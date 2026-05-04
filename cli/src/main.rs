@@ -91,7 +91,7 @@ enum UpsCommand {
 struct UpsStatusArgs {
     /// Emit the parsed `upsc` model as JSON instead of a human summary.
     /// Stable shape; distinct error sentinels for the not-enabled and
-    /// daemon-down branches.
+    /// query-failed branches.
     #[arg(long)]
     json: bool,
 }

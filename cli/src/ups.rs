@@ -1,14 +1,14 @@
 //! `braid ups status` -- operator inspection of live NUT state.
 //!
 //! Missing or disabled config prints a helpful enable-hint and exits 0 --
-//! `braid ups status` on a pool without UPS is not an error. Daemon-down
-//! (non-zero `upsc` exit) is a hard error with a pointer at the upsd unit.
+//! `braid ups status` on a pool without UPS is not an error. Query failure
+//! (non-zero `upsc` exit) is a hard error with `upsc`'s own stderr surfaced.
 //!
 //! `--json` emits a stable serialized `UpscOutput` (plus distinct error
-//! shapes for the daemon-down and not-enabled cases) so scripts can key
+//! shapes for the query-failed and not-enabled cases) so scripts can key
 //! off the parsed model without re-parsing `upsc` output themselves.
 
-use crate::cmd::{CmdRequest, CommandRunner};
+use crate::cmd::{CmdError, CmdRequest, CommandRunner};
 use crate::config::{ConfigError, Ups, config_read};
 use crate::parse::parse_upsc;
 use crate::parse::types::{UpsStatusFlag, UpscOutput};
@@ -18,20 +18,50 @@ use std::path::Path;
 pub enum UpsError {
     #[error("config error: {0}")]
     Config(#[from] ConfigError),
-    #[error("ups daemon not running -- check 'systemctl status upsd.service'")]
-    DaemonDown,
+    #[error("upsc query failed: {detail}")]
+    QueryFailed { detail: String },
     #[error("failed to serialize ups status: {0}")]
     Serialize(#[source] serde_json::Error),
 }
 
+#[derive(Debug, thiserror::Error)]
+pub enum UpsQueryError {
+    /// Runner-level failure: spawn error, signal-killed child, stdin IO
+    /// failure, or request/mode mismatch.
+    #[error("upsc invocation failed: {0}")]
+    InvocationFailed(#[from] CmdError),
+    /// `upsc` exited non-zero. This covers an unreachable upsd daemon, an
+    /// unknown UPS name, or another fatal NUT path.
+    #[error("upsc query failed (exit {exit_code}): {stderr}")]
+    QueryFailed { exit_code: i32, stderr: String },
+}
+
+pub fn query_ups<R: CommandRunner>(runner: &R, name: &str) -> Result<UpscOutput, UpsQueryError> {
+    let raw = runner.run(&CmdRequest::UpscQuery {
+        name: name.to_owned(),
+    })?;
+    if raw.exit_status != 0 {
+        return Err(UpsQueryError::QueryFailed {
+            exit_code: raw.exit_status,
+            stderr: raw.stderr.trim().to_owned(),
+        });
+    }
+    Ok(parse_upsc(&raw.stdout))
+}
+
 /// `--json` output mode for `braid ups status`. Separate from
-/// `UpscOutput` so the "not enabled" and "daemon down" branches have a
+/// `UpscOutput` so the "not enabled" and "query failed" branches have a
 /// stable surface for scripting without piggy-backing on the parse model.
 #[derive(Debug, serde::Serialize)]
 #[serde(untagged)]
 enum JsonReport<'a> {
-    NotEnabled { error: &'static str },
-    DaemonDown { error: &'static str },
+    NotEnabled {
+        error: &'static str,
+    },
+    QueryFailed {
+        error: &'static str,
+        detail: &'a str,
+    },
     Ok(&'a UpscOutput),
 }
 
@@ -67,15 +97,14 @@ fn print_not_enabled(json: bool) -> Result<(), UpsError> {
 }
 
 fn render_live<R: CommandRunner>(runner: &R, ups_cfg: &Ups, json: bool) -> Result<(), UpsError> {
-    let raw = match runner.run(&CmdRequest::UpscQuery {
-        name: ups_cfg.name.clone(),
-    }) {
-        Ok(r) => r,
-        Err(_) => return emit_daemon_down(json),
-    };
-    let parsed = match parse_upsc(&raw) {
+    let parsed = match query_ups(runner, &ups_cfg.name) {
         Ok(p) => p,
-        Err(_) => return emit_daemon_down(json),
+        Err(UpsQueryError::InvocationFailed(e)) => {
+            return emit_query_failed(json, format!("invocation failed: {e}"));
+        }
+        Err(UpsQueryError::QueryFailed { exit_code, stderr }) => {
+            return emit_query_failed(json, format!("exit {exit_code}: {stderr}"));
+        }
     };
     if json {
         emit_json(&JsonReport::Ok(&parsed))?;
@@ -85,13 +114,14 @@ fn render_live<R: CommandRunner>(runner: &R, ups_cfg: &Ups, json: bool) -> Resul
     Ok(())
 }
 
-fn emit_daemon_down(json: bool) -> Result<(), UpsError> {
+fn emit_query_failed(json: bool, detail: String) -> Result<(), UpsError> {
     if json {
-        emit_json(&JsonReport::DaemonDown {
-            error: "daemon_down",
+        emit_json(&JsonReport::QueryFailed {
+            error: "query_failed",
+            detail: &detail,
         })?;
     }
-    Err(UpsError::DaemonDown)
+    Err(UpsError::QueryFailed { detail })
 }
 
 fn emit_json(payload: &JsonReport<'_>) -> Result<(), UpsError> {
@@ -299,49 +329,135 @@ mod tests {
         assert!(text.contains("\"ups_not_enabled\""));
     }
 
-    // Intent: daemon-down --json surfaces a distinct sentinel.
+    // Intent: query-failed --json surfaces a distinct sentinel with detail.
     // Why: script callers distinguish "unreachable UPS" from "no UPS
-    // configured"; one is a transient failure, the other is steady state.
-    // Scenario: unit test of `emit_daemon_down(true)` via JsonReport.
+    // configured" and can display upsc's own stderr.
+    // Scenario: unit test of `emit_query_failed(true)` via JsonReport.
     #[test]
-    fn json_daemon_down_has_sentinel_error() {
-        let payload = JsonReport::DaemonDown {
-            error: "daemon_down",
+    fn json_query_failed_has_sentinel_error_and_detail() {
+        let payload = JsonReport::QueryFailed {
+            error: "query_failed",
+            detail: "exit 1: Error: Connection failure: Connection refused",
         };
         let text = serde_json::to_string_pretty(&payload).unwrap();
-        assert!(text.contains("\"daemon_down\""));
+        assert!(text.contains("\"query_failed\""));
+        assert!(text.contains("Connection failure"));
     }
 
-    // Intent: render_live routes daemon-down to UpsError::DaemonDown.
-    // Why: CLI shell relies on that variant to print the error and
-    // exit(1); if MissingMock (simulating a spawn failure) were surfaced
-    // as a generic Config error, the wrapper would drop the intended
-    // diagnostic.
-    // Scenario: MockRunner with no UpscQuery mock seeded.
+    /*
+     * Intent: query_ups returns QueryFailed when upsc exits non-zero.
+     * Why it exists: non-zero exit is runner-integration state, not parser
+     * state; callers need the captured stderr to diagnose daemon vs name
+     * problems.
+     * Scenario: upsd.service is stopped and upsc reports a connection
+     * failure on stderr.
+     */
     #[test]
-    fn render_live_daemon_down_surfaces_typed_error() {
-        let runner = MockRunner::default();
-        let cfg = Ups {
-            enable: true,
-            name: "ups".into(),
-        };
-        let err = render_live(&runner, &cfg, false).expect_err("daemon down expected");
-        assert!(matches!(err, UpsError::DaemonDown));
-    }
-
-    // Intent: render_live returns DaemonDown on a non-zero `upsc` exit.
-    // Why: parse_upsc also classifies non-zero exit as CommandFailed; the
-    // outer render layer collapses both failure modes into DaemonDown so
-    // operators see a single consistent error message.
-    // Scenario: stubbed upsc returning exit 1 and an empty stdout.
-    #[test]
-    fn render_live_non_zero_exit_is_daemon_down() {
+    fn query_ups_returns_query_failed_on_non_zero_exit() {
         let runner = MockRunner::default().with_output(
             CmdRequest::UpscQuery { name: "ups".into() },
             RawCommandOutput {
                 cmd: "upsc ups".into(),
                 stdout: String::new(),
-                stderr: "Error: Connection refused".into(),
+                stderr: "Error: Connection failure: Connection refused\n".into(),
+                exit_status: 1,
+            },
+        );
+
+        let err = query_ups(&runner, "ups").expect_err("query failure expected");
+
+        match err {
+            UpsQueryError::QueryFailed { exit_code, stderr } => {
+                assert_eq!(exit_code, 1);
+                assert_eq!(stderr, "Error: Connection failure: Connection refused");
+            }
+            other => panic!("expected QueryFailed, got {other:?}"),
+        }
+    }
+
+    /*
+     * Intent: query_ups returns InvocationFailed for runner-level failures.
+     * Why it exists: spawn failures, signal-killed children, stdin errors,
+     * and request/mode mistakes are not the same as upsc's own non-zero
+     * exit.
+     * Scenario: MockRunner has no UpscQuery response seeded, producing
+     * CmdError::MissingMock.
+     */
+    #[test]
+    fn query_ups_returns_invocation_failed_on_missing_mock() {
+        let runner = MockRunner::default();
+
+        let err = query_ups(&runner, "ups").expect_err("invocation failure expected");
+
+        assert!(
+            matches!(err, UpsQueryError::InvocationFailed(_)),
+            "expected InvocationFailed, got {err:?}"
+        );
+    }
+
+    /*
+     * Intent: query_ups returns parsed output when upsc exits zero.
+     * Why it exists: the helper is now the production boundary between the
+     * command runner and the infallible parser; healthy output must still
+     * produce the same model as direct parsing.
+     * Scenario: upsd is reachable and reports OL with a full battery.
+     */
+    #[test]
+    fn query_ups_returns_ok_on_healthy_output() {
+        let runner = MockRunner::default().with_output(
+            CmdRequest::UpscQuery { name: "ups".into() },
+            RawCommandOutput {
+                cmd: "upsc ups".into(),
+                stdout: "ups.status: OL\nbattery.charge: 100\n".into(),
+                stderr: String::new(),
+                exit_status: 0,
+            },
+        );
+
+        let out = query_ups(&runner, "ups").expect("healthy upsc output parses");
+
+        assert!(out.status_flags.contains(&UpsStatusFlag::Ol));
+        assert_eq!(out.battery.charge_pct, Some(100));
+    }
+
+    // Intent: render_live routes invocation failure to UpsError::QueryFailed.
+    // Why: CLI shell relies on that variant to print the error and exit(1);
+    // if MissingMock (simulating a spawn failure) were surfaced as a generic
+    // Config error, the wrapper would drop the intended diagnostic.
+    // Scenario: MockRunner with no UpscQuery mock seeded.
+    #[test]
+    fn render_live_invocation_failure_surfaces_typed_error() {
+        let runner = MockRunner::default();
+        let cfg = Ups {
+            enable: true,
+            name: "ups".into(),
+        };
+        let err = render_live(&runner, &cfg, false).expect_err("query failure expected");
+        match &err {
+            UpsError::QueryFailed { detail } => {
+                assert!(detail.starts_with("invocation failed: "), "got: {detail}");
+            }
+            other => panic!("expected QueryFailed, got {other:?}"),
+        }
+        assert!(
+            err.to_string()
+                .starts_with("upsc query failed: invocation failed: "),
+            "unexpected display: {err}"
+        );
+    }
+
+    // Intent: render_live returns QueryFailed on a non-zero `upsc` exit.
+    // Why: non-zero upsc exits carry useful stderr, and the rendered error
+    // must not double-prefix the query-failed wording.
+    // Scenario: stubbed upsc returning exit 1 and an empty stdout.
+    #[test]
+    fn render_live_non_zero_exit_is_query_failed() {
+        let runner = MockRunner::default().with_output(
+            CmdRequest::UpscQuery { name: "ups".into() },
+            RawCommandOutput {
+                cmd: "upsc ups".into(),
+                stdout: String::new(),
+                stderr: "Error: Connection failure: Connection refused".into(),
                 exit_status: 1,
             },
         );
@@ -349,8 +465,18 @@ mod tests {
             enable: true,
             name: "ups".into(),
         };
-        let err = render_live(&runner, &cfg, false).expect_err("daemon down expected");
-        assert!(matches!(err, UpsError::DaemonDown));
+        let err = render_live(&runner, &cfg, false).expect_err("query failure expected");
+        match &err {
+            UpsError::QueryFailed { detail } => {
+                assert!(detail.starts_with("exit 1: "), "got: {detail}");
+                assert!(detail.contains("Connection failure"), "got: {detail}");
+            }
+            other => panic!("expected QueryFailed, got {other:?}"),
+        }
+        assert_eq!(
+            err.to_string(),
+            "upsc query failed: exit 1: Error: Connection failure: Connection refused"
+        );
     }
 
     // --- Fixture-backed render snapshots ---
@@ -366,13 +492,7 @@ mod tests {
     // two outputs against drift relative to each other.
 
     fn parse_fixture(stdout: &str) -> UpscOutput {
-        let raw = RawCommandOutput {
-            cmd: "upsc ups".into(),
-            stdout: stdout.to_owned(),
-            stderr: String::new(),
-            exit_status: 0,
-        };
-        crate::parse::parse_upsc(&raw).expect("fixture parses cleanly")
+        crate::parse::parse_upsc(stdout)
     }
 
     macro_rules! snap {
@@ -523,14 +643,15 @@ mod tests {
         assert!(!flags.iter().any(|v| v == "OB"));
     }
 
-    // Intent: daemon-down --json serializes to the sentinel error.
-    // Why: scripts key off `.error == "daemon_down"`; snapshot proves
-    // the JSON object has exactly that shape and nothing more.
+    // Intent: query-failed --json serializes to the sentinel error plus detail.
+    // Why: scripts key off `.error == "query_failed"` and can surface the
+    // captured upsc stderr without scraping CLI stderr.
     // Scenario: `braid ups status --json` while upsd.service is stopped.
     #[test]
-    fn snapshot_json_daemon_down() {
-        let payload = JsonReport::DaemonDown {
-            error: "daemon_down",
+    fn snapshot_json_query_failed() {
+        let payload = JsonReport::QueryFailed {
+            error: "query_failed",
+            detail: "exit 1: Error: Connection failure: Connection refused",
         };
         snap_json!(&payload);
     }

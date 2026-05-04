@@ -1,0 +1,8 @@
+---
+source: cli/src/ups.rs
+expression: "&payload"
+---
+{
+  "error": "query_failed",
+  "detail": "exit 1: Error: Connection failure: Connection refused"
+}

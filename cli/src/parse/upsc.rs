@@ -8,13 +8,10 @@
 //! keeps every other line verbatim in `extra` so unfamiliar driver keys
 //! are still observable via `braid ups status --json`.
 //!
-//! Daemon-down handling: a non-zero `upsc` exit becomes
-//! `ParseError::CommandFailed`. Callers (`cmd_ups_status`,
-//! `check_ups_not_on_battery`, `probe_ups_for_tui`) fail-closed on that
-//! condition rather than silently treating it as an empty status set.
+//! This parser is infallible by design: malformed or unknown fields are
+//! omitted from typed fields or preserved in `extra`. Subprocess invocation
+//! and non-zero `upsc` exits are classified by `crate::ups::query_ups`.
 
-use crate::cmd::RawCommandOutput;
-use crate::parse::ParseError;
 use crate::parse::types::{BatteryFields, DeviceFields, InputFields, UpsStatusFlag, UpscOutput};
 
 impl UpsStatusFlag {
@@ -43,18 +40,9 @@ impl UpsStatusFlag {
 
 /// Parse `upsc <name>` output.
 ///
-/// Fails (`ParseError::CommandFailed`) if the subprocess reported a
-/// non-zero exit status. On success, walks `key: value` lines and routes
-/// each known key to a typed field; unrecognised keys land in `extra`.
-pub fn parse_upsc(raw: &RawCommandOutput) -> Result<UpscOutput, ParseError> {
-    if raw.exit_status != 0 {
-        return Err(ParseError::CommandFailed {
-            cmd: "upsc".to_owned(),
-            exit_code: raw.exit_status,
-            stderr: raw.stderr.trim().to_owned(),
-        });
-    }
-
+/// Walks `key: value` lines and routes each known key to a typed field;
+/// unrecognised keys land in `extra`.
+pub fn parse_upsc(stdout: &str) -> UpscOutput {
     let mut status_flags = std::collections::HashSet::new();
     let mut battery = BatteryFields::default();
     let mut load_pct: Option<u8> = None;
@@ -69,7 +57,7 @@ pub fn parse_upsc(raw: &RawCommandOutput) -> Result<UpscOutput, ParseError> {
     let mut ups_serial: Option<String> = None;
     let mut extra = std::collections::BTreeMap::new();
 
-    for line in raw.stdout.lines() {
+    for line in stdout.lines() {
         let line = line.trim_end_matches('\r');
         if line.is_empty() {
             continue;
@@ -124,7 +112,7 @@ pub fn parse_upsc(raw: &RawCommandOutput) -> Result<UpscOutput, ParseError> {
         device.serial = ups_serial;
     }
 
-    Ok(UpscOutput {
+    UpscOutput {
         status_flags,
         battery,
         load_pct,
@@ -133,7 +121,7 @@ pub fn parse_upsc(raw: &RawCommandOutput) -> Result<UpscOutput, ParseError> {
         test_result,
         device,
         extra,
-    })
+    }
 }
 
 fn some_non_empty(s: &str) -> Option<String> {
@@ -158,22 +146,13 @@ fn parse_pct(s: &str) -> Option<u8> {
 mod tests {
     use super::*;
 
-    fn ok(stdout: &str) -> RawCommandOutput {
-        RawCommandOutput {
-            cmd: "upsc ups".to_owned(),
-            stdout: stdout.to_owned(),
-            stderr: String::new(),
-            exit_status: 0,
-        }
-    }
-
     // Intent: parse_upsc recognizes OL as the sole flag on a healthy UPS.
     // Why: preflight treats "status set contains OB or LB" as refuse; "status
     // set equals {OL}" must therefore be recognized, not treated as unknown.
     // Scenario: typical `upsc ups` output with a UPS on utility power.
     #[test]
     fn parses_ol_flag() {
-        let out = parse_upsc(&ok("ups.status: OL\nbattery.charge: 100\n")).unwrap();
+        let out = parse_upsc("ups.status: OL\nbattery.charge: 100\n");
         assert!(out.status_flags.contains(&UpsStatusFlag::Ol));
         assert_eq!(out.status_flags.len(), 1);
         assert_eq!(out.battery.charge_pct, Some(100));
@@ -187,7 +166,7 @@ mod tests {
     // threshold fired -- both flags are present in the same status string.
     #[test]
     fn parses_ob_lb_combined() {
-        let out = parse_upsc(&ok("ups.status: OB LB\n")).unwrap();
+        let out = parse_upsc("ups.status: OB LB\n");
         assert!(out.status_flags.contains(&UpsStatusFlag::Ob));
         assert!(out.status_flags.contains(&UpsStatusFlag::Lb));
     }
@@ -199,7 +178,7 @@ mod tests {
     // Scenario: `upsc` emits a token braid has not shipped support for yet.
     #[test]
     fn preserves_unknown_flag_verbatim() {
-        let out = parse_upsc(&ok("ups.status: OL NEWFLAG\n")).unwrap();
+        let out = parse_upsc("ups.status: OL NEWFLAG\n");
         assert!(
             out.status_flags
                 .contains(&UpsStatusFlag::Unknown("NEWFLAG".to_owned()))
@@ -213,7 +192,7 @@ mod tests {
     // Scenario: driver surfaces TESTFAIL in ups.status alongside OL.
     #[test]
     fn recognises_testfail_and_commbad_as_typed() {
-        let out = parse_upsc(&ok("ups.status: OL TESTFAIL COMMBAD\n")).unwrap();
+        let out = parse_upsc("ups.status: OL TESTFAIL COMMBAD\n");
         assert!(out.status_flags.contains(&UpsStatusFlag::Ol));
         assert!(out.status_flags.contains(&UpsStatusFlag::TestFail));
         assert!(out.status_flags.contains(&UpsStatusFlag::CommBad));
@@ -229,31 +208,11 @@ mod tests {
     // first status write arrived.
     #[test]
     fn empty_status_produces_no_flags() {
-        let out = parse_upsc(&ok("battery.charge: 50\ndriver.name: usbhid-ups\n")).unwrap();
+        let out = parse_upsc("battery.charge: 50\ndriver.name: usbhid-ups\n");
         assert!(out.status_flags.is_empty());
         assert_eq!(out.battery.charge_pct, Some(50));
         // driver.name is not a typed key yet -> lands in `extra`.
         assert_eq!(out.extra.get("driver.name"), Some(&"usbhid-ups".to_owned()));
-    }
-
-    // Intent: parse_upsc returns CommandFailed when the subprocess exited
-    // non-zero -- upsc's behavior when the daemon is unreachable.
-    // Why: caller-side fail-closed logic in check_ups_not_on_battery and
-    // cmd_ups_status distinguishes daemon-down from malformed output.
-    // Scenario: upsd.service is inactive when operator runs `upsc ups`.
-    #[test]
-    fn daemon_down_is_command_failed() {
-        let raw = RawCommandOutput {
-            cmd: "upsc ups".to_owned(),
-            stdout: String::new(),
-            stderr: "Error: Connection failure: Connection refused".to_owned(),
-            exit_status: 1,
-        };
-        let err = parse_upsc(&raw).unwrap_err();
-        assert!(
-            matches!(err, ParseError::CommandFailed { .. }),
-            "expected CommandFailed, got {err:?}"
-        );
     }
 
     // Intent: parse_upsc populates the full typed model when all expected
@@ -285,7 +244,7 @@ ups.realpower.nominal: 330\n\
 ups.status: OL\n\
 ups.test.result: Done and passed\n\
 ";
-        let out = parse_upsc(&ok(stdout)).unwrap();
+        let out = parse_upsc(stdout);
         assert!(out.status_flags.contains(&UpsStatusFlag::Ol));
         assert_eq!(out.battery.charge_pct, Some(95));
         assert_eq!(out.battery.runtime_secs, Some(1800));
@@ -322,11 +281,11 @@ ups.test.result: Done and passed\n\
     #[test]
     fn ups_keys_are_fallback_for_device_fields() {
         // ups.* only -- populated.
-        let only_ups = parse_upsc(&ok("ups.mfr: APC\nups.model: Back-UPS\n")).unwrap();
+        let only_ups = parse_upsc("ups.mfr: APC\nups.model: Back-UPS\n");
         assert_eq!(only_ups.device.mfr.as_deref(), Some("APC"));
         assert_eq!(only_ups.device.model.as_deref(), Some("Back-UPS"));
         // Both present -- device.* wins.
-        let both = parse_upsc(&ok("device.mfr: DeviceMfr\nups.mfr: UpsMfr\n")).unwrap();
+        let both = parse_upsc("device.mfr: DeviceMfr\nups.mfr: UpsMfr\n");
         assert_eq!(both.device.mfr.as_deref(), Some("DeviceMfr"));
     }
 
@@ -338,11 +297,11 @@ ups.test.result: Done and passed\n\
     // missing; both present.
     #[test]
     fn watts_estimated_requires_both_ingredients() {
-        let only_load = parse_upsc(&ok("ups.load: 50\n")).unwrap();
+        let only_load = parse_upsc("ups.load: 50\n");
         assert_eq!(only_load.watts_estimated(), None);
-        let only_nominal = parse_upsc(&ok("ups.realpower.nominal: 330\n")).unwrap();
+        let only_nominal = parse_upsc("ups.realpower.nominal: 330\n");
         assert_eq!(only_nominal.watts_estimated(), None);
-        let both = parse_upsc(&ok("ups.load: 50\nups.realpower.nominal: 330\n")).unwrap();
+        let both = parse_upsc("ups.load: 50\nups.realpower.nominal: 330\n");
         // 50 * 330 = 16500, / 100 = 165 (with rounding: +50 before div).
         assert_eq!(both.watts_estimated(), Some(165));
     }
@@ -354,7 +313,7 @@ ups.test.result: Done and passed\n\
     // Scenario: malformed driver output.
     #[test]
     fn pct_out_of_range_is_none() {
-        let out = parse_upsc(&ok("battery.charge: 200\nups.load: 999\n")).unwrap();
+        let out = parse_upsc("battery.charge: 200\nups.load: 999\n");
         assert_eq!(out.battery.charge_pct, None);
         assert_eq!(out.load_pct, None);
     }
@@ -367,7 +326,7 @@ ups.test.result: Done and passed\n\
     #[test]
     fn parses_online_fixture() {
         let fixture = include_str!("../../tests/fixtures/nut/upsc-online.txt");
-        let out = parse_upsc(&ok(fixture)).unwrap();
+        let out = parse_upsc(fixture);
         assert!(out.status_flags.contains(&UpsStatusFlag::Ol));
         assert!(!out.status_flags.contains(&UpsStatusFlag::Ob));
         assert_eq!(out.battery.charge_pct, Some(100));
@@ -381,26 +340,9 @@ ups.test.result: Done and passed\n\
     #[test]
     fn parses_onbattery_low_fixture() {
         let fixture = include_str!("../../tests/fixtures/nut/upsc-onbattery-low.txt");
-        let out = parse_upsc(&ok(fixture)).unwrap();
+        let out = parse_upsc(fixture);
         assert!(out.status_flags.contains(&UpsStatusFlag::Ob));
         assert!(out.status_flags.contains(&UpsStatusFlag::Lb));
         assert_eq!(out.battery.charge_pct, Some(8));
-    }
-
-    // Intent: the `upsc-daemon-down.stderr` fixture surfaces as an error.
-    // Why: even at the fixture layer, daemon-down must stay CommandFailed --
-    // a silent Ok({}) would let preflight pass when upsd is unreachable.
-    // Scenario: operator runs `braid ups status` while upsd is stopped.
-    #[test]
-    fn parses_daemon_down_fixture() {
-        let stderr = include_str!("../../tests/fixtures/nut/upsc-daemon-down.stderr");
-        let raw = RawCommandOutput {
-            cmd: "upsc ups".to_owned(),
-            stdout: String::new(),
-            stderr: stderr.to_owned(),
-            exit_status: 1,
-        };
-        let err = parse_upsc(&raw).unwrap_err();
-        assert!(matches!(err, ParseError::CommandFailed { .. }));
     }
 }

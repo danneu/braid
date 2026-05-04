@@ -80,7 +80,7 @@ sentinels are emitted for the common non-OK cases:
 
 | Condition | JSON shape | Exit code |
 | --- | --- | --- |
-| UPS unreachable | `{"error": "daemon_down"}` | 1 |
+| UPS query failed | `{"error": "query_failed", "detail": "exit 1: Error: Connection failure: ..."}` | 1 |
 | UPS not enabled | `{"error": "ups_not_enabled"}` | 0 |
 | UPS reachable | serialized `UpscOutput` | 0 |
 
@@ -93,7 +93,7 @@ Status text is color-coded by severity:
 - **Yellow** -- OB (on battery, not yet critical).
 - **Red** -- LB / TESTFAIL / COMMBAD / FSD (critical; shutdown imminent
   or comms-loss).
-- **DarkGray** -- daemon down, or no UPS state available yet.
+- **DarkGray** -- UPS query failed, or no UPS state available yet.
 
 The panel polls on the same 5-second cadence as the fan panel. Press `r`
 to refresh both pool and UPS probes immediately.
@@ -132,12 +132,12 @@ power, then retry.
 Recovery: run `braid ups status` to confirm, restore utility power,
 wait for the status to return to `OL`, and retry the command.
 
-If `upsc` cannot reach the daemon (`daemon_down`), mutations also
-refuse with the same "cannot verify" wording -- fail-closed so a dead
-NUT daemon does not silently bypass the preflight. `TESTFAIL` and
-`COMMBAD` are treated the same way: braid does not start mutations on
-a UPS that is reporting a known-bad state, even when `OL` is also
-lit.
+If `upsc` cannot query the configured UPS, mutations also refuse with
+the same "cannot verify" wording and include `upsc`'s stderr when it
+exits non-zero. This fail-closed path covers a stopped daemon, an
+unknown UPS name, or another fatal NUT error. `TESTFAIL` and `COMMBAD`
+are treated the same way: braid does not start mutations on a UPS that
+is reporting a known-bad state, even when `OL` is also lit.
 
 ## doctor checks
 

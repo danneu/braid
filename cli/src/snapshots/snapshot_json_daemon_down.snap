@@ -1,7 +1,0 @@
----
-source: cli/src/ups.rs
-expression: "&payload"
----
-{
-  "error": "daemon_down"
-}

@@ -44,15 +44,22 @@ assert parsed["realpower_nominal_watts"] == 330, parsed
 assert parsed["device"]["model"] == "Back-UPS ES 550G", parsed
 assert parsed["device"]["mfr"] == "APC", parsed
 
-# --- Daemon-down branch ---
-# Stop upsd and confirm the daemon-down JSON shape has the sentinel
+# --- Query-failed branch ---
+# Stop upsd and confirm the query-failed JSON shape has the sentinel
 # error. The exit code is 1 so machine.execute (tolerant).
 machine.succeed("systemctl stop upsd.service")
 exit_code, raw_down = machine.execute("braid ups status --json")
 assert exit_code != 0, (
-    f"braid ups status --json must exit non-zero when daemon down; got 0\n{raw_down}"
+    f"braid ups status --json must exit non-zero when query fails; got 0\n{raw_down}"
 )
 parsed_down = json.loads(raw_down)
-assert parsed_down.get("error") == "daemon_down", (
-    f"expected error=daemon_down, got {parsed_down}"
+assert parsed_down.get("error") == "query_failed", (
+    f"expected error=query_failed, got {parsed_down}"
+)
+detail = parsed_down.get("detail", "")
+# When upsd is stopped, upsc emits "Error: Connection failure: ..." on stderr.
+# The "Connection failure" substring is the stable slice; this catches a
+# regression that drops captured stderr from the JSON detail field.
+assert isinstance(detail, str) and "Connection failure" in detail, (
+    f"expected detail to contain upsc stderr 'Connection failure', got {parsed_down}"
 )

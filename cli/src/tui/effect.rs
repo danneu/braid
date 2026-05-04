@@ -40,7 +40,7 @@ pub enum Effect {
     ScheduleFanProbe {
         delay: Duration,
     },
-    /// Run `upsc <name>` + `parse_upsc` on a worker thread; the result
+    /// Run `upsc <name>` through `query_ups` on a worker thread; the result
     /// becomes `Event::UpsProbeFinished`.
     ProbeUps {
         name: String,

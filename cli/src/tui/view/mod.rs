@@ -2237,11 +2237,11 @@ pub(crate) mod tests {
     }
 
     // Intent: empty flag set renders DarkGray (unknown).
-    // Why: the first-probe placeholder and the daemon-down fail-closed
+    // Why: the first-probe placeholder and the query-failed fail-closed
     // path both land here; both deserve the dim "nothing known yet"
     // color, not green or yellow.
     // Scenario: pre-first-probe Model::ups == None path, or UpsSnapshot
-    // built from a daemon-down fallback.
+    // built from a query-failed fallback.
     #[test]
     fn ups_severity_empty_is_dark_gray() {
         let flags = std::collections::HashSet::new();

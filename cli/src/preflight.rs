@@ -5,13 +5,13 @@ use crate::journal;
 use crate::membership::PoolMembership;
 use crate::mount_check::mount_entry_at_via_fs;
 use crate::parse::parse_btrfs_device_usage;
-use crate::parse::parse_upsc;
 use crate::parse::types::{BtrfsBgType, BtrfsDeviceUsageEntry, BtrfsDfOutput};
 use crate::preview::PreviewNote;
 use crate::probe::Filesystem;
 use crate::state_paths::StatePaths;
 use crate::status::format_bytes;
 use crate::types::{MountPoint, PoolState};
+use crate::ups::{UpsQueryError, query_ups};
 
 /// Refuse if pool.json lists members but the pool is not mounted (locked).
 /// Catches the silent-bootstrap case where `braid add` against a locked pool
@@ -433,11 +433,11 @@ pub fn check_single_survivor_capacity(
 /// Refuse if the configured UPS is on battery, in any critical state,
 /// or unreachable.
 ///
-/// Fail-closed: daemon-down, malformed output, and an empty `ups.status`
-/// all produce the same refusal. One wording covers all three so the
-/// message stays honest when the real cause is comms-failure rather than
-/// an on-battery condition. Caller passes `None` when no UPS is
-/// configured, which makes this a no-op.
+/// Fail-closed: query failure and an empty `ups.status` both refuse the
+/// mutation. The refusal wording always points operators at `braid ups
+/// status` because the safety decision needs a fresh, explicit
+/// non-critical status set. Caller passes `None` when no UPS is configured,
+/// which makes this a no-op.
 ///
 /// Critical-state classification is shared with the TUI via
 /// `UpsStatusFlag::is_critical` so the two surfaces stay in sync: any
@@ -463,15 +463,14 @@ pub fn check_ups_not_on_battery<R: CommandRunner>(
              Check 'braid ups status', restore utility power, then retry."
         ))
     };
-    let raw = match runner.run(&CmdRequest::UpscQuery {
-        name: name.to_owned(),
-    }) {
-        Ok(r) => r,
-        Err(_) => return refuse("upsc command failed"),
-    };
-    let parsed = match parse_upsc(&raw) {
+    let parsed = match query_ups(runner, name) {
         Ok(p) => p,
-        Err(_) => return refuse("upsc output unparseable or upsd unreachable"),
+        Err(UpsQueryError::InvocationFailed(_)) => {
+            return refuse("upsc invocation failed");
+        }
+        Err(UpsQueryError::QueryFailed { stderr, .. }) => {
+            return refuse(&format!("upsc query failed: {stderr}"));
+        }
     };
     if parsed.status_flags.is_empty() {
         return refuse("ups.status is empty or missing");
@@ -1463,7 +1462,12 @@ mod tests {
             RawCommandOutput {
                 cmd: format!("upsc {name}"),
                 stdout: stdout.to_owned(),
-                stderr: if exit == 0 { "" } else { "daemon unreachable" }.to_owned(),
+                stderr: if exit == 0 {
+                    ""
+                } else {
+                    "Error: Connection failure: Connection refused"
+                }
+                .to_owned(),
                 exit_status: exit,
             },
         )
@@ -1556,14 +1560,16 @@ mod tests {
     }
 
     #[test]
-    // Intent: daemon-down (non-zero upsc exit) refuses the mutation.
+    // Intent: query failure (non-zero upsc exit) refuses the mutation.
     // Why: fail-closed -- if braid cannot determine UPS state, it must not
     // start work it can't guarantee a clean shutdown from.
     // Scenario: upsd.service has crashed or hasn't started yet.
-    fn ups_daemon_down_refuses() {
+    fn ups_query_failed_refuses() {
         let runner = upsc_mock("ups", "", 1);
         let err = check_ups_not_on_battery(&runner, Some("ups"), "replace").unwrap_err();
         assert!(err.contains("utility power"), "got: {err}");
+        assert!(err.contains("upsc query failed"), "got: {err}");
+        assert!(err.contains("Connection failure"), "got: {err}");
     }
 
     #[test]
@@ -1578,14 +1584,15 @@ mod tests {
     }
 
     #[test]
-    // Intent: missing mock output is treated as daemon-down (fail-closed).
+    // Intent: missing mock output is treated as invocation failure (fail-closed).
     // Why: MockRunner::default() produces MissingMock, which mirrors a
     // subprocess spawn failure at runtime; both must refuse.
     // Scenario: a future refactor forgets to wire the upsc mock in a test.
-    fn ups_missing_mock_refuses() {
+    fn ups_invocation_failed_refuses() {
         let runner = MockRunner::default();
         let err = check_ups_not_on_battery(&runner, Some("ups"), "add").unwrap_err();
         assert!(err.contains("utility power"), "got: {err}");
+        assert!(err.contains("upsc invocation failed"), "got: {err}");
     }
 
     #[test]

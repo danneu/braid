@@ -8,7 +8,7 @@ use crate::luks;
 use crate::parse::types::{ScrubState, SmartHealth, SmartProbe};
 use crate::parse::{
     parse_btrfs_device_stats, parse_btrfs_device_usage, parse_btrfs_scrub_status,
-    parse_cryptsetup_luks_dump, parse_lsblk_json, parse_smartctl, parse_upsc,
+    parse_cryptsetup_luks_dump, parse_lsblk_json, parse_smartctl,
 };
 use crate::probe::{Filesystem, ProbeError, probe_config_disk, probe_pool};
 use crate::state_paths::StatePaths;
@@ -19,6 +19,7 @@ use crate::tui::model::{
     TemperatureDiskId, TemperatureReading, UnpooledDiskRender, UpsSnapshot,
 };
 use crate::types::{ByIdPath, ConfigDiskState, LuksUuid, MountPoint};
+use crate::ups::{UpsQueryError, query_ups};
 
 pub fn probe_pool_for_tui<R: CommandRunner, F: Filesystem + ?Sized>(
     runner: &R,
@@ -576,23 +577,19 @@ fn pick_driving(
 const UPS_DAEMON_UNIT: &str = "upsd.service";
 
 /// Probe UPS state for the TUI: invoke `upsc <name>`, parse, and
-/// convert to the TUI-facing `UpsSnapshot`. Failures from the runner
-/// or the parser become `DaemonStatus::Inactive` with an empty
-/// snapshot -- that's the DarkGray state the view renders.
+/// convert to the TUI-facing `UpsSnapshot`. Invocation or query failures
+/// become `DaemonStatus::Inactive` with an empty snapshot -- that's the
+/// DarkGray state the view renders.
 ///
 /// This is the single bridge from `UpscOutput` -> `UpsSnapshot`, per
 /// the plan's risk 3 ("TUI snapshot drifts from UpscOutput"): all
 /// conversion happens here, tests snapshot the converter output.
 pub fn probe_ups_for_tui<R: CommandRunner>(runner: &R, name: &str) -> UpsSnapshot {
-    let raw = match runner.run(&CmdRequest::UpscQuery {
-        name: name.to_owned(),
-    }) {
-        Ok(r) => r,
-        Err(_) => return ups_snapshot_daemon_down(runner),
-    };
-    let parsed = match parse_upsc(&raw) {
+    let parsed = match query_ups(runner, name) {
         Ok(p) => p,
-        Err(_) => return ups_snapshot_daemon_down(runner),
+        Err(UpsQueryError::InvocationFailed(_)) | Err(UpsQueryError::QueryFailed { .. }) => {
+            return ups_snapshot_query_failed(runner);
+        }
     };
     UpsSnapshot {
         flags: parsed.status_flags.clone(),
@@ -608,7 +605,7 @@ pub fn probe_ups_for_tui<R: CommandRunner>(runner: &R, name: &str) -> UpsSnapsho
     }
 }
 
-fn ups_snapshot_daemon_down<R: CommandRunner>(runner: &R) -> UpsSnapshot {
+fn ups_snapshot_query_failed<R: CommandRunner>(runner: &R) -> UpsSnapshot {
     UpsSnapshot {
         flags: std::collections::HashSet::new(),
         battery_charge_pct: None,
@@ -1981,16 +1978,7 @@ mod tests {
     // This is the single UpscOutput -> UpsSnapshot bridge (plan risk
     // 3). Test coverage locks in: typed-field passthrough, the
     // watts_estimated derivation guard, and the two fail-closed
-    // branches (runner error, parse error).
-
-    fn upsc_ok(stdout: &str) -> RawCommandOutput {
-        RawCommandOutput {
-            cmd: "upsc ups".into(),
-            stdout: stdout.to_owned(),
-            stderr: String::new(),
-            exit_status: 0,
-        }
-    }
+    // branches (invocation failure, query failure).
 
     fn mock_with_upsc_and_unit(stdout: &str, exit: i32, unit_stdout: &str) -> MockRunner {
         MockRunner::default()
@@ -2054,13 +2042,42 @@ mod tests {
         assert_eq!(snap.watts_estimated, None);
     }
 
+    /*
+     * Intent: probe_ups_for_tui falls back when upsc cannot be invoked.
+     * Why it exists: runner-level failures should produce the same empty,
+     * fail-closed TUI snapshot as an upsc query failure.
+     * Scenario: the wrapper did not put upsc on PATH, but systemctl can
+     * still report the upsd unit state.
+     */
+    #[test]
+    fn probe_ups_falls_back_on_invocation_failure() {
+        let mock = MockRunner::default().with_output(
+            CmdRequest::SystemctlIsActive {
+                unit: "upsd.service".into(),
+            },
+            RawCommandOutput {
+                cmd: "systemctl is-active upsd.service".into(),
+                stdout: "inactive\n".into(),
+                stderr: String::new(),
+                exit_status: 3,
+            },
+        );
+
+        let snap = probe_ups_for_tui(&mock, "ups");
+
+        assert!(snap.flags.is_empty());
+        assert_eq!(snap.battery_charge_pct, None);
+        assert_eq!(snap.load_pct, None);
+        assert_eq!(snap.daemon, DaemonStatus::Inactive);
+    }
+
     // Intent: probe_ups_for_tui returns an empty snapshot with daemon
     // falling back to the unit probe on a non-zero upsc exit.
-    // Why: fail-closed fallback -- a parse error cannot silently
-    // render as OL.
+    // Why: fail-closed fallback -- query failure cannot silently render
+    // as OL.
     // Scenario: upsd.service is stopped; upsc exits 1.
     #[test]
-    fn probe_ups_falls_back_on_upsc_failure() {
+    fn probe_ups_falls_back_on_query_failure() {
         let mock = mock_with_upsc_and_unit("", 1, "inactive\n");
         let snap = probe_ups_for_tui(&mock, "ups");
         assert!(snap.flags.is_empty());

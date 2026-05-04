@@ -71,7 +71,7 @@ Distinct error sentinels cover the common non-OK cases:
 | Condition | JSON | Exit code |
 | --- | --- | --- |
 | UPS reachable | serialized `UpscOutput` | 0 |
-| UPS unreachable | `{"error": "daemon_down"}` | 1 |
+| UPS query failed | `{"error": "query_failed", "detail": "exit 1: Error: Connection failure: ..."}` | 1 |
 | UPS not enabled | `{"error": "ups_not_enabled"}` | 0 |
 
 ## Flags

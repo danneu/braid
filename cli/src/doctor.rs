@@ -617,11 +617,10 @@ fn check_beep_path<R: CommandRunner>(
 ///
 /// A spawn failure or missing `upsc` is `Fail` because the enabled UPS
 /// configuration cannot verify its load-bearing shutdown path. `upsc`
-/// non-zero output, including an unreachable upsd daemon, stays `Warn`:
-/// the operator can fix daemon state directly (e.g. `systemctl start upsd`),
-/// and braid does not intervene in NUT lifecycle. Skips with a distinct reason
-/// when config is unavailable; otherwise skips when UPS is not configured or
-/// disabled.
+/// non-zero output, including an unreachable upsd daemon or unknown UPS name,
+/// stays `Warn`: the operator can fix NUT state directly, and braid does not
+/// intervene in NUT lifecycle. Skips with a distinct reason when config is
+/// unavailable; otherwise skips when UPS is not configured or disabled.
 fn check_ups_daemon_up<R: CommandRunner>(ctx: &mut DoctorContext<'_, R>) -> CheckResult {
     let name = "ups_daemon";
     let Some(config) = ctx.config.as_ref() else {
@@ -633,38 +632,27 @@ fn check_ups_daemon_up<R: CommandRunner>(ctx: &mut DoctorContext<'_, R>) -> Chec
             return CheckResult::skip(name, "skipped (braid.ups not enabled)");
         }
     };
-    let raw = match ctx.runner.run(&CmdRequest::UpscQuery {
-        name: ups_cfg.name.clone(),
-    }) {
-        Ok(r) => r,
-        Err(e) => {
-            return CheckResult::fail(
-                name,
-                format!("upsc failed to spawn: {e} -- is pkgs.nut on PATH?"),
-            );
-        }
-    };
-    match crate::parse::parse_upsc(&raw) {
-        Ok(out) => {
-            if out.status_flags.is_empty() {
-                CheckResult::warn(
-                    name,
-                    format!(
-                        "upsc {} responded but ups.status is empty -- driver may still be starting",
-                        ups_cfg.name
-                    ),
-                )
-            } else {
-                CheckResult::ok(name, format!("upsc {} reachable", ups_cfg.name))
-            }
-        }
-        Err(_) => CheckResult::warn(
+    match crate::ups::query_ups(ctx.runner, &ups_cfg.name) {
+        Err(crate::ups::UpsQueryError::InvocationFailed(e)) => CheckResult::fail(
+            name,
+            format!("upsc invocation failed: {e} -- is pkgs.nut on PATH?"),
+        ),
+        Err(crate::ups::UpsQueryError::QueryFailed { exit_code, stderr }) => CheckResult::warn(
             name,
             format!(
-                "upsc {} unreachable -- check 'systemctl status upsd.service'",
+                "upsc {} failed (exit {exit_code}): {stderr} -- \
+                 check 'systemctl status upsd.service' or verify the UPS name",
                 ups_cfg.name
             ),
         ),
+        Ok(out) if out.status_flags.is_empty() => CheckResult::warn(
+            name,
+            format!(
+                "upsc {} responded but ups.status is empty -- driver may still be starting",
+                ups_cfg.name
+            ),
+        ),
+        Ok(_) => CheckResult::ok(name, format!("upsc {} reachable", ups_cfg.name)),
     }
 }
 
@@ -2684,13 +2672,13 @@ mod tests {
     }
 
     // Intent: check_ups_daemon_up warns when `upsc` exits non-zero.
-    // Why: the daemon-down state deserves a visible but non-fatal nudge
-    // -- the plan says this is a Warn (operator fixes it, braid does
-    // not intervene). Regression here would turn every rebooting
-    // upsd.service into a false Fail that masks real problems.
+    // Why: query failure deserves a visible but non-fatal nudge -- the
+    // operator fixes NUT state, braid does not intervene. Regression here
+    // would turn every rebooting upsd.service into a false Fail that masks
+    // real problems.
     // Scenario: `systemctl stop upsd.service` while doctor runs.
     #[test]
-    fn ups_daemon_check_warns_when_daemon_down() {
+    fn ups_daemon_check_warns_when_upsc_query_fails() {
         let runner = MockRunner::default().with_output(
             CmdRequest::UpscQuery { name: "ups".into() },
             RawCommandOutput {
@@ -2704,10 +2692,25 @@ mod tests {
         let mut ctx = ups_ctx(&runner, &paths, config_with_ups_enabled());
         let r = check_ups_daemon_up(&mut ctx);
         assert_eq!(r.status, CheckStatus::Warn, "got: {r:?}");
-        assert!(r.message.contains("unreachable"));
+        assert!(r.message.contains("failed (exit 1)"), "got: {}", r.message);
+        assert!(
+            r.message.contains("Error: Connection refused"),
+            "got: {}",
+            r.message
+        );
+        assert!(
+            r.message.contains("systemctl status upsd.service"),
+            "got: {}",
+            r.message
+        );
+        assert!(
+            r.message.contains("verify the UPS name"),
+            "got: {}",
+            r.message
+        );
     }
 
-    // Intent: check_ups_daemon_up fails when `upsc` cannot be spawned.
+    // Intent: check_ups_daemon_up fails when `upsc` cannot be invoked.
     // Why: an enabled UPS configuration whose client binary is missing
     // cannot verify the load-bearing shutdown safety path; unlike a
     // temporarily unreachable daemon, this is a packaging/wrapper fault.
@@ -2721,8 +2724,13 @@ mod tests {
         let r = check_ups_daemon_up(&mut ctx);
         assert_eq!(r.status, CheckStatus::Fail, "got: {r:?}");
         assert!(
-            r.message.contains("upsc failed to spawn"),
+            r.message.contains("upsc invocation failed"),
             "unexpected message: {}",
+            r.message
+        );
+        assert!(
+            !r.message.contains("systemctl status upsd.service"),
+            "invocation failures should not point at upsd: {}",
             r.message
         );
     }
