@@ -60,7 +60,11 @@ fn discover_from_dir<R: CommandRunner>(
         Err(e) => return Err(DiscoverError::ReadDir(e)),
     };
 
-    let mut members: BTreeMap<String, (ByIdPath, String)> = BTreeMap::new();
+    // (priority, filename, by_id, canonical) for the best candidate per disk
+    // name. Caching priority + filename at insertion lets the Occupied arm
+    // tie-break without re-extracting the basename or recomputing the priority
+    // class for the stored entry.
+    let mut members: BTreeMap<String, (u8, String, ByIdPath, String)> = BTreeMap::new();
 
     for entry in entries.flatten() {
         let name = entry.file_name();
@@ -75,12 +79,11 @@ fn discover_from_dir<R: CommandRunner>(
         let path_str = path.to_string_lossy().to_string();
 
         // Check if LUKS
-        match runner.run(&CmdRequest::CryptsetupIsLuks {
+        let raw = runner.run(&CmdRequest::CryptsetupIsLuks {
             device: path_str.clone(),
-        }) {
-            Ok(raw) if raw.exit_status != 0 => continue,
-            Err(_) => continue,
-            _ => {}
+        })?;
+        if raw.exit_status != 0 {
+            continue;
         }
 
         // Read LUKS label + version via luksDump text output. One luksDump
@@ -88,12 +91,9 @@ fn discover_from_dir<R: CommandRunner>(
         // enforces braid's LUKS2-only invariant at this gateway so a
         // braid-labeled LUKS1 disk never reaches pool.json via
         // `braid discover --write`.
-        let dump_raw = match runner.run(&CmdRequest::CryptsetupLuksDumpText {
+        let dump_raw = runner.run(&CmdRequest::CryptsetupLuksDumpText {
             device: path_str.clone(),
-        }) {
-            Ok(raw) => raw,
-            Err(_) => continue,
-        };
+        })?;
 
         let version = match parse_cryptsetup_luks_version(&dump_raw) {
             Ok(out) => out.version,
@@ -121,12 +121,16 @@ fn discover_from_dir<R: CommandRunner>(
                 }
             };
 
+            let priority = by_id_priority(&name_str);
+            let filename = name_str.into_owned();
+
             match members.entry(disk_name.to_owned()) {
                 Entry::Vacant(e) => {
-                    e.insert((ByIdPath(path_str), canonical));
+                    e.insert((priority, filename, ByIdPath(path_str), canonical));
                 }
                 Entry::Occupied(mut e) => {
-                    let (existing_by_id, existing_canonical) = e.get();
+                    let (existing_priority, existing_filename, existing_by_id, existing_canonical) =
+                        e.get();
                     if *existing_canonical != canonical {
                         return Err(label_collision(
                             disk_name,
@@ -135,14 +139,13 @@ fn discover_from_dir<R: CommandRunner>(
                         ));
                     }
 
-                    // Keep the candidate with the best (priority, filename) key so
-                    // selection is fully deterministic regardless of read_dir order.
-                    let existing_name =
-                        existing_by_id.0.rsplit('/').next().unwrap_or("").to_owned();
-                    let candidate_key = (by_id_priority(&name_str), name_str.as_ref());
-                    let existing_key = (by_id_priority(&existing_name), existing_name.as_str());
-                    if candidate_key < existing_key {
-                        e.insert((ByIdPath(path_str), canonical));
+                    // Same physical disk via two aliases -- keep the candidate
+                    // with the best (priority, filename) key so selection is
+                    // deterministic regardless of read_dir order.
+                    let candidate_better = (priority, filename.as_str())
+                        < (*existing_priority, existing_filename.as_str());
+                    if candidate_better {
+                        e.insert((priority, filename, ByIdPath(path_str), canonical));
                     }
                 }
             }
@@ -151,7 +154,7 @@ fn discover_from_dir<R: CommandRunner>(
 
     Ok(members
         .into_iter()
-        .map(|(name, (by_id, _canonical))| (name, by_id))
+        .map(|(name, (_, _, by_id, _))| (name, by_id))
         .collect())
 }
 
@@ -308,6 +311,110 @@ mod tests {
         let path = dir.join(name);
         std::os::unix::fs::symlink(target, &path).unwrap();
         path.to_string_lossy().into_owned()
+    }
+
+    #[test]
+    fn discover_propagates_runner_error_at_isluks() {
+        /*
+         * Intent: a CmdError from the isLuks runner call bubbles up as
+         *   DiscoverError::Cmd, not silently swallowed as "no labeled disks found".
+         * Why it exists: runner-level failures and the legitimate per-entry
+         *   "not LUKS" signal must not be conflated. This pins propagation
+         *   at the first command site.
+         * Scenario: a developer runs the CLI outside its NixOS context and
+         *   cryptsetup is not on PATH; discover should fail loudly with a
+         *   spawn-error message, not silently report no disks.
+         */
+        struct IsLuksFailRunner;
+
+        impl CommandRunner for IsLuksFailRunner {
+            fn run(&self, _req: &CmdRequest) -> Result<RawCommandOutput, CmdError> {
+                Err(CmdError::Failed(
+                    "cryptsetup: No such file or directory (os error 2)".into(),
+                ))
+            }
+
+            fn run_with_stdin(
+                &self,
+                req: &CmdRequest,
+                _stdin: &[u8],
+            ) -> Result<RawCommandOutput, CmdError> {
+                self.run(req)
+            }
+        }
+
+        let by_id_dir = tempfile::tempdir().unwrap();
+        let target_dir = tempfile::tempdir().unwrap();
+        let target = create_target(target_dir.path(), "fake-disk");
+        create_by_id_symlink(by_id_dir.path(), "ata-SOMEDISK", &target);
+
+        let err = discover_from_dir(
+            &IsLuksFailRunner,
+            &crate::recover::RealByIdResolver,
+            by_id_dir.path(),
+        )
+        .unwrap_err();
+
+        assert!(
+            matches!(err, DiscoverError::Cmd(_)),
+            "expected DiscoverError::Cmd from isLuks failure, got {err:?}",
+        );
+    }
+
+    #[test]
+    fn discover_propagates_runner_error_at_luksdump() {
+        /*
+         * Intent: a CmdError from the luksDump runner call bubbles up as
+         *   DiscoverError::Cmd after isLuks succeeds.
+         * Why it exists: a fail-at-first-call test does not exercise the
+         *   second command site, so this separately pins the luksDump
+         *   propagation path.
+         * Scenario: cryptsetup spawns successfully for isLuks but fails for
+         *   luksDump, such as a transient I/O error on the second invocation.
+         */
+        struct LuksDumpFailRunner;
+
+        impl CommandRunner for LuksDumpFailRunner {
+            fn run(&self, req: &CmdRequest) -> Result<RawCommandOutput, CmdError> {
+                match req {
+                    CmdRequest::CryptsetupIsLuks { .. } => Ok(RawCommandOutput {
+                        cmd: "cryptsetup".into(),
+                        stdout: String::new(),
+                        stderr: String::new(),
+                        exit_status: 0,
+                    }),
+                    CmdRequest::CryptsetupLuksDumpText { .. } => {
+                        Err(CmdError::Failed("cryptsetup luksDump: I/O error".into()))
+                    }
+                    _ => Err(CmdError::MissingMock),
+                }
+            }
+
+            fn run_with_stdin(
+                &self,
+                req: &CmdRequest,
+                _stdin: &[u8],
+            ) -> Result<RawCommandOutput, CmdError> {
+                self.run(req)
+            }
+        }
+
+        let by_id_dir = tempfile::tempdir().unwrap();
+        let target_dir = tempfile::tempdir().unwrap();
+        let target = create_target(target_dir.path(), "fake-disk");
+        create_by_id_symlink(by_id_dir.path(), "ata-SOMEDISK", &target);
+
+        let err = discover_from_dir(
+            &LuksDumpFailRunner,
+            &crate::recover::RealByIdResolver,
+            by_id_dir.path(),
+        )
+        .unwrap_err();
+
+        assert!(
+            matches!(err, DiscoverError::Cmd(_)),
+            "expected DiscoverError::Cmd from luksDump failure, got {err:?}",
+        );
     }
 
     #[test]
