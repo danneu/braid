@@ -14,7 +14,7 @@ pub enum ScrubCancelResult {
 
 #[derive(Debug, thiserror::Error)]
 pub enum ScrubCancelError {
-    #[error("command error: {0}")]
+    #[error("btrfs scrub cancel command error: {0}")]
     Cmd(#[from] CmdError),
     #[error("btrfs scrub cancel failed: {stderr}")]
     CancelFailed { stderr: String },
@@ -217,19 +217,52 @@ mod tests {
         );
     }
 
+    struct FailingCancelRunner;
+
+    impl CommandRunner for FailingCancelRunner {
+        fn run(&self, request: &CmdRequest) -> Result<RawCommandOutput, CmdError> {
+            match request {
+                CmdRequest::BtrfsScrubCancel { .. } => Err(CmdError::Failed(
+                    "btrfs scrub cancel /mnt/storage: No such file or directory (os error 2)"
+                        .into(),
+                )),
+                other => panic!("unexpected request: {other:?}"),
+            }
+        }
+
+        fn run_with_stdin(
+            &self,
+            _request: &CmdRequest,
+            _stdin: &[u8],
+        ) -> Result<RawCommandOutput, CmdError> {
+            panic!("run_with_stdin not used by cmd_scrub_cancel")
+        }
+    }
+
+    /*
+     * Intent: a CommandRunner-layer failure (for example spawn error) remains
+     *   Err(Cmd), but displays with scrub-cancel-specific framing.
+     * Why it exists: pins the distinction between command-layer failure and
+     *   btrfs cancel output failure while making the ExecStop journal line
+     *   identify the failing operation. Reverting the display string to the
+     *   generic "command error:" prefix must fail this test.
+     * Scenario: braid-scrub.service ExecStop tries to cancel scrub, but the
+     *   cancel subprocess cannot be spawned before any exit-status output exists.
+     */
     #[test]
-    // Intent: a CommandRunner-layer failure (e.g. spawn error) -> Err(Cmd),
-    //   not silently treated as success.
-    // Why it exists: pins the command-layer error propagation. If the
-    //   subprocess never executed, we cannot claim the scrub is cancelled;
-    //   ExecStop must surface that as a stop failure rather than masking it.
-    // Scenario: btrfs binary missing on PATH or the runner cannot fork.
     fn cancel_command_failure_propagates() {
-        let runner = MockRunner::default(); // no mocks seeded -> MissingMock
+        let runner = FailingCancelRunner;
         let result = cmd_scrub_cancel(&runner, &mp());
+        let err = result.unwrap_err();
+
         assert!(
-            matches!(result, Err(ScrubCancelError::Cmd(_))),
-            "expected Err(Cmd), got {result:?}"
+            matches!(&err, ScrubCancelError::Cmd(_)),
+            "expected Err(Cmd), got {err:?}"
+        );
+        assert!(
+            err.to_string()
+                .starts_with("btrfs scrub cancel command error:"),
+            "expected cancel command error framing, got {err}"
         );
     }
 }
