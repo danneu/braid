@@ -41,6 +41,10 @@ pub enum DiscoverWarning {
         path: String,
         detail: String,
     },
+    InvalidDiskName {
+        path: String,
+        label: String,
+    },
 }
 
 impl fmt::Display for DiscoverWarning {
@@ -67,6 +71,11 @@ impl fmt::Display for DiscoverWarning {
             DiscoverWarning::CannotCanonicalize { path, detail } => {
                 write!(f, "skipping {path}: cannot canonicalize -- {detail}")
             }
+            DiscoverWarning::InvalidDiskName { path, label } => write!(
+                f,
+                "skipping {path}: label \"{}\" has an invalid disk name",
+                label.escape_default(),
+            ),
         }
     }
 }
@@ -188,47 +197,56 @@ fn discover_from_dir<R: CommandRunner>(
             .and_then(|out| out.label);
 
         // Check if label matches braid-<name>
-        if let Some(label) = label
-            && let Some(disk_name) = crate::config::name_from_mapper(&label)
-            && crate::membership::is_valid_disk_name(disk_name)
-        {
-            let canonical = match resolver.canonicalize(&path_str) {
-                Ok(c) => c,
-                Err(e) => {
-                    warnings.push(DiscoverWarning::CannotCanonicalize {
-                        path: path_str.clone(),
-                        detail: e.to_string(),
-                    });
-                    continue;
+        let Some(label) = label else {
+            continue;
+        };
+        let Some(disk_name) = crate::config::name_from_mapper(&label) else {
+            continue;
+        };
+        if !crate::membership::is_valid_disk_name(disk_name) {
+            warnings.push(DiscoverWarning::InvalidDiskName {
+                path: path_str.clone(),
+                label: label.clone(),
+            });
+            continue;
+        }
+
+        let canonical = match resolver.canonicalize(&path_str) {
+            Ok(c) => c,
+            Err(e) => {
+                warnings.push(DiscoverWarning::CannotCanonicalize {
+                    path: path_str.clone(),
+                    detail: e.to_string(),
+                });
+                continue;
+            }
+        };
+
+        let priority = by_id_priority(&name_str);
+        let filename = name_str.into_owned();
+
+        match members.entry(disk_name.to_owned()) {
+            Entry::Vacant(e) => {
+                e.insert((priority, filename, ByIdPath(path_str), canonical));
+            }
+            Entry::Occupied(mut e) => {
+                let (existing_priority, existing_filename, existing_by_id, existing_canonical) =
+                    e.get();
+                if *existing_canonical != canonical {
+                    return Err(label_collision(
+                        disk_name,
+                        existing_by_id.0.clone(),
+                        path_str,
+                    ));
                 }
-            };
 
-            let priority = by_id_priority(&name_str);
-            let filename = name_str.into_owned();
-
-            match members.entry(disk_name.to_owned()) {
-                Entry::Vacant(e) => {
+                // Same physical disk via two aliases -- keep the candidate
+                // with the best (priority, filename) key so selection is
+                // deterministic regardless of read_dir order.
+                let candidate_better = (priority, filename.as_str())
+                    < (*existing_priority, existing_filename.as_str());
+                if candidate_better {
                     e.insert((priority, filename, ByIdPath(path_str), canonical));
-                }
-                Entry::Occupied(mut e) => {
-                    let (existing_priority, existing_filename, existing_by_id, existing_canonical) =
-                        e.get();
-                    if *existing_canonical != canonical {
-                        return Err(label_collision(
-                            disk_name,
-                            existing_by_id.0.clone(),
-                            path_str,
-                        ));
-                    }
-
-                    // Same physical disk via two aliases -- keep the candidate
-                    // with the best (priority, filename) key so selection is
-                    // deterministic regardless of read_dir order.
-                    let candidate_better = (priority, filename.as_str())
-                        < (*existing_priority, existing_filename.as_str());
-                    if candidate_better {
-                        e.insert((priority, filename, ByIdPath(path_str), canonical));
-                    }
                 }
             }
         }
@@ -785,6 +803,76 @@ mod tests {
             DiscoverWarning::UnsupportedLuksVersion { path, version: 1 }
                 if path.ends_with("ata-LEGACY_DISK")
         ));
+    }
+
+    #[test]
+    fn discover_warns_on_invalid_disk_name_in_braid_label() {
+        /*
+         * Intent: a `braid-<NAME>` label whose <NAME> fails
+         *   is_valid_disk_name (leading digit, embedded space, > 32 chars,
+         *   non-ASCII) must produce a structured InvalidDiskName warning
+         *   AND be absent from the discovered members. Either alone is
+         *   insufficient: absence already happens via short-circuit in the
+         *   if-let chain (the prior, broken behavior), so the warning push
+         *   is what the test pins.
+         * Why it exists: the rejection used to be silent and
+         *   indistinguishable from "this isn't a braid disk." A user who
+         *   externally formats a drive with a malformed name would see
+         *   nothing in `braid discover` output. The new warning routes
+         *   through main.rs -> Display impl, surfacing the label and path
+         *   so the user can relabel.
+         * Scenario: an admin runs `cryptsetup luksFormat --label braid-é`
+         *   on a new disk (non-ASCII name -- cryptsetup accepts any UTF-8
+         *   string up to 47 bytes), plugs it in alongside a properly
+         *   formatted braid disk, and runs `braid discover`. Only the
+         *   valid disk should appear in members; the malformed one must
+         *   produce one InvalidDiskName warning whose rendered Display
+         *   form escapes the non-ASCII byte.
+         */
+        let dir = tempfile::tempdir().unwrap();
+        let bad_target = create_target(dir.path(), "fake-bad");
+        let good_target = create_target(dir.path(), "fake-good");
+        let bad_path = create_by_id_symlink(dir.path(), "ata-BAD_LABEL", &bad_target);
+        let good_path = create_by_id_symlink(dir.path(), "ata-GOOD_LABEL", &good_target);
+        let runner = LabelMap::new(&[(&bad_path, "braid-é"), (&good_path, "braid-good")]);
+
+        let outcome =
+            discover_from_dir(&runner, &crate::recover::RealByIdResolver, dir.path()).unwrap();
+
+        assert_eq!(
+            outcome.members.len(),
+            1,
+            "expected only the valid disk: {:?}",
+            outcome.members,
+        );
+        assert!(
+            outcome.members.contains_key("good"),
+            "good disk should be discovered: {:?}",
+            outcome.members,
+        );
+        assert!(
+            !outcome.members.keys().any(|k| k.contains("é")),
+            "invalid name must not be recorded: {:?}",
+            outcome.members,
+        );
+
+        assert_eq!(outcome.warnings.len(), 1);
+        let DiscoverWarning::InvalidDiskName { path, label } = &outcome.warnings[0] else {
+            panic!("expected InvalidDiskName, got {:?}", outcome.warnings[0]);
+        };
+        assert!(path.ends_with("ata-BAD_LABEL"), "path was {path}");
+        assert_eq!(label, "braid-é");
+
+        // Pin the escape_default() choice: non-ASCII characters in the
+        // label must be rendered as \u{...} escapes in the user-facing
+        // warning. If someone replaces escape_default() with {:?} (Debug)
+        // or {} (raw), the printable non-ASCII byte survives verbatim and
+        // this assertion fails.
+        let rendered = outcome.warnings[0].to_string();
+        assert!(
+            rendered.contains("\"braid-\\u{e9}\""),
+            "expected escape_default rendering of non-ASCII label, got: {rendered:?}",
+        );
     }
 
     #[test]
