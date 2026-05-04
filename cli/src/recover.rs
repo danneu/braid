@@ -327,8 +327,15 @@ impl RecoverPlan {
         //
         // Skipped when the pool was already mounted before recover started:
         // we don't know who's using that mount and umount could fail with
-        // EBUSY. The bug only manifests on the mount session that triggered
-        // the kernel resume, which is one we just opened ourselves.
+        // EBUSY.
+        //
+        // Pre-condition for reaching this branch with `just_mounted == false`:
+        // the planner-level fail-fast in `plan_recover` rejects the
+        // (already-mounted, OpKind::Replace) combination outright, directing
+        // the operator to `braid lock; braid recover`. So when execute()
+        // reaches an already-mounted pool here, the journal op is Add /
+        // Remove / RemoveMissing -- none of which trigger the kernel
+        // dev_replace resume bug -- and skipping the cycle is sound.
         if just_mounted {
             wait_for_kernel_replace_to_finish(runner, params.config.mount_point(), color_enabled);
             // We mounted, so open_plan was Some, so credential was eagerly resolved
@@ -510,6 +517,36 @@ pub fn plan_recover<R: CommandRunner + Sync, F: Filesystem + ?Sized>(
         }
     };
 
+    // Refuse Replace recovery on an already-mounted pool. The cycle that
+    // scrubs stale in-memory btrfs_fs_devices after a kernel-resumed
+    // dev_replace requires a clean umount-and-remount that we cannot safely
+    // perform when an external process holds the mount (EBUSY risk). The
+    // staleness is also undetectable from userspace post-resume: btrfs
+    // replace status reports `Finished` for both a normally-completed
+    // replace and a kernel-resumed replace, so we cannot use it to tell
+    // whether the in-memory fs_devices view is fresh.
+    //
+    // Operator's recovery path: `braid lock` (works with a journal present
+    // -- no pending-op preflight in lock.rs) then `braid recover`, which
+    // opens its own mount and takes the just_mounted == true cycle path.
+    if open_plan.is_none() && matches!(&journal.op, journal::OpKind::Replace { .. }) {
+        return RecoverPlanReport {
+            notes,
+            result: Err(RecoverError::Failed(
+                "recover refuses to probe an already-mounted pool when the journal \
+                 records a replace -- the kernel may have resumed an interrupted \
+                 dev_replace on this mount session, leaving stale in-memory device \
+                 state that probe_pool cannot distinguish from real topology.\n\n\
+                 To recover safely, fully cycle the mount yourself first:\n  \
+                 sudo braid lock\n  sudo braid recover\n\n\
+                 braid lock works with a pending-operation journal and unmounts + \
+                 closes LUKS, after which braid recover opens a fresh mount session \
+                 and clears the staleness via the relock cycle."
+                    .to_owned(),
+            )),
+        };
+    }
+
     // Build dry-run steps.
     let mut steps = Vec::new();
     if let Some(op) = &open_plan {
@@ -555,7 +592,7 @@ pub fn plan_recover<R: CommandRunner + Sync, F: Filesystem + ?Sized>(
         }
     }
 
-    if matches!(journal.op, journal::OpKind::Replace { .. }) && open_plan.is_some() {
+    if matches!(&journal.op, journal::OpKind::Replace { .. }) && open_plan.is_some() {
         steps.push(Step {
             risk: "long",
             description: "wait for kernel dev_replace to finish (skipped if no running replace)"
@@ -3963,25 +4000,201 @@ mod tests {
     /// The live VM matrix (M3) needs this fix to reliably assert "final
     /// device layout matches the requested replacement".
     ///
+    /// Path: this test exercises the `just_mounted == true` cycle path --
+    /// recover opens the mount itself, then runs
+    /// `wait_for_kernel_replace_to_finish` + `relock_and_remount` to scrub
+    /// any kernel-resumed-dev_replace staleness, then probes and replays
+    /// the resize. The previously-existing `mountpoint_ok()` (already-mounted)
+    /// variant of this test is intentionally absent: that path is now
+    /// refused at the planner level for OpKind::Replace
+    /// (`plan_recover_refuses_replace_on_externally_mounted_pool` pins the
+    /// refusal).
+    ///
     /// Scenario: Operator started `braid replace old new` against a pool that
     /// finished the kernel-side dev_replace under UPS battery, then power
-    /// dropped before resize. Pool comes up mounted with the new device on
-    /// devid 2; recover resizes it as part of replaying the post-mutation
-    /// steps and then clears the journal.
+    /// dropped before resize. Pool comes up unmounted (auto-unlock blocked
+    /// by the pending-op preflight); recover opens the mount, finishes the
+    /// kernel resume + cycle, sees the new device on devid 2, and resizes
+    /// it as part of replaying the post-mutation steps before clearing the
+    /// journal.
     #[test]
-    fn recover_replays_resize_after_replace() {
+    fn recover_replays_resize_after_replace_via_mount_cycle() {
         let tmp = tempfile::TempDir::new().unwrap();
         let paths = StatePaths::custom(tmp.path().into());
         let config = Config::new(MountPoint("/mnt/storage".into())).unwrap();
-        let fs = MockFs::new(&[]);
+
+        // StatefulMockFs starts with by-id paths for the union {disk1, old,
+        // new}. No mapper paths -- everything starts closed.
+        // MapperClosingRunner adds mapper paths after each successful
+        // CryptsetupLuksOpen and removes them after each CryptsetupClose.
+        let fs = StatefulMockFs::new(&[
+            "/dev/disk/by-id/virtio-disk1",
+            "/dev/disk/by-id/virtio-old",
+            "/dev/disk/by-id/virtio-new",
+        ]);
+        let fs_handle = fs.handle();
 
         let journal = replace_journal();
         journal::write_journal(&paths, &journal).unwrap();
 
-        let (mp_req, mp_out) = mountpoint_ok();
-        let runner = MockRunner::default()
-            // mountpoint check -> already mounted (skips the mount cycle)
-            .with_output(mp_req, mp_out)
+        let inner = MockRunner::default()
+            // ── Initial plan_open_pool ──────────────────────────────────
+            // mountpoint check → not mounted → plan_open_pool returns
+            // Some(open_plan) and recover takes the just_mounted == true
+            // path.
+            .with_output(mountpoint_fail().0, mountpoint_fail().1)
+            // probe each union member's LUKS UUID (mapper closed → mapper_open=false).
+            .with_output(
+                CmdRequest::CryptsetupLuksUuid {
+                    device: "/dev/disk/by-id/virtio-disk1".into(),
+                },
+                cryptsetup_uuid_ok(
+                    "/dev/disk/by-id/virtio-disk1",
+                    "11111111-1111-1111-1111-111111111111",
+                ),
+            )
+            .with_output(
+                CmdRequest::CryptsetupLuksUuid {
+                    device: "/dev/disk/by-id/virtio-old".into(),
+                },
+                cryptsetup_uuid_ok(
+                    "/dev/disk/by-id/virtio-old",
+                    "22222222-2222-2222-2222-222222222222",
+                ),
+            )
+            .with_output(
+                CmdRequest::CryptsetupLuksUuid {
+                    device: "/dev/disk/by-id/virtio-new".into(),
+                },
+                cryptsetup_uuid_ok(
+                    "/dev/disk/by-id/virtio-new",
+                    "33333333-3333-3333-3333-333333333333",
+                ),
+            )
+            // ── Initial execute_unlock_and_mount ────────────────────────
+            // Per-disk verify-passphrase + open. Order is BTreeMap-alphabetical:
+            // disk1, new, old.
+            .with_output_stdin(
+                CmdRequest::CryptsetupTestPassphrase {
+                    device: "/dev/disk/by-id/virtio-disk1".into(),
+                },
+                b"testpass".to_vec(),
+                ok_raw_empty("cryptsetup open --test-passphrase"),
+            )
+            .with_output_stdin(
+                CmdRequest::CryptsetupTestPassphrase {
+                    device: "/dev/disk/by-id/virtio-new".into(),
+                },
+                b"testpass".to_vec(),
+                ok_raw_empty("cryptsetup open --test-passphrase"),
+            )
+            .with_output_stdin(
+                CmdRequest::CryptsetupTestPassphrase {
+                    device: "/dev/disk/by-id/virtio-old".into(),
+                },
+                b"testpass".to_vec(),
+                ok_raw_empty("cryptsetup open --test-passphrase"),
+            )
+            .with_output_stdin(
+                CmdRequest::CryptsetupLuksOpen {
+                    device: "/dev/disk/by-id/virtio-disk1".into(),
+                    mapper: "braid-disk1".into(),
+                },
+                b"testpass".to_vec(),
+                ok_raw_empty("cryptsetup open"),
+            )
+            .with_output_stdin(
+                CmdRequest::CryptsetupLuksOpen {
+                    device: "/dev/disk/by-id/virtio-new".into(),
+                    mapper: "braid-new".into(),
+                },
+                b"testpass".to_vec(),
+                ok_raw_empty("cryptsetup open"),
+            )
+            .with_output_stdin(
+                CmdRequest::CryptsetupLuksOpen {
+                    device: "/dev/disk/by-id/virtio-old".into(),
+                    mapper: "braid-old".into(),
+                },
+                b"testpass".to_vec(),
+                ok_raw_empty("cryptsetup open"),
+            )
+            .with_output(
+                CmdRequest::BtrfsDeviceScanAll,
+                ok_raw_empty("btrfs device scan"),
+            )
+            // No missing members in the union → plain Mount, not
+            // MountWithOptions. mount_device is the first to_unlock entry
+            // (alphabetical → braid-disk1).
+            .with_output(
+                CmdRequest::Mount {
+                    device: "/dev/mapper/braid-disk1".into(),
+                    mount_point: MountPoint("/mnt/storage".into()),
+                },
+                ok_raw_empty("mount"),
+            )
+            // ── wait_for_kernel_replace_to_finish ───────────────────────
+            // Realistic post-resume status: Finished. The parser routes
+            // "finished on" to ReplaceState::Finished and the wait loop
+            // returns immediately.
+            .with_output(
+                CmdRequest::BtrfsReplaceStatus {
+                    mount_point: MountPoint("/mnt/storage".into()),
+                },
+                ok_raw(
+                    "btrfs replace status",
+                    "Started on 27.Feb 10:30:00, finished on 27.Feb 10:35:00, \
+                     0 write errs, 0 uncorr. read errs\n",
+                ),
+            )
+            // ── relock_and_remount cycle ────────────────────────────────
+            // 1. Umount.
+            .with_output(
+                CmdRequest::Umount {
+                    mount_point: MountPoint("/mnt/storage".into()),
+                },
+                ok_raw_empty("umount"),
+            )
+            // 2. scan --forget -- pool-scoped to the union mappers.
+            .with_output(
+                CmdRequest::BtrfsDeviceScanForget {
+                    devices: vec![
+                        "/dev/mapper/braid-disk1".into(),
+                        "/dev/mapper/braid-new".into(),
+                        "/dev/mapper/braid-old".into(),
+                    ],
+                },
+                ok_raw_empty("btrfs device scan --forget"),
+            )
+            // 3. Close each union mapper. MapperClosingRunner removes the
+            //    mapper path from StatefulMockFs and adds the name to its
+            //    `closed` set after each successful close.
+            .with_output(
+                CmdRequest::CryptsetupClose {
+                    mapper: "braid-disk1".into(),
+                },
+                ok_raw_empty("cryptsetup close braid-disk1"),
+            )
+            .with_output(
+                CmdRequest::CryptsetupClose {
+                    mapper: "braid-new".into(),
+                },
+                ok_raw_empty("cryptsetup close braid-new"),
+            )
+            .with_output(
+                CmdRequest::CryptsetupClose {
+                    mapper: "braid-old".into(),
+                },
+                ok_raw_empty("cryptsetup close braid-old"),
+            )
+            // 4. Cycle re-plan: mountpoint check + LuksUuid mocks reused
+            //    via MockRunner's HashMap lookup. Mappers report inactive
+            //    via MapperClosingRunner's `closed` set. TestPassphrase +
+            //    LuksOpen mocks above are reused for the cycle reopen.
+            // 5. Cycle execute mount: same Mount mock as above.
+            // ── Post-cycle probe_pool ───────────────────────────────────
+            // The fix-state topology: 2 devices (disk1 + new), no phantom
+            // MISSING. This is what btrfs_show_disk1_and_new() returns.
             .with_output(
                 CmdRequest::BtrfsFilesystemShow {
                     mount_point: MountPoint("/mnt/storage".into()),
@@ -4012,9 +4225,10 @@ mod tests {
                 },
                 cryptsetup_uuid_ok("/dev/vdc", "33333333-3333-3333-3333-333333333333"),
             )
-            // M1 replay: idempotent resize-to-max on the new device's devid (2).
-            // Without this mock the test fails with MissingMock, proving recover
-            // actually issued the resize.
+            // ── replay_post_mutation ────────────────────────────────────
+            // Resize-to-max on the new device's devid (2). Load-bearing
+            // assertion: without this mock the test fails with MissingMock,
+            // proving recover actually issued the resize.
             .with_output(
                 CmdRequest::BtrfsFilesystemResize {
                     devid: 2,
@@ -4022,21 +4236,51 @@ mod tests {
                 },
                 ok_raw_empty("btrfs filesystem resize"),
             )
-            // M1 replay: per-op soft RAID1 balance to drain any chunks
-            // a cancelled-mid-flight balance worker left non-RAID1.
-            // For Replace, this is idempotent for the Live path (already
-            // RAID1) and load-bearing for the Missing path.
+            // Per-op soft RAID1 balance to drain any chunks a
+            // cancelled-mid-flight balance worker left non-RAID1.
             .with_output(
                 CmdRequest::BtrfsBalanceRaid1Soft {
                     mount_point: MountPoint("/mnt/storage".into()),
                 },
                 ok_raw_empty("btrfs balance start"),
-            );
+            )
+            // LUKS dump used by probe_config_disk to classify each by-id
+            // path as a real LUKS device.
+            .with_luks_dump_text_luks2_for(&[
+                "/dev/disk/by-id/virtio-disk1",
+                "/dev/disk/by-id/virtio-old",
+                "/dev/disk/by-id/virtio-new",
+            ]);
         // Note: BtrfsBalanceStatus is NOT mocked. get_balance_report swallows
         // MissingMock as BalanceReport::Unknown, which cleanly skips the
         // balance-resume branch -- this test exercises both the resize
         // replay (mocked above) and the unconditional soft-balance replay
         // (mocked above).
+
+        // All three union mappers start closed: probe_mapper_open reports
+        // inactive via MapperClosingRunner's `closed`-set fast path, so
+        // plan_open_pool builds a non-empty to_unlock and the initial
+        // mount runs LuksOpen for each. Successful LuksOpen removes the
+        // entry from `closed` and adds the mapper path to fs; the cycle's
+        // Close re-adds the entry and removes the mapper path; the cycle's
+        // LuksOpen reverses again.
+        let mut closed0 = std::collections::HashSet::new();
+        closed0.insert("braid-disk1".to_owned());
+        closed0.insert("braid-new".to_owned());
+        closed0.insert("braid-old".to_owned());
+        let runner = MapperClosingRunner {
+            inner,
+            fs_paths: fs_handle,
+            closed: std::sync::Mutex::new(closed0),
+        };
+
+        // Passphrase file with the canonical "testpass" -- the mocks above
+        // assert on this exact stdin payload.
+        let passphrase_file = tempfile::NamedTempFile::new().unwrap();
+        {
+            use std::io::Write;
+            passphrase_file.as_file().write_all(b"testpass").unwrap();
+        }
 
         let resolver = resolver_for(&[("/dev/vda", "virtio-disk1"), ("/dev/vdc", "virtio-new")]);
         let result = cmd_recover(
@@ -4047,14 +4291,14 @@ mod tests {
                 config: &config,
                 paths: &paths,
                 passphrase_stdin: false,
-                passphrase_file: None,
+                passphrase_file: Some(passphrase_file.path()),
                 allow_degraded: false,
                 dry_run: false,
                 progress: ProgressOutput::Off,
             },
         );
 
-        result.expect("recover should succeed and replay the resize");
+        result.expect("recover should succeed via the mount cycle and replay the resize");
 
         let recovered = membership::load_membership(&paths).unwrap();
         assert!(
@@ -4565,6 +4809,102 @@ mod tests {
             !rendered.contains("nothing to do."),
             "stepful preview must not emit the `nothing to do.` fallback, got: {rendered:?}",
         );
+    }
+
+    /* Intent: when the journal records OpKind::Replace and the pool is already
+     * mounted at planner entry, plan_recover MUST return RecoverError::Failed
+     * with safe-recovery instructions, preserving the entry banner and
+     * AlreadyMounted info note on report.notes. The refusal must fire for
+     * both dry_run = false (real run) and dry_run = true (preview); the gate
+     * sits upstream of that branch, so a regression that affects only one of
+     * the two would still be a real regression.
+     *
+     * Why it exists: kernel-resumed btrfs_resume_dev_replace_async on a session
+     * braid did not open leaves stale in-memory fs_devices that probe_pool
+     * cannot distinguish from real topology. The mount cycle that scrubs this
+     * state is gated on just_mounted == true, and an admin-mounted pool takes
+     * the just_mounted == false path. Without this fail-fast, recover would
+     * silently corrupt pool.json from stale topology.
+     *
+     * Scenario: post-crash, an admin ran `cryptsetup open` + `mount(8)`
+     * directly (circumventing braid's pending-op preflight on `unlock`), then
+     * invoked `braid recover`.
+     */
+    #[test]
+    fn plan_recover_refuses_replace_on_externally_mounted_pool() {
+        for dry_run in [false, true] {
+            let tmp = tempfile::TempDir::new().unwrap();
+            let paths = StatePaths::custom(tmp.path().into());
+            let config = Config::new(MountPoint("/mnt/storage".into())).unwrap();
+            let fs = MockFs::new(&[]);
+
+            let journal = replace_journal();
+            journal::write_journal(&paths, &journal).unwrap();
+
+            // Only mock the mountpoint check. plan_open_pool short-circuits to
+            // Ok(None) before any per-disk probe, so no further mocks are
+            // needed -- any subsequent CryptsetupStatus / BtrfsFilesystemShow
+            // call would surface as MissingMock, proving the fail-fast fires
+            // before probing.
+            let (mp_req, mp_out) = mountpoint_ok();
+            let runner = MockRunner::default().with_output(mp_req, mp_out);
+
+            let params = RecoverParams {
+                config: &config,
+                paths: &paths,
+                passphrase_stdin: false,
+                passphrase_file: None,
+                allow_degraded: false,
+                dry_run,
+                progress: ProgressOutput::Off,
+            };
+
+            let report = plan_recover(&runner, &fs, &params);
+            let err = match report.result {
+                Err(RecoverError::Failed(msg)) => msg,
+                other => {
+                    panic!("expected RecoverError::Failed for dry_run={dry_run}, got: {other:?}")
+                }
+            };
+            assert!(
+                err.contains("already-mounted"),
+                "dry_run={dry_run}: error must mention the already-mounted condition, got: {err:?}",
+            );
+            assert!(
+                err.contains("sudo braid lock"),
+                "dry_run={dry_run}: error must direct to `sudo braid lock`, got: {err:?}",
+            );
+            assert!(
+                err.contains("sudo braid recover"),
+                "dry_run={dry_run}: error must direct to `sudo braid recover`, got: {err:?}",
+            );
+
+            assert_eq!(
+                report.notes.len(),
+                2,
+                "dry_run={dry_run}: report.notes must hold entry banner + AlreadyMounted, got: {:?}",
+                report.notes,
+            );
+            let entry_banner = format_recover_entry(&journal);
+            match &report.notes[0] {
+                PreviewNote::Info(msg) => assert_eq!(
+                    msg, &entry_banner,
+                    "dry_run={dry_run}: notes[0] must be the entry banner",
+                ),
+                other => {
+                    panic!("dry_run={dry_run}: notes[0] must be PreviewNote::Info, got: {other:?}")
+                }
+            }
+            match &report.notes[1] {
+                PreviewNote::Info(msg) => assert!(
+                    msg.contains("pool already mounted at /mnt/storage"),
+                    "dry_run={dry_run}: notes[1] must be the AlreadyMounted info, got: {msg:?}",
+                ),
+                other => {
+                    panic!("dry_run={dry_run}: notes[1] must be PreviewNote::Info, got: {other:?}")
+                }
+            }
+        }
     }
 
     fn render_recover_dry_run(

@@ -126,6 +126,21 @@ Or with a passphrase file:
 sudo braid recover --passphrase-file /path/to/passphrase
 ```
 
+### Recover for a replace journal when the pool is already mounted
+
+**Symptom:** `sudo braid recover` exits with `recover refuses to probe an already-mounted pool when the journal records a replace ...` and instructs you to run `braid lock` first.
+
+**Cause:** The pool was mounted by something other than `braid recover` itself (typically a manual `cryptsetup open` + `mount` after a crash, since `braid unlock` and `braid-auto-unlock.service` both refuse to mount when a pending-op journal exists). For a replace journal, the kernel may have resumed an interrupted `dev_replace` on that mount session, leaving stale in-memory device state that recover cannot distinguish from real topology. The cycle that scrubs this state needs to unmount and remount, which is unsafe on a mount recover does not own.
+
+#### Steps
+
+```sh
+sudo braid lock      # works with a journal present -- no pending-op preflight
+sudo braid recover   # opens its own mount and runs the relock cycle
+```
+
+`braid lock` unmounts the pool and closes the LUKS mappers. `braid recover` then opens a fresh mount session, finishes any in-progress kernel `dev_replace`, and runs the umount-and-remount cycle that clears stale `btrfs_fs_devices` -- the standard happy path for replace recovery.
+
 ## Missing disk (drive failure)
 
 **Symptom:** `braid status` shows a device as missing. The pool may be mounted degraded or may refuse to mount.

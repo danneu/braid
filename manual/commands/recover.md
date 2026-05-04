@@ -67,7 +67,7 @@ sudo braid recover --dry-run
 
 1. Loads `pending-op.json` (refuses if absent -- nothing to recover).
 2. Computes a union membership from both the pre-operation and target snapshots in the journal, ensuring every device referenced by the interrupted operation can be opened.
-3. Opens LUKS devices and mounts the pool (or reuses the existing mount if already mounted).
+3. Opens LUKS devices and mounts the pool (or reuses the existing mount if already mounted). **Exception:** if the journal records a `replace` operation and the pool is already mounted by an external process, recover refuses -- run `sudo braid lock` followed by `sudo braid recover` so a fresh mount session can clear any kernel-resumed-dev_replace staleness via the relock cycle.
 4. If a kernel-resumed btrfs replace is in progress (from a crash during `braid replace`), waits for it to finish.
 5. If the pool was just mounted by this recover run, performs a full relock-and-remount cycle (umount, `btrfs device scan --forget`, close LUKS, reopen, remount) to ensure the kernel's in-memory device topology matches the on-disk state.
 6. Probes the live pool to discover actual membership.
@@ -83,6 +83,7 @@ sudo braid recover --dry-run
 - Hard-fails if a live pool device has no `/dev/disk/by-id/` symlink (recovery can't guess a stable identifier).
 - Detects interrupted bootstrap add (first disk, no filesystem yet) and gives specific wipe-and-retry instructions instead of a confusing mount error.
 - Without `--allow-degraded`, refuses to mount if devices are missing (exit code 2 for degraded-refused, distinguishing it from other errors).
+- Refuses to recover a `replace` operation when the pool is already mounted (admin-mounted, circumventing braid's pending-op preflight on `unlock`). The kernel may have resumed an interrupted `dev_replace` on that mount session, leaving stale in-memory device state that recover cannot scrub without unmounting -- which it will not do on a mount it does not own. Remediation: `sudo braid lock; sudo braid recover`.
 
 ## Related commands
 
