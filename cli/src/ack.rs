@@ -41,6 +41,12 @@ pub fn cmd_ack<R: CommandRunner, F: Filesystem + ?Sized>(
         return ack_offline(latch_state, latch_corrupt, paths);
     }
 
+    let smartd_active = alert::smartd_alert_active(paths);
+    if latch_count == 0 && !smartd_active && !latch_corrupt {
+        println!("no active alerts");
+        return Ok(());
+    }
+
     // 3. Run btrfs device stats
     let stats_raw = runner.run(&CmdRequest::BtrfsDeviceStatsJson {
         mount_point: mount_point.clone(),
@@ -172,7 +178,7 @@ mod tests {
     use crate::alert::{
         AckedDeviceCounters, AckedDisk, AckedStats, load_acked_stats, save_alert_latch,
     };
-    use crate::cmd::{CmdError, RawCommandOutput};
+    use crate::cmd::{CmdError, MockRunner, RawCommandOutput};
     use std::collections::BTreeMap;
 
     /// Mountinfo where /mnt/storage is held by ext4 -> probe_pool returns
@@ -180,6 +186,8 @@ mod tests {
     /// never called on this path.
     const MOUNTINFO_EXT4: &str =
         "36 35 0:32 / /mnt/storage rw,noatime shared:1 - ext4 /dev/sda1 rw\n";
+    const MOUNTINFO_BTRFS: &str =
+        "36 35 0:32 / /mnt/storage rw,noatime shared:1 - btrfs /dev/mapper/braid-disk1 rw\n";
 
     struct PanicRunner;
 
@@ -214,6 +222,24 @@ mod tests {
         }
     }
 
+    struct BtrfsFs;
+
+    impl Filesystem for BtrfsFs {
+        fn exists(&self, _path: &str) -> bool {
+            false
+        }
+        fn is_block_device(&self, _path: &str) -> bool {
+            false
+        }
+        fn read_to_string(&self, path: &str) -> Result<String, std::io::Error> {
+            assert_eq!(path, "/proc/self/mountinfo");
+            Ok(MOUNTINFO_BTRFS.to_owned())
+        }
+        fn list_dir(&self, _path: &str) -> Result<Vec<String>, std::io::Error> {
+            Ok(vec![])
+        }
+    }
+
     fn mp() -> MountPoint {
         MountPoint("/mnt/storage".to_owned())
     }
@@ -230,6 +256,217 @@ mod tests {
             causes,
         };
         save_alert_latch(&state, paths).unwrap();
+    }
+
+    fn ok_raw(cmd: &str, stdout: &str) -> RawCommandOutput {
+        RawCommandOutput {
+            cmd: cmd.to_owned(),
+            stdout: stdout.to_owned(),
+            stderr: String::new(),
+            exit_status: 0,
+        }
+    }
+
+    fn btrfs_show_2disk() -> RawCommandOutput {
+        ok_raw(
+            "btrfs filesystem show /mnt/storage",
+            "Label: none  uuid: aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee\n\
+             \tTotal devices 2 FS bytes used 1.00GiB\n\
+             \tdevid    1 size 10.00GiB used 2.00GiB path /dev/mapper/braid-disk1\n\
+             \tdevid    3 size 10.00GiB used 2.00GiB path /dev/mapper/braid-disk3\n",
+        )
+    }
+
+    fn cryptsetup_status_active(mapper: &str, device: &str) -> RawCommandOutput {
+        ok_raw(
+            &format!("cryptsetup status {mapper}"),
+            &format!(
+                "/dev/mapper/{mapper} is active and is in use.\n\
+                 \ttype:    LUKS2\n\
+                 \tcipher:  aes-xts-plain64\n\
+                 \tdevice:  {device}\n\
+                 \tsector size:  512\n"
+            ),
+        )
+    }
+
+    fn cryptsetup_uuid_ok(device: &str, uuid: &str) -> RawCommandOutput {
+        ok_raw(
+            &format!("cryptsetup luksUUID {device}"),
+            &format!("{uuid}\n"),
+        )
+    }
+
+    fn btrfs_device_stats_healthy() -> RawCommandOutput {
+        ok_raw(
+            "btrfs --format json device stats /mnt/storage",
+            r#"{
+                "device-stats": [
+                    {
+                        "device": "/dev/mapper/braid-disk1",
+                        "devid": 1,
+                        "write_io_errs": 0,
+                        "read_io_errs": 0,
+                        "flush_io_errs": 0,
+                        "corruption_errs": 0,
+                        "generation_errs": 0
+                    },
+                    {
+                        "device": "/dev/mapper/braid-disk3",
+                        "devid": 3,
+                        "write_io_errs": 0,
+                        "read_io_errs": 0,
+                        "flush_io_errs": 0,
+                        "corruption_errs": 0,
+                        "generation_errs": 0
+                    }
+                ]
+            }"#,
+        )
+    }
+
+    fn mounted_probe_runner() -> MockRunner {
+        MockRunner::default()
+            .with_output(
+                CmdRequest::BtrfsFilesystemShow { mount_point: mp() },
+                btrfs_show_2disk(),
+            )
+            .with_output(
+                CmdRequest::CryptsetupStatus {
+                    mapper: "braid-disk1".into(),
+                },
+                cryptsetup_status_active("braid-disk1", "/dev/vda"),
+            )
+            .with_output(
+                CmdRequest::CryptsetupLuksUuid {
+                    device: "/dev/vda".into(),
+                },
+                cryptsetup_uuid_ok("/dev/vda", "11111111-1111-1111-1111-111111111111"),
+            )
+            .with_output(
+                CmdRequest::CryptsetupStatus {
+                    mapper: "braid-disk3".into(),
+                },
+                cryptsetup_status_active("braid-disk3", "/dev/vdc"),
+            )
+            .with_output(
+                CmdRequest::CryptsetupLuksUuid {
+                    device: "/dev/vdc".into(),
+                },
+                cryptsetup_uuid_ok("/dev/vdc", "33333333-3333-3333-3333-333333333333"),
+            )
+    }
+
+    fn mounted_probe_runner_with_device_stats() -> MockRunner {
+        mounted_probe_runner().with_output(
+            CmdRequest::BtrfsDeviceStatsJson { mount_point: mp() },
+            btrfs_device_stats_healthy(),
+        )
+    }
+
+    /*
+     * Intent: Mounted ack with no latched alert, no smartd flag, and no
+     * corrupt latch is a true no-op: it does not query btrfs device stats
+     * or rewrite acked-stats.json.
+     * Why it exists: A proactive ack on a healthy pool used to snapshot
+     * current btrfs counters as the new baseline, which could bury errors
+     * that appeared after the last monitor cycle but before ack.
+     * Scenario: the pool is mounted and healthy; the user runs `braid ack`
+     * "for good measure" before monitor has latched any alert.
+     */
+    #[test]
+    fn cmd_ack_noop_when_no_alerts_does_not_query_btrfs_or_write_acked_stats() {
+        let (_dir, paths) = fresh_paths();
+        let runner = mounted_probe_runner();
+
+        let result = cmd_ack(&runner, &BtrfsFs, &mp(), &paths);
+
+        assert!(result.is_ok(), "no-op ack should succeed, got {result:?}");
+        assert!(
+            !runner
+                .requests()
+                .iter()
+                .any(|r| matches!(r, CmdRequest::BtrfsDeviceStatsJson { .. })),
+            "no-op ack must not query btrfs device stats"
+        );
+        assert!(!paths.acked_stats_json().exists());
+    }
+
+    /*
+     * Intent: Mounted ack still runs the full ack path when
+     * alert-latch.json is corrupt, even though the parsed latch count is
+     * zero.
+     * Why it exists: A guard that checks only latch_count and smartd state
+     * would return early on corrupt latch bytes, leaving the corrupt file
+     * uncleared and violating the corrupt-latch recovery contract.
+     * Scenario: external tampering or filesystem damage leaves a corrupt
+     * latch while the pool is mounted; `braid ack` must clear it.
+     */
+    #[test]
+    fn cmd_ack_with_mounted_pool_and_corrupt_latch_runs_full_ack_path() {
+        let (_dir, paths) = fresh_paths();
+        std::fs::write(paths.alert_latch_json(), b"not json").unwrap();
+        let runner = mounted_probe_runner_with_device_stats();
+
+        let result = cmd_ack(&runner, &BtrfsFs, &mp(), &paths);
+
+        assert!(
+            result.is_ok(),
+            "corrupt-latch ack should succeed, got {result:?}"
+        );
+        assert!(
+            runner
+                .requests()
+                .iter()
+                .any(|r| matches!(r, CmdRequest::BtrfsDeviceStatsJson { .. })),
+            "corrupt-latch ack must run the full ack path"
+        );
+        assert!(
+            !paths.alert_latch_json().exists(),
+            "corrupt latch must be removed"
+        );
+        assert!(
+            paths.acked_stats_json().exists(),
+            "snapshot must have been saved"
+        );
+    }
+
+    /*
+     * Intent: Mounted ack still runs the full ack path when only the
+     * smartd alert flag exists and monitor has not latched it yet.
+     * Why it exists: The smartd hook can fire between monitor cycles. A
+     * guard that ignores the flag would return early, leaving the flag in
+     * place and failing to silence the alert source.
+     * Scenario: smartd writes /var/lib/braid/smartd-alert; before monitor
+     * runs, the user runs `braid ack` on a mounted pool.
+     */
+    #[test]
+    fn cmd_ack_with_mounted_pool_and_smartd_flag_no_latch_runs_full_ack_path() {
+        let (_dir, paths) = fresh_paths();
+        std::fs::write(paths.smartd_alert(), b"").unwrap();
+        let runner = mounted_probe_runner_with_device_stats();
+
+        let result = cmd_ack(&runner, &BtrfsFs, &mp(), &paths);
+
+        assert!(
+            result.is_ok(),
+            "smartd-only ack should succeed, got {result:?}"
+        );
+        assert!(
+            runner
+                .requests()
+                .iter()
+                .any(|r| matches!(r, CmdRequest::BtrfsDeviceStatsJson { .. })),
+            "smartd-only ack must run the full ack path"
+        );
+        assert!(
+            !paths.smartd_alert().exists(),
+            "smartd flag must be removed"
+        );
+        assert!(
+            paths.acked_stats_json().exists(),
+            "snapshot must have been saved"
+        );
     }
 
     /*

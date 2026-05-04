@@ -17,6 +17,15 @@ start_all()
 machine.wait_for_unit("multi-user.target")
 
 passphrase = "testpassphrase"
+acked_stats_path = "/var/lib/braid/acked-stats.json"
+
+
+def acked_stats_fingerprint():
+    return machine.succeed(
+        f"if test -f {acked_stats_path}; then "
+        f"stat -c '%i %s %y' {acked_stats_path}; "
+        "else printf absent; fi"
+    ).strip()
 
 # --- Setup: create 3-disk RAID1 pool ---
 with subtest("Create 3-disk RAID1 pool"):
@@ -41,6 +50,26 @@ with subtest("Healthy pool: monitor exits 0"):
 with subtest("Healthy pool: status has no ALERT"):
     output = machine.succeed("braid status")
     assert "ALERT" not in output, f"Expected no ALERT in healthy status, got: {output}"
+
+# /*
+#  * Intent: A mounted healthy-pool `braid ack` with no active alert source
+#  *   exits 0 without mutating acked-stats.json.
+#  * Why it exists: A proactive no-op ack used to snapshot current btrfs
+#  *   counters as the new baseline, which could bury errors that occurred
+#  *   after the last monitor cycle but before ack.
+#  * Scenario: the pool is mounted and healthy; the user runs `braid ack`
+#  *   out of caution before any monitor cycle has latched an alert.
+#  */
+with subtest("Healthy mounted pool: ack is a durable no-op"):
+    before = acked_stats_fingerprint()
+    output = machine.succeed("braid ack")
+    assert "no active alerts" in output, (
+        f"Expected no active alerts from healthy ack, got: {output}"
+    )
+    after = acked_stats_fingerprint()
+    assert after == before, (
+        f"Expected acked-stats fingerprint unchanged, before={before!r} after={after!r}"
+    )
 
 # --- Simulate disk failure: close one LUKS mapper ---
 with subtest("Simulate disk failure"):
