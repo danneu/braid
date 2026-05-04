@@ -14,11 +14,14 @@ let
     # If pool is already unmounted during shutdown race, nothing remains to cancel.
     ${utilLinux}/bin/mountpoint -q ${cfg.mountPoint} || exit 0
 
-    # Use the typed scrub-status parser instead of grep -- see
-    # cli/src/scrub_cancel.rs. Only cancels if status is Running; clean
-    # no-op for terminal non-running states; hard-fails on Unknown so
-    # parser drift surfaces instead of silently masking a busy mount.
-    # Mount is passed explicitly -- ExecStop has no config-file dependency.
+    # braid scrub-cancel calls the kernel BTRFS_IOC_SCRUB_CANCEL ioctl
+    # directly -- see cli/src/scrub_cancel.rs. The ioctl is the
+    # kernel-authoritative path: no userspace status round-trip, no parser
+    # dependency, immune to status-command failure and userspace/kernel
+    # state divergence. An idle filesystem returns ENOTCONN (mapped to
+    # "not running" stderr), which braid maps to a clean exit 0; only real
+    # cancel-ioctl errors propagate. Mount is passed explicitly --
+    # ExecStop has no config-file dependency.
     ${braidWrapped}/bin/braid scrub-cancel --mount ${cfg.mountPoint}
     ret=$?
     # Give the foreground `btrfs scrub start/resume -B` process a chance to
