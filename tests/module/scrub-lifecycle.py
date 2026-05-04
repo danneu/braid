@@ -357,12 +357,17 @@ with subtest("concurrency: prepare dm-delay backed pool with saved scrub progres
     # Reset dm-delay after cancel so the offline setup work is fast; we re-arm
     # the delay before the actual race trigger below.
     dm_delay_activate(concurrency)
-    concurrency.wait_until_succeeds(
-        "btrfs scrub status --raw /mnt/storage 2>/dev/null "
-        "| grep -Eq 'Status:[[:space:]]+aborted' "
-        "|| ! mountpoint -q /mnt/storage",
-        timeout=30,
-    )
+    # No explicit "aborted" assertion here. braid lock returned 0, which only
+    # happens after umount succeeds, so scrub.status.<fsid> is not queryable
+    # from this node without re-unlocking. Cancel-success is verified ONLY by
+    # the resume node's "cancel preserves Aborted state across lock/unlock"
+    # subtest, which asserts the persisted `aborted` (canceled=1) state after
+    # re-unlock. The "Scrub resumed:" assertion below is NOT a transitive
+    # cancel-success guard: btrfs scrub resume -B accepts both canceled=1
+    # ("aborted") and canceled=0/finished=0 ("interrupted") progress
+    # (reference/btrfs-progs/cmds/scrub.c:1430). This subtest only validates
+    # that an overdue timer fire and a resumable pool-online state coalesce
+    # into one scrub run.
 
 with subtest("concurrency: overdue timer + resumable state coalesce into one scrub"):
     # Age the timer stamp so Persistent=true fires immediately on next unlock.
