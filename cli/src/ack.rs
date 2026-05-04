@@ -320,10 +320,7 @@ mod tests {
     }
 
     fn write_latch(paths: &StatePaths, causes: Vec<AlertCause>) {
-        let state = AlertState {
-            active: !causes.is_empty(),
-            causes,
-        };
+        let state = AlertState { causes };
         save_alert_latch(&state, paths).unwrap();
     }
 

@@ -243,10 +243,7 @@ pub fn run_demo() -> io::Result<()> {
             ),
         ]),
         unpooled_disks: HashMap::new(),
-        alert_state: crate::alert::AlertState {
-            active: false,
-            causes: vec![],
-        },
+        alert_state: crate::alert::AlertState::default(),
         scrub: ScrubState::Finished {
             started_at: ScrubTimestamp(time::macros::datetime!(2026-02-24 02:00:07)),
             error_count: 0,

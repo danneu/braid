@@ -13,8 +13,13 @@ use crate::state_paths::StatePaths;
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
 pub struct AlertState {
-    pub active: bool,
     pub causes: Vec<AlertCause>,
+}
+
+impl AlertState {
+    pub fn active(&self) -> bool {
+        !self.causes.is_empty()
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -121,10 +126,7 @@ pub fn compute_alert_state(
         causes.push(AlertCause::SmartdAlert);
     }
 
-    AlertState {
-        active: !causes.is_empty(),
-        causes,
-    }
+    AlertState { causes }
 }
 
 // Counter reset detection: if current < acked, the kernel has zeroed the
@@ -377,7 +379,7 @@ pub fn remove_alert_latch_corrupt(paths: &StatePaths) -> Result<(), std::io::Err
 /// 1. Start with all causes from the existing latch (carried forward).
 /// 2. For each live cause: if a latched cause matches by key, replace it;
 ///    otherwise append.
-/// 3. Result: `AlertState { active: !causes.is_empty(), causes }`.
+/// 3. Result: `AlertState { causes }` (active derived from causes).
 pub fn merge_into_latch(
     existing_latch: Option<&AlertState>,
     live_causes: &[AlertCause],
@@ -395,10 +397,7 @@ pub fn merge_into_latch(
         }
     }
 
-    AlertState {
-        active: !causes.is_empty(),
-        causes,
-    }
+    AlertState { causes }
 }
 
 /// Two causes match by key if they identify the same "slot" in the latch.
@@ -561,12 +560,64 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("good.json");
         let original = AlertState {
-            active: true,
             causes: vec![AlertCause::MissingDevice { devid: 7 }],
         };
         std::fs::write(&path, serde_json::to_string(&original).unwrap()).unwrap();
         let result = load_alert_latch_at(&path).unwrap();
         assert_eq!(result, Some(original));
+    }
+
+    /*
+     * Intent: load_alert_latch_at parses a JSON latch that contains a legacy
+     * "active" key alongside causes, returning Ok(Some(state)) with the
+     * preserved causes; AlertState::active() is then derived from causes
+     * regardless of what the legacy "active" value was on disk.
+     *
+     * Why it exists: braid is unreleased and AGENTS.md forbids migration
+     * paths, but pre-refactor latches written to /var/lib/braid/alert-latch.json
+     * by an older binary still need to load cleanly post-refactor. The refactor
+     * relies on serde ignoring the legacy key because AlertState has no
+     * deny_unknown_fields. Without this test, a later strictness change could
+     * regress every legacy on-disk latch into the corrupt-latch quarantine path
+     * on next monitor cycle.
+     *
+     * Scenario: a NAS upgrades the braid binary across this refactor with a
+     * latch from the prior version still on disk. Next monitor/status/ack
+     * invocation loads the legacy-shaped JSON; load_alert_latch_at must accept
+     * it, and the resulting AlertState must report active() based on its causes
+     * vec, not on whatever "active" value the legacy file carried.
+     */
+    #[test]
+    fn load_alert_latch_accepts_legacy_active_key() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("legacy-latch.json");
+        let legacy = br#"{"active":true,"causes":[{"type":"missing_device","devid":7}]}"#;
+        std::fs::write(&path, legacy).unwrap();
+
+        let state = load_alert_latch_at(&path)
+            .unwrap()
+            .expect("legacy latch must parse");
+        assert_eq!(
+            state.causes,
+            vec![AlertCause::MissingDevice { devid: 7 }],
+            "causes must round-trip from legacy JSON"
+        );
+        assert!(
+            state.active(),
+            "active() must be derived from causes (true here, non-empty causes)"
+        );
+
+        let path2 = dir.path().join("legacy-latch-empty.json");
+        let legacy_empty = br#"{"active":true,"causes":[]}"#;
+        std::fs::write(&path2, legacy_empty).unwrap();
+        let state2 = load_alert_latch_at(&path2)
+            .unwrap()
+            .expect("legacy empty latch must parse");
+        assert!(state2.causes.is_empty());
+        assert!(
+            !state2.active(),
+            "active() must follow causes, not the legacy active field on disk"
+        );
     }
 
     /*
@@ -611,7 +662,7 @@ mod tests {
         let stats = make_stats(vec![zero_device("/dev/mapper/braid-vda", 1)]);
         let acked = AckedStats::default();
         let alert = compute_alert_state(&stats, &acked, &[], false);
-        assert!(!alert.active);
+        assert!(!alert.active());
         assert!(alert.causes.is_empty());
     }
 
@@ -623,7 +674,7 @@ mod tests {
         let stats = make_stats(vec![dev]);
         let acked = AckedStats::default();
         let alert = compute_alert_state(&stats, &acked, &[], false);
-        assert!(alert.active);
+        assert!(alert.active());
         assert_eq!(alert.causes.len(), 1);
         assert_eq!(alert.causes[0], AlertCause::BtrfsDeviceErrors { devid: 1 });
     }
@@ -633,7 +684,7 @@ mod tests {
         let stats = make_stats(vec![zero_device("/dev/mapper/braid-vda", 1)]);
         let acked = AckedStats::default();
         let alert = compute_alert_state(&stats, &acked, &[2], false);
-        assert!(alert.active);
+        assert!(alert.active());
         assert_eq!(alert.causes.len(), 1);
         assert_eq!(alert.causes[0], AlertCause::MissingDevice { devid: 2 });
     }
@@ -643,7 +694,7 @@ mod tests {
         let stats = make_stats(vec![zero_device("/dev/mapper/braid-vda", 1)]);
         let acked = AckedStats::default();
         let alert = compute_alert_state(&stats, &acked, &[], true);
-        assert!(alert.active);
+        assert!(alert.active());
         assert_eq!(alert.causes.len(), 1);
         assert_eq!(alert.causes[0], AlertCause::SmartdAlert);
     }
@@ -667,7 +718,7 @@ mod tests {
         );
         let acked = AckedStats(acked_map);
         let alert = compute_alert_state(&stats, &acked, &[], false);
-        assert!(!alert.active);
+        assert!(!alert.active());
     }
 
     #[test]
@@ -691,7 +742,7 @@ mod tests {
         );
         let acked = AckedStats(acked_map);
         let alert = compute_alert_state(&stats, &acked, &[], false);
-        assert!(alert.active, "counter reset should trigger alert");
+        assert!(alert.active(), "counter reset should trigger alert");
     }
 
     #[test]
@@ -707,7 +758,7 @@ mod tests {
         );
         let acked = AckedStats(acked_map);
         let alert = compute_alert_state(&stats, &acked, &[2], false);
-        assert!(!alert.active, "acked missing should not trigger alert");
+        assert!(!alert.active(), "acked missing should not trigger alert");
     }
 
     #[test]
@@ -717,7 +768,7 @@ mod tests {
         let stats = make_stats(vec![dev]);
         let acked = AckedStats::default();
         let alert = compute_alert_state(&stats, &acked, &[2], true);
-        assert!(alert.active);
+        assert!(alert.active());
         assert_eq!(alert.causes.len(), 3);
     }
 
@@ -758,7 +809,7 @@ mod tests {
         let acked = AckedStats(acked_map);
         let alert = compute_alert_state(&stats, &acked, &[], false);
         assert!(
-            alert.active,
+            alert.active(),
             "new errors above acked baseline should trigger alert"
         );
     }
@@ -780,7 +831,7 @@ mod tests {
         let stats = make_stats(vec![zero_device("/dev/mapper/braid-stale", 99)]);
         let acked = AckedStats::default();
         let alert = compute_alert_state(&stats, &acked, &[], false);
-        assert!(!alert.active);
+        assert!(!alert.active());
         assert!(alert.causes.is_empty());
     }
 
@@ -795,7 +846,7 @@ mod tests {
         ]);
         let acked = AckedStats::default();
         let alert = compute_alert_state(&stats, &acked, &[2], false);
-        assert!(alert.active);
+        assert!(alert.active());
         assert_eq!(alert.causes.len(), 1);
         assert_eq!(alert.causes[0], AlertCause::MissingDevice { devid: 2 });
     }
@@ -820,25 +871,23 @@ mod tests {
     fn merge_live_causes_appended() {
         let live = vec![AlertCause::BtrfsDeviceErrors { devid: 1 }];
         let merged = merge_into_latch(None, &live);
-        assert!(merged.active);
+        assert!(merged.active());
         assert_eq!(merged.causes.len(), 1);
     }
 
     #[test]
     fn merge_no_new_causes_carries_forward_latched() {
         let existing = AlertState {
-            active: true,
             causes: vec![AlertCause::BtrfsDeviceErrors { devid: 1 }],
         };
         let merged = merge_into_latch(Some(&existing), &[]);
-        assert!(merged.active);
+        assert!(merged.active());
         assert_eq!(merged.causes.len(), 1);
     }
 
     #[test]
     fn merge_live_same_devid_replaces_latched() {
         let existing = AlertState {
-            active: true,
             causes: vec![AlertCause::BtrfsDeviceErrors { devid: 1 }],
         };
         let live = vec![AlertCause::BtrfsDeviceErrors { devid: 1 }];
@@ -851,7 +900,6 @@ mod tests {
         // Key invariant fix: a previously-latched cause for devid 1 persists
         // even when live causes no longer include devid 1.
         let existing = AlertState {
-            active: true,
             causes: vec![
                 AlertCause::BtrfsDeviceErrors { devid: 1 },
                 AlertCause::MissingDevice { devid: 2 },
@@ -861,7 +909,7 @@ mod tests {
         let live = vec![AlertCause::MissingDevice { devid: 2 }];
         let merged = merge_into_latch(Some(&existing), &live);
         assert_eq!(merged.causes.len(), 2);
-        assert!(merged.active);
+        assert!(merged.active());
     }
 
     #[test]
@@ -1176,7 +1224,7 @@ mod tests {
         // Alert-local missing devids includes the null-underlying device's devid
         let alert_missing = vec![2u64];
         let alert = compute_alert_state(&stats, &acked, &alert_missing, false);
-        assert!(alert.active);
+        assert!(alert.active());
         assert_eq!(alert.causes.len(), 1);
         assert_eq!(alert.causes[0], AlertCause::MissingDevice { devid: 2 });
     }

@@ -232,7 +232,6 @@ with subtest("Offline ack refused on mixed BtrfsDeviceErrors + MissingDevice lat
     # exercise the corrupt-latch path instead of the refusal path).
     latch_fixture = json.dumps(
         {
-            "active": True,
             "causes": [
                 {"type": "btrfs_device_errors", "devid": 1},
                 {"type": "missing_device", "devid": 2},

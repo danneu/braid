@@ -139,15 +139,15 @@ pub fn cmd_monitor<R: CommandRunner, F: Filesystem + ?Sized>(
     // 10. Merge: existing latch + live causes
     let merged = merge_into_latch(existing_latch.as_ref(), &live_causes);
 
-    // 11. If merged state active → write latch
-    if merged.active
+    // 11. If merged state active -> write latch
+    if merged.active()
         && let Err(e) = alert::save_alert_latch(&merged, paths)
     {
         eprintln!("Warning: failed to write alert latch: {e}");
     }
 
     // 12. Return result based on merged state
-    if merged.active {
+    if merged.active() {
         MonitorResult::Alert(merged)
     } else {
         MonitorResult::Ok
@@ -431,7 +431,7 @@ mod tests {
     fn assert_single_computation_error(result: &MonitorResult) -> &str {
         match result {
             MonitorResult::Alert(state) => {
-                assert!(state.active, "AlertState must be active");
+                assert!(state.active(), "AlertState must be active");
                 assert_eq!(
                     state.causes.len(),
                     1,

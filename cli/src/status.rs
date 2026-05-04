@@ -328,7 +328,7 @@ fn not_mounted_status(config: &Config, paths: &StatePaths, advisories: Vec<Strin
             allocation: None,
             disks: vec![],
             advisories,
-            alert_active: alert_state.active,
+            alert_active: alert_state.active(),
             alert_causes: alert_state.causes,
             missing_devids: vec![],
         },
@@ -400,7 +400,7 @@ fn build_status<R: CommandRunner, F: Filesystem>(
         allocation: Some(df_summary.allocation),
         disks: verbose_ctx.disks,
         advisories,
-        alert_active: alert_state.active,
+        alert_active: alert_state.active(),
         alert_causes: alert_state.causes,
         missing_devids: pool.alert_missing_devids(),
     };
@@ -468,10 +468,7 @@ pub(crate) fn resolve_alert_state(paths: &StatePaths) -> AlertState {
             if smartd_active {
                 causes.push(AlertCause::SmartdAlert);
             }
-            return AlertState {
-                active: true,
-                causes,
-            };
+            return AlertState { causes };
         }
     };
 
@@ -484,7 +481,6 @@ pub(crate) fn resolve_alert_state(paths: &StatePaths) -> AlertState {
     {
         state.causes.push(AlertCause::SmartdAlert);
     }
-    state.active = !state.causes.is_empty();
     state
 }
 
@@ -4214,7 +4210,7 @@ mod tests {
 
         let state = resolve_alert_state(&paths);
 
-        assert!(state.active, "corrupt latch must surface as active alert");
+        assert!(state.active(), "corrupt latch must surface as active alert");
         assert!(
             matches!(
                 state.causes.as_slice(),

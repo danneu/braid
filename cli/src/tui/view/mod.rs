@@ -1305,7 +1305,7 @@ pub fn view(model: &Model, frame: &mut Frame, now: PrimitiveDateTime) {
     let alert_active = model
         .pool
         .current()
-        .map(|p| p.alert_state.active)
+        .map(|p| p.alert_state.active())
         .unwrap_or(false);
     let alert_height: u16 = if alert_active { 1 } else { 0 };
 
@@ -1629,10 +1629,7 @@ pub(crate) mod tests {
                 ),
             ]),
             unpooled_disks: HashMap::new(),
-            alert_state: crate::alert::AlertState {
-                active: false,
-                causes: vec![],
-            },
+            alert_state: crate::alert::AlertState::default(),
             scrub: ScrubState::Finished {
                 started_at: ScrubTimestamp(time::macros::datetime!(2026-02-24 02:00:07)),
                 error_count: 0,
