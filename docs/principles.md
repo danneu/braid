@@ -60,7 +60,7 @@ Mount options, LUKS flags, and scrub scheduling are chosen for HDD NAS deploymen
 
 Pool-mutating commands (`unlock`, `add`, `recover`) acquire an exclusive **non-blocking** `flock` on `/run/braid-pool.lock` for their duration. braid does not queue pool operations: a concurrent attempt (e.g. `braid-auto-unlock` at boot racing a manual `braid-pool.target` start) fails fast with `braid: another braid operation is already in progress` and the user must retry once the active operation completes. Mutual exclusion is enforced at the critical section itself, not via systemd unit topology. Under the held lock, `unlock` re-checks whether the pool is already mounted and exits cleanly if a prior winner mounted it sequentially; `add` and `recover` do not fast-exit because they legitimately operate on mounted pools.
 
-## 13. Announce blocking work
+## 13. Announce long-running work
 
 Every interactive command emits a `[wait]` row before any subprocess
 that can stall the terminal long enough for the user to wonder

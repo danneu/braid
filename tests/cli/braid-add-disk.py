@@ -40,7 +40,7 @@ with subtest("First disk creates single-drive pool"):
     )
     add1_err = machine.succeed("cat /tmp/add1.err")
 
-    # Principle 13: [wait] before each blocking cryptsetup Argon2 step.
+    # Principle 13: [wait] before each cryptsetup Argon2 step.
     fmt_wait = "[wait] disk disk1: formatting LUKS..."
     fmt_ok = "[ok]   disk disk1: LUKS formatted"
     assert fmt_wait in add1_err and fmt_ok in add1_err, (

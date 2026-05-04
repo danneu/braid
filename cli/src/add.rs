@@ -2136,7 +2136,7 @@ mod tests {
         // Intent: rollback close failures close their [wait] row with [warn].
         // Why it exists: add rollback is best-effort, so the command can
         // continue unwinding after a failed close without leaving a dangling
-        // blocking-work row.
+        // [wait] row.
         // Scenario: cryptsetup close returns non-zero while the cleanup guard
         // is closing a mapper after a later add step failed.
         let runner = SpyRunner::new(MockRunner::default()).with_close_output(RawCommandOutput {

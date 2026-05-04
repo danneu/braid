@@ -14,7 +14,7 @@ intent: Map device-disappearance states to btrfs, cryptsetup, and kernel output 
 
 ## Top-level docs
 
-- [principles.md](principles.md) — Thirteen canonical invariants spanning resilient boot, CLI-owned membership, safe-by-construction operations, identifier stability, NixOS-native conventions, pinned parser toolchain, pool-mutation serialization, and blocking-work announcement.
+- [principles.md](principles.md) — Thirteen canonical invariants spanning resilient boot, CLI-owned membership, safe-by-construction operations, identifier stability, NixOS-native conventions, pinned parser toolchain, pool-mutation serialization, and long-running-work announcement.
 - [1-user-stories.md](1-user-stories.md) — End-to-end user workflows from first disk through pool expansion and daily operation.
 - [btrfs-balance-profiles.md](btrfs-balance-profiles.md) — RAID profile conversions for data/metadata/system chunks; commands for single↔RAID1 transitions.
 - [btrfs-balance-soft.md](btrfs-balance-soft.md) — The `--soft` flag optimization for resuming interrupted profile conversions without rewriting already-converted chunks.
@@ -49,7 +49,7 @@ Architecture decision records. Each has a status: `Draft`, `Active`, `Superseded
 - [decisions/018-systemd-lifecycle.md](decisions/018-systemd-lifecycle.md) — Thin systemd layer for unlock/mount entry points; CLI owns LUKS and btrfs operations.
 - [decisions/019-inhibit-sleep.md](decisions/019-inhibit-sleep.md) — When braid should hold a systemd sleep inhibitor: only for the non-interruptible mutation window, not during prompts or reversible preflight.
 - [decisions/020-ups-integration.md](decisions/020-ups-integration.md) — **Active.** Opinionated `braid.ups.*` wrapper over nixpkgs' `power.ups`: standalone USB single-host; guarantees orderly shutdown for ordinary operation + preflight reject on battery + live UPS state in `braid ups status`/TUI; mid-mutation power loss is a supported recovery case proven by the per-mutation `ups-lb-during-*` VM matrix; alert-model integration deferred to a future ADR.
-- [decisions/021-wait-in-unlock.md](decisions/021-wait-in-unlock.md) — **Superseded by [Principle 13](principles.md#13-announce-blocking-work).** `braid unlock` (and `braid recover`'s shared mount tail) emitted a `[wait]` row before per-disk LUKS open and before the mount phase; promotion to a project-wide principle landed once the rest of the interactive commands complied.
+- [decisions/021-wait-in-unlock.md](decisions/021-wait-in-unlock.md) — **Superseded by [Principle 13](principles.md#13-announce-long-running-work).** `braid unlock` (and `braid recover`'s shared mount tail) emitted a `[wait]` row before per-disk LUKS open and before the mount phase; promotion to a project-wide principle landed once the rest of the interactive commands complied.
 
 ## tool-behavior/
 

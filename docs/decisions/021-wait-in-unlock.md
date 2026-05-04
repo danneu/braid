@@ -1,15 +1,15 @@
 ---
 intent: Capture why `braid unlock` and the shared mount helpers
-  announce every blocking step with a `[wait]` row, and why that
+  announce every long-running step with a `[wait]` row, and why that
   unlock-scoped rule was promoted to project-wide Principle 13. Read
   before changing unlock UX or the mount helpers.
 ---
 
 # Wait rows in unlock and shared mount helpers
 
-Status: Superseded by [Principle 13](../principles.md#13-announce-blocking-work)
+Status: Superseded by [Principle 13](../principles.md#13-announce-long-running-work)
 
-> Principle: [13. Announce blocking work](../principles.md#13-announce-blocking-work)
+> Principle: [13. Announce long-running work](../principles.md#13-announce-long-running-work)
 
 ## Context
 
@@ -42,7 +42,7 @@ anything was happening.
    journals.
 2. **Best-effort ad-hoc waits.** Add `[wait]` rows whenever a gap is
    noticed. Rejected: gaps recur whenever a new slow path is added.
-3. **Codify "[wait] before every blocking step" as a project
+3. **Codify "[wait] before every long-running step" as a project
    principle now.** Rejected: principles are authoritative
    (`docs/principles.md:3`); a principle the codebase doesn't satisfy
    on the day it lands is a documentation bug. `add`, `replace`,
@@ -56,7 +56,7 @@ anything was happening.
 
 `braid unlock` -- and `braid recover`'s mount tail, which routes
 through the same shared helpers -- emit a `[wait]` row before every
-blocking step:
+long-running step:
 
 - per-disk `cryptsetup luksOpen` (passphrase and keyfile arms),
   worded `[wait] disk {name}: unlocking...`;
@@ -82,7 +82,7 @@ individually updated.
 - `braid recover` inherits the new rows automatically because
   `execute_mount_only` and `execute_unlock_and_mount` are shared.
   This is desirable: `recover`'s mount tail is exactly the same
-  blocking work as `unlock`'s.
+  long-running work as `unlock`'s.
 
 ## Promotion outcome
 

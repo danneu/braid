@@ -67,7 +67,7 @@ with subtest("Test 1: happy path — mounted pool locks cleanly"):
     assert "[ok]   disk longdisk3: locked" in live_stderr_lines, (
         f"expected exact long-name disk row, got: {live_stderr!r}"
     )
-    # Principle 13: a [wait] row precedes every blocking subprocess.
+    # Principle 13: a [wait] row precedes every long-running subprocess.
     unmount_wait = "[wait] pool: unmounting /mnt/storage..."
     unmounted_ok = "[ok]   pool: unmounted /mnt/storage"
     assert unmount_wait in live_stderr_lines, (
