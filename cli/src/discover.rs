@@ -196,7 +196,8 @@ fn discover_from_dir<R: CommandRunner>(
             .ok()
             .and_then(|out| out.label);
 
-        // Check if label matches braid-<name>
+        // Require label = braid-<valid-name>. An invalid braid label warns so the
+        // user can relabel; any other miss is a silent skip.
         let Some(label) = label else {
             continue;
         };
