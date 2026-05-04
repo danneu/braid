@@ -51,8 +51,9 @@ sudo braid discover --write
 5. Runs `cryptsetup luksDump` to read the LUKS label and version.
 6. Skips LUKS1 devices (braid requires LUKS2).
 7. Matches labels of the form `braid-<name>` and extracts the disk name.
-8. When multiple `/dev/disk/by-id/` symlinks point to the same disk, picks the most stable one (preference order: wwn > nvme > scsi > ata > usb > other, with lexicographic tie-breaking).
-9. With `--write`, saves the discovered membership to `pool.json`.
+8. When multiple `/dev/disk/by-id/` symlinks resolve to the same canonical kernel device (i.e. `wwn-` and `ata-` aliases of the same physical disk), picks the most stable one (preference order: wwn > nvme > scsi > ata > usb > other, with lexicographic tie-breaking).
+9. If two symlinks that share the same `braid-<name>` label resolve to different kernel devices, refuses the entire scan with an error. Two physically distinct disks share a label -- typically after a `dd` clone or a manual mislabel -- and braid cannot safely choose one. Relabel or detach one disk before retrying.
+10. With `--write`, saves the discovered membership to `pool.json`.
 
 ## Safety checks
 
@@ -60,6 +61,7 @@ sudo braid discover --write
 - Refuses if a pending operation journal exists.
 - Without `--write`, makes no changes at all -- read-only scan.
 - LUKS1 devices are skipped with a warning.
+- Refuses the scan if two distinct devices share the same `braid-<name>` LUKS label -- relabel or detach one disk before retrying.
 
 ## Related commands
 
