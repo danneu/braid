@@ -42,9 +42,11 @@ pub enum ScrubCancelError {
 /// - other non-zero -> `CancelFailed`.
 ///
 /// We dispatch on the numeric exit code rather than the stderr substring:
-/// the "not running" text is btrfs-progs's `strerror(errno)` rendering of
-/// ENOTCONN and is not a stable contract, while exit code 2 IS the
-/// documented btrfs-progs ABI for ENOTCONN.
+/// "not running" is btrfs-progs's human-readable ENOTCONN error text,
+/// not the API braid should parse. Exit code 2 is the implementation
+/// contract in the pinned btrfs-progs source, guarded by the live
+/// scrub-lifecycle VM canary; btrfs-scrub(8) does not document the
+/// cancel-idle exit code.
 pub fn cmd_scrub_cancel<R: CommandRunner>(
     runner: &R,
     mount_point: &MountPoint,
@@ -132,8 +134,8 @@ mod tests {
     //   when no scrub is running; this is the common case on every shutdown
     //   that did not coincide with a live scrub. Regression here would
     //   reintroduce the "false-fail in Never state" bug. Dispatch is exit
-    //   code 2 (the documented btrfs-progs ABI for ENOTCONN), not the
-    //   "not running" stderr text.
+    //   code 2 (source-pinned btrfs-progs behavior guarded by the VM canary),
+    //   not the "not running" stderr text.
     // Scenario: braid-scrub.service stop fires with no scrub active; cancel
     //   ioctl returns -ENOTCONN, btrfs prints "ERROR: ...: not running"
     //   and exits 2.

@@ -208,8 +208,10 @@ with subtest("cancel: unlock and wait for fake scrub active"):
     )
 
 with subtest("cancel: btrfs upstream contract -- `btrfs scrub cancel` on no-scrub mount exits 2 (ENOTCONN)"):
-    # Pin btrfs-progs's documented ENOTCONN exit code, which braid's typed
-    # scrub_cancel dispatch (cli/src/scrub_cancel.rs) depends on. The fake
+    # Pin btrfs-progs's source-pinned ENOTCONN exit code, which braid's
+    # typed scrub_cancel dispatch (cli/src/scrub_cancel.rs) depends on.
+    # The cancel-idle exit code is not documented in btrfs-scrub(8); it is
+    # an implementation contract in the pinned btrfs-progs source. The fake
     # scrub service is up but never issued `btrfs scrub start`, so the kernel
     # has no scrub -- the ioctl returns ENOTCONN deterministically. If a
     # future nixpkgs bump ever changes this exit code, this subtest fails

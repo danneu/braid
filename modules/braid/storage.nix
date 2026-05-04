@@ -18,9 +18,10 @@ let
     # directly -- see cli/src/scrub_cancel.rs. The ioctl is the
     # kernel-authoritative path: no userspace status round-trip, no parser
     # dependency, immune to status-command failure and userspace/kernel
-    # state divergence. An idle filesystem returns ENOTCONN (mapped to
-    # "not running" stderr), which braid maps to a clean exit 0; only real
-    # cancel-ioctl errors propagate. Mount is passed explicitly --
+    # state divergence. An idle filesystem returns ENOTCONN, which btrfs-progs
+    # renders as exit code 2 with "not running" stderr; braid dispatches on
+    # the exit code and maps it to a clean exit 0. Only real cancel-ioctl
+    # errors propagate. Mount is passed explicitly --
     # ExecStop has no config-file dependency.
     ${braidWrapped}/bin/braid scrub-cancel --mount ${cfg.mountPoint}
     ret=$?
