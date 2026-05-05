@@ -2938,10 +2938,10 @@ mod tests {
                     &format!("cryptsetup open --type luks {device} {mapper}"),
                     "",
                 )),
-                CmdRequest::BtrfsDeviceScan { device } => Ok(RawCommandOutput {
-                    cmd: format!("btrfs device scan {device}"),
+                CmdRequest::BtrfsFilesystemShowTarget { target } => Ok(RawCommandOutput {
+                    cmd: format!("btrfs filesystem show {target}"),
                     stdout: String::new(),
-                    stderr: "ERROR: not a btrfs filesystem".into(),
+                    stderr: format!("ERROR: not a valid btrfs filesystem on {target}"),
                     exit_status: 1,
                 }),
                 CmdRequest::MkfsBtrfs { device } => {

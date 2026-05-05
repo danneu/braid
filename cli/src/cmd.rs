@@ -561,7 +561,6 @@ impl CmdRequest {
             CmdRequest::MkfsBtrfs { device } => CmdArgs {
                 program: "mkfs.btrfs".to_owned(),
                 args: vec![
-                    "-f".into(),
                     "-d".into(),
                     "single".into(),
                     "-m".into(),
@@ -570,13 +569,7 @@ impl CmdRequest {
                 ],
             },
             CmdRequest::MkfsBtrfsRaid1 { devices } => {
-                let mut args = vec![
-                    "-f".into(),
-                    "-d".into(),
-                    "raid1".into(),
-                    "-m".into(),
-                    "raid1".into(),
-                ];
+                let mut args = vec!["-d".into(), "raid1".into(), "-m".into(), "raid1".into()];
                 args.extend(devices.iter().cloned());
                 CmdArgs {
                     program: "mkfs.btrfs".to_owned(),
@@ -1525,7 +1518,9 @@ mod tests {
 
     #[test]
     // Intent: MkfsBtrfsRaid1 generates correct argv with -d raid1 -m raid1 and all devices.
-    // Why: incorrect mkfs arguments could create a single-profile filesystem instead of RAID1.
+    // Why: incorrect mkfs arguments could create a single-profile filesystem
+    // instead of RAID1; -f is intentionally absent so mkfs.btrfs's libblkid
+    // signature check remains the final backstop against existing filesystems.
     // Scenario: multi-disk add bootstraps a new pool with 2+ fresh disks.
     fn mkfs_btrfs_raid1_generates_correct_argv() {
         let cmd = CmdRequest::MkfsBtrfsRaid1 {
@@ -1539,7 +1534,6 @@ mod tests {
         assert_eq!(
             cmd.args,
             vec![
-                "-f",
                 "-d",
                 "raid1",
                 "-m",
@@ -1552,7 +1546,8 @@ mod tests {
 
     #[test]
     /* Intent: MkfsBtrfs generates correct argv with -d single -m dup.
-     * Why: implicit profiles make braid's storage intent ambiguous and ignore upstream guidance.
+     * Why: implicit profiles make braid's storage intent ambiguous and ignore upstream guidance;
+     * -f is intentionally absent so mkfs.btrfs's own signature check remains active.
      * Scenario: single-disk bootstrap creates a new pool with one fresh disk.
      */
     fn mkfs_btrfs_single_generates_correct_argv() {
@@ -1563,7 +1558,7 @@ mod tests {
         assert_eq!(cmd.program, "mkfs.btrfs");
         assert_eq!(
             cmd.args,
-            vec!["-f", "-d", "single", "-m", "dup", "/dev/mapper/braid-disk1"]
+            vec!["-d", "single", "-m", "dup", "/dev/mapper/braid-disk1"]
         );
     }
 
