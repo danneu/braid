@@ -72,6 +72,9 @@ pub fn update(model: &mut Model, msg: Message) -> Vec<Effect> {
             vec![]
         }
         Message::RefreshPool => {
+            let Some(paths) = model.paths.clone() else {
+                return vec![];
+            };
             let mut effects: Vec<Effect> = vec![];
             if !model.pool.is_inflight() {
                 model.spinner_deadline = Some(Instant::now() + Duration::from_millis(500));
@@ -83,7 +86,7 @@ pub fn update(model: &mut Model, msg: Message) -> Vec<Effect> {
                 effects.push(Effect::ProbePool {
                     mount_point: model.mount_point.clone(),
                     disk_by_id: model.disk_by_id.clone(),
-                    paths: model.paths.clone(),
+                    paths,
                 });
             }
             // Manual `r` refreshes the fan too, but only if one isn't
@@ -354,12 +357,40 @@ mod tests {
     #[test]
     fn refresh_pool_sets_spinner_deadline() {
         let mut model = Model::new_demo(sample_disk_names(), PoolStatus::Mounted(sample_pool()));
+        let _tmp = tempfile::tempdir().unwrap();
+        model.paths = Some(crate::state_paths::StatePaths::custom(_tmp.path().into()));
         let before = Instant::now();
         update(&mut model, Message::RefreshPool);
         let after = Instant::now();
         let deadline = model.spinner_deadline.expect("should be set");
         assert!(deadline >= before + Duration::from_millis(500));
         assert!(deadline <= after + Duration::from_millis(500));
+    }
+
+    // Intent: in demo mode (paths None), Message::RefreshPool must be a true
+    // no-op -- no probe effects of any kind, no spinner_deadline, no pool
+    // state flip -- even when fan_control and ups_config are both set.
+    // Why it exists: paths None is the type-level guarantee that demo cannot
+    // reach /var/lib/braid; this test pins the corresponding runtime behavior
+    // so a future contributor can't degrade the gate to "only the pool block
+    // is conditional" and let fan/UPS probes leak through, or leave the pool
+    // stuck in Loading.
+    // Scenario: user runs `braid tui --demo` as a non-root user and presses
+    // 'r' on a hypothetical demo build that has fan and UPS enabled.
+    #[test]
+    fn refresh_pool_in_demo_is_noop() {
+        let mut model = Model::new_demo(sample_disk_names(), PoolStatus::Mounted(sample_pool()));
+        model.fan_control = Some(sample_fan_control());
+        model.fan_probe_inflight = false;
+        model.ups_config = Some(sample_ups_config(true));
+        model.ups_probe_inflight = false;
+
+        let effects = update(&mut model, Message::RefreshPool);
+        assert!(effects.is_empty(), "got {} effects", effects.len());
+        assert!(model.spinner_deadline.is_none());
+        assert!(matches!(model.pool, PoolStatus::Mounted(_)));
+        assert!(!model.fan_probe_inflight);
+        assert!(!model.ups_probe_inflight);
     }
 
     /*
@@ -551,6 +582,8 @@ mod tests {
     #[test]
     fn refresh_pool_fan_piggyback_does_not_double_arm_scheduler() {
         let mut model = Model::new_demo(sample_disk_names(), PoolStatus::Mounted(sample_pool()));
+        let _tmp = tempfile::tempdir().unwrap();
+        model.paths = Some(crate::state_paths::StatePaths::custom(_tmp.path().into()));
         model.fan_control = Some(sample_fan_control());
         model.fan_probe_inflight = false;
         model.fan_scheduler_pending = true;
@@ -709,6 +742,8 @@ mod tests {
     #[test]
     fn refresh_pool_with_fan_idle_emits_both() {
         let mut model = Model::new_demo(sample_disk_names(), PoolStatus::Mounted(sample_pool()));
+        let _tmp = tempfile::tempdir().unwrap();
+        model.paths = Some(crate::state_paths::StatePaths::custom(_tmp.path().into()));
         model.fan_control = Some(sample_fan_control());
         model.fan_probe_inflight = false;
         let effects = update(&mut model, Message::RefreshPool);
@@ -725,6 +760,8 @@ mod tests {
     #[test]
     fn refresh_pool_with_fan_inflight_emits_only_pool() {
         let mut model = Model::new_demo(sample_disk_names(), PoolStatus::Mounted(sample_pool()));
+        let _tmp = tempfile::tempdir().unwrap();
+        model.paths = Some(crate::state_paths::StatePaths::custom(_tmp.path().into()));
         model.fan_control = Some(sample_fan_control());
         model.fan_probe_inflight = true;
         let effects = update(&mut model, Message::RefreshPool);
@@ -741,6 +778,8 @@ mod tests {
     #[test]
     fn refresh_pool_with_fan_disabled_emits_only_pool() {
         let mut model = Model::new_demo(sample_disk_names(), PoolStatus::Mounted(sample_pool()));
+        let _tmp = tempfile::tempdir().unwrap();
+        model.paths = Some(crate::state_paths::StatePaths::custom(_tmp.path().into()));
         model.fan_control = None;
         let effects = update(&mut model, Message::RefreshPool);
         assert!(effects.iter().any(is_probe_pool));
@@ -801,6 +840,8 @@ mod tests {
     #[test]
     fn refresh_pool_ups_piggyback_does_not_double_arm_scheduler() {
         let mut model = Model::new_demo(sample_disk_names(), PoolStatus::Mounted(sample_pool()));
+        let _tmp = tempfile::tempdir().unwrap();
+        model.paths = Some(crate::state_paths::StatePaths::custom(_tmp.path().into()));
         model.ups_config = Some(sample_ups_config(true));
         model.ups_probe_inflight = false;
         model.ups_scheduler_pending = true;
@@ -939,6 +980,8 @@ mod tests {
     #[test]
     fn refresh_pool_with_ups_idle_emits_both() {
         let mut model = Model::new_demo(sample_disk_names(), PoolStatus::Mounted(sample_pool()));
+        let _tmp = tempfile::tempdir().unwrap();
+        model.paths = Some(crate::state_paths::StatePaths::custom(_tmp.path().into()));
         model.ups_config = Some(sample_ups_config(true));
         model.ups_probe_inflight = false;
         let effects = update(&mut model, Message::RefreshPool);
@@ -954,6 +997,8 @@ mod tests {
     #[test]
     fn refresh_pool_with_ups_inflight_emits_only_pool() {
         let mut model = Model::new_demo(sample_disk_names(), PoolStatus::Mounted(sample_pool()));
+        let _tmp = tempfile::tempdir().unwrap();
+        model.paths = Some(crate::state_paths::StatePaths::custom(_tmp.path().into()));
         model.ups_config = Some(sample_ups_config(true));
         model.ups_probe_inflight = true;
         let effects = update(&mut model, Message::RefreshPool);
