@@ -197,8 +197,7 @@ with subtest("flock -n succeeds (lock is acquirable)"):
 
 with subtest("braid recover proceeds (end-to-end smoke)"):
     rc, out = machine.execute(
-        "printf '%s\\n' " + passphrase + " | "
-        "braid recover --passphrase-stdin 2>&1"
+        "braid recover --passphrase-file /tmp/passphrase 2>&1"
     )
     assert rc == 0, f"braid recover failed: rc={rc}\n{out}"
 
