@@ -51,10 +51,15 @@ with subtest("Hold mapper busy with a loop device"):
     ).strip()
     assert loop_dev, "expected a loop device to be attached"
 
-with subtest("braid remove exits 0 even when luksClose fails"):
+with subtest("braid remove exits 0 even when mapper close fails"):
     output = machine.succeed("braid remove disk3 --yes 2>&1")
-    assert "Warning" in output and "braid-disk3" in output, (
-        f"expected luksClose warning in output:\n{output}"
+    wait_row = "[wait] disk disk3: locking..."
+    warn_row = "[warn] disk disk3: lock failed"
+    assert wait_row in output and warn_row in output, (
+        f"expected mapper close wait/warn rows in output:\n{output}"
+    )
+    assert output.find(wait_row) < output.find(warn_row), (
+        f"expected mapper close wait row before warn row:\n{output}"
     )
 
 with subtest("Mapper remains open after busy-close warning"):
