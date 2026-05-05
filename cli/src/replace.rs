@@ -604,13 +604,13 @@ mod replace_stderr_capture {
 
 /// Plan a `braid replace` run. Owns everything above today's `--dry-run`
 /// gate: pending-op preflight, config read, `--new` spec parsing,
-/// `probe_pool` + mounted validation, mutation/UPS preflight, `--old == --new`
-/// guard, replace-source resolution, membership load +
-/// `build_replacement_membership`, new-disk probe, and step compilation.
-/// Returns a `ReplacePlanReport`: on success, accumulated notes move into
-/// `plan.notes`; on post-preflight failure, accumulated notes stay on
-/// `report.notes` so `cmd_replace` can render them before returning the
-/// error.
+/// `--old == --new` guard, keyfile path validation, `probe_pool` + mounted
+/// validation, mutation/UPS preflight, replace-source resolution,
+/// membership load + `build_replacement_membership`, new-disk probe, and
+/// step compilation. Returns a `ReplacePlanReport`: on success, accumulated
+/// notes move into `plan.notes`; on post-preflight failure, accumulated
+/// notes stay on `report.notes` so `cmd_replace` can render them before
+/// returning the error.
 ///
 /// Does not read or verify the passphrase, acquire the sleep inhibitor,
 /// or run `check_new_not_in_pool` -- those happen inside
@@ -647,6 +647,19 @@ pub fn plan_replace<R: CommandRunner + Sync, F: Filesystem + ?Sized>(
     };
     let new_name = new_name_parsed.as_str();
 
+    // --old == --new: reject before any pool or disk probes.
+    if params.old_name == new_name {
+        return err_empty(ReplaceError::Validation(
+            "--old and --new must be different disks".into(),
+        ));
+    }
+
+    if let Some(kf) = params.enroll_key_file
+        && let Err(e) = crate::enroll_key_file::validate_key_file_path(kf, false)
+    {
+        return err_empty(ReplaceError::Validation(e.to_string()));
+    }
+
     let pool = match probe_pool(runner, fs, config.mount_point()) {
         Ok(p) => p,
         Err(ProbeError::NotBtrfs { .. }) => {
@@ -677,16 +690,6 @@ pub fn plan_replace<R: CommandRunner + Sync, F: Filesystem + ?Sized>(
         return ReplacePlanReport {
             notes: std::mem::take(&mut notes),
             result: Err(ReplaceError::Validation(msg)),
-        };
-    }
-
-    // --old == --new: reject early.
-    if params.old_name == new_name {
-        return ReplacePlanReport {
-            notes: std::mem::take(&mut notes),
-            result: Err(ReplaceError::Validation(
-                "--old and --new must be different disks".into(),
-            )),
         };
     }
 
@@ -1216,6 +1219,42 @@ mod tests {
 
     fn mp() -> MountPoint {
         MountPoint("/mnt/storage".into())
+    }
+
+    struct PanicRunner;
+
+    impl CommandRunner for PanicRunner {
+        fn run(&self, request: &CmdRequest) -> Result<RawCommandOutput, crate::cmd::CmdError> {
+            panic!("planner-boundary test: runner must not be invoked; got: {request:?}");
+        }
+
+        fn run_with_stdin(
+            &self,
+            request: &CmdRequest,
+            _stdin: &[u8],
+        ) -> Result<RawCommandOutput, crate::cmd::CmdError> {
+            panic!("planner-boundary test: runner must not be invoked; got: {request:?}");
+        }
+    }
+
+    struct PanicFilesystem;
+
+    impl Filesystem for PanicFilesystem {
+        fn exists(&self, path: &str) -> bool {
+            panic!("planner-boundary test: fs.exists must not be called; got: {path}");
+        }
+
+        fn is_block_device(&self, path: &str) -> bool {
+            panic!("planner-boundary test: fs.is_block_device must not be called; got: {path}");
+        }
+
+        fn list_dir(&self, path: &str) -> Result<Vec<String>, std::io::Error> {
+            panic!("planner-boundary test: fs.list_dir must not be called; got: {path}");
+        }
+
+        fn read_to_string(&self, path: &str) -> Result<String, std::io::Error> {
+            panic!("planner-boundary test: fs.read_to_string must not be called; got: {path}");
+        }
     }
 
     /*
@@ -3829,6 +3868,7 @@ mod tests {
 
         let kf_dir = tempfile::tempdir().unwrap();
         let kf_path = kf_dir.path().join("braid.key");
+        std::fs::write(&kf_path, [0u8; crate::luks::KEYFILE_SIZE]).unwrap();
 
         // Only disk3's by_id exists; the mapper /dev/mapper/braid-disk3 is
         // absent so `ensure_luks_open` proceeds to issue `LuksOpen`.
@@ -4468,31 +4508,17 @@ mod tests {
         );
     }
 
-    /* Intent: when plan_replace accumulates a preflight Info note and
-     * then fails on the `--old == --new` validation, the accumulated
-     * notes survive on `report.notes`.
-     * Why it exists: Shape A "notes-carrying report" promises
-     * preserved context; a same-name --old/--new typo during an
-     * in-flight balance must not hide the busy-op context from the
-     * operator.
-     * Scenario: 2-disk pool, sysfs reports "device add", operator
-     * runs `braid replace --old disk2 --new disk2=/...` (same name).
-     */
+    // Intent: a same-name `braid replace --old/--new` typo aborts in the
+    // planner before any shell or Filesystem-backed probe.
+    // Why it exists: the pre-hoist preserved-note behavior conflated a pure
+    // input-shape error with I/O-precondition context; this path now fails
+    // before preflight can accumulate state-context notes.
+    // Scenario: user runs `braid replace --old disk2 --new disk2=/...`;
+    // the planner returns the same-name validation error with no probes.
     #[test]
-    fn plan_replace_preserves_preflight_notes_on_old_equals_new_validation() {
+    fn plan_replace_old_equals_new_aborts_before_any_probe() {
         let state_tmp = tempfile::tempdir().unwrap();
         let paths = StatePaths::custom(state_tmp.path().into());
-        let mut m = PoolMembership::empty();
-        m.disks.insert(
-            "disk1".into(),
-            DiskMember::from_by_id(ByIdPath("/dev/disk/by-id/virtio-disk1".into())),
-        );
-        m.disks.insert(
-            "disk2".into(),
-            DiskMember::from_by_id(ByIdPath("/dev/disk/by-id/virtio-disk2".into())),
-        );
-        membership::save_membership(&m, &paths).unwrap();
-
         let config_tmp = tempfile::tempdir().unwrap();
         let config_path = config_tmp.path().join("config.json");
         std::fs::write(
@@ -4500,18 +4526,10 @@ mod tests {
             serde_json::to_vec(&serde_json::json!({ "mount_point": "/mnt/storage" })).unwrap(),
         )
         .unwrap();
-        let pass_path = config_tmp.path().join("passphrase");
-        std::fs::write(&pass_path, b"test-passphrase\n").unwrap();
-
-        let fs = ReplaceMockFsWithSysfs::new(
-            vec!["/dev/disk/by-id/virtio-disk2".into()],
-            "device add\n",
-        );
-        let runner = FailingReplaceRunner;
         let inhibitor = crate::inhibit::RecordingInhibitor::new();
         let report = plan_replace(
-            &runner,
-            &fs,
+            &PanicRunner,
+            &PanicFilesystem,
             &ReplaceParams {
                 config_path: &config_path,
                 old_name: "disk2",
@@ -4520,7 +4538,7 @@ mod tests {
                 dry_run: true,
                 yes: true,
                 passphrase_stdin: false,
-                passphrase_file: Some(pass_path.as_path()),
+                passphrase_file: None,
                 enroll_key_file: None,
                 progress: crate::progress::ProgressOutput::Off,
                 paths: &paths,
@@ -4539,18 +4557,122 @@ mod tests {
         }
         assert_eq!(
             report.notes.len(),
-            1,
-            "busy-op Info note must survive the same-name failure, got: {:?}",
+            0,
+            "same-name input validation must not preserve preflight notes, got: {:?}",
             report.notes,
         );
-        assert!(
-            matches!(
-                &report.notes[0],
-                PreviewNote::Info(b) if b.contains("waiting for in-flight") && b.contains("device add")
-            ),
-            "notes[0]={:?}",
-            report.notes[0],
+        assert_eq!(inhibitor.acquire_count(), 0);
+    }
+
+    // Intent: `braid replace --enroll` rejects a missing braid.key during
+    // planning, before shell probes or Filesystem-backed pool/disk probes.
+    // Why it exists: a typoed keyfile path must not let replace format the
+    // new disk and then fail only at keyfile enrollment.
+    // Scenario: user passes a nonexistent enroll directory while replacing a
+    // disk; the command refuses with a keyfile error and no probes run.
+    #[test]
+    fn plan_replace_aborts_when_keyfile_missing_before_any_probe() {
+        let state_tmp = tempfile::tempdir().unwrap();
+        let paths = StatePaths::custom(state_tmp.path().into());
+        let config_tmp = tempfile::tempdir().unwrap();
+        let config_path = config_tmp.path().join("config.json");
+        std::fs::write(
+            &config_path,
+            serde_json::to_vec(&serde_json::json!({ "mount_point": "/mnt/storage" })).unwrap(),
+        )
+        .unwrap();
+        let kf_path = config_tmp.path().join("does-not-exist").join("braid.key");
+        let inhibitor = crate::inhibit::RecordingInhibitor::new();
+
+        let report = plan_replace(
+            &PanicRunner,
+            &PanicFilesystem,
+            &ReplaceParams {
+                config_path: &config_path,
+                old_name: "disk2",
+                new_name: "disk3=/dev/disk/by-id/virtio-disk3",
+                missing_id: None,
+                dry_run: true,
+                yes: true,
+                passphrase_stdin: false,
+                passphrase_file: None,
+                enroll_key_file: Some(kf_path.as_path()),
+                progress: crate::progress::ProgressOutput::Off,
+                paths: &paths,
+                sleep_inhibitor: &inhibitor,
+            },
         );
+
+        match report.result {
+            Err(ReplaceError::Validation(msg)) => assert!(
+                msg.contains("keyfile not found"),
+                "expected missing keyfile validation, got: {msg}"
+            ),
+            Err(other) => panic!("expected Validation, got: {other:?}"),
+            Ok(_) => panic!("expected Err(Validation), got Ok(_)"),
+        }
+        assert!(
+            report.notes.is_empty(),
+            "expected no notes: {:?}",
+            report.notes
+        );
+        assert_eq!(inhibitor.acquire_count(), 0);
+    }
+
+    // Intent: `braid replace --enroll` rejects a directory at braid.key during
+    // planning, before shell probes or Filesystem-backed pool/disk probes.
+    // Why it exists: checking only existence would still allow an invalid
+    // keyfile path to reach destructive LUKS work before enrollment fails.
+    // Scenario: user points --enroll at a directory containing a subdirectory
+    // named braid.key; the command refuses before any disk inspection.
+    #[test]
+    fn plan_replace_aborts_when_keyfile_is_directory_before_any_probe() {
+        let state_tmp = tempfile::tempdir().unwrap();
+        let paths = StatePaths::custom(state_tmp.path().into());
+        let config_tmp = tempfile::tempdir().unwrap();
+        let config_path = config_tmp.path().join("config.json");
+        std::fs::write(
+            &config_path,
+            serde_json::to_vec(&serde_json::json!({ "mount_point": "/mnt/storage" })).unwrap(),
+        )
+        .unwrap();
+        let kf_path = config_tmp.path().join("braid.key");
+        std::fs::create_dir(&kf_path).unwrap();
+        let inhibitor = crate::inhibit::RecordingInhibitor::new();
+
+        let report = plan_replace(
+            &PanicRunner,
+            &PanicFilesystem,
+            &ReplaceParams {
+                config_path: &config_path,
+                old_name: "disk2",
+                new_name: "disk3=/dev/disk/by-id/virtio-disk3",
+                missing_id: None,
+                dry_run: true,
+                yes: true,
+                passphrase_stdin: false,
+                passphrase_file: None,
+                enroll_key_file: Some(kf_path.as_path()),
+                progress: crate::progress::ProgressOutput::Off,
+                paths: &paths,
+                sleep_inhibitor: &inhibitor,
+            },
+        );
+
+        match report.result {
+            Err(ReplaceError::Validation(msg)) => assert!(
+                msg.contains("is not a regular file"),
+                "expected directory keyfile validation, got: {msg}"
+            ),
+            Err(other) => panic!("expected Validation, got: {other:?}"),
+            Ok(_) => panic!("expected Err(Validation), got Ok(_)"),
+        }
+        assert!(
+            report.notes.is_empty(),
+            "expected no notes: {:?}",
+            report.notes
+        );
+        assert_eq!(inhibitor.acquire_count(), 0);
     }
 
     #[derive(Clone, Copy)]
@@ -4783,31 +4905,17 @@ mod tests {
         );
     }
 
-    /* Intent: cmd_replace renders preserved preflight notes on the Err
-     * branch before returning the validation error.
-     * Why it exists: planner tests prove `report.notes` survives; this
-     * locks the command wrapper behavior that surfaces those preserved
-     * notes to stderr for the operator.
-     * Scenario: 2-disk pool, sysfs reports "device add", operator runs
-     * `braid replace --old disk2 --new disk2=/...` (same name), so the
-     * command returns the same-name validation error after accumulating
-     * the busy-op Info note.
-     */
+    // Intent: cmd_replace returns the same-name validation error without
+    // rendering preserved preflight notes.
+    // Why it exists: the pre-hoist preserved-note behavior was intentionally
+    // retired; pure input-shape errors now abort before I/O-precondition
+    // context can be gathered or rendered.
+    // Scenario: user runs `braid replace --old disk2 --new disk2=/...`; the
+    // command returns the validation error and stderr has no busy-op note.
     #[test]
-    fn cmd_replace_renders_preserved_preflight_notes_on_old_equals_new_validation() {
+    fn cmd_replace_old_equals_new_aborts_before_any_probe() {
         let state_tmp = tempfile::tempdir().unwrap();
         let paths = StatePaths::custom(state_tmp.path().into());
-        let mut m = PoolMembership::empty();
-        m.disks.insert(
-            "disk1".into(),
-            DiskMember::from_by_id(ByIdPath("/dev/disk/by-id/virtio-disk1".into())),
-        );
-        m.disks.insert(
-            "disk2".into(),
-            DiskMember::from_by_id(ByIdPath("/dev/disk/by-id/virtio-disk2".into())),
-        );
-        membership::save_membership(&m, &paths).unwrap();
-
         let config_tmp = tempfile::tempdir().unwrap();
         let config_path = config_tmp.path().join("config.json");
         std::fs::write(
@@ -4815,19 +4923,11 @@ mod tests {
             serde_json::to_vec(&serde_json::json!({ "mount_point": "/mnt/storage" })).unwrap(),
         )
         .unwrap();
-        let pass_path = config_tmp.path().join("passphrase");
-        std::fs::write(&pass_path, b"test-passphrase\n").unwrap();
-
-        let fs = ReplaceMockFsWithSysfs::new(
-            vec!["/dev/disk/by-id/virtio-disk2".into()],
-            "device add\n",
-        );
-        let runner = FailingReplaceRunner;
         let inhibitor = crate::inhibit::RecordingInhibitor::new();
         let (result, stderr) = super::replace_stderr_capture::capture(|| {
             cmd_replace(
-                &runner,
-                &fs,
+                &PanicRunner,
+                &PanicFilesystem,
                 &ReplaceParams {
                     config_path: &config_path,
                     old_name: "disk2",
@@ -4836,7 +4936,7 @@ mod tests {
                     dry_run: false,
                     yes: true,
                     passphrase_stdin: false,
-                    passphrase_file: Some(pass_path.as_path()),
+                    passphrase_file: None,
                     enroll_key_file: None,
                     progress: crate::progress::ProgressOutput::Off,
                     paths: &paths,
@@ -4856,8 +4956,13 @@ mod tests {
             Ok(_) => panic!("expected Err(Validation), got Ok(_)"),
         }
         assert!(
-            stderr.contains("waiting for in-flight device add"),
-            "cmd_replace must render preserved preflight notes to stderr, got:\n{stderr}",
+            !stderr.contains("waiting for in-flight"),
+            "same-name validation must not render busy-op notes, got:\n{stderr}",
         );
+        assert!(
+            stderr.is_empty(),
+            "expected no preserved notes, got:\n{stderr}"
+        );
+        assert_eq!(inhibitor.acquire_count(), 0);
     }
 }

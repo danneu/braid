@@ -496,7 +496,10 @@ impl EnrollPlan {
 /// No-context preview-generation failure for bad `--key-file` paths.
 /// Lives in `plan_enroll` so cmd-level code has a single planner
 /// entry point. Failures here have no accumulated notes.
-fn validate_key_file_path(key_file_path: &Path, generate: bool) -> Result<(), EnrollKeyFileError> {
+pub fn validate_key_file_path(
+    key_file_path: &Path,
+    generate: bool,
+) -> Result<(), EnrollKeyFileError> {
     if generate {
         if key_file_path.exists() {
             return Err(EnrollKeyFileError::Validation(format!(

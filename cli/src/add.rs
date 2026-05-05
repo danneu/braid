@@ -782,11 +782,11 @@ impl AddPlan {
 
 /// Plan a `braid add` run. Owns everything above today's `--dry-run` gate:
 /// pending-op preflight, config read, disk-spec parsing, duplicate-name /
-/// duplicate-by-id validation, membership load, conflict validation,
-/// per-disk probe, pool probe, mutation preflight, UPS preflight, the
-/// missing-devices warning, the keyfile-asymmetry warning, and
-/// `compile_add_steps_multi`. On success, every accumulated note lives on
-/// `plan.notes`; on failure after note accumulation, notes survive on
+/// duplicate-by-id validation, keyfile path validation, membership load,
+/// conflict validation, per-disk probe, pool probe, mutation preflight, UPS
+/// preflight, the missing-devices warning, the keyfile-asymmetry warning,
+/// and `compile_add_steps_multi`. On success, every accumulated note lives
+/// on `plan.notes`; on failure after note accumulation, notes survive on
 /// `report.notes` so `cmd_add` can render them to stderr before the error.
 pub fn plan_add<R: CommandRunner + Sync, F: Filesystem + ?Sized>(
     runner: &R,
@@ -854,6 +854,12 @@ pub fn plan_add<R: CommandRunner + Sync, F: Filesystem + ?Sized>(
                 )));
             }
         }
+    }
+
+    if let Some(kf) = params.enroll_key_file
+        && let Err(e) = crate::enroll_key_file::validate_key_file_path(kf, false)
+    {
+        return err_empty(AddError::Validation(e.to_string()));
     }
 
     // Load existing membership (or empty if first add)
@@ -3904,6 +3910,135 @@ mod tests {
         (state_tmp, paths, tmp, config_path)
     }
 
+    struct PanicRunner;
+
+    impl CommandRunner for PanicRunner {
+        fn run(&self, request: &CmdRequest) -> Result<RawCommandOutput, CmdError> {
+            panic!("planner-boundary test: runner must not be invoked; got: {request:?}");
+        }
+
+        fn run_with_stdin(
+            &self,
+            request: &CmdRequest,
+            _stdin: &[u8],
+        ) -> Result<RawCommandOutput, CmdError> {
+            panic!("planner-boundary test: runner must not be invoked; got: {request:?}");
+        }
+    }
+
+    struct PanicFilesystem;
+
+    impl Filesystem for PanicFilesystem {
+        fn exists(&self, path: &str) -> bool {
+            panic!("planner-boundary test: fs.exists must not be called; got: {path}");
+        }
+
+        fn is_block_device(&self, path: &str) -> bool {
+            panic!("planner-boundary test: fs.is_block_device must not be called; got: {path}");
+        }
+
+        fn list_dir(&self, path: &str) -> Result<Vec<String>, std::io::Error> {
+            panic!("planner-boundary test: fs.list_dir must not be called; got: {path}");
+        }
+
+        fn read_to_string(&self, path: &str) -> Result<String, std::io::Error> {
+            panic!("planner-boundary test: fs.read_to_string must not be called; got: {path}");
+        }
+    }
+
+    // Intent: `braid add --enroll` rejects a missing braid.key during
+    // planning, before shell probes or Filesystem-backed disk probes.
+    // Why it exists: a typoed keyfile path must not reach the destructive
+    // LUKS format path and then fail only at keyfile enrollment.
+    // Scenario: user passes a nonexistent enroll directory while adding a
+    // fresh disk; the command refuses with a keyfile error and no probes run.
+    #[test]
+    fn plan_add_aborts_when_keyfile_missing_before_any_probe() {
+        let (_state_tmp, paths, tmp, config_path) = confirm_test_setup();
+        let kf_path = tmp.path().join("does-not-exist").join("braid.key");
+        let inhibitor = crate::inhibit::RecordingInhibitor::new();
+
+        let report = plan_add(
+            &PanicRunner,
+            &PanicFilesystem,
+            &AddParams {
+                config_path: &config_path,
+                disk_specs: &["disk1=/dev/disk/by-id/virtio-disk1".into()],
+                dry_run: true,
+                yes: true,
+                passphrase_stdin: false,
+                passphrase_file: None,
+                enroll_key_file: Some(kf_path.as_path()),
+                progress: ProgressOutput::Off,
+                paths: &paths,
+                sleep_inhibitor: &inhibitor,
+                passphrase_reader: &crate::luks::RealTty,
+            },
+        );
+
+        match report.result {
+            Err(AddError::Validation(msg)) => assert!(
+                msg.contains("keyfile not found"),
+                "expected missing keyfile validation, got: {msg}"
+            ),
+            Err(other) => panic!("expected Validation, got: {other:?}"),
+            Ok(_) => panic!("expected Err(Validation), got Ok(_)"),
+        }
+        assert!(
+            report.notes.is_empty(),
+            "expected no notes: {:?}",
+            report.notes
+        );
+        assert_eq!(inhibitor.acquire_count(), 0);
+    }
+
+    // Intent: `braid add --enroll` rejects a directory at braid.key during
+    // planning, before shell probes or Filesystem-backed disk probes.
+    // Why it exists: checking only existence would still allow an invalid
+    // keyfile path to reach destructive LUKS work before enrollment fails.
+    // Scenario: user points --enroll at a directory containing a subdirectory
+    // named braid.key; the command refuses before any disk inspection.
+    #[test]
+    fn plan_add_aborts_when_keyfile_is_directory_before_any_probe() {
+        let (_state_tmp, paths, tmp, config_path) = confirm_test_setup();
+        let kf_path = tmp.path().join("braid.key");
+        std::fs::create_dir(&kf_path).unwrap();
+        let inhibitor = crate::inhibit::RecordingInhibitor::new();
+
+        let report = plan_add(
+            &PanicRunner,
+            &PanicFilesystem,
+            &AddParams {
+                config_path: &config_path,
+                disk_specs: &["disk1=/dev/disk/by-id/virtio-disk1".into()],
+                dry_run: true,
+                yes: true,
+                passphrase_stdin: false,
+                passphrase_file: None,
+                enroll_key_file: Some(kf_path.as_path()),
+                progress: ProgressOutput::Off,
+                paths: &paths,
+                sleep_inhibitor: &inhibitor,
+                passphrase_reader: &crate::luks::RealTty,
+            },
+        );
+
+        match report.result {
+            Err(AddError::Validation(msg)) => assert!(
+                msg.contains("is not a regular file"),
+                "expected directory keyfile validation, got: {msg}"
+            ),
+            Err(other) => panic!("expected Validation, got: {other:?}"),
+            Ok(_) => panic!("expected Err(Validation), got Ok(_)"),
+        }
+        assert!(
+            report.notes.is_empty(),
+            "expected no notes: {:?}",
+            report.notes
+        );
+        assert_eq!(inhibitor.acquire_count(), 0);
+    }
+
     /*
      * Intent: bootstrap `braid add` with a mismatched confirmation prompt
      *   aborts BEFORE `cryptsetup luksFormat` runs.
@@ -4060,6 +4195,7 @@ mod tests {
         let tty = ScriptedPassphraseReader::new(["ok", "ok"]);
         let kf_dir = tempfile::tempdir().unwrap();
         let kf_path = kf_dir.path().join("braid.key");
+        std::fs::write(&kf_path, [0u8; crate::luks::KEYFILE_SIZE]).unwrap();
 
         let result = cmd_add(
             &runner,
