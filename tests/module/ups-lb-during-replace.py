@@ -215,10 +215,15 @@ with subtest("braid recover completes cleanly"):
         f"braid recover panicked:\n{recover_out}"
     )
     # The kernel's resume-on-mount path completed the dev_replace before
-    # `cmd_recover` probed the live pool, so guidance reports the
-    # replace as completed.
-    assert "replace completed" in recover_out, (
-        f"recover did not emit 'replace completed' guidance.\n"
+    # `cmd_recover` probed the live pool, so phased recovery advances to
+    # committed replace maintenance: write the committed membership, then
+    # replay the owed resize.
+    assert "pool.json written from committed replace membership" in recover_out, (
+        f"recover did not take the committed replace maintenance path.\n"
+        f"Output:\n{recover_out}"
+    )
+    assert "Replaying post-replace resize" in recover_out, (
+        f"recover did not replay the post-replace resize.\n"
         f"Output:\n{recover_out}"
     )
     kernel_wait = "[wait] pool: waiting for kernel dev_replace to finish..."
