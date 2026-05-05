@@ -69,12 +69,17 @@ with subtest("Hold old mapper busy with a loop device"):
     ).strip()
     assert loop_dev, "expected a loop device to be attached"
 
-with subtest("braid replace exits 0 even when post-replace luksClose fails"):
+with subtest("braid replace exits 0 even when post-replace mapper close fails"):
     output = machine.succeed(replace_cmd("disk2", "disk4") + " 2>&1")
     print(f"braid replace output:\n{output}")
 
-    assert "Warning" in output and "braid-disk2" in output, (
-        f"expected luksClose warning naming braid-disk2:\n{output}"
+    wait_row = "[wait] disk disk2: locking..."
+    warn_row = "[warn] disk disk2: lock failed"
+    assert wait_row in output and warn_row in output, (
+        f"expected mapper close wait/warn rows for disk2:\n{output}"
+    )
+    assert output.find(wait_row) < output.find(warn_row), (
+        f"expected mapper close wait row before warn row:\n{output}"
     )
     # Regression gate: the wipe-guidance line must NOT appear when the
     # close failed. Before the fix, it printed unconditionally.
