@@ -548,6 +548,11 @@
               braid = linuxCrane.braid-cli-unwrapped;
             }
           );
+          alert-state-lock = pkgs.testers.nixosTest (
+            import ./tests/module/alert-state-lock.nix {
+              braid = linuxCrane.braid-cli-unwrapped;
+            }
+          );
           wrapper-pool-lock-released-after-sigkill = pkgs.testers.nixosTest (
             import ./tests/module/wrapper-pool-lock-released-after-sigkill.nix {
               braid = linuxCrane.braid-cli-unwrapped;

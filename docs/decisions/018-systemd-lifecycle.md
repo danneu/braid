@@ -135,15 +135,15 @@ The wrapper (`braid-wrapper.sh`) bridges CLI operations and systemd state. This 
 2. `ExecStop = braid lock` runs with `BRAID_SYSTEMD_EXECSTOP=1` -- unmounts and closes LUKS.
 3. Drives are safe to power off.
 
-## Unlock path mutual exclusion
+## Pool lock mutual exclusion
 
-Pool-mutating commands (`unlock`, `add`, `recover`) acquire an exclusive **non-blocking** `flock` on `/run/braid-pool.lock` in the wrapper before invoking the CLI. **braid does not queue pool operations** — if the lock is already held by another braid process, the wrapper exits 1 immediately with `braid: another braid operation is already in progress` and the user must retry once the active operation completes. The lock is held through post-processing (permissions, `braid-online` activation). Under the held lock, `unlock` re-checks whether the pool is already mounted and exits cleanly if a prior winner mounted it sequentially — `add` and `recover` do not fast-exit because they operate on mounted pools. See [Principle 12](../principles.md#12-one-pool-operation-at-a-time).
+Pool and alert-state mutators (`unlock`, `add`, `recover`, `remove`, `remove-missing`, `ack`, `monitor`) acquire an exclusive `flock` on `/run/braid-pool.lock` in the wrapper before invoking the CLI. `unlock`, `add`, `recover`, `remove`, and `remove-missing` are non-blocking fail-fast commands: if the lock is already held by another braid process, the wrapper exits 1 immediately with `braid: another braid operation is already in progress` and the user must retry once the active operation completes. `ack` waits up to 10 seconds before returning a retry message. `monitor` exits 0 silently on contention so a skipped timer cycle does not start alert notification. The lock is held through post-processing (permissions, `braid-online` activation). Under the held lock, `unlock` re-checks whether the pool is already mounted and exits cleanly if a prior winner mounted it sequentially; `add`, `recover`, `remove`, and `remove-missing` do not fast-exit because they operate on mounted pools. See [Principle 12](../principles.md#12-one-pool-operation-at-a-time).
 
 ### Lock acquisition site
 
-For non-dry-run pool mutators, the operation lock (`PoolLockGuard`) must be acquired in top-level dispatch in `cli/src/main.rs` **before** any mutable pool-state I/O: config load, `pool.json` load, journal read, identity probes, interactive prompts. Either move those loads under the guard or move the loads into the locked `cmd_*` function.
+For non-dry-run pool and alert-state mutators, the operation lock is acquired in `modules/braid/braid-wrapper.sh` **before** the wrapper invokes the Rust CLI. The wrapper opens fd 9 on `/run/braid-pool.lock` and calls `flock` before `@braidBin@ "$@"`, so config load, `pool.json` load, journal read, identity probes, subprocess health probes, and interactive prompts all run with the lock already held.
 
-A command started during another mutator could otherwise read a stale `pool.json`, then acquire the lock after the first command finishes and act on old state. Late acquisition also regresses the fail-fast UX -- users see prompts and probes complete before being told the operation is contended.
+A command started during another mutator could otherwise read stale state, then acquire the lock after the first command finishes and act on old inputs. Late acquisition also regresses the fail-fast UX -- users see prompts and probes complete before being told the operation is contended.
 
 The pool lock is the first real execution boundary. Do not model it after the sleep inhibitor's late-acquisition pattern: the inhibitor protects against suspend mid-operation and can wait until the irreversible window; the pool lock protects against state-staleness and must precede any read of pool state.
 

@@ -65,6 +65,8 @@ Exit codes:
 
 Fail closed: any failure inside `cmd_monitor` that leaves pool state indeterminate latches a `ComputationError` cause and reports exit 1, so the systemd wrapper starts the beeper. Exit 2 means the monitor never ran -- a beep would be meaningless because there is no `AlertState` to report.
 
+Alert-state mutators are serialized by `/run/braid-pool.lock`. Every command that writes `acked-stats.json` or `alert-latch.json` (`monitor`, `ack`, `add`, `remove`, `remove-missing`) holds the wrapper-level pool lock before invoking the Rust CLI. This is intentionally the same lock used by pool mutators: monitor and ack perform read-modify-write cycles around subprocess I/O, while add/remove/remove-missing prune acked baselines as membership changes. Sharing one lock keeps "baseline and latch clear" authoritative and prevents stale monitor snapshots from resurrecting acknowledged alerts.
+
 Mount presence is read from `/proc/self/mountinfo` via `mount_check::fstype_at_mount_via_fs`, not from `findmnt`. A readable, well-formed mountinfo file with no entry for the configured mount point is legitimate `PoolOffline` and exits 0. Any mountinfo I/O failure, malformed line, or duplicate target entry is indeterminate state: it surfaces as `ProbeError::MountInfo`, latches `ComputationError`, exits 1, and starts the beeper.
 
 Self-heals stale ack state (resets `missing_acked` for now-present devids after drive replacement).

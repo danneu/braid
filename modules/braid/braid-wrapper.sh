@@ -33,19 +33,45 @@ case "${BRAID_SYSTEMD_EXECSTOP:-}" in
   1|true|yes) in_systemd_execstop=true ;;
 esac
 
-# Pool-mutating commands (unlock, add, recover) acquire an exclusive
-# non-blocking flock on /run/braid-pool.lock. braid does not queue pool
-# operations: a concurrent attempt fails fast with a clear message and
-# the user must retry once the active operation finishes. This enforces
-# mutual exclusion at the critical section itself, not via systemd unit
-# topology. See Principle 12.
+# Pool and alert-state mutators acquire /run/braid-pool.lock before the
+# CLI runs. The lock intentionally spans subprocess I/O as well as JSON
+# file writes, so monitor cannot compare pre-ack btrfs stats against a
+# post-ack baseline and re-latch a stale alert.
+#
+# Contention behavior is per command:
+# - unlock/add/recover/remove/remove-missing: non-blocking fail-fast for
+#   interactive pool mutation; the user retries once the active operation
+#   finishes.
+# - ack: wait briefly for a monitor cycle, but bound the wait so a stuck
+#   pool operation still returns a clear retry message.
+# - monitor: non-blocking silent exit 0; a missed timer cycle is harmless,
+#   and exit 1 would falsely start the alert service.
+# This enforces mutual exclusion at the critical section itself, not via
+# systemd unit topology. See Principle 12.
 case "$subcmd" in
-  unlock|add|recover)
+  unlock|add|recover|remove|remove-missing)
     if ! $skip_fixup; then
       exec 9>/run/braid-pool.lock
       if ! @flockBin@ -n 9; then
         echo "braid: another braid operation is already in progress (pool lock /run/braid-pool.lock is held); retry once it finishes" >&2
         exit 1
+      fi
+    fi
+    ;;
+  ack)
+    if ! $skip_fixup; then
+      exec 9>/run/braid-pool.lock
+      if ! @flockBin@ -w 10 9; then
+        echo "braid: another braid operation is in progress (pool lock /run/braid-pool.lock is held); retry once it finishes" >&2
+        exit 1
+      fi
+    fi
+    ;;
+  monitor)
+    if ! $skip_fixup; then
+      exec 9>/run/braid-pool.lock
+      if ! @flockBin@ -n 9; then
+        exit 0
       fi
     fi
     ;;
