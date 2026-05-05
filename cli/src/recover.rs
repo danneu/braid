@@ -1245,7 +1245,7 @@ fn discover_add_targets_before_mount<R: CommandRunner, F: Filesystem + ?Sized>(
             luks::ensure_luks_open(runner, fs, name, &target.by_id, passphrase)?;
         }
 
-        scan_mapper(runner, &format!("/dev/mapper/{}", target.mapper_name))?;
+        scan_mapper_if_btrfs_visible(runner, &format!("/dev/mapper/{}", target.mapper_name))?;
     }
 
     Ok(credential)
@@ -1373,6 +1373,17 @@ fn scan_mapper<R: CommandRunner>(runner: &R, mapper_path: &str) -> Result<(), Re
     Ok(())
 }
 
+fn scan_mapper_if_btrfs_visible<R: CommandRunner>(
+    runner: &R,
+    mapper_path: &str,
+) -> Result<bool, RecoverError> {
+    if visible_btrfs_fsid(runner, mapper_path)?.is_none() {
+        return Ok(false);
+    }
+    scan_mapper(runner, mapper_path)?;
+    Ok(true)
+}
+
 fn ensure_keyfile_enrolled<R: CommandRunner>(
     runner: &R,
     device: &str,
@@ -1494,8 +1505,10 @@ fn execute_add_pool_mutation_recovery<R: CommandRunner + Sync, F: Filesystem + ?
                     .expect("passphrase was resolved above");
                 luks::ensure_luks_open(runner, fs, name, &target.by_id, passphrase)?;
             }
-            scan_mapper(runner, &format!("/dev/mapper/{}", target.mapper_name))?;
-            opened_or_scanned = true;
+            if scan_mapper_if_btrfs_visible(runner, &format!("/dev/mapper/{}", target.mapper_name))?
+            {
+                opened_or_scanned = true;
+            }
         }
 
         if opened_or_scanned {
@@ -2866,6 +2879,14 @@ mod tests {
         )
     }
 
+    fn btrfs_show_target_no_btrfs(target: &str) -> RawCommandOutput {
+        err_raw(
+            "btrfs filesystem show target",
+            1,
+            &format!("not a valid btrfs filesystem on {target}"),
+        )
+    }
+
     fn with_one_disk_pool_probe(runner: MockRunner) -> MockRunner {
         runner
             .with_output(
@@ -2895,40 +2916,6 @@ mod tests {
                     mount_point: MountPoint("/mnt/storage".into()),
                 },
                 btrfs_show_two_disks(),
-            )
-            .with_output(
-                CmdRequest::CryptsetupStatus {
-                    mapper: "braid-disk1".into(),
-                },
-                cryptsetup_status_active("braid-disk1", "/dev/vda"),
-            )
-            .with_output(
-                CmdRequest::CryptsetupLuksUuid {
-                    device: "/dev/vda".into(),
-                },
-                cryptsetup_uuid_ok("/dev/vda", "11111111-1111-1111-1111-111111111111"),
-            )
-            .with_output(
-                CmdRequest::CryptsetupStatus {
-                    mapper: "braid-disk2".into(),
-                },
-                cryptsetup_status_active("braid-disk2", "/dev/vdb"),
-            )
-            .with_output(
-                CmdRequest::CryptsetupLuksUuid {
-                    device: "/dev/vdb".into(),
-                },
-                cryptsetup_uuid_ok("/dev/vdb", "22222222-2222-2222-2222-222222222222"),
-            )
-    }
-
-    fn with_one_then_two_disk_pool_probe(runner: MockRunner) -> MockRunner {
-        runner
-            .with_output_sequence(
-                CmdRequest::BtrfsFilesystemShow {
-                    mount_point: MountPoint("/mnt/storage".into()),
-                },
-                vec![btrfs_show_one_disk(), btrfs_show_two_disks()],
             )
             .with_output(
                 CmdRequest::CryptsetupStatus {
@@ -3055,6 +3042,12 @@ mod tests {
                 },
                 b"testpass".to_vec(),
                 ok_raw_empty("cryptsetup open"),
+            )
+            .with_output(
+                CmdRequest::BtrfsFilesystemShowTarget {
+                    target: "/dev/mapper/braid-disk2".into(),
+                },
+                btrfs_show_target_fsid("aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee"),
             )
             .with_output(
                 CmdRequest::BtrfsDeviceScan {
@@ -3193,10 +3186,10 @@ mod tests {
                 ok_raw_empty("cryptsetup open"),
             )
             .with_output(
-                CmdRequest::BtrfsDeviceScan {
-                    device: "/dev/mapper/braid-disk2".into(),
+                CmdRequest::BtrfsFilesystemShowTarget {
+                    target: "/dev/mapper/braid-disk2".into(),
                 },
-                ok_raw_empty("btrfs device scan"),
+                btrfs_show_target_no_btrfs("/dev/mapper/braid-disk2"),
             );
         let request_log = inner.clone();
         let runner = MapperClosingRunner {
@@ -3231,16 +3224,16 @@ mod tests {
                 )
             })
             .expect("pre-mount discovery should open the committed fresh target");
-        let disk2_scan = requests
+        let disk2_btrfs_probe = requests
             .iter()
             .position(|r| {
                 matches!(
                     r,
-                    CmdRequest::BtrfsDeviceScan { device }
-                        if device == "/dev/mapper/braid-disk2"
+                    CmdRequest::BtrfsFilesystemShowTarget { target }
+                        if target == "/dev/mapper/braid-disk2"
                 )
             })
-            .expect("pre-mount discovery should scan the committed fresh target");
+            .expect("pre-mount discovery should probe the committed fresh target for btrfs");
         let disk1_probe = requests
             .iter()
             .position(|r| {
@@ -3252,8 +3245,18 @@ mod tests {
             })
             .expect("mount planning should probe pre-membership disk1");
         assert!(
-            disk2_open < disk1_probe && disk2_scan < disk1_probe,
+            disk2_open < disk1_probe && disk2_btrfs_probe < disk1_probe,
             "fresh target discovery must run before mount planning chooses from pre-membership"
+        );
+        assert!(
+            !requests.iter().any(|r| {
+                matches!(
+                    r,
+                    CmdRequest::BtrfsDeviceScan { device }
+                        if device == "/dev/mapper/braid-disk2"
+                )
+            }),
+            "fresh target without btrfs signature must not be scanned before mount"
         );
     }
 
@@ -3292,6 +3295,12 @@ mod tests {
                 "braid-disk2",
                 "/dev/vdb",
                 "22222222-2222-2222-2222-222222222222",
+            )
+            .with_output(
+                CmdRequest::BtrfsFilesystemShowTarget {
+                    target: "/dev/mapper/braid-disk2".into(),
+                },
+                btrfs_show_target_fsid("aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee"),
             )
             .with_output(
                 CmdRequest::BtrfsDeviceScan {
@@ -3399,7 +3408,7 @@ mod tests {
             passphrase_file.as_file().write_all(b"testpass").unwrap();
         }
 
-        let runner = with_balance_replay(with_one_then_two_disk_pool_probe(
+        let runner = with_balance_replay(with_two_disk_pool_probe(
             MockRunner::default()
                 .with_output(
                     CmdRequest::CryptsetupLuksUuid {
@@ -3415,12 +3424,6 @@ mod tests {
                     "braid-disk2",
                     "/dev/vdb",
                     "22222222-2222-2222-2222-222222222222",
-                )
-                .with_output(
-                    CmdRequest::BtrfsDeviceScan {
-                        device: "/dev/mapper/braid-disk2".into(),
-                    },
-                    ok_raw_empty("btrfs device scan"),
                 )
                 .with_output_stdin(
                     CmdRequest::CryptsetupTestPassphrase {
@@ -3440,7 +3443,7 @@ mod tests {
                     CmdRequest::BtrfsFilesystemShowTarget {
                         target: "/dev/mapper/braid-disk2".into(),
                     },
-                    btrfs_show_target_fsid("aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee"),
+                    btrfs_show_target_no_btrfs("/dev/mapper/braid-disk2"),
                 )
                 .with_output(
                     CmdRequest::BtrfsDeviceScanForget {
@@ -3487,6 +3490,16 @@ mod tests {
         .expect("returned-disk replay should complete recovery");
 
         let requests = runner.requests();
+        assert!(
+            !requests.iter().any(|r| {
+                matches!(
+                    r,
+                    CmdRequest::BtrfsDeviceScan { device }
+                        if device == "/dev/mapper/braid-disk2"
+                )
+            }),
+            "returned disk after wipefs has no btrfs signature and must not be scanned"
+        );
         let forget = requests
             .iter()
             .position(|r| matches!(r, CmdRequest::BtrfsDeviceScanForget { .. }))
@@ -3540,6 +3553,12 @@ mod tests {
                     "braid-disk2",
                     "/dev/vdb",
                     "22222222-2222-2222-2222-222222222222",
+                )
+                .with_output(
+                    CmdRequest::BtrfsFilesystemShowTarget {
+                        target: "/dev/mapper/braid-disk2".into(),
+                    },
+                    btrfs_show_target_fsid("aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee"),
                 )
                 .with_output(
                     CmdRequest::BtrfsDeviceScan {
@@ -3799,7 +3818,7 @@ mod tests {
             use std::io::Write;
             passphrase_file.as_file().write_all(b"testpass").unwrap();
         }
-        let inner = with_balance_replay(with_one_then_two_disk_pool_probe(
+        let inner = with_balance_replay(with_two_disk_pool_probe(
             MockRunner::default()
                 .with_output(
                     CmdRequest::CryptsetupLuksUuid {
@@ -3822,10 +3841,10 @@ mod tests {
                     "22222222-2222-2222-2222-222222222222",
                 )
                 .with_output(
-                    CmdRequest::BtrfsDeviceScan {
-                        device: "/dev/mapper/braid-disk2".into(),
+                    CmdRequest::BtrfsFilesystemShowTarget {
+                        target: "/dev/mapper/braid-disk2".into(),
                     },
-                    ok_raw_empty("btrfs device scan"),
+                    btrfs_show_target_no_btrfs("/dev/mapper/braid-disk2"),
                 )
                 .with_output_stdin(
                     CmdRequest::CryptsetupTestPassphrase {
@@ -3897,6 +3916,16 @@ mod tests {
                 .iter()
                 .any(|r| matches!(r, CmdRequest::CryptsetupLuksFormat { .. })),
             "already-formatted fresh target must not be reformatted"
+        );
+        assert!(
+            !request_log.requests().iter().any(|r| {
+                matches!(
+                    r,
+                    CmdRequest::BtrfsDeviceScan { device }
+                        if device == "/dev/mapper/braid-disk2"
+                )
+            }),
+            "fresh target after LUKS format has no btrfs signature and must not be scanned"
         );
     }
 
@@ -4095,10 +4124,10 @@ mod tests {
                     "22222222-2222-2222-2222-222222222222",
                 )
                 .with_output(
-                    CmdRequest::BtrfsDeviceScan {
-                        device: "/dev/mapper/braid-disk2".into(),
+                    CmdRequest::BtrfsFilesystemShowTarget {
+                        target: "/dev/mapper/braid-disk2".into(),
                     },
-                    ok_raw_empty("btrfs device scan"),
+                    btrfs_show_target_no_btrfs("/dev/mapper/braid-disk2"),
                 )
                 .with_output_stdin(
                     CmdRequest::CryptsetupTestPassphrase {
