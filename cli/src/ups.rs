@@ -144,22 +144,16 @@ pub fn format_human(name: &str, parsed: &UpscOutput) -> String {
     let mut out = String::new();
     let _ = writeln!(out, "UPS: {}", name);
     let _ = writeln!(out, "Status: {}", format_status(&parsed.status_flags));
-    match parsed.battery.charge_pct {
-        Some(pct) => {
-            let _ = writeln!(out, "Battery: {}%", pct);
-        }
-        None => {
-            let _ = writeln!(out, "Battery: --");
-        }
-    }
-    match parsed.battery.runtime_secs {
-        Some(secs) => {
-            let _ = writeln!(out, "Runtime: {}", format_runtime(secs));
-        }
-        None => {
-            let _ = writeln!(out, "Runtime: --");
-        }
-    }
+    line(
+        &mut out,
+        "Battery",
+        parsed.battery.charge_pct.map(|pct| format!("{pct}%")),
+    );
+    line(
+        &mut out,
+        "Runtime",
+        parsed.battery.runtime_secs.map(format_runtime),
+    );
     match parsed.load_pct {
         Some(load) => match parsed.watts_estimated() {
             Some(w) => {
@@ -193,6 +187,17 @@ pub fn format_human(name: &str, parsed: &UpscOutput) -> String {
         let _ = writeln!(out, "Last test: {}", result);
     }
     out
+}
+
+fn line<W: std::fmt::Write>(out: &mut W, label: &str, value: Option<impl std::fmt::Display>) {
+    match value {
+        Some(v) => {
+            let _ = writeln!(out, "{label}: {v}");
+        }
+        None => {
+            let _ = writeln!(out, "{label}: --");
+        }
+    }
 }
 
 fn format_device_line(parsed: &UpscOutput) -> Option<String> {
@@ -315,6 +320,61 @@ mod tests {
             text.contains("\"OL\""),
             "flag token appears verbatim: {text}"
         );
+    }
+
+    // Intent: format_human emits exactly `Battery: --`, `Runtime: --`,
+    // and `Load: --` when charge, runtime, and load are missing.
+    // Why it exists: captured fixtures populate these fields, so snapshots
+    // only pin the Some arm; this catches dash sentinel drift.
+    // Scenario: a UPS driver has surfaced ups.status but no numeric telemetry.
+    #[test]
+    fn format_human_renders_dash_for_missing_optional_fields() {
+        let parsed = UpscOutput {
+            status_flags: {
+                let mut s = std::collections::HashSet::new();
+                s.insert(UpsStatusFlag::Ol);
+                s
+            },
+            battery: BatteryFields::default(),
+            load_pct: None,
+            realpower_nominal_watts: None,
+            input: InputFields::default(),
+            test_result: None,
+            device: DeviceFields::default(),
+            extra: std::collections::BTreeMap::new(),
+        };
+        let rendered = format_human("ups", &parsed);
+        let lines: Vec<&str> = rendered.lines().collect();
+        assert!(lines.contains(&"Battery: --"), "got: {rendered}");
+        assert!(lines.contains(&"Runtime: --"), "got: {rendered}");
+        assert!(lines.contains(&"Load: --"), "got: {rendered}");
+    }
+
+    // Intent: format_human emits exactly `Load: 50%` when load is present
+    // but nominal real power is missing.
+    // Why it exists: snapshots only pin the `Some(load) + Some(watts)` shape;
+    // this catches regressions in the asymmetric no-watts branch.
+    // Scenario: a consumer UPS reports ups.load but not ups.realpower.nominal.
+    #[test]
+    fn format_human_load_omits_estimated_when_nominal_watts_missing() {
+        let parsed = UpscOutput {
+            status_flags: {
+                let mut s = std::collections::HashSet::new();
+                s.insert(UpsStatusFlag::Ol);
+                s
+            },
+            battery: BatteryFields::default(),
+            load_pct: Some(50),
+            realpower_nominal_watts: None,
+            input: InputFields::default(),
+            test_result: None,
+            device: DeviceFields::default(),
+            extra: std::collections::BTreeMap::new(),
+        };
+        let rendered = format_human("ups", &parsed);
+        let lines: Vec<&str> = rendered.lines().collect();
+        assert!(lines.contains(&"Load: 50%"), "got: {rendered}");
+        assert!(!rendered.contains("estimated"), "got: {rendered}");
     }
 
     // Intent: not-enabled --json surfaces the stable error sentinel.
