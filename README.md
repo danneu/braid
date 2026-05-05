@@ -117,6 +117,10 @@ Every mutating command (`add`, `remove`, `remove-missing`, `replace`, `unlock`, 
 sudo braid add toshiba=/dev/disk/by-id/ata-Toshiba_MN07_XXXX --dry-run
 ```
 
+## Recovery
+
+If a mutation is interrupted, braid leaves `/var/lib/braid/pending-op.json` in place and normal commands refuse until recovery completes. Run `sudo braid recover` (add `--allow-degraded` when a member is missing). Recovery repairs `pool.json` from committed live btrfs membership and finishes only the owed post-mutation maintenance, such as resize or soft RAID1 balance.
+
 ## Manual
 
 ### Commands

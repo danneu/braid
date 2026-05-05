@@ -86,17 +86,18 @@ sudo braid replace --old toshiba1 --new toshiba4=/dev/disk/by-id/ata-TOSHIBA_MN0
 **For a fresh replacement disk (no LUKS):**
 
 1. LUKS-formats the new disk with the pool passphrase and a `braid-<name>` label
-2. Creates a LUKS header backup
-3. Opens the LUKS mapper
-4. Optionally enrolls a keyfile in slot 1
+2. Optionally enrolls a keyfile in slot 1
+3. Creates a LUKS header backup
+4. Opens the LUKS mapper
 
 **Then, for all replacements:**
 
 5. Runs `btrfs replace start` to copy data from the old device (or its mirrors) to the new device
-6. After replace completes, resizes the new device to use its full capacity (important when the new disk is larger)
+6. Writes committed membership to `pool.json` and advances the journal to post-replace maintenance
 7. For live replacements: closes the old disk's LUKS mapper
-8. For missing-disk replacements that clear the last missing device: runs a soft RAID1 balance to restore redundancy on any single-profile chunks
-9. Updates pool.json with the new disk's membership info
+8. Resizes the new device to use its full capacity (important when the new disk is larger)
+9. For missing-disk replacements that clear the last missing device: runs a soft RAID1 balance to restore redundancy on any single-profile chunks
+10. Clears the journal
 
 A sleep inhibitor is held throughout the replace to prevent the system from suspending. Suspending mid-replace can corrupt the btrfs topology.
 

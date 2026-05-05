@@ -70,10 +70,12 @@ Failure to acquire the inhibitor returns a `Validation`-shaped error before the 
 
 The protected scope includes:
 
-- journal write
+- journal write and post-commit phase rewrite
 - new-disk LUKS initialization/open
 - `btrfs replace start`
-- post-replace `maybe_restore_raid1` soft balance for missing-path replacements
+- best-effort old-mapper close for live replacements
+- post-replace resize
+- post-replace soft RAID1 balance for missing-path replacements that clear the last missing device
 
 ### `braid remove`
 
@@ -93,8 +95,9 @@ The protected scope includes:
   `btrfs_shrink_device`; can run for minutes when the missing device had data
   allocated because surviving RAID1 stripes are rewritten into newly allocated
   chunks on remaining devices)
-- the conditional `maybe_restore_raid1` soft balance that converts single-profile chunks (created during degraded operation) back to RAID1 when clearing the last missing device on a multi-disk pool
 - post-op membership persistence
+- post-commit phase rewrite
+- the conditional soft RAID1 balance that converts single-profile chunks (created during degraded operation) back to RAID1 when clearing the last missing device on a multi-disk pool
 
 The inhibitor is acquired unconditionally before journal write, even in the cases where `maybe_restore_raid1` will be a no-op. This keeps the boundary rule simple ("acquire before journal") and matches the rest of the suite. The "savings" of skipping acquisition when the soft balance will not run are tiny on a NAS that is idle most of the time.
 
@@ -110,6 +113,8 @@ The protected scope includes:
 As with `remove-missing`, the inhibitor is acquired unconditionally before journal write. The bootstrap path's mkfs phase is fast but still irreversible across the journal boundary; the add-to-existing path's RAID1 balance is the long-running phase that the inhibitor primarily protects.
 
 The no-op early-return path (all requested disks already in the pool) returns before the inhibitor seam fires — no journal is written, so no protection is required.
+
+`braid recover` follows the same boundary for replayed destructive work. In particular, add `PoolMutation` recovery resolves and verifies the needed passphrase before acquiring a sleep inhibitor; the inhibitor is acquired only after reversible credential checks pass and immediately before replaying target preparation or btrfs membership work.
 
 ## Consequences
 

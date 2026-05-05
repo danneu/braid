@@ -135,6 +135,17 @@ impl ReplacePlan {
 
         let old_mn = mapper_name(params.old_name);
         let new_mn = mapper_name(&new_name);
+        let new_target = build_replace_journal_target(
+            &new_name,
+            &new_by_id,
+            &new_probed,
+            params.enroll_key_file,
+            params.luks_format_extra_opts,
+        )?;
+        let journal_source = build_replace_journal_source(&replace_source);
+        let restore_raid1_after_commit = matches!(&replace_source, ReplaceSource::Missing { .. })
+            && pool.missing_count == 1
+            && pool.devices.len() + 1 >= 2;
 
         // Confirm
         if !params.yes {
@@ -288,9 +299,13 @@ impl ReplacePlan {
             pre_membership,
             target_membership.clone(),
             journal::OpKind::Replace {
+                phase: journal::ReplacePhase::PoolMutation,
                 old_name: params.old_name.to_owned(),
                 new_name: new_name.clone(),
                 new_by_id: new_by_id.clone(),
+                new_target: new_target.clone(),
+                source: journal_source.clone(),
+                restore_raid1_after_commit,
             },
         );
         journal::write_journal(params.paths, &journal)
@@ -301,9 +316,8 @@ impl ReplacePlan {
             ConfigDiskState::Absent => unreachable!("already checked above"),
             ConfigDiskState::PresentNotLuks => {
                 // Passphrase already verified above.
-                let mut luks_opts = params.luks_format_extra_opts.to_vec();
-                luks_opts.push("--label".into());
-                luks_opts.push(format!("braid-{new_name}"));
+                let luks_opts =
+                    effective_luks_format_opts(&new_name, params.luks_format_extra_opts);
                 eprint!(
                     "{}",
                     status_line(
@@ -463,12 +477,34 @@ impl ReplacePlan {
         membership::save_membership(&target_membership, params.paths).map_err(|e| {
             ReplaceError::Validation(format!("failed to persist pool membership: {e}"))
         })?;
+        let journal = journal::rewrite_journal(
+            params.paths,
+            &journal,
+            journal::OpKind::Replace {
+                phase: journal::ReplacePhase::PostReplaceMaintenance,
+                old_name: params.old_name.to_owned(),
+                new_name: new_name.clone(),
+                new_by_id: new_by_id.clone(),
+                new_target,
+                source: journal_source,
+                restore_raid1_after_commit,
+            },
+            Some(target_membership.clone()),
+        )
+        .map_err(|e| ReplaceError::Validation(e.to_string()))?;
 
         // Live-only: best-effort close of old mapper. Runs BEFORE the resize
         // so a resize failure does not `?` out and strand the old dm slot
         // bound to the backing disk until `braid lock` or reboot. Missing has
         // no old mapper to close.
-        if let ReplaceSource::Live { mapper, .. } = &replace_source {
+        if let journal::OpKind::Replace {
+            source:
+                journal::ReplaceJournalSource::Live {
+                    old_mapper: mapper, ..
+                },
+            ..
+        } = &journal.op
+        {
             let old_label = mapper.0.strip_prefix("braid-").unwrap_or(&mapper.0);
             emit_status(&status_line(
                 StatusTag::Wait,
@@ -509,7 +545,7 @@ impl ReplacePlan {
         pool_resize_device(runner, devid, config.mount_point())?;
 
         // Restore RAID1 redundancy for missing-path replacements that clear the last missing device
-        if matches!(&replace_source, ReplaceSource::Missing { .. }) {
+        if restore_raid1_after_commit {
             crate::pool::maybe_restore_raid1(
                 runner,
                 fs,
@@ -846,6 +882,55 @@ pub enum ReplaceSource {
     Missing { devid: u64 },
 }
 
+fn effective_luks_format_opts(new_name: &str, extra_opts: &[String]) -> Vec<String> {
+    let mut opts = extra_opts.to_vec();
+    opts.push("--label".into());
+    opts.push(format!("braid-{new_name}"));
+    opts
+}
+
+fn build_replace_journal_source(source: &ReplaceSource) -> journal::ReplaceJournalSource {
+    match source {
+        ReplaceSource::Live { mapper, devid } => journal::ReplaceJournalSource::Live {
+            old_devid: *devid,
+            old_mapper: mapper.clone(),
+        },
+        ReplaceSource::Missing { devid } => {
+            journal::ReplaceJournalSource::Missing { old_devid: *devid }
+        }
+    }
+}
+
+fn build_replace_journal_target(
+    new_name: &str,
+    new_by_id: &ByIdPath,
+    new_probed: &ConfigDisk,
+    enroll_key_file: Option<&Path>,
+    luks_format_extra_opts: &[String],
+) -> Result<journal::ReplaceJournalTarget, ReplaceError> {
+    let mode = match &new_probed.state {
+        ConfigDiskState::PresentNotLuks => journal::ReplaceJournalMode::FreshLuks {
+            luks_label: format!("braid-{new_name}"),
+            luks_format_extra_opts: effective_luks_format_opts(new_name, luks_format_extra_opts),
+            enroll_key_file: enroll_key_file.map(|p| p.to_path_buf()),
+        },
+        ConfigDiskState::PresentLuks { uuid, .. } => journal::ReplaceJournalMode::ExistingLuks {
+            luks_uuid: uuid.clone(),
+        },
+        ConfigDiskState::Absent => {
+            return Err(ReplaceError::Validation(format!(
+                "new disk '{}' ({}) is not present. Is it plugged in?",
+                new_name, new_by_id
+            )));
+        }
+    };
+    Ok(journal::ReplaceJournalTarget {
+        by_id: new_by_id.clone(),
+        mapper_name: mapper_name(new_name).0,
+        mode,
+    })
+}
+
 fn check_new_not_in_pool(
     new_name: &str,
     new_mn: &MapperName,
@@ -964,9 +1049,8 @@ fn compile_replace_steps(input: &ReplaceStepsInput<'_>) -> Result<Vec<Step>, Rep
             )));
         }
         ConfigDiskState::PresentNotLuks => {
-            let mut extra_opts = input.luks_format_extra_opts.to_vec();
-            extra_opts.push("--label".into());
-            extra_opts.push(format!("braid-{}", input.new_name));
+            let extra_opts =
+                effective_luks_format_opts(input.new_name, input.luks_format_extra_opts);
             steps.push(Step {
                 risk: "destructive",
                 description: format!("LUKS format {}", input.new_by_id),
@@ -2014,6 +2098,130 @@ mod tests {
         }
     }
 
+    // Intent: build_replace_journal_target records a fresh replacement disk
+    // as FreshLuks with the generated braid label.
+    // Why it exists: recovery relies on the journaled FreshLuks label and
+    // effective luksFormat args to recognize an interrupted prepared target.
+    // Scenario: replace plans against a present non-LUKS disk with an enroll
+    // key file and extra luksFormat options.
+    #[test]
+    fn build_replace_journal_target_records_fresh_luks_target() {
+        let new_by_id = ByIdPath("/dev/disk/by-id/virtio-disk3".into());
+        let key_file = std::path::Path::new("/run/keys/braid-disk3.key");
+        let extra_opts = vec!["--pbkdf".to_owned(), "pbkdf2".to_owned()];
+        let new_probed = ConfigDisk {
+            name: "disk3".into(),
+            by_id_path: new_by_id.clone(),
+            state: ConfigDiskState::PresentNotLuks,
+        };
+
+        let target = build_replace_journal_target(
+            "disk3",
+            &new_by_id,
+            &new_probed,
+            Some(key_file),
+            &extra_opts,
+        )
+        .expect("fresh disk should build a replace journal target");
+
+        assert_eq!(target.by_id, new_by_id);
+        assert_eq!(target.mapper_name, "braid-disk3");
+        match target.mode {
+            journal::ReplaceJournalMode::FreshLuks {
+                luks_label,
+                luks_format_extra_opts,
+                enroll_key_file,
+            } => {
+                assert_eq!(luks_label, "braid-disk3");
+                assert_eq!(
+                    luks_format_extra_opts,
+                    vec!["--pbkdf", "pbkdf2", "--label", "braid-disk3"]
+                );
+                assert_eq!(enroll_key_file, Some(key_file.to_path_buf()));
+            }
+            other => panic!("expected FreshLuks journal target, got {other:?}"),
+        }
+    }
+
+    // Intent: build_replace_journal_target records an already-LUKS
+    // replacement disk as ExistingLuks with its UUID.
+    // Why it exists: recovery must not run FreshLuks label matching or
+    // keyfile/header-prep replay for a disk that was already LUKS.
+    // Scenario: replace plans against a present LUKS disk whose mapper is not
+    // yet open.
+    #[test]
+    fn build_replace_journal_target_records_existing_luks_target() {
+        let new_by_id = ByIdPath("/dev/disk/by-id/virtio-disk3".into());
+        let luks_uuid = LuksUuid("33333333-3333-3333-3333-333333333333".into());
+        let new_probed = ConfigDisk {
+            name: "disk3".into(),
+            by_id_path: new_by_id.clone(),
+            state: ConfigDiskState::PresentLuks {
+                uuid: luks_uuid.clone(),
+                mapper_open: false,
+            },
+        };
+
+        let target = build_replace_journal_target(
+            "disk3",
+            &new_by_id,
+            &new_probed,
+            None,
+            &["--label".to_owned(), "ignored".to_owned()],
+        )
+        .expect("existing LUKS disk should build a replace journal target");
+
+        assert_eq!(target.by_id, new_by_id);
+        assert_eq!(target.mapper_name, "braid-disk3");
+        match target.mode {
+            journal::ReplaceJournalMode::ExistingLuks { luks_uuid: got } => {
+                assert_eq!(got, luks_uuid);
+            }
+            other => panic!("expected ExistingLuks journal target, got {other:?}"),
+        }
+    }
+
+    // Intent: build_replace_journal_source preserves the live-source mapper
+    // and devid in the journal.
+    // Why it exists: recovery uses this identity to close only the replaced
+    // old mapper and to distinguish live-source from missing-source cleanup.
+    // Scenario: replace plans from an old disk that is still present in the
+    // live btrfs pool.
+    #[test]
+    fn build_replace_journal_source_records_live_mapper() {
+        let source = ReplaceSource::Live {
+            mapper: MapperName("braid-disk2".into()),
+            devid: 2,
+        };
+
+        let journal_source = build_replace_journal_source(&source);
+
+        assert_eq!(
+            journal_source,
+            journal::ReplaceJournalSource::Live {
+                old_devid: 2,
+                old_mapper: MapperName("braid-disk2".into()),
+            }
+        );
+    }
+
+    // Intent: build_replace_journal_source preserves the missing-source
+    // devid without inventing an old mapper.
+    // Why it exists: missing-source recovery must not try to close a mapper
+    // for a device that was already gone.
+    // Scenario: replace plans by `--missing-id 2`.
+    #[test]
+    fn build_replace_journal_source_records_missing_devid() {
+        let source = ReplaceSource::Missing { devid: 2 };
+
+        let journal_source = build_replace_journal_source(&source);
+
+        assert_eq!(
+            journal_source,
+            journal::ReplaceJournalSource::Missing { old_devid: 2 }
+        );
+    }
+
     #[test]
     // Intent: missing-path dry-run (not last missing) omits rebalance step.
     // Why: if other missing devices remain, a rebalance would be premature.
@@ -2652,6 +2860,20 @@ mod tests {
         assert!(
             journal::load_journal(&paths).unwrap().is_some(),
             "pending-op.json must survive error exit so braid recover can reconcile"
+        );
+        let journal = journal::load_journal(&paths)
+            .unwrap()
+            .expect("journal should remain after post-replace resize failure");
+        assert!(
+            matches!(
+                journal.op,
+                journal::OpKind::Replace {
+                    phase: journal::ReplacePhase::PostReplaceMaintenance,
+                    ..
+                }
+            ),
+            "journal should advance after btrfs replace commits: {:?}",
+            journal.op
         );
 
         // Membership commits at btrfs replace start; pool.json must reflect
@@ -4176,6 +4398,20 @@ mod tests {
         assert!(
             journal::load_journal(&paths).unwrap().is_some(),
             "pending-op.json must survive error exit so braid recover can reconcile"
+        );
+        let journal = journal::load_journal(&paths)
+            .unwrap()
+            .expect("journal should remain after post-replace balance failure");
+        assert!(
+            matches!(
+                journal.op,
+                journal::OpKind::Replace {
+                    phase: journal::ReplacePhase::PostReplaceMaintenance,
+                    ..
+                }
+            ),
+            "journal should advance after btrfs replace commits: {:?}",
+            journal.op
         );
 
         let saved = membership::load_membership(&paths)

@@ -47,7 +47,7 @@ The old architecture used a structural code boundary — `luksFormat` was litera
    f. Superblock guard remains as defense-in-depth within the FSID-matching path.
 3. **Unified confirmation with device context**: all mutating commands (`add`, `remove`, `remove-missing`, `replace`) show a rich device-info block (model, size, serial via lsblk) and confirm with `Type 'yes' to continue:`. Degraded-path warnings are informational text, not special confirmation phrases. `--yes` skips the prompt for scripting.
 4. **Disk name immutability**: mutating commands validate names against recorded disk identity and reject name rename/reassignment. Operators must use explicit `replace` or `remove`+`add` workflows instead of renaming.
-5. **Journal-protected mutations**: mutating commands write `pending-op.json` before the first irreversible step; it is cleared only after the full operation (including follow-up work like soft balance) succeeds. Existing-pool add journals are phased: `PoolMutation` may finish target preparation and btrfs membership, while `PostAddBalanceRaid1` may only validate committed membership and finish the owed RAID1 balance. On any error exit, the journal persists to enable `braid recover`.
+5. **Journal-protected mutations**: mutating commands write `pending-op.json` before the first irreversible step; it is cleared only after the full operation (including follow-up work like soft balance) succeeds. Existing-pool add, replace, and remove-missing journals are phased. Their `PoolMutation` phases may reconcile whether the primary btrfs membership mutation committed; their post-maintenance phases may only validate committed membership, repair `pool.json`, and finish owed resize/balance work. On any error exit, the journal persists to enable `braid recover`.
 
 `--dry-run` performs side-effect-free, passphrase-free LUKS probes only -- LUKS label reads, and the keyfile credential test used by `braid enroll` (`cryptsetup open --test-passphrase --key-file`, which evaluates a credential without activating the device). Checks that require a passphrase or an open mapper -- e.g. full identity verification (FSID comparison) -- are deferred to execution time when the mapper is closed.
 
@@ -60,7 +60,7 @@ The dry-run preview itself stays on stdout. Side-effect-free probes that neverth
 - `--missing-id` is only valid when `--old` is dead/missing. Rejected with live `--old`. Validated against actual missing devids via `probe_missing_devids()`.
 - When exactly one device is missing, the devid is auto-resolved. Multiple missing devices require explicit `--missing-id`.
 - Mixed state (live `--old` + pool has missing devices) is rejected — operator must repair the missing device first with `braid replace --missing-id <devid>`. `braid remove-missing` is only for intentional cleanup (forgetting stale entries without rebuilding data).
-- No replacement path uses `btrfs device add` or `btrfs balance` — those are for `braid add` only.
+- No replacement path uses `btrfs device add`. Missing-path replace may run a post-commit soft RAID1 balance only when it clears the last missing device.
 
 ### ENOSPC pre-flight check
 

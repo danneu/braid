@@ -101,9 +101,35 @@ with subtest("Lock pool and roll back metadata to simulate crash"):
         "started_at": "2026-01-01T00:00:00Z",
         "op": {
             "op": "Replace",
+            "phase": "PoolMutation",
             "old_name": "disk2",
             "new_name": "disk4",
             "new_by_id": "/dev/disk/by-id/virtio-disk4",
+            "new_target": {
+                "by_id": "/dev/disk/by-id/virtio-disk4",
+                "mapper_name": "braid-disk4",
+                "mode": {
+                    "FreshLuks": {
+                        "luks_label": "braid-disk4",
+                        "luks_format_extra_opts": [
+                            "--pbkdf",
+                            "pbkdf2",
+                            "--pbkdf-force-iterations",
+                            "1000",
+                            "--label",
+                            "braid-disk4",
+                        ],
+                        "enroll_key_file": None,
+                    }
+                },
+            },
+            "source": {
+                "Live": {
+                    "old_devid": pre_replace_json["disks"]["disk2"]["devid"],
+                    "old_mapper": "braid-disk2",
+                }
+            },
+            "restore_raid1_after_commit": False,
         },
         "pre_membership": pre_replace_json,
         "target_membership": target_json,

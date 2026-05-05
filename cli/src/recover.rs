@@ -352,7 +352,7 @@ impl RecoverPlan {
         // reaches an already-mounted pool here, the journal op is Add /
         // Remove / RemoveMissing -- none of which trigger the kernel
         // dev_replace resume bug -- and skipping the cycle is sound.
-        if just_mounted {
+        if just_mounted && is_replace_pool_mutation(&journal.op) {
             wait_for_kernel_replace_to_finish(
                 runner,
                 params.config.mount_point(),
@@ -409,7 +409,87 @@ impl RecoverPlan {
                     false,
                 );
             }
-            _ => {}
+            journal::OpKind::RemoveMissing {
+                phase: journal::RemoveMissingPhase::PoolMutation,
+                devid,
+                restore_raid1_after_commit,
+            } => {
+                return execute_remove_missing_pool_mutation_recovery(
+                    runner,
+                    by_id_resolver,
+                    params,
+                    &journal,
+                    pool,
+                    *devid,
+                    *restore_raid1_after_commit,
+                );
+            }
+            journal::OpKind::RemoveMissing {
+                phase: journal::RemoveMissingPhase::PostRemoveMissingMaintenance,
+                devid,
+                restore_raid1_after_commit,
+            } => {
+                return execute_remove_missing_post_maintenance_recovery(
+                    runner,
+                    by_id_resolver,
+                    params,
+                    &journal,
+                    pool,
+                    *devid,
+                    *restore_raid1_after_commit,
+                    false,
+                );
+            }
+            journal::OpKind::Replace {
+                phase: journal::ReplacePhase::PoolMutation,
+                old_name,
+                new_name,
+                new_target,
+                source,
+                restore_raid1_after_commit,
+                ..
+            } => {
+                return execute_replace_pool_mutation_recovery(
+                    runner,
+                    fs,
+                    by_id_resolver,
+                    params,
+                    credential.as_ref(),
+                    &journal,
+                    &union,
+                    pool,
+                    old_name,
+                    new_name,
+                    new_target,
+                    source,
+                    *restore_raid1_after_commit,
+                );
+            }
+            journal::OpKind::Replace {
+                phase: journal::ReplacePhase::PostReplaceMaintenance,
+                new_name,
+                source,
+                restore_raid1_after_commit,
+                ..
+            } => {
+                return execute_replace_post_maintenance_recovery(
+                    runner,
+                    by_id_resolver,
+                    params,
+                    &journal,
+                    pool,
+                    new_name,
+                    source,
+                    fs,
+                    *restore_raid1_after_commit,
+                    false,
+                );
+            }
+            journal::OpKind::Add {
+                phase: journal::AddPhase::PoolMutation,
+                ..
+            } => {}
+            journal::OpKind::Remove { .. } => {}
         }
 
         // 4. Build new membership from live pool state
@@ -569,7 +649,7 @@ pub fn plan_recover<R: CommandRunner + Sync, F: Filesystem + ?Sized>(
     // Operator's recovery path: `braid lock` (works with a journal present
     // -- no pending-op preflight in lock.rs) then `braid recover`, which
     // opens its own mount and takes the just_mounted == true cycle path.
-    if open_plan.is_none() && matches!(&journal.op, journal::OpKind::Replace { .. }) {
+    if open_plan.is_none() && is_replace_pool_mutation(&journal.op) {
         return RecoverPlanReport {
             notes,
             result: Err(RecoverError::Failed(
@@ -626,7 +706,7 @@ pub fn plan_recover<R: CommandRunner + Sync, F: Filesystem + ?Sized>(
         ));
     }
 
-    if matches!(&journal.op, journal::OpKind::Replace { .. }) && open_plan.is_some() {
+    if is_replace_pool_mutation(&journal.op) && open_plan.is_some() {
         steps.push(Step {
             risk: "long",
             description: "wait for kernel dev_replace to finish (skipped if no running replace)"
@@ -635,7 +715,9 @@ pub fn plan_recover<R: CommandRunner + Sync, F: Filesystem + ?Sized>(
         });
     }
 
-    if let Some(initial_open_plan) = &open_plan {
+    if let Some(initial_open_plan) = &open_plan
+        && is_replace_pool_mutation(&journal.op)
+    {
         let mount_point = params.config.mount_point();
         steps.push(Step {
             risk: "safe",
@@ -855,7 +937,11 @@ pub fn plan_recover<R: CommandRunner + Sync, F: Filesystem + ?Sized>(
     });
 
     match &journal.op {
-        journal::OpKind::Replace { new_name, .. } => {
+        journal::OpKind::Replace {
+            phase: journal::ReplacePhase::PoolMutation,
+            new_name,
+            ..
+        } => {
             steps.push(Step {
                 risk: "safe",
                 description: format!(
@@ -867,32 +953,54 @@ pub fn plan_recover<R: CommandRunner + Sync, F: Filesystem + ?Sized>(
                 commands: vec![],
             });
         }
-        journal::OpKind::Add { .. } | journal::OpKind::RemoveMissing { .. } => {}
-        journal::OpKind::Remove { .. } => {}
-    }
-
-    match &journal.op {
-        journal::OpKind::Add { .. }
-        | journal::OpKind::RemoveMissing { .. }
-        | journal::OpKind::Replace { .. } => {
-            let mount_point = params.config.mount_point();
+        journal::OpKind::Replace {
+            phase: journal::ReplacePhase::PostReplaceMaintenance,
+            new_name,
+            ..
+        } => {
             steps.push(Step {
-                risk: "long",
+                risk: "safe",
                 description: format!(
-                    "btrfs balance resume {mount_point} (skipped if no paused balance)"
-                ),
-                commands: vec![],
-            });
-            steps.push(Step {
-                risk: "long",
-                description: format!(
-                    "btrfs balance -dconvert=raid1,soft -mconvert=raid1,soft {mount_point} \
-                     (skipped if pool has <2 devices)"
+                    "btrfs filesystem resize <devid>:max {} (devid for '{}' resolved post-mount)",
+                    params.config.mount_point(),
+                    new_name,
                 ),
                 commands: vec![],
             });
         }
+        journal::OpKind::Add { .. } | journal::OpKind::RemoveMissing { .. } => {}
         journal::OpKind::Remove { .. } => {}
+    }
+
+    let show_raid1_maintenance = match &journal.op {
+        journal::OpKind::Add { .. } => true,
+        journal::OpKind::RemoveMissing {
+            restore_raid1_after_commit,
+            ..
+        }
+        | journal::OpKind::Replace {
+            restore_raid1_after_commit,
+            ..
+        } => *restore_raid1_after_commit,
+        journal::OpKind::Remove { .. } => false,
+    };
+    if show_raid1_maintenance {
+        let mount_point = params.config.mount_point();
+        steps.push(Step {
+            risk: "long",
+            description: format!(
+                "btrfs balance resume {mount_point} (skipped if no paused balance)"
+            ),
+            commands: vec![],
+        });
+        steps.push(Step {
+            risk: "long",
+            description: format!(
+                "btrfs balance -dconvert=raid1,soft -mconvert=raid1,soft {mount_point} \
+                     (skipped if pool has <2 devices)"
+            ),
+            commands: vec![],
+        });
     }
 
     steps.push(Step {
@@ -951,29 +1059,208 @@ pub fn cmd_recover<R: CommandRunner + Sync, F: Filesystem + ?Sized>(
     plan.execute(runner, fs, by_id_resolver, params)
 }
 
-/// Re-issue the per-op steps that originally run after the long phase but
-/// before `clear_journal`. Called from `cmd_recover` once pool.json has been
+fn is_replace_pool_mutation(op: &journal::OpKind) -> bool {
+    matches!(
+        op,
+        journal::OpKind::Replace {
+            phase: journal::ReplacePhase::PoolMutation,
+            ..
+        }
+    )
+}
+
+fn live_pool_matches_membership(pool: &PoolState, membership: &PoolMembership) -> bool {
+    let live = live_member_names(pool);
+    let missing_devids: std::collections::BTreeSet<u64> =
+        pool.missing_devids.iter().copied().collect();
+    let membership_missing_devids: std::collections::BTreeSet<u64> = membership
+        .disks
+        .values()
+        .filter_map(|member| member.devid)
+        .filter(|devid| missing_devids.contains(devid))
+        .collect();
+    if membership_missing_devids != missing_devids {
+        return false;
+    }
+
+    let expected_live: std::collections::BTreeSet<String> = membership
+        .disks
+        .iter()
+        .filter(|(_, member)| {
+            member
+                .devid
+                .is_none_or(|devid| !missing_devids.contains(&devid))
+        })
+        .map(|(name, _)| name.clone())
+        .collect();
+    live == expected_live
+}
+
+fn recover_membership_matching_expected(
+    pool: &PoolState,
+    expected: &PoolMembership,
+    prior: Option<&PoolMembership>,
+    by_id_resolver: &dyn ByIdResolver,
+) -> Result<PoolMembership, RecoverError> {
+    let mut recovered = expected.clone();
+    for dev in &pool.devices {
+        let Some(name) = config::name_from_mapper(&dev.mapper.0) else {
+            eprintln!("  skip: device {} has no braid- prefix", dev.mapper.0);
+            continue;
+        };
+        if !expected.disks.contains_key(name) {
+            return Err(RecoverError::Failed(format!(
+                "device {} is in the live pool but is not part of the expected \
+                 committed membership.",
+                dev.mapper.0
+            )));
+        }
+        let by_id = resolve_by_id_for_underlying(by_id_resolver, &dev.underlying)?;
+        let added_at = prior
+            .and_then(|p| p.disks.get(name))
+            .and_then(|m| m.added_at.clone())
+            .or_else(|| expected.disks.get(name).and_then(|m| m.added_at.clone()));
+        recovered.disks.insert(
+            name.to_owned(),
+            DiskMember {
+                by_id,
+                luks_uuid: None,
+                devid: None,
+                added_at,
+            },
+        );
+    }
+    membership::enrich_from_pool_state(pool, &mut recovered);
+    Ok(recovered)
+}
+
+fn write_remove_missing_phase(
+    paths: &StatePaths,
+    journal: &Journal,
+    phase: journal::RemoveMissingPhase,
+    target_membership: Option<PoolMembership>,
+) -> Result<Journal, RecoverError> {
+    let journal::OpKind::RemoveMissing {
+        devid,
+        restore_raid1_after_commit,
+        ..
+    } = &journal.op
+    else {
+        return Err(RecoverError::Journal(
+            "cannot advance non-remove-missing journal".into(),
+        ));
+    };
+    journal::rewrite_journal(
+        paths,
+        journal,
+        journal::OpKind::RemoveMissing {
+            phase,
+            devid: *devid,
+            restore_raid1_after_commit: *restore_raid1_after_commit,
+        },
+        target_membership,
+    )
+    .map_err(|e| RecoverError::Journal(e.to_string()))
+}
+
+fn write_replace_phase(
+    paths: &StatePaths,
+    journal: &Journal,
+    phase: journal::ReplacePhase,
+    target_membership: Option<PoolMembership>,
+) -> Result<Journal, RecoverError> {
+    let journal::OpKind::Replace {
+        old_name,
+        new_name,
+        new_by_id,
+        new_target,
+        source,
+        restore_raid1_after_commit,
+        ..
+    } = &journal.op
+    else {
+        return Err(RecoverError::Journal(
+            "cannot advance non-replace journal".into(),
+        ));
+    };
+    journal::rewrite_journal(
+        paths,
+        journal,
+        journal::OpKind::Replace {
+            phase,
+            old_name: old_name.clone(),
+            new_name: new_name.clone(),
+            new_by_id: new_by_id.clone(),
+            new_target: new_target.clone(),
+            source: source.clone(),
+            restore_raid1_after_commit: *restore_raid1_after_commit,
+        },
+        target_membership,
+    )
+    .map_err(|e| RecoverError::Journal(e.to_string()))
+}
+
+fn replay_owed_raid1_maintenance<R: CommandRunner + Sync>(
+    runner: &R,
+    mount_point: &MountPoint,
+    label: &str,
+    pool: &PoolState,
+    progress: ProgressOutput,
+) -> Result<(), RecoverError> {
+    let color_enabled = color_enabled_for_stderr();
+    if let BalanceReport::Paused { .. } = get_balance_report(runner, mount_point) {
+        eprint!(
+            "{}",
+            status_line(
+                StatusTag::Wait,
+                color_enabled,
+                &format!("pool: resuming paused balance left by interrupted {label}..."),
+            )
+        );
+        crate::pool::pool_balance_resume(runner, mount_point, progress)
+            .map_err(|e| RecoverError::Failed(format!("recover balance resume: {e}")))?;
+        eprint!(
+            "{}",
+            status_line(
+                StatusTag::Ok,
+                color_enabled,
+                "pool: balance resume complete",
+            )
+        );
+    }
+
+    if pool.devices.len() >= 2 {
+        eprint!(
+            "{}",
+            status_line(
+                StatusTag::Wait,
+                color_enabled,
+                &format!(
+                    "pool: replaying post-{label} RAID1 soft balance (skip already-RAID1 chunks)..."
+                ),
+            )
+        );
+        crate::pool::pool_balance_raid1_soft(runner, mount_point, progress)
+            .map_err(|e| RecoverError::Failed(format!("recover balance replay: {e}")))?;
+        eprint!(
+            "{}",
+            status_line(
+                StatusTag::Ok,
+                color_enabled,
+                "pool: RAID1 soft balance replay complete",
+            )
+        );
+    }
+    Ok(())
+}
+
+/// Re-issue legacy generic post-mutation work after pool.json has been
 /// rewritten and before the journal is cleared.
 ///
-/// Steps, in order:
-///
-/// 1. **Replace-only**: replay `pool_resize_device` on the new disk's devid.
-///    The original command issues the resize in both the Live and Missing
-///    arms after `pool_replace_device` succeeds. If shutdown lands between
-///    the kernel-resumed dev_replace and the resize, the new disk reports
-///    the source disk's old size instead of its full capacity. Resize-to-max
-///    is idempotent at the btrfs layer.
-///
-/// 2. **Per-op resume + balance replay** (Add / RemoveMissing / Replace
-///    only): if the kernel left a paused BALANCE_ITEM on umount, drain
-///    it; then re-run the post-mutation balance with `,soft` semantics so
-///    any non-target-profile chunks left behind by a cancelled-mid-flight
-///    balance get converted. The kernel may CANCEL rather than PAUSE the
-///    balance during the umount triggered by `systemctl poweroff`, in
-///    which case the resume is a no-op and the chunks that had not yet
-///    been converted stay single-profile. The `,soft` filter skips chunks
-///    already in the target profile, so this is idempotent if the
-///    original balance completed naturally.
+/// This helper is intentionally limited to generic Add balance replay plus
+/// Remove's explicit no-op. Phased Add, Replace, and RemoveMissing recovery
+/// use phase-specific handlers so post phases cannot accidentally rerun their
+/// primary btrfs membership mutation.
 ///
 ///    `OpKind::Remove` is intentionally skipped for BOTH the resume and
 ///    the soft replay: the operator's recovery path is to re-run
@@ -990,9 +1277,7 @@ pub fn cmd_recover<R: CommandRunner + Sync, F: Filesystem + ?Sized>(
 ///    correctly.
 ///
 ///    For `OpKind::Add` the new disk is already in the pool (so
-///    `braid add` would refuse on rerun) and for `OpKind::RemoveMissing`
-///    the missing device is already gone (so `braid remove-missing`
-///    would refuse), so those need the recover-side replay to avoid
+///    `braid add` would refuse on rerun), so recover-side replay avoids
 ///    stranding the operator with single-profile chunks they have to fix
 ///    manually with `btrfs balance start`.
 fn replay_post_mutation<R: CommandRunner + Sync>(
@@ -1003,22 +1288,8 @@ fn replay_post_mutation<R: CommandRunner + Sync>(
     progress: ProgressOutput,
 ) -> Result<(), RecoverError> {
     let color_enabled = color_enabled_for_stderr();
-    if let journal::OpKind::Replace { new_name, .. } = op {
-        let new_mn = config::mapper_name(new_name);
-        if let Some(dev) = pool.devices.iter().find(|d| d.mapper == new_mn) {
-            eprintln!(
-                "Replaying post-replace resize on devid {} (new disk '{}')...",
-                dev.devid, new_name
-            );
-            crate::pool::pool_resize_device(runner, dev.devid, mount_point)
-                .map_err(|e| RecoverError::Failed(format!("recover replace resize: {e}")))?;
-        }
-    }
-
     match op {
-        journal::OpKind::Add { .. }
-        | journal::OpKind::RemoveMissing { .. }
-        | journal::OpKind::Replace { .. } => {
+        journal::OpKind::Add { .. } => {
             if let BalanceReport::Paused { .. } = get_balance_report(runner, mount_point) {
                 eprint!(
                     "{}",
@@ -1079,6 +1350,12 @@ fn replay_post_mutation<R: CommandRunner + Sync>(
             // operator to re-run `braid remove` instead, which handles
             // every shape (2->1 pre-balance, 3->2 / 4->3 with no
             // pre-balance) correctly.
+        }
+        journal::OpKind::RemoveMissing { .. } | journal::OpKind::Replace { .. } => {
+            return Err(RecoverError::Failed(
+                "internal error: phased replace/remove-missing recovery reached generic replay"
+                    .into(),
+            ));
         }
     }
 
@@ -1533,12 +1810,12 @@ fn execute_add_pool_mutation_recovery<R: CommandRunner + Sync, F: Filesystem + ?
     }
 
     if !add_targets_all_live(&pool, targets) {
+        let passphrase = recover_passphrase(credential, params)?;
+        verify_recover_passphrase_for_add_replay(runner, fs, &pool, targets, passphrase.as_ref())?;
         let _guard = params
             .sleep_inhibitor
             .acquire("replaying interrupted add")
             .map_err(|e| RecoverError::Failed(format!("could not acquire sleep inhibitor: {e}")))?;
-        let passphrase = recover_passphrase(credential, params)?;
-        verify_recover_passphrase_for_add_replay(runner, fs, &pool, targets, passphrase.as_ref())?;
 
         for (name, target) in targets {
             if live_member_names(&pool).contains(name) {
@@ -1676,6 +1953,455 @@ fn execute_add_pool_mutation_recovery<R: CommandRunner + Sync, F: Filesystem + ?
         journal::AddPhase::PostAddBalanceRaid1,
     )?;
     execute_add_post_balance_recovery(runner, by_id_resolver, params, &journal, union, pool, false)
+}
+
+fn execute_remove_missing_pool_mutation_recovery<R: CommandRunner + Sync>(
+    runner: &R,
+    by_id_resolver: &dyn ByIdResolver,
+    params: &RecoverParams<'_>,
+    journal: &Journal,
+    pool: PoolState,
+    devid: u64,
+    restore_raid1_after_commit: bool,
+) -> Result<(), RecoverError> {
+    if pool.missing_devids.contains(&devid) {
+        if !live_pool_matches_membership(&pool, &journal.pre_membership) {
+            return Err(RecoverError::Failed(format!(
+                "remove-missing recovery found devid {devid} still missing, but live pool \
+                 topology does not match the pre-operation membership"
+            )));
+        }
+        membership::save_membership(&journal.pre_membership, params.paths)?;
+        journal::clear_journal(params.paths).map_err(|e| RecoverError::Journal(e.to_string()))?;
+        eprintln!(
+            "remove-missing did not complete -- missing devid {devid} is still recorded. \
+             Re-run braid remove-missing to retry."
+        );
+        return Ok(());
+    }
+
+    if !live_pool_matches_membership(&pool, &journal.target_membership) {
+        return Err(RecoverError::Failed(format!(
+            "remove-missing recovery found devid {devid} gone, but live pool topology \
+             does not match the target membership"
+        )));
+    }
+
+    let recovered = recover_membership_matching_expected(
+        &pool,
+        &journal.target_membership,
+        membership::load_membership(params.paths).ok().as_ref(),
+        by_id_resolver,
+    )?;
+    let journal = write_remove_missing_phase(
+        params.paths,
+        journal,
+        journal::RemoveMissingPhase::PostRemoveMissingMaintenance,
+        Some(recovered),
+    )?;
+    execute_remove_missing_post_maintenance_recovery(
+        runner,
+        by_id_resolver,
+        params,
+        &journal,
+        pool,
+        devid,
+        restore_raid1_after_commit,
+        false,
+    )
+}
+
+fn execute_remove_missing_post_maintenance_recovery<R: CommandRunner + Sync>(
+    runner: &R,
+    by_id_resolver: &dyn ByIdResolver,
+    params: &RecoverParams<'_>,
+    journal: &Journal,
+    pool: PoolState,
+    devid: u64,
+    restore_raid1_after_commit: bool,
+    inhibitor_already_held: bool,
+) -> Result<(), RecoverError> {
+    if pool.missing_devids.contains(&devid) {
+        return Err(RecoverError::Failed(format!(
+            "post-remove-missing recovery expected devid {devid} to be gone, \
+             but btrfs still reports it missing"
+        )));
+    }
+    if !live_pool_matches_membership(&pool, &journal.target_membership) {
+        return Err(RecoverError::Failed(
+            "post-remove-missing recovery live pool does not match target membership".into(),
+        ));
+    }
+
+    let prior = membership::load_membership(params.paths).ok();
+    let recovered = recover_membership_matching_expected(
+        &pool,
+        &journal.target_membership,
+        prior.as_ref(),
+        by_id_resolver,
+    )?;
+    membership::save_membership(&recovered, params.paths)?;
+    eprintln!("pool.json written from committed remove-missing membership.");
+
+    let _guard = if inhibitor_already_held || !restore_raid1_after_commit {
+        None
+    } else {
+        Some(
+            params
+                .sleep_inhibitor
+                .acquire("finishing interrupted remove-missing maintenance")
+                .map_err(|e| {
+                    RecoverError::Failed(format!("could not acquire sleep inhibitor: {e}"))
+                })?,
+        )
+    };
+    if restore_raid1_after_commit {
+        replay_owed_raid1_maintenance(
+            runner,
+            params.config.mount_point(),
+            "remove-missing",
+            &pool,
+            params.progress,
+        )?;
+    }
+    journal::clear_journal(params.paths).map_err(|e| RecoverError::Journal(e.to_string()))?;
+    eprintln!("pending-op.json cleared. Recovery complete.");
+    Ok(())
+}
+
+fn recover_passphrase_for_context<'a>(
+    existing: Option<&'a OpenCredential>,
+    params: &RecoverParams<'_>,
+    context: &str,
+) -> Result<Cow<'a, str>, RecoverError> {
+    match existing {
+        Some(OpenCredential::Passphrase(passphrase)) => Ok(Cow::Borrowed(passphrase.as_str())),
+        Some(OpenCredential::KeyFile(_)) => Err(RecoverError::Failed(format!(
+            "{context} requires a passphrase"
+        ))),
+        None => Ok(Cow::Owned(luks::read_passphrase(
+            params.passphrase_file,
+            params.passphrase_stdin,
+        )?)),
+    }
+}
+
+fn verify_replace_fresh_prep_passphrase<R: CommandRunner>(
+    runner: &R,
+    pool: &PoolState,
+    new_name: &str,
+    new_by_id: &ByIdPath,
+    passphrase: &str,
+) -> Result<(), RecoverError> {
+    let mut targets: Vec<_> = pool
+        .devices
+        .iter()
+        .map(|device| CredentialVerifyTarget {
+            name: config::name_from_mapper(&device.mapper.0)
+                .unwrap_or(device.mapper.0.as_str())
+                .to_owned(),
+            device: device.underlying.clone(),
+        })
+        .collect();
+    targets.push(CredentialVerifyTarget {
+        name: new_name.to_owned(),
+        device: new_by_id.0.clone(),
+    });
+    verify_credential_for_targets(
+        runner,
+        &targets,
+        Credential::Passphrase(passphrase),
+        color_enabled_for_stderr(),
+        |line| eprint!("{line}"),
+    )
+    .map_err(|e| match e {
+        crate::credential_verify::CredentialVerifyError::Rejected { target } => {
+            RecoverError::Failed(format!(
+                "recover replace passphrase was rejected by '{}'",
+                target.name
+            ))
+        }
+        crate::credential_verify::CredentialVerifyError::Luks { target, source } => {
+            RecoverError::Failed(format!(
+                "recover replace credential verification failed on '{}': {source}",
+                target.name
+            ))
+        }
+    })
+}
+
+fn finish_uncommitted_replace_recovery<R: CommandRunner + Sync, F: Filesystem + ?Sized>(
+    runner: &R,
+    fs: &F,
+    params: &RecoverParams<'_>,
+    credential: Option<&OpenCredential>,
+    journal: &Journal,
+    pool: &PoolState,
+    new_name: &str,
+    new_target: &journal::ReplaceJournalTarget,
+) -> Result<(), RecoverError> {
+    match &new_target.mode {
+        journal::ReplaceJournalMode::ExistingLuks { .. } => {
+            membership::save_membership(&journal.pre_membership, params.paths)?;
+            journal::clear_journal(params.paths)
+                .map_err(|e| RecoverError::Journal(e.to_string()))?;
+        }
+        journal::ReplaceJournalMode::FreshLuks {
+            luks_label,
+            enroll_key_file,
+            ..
+        } => {
+            let probed = probe::probe_config_disk(runner, fs, new_name, &new_target.by_id)?;
+            match probed.state {
+                ConfigDiskState::PresentNotLuks => {
+                    membership::save_membership(&journal.pre_membership, params.paths)?;
+                    journal::clear_journal(params.paths)
+                        .map_err(|e| RecoverError::Journal(e.to_string()))?;
+                }
+                ConfigDiskState::PresentLuks { .. } => {
+                    if read_luks_label(runner, &new_target.by_id.0)?.as_deref()
+                        != Some(luks_label.as_str())
+                    {
+                        return Err(RecoverError::Failed(format!(
+                            "recover replace target '{}' has unexpected LUKS label",
+                            new_name
+                        )));
+                    }
+
+                    let passphrase =
+                        recover_passphrase_for_context(credential, params, "replace recovery")?;
+                    verify_replace_fresh_prep_passphrase(
+                        runner,
+                        pool,
+                        new_name,
+                        &new_target.by_id,
+                        passphrase.as_ref(),
+                    )?;
+                    let _guard = params
+                        .sleep_inhibitor
+                        .acquire("finishing interrupted replace preparation")
+                        .map_err(|e| {
+                            RecoverError::Failed(format!("could not acquire sleep inhibitor: {e}"))
+                        })?;
+                    if let Some(key_file) = enroll_key_file {
+                        ensure_keyfile_enrolled(
+                            runner,
+                            &new_target.by_id.0,
+                            passphrase.as_ref(),
+                            key_file,
+                        )?;
+                    }
+                    luks::backup_luks_header(
+                        runner,
+                        &new_target.by_id.0,
+                        &new_target.mapper_name,
+                        params.paths,
+                    )?;
+                    membership::save_membership(&journal.pre_membership, params.paths)?;
+                    journal::clear_journal(params.paths)
+                        .map_err(|e| RecoverError::Journal(e.to_string()))?;
+                }
+                ConfigDiskState::Absent => {
+                    return Err(RecoverError::Failed(format!(
+                        "recover replace target '{}' ({}) is not present",
+                        new_name, new_target.by_id
+                    )));
+                }
+            }
+        }
+    }
+
+    eprintln!(
+        "replace did not complete -- pool still has the pre-replace topology. \
+         Re-run braid replace to retry."
+    );
+    Ok(())
+}
+
+#[allow(clippy::too_many_arguments)]
+fn execute_replace_pool_mutation_recovery<R: CommandRunner + Sync, F: Filesystem + ?Sized>(
+    runner: &R,
+    fs: &F,
+    by_id_resolver: &dyn ByIdResolver,
+    params: &RecoverParams<'_>,
+    credential: Option<&OpenCredential>,
+    journal: &Journal,
+    union: &PoolMembership,
+    pool: PoolState,
+    old_name: &str,
+    new_name: &str,
+    new_target: &journal::ReplaceJournalTarget,
+    source: &journal::ReplaceJournalSource,
+    restore_raid1_after_commit: bool,
+) -> Result<(), RecoverError> {
+    validate_live_members_allowed(&pool, union)?;
+    let live = live_member_names(&pool);
+    let committed = live.contains(new_name) && !live.contains(old_name);
+    let pre_topology =
+        live_pool_matches_membership(&pool, &journal.pre_membership) && !live.contains(new_name);
+
+    if committed {
+        if !live_pool_matches_membership(&pool, &journal.target_membership) {
+            return Err(RecoverError::Failed(
+                "replace recovery found the new disk live, but live pool topology \
+                 does not match the target membership"
+                    .into(),
+            ));
+        }
+        let recovered = recover_membership_matching_expected(
+            &pool,
+            &journal.target_membership,
+            membership::load_membership(params.paths).ok().as_ref(),
+            by_id_resolver,
+        )?;
+        let journal = write_replace_phase(
+            params.paths,
+            journal,
+            journal::ReplacePhase::PostReplaceMaintenance,
+            Some(recovered),
+        )?;
+        return execute_replace_post_maintenance_recovery(
+            runner,
+            by_id_resolver,
+            params,
+            &journal,
+            pool,
+            new_name,
+            source,
+            fs,
+            restore_raid1_after_commit,
+            false,
+        );
+    }
+
+    if pre_topology {
+        return finish_uncommitted_replace_recovery(
+            runner, fs, params, credential, journal, &pool, new_name, new_target,
+        );
+    }
+
+    Err(RecoverError::Failed(
+        "replace recovery live pool does not match either the pre-replace or \
+         committed target topology; preserving pending-op.json"
+            .into(),
+    ))
+}
+
+fn close_old_mapper_best_effort<R: CommandRunner, F: Filesystem + ?Sized>(
+    runner: &R,
+    fs: &F,
+    mapper: &crate::types::MapperName,
+) {
+    if !fs.exists(&format!("/dev/mapper/{}", mapper.0)) {
+        return;
+    }
+    let color_enabled = color_enabled_for_stderr();
+    let old_label = mapper.0.strip_prefix("braid-").unwrap_or(&mapper.0);
+    emit_status(&status_line(
+        StatusTag::Wait,
+        color_enabled,
+        &format!("disk {old_label}: locking..."),
+    ));
+    let close_result = runner.run(&CmdRequest::CryptsetupClose {
+        mapper: mapper.0.clone(),
+    });
+    match close_result {
+        Ok(r) if r.exit_status == 0 => {
+            emit_status(&status_line(
+                StatusTag::Ok,
+                color_enabled,
+                &format!("disk {old_label}: locked"),
+            ));
+            eprintln!("Old device closed. If repurposing the physical disk, wipe it separately.");
+        }
+        Ok(r) => {
+            emit_status(&status_line(
+                StatusTag::Warn,
+                color_enabled,
+                &format!("disk {old_label}: lock failed (exit {})", r.exit_status),
+            ));
+        }
+        Err(e) => {
+            emit_status(&status_line(
+                StatusTag::Warn,
+                color_enabled,
+                &format!("disk {old_label}: lock failed ({e})"),
+            ));
+        }
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn execute_replace_post_maintenance_recovery<R: CommandRunner + Sync, F: Filesystem + ?Sized>(
+    runner: &R,
+    by_id_resolver: &dyn ByIdResolver,
+    params: &RecoverParams<'_>,
+    journal: &Journal,
+    pool: PoolState,
+    new_name: &str,
+    source: &journal::ReplaceJournalSource,
+    fs: &F,
+    restore_raid1_after_commit: bool,
+    inhibitor_already_held: bool,
+) -> Result<(), RecoverError> {
+    if !live_pool_matches_membership(&pool, &journal.target_membership) {
+        return Err(RecoverError::Failed(
+            "post-replace recovery live pool does not match target membership".into(),
+        ));
+    }
+    let prior = membership::load_membership(params.paths).ok();
+    let recovered = recover_membership_matching_expected(
+        &pool,
+        &journal.target_membership,
+        prior.as_ref(),
+        by_id_resolver,
+    )?;
+    membership::save_membership(&recovered, params.paths)?;
+    eprintln!("pool.json written from committed replace membership.");
+
+    let _guard = if inhibitor_already_held {
+        None
+    } else {
+        Some(
+            params
+                .sleep_inhibitor
+                .acquire("finishing interrupted replace maintenance")
+                .map_err(|e| {
+                    RecoverError::Failed(format!("could not acquire sleep inhibitor: {e}"))
+                })?,
+        )
+    };
+
+    if let journal::ReplaceJournalSource::Live { old_mapper, .. } = source {
+        close_old_mapper_best_effort(runner, fs, old_mapper);
+    }
+
+    let new_mn = config::mapper_name(new_name);
+    let Some(dev) = pool.devices.iter().find(|d| d.mapper == new_mn) else {
+        return Err(RecoverError::Failed(format!(
+            "post-replace recovery could not find new disk '{}' in the live pool",
+            new_name
+        )));
+    };
+    eprintln!(
+        "Replaying post-replace resize on devid {} (new disk '{}')...",
+        dev.devid, new_name
+    );
+    crate::pool::pool_resize_device(runner, dev.devid, params.config.mount_point())
+        .map_err(|e| RecoverError::Failed(format!("recover replace resize: {e}")))?;
+
+    if restore_raid1_after_commit {
+        replay_owed_raid1_maintenance(
+            runner,
+            params.config.mount_point(),
+            "replace",
+            &pool,
+            params.progress,
+        )?;
+    }
+    journal::clear_journal(params.paths).map_err(|e| RecoverError::Journal(e.to_string()))?;
+    eprintln!("pending-op.json cleared. Recovery complete.");
+    Ok(())
 }
 
 const REPLACE_WAIT_POLL_INTERVAL: Duration = Duration::from_millis(200);
@@ -2010,7 +2736,27 @@ fn mount_membership_for_recover<'a>(
             phase: journal::AddPhase::PostAddBalanceRaid1,
             ..
         } => &journal.target_membership,
-        _ => union,
+        journal::OpKind::RemoveMissing {
+            phase: journal::RemoveMissingPhase::PoolMutation,
+            ..
+        } => &journal.pre_membership,
+        journal::OpKind::RemoveMissing {
+            phase: journal::RemoveMissingPhase::PostRemoveMissingMaintenance,
+            ..
+        } => &journal.target_membership,
+        journal::OpKind::Replace {
+            phase: journal::ReplacePhase::PoolMutation,
+            ..
+        } => union,
+        journal::OpKind::Replace {
+            phase: journal::ReplacePhase::PostReplaceMaintenance,
+            ..
+        } => &journal.target_membership,
+        journal::OpKind::Add {
+            phase: journal::AddPhase::PoolMutation,
+            ..
+        } => union,
+        journal::OpKind::Remove { .. } => union,
     }
 }
 
@@ -2082,6 +2828,41 @@ mod tests {
     impl AcquireSleepInhibitor for FailingInhibitor {
         fn acquire(&self, _why: &str) -> std::io::Result<Box<dyn crate::inhibit::SleepGuard>> {
             Err(std::io::Error::other("forced inhibitor failure"))
+        }
+    }
+
+    struct RequestCountInhibitor {
+        runner: MockRunner,
+        first_acquire_request_count: std::cell::Cell<Option<usize>>,
+        acquire_count: std::cell::Cell<usize>,
+    }
+
+    impl RequestCountInhibitor {
+        fn new(runner: MockRunner) -> Self {
+            Self {
+                runner,
+                first_acquire_request_count: std::cell::Cell::new(None),
+                acquire_count: std::cell::Cell::new(0),
+            }
+        }
+
+        fn first_acquire_request_count(&self) -> Option<usize> {
+            self.first_acquire_request_count.get()
+        }
+
+        fn acquire_count(&self) -> usize {
+            self.acquire_count.get()
+        }
+    }
+
+    impl AcquireSleepInhibitor for RequestCountInhibitor {
+        fn acquire(&self, _why: &str) -> std::io::Result<Box<dyn crate::inhibit::SleepGuard>> {
+            self.acquire_count.set(self.acquire_count.get() + 1);
+            if self.first_acquire_request_count.get().is_none() {
+                self.first_acquire_request_count
+                    .set(Some(self.runner.requests().len()));
+            }
+            Ok(Box::new(()))
         }
     }
 
@@ -2583,6 +3364,15 @@ mod tests {
         }
     }
 
+    fn disk_member_with_devid(by_id: &str, devid: u64) -> DiskMember {
+        DiskMember {
+            by_id: ByIdPath(by_id.to_owned()),
+            luks_uuid: None,
+            devid: Some(devid),
+            added_at: None,
+        }
+    }
+
     fn add_op_from_disks(disks: BTreeMap<String, ByIdPath>) -> OpKind {
         OpKind::Add {
             phase: journal::AddPhase::PostAddBalanceRaid1,
@@ -2667,22 +3457,65 @@ mod tests {
         let mut pre_disks = BTreeMap::new();
         pre_disks.insert(
             "disk1".to_owned(),
-            DiskMember::from_by_id(ByIdPath("/dev/disk/by-id/virtio-disk1".into())),
+            disk_member_with_devid("/dev/disk/by-id/virtio-disk1", 1),
         );
         pre_disks.insert(
             "disk2".to_owned(),
-            DiskMember::from_by_id(ByIdPath("/dev/disk/by-id/virtio-disk2".into())),
+            disk_member_with_devid("/dev/disk/by-id/virtio-disk2", 2),
         );
 
         let mut target_disks = BTreeMap::new();
         target_disks.insert(
             "disk1".to_owned(),
-            DiskMember::from_by_id(ByIdPath("/dev/disk/by-id/virtio-disk1".into())),
+            disk_member_with_devid("/dev/disk/by-id/virtio-disk1", 1),
         );
 
         journal::Journal {
             started_at: "2026-01-01T00:00:00Z".into(),
-            op: OpKind::RemoveMissing { devid: 2 },
+            op: OpKind::RemoveMissing {
+                phase: journal::RemoveMissingPhase::PoolMutation,
+                devid: 2,
+                restore_raid1_after_commit: true,
+            },
+            pre_membership: PoolMembership { disks: pre_disks },
+            target_membership: PoolMembership {
+                disks: target_disks,
+            },
+        }
+    }
+
+    fn remove_missing_journal_two_survivors() -> journal::Journal {
+        let mut pre_disks = BTreeMap::new();
+        pre_disks.insert(
+            "disk1".to_owned(),
+            disk_member_with_devid("/dev/disk/by-id/virtio-disk1", 1),
+        );
+        pre_disks.insert(
+            "disk2".to_owned(),
+            disk_member_with_devid("/dev/disk/by-id/virtio-disk2", 2),
+        );
+        pre_disks.insert(
+            "disk3".to_owned(),
+            disk_member_with_devid("/dev/disk/by-id/virtio-disk3", 3),
+        );
+
+        let mut target_disks = BTreeMap::new();
+        target_disks.insert(
+            "disk1".to_owned(),
+            disk_member_with_devid("/dev/disk/by-id/virtio-disk1", 1),
+        );
+        target_disks.insert(
+            "disk2".to_owned(),
+            disk_member_with_devid("/dev/disk/by-id/virtio-disk2", 2),
+        );
+
+        journal::Journal {
+            started_at: "2026-01-01T00:00:00Z".into(),
+            op: OpKind::RemoveMissing {
+                phase: journal::RemoveMissingPhase::PoolMutation,
+                devid: 3,
+                restore_raid1_after_commit: true,
+            },
             pre_membership: PoolMembership { disks: pre_disks },
             target_membership: PoolMembership {
                 disks: target_disks,
@@ -2988,6 +3821,85 @@ mod tests {
             total_devices: 2,
             fsid: Some("aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee".into()),
             missing_devids: vec![],
+            null_underlying: vec![],
+        }
+    }
+
+    fn pool_state_disk1_and_old() -> PoolState {
+        PoolState {
+            mounted: true,
+            devices: vec![
+                PoolDevice {
+                    mapper: MapperName("braid-disk1".into()),
+                    luks_uuid: LuksUuid("11111111-1111-1111-1111-111111111111".into()),
+                    devid: 1,
+                    underlying: "/dev/vda".into(),
+                },
+                PoolDevice {
+                    mapper: MapperName("braid-old".into()),
+                    luks_uuid: LuksUuid("22222222-2222-2222-2222-222222222222".into()),
+                    devid: 2,
+                    underlying: "/dev/vdb".into(),
+                },
+            ],
+            missing_count: 0,
+            total_devices: 2,
+            fsid: Some("aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee".into()),
+            missing_devids: vec![],
+            null_underlying: vec![],
+        }
+    }
+
+    fn pool_state_disk1_and_new() -> PoolState {
+        PoolState {
+            mounted: true,
+            devices: vec![
+                PoolDevice {
+                    mapper: MapperName("braid-disk1".into()),
+                    luks_uuid: LuksUuid("11111111-1111-1111-1111-111111111111".into()),
+                    devid: 1,
+                    underlying: "/dev/vda".into(),
+                },
+                PoolDevice {
+                    mapper: MapperName("braid-new".into()),
+                    luks_uuid: LuksUuid("33333333-3333-3333-3333-333333333333".into()),
+                    devid: 2,
+                    underlying: "/dev/vdc".into(),
+                },
+            ],
+            missing_count: 0,
+            total_devices: 2,
+            fsid: Some("aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee".into()),
+            missing_devids: vec![],
+            null_underlying: vec![],
+        }
+    }
+
+    fn pool_state_disk1_old_and_new() -> PoolState {
+        let mut pool = pool_state_disk1_and_old();
+        pool.devices.push(PoolDevice {
+            mapper: MapperName("braid-new".into()),
+            luks_uuid: LuksUuid("33333333-3333-3333-3333-333333333333".into()),
+            devid: 3,
+            underlying: "/dev/vdc".into(),
+        });
+        pool.total_devices = 3;
+        pool
+    }
+
+    fn pool_state_disk1_with_missing_devid2() -> PoolState {
+        PoolState {
+            mounted: true,
+            devices: vec![PoolDevice {
+                mapper: MapperName("braid-disk1".into()),
+                luks_uuid: LuksUuid("11111111-1111-1111-1111-111111111111".into()),
+                devid: 1,
+                underlying: "/dev/vda".into(),
+            }],
+            missing_count: 1,
+            total_devices: 2,
+            fsid: Some("aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee".into()),
+            missing_devids: vec![2],
             null_underlying: vec![],
         }
     }
@@ -4019,7 +4931,7 @@ mod tests {
                 ),
         ));
         let resolver = resolver_for(&[("/dev/vda", "virtio-disk1"), ("/dev/vdb", "virtio-disk2")]);
-        let inhibitor = crate::inhibit::RecordingInhibitor::new();
+        let inhibitor = RequestCountInhibitor::new(runner.clone());
         let params = recover_params_with_inhibitor(
             &config,
             &paths,
@@ -4066,6 +4978,23 @@ mod tests {
             .expect("returned replay should force-add after wipe");
         assert!(forget < wipe && wipe < add);
         assert_eq!(inhibitor.acquire_count(), 1);
+        let acquire_at = inhibitor
+            .first_acquire_request_count()
+            .expect("replay should acquire the sleep inhibitor");
+        for (idx, request) in requests.iter().enumerate() {
+            if matches!(request, CmdRequest::CryptsetupTestPassphrase { .. }) {
+                assert!(
+                    idx < acquire_at,
+                    "credential verification must finish before inhibitor acquisition; \
+                     acquire_at={acquire_at}, request {idx}={request:?}, requests={requests:?}"
+                );
+            }
+        }
+        assert!(
+            wipe >= acquire_at && add >= acquire_at,
+            "destructive replay must stay inside the inhibitor window; \
+             acquire_at={acquire_at}, wipe={wipe}, add={add}, requests={requests:?}"
+        );
         assert!(!paths.pending_op_json().exists());
         let recovered = membership::load_membership(&paths).unwrap();
         assert!(recovered.disks.contains_key("disk2"));
@@ -4178,7 +5107,13 @@ mod tests {
             OpKind::Add { targets, .. } => targets,
             _ => unreachable!("test journal is Add"),
         };
-        let runner = MockRunner::default();
+        let runner = MockRunner::default().with_output_stdin(
+            CmdRequest::CryptsetupTestPassphrase {
+                device: "/dev/vda".into(),
+            },
+            b"testpass".to_vec(),
+            ok_raw_empty("cryptsetup open --test-passphrase"),
+        );
         let resolver = resolver_for(&[
             ("/dev/vda", "virtio-disk1"),
             ("/dev/vdb", "virtio-disk2"),
@@ -4406,10 +5341,8 @@ mod tests {
                 },
                 // Status probes for disk1, in order:
                 // 1. initial mount planning sees disk1 closed;
-                // 2. remount-cycle planning sees disk1 closed after close;
-                // 3. post-mount probe_pool sees disk1 active.
+                // 2. post-mount probe_pool sees disk1 active.
                 vec![
-                    MapperClosingRunner::inactive_status("braid-disk1"),
                     MapperClosingRunner::inactive_status("braid-disk1"),
                     cryptsetup_status_active("braid-disk1", "/dev/vda"),
                 ],
@@ -4473,8 +5406,8 @@ mod tests {
         assert!(msg.contains("LUKS UUID mismatch"), "{msg}");
         assert_eq!(
             inhibitor.acquire_count(),
-            1,
-            "recovery must reach the post-mount destructive-replay gate"
+            0,
+            "UUID mismatch is a reversible target check and must fail before inhibitor acquisition"
         );
         assert!(
             !request_log.requests().iter().any(|r| matches!(
@@ -4937,7 +5870,14 @@ mod tests {
                     err_raw("cryptsetup open --test-passphrase", 2, "No key available"),
                 ),
         );
-        let params = recover_params(&config, &paths, Some(passphrase_file.path()), false);
+        let inhibitor = crate::inhibit::RecordingInhibitor::new();
+        let params = recover_params_with_inhibitor(
+            &config,
+            &paths,
+            Some(passphrase_file.path()),
+            false,
+            &inhibitor,
+        );
         let err = execute_add_pool_mutation_recovery(
             &runner,
             &fs,
@@ -4954,6 +5894,11 @@ mod tests {
             err.to_string()
                 .contains("recover add passphrase was rejected by 'disk2'"),
             "{err}"
+        );
+        assert_eq!(
+            inhibitor.acquire_count(),
+            0,
+            "bad add recovery credential must fail before acquiring the inhibitor"
         );
         assert!(
             !runner.requests().iter().any(|r| matches!(
@@ -5019,7 +5964,13 @@ mod tests {
         let journal = committed_two_disk_add_journal();
         journal::write_journal(&paths, &journal).unwrap();
         let union = union_memberships(&journal);
-        let runner = MockRunner::default();
+        let runner = MockRunner::default().with_output_stdin(
+            CmdRequest::CryptsetupTestPassphrase {
+                device: "/dev/vda".into(),
+            },
+            b"testpass".to_vec(),
+            ok_raw_empty("cryptsetup open --test-passphrase"),
+        );
         let params = recover_params(&config, &paths, None, false);
         let err = execute_add_post_balance_recovery(
             &runner,
@@ -5057,7 +6008,13 @@ mod tests {
             use std::io::Write;
             passphrase_file.as_file().write_all(b"testpass").unwrap();
         }
-        let runner = MockRunner::default();
+        let runner = MockRunner::default().with_output_stdin(
+            CmdRequest::CryptsetupTestPassphrase {
+                device: "/dev/vda".into(),
+            },
+            b"testpass".to_vec(),
+            ok_raw_empty("cryptsetup open --test-passphrase"),
+        );
         let inhibitor = FailingInhibitor;
         let params = recover_params_with_inhibitor(
             &config,
@@ -5129,6 +6086,1078 @@ mod tests {
             )),
             "post-add inhibitor failure must stop before balance"
         );
+        assert!(paths.pending_op_json().exists());
+    }
+
+    // Intent: RemoveMissing::PoolMutation recovery treats the primary
+    // mutation as committed when the journaled missing devid is gone.
+    // Why it exists: recovery must advance to post-maintenance and finish the
+    // owed RAID1 work without ever rerunning btrfs device remove.
+    // Scenario: remove-missing removed devid 2 and crashed before clearing
+    // the journal; recover writes committed membership, balances, and clears.
+    #[test]
+    fn remove_missing_pool_mutation_committed_finishes_post_maintenance() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let paths = StatePaths::custom(tmp.path().into());
+        let config = Config::new(MountPoint("/mnt/storage".into())).unwrap();
+        let journal = remove_missing_journal_two_survivors();
+        journal::write_journal(&paths, &journal).unwrap();
+        let runner = with_balance_replay(MockRunner::default());
+        let resolver = resolver_for(&[("/dev/vda", "virtio-disk1"), ("/dev/vdb", "virtio-disk2")]);
+        let inhibitor = crate::inhibit::RecordingInhibitor::new();
+        let params = recover_params_with_inhibitor(&config, &paths, None, false, &inhibitor);
+
+        execute_remove_missing_pool_mutation_recovery(
+            &runner,
+            &resolver,
+            &params,
+            &journal,
+            pool_state_two_disks(),
+            3,
+            true,
+        )
+        .expect("committed remove-missing should finish post maintenance");
+
+        let requests = runner.requests();
+        assert_eq!(inhibitor.acquire_count(), 1);
+        assert!(
+            requests
+                .iter()
+                .any(|r| matches!(r, CmdRequest::BtrfsBalanceRaid1Soft { .. })),
+            "owed RAID1 maintenance should run"
+        );
+        assert!(
+            !requests
+                .iter()
+                .any(|r| matches!(r, CmdRequest::BtrfsDeviceRemove { .. })),
+            "recover must never rerun btrfs device remove"
+        );
+        assert!(!paths.pending_op_json().exists());
+        let recovered = membership::load_membership(&paths).unwrap();
+        assert_eq!(
+            recovered.disks.keys().cloned().collect::<Vec<_>>(),
+            vec!["disk1".to_owned(), "disk2".to_owned()]
+        );
+    }
+
+    // Intent: RemoveMissing::PoolMutation recovery exits recovery mode when
+    // the primary remove did not commit.
+    // Why it exists: recover may restore bookkeeping, but it must not retry
+    // btrfs device remove behind the user's back.
+    // Scenario: the journal exists but btrfs still reports the same missing
+    // devid, so recovery restores pre-operation pool.json and asks for rerun.
+    #[test]
+    fn remove_missing_pool_mutation_not_committed_restores_pre_membership() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let paths = StatePaths::custom(tmp.path().into());
+        let config = Config::new(MountPoint("/mnt/storage".into())).unwrap();
+        let journal = remove_missing_journal();
+        journal::write_journal(&paths, &journal).unwrap();
+        let runner = MockRunner::default();
+        let inhibitor = crate::inhibit::RecordingInhibitor::new();
+        let params = recover_params_with_inhibitor(&config, &paths, None, false, &inhibitor);
+
+        execute_remove_missing_pool_mutation_recovery(
+            &runner,
+            &MockByIdResolver::default(),
+            &params,
+            &journal,
+            pool_state_disk1_with_missing_devid2(),
+            2,
+            true,
+        )
+        .expect("uncommitted remove-missing should clear journal after restoring pre state");
+
+        assert_eq!(inhibitor.acquire_count(), 0);
+        assert!(runner.requests().is_empty());
+        assert!(!paths.pending_op_json().exists());
+        let recovered = membership::load_membership(&paths).unwrap();
+        assert!(recovered.disks.contains_key("disk2"));
+    }
+
+    // Intent: RemoveMissing::PoolMutation recovery rejects mixed live state.
+    // Why it exists: if live topology is neither exact pre nor exact target,
+    // clearing the journal would hide an ambiguous storage state.
+    // Scenario: the missing devid is gone from btrfs missing_devids, but the
+    // old disk name is still live, so recovery preserves pending-op.json.
+    #[test]
+    fn remove_missing_pool_mutation_mixed_state_preserves_journal() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let paths = StatePaths::custom(tmp.path().into());
+        let config = Config::new(MountPoint("/mnt/storage".into())).unwrap();
+        let journal = remove_missing_journal();
+        journal::write_journal(&paths, &journal).unwrap();
+        let runner = MockRunner::default();
+        let params = recover_params(&config, &paths, None, false);
+
+        let err = execute_remove_missing_pool_mutation_recovery(
+            &runner,
+            &MockByIdResolver::default(),
+            &params,
+            &journal,
+            pool_state_two_disks(),
+            2,
+            true,
+        )
+        .unwrap_err();
+
+        assert!(
+            err.to_string()
+                .contains("does not match the target membership"),
+            "{err}"
+        );
+        assert!(paths.pending_op_json().exists());
+        assert!(!paths.pool_json().exists());
+        assert!(runner.requests().is_empty());
+    }
+
+    // Intent: RemoveMissing::PostRemoveMissingMaintenance honors the stored
+    // restore_raid1_after_commit gate.
+    // Why it exists: post-phase recovery should not resume or start balances
+    // that the original remove-missing did not owe.
+    // Scenario: committed remove-missing only needs pool.json repair and
+    // journal clear because another missing device remains.
+    #[test]
+    fn remove_missing_post_maintenance_skips_unowed_balance() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let paths = StatePaths::custom(tmp.path().into());
+        let config = Config::new(MountPoint("/mnt/storage".into())).unwrap();
+        let mut journal = remove_missing_journal();
+        journal.op = OpKind::RemoveMissing {
+            phase: journal::RemoveMissingPhase::PostRemoveMissingMaintenance,
+            devid: 2,
+            restore_raid1_after_commit: false,
+        };
+        journal::write_journal(&paths, &journal).unwrap();
+        let runner = MockRunner::default();
+        let resolver = resolver_for(&[("/dev/vda", "virtio-disk1")]);
+        let inhibitor = crate::inhibit::RecordingInhibitor::new();
+        let params = recover_params_with_inhibitor(&config, &paths, None, false, &inhibitor);
+
+        execute_remove_missing_post_maintenance_recovery(
+            &runner,
+            &resolver,
+            &params,
+            &journal,
+            pool_state_one_disk(),
+            2,
+            false,
+            false,
+        )
+        .expect("unowed post-remove maintenance should only repair state");
+
+        assert_eq!(inhibitor.acquire_count(), 0);
+        assert!(runner.requests().is_empty());
+        assert!(!paths.pending_op_json().exists());
+    }
+
+    // Intent: post-maintenance inhibitor failure preserves the remove-missing
+    // journal and runs no maintenance command.
+    // Why it exists: recovering the committed membership is safe, but balance
+    // replay must stay behind the inhibitor boundary.
+    // Scenario: remove-missing has committed and owes RAID1 restore, but
+    // logind refuses the inhibitor.
+    #[test]
+    fn remove_missing_post_maintenance_inhibitor_failure_preserves_journal() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let paths = StatePaths::custom(tmp.path().into());
+        let config = Config::new(MountPoint("/mnt/storage".into())).unwrap();
+        let mut journal = remove_missing_journal();
+        journal.op = OpKind::RemoveMissing {
+            phase: journal::RemoveMissingPhase::PostRemoveMissingMaintenance,
+            devid: 2,
+            restore_raid1_after_commit: true,
+        };
+        journal::write_journal(&paths, &journal).unwrap();
+        let runner = MockRunner::default();
+        let resolver = resolver_for(&[("/dev/vda", "virtio-disk1")]);
+        let inhibitor = FailingInhibitor;
+        let params = recover_params_with_inhibitor(&config, &paths, None, false, &inhibitor);
+
+        let err = execute_remove_missing_post_maintenance_recovery(
+            &runner,
+            &resolver,
+            &params,
+            &journal,
+            pool_state_one_disk(),
+            2,
+            true,
+            false,
+        )
+        .unwrap_err();
+
+        assert!(
+            err.to_string()
+                .contains("could not acquire sleep inhibitor"),
+            "{err}"
+        );
+        assert!(runner.requests().is_empty());
+        assert!(paths.pending_op_json().exists());
+    }
+
+    // Intent: Replace::PoolMutation recovery advances committed replace to
+    // post-maintenance instead of restarting replace.
+    // Why it exists: a finished kernel replace has already mutated btrfs
+    // membership; recover only owes old-mapper close and resize.
+    // Scenario: live pool has disk1+new, journal still says PoolMutation.
+    #[test]
+    fn replace_pool_mutation_committed_finishes_resize_without_replace_start() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let paths = StatePaths::custom(tmp.path().into());
+        let config = Config::new(MountPoint("/mnt/storage".into())).unwrap();
+        let fs = MockFs::new(&[]);
+        let journal = replace_journal();
+        journal::write_journal(&paths, &journal).unwrap();
+        let union = union_memberships(&journal);
+        let runner = MockRunner::default()
+            .with_output(
+                CmdRequest::CryptsetupClose {
+                    mapper: "braid-old".into(),
+                },
+                ok_raw_empty("cryptsetup close braid-old"),
+            )
+            .with_output(
+                CmdRequest::BtrfsFilesystemResize {
+                    devid: 2,
+                    mount_point: MountPoint("/mnt/storage".into()),
+                },
+                ok_raw_empty("btrfs filesystem resize"),
+            );
+        let resolver = resolver_for(&[("/dev/vda", "virtio-disk1"), ("/dev/vdc", "virtio-new")]);
+        let inhibitor = crate::inhibit::RecordingInhibitor::new();
+        let params = recover_params_with_inhibitor(&config, &paths, None, false, &inhibitor);
+        let OpKind::Replace {
+            new_target, source, ..
+        } = &journal.op
+        else {
+            unreachable!("replace_journal returns Replace");
+        };
+
+        execute_replace_pool_mutation_recovery(
+            &runner,
+            &fs,
+            &resolver,
+            &params,
+            None,
+            &journal,
+            &union,
+            pool_state_disk1_and_new(),
+            "old",
+            "new",
+            new_target,
+            source,
+            false,
+        )
+        .expect("committed replace should finish post maintenance");
+
+        let requests = runner.requests();
+        assert_eq!(inhibitor.acquire_count(), 1);
+        assert!(
+            requests
+                .iter()
+                .any(|r| matches!(r, CmdRequest::BtrfsFilesystemResize { devid: 2, .. }))
+        );
+        assert!(
+            !requests
+                .iter()
+                .any(|r| matches!(r, CmdRequest::BtrfsReplaceStart { .. })),
+            "recover must not rerun btrfs replace start"
+        );
+        assert!(!paths.pending_op_json().exists());
+        let recovered = membership::load_membership(&paths).unwrap();
+        assert!(recovered.disks.contains_key("new"));
+        assert!(!recovered.disks.contains_key("old"));
+    }
+
+    // Intent: Replace::PoolMutation recovery restores pre state when replace
+    // did not commit.
+    // Why it exists: recovery should exit recovery mode and ask the operator
+    // to rerun replace rather than starting btrfs replace itself.
+    // Scenario: live pool still contains disk1+old and no new member.
+    #[test]
+    fn replace_pool_mutation_not_committed_restores_pre_membership() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let paths = StatePaths::custom(tmp.path().into());
+        let config = Config::new(MountPoint("/mnt/storage".into())).unwrap();
+        let fs = MockFs::new(&[]);
+        let journal = replace_journal();
+        journal::write_journal(&paths, &journal).unwrap();
+        let union = union_memberships(&journal);
+        let runner = MockRunner::default();
+        let inhibitor = crate::inhibit::RecordingInhibitor::new();
+        let params = recover_params_with_inhibitor(&config, &paths, None, false, &inhibitor);
+        let OpKind::Replace {
+            new_target, source, ..
+        } = &journal.op
+        else {
+            unreachable!("replace_journal returns Replace");
+        };
+
+        execute_replace_pool_mutation_recovery(
+            &runner,
+            &fs,
+            &MockByIdResolver::default(),
+            &params,
+            None,
+            &journal,
+            &union,
+            pool_state_disk1_and_old(),
+            "old",
+            "new",
+            new_target,
+            source,
+            false,
+        )
+        .expect("uncommitted replace should restore pre state and clear journal");
+
+        assert_eq!(inhibitor.acquire_count(), 0);
+        assert!(runner.requests().is_empty());
+        assert!(!paths.pending_op_json().exists());
+        let recovered = membership::load_membership(&paths).unwrap();
+        assert!(recovered.disks.contains_key("old"));
+        assert!(!recovered.disks.contains_key("new"));
+    }
+
+    // Intent: Replace::PoolMutation recovery rejects mixed pre/post topology.
+    // Why it exists: a pool containing both old and new cannot be classified
+    // safely as either uncommitted or committed.
+    // Scenario: live btrfs reports disk1+old+new, so recovery preserves the
+    // journal for manual inspection.
+    #[test]
+    fn replace_pool_mutation_mixed_state_preserves_journal() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let paths = StatePaths::custom(tmp.path().into());
+        let config = Config::new(MountPoint("/mnt/storage".into())).unwrap();
+        let fs = MockFs::new(&[]);
+        let journal = replace_journal();
+        journal::write_journal(&paths, &journal).unwrap();
+        let union = union_memberships(&journal);
+        let runner = MockRunner::default();
+        let params = recover_params(&config, &paths, None, false);
+        let OpKind::Replace {
+            new_target, source, ..
+        } = &journal.op
+        else {
+            unreachable!("replace_journal returns Replace");
+        };
+
+        let err = execute_replace_pool_mutation_recovery(
+            &runner,
+            &fs,
+            &MockByIdResolver::default(),
+            &params,
+            None,
+            &journal,
+            &union,
+            pool_state_disk1_old_and_new(),
+            "old",
+            "new",
+            new_target,
+            source,
+            false,
+        )
+        .unwrap_err();
+
+        assert!(err.to_string().contains("does not match either"), "{err}");
+        assert!(paths.pending_op_json().exists());
+        assert!(!paths.pool_json().exists());
+    }
+
+    // Intent: Replace::PoolMutation FreshLuks recovery finishes committed
+    // preparation side effects without reformatting or restarting replace.
+    // Why it exists: a crash after LUKS format but before btrfs replace must
+    // be recoverable by validating the prepared target, enrolling the keyfile,
+    // backing up the header, and then asking the user to rerun replace.
+    // Scenario: live pool is still disk1+old, while the new target is already
+    // LUKS2 with the journaled label and needs keyfile enrollment.
+    #[test]
+    fn replace_pool_mutation_fresh_luks_expected_label_finishes_prep_only() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let paths = StatePaths::custom(tmp.path().into());
+        let config = Config::new(MountPoint("/mnt/storage".into())).unwrap();
+        let fs = MockFs::new(&["/dev/disk/by-id/virtio-new"]);
+        let key_file = std::path::PathBuf::from("/run/keys/braid-new.key");
+        let journal = replace_fresh_luks_journal(key_file.clone());
+        journal::write_journal(&paths, &journal).unwrap();
+        let union = union_memberships(&journal);
+        let passphrase_file = tempfile::NamedTempFile::new().unwrap();
+        {
+            use std::io::Write;
+            passphrase_file.as_file().write_all(b"testpass").unwrap();
+        }
+        let runner = MockRunner::default()
+            .with_output(
+                CmdRequest::CryptsetupLuksUuid {
+                    device: "/dev/disk/by-id/virtio-new".into(),
+                },
+                cryptsetup_uuid_ok(
+                    "/dev/disk/by-id/virtio-new",
+                    "33333333-3333-3333-3333-333333333333",
+                ),
+            )
+            .with_output(
+                CmdRequest::CryptsetupLuksDumpText {
+                    device: "/dev/disk/by-id/virtio-new".into(),
+                },
+                luks_dump_label("braid-new"),
+            )
+            .with_mapper_closed("braid-new")
+            .with_output_stdin(
+                CmdRequest::CryptsetupTestPassphrase {
+                    device: "/dev/vda".into(),
+                },
+                b"testpass".to_vec(),
+                ok_raw_empty("cryptsetup open --test-passphrase"),
+            )
+            .with_output_stdin(
+                CmdRequest::CryptsetupTestPassphrase {
+                    device: "/dev/vdb".into(),
+                },
+                b"testpass".to_vec(),
+                ok_raw_empty("cryptsetup open --test-passphrase"),
+            )
+            .with_output_stdin(
+                CmdRequest::CryptsetupTestPassphrase {
+                    device: "/dev/disk/by-id/virtio-new".into(),
+                },
+                b"testpass".to_vec(),
+                ok_raw_empty("cryptsetup open --test-passphrase"),
+            )
+            .with_output(
+                CmdRequest::CryptsetupTestKeyFile {
+                    device: "/dev/disk/by-id/virtio-new".into(),
+                    key_file_path: key_file.display().to_string(),
+                },
+                err_raw(
+                    "cryptsetup open --test-passphrase --key-file",
+                    2,
+                    "No key available",
+                ),
+            )
+            .with_output_stdin(
+                CmdRequest::CryptsetupLuksAddKeyFile {
+                    device: "/dev/disk/by-id/virtio-new".into(),
+                    key_file_path: key_file.display().to_string(),
+                },
+                b"testpass".to_vec(),
+                ok_raw_empty("cryptsetup luksAddKey"),
+            )
+            .with_output(
+                CmdRequest::CryptsetupLuksHeaderBackup {
+                    device: "/dev/disk/by-id/virtio-new".into(),
+                    backup_path: paths
+                        .luks_headers_dir()
+                        .join("braid-new.luksheader.tmp")
+                        .display()
+                        .to_string(),
+                },
+                ok_raw_empty("cryptsetup luksHeaderBackup"),
+            );
+        let inhibitor = RequestCountInhibitor::new(runner.clone());
+        let params = recover_params_with_inhibitor(
+            &config,
+            &paths,
+            Some(passphrase_file.path()),
+            false,
+            &inhibitor,
+        );
+        let OpKind::Replace {
+            new_target, source, ..
+        } = &journal.op
+        else {
+            unreachable!("replace_fresh_luks_journal returns Replace");
+        };
+
+        execute_replace_pool_mutation_recovery(
+            &runner,
+            &fs,
+            &MockByIdResolver::default(),
+            &params,
+            None,
+            &journal,
+            &union,
+            pool_state_disk1_and_old(),
+            "old",
+            "new",
+            new_target,
+            source,
+            false,
+        )
+        .expect("fresh prepared target should be reconciled without replace start");
+
+        let requests = runner.requests();
+        assert_eq!(inhibitor.acquire_count(), 1);
+        let acquire_at = inhibitor
+            .first_acquire_request_count()
+            .expect("fresh prep reconciliation should acquire inhibitor");
+        for (idx, request) in requests.iter().enumerate() {
+            if matches!(request, CmdRequest::CryptsetupTestPassphrase { .. }) {
+                assert!(
+                    idx < acquire_at,
+                    "credential verification must finish before inhibitor acquisition; \
+                     acquire_at={acquire_at}, request {idx}={request:?}, requests={requests:?}"
+                );
+            }
+        }
+        let add_key = requests
+            .iter()
+            .position(|r| matches!(r, CmdRequest::CryptsetupLuksAddKeyFile { .. }))
+            .expect("expected keyfile enrollment");
+        let backup = requests
+            .iter()
+            .position(|r| matches!(r, CmdRequest::CryptsetupLuksHeaderBackup { .. }))
+            .expect("expected header backup");
+        assert!(
+            add_key >= acquire_at && backup >= acquire_at,
+            "keyfile enrollment and header backup must be inside inhibitor window; \
+             acquire_at={acquire_at}, add_key={add_key}, backup={backup}, requests={requests:?}"
+        );
+        assert!(
+            !requests.iter().any(|r| matches!(
+                r,
+                CmdRequest::CryptsetupLuksFormat { .. } | CmdRequest::BtrfsReplaceStart { .. }
+            )),
+            "prepared target recovery must not reformat or start replace"
+        );
+        assert!(!paths.pending_op_json().exists());
+        let recovered = membership::load_membership(&paths).unwrap();
+        assert!(recovered.disks.contains_key("old"));
+        assert!(!recovered.disks.contains_key("new"));
+    }
+
+    // Intent: Replace::PoolMutation FreshLuks recovery refuses a prepared
+    // target whose LUKS label does not match the journal.
+    // Why it exists: the label check prevents recovery from treating an
+    // unrelated LUKS device as braid's interrupted fresh target.
+    // Scenario: live pool is still disk1+old, the new by-id path is LUKS2,
+    // but its label is not the journaled `braid-new` label.
+    #[test]
+    fn replace_pool_mutation_fresh_luks_wrong_label_preserves_journal() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let paths = StatePaths::custom(tmp.path().into());
+        let config = Config::new(MountPoint("/mnt/storage".into())).unwrap();
+        let fs = MockFs::new(&["/dev/disk/by-id/virtio-new"]);
+        let journal = replace_fresh_luks_journal("/run/keys/braid-new.key".into());
+        journal::write_journal(&paths, &journal).unwrap();
+        let union = union_memberships(&journal);
+        let runner = MockRunner::default()
+            .with_output(
+                CmdRequest::CryptsetupLuksUuid {
+                    device: "/dev/disk/by-id/virtio-new".into(),
+                },
+                cryptsetup_uuid_ok(
+                    "/dev/disk/by-id/virtio-new",
+                    "33333333-3333-3333-3333-333333333333",
+                ),
+            )
+            .with_output(
+                CmdRequest::CryptsetupLuksDumpText {
+                    device: "/dev/disk/by-id/virtio-new".into(),
+                },
+                luks_dump_label("not-braid-new"),
+            )
+            .with_mapper_closed("braid-new");
+        let inhibitor = crate::inhibit::RecordingInhibitor::new();
+        let params = recover_params_with_inhibitor(&config, &paths, None, false, &inhibitor);
+        let OpKind::Replace {
+            new_target, source, ..
+        } = &journal.op
+        else {
+            unreachable!("replace_fresh_luks_journal returns Replace");
+        };
+
+        let err = execute_replace_pool_mutation_recovery(
+            &runner,
+            &fs,
+            &MockByIdResolver::default(),
+            &params,
+            None,
+            &journal,
+            &union,
+            pool_state_disk1_and_old(),
+            "old",
+            "new",
+            new_target,
+            source,
+            false,
+        )
+        .unwrap_err();
+
+        assert!(err.to_string().contains("unexpected LUKS label"), "{err}");
+        assert_eq!(inhibitor.acquire_count(), 0);
+        let requests = runner.requests();
+        assert!(
+            !requests.iter().any(|r| matches!(
+                r,
+                CmdRequest::CryptsetupLuksFormat { .. }
+                    | CmdRequest::CryptsetupLuksAddKeyFile { .. }
+                    | CmdRequest::CryptsetupLuksHeaderBackup { .. }
+                    | CmdRequest::BtrfsReplaceStart { .. }
+                    | CmdRequest::BtrfsFilesystemResize { .. }
+            )),
+            "wrong-label target must stop before fresh-target side effects: {requests:?}"
+        );
+        assert!(paths.pending_op_json().exists());
+        assert!(!paths.pool_json().exists());
+    }
+
+    // Intent: Replace::PoolMutation FreshLuks recovery refuses a missing
+    // target device and preserves the journal.
+    // Why it exists: if the replacement disk is absent, recovery cannot prove
+    // whether pre-replace preparation completed and must not rewrite pool.json.
+    // Scenario: live pool is still disk1+old, but the journaled new by-id path
+    // is no longer present after reboot.
+    #[test]
+    fn replace_pool_mutation_fresh_luks_absent_target_preserves_journal() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let paths = StatePaths::custom(tmp.path().into());
+        let config = Config::new(MountPoint("/mnt/storage".into())).unwrap();
+        let fs = MockFs::new(&[]);
+        let journal = replace_fresh_luks_journal("/run/keys/braid-new.key".into());
+        journal::write_journal(&paths, &journal).unwrap();
+        let union = union_memberships(&journal);
+        let runner = MockRunner::default();
+        let inhibitor = crate::inhibit::RecordingInhibitor::new();
+        let params = recover_params_with_inhibitor(&config, &paths, None, false, &inhibitor);
+        let OpKind::Replace {
+            new_target, source, ..
+        } = &journal.op
+        else {
+            unreachable!("replace_fresh_luks_journal returns Replace");
+        };
+
+        let err = execute_replace_pool_mutation_recovery(
+            &runner,
+            &fs,
+            &MockByIdResolver::default(),
+            &params,
+            None,
+            &journal,
+            &union,
+            pool_state_disk1_and_old(),
+            "old",
+            "new",
+            new_target,
+            source,
+            false,
+        )
+        .unwrap_err();
+
+        assert!(err.to_string().contains("is not present"), "{err}");
+        assert_eq!(inhibitor.acquire_count(), 0);
+        assert!(
+            runner.requests().is_empty(),
+            "absent target should fail from the filesystem probe only"
+        );
+        assert!(paths.pending_op_json().exists());
+        assert!(!paths.pool_json().exists());
+    }
+
+    // Intent: Replace::PoolMutation FreshLuks recovery rejects a bad
+    // passphrase before acquiring the post-prep inhibitor.
+    // Why it exists: credential verification must be complete before recovery
+    // enrolls a keyfile, backs up a header, or writes pool.json.
+    // Scenario: the prepared target has the expected label, but the supplied
+    // passphrase opens the old pool devices and is rejected by the new target.
+    #[test]
+    fn replace_pool_mutation_fresh_luks_bad_passphrase_preserves_journal() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let paths = StatePaths::custom(tmp.path().into());
+        let config = Config::new(MountPoint("/mnt/storage".into())).unwrap();
+        let fs = MockFs::new(&["/dev/disk/by-id/virtio-new"]);
+        let key_file = std::path::PathBuf::from("/run/keys/braid-new.key");
+        let journal = replace_fresh_luks_journal(key_file);
+        journal::write_journal(&paths, &journal).unwrap();
+        let union = union_memberships(&journal);
+        let passphrase_file = tempfile::NamedTempFile::new().unwrap();
+        {
+            use std::io::Write;
+            passphrase_file.as_file().write_all(b"wrongpass").unwrap();
+        }
+        let runner = MockRunner::default()
+            .with_output(
+                CmdRequest::CryptsetupLuksUuid {
+                    device: "/dev/disk/by-id/virtio-new".into(),
+                },
+                cryptsetup_uuid_ok(
+                    "/dev/disk/by-id/virtio-new",
+                    "33333333-3333-3333-3333-333333333333",
+                ),
+            )
+            .with_output(
+                CmdRequest::CryptsetupLuksDumpText {
+                    device: "/dev/disk/by-id/virtio-new".into(),
+                },
+                luks_dump_label("braid-new"),
+            )
+            .with_mapper_closed("braid-new")
+            .with_output_stdin(
+                CmdRequest::CryptsetupTestPassphrase {
+                    device: "/dev/vda".into(),
+                },
+                b"wrongpass".to_vec(),
+                ok_raw_empty("cryptsetup open --test-passphrase"),
+            )
+            .with_output_stdin(
+                CmdRequest::CryptsetupTestPassphrase {
+                    device: "/dev/vdb".into(),
+                },
+                b"wrongpass".to_vec(),
+                ok_raw_empty("cryptsetup open --test-passphrase"),
+            )
+            .with_output_stdin(
+                CmdRequest::CryptsetupTestPassphrase {
+                    device: "/dev/disk/by-id/virtio-new".into(),
+                },
+                b"wrongpass".to_vec(),
+                err_raw("cryptsetup open --test-passphrase", 2, "No key available"),
+            );
+        let inhibitor = RequestCountInhibitor::new(runner.clone());
+        let params = recover_params_with_inhibitor(
+            &config,
+            &paths,
+            Some(passphrase_file.path()),
+            false,
+            &inhibitor,
+        );
+        let OpKind::Replace {
+            new_target, source, ..
+        } = &journal.op
+        else {
+            unreachable!("replace_fresh_luks_journal returns Replace");
+        };
+
+        let err = execute_replace_pool_mutation_recovery(
+            &runner,
+            &fs,
+            &MockByIdResolver::default(),
+            &params,
+            None,
+            &journal,
+            &union,
+            pool_state_disk1_and_old(),
+            "old",
+            "new",
+            new_target,
+            source,
+            false,
+        )
+        .unwrap_err();
+
+        assert!(
+            err.to_string()
+                .contains("recover replace passphrase was rejected by 'new'"),
+            "{err}"
+        );
+        assert_eq!(inhibitor.acquire_count(), 0);
+        assert!(inhibitor.first_acquire_request_count().is_none());
+        let requests = runner.requests();
+        assert!(
+            !requests.iter().any(|r| matches!(
+                r,
+                CmdRequest::CryptsetupLuksAddKeyFile { .. }
+                    | CmdRequest::CryptsetupLuksHeaderBackup { .. }
+                    | CmdRequest::BtrfsReplaceStart { .. }
+                    | CmdRequest::BtrfsFilesystemResize { .. }
+            )),
+            "bad credential must stop before fresh-target side effects: {requests:?}"
+        );
+        assert!(paths.pending_op_json().exists());
+        assert!(!paths.pool_json().exists());
+    }
+
+    // Intent: Replace::PoolMutation FreshLuks recovery preserves the journal
+    // if header backup fails after credential verification.
+    // Why it exists: recovery must not clear the journal or write pool.json
+    // until all fresh-target preparation side effects are complete.
+    // Scenario: the prepared target has the expected label and credential,
+    // but `cryptsetup luksHeaderBackup` fails.
+    #[test]
+    fn replace_pool_mutation_fresh_luks_header_backup_failure_preserves_journal() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let paths = StatePaths::custom(tmp.path().into());
+        let config = Config::new(MountPoint("/mnt/storage".into())).unwrap();
+        let fs = MockFs::new(&["/dev/disk/by-id/virtio-new"]);
+        let key_file = std::path::PathBuf::from("/run/keys/braid-new.key");
+        let journal = replace_fresh_luks_journal(key_file.clone());
+        journal::write_journal(&paths, &journal).unwrap();
+        let union = union_memberships(&journal);
+        let passphrase_file = tempfile::NamedTempFile::new().unwrap();
+        {
+            use std::io::Write;
+            passphrase_file.as_file().write_all(b"testpass").unwrap();
+        }
+        let runner = MockRunner::default()
+            .with_output(
+                CmdRequest::CryptsetupLuksUuid {
+                    device: "/dev/disk/by-id/virtio-new".into(),
+                },
+                cryptsetup_uuid_ok(
+                    "/dev/disk/by-id/virtio-new",
+                    "33333333-3333-3333-3333-333333333333",
+                ),
+            )
+            .with_output(
+                CmdRequest::CryptsetupLuksDumpText {
+                    device: "/dev/disk/by-id/virtio-new".into(),
+                },
+                luks_dump_label("braid-new"),
+            )
+            .with_mapper_closed("braid-new")
+            .with_output_stdin(
+                CmdRequest::CryptsetupTestPassphrase {
+                    device: "/dev/vda".into(),
+                },
+                b"testpass".to_vec(),
+                ok_raw_empty("cryptsetup open --test-passphrase"),
+            )
+            .with_output_stdin(
+                CmdRequest::CryptsetupTestPassphrase {
+                    device: "/dev/vdb".into(),
+                },
+                b"testpass".to_vec(),
+                ok_raw_empty("cryptsetup open --test-passphrase"),
+            )
+            .with_output_stdin(
+                CmdRequest::CryptsetupTestPassphrase {
+                    device: "/dev/disk/by-id/virtio-new".into(),
+                },
+                b"testpass".to_vec(),
+                ok_raw_empty("cryptsetup open --test-passphrase"),
+            )
+            .with_output(
+                CmdRequest::CryptsetupTestKeyFile {
+                    device: "/dev/disk/by-id/virtio-new".into(),
+                    key_file_path: key_file.display().to_string(),
+                },
+                ok_raw_empty("cryptsetup open --test-passphrase --key-file"),
+            )
+            .with_output(
+                CmdRequest::CryptsetupLuksHeaderBackup {
+                    device: "/dev/disk/by-id/virtio-new".into(),
+                    backup_path: paths
+                        .luks_headers_dir()
+                        .join("braid-new.luksheader.tmp")
+                        .display()
+                        .to_string(),
+                },
+                err_raw("cryptsetup luksHeaderBackup", 1, "backup failed"),
+            );
+        let inhibitor = crate::inhibit::RecordingInhibitor::new();
+        let params = recover_params_with_inhibitor(
+            &config,
+            &paths,
+            Some(passphrase_file.path()),
+            false,
+            &inhibitor,
+        );
+        let OpKind::Replace {
+            new_target, source, ..
+        } = &journal.op
+        else {
+            unreachable!("replace_fresh_luks_journal returns Replace");
+        };
+
+        let err = execute_replace_pool_mutation_recovery(
+            &runner,
+            &fs,
+            &MockByIdResolver::default(),
+            &params,
+            None,
+            &journal,
+            &union,
+            pool_state_disk1_and_old(),
+            "old",
+            "new",
+            new_target,
+            source,
+            false,
+        )
+        .unwrap_err();
+
+        assert!(err.to_string().contains("backup failed"), "{err}");
+        assert_eq!(inhibitor.acquire_count(), 1);
+        assert!(
+            !runner
+                .requests()
+                .iter()
+                .any(|r| matches!(r, CmdRequest::BtrfsReplaceStart { .. })),
+            "fresh-prep recovery must not start btrfs replace"
+        );
+        assert!(paths.pending_op_json().exists());
+        assert!(!paths.pool_json().exists());
+    }
+
+    // Intent: Replace::PostReplaceMaintenance skips unowed balance work.
+    // Why it exists: recovery should not resume an unrelated paused balance
+    // when restore_raid1_after_commit is false.
+    // Scenario: replace committed and only resize remains.
+    #[test]
+    fn replace_post_maintenance_skips_unowed_balance() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let paths = StatePaths::custom(tmp.path().into());
+        let config = Config::new(MountPoint("/mnt/storage".into())).unwrap();
+        let fs = MockFs::new(&[]);
+        let journal = replace_journal_in_phase(
+            journal::ReplacePhase::PostReplaceMaintenance,
+            false,
+            journal::ReplaceJournalSource::Missing { old_devid: 2 },
+        );
+        journal::write_journal(&paths, &journal).unwrap();
+        let runner = MockRunner::default().with_output(
+            CmdRequest::BtrfsFilesystemResize {
+                devid: 2,
+                mount_point: MountPoint("/mnt/storage".into()),
+            },
+            ok_raw_empty("btrfs filesystem resize"),
+        );
+        let resolver = resolver_for(&[("/dev/vda", "virtio-disk1"), ("/dev/vdc", "virtio-new")]);
+        let inhibitor = crate::inhibit::RecordingInhibitor::new();
+        let params = recover_params_with_inhibitor(&config, &paths, None, false, &inhibitor);
+        let OpKind::Replace { source, .. } = &journal.op else {
+            unreachable!("replace_journal_in_phase returns Replace");
+        };
+
+        execute_replace_post_maintenance_recovery(
+            &runner,
+            &resolver,
+            &params,
+            &journal,
+            pool_state_disk1_and_new(),
+            "new",
+            source,
+            &fs,
+            false,
+            false,
+        )
+        .expect("post-replace maintenance should resize and clear");
+
+        let requests = runner.requests();
+        assert_eq!(inhibitor.acquire_count(), 1);
+        assert!(
+            requests
+                .iter()
+                .any(|r| matches!(r, CmdRequest::BtrfsFilesystemResize { devid: 2, .. }))
+        );
+        assert!(
+            !requests.iter().any(|r| matches!(
+                r,
+                CmdRequest::BtrfsBalanceStatus { .. }
+                    | CmdRequest::BtrfsBalanceResume { .. }
+                    | CmdRequest::BtrfsBalanceRaid1Soft { .. }
+            )),
+            "restore_raid1_after_commit=false must skip balance probes and replay"
+        );
+        assert!(!paths.pending_op_json().exists());
+    }
+
+    // Intent: Replace::PostReplaceMaintenance runs owed RAID1 maintenance
+    // when the journal says the committed replace cleared the last missing
+    // device.
+    // Why it exists: the restore_raid1_after_commit gate must be positive as
+    // well as negative; otherwise post-replace recovery could strand
+    // single-profile chunks after a missing-device replacement.
+    // Scenario: replace committed, resize succeeds, no balance is paused, and
+    // recovery replays the soft RAID1 balance before clearing the journal.
+    #[test]
+    fn replace_post_maintenance_runs_owed_balance() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let paths = StatePaths::custom(tmp.path().into());
+        let config = Config::new(MountPoint("/mnt/storage".into())).unwrap();
+        let fs = MockFs::new(&[]);
+        let journal = replace_journal_in_phase(
+            journal::ReplacePhase::PostReplaceMaintenance,
+            true,
+            journal::ReplaceJournalSource::Missing { old_devid: 2 },
+        );
+        journal::write_journal(&paths, &journal).unwrap();
+        let runner = with_balance_replay(MockRunner::default()).with_output(
+            CmdRequest::BtrfsFilesystemResize {
+                devid: 2,
+                mount_point: MountPoint("/mnt/storage".into()),
+            },
+            ok_raw_empty("btrfs filesystem resize"),
+        );
+        let resolver = resolver_for(&[("/dev/vda", "virtio-disk1"), ("/dev/vdc", "virtio-new")]);
+        let inhibitor = crate::inhibit::RecordingInhibitor::new();
+        let params = recover_params_with_inhibitor(&config, &paths, None, false, &inhibitor);
+        let OpKind::Replace { source, .. } = &journal.op else {
+            unreachable!("replace_journal_in_phase returns Replace");
+        };
+
+        execute_replace_post_maintenance_recovery(
+            &runner,
+            &resolver,
+            &params,
+            &journal,
+            pool_state_disk1_and_new(),
+            "new",
+            source,
+            &fs,
+            true,
+            false,
+        )
+        .expect("post-replace maintenance should resize, balance, and clear");
+
+        let requests = runner.requests();
+        assert_eq!(inhibitor.acquire_count(), 1);
+        assert!(
+            requests
+                .iter()
+                .any(|r| matches!(r, CmdRequest::BtrfsBalanceRaid1Soft { .. })),
+            "owed RAID1 maintenance should run"
+        );
+        assert!(!paths.pending_op_json().exists());
+    }
+
+    // Intent: post-maintenance inhibitor failure preserves the replace
+    // journal and runs no maintenance command.
+    // Why it exists: close, resize, and balance are all post-commit
+    // maintenance and must stay behind the inhibitor boundary.
+    // Scenario: replace committed, but logind refuses the recovery inhibitor.
+    #[test]
+    fn replace_post_maintenance_inhibitor_failure_preserves_journal() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let paths = StatePaths::custom(tmp.path().into());
+        let config = Config::new(MountPoint("/mnt/storage".into())).unwrap();
+        let fs = MockFs::new(&["/dev/mapper/braid-old"]);
+        let journal = replace_journal_in_phase(
+            journal::ReplacePhase::PostReplaceMaintenance,
+            true,
+            journal::ReplaceJournalSource::Live {
+                old_devid: 2,
+                old_mapper: MapperName("braid-old".into()),
+            },
+        );
+        journal::write_journal(&paths, &journal).unwrap();
+        let runner = MockRunner::default();
+        let resolver = resolver_for(&[("/dev/vda", "virtio-disk1"), ("/dev/vdc", "virtio-new")]);
+        let inhibitor = FailingInhibitor;
+        let params = recover_params_with_inhibitor(&config, &paths, None, false, &inhibitor);
+        let OpKind::Replace { source, .. } = &journal.op else {
+            unreachable!("replace_journal_in_phase returns Replace");
+        };
+
+        let err = execute_replace_post_maintenance_recovery(
+            &runner,
+            &resolver,
+            &params,
+            &journal,
+            pool_state_disk1_and_new(),
+            "new",
+            source,
+            &fs,
+            true,
+            false,
+        )
+        .unwrap_err();
+
+        assert!(
+            err.to_string()
+                .contains("could not acquire sleep inhibitor"),
+            "{err}"
+        );
+        assert!(runner.requests().is_empty());
         assert!(paths.pending_op_json().exists());
     }
 
@@ -5532,41 +7561,27 @@ mod tests {
         );
     }
 
-    /// Intent: Recover MUST resolve a credential up-front whenever the pool
-    /// is not already mounted, even if every LUKS mapper happens to be open
-    /// at probe time. The post-mount relock/remount cycle closes every
-    /// mapper and must reopen them with the same credential — so the cycle
-    /// only works if the credential was eagerly resolved before the initial
-    /// mount, NOT lazily based on `plan.to_unlock`.
+    /// Intent: Add post-balance recovery can mount an offline pool when all
+    /// recorded LUKS mappers are already open.
     ///
-    /// Why it exists: A natural-looking refactor of `resolve_credential`
-    /// (gating the read on `plan.to_unlock.is_empty()`, the way `cmd_unlock`
-    /// does) silently breaks this path. The initial plan would see
-    /// `to_unlock.is_empty()` and skip the read; recover would later try to
-    /// hand a `None` credential to `relock_and_remount` and panic. The cycle
-    /// itself works fine in production because cryptsetup close empties
-    /// `to_unlock` for the cycle's plan — but a unit test needs an
-    /// interior-mutable `StatefulMockFs` + `MapperClosingRunner` to model
-    /// the post-close world correctly. Without this test the credential-flow
-    /// regression can pass `cargo test` while leaving recover unable to
-    /// complete its cycle in production.
+    /// Why it exists: replace-specific recovery now owns the relock/remount
+    /// cycle. Add post-balance recovery should take the simpler mount-only
+    /// path, then repair pool.json, replay the owed balance, and clear the
+    /// journal without closing or reopening LUKS mappers.
     ///
-    /// Scenario: 2-disk RAID1, interrupted add of disk3, both disk1 and
-    /// disk2 LUKS mappers manually opened by an operator (`cryptsetup open`
-    /// outside braid) before recovery is invoked. The pool is NOT mounted.
-    /// Recover must (1) read the passphrase upfront, (2) reach the initial
-    /// mount with `to_unlock` empty (mount-only path), (3) run the cycle
-    /// which closes both mappers and reopens them with the same passphrase,
-    /// (4) complete recovery successfully.
+    /// Scenario: 2-disk RAID1, interrupted add post-balance journal, both
+    /// disk1 and disk2 LUKS mappers manually opened by an operator
+    /// (`cryptsetup open` outside braid) before recovery is invoked. The pool
+    /// is not mounted. Recover mounts, probes, balances, and completes.
     #[test]
-    fn recover_with_all_mappers_open_still_resolves_credential_for_cycle() {
+    fn post_add_recovery_mounts_when_all_mappers_already_open() {
         let tmp = tempfile::TempDir::new().unwrap();
         let paths = StatePaths::custom(tmp.path().into());
         let config = Config::new(MountPoint("/mnt/storage".into())).unwrap();
 
         // StatefulMockFs starts with both by-id paths AND both mapper paths.
-        // The MapperClosingRunner removes mapper paths when CryptsetupClose
-        // succeeds, modeling the post-close kernel state.
+        // Both mapper paths are already present, modeling an operator who
+        // opened LUKS manually before invoking recover.
         let fs = StatefulMockFs::new(&[
             "/dev/disk/by-id/virtio-disk1",
             "/dev/disk/by-id/virtio-disk2",
@@ -5623,79 +7638,7 @@ mod tests {
                 },
                 ok_raw_empty("mount"),
             )
-            // ── relock_and_remount cycle ────────────────────────────────
-            // 1. Umount
-            .with_output(
-                CmdRequest::Umount {
-                    mount_point: MountPoint("/mnt/storage".into()),
-                },
-                ok_raw_empty("umount"),
-            )
-            // 2. scan --forget -- pool-scoped to the membership mappers.
-            .with_output(
-                CmdRequest::BtrfsDeviceScanForget {
-                    devices: vec![
-                        "/dev/mapper/braid-disk1".into(),
-                        "/dev/mapper/braid-disk2".into(),
-                    ],
-                },
-                ok_raw_empty("btrfs device scan --forget"),
-            )
-            // 3. close each mapper. The wrapper runner removes the mapper
-            //    path from the StatefulMockFs after each successful close.
-            .with_output(
-                CmdRequest::CryptsetupClose {
-                    mapper: "braid-disk1".into(),
-                },
-                ok_raw_empty("cryptsetup close braid-disk1"),
-            )
-            .with_output(
-                CmdRequest::CryptsetupClose {
-                    mapper: "braid-disk2".into(),
-                },
-                ok_raw_empty("cryptsetup close braid-disk2"),
-            )
-            // 4. cycle re-plan: mountpoint check → not mounted (same mock as above
-            //    is reused via MockRunner's HashMap lookup)
-            // 4. cycle re-plan: probe disk1, disk2 LUKS UUIDs (same mocks reused).
-            //    NOW mapper_open=false because the close hooks removed the mapper
-            //    paths from the StatefulMockFs.
-            // 5. cycle execute: verify passphrase against both disks, then open both.
-            //    This is the LOAD-BEARING assertion: if the credential was not
-            //    eagerly resolved before the initial mount, this stdin-bearing
-            //    mock would never be called and the test would error with
-            //    MissingMock or panic in cmd_recover's `expect`.
-            .with_output_stdin(
-                CmdRequest::CryptsetupTestPassphrase {
-                    device: "/dev/disk/by-id/virtio-disk1".into(),
-                },
-                b"testpass".to_vec(),
-                ok_raw_empty("cryptsetup open --test-passphrase"),
-            )
-            .with_output_stdin(
-                CmdRequest::CryptsetupTestPassphrase {
-                    device: "/dev/disk/by-id/virtio-disk2".into(),
-                },
-                b"testpass".to_vec(),
-                ok_raw_empty("cryptsetup open --test-passphrase"),
-            )
-            .with_output_stdin(
-                CmdRequest::CryptsetupLuksOpen {
-                    device: "/dev/disk/by-id/virtio-disk1".into(),
-                    mapper: "braid-disk1".into(),
-                },
-                b"testpass".to_vec(),
-                ok_raw_empty("cryptsetup open"),
-            )
-            .with_output_stdin(
-                CmdRequest::CryptsetupLuksOpen {
-                    device: "/dev/disk/by-id/virtio-disk2".into(),
-                    mapper: "braid-disk2".into(),
-                },
-                b"testpass".to_vec(),
-                ok_raw_empty("cryptsetup open"),
-            )
-            // probe_pool after the cycle
+            // Probe pool after the initial mount.
             .with_output(
                 CmdRequest::BtrfsFilesystemShow {
                     mount_point: MountPoint("/mnt/storage".into()),
@@ -5770,13 +7713,17 @@ mod tests {
             },
         );
 
-        // If credential resolution were lazily gated on plan.to_unlock the
-        // initial plan would skip the read, the cycle would have no
-        // credential, and cmd_recover would panic on `credential.as_ref()
-        // .expect(...)` — failing the test with an unwrap-on-None message.
         result.expect(
-            "recover should resolve credential eagerly and complete the relock cycle, \
-             even though the initial plan has nothing to unlock",
+            "post-add recovery should mount with already-open mappers and finish balance replay",
+        );
+
+        let requests = runner.inner.requests();
+        assert!(
+            !requests.iter().any(|r| matches!(
+                r,
+                CmdRequest::CryptsetupClose { .. } | CmdRequest::CryptsetupLuksOpen { .. }
+            )),
+            "Add post-balance recovery must not run the replace-only relock cycle"
         );
 
         // pool.json must have been written from live pool state.
@@ -5809,8 +7756,8 @@ mod tests {
     /// probe_pool's view, so the only safe action is to fail recovery and
     /// leave the journal in place for retry.
     ///
-    /// Scenario: 2-disk RAID1 with disk3 absent (interrupted add). LUKS opens
-    /// and the first mount succeeds, but the cycle's umount returns EBUSY.
+    /// Scenario: interrupted replace. LUKS opens and the first mount succeeds,
+    /// but the replace-specific cycle's umount returns EBUSY.
     #[test]
     fn recover_remount_cycle_umount_failure_aborts_before_pool_json() {
         let tmp = tempfile::TempDir::new().unwrap();
@@ -5818,10 +7765,11 @@ mod tests {
         let config = Config::new(MountPoint("/mnt/storage".into())).unwrap();
         let fs = MockFs::new(&[
             "/dev/disk/by-id/virtio-disk1",
-            "/dev/disk/by-id/virtio-disk2",
+            "/dev/disk/by-id/virtio-new",
+            "/dev/disk/by-id/virtio-old",
         ]);
 
-        let journal = committed_two_disk_add_journal();
+        let journal = replace_journal();
         journal::write_journal(&paths, &journal).unwrap();
 
         let (mp_req, mp_out) = mountpoint_fail();
@@ -5838,10 +7786,19 @@ mod tests {
             )
             .with_output(
                 CmdRequest::CryptsetupLuksUuid {
-                    device: "/dev/disk/by-id/virtio-disk2".into(),
+                    device: "/dev/disk/by-id/virtio-new".into(),
                 },
                 cryptsetup_uuid_ok(
-                    "/dev/disk/by-id/virtio-disk2",
+                    "/dev/disk/by-id/virtio-new",
+                    "33333333-3333-3333-3333-333333333333",
+                ),
+            )
+            .with_output(
+                CmdRequest::CryptsetupLuksUuid {
+                    device: "/dev/disk/by-id/virtio-old".into(),
+                },
+                cryptsetup_uuid_ok(
+                    "/dev/disk/by-id/virtio-old",
                     "22222222-2222-2222-2222-222222222222",
                 ),
             )
@@ -5854,7 +7811,14 @@ mod tests {
             )
             .with_output_stdin(
                 CmdRequest::CryptsetupTestPassphrase {
-                    device: "/dev/disk/by-id/virtio-disk2".into(),
+                    device: "/dev/disk/by-id/virtio-new".into(),
+                },
+                b"testpass".to_vec(),
+                ok_raw_empty("cryptsetup open --test-passphrase"),
+            )
+            .with_output_stdin(
+                CmdRequest::CryptsetupTestPassphrase {
+                    device: "/dev/disk/by-id/virtio-old".into(),
                 },
                 b"testpass".to_vec(),
                 ok_raw_empty("cryptsetup open --test-passphrase"),
@@ -5869,8 +7833,16 @@ mod tests {
             )
             .with_output_stdin(
                 CmdRequest::CryptsetupLuksOpen {
-                    device: "/dev/disk/by-id/virtio-disk2".into(),
-                    mapper: "braid-disk2".into(),
+                    device: "/dev/disk/by-id/virtio-new".into(),
+                    mapper: "braid-new".into(),
+                },
+                b"testpass".to_vec(),
+                ok_raw_empty("cryptsetup open"),
+            )
+            .with_output_stdin(
+                CmdRequest::CryptsetupLuksOpen {
+                    device: "/dev/disk/by-id/virtio-old".into(),
+                    mapper: "braid-old".into(),
                 },
                 b"testpass".to_vec(),
                 ok_raw_empty("cryptsetup open"),
@@ -5880,19 +7852,21 @@ mod tests {
                 ok_raw_empty("btrfs device scan"),
             )
             .with_output(
-                CmdRequest::MountWithOptions {
-                    device: "/dev/mapper/braid-disk1".into(),
-                    mount_point: MountPoint("/mnt/storage".into()),
-                    options: vec!["degraded".to_owned()],
-                },
-                ok_raw_empty("mount"),
-            )
-            .with_output(
                 CmdRequest::Mount {
                     device: "/dev/mapper/braid-disk1".into(),
                     mount_point: MountPoint("/mnt/storage".into()),
                 },
                 ok_raw_empty("mount"),
+            )
+            .with_output(
+                CmdRequest::BtrfsReplaceStatus {
+                    mount_point: MountPoint("/mnt/storage".into()),
+                },
+                ok_raw(
+                    "btrfs replace status",
+                    "Started on 27.Feb 10:30:00, finished on 27.Feb 10:35:00, \
+                     0 write errs, 0 uncorr. read errs\n",
+                ),
             )
             // Cycle umount fails with EBUSY.
             .with_output(
@@ -5903,9 +7877,10 @@ mod tests {
             )
             .with_luks_dump_text_luks2_for(&[
                 "/dev/disk/by-id/virtio-disk1",
-                "/dev/disk/by-id/virtio-disk2",
+                "/dev/disk/by-id/virtio-new",
+                "/dev/disk/by-id/virtio-old",
             ])
-            .with_mappers_closed(&["braid-disk1", "braid-disk2"]);
+            .with_mappers_closed(&["braid-disk1", "braid-new", "braid-old"]);
         // No probe_pool / save_membership / clear_journal mocks — those must
         // not be reached.
 
@@ -7266,7 +9241,11 @@ mod tests {
         let pre = set_of(&["disk1", "disk2"]);
         let target = set_of(&["disk1"]);
         let recovered = set_of(&["disk1"]);
-        let op = OpKind::RemoveMissing { devid: 2 };
+        let op = OpKind::RemoveMissing {
+            phase: journal::RemoveMissingPhase::PoolMutation,
+            devid: 2,
+            restore_raid1_after_commit: true,
+        };
 
         assert_eq!(
             recovery_guidance(&op, &ref_set(&pre), &ref_set(&target), &ref_set(&recovered)),
@@ -7279,7 +9258,11 @@ mod tests {
         let pre = set_of(&["disk1", "disk2"]);
         let target = set_of(&["disk1"]);
         let recovered = set_of(&["disk1", "disk2"]);
-        let op = OpKind::RemoveMissing { devid: 2 };
+        let op = OpKind::RemoveMissing {
+            phase: journal::RemoveMissingPhase::PoolMutation,
+            devid: 2,
+            restore_raid1_after_commit: true,
+        };
 
         assert_eq!(
             recovery_guidance(&op, &ref_set(&pre), &ref_set(&target), &ref_set(&recovered)),
@@ -7293,9 +9276,22 @@ mod tests {
         let target = set_of(&["disk1", "new"]);
         let recovered = set_of(&["disk1", "new"]);
         let op = OpKind::Replace {
+            phase: journal::ReplacePhase::PoolMutation,
             old_name: "old".to_owned(),
             new_name: "new".to_owned(),
             new_by_id: ByIdPath("/dev/disk/by-id/x".into()),
+            new_target: journal::ReplaceJournalTarget {
+                by_id: ByIdPath("/dev/disk/by-id/x".into()),
+                mapper_name: "braid-new".into(),
+                mode: journal::ReplaceJournalMode::ExistingLuks {
+                    luks_uuid: LuksUuid("luks-new".into()),
+                },
+            },
+            source: journal::ReplaceJournalSource::Live {
+                old_devid: 2,
+                old_mapper: MapperName("braid-old".into()),
+            },
+            restore_raid1_after_commit: false,
         };
 
         assert_eq!(
@@ -7310,9 +9306,22 @@ mod tests {
         let target = set_of(&["disk1", "new"]);
         let recovered = set_of(&["disk1", "old"]);
         let op = OpKind::Replace {
+            phase: journal::ReplacePhase::PoolMutation,
             old_name: "old".to_owned(),
             new_name: "new".to_owned(),
             new_by_id: ByIdPath("/dev/disk/by-id/x".into()),
+            new_target: journal::ReplaceJournalTarget {
+                by_id: ByIdPath("/dev/disk/by-id/x".into()),
+                mapper_name: "braid-new".into(),
+                mode: journal::ReplaceJournalMode::ExistingLuks {
+                    luks_uuid: LuksUuid("luks-new".into()),
+                },
+            },
+            source: journal::ReplaceJournalSource::Live {
+                old_devid: 2,
+                old_mapper: MapperName("braid-old".into()),
+            },
+            restore_raid1_after_commit: false,
         };
 
         assert_eq!(
@@ -7371,13 +9380,70 @@ mod tests {
         journal::Journal {
             started_at: "2026-01-01T00:00:00Z".into(),
             op: OpKind::Replace {
+                phase: journal::ReplacePhase::PoolMutation,
                 old_name: "old".to_owned(),
                 new_name: "new".to_owned(),
                 new_by_id: ByIdPath("/dev/disk/by-id/virtio-new".into()),
+                new_target: journal::ReplaceJournalTarget {
+                    by_id: ByIdPath("/dev/disk/by-id/virtio-new".into()),
+                    mapper_name: "braid-new".into(),
+                    mode: journal::ReplaceJournalMode::ExistingLuks {
+                        luks_uuid: LuksUuid("luks-new".into()),
+                    },
+                },
+                source: journal::ReplaceJournalSource::Live {
+                    old_devid: 2,
+                    old_mapper: MapperName("braid-old".into()),
+                },
+                restore_raid1_after_commit: false,
             },
             pre_membership: pre,
             target_membership: target,
         }
+    }
+
+    fn replace_journal_in_phase(
+        phase: journal::ReplacePhase,
+        restore_raid1_after_commit: bool,
+        source: journal::ReplaceJournalSource,
+    ) -> journal::Journal {
+        let mut journal = replace_journal();
+        let OpKind::Replace {
+            phase: stored_phase,
+            source: stored_source,
+            restore_raid1_after_commit: stored_restore,
+            ..
+        } = &mut journal.op
+        else {
+            unreachable!("replace_journal returns Replace");
+        };
+        *stored_phase = phase;
+        *stored_source = source;
+        *stored_restore = restore_raid1_after_commit;
+        journal
+    }
+
+    fn replace_fresh_luks_journal(enroll_key_file: std::path::PathBuf) -> journal::Journal {
+        let mut journal = replace_journal();
+        let OpKind::Replace {
+            new_target,
+            restore_raid1_after_commit,
+            ..
+        } = &mut journal.op
+        else {
+            unreachable!("replace_journal returns Replace");
+        };
+        *new_target = journal::ReplaceJournalTarget {
+            by_id: ByIdPath("/dev/disk/by-id/virtio-new".into()),
+            mapper_name: "braid-new".into(),
+            mode: journal::ReplaceJournalMode::FreshLuks {
+                luks_label: "braid-new".into(),
+                luks_format_extra_opts: vec!["--label".into(), "braid-new".into()],
+                enroll_key_file: Some(enroll_key_file),
+            },
+        };
+        *restore_raid1_after_commit = false;
+        journal
     }
 
     /// btrfs filesystem show for the post-replace pool: disk1 (devid 1) + new
@@ -7642,14 +9708,6 @@ mod tests {
                 },
                 ok_raw_empty("btrfs filesystem resize"),
             )
-            // Per-op soft RAID1 balance to drain any chunks a
-            // cancelled-mid-flight balance worker left non-RAID1.
-            .with_output(
-                CmdRequest::BtrfsBalanceRaid1Soft {
-                    mount_point: MountPoint("/mnt/storage".into()),
-                },
-                ok_raw_empty("btrfs balance start"),
-            )
             // LUKS dump used by probe_config_disk to classify each by-id
             // path as a real LUKS device.
             .with_luks_dump_text_luks2_for(&[
@@ -7657,11 +9715,10 @@ mod tests {
                 "/dev/disk/by-id/virtio-old",
                 "/dev/disk/by-id/virtio-new",
             ]);
-        // Note: BtrfsBalanceStatus is NOT mocked. get_balance_report swallows
-        // MissingMock as BalanceReport::Unknown, which cleanly skips the
-        // balance-resume branch -- this test exercises both the resize
-        // replay (mocked above) and the unconditional soft-balance replay
-        // (mocked above).
+        // Note: BtrfsBalanceStatus, BtrfsBalanceResume, and
+        // BtrfsBalanceRaid1Soft are NOT mocked. This live-source replace does
+        // not owe post-commit RAID1 maintenance, so any balance replay would
+        // fail with MissingMock.
 
         // All three union mappers start closed: probe_mapper_open reports
         // inactive via MapperClosingRunner's `closed`-set fast path, so
@@ -7706,6 +9763,7 @@ mod tests {
         );
 
         result.expect("recover should succeed via the mount cycle and replay the resize");
+        let requests = runner.inner.requests();
 
         let recovered = membership::load_membership(&paths).unwrap();
         assert!(
@@ -7720,6 +9778,15 @@ mod tests {
         assert!(
             !paths.pending_op_json().exists(),
             "journal must be cleared after a successful resize replay"
+        );
+        assert!(
+            !requests.iter().any(|r| matches!(
+                r,
+                CmdRequest::BtrfsBalanceStatus { .. }
+                    | CmdRequest::BtrfsBalanceResume { .. }
+                    | CmdRequest::BtrfsBalanceRaid1Soft { .. }
+            )),
+            "live-source replace recovery must not replay unowed balance work: {requests:?}"
         );
     }
 
@@ -8626,18 +10693,15 @@ mod tests {
      * dry-run preview must not hide that offline window.
      *
      * Scenario
-     * Interrupted add with disk1 and disk2 present, disk3 absent, and
+     * Interrupted replace with disk1 and new present, old absent, and
      * --allow-degraded supplied so the initial mount plan succeeds.
      */
     #[test]
     fn plan_recover_dry_run_includes_remount_cycle_when_not_mounted() {
         let rendered = render_recover_dry_run(
-            two_disk_journal(),
-            &[
-                "/dev/disk/by-id/virtio-disk1",
-                "/dev/disk/by-id/virtio-disk2",
-            ],
-            closed_two_disk_dry_run_runner(),
+            replace_journal(),
+            &["/dev/disk/by-id/virtio-disk1", "/dev/disk/by-id/virtio-new"],
+            closed_replace_dry_run_runner(),
             true,
         );
 
@@ -8647,20 +10711,20 @@ mod tests {
         );
         assert!(
             rendered.contains(
-                "$ btrfs device scan --forget /dev/mapper/braid-disk1 /dev/mapper/braid-disk2"
+                "$ btrfs device scan --forget /dev/mapper/braid-disk1 /dev/mapper/braid-new"
             ),
             "missing pool-scoped scan --forget command: {rendered:?}",
         );
         assert!(
             rendered.contains("close LUKS mapper braid-disk1 (recover remount cycle)")
-                && rendered.contains("close LUKS mapper braid-disk2 (recover remount cycle)"),
+                && rendered.contains("close LUKS mapper braid-new (recover remount cycle)"),
             "missing cycle close steps: {rendered:?}",
         );
         assert!(
             rendered.contains(
                 "LUKS open /dev/disk/by-id/virtio-disk1 → braid-disk1 (recover remount cycle)"
             ) && rendered.contains(
-                "LUKS open /dev/disk/by-id/virtio-disk2 → braid-disk2 (recover remount cycle)"
+                "LUKS open /dev/disk/by-id/virtio-new → braid-new (recover remount cycle)"
             ),
             "missing cycle reopen steps: {rendered:?}",
         );
@@ -8800,35 +10864,35 @@ mod tests {
      * damaged or absent disks whose mapper is still live.
      *
      * Scenario
-     * Interrupted add where disk3's by-id path is absent but
-     * /dev/mapper/braid-disk3 exists at recover planning time.
+     * Interrupted replace where old's by-id path is absent but
+     * /dev/mapper/braid-old exists at recover planning time.
      */
     #[test]
     fn plan_recover_dry_run_cycle_close_set_includes_absent_open_mapper() {
         let rendered = render_recover_dry_run(
-            two_disk_journal(),
+            replace_journal(),
             &[
                 "/dev/disk/by-id/virtio-disk1",
-                "/dev/disk/by-id/virtio-disk2",
-                "/dev/mapper/braid-disk3",
+                "/dev/disk/by-id/virtio-new",
+                "/dev/mapper/braid-old",
             ],
-            closed_two_disk_dry_run_runner(),
+            closed_replace_dry_run_runner(),
             true,
         );
 
         assert!(
             rendered.contains(
-                "$ btrfs device scan --forget /dev/mapper/braid-disk1 /dev/mapper/braid-disk2 /dev/mapper/braid-disk3"
+                "$ btrfs device scan --forget /dev/mapper/braid-disk1 /dev/mapper/braid-new /dev/mapper/braid-old"
             ),
-            "scan --forget should include absent-but-open disk3 mapper: {rendered:?}",
+            "scan --forget should include absent-but-open old mapper: {rendered:?}",
         );
         assert!(
-            rendered.contains("close LUKS mapper braid-disk3 (recover remount cycle)"),
-            "close set should include disk3 mapper: {rendered:?}",
+            rendered.contains("close LUKS mapper braid-old (recover remount cycle)"),
+            "close set should include old mapper: {rendered:?}",
         );
         assert!(
-            !rendered.contains("LUKS open /dev/disk/by-id/virtio-disk3"),
-            "reopen set should not include absent disk3: {rendered:?}",
+            !rendered.contains("LUKS open /dev/disk/by-id/virtio-old"),
+            "reopen set should not include absent old disk: {rendered:?}",
         );
     }
 
@@ -8842,7 +10906,7 @@ mod tests {
      * incorrectly preview reopening a disk whose LUKS header cannot be used.
      *
      * Scenario
-     * Interrupted add where disk3's by-id path and mapper path both exist,
+     * Interrupted replace where old's by-id path and mapper path both exist,
      * but `cryptsetup luksUUID` fails, `isLuks` succeeds, and `luksDump`
      * fails, producing a damaged-header probe event.
      */
@@ -8851,48 +10915,59 @@ mod tests {
         let runner = closed_two_disk_dry_run_runner()
             .with_output(
                 CmdRequest::CryptsetupLuksUuid {
-                    device: "/dev/disk/by-id/virtio-disk3".into(),
+                    device: "/dev/disk/by-id/virtio-old".into(),
                 },
                 err_raw("cryptsetup luksUUID", 1, "LUKS metadata corrupted"),
             )
             .with_output(
                 CmdRequest::CryptsetupIsLuks {
-                    device: "/dev/disk/by-id/virtio-disk3".into(),
+                    device: "/dev/disk/by-id/virtio-old".into(),
                 },
                 ok_raw_empty("cryptsetup isLuks"),
             )
             .with_output(
                 CmdRequest::CryptsetupLuksDumpText {
-                    device: "/dev/disk/by-id/virtio-disk3".into(),
+                    device: "/dev/disk/by-id/virtio-old".into(),
                 },
                 err_raw("cryptsetup luksDump", 1, "LUKS2 metadata corrupted"),
-            );
+            )
+            .with_output(
+                CmdRequest::CryptsetupLuksUuid {
+                    device: "/dev/disk/by-id/virtio-new".into(),
+                },
+                cryptsetup_uuid_ok(
+                    "/dev/disk/by-id/virtio-new",
+                    "33333333-3333-3333-3333-333333333333",
+                ),
+            )
+            .with_luks_dump_text_luks2("/dev/disk/by-id/virtio-new")
+            .with_mapper_closed("braid-new");
 
         let rendered = render_recover_dry_run(
-            two_disk_journal(),
+            replace_journal(),
             &[
                 "/dev/disk/by-id/virtio-disk1",
-                "/dev/disk/by-id/virtio-disk2",
-                "/dev/disk/by-id/virtio-disk3",
-                "/dev/mapper/braid-disk3",
+                "/dev/disk/by-id/virtio-new",
+                "/dev/disk/by-id/virtio-old",
+                "/dev/mapper/braid-old",
             ],
             runner,
             true,
         );
 
         assert!(
-            rendered.contains("[skip] disk disk3: LUKS header metadata damaged"),
-            "test setup should classify disk3 as damaged, got: {rendered:?}",
+            rendered.contains("[skip] disk old: LUKS header metadata damaged"),
+            "test setup should classify old as damaged, got: {rendered:?}",
         );
         assert!(
-            rendered.contains("close LUKS mapper braid-disk3 (recover remount cycle)"),
-            "close set should include damaged disk3 mapper: {rendered:?}",
+            rendered.contains("close LUKS mapper braid-old (recover remount cycle)"),
+            "close set should include damaged old mapper: {rendered:?}",
         );
         assert!(
             !rendered.contains(
-                "LUKS open /dev/disk/by-id/virtio-disk3 → braid-disk3 (recover remount cycle)"
+                "LUKS open /dev/disk/by-id/virtio-old → braid-old (recover remount cycle)"
             ),
-            "reopen set should not include damaged disk3: {rendered:?}",
+            "reopen set should not include damaged old disk: {rendered:?}",
         );
     }
 
@@ -8906,8 +10981,8 @@ mod tests {
      * union disk. Dry-run must mirror the re-planned cycle device.
      *
      * Scenario
-     * disk1 mapper is already open, disk2 is closed, disk3 is absent. The
-     * initial mount uses braid-disk2, while the cycle mount uses braid-disk1.
+     * disk1 mapper is already open, new is closed, old is absent. The
+     * initial mount uses braid-new, while the cycle mount uses braid-disk1.
      */
     #[test]
     fn plan_recover_dry_run_cycle_mount_uses_first_reopen_not_initial_mount_device() {
@@ -8925,40 +11000,40 @@ mod tests {
             )
             .with_output(
                 CmdRequest::CryptsetupLuksUuid {
-                    device: "/dev/disk/by-id/virtio-disk2".into(),
+                    device: "/dev/disk/by-id/virtio-new".into(),
                 },
                 cryptsetup_uuid_ok(
-                    "/dev/disk/by-id/virtio-disk2",
-                    "22222222-2222-2222-2222-222222222222",
+                    "/dev/disk/by-id/virtio-new",
+                    "33333333-3333-3333-3333-333333333333",
                 ),
             )
             .with_luks_dump_text_luks2_for(&[
                 "/dev/disk/by-id/virtio-disk1",
-                "/dev/disk/by-id/virtio-disk2",
+                "/dev/disk/by-id/virtio-new",
             ])
             .with_mapper_open(
                 "braid-disk1",
                 "/dev/vda",
                 "11111111-1111-1111-1111-111111111111",
             )
-            .with_mapper_closed("braid-disk2");
+            .with_mapper_closed("braid-new");
 
         let rendered = render_recover_dry_run(
-            two_disk_journal(),
+            replace_journal(),
             &[
                 "/dev/disk/by-id/virtio-disk1",
-                "/dev/disk/by-id/virtio-disk2",
+                "/dev/disk/by-id/virtio-new",
                 "/dev/mapper/braid-disk1",
             ],
             runner,
             true,
         );
 
-        let initial = "$ mount -o 'noatime,skip_balance,subvolid=5,degraded' /dev/mapper/braid-disk2 /mnt/storage";
+        let initial = "$ mount -o 'noatime,skip_balance,subvolid=5,degraded' /dev/mapper/braid-new /mnt/storage";
         let cycle = "$ mount -o 'noatime,skip_balance,subvolid=5,degraded' /dev/mapper/braid-disk1 /mnt/storage";
         let initial_pos = rendered
             .find(initial)
-            .unwrap_or_else(|| panic!("initial mount should use braid-disk2: {rendered:?}"));
+            .unwrap_or_else(|| panic!("initial mount should use braid-new: {rendered:?}"));
         let cycle_pos = rendered
             .find(cycle)
             .unwrap_or_else(|| panic!("cycle mount should use braid-disk1: {rendered:?}"));
@@ -9046,14 +11121,13 @@ mod tests {
     }
 
     /* Intent
-     * Verify replace dry-run previews post-mutation resize and balance
-     * replay as conditional placeholders without command lines.
+     * Verify live-source replace dry-run previews post-mutation resize but
+     * omits RAID1 balance replay when no degraded repair is owed.
      *
      * Why it exists
      * Execution resolves the replacement disk devid from the post-mount live
-     * pool, skips resize if replacement did not commit, and conditionally
-     * resumes or replays balance work based on post-mount probes. Dry-run
-     * cannot know that runtime state yet.
+     * pool, skips resize if replacement did not commit, and gates balance
+     * replay on the journaled restore_raid1_after_commit flag.
      *
      * Scenario
      * Interrupted replace where disk1 and new are present and old is absent.
@@ -9078,16 +11152,9 @@ mod tests {
             "conditional resize placeholder must not render a command: {rendered:?}",
         );
         assert!(
-            rendered.contains("btrfs balance resume /mnt/storage (skipped if no paused balance)")
-                && rendered.contains(
-                    "btrfs balance -dconvert=raid1,soft -mconvert=raid1,soft /mnt/storage (skipped if pool has <2 devices)"
-                ),
-            "replace preview should include balance replay placeholders: {rendered:?}",
-        );
-        assert!(
             !rendered.contains("$ btrfs balance resume")
-                && !rendered.contains("$ btrfs balance start --enqueue -dconvert=raid1,soft"),
-            "conditional balance placeholders must not render commands: {rendered:?}",
+                && !rendered.contains("-dconvert=raid1,soft"),
+            "live-source replace preview must not include RAID1 balance replay: {rendered:?}",
         );
     }
 

@@ -412,6 +412,11 @@
               braid = linuxCrane.braid;
             }
           );
+          recover-remove-missing-completed = pkgs.testers.nixosTest (
+            import ./tests/cli/recover-remove-missing-completed.nix {
+              braid = linuxCrane.braid;
+            }
+          );
           recover-bootstrap-crash = pkgs.testers.nixosTest (
             import ./tests/cli/recover-bootstrap-crash.nix {
               braid = linuxCrane.braid;

@@ -1,7 +1,7 @@
 use crate::membership::PoolMembership;
 use crate::state_io::atomic_write;
 use crate::state_paths::StatePaths;
-use crate::types::{ByIdPath, LuksUuid};
+use crate::types::{ByIdPath, LuksUuid, MapperName};
 use crate::util::now_iso;
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
@@ -48,6 +48,48 @@ pub enum AddJournalMode {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub enum RemoveMissingPhase {
+    PoolMutation,
+    PostRemoveMissingMaintenance,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub enum ReplacePhase {
+    PoolMutation,
+    PostReplaceMaintenance,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub enum ReplaceJournalSource {
+    Live {
+        old_devid: u64,
+        old_mapper: MapperName,
+    },
+    Missing {
+        old_devid: u64,
+    },
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ReplaceJournalTarget {
+    pub by_id: ByIdPath,
+    pub mapper_name: String,
+    pub mode: ReplaceJournalMode,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub enum ReplaceJournalMode {
+    FreshLuks {
+        luks_label: String,
+        luks_format_extra_opts: Vec<String>,
+        enroll_key_file: Option<PathBuf>,
+    },
+    ExistingLuks {
+        luks_uuid: LuksUuid,
+    },
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(tag = "op")]
 pub enum OpKind {
     Add {
@@ -58,12 +100,18 @@ pub enum OpKind {
         name: String,
     },
     RemoveMissing {
+        phase: RemoveMissingPhase,
         devid: u64,
+        restore_raid1_after_commit: bool,
     },
     Replace {
+        phase: ReplacePhase,
         old_name: String,
         new_name: String,
         new_by_id: ByIdPath,
+        new_target: ReplaceJournalTarget,
+        source: ReplaceJournalSource,
+        restore_raid1_after_commit: bool,
     },
 }
 
@@ -133,6 +181,25 @@ pub fn build_journal(
         pre_membership,
         target_membership,
     }
+}
+
+/// Rewrite the pending-operation journal after a durable phase transition.
+///
+/// The caller supplies the next op shape and may replace target_membership
+/// with a committed, freshly-enriched membership snapshot.
+pub fn rewrite_journal(
+    paths: &StatePaths,
+    journal: &Journal,
+    op: OpKind,
+    target_membership: Option<PoolMembership>,
+) -> Result<Journal, JournalError> {
+    let mut next = journal.clone();
+    next.op = op;
+    if let Some(target_membership) = target_membership {
+        next.target_membership = target_membership;
+    }
+    write_journal(paths, &next)?;
+    Ok(next)
 }
 
 #[cfg(test)]
@@ -260,9 +327,22 @@ mod tests {
             sample_membership(),
             sample_membership(),
             OpKind::Replace {
+                phase: ReplacePhase::PoolMutation,
                 old_name: "disk1".into(),
                 new_name: "disk2".into(),
                 new_by_id: ByIdPath("/dev/disk/by-id/ata-NEW".into()),
+                new_target: ReplaceJournalTarget {
+                    by_id: ByIdPath("/dev/disk/by-id/ata-NEW".into()),
+                    mapper_name: "braid-disk2".into(),
+                    mode: ReplaceJournalMode::ExistingLuks {
+                        luks_uuid: LuksUuid("luks-new".into()),
+                    },
+                },
+                source: ReplaceJournalSource::Live {
+                    old_devid: 1,
+                    old_mapper: MapperName("braid-disk1".into()),
+                },
+                restore_raid1_after_commit: false,
             },
         );
         write_journal(&paths, &journal).unwrap();
@@ -277,7 +357,11 @@ mod tests {
         let journal = build_journal(
             sample_membership(),
             PoolMembership::empty(),
-            OpKind::RemoveMissing { devid: 3 },
+            OpKind::RemoveMissing {
+                phase: RemoveMissingPhase::PoolMutation,
+                devid: 3,
+                restore_raid1_after_commit: true,
+            },
         );
         write_journal(&paths, &journal).unwrap();
         let loaded = load_journal(&paths).unwrap().unwrap();
@@ -314,5 +398,138 @@ mod tests {
         write_journal(&paths, &journal).unwrap();
         let loaded = load_journal(&paths).unwrap().unwrap();
         assert_eq!(loaded.op, journal.op);
+    }
+
+    #[test]
+    fn rewrite_journal_preserves_context_and_replaces_op() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let paths = StatePaths::custom(tmp.path().into());
+        let journal = sample_journal();
+        write_journal(&paths, &journal).unwrap();
+
+        let mut committed = sample_membership();
+        committed.disks.insert(
+            "disk2".into(),
+            DiskMember::from_by_id(ByIdPath("/dev/disk/by-id/ata-Y".into())),
+        );
+        let next = rewrite_journal(
+            &paths,
+            &journal,
+            OpKind::Add {
+                phase: AddPhase::PostAddBalanceRaid1,
+                targets: match &journal.op {
+                    OpKind::Add { targets, .. } => targets.clone(),
+                    _ => unreachable!(),
+                },
+            },
+            Some(committed.clone()),
+        )
+        .unwrap();
+
+        assert_eq!(next.started_at, journal.started_at);
+        assert_eq!(next.pre_membership, journal.pre_membership);
+        assert_eq!(next.target_membership, committed);
+        let loaded = load_journal(&paths).unwrap().unwrap();
+        assert_eq!(loaded, next);
+    }
+
+    #[test]
+    fn rewrite_journal_preserves_context_for_replace_phase() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let paths = StatePaths::custom(tmp.path().into());
+        let journal = build_journal(
+            sample_membership(),
+            sample_membership(),
+            OpKind::Replace {
+                phase: ReplacePhase::PoolMutation,
+                old_name: "disk1".into(),
+                new_name: "disk2".into(),
+                new_by_id: ByIdPath("/dev/disk/by-id/ata-Y".into()),
+                new_target: ReplaceJournalTarget {
+                    by_id: ByIdPath("/dev/disk/by-id/ata-Y".into()),
+                    mapper_name: "braid-disk2".into(),
+                    mode: ReplaceJournalMode::ExistingLuks {
+                        luks_uuid: LuksUuid("luks-2".into()),
+                    },
+                },
+                source: ReplaceJournalSource::Live {
+                    old_devid: 1,
+                    old_mapper: MapperName("braid-disk1".into()),
+                },
+                restore_raid1_after_commit: true,
+            },
+        );
+        write_journal(&paths, &journal).unwrap();
+        let mut committed = sample_membership();
+        committed.disks.remove("disk1");
+        committed.disks.insert(
+            "disk2".into(),
+            DiskMember::from_by_id(ByIdPath("/dev/disk/by-id/ata-Y".into())),
+        );
+
+        let next = rewrite_journal(
+            &paths,
+            &journal,
+            OpKind::Replace {
+                phase: ReplacePhase::PostReplaceMaintenance,
+                old_name: "disk1".into(),
+                new_name: "disk2".into(),
+                new_by_id: ByIdPath("/dev/disk/by-id/ata-Y".into()),
+                new_target: ReplaceJournalTarget {
+                    by_id: ByIdPath("/dev/disk/by-id/ata-Y".into()),
+                    mapper_name: "braid-disk2".into(),
+                    mode: ReplaceJournalMode::ExistingLuks {
+                        luks_uuid: LuksUuid("luks-2".into()),
+                    },
+                },
+                source: ReplaceJournalSource::Live {
+                    old_devid: 1,
+                    old_mapper: MapperName("braid-disk1".into()),
+                },
+                restore_raid1_after_commit: true,
+            },
+            Some(committed.clone()),
+        )
+        .unwrap();
+
+        assert_eq!(next.started_at, journal.started_at);
+        assert_eq!(next.pre_membership, journal.pre_membership);
+        assert_eq!(next.target_membership, committed);
+        let loaded = load_journal(&paths).unwrap().unwrap();
+        assert_eq!(loaded, next);
+    }
+
+    #[test]
+    fn rewrite_journal_preserves_context_for_remove_missing_phase() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let paths = StatePaths::custom(tmp.path().into());
+        let journal = build_journal(
+            sample_membership(),
+            PoolMembership::empty(),
+            OpKind::RemoveMissing {
+                phase: RemoveMissingPhase::PoolMutation,
+                devid: 2,
+                restore_raid1_after_commit: true,
+            },
+        );
+        write_journal(&paths, &journal).unwrap();
+
+        let next = rewrite_journal(
+            &paths,
+            &journal,
+            OpKind::RemoveMissing {
+                phase: RemoveMissingPhase::PostRemoveMissingMaintenance,
+                devid: 2,
+                restore_raid1_after_commit: true,
+            },
+            None,
+        )
+        .unwrap();
+
+        assert_eq!(next.started_at, journal.started_at);
+        assert_eq!(next.pre_membership, journal.pre_membership);
+        assert_eq!(next.target_membership, journal.target_membership);
+        let loaded = load_journal(&paths).unwrap().unwrap();
+        assert_eq!(loaded, next);
     }
 }

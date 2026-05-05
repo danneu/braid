@@ -176,11 +176,15 @@ impl RemoveMissingPlan {
         // Build journal before btrfs operation.
         let mut target_membership = pre_membership.clone();
         target_membership.disks.remove(&name_to_remove);
+        let restore_raid1_after_commit =
+            self.will_clear_last_missing && self.remaining_present >= 2;
         let journal = journal::build_journal(
             pre_membership,
             target_membership.clone(),
             journal::OpKind::RemoveMissing {
+                phase: journal::RemoveMissingPhase::PoolMutation,
                 devid: resolved_devid,
+                restore_raid1_after_commit,
             },
         );
         journal::write_journal(params.paths, &journal)
@@ -220,14 +224,32 @@ impl RemoveMissingPlan {
             RemoveMissingError::Validation(format!("failed to persist pool membership: {e}"))
         })?;
 
-        crate::pool::maybe_restore_raid1(
-            runner,
-            fs,
-            &self.mount_point,
-            self.missing_count,
-            params.progress,
+        let post_journal = journal::rewrite_journal(
+            params.paths,
+            &journal,
+            journal::OpKind::RemoveMissing {
+                phase: journal::RemoveMissingPhase::PostRemoveMissingMaintenance,
+                devid: resolved_devid,
+                restore_raid1_after_commit,
+            },
+            None,
         )
-        .map_err(RemoveMissingError::Pool)?;
+        .map_err(|e| RemoveMissingError::Validation(e.to_string()))?;
+
+        if let journal::OpKind::RemoveMissing {
+            restore_raid1_after_commit: true,
+            ..
+        } = post_journal.op
+        {
+            crate::pool::maybe_restore_raid1(
+                runner,
+                fs,
+                &self.mount_point,
+                self.missing_count,
+                params.progress,
+            )
+            .map_err(RemoveMissingError::Pool)?;
+        }
 
         // Maintenance complete -- safe to clear the journal.
         journal::clear_journal(params.paths)
@@ -1784,6 +1806,20 @@ mod tests {
         assert!(
             journal::load_journal(&state_paths).unwrap().is_some(),
             "pending-op.json must survive error exit so braid recover can reconcile"
+        );
+        let journal = journal::load_journal(&state_paths)
+            .unwrap()
+            .expect("journal should remain after post-remove maintenance failure");
+        assert!(
+            matches!(
+                journal.op,
+                journal::OpKind::RemoveMissing {
+                    phase: journal::RemoveMissingPhase::PostRemoveMissingMaintenance,
+                    ..
+                }
+            ),
+            "journal should advance after btrfs device remove commits: {:?}",
+            journal.op
         );
         // Membership commits at btrfs device remove; pool.json must reflect
         // the removed missing disk even when the post-remove soft balance
