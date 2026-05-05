@@ -132,6 +132,7 @@ pub enum ViewMode {
 pub struct Model {
     pub running: bool,
     pub mode: ViewMode,
+    pub help_return_mode: ViewMode,
     pub mount_point: MountPoint,
     pub tab: Tab,
     pub subtab_index: usize,
@@ -154,6 +155,7 @@ impl Model {
         let model = Self {
             running: true,
             mode: ViewMode::Normal,
+            help_return_mode: ViewMode::Normal,
             mount_point,
             tab: Tab::Filesystem,
             subtab_index: 0,
@@ -189,6 +191,7 @@ impl Model {
         Self {
             running: true,
             mode: ViewMode::Normal,
+            help_return_mode: ViewMode::Normal,
             mount_point: MountPoint(mount_point.to_owned()),
             tab,
             subtab_index: 0,

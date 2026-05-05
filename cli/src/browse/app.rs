@@ -33,8 +33,11 @@ pub fn update(model: &mut Model, msg: Message) -> Vec<Effect> {
         }
         Message::ToggleHelp => {
             model.mode = match model.mode {
-                ViewMode::Help => ViewMode::Normal,
-                _ => ViewMode::Help,
+                ViewMode::Help => model.help_return_mode,
+                other => {
+                    model.help_return_mode = other;
+                    ViewMode::Help
+                }
             };
             vec![]
         }
@@ -134,9 +137,11 @@ pub fn update(model: &mut Model, msg: Message) -> Vec<Effect> {
                     model.mode = ViewMode::Normal;
                     model.output = model.subvol_list_output.clone();
                     model.scroll_offset = 0;
+                    model.command_gen += 1;
+                    model.loading = false;
                 }
                 ViewMode::Help => {
-                    model.mode = ViewMode::Normal;
+                    model.mode = model.help_return_mode;
                 }
                 ViewMode::Normal => {}
             }
@@ -337,6 +342,106 @@ mod tests {
         assert_eq!(model.mode, ViewMode::Normal);
         assert_eq!(model.output, vec!["list line"]);
         assert!(effects.is_empty());
+    }
+
+    // Intent: a `btrfs subvolume show` response that arrives after Back is
+    // dropped instead of clobbering the restored list view.
+    //
+    // Why it exists: Back used to leave `command_gen` and `loading` untouched,
+    // so the in-flight detail command's response replaced the restored list
+    // output and ran the list parser against `subvolume show` text, clearing
+    // `model.subvolumes` and making the table unusable until reload.
+    //
+    // Scenario: user drills into a subvolume, presses Esc before
+    // `btrfs subvolume show` returns, then the response lands.
+    #[test]
+    fn back_discards_in_flight_subvol_detail_command() {
+        let mut model = Model::new_demo(
+            "/mnt/storage",
+            Tab::Subvolumes,
+            vec!["ID 256 gen 10 top level 5 path data".into()],
+        );
+        model.subvolumes = vec![crate::parse::types::BtrfsSubvolume {
+            id: 256,
+            generation: 10,
+            top_level: 5,
+            path: "data".into(),
+        }];
+
+        let _ = update(&mut model, Message::Select);
+        let detail_gen = model.command_gen;
+        let _ = update(&mut model, Message::Back);
+
+        let stale_show_stdout = "\tName:\t\t\tdata\n\tUUID:\t\t\t...\n\tParent UUID:\t\t-\n";
+        let _ = update(
+            &mut model,
+            Message::CommandFinished {
+                raw: RawCommandOutput {
+                    cmd: "btrfs subvolume show /mnt/storage/data".into(),
+                    stdout: stale_show_stdout.into(),
+                    stderr: String::new(),
+                    exit_status: 0,
+                },
+                generation: detail_gen,
+            },
+        );
+
+        assert_eq!(model.mode, ViewMode::Normal);
+        assert_eq!(
+            model.output,
+            vec!["ID 256 gen 10 top level 5 path data".to_string()]
+        );
+        assert_eq!(model.subvolumes.len(), 1);
+        assert!(!model.loading);
+    }
+
+    // Intent: opening and closing Help while in SubvolDetail returns to
+    // SubvolDetail, not Normal.
+    //
+    // Why it exists: ToggleHelp used to flip Help to Normal unconditionally, so
+    // `Select -> ? -> ?` leaked into Normal mode while a detail command was
+    // still in flight. The late response then fed `subvolume show` text into
+    // the list parser and cleared the table.
+    //
+    // Scenario: user drills into a subvolume, opens and closes Help before
+    // `btrfs subvolume show` returns, then the response lands.
+    #[test]
+    fn help_round_trip_preserves_subvol_detail() {
+        let mut model = Model::new_demo(
+            "/mnt/storage",
+            Tab::Subvolumes,
+            vec!["ID 256 gen 10 top level 5 path data".into()],
+        );
+        model.subvolumes = vec![crate::parse::types::BtrfsSubvolume {
+            id: 256,
+            generation: 10,
+            top_level: 5,
+            path: "data".into(),
+        }];
+
+        let _ = update(&mut model, Message::Select);
+        let detail_gen = model.command_gen;
+        let _ = update(&mut model, Message::ToggleHelp);
+        let _ = update(&mut model, Message::ToggleHelp);
+
+        assert_eq!(model.mode, ViewMode::SubvolDetail);
+
+        let stale_show_stdout = "\tName:\t\t\tdata\n\tUUID:\t\t\t...\n\tParent UUID:\t\t-\n";
+        let _ = update(
+            &mut model,
+            Message::CommandFinished {
+                raw: RawCommandOutput {
+                    cmd: "btrfs subvolume show /mnt/storage/data".into(),
+                    stdout: stale_show_stdout.into(),
+                    stderr: String::new(),
+                    exit_status: 0,
+                },
+                generation: detail_gen,
+            },
+        );
+
+        assert_eq!(model.subvolumes.len(), 1);
+        assert_eq!(model.mode, ViewMode::SubvolDetail);
     }
 
     /*
