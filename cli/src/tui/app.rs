@@ -245,8 +245,8 @@ pub fn update(model: &mut Model, msg: Message) -> Vec<Effect> {
 mod tests {
     use super::*;
     use crate::config::{FanControl as FanControlCfg, Pwm};
+    use crate::tui::demo::{sample_disk_names, sample_pool};
     use crate::tui::model::{DaemonStatus, FanSnapshot};
-    use crate::tui::view::tests::{sample_disk_names, sample_pool};
 
     fn is_probe_fan(e: &Effect) -> bool {
         matches!(e, Effect::ProbeFan { .. })

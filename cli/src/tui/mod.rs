@@ -1,4 +1,5 @@
 mod app;
+mod demo;
 mod effect;
 mod event;
 mod keymap;
@@ -10,24 +11,18 @@ use std::collections::HashMap;
 use std::io;
 use std::path::Path;
 use std::sync::mpsc;
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 use app::update;
-use effect::execute_effect;
+use effect::{Effect, execute_effect};
 use event::InputHandler;
-use model::{DiskLuksInfo, DiskUsage, Model, PoolState, PoolStatus};
+use model::{Model, PoolStatus};
 use view::view;
 
 use crate::config::config_read;
 use crate::luks;
 use crate::membership;
-use crate::parse::types::{
-    BtrfsBgType, BtrfsDfEntry, BtrfsProfile, DeviceAllocation, ScrubState, ScrubTimestamp,
-    SmartHealth,
-};
 use crate::state_paths::StatePaths;
-use crate::status::DiskErrors;
-use crate::types::MountPoint;
 
 pub fn run(config_path: &Path, paths: &StatePaths) -> io::Result<()> {
     crate::util::require_tty("tui")?;
@@ -35,15 +30,13 @@ pub fn run(config_path: &Path, paths: &StatePaths) -> io::Result<()> {
     let membership =
         membership::load_membership(paths).map_err(|e| io::Error::other(e.to_string()))?;
     let advisories = luks::header_backup_advisories(paths);
-    let mut terminal = ratatui::init();
-    let (_input, cmd_tx, rx) = InputHandler::new();
     let disk_names: Vec<String> = membership.disks.keys().cloned().collect();
     let disk_by_id: HashMap<String, String> = membership
         .disks
         .iter()
         .map(|(k, m)| (k.clone(), m.by_id.to_string()))
         .collect();
-    let (mut model, init_effects) = Model::new(
+    let (model, init_effects) = Model::new(
         disk_names,
         disk_by_id,
         config.mount_point().0.clone(),
@@ -52,214 +45,24 @@ pub fn run(config_path: &Path, paths: &StatePaths) -> io::Result<()> {
         advisories,
         paths.clone(),
     );
-    for effect in init_effects {
-        execute_effect(effect, &cmd_tx);
-    }
-    let result = run_loop(&mut terminal, &mut model, &rx, &cmd_tx);
-    ratatui::restore();
-    result
+    run_with_model(model, init_effects)
 }
 
 pub fn run_demo() -> io::Result<()> {
     crate::util::require_tty("tui")?;
-    let disk_names = vec![
-        "toshiba".to_owned(),
-        "ironwolf".to_owned(),
-        "wdc".to_owned(),
-    ];
-    let disk_usage = HashMap::from([
-        (
-            "toshiba".to_owned(),
-            DiskUsage {
-                size: 6_001_175_126_016,
-                allocations: vec![
-                    DeviceAllocation {
-                        alloc_type: "Data".into(),
-                        profile: "RAID1".into(),
-                        bytes: 1_483_734_958_080,
-                    },
-                    DeviceAllocation {
-                        alloc_type: "Metadata".into(),
-                        profile: "DUP".into(),
-                        bytes: 1_610_612_736,
-                    },
-                    DeviceAllocation {
-                        alloc_type: "System".into(),
-                        profile: "DUP".into(),
-                        bytes: 16_777_216,
-                    },
-                ],
-                unallocated: 4_515_816_777_984,
-            },
-        ),
-        (
-            "ironwolf".to_owned(),
-            DiskUsage {
-                size: 6_001_175_126_016,
-                allocations: vec![
-                    DeviceAllocation {
-                        alloc_type: "Data".into(),
-                        profile: "RAID1".into(),
-                        bytes: 1_483_734_958_080,
-                    },
-                    DeviceAllocation {
-                        alloc_type: "Metadata".into(),
-                        profile: "DUP".into(),
-                        bytes: 1_610_612_736,
-                    },
-                    DeviceAllocation {
-                        alloc_type: "System".into(),
-                        profile: "DUP".into(),
-                        bytes: 16_777_216,
-                    },
-                ],
-                unallocated: 4_515_816_777_984,
-            },
-        ),
-        (
-            "wdc".to_owned(),
-            DiskUsage {
-                size: 4_000_787_030_016,
-                allocations: vec![
-                    DeviceAllocation {
-                        alloc_type: "Data".into(),
-                        profile: "RAID1".into(),
-                        bytes: 824_633_720_832,
-                    },
-                    DeviceAllocation {
-                        alloc_type: "Metadata".into(),
-                        profile: "DUP".into(),
-                        bytes: 1_073_741_824,
-                    },
-                    DeviceAllocation {
-                        alloc_type: "System".into(),
-                        profile: "DUP".into(),
-                        bytes: 16_777_216,
-                    },
-                ],
-                unallocated: 3_175_062_790_144,
-            },
-        ),
-    ]);
-    let smart_health = HashMap::from([
-        ("toshiba".to_owned(), SmartHealth::Healthy),
-        ("ironwolf".to_owned(), SmartHealth::Degraded),
-        ("wdc".to_owned(), SmartHealth::Unknown),
-    ]);
-    let luks_info = HashMap::from([
-        (
-            "toshiba".to_owned(),
-            DiskLuksInfo {
-                cipher: "aes-xts-plain64".to_owned(),
-                key_size_bits: 512,
-                keyslot_count: 1,
-            },
-        ),
-        (
-            "ironwolf".to_owned(),
-            DiskLuksInfo {
-                cipher: "aes-xts-plain64".to_owned(),
-                key_size_bits: 512,
-                keyslot_count: 1,
-            },
-        ),
-        (
-            "wdc".to_owned(),
-            DiskLuksInfo {
-                cipher: "aes-xts-plain64".to_owned(),
-                key_size_bits: 512,
-                keyslot_count: 1,
-            },
-        ),
-    ]);
-    let disk_transport = HashMap::from([
-        ("toshiba".to_owned(), "sata".to_owned()),
-        ("ironwolf".to_owned(), "sata".to_owned()),
-        ("wdc".to_owned(), "usb".to_owned()),
-    ]);
-    let pool = PoolState {
-        mount_point: MountPoint("/mnt/storage".to_owned()),
-        df_entries: vec![
-            BtrfsDfEntry {
-                bg_type: BtrfsBgType::Data,
-                bg_profile: BtrfsProfile::Raid1,
-                bg_used: 2_308_094_370_816,
-                bg_total: 5_937_955_045_376,
-            },
-            BtrfsDfEntry {
-                bg_type: BtrfsBgType::Metadata,
-                bg_profile: BtrfsProfile::Raid1,
-                bg_used: 1_610_612_736,
-                bg_total: 2_147_483_648,
-            },
-            BtrfsDfEntry {
-                bg_type: BtrfsBgType::System,
-                bg_profile: BtrfsProfile::Raid1,
-                bg_used: 16_384,
-                bg_total: 16_777_216,
-            },
-            BtrfsDfEntry {
-                bg_type: BtrfsBgType::GlobalReserve,
-                bg_profile: BtrfsProfile::Single,
-                bg_used: 0,
-                bg_total: 5_767_168,
-            },
-        ],
-        disk_usage,
-        disk_transport,
-        smart_health,
-        disk_temperature_readings: HashMap::new(),
-        luks_info,
-        device_errors: HashMap::from([
-            (
-                "toshiba".to_owned(),
-                DiskErrors {
-                    read: 0,
-                    write: 0,
-                    flush: 0,
-                    corruption: 0,
-                    generation: 0,
-                },
-            ),
-            (
-                "ironwolf".to_owned(),
-                DiskErrors {
-                    read: 3,
-                    write: 0,
-                    flush: 0,
-                    corruption: 0,
-                    generation: 0,
-                },
-            ),
-            (
-                "wdc".to_owned(),
-                DiskErrors {
-                    read: 0,
-                    write: 0,
-                    flush: 0,
-                    corruption: 0,
-                    generation: 0,
-                },
-            ),
-        ]),
-        unpooled_disks: HashMap::new(),
-        alert_state: crate::alert::AlertState::default(),
-        scrub: ScrubState::Finished {
-            started_at: ScrubTimestamp(time::macros::datetime!(2026-02-24 02:00:07)),
-            error_count: 0,
-            duration_secs: Some(0),
-            total_bytes: Some(33_931_264),
-            rate_bytes_per_sec: Some(33_910_682),
-        },
-        balance: crate::status::BalanceReport::Idle,
-        capacity_total_bytes: Some(8_001_568_641_024),
-        capacity_used_bytes: 2_308_094_370_816,
-        probed_at: Instant::now(),
-    };
-    let mut model = Model::new_demo(disk_names, PoolStatus::Mounted(pool));
+    let model = Model::new_demo(
+        demo::sample_disk_names(),
+        PoolStatus::Mounted(demo::sample_pool()),
+    );
+    run_with_model(model, vec![])
+}
 
+fn run_with_model(mut model: Model, init_effects: Vec<Effect>) -> io::Result<()> {
     let mut terminal = ratatui::init();
     let (_input, cmd_tx, rx) = InputHandler::new();
+    for effect in init_effects {
+        execute_effect(effect, &cmd_tx);
+    }
     let result = run_loop(&mut terminal, &mut model, &rx, &cmd_tx);
     ratatui::restore();
     result
