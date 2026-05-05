@@ -6,7 +6,6 @@ use crate::parse::types::{BtrfsDfEntry, DeviceAllocation, ScrubState, SmartHealt
 use crate::state_paths::StatePaths;
 use crate::status::{BalanceReport, DiskErrors};
 use crate::tui::effect::Effect;
-use crate::tui::state::{CmdId, CommandState};
 use crate::types::{ByIdPath, LuksUuid, MountPoint};
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -242,7 +241,6 @@ pub struct Model {
     pub selected_disk: usize,
     pub pool: PoolStatus,
     pub mount_point: MountPoint,
-    pub commands: HashMap<CmdId, CommandState>,
     pub probe_duration: Option<Duration>,
     pub frame: u64,
     pub spinner_deadline: Option<Instant>,
@@ -257,7 +255,6 @@ pub struct Model {
     pub ups: Option<UpsSnapshot>,
     pub ups_probe_inflight: bool,
     pub ups_scheduler_pending: bool,
-    next_cmd_id: u64,
 }
 
 impl Model {
@@ -306,7 +303,6 @@ impl Model {
             selected_disk: 0,
             pool: PoolStatus::Loading,
             mount_point,
-            commands: HashMap::new(),
             probe_duration: None,
             frame: 0,
             spinner_deadline: Some(Instant::now() + Duration::from_millis(500)),
@@ -321,7 +317,6 @@ impl Model {
             ups: None,
             ups_probe_inflight,
             ups_scheduler_pending: false,
-            next_cmd_id: 0,
         };
         (model, effects)
     }
@@ -337,7 +332,6 @@ impl Model {
             selected_disk: 0,
             pool,
             mount_point: MountPoint(String::new()),
-            commands: HashMap::new(),
             probe_duration: None,
             frame: 0,
             spinner_deadline: None,
@@ -352,7 +346,6 @@ impl Model {
             ups: None,
             ups_probe_inflight: false,
             ups_scheduler_pending: false,
-            next_cmd_id: 0,
         }
     }
 }

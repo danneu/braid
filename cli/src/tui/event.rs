@@ -1,4 +1,3 @@
-use std::process::ExitStatus;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc;
@@ -10,24 +9,10 @@ use ratatui::crossterm::event::{self, KeyEvent, KeyEventKind};
 use crate::tui::app::Message;
 use crate::tui::keymap;
 use crate::tui::model::{FanSnapshot, PoolState, UpsSnapshot};
-use crate::tui::state::{CmdId, Stream};
 use crate::types::MountPoint;
 
 pub enum Event {
     Key(KeyEvent),
-    CommandStarted {
-        id: CmdId,
-        cmd: String,
-    },
-    CommandOutput {
-        id: CmdId,
-        stream: Stream,
-        line: String,
-    },
-    CommandFinished {
-        id: CmdId,
-        status: ExitStatus,
-    },
     PoolProbeFinished(Box<Result<Option<PoolState>, String>>, Duration),
     PollRefresh {
         mount_point: MountPoint,
@@ -47,11 +32,6 @@ impl Event {
                 }
                 keymap::handle_key(key, show_help, show_disk_detail)
             }
-            Event::CommandStarted { id, cmd } => Some(Message::CommandStarted { id, cmd }),
-            Event::CommandOutput { id, stream, line } => {
-                Some(Message::CommandOutput { id, stream, line })
-            }
-            Event::CommandFinished { id, status } => Some(Message::CommandFinished { id, status }),
             Event::PoolProbeFinished(result, elapsed) => {
                 Some(Message::PoolProbeFinished(result, elapsed))
             }

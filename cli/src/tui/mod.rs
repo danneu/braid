@@ -1,11 +1,9 @@
 mod app;
-mod command;
 mod effect;
 mod event;
 mod keymap;
 mod model;
 pub(crate) mod probe;
-mod state;
 mod view;
 
 use std::collections::HashMap;

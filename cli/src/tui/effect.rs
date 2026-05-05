@@ -6,9 +6,7 @@ use std::thread;
 use crate::cmd::RealRunner;
 use crate::config::FanControl;
 use crate::state_paths::StatePaths;
-use crate::tui::command;
 use crate::tui::event::Event;
-use crate::tui::state::CmdId;
 use crate::types::MountPoint;
 
 use std::time::Duration;
@@ -18,10 +16,6 @@ pub const FAN_PROBE_INTERVAL: Duration = Duration::from_secs(5);
 pub const UPS_PROBE_INTERVAL: Duration = Duration::from_secs(5);
 
 pub enum Effect {
-    SpawnCommand {
-        id: CmdId,
-        cmd: String,
-    },
     ProbePool {
         mount_point: MountPoint,
         disk_by_id: HashMap<String, String>,
@@ -52,9 +46,6 @@ pub enum Effect {
 
 pub fn execute_effect(effect: Effect, cmd_tx: &mpsc::Sender<Event>) {
     match effect {
-        Effect::SpawnCommand { id, cmd } => {
-            command::spawn(id, &cmd, cmd_tx);
-        }
         Effect::ProbePool {
             mount_point,
             disk_by_id,

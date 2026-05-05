@@ -1,12 +1,9 @@
-use std::collections::VecDeque;
-use std::process::ExitStatus;
 use std::time::{Duration, Instant};
 
 use crate::tui::effect::{Effect, FAN_PROBE_INTERVAL, UPS_PROBE_INTERVAL};
 use crate::tui::model::{
     FanSnapshot, Model, PoolState, PoolStatus, TemperatureWatermark, UpsSnapshot,
 };
-use crate::tui::state::{CmdId, CmdStatus, CommandState, MAX_LINES, Stream};
 
 pub enum Message {
     Quit,
@@ -19,19 +16,6 @@ pub enum Message {
     OpenDiskDetail,
     CloseDiskDetail,
     ResetTemperatureStats,
-    CommandStarted {
-        id: CmdId,
-        cmd: String,
-    },
-    CommandOutput {
-        id: CmdId,
-        stream: Stream,
-        line: String,
-    },
-    CommandFinished {
-        id: CmdId,
-        status: ExitStatus,
-    },
     PoolProbeFinished(Box<Result<Option<PoolState>, String>>, Duration),
     /// A fan probe finished. Install the snapshot and re-arm the loop.
     FanProbeFinished(FanSnapshot),
@@ -147,36 +131,6 @@ pub fn update(model: &mut Model, msg: Message) -> Vec<Effect> {
         }
         Message::ResetTemperatureStats => {
             model.session_temperature_stats.clear();
-            vec![]
-        }
-        Message::CommandStarted { id, cmd } => {
-            model.commands.insert(
-                id,
-                CommandState {
-                    cmd,
-                    status: CmdStatus::Running,
-                    output: VecDeque::new(),
-                },
-            );
-            vec![]
-        }
-        Message::CommandOutput {
-            id,
-            stream: _,
-            line,
-        } => {
-            if let Some(state) = model.commands.get_mut(&id) {
-                state.output.push_back(line);
-                if state.output.len() > MAX_LINES {
-                    state.output.pop_front();
-                }
-            }
-            vec![]
-        }
-        Message::CommandFinished { id, status } => {
-            if let Some(state) = model.commands.get_mut(&id) {
-                state.status = CmdStatus::Finished(status);
-            }
             vec![]
         }
         Message::PoolProbeFinished(result, elapsed) => {
