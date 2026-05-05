@@ -240,7 +240,7 @@ fn format_ups_flags(flags: &std::collections::HashSet<UpsStatusFlag>) -> String 
     if flags.is_empty() {
         return "--".into();
     }
-    let mut tokens: Vec<String> = flags.iter().map(UpsStatusFlag::as_token).collect();
+    let mut tokens: Vec<&str> = flags.iter().map(UpsStatusFlag::as_token).collect();
     tokens.sort();
     tokens.join(" ")
 }

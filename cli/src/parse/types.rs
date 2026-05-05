@@ -1,6 +1,6 @@
 use std::collections::BTreeSet;
 
-use serde::Serialize;
+use serde::{Serialize, Serializer};
 
 use crate::types::LuksUuid;
 
@@ -469,8 +469,7 @@ pub struct BtrfsSubvolumeListOutput {
 ///
 /// `Unknown(String)` preserves any token we don't yet recognize so future
 /// NUT statuses are surfaced rather than silently dropped.
-#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize)]
-#[serde(into = "String")]
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub enum UpsStatusFlag {
     /// On utility power.
     Ol,
@@ -513,25 +512,25 @@ pub enum UpsStatusFlag {
 impl UpsStatusFlag {
     /// Rendered token, matching NUT's own `ups.status` vocabulary
     /// (`reference/nut/clients/upsc.c:141` emits these verbatim).
-    pub fn as_token(&self) -> String {
+    pub fn as_token(&self) -> &str {
         match self {
-            Self::Ol => "OL".into(),
-            Self::Ob => "OB".into(),
-            Self::Lb => "LB".into(),
-            Self::Rb => "RB".into(),
-            Self::Hb => "HB".into(),
-            Self::Chrg => "CHRG".into(),
-            Self::Dischrg => "DISCHRG".into(),
-            Self::Cal => "CAL".into(),
-            Self::Bypass => "BYPASS".into(),
-            Self::Off => "OFF".into(),
-            Self::Over => "OVER".into(),
-            Self::Trim => "TRIM".into(),
-            Self::Boost => "BOOST".into(),
-            Self::Fsd => "FSD".into(),
-            Self::TestFail => "TESTFAIL".into(),
-            Self::CommBad => "COMMBAD".into(),
-            Self::Unknown(s) => s.clone(),
+            Self::Ol => "OL",
+            Self::Ob => "OB",
+            Self::Lb => "LB",
+            Self::Rb => "RB",
+            Self::Hb => "HB",
+            Self::Chrg => "CHRG",
+            Self::Dischrg => "DISCHRG",
+            Self::Cal => "CAL",
+            Self::Bypass => "BYPASS",
+            Self::Off => "OFF",
+            Self::Over => "OVER",
+            Self::Trim => "TRIM",
+            Self::Boost => "BOOST",
+            Self::Fsd => "FSD",
+            Self::TestFail => "TESTFAIL",
+            Self::CommBad => "COMMBAD",
+            Self::Unknown(s) => s.as_str(),
         }
     }
 
@@ -572,9 +571,12 @@ impl UpscOutput {
     }
 }
 
-impl From<UpsStatusFlag> for String {
-    fn from(flag: UpsStatusFlag) -> Self {
-        flag.as_token()
+impl Serialize for UpsStatusFlag {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
+        serializer.serialize_str(self.as_token())
     }
 }
 

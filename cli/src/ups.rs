@@ -230,7 +230,7 @@ fn format_status(flags: &std::collections::HashSet<UpsStatusFlag>) -> String {
     if flags.is_empty() {
         return "(unknown -- ups.status missing)".to_owned();
     }
-    let mut tokens: Vec<String> = flags.iter().map(UpsStatusFlag::as_token).collect();
+    let mut tokens: Vec<&str> = flags.iter().map(UpsStatusFlag::as_token).collect();
     tokens.sort();
     tokens.join(" ")
 }
@@ -299,6 +299,7 @@ mod tests {
             status_flags: {
                 let mut s = std::collections::HashSet::new();
                 s.insert(UpsStatusFlag::Ol);
+                s.insert(UpsStatusFlag::Unknown("NEWFLAG".into()));
                 s
             },
             battery: BatteryFields {
@@ -319,6 +320,10 @@ mod tests {
         assert!(
             text.contains("\"OL\""),
             "flag token appears verbatim: {text}"
+        );
+        assert!(
+            text.contains("\"NEWFLAG\""),
+            "unknown flag token appears verbatim: {text}"
         );
     }
 
