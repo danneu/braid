@@ -322,6 +322,7 @@ fn main() {
                 .enroll_key_file
                 .as_ref()
                 .map(|dir| dir.join(braid_cli::luks::KEYFILE_NAME));
+            let luks_format_extra_opts = braid_cli::luks::luks_opts_from_env();
             if let Err(e) = braid_cli::add::cmd_add(
                 &runner,
                 &fs,
@@ -333,6 +334,7 @@ fn main() {
                     passphrase_stdin: args.common.passphrase_stdin,
                     passphrase_file: args.common.passphrase_file.as_deref(),
                     enroll_key_file: enroll_kf.as_deref(),
+                    luks_format_extra_opts: &luks_format_extra_opts,
                     progress,
                     paths: &paths,
                     sleep_inhibitor: &sleep_inhibitor,
@@ -758,6 +760,7 @@ fn main() {
                     allow_degraded: args.allow_degraded,
                     dry_run: args.dry_run,
                     progress,
+                    sleep_inhibitor: &sleep_inhibitor,
                 },
             ) {
                 Ok(()) => {}

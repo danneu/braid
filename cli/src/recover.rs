@@ -2,6 +2,7 @@ use crate::cmd::{CmdRequest, CommandRunner, Step};
 use crate::config::{self, Config};
 use crate::credential_verify::{Credential, CredentialVerifyTarget, verify_credential_for_targets};
 use crate::discover;
+use crate::inhibit::AcquireSleepInhibitor;
 use crate::journal::{self, Journal};
 use crate::luks::{self, VerifyOutcome};
 use crate::membership::{self, DiskMember, PoolMembership};
@@ -148,6 +149,7 @@ pub struct RecoverParams<'a> {
     /// replay and paused-balance resume). Off in tests; Human/Json in real
     /// use because the resume can be long-running.
     pub progress: ProgressOutput,
+    pub sleep_inhibitor: &'a dyn AcquireSleepInhibitor,
 }
 
 /// Dry-run preview source of truth for `braid recover` plus the
@@ -1064,56 +1066,6 @@ fn journal_op_label(op: &journal::OpKind) -> &'static str {
     }
 }
 
-#[cfg(not(test))]
-fn acquire_recover_sleep_inhibitor(
-    why: &str,
-) -> Result<Box<dyn crate::inhibit::SleepGuard>, RecoverError> {
-    use crate::inhibit::AcquireSleepInhibitor;
-    crate::inhibit::RealSleepInhibitor
-        .acquire(why)
-        .map_err(|e| RecoverError::Failed(format!("could not acquire sleep inhibitor: {e}")))
-}
-
-#[cfg(test)]
-fn acquire_recover_sleep_inhibitor(
-    why: &str,
-) -> Result<Box<dyn crate::inhibit::SleepGuard>, RecoverError> {
-    recover_inhibitor_test_seam::acquire(why)
-        .map_err(|e| RecoverError::Failed(format!("could not acquire sleep inhibitor: {e}")))?;
-    Ok(Box::new(()))
-}
-
-#[cfg(test)]
-mod recover_inhibitor_test_seam {
-    use std::cell::Cell;
-
-    thread_local! {
-        static ACQUIRE_COUNT: Cell<usize> = const { Cell::new(0) };
-        static FAIL_NEXT: Cell<bool> = const { Cell::new(false) };
-    }
-
-    pub(super) fn reset() {
-        ACQUIRE_COUNT.with(|count| count.set(0));
-        FAIL_NEXT.with(|fail| fail.set(false));
-    }
-
-    pub(super) fn fail_next() {
-        FAIL_NEXT.with(|fail| fail.set(true));
-    }
-
-    pub(super) fn acquire_count() -> usize {
-        ACQUIRE_COUNT.with(Cell::get)
-    }
-
-    pub(super) fn acquire(_why: &str) -> std::io::Result<()> {
-        ACQUIRE_COUNT.with(|count| count.set(count.get() + 1));
-        if FAIL_NEXT.with(|fail| fail.replace(false)) {
-            return Err(std::io::Error::other("forced inhibitor failure"));
-        }
-        Ok(())
-    }
-}
-
 fn live_member_names(pool: &PoolState) -> std::collections::BTreeSet<String> {
     pool.devices
         .iter()
@@ -1477,9 +1429,14 @@ fn execute_add_post_balance_recovery<R: CommandRunner + Sync>(
     let _guard = if inhibitor_already_held {
         None
     } else {
-        Some(acquire_recover_sleep_inhibitor(
-            "finishing interrupted add balance",
-        )?)
+        Some(
+            params
+                .sleep_inhibitor
+                .acquire("finishing interrupted add balance")
+                .map_err(|e| {
+                    RecoverError::Failed(format!("could not acquire sleep inhibitor: {e}"))
+                })?,
+        )
     };
     run_add_post_balance(runner, params.config.mount_point(), &pool, params.progress)?;
     journal::clear_journal(params.paths).map_err(|e| RecoverError::Journal(e.to_string()))?;
@@ -1548,7 +1505,10 @@ fn execute_add_pool_mutation_recovery<R: CommandRunner + Sync, F: Filesystem + ?
     }
 
     if !add_targets_all_live(&pool, targets) {
-        let _guard = acquire_recover_sleep_inhibitor("replaying interrupted add")?;
+        let _guard = params
+            .sleep_inhibitor
+            .acquire("replaying interrupted add")
+            .map_err(|e| RecoverError::Failed(format!("could not acquire sleep inhibitor: {e}")))?;
         let passphrase = recover_passphrase(credential, params)?;
         verify_recover_passphrase_for_add_replay(runner, fs, &pool, targets, passphrase.as_ref())?;
 
@@ -2078,6 +2038,24 @@ mod tests {
     /// MapperClosingRunner can both observe path mutations.
     /// `CommandRunner: Sync`, so `Rc<RefCell<...>>` is not usable here.
     type SharedPaths = std::sync::Arc<std::sync::Mutex<std::collections::HashSet<String>>>;
+
+    struct NoopInhibitor;
+
+    impl AcquireSleepInhibitor for NoopInhibitor {
+        fn acquire(&self, _why: &str) -> std::io::Result<Box<dyn crate::inhibit::SleepGuard>> {
+            Ok(Box::new(()))
+        }
+    }
+
+    static NOOP_INHIBITOR: NoopInhibitor = NoopInhibitor;
+
+    struct FailingInhibitor;
+
+    impl AcquireSleepInhibitor for FailingInhibitor {
+        fn acquire(&self, _why: &str) -> std::io::Result<Box<dyn crate::inhibit::SleepGuard>> {
+            Err(std::io::Error::other("forced inhibitor failure"))
+        }
+    }
 
     /// Mock filesystem with interior mutability so test code can model
     /// device-mapper paths disappearing when `cryptsetup close` runs.
@@ -3003,6 +2981,16 @@ mod tests {
         passphrase_file: Option<&'a std::path::Path>,
         dry_run: bool,
     ) -> RecoverParams<'a> {
+        recover_params_with_inhibitor(config, paths, passphrase_file, dry_run, &NOOP_INHIBITOR)
+    }
+
+    fn recover_params_with_inhibitor<'a>(
+        config: &'a Config,
+        paths: &'a StatePaths,
+        passphrase_file: Option<&'a std::path::Path>,
+        dry_run: bool,
+        sleep_inhibitor: &'a dyn AcquireSleepInhibitor,
+    ) -> RecoverParams<'a> {
         RecoverParams {
             config,
             paths,
@@ -3011,6 +2999,7 @@ mod tests {
             allow_degraded: false,
             dry_run,
             progress: ProgressOutput::Off,
+            sleep_inhibitor,
         }
     }
 
@@ -3088,6 +3077,7 @@ mod tests {
             allow_degraded: false,
             dry_run: false,
             progress: ProgressOutput::Off,
+            sleep_inhibitor: &NOOP_INHIBITOR,
         };
 
         let plan = plan_recover(&runner, &fs, &params)
@@ -3351,6 +3341,7 @@ mod tests {
             allow_degraded: false,
             dry_run: false,
             progress: ProgressOutput::Off,
+            sleep_inhibitor: &NOOP_INHIBITOR,
         };
         let err = execute_add_pool_mutation_recovery(
             &runner,
@@ -3390,7 +3381,6 @@ mod tests {
 
     #[test]
     fn add_pool_mutation_replays_returned_disk_after_wipefs_crash() {
-        recover_inhibitor_test_seam::reset();
         let tmp = tempfile::TempDir::new().unwrap();
         let paths = StatePaths::custom(tmp.path().into());
         let config = Config::new(MountPoint("/mnt/storage".into())).unwrap();
@@ -3474,7 +3464,14 @@ mod tests {
                 ),
         ));
         let resolver = resolver_for(&[("/dev/vda", "virtio-disk1"), ("/dev/vdb", "virtio-disk2")]);
-        let params = recover_params(&config, &paths, Some(passphrase_file.path()), false);
+        let inhibitor = crate::inhibit::RecordingInhibitor::new();
+        let params = recover_params_with_inhibitor(
+            &config,
+            &paths,
+            Some(passphrase_file.path()),
+            false,
+            &inhibitor,
+        );
 
         execute_add_pool_mutation_recovery(
             &runner,
@@ -3503,7 +3500,7 @@ mod tests {
             .position(|r| matches!(r, CmdRequest::BtrfsDeviceAdd { force: true, .. }))
             .expect("returned replay should force-add after wipe");
         assert!(forget < wipe && wipe < add);
-        assert_eq!(recover_inhibitor_test_seam::acquire_count(), 1);
+        assert_eq!(inhibitor.acquire_count(), 1);
         assert!(!paths.pending_op_json().exists());
         let recovered = membership::load_membership(&paths).unwrap();
         assert!(recovered.disks.contains_key("disk2"));
@@ -3682,7 +3679,6 @@ mod tests {
 
     #[test]
     fn fresh_replay_formats_with_stored_opts_and_ignores_current_env() {
-        let _env = crate::luks::LuksOptsEnvGuard::set("--iter-time 999 --label wrong-label");
         let tmp = tempfile::TempDir::new().unwrap();
         let paths = StatePaths::custom(tmp.path().into());
         let config = Config::new(MountPoint("/mnt/storage".into())).unwrap();
@@ -4153,7 +4149,6 @@ mod tests {
 
     #[test]
     fn post_add_recovery_never_prepares_or_adds_targets() {
-        recover_inhibitor_test_seam::reset();
         let tmp = tempfile::TempDir::new().unwrap();
         let paths = StatePaths::custom(tmp.path().into());
         let config = Config::new(MountPoint("/mnt/storage".into())).unwrap();
@@ -4162,7 +4157,8 @@ mod tests {
         let union = union_memberships(&journal);
         let runner = with_balance_replay(MockRunner::default());
         let resolver = resolver_for(&[("/dev/vda", "virtio-disk1"), ("/dev/vdb", "virtio-disk2")]);
-        let params = recover_params(&config, &paths, None, false);
+        let inhibitor = crate::inhibit::RecordingInhibitor::new();
+        let params = recover_params_with_inhibitor(&config, &paths, None, false, &inhibitor);
 
         execute_add_post_balance_recovery(
             &runner,
@@ -4176,7 +4172,7 @@ mod tests {
         .expect("post-add recovery should only finish balance work");
 
         let requests = runner.requests();
-        assert_eq!(recover_inhibitor_test_seam::acquire_count(), 1);
+        assert_eq!(inhibitor.acquire_count(), 1);
         assert!(
             !requests.iter().any(|r| matches!(
                 r,
@@ -4223,8 +4219,6 @@ mod tests {
 
     #[test]
     fn pool_mutation_inhibitor_failure_stops_before_destructive_replay() {
-        recover_inhibitor_test_seam::reset();
-        recover_inhibitor_test_seam::fail_next();
         let tmp = tempfile::TempDir::new().unwrap();
         let paths = StatePaths::custom(tmp.path().into());
         let config = Config::new(MountPoint("/mnt/storage".into())).unwrap();
@@ -4242,7 +4236,14 @@ mod tests {
             passphrase_file.as_file().write_all(b"testpass").unwrap();
         }
         let runner = MockRunner::default();
-        let params = recover_params(&config, &paths, Some(passphrase_file.path()), false);
+        let inhibitor = FailingInhibitor;
+        let params = recover_params_with_inhibitor(
+            &config,
+            &paths,
+            Some(passphrase_file.path()),
+            false,
+            &inhibitor,
+        );
         let err = execute_add_pool_mutation_recovery(
             &runner,
             &fs,
@@ -4272,8 +4273,6 @@ mod tests {
 
     #[test]
     fn post_add_inhibitor_failure_stops_before_balance_and_preserves_journal() {
-        recover_inhibitor_test_seam::reset();
-        recover_inhibitor_test_seam::fail_next();
         let tmp = tempfile::TempDir::new().unwrap();
         let paths = StatePaths::custom(tmp.path().into());
         let config = Config::new(MountPoint("/mnt/storage".into())).unwrap();
@@ -4282,7 +4281,8 @@ mod tests {
         let union = union_memberships(&journal);
         let runner = MockRunner::default();
         let resolver = resolver_for(&[("/dev/vda", "virtio-disk1"), ("/dev/vdb", "virtio-disk2")]);
-        let params = recover_params(&config, &paths, None, false);
+        let inhibitor = FailingInhibitor;
+        let params = recover_params_with_inhibitor(&config, &paths, None, false, &inhibitor);
 
         let err = execute_add_post_balance_recovery(
             &runner,
@@ -4312,7 +4312,6 @@ mod tests {
 
     #[test]
     fn recover_dry_run_does_not_acquire_sleep_inhibitor() {
-        recover_inhibitor_test_seam::reset();
         let tmp = tempfile::TempDir::new().unwrap();
         let paths = StatePaths::custom(tmp.path().into());
         let config = Config::new(MountPoint("/mnt/storage".into())).unwrap();
@@ -4331,11 +4330,12 @@ mod tests {
             )
             .with_luks_dump_text_luks2("/dev/disk/by-id/virtio-disk1")
             .with_mapper_closed("braid-disk1");
-        let params = recover_params(&config, &paths, None, true);
+        let inhibitor = crate::inhibit::RecordingInhibitor::new();
+        let params = recover_params_with_inhibitor(&config, &paths, None, true, &inhibitor);
         plan_recover(&runner, &fs, &params)
             .result
             .expect("dry-run planning should not acquire inhibitor");
-        assert_eq!(recover_inhibitor_test_seam::acquire_count(), 0);
+        assert_eq!(inhibitor.acquire_count(), 0);
     }
 
     /// If a live pool device is absent from both the pre-operation and target
@@ -4426,6 +4426,7 @@ mod tests {
                 allow_degraded: false,
                 dry_run: false,
                 progress: ProgressOutput::Off,
+                sleep_inhibitor: &NOOP_INHIBITOR,
             },
         );
 
@@ -4663,6 +4664,7 @@ mod tests {
                 allow_degraded: true, // disk3 is absent
                 dry_run: false,
                 progress: ProgressOutput::Off,
+                sleep_inhibitor: &NOOP_INHIBITOR,
             },
         );
 
@@ -4921,6 +4923,7 @@ mod tests {
                 allow_degraded: true, // disk3 is "absent" (not in fs paths)
                 dry_run: false,
                 progress: ProgressOutput::Off,
+                sleep_inhibitor: &NOOP_INHIBITOR,
             },
         );
 
@@ -5081,6 +5084,7 @@ mod tests {
                 allow_degraded: true,
                 dry_run: false,
                 progress: ProgressOutput::Off,
+                sleep_inhibitor: &NOOP_INHIBITOR,
             },
         );
 
@@ -5208,6 +5212,7 @@ mod tests {
                 allow_degraded: false,
                 dry_run: false,
                 progress: ProgressOutput::Off,
+                sleep_inhibitor: &NOOP_INHIBITOR,
             },
         );
 
@@ -5305,6 +5310,7 @@ mod tests {
                 allow_degraded: false,
                 dry_run: false,
                 progress: ProgressOutput::Off,
+                sleep_inhibitor: &NOOP_INHIBITOR,
             },
         );
 
@@ -5360,6 +5366,7 @@ mod tests {
                 allow_degraded: false,
                 dry_run: false,
                 progress: ProgressOutput::Off,
+                sleep_inhibitor: &NOOP_INHIBITOR,
             },
         );
 
@@ -5434,6 +5441,7 @@ mod tests {
                 allow_degraded: false,
                 dry_run: false,
                 progress: ProgressOutput::Off,
+                sleep_inhibitor: &NOOP_INHIBITOR,
             },
         );
 
@@ -5479,6 +5487,7 @@ mod tests {
                 allow_degraded: false,
                 dry_run: false,
                 progress: ProgressOutput::Off,
+                sleep_inhibitor: &NOOP_INHIBITOR,
             },
         );
 
@@ -5603,6 +5612,7 @@ mod tests {
                 allow_degraded: false,
                 dry_run: false,
                 progress: ProgressOutput::Off,
+                sleep_inhibitor: &NOOP_INHIBITOR,
             },
         );
 
@@ -5746,6 +5756,7 @@ mod tests {
                 allow_degraded: false,
                 dry_run: false,
                 progress: ProgressOutput::Off,
+                sleep_inhibitor: &NOOP_INHIBITOR,
             },
         );
 
@@ -5857,6 +5868,7 @@ mod tests {
                 allow_degraded: false,
                 dry_run: false,
                 progress: ProgressOutput::Off,
+                sleep_inhibitor: &NOOP_INHIBITOR,
             },
         );
 
@@ -5924,6 +5936,7 @@ mod tests {
                 allow_degraded: false,
                 dry_run: false,
                 progress: ProgressOutput::Off,
+                sleep_inhibitor: &NOOP_INHIBITOR,
             },
         );
 
@@ -6046,6 +6059,7 @@ mod tests {
                 allow_degraded: false,
                 dry_run: false,
                 progress: ProgressOutput::Off,
+                sleep_inhibitor: &NOOP_INHIBITOR,
             },
         );
 
@@ -6167,6 +6181,7 @@ mod tests {
                 allow_degraded: false,
                 dry_run: false,
                 progress: ProgressOutput::Off,
+                sleep_inhibitor: &NOOP_INHIBITOR,
             },
         );
 
@@ -6255,6 +6270,7 @@ mod tests {
                 allow_degraded: false,
                 dry_run: false,
                 progress: ProgressOutput::Off,
+                sleep_inhibitor: &NOOP_INHIBITOR,
             },
         );
 
@@ -6842,6 +6858,7 @@ mod tests {
                 allow_degraded: false,
                 dry_run: false,
                 progress: ProgressOutput::Off,
+                sleep_inhibitor: &NOOP_INHIBITOR,
             },
         );
 
@@ -6979,6 +6996,7 @@ mod tests {
                 allow_degraded: false,
                 dry_run: false,
                 progress: ProgressOutput::Off,
+                sleep_inhibitor: &NOOP_INHIBITOR,
             },
         );
 
@@ -7118,6 +7136,7 @@ mod tests {
                 allow_degraded: false,
                 dry_run: false,
                 progress: ProgressOutput::Off,
+                sleep_inhibitor: &NOOP_INHIBITOR,
             },
         );
 
@@ -7202,6 +7221,7 @@ mod tests {
             allow_degraded: true,
             dry_run: true,
             progress: ProgressOutput::Off,
+            sleep_inhibitor: &NOOP_INHIBITOR,
         };
 
         let rendered = plan_recover(&runner, &fs, &params)
@@ -7327,6 +7347,7 @@ mod tests {
             allow_degraded: false,
             dry_run: true,
             progress: ProgressOutput::Off,
+            sleep_inhibitor: &NOOP_INHIBITOR,
         };
 
         let rendered = plan_recover(&runner, &fs, &params)
@@ -7404,6 +7425,7 @@ mod tests {
                 allow_degraded: false,
                 dry_run,
                 progress: ProgressOutput::Off,
+                sleep_inhibitor: &NOOP_INHIBITOR,
             };
 
             let report = plan_recover(&runner, &fs, &params);
@@ -7474,6 +7496,7 @@ mod tests {
             allow_degraded,
             dry_run: true,
             progress: ProgressOutput::Off,
+            sleep_inhibitor: &NOOP_INHIBITOR,
         };
 
         plan_recover(&runner, &fs, &params)
@@ -8164,6 +8187,7 @@ mod tests {
             allow_degraded: false,
             dry_run: true,
             progress: ProgressOutput::Off,
+            sleep_inhibitor: &NOOP_INHIBITOR,
         };
 
         let report = plan_recover(&runner, &fs, &params);
