@@ -17,8 +17,7 @@ def add_cmd(key):
     pq = shlex.quote(passphrase)
     return (
         f"printf '%s\\n' {pq} | "
-        f"BRAID_LUKS_OPTS='{luks_opts}' "
-        f"braid add {key}=/dev/disk/by-id/virtio-{key} --passphrase-stdin --yes"
+        f"braid add --luks-format-arg=--pbkdf --luks-format-arg=pbkdf2 --luks-format-arg=--pbkdf-force-iterations --luks-format-arg=1000 {key}=/dev/disk/by-id/virtio-{key} --passphrase-stdin --yes"
     )
 
 
@@ -26,8 +25,7 @@ def replace_cmd(old, new, extra=""):
     pq = shlex.quote(passphrase)
     return (
         f"printf '%s\\n' {pq} | "
-        f"BRAID_LUKS_OPTS='{luks_opts}' "
-        f"braid replace --old {old} --new {new}=/dev/disk/by-id/virtio-{new} "
+        f"braid replace --luks-format-arg=--pbkdf --luks-format-arg=pbkdf2 --luks-format-arg=--pbkdf-force-iterations --luks-format-arg=1000 --old {old} --new {new}=/dev/disk/by-id/virtio-{new} "
         f"--passphrase-stdin {extra}"
     )
 
@@ -108,8 +106,10 @@ def replace_unwrapped_cmd(old, new, extra=""):
     pq = shlex.quote(passphrase)
     return (
         f"printf '%s\\n' {pq} | "
-        f"PATH=/tmp/wrap:$PATH BRAID_LUKS_OPTS='{luks_opts}' "
-        f"{unwrapped_braid} replace --old {old} --new {new}=/dev/disk/by-id/virtio-{new} "
+        f"PATH=/tmp/wrap:$PATH {unwrapped_braid} replace "
+        f"--luks-format-arg=--pbkdf --luks-format-arg=pbkdf2 "
+        f"--luks-format-arg=--pbkdf-force-iterations --luks-format-arg=1000 "
+        f"--old {old} --new {new}=/dev/disk/by-id/virtio-{new} "
         f"--passphrase-stdin {extra}"
     )
 

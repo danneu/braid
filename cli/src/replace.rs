@@ -8,8 +8,8 @@ use crate::inhibit::AcquireSleepInhibitor;
 use crate::journal;
 use crate::luks::{
     backup_luks_header, ensure_luks_open, format_keyfile_asymmetry_warning,
-    format_keyfile_enrollment_probe_failure, luks_format, luks_opts_from_env,
-    probe_pool_keyfile_enrollment, read_passphrase,
+    format_keyfile_enrollment_probe_failure, luks_format, probe_pool_keyfile_enrollment,
+    read_passphrase,
 };
 use crate::membership::{self, PoolMembership};
 use crate::parse::parse_btrfs_device_stats;
@@ -51,6 +51,7 @@ pub struct ReplaceParams<'a> {
     pub passphrase_stdin: bool,
     pub passphrase_file: Option<&'a Path>,
     pub enroll_key_file: Option<&'a Path>,
+    pub luks_format_extra_opts: &'a [String],
     pub progress: ProgressOutput,
     pub paths: &'a StatePaths,
     /// Seam for acquiring a logind sleep inhibitor before the irreversible
@@ -300,7 +301,7 @@ impl ReplacePlan {
             ConfigDiskState::Absent => unreachable!("already checked above"),
             ConfigDiskState::PresentNotLuks => {
                 // Passphrase already verified above.
-                let mut luks_opts = luks_opts_from_env();
+                let mut luks_opts = params.luks_format_extra_opts.to_vec();
                 luks_opts.push("--label".into());
                 luks_opts.push(format!("braid-{new_name}"));
                 eprint!(
@@ -784,6 +785,7 @@ pub fn plan_replace<R: CommandRunner + Sync, F: Filesystem + ?Sized>(
         total_devices: pool.total_devices,
         paths: params.paths,
         enroll_key_file: params.enroll_key_file,
+        luks_format_extra_opts: params.luks_format_extra_opts,
     }) {
         Ok(s) => s,
         Err(e) => {
@@ -947,6 +949,7 @@ struct ReplaceStepsInput<'a> {
     total_devices: u64,
     paths: &'a StatePaths,
     enroll_key_file: Option<&'a Path>,
+    luks_format_extra_opts: &'a [String],
 }
 
 fn compile_replace_steps(input: &ReplaceStepsInput<'_>) -> Result<Vec<Step>, ReplaceError> {
@@ -961,7 +964,7 @@ fn compile_replace_steps(input: &ReplaceStepsInput<'_>) -> Result<Vec<Step>, Rep
             )));
         }
         ConfigDiskState::PresentNotLuks => {
-            let mut extra_opts = luks_opts_from_env();
+            let mut extra_opts = input.luks_format_extra_opts.to_vec();
             extra_opts.push("--label".into());
             extra_opts.push(format!("braid-{}", input.new_name));
             steps.push(Step {
@@ -1737,6 +1740,7 @@ mod tests {
             total_devices: 2,
             paths: &test_paths().1,
             enroll_key_file: None,
+            luks_format_extra_opts: &[],
         })
         .unwrap();
         let descriptions: Vec<&str> = steps.iter().map(|s| s.description.as_str()).collect();
@@ -1797,6 +1801,7 @@ mod tests {
             total_devices: 2,
             paths: &test_paths().1,
             enroll_key_file: None,
+            luks_format_extra_opts: &[],
         })
         .unwrap();
         let descriptions: Vec<&str> = steps.iter().map(|s| s.description.as_str()).collect();
@@ -2027,6 +2032,7 @@ mod tests {
             total_devices: 3,
             paths: &test_paths().1,
             enroll_key_file: None,
+            luks_format_extra_opts: &[],
         })
         .unwrap();
         let descriptions: Vec<&str> = steps.iter().map(|s| s.description.as_str()).collect();
@@ -2056,6 +2062,7 @@ mod tests {
             total_devices: 1,
             paths: &test_paths().1,
             enroll_key_file: None,
+            luks_format_extra_opts: &[],
         })
         .unwrap();
         let descriptions: Vec<&str> = steps.iter().map(|s| s.description.as_str()).collect();
@@ -2240,6 +2247,7 @@ mod tests {
                 passphrase_stdin: false,
                 passphrase_file: Some(pass_path.as_path()),
                 enroll_key_file: None,
+                luks_format_extra_opts: &[],
                 progress: crate::progress::ProgressOutput::Off,
                 paths: &paths,
                 sleep_inhibitor: &inhibitor,
@@ -2331,6 +2339,7 @@ mod tests {
                 passphrase_stdin: false,
                 passphrase_file: Some(pass_path.as_path()),
                 enroll_key_file: None,
+                luks_format_extra_opts: &[],
                 progress: crate::progress::ProgressOutput::Off,
                 paths: &paths,
                 sleep_inhibitor: &inhibitor,
@@ -2414,6 +2423,7 @@ mod tests {
                 passphrase_stdin: false,
                 passphrase_file: Some(pass_path.as_path()),
                 enroll_key_file: None,
+                luks_format_extra_opts: &[],
                 progress: crate::progress::ProgressOutput::Off,
                 paths: &paths,
                 sleep_inhibitor: &inhibitor,
@@ -2600,6 +2610,7 @@ mod tests {
                 passphrase_stdin: false,
                 passphrase_file: Some(pass_path.as_path()),
                 enroll_key_file: None,
+                luks_format_extra_opts: &[],
                 progress: crate::progress::ProgressOutput::Off,
                 paths: &paths,
                 sleep_inhibitor: &inhibitor,
@@ -2824,6 +2835,7 @@ mod tests {
                     passphrase_stdin: false,
                     passphrase_file: Some(pass_path.as_path()),
                     enroll_key_file: None,
+                    luks_format_extra_opts: &[],
                     progress: crate::progress::ProgressOutput::Off,
                     paths: &paths,
                     sleep_inhibitor: &inhibitor,
@@ -2961,6 +2973,7 @@ mod tests {
                 passphrase_stdin: false,
                 passphrase_file: Some(pass_path.as_path()),
                 enroll_key_file: None,
+                luks_format_extra_opts: &[],
                 progress: crate::progress::ProgressOutput::Off,
                 paths: &paths,
                 sleep_inhibitor: &inhibitor,
@@ -3003,6 +3016,7 @@ mod tests {
             total_devices: 2,
             paths: &test_paths().1,
             enroll_key_file: None,
+            luks_format_extra_opts: &[],
         })
         .unwrap();
         let descriptions: Vec<&str> = steps.iter().map(|s| s.description.as_str()).collect();
@@ -3025,6 +3039,12 @@ mod tests {
             devid: 2,
         };
         let kf = Path::new("/mnt/usb/braid.key");
+        let luks_format_extra_opts = vec![
+            "--pbkdf".to_owned(),
+            "pbkdf2".to_owned(),
+            "--iter-time".to_owned(),
+            "1".to_owned(),
+        ];
         let steps = compile_replace_steps(&ReplaceStepsInput {
             new_name: "disk3",
             new_by_id: &ByIdPath("/dev/disk/by-id/virtio-disk3".into()),
@@ -3035,6 +3055,7 @@ mod tests {
             total_devices: 2,
             paths: &test_paths().1,
             enroll_key_file: Some(kf),
+            luks_format_extra_opts: &luks_format_extra_opts,
         })
         .unwrap();
         let output = Step::render_dry_run(&steps);
@@ -3049,6 +3070,7 @@ mod tests {
         // LUKS format
         assert!(lines[0].contains("[destructive]"));
         assert!(lines[1].contains("$ cryptsetup luksFormat"));
+        assert!(lines[1].contains("--pbkdf pbkdf2 --iter-time 1"));
         assert!(lines[1].contains("--label braid-disk3"));
 
         // Keyfile enrollment (runs before backup so slot 1 lands in the backup)
@@ -3108,6 +3130,7 @@ mod tests {
             total_devices: 2,
             paths: &test_paths().1,
             enroll_key_file: None,
+            luks_format_extra_opts: &[],
         })
         .unwrap();
         let output = Step::render_dry_run(&steps);
@@ -3299,6 +3322,7 @@ mod tests {
                 passphrase_stdin: false,
                 passphrase_file: Some(pass_path.as_path()),
                 enroll_key_file: None,
+                luks_format_extra_opts: &[],
                 progress: crate::progress::ProgressOutput::Off,
                 paths: &paths,
                 sleep_inhibitor: &inhibitor,
@@ -3414,6 +3438,7 @@ mod tests {
                 passphrase_stdin: false,
                 passphrase_file: Some(pass_path.as_path()),
                 enroll_key_file: None,
+                luks_format_extra_opts: &[],
                 progress: crate::progress::ProgressOutput::Off,
                 paths: &paths,
                 sleep_inhibitor: &inhibitor,
@@ -3659,6 +3684,7 @@ mod tests {
                 passphrase_stdin: false,
                 passphrase_file: Some(pass_path.as_path()),
                 enroll_key_file: None,
+                luks_format_extra_opts: &[],
                 progress: crate::progress::ProgressOutput::Off,
                 paths: &paths,
                 sleep_inhibitor: &inhibitor,
@@ -3876,6 +3902,12 @@ mod tests {
         let log = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
         let runner = KeyfileOrderingReplaceRunner { log: log.clone() };
         let inhibitor = crate::inhibit::RecordingInhibitor::new();
+        let luks_format_extra_opts = vec![
+            "--pbkdf".to_owned(),
+            "pbkdf2".to_owned(),
+            "--iter-time".to_owned(),
+            "1".to_owned(),
+        ];
 
         let result = cmd_replace(
             &runner,
@@ -3890,6 +3922,7 @@ mod tests {
                 passphrase_stdin: false,
                 passphrase_file: Some(pass_path.as_path()),
                 enroll_key_file: Some(kf_path.as_path()),
+                luks_format_extra_opts: &luks_format_extra_opts,
                 progress: crate::progress::ProgressOutput::Off,
                 paths: &paths,
                 sleep_inhibitor: &inhibitor,
@@ -3910,6 +3943,20 @@ mod tests {
         let format = position("LuksFormat", |r| {
             matches!(r, CmdRequest::CryptsetupLuksFormat { .. })
         });
+        let CmdRequest::CryptsetupLuksFormat { extra_opts, .. } = &log[format] else {
+            unreachable!("format index matched CryptsetupLuksFormat")
+        };
+        assert_eq!(
+            extra_opts,
+            &vec![
+                "--pbkdf".to_owned(),
+                "pbkdf2".to_owned(),
+                "--iter-time".to_owned(),
+                "1".to_owned(),
+                "--label".to_owned(),
+                "braid-disk3".to_owned(),
+            ]
+        );
         let addkey = position("LuksAddKeyFile", |r| {
             matches!(r, CmdRequest::CryptsetupLuksAddKeyFile { .. })
         });
@@ -4114,6 +4161,7 @@ mod tests {
                 passphrase_stdin: false,
                 passphrase_file: Some(pass_path.as_path()),
                 enroll_key_file: None,
+                luks_format_extra_opts: &[],
                 progress: crate::progress::ProgressOutput::Off,
                 paths: &paths,
                 sleep_inhibitor: &inhibitor,
@@ -4212,6 +4260,7 @@ mod tests {
                 passphrase_stdin: false,
                 passphrase_file: Some(pass_path.as_path()),
                 enroll_key_file: None,
+                luks_format_extra_opts: &[],
                 progress: crate::progress::ProgressOutput::Off,
                 paths: &paths,
                 sleep_inhibitor: &inhibitor,
@@ -4320,6 +4369,7 @@ mod tests {
                 passphrase_stdin: false,
                 passphrase_file: Some(pass_path.as_path()),
                 enroll_key_file: None,
+                luks_format_extra_opts: &[],
                 progress: crate::progress::ProgressOutput::Off,
                 paths: &paths,
                 sleep_inhibitor: &inhibitor,
@@ -4475,6 +4525,7 @@ mod tests {
                 passphrase_stdin: false,
                 passphrase_file: Some(pass_path.as_path()),
                 enroll_key_file: None,
+                luks_format_extra_opts: &[],
                 progress: crate::progress::ProgressOutput::Off,
                 paths: &paths,
                 sleep_inhibitor: &inhibitor,
@@ -4540,6 +4591,7 @@ mod tests {
                 passphrase_stdin: false,
                 passphrase_file: None,
                 enroll_key_file: None,
+                luks_format_extra_opts: &[],
                 progress: crate::progress::ProgressOutput::Off,
                 paths: &paths,
                 sleep_inhibitor: &inhibitor,
@@ -4597,6 +4649,7 @@ mod tests {
                 passphrase_stdin: false,
                 passphrase_file: None,
                 enroll_key_file: Some(kf_path.as_path()),
+                luks_format_extra_opts: &[],
                 progress: crate::progress::ProgressOutput::Off,
                 paths: &paths,
                 sleep_inhibitor: &inhibitor,
@@ -4653,6 +4706,7 @@ mod tests {
                 passphrase_stdin: false,
                 passphrase_file: None,
                 enroll_key_file: Some(kf_path.as_path()),
+                luks_format_extra_opts: &[],
                 progress: crate::progress::ProgressOutput::Off,
                 paths: &paths,
                 sleep_inhibitor: &inhibitor,
@@ -4802,6 +4856,7 @@ mod tests {
                 passphrase_stdin: false,
                 passphrase_file: Some(self.pass_path.as_path()),
                 enroll_key_file: None,
+                luks_format_extra_opts: &[],
                 progress: crate::progress::ProgressOutput::Off,
                 paths: &self.paths,
                 sleep_inhibitor: &self.inhibitor,
@@ -4938,6 +4993,7 @@ mod tests {
                     passphrase_stdin: false,
                     passphrase_file: None,
                     enroll_key_file: None,
+                    luks_format_extra_opts: &[],
                     progress: crate::progress::ProgressOutput::Off,
                     paths: &paths,
                     sleep_inhibitor: &inhibitor,

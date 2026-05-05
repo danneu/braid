@@ -29,8 +29,7 @@ def add_cmd(name):
     passphrase_q = shlex.quote(passphrase)
     return (
         "printf '%s\\n' " + passphrase_q + " | "
-        "BRAID_LUKS_OPTS='" + luks_opts + "' "
-        "braid add " + name + "=/dev/disk/by-id/virtio-" + name + " --passphrase-stdin --yes"
+        "braid add --luks-format-arg=--pbkdf --luks-format-arg=pbkdf2 --luks-format-arg=--pbkdf-force-iterations --luks-format-arg=1000 " + name + "=/dev/disk/by-id/virtio-" + name + " --passphrase-stdin --yes"
     )
 
 

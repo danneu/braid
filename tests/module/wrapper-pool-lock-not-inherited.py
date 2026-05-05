@@ -37,8 +37,7 @@ machine.succeed(
 # --- Phase 1: Bootstrap a 1-disk pool ---
 with subtest("Bootstrap 1-disk pool"):
     machine.succeed(
-        "BRAID_LUKS_OPTS='" + luks_opts + "' "
-        "braid add disk1=/dev/disk/by-id/virtio-disk1 "
+        "braid add --luks-format-arg=--pbkdf --luks-format-arg=pbkdf2 --luks-format-arg=--pbkdf-force-iterations --luks-format-arg=1000 disk1=/dev/disk/by-id/virtio-disk1 "
         "--passphrase-file /tmp/passphrase --yes"
     )
     machine.succeed("mountpoint -q /mnt/storage")
@@ -60,8 +59,7 @@ with subtest("Write urandom payload"):
 with subtest("Background braid add disk2"):
     wrapper_pid = machine.succeed(
         "rm -f /tmp/add.log; "
-        "nohup env BRAID_LUKS_OPTS='" + luks_opts + "' "
-        "braid add disk2=/dev/disk/by-id/virtio-disk2 "
+        "nohup braid add --luks-format-arg=--pbkdf --luks-format-arg=pbkdf2 --luks-format-arg=--pbkdf-force-iterations --luks-format-arg=1000 disk2=/dev/disk/by-id/virtio-disk2 "
         "--passphrase-file /tmp/passphrase --yes "
         ">/tmp/add.log 2>&1 & echo $!"
     ).strip()

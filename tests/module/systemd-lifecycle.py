@@ -223,8 +223,7 @@ with subtest("braid add activates braid-online.service"):
     # Add a 3rd disk through the wrapper — this must activate braid-online.
     machine.succeed(
         f"printf '%s\\n' {pq} | "
-        f"BRAID_LUKS_OPTS='{luks_opts}' "
-        f"braid add disk3=/dev/disk/by-id/virtio-disk3 --passphrase-stdin --yes"
+        f"braid add --luks-format-arg=--pbkdf --luks-format-arg=pbkdf2 --luks-format-arg=--pbkdf-force-iterations --luks-format-arg=1000 disk3=/dev/disk/by-id/virtio-disk3 --passphrase-stdin --yes"
     )
 
     machine.succeed("systemctl is-active braid-online.service")
@@ -351,11 +350,9 @@ with subtest("Concurrent adds reject the loser cleanly"):
     # NixOS test driver wraps commands with `set -e`, so a bare
     # `wait $pid_loser` would abort the chain before exit-file writes.
     machine.succeed(
-        f"printf '%s\\n' {pq} | BRAID_LUKS_OPTS='{luks_opts}' "
-        f"braid add disk4=/dev/disk/by-id/virtio-disk4 --passphrase-stdin --yes "
+        f"printf '%s\\n' {pq} | braid add --luks-format-arg=--pbkdf --luks-format-arg=pbkdf2 --luks-format-arg=--pbkdf-force-iterations --luks-format-arg=1000 disk4=/dev/disk/by-id/virtio-disk4 --passphrase-stdin --yes "
         f">/tmp/add-a 2>&1 & pid_a=$! ; "
-        f"printf '%s\\n' {pq} | BRAID_LUKS_OPTS='{luks_opts}' "
-        f"braid add disk5=/dev/disk/by-id/virtio-disk5 --passphrase-stdin --yes "
+        f"printf '%s\\n' {pq} | braid add --luks-format-arg=--pbkdf --luks-format-arg=pbkdf2 --luks-format-arg=--pbkdf-force-iterations --luks-format-arg=1000 disk5=/dev/disk/by-id/virtio-disk5 --passphrase-stdin --yes "
         f">/tmp/add-b 2>&1 & pid_b=$! ; "
         f"ec_a=0 ; wait $pid_a || ec_a=$? ; echo $ec_a > /tmp/exit-a ; "
         f"ec_b=0 ; wait $pid_b || ec_b=$? ; echo $ec_b > /tmp/exit-b"

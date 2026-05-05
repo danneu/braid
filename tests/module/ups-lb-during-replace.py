@@ -42,8 +42,7 @@ luks_opts = "--pbkdf pbkdf2 --pbkdf-force-iterations 1000"
 def add_cmd(key):
     return (
         f"printf '%s\\n' {pq} | "
-        f"BRAID_LUKS_OPTS='{luks_opts}' "
-        f"braid add {key}=/dev/disk/by-id/virtio-{key} --passphrase-stdin --yes"
+        f"braid add --luks-format-arg=--pbkdf --luks-format-arg=pbkdf2 --luks-format-arg=--pbkdf-force-iterations --luks-format-arg=1000 {key}=/dev/disk/by-id/virtio-{key} --passphrase-stdin --yes"
     )
 
 
@@ -53,8 +52,7 @@ def replace_cmd_bg(old, new):
     # applies to the whole pipeline rather than just the tail braid call.
     return (
         f"(printf '%s\\n' {pq} | "
-        f"BRAID_LUKS_OPTS='{luks_opts}' "
-        f"braid replace --old {old} --new {new}=/dev/disk/by-id/virtio-{new} "
+        f"braid replace --luks-format-arg=--pbkdf --luks-format-arg=pbkdf2 --luks-format-arg=--pbkdf-force-iterations --luks-format-arg=1000 --old {old} --new {new}=/dev/disk/by-id/virtio-{new} "
         f"--passphrase-stdin --yes) > /tmp/replace.log 2>&1 &"
     )
 

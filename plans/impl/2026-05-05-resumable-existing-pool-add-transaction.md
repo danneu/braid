@@ -69,10 +69,10 @@ remains the known-good state before the Add mutation.
 For fresh disks, store the effective LUKS format options needed for replay:
 
 - `luks_format_extra_opts` is the exact `extra_opts` vector passed to
-  `CryptsetupLuksFormat`, including the effective `BRAID_LUKS_OPTS` value from
-  the original `add` invocation and the generated `--label braid-<name>`.
+  `CryptsetupLuksFormat`, including the explicit format args from the original
+  `add` invocation and the generated `--label braid-<name>`.
 - Recovery must use the stored options. It must not re-read
-  `BRAID_LUKS_OPTS`.
+  command-boundary LUKS format args.
 - The passphrase is never stored. Recovery resolves a credential at recovery
   time and verifies it against the existing pool before using it for delayed
   `luksFormat`.
@@ -278,9 +278,9 @@ Dry-run output should reflect the phase:
 - Round-trip both target modes, including fresh `luks_format_extra_opts` and
   `enroll_key_file`.
 - Assert fresh journal construction stores the effective original
-  `CryptsetupLuksFormat.extra_opts`, including label and env-derived options.
-- Assert recover uses stored fresh format options and does not read
-  `BRAID_LUKS_OPTS`.
+  `CryptsetupLuksFormat.extra_opts`, including label and explicit format args.
+- Assert recover uses stored fresh format options and does not re-snapshot
+  command-boundary LUKS format args.
 - Assert recover keyfile ensure tests the requested keyfile first, skips
   `luksAddKey` when accepted, enrolls only when rejected, and fails on probe
   errors.

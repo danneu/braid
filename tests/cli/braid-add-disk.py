@@ -23,12 +23,11 @@ luks_opts = "--pbkdf pbkdf2 --pbkdf-force-iterations 1000"
 
 
 def add_cmd(key):
-    """Build a `braid add <key> --yes` command with env vars."""
+    """Build a `braid add <key> --yes` command with LUKS format args."""
     passphrase_q = shlex.quote(passphrase)
     return (
         f"printf '%s\\n' {passphrase_q} | "
-        f"BRAID_LUKS_OPTS='{luks_opts}' "
-        f"braid add {key}=/dev/disk/by-id/virtio-{key} --passphrase-stdin --yes"
+        f"braid add --luks-format-arg=--pbkdf --luks-format-arg=pbkdf2 --luks-format-arg=--pbkdf-force-iterations --luks-format-arg=1000 {key}=/dev/disk/by-id/virtio-{key} --passphrase-stdin --yes"
     )
 
 

@@ -85,12 +85,11 @@ LUKS_OPTS = "--pbkdf pbkdf2 --pbkdf-force-iterations 1000"
 
 
 def add_cmd(key, by_id):
-    """Build a `braid add <key>=<by_id> --yes` command with env vars and --config."""
+    """Build a `braid add <key>=<by_id> --yes` command with LUKS format args and --config."""
     pq = shlex.quote(PASSPHRASE)
     return (
         f"printf '%s\\n' {pq} | "
-        f"BRAID_LUKS_OPTS='{LUKS_OPTS}' "
-        f"braid add {key}={by_id} --passphrase-stdin --yes --config {CONFIG}"
+        f"braid add --luks-format-arg=--pbkdf --luks-format-arg=pbkdf2 --luks-format-arg=--pbkdf-force-iterations --luks-format-arg=1000 {key}={by_id} --passphrase-stdin --yes --config {CONFIG}"
     )
 
 
@@ -99,8 +98,7 @@ def replace_cmd(old, new, new_by_id, extra=""):
     pq = shlex.quote(PASSPHRASE)
     return (
         f"printf '%s\\n' {pq} | "
-        f"BRAID_LUKS_OPTS='{LUKS_OPTS}' "
-        f"braid replace --old {old} --new {new}={new_by_id} "
+        f"braid replace --luks-format-arg=--pbkdf --luks-format-arg=pbkdf2 --luks-format-arg=--pbkdf-force-iterations --luks-format-arg=1000 --old {old} --new {new}={new_by_id} "
         f"--passphrase-stdin --yes --config {CONFIG} {extra}"
     )
 

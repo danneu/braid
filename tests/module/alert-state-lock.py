@@ -89,8 +89,7 @@ def write_missing_latch(devid):
 def add_cmd(key):
     return (
         f"printf '%s\\n' {pq} | "
-        f"BRAID_LUKS_OPTS={quote(luks_opts)} "
-        f"braid add {key}=/dev/disk/by-id/virtio-{key} "
+        f"braid add --luks-format-arg=--pbkdf --luks-format-arg=pbkdf2 --luks-format-arg=--pbkdf-force-iterations --luks-format-arg=1000 {key}=/dev/disk/by-id/virtio-{key} "
         "--passphrase-stdin --yes"
     )
 

@@ -39,8 +39,7 @@ with subtest("Setup: create 1-disk pool without keyfile"):
     pq = shlex.quote(passphrase)
     machine.succeed(
         f"printf '%s\\n' {pq} | "
-        f"BRAID_LUKS_OPTS='{luks_opts}' "
-        f"braid add disk1=/dev/disk/by-id/virtio-disk1 --passphrase-stdin --yes"
+        f"braid add --luks-format-arg=--pbkdf --luks-format-arg=pbkdf2 --luks-format-arg=--pbkdf-force-iterations --luks-format-arg=1000 disk1=/dev/disk/by-id/virtio-disk1 --passphrase-stdin --yes"
     )
     machine.succeed("echo 'add-enroll test' > /mnt/storage/test.txt")
     machine.succeed("sync")
@@ -55,8 +54,7 @@ with subtest("Test 1: add disk2 with --enroll"):
     pq = shlex.quote(passphrase)
     machine.succeed(
         f"printf '%s\\n' {pq} | "
-        f"BRAID_LUKS_OPTS='{luks_opts}' "
-        f"braid add disk2=/dev/disk/by-id/virtio-disk2 --passphrase-stdin --yes "
+        f"braid add --luks-format-arg=--pbkdf --luks-format-arg=pbkdf2 --luks-format-arg=--pbkdf-force-iterations --luks-format-arg=1000 disk2=/dev/disk/by-id/virtio-disk2 --passphrase-stdin --yes "
         f"--enroll /tmp >/tmp/add-enroll.out 2>/tmp/add-enroll.err"
     )
     add_err = machine.succeed("cat /tmp/add-enroll.err")
@@ -142,8 +140,7 @@ def add_cmd_disk3(extra=""):
     pq = shlex.quote(passphrase)
     return (
         f"printf '%s\\n' {pq} | "
-        f"BRAID_LUKS_OPTS='{luks_opts}' "
-        f"braid add disk3=/dev/disk/by-id/virtio-disk3 --passphrase-stdin --yes {extra}"
+        f"braid add --luks-format-arg=--pbkdf --luks-format-arg=pbkdf2 --luks-format-arg=--pbkdf-force-iterations --luks-format-arg=1000 disk3=/dev/disk/by-id/virtio-disk3 --passphrase-stdin --yes {extra}"
     )
 
 

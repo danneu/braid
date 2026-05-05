@@ -23,8 +23,7 @@ def add_cmd(key):
     passphrase_q = shlex.quote(passphrase)
     return (
         f"printf '%s\\n' {passphrase_q} | "
-        f"BRAID_LUKS_OPTS='{luks_opts}' "
-        f"braid add {key}=/dev/disk/by-id/virtio-{key} --passphrase-stdin --yes"
+        f"braid add --luks-format-arg=--pbkdf --luks-format-arg=pbkdf2 --luks-format-arg=--pbkdf-force-iterations --luks-format-arg=1000 {key}=/dev/disk/by-id/virtio-{key} --passphrase-stdin --yes"
     )
 
 
@@ -48,8 +47,7 @@ with subtest("Add with renamed name for same disk is rejected"):
     pq = shlex.quote(passphrase)
     status, output = machine.execute(
         f"printf '%s\\n' {pq} | "
-        f"BRAID_LUKS_OPTS='{luks_opts}' "
-        f"braid add wd-red=/dev/disk/by-id/virtio-disk1 --passphrase-stdin --yes 2>&1"
+        f"braid add --luks-format-arg=--pbkdf --luks-format-arg=pbkdf2 --luks-format-arg=--pbkdf-force-iterations --luks-format-arg=1000 wd-red=/dev/disk/by-id/virtio-disk1 --passphrase-stdin --yes 2>&1"
     )
     assert status != 0, f"expected non-zero exit, got {status}:\n{output}"
 

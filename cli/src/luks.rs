@@ -582,19 +582,6 @@ pub fn device_has_btrfs_superblock<R: CommandRunner>(
     Ok(result.exit_status == 0)
 }
 
-fn parse_luks_opts(raw: &str) -> Vec<String> {
-    if raw.is_empty() {
-        return vec![];
-    }
-    shell_words::split(&raw).unwrap_or_default()
-}
-
-/// Read LUKS opts from BRAID_LUKS_OPTS env var, split using shell words.
-pub fn luks_opts_from_env() -> Vec<String> {
-    let raw = std::env::var("BRAID_LUKS_OPTS").unwrap_or_default();
-    parse_luks_opts(&raw)
-}
-
 /// Open a LUKS device with a binary keyfile (no passphrase, no PBKDF).
 pub fn ensure_luks_open_with_key_file<R: CommandRunner, F: Filesystem + ?Sized>(
     runner: &R,

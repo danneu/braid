@@ -1,4 +1,4 @@
-use clap::{Args, CommandFactory, Parser, Subcommand};
+use clap::{ArgAction, Args, CommandFactory, Parser, Subcommand};
 use clap_complete::engine::{ArgValueCandidates, CompletionCandidate};
 use std::path::Path;
 
@@ -146,6 +146,23 @@ struct CommonArgs {
 }
 
 #[derive(Debug, Args)]
+struct LuksFormatArgs {
+    /// Advanced: pass one raw argv element to cryptsetup luksFormat.
+    ///
+    /// Repeat for multiple arguments. Use the equals form for values that
+    /// start with a hyphen, e.g. --luks-format-arg=--pbkdf.
+    #[arg(
+        long = "luks-format-arg",
+        value_name = "ARG",
+        action = ArgAction::Append,
+        num_args = 1,
+        require_equals = true,
+        allow_hyphen_values = true
+    )]
+    luks_format_extra_opts: Vec<String>,
+}
+
+#[derive(Debug, Args)]
 struct AddArgs {
     /// Disk spec(s): NAME=/dev/disk/by-id/... (e.g. toshiba=/dev/disk/by-id/ata-TOSHIBA_MN07)
     #[arg(required = true, num_args(1..), add = ArgValueCandidates::new(disk_name_candidates))]
@@ -153,6 +170,8 @@ struct AddArgs {
     /// Directory containing braid.key to enroll in the new disk (LUKS slot 1)
     #[arg(long = "enroll")]
     enroll_key_file: Option<std::path::PathBuf>,
+    #[command(flatten)]
+    luks_format: LuksFormatArgs,
     #[command(flatten)]
     common: CommonArgs,
 }
@@ -189,6 +208,8 @@ struct ReplaceArgs {
     /// Directory containing braid.key to enroll in the new disk (LUKS slot 1)
     #[arg(long = "enroll")]
     enroll_key_file: Option<std::path::PathBuf>,
+    #[command(flatten)]
+    luks_format: LuksFormatArgs,
     #[command(flatten)]
     common: CommonArgs,
 }
@@ -322,7 +343,6 @@ fn main() {
                 .enroll_key_file
                 .as_ref()
                 .map(|dir| dir.join(braid_cli::luks::KEYFILE_NAME));
-            let luks_format_extra_opts = braid_cli::luks::luks_opts_from_env();
             if let Err(e) = braid_cli::add::cmd_add(
                 &runner,
                 &fs,
@@ -334,7 +354,7 @@ fn main() {
                     passphrase_stdin: args.common.passphrase_stdin,
                     passphrase_file: args.common.passphrase_file.as_deref(),
                     enroll_key_file: enroll_kf.as_deref(),
-                    luks_format_extra_opts: &luks_format_extra_opts,
+                    luks_format_extra_opts: &args.luks_format.luks_format_extra_opts,
                     progress,
                     paths: &paths,
                     sleep_inhibitor: &sleep_inhibitor,
@@ -421,6 +441,7 @@ fn main() {
                     passphrase_stdin: args.common.passphrase_stdin,
                     passphrase_file: args.common.passphrase_file.as_deref(),
                     enroll_key_file: enroll_kf.as_deref(),
+                    luks_format_extra_opts: &args.luks_format.luks_format_extra_opts,
                     progress,
                     paths: &paths,
                     sleep_inhibitor: &sleep_inhibitor,
@@ -827,6 +848,98 @@ fn print_cli_error(message: &str) {
         eprintln!("{message}");
     } else {
         eprintln!("error: {message}");
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn expected_luks_format_args() -> Vec<String> {
+        [
+            "--pbkdf",
+            "pbkdf2",
+            "--iter-time",
+            "1",
+            "--label",
+            "ignored-by-cli-test",
+        ]
+        .into_iter()
+        .map(str::to_owned)
+        .collect()
+    }
+
+    #[test]
+    fn add_accepts_repeated_luks_format_arg_values_starting_with_hyphen() {
+        let cli = Cli::try_parse_from([
+            "braid",
+            "add",
+            "disk2=/dev/disk/by-id/x",
+            "--luks-format-arg=--pbkdf",
+            "--luks-format-arg=pbkdf2",
+            "--luks-format-arg=--iter-time",
+            "--luks-format-arg=1",
+            "--luks-format-arg=--label",
+            "--luks-format-arg=ignored-by-cli-test",
+        ])
+        .expect("add should accept repeated raw LUKS format argv elements");
+
+        let Commands::Add(args) = cli.command else {
+            panic!("expected add command");
+        };
+        assert_eq!(
+            args.luks_format.luks_format_extra_opts,
+            expected_luks_format_args()
+        );
+    }
+
+    #[test]
+    fn replace_accepts_repeated_luks_format_arg_values_starting_with_hyphen() {
+        let cli = Cli::try_parse_from([
+            "braid",
+            "replace",
+            "--luks-format-arg=--pbkdf",
+            "--luks-format-arg=pbkdf2",
+            "--luks-format-arg=--iter-time",
+            "--luks-format-arg=1",
+            "--luks-format-arg=--label",
+            "--luks-format-arg=ignored-by-cli-test",
+            "--old",
+            "disk1",
+            "--new",
+            "disk2=/dev/disk/by-id/x",
+        ])
+        .expect("replace should accept repeated raw LUKS format argv elements");
+
+        let Commands::Replace(args) = cli.command else {
+            panic!("expected replace command");
+        };
+        assert_eq!(
+            args.luks_format.luks_format_extra_opts,
+            expected_luks_format_args()
+        );
+    }
+
+    #[test]
+    fn remove_does_not_accept_luks_format_arg() {
+        let err = Cli::try_parse_from(["braid", "remove", "disk1", "--luks-format-arg=--pbkdf"])
+            .expect_err("remove must not expose LUKS format options");
+
+        assert!(err.to_string().contains("unexpected argument"));
+    }
+
+    #[test]
+    fn luks_format_arg_rejects_space_form_for_hyphen_value() {
+        let err = Cli::try_parse_from([
+            "braid",
+            "add",
+            "disk2=/dev/disk/by-id/x",
+            "--luks-format-arg",
+            "--pbkdf",
+        ])
+        .expect_err("luks format args must use --luks-format-arg=ARG");
+
+        assert!(err.to_string().contains("equal sign is needed"));
     }
 }
 

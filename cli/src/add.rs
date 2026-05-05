@@ -3447,14 +3447,14 @@ mod tests {
     //   that the original invocation computed before `luksFormat`.
     //
     // Why it exists: recovery must replay a fresh target using the journaled
-    //   format contract, not whatever `BRAID_LUKS_OPTS` happens to contain
-    //   later. The easiest command-level proof is to fail `luksFormat` after
+    //   format contract, not whatever flags a later invocation happens to
+    //   pass. The easiest command-level proof is to fail `luksFormat` after
     //   the journal write and inspect the preserved `pending-op.json`.
     //
-    // Scenario: the user adds a fresh disk with env-derived LUKS options; the
-    //   machine crashes or the format command fails immediately after the
-    //   journal is durable. Recovery must know the same opts, including the
-    //   generated braid label.
+    // Scenario: the user adds a fresh disk with explicit LUKS format args;
+    //   the machine crashes or the format command fails immediately after
+    //   the journal is durable. Recovery must know the same opts, including
+    //   the generated braid label.
     fn fresh_add_journal_stores_effective_luks_format_opts() {
         let (_state_tmp, paths, _tmp, config_path, pass_path) = add_test_setup();
         let runner = AddFullPathRunner::live().with_luks_format_failure();
@@ -3750,6 +3750,12 @@ mod tests {
             state: ConfigDiskState::PresentNotLuks,
         }];
         let pool = pool_unmounted();
+        let luks_format_extra_opts = vec![
+            "--pbkdf".to_owned(),
+            "pbkdf2".to_owned(),
+            "--iter-time".to_owned(),
+            "1".to_owned(),
+        ];
 
         let steps = compile_add_steps_multi(
             &runner,
@@ -3761,7 +3767,7 @@ mod tests {
                 mount_point: &MountPoint("/mnt/storage".into()),
                 paths: &test_paths().1,
                 enroll_key_file: None,
-                luks_format_extra_opts: &[],
+                luks_format_extra_opts: &luks_format_extra_opts,
             },
         )
         .unwrap();
@@ -3775,6 +3781,7 @@ mod tests {
         assert!(lines[0].contains("[destructive]"));
         assert!(lines[0].contains("LUKS format"));
         assert!(lines[1].contains("$ cryptsetup luksFormat"));
+        assert!(lines[1].contains("--pbkdf pbkdf2 --iter-time 1"));
         assert!(lines[1].contains("--label braid-disk1"));
 
         // Header backup

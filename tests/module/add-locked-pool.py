@@ -42,8 +42,7 @@ def add_cmd(key, *, dry_run=False, capture_stderr=True):
     redir = " 2>&1" if capture_stderr else ""
     return (
         f"printf '%s\\n' {pq} | "
-        f"BRAID_LUKS_OPTS='{luks_opts}' "
-        f"braid add {key}=/dev/disk/by-id/virtio-{key} {flags}{redir}"
+        f"braid add --luks-format-arg=--pbkdf --luks-format-arg=pbkdf2 --luks-format-arg=--pbkdf-force-iterations --luks-format-arg=1000 {key}=/dev/disk/by-id/virtio-{key} {flags}{redir}"
     )
 
 

@@ -26,8 +26,7 @@ def add_cmd(key):
     pq = shlex.quote(passphrase)
     return (
         f"printf '%s\\n' {pq} | "
-        f"BRAID_LUKS_OPTS='{luks_opts}' "
-        f"braid add {key}=/dev/disk/by-id/virtio-{key} --passphrase-stdin --yes"
+        f"braid add --luks-format-arg=--pbkdf --luks-format-arg=pbkdf2 --luks-format-arg=--pbkdf-force-iterations --luks-format-arg=1000 {key}=/dev/disk/by-id/virtio-{key} --passphrase-stdin --yes"
     )
 
 
@@ -125,8 +124,7 @@ with subtest("dry-run during in-flight balance routes notes to stdout only"):
     pq = shlex.quote(passphrase)
     dry_cmd = (
         f"printf '%s\\n' {pq} | "
-        f"BRAID_LUKS_OPTS='{luks_opts}' "
-        f"braid add disk4=/dev/disk/by-id/virtio-disk4 "
+        f"braid add --luks-format-arg=--pbkdf --luks-format-arg=pbkdf2 --luks-format-arg=--pbkdf-force-iterations --luks-format-arg=1000 disk4=/dev/disk/by-id/virtio-disk4 "
         f"--passphrase-stdin --yes --dry-run "
         f"> /tmp/add-dryrun.out 2> /tmp/add-dryrun.err"
     )
