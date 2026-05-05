@@ -33,13 +33,23 @@ impl Tab {
     }
 
     pub fn next(self) -> Tab {
-        let idx = Self::ALL.iter().position(|t| *t == self).unwrap();
-        Self::ALL[(idx + 1) % Self::ALL.len()]
+        match self {
+            Tab::Filesystem => Tab::Devices,
+            Tab::Devices => Tab::Subvolumes,
+            Tab::Subvolumes => Tab::Scrub,
+            Tab::Scrub => Tab::Balance,
+            Tab::Balance => Tab::Filesystem,
+        }
     }
 
     pub fn prev(self) -> Tab {
-        let idx = Self::ALL.iter().position(|t| *t == self).unwrap();
-        Self::ALL[(idx + Self::ALL.len() - 1) % Self::ALL.len()]
+        match self {
+            Tab::Filesystem => Tab::Balance,
+            Tab::Devices => Tab::Filesystem,
+            Tab::Subvolumes => Tab::Devices,
+            Tab::Scrub => Tab::Subvolumes,
+            Tab::Balance => Tab::Scrub,
+        }
     }
 
     pub fn subtabs(self) -> &'static [SubTab] {
@@ -50,6 +60,45 @@ impl Tab {
             Tab::Scrub => &[SubTab::ScrubStatus],
             Tab::Balance => &[SubTab::BalanceStatus],
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::Tab;
+
+    // Intent: Tab::next returns the variant that follows self in the user-facing
+    // cycle, wrapping Tab::Balance back to Tab::Filesystem.
+    // Why it exists: this refactor replaces an ALL.position(...).unwrap() lookup
+    // with an exhaustive match. Without an explicit cycle assertion, an
+    // accidental swap of two arms would compile and silently misnavigate the TUI.
+    // Scenario: a user in `braid browse` presses Tab from each starting tab and
+    // sees the next tab become active, including the wrap from the last tab back
+    // to the first.
+    #[test]
+    fn tab_next_cycles_forward_through_all_variants() {
+        assert_eq!(Tab::Filesystem.next(), Tab::Devices);
+        assert_eq!(Tab::Devices.next(), Tab::Subvolumes);
+        assert_eq!(Tab::Subvolumes.next(), Tab::Scrub);
+        assert_eq!(Tab::Scrub.next(), Tab::Balance);
+        assert_eq!(Tab::Balance.next(), Tab::Filesystem);
+    }
+
+    // Intent: Tab::prev returns the variant that precedes self in the user-facing
+    // cycle, wrapping Tab::Filesystem back to Tab::Balance.
+    // Why it exists: symmetric guard to tab_next_cycles_forward_through_all_variants;
+    // the new exhaustive-match prev() is a separate set of arms, so a swap there
+    // is not caught by the next() test.
+    // Scenario: a user in `braid browse` presses Shift+Tab from each starting tab
+    // and sees the previous tab become active, including the wrap from the first
+    // tab back to the last.
+    #[test]
+    fn tab_prev_cycles_backward_through_all_variants() {
+        assert_eq!(Tab::Filesystem.prev(), Tab::Balance);
+        assert_eq!(Tab::Devices.prev(), Tab::Filesystem);
+        assert_eq!(Tab::Subvolumes.prev(), Tab::Devices);
+        assert_eq!(Tab::Scrub.prev(), Tab::Subvolumes);
+        assert_eq!(Tab::Balance.prev(), Tab::Scrub);
     }
 }
 
