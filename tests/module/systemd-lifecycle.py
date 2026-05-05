@@ -287,16 +287,18 @@ with subtest("braid recover activates braid-online.service"):
     machine.fail("systemctl is-active braid-online.service")
 
     # Inject a pending-op.json to enter recovery mode.
-    # The pool now has 3 disks (after subtest 6 added disk3). Build the
-    # journal to match: pre_membership has all 3 actual pool members so
-    # recover opens the right LUKS devices.
+    # The pool now has 3 disks (after subtest 6 added disk3). Use a
+    # PostAddBalanceRaid1 journal whose membership already matches the live
+    # pool so recover only mounts, reconciles pool.json, and clears recovery
+    # mode through the wrapper.
     pool_json_raw = machine.succeed("cat /var/lib/braid/pool.json")
     pool_membership = json.loads(pool_json_raw)
     journal = {
         "started_at": "2026-01-01T00:00:00Z",
         "op": {
             "op": "Add",
-            "disks": {"disk99": "/dev/disk/by-id/virtio-disk99"},
+            "phase": "PostAddBalanceRaid1",
+            "targets": {},
         },
         "pre_membership": pool_membership,
         "target_membership": pool_membership,
