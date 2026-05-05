@@ -74,6 +74,12 @@ Distinct error sentinels cover the common non-OK cases:
 | UPS query failed | `{"error": "query_failed", "detail": "exit 1: Error: Connection failure: ..."}` | 1 |
 | UPS not enabled | `{"error": "ups_not_enabled"}` | 0 |
 
+For the three cases above, `--json` writes only to stdout -- stderr
+stays silent so the JSON sentinel can be piped into a single sink
+(`jq`, `tee`, CI logs) without a redundant human error line. Other
+failure modes, such as malformed config, still print a human error to
+stderr.
+
 ## Flags
 
 | Flag | Effect |

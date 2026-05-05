@@ -776,13 +776,19 @@ fn main() {
         Commands::Ups(args) => match args.command {
             UpsCommand::Status(status_args) => {
                 let runner = RealRunner;
-                if let Err(e) = braid_cli::ups::cmd_ups_status(
+                match braid_cli::ups::cmd_ups_status(
                     &runner,
                     Path::new(&config_path),
                     status_args.json,
                 ) {
-                    print_cli_error(&e.to_string());
-                    std::process::exit(1);
+                    Ok(()) => {}
+                    Err(braid_cli::ups::UpsError::QueryFailedJsonReported) => {
+                        std::process::exit(1);
+                    }
+                    Err(e) => {
+                        print_cli_error(&e.to_string());
+                        std::process::exit(1);
+                    }
                 }
             }
         },

@@ -20,6 +20,8 @@ pub enum UpsError {
     Config(#[from] ConfigError),
     #[error("upsc query failed: {detail}")]
     QueryFailed { detail: String },
+    #[error("internal: ups query failed (json sentinel already on stdout)")]
+    QueryFailedJsonReported,
     #[error("failed to serialize ups status: {0}")]
     Serialize(#[source] serde_json::Error),
 }
@@ -120,6 +122,7 @@ fn emit_query_failed(json: bool, detail: String) -> Result<(), UpsError> {
             error: "query_failed",
             detail: &detail,
         })?;
+        return Err(UpsError::QueryFailedJsonReported);
     }
     Err(UpsError::QueryFailed { detail })
 }
@@ -476,6 +479,33 @@ mod tests {
         assert_eq!(
             err.to_string(),
             "upsc query failed: exit 1: Error: Connection failure: Connection refused"
+        );
+    }
+
+    // Intent: render_live in --json mode signals "already reported on stdout".
+    // Why it exists: --json query failure emits a JSON sentinel as the full
+    // report, and the CLI shell must not add a redundant human error line on
+    // stderr.
+    // Scenario: upsd is stopped, so upsc exits non-zero in --json mode.
+    #[test]
+    fn render_live_json_query_failed_signals_already_reported() {
+        let runner = MockRunner::default().with_output(
+            CmdRequest::UpscQuery { name: "ups".into() },
+            RawCommandOutput {
+                cmd: "upsc ups".into(),
+                stdout: String::new(),
+                stderr: "Error: Connection failure: Connection refused".into(),
+                exit_status: 1,
+            },
+        );
+        let cfg = Ups {
+            enable: true,
+            name: "ups".into(),
+        };
+        let err = render_live(&runner, &cfg, true).expect_err("query failure expected");
+        assert!(
+            matches!(err, UpsError::QueryFailedJsonReported),
+            "got {err:?}"
         );
     }
 

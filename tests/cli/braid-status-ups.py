@@ -46,13 +46,18 @@ assert parsed["device"]["mfr"] == "APC", parsed
 
 # --- Query-failed branch ---
 # Stop upsd and confirm the query-failed JSON shape has the sentinel
-# error. The exit code is 1 so machine.execute (tolerant).
+# error and that --json mode keeps stderr silent. The exit code is 1
+# so machine.execute (tolerant).
 machine.succeed("systemctl stop upsd.service")
-exit_code, raw_down = machine.execute("braid ups status --json")
+exit_code = machine.execute(
+    "braid ups status --json >/tmp/ups_qf.out 2>/tmp/ups_qf.err"
+)[0]
 assert exit_code != 0, (
-    f"braid ups status --json must exit non-zero when query fails; got 0\n{raw_down}"
+    "braid ups status --json must exit non-zero when query fails; got 0"
 )
-parsed_down = json.loads(raw_down)
+out = machine.succeed("cat /tmp/ups_qf.out")
+err = machine.succeed("cat /tmp/ups_qf.err")
+parsed_down = json.loads(out)
 assert parsed_down.get("error") == "query_failed", (
     f"expected error=query_failed, got {parsed_down}"
 )
@@ -62,4 +67,7 @@ detail = parsed_down.get("detail", "")
 # regression that drops captured stderr from the JSON detail field.
 assert isinstance(detail, str) and "Connection failure" in detail, (
     f"expected detail to contain upsc stderr 'Connection failure', got {parsed_down}"
+)
+assert err == "", (
+    f"expected empty stderr in --json query-failed, got: {err!r}"
 )
