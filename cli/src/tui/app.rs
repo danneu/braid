@@ -19,7 +19,6 @@ pub enum Message {
     OpenDiskDetail,
     CloseDiskDetail,
     ResetTemperatureStats,
-    Tick,
     CommandStarted {
         id: CmdId,
         cmd: String,
@@ -150,7 +149,6 @@ pub fn update(model: &mut Model, msg: Message) -> Vec<Effect> {
             model.session_temperature_stats.clear();
             vec![]
         }
-        Message::Tick => vec![],
         Message::CommandStarted { id, cmd } => {
             model.commands.insert(
                 id,

@@ -18,7 +18,6 @@ pub enum Message {
     Select,
     Back,
     Reload,
-    Tick,
     CommandFinished {
         raw: RawCommandOutput,
         generation: u64,
@@ -168,7 +167,6 @@ pub fn update(model: &mut Model, msg: Message) -> Vec<Effect> {
                 switch_command(model)
             }
         }
-        Message::Tick => vec![],
         Message::CommandFinished { raw, generation } => {
             if generation != model.command_gen {
                 return vec![];

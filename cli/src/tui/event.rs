@@ -36,7 +36,6 @@ pub enum Event {
     PollFanRefresh,
     UpsProbeFinished(UpsSnapshot),
     PollUpsRefresh,
-    Tick,
 }
 
 impl Event {
@@ -61,7 +60,6 @@ impl Event {
             Event::PollFanRefresh => Some(Message::RefreshFan),
             Event::UpsProbeFinished(snapshot) => Some(Message::UpsProbeFinished(snapshot)),
             Event::PollUpsRefresh => Some(Message::RefreshUps),
-            Event::Tick => Some(Message::Tick),
         }
     }
 }
@@ -133,11 +131,7 @@ impl InputHandler {
                             break;
                         }
                     }
-                    Ok(false) => {
-                        if thread_tx.send(Event::Tick).is_err() {
-                            break;
-                        }
-                    }
+                    Ok(false) => {}
                     Err(_) => break,
                 }
             }

@@ -18,7 +18,6 @@ pub enum Event {
         raw: RawCommandOutput,
         generation: u64,
     },
-    Tick,
 }
 
 impl Event {
@@ -33,7 +32,6 @@ impl Event {
             Event::CommandFinished { raw, generation } => {
                 Some(Message::CommandFinished { raw, generation })
             }
-            Event::Tick => Some(Message::Tick),
         }
     }
 }
@@ -61,11 +59,7 @@ impl InputHandler {
                             break;
                         }
                     }
-                    Ok(false) => {
-                        if thread_tx.send(Event::Tick).is_err() {
-                            break;
-                        }
-                    }
+                    Ok(false) => {}
                     Err(_) => break,
                 }
             }
