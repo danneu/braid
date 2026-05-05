@@ -294,31 +294,12 @@ with subtest("braid recover self-mounts and rebuilds pool.json"):
         f"mounting wait must precede mounted row, got: {err!r}"
     )
 
-    # relock_and_remount cycle: unmount + per-disk close happen between the
-    # initial self-mount and the second mount cycle's [wait] passphrase row.
-    cycle_unmount_wait = "[wait] pool: unmounting /mnt/storage (recover remount cycle)...\n"
-    cycle_unmounted_ok = "[ok]   pool: unmounted /mnt/storage (recover remount cycle)\n"
-    assert cycle_unmount_wait in err, (
-        f"recover remount cycle umount wait row missing, got: {err!r}"
-    )
-    assert err.find(cycle_unmount_wait) < err.find(cycle_unmounted_ok), (
-        f"recover cycle unmount wait must precede unmounted ok, got: {err!r}"
-    )
-    cycle_lock_wait = "[wait] disk disk1: locking...\n"
-    cycle_locked_ok = "[ok]   disk disk1: locked\n"
-    assert cycle_lock_wait in err, (
-        f"recover remount cycle locking wait row missing, got: {err!r}"
-    )
-    assert err.find(cycle_lock_wait) < err.find(cycle_locked_ok), (
-        f"recover cycle locking wait must precede locked ok, got: {err!r}"
-    )
-    cycle_lock_wait_2 = "[wait] disk disk2: locking...\n"
-    cycle_locked_ok_2 = "[ok]   disk disk2: locked\n"
-    assert cycle_lock_wait_2 in err, (
-        f"recover remount cycle locking wait row missing for disk2, got: {err!r}"
-    )
-    assert err.find(cycle_lock_wait_2) < err.find(cycle_locked_ok_2), (
-        f"recover cycle disk2 locking wait must precede locked ok, got: {err!r}"
+    # This journal is Add::PostAddBalanceRaid1: membership already committed
+    # and only post-add maintenance remains. The relock/remount cycle is
+    # replace-specific, so this add recovery should not take the pool offline
+    # a second time before replaying the owed balance.
+    assert "recover remount cycle" not in err, (
+        f"post-add recovery must not run the replace remount cycle, got: {err!r}"
     )
     # post-{label} RAID1 soft balance replay rows from replay_post_mutation.
     # Pin the substring shared with module tests for cross-suite consistency.
