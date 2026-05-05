@@ -102,7 +102,7 @@ test-parsers *args:
 
 # Run Rust unit tests (excludes unstable golden tests)
 test-rust:
-    cargo test --lib --test golden_nixos_25_11
+    cargo test --lib --test golden_nixos_25_11 --test tty_guard
 
 # Format nix source + tests with nixfmt
 fmt-nix:

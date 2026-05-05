@@ -26,6 +26,7 @@ pub enum Effect {
 }
 
 pub fn run(mount_point: &str) -> io::Result<()> {
+    crate::util::require_tty("browse")?;
     let mp = MountPoint(mount_point.to_owned());
     let mut terminal = ratatui::init();
     let (_input, cmd_tx, rx) = InputHandler::new();

@@ -32,6 +32,7 @@ use crate::status::DiskErrors;
 use crate::types::MountPoint;
 
 pub fn run(config_path: &Path, paths: &StatePaths) -> io::Result<()> {
+    crate::util::require_tty("tui")?;
     let config = config_read(config_path).map_err(|e| io::Error::other(e.to_string()))?;
     let membership =
         membership::load_membership(paths).map_err(|e| io::Error::other(e.to_string()))?;
@@ -62,6 +63,7 @@ pub fn run(config_path: &Path, paths: &StatePaths) -> io::Result<()> {
 }
 
 pub fn run_demo() -> io::Result<()> {
+    crate::util::require_tty("tui")?;
     let disk_names = vec![
         "toshiba".to_owned(),
         "ironwolf".to_owned(),
