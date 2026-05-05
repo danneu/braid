@@ -5,6 +5,8 @@ use crate::tui::model::{
     FanSnapshot, Model, PoolState, PoolStatus, TemperatureWatermark, UpsSnapshot,
 };
 
+// Single large variant by design; probe results are rare, and boxing added an extra allocation/deref without a measured benefit -- revisit if profiling shows enum size matters.
+#[allow(clippy::large_enum_variant)]
 pub enum Message {
     Quit,
     ToggleHelp,
@@ -16,7 +18,7 @@ pub enum Message {
     OpenDiskDetail,
     CloseDiskDetail,
     ResetTemperatureStats,
-    PoolProbeFinished(Box<Result<Option<PoolState>, String>>, Duration),
+    PoolProbeFinished(Result<Option<PoolState>, String>, Duration),
     /// A fan probe finished. Install the snapshot and re-arm the loop.
     FanProbeFinished(FanSnapshot),
     /// Scheduler tick from `Effect::ScheduleFanProbe`. The handler reads
@@ -138,7 +140,7 @@ pub fn update(model: &mut Model, msg: Message) -> Vec<Effect> {
         }
         Message::PoolProbeFinished(result, elapsed) => {
             let stale = model.pool.current().cloned();
-            model.pool = match *result {
+            model.pool = match result {
                 Ok(Some(pool)) => {
                     // Fold this tick's temperature readings into the
                     // session watermark map *before* moving `pool` into
@@ -408,7 +410,7 @@ mod tests {
         let pool = sample_pool();
         update(
             &mut model,
-            Message::PoolProbeFinished(Box::new(Ok(Some(pool))), Duration::from_millis(50)),
+            Message::PoolProbeFinished(Ok(Some(pool)), Duration::from_millis(50)),
         );
         assert!(model.spinner_deadline.is_some());
     }
@@ -442,7 +444,7 @@ mod tests {
         let pool = pool_with_temperature("toshiba", "11111111-1111-1111-1111-111111111111", 38);
         update(
             &mut model,
-            Message::PoolProbeFinished(Box::new(Ok(Some(pool))), Duration::from_millis(10)),
+            Message::PoolProbeFinished(Ok(Some(pool)), Duration::from_millis(10)),
         );
         let id = TemperatureDiskId::LuksUuid(LuksUuid(
             "11111111-1111-1111-1111-111111111111".to_owned(),
@@ -469,14 +471,14 @@ mod tests {
         update(
             &mut model,
             Message::PoolProbeFinished(
-                Box::new(Ok(Some(pool_with_temperature("toshiba", uuid, 38)))),
+                Ok(Some(pool_with_temperature("toshiba", uuid, 38))),
                 Duration::from_millis(10),
             ),
         );
         update(
             &mut model,
             Message::PoolProbeFinished(
-                Box::new(Ok(Some(pool_with_temperature("toshiba", uuid, 44)))),
+                Ok(Some(pool_with_temperature("toshiba", uuid, 44))),
                 Duration::from_millis(10),
             ),
         );
@@ -497,14 +499,14 @@ mod tests {
         update(
             &mut model,
             Message::PoolProbeFinished(
-                Box::new(Ok(Some(pool_with_temperature("toshiba", uuid, 38)))),
+                Ok(Some(pool_with_temperature("toshiba", uuid, 38))),
                 Duration::from_millis(10),
             ),
         );
         update(
             &mut model,
             Message::PoolProbeFinished(
-                Box::new(Ok(Some(pool_with_temperature("toshiba", uuid, 30)))),
+                Ok(Some(pool_with_temperature("toshiba", uuid, 30))),
                 Duration::from_millis(10),
             ),
         );
@@ -530,7 +532,7 @@ mod tests {
         update(
             &mut model,
             Message::PoolProbeFinished(
-                Box::new(Ok(Some(pool_with_temperature("toshiba", uuid, 38)))),
+                Ok(Some(pool_with_temperature("toshiba", uuid, 38))),
                 Duration::from_millis(10),
             ),
         );
@@ -538,10 +540,7 @@ mod tests {
         // all -- simulates toshiba's smartctl briefly failing.
         update(
             &mut model,
-            Message::PoolProbeFinished(
-                Box::new(Ok(Some(sample_pool()))),
-                Duration::from_millis(10),
-            ),
+            Message::PoolProbeFinished(Ok(Some(sample_pool())), Duration::from_millis(10)),
         );
         let w = model.session_temperature_stats.get(&id).unwrap();
         assert_eq!(w.min_celsius, 38);
@@ -658,10 +657,7 @@ mod tests {
         let mut model = Model::new_demo(sample_disk_names(), PoolStatus::Loading);
         let effects = update(
             &mut model,
-            Message::PoolProbeFinished(
-                Box::new(Ok(Some(sample_pool()))),
-                Duration::from_millis(10),
-            ),
+            Message::PoolProbeFinished(Ok(Some(sample_pool())), Duration::from_millis(10)),
         );
         assert!(effects.is_empty(), "got {} effects", effects.len());
     }
@@ -799,7 +795,7 @@ mod tests {
         update(
             &mut model,
             Message::PoolProbeFinished(
-                Box::new(Ok(Some(pool_with_temperature("toshiba", uuid, 38)))),
+                Ok(Some(pool_with_temperature("toshiba", uuid, 38))),
                 Duration::from_millis(10),
             ),
         );
