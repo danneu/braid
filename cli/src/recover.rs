@@ -1146,12 +1146,13 @@ fn write_add_phase(
     paths: &StatePaths,
     journal: &Journal,
     phase: journal::AddPhase,
-) -> Result<(), RecoverError> {
+) -> Result<Journal, RecoverError> {
     let mut next = journal.clone();
     if let journal::OpKind::Add { phase: p, .. } = &mut next.op {
         *p = phase;
     }
-    journal::write_journal(paths, &next).map_err(|e| RecoverError::Journal(e.to_string()))
+    journal::write_journal(paths, &next).map_err(|e| RecoverError::Journal(e.to_string()))?;
+    Ok(next)
 }
 
 fn recover_passphrase<'a>(
@@ -1393,19 +1394,6 @@ fn ensure_keyfile_enrolled<R: CommandRunner>(
     }
 }
 
-fn run_add_post_balance<R: CommandRunner + Sync>(
-    runner: &R,
-    mount_point: &MountPoint,
-    pool: &PoolState,
-    progress: ProgressOutput,
-) -> Result<(), RecoverError> {
-    let op = journal::OpKind::Add {
-        phase: journal::AddPhase::PostAddBalanceRaid1,
-        targets: std::collections::BTreeMap::new(),
-    };
-    replay_post_mutation(runner, mount_point, &op, pool, progress)
-}
-
 fn execute_add_post_balance_recovery<R: CommandRunner + Sync>(
     runner: &R,
     by_id_resolver: &dyn ByIdResolver,
@@ -1442,7 +1430,13 @@ fn execute_add_post_balance_recovery<R: CommandRunner + Sync>(
                 })?,
         )
     };
-    run_add_post_balance(runner, params.config.mount_point(), &pool, params.progress)?;
+    replay_post_mutation(
+        runner,
+        params.config.mount_point(),
+        &journal.op,
+        &pool,
+        params.progress,
+    )?;
     journal::clear_journal(params.paths).map_err(|e| RecoverError::Journal(e.to_string()))?;
     eprintln!("pending-op.json cleared. Recovery complete.");
     Ok(())
@@ -1628,7 +1622,7 @@ fn execute_add_pool_mutation_recovery<R: CommandRunner + Sync, F: Filesystem + ?
             build_membership_from_live_pool(&pool, union, prior.as_ref(), by_id_resolver)?;
         membership::save_membership(&recovered, params.paths)?;
         eprintln!("pool.json written from completed add membership.");
-        write_add_phase(
+        let journal = write_add_phase(
             params.paths,
             journal,
             journal::AddPhase::PostAddBalanceRaid1,
@@ -1637,7 +1631,7 @@ fn execute_add_pool_mutation_recovery<R: CommandRunner + Sync, F: Filesystem + ?
             runner,
             by_id_resolver,
             params,
-            journal,
+            &journal,
             union,
             pool,
             true,
@@ -1648,12 +1642,12 @@ fn execute_add_pool_mutation_recovery<R: CommandRunner + Sync, F: Filesystem + ?
     let recovered = build_membership_from_live_pool(&pool, union, prior.as_ref(), by_id_resolver)?;
     membership::save_membership(&recovered, params.paths)?;
     eprintln!("pool.json written from completed add membership.");
-    write_add_phase(
+    let journal = write_add_phase(
         params.paths,
         journal,
         journal::AddPhase::PostAddBalanceRaid1,
     )?;
-    execute_add_post_balance_recovery(runner, by_id_resolver, params, journal, union, pool, false)
+    execute_add_post_balance_recovery(runner, by_id_resolver, params, &journal, union, pool, false)
 }
 
 const REPLACE_WAIT_POLL_INTERVAL: Duration = Duration::from_millis(200);
