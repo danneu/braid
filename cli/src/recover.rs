@@ -1415,7 +1415,6 @@ fn execute_add_post_balance_recovery<R: CommandRunner + Sync>(
     pool: PoolState,
     inhibitor_already_held: bool,
 ) -> Result<(), RecoverError> {
-    validate_live_members_allowed(&pool, &journal.target_membership)?;
     let live = live_member_names(&pool);
     let target: std::collections::BTreeSet<_> =
         journal.target_membership.disks.keys().cloned().collect();
@@ -4895,14 +4894,25 @@ mod tests {
         assert_eq!(inhibitor.acquire_count(), 0);
     }
 
-    /// If a live pool device is absent from both the pre-operation and target
-    /// membership snapshots, recovery must fail rather than fabricating a bogus
-    /// by_id path. This protects against writing corrupt pool.json entries that
-    /// would break subsequent unlock/lock cycles.
-    ///
-    /// Scenario: an interrupted add left a device in the btrfs pool that
-    /// somehow appears in neither journal snapshot. Recovery should refuse to
-    /// write pool.json and leave the journal intact so the user can intervene.
+    // Intent: verify that when the live pool contains a braid-prefixed
+    // device that is in NEITHER the pre nor target membership snapshot,
+    // cmd_recover for a PostAddBalanceRaid1 journal refuses to proceed
+    // via the set-equality check, surfaces the post-add-recovery
+    // mismatch message, and leaves the journal + pool.json untouched.
+    // Why it exists: protects the simplification that drops the
+    // structurally-redundant validate_live_members_allowed call in
+    // execute_add_post_balance_recovery. Without this assertion, a
+    // future refactor could re-introduce that call or replace the
+    // set-equality check with a one-direction check and silently
+    // regress the error-message contract for the live-not-in-target
+    // direction. Pinned via the cmd_recover load path so the
+    // live-pool probe and PostAddBalanceRaid1 dispatch in
+    // RecoverPlan::execute stay under the assertion.
+    // Scenario: an interrupted add left a device in the btrfs pool that
+    // appears in neither journal snapshot, such as an admin manually
+    // running `btrfs device add` outside of braid or a stale mapper
+    // surviving a prior recovery. Recovery must refuse to write
+    // pool.json and leave the journal intact so the user can intervene.
     #[test]
     fn recover_fails_when_device_missing_from_both_snapshots() {
         let tmp = tempfile::TempDir::new().unwrap();
@@ -4919,7 +4929,7 @@ mod tests {
         let pre = PoolMembership { disks: pre_disks };
         let target = pre.clone();
 
-        // Op is adding "mystery" — but neither snapshot contains it
+        // Op is adding "mystery" -- but neither snapshot contains it
         let mut add_disks = BTreeMap::new();
         add_disks.insert(
             "mystery".to_owned(),
@@ -4968,8 +4978,8 @@ mod tests {
                 cryptsetup_uuid_ok("/dev/vdb", "22222222-2222-2222-2222-222222222222"),
             );
 
-        // Toshiba (devid 1) iterates first; resolver must succeed for /dev/vda
-        // so the loop reaches the unknown 'mystery' device.
+        // Recovery should fail before by-id resolution; this resolver only
+        // satisfies the cmd_recover call signature.
         let resolver = resolver_for(&[("/dev/vda", "ata-TOSHIBA")]);
         let result = cmd_recover(
             &runner,
@@ -4987,12 +4997,22 @@ mod tests {
             },
         );
 
-        // Must fail with an error mentioning the unknown device
+        // Must fail with the set-equality mismatch message naming the
+        // unknown device, without the deleted by-id-path remediation hint.
         let err = result.unwrap_err();
         let msg = err.to_string();
         assert!(
-            msg.contains("braid-mystery"),
-            "error should name the unknown device, got: {msg}"
+            msg.contains("post-add recovery expected live pool membership"),
+            "expected set-mismatch message, got: {msg}"
+        );
+        assert!(
+            msg.contains("mystery"),
+            "expected error to surface the unexpected device name, got: {msg}"
+        );
+        assert!(
+            !msg.contains("no by-id path"),
+            "post-balance recovery should use the set-mismatch message, not \
+             the deleted by-id-path message; got: {msg}"
         );
 
         // pool.json must NOT have been written
