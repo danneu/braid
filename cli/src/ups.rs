@@ -9,7 +9,7 @@
 //! off the parsed model without re-parsing `upsc` output themselves.
 
 use crate::cmd::{CmdError, CmdRequest, CommandRunner};
-use crate::config::{ConfigError, Ups, config_read};
+use crate::config::{ConfigError, config_read};
 use crate::parse::parse_upsc;
 use crate::parse::types::{UpsStatusFlag, UpscOutput};
 use std::path::Path;
@@ -82,24 +82,6 @@ pub fn cmd_ups_status<R: CommandRunner>(
     if !ups_cfg.enable {
         return print_not_enabled(json);
     }
-    render_live(runner, ups_cfg, json)
-}
-
-fn print_not_enabled(json: bool) -> Result<(), UpsError> {
-    if json {
-        let payload = JsonReport::Error(ErrorReport::NotEnabled);
-        emit_json(&payload)?;
-    } else {
-        println!(
-            "UPS support is not enabled. Set `braid.ups.enable = true` in\n\
-             your NixOS configuration and rebuild to enable preflight\n\
-             safety and low-battery shutdown."
-        );
-    }
-    Ok(())
-}
-
-fn render_live<R: CommandRunner>(runner: &R, ups_cfg: &Ups, json: bool) -> Result<(), UpsError> {
     let parsed = match query_ups(runner, &ups_cfg.name) {
         Ok(p) => p,
         Err(UpsQueryError::InvocationFailed(e)) => {
@@ -113,6 +95,20 @@ fn render_live<R: CommandRunner>(runner: &R, ups_cfg: &Ups, json: bool) -> Resul
         emit_json(&JsonReport::Ok(&parsed))?;
     } else {
         print!("{}", format_human(&ups_cfg.name, &parsed));
+    }
+    Ok(())
+}
+
+fn print_not_enabled(json: bool) -> Result<(), UpsError> {
+    if json {
+        let payload = JsonReport::Error(ErrorReport::NotEnabled);
+        emit_json(&payload)?;
+    } else {
+        println!(
+            "UPS support is not enabled. Set `braid.ups.enable = true` in\n\
+             your NixOS configuration and rebuild to enable preflight\n\
+             safety and low-battery shutdown."
+        );
     }
     Ok(())
 }
@@ -240,6 +236,18 @@ mod tests {
     use super::*;
     use crate::cmd::{MockRunner, RawCommandOutput};
     use crate::parse::types::{BatteryFields, DeviceFields, InputFields};
+    use std::path::PathBuf;
+    use tempfile::TempDir;
+
+    fn write_ups_config(dir: &TempDir, name: &str) -> PathBuf {
+        let path = dir.path().join("config.json");
+        std::fs::write(
+            &path,
+            format!(r#"{{"mount_point":"/mnt/storage","ups":{{"enable":true,"name":"{name}"}}}}"#),
+        )
+        .unwrap();
+        path
+    }
 
     // Intent: format_status renders OL verbatim when the UPS is on utility power.
     // Why: operators triaging preflight failures need the rendered line to
@@ -485,19 +493,18 @@ mod tests {
         assert_eq!(out.battery.charge_pct, Some(100));
     }
 
-    // Intent: render_live routes invocation failure to UpsError::QueryFailed.
-    // Why: CLI shell relies on that variant to print the error and exit(1);
-    // if MissingMock (simulating a spawn failure) were surfaced as a generic
-    // Config error, the wrapper would drop the intended diagnostic.
-    // Scenario: MockRunner with no UpscQuery mock seeded.
+    // Intent: cmd_ups_status routes invocation failure to UpsError::QueryFailed
+    // with an "invocation failed: ..." detail prefix.
+    // Why it exists: CLI shell at main.rs prints e.to_string() to stderr for
+    // non-JSON mode; the prefix tells operators that upsc could not even run.
+    // Scenario: MockRunner with no UpscQuery mock seeded simulates a spawn
+    // failure (CmdError::MissingMock).
     #[test]
-    fn render_live_invocation_failure_surfaces_typed_error() {
+    fn cmd_ups_status_invocation_failure_surfaces_typed_error() {
         let runner = MockRunner::default();
-        let cfg = Ups {
-            enable: true,
-            name: "ups".into(),
-        };
-        let err = render_live(&runner, &cfg, false).expect_err("query failure expected");
+        let dir = tempfile::tempdir().unwrap();
+        let cfg = write_ups_config(&dir, "ups");
+        let err = cmd_ups_status(&runner, &cfg, false).expect_err("query failure expected");
         match &err {
             UpsError::QueryFailed { detail } => {
                 assert!(detail.starts_with("invocation failed: "), "got: {detail}");
@@ -511,12 +518,14 @@ mod tests {
         );
     }
 
-    // Intent: render_live returns QueryFailed on a non-zero `upsc` exit.
-    // Why: non-zero upsc exits carry useful stderr, and the rendered error
-    // must not double-prefix the query-failed wording.
-    // Scenario: stubbed upsc returning exit 1 and an empty stdout.
+    // Intent: cmd_ups_status returns QueryFailed with detail "exit N: <stderr>"
+    // when upsc exits non-zero.
+    // Why it exists: non-zero upsc exits carry stderr that diagnoses daemon vs
+    // name problems; the rendered detail must surface that stderr verbatim.
+    // Scenario: stubbed upsc returning exit 1 with a connection-refused stderr
+    // (the realistic shape when upsd.service is down).
     #[test]
-    fn render_live_non_zero_exit_is_query_failed() {
+    fn cmd_ups_status_non_zero_exit_is_query_failed() {
         let runner = MockRunner::default().with_output(
             CmdRequest::UpscQuery { name: "ups".into() },
             RawCommandOutput {
@@ -526,11 +535,9 @@ mod tests {
                 exit_status: 1,
             },
         );
-        let cfg = Ups {
-            enable: true,
-            name: "ups".into(),
-        };
-        let err = render_live(&runner, &cfg, false).expect_err("query failure expected");
+        let dir = tempfile::tempdir().unwrap();
+        let cfg = write_ups_config(&dir, "ups");
+        let err = cmd_ups_status(&runner, &cfg, false).expect_err("query failure expected");
         match &err {
             UpsError::QueryFailed { detail } => {
                 assert!(detail.starts_with("exit 1: "), "got: {detail}");
@@ -544,27 +551,17 @@ mod tests {
         );
     }
 
-    // Intent: render_live in --json mode signals "already reported on stdout".
-    // Why it exists: --json query failure emits a JSON sentinel as the full
-    // report, and the CLI shell must not add a redundant human error line on
-    // stderr.
-    // Scenario: upsd is stopped, so upsc exits non-zero in --json mode.
+    // Intent: emit_query_failed in --json mode returns
+    // QueryFailedJsonReported so the CLI shell skips the human-readable error
+    // line on stderr.
+    // Why it exists: stdout-quiet contract -- scripts wrapping --json must see
+    // exactly one document on stdout and nothing on stderr.
+    // Scenario: any query failure under --json; the branch under test is the
+    // variant choice, not detail formatting.
     #[test]
-    fn render_live_json_query_failed_signals_already_reported() {
-        let runner = MockRunner::default().with_output(
-            CmdRequest::UpscQuery { name: "ups".into() },
-            RawCommandOutput {
-                cmd: "upsc ups".into(),
-                stdout: String::new(),
-                stderr: "Error: Connection failure: Connection refused".into(),
-                exit_status: 1,
-            },
-        );
-        let cfg = Ups {
-            enable: true,
-            name: "ups".into(),
-        };
-        let err = render_live(&runner, &cfg, true).expect_err("query failure expected");
+    fn emit_query_failed_json_returns_already_reported() {
+        let err = emit_query_failed(true, "exit 1: dummy".into())
+            .expect_err("err expected from emit_query_failed");
         assert!(
             matches!(err, UpsError::QueryFailedJsonReported),
             "got {err:?}"
