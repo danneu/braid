@@ -5,7 +5,7 @@ use std::sync::mpsc;
 use std::thread;
 use std::time::Duration;
 
-use ratatui::crossterm::event::{self, KeyEvent};
+use ratatui::crossterm::event::{self, KeyEvent, KeyEventKind};
 
 use crate::tui::app::Message;
 use crate::tui::keymap;
@@ -42,7 +42,12 @@ pub enum Event {
 impl Event {
     pub fn into_message(self, show_help: bool, show_disk_detail: bool) -> Option<Message> {
         match self {
-            Event::Key(key) => keymap::handle_key(key, show_help, show_disk_detail),
+            Event::Key(key) => {
+                if !matches!(key.kind, KeyEventKind::Press | KeyEventKind::Repeat) {
+                    return None;
+                }
+                keymap::handle_key(key, show_help, show_disk_detail)
+            }
             Event::CommandStarted { id, cmd } => Some(Message::CommandStarted { id, cmd }),
             Event::CommandOutput { id, stream, line } => {
                 Some(Message::CommandOutput { id, stream, line })
@@ -58,6 +63,50 @@ impl Event {
             Event::PollUpsRefresh => Some(Message::RefreshUps),
             Event::Tick => Some(Message::Tick),
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use ratatui::crossterm::event::{KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
+
+    use super::*;
+
+    fn q_event(kind: KeyEventKind) -> Event {
+        Event::Key(KeyEvent::new_with_kind(
+            KeyCode::Char('q'),
+            KeyModifiers::NONE,
+            kind,
+        ))
+    }
+
+    // Intent: Release events are dropped before tui keymap dispatch.
+    // Why it exists: kitty keyboard protocol can emit a Release after q; that
+    // must not produce a second Quit action.
+    // Scenario: user presses and releases q in the tui.
+    #[test]
+    fn release_q_is_ignored() {
+        assert!(
+            q_event(KeyEventKind::Release)
+                .into_message(false, false)
+                .is_none()
+        );
+    }
+
+    // Intent: Press and Repeat events still flow through tui keymap dispatch.
+    // Why it exists: the key-kind filter must not drop normal key presses or
+    // kitty protocol auto-repeat events.
+    // Scenario: user presses q normally, or holds q long enough to generate repeat.
+    #[test]
+    fn press_and_repeat_q_emit_quit() {
+        assert!(matches!(
+            q_event(KeyEventKind::Press).into_message(false, false),
+            Some(Message::Quit)
+        ));
+        assert!(matches!(
+            q_event(KeyEventKind::Repeat).into_message(false, false),
+            Some(Message::Quit)
+        ));
     }
 }
 
