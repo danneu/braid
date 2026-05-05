@@ -118,14 +118,7 @@ pub fn update(model: &mut Model, msg: Message) -> Vec<Effect> {
                 let path = format!("{}/{}", model.mount_point.as_str(), subvol.path);
                 model.mode = ViewMode::SubvolDetail;
                 model.subvol_list_output = model.output.clone();
-                model.scroll_offset = 0;
-                model.command_gen += 1;
-                model.loading = true;
-                model.output.clear();
-                vec![Effect::RunCommand {
-                    request: CmdRequest::BtrfsSubvolumeShow { path },
-                    generation: model.command_gen,
-                }]
+                dispatch(model, CmdRequest::BtrfsSubvolumeShow { path })
             } else {
                 vec![]
             }
@@ -155,12 +148,7 @@ pub fn update(model: &mut Model, msg: Message) -> Vec<Effect> {
                 if !model.subvolumes.is_empty() {
                     let subvol = &model.subvolumes[model.subvol_selected];
                     let path = format!("{}/{}", model.mount_point.as_str(), subvol.path);
-                    model.command_gen += 1;
-                    model.loading = true;
-                    return vec![Effect::RunCommand {
-                        request: CmdRequest::BtrfsSubvolumeShow { path },
-                        generation: model.command_gen,
-                    }];
+                    return dispatch(model, CmdRequest::BtrfsSubvolumeShow { path });
                 }
                 vec![]
             } else {
@@ -201,11 +189,15 @@ pub fn update(model: &mut Model, msg: Message) -> Vec<Effect> {
 }
 
 fn switch_command(model: &mut Model) -> Vec<Effect> {
+    let request = model.current_subtab().request(&model.mount_point);
+    dispatch(model, request)
+}
+
+fn dispatch(model: &mut Model, request: CmdRequest) -> Vec<Effect> {
     model.scroll_offset = 0;
     model.command_gen += 1;
     model.loading = true;
     model.output.clear();
-    let request = model.current_subtab().request(&model.mount_point);
     vec![Effect::RunCommand {
         request,
         generation: model.command_gen,
@@ -440,6 +432,52 @@ mod tests {
 
         assert_eq!(model.subvolumes.len(), 1);
         assert_eq!(model.mode, ViewMode::SubvolDetail);
+    }
+
+    // Intent: Reload while in SubvolDetail re-dispatches `btrfs subvolume
+    // show <selected>` with a bumped generation and clears output + scroll,
+    // matching every other dispatch path.
+    // Why it exists: this path previously skipped output.clear() and
+    // scroll_offset = 0 silently; the unified `dispatch` helper aligns all
+    // three call sites. This test pins the dispatched request, the
+    // generation bump, and the cleared state so a future regression cannot
+    // silently swap the request kind or skip the resets.
+    // Scenario: user drills into a subvolume, scrolls partway down the
+    // detail output, and presses 'r' to refresh.
+    #[test]
+    fn reload_in_subvol_detail_clears_and_dispatches() {
+        let mut model = Model::new_demo("/mnt/storage", Tab::Subvolumes, vec!["old detail".into()]);
+        model.subvolumes = vec![crate::parse::types::BtrfsSubvolume {
+            id: 256,
+            generation: 10,
+            top_level: 5,
+            path: "data".into(),
+        }];
+        model.mode = ViewMode::SubvolDetail;
+        model.scroll_offset = 7;
+        let generation_before = model.command_gen;
+
+        let effects = update(&mut model, Message::Reload);
+
+        assert_eq!(effects.len(), 1);
+        match &effects[0] {
+            Effect::RunCommand {
+                request,
+                generation,
+            } => {
+                assert_eq!(
+                    *request,
+                    CmdRequest::BtrfsSubvolumeShow {
+                        path: "/mnt/storage/data".into(),
+                    },
+                );
+                assert_eq!(*generation, generation_before + 1);
+            }
+        }
+        assert!(model.loading);
+        assert!(model.output.is_empty());
+        assert_eq!(model.scroll_offset, 0);
+        assert_eq!(model.command_gen, generation_before + 1);
     }
 
     /*
