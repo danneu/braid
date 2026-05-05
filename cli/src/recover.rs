@@ -587,15 +587,7 @@ pub fn plan_recover<R: CommandRunner + Sync, F: Filesystem + ?Sized>(
         };
     }
 
-    // Build dry-run steps.
-    let mut steps = Vec::new();
-    if let Some(op) = &open_plan {
-        steps.extend(mount::compile_open_steps(
-            op,
-            params.config.mount_point(),
-            None,
-        ));
-    } else if params.dry_run {
+    let probed_live_pool = if open_plan.is_none() && params.dry_run {
         // Pool is already mounted -- run the same read-only reconciliation
         // validation that execution's later probe_pool loop does. This
         // catches errors like "device X has no by-id path in either
@@ -613,23 +605,25 @@ pub fn plan_recover<R: CommandRunner + Sync, F: Filesystem + ?Sized>(
                 };
             }
         };
-        for dev in &pool.devices {
-            let Some(name) = config::name_from_mapper(&dev.mapper.0) else {
-                continue;
+        if let Err(e) = validate_live_members_allowed(&pool, &union) {
+            return RecoverPlanReport {
+                notes,
+                result: Err(e),
             };
-            if !union.disks.contains_key(name) {
-                return RecoverPlanReport {
-                    notes,
-                    result: Err(RecoverError::Failed(format!(
-                        "device {} is in the live pool but has no by-id path in either \
-                         the pre-operation or target membership snapshot.\n\
-                         This must be resolved manually -- provide the correct \
-                         /dev/disk/by-id/ path and re-run recovery.",
-                        dev.mapper.0
-                    ))),
-                };
-            }
         }
+        Some(pool)
+    } else {
+        None
+    };
+
+    // Build dry-run steps.
+    let mut steps = Vec::new();
+    if let Some(op) = &open_plan {
+        steps.extend(mount::compile_open_steps(
+            op,
+            params.config.mount_point(),
+            None,
+        ));
     }
 
     if matches!(&journal.op, journal::OpKind::Replace { .. }) && open_plan.is_some() {
@@ -745,18 +739,49 @@ pub fn plan_recover<R: CommandRunner + Sync, F: Filesystem + ?Sized>(
     } = &journal.op
         && !journal.pre_membership.disks.is_empty()
     {
+        let all_targets_already_live = probed_live_pool
+            .as_ref()
+            .is_some_and(|pool| add_targets_all_live(pool, targets));
         steps.push(Step {
             risk: "safe",
-            description: "reconcile journaled add targets against live pool".into(),
+            description: if all_targets_already_live {
+                "reconcile journaled add targets against live pool (no replay needed: all targets already live)"
+                    .into()
+            } else {
+                "reconcile journaled add targets against live pool".into()
+            },
             commands: vec![],
         });
-        for target in targets.values() {
+        let live_names = probed_live_pool.as_ref().map(live_member_names);
+        let conditional_suffix =
+            " (skipped at runtime if open/scan reconciliation makes target live before replay)";
+        for (name, target) in targets {
             let mapper_path = format!("/dev/mapper/{}", target.mapper_name);
+            if live_names.as_ref().is_some_and(|live| live.contains(name)) {
+                let (kind, label) = match &target.mode {
+                    journal::AddJournalMode::RecoverableBraidLabeled { .. } => {
+                        ("verified returned-disk add", mapper_path.clone())
+                    }
+                    journal::AddJournalMode::FreshLuks { .. } => {
+                        ("fresh add target", target.by_id.0.clone())
+                    }
+                };
+                steps.push(Step {
+                    risk: "safe",
+                    description: format!(
+                        "replay {kind} {label} (skipped: target already live in pool)"
+                    ),
+                    commands: vec![],
+                });
+                continue;
+            }
             match &target.mode {
                 journal::AddJournalMode::RecoverableBraidLabeled { .. } => {
                     steps.push(Step {
                         risk: "safe",
-                        description: format!("replay verified returned-disk add {}", mapper_path),
+                        description: format!(
+                            "replay verified returned-disk add {mapper_path}{conditional_suffix}"
+                        ),
                         commands: vec![
                             CmdRequest::BtrfsDeviceScanForget {
                                 devices: vec![mapper_path.clone()],
@@ -807,7 +832,10 @@ pub fn plan_recover<R: CommandRunner + Sync, F: Filesystem + ?Sized>(
                     });
                     steps.push(Step {
                         risk: "destructive",
-                        description: format!("replay fresh add target {}", target.by_id),
+                        description: format!(
+                            "replay fresh add target {}{conditional_suffix}",
+                            target.by_id
+                        ),
                         commands,
                     });
                 }
@@ -2502,6 +2530,17 @@ mod tests {
         )
     }
 
+    fn btrfs_show_three_disks() -> RawCommandOutput {
+        ok_raw(
+            "btrfs filesystem show /mnt/storage",
+            "Label: none  uuid: aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee\n\
+             \tTotal devices 3 FS bytes used 1.00GiB\n\
+             \tdevid    1 size 10.00GiB used 2.00GiB path /dev/mapper/braid-disk1\n\
+             \tdevid    2 size 10.00GiB used 2.00GiB path /dev/mapper/braid-disk2\n\
+             \tdevid    3 size 10.00GiB used 2.00GiB path /dev/mapper/braid-disk3\n",
+        )
+    }
+
     fn btrfs_show_one_disk() -> RawCommandOutput {
         ok_raw(
             "btrfs filesystem show /mnt/storage",
@@ -2809,6 +2848,63 @@ mod tests {
         }
     }
 
+    fn mixed_pool_mutation_add_journal() -> journal::Journal {
+        let mut pre_disks = BTreeMap::new();
+        pre_disks.insert(
+            "disk1".to_owned(),
+            DiskMember::from_by_id(ByIdPath("/dev/disk/by-id/virtio-disk1".into())),
+        );
+        let pre = PoolMembership { disks: pre_disks };
+
+        let mut target_disks = pre.disks.clone();
+        for name in ["disk2", "disk3"] {
+            target_disks.insert(
+                name.to_owned(),
+                DiskMember::from_by_id(ByIdPath(format!("/dev/disk/by-id/virtio-{name}"))),
+            );
+        }
+        let target = PoolMembership {
+            disks: target_disks,
+        };
+
+        let mut targets = BTreeMap::new();
+        targets.insert(
+            "disk2".to_owned(),
+            journal::AddJournalTarget {
+                by_id: ByIdPath("/dev/disk/by-id/virtio-disk2".into()),
+                mapper_name: "braid-disk2".into(),
+                mode: journal::AddJournalMode::RecoverableBraidLabeled {
+                    verified_pool_fsid: "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee".into(),
+                    luks_uuid: LuksUuid("22222222-2222-2222-2222-222222222222".into()),
+                },
+            },
+        );
+        targets.insert(
+            "disk3".to_owned(),
+            journal::AddJournalTarget {
+                by_id: ByIdPath("/dev/disk/by-id/virtio-disk3".into()),
+                mapper_name: "braid-disk3".into(),
+                mode: journal::AddJournalMode::FreshLuks {
+                    luks_label: "braid-disk3".into(),
+                    luks_format_extra_opts: vec!["--label".into(), "braid-disk3".into()],
+                    enroll_key_file: Some(std::path::PathBuf::from(
+                        "/var/lib/braid/keyfiles/braid-disk3.key",
+                    )),
+                },
+            },
+        );
+
+        journal::Journal {
+            started_at: "2026-01-01T00:00:00Z".into(),
+            op: OpKind::Add {
+                phase: journal::AddPhase::PoolMutation,
+                targets,
+            },
+            pre_membership: pre,
+            target_membership: target,
+        }
+    }
+
     fn fresh_pool_mutation_add_journal(
         luks_format_extra_opts: Vec<String>,
         enroll_key_file: Option<std::path::PathBuf>,
@@ -2896,6 +2992,37 @@ mod tests {
         }
     }
 
+    fn pool_state_three_disks() -> PoolState {
+        PoolState {
+            mounted: true,
+            devices: vec![
+                PoolDevice {
+                    mapper: MapperName("braid-disk1".into()),
+                    luks_uuid: LuksUuid("11111111-1111-1111-1111-111111111111".into()),
+                    devid: 1,
+                    underlying: "/dev/vda".into(),
+                },
+                PoolDevice {
+                    mapper: MapperName("braid-disk2".into()),
+                    luks_uuid: LuksUuid("22222222-2222-2222-2222-222222222222".into()),
+                    devid: 2,
+                    underlying: "/dev/vdb".into(),
+                },
+                PoolDevice {
+                    mapper: MapperName("braid-disk3".into()),
+                    luks_uuid: LuksUuid("33333333-3333-3333-3333-333333333333".into()),
+                    devid: 3,
+                    underlying: "/dev/vdc".into(),
+                },
+            ],
+            missing_count: 0,
+            total_devices: 3,
+            fsid: Some("aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee".into()),
+            missing_devids: vec![],
+            null_underlying: vec![],
+        }
+    }
+
     fn luks_dump_label(label: &str) -> RawCommandOutput {
         ok_raw(
             "cryptsetup luksDump",
@@ -2975,6 +3102,52 @@ mod tests {
                     device: "/dev/vdb".into(),
                 },
                 cryptsetup_uuid_ok("/dev/vdb", "22222222-2222-2222-2222-222222222222"),
+            )
+    }
+
+    fn with_three_disk_pool_probe(runner: MockRunner) -> MockRunner {
+        runner
+            .with_output(
+                CmdRequest::BtrfsFilesystemShow {
+                    mount_point: MountPoint("/mnt/storage".into()),
+                },
+                btrfs_show_three_disks(),
+            )
+            .with_output(
+                CmdRequest::CryptsetupStatus {
+                    mapper: "braid-disk1".into(),
+                },
+                cryptsetup_status_active("braid-disk1", "/dev/vda"),
+            )
+            .with_output(
+                CmdRequest::CryptsetupLuksUuid {
+                    device: "/dev/vda".into(),
+                },
+                cryptsetup_uuid_ok("/dev/vda", "11111111-1111-1111-1111-111111111111"),
+            )
+            .with_output(
+                CmdRequest::CryptsetupStatus {
+                    mapper: "braid-disk2".into(),
+                },
+                cryptsetup_status_active("braid-disk2", "/dev/vdb"),
+            )
+            .with_output(
+                CmdRequest::CryptsetupLuksUuid {
+                    device: "/dev/vdb".into(),
+                },
+                cryptsetup_uuid_ok("/dev/vdb", "22222222-2222-2222-2222-222222222222"),
+            )
+            .with_output(
+                CmdRequest::CryptsetupStatus {
+                    mapper: "braid-disk3".into(),
+                },
+                cryptsetup_status_active("braid-disk3", "/dev/vdc"),
+            )
+            .with_output(
+                CmdRequest::CryptsetupLuksUuid {
+                    device: "/dev/vdc".into(),
+                },
+                cryptsetup_uuid_ok("/dev/vdc", "33333333-3333-3333-3333-333333333333"),
             )
     }
 
@@ -3977,6 +4150,105 @@ mod tests {
             "already live target must not be wiped or re-added"
         );
         assert!(!paths.pending_op_json().exists());
+    }
+
+    // Intent
+    // Verify PoolMutation recovery advances an all-live add journal to
+    // PostAddBalanceRaid1 before attempting balance replay.
+    //
+    // Why it exists
+    // The all-live fast path must still persist the phase handoff; otherwise
+    // an interruption during post-add balance recovery would leave a stale
+    // PoolMutation journal that previews or replays the wrong work.
+    //
+    // Scenario
+    // Mixed returned/fresh add journal where every target is already in the
+    // live pool; a failing sleep inhibitor stops post-add balance recovery so
+    // the preserved journal can be inspected.
+    #[test]
+    fn add_pool_mutation_initial_all_live_advances_phase_before_balance_inhibitor_failure() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let paths = StatePaths::custom(tmp.path().into());
+        let config = Config::new(MountPoint("/mnt/storage".into())).unwrap();
+        let fs = MockFs::new(&[]);
+        let journal = mixed_pool_mutation_add_journal();
+        journal::write_journal(&paths, &journal).unwrap();
+        let union = union_memberships(&journal);
+        let targets = match &journal.op {
+            OpKind::Add { targets, .. } => targets,
+            _ => unreachable!("test journal is Add"),
+        };
+        let runner = MockRunner::default();
+        let resolver = resolver_for(&[
+            ("/dev/vda", "virtio-disk1"),
+            ("/dev/vdb", "virtio-disk2"),
+            ("/dev/vdc", "virtio-disk3"),
+        ]);
+        let inhibitor = FailingInhibitor;
+        let params = recover_params_with_inhibitor(&config, &paths, None, false, &inhibitor);
+
+        let err = execute_add_pool_mutation_recovery(
+            &runner,
+            &fs,
+            &resolver,
+            &params,
+            None,
+            &journal,
+            &union,
+            targets,
+            pool_state_three_disks(),
+        )
+        .unwrap_err();
+
+        assert!(
+            err.to_string()
+                .contains("could not acquire sleep inhibitor"),
+            "expected post-add inhibitor failure, got: {err}",
+        );
+        assert!(
+            !runner.requests().iter().any(|r| matches!(
+                r,
+                CmdRequest::CryptsetupLuksFormat { .. }
+                    | CmdRequest::CryptsetupLuksAddKeyFile { .. }
+                    | CmdRequest::CryptsetupLuksHeaderBackup { .. }
+                    | CmdRequest::CryptsetupLuksOpen { .. }
+                    | CmdRequest::BtrfsDeviceScan { .. }
+                    | CmdRequest::BtrfsDeviceScanForget { .. }
+                    | CmdRequest::WipefsBtrfs { .. }
+                    | CmdRequest::BtrfsDeviceAdd { .. }
+            )),
+            "all-live path must not prep, scan, wipe, or add targets"
+        );
+        assert!(
+            !runner.requests().iter().any(|r| matches!(
+                r,
+                CmdRequest::BtrfsBalanceStatus { .. }
+                    | CmdRequest::BtrfsBalanceResume { .. }
+                    | CmdRequest::BtrfsBalanceRaid1Soft { .. }
+            )),
+            "inhibitor failure must stop before balance commands"
+        );
+
+        assert!(paths.pool_json().exists(), "pool.json should be written");
+        let recovered = membership::load_membership(&paths).unwrap();
+        assert!(recovered.disks.contains_key("disk1"));
+        assert!(recovered.disks.contains_key("disk2"));
+        assert!(recovered.disks.contains_key("disk3"));
+        assert!(
+            paths.pending_op_json().exists(),
+            "failing inhibitor should preserve the journal"
+        );
+        let preserved = journal::load_journal(&paths).unwrap().unwrap();
+        assert!(
+            matches!(
+                preserved.op,
+                OpKind::Add {
+                    phase: journal::AddPhase::PostAddBalanceRaid1,
+                    ..
+                }
+            ),
+            "preserved journal should be advanced to PostAddBalanceRaid1"
+        );
     }
 
     #[test]
@@ -8077,6 +8349,24 @@ mod tests {
             .render()
     }
 
+    fn rendered_step_block<'a>(rendered: &'a str, needle: &str) -> &'a str {
+        let needle_pos = rendered
+            .find(needle)
+            .unwrap_or_else(|| panic!("missing step containing {needle:?}: {rendered:?}"));
+        let block_start = rendered[..needle_pos].rfind('\n').map_or(0, |pos| pos + 1);
+        let after_first_line = rendered[block_start..]
+            .find('\n')
+            .map_or(rendered.len(), |pos| block_start + pos + 1);
+        let tail = &rendered[after_first_line..];
+        let block_end = if tail.starts_with('[') {
+            after_first_line
+        } else {
+            tail.find("\n[")
+                .map_or(rendered.len(), |pos| after_first_line + pos + 1)
+        };
+        &rendered[block_start..block_end]
+    }
+
     fn closed_two_disk_dry_run_runner() -> MockRunner {
         let (mp_req, mp_out) = mountpoint_fail();
         MockRunner::default()
@@ -8150,6 +8440,181 @@ mod tests {
                 "/dev/disk/by-id/virtio-new",
             ])
             .with_mappers_closed(&["braid-disk1", "braid-new"])
+    }
+
+    // Intent
+    // Verify an already-mounted PoolMutation dry-run renders no-op rows for
+    // already-live returned and fresh add targets.
+    //
+    // Why it exists
+    // The executor skips replay for targets that are already live. The
+    // preview must not advertise destructive replay commands for the common
+    // crash-after-pool.json-save window.
+    //
+    // Scenario
+    // Mixed returned/fresh add journal where disk1, disk2, and disk3 are all
+    // already in the mounted live pool.
+    #[test]
+    fn plan_recover_dry_run_pool_mutation_already_mounted_all_live_mixed_modes_renders_safe_placeholders()
+     {
+        let (mp_req, mp_out) = mountpoint_ok();
+        let runner = with_three_disk_pool_probe(MockRunner::default().with_output(mp_req, mp_out));
+
+        let rendered =
+            render_recover_dry_run(mixed_pool_mutation_add_journal(), &[], runner, false);
+
+        assert!(
+            rendered.contains(
+                "reconcile journaled add targets against live pool (no replay needed: all targets already live)"
+            ),
+            "all-live reconcile header should be annotated: {rendered:?}",
+        );
+        assert!(
+            rendered.contains(
+                "[safe       ] replay verified returned-disk add /dev/mapper/braid-disk2 (skipped: target already live in pool)"
+            ),
+            "returned target should render a safe skip placeholder: {rendered:?}",
+        );
+        assert!(
+            rendered.contains(
+                "[safe       ] replay fresh add target /dev/disk/by-id/virtio-disk3 (skipped: target already live in pool)"
+            ),
+            "fresh target should render a safe skip placeholder: {rendered:?}",
+        );
+        assert!(
+            !rendered.contains("$ cryptsetup luksFormat")
+                && !rendered.contains("$ cryptsetup luksAddKey")
+                && !rendered.contains("$ cryptsetup luksHeaderBackup")
+                && !rendered.contains("$ cryptsetup open")
+                && !rendered.contains("$ wipefs")
+                && !rendered.contains("$ btrfs device add")
+                && !rendered.contains("$ btrfs device scan --forget"),
+            "all-live PoolMutation dry-run must not render replay argv rows: {rendered:?}",
+        );
+    }
+
+    // Intent
+    // Verify an already-mounted PoolMutation dry-run skips targets proven
+    // live while keeping conditional replay rows for targets absent from the
+    // planner's live snapshot.
+    //
+    // Why it exists
+    // The executor can open/scan a committed but closed returned target before
+    // replay, so the preview must describe that concrete rows are conditional.
+    //
+    // Scenario
+    // Two returned targets are journaled; disk2 is already live, while disk3
+    // is journaled but absent from the probed mounted pool.
+    #[test]
+    fn plan_recover_dry_run_pool_mutation_already_mounted_partial_live_returned_conditional_replay()
+    {
+        let (mp_req, mp_out) = mountpoint_ok();
+        let runner = with_two_disk_pool_probe(MockRunner::default().with_output(mp_req, mp_out));
+
+        let rendered = render_recover_dry_run(
+            two_target_recoverable_pool_mutation_add_journal(),
+            &[],
+            runner,
+            false,
+        );
+
+        assert!(
+            rendered.contains("reconcile journaled add targets against live pool"),
+            "missing reconcile header: {rendered:?}",
+        );
+        assert!(
+            !rendered.contains("no replay needed: all targets already live"),
+            "mixed live-set header must stay unannotated: {rendered:?}",
+        );
+
+        let disk2_block = rendered_step_block(
+            &rendered,
+            "replay verified returned-disk add /dev/mapper/braid-disk2",
+        );
+        assert!(
+            disk2_block.contains("(skipped: target already live in pool)"),
+            "disk2 should be a skip placeholder: {disk2_block:?}",
+        );
+        assert!(
+            !disk2_block.contains("$ "),
+            "disk2 placeholder must not render argv rows: {disk2_block:?}",
+        );
+
+        let disk3_block = rendered_step_block(
+            &rendered,
+            "replay verified returned-disk add /dev/mapper/braid-disk3",
+        );
+        assert!(
+            disk3_block.contains(
+                "(skipped at runtime if open/scan reconciliation makes target live before replay)"
+            ),
+            "disk3 replay row should advertise runtime skip: {disk3_block:?}",
+        );
+        assert!(
+            disk3_block.contains("$ btrfs device scan --forget /dev/mapper/braid-disk3")
+                && disk3_block.contains("$ wipefs --all --types btrfs /dev/mapper/braid-disk3")
+                && disk3_block.contains(
+                    "$ btrfs device add --enqueue -f /dev/mapper/braid-disk3 /mnt/storage"
+                ),
+            "disk3 replay row should render returned-target argv rows: {disk3_block:?}",
+        );
+    }
+
+    // Intent
+    // Verify a not-mounted PoolMutation dry-run renders fresh-target setup as
+    // conditional replay, including the format row.
+    //
+    // Why it exists
+    // The planner has no mounted live-set snapshot in this shape, but the
+    // executor can still open/scan a committed target before replay.
+    //
+    // Scenario
+    // Fresh disk2 add journal with the pool offline; recover will mount disk1
+    // first, then conditionally replay disk2 setup/add.
+    #[test]
+    fn plan_recover_dry_run_pool_mutation_not_mounted_fresh_conditional_replay_with_format_row() {
+        let rendered = render_recover_dry_run(
+            fresh_pool_mutation_add_journal(vec!["--label".into(), "braid-disk2".into()], None),
+            &["/dev/disk/by-id/virtio-disk1"],
+            closed_disk1_dry_run_runner(),
+            false,
+        );
+
+        assert!(
+            rendered.contains("reconcile journaled add targets against live pool"),
+            "missing reconcile header: {rendered:?}",
+        );
+        assert!(
+            !rendered.contains("no replay needed: all targets already live"),
+            "offline dry-run must not use the all-live annotation: {rendered:?}",
+        );
+
+        let disk2_block = rendered_step_block(
+            &rendered,
+            "replay fresh add target /dev/disk/by-id/virtio-disk2",
+        );
+        assert!(
+            disk2_block.contains(
+                "(skipped at runtime if open/scan reconciliation makes target live before replay)"
+            ),
+            "fresh replay row should advertise runtime skip: {disk2_block:?}",
+        );
+        assert!(
+            disk2_block.contains(
+                "$ cryptsetup luksFormat --type luks2 --batch-mode '--key-file=-' --label braid-disk2 /dev/disk/by-id/virtio-disk2"
+            ) && disk2_block.contains("$ cryptsetup luksHeaderBackup --header-backup-file")
+                && disk2_block.contains("braid-disk2.luksheader /dev/disk/by-id/virtio-disk2")
+                && disk2_block.contains(
+                    "$ cryptsetup open --type luks '--key-file=-' --perf-no_read_workqueue --perf-no_write_workqueue /dev/disk/by-id/virtio-disk2 braid-disk2"
+                )
+                && disk2_block.contains(
+                    "$ btrfs device add --enqueue /dev/mapper/braid-disk2 /mnt/storage"
+                )
+                && !disk2_block.contains(
+                    "$ btrfs device add --enqueue -f /dev/mapper/braid-disk2 /mnt/storage"
+                ),
+            "fresh replay row should render non-force setup/add argv rows: {disk2_block:?}",
+        );
     }
 
     /* Intent
