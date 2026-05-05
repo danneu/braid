@@ -32,6 +32,14 @@ def add_cmd(key):
     )
 
 
+def post_add_balance_op():
+    return {
+        "op": "Add",
+        "phase": "PostAddBalanceRaid1",
+        "targets": {},
+    }
+
+
 # --- Phase 1: Build 2-disk RAID1 pool and write test data ---
 
 with subtest("Build 2-disk pool"):
@@ -52,15 +60,11 @@ with subtest("Lock pool and inject journal"):
     machine.succeed("braid lock")
     machine.fail("mountpoint -q /mnt/storage")
 
-    # Build a pending-op.json simulating an interrupted add of disk3.
-    # OpKind uses #[serde(tag = "op")] internally-tagged representation,
-    # so the "op" field contains an object with the discriminant inside.
+    # Build a pending-op.json simulating an interrupted add after pool
+    # membership was already committed and only post-add maintenance remains.
     journal = {
         "started_at": "2026-01-01T00:00:00Z",
-        "op": {
-            "op": "Add",
-            "disks": {"disk3": "/dev/disk/by-id/virtio-disk3"},
-        },
+        "op": post_add_balance_op(),
         "pre_membership": pool_json,
         "target_membership": pool_json,
     }
@@ -120,10 +124,7 @@ with subtest("Test 3a: dry-run preserved-context failure -> stdout empty, stderr
     }
     journal_deg = {
         "started_at": "2026-01-01T00:00:00Z",
-        "op": {
-            "op": "Add",
-            "disks": {"disk3": "/dev/disk/by-id/virtio-disk3"},
-        },
+        "op": post_add_balance_op(),
         "pre_membership": pool_json,
         "target_membership": target_with_disk3,
     }

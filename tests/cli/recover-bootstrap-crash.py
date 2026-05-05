@@ -47,7 +47,23 @@ with subtest("Inject bootstrap journal"):
         "started_at": "2026-01-01T00:00:00Z",
         "op": {
             "op": "Add",
-            "disks": {"disk1": "/dev/disk/by-id/virtio-disk1"},
+            "phase": "PoolMutation",
+            "targets": {
+                "disk1": {
+                    "by_id": "/dev/disk/by-id/virtio-disk1",
+                    "mapper_name": "braid-disk1",
+                    "mode": {
+                        "FreshLuks": {
+                            "luks_label": "braid-disk1",
+                            "luks_format_extra_opts": [
+                                "--label",
+                                "braid-disk1",
+                            ],
+                            "enroll_key_file": None,
+                        }
+                    },
+                }
+            },
         },
         "pre_membership": {"disks": {}},
         "target_membership": {
