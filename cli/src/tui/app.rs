@@ -223,15 +223,22 @@ pub fn update(model: &mut Model, msg: Message) -> Vec<Effect> {
         Message::FanProbeFinished(snapshot) => {
             model.fan = Some(snapshot);
             model.fan_probe_inflight = false;
-            vec![Effect::ScheduleFanProbe {
-                delay: FAN_PROBE_INTERVAL,
-            }]
+            if model.fan_scheduler_pending {
+                vec![]
+            } else {
+                model.fan_scheduler_pending = true;
+                vec![Effect::ScheduleFanProbe {
+                    delay: FAN_PROBE_INTERVAL,
+                }]
+            }
         }
         Message::RefreshFan => {
+            model.fan_scheduler_pending = false;
             if model.fan_control.is_none() {
                 return vec![];
             }
             if model.fan_probe_inflight {
+                model.fan_scheduler_pending = true;
                 return vec![Effect::ScheduleFanProbe {
                     delay: FAN_PROBE_INTERVAL,
                 }];
@@ -246,11 +253,17 @@ pub fn update(model: &mut Model, msg: Message) -> Vec<Effect> {
         Message::UpsProbeFinished(snapshot) => {
             model.ups = Some(snapshot);
             model.ups_probe_inflight = false;
-            vec![Effect::ScheduleUpsProbe {
-                delay: UPS_PROBE_INTERVAL,
-            }]
+            if model.ups_scheduler_pending {
+                vec![]
+            } else {
+                model.ups_scheduler_pending = true;
+                vec![Effect::ScheduleUpsProbe {
+                    delay: UPS_PROBE_INTERVAL,
+                }]
+            }
         }
         Message::RefreshUps => {
+            model.ups_scheduler_pending = false;
             // Disabled / absent UPS config -> tear the loop down, no
             // further effects. Mirror of the fan loop.
             let enabled = model.ups_config.as_ref().is_some_and(|u| u.enable);
@@ -258,6 +271,7 @@ pub fn update(model: &mut Model, msg: Message) -> Vec<Effect> {
                 return vec![];
             }
             if model.ups_probe_inflight {
+                model.ups_scheduler_pending = true;
                 return vec![Effect::ScheduleUpsProbe {
                     delay: UPS_PROBE_INTERVAL,
                 }];
@@ -296,6 +310,9 @@ mod tests {
     }
     fn is_schedule_ups(e: &Effect) -> bool {
         matches!(e, Effect::ScheduleUpsProbe { .. })
+    }
+    fn count_effects(effects: &[Effect], pred: fn(&Effect) -> bool) -> usize {
+        effects.iter().filter(|effect| pred(effect)).count()
     }
 
     fn sample_ups_config(enable: bool) -> crate::config::Ups {
@@ -338,6 +355,39 @@ mod tests {
             daemon: DaemonStatus::Active,
             probed_at: Instant::now(),
         }
+    }
+
+    // Intent: production startup must probe fan and UPS immediately without
+    // arming either scheduler until the first probe finishes.
+    // Why it exists: initializing scheduler-pending state to true would
+    // suppress the first re-arm and leave startup telemetry stale forever.
+    // Scenario: TUI starts with fan control and an enabled UPS configured.
+    #[test]
+    fn startup_probes_without_scheduler_pending_then_first_finish_arms_loop() {
+        let (mut model, init_effects) = Model::new(
+            sample_disk_names(),
+            std::collections::HashMap::new(),
+            "/mnt/storage".to_owned(),
+            Some(sample_fan_control()),
+            Some(sample_ups_config(true)),
+            vec![],
+            crate::state_paths::StatePaths::production(),
+        );
+
+        assert_eq!(count_effects(&init_effects, is_probe_fan), 1);
+        assert_eq!(count_effects(&init_effects, is_probe_ups), 1);
+        assert_eq!(count_effects(&init_effects, is_schedule_fan), 0);
+        assert_eq!(count_effects(&init_effects, is_schedule_ups), 0);
+        assert!(!model.fan_scheduler_pending);
+        assert!(!model.ups_scheduler_pending);
+
+        let fan_effects = update(&mut model, Message::FanProbeFinished(sample_fan_snapshot()));
+        assert_eq!(count_effects(&fan_effects, is_schedule_fan), 1);
+        assert!(model.fan_scheduler_pending);
+
+        let ups_effects = update(&mut model, Message::UpsProbeFinished(sample_ups_snapshot()));
+        assert_eq!(count_effects(&ups_effects, is_schedule_ups), 1);
+        assert!(model.ups_scheduler_pending);
     }
 
     /*
@@ -530,13 +580,85 @@ mod tests {
         let mut model = Model::new_demo(sample_disk_names(), PoolStatus::Mounted(sample_pool()));
         model.fan_control = Some(sample_fan_control());
         model.fan_probe_inflight = true;
+        model.fan_scheduler_pending = false;
         let effects = update(&mut model, Message::FanProbeFinished(sample_fan_snapshot()));
         assert!(model.fan.is_some());
         assert!(!model.fan_probe_inflight);
+        assert!(model.fan_scheduler_pending);
         assert_eq!(effects.len(), 1);
         assert!(is_schedule_fan(&effects[0]));
         assert!(!effects.iter().any(is_probe_pool));
         assert!(!effects.iter().any(is_schedule_pool));
+    }
+
+    // Intent: manual `r` must not double-arm the fan scheduler when a
+    // scheduler sleeper is already pending.
+    // Why it exists: the leaked scheduler came from manual fan probes whose
+    // completion always armed a second sleeper.
+    // Scenario: user presses `r` between fan auto-poll ticks.
+    #[test]
+    fn refresh_pool_fan_piggyback_does_not_double_arm_scheduler() {
+        let mut model = Model::new_demo(sample_disk_names(), PoolStatus::Mounted(sample_pool()));
+        model.fan_control = Some(sample_fan_control());
+        model.fan_probe_inflight = false;
+        model.fan_scheduler_pending = true;
+
+        let refresh_effects = update(&mut model, Message::RefreshPool);
+        assert_eq!(count_effects(&refresh_effects, is_probe_fan), 1);
+        assert!(model.fan_probe_inflight);
+        assert!(model.fan_scheduler_pending);
+
+        let finish_effects = update(&mut model, Message::FanProbeFinished(sample_fan_snapshot()));
+        assert_eq!(count_effects(&finish_effects, is_schedule_fan), 0);
+        assert!(!model.fan_probe_inflight);
+        assert!(model.fan_scheduler_pending);
+    }
+
+    // Intent: the normal fan auto-loop tick must consume the old sleeper and
+    // arm exactly one replacement when the probe finishes.
+    // Why it exists: the pending flag must prevent duplicate sleepers without
+    // stopping the healthy 5s loop.
+    // Scenario: fan scheduler fires while the fan subsystem is idle.
+    #[test]
+    fn refresh_fan_idle_tick_rearms_once_after_probe_finished() {
+        let mut model = Model::new_demo(sample_disk_names(), PoolStatus::Loading);
+        model.fan_control = Some(sample_fan_control());
+        model.fan_probe_inflight = false;
+        model.fan_scheduler_pending = true;
+
+        let refresh_effects = update(&mut model, Message::RefreshFan);
+        assert_eq!(count_effects(&refresh_effects, is_probe_fan), 1);
+        assert!(model.fan_probe_inflight);
+        assert!(!model.fan_scheduler_pending);
+
+        let finish_effects = update(&mut model, Message::FanProbeFinished(sample_fan_snapshot()));
+        assert_eq!(count_effects(&finish_effects, is_schedule_fan), 1);
+        assert!(!model.fan_probe_inflight);
+        assert!(model.fan_scheduler_pending);
+    }
+
+    // Intent: a fan tick that lands during an in-flight probe must re-arm the
+    // scheduler once, and the in-flight probe completion must not add another.
+    // Why it exists: this pins the overlap case where the auto-loop preserves
+    // cadence without accumulating concurrent sleeper threads.
+    // Scenario: fan scheduler fires before a slow fan probe returns.
+    #[test]
+    fn refresh_fan_inflight_tick_rearms_once_total() {
+        let mut model = Model::new_demo(sample_disk_names(), PoolStatus::Loading);
+        model.fan_control = Some(sample_fan_control());
+        model.fan_probe_inflight = true;
+        model.fan_scheduler_pending = true;
+
+        let refresh_effects = update(&mut model, Message::RefreshFan);
+        assert_eq!(count_effects(&refresh_effects, is_schedule_fan), 1);
+        assert_eq!(count_effects(&refresh_effects, is_probe_fan), 0);
+        assert!(model.fan_probe_inflight);
+        assert!(model.fan_scheduler_pending);
+
+        let finish_effects = update(&mut model, Message::FanProbeFinished(sample_fan_snapshot()));
+        assert_eq!(count_effects(&finish_effects, is_schedule_fan), 0);
+        assert!(!model.fan_probe_inflight);
+        assert!(model.fan_scheduler_pending);
     }
 
     // Intent: PoolProbeFinished must NOT auto-reschedule pool probes.
@@ -574,10 +696,12 @@ mod tests {
         let mut model = Model::new_demo(sample_disk_names(), PoolStatus::Loading);
         model.fan_control = Some(sample_fan_control());
         model.fan_probe_inflight = true;
+        model.fan_scheduler_pending = false;
         let effects = update(&mut model, Message::RefreshFan);
         assert_eq!(effects.len(), 1);
         assert!(is_schedule_fan(&effects[0]));
         assert!(!effects.iter().any(is_probe_fan));
+        assert!(model.fan_scheduler_pending);
     }
 
     // Intent: RefreshFan with no fan_control tears the loop down
@@ -590,8 +714,10 @@ mod tests {
     fn refresh_fan_skips_when_disabled() {
         let mut model = Model::new_demo(sample_disk_names(), PoolStatus::Loading);
         model.fan_control = None;
+        model.fan_scheduler_pending = true;
         let effects = update(&mut model, Message::RefreshFan);
         assert!(effects.is_empty());
+        assert!(!model.fan_scheduler_pending);
     }
 
     // Intent: RefreshFan with fan_control set and no probe in flight
@@ -704,13 +830,85 @@ mod tests {
         let mut model = Model::new_demo(sample_disk_names(), PoolStatus::Mounted(sample_pool()));
         model.ups_config = Some(sample_ups_config(true));
         model.ups_probe_inflight = true;
+        model.ups_scheduler_pending = false;
         let effects = update(&mut model, Message::UpsProbeFinished(sample_ups_snapshot()));
         assert!(model.ups.is_some());
         assert!(!model.ups_probe_inflight);
+        assert!(model.ups_scheduler_pending);
         assert_eq!(effects.len(), 1);
         assert!(is_schedule_ups(&effects[0]));
         assert!(!effects.iter().any(is_probe_pool));
         assert!(!effects.iter().any(is_schedule_pool));
+    }
+
+    // Intent: manual `r` must not double-arm the UPS scheduler when a
+    // scheduler sleeper is already pending.
+    // Why it exists: the UPS path has the same manual-probe leak shape as
+    // the fan path and must keep the same one-sleeper invariant.
+    // Scenario: user presses `r` between UPS auto-poll ticks.
+    #[test]
+    fn refresh_pool_ups_piggyback_does_not_double_arm_scheduler() {
+        let mut model = Model::new_demo(sample_disk_names(), PoolStatus::Mounted(sample_pool()));
+        model.ups_config = Some(sample_ups_config(true));
+        model.ups_probe_inflight = false;
+        model.ups_scheduler_pending = true;
+
+        let refresh_effects = update(&mut model, Message::RefreshPool);
+        assert_eq!(count_effects(&refresh_effects, is_probe_ups), 1);
+        assert!(model.ups_probe_inflight);
+        assert!(model.ups_scheduler_pending);
+
+        let finish_effects = update(&mut model, Message::UpsProbeFinished(sample_ups_snapshot()));
+        assert_eq!(count_effects(&finish_effects, is_schedule_ups), 0);
+        assert!(!model.ups_probe_inflight);
+        assert!(model.ups_scheduler_pending);
+    }
+
+    // Intent: the normal UPS auto-loop tick must consume the old sleeper and
+    // arm exactly one replacement when the probe finishes.
+    // Why it exists: the pending flag must prevent duplicate sleepers without
+    // stopping the healthy 5s loop.
+    // Scenario: UPS scheduler fires while the UPS subsystem is idle.
+    #[test]
+    fn refresh_ups_idle_tick_rearms_once_after_probe_finished() {
+        let mut model = Model::new_demo(sample_disk_names(), PoolStatus::Loading);
+        model.ups_config = Some(sample_ups_config(true));
+        model.ups_probe_inflight = false;
+        model.ups_scheduler_pending = true;
+
+        let refresh_effects = update(&mut model, Message::RefreshUps);
+        assert_eq!(count_effects(&refresh_effects, is_probe_ups), 1);
+        assert!(model.ups_probe_inflight);
+        assert!(!model.ups_scheduler_pending);
+
+        let finish_effects = update(&mut model, Message::UpsProbeFinished(sample_ups_snapshot()));
+        assert_eq!(count_effects(&finish_effects, is_schedule_ups), 1);
+        assert!(!model.ups_probe_inflight);
+        assert!(model.ups_scheduler_pending);
+    }
+
+    // Intent: a UPS tick that lands during an in-flight probe must re-arm the
+    // scheduler once, and the in-flight probe completion must not add another.
+    // Why it exists: this pins the overlap case where the auto-loop preserves
+    // cadence without accumulating concurrent sleeper threads.
+    // Scenario: UPS scheduler fires before a slow NUT query returns.
+    #[test]
+    fn refresh_ups_inflight_tick_rearms_once_total() {
+        let mut model = Model::new_demo(sample_disk_names(), PoolStatus::Loading);
+        model.ups_config = Some(sample_ups_config(true));
+        model.ups_probe_inflight = true;
+        model.ups_scheduler_pending = true;
+
+        let refresh_effects = update(&mut model, Message::RefreshUps);
+        assert_eq!(count_effects(&refresh_effects, is_schedule_ups), 1);
+        assert_eq!(count_effects(&refresh_effects, is_probe_ups), 0);
+        assert!(model.ups_probe_inflight);
+        assert!(model.ups_scheduler_pending);
+
+        let finish_effects = update(&mut model, Message::UpsProbeFinished(sample_ups_snapshot()));
+        assert_eq!(count_effects(&finish_effects, is_schedule_ups), 0);
+        assert!(!model.ups_probe_inflight);
+        assert!(model.ups_scheduler_pending);
     }
 
     // Intent: RefreshUps with a probe in flight re-arms the scheduler
@@ -725,10 +923,12 @@ mod tests {
         let mut model = Model::new_demo(sample_disk_names(), PoolStatus::Loading);
         model.ups_config = Some(sample_ups_config(true));
         model.ups_probe_inflight = true;
+        model.ups_scheduler_pending = false;
         let effects = update(&mut model, Message::RefreshUps);
         assert_eq!(effects.len(), 1);
         assert!(is_schedule_ups(&effects[0]));
         assert!(!effects.iter().any(is_probe_ups));
+        assert!(model.ups_scheduler_pending);
     }
 
     // Intent: RefreshUps with no UPS config tears the loop down
@@ -740,8 +940,10 @@ mod tests {
     fn refresh_ups_skips_when_disabled() {
         let mut model = Model::new_demo(sample_disk_names(), PoolStatus::Loading);
         model.ups_config = None;
+        model.ups_scheduler_pending = true;
         let effects = update(&mut model, Message::RefreshUps);
         assert!(effects.is_empty());
+        assert!(!model.ups_scheduler_pending);
     }
 
     // Intent: RefreshUps with config present but enable=false also
@@ -754,8 +956,10 @@ mod tests {
     fn refresh_ups_skips_when_not_enabled() {
         let mut model = Model::new_demo(sample_disk_names(), PoolStatus::Loading);
         model.ups_config = Some(sample_ups_config(false));
+        model.ups_scheduler_pending = true;
         let effects = update(&mut model, Message::RefreshUps);
         assert!(effects.is_empty());
+        assert!(!model.ups_scheduler_pending);
     }
 
     // Intent: RefreshUps with config enabled and no probe in flight

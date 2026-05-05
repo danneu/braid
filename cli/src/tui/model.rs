@@ -252,9 +252,11 @@ pub struct Model {
     pub fan_control: Option<crate::config::FanControl>,
     pub fan: Option<FanSnapshot>,
     pub fan_probe_inflight: bool,
+    pub fan_scheduler_pending: bool,
     pub ups_config: Option<crate::config::Ups>,
     pub ups: Option<UpsSnapshot>,
     pub ups_probe_inflight: bool,
+    pub ups_scheduler_pending: bool,
     next_cmd_id: u64,
 }
 
@@ -314,9 +316,11 @@ impl Model {
             fan_control,
             fan: None,
             fan_probe_inflight,
+            fan_scheduler_pending: false,
             ups_config,
             ups: None,
             ups_probe_inflight,
+            ups_scheduler_pending: false,
             next_cmd_id: 0,
         };
         (model, effects)
@@ -343,9 +347,11 @@ impl Model {
             fan_control: None,
             fan: None,
             fan_probe_inflight: false,
+            fan_scheduler_pending: false,
             ups_config: None,
             ups: None,
             ups_probe_inflight: false,
+            ups_scheduler_pending: false,
             next_cmd_id: 0,
         }
     }
