@@ -57,14 +57,17 @@ pub fn query_ups<R: CommandRunner>(runner: &R, name: &str) -> Result<UpscOutput,
 #[derive(Debug, serde::Serialize)]
 #[serde(untagged)]
 enum JsonReport<'a> {
-    NotEnabled {
-        error: &'static str,
-    },
-    QueryFailed {
-        error: &'static str,
-        detail: &'a str,
-    },
+    Error(ErrorReport<'a>),
     Ok(&'a UpscOutput),
+}
+
+#[derive(Debug, serde::Serialize)]
+#[serde(tag = "error")]
+enum ErrorReport<'a> {
+    #[serde(rename = "ups_not_enabled")]
+    NotEnabled,
+    #[serde(rename = "query_failed")]
+    QueryFailed { detail: &'a str },
 }
 
 pub fn cmd_ups_status<R: CommandRunner>(
@@ -84,9 +87,7 @@ pub fn cmd_ups_status<R: CommandRunner>(
 
 fn print_not_enabled(json: bool) -> Result<(), UpsError> {
     if json {
-        let payload = JsonReport::NotEnabled {
-            error: "ups_not_enabled",
-        };
+        let payload = JsonReport::Error(ErrorReport::NotEnabled);
         emit_json(&payload)?;
     } else {
         println!(
@@ -118,10 +119,9 @@ fn render_live<R: CommandRunner>(runner: &R, ups_cfg: &Ups, json: bool) -> Resul
 
 fn emit_query_failed(json: bool, detail: String) -> Result<(), UpsError> {
     if json {
-        emit_json(&JsonReport::QueryFailed {
-            error: "query_failed",
+        emit_json(&JsonReport::Error(ErrorReport::QueryFailed {
             detail: &detail,
-        })?;
+        }))?;
         return Err(UpsError::QueryFailedJsonReported);
     }
     Err(UpsError::QueryFailed { detail })
@@ -324,9 +324,7 @@ mod tests {
     // is false or the config block is absent.
     #[test]
     fn json_not_enabled_has_sentinel_error() {
-        let payload = JsonReport::NotEnabled {
-            error: "ups_not_enabled",
-        };
+        let payload = JsonReport::Error(ErrorReport::NotEnabled);
         let text = serde_json::to_string_pretty(&payload).unwrap();
         assert!(text.contains("\"error\""));
         assert!(text.contains("\"ups_not_enabled\""));
@@ -338,10 +336,9 @@ mod tests {
     // Scenario: unit test of `emit_query_failed(true)` via JsonReport.
     #[test]
     fn json_query_failed_has_sentinel_error_and_detail() {
-        let payload = JsonReport::QueryFailed {
-            error: "query_failed",
+        let payload = JsonReport::Error(ErrorReport::QueryFailed {
             detail: "exit 1: Error: Connection failure: Connection refused",
-        };
+        });
         let text = serde_json::to_string_pretty(&payload).unwrap();
         assert!(text.contains("\"query_failed\""));
         assert!(text.contains("Connection failure"));
@@ -679,10 +676,9 @@ mod tests {
     // Scenario: `braid ups status --json` while upsd.service is stopped.
     #[test]
     fn snapshot_json_query_failed() {
-        let payload = JsonReport::QueryFailed {
-            error: "query_failed",
+        let payload = JsonReport::Error(ErrorReport::QueryFailed {
             detail: "exit 1: Error: Connection failure: Connection refused",
-        };
+        });
         snap_json!(&payload);
     }
 
@@ -693,9 +689,7 @@ mod tests {
     // status --json` still exits 0 with the ups_not_enabled sentinel.
     #[test]
     fn snapshot_json_not_enabled() {
-        let payload = JsonReport::NotEnabled {
-            error: "ups_not_enabled",
-        };
+        let payload = JsonReport::Error(ErrorReport::NotEnabled);
         snap_json!(&payload);
     }
 }

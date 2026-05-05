@@ -71,3 +71,13 @@ assert isinstance(detail, str) and "Connection failure" in detail, (
 assert err == "", (
     f"expected empty stderr in --json query-failed, got: {err!r}"
 )
+
+# --- Not-enabled branch ---
+# Materialize a config without the optional ups block and confirm the
+# informational --json path exits 0 with its stable sentinel.
+machine.succeed("jq 'del(.ups)' /etc/braid/config.json > /tmp/no-ups.json")
+raw_no_ups = machine.succeed("braid --config /tmp/no-ups.json ups status --json")
+parsed_no_ups = json.loads(raw_no_ups)
+assert parsed_no_ups.get("error") == "ups_not_enabled", (
+    f"expected error=ups_not_enabled, got {parsed_no_ups}"
+)
