@@ -39,6 +39,15 @@ pub enum OpenCredential {
     KeyFile(PathBuf),
 }
 
+impl std::fmt::Debug for OpenCredential {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            OpenCredential::Passphrase(_) => f.write_str("Passphrase(<redacted>)"),
+            OpenCredential::KeyFile(path) => f.debug_tuple("KeyFile").field(path).finish(),
+        }
+    }
+}
+
 /// Resolve credential flag inputs into an owned, fully-resolved
 /// `OpenCredential`. ALWAYS reads -- callers decide whether to invoke this,
 /// because the "should we prompt now?" rule differs by command:

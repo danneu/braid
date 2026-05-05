@@ -20,10 +20,36 @@ pub fn pool_add_device<R: CommandRunner + Sync>(
     runner: &R,
     device: &str,
     mount_point: &MountPoint,
+    force: bool,
 ) -> Result<(), PoolError> {
+    if force {
+        let scan_result = runner.run(&CmdRequest::BtrfsDeviceScanForget {
+            devices: vec![device.to_owned()],
+        })?;
+        if scan_result.exit_status != 0 {
+            return Err(PoolError::Failed(format!(
+                "btrfs device scan --forget failed (exit {}): {}",
+                scan_result.exit_status,
+                scan_result.stderr.trim()
+            )));
+        }
+
+        let wipe_result = runner.run(&CmdRequest::WipefsBtrfs {
+            device: device.to_owned(),
+        })?;
+        if wipe_result.exit_status != 0 {
+            return Err(PoolError::Failed(format!(
+                "wipefs --types btrfs failed (exit {}): {}",
+                wipe_result.exit_status,
+                wipe_result.stderr.trim()
+            )));
+        }
+    }
+
     let result = runner.run(&CmdRequest::BtrfsDeviceAdd {
         device: device.to_owned(),
         mount_point: mount_point.clone(),
+        force,
     })?;
     if result.exit_status != 0 {
         return Err(PoolError::Failed(format!(
@@ -496,6 +522,73 @@ mod tests {
 
     fn mp() -> MountPoint {
         MountPoint("/mnt/storage".into())
+    }
+
+    #[test]
+    fn pool_add_device_without_force_runs_only_device_add() {
+        let runner = MockRunner::default().with_output(
+            CmdRequest::BtrfsDeviceAdd {
+                device: "/dev/mapper/braid-new".into(),
+                mount_point: mp(),
+                force: false,
+            },
+            ok_raw(),
+        );
+
+        pool_add_device(&runner, "/dev/mapper/braid-new", &mp(), false).unwrap();
+
+        assert_eq!(
+            runner.requests(),
+            vec![CmdRequest::BtrfsDeviceAdd {
+                device: "/dev/mapper/braid-new".into(),
+                mount_point: mp(),
+                force: false,
+            }]
+        );
+    }
+
+    #[test]
+    fn pool_add_device_with_force_forgets_wipes_then_adds() {
+        let runner = MockRunner::default()
+            .with_output(
+                CmdRequest::BtrfsDeviceScanForget {
+                    devices: vec!["/dev/mapper/braid-returned".into()],
+                },
+                ok_raw(),
+            )
+            .with_output(
+                CmdRequest::WipefsBtrfs {
+                    device: "/dev/mapper/braid-returned".into(),
+                },
+                ok_raw(),
+            )
+            .with_output(
+                CmdRequest::BtrfsDeviceAdd {
+                    device: "/dev/mapper/braid-returned".into(),
+                    mount_point: mp(),
+                    force: true,
+                },
+                ok_raw(),
+            );
+
+        pool_add_device(&runner, "/dev/mapper/braid-returned", &mp(), true).unwrap();
+
+        assert_eq!(
+            runner.requests(),
+            vec![
+                CmdRequest::BtrfsDeviceScanForget {
+                    devices: vec!["/dev/mapper/braid-returned".into()],
+                },
+                CmdRequest::WipefsBtrfs {
+                    device: "/dev/mapper/braid-returned".into(),
+                },
+                CmdRequest::BtrfsDeviceAdd {
+                    device: "/dev/mapper/braid-returned".into(),
+                    mount_point: mp(),
+                    force: true,
+                },
+            ]
+        );
     }
 
     use crate::cmd::CmdError;

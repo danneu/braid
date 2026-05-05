@@ -1,7 +1,9 @@
 use crate::cmd::{CmdRequest, CommandRunner, Step};
 use crate::config::{self, Config};
+use crate::credential_verify::{Credential, CredentialVerifyTarget, verify_credential_for_targets};
 use crate::discover;
 use crate::journal::{self, Journal};
+use crate::luks::{self, VerifyOutcome};
 use crate::membership::{self, DiskMember, PoolMembership};
 use crate::mount::{self, MountError, OpenCredential, OpenPlan};
 use crate::parse::btrfs_filesystem_show::{DeviceBtrfsProbe, classify_btrfs_probe};
@@ -12,7 +14,8 @@ use crate::progress::{self, ProgressOutput, Sleeper};
 use crate::state_paths::StatePaths;
 use crate::status::{BalanceReport, get_balance_report};
 use crate::status_tag::{StatusTag, color_enabled_for_stderr, emit_status, status_line};
-use crate::types::{ByIdPath, MountPoint, PoolState};
+use crate::types::{ByIdPath, ConfigDiskState, MountPoint, PoolState};
+use std::borrow::Cow;
 use std::time::Duration;
 use thiserror::Error;
 
@@ -20,12 +23,18 @@ use thiserror::Error;
 pub enum RecoverError {
     #[error("{0}")]
     Probe(#[from] ProbeError),
+    #[error("command error: {0}")]
+    Cmd(#[from] crate::cmd::CmdError),
+    #[error("parse error: {0}")]
+    Parse(#[from] crate::parse::ParseError),
     #[error("journal error: {0}")]
     Journal(String),
     #[error("membership error: {0}")]
     Membership(#[from] membership::MembershipError),
     #[error("{0}")]
     Mount(#[from] MountError),
+    #[error("luks error: {0}")]
+    Luks(#[from] crate::luks::LuksError),
     #[error("{0}")]
     Failed(String),
 }
@@ -156,6 +165,7 @@ pub struct RecoverPlan {
     pub notes: Vec<PreviewNote>,
     pub steps: Vec<Step>,
     pub open_plan: Option<OpenPlan>,
+    pub pre_resolved_credential: Option<OpenCredential>,
     pub journal: Journal,
     pub union: PoolMembership,
 }
@@ -221,11 +231,13 @@ impl RecoverPlan {
             notes: _,
             steps: _,
             open_plan,
+            pre_resolved_credential,
             journal,
             union,
         } = self;
 
         let color_enabled = color_enabled_for_stderr();
+        let recovery_mount_membership = mount_membership_for_recover(&journal, &union).clone();
 
         // Recover-specific gate: resolve a credential whenever we have
         // an initial mount plan (i.e. the pool is not already mounted).
@@ -235,8 +247,9 @@ impl RecoverPlan {
         // reopen them, so a credential is required regardless. The
         // resolved credential lives in this local across both execute
         // calls (initial mount and the cycle remount).
-        let credential = match open_plan.as_ref() {
-            Some(_) => Some(
+        let credential = match (open_plan.as_ref(), pre_resolved_credential) {
+            (Some(_), Some(credential)) => Some(credential),
+            (Some(_), None) => Some(
                 mount::resolve_credential(
                     params.passphrase_stdin,
                     params.passphrase_file,
@@ -244,7 +257,7 @@ impl RecoverPlan {
                 )
                 .map_err(|e| RecoverError::Failed(format!("recover: {e}")))?,
             ),
-            None => None, // already mounted, no cycle, no credential needed
+            (None, credential) => credential,
         };
 
         // Initial mount. Dispatch on `p.to_unlock.is_empty()` to the
@@ -269,10 +282,10 @@ impl RecoverPlan {
                         // superblock exists — only then is it safe to advise wiping.
                         if journal.pre_membership.disks.is_empty()
                             && let mount::MountError::MountFailed(_) = &e
-                            && let journal::OpKind::Add { ref disks } = journal.op
+                            && let journal::OpKind::Add { ref targets, .. } = journal.op
                         {
-                            let all_no_btrfs = disks.keys().all(|name| {
-                                let mapper = format!("/dev/mapper/{}", config::mapper_name(name).0);
+                            let all_no_btrfs = targets.values().all(|target| {
+                                let mapper = format!("/dev/mapper/{}", target.mapper_name);
                                 match runner
                                     .run(&CmdRequest::BtrfsFilesystemShowTarget { target: mapper })
                                 {
@@ -353,7 +366,7 @@ impl RecoverPlan {
                 runner,
                 fs,
                 params.config,
-                &union,
+                &recovery_mount_membership,
                 params.allow_degraded,
                 cred,
             )?;
@@ -363,45 +376,44 @@ impl RecoverPlan {
         let mount_point = params.config.mount_point();
         let pool = probe::probe_pool(runner, fs, mount_point)?;
 
+        match &journal.op {
+            journal::OpKind::Add {
+                phase: journal::AddPhase::PoolMutation,
+                targets,
+            } if !journal.pre_membership.disks.is_empty() => {
+                return execute_add_pool_mutation_recovery(
+                    runner,
+                    fs,
+                    by_id_resolver,
+                    params,
+                    credential.as_ref(),
+                    &journal,
+                    &union,
+                    targets,
+                    pool,
+                );
+            }
+            journal::OpKind::Add {
+                phase: journal::AddPhase::PostAddBalanceRaid1,
+                ..
+            } => {
+                return execute_add_post_balance_recovery(
+                    runner,
+                    by_id_resolver,
+                    params,
+                    &journal,
+                    &union,
+                    pool,
+                    false,
+                );
+            }
+            _ => {}
+        }
+
         // 4. Build new membership from live pool state
         let prior = membership::load_membership(params.paths).ok();
-        let mut recovered = PoolMembership::empty();
-        for dev in &pool.devices {
-            let Some(name) = config::name_from_mapper(&dev.mapper.0) else {
-                eprintln!("  skip: device {} has no braid- prefix", dev.mapper.0);
-                continue;
-            };
-            // Sanity check: refuse to handle live pool members the journal never recorded.
-            if !union.disks.contains_key(name) {
-                return Err(RecoverError::Failed(format!(
-                    "device {} is in the live pool but has no by-id path in either \
-                     the pre-operation or target membership snapshot.\n\
-                     This must be resolved manually -- provide the correct \
-                     /dev/disk/by-id/ path and re-run recovery.",
-                    dev.mapper.0
-                )));
-            }
-            // Resolve by_id from the live device's identity, not from the journal.
-            let by_id = resolve_by_id_for_underlying(by_id_resolver, &dev.underlying)?;
-            // Source priority for added_at: current pool.json (mid-op enrich may
-            // already have stamped new disks), then journal union, then fresh
-            // stamp from enrich_from_pool_state for genuine bootstrap recovery.
-            let added_at = prior
-                .as_ref()
-                .and_then(|p| p.disks.get(name))
-                .and_then(|m| m.added_at.clone())
-                .or_else(|| union.disks.get(name).and_then(|m| m.added_at.clone()));
-            recovered.disks.insert(
-                name.to_owned(),
-                DiskMember {
-                    by_id,
-                    luks_uuid: None,
-                    devid: None,
-                    added_at,
-                },
-            );
-        }
-        membership::enrich_from_pool_state(&pool, &mut recovered);
+        let recovered =
+            build_membership_from_live_pool(&pool, &union, prior.as_ref(), by_id_resolver)?;
 
         // 5. Report what changed
         let pre_names: std::collections::BTreeSet<_> =
@@ -478,12 +490,32 @@ pub fn plan_recover<R: CommandRunner + Sync, F: Filesystem + ?Sized>(
     let mut notes = vec![PreviewNote::Info(format_recover_entry(&journal))];
 
     let union = union_memberships(&journal);
+    let mount_membership = mount_membership_for_recover(&journal, &union);
+    let mut pre_resolved_credential = None;
+
+    if let journal::OpKind::Add {
+        phase: journal::AddPhase::PoolMutation,
+        targets,
+    } = &journal.op
+        && !journal.pre_membership.disks.is_empty()
+        && !params.dry_run
+    {
+        match discover_add_targets_before_mount(runner, fs, params, &journal, targets) {
+            Ok(credential) => pre_resolved_credential = credential,
+            Err(e) => {
+                return RecoverPlanReport {
+                    notes,
+                    result: Err(e),
+                };
+            }
+        }
+    }
 
     let report = mount::plan_open_pool(
         runner,
         fs,
         params.config,
-        &union,
+        mount_membership,
         params.allow_degraded,
         "recover",
     );
@@ -705,6 +737,82 @@ pub fn plan_recover<R: CommandRunner + Sync, F: Filesystem + ?Sized>(
         }
     }
 
+    if let journal::OpKind::Add {
+        phase: journal::AddPhase::PoolMutation,
+        targets,
+    } = &journal.op
+        && !journal.pre_membership.disks.is_empty()
+    {
+        steps.push(Step {
+            risk: "safe",
+            description: "reconcile journaled add targets against live pool".into(),
+            commands: vec![],
+        });
+        for target in targets.values() {
+            let mapper_path = format!("/dev/mapper/{}", target.mapper_name);
+            match &target.mode {
+                journal::AddJournalMode::RecoverableBraidLabeled { .. } => {
+                    steps.push(Step {
+                        risk: "safe",
+                        description: format!("replay verified returned-disk add {}", mapper_path),
+                        commands: vec![
+                            CmdRequest::BtrfsDeviceScanForget {
+                                devices: vec![mapper_path.clone()],
+                            },
+                            CmdRequest::WipefsBtrfs {
+                                device: mapper_path.clone(),
+                            },
+                            CmdRequest::BtrfsDeviceAdd {
+                                device: mapper_path,
+                                mount_point: params.config.mount_point().clone(),
+                                force: true,
+                            },
+                        ],
+                    });
+                }
+                journal::AddJournalMode::FreshLuks {
+                    luks_format_extra_opts,
+                    enroll_key_file,
+                    ..
+                } => {
+                    let mut commands = vec![CmdRequest::CryptsetupLuksFormat {
+                        device: target.by_id.0.clone(),
+                        extra_opts: luks_format_extra_opts.clone(),
+                    }];
+                    if let Some(key_file) = enroll_key_file {
+                        commands.push(CmdRequest::CryptsetupLuksAddKeyFile {
+                            device: target.by_id.0.clone(),
+                            key_file_path: key_file.display().to_string(),
+                        });
+                    }
+                    commands.push(CmdRequest::CryptsetupLuksHeaderBackup {
+                        device: target.by_id.0.clone(),
+                        backup_path: params
+                            .paths
+                            .luks_headers_dir()
+                            .join(format!("{}.luksheader", target.mapper_name))
+                            .display()
+                            .to_string(),
+                    });
+                    commands.push(CmdRequest::CryptsetupLuksOpen {
+                        device: target.by_id.0.clone(),
+                        mapper: target.mapper_name.clone(),
+                    });
+                    commands.push(CmdRequest::BtrfsDeviceAdd {
+                        device: mapper_path,
+                        mount_point: params.config.mount_point().clone(),
+                        force: false,
+                    });
+                    steps.push(Step {
+                        risk: "destructive",
+                        description: format!("replay fresh add target {}", target.by_id),
+                        commands,
+                    });
+                }
+            }
+        }
+    }
+
     // State recovery steps are always shown (recover writes pool.json
     // even when mounted).
     steps.push(Step {
@@ -772,6 +880,7 @@ pub fn plan_recover<R: CommandRunner + Sync, F: Filesystem + ?Sized>(
             notes,
             steps,
             open_plan,
+            pre_resolved_credential,
             journal,
             union,
         }),
@@ -953,6 +1062,632 @@ fn journal_op_label(op: &journal::OpKind) -> &'static str {
         journal::OpKind::RemoveMissing { .. } => "remove-missing",
         journal::OpKind::Replace { .. } => "replace",
     }
+}
+
+#[cfg(not(test))]
+fn acquire_recover_sleep_inhibitor(
+    why: &str,
+) -> Result<Box<dyn crate::inhibit::SleepGuard>, RecoverError> {
+    use crate::inhibit::AcquireSleepInhibitor;
+    crate::inhibit::RealSleepInhibitor
+        .acquire(why)
+        .map_err(|e| RecoverError::Failed(format!("could not acquire sleep inhibitor: {e}")))
+}
+
+#[cfg(test)]
+fn acquire_recover_sleep_inhibitor(
+    why: &str,
+) -> Result<Box<dyn crate::inhibit::SleepGuard>, RecoverError> {
+    recover_inhibitor_test_seam::acquire(why)
+        .map_err(|e| RecoverError::Failed(format!("could not acquire sleep inhibitor: {e}")))?;
+    Ok(Box::new(()))
+}
+
+#[cfg(test)]
+mod recover_inhibitor_test_seam {
+    use std::cell::Cell;
+
+    thread_local! {
+        static ACQUIRE_COUNT: Cell<usize> = const { Cell::new(0) };
+        static FAIL_NEXT: Cell<bool> = const { Cell::new(false) };
+    }
+
+    pub(super) fn reset() {
+        ACQUIRE_COUNT.with(|count| count.set(0));
+        FAIL_NEXT.with(|fail| fail.set(false));
+    }
+
+    pub(super) fn fail_next() {
+        FAIL_NEXT.with(|fail| fail.set(true));
+    }
+
+    pub(super) fn acquire_count() -> usize {
+        ACQUIRE_COUNT.with(Cell::get)
+    }
+
+    pub(super) fn acquire(_why: &str) -> std::io::Result<()> {
+        ACQUIRE_COUNT.with(|count| count.set(count.get() + 1));
+        if FAIL_NEXT.with(|fail| fail.replace(false)) {
+            return Err(std::io::Error::other("forced inhibitor failure"));
+        }
+        Ok(())
+    }
+}
+
+fn live_member_names(pool: &PoolState) -> std::collections::BTreeSet<String> {
+    pool.devices
+        .iter()
+        .filter_map(|dev| config::name_from_mapper(&dev.mapper.0).map(str::to_owned))
+        .collect()
+}
+
+fn validate_live_members_allowed(
+    pool: &PoolState,
+    allowed: &PoolMembership,
+) -> Result<(), RecoverError> {
+    for dev in &pool.devices {
+        let Some(name) = config::name_from_mapper(&dev.mapper.0) else {
+            continue;
+        };
+        if !allowed.disks.contains_key(name) {
+            return Err(RecoverError::Failed(format!(
+                "device {} is in the live pool but has no by-id path in either \
+                 the pre-operation or target membership snapshot.\n\
+                 This must be resolved manually -- provide the correct \
+                 /dev/disk/by-id/ path and re-run recovery.",
+                dev.mapper.0
+            )));
+        }
+    }
+    Ok(())
+}
+
+fn add_targets_all_live(
+    pool: &PoolState,
+    targets: &std::collections::BTreeMap<String, journal::AddJournalTarget>,
+) -> bool {
+    let live = live_member_names(pool);
+    targets.keys().all(|name| live.contains(name))
+}
+
+fn build_membership_from_live_pool(
+    pool: &PoolState,
+    union: &PoolMembership,
+    prior: Option<&PoolMembership>,
+    by_id_resolver: &dyn ByIdResolver,
+) -> Result<PoolMembership, RecoverError> {
+    let mut recovered = PoolMembership::empty();
+    for dev in &pool.devices {
+        let Some(name) = config::name_from_mapper(&dev.mapper.0) else {
+            eprintln!("  skip: device {} has no braid- prefix", dev.mapper.0);
+            continue;
+        };
+        if !union.disks.contains_key(name) {
+            return Err(RecoverError::Failed(format!(
+                "device {} is in the live pool but has no by-id path in either \
+                 the pre-operation or target membership snapshot.\n\
+                 This must be resolved manually -- provide the correct \
+                 /dev/disk/by-id/ path and re-run recovery.",
+                dev.mapper.0
+            )));
+        }
+        let by_id = resolve_by_id_for_underlying(by_id_resolver, &dev.underlying)?;
+        let added_at = prior
+            .and_then(|p| p.disks.get(name))
+            .and_then(|m| m.added_at.clone())
+            .or_else(|| union.disks.get(name).and_then(|m| m.added_at.clone()));
+        recovered.disks.insert(
+            name.to_owned(),
+            DiskMember {
+                by_id,
+                luks_uuid: None,
+                devid: None,
+                added_at,
+            },
+        );
+    }
+    membership::enrich_from_pool_state(pool, &mut recovered);
+    Ok(recovered)
+}
+
+fn write_add_phase(
+    paths: &StatePaths,
+    journal: &Journal,
+    phase: journal::AddPhase,
+) -> Result<(), RecoverError> {
+    let mut next = journal.clone();
+    if let journal::OpKind::Add { phase: p, .. } = &mut next.op {
+        *p = phase;
+    }
+    journal::write_journal(paths, &next).map_err(|e| RecoverError::Journal(e.to_string()))
+}
+
+fn recover_passphrase<'a>(
+    existing: Option<&'a OpenCredential>,
+    params: &RecoverParams<'_>,
+) -> Result<Cow<'a, str>, RecoverError> {
+    match existing {
+        Some(OpenCredential::Passphrase(passphrase)) => Ok(Cow::Borrowed(passphrase.as_str())),
+        Some(OpenCredential::KeyFile(_)) => Err(RecoverError::Failed(
+            "add recovery requires a passphrase for delayed LUKS format".into(),
+        )),
+        None => Ok(Cow::Owned(luks::read_passphrase(
+            params.passphrase_file,
+            params.passphrase_stdin,
+        )?)),
+    }
+}
+
+fn open_credential_passphrase<'a>(
+    credential: &'a OpenCredential,
+    context: &str,
+) -> Result<&'a str, RecoverError> {
+    match credential {
+        OpenCredential::Passphrase(passphrase) => Ok(passphrase.as_str()),
+        OpenCredential::KeyFile(_) => Err(RecoverError::Failed(format!(
+            "{context} requires a passphrase"
+        ))),
+    }
+}
+
+fn discover_add_targets_before_mount<R: CommandRunner, F: Filesystem + ?Sized>(
+    runner: &R,
+    fs: &F,
+    params: &RecoverParams<'_>,
+    journal: &Journal,
+    targets: &std::collections::BTreeMap<String, journal::AddJournalTarget>,
+) -> Result<Option<OpenCredential>, RecoverError> {
+    let mount_result = runner.run(&CmdRequest::MountpointCheck {
+        path: params.config.mount_point().clone(),
+    })?;
+    if mount_result.exit_status == 0 {
+        return Ok(None);
+    }
+
+    let mut credential: Option<OpenCredential> = None;
+    for (name, target) in targets {
+        if journal.pre_membership.disks.contains_key(name) {
+            continue;
+        }
+
+        let probed = probe::probe_config_disk(runner, fs, name, &target.by_id)?;
+        let ConfigDiskState::PresentLuks { uuid, mapper_open } = probed.state else {
+            continue;
+        };
+
+        match &target.mode {
+            journal::AddJournalMode::RecoverableBraidLabeled { luks_uuid, .. } => {
+                if &uuid != luks_uuid {
+                    return Err(RecoverError::Failed(format!(
+                        "recover add target '{}' LUKS UUID mismatch before mount: expected {}, found {}",
+                        name, luks_uuid, uuid
+                    )));
+                }
+            }
+            journal::AddJournalMode::FreshLuks { luks_label, .. } => {
+                if read_luks_label(runner, &target.by_id.0)?.as_deref() != Some(luks_label.as_str())
+                {
+                    return Err(RecoverError::Failed(format!(
+                        "recover add target '{}' has unexpected LUKS label before mount",
+                        name
+                    )));
+                }
+            }
+        }
+
+        if !mapper_open {
+            if credential.is_none() {
+                credential = Some(
+                    mount::resolve_credential(
+                        params.passphrase_stdin,
+                        params.passphrase_file,
+                        None,
+                    )
+                    .map_err(|e| RecoverError::Failed(format!("recover: {e}")))?,
+                );
+            }
+            let passphrase = open_credential_passphrase(
+                credential.as_ref().expect("credential was resolved above"),
+                "add recovery pre-mount discovery",
+            )?;
+            luks::ensure_luks_open(runner, fs, name, &target.by_id, passphrase)?;
+        }
+
+        scan_mapper(runner, &format!("/dev/mapper/{}", target.mapper_name))?;
+    }
+
+    Ok(credential)
+}
+
+fn verify_recover_passphrase_for_add_replay<R: CommandRunner, F: Filesystem + ?Sized>(
+    runner: &R,
+    fs: &F,
+    pool: &PoolState,
+    targets: &std::collections::BTreeMap<String, journal::AddJournalTarget>,
+    passphrase: &str,
+) -> Result<(), RecoverError> {
+    let mut verify_targets: Vec<_> = pool
+        .devices
+        .iter()
+        .map(|device| CredentialVerifyTarget {
+            name: config::name_from_mapper(&device.mapper.0)
+                .unwrap_or(device.mapper.0.as_str())
+                .to_owned(),
+            device: device.underlying.clone(),
+        })
+        .collect();
+    if verify_targets.is_empty() {
+        return Err(RecoverError::Failed(
+            "cannot verify add recovery passphrase because no live pool members were found".into(),
+        ));
+    }
+
+    let live = live_member_names(pool);
+    for (name, target) in targets {
+        if live.contains(name) {
+            continue;
+        }
+        let probed = probe::probe_config_disk(runner, fs, name, &target.by_id)?;
+        let ConfigDiskState::PresentLuks { uuid, .. } = probed.state else {
+            continue;
+        };
+        match &target.mode {
+            journal::AddJournalMode::RecoverableBraidLabeled { luks_uuid, .. } => {
+                if &uuid != luks_uuid {
+                    return Err(RecoverError::Failed(format!(
+                        "recover add target '{}' LUKS UUID mismatch: expected {}, found {}",
+                        name, luks_uuid, uuid
+                    )));
+                }
+            }
+            journal::AddJournalMode::FreshLuks { luks_label, .. } => {
+                if read_luks_label(runner, &target.by_id.0)?.as_deref() != Some(luks_label.as_str())
+                {
+                    return Err(RecoverError::Failed(format!(
+                        "recover add target '{}' has unexpected LUKS label",
+                        name
+                    )));
+                }
+            }
+        }
+        verify_targets.push(CredentialVerifyTarget {
+            name: name.clone(),
+            device: target.by_id.0.clone(),
+        });
+    }
+
+    verify_credential_for_targets(
+        runner,
+        &verify_targets,
+        Credential::Passphrase(passphrase),
+        color_enabled_for_stderr(),
+        |line| eprint!("{line}"),
+    )
+    .map_err(|e| match e {
+        crate::credential_verify::CredentialVerifyError::Rejected { target } => {
+            RecoverError::Failed(format!(
+                "recover add passphrase was rejected by '{}'",
+                target.name
+            ))
+        }
+        crate::credential_verify::CredentialVerifyError::Luks { target, source } => {
+            RecoverError::Failed(format!(
+                "recover add credential verification failed on '{}': {source}",
+                target.name
+            ))
+        }
+    })
+}
+
+fn read_luks_label<R: CommandRunner>(
+    runner: &R,
+    device: &str,
+) -> Result<Option<String>, RecoverError> {
+    let raw = runner.run(&CmdRequest::CryptsetupLuksDumpText {
+        device: device.to_owned(),
+    })?;
+    Ok(crate::parse::parse_cryptsetup_luks_label(&raw)?.label)
+}
+
+fn visible_btrfs_fsid<R: CommandRunner>(
+    runner: &R,
+    mapper_path: &str,
+) -> Result<Option<String>, RecoverError> {
+    let show_raw = runner.run(&CmdRequest::BtrfsFilesystemShowTarget {
+        target: mapper_path.to_owned(),
+    })?;
+    match classify_btrfs_probe(&show_raw) {
+        DeviceBtrfsProbe::NoBtrfs => Ok(None),
+        DeviceBtrfsProbe::Unknown(msg) => Err(RecoverError::Failed(msg)),
+        DeviceBtrfsProbe::HasBtrfs => {
+            let show = crate::parse::parse_btrfs_filesystem_show(&show_raw)?;
+            Ok(show.uuid)
+        }
+    }
+}
+
+fn scan_mapper<R: CommandRunner>(runner: &R, mapper_path: &str) -> Result<(), RecoverError> {
+    let result = runner.run(&CmdRequest::BtrfsDeviceScan {
+        device: mapper_path.to_owned(),
+    })?;
+    if result.exit_status != 0 {
+        return Err(RecoverError::Failed(format!(
+            "btrfs device scan failed for {} (exit {}): {}",
+            mapper_path,
+            result.exit_status,
+            result.stderr.trim()
+        )));
+    }
+    Ok(())
+}
+
+fn ensure_keyfile_enrolled<R: CommandRunner>(
+    runner: &R,
+    device: &str,
+    passphrase: &str,
+    key_file: &std::path::Path,
+) -> Result<(), RecoverError> {
+    match luks::verify_key_file(runner, device, key_file)? {
+        VerifyOutcome::Authenticated => Ok(()),
+        VerifyOutcome::Rejected => {
+            luks::enroll_key_file(runner, device, passphrase, key_file)?;
+            Ok(())
+        }
+    }
+}
+
+fn run_add_post_balance<R: CommandRunner + Sync>(
+    runner: &R,
+    mount_point: &MountPoint,
+    pool: &PoolState,
+    progress: ProgressOutput,
+) -> Result<(), RecoverError> {
+    let op = journal::OpKind::Add {
+        phase: journal::AddPhase::PostAddBalanceRaid1,
+        targets: std::collections::BTreeMap::new(),
+    };
+    replay_post_mutation(runner, mount_point, &op, pool, progress)
+}
+
+fn execute_add_post_balance_recovery<R: CommandRunner + Sync>(
+    runner: &R,
+    by_id_resolver: &dyn ByIdResolver,
+    params: &RecoverParams<'_>,
+    journal: &Journal,
+    union: &PoolMembership,
+    pool: PoolState,
+    inhibitor_already_held: bool,
+) -> Result<(), RecoverError> {
+    validate_live_members_allowed(&pool, &journal.target_membership)?;
+    let live = live_member_names(&pool);
+    let target: std::collections::BTreeSet<_> =
+        journal.target_membership.disks.keys().cloned().collect();
+    if live != target {
+        return Err(RecoverError::Failed(format!(
+            "post-add recovery expected live pool membership {:?}, found {:?}",
+            target, live
+        )));
+    }
+
+    let prior = membership::load_membership(params.paths).ok();
+    let recovered = build_membership_from_live_pool(&pool, union, prior.as_ref(), by_id_resolver)?;
+    membership::save_membership(&recovered, params.paths)?;
+    eprintln!("pool.json written from committed add membership.");
+
+    let _guard = if inhibitor_already_held {
+        None
+    } else {
+        Some(acquire_recover_sleep_inhibitor(
+            "finishing interrupted add balance",
+        )?)
+    };
+    run_add_post_balance(runner, params.config.mount_point(), &pool, params.progress)?;
+    journal::clear_journal(params.paths).map_err(|e| RecoverError::Journal(e.to_string()))?;
+    eprintln!("pending-op.json cleared. Recovery complete.");
+    Ok(())
+}
+
+fn execute_add_pool_mutation_recovery<R: CommandRunner + Sync, F: Filesystem + ?Sized>(
+    runner: &R,
+    fs: &F,
+    by_id_resolver: &dyn ByIdResolver,
+    params: &RecoverParams<'_>,
+    credential: Option<&OpenCredential>,
+    journal: &Journal,
+    union: &PoolMembership,
+    targets: &std::collections::BTreeMap<String, journal::AddJournalTarget>,
+    mut pool: PoolState,
+) -> Result<(), RecoverError> {
+    validate_live_members_allowed(&pool, union)?;
+    let mount_point = params.config.mount_point();
+
+    if !add_targets_all_live(&pool, targets) {
+        let mut opened_or_scanned = false;
+        let mut passphrase: Option<Cow<'_, str>> = None;
+        for (name, target) in targets {
+            if live_member_names(&pool).contains(name) {
+                continue;
+            }
+            let probed = probe::probe_config_disk(runner, fs, name, &target.by_id)?;
+            let ConfigDiskState::PresentLuks { uuid, mapper_open } = probed.state else {
+                continue;
+            };
+
+            match &target.mode {
+                journal::AddJournalMode::RecoverableBraidLabeled { luks_uuid, .. } => {
+                    if &uuid != luks_uuid {
+                        continue;
+                    }
+                }
+                journal::AddJournalMode::FreshLuks { luks_label, .. } => {
+                    if read_luks_label(runner, &target.by_id.0)?.as_deref()
+                        != Some(luks_label.as_str())
+                    {
+                        continue;
+                    }
+                }
+            }
+
+            if !mapper_open {
+                if passphrase.is_none() {
+                    passphrase = Some(recover_passphrase(credential, params)?);
+                }
+                let passphrase = passphrase
+                    .as_deref()
+                    .expect("passphrase was resolved above");
+                luks::ensure_luks_open(runner, fs, name, &target.by_id, passphrase)?;
+            }
+            scan_mapper(runner, &format!("/dev/mapper/{}", target.mapper_name))?;
+            opened_or_scanned = true;
+        }
+
+        if opened_or_scanned {
+            pool = probe::probe_pool(runner, fs, mount_point)?;
+            validate_live_members_allowed(&pool, union)?;
+        }
+    }
+
+    if !add_targets_all_live(&pool, targets) {
+        let _guard = acquire_recover_sleep_inhibitor("replaying interrupted add")?;
+        let passphrase = recover_passphrase(credential, params)?;
+        verify_recover_passphrase_for_add_replay(runner, fs, &pool, targets, passphrase.as_ref())?;
+
+        for (name, target) in targets {
+            if live_member_names(&pool).contains(name) {
+                continue;
+            }
+            let mapper_path = format!("/dev/mapper/{}", target.mapper_name);
+            match &target.mode {
+                journal::AddJournalMode::RecoverableBraidLabeled {
+                    verified_pool_fsid,
+                    luks_uuid,
+                } => {
+                    let probed = probe::probe_config_disk(runner, fs, name, &target.by_id)?;
+                    let ConfigDiskState::PresentLuks { uuid, mapper_open } = probed.state else {
+                        return Err(RecoverError::Failed(format!(
+                            "recover add target '{}' is not a LUKS device",
+                            name
+                        )));
+                    };
+                    if &uuid != luks_uuid {
+                        return Err(RecoverError::Failed(format!(
+                            "recover add target '{}' LUKS UUID mismatch: expected {}, found {}",
+                            name, luks_uuid, uuid
+                        )));
+                    }
+                    if !mapper_open {
+                        luks::ensure_luks_open(
+                            runner,
+                            fs,
+                            name,
+                            &target.by_id,
+                            passphrase.as_ref(),
+                        )?;
+                    }
+                    if let Some(fsid) = visible_btrfs_fsid(runner, &mapper_path)?
+                        && &fsid != verified_pool_fsid
+                    {
+                        return Err(RecoverError::Failed(format!(
+                            "recover add target '{}' btrfs FSID mismatch: expected {}, found {}",
+                            name, verified_pool_fsid, fsid
+                        )));
+                    }
+                    crate::pool::pool_add_device(runner, &mapper_path, mount_point, true)
+                        .map_err(|e| RecoverError::Failed(format!("recover add replay: {e}")))?;
+                }
+                journal::AddJournalMode::FreshLuks {
+                    luks_label,
+                    luks_format_extra_opts,
+                    enroll_key_file,
+                } => {
+                    let probed = probe::probe_config_disk(runner, fs, name, &target.by_id)?;
+                    match probed.state {
+                        ConfigDiskState::PresentNotLuks => {
+                            luks::luks_format(
+                                runner,
+                                &target.by_id.0,
+                                passphrase.as_ref(),
+                                luks_format_extra_opts,
+                            )?;
+                        }
+                        ConfigDiskState::PresentLuks { .. } => {
+                            if read_luks_label(runner, &target.by_id.0)?.as_deref()
+                                != Some(luks_label.as_str())
+                            {
+                                return Err(RecoverError::Failed(format!(
+                                    "recover add target '{}' has unexpected LUKS label",
+                                    name
+                                )));
+                            }
+                        }
+                        ConfigDiskState::Absent => {
+                            return Err(RecoverError::Failed(format!(
+                                "recover add target '{}' ({}) is not present",
+                                name, target.by_id
+                            )));
+                        }
+                    }
+
+                    if let Some(key_file) = enroll_key_file {
+                        ensure_keyfile_enrolled(
+                            runner,
+                            &target.by_id.0,
+                            passphrase.as_ref(),
+                            key_file,
+                        )?;
+                    }
+                    luks::backup_luks_header(
+                        runner,
+                        &target.by_id.0,
+                        &target.mapper_name,
+                        params.paths,
+                    )?;
+                    luks::ensure_luks_open(runner, fs, name, &target.by_id, passphrase.as_ref())?;
+                    crate::pool::pool_add_device(runner, &mapper_path, mount_point, false)
+                        .map_err(|e| RecoverError::Failed(format!("recover add replay: {e}")))?;
+                }
+            }
+            pool = probe::probe_pool(runner, fs, mount_point)?;
+            validate_live_members_allowed(&pool, union)?;
+        }
+
+        if !add_targets_all_live(&pool, targets) {
+            return Err(RecoverError::Failed(
+                "recover add replay finished but not every journaled target is live".into(),
+            ));
+        }
+
+        let prior = membership::load_membership(params.paths).ok();
+        let recovered =
+            build_membership_from_live_pool(&pool, union, prior.as_ref(), by_id_resolver)?;
+        membership::save_membership(&recovered, params.paths)?;
+        eprintln!("pool.json written from completed add membership.");
+        write_add_phase(
+            params.paths,
+            journal,
+            journal::AddPhase::PostAddBalanceRaid1,
+        )?;
+        return execute_add_post_balance_recovery(
+            runner,
+            by_id_resolver,
+            params,
+            journal,
+            union,
+            pool,
+            true,
+        );
+    }
+
+    let prior = membership::load_membership(params.paths).ok();
+    let recovered = build_membership_from_live_pool(&pool, union, prior.as_ref(), by_id_resolver)?;
+    membership::save_membership(&recovered, params.paths)?;
+    eprintln!("pool.json written from completed add membership.");
+    write_add_phase(
+        params.paths,
+        journal,
+        journal::AddPhase::PostAddBalanceRaid1,
+    )?;
+    execute_add_post_balance_recovery(runner, by_id_resolver, params, journal, union, pool, false)
 }
 
 const REPLACE_WAIT_POLL_INTERVAL: Duration = Duration::from_millis(200);
@@ -1212,8 +1947,8 @@ fn recovery_guidance(
 ) -> String {
     if recovered_names == target_names {
         match op {
-            journal::OpKind::Add { disks } => {
-                let names: Vec<_> = disks.keys().map(|n| format!("'{n}'")).collect();
+            journal::OpKind::Add { targets, .. } => {
+                let names: Vec<_> = targets.keys().map(|n| format!("'{n}'")).collect();
                 format!("add completed -- {} now in the pool.", names.join(", "))
             }
             journal::OpKind::Remove { name } => {
@@ -1230,8 +1965,8 @@ fn recovery_guidance(
         }
     } else if recovered_names == pre_names {
         match op {
-            journal::OpKind::Add { disks } => {
-                let names: Vec<_> = disks.keys().map(|n| format!("'{n}'")).collect();
+            journal::OpKind::Add { targets, .. } => {
+                let names: Vec<_> = targets.keys().map(|n| format!("'{n}'")).collect();
                 format!(
                     "add did not complete -- {} not in the pool. Re-run braid add to retry.",
                     names.join(", ")
@@ -1274,6 +2009,23 @@ fn union_memberships(journal: &Journal) -> PoolMembership {
     union
 }
 
+fn mount_membership_for_recover<'a>(
+    journal: &'a Journal,
+    union: &'a PoolMembership,
+) -> &'a PoolMembership {
+    match &journal.op {
+        journal::OpKind::Add {
+            phase: journal::AddPhase::PoolMutation,
+            ..
+        } if !journal.pre_membership.disks.is_empty() => &journal.pre_membership,
+        journal::OpKind::Add {
+            phase: journal::AddPhase::PostAddBalanceRaid1,
+            ..
+        } => &journal.target_membership,
+        _ => union,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1282,7 +2034,7 @@ mod tests {
     use crate::mount::MountError;
     use crate::preview::NoteLevel;
     use crate::probe::Filesystem;
-    use crate::types::{ByIdPath, MountPoint};
+    use crate::types::{ByIdPath, LuksUuid, MapperName, MountPoint, PoolDevice};
     use std::collections::{BTreeMap, VecDeque};
     use std::sync::Mutex;
 
@@ -1814,6 +2566,32 @@ mod tests {
         }
     }
 
+    fn add_op_from_disks(disks: BTreeMap<String, ByIdPath>) -> OpKind {
+        OpKind::Add {
+            phase: journal::AddPhase::PostAddBalanceRaid1,
+            targets: disks
+                .into_iter()
+                .map(|(name, by_id)| {
+                    (
+                        name.clone(),
+                        journal::AddJournalTarget {
+                            by_id,
+                            mapper_name: config::mapper_name(&name).0,
+                            mode: journal::AddJournalMode::FreshLuks {
+                                luks_label: format!("braid-{name}"),
+                                luks_format_extra_opts: vec![
+                                    "--label".into(),
+                                    format!("braid-{name}"),
+                                ],
+                                enroll_key_file: None,
+                            },
+                        },
+                    )
+                })
+                .collect(),
+        }
+    }
+
     fn already_mounted_one_disk_runner() -> MockRunner {
         let (mp_req, mp_out) = mountpoint_ok();
         MockRunner::default()
@@ -1925,10 +2703,1639 @@ mod tests {
 
         journal::Journal {
             started_at: "2026-01-01T00:00:00Z".into(),
-            op: OpKind::Add { disks: add_disks },
+            op: add_op_from_disks(add_disks),
             pre_membership: pre,
             target_membership: target,
         }
+    }
+
+    /// Add journal for the committed post-add phase: pre has disk1,
+    /// target/live pool has disk1+disk2, and recovery only owes balance.
+    fn committed_two_disk_add_journal() -> journal::Journal {
+        let mut pre_disks = BTreeMap::new();
+        pre_disks.insert(
+            "disk1".to_owned(),
+            DiskMember::from_by_id(ByIdPath("/dev/disk/by-id/virtio-disk1".into())),
+        );
+        let pre = PoolMembership { disks: pre_disks };
+
+        let mut target_disks = pre.disks.clone();
+        target_disks.insert(
+            "disk2".to_owned(),
+            DiskMember::from_by_id(ByIdPath("/dev/disk/by-id/virtio-disk2".into())),
+        );
+        let target = PoolMembership {
+            disks: target_disks,
+        };
+
+        let mut add_disks = BTreeMap::new();
+        add_disks.insert(
+            "disk2".to_owned(),
+            ByIdPath("/dev/disk/by-id/virtio-disk2".into()),
+        );
+
+        journal::Journal {
+            started_at: "2026-01-01T00:00:00Z".into(),
+            op: add_op_from_disks(add_disks),
+            pre_membership: pre,
+            target_membership: target,
+        }
+    }
+
+    fn recoverable_pool_mutation_add_journal() -> journal::Journal {
+        let mut pre_disks = BTreeMap::new();
+        pre_disks.insert(
+            "disk1".to_owned(),
+            DiskMember::from_by_id(ByIdPath("/dev/disk/by-id/virtio-disk1".into())),
+        );
+        let pre = PoolMembership { disks: pre_disks };
+
+        let mut target_disks = pre.disks.clone();
+        target_disks.insert(
+            "disk2".to_owned(),
+            DiskMember::from_by_id(ByIdPath("/dev/disk/by-id/virtio-disk2".into())),
+        );
+        let target = PoolMembership {
+            disks: target_disks,
+        };
+
+        let mut targets = BTreeMap::new();
+        targets.insert(
+            "disk2".to_owned(),
+            journal::AddJournalTarget {
+                by_id: ByIdPath("/dev/disk/by-id/virtio-disk2".into()),
+                mapper_name: "braid-disk2".into(),
+                mode: journal::AddJournalMode::RecoverableBraidLabeled {
+                    verified_pool_fsid: "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee".into(),
+                    luks_uuid: LuksUuid("22222222-2222-2222-2222-222222222222".into()),
+                },
+            },
+        );
+
+        journal::Journal {
+            started_at: "2026-01-01T00:00:00Z".into(),
+            op: OpKind::Add {
+                phase: journal::AddPhase::PoolMutation,
+                targets,
+            },
+            pre_membership: pre,
+            target_membership: target,
+        }
+    }
+
+    fn fresh_pool_mutation_add_journal(
+        luks_format_extra_opts: Vec<String>,
+        enroll_key_file: Option<std::path::PathBuf>,
+    ) -> journal::Journal {
+        let mut pre_disks = BTreeMap::new();
+        pre_disks.insert(
+            "disk1".to_owned(),
+            DiskMember::from_by_id(ByIdPath("/dev/disk/by-id/virtio-disk1".into())),
+        );
+        let pre = PoolMembership { disks: pre_disks };
+
+        let mut target_disks = pre.disks.clone();
+        target_disks.insert(
+            "disk2".to_owned(),
+            DiskMember::from_by_id(ByIdPath("/dev/disk/by-id/virtio-disk2".into())),
+        );
+        let target = PoolMembership {
+            disks: target_disks,
+        };
+
+        let mut targets = BTreeMap::new();
+        targets.insert(
+            "disk2".to_owned(),
+            journal::AddJournalTarget {
+                by_id: ByIdPath("/dev/disk/by-id/virtio-disk2".into()),
+                mapper_name: "braid-disk2".into(),
+                mode: journal::AddJournalMode::FreshLuks {
+                    luks_label: "braid-disk2".into(),
+                    luks_format_extra_opts,
+                    enroll_key_file,
+                },
+            },
+        );
+
+        journal::Journal {
+            started_at: "2026-01-01T00:00:00Z".into(),
+            op: OpKind::Add {
+                phase: journal::AddPhase::PoolMutation,
+                targets,
+            },
+            pre_membership: pre,
+            target_membership: target,
+        }
+    }
+
+    fn pool_state_one_disk() -> PoolState {
+        PoolState {
+            mounted: true,
+            devices: vec![PoolDevice {
+                mapper: MapperName("braid-disk1".into()),
+                luks_uuid: LuksUuid("11111111-1111-1111-1111-111111111111".into()),
+                devid: 1,
+                underlying: "/dev/vda".into(),
+            }],
+            missing_count: 0,
+            total_devices: 1,
+            fsid: Some("aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee".into()),
+            missing_devids: vec![],
+            null_underlying: vec![],
+        }
+    }
+
+    fn pool_state_two_disks() -> PoolState {
+        PoolState {
+            mounted: true,
+            devices: vec![
+                PoolDevice {
+                    mapper: MapperName("braid-disk1".into()),
+                    luks_uuid: LuksUuid("11111111-1111-1111-1111-111111111111".into()),
+                    devid: 1,
+                    underlying: "/dev/vda".into(),
+                },
+                PoolDevice {
+                    mapper: MapperName("braid-disk2".into()),
+                    luks_uuid: LuksUuid("22222222-2222-2222-2222-222222222222".into()),
+                    devid: 2,
+                    underlying: "/dev/vdb".into(),
+                },
+            ],
+            missing_count: 0,
+            total_devices: 2,
+            fsid: Some("aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee".into()),
+            missing_devids: vec![],
+            null_underlying: vec![],
+        }
+    }
+
+    fn luks_dump_label(label: &str) -> RawCommandOutput {
+        ok_raw(
+            "cryptsetup luksDump",
+            &format!("LUKS header information\nVersion:       \t2\nLabel:         \t{label}\n"),
+        )
+    }
+
+    fn btrfs_show_target_fsid(fsid: &str) -> RawCommandOutput {
+        ok_raw(
+            "btrfs filesystem show target",
+            &format!(
+                "Label: none  uuid: {fsid}\n\
+                 \tTotal devices 1 FS bytes used 1.00GiB\n\
+                 \tdevid    1 size 10.00GiB used 2.00GiB path /dev/mapper/braid-disk2\n"
+            ),
+        )
+    }
+
+    fn with_one_disk_pool_probe(runner: MockRunner) -> MockRunner {
+        runner
+            .with_output(
+                CmdRequest::BtrfsFilesystemShow {
+                    mount_point: MountPoint("/mnt/storage".into()),
+                },
+                btrfs_show_one_disk(),
+            )
+            .with_output(
+                CmdRequest::CryptsetupStatus {
+                    mapper: "braid-disk1".into(),
+                },
+                cryptsetup_status_active("braid-disk1", "/dev/vda"),
+            )
+            .with_output(
+                CmdRequest::CryptsetupLuksUuid {
+                    device: "/dev/vda".into(),
+                },
+                cryptsetup_uuid_ok("/dev/vda", "11111111-1111-1111-1111-111111111111"),
+            )
+    }
+
+    fn with_two_disk_pool_probe(runner: MockRunner) -> MockRunner {
+        runner
+            .with_output(
+                CmdRequest::BtrfsFilesystemShow {
+                    mount_point: MountPoint("/mnt/storage".into()),
+                },
+                btrfs_show_two_disks(),
+            )
+            .with_output(
+                CmdRequest::CryptsetupStatus {
+                    mapper: "braid-disk1".into(),
+                },
+                cryptsetup_status_active("braid-disk1", "/dev/vda"),
+            )
+            .with_output(
+                CmdRequest::CryptsetupLuksUuid {
+                    device: "/dev/vda".into(),
+                },
+                cryptsetup_uuid_ok("/dev/vda", "11111111-1111-1111-1111-111111111111"),
+            )
+            .with_output(
+                CmdRequest::CryptsetupStatus {
+                    mapper: "braid-disk2".into(),
+                },
+                cryptsetup_status_active("braid-disk2", "/dev/vdb"),
+            )
+            .with_output(
+                CmdRequest::CryptsetupLuksUuid {
+                    device: "/dev/vdb".into(),
+                },
+                cryptsetup_uuid_ok("/dev/vdb", "22222222-2222-2222-2222-222222222222"),
+            )
+    }
+
+    fn with_one_then_two_disk_pool_probe(runner: MockRunner) -> MockRunner {
+        runner
+            .with_output_sequence(
+                CmdRequest::BtrfsFilesystemShow {
+                    mount_point: MountPoint("/mnt/storage".into()),
+                },
+                vec![btrfs_show_one_disk(), btrfs_show_two_disks()],
+            )
+            .with_output(
+                CmdRequest::CryptsetupStatus {
+                    mapper: "braid-disk1".into(),
+                },
+                cryptsetup_status_active("braid-disk1", "/dev/vda"),
+            )
+            .with_output(
+                CmdRequest::CryptsetupLuksUuid {
+                    device: "/dev/vda".into(),
+                },
+                cryptsetup_uuid_ok("/dev/vda", "11111111-1111-1111-1111-111111111111"),
+            )
+            .with_output(
+                CmdRequest::CryptsetupStatus {
+                    mapper: "braid-disk2".into(),
+                },
+                cryptsetup_status_active("braid-disk2", "/dev/vdb"),
+            )
+            .with_output(
+                CmdRequest::CryptsetupLuksUuid {
+                    device: "/dev/vdb".into(),
+                },
+                cryptsetup_uuid_ok("/dev/vdb", "22222222-2222-2222-2222-222222222222"),
+            )
+    }
+
+    fn with_balance_replay(runner: MockRunner) -> MockRunner {
+        runner
+            .with_output(
+                CmdRequest::BtrfsBalanceStatus {
+                    mount_point: MountPoint("/mnt/storage".into()),
+                },
+                ok_raw(
+                    "btrfs balance status",
+                    "No balance found on '/mnt/storage'\n",
+                ),
+            )
+            .with_output(
+                CmdRequest::BtrfsBalanceRaid1Soft {
+                    mount_point: MountPoint("/mnt/storage".into()),
+                },
+                ok_raw_empty("btrfs balance start"),
+            )
+    }
+
+    fn recover_params<'a>(
+        config: &'a Config,
+        paths: &'a StatePaths,
+        passphrase_file: Option<&'a std::path::Path>,
+        dry_run: bool,
+    ) -> RecoverParams<'a> {
+        RecoverParams {
+            config,
+            paths,
+            passphrase_stdin: false,
+            passphrase_file,
+            allow_degraded: false,
+            dry_run,
+            progress: ProgressOutput::Off,
+        }
+    }
+
+    #[test]
+    fn plan_recover_discovers_add_targets_before_mount_planning() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let paths = StatePaths::custom(tmp.path().into());
+        let config = Config::new(MountPoint("/mnt/storage".into())).unwrap();
+        let fs = StatefulMockFs::new(&[
+            "/dev/disk/by-id/virtio-disk1",
+            "/dev/disk/by-id/virtio-disk2",
+        ]);
+        let fs_handle = fs.handle();
+
+        let journal = recoverable_pool_mutation_add_journal();
+        journal::write_journal(&paths, &journal).unwrap();
+
+        let passphrase_file = tempfile::NamedTempFile::new().unwrap();
+        {
+            use std::io::Write;
+            passphrase_file.as_file().write_all(b"testpass").unwrap();
+        }
+
+        let inner = MockRunner::default()
+            .with_output(mountpoint_fail().0, mountpoint_fail().1)
+            .with_output(
+                CmdRequest::CryptsetupLuksUuid {
+                    device: "/dev/disk/by-id/virtio-disk2".into(),
+                },
+                cryptsetup_uuid_ok(
+                    "/dev/disk/by-id/virtio-disk2",
+                    "22222222-2222-2222-2222-222222222222",
+                ),
+            )
+            .with_output(
+                CmdRequest::CryptsetupLuksUuid {
+                    device: "/dev/disk/by-id/virtio-disk1".into(),
+                },
+                cryptsetup_uuid_ok(
+                    "/dev/disk/by-id/virtio-disk1",
+                    "11111111-1111-1111-1111-111111111111",
+                ),
+            )
+            .with_luks_dump_text_luks2_for(&[
+                "/dev/disk/by-id/virtio-disk1",
+                "/dev/disk/by-id/virtio-disk2",
+            ])
+            .with_mappers_closed(&["braid-disk1", "braid-disk2"])
+            .with_output_stdin(
+                CmdRequest::CryptsetupLuksOpen {
+                    device: "/dev/disk/by-id/virtio-disk2".into(),
+                    mapper: "braid-disk2".into(),
+                },
+                b"testpass".to_vec(),
+                ok_raw_empty("cryptsetup open"),
+            )
+            .with_output(
+                CmdRequest::BtrfsDeviceScan {
+                    device: "/dev/mapper/braid-disk2".into(),
+                },
+                ok_raw_empty("btrfs device scan"),
+            );
+        let request_log = inner.clone();
+        let runner = MapperClosingRunner {
+            inner,
+            fs_paths: fs_handle,
+            closed: Mutex::new(["braid-disk1".to_owned(), "braid-disk2".to_owned()].into()),
+        };
+
+        let params = RecoverParams {
+            config: &config,
+            paths: &paths,
+            passphrase_stdin: false,
+            passphrase_file: Some(passphrase_file.path()),
+            allow_degraded: false,
+            dry_run: false,
+            progress: ProgressOutput::Off,
+        };
+
+        let plan = plan_recover(&runner, &fs, &params)
+            .result
+            .expect("planner should discover add target, then plan from pre-membership");
+        assert!(
+            plan.pre_resolved_credential.is_some(),
+            "pre-mount discovery should carry the resolved passphrase into execution"
+        );
+        let open_plan = plan
+            .open_plan
+            .expect("pool should still need initial mount");
+        assert_eq!(
+            open_plan.to_unlock,
+            vec![(
+                "disk1".to_owned(),
+                ByIdPath("/dev/disk/by-id/virtio-disk1".into())
+            )]
+        );
+
+        let requests = request_log.requests();
+        let disk2_open = requests
+            .iter()
+            .position(|r| {
+                matches!(
+                    r,
+                    CmdRequest::CryptsetupLuksOpen { device, mapper }
+                        if device == "/dev/disk/by-id/virtio-disk2" && mapper == "braid-disk2"
+                )
+            })
+            .expect("pre-mount discovery should open the committed add target");
+        let disk2_scan = requests
+            .iter()
+            .position(|r| {
+                matches!(
+                    r,
+                    CmdRequest::BtrfsDeviceScan { device }
+                        if device == "/dev/mapper/braid-disk2"
+                )
+            })
+            .expect("pre-mount discovery should scan the committed add target");
+        let disk1_probe = requests
+            .iter()
+            .position(|r| {
+                matches!(
+                    r,
+                    CmdRequest::CryptsetupLuksUuid { device }
+                        if device == "/dev/disk/by-id/virtio-disk1"
+                )
+            })
+            .expect("mount planning should probe pre-membership disk1");
+        assert!(
+            disk2_open < disk1_probe && disk2_scan < disk1_probe,
+            "add target discovery must run before mount planning chooses from pre-membership"
+        );
+    }
+
+    #[test]
+    fn plan_recover_discovers_fresh_add_targets_before_mount_planning() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let paths = StatePaths::custom(tmp.path().into());
+        let config = Config::new(MountPoint("/mnt/storage".into())).unwrap();
+        let fs = StatefulMockFs::new(&[
+            "/dev/disk/by-id/virtio-disk1",
+            "/dev/disk/by-id/virtio-disk2",
+        ]);
+        let fs_handle = fs.handle();
+
+        let journal =
+            fresh_pool_mutation_add_journal(vec!["--label".into(), "braid-disk2".into()], None);
+        journal::write_journal(&paths, &journal).unwrap();
+
+        let passphrase_file = tempfile::NamedTempFile::new().unwrap();
+        {
+            use std::io::Write;
+            passphrase_file.as_file().write_all(b"testpass").unwrap();
+        }
+
+        let inner = MockRunner::default()
+            .with_output(mountpoint_fail().0, mountpoint_fail().1)
+            .with_output(
+                CmdRequest::CryptsetupLuksUuid {
+                    device: "/dev/disk/by-id/virtio-disk2".into(),
+                },
+                cryptsetup_uuid_ok(
+                    "/dev/disk/by-id/virtio-disk2",
+                    "22222222-2222-2222-2222-222222222222",
+                ),
+            )
+            .with_output(
+                CmdRequest::CryptsetupLuksDumpText {
+                    device: "/dev/disk/by-id/virtio-disk2".into(),
+                },
+                luks_dump_label("braid-disk2"),
+            )
+            .with_output(
+                CmdRequest::CryptsetupLuksUuid {
+                    device: "/dev/disk/by-id/virtio-disk1".into(),
+                },
+                cryptsetup_uuid_ok(
+                    "/dev/disk/by-id/virtio-disk1",
+                    "11111111-1111-1111-1111-111111111111",
+                ),
+            )
+            .with_luks_dump_text_luks2("/dev/disk/by-id/virtio-disk1")
+            .with_mappers_closed(&["braid-disk1", "braid-disk2"])
+            .with_output_stdin(
+                CmdRequest::CryptsetupLuksOpen {
+                    device: "/dev/disk/by-id/virtio-disk2".into(),
+                    mapper: "braid-disk2".into(),
+                },
+                b"testpass".to_vec(),
+                ok_raw_empty("cryptsetup open"),
+            )
+            .with_output(
+                CmdRequest::BtrfsDeviceScan {
+                    device: "/dev/mapper/braid-disk2".into(),
+                },
+                ok_raw_empty("btrfs device scan"),
+            );
+        let request_log = inner.clone();
+        let runner = MapperClosingRunner {
+            inner,
+            fs_paths: fs_handle,
+            closed: Mutex::new(["braid-disk1".to_owned(), "braid-disk2".to_owned()].into()),
+        };
+
+        let params = recover_params(&config, &paths, Some(passphrase_file.path()), false);
+        let plan = plan_recover(&runner, &fs, &params)
+            .result
+            .expect("planner should discover fresh add target, then plan from pre-membership");
+        let open_plan = plan
+            .open_plan
+            .expect("pool should still need initial mount");
+        assert_eq!(
+            open_plan.to_unlock,
+            vec![(
+                "disk1".to_owned(),
+                ByIdPath("/dev/disk/by-id/virtio-disk1".into())
+            )]
+        );
+
+        let requests = request_log.requests();
+        let disk2_open = requests
+            .iter()
+            .position(|r| {
+                matches!(
+                    r,
+                    CmdRequest::CryptsetupLuksOpen { device, mapper }
+                        if device == "/dev/disk/by-id/virtio-disk2" && mapper == "braid-disk2"
+                )
+            })
+            .expect("pre-mount discovery should open the committed fresh target");
+        let disk2_scan = requests
+            .iter()
+            .position(|r| {
+                matches!(
+                    r,
+                    CmdRequest::BtrfsDeviceScan { device }
+                        if device == "/dev/mapper/braid-disk2"
+                )
+            })
+            .expect("pre-mount discovery should scan the committed fresh target");
+        let disk1_probe = requests
+            .iter()
+            .position(|r| {
+                matches!(
+                    r,
+                    CmdRequest::CryptsetupLuksUuid { device }
+                        if device == "/dev/disk/by-id/virtio-disk1"
+                )
+            })
+            .expect("mount planning should probe pre-membership disk1");
+        assert!(
+            disk2_open < disk1_probe && disk2_scan < disk1_probe,
+            "fresh target discovery must run before mount planning chooses from pre-membership"
+        );
+    }
+
+    #[test]
+    fn add_pool_mutation_replay_verifies_open_journaled_target_passphrase() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let paths = StatePaths::custom(tmp.path().into());
+        let config = Config::new(MountPoint("/mnt/storage".into())).unwrap();
+        let fs = MockFs::new(&["/dev/disk/by-id/virtio-disk2", "/dev/mapper/braid-disk2"]);
+
+        let journal = recoverable_pool_mutation_add_journal();
+        let union = union_memberships(&journal);
+        let targets = match &journal.op {
+            OpKind::Add { targets, .. } => targets,
+            _ => unreachable!("test journal is Add"),
+        };
+
+        let passphrase_file = tempfile::NamedTempFile::new().unwrap();
+        {
+            use std::io::Write;
+            passphrase_file.as_file().write_all(b"testpass").unwrap();
+        }
+
+        let runner = MockRunner::default()
+            .with_output(
+                CmdRequest::CryptsetupLuksUuid {
+                    device: "/dev/disk/by-id/virtio-disk2".into(),
+                },
+                cryptsetup_uuid_ok(
+                    "/dev/disk/by-id/virtio-disk2",
+                    "22222222-2222-2222-2222-222222222222",
+                ),
+            )
+            .with_luks_dump_text_luks2("/dev/disk/by-id/virtio-disk2")
+            .with_mapper_open(
+                "braid-disk2",
+                "/dev/vdb",
+                "22222222-2222-2222-2222-222222222222",
+            )
+            .with_output(
+                CmdRequest::BtrfsDeviceScan {
+                    device: "/dev/mapper/braid-disk2".into(),
+                },
+                ok_raw_empty("btrfs device scan"),
+            )
+            .with_output(
+                CmdRequest::BtrfsFilesystemShow {
+                    mount_point: MountPoint("/mnt/storage".into()),
+                },
+                btrfs_show_one_disk(),
+            )
+            .with_output(
+                CmdRequest::CryptsetupStatus {
+                    mapper: "braid-disk1".into(),
+                },
+                cryptsetup_status_active("braid-disk1", "/dev/vda"),
+            )
+            .with_output(
+                CmdRequest::CryptsetupLuksUuid {
+                    device: "/dev/vda".into(),
+                },
+                cryptsetup_uuid_ok("/dev/vda", "11111111-1111-1111-1111-111111111111"),
+            )
+            .with_output_stdin(
+                CmdRequest::CryptsetupTestPassphrase {
+                    device: "/dev/vda".into(),
+                },
+                b"testpass".to_vec(),
+                ok_raw_empty("cryptsetup open --test-passphrase"),
+            )
+            .with_output_stdin(
+                CmdRequest::CryptsetupTestPassphrase {
+                    device: "/dev/disk/by-id/virtio-disk2".into(),
+                },
+                b"testpass".to_vec(),
+                err_raw("cryptsetup open --test-passphrase", 2, "No key available"),
+            );
+
+        let resolver = MockByIdResolver::default();
+        let params = RecoverParams {
+            config: &config,
+            paths: &paths,
+            passphrase_stdin: false,
+            passphrase_file: Some(passphrase_file.path()),
+            allow_degraded: false,
+            dry_run: false,
+            progress: ProgressOutput::Off,
+        };
+        let err = execute_add_pool_mutation_recovery(
+            &runner,
+            &fs,
+            &resolver,
+            &params,
+            None,
+            &journal,
+            &union,
+            targets,
+            pool_state_one_disk(),
+        )
+        .unwrap_err();
+
+        let msg = err.to_string();
+        assert!(
+            msg.contains("recover add passphrase was rejected by 'disk2'"),
+            "error should name the journaled target, got: {msg}"
+        );
+        let requests = runner.requests();
+        assert!(
+            requests.iter().any(|r| matches!(
+                r,
+                CmdRequest::CryptsetupTestPassphrase { device }
+                    if device == "/dev/disk/by-id/virtio-disk2"
+            )),
+            "replay must verify the passphrase against the already-open add target"
+        );
+        assert!(
+            !requests.iter().any(|r| matches!(
+                r,
+                CmdRequest::WipefsBtrfs { .. } | CmdRequest::BtrfsDeviceAdd { .. }
+            )),
+            "credential rejection must stop before destructive returned-disk replay"
+        );
+    }
+
+    #[test]
+    fn add_pool_mutation_replays_returned_disk_after_wipefs_crash() {
+        recover_inhibitor_test_seam::reset();
+        let tmp = tempfile::TempDir::new().unwrap();
+        let paths = StatePaths::custom(tmp.path().into());
+        let config = Config::new(MountPoint("/mnt/storage".into())).unwrap();
+        let fs = MockFs::new(&["/dev/disk/by-id/virtio-disk2", "/dev/mapper/braid-disk2"]);
+        let journal = recoverable_pool_mutation_add_journal();
+        journal::write_journal(&paths, &journal).unwrap();
+        let union = union_memberships(&journal);
+        let targets = match &journal.op {
+            OpKind::Add { targets, .. } => targets,
+            _ => unreachable!("test journal is Add"),
+        };
+
+        let passphrase_file = tempfile::NamedTempFile::new().unwrap();
+        {
+            use std::io::Write;
+            passphrase_file.as_file().write_all(b"testpass").unwrap();
+        }
+
+        let runner = with_balance_replay(with_one_then_two_disk_pool_probe(
+            MockRunner::default()
+                .with_output(
+                    CmdRequest::CryptsetupLuksUuid {
+                        device: "/dev/disk/by-id/virtio-disk2".into(),
+                    },
+                    cryptsetup_uuid_ok(
+                        "/dev/disk/by-id/virtio-disk2",
+                        "22222222-2222-2222-2222-222222222222",
+                    ),
+                )
+                .with_luks_dump_text_luks2("/dev/disk/by-id/virtio-disk2")
+                .with_mapper_open(
+                    "braid-disk2",
+                    "/dev/vdb",
+                    "22222222-2222-2222-2222-222222222222",
+                )
+                .with_output(
+                    CmdRequest::BtrfsDeviceScan {
+                        device: "/dev/mapper/braid-disk2".into(),
+                    },
+                    ok_raw_empty("btrfs device scan"),
+                )
+                .with_output_stdin(
+                    CmdRequest::CryptsetupTestPassphrase {
+                        device: "/dev/vda".into(),
+                    },
+                    b"testpass".to_vec(),
+                    ok_raw_empty("cryptsetup open --test-passphrase"),
+                )
+                .with_output_stdin(
+                    CmdRequest::CryptsetupTestPassphrase {
+                        device: "/dev/disk/by-id/virtio-disk2".into(),
+                    },
+                    b"testpass".to_vec(),
+                    ok_raw_empty("cryptsetup open --test-passphrase"),
+                )
+                .with_output(
+                    CmdRequest::BtrfsFilesystemShowTarget {
+                        target: "/dev/mapper/braid-disk2".into(),
+                    },
+                    btrfs_show_target_fsid("aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee"),
+                )
+                .with_output(
+                    CmdRequest::BtrfsDeviceScanForget {
+                        devices: vec!["/dev/mapper/braid-disk2".into()],
+                    },
+                    ok_raw_empty("btrfs device scan --forget"),
+                )
+                .with_output(
+                    CmdRequest::WipefsBtrfs {
+                        device: "/dev/mapper/braid-disk2".into(),
+                    },
+                    ok_raw_empty("wipefs"),
+                )
+                .with_output(
+                    CmdRequest::BtrfsDeviceAdd {
+                        device: "/dev/mapper/braid-disk2".into(),
+                        mount_point: MountPoint("/mnt/storage".into()),
+                        force: true,
+                    },
+                    ok_raw_empty("btrfs device add"),
+                ),
+        ));
+        let resolver = resolver_for(&[("/dev/vda", "virtio-disk1"), ("/dev/vdb", "virtio-disk2")]);
+        let params = recover_params(&config, &paths, Some(passphrase_file.path()), false);
+
+        execute_add_pool_mutation_recovery(
+            &runner,
+            &fs,
+            &resolver,
+            &params,
+            None,
+            &journal,
+            &union,
+            targets,
+            pool_state_one_disk(),
+        )
+        .expect("returned-disk replay should complete recovery");
+
+        let requests = runner.requests();
+        let forget = requests
+            .iter()
+            .position(|r| matches!(r, CmdRequest::BtrfsDeviceScanForget { .. }))
+            .expect("returned replay should forget stale btrfs scan state");
+        let wipe = requests
+            .iter()
+            .position(|r| matches!(r, CmdRequest::WipefsBtrfs { .. }))
+            .expect("returned replay should narrowly wipe btrfs signature");
+        let add = requests
+            .iter()
+            .position(|r| matches!(r, CmdRequest::BtrfsDeviceAdd { force: true, .. }))
+            .expect("returned replay should force-add after wipe");
+        assert!(forget < wipe && wipe < add);
+        assert_eq!(recover_inhibitor_test_seam::acquire_count(), 1);
+        assert!(!paths.pending_op_json().exists());
+        let recovered = membership::load_membership(&paths).unwrap();
+        assert!(recovered.disks.contains_key("disk2"));
+    }
+
+    #[test]
+    fn add_pool_mutation_committed_target_scans_without_wipe_or_add() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let paths = StatePaths::custom(tmp.path().into());
+        let config = Config::new(MountPoint("/mnt/storage".into())).unwrap();
+        let fs = MockFs::new(&["/dev/disk/by-id/virtio-disk2", "/dev/mapper/braid-disk2"]);
+        let journal = recoverable_pool_mutation_add_journal();
+        journal::write_journal(&paths, &journal).unwrap();
+        let union = union_memberships(&journal);
+        let targets = match &journal.op {
+            OpKind::Add { targets, .. } => targets,
+            _ => unreachable!("test journal is Add"),
+        };
+        let passphrase_file = tempfile::NamedTempFile::new().unwrap();
+        {
+            use std::io::Write;
+            passphrase_file.as_file().write_all(b"testpass").unwrap();
+        }
+        let runner = with_balance_replay(with_two_disk_pool_probe(
+            MockRunner::default()
+                .with_output(
+                    CmdRequest::CryptsetupLuksUuid {
+                        device: "/dev/disk/by-id/virtio-disk2".into(),
+                    },
+                    cryptsetup_uuid_ok(
+                        "/dev/disk/by-id/virtio-disk2",
+                        "22222222-2222-2222-2222-222222222222",
+                    ),
+                )
+                .with_luks_dump_text_luks2("/dev/disk/by-id/virtio-disk2")
+                .with_mapper_open(
+                    "braid-disk2",
+                    "/dev/vdb",
+                    "22222222-2222-2222-2222-222222222222",
+                )
+                .with_output(
+                    CmdRequest::BtrfsDeviceScan {
+                        device: "/dev/mapper/braid-disk2".into(),
+                    },
+                    ok_raw_empty("btrfs device scan"),
+                ),
+        ));
+        let resolver = resolver_for(&[("/dev/vda", "virtio-disk1"), ("/dev/vdb", "virtio-disk2")]);
+        let params = recover_params(&config, &paths, Some(passphrase_file.path()), false);
+
+        execute_add_pool_mutation_recovery(
+            &runner,
+            &fs,
+            &resolver,
+            &params,
+            None,
+            &journal,
+            &union,
+            targets,
+            pool_state_one_disk(),
+        )
+        .expect("already-committed target should advance to balance recovery");
+
+        let requests = runner.requests();
+        assert!(
+            requests
+                .iter()
+                .any(|r| matches!(r, CmdRequest::BtrfsDeviceScan { device } if device == "/dev/mapper/braid-disk2")),
+            "committed closed target should be scanned before re-probe"
+        );
+        assert!(
+            !requests.iter().any(|r| matches!(
+                r,
+                CmdRequest::WipefsBtrfs { .. } | CmdRequest::BtrfsDeviceAdd { .. }
+            )),
+            "already live target must not be wiped or re-added"
+        );
+        assert!(!paths.pending_op_json().exists());
+    }
+
+    #[test]
+    fn returned_replay_wrong_identity_fails_before_wipe_or_add() {
+        for wrong_fsid in [false, true] {
+            let tmp = tempfile::TempDir::new().unwrap();
+            let paths = StatePaths::custom(tmp.path().into());
+            let config = Config::new(MountPoint("/mnt/storage".into())).unwrap();
+            let fs = MockFs::new(&["/dev/disk/by-id/virtio-disk2", "/dev/mapper/braid-disk2"]);
+            let journal = recoverable_pool_mutation_add_journal();
+            journal::write_journal(&paths, &journal).unwrap();
+            let union = union_memberships(&journal);
+            let targets = match &journal.op {
+                OpKind::Add { targets, .. } => targets,
+                _ => unreachable!("test journal is Add"),
+            };
+            let passphrase_file = tempfile::NamedTempFile::new().unwrap();
+            {
+                use std::io::Write;
+                passphrase_file.as_file().write_all(b"testpass").unwrap();
+            }
+
+            let uuid = if wrong_fsid {
+                "22222222-2222-2222-2222-222222222222"
+            } else {
+                "99999999-9999-9999-9999-999999999999"
+            };
+            let mut runner = with_one_disk_pool_probe(MockRunner::default())
+                .with_output(
+                    CmdRequest::CryptsetupLuksUuid {
+                        device: "/dev/disk/by-id/virtio-disk2".into(),
+                    },
+                    cryptsetup_uuid_ok("/dev/disk/by-id/virtio-disk2", uuid),
+                )
+                .with_luks_dump_text_luks2("/dev/disk/by-id/virtio-disk2")
+                .with_mapper_open("braid-disk2", "/dev/vdb", uuid)
+                .with_output(
+                    CmdRequest::BtrfsDeviceScan {
+                        device: "/dev/mapper/braid-disk2".into(),
+                    },
+                    ok_raw_empty("btrfs device scan"),
+                )
+                .with_output_stdin(
+                    CmdRequest::CryptsetupTestPassphrase {
+                        device: "/dev/vda".into(),
+                    },
+                    b"testpass".to_vec(),
+                    ok_raw_empty("cryptsetup open --test-passphrase"),
+                );
+            if wrong_fsid {
+                runner = runner
+                    .with_output_stdin(
+                        CmdRequest::CryptsetupTestPassphrase {
+                            device: "/dev/disk/by-id/virtio-disk2".into(),
+                        },
+                        b"testpass".to_vec(),
+                        ok_raw_empty("cryptsetup open --test-passphrase"),
+                    )
+                    .with_output(
+                        CmdRequest::BtrfsFilesystemShowTarget {
+                            target: "/dev/mapper/braid-disk2".into(),
+                        },
+                        btrfs_show_target_fsid("ffffffff-ffff-ffff-ffff-ffffffffffff"),
+                    );
+            }
+            let params = recover_params(&config, &paths, Some(passphrase_file.path()), false);
+            let err = execute_add_pool_mutation_recovery(
+                &runner,
+                &fs,
+                &MockByIdResolver::default(),
+                &params,
+                None,
+                &journal,
+                &union,
+                targets,
+                pool_state_one_disk(),
+            )
+            .unwrap_err();
+            let msg = err.to_string();
+            if wrong_fsid {
+                assert!(msg.contains("btrfs FSID mismatch"), "{msg}");
+            } else {
+                assert!(msg.contains("LUKS UUID mismatch"), "{msg}");
+            }
+            assert!(
+                !runner.requests().iter().any(|r| matches!(
+                    r,
+                    CmdRequest::BtrfsDeviceScanForget { .. }
+                        | CmdRequest::WipefsBtrfs { .. }
+                        | CmdRequest::BtrfsDeviceAdd { .. }
+                )),
+                "wrong identity must fail before destructive replay"
+            );
+            assert!(paths.pending_op_json().exists());
+            assert!(!paths.pool_json().exists());
+        }
+    }
+
+    #[test]
+    fn fresh_replay_formats_with_stored_opts_and_ignores_current_env() {
+        let _env = crate::luks::LuksOptsEnvGuard::set("--iter-time 999 --label wrong-label");
+        let tmp = tempfile::TempDir::new().unwrap();
+        let paths = StatePaths::custom(tmp.path().into());
+        let config = Config::new(MountPoint("/mnt/storage".into())).unwrap();
+        let fs = StatefulMockFs::new(&["/dev/disk/by-id/virtio-disk2"]);
+        let fs_handle = fs.handle();
+        let stored_opts = vec![
+            "--pbkdf".into(),
+            "pbkdf2".into(),
+            "--label".into(),
+            "braid-disk2".into(),
+        ];
+        let journal = fresh_pool_mutation_add_journal(stored_opts.clone(), None);
+        journal::write_journal(&paths, &journal).unwrap();
+        let union = union_memberships(&journal);
+        let targets = match &journal.op {
+            OpKind::Add { targets, .. } => targets,
+            _ => unreachable!("test journal is Add"),
+        };
+        let passphrase_file = tempfile::NamedTempFile::new().unwrap();
+        {
+            use std::io::Write;
+            passphrase_file.as_file().write_all(b"testpass").unwrap();
+        }
+
+        let runner = MapperClosingRunner {
+            inner: with_balance_replay(with_two_disk_pool_probe(
+                MockRunner::default()
+                    .with_output(
+                        CmdRequest::CryptsetupLuksUuid {
+                            device: "/dev/disk/by-id/virtio-disk2".into(),
+                        },
+                        err_raw(
+                            "cryptsetup luksUUID",
+                            1,
+                            "Device is not a valid LUKS device",
+                        ),
+                    )
+                    .with_output_stdin(
+                        CmdRequest::CryptsetupTestPassphrase {
+                            device: "/dev/vda".into(),
+                        },
+                        b"testpass".to_vec(),
+                        ok_raw_empty("cryptsetup open --test-passphrase"),
+                    )
+                    .with_output_stdin(
+                        CmdRequest::CryptsetupLuksFormat {
+                            device: "/dev/disk/by-id/virtio-disk2".into(),
+                            extra_opts: stored_opts.clone(),
+                        },
+                        b"testpass".to_vec(),
+                        ok_raw_empty("cryptsetup luksFormat"),
+                    )
+                    .with_output(
+                        CmdRequest::CryptsetupLuksHeaderBackup {
+                            device: "/dev/disk/by-id/virtio-disk2".into(),
+                            backup_path: paths
+                                .luks_headers_dir()
+                                .join("braid-disk2.luksheader.tmp")
+                                .display()
+                                .to_string(),
+                        },
+                        ok_raw_empty("cryptsetup luksHeaderBackup"),
+                    )
+                    .with_output_stdin(
+                        CmdRequest::CryptsetupLuksOpen {
+                            device: "/dev/disk/by-id/virtio-disk2".into(),
+                            mapper: "braid-disk2".into(),
+                        },
+                        b"testpass".to_vec(),
+                        ok_raw_empty("cryptsetup open"),
+                    )
+                    .with_output(
+                        CmdRequest::BtrfsDeviceAdd {
+                            device: "/dev/mapper/braid-disk2".into(),
+                            mount_point: MountPoint("/mnt/storage".into()),
+                            force: false,
+                        },
+                        ok_raw_empty("btrfs device add"),
+                    ),
+            )),
+            fs_paths: fs_handle,
+            closed: Mutex::new(["braid-disk2".to_owned()].into()),
+        };
+        let resolver = resolver_for(&[("/dev/vda", "virtio-disk1"), ("/dev/vdb", "virtio-disk2")]);
+        let params = recover_params(&config, &paths, Some(passphrase_file.path()), false);
+
+        execute_add_pool_mutation_recovery(
+            &runner,
+            &fs,
+            &resolver,
+            &params,
+            None,
+            &journal,
+            &union,
+            targets,
+            pool_state_one_disk(),
+        )
+        .expect("fresh replay should use stored format options");
+    }
+
+    #[test]
+    fn fresh_replay_after_luks_format_does_not_reformat() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let paths = StatePaths::custom(tmp.path().into());
+        let config = Config::new(MountPoint("/mnt/storage".into())).unwrap();
+        let fs = StatefulMockFs::new(&["/dev/disk/by-id/virtio-disk2"]);
+        let fs_handle = fs.handle();
+        let journal =
+            fresh_pool_mutation_add_journal(vec!["--label".into(), "braid-disk2".into()], None);
+        journal::write_journal(&paths, &journal).unwrap();
+        let union = union_memberships(&journal);
+        let targets = match &journal.op {
+            OpKind::Add { targets, .. } => targets,
+            _ => unreachable!("test journal is Add"),
+        };
+        let passphrase_file = tempfile::NamedTempFile::new().unwrap();
+        {
+            use std::io::Write;
+            passphrase_file.as_file().write_all(b"testpass").unwrap();
+        }
+        let inner = with_balance_replay(with_one_then_two_disk_pool_probe(
+            MockRunner::default()
+                .with_output(
+                    CmdRequest::CryptsetupLuksUuid {
+                        device: "/dev/disk/by-id/virtio-disk2".into(),
+                    },
+                    cryptsetup_uuid_ok(
+                        "/dev/disk/by-id/virtio-disk2",
+                        "22222222-2222-2222-2222-222222222222",
+                    ),
+                )
+                .with_output(
+                    CmdRequest::CryptsetupLuksDumpText {
+                        device: "/dev/disk/by-id/virtio-disk2".into(),
+                    },
+                    luks_dump_label("braid-disk2"),
+                )
+                .with_mapper_open(
+                    "braid-disk2",
+                    "/dev/vdb",
+                    "22222222-2222-2222-2222-222222222222",
+                )
+                .with_output(
+                    CmdRequest::BtrfsDeviceScan {
+                        device: "/dev/mapper/braid-disk2".into(),
+                    },
+                    ok_raw_empty("btrfs device scan"),
+                )
+                .with_output_stdin(
+                    CmdRequest::CryptsetupTestPassphrase {
+                        device: "/dev/vda".into(),
+                    },
+                    b"testpass".to_vec(),
+                    ok_raw_empty("cryptsetup open --test-passphrase"),
+                )
+                .with_output_stdin(
+                    CmdRequest::CryptsetupTestPassphrase {
+                        device: "/dev/disk/by-id/virtio-disk2".into(),
+                    },
+                    b"testpass".to_vec(),
+                    ok_raw_empty("cryptsetup open --test-passphrase"),
+                )
+                .with_output(
+                    CmdRequest::CryptsetupLuksHeaderBackup {
+                        device: "/dev/disk/by-id/virtio-disk2".into(),
+                        backup_path: paths
+                            .luks_headers_dir()
+                            .join("braid-disk2.luksheader.tmp")
+                            .display()
+                            .to_string(),
+                    },
+                    ok_raw_empty("cryptsetup luksHeaderBackup"),
+                )
+                .with_output_stdin(
+                    CmdRequest::CryptsetupLuksOpen {
+                        device: "/dev/disk/by-id/virtio-disk2".into(),
+                        mapper: "braid-disk2".into(),
+                    },
+                    b"testpass".to_vec(),
+                    ok_raw_empty("cryptsetup open"),
+                )
+                .with_output(
+                    CmdRequest::BtrfsDeviceAdd {
+                        device: "/dev/mapper/braid-disk2".into(),
+                        mount_point: MountPoint("/mnt/storage".into()),
+                        force: false,
+                    },
+                    ok_raw_empty("btrfs device add"),
+                ),
+        ));
+        let request_log = inner.clone();
+        let runner = MapperClosingRunner {
+            inner,
+            fs_paths: fs_handle,
+            closed: Mutex::new(["braid-disk2".to_owned()].into()),
+        };
+        let resolver = resolver_for(&[("/dev/vda", "virtio-disk1"), ("/dev/vdb", "virtio-disk2")]);
+        let params = recover_params(&config, &paths, Some(passphrase_file.path()), false);
+
+        execute_add_pool_mutation_recovery(
+            &runner,
+            &fs,
+            &resolver,
+            &params,
+            None,
+            &journal,
+            &union,
+            targets,
+            pool_state_one_disk(),
+        )
+        .expect("fresh replay should continue after preexisting LUKS format");
+
+        assert!(
+            !request_log
+                .requests()
+                .iter()
+                .any(|r| matches!(r, CmdRequest::CryptsetupLuksFormat { .. })),
+            "already-formatted fresh target must not be reformatted"
+        );
+    }
+
+    #[test]
+    fn ensure_keyfile_enrolled_is_idempotent_and_fails_on_probe_errors() {
+        let key_file = std::path::Path::new("/run/keys/braid.key");
+        let accepted = MockRunner::default().with_output(
+            CmdRequest::CryptsetupTestKeyFile {
+                device: "/dev/disk/by-id/virtio-disk2".into(),
+                key_file_path: key_file.display().to_string(),
+            },
+            ok_raw_empty("cryptsetup open --test-passphrase --key-file"),
+        );
+        ensure_keyfile_enrolled(
+            &accepted,
+            "/dev/disk/by-id/virtio-disk2",
+            "testpass",
+            key_file,
+        )
+        .expect("accepted keyfile should be treated as already enrolled");
+        assert!(
+            !accepted
+                .requests()
+                .iter()
+                .any(|r| matches!(r, CmdRequest::CryptsetupLuksAddKeyFile { .. })),
+            "accepted keyfile must skip luksAddKey"
+        );
+
+        let rejected = MockRunner::default()
+            .with_output(
+                CmdRequest::CryptsetupTestKeyFile {
+                    device: "/dev/disk/by-id/virtio-disk2".into(),
+                    key_file_path: key_file.display().to_string(),
+                },
+                err_raw(
+                    "cryptsetup open --test-passphrase --key-file",
+                    2,
+                    "No key available",
+                ),
+            )
+            .with_output_stdin(
+                CmdRequest::CryptsetupLuksAddKeyFile {
+                    device: "/dev/disk/by-id/virtio-disk2".into(),
+                    key_file_path: key_file.display().to_string(),
+                },
+                b"testpass".to_vec(),
+                ok_raw_empty("cryptsetup luksAddKey"),
+            );
+        ensure_keyfile_enrolled(
+            &rejected,
+            "/dev/disk/by-id/virtio-disk2",
+            "testpass",
+            key_file,
+        )
+        .expect("rejected keyfile should be enrolled with the passphrase");
+        assert!(
+            rejected
+                .requests()
+                .iter()
+                .any(|r| { matches!(r, CmdRequest::CryptsetupLuksAddKeyFile { .. }) })
+        );
+
+        let busy = MockRunner::default().with_output(
+            CmdRequest::CryptsetupTestKeyFile {
+                device: "/dev/disk/by-id/virtio-disk2".into(),
+                key_file_path: key_file.display().to_string(),
+            },
+            err_raw(
+                "cryptsetup open --test-passphrase --key-file",
+                5,
+                "Device busy",
+            ),
+        );
+        let err =
+            ensure_keyfile_enrolled(&busy, "/dev/disk/by-id/virtio-disk2", "testpass", key_file)
+                .unwrap_err();
+        assert!(
+            err.to_string().contains("device is already open or busy"),
+            "{err}"
+        );
+    }
+
+    #[test]
+    fn fresh_missing_or_wrong_target_preserves_journal_and_pool_json() {
+        for wrong_label in [false, true] {
+            let tmp = tempfile::TempDir::new().unwrap();
+            let paths = StatePaths::custom(tmp.path().into());
+            let config = Config::new(MountPoint("/mnt/storage".into())).unwrap();
+            let fs = if wrong_label {
+                MockFs::new(&["/dev/disk/by-id/virtio-disk2"])
+            } else {
+                MockFs::new(&[])
+            };
+            let journal =
+                fresh_pool_mutation_add_journal(vec!["--label".into(), "braid-disk2".into()], None);
+            journal::write_journal(&paths, &journal).unwrap();
+            let union = union_memberships(&journal);
+            let targets = match &journal.op {
+                OpKind::Add { targets, .. } => targets,
+                _ => unreachable!("test journal is Add"),
+            };
+            let passphrase_file = tempfile::NamedTempFile::new().unwrap();
+            {
+                use std::io::Write;
+                passphrase_file.as_file().write_all(b"testpass").unwrap();
+            }
+            let mut runner = MockRunner::default().with_output_stdin(
+                CmdRequest::CryptsetupTestPassphrase {
+                    device: "/dev/vda".into(),
+                },
+                b"testpass".to_vec(),
+                ok_raw_empty("cryptsetup open --test-passphrase"),
+            );
+            if wrong_label {
+                runner = runner
+                    .with_output(
+                        CmdRequest::CryptsetupLuksUuid {
+                            device: "/dev/disk/by-id/virtio-disk2".into(),
+                        },
+                        cryptsetup_uuid_ok(
+                            "/dev/disk/by-id/virtio-disk2",
+                            "22222222-2222-2222-2222-222222222222",
+                        ),
+                    )
+                    .with_output(
+                        CmdRequest::CryptsetupLuksDumpText {
+                            device: "/dev/disk/by-id/virtio-disk2".into(),
+                        },
+                        luks_dump_label("wrong-label"),
+                    )
+                    .with_mapper_closed("braid-disk2");
+            }
+            let params = recover_params(&config, &paths, Some(passphrase_file.path()), false);
+            let err = execute_add_pool_mutation_recovery(
+                &runner,
+                &fs,
+                &MockByIdResolver::default(),
+                &params,
+                None,
+                &journal,
+                &union,
+                targets,
+                pool_state_one_disk(),
+            )
+            .unwrap_err();
+            let msg = err.to_string();
+            if wrong_label {
+                assert!(msg.contains("unexpected LUKS label"), "{msg}");
+            } else {
+                assert!(msg.contains("is not present"), "{msg}");
+            }
+            assert!(paths.pending_op_json().exists());
+            assert!(!paths.pool_json().exists());
+        }
+    }
+
+    #[test]
+    fn fresh_present_target_rejects_bad_credential_before_pool_json() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let paths = StatePaths::custom(tmp.path().into());
+        let config = Config::new(MountPoint("/mnt/storage".into())).unwrap();
+        let fs = MockFs::new(&["/dev/disk/by-id/virtio-disk2", "/dev/mapper/braid-disk2"]);
+        let journal =
+            fresh_pool_mutation_add_journal(vec!["--label".into(), "braid-disk2".into()], None);
+        journal::write_journal(&paths, &journal).unwrap();
+        let union = union_memberships(&journal);
+        let targets = match &journal.op {
+            OpKind::Add { targets, .. } => targets,
+            _ => unreachable!("test journal is Add"),
+        };
+        let passphrase_file = tempfile::NamedTempFile::new().unwrap();
+        {
+            use std::io::Write;
+            passphrase_file.as_file().write_all(b"wrongpass").unwrap();
+        }
+        let runner = with_one_disk_pool_probe(
+            MockRunner::default()
+                .with_output(
+                    CmdRequest::CryptsetupLuksUuid {
+                        device: "/dev/disk/by-id/virtio-disk2".into(),
+                    },
+                    cryptsetup_uuid_ok(
+                        "/dev/disk/by-id/virtio-disk2",
+                        "22222222-2222-2222-2222-222222222222",
+                    ),
+                )
+                .with_output(
+                    CmdRequest::CryptsetupLuksDumpText {
+                        device: "/dev/disk/by-id/virtio-disk2".into(),
+                    },
+                    luks_dump_label("braid-disk2"),
+                )
+                .with_mapper_open(
+                    "braid-disk2",
+                    "/dev/vdb",
+                    "22222222-2222-2222-2222-222222222222",
+                )
+                .with_output(
+                    CmdRequest::BtrfsDeviceScan {
+                        device: "/dev/mapper/braid-disk2".into(),
+                    },
+                    ok_raw_empty("btrfs device scan"),
+                )
+                .with_output_stdin(
+                    CmdRequest::CryptsetupTestPassphrase {
+                        device: "/dev/vda".into(),
+                    },
+                    b"wrongpass".to_vec(),
+                    ok_raw_empty("cryptsetup open --test-passphrase"),
+                )
+                .with_output_stdin(
+                    CmdRequest::CryptsetupTestPassphrase {
+                        device: "/dev/disk/by-id/virtio-disk2".into(),
+                    },
+                    b"wrongpass".to_vec(),
+                    err_raw("cryptsetup open --test-passphrase", 2, "No key available"),
+                ),
+        );
+        let params = recover_params(&config, &paths, Some(passphrase_file.path()), false);
+        let err = execute_add_pool_mutation_recovery(
+            &runner,
+            &fs,
+            &MockByIdResolver::default(),
+            &params,
+            None,
+            &journal,
+            &union,
+            targets,
+            pool_state_one_disk(),
+        )
+        .unwrap_err();
+        assert!(
+            err.to_string()
+                .contains("recover add passphrase was rejected by 'disk2'"),
+            "{err}"
+        );
+        assert!(
+            !runner.requests().iter().any(|r| matches!(
+                r,
+                CmdRequest::CryptsetupLuksFormat { .. }
+                    | CmdRequest::BtrfsDeviceAdd { .. }
+                    | CmdRequest::BtrfsDeviceScanForget { .. }
+                    | CmdRequest::WipefsBtrfs { .. }
+            )),
+            "bad fresh-target credential must stop before mutation"
+        );
+        assert!(paths.pending_op_json().exists());
+        assert!(!paths.pool_json().exists());
+    }
+
+    #[test]
+    fn post_add_recovery_never_prepares_or_adds_targets() {
+        recover_inhibitor_test_seam::reset();
+        let tmp = tempfile::TempDir::new().unwrap();
+        let paths = StatePaths::custom(tmp.path().into());
+        let config = Config::new(MountPoint("/mnt/storage".into())).unwrap();
+        let journal = committed_two_disk_add_journal();
+        journal::write_journal(&paths, &journal).unwrap();
+        let union = union_memberships(&journal);
+        let runner = with_balance_replay(MockRunner::default());
+        let resolver = resolver_for(&[("/dev/vda", "virtio-disk1"), ("/dev/vdb", "virtio-disk2")]);
+        let params = recover_params(&config, &paths, None, false);
+
+        execute_add_post_balance_recovery(
+            &runner,
+            &resolver,
+            &params,
+            &journal,
+            &union,
+            pool_state_two_disks(),
+            false,
+        )
+        .expect("post-add recovery should only finish balance work");
+
+        let requests = runner.requests();
+        assert_eq!(recover_inhibitor_test_seam::acquire_count(), 1);
+        assert!(
+            !requests.iter().any(|r| matches!(
+                r,
+                CmdRequest::CryptsetupLuksFormat { .. }
+                    | CmdRequest::CryptsetupLuksAddKeyFile { .. }
+                    | CmdRequest::CryptsetupLuksHeaderBackup { .. }
+                    | CmdRequest::BtrfsDeviceScanForget { .. }
+                    | CmdRequest::WipefsBtrfs { .. }
+                    | CmdRequest::BtrfsDeviceAdd { .. }
+            )),
+            "PostAddBalanceRaid1 must not replay disk preparation or add"
+        );
+        assert!(!paths.pending_op_json().exists());
+        assert!(paths.pool_json().exists());
+    }
+
+    #[test]
+    fn post_add_recovery_refuses_membership_mismatch_and_preserves_journal() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let paths = StatePaths::custom(tmp.path().into());
+        let config = Config::new(MountPoint("/mnt/storage".into())).unwrap();
+        let journal = committed_two_disk_add_journal();
+        journal::write_journal(&paths, &journal).unwrap();
+        let union = union_memberships(&journal);
+        let runner = MockRunner::default();
+        let params = recover_params(&config, &paths, None, false);
+        let err = execute_add_post_balance_recovery(
+            &runner,
+            &MockByIdResolver::default(),
+            &params,
+            &journal,
+            &union,
+            pool_state_one_disk(),
+            false,
+        )
+        .unwrap_err();
+        assert!(
+            err.to_string()
+                .contains("post-add recovery expected live pool membership")
+        );
+        assert!(paths.pending_op_json().exists());
+        assert!(!paths.pool_json().exists());
+    }
+
+    #[test]
+    fn pool_mutation_inhibitor_failure_stops_before_destructive_replay() {
+        recover_inhibitor_test_seam::reset();
+        recover_inhibitor_test_seam::fail_next();
+        let tmp = tempfile::TempDir::new().unwrap();
+        let paths = StatePaths::custom(tmp.path().into());
+        let config = Config::new(MountPoint("/mnt/storage".into())).unwrap();
+        let fs = MockFs::new(&[]);
+        let journal = recoverable_pool_mutation_add_journal();
+        journal::write_journal(&paths, &journal).unwrap();
+        let union = union_memberships(&journal);
+        let targets = match &journal.op {
+            OpKind::Add { targets, .. } => targets,
+            _ => unreachable!("test journal is Add"),
+        };
+        let passphrase_file = tempfile::NamedTempFile::new().unwrap();
+        {
+            use std::io::Write;
+            passphrase_file.as_file().write_all(b"testpass").unwrap();
+        }
+        let runner = MockRunner::default();
+        let params = recover_params(&config, &paths, Some(passphrase_file.path()), false);
+        let err = execute_add_pool_mutation_recovery(
+            &runner,
+            &fs,
+            &MockByIdResolver::default(),
+            &params,
+            None,
+            &journal,
+            &union,
+            targets,
+            pool_state_one_disk(),
+        )
+        .unwrap_err();
+        assert!(
+            err.to_string()
+                .contains("could not acquire sleep inhibitor")
+        );
+        assert!(
+            !runner.requests().iter().any(|r| matches!(
+                r,
+                CmdRequest::WipefsBtrfs { .. } | CmdRequest::BtrfsDeviceAdd { .. }
+            )),
+            "inhibitor failure must stop before destructive replay"
+        );
+        assert!(paths.pending_op_json().exists());
+        assert!(!paths.pool_json().exists());
+    }
+
+    #[test]
+    fn post_add_inhibitor_failure_stops_before_balance_and_preserves_journal() {
+        recover_inhibitor_test_seam::reset();
+        recover_inhibitor_test_seam::fail_next();
+        let tmp = tempfile::TempDir::new().unwrap();
+        let paths = StatePaths::custom(tmp.path().into());
+        let config = Config::new(MountPoint("/mnt/storage".into())).unwrap();
+        let journal = committed_two_disk_add_journal();
+        journal::write_journal(&paths, &journal).unwrap();
+        let union = union_memberships(&journal);
+        let runner = MockRunner::default();
+        let resolver = resolver_for(&[("/dev/vda", "virtio-disk1"), ("/dev/vdb", "virtio-disk2")]);
+        let params = recover_params(&config, &paths, None, false);
+
+        let err = execute_add_post_balance_recovery(
+            &runner,
+            &resolver,
+            &params,
+            &journal,
+            &union,
+            pool_state_two_disks(),
+            false,
+        )
+        .unwrap_err();
+        assert!(
+            err.to_string()
+                .contains("could not acquire sleep inhibitor")
+        );
+        assert!(
+            !runner.requests().iter().any(|r| matches!(
+                r,
+                CmdRequest::BtrfsBalanceStatus { .. }
+                    | CmdRequest::BtrfsBalanceResume { .. }
+                    | CmdRequest::BtrfsBalanceRaid1Soft { .. }
+            )),
+            "post-add inhibitor failure must stop before balance"
+        );
+        assert!(paths.pending_op_json().exists());
+    }
+
+    #[test]
+    fn recover_dry_run_does_not_acquire_sleep_inhibitor() {
+        recover_inhibitor_test_seam::reset();
+        let tmp = tempfile::TempDir::new().unwrap();
+        let paths = StatePaths::custom(tmp.path().into());
+        let config = Config::new(MountPoint("/mnt/storage".into())).unwrap();
+        journal::write_journal(&paths, &recoverable_pool_mutation_add_journal()).unwrap();
+        let fs = MockFs::new(&["/dev/disk/by-id/virtio-disk1"]);
+        let runner = MockRunner::default()
+            .with_output(mountpoint_fail().0, mountpoint_fail().1)
+            .with_output(
+                CmdRequest::CryptsetupLuksUuid {
+                    device: "/dev/disk/by-id/virtio-disk1".into(),
+                },
+                cryptsetup_uuid_ok(
+                    "/dev/disk/by-id/virtio-disk1",
+                    "11111111-1111-1111-1111-111111111111",
+                ),
+            )
+            .with_luks_dump_text_luks2("/dev/disk/by-id/virtio-disk1")
+            .with_mapper_closed("braid-disk1");
+        let params = recover_params(&config, &paths, None, true);
+        plan_recover(&runner, &fs, &params)
+            .result
+            .expect("dry-run planning should not acquire inhibitor");
+        assert_eq!(recover_inhibitor_test_seam::acquire_count(), 0);
     }
 
     /// If a live pool device is absent from both the pre-operation and target
@@ -1963,7 +4370,7 @@ mod tests {
         );
         let journal = journal::Journal {
             started_at: "2026-01-01T00:00:00Z".into(),
-            op: OpKind::Add { disks: add_disks },
+            op: add_op_from_disks(add_disks),
             pre_membership: pre,
             target_membership: target,
         };
@@ -2062,7 +4469,7 @@ mod tests {
         ]);
         let fs_handle = fs.handle();
 
-        let journal = two_disk_journal();
+        let journal = committed_two_disk_add_journal();
         journal::write_journal(&paths, &journal).unwrap();
 
         let (mp_req, mp_out) = mountpoint_fail();
@@ -2133,6 +4540,13 @@ mod tests {
                     device: "/dev/mapper/braid-disk1".into(),
                     mount_point: MountPoint("/mnt/storage".into()),
                     options: vec!["degraded".to_owned()],
+                },
+                ok_raw_empty("mount"),
+            )
+            .with_output(
+                CmdRequest::Mount {
+                    device: "/dev/mapper/braid-disk1".into(),
+                    mount_point: MountPoint("/mnt/storage".into()),
                 },
                 ok_raw_empty("mount"),
             )
@@ -2316,7 +4730,7 @@ mod tests {
         ]);
         let fs_handle = fs.handle();
 
-        let journal = two_disk_journal();
+        let journal = committed_two_disk_add_journal();
         journal::write_journal(&paths, &journal).unwrap();
 
         let inner = MockRunner::default()
@@ -2354,6 +4768,13 @@ mod tests {
                     device: "/dev/mapper/braid-disk1".into(),
                     mount_point: MountPoint("/mnt/storage".into()),
                     options: vec!["degraded".to_owned()],
+                },
+                ok_raw_empty("mount"),
+            )
+            .with_output(
+                CmdRequest::Mount {
+                    device: "/dev/mapper/braid-disk1".into(),
+                    mount_point: MountPoint("/mnt/storage".into()),
                 },
                 ok_raw_empty("mount"),
             )
@@ -2554,7 +4975,7 @@ mod tests {
             "/dev/disk/by-id/virtio-disk2",
         ]);
 
-        let journal = two_disk_journal();
+        let journal = committed_two_disk_add_journal();
         journal::write_journal(&paths, &journal).unwrap();
 
         let (mp_req, mp_out) = mountpoint_fail();
@@ -2617,6 +5038,13 @@ mod tests {
                     device: "/dev/mapper/braid-disk1".into(),
                     mount_point: MountPoint("/mnt/storage".into()),
                     options: vec!["degraded".to_owned()],
+                },
+                ok_raw_empty("mount"),
+            )
+            .with_output(
+                CmdRequest::Mount {
+                    device: "/dev/mapper/braid-disk1".into(),
+                    mount_point: MountPoint("/mnt/storage".into()),
                 },
                 ok_raw_empty("mount"),
             )
@@ -2815,7 +5243,7 @@ mod tests {
         let config = Config::new(MountPoint("/mnt/storage".into())).unwrap();
         let fs = MockFs::new(&[]);
 
-        let journal = two_disk_journal();
+        let journal = committed_two_disk_add_journal();
         journal::write_journal(&paths, &journal).unwrap();
 
         let (mp_req, mp_out) = mountpoint_ok();
@@ -3116,7 +5544,7 @@ mod tests {
         );
         let journal = journal::Journal {
             started_at: "2026-01-01T00:00:00Z".into(),
-            op: OpKind::Add { disks: add_disks },
+            op: add_op_from_disks(add_disks),
             pre_membership: pre,
             target_membership: target,
         };
@@ -3211,7 +5639,7 @@ mod tests {
 
         journal::Journal {
             started_at: "2026-01-01T00:00:00Z".into(),
-            op: OpKind::Add { disks: add_disks },
+            op: add_op_from_disks(add_disks),
             pre_membership: PoolMembership::empty(),
             target_membership: target,
         }
@@ -3660,7 +6088,7 @@ mod tests {
         let config = Config::new(MountPoint("/mnt/storage".into())).unwrap();
         let fs = MockFs::new(&[]);
 
-        let journal = two_disk_journal();
+        let journal = committed_two_disk_add_journal();
         journal::write_journal(&paths, &journal).unwrap();
 
         let (mp_req, mp_out) = mountpoint_ok();
@@ -3772,7 +6200,7 @@ mod tests {
         let config = Config::new(MountPoint("/mnt/storage".into())).unwrap();
         let fs = MockFs::new(&[]);
 
-        let journal = two_disk_journal();
+        let journal = committed_two_disk_add_journal();
         journal::write_journal(&paths, &journal).unwrap();
 
         let (mp_req, mp_out) = mountpoint_ok();
@@ -3921,7 +6349,7 @@ mod tests {
         let recovered = set_of(&["disk1", "disk2", "disk3"]);
         let mut add_disks = BTreeMap::new();
         add_disks.insert("disk3".to_owned(), ByIdPath("/dev/disk/by-id/x".into()));
-        let op = OpKind::Add { disks: add_disks };
+        let op = add_op_from_disks(add_disks);
 
         assert_eq!(
             recovery_guidance(&op, &ref_set(&pre), &ref_set(&target), &ref_set(&recovered)),
@@ -3936,7 +6364,7 @@ mod tests {
         let recovered = set_of(&["disk1", "disk2"]);
         let mut add_disks = BTreeMap::new();
         add_disks.insert("disk3".to_owned(), ByIdPath("/dev/disk/by-id/x".into()));
-        let op = OpKind::Add { disks: add_disks };
+        let op = add_op_from_disks(add_disks);
 
         assert_eq!(
             recovery_guidance(&op, &ref_set(&pre), &ref_set(&target), &ref_set(&recovered)),
@@ -4041,7 +6469,7 @@ mod tests {
         let recovered = set_of(&["disk1", "disk3"]);
         let mut add_disks = BTreeMap::new();
         add_disks.insert("disk3".to_owned(), ByIdPath("/dev/disk/by-id/x".into()));
-        let op = OpKind::Add { disks: add_disks };
+        let op = add_op_from_disks(add_disks);
 
         assert_eq!(
             recovery_guidance(&op, &ref_set(&pre), &ref_set(&target), &ref_set(&recovered)),
@@ -4463,7 +6891,7 @@ mod tests {
         // OpKind::Add interrupted mid-balance. Live pool already reflects
         // the target membership (disk1 + disk2) because `btrfs device add`
         // committed before the crash; only the rebalance was in flight.
-        let journal = two_disk_journal();
+        let journal = committed_two_disk_add_journal();
         journal::write_journal(&paths, &journal).unwrap();
 
         let (mp_req, mp_out) = mountpoint_ok();
@@ -5527,6 +7955,34 @@ mod tests {
             !rendered.contains("$ btrfs balance resume")
                 && !rendered.contains("$ btrfs balance start --enqueue -dconvert=raid1,soft"),
             "conditional placeholders must not render btrfs balance commands: {rendered:?}",
+        );
+    }
+
+    #[test]
+    fn plan_recover_dry_run_post_add_balance_only_has_no_target_replay() {
+        let rendered = render_recover_dry_run(
+            committed_two_disk_add_journal(),
+            &[
+                "/dev/disk/by-id/virtio-disk1",
+                "/dev/disk/by-id/virtio-disk2",
+            ],
+            closed_two_disk_dry_run_runner(),
+            false,
+        );
+
+        assert!(
+            rendered.contains("btrfs balance resume /mnt/storage (skipped if no paused balance)")
+                && rendered.contains(
+                    "btrfs balance -dconvert=raid1,soft -mconvert=raid1,soft /mnt/storage (skipped if pool has <2 devices)"
+                ),
+            "post-add preview should include only balance completion work: {rendered:?}",
+        );
+        assert!(
+            !rendered.contains("replay fresh add target")
+                && !rendered.contains("replay verified returned-disk add")
+                && !rendered.contains("wipefs")
+                && !rendered.contains("btrfs device add"),
+            "PostAddBalanceRaid1 dry-run must not show target replay commands: {rendered:?}",
         );
     }
 

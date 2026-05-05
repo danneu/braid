@@ -71,7 +71,7 @@ sudo braid unlock
 
 **Symptom:** braid commands fail with a message about a pending operation. `ls /var/lib/braid/pending-op.json` confirms the journal file exists.
 
-**Cause:** A pool mutation (`add`, `remove`, `remove-missing`, `replace`) was interrupted before it could complete. The journal records the operation type, the pre-operation membership, and the target membership.
+**Cause:** A pool mutation (`add`, `remove`, `remove-missing`, `replace`) was interrupted before it could complete. The journal records the operation type, the pre-operation membership, and the target membership. Existing-pool `add` journals also record a phase: `PoolMutation` for unfinished disk preparation or btrfs membership, and `PostAddBalanceRaid1` after membership is committed but balance work remains.
 
 ### Steps
 
@@ -90,11 +90,13 @@ sudo braid recover
 ```
 
 Recover will:
-- Open LUKS devices from both the pre-operation and target membership snapshots (covers partially-completed mutations)
+- Open the LUKS devices needed for the journal phase
 - Mount the btrfs pool
 - Probe the live btrfs topology to determine what actually happened
-- Rebuild pool.json from actual disk state
-- Clear pending-op.json
+- For add `PoolMutation`, finish only the journaled add targets that are not already live
+- For add `PostAddBalanceRaid1`, skip all disk preparation and btrfs add steps, then finish the owed RAID1 balance
+- Rebuild or repair pool.json only when live membership is complete
+- Clear pending-op.json only after required membership and balance work is complete
 
 3. Verify:
 

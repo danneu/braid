@@ -582,13 +582,50 @@ pub fn device_has_btrfs_superblock<R: CommandRunner>(
     Ok(result.exit_status == 0)
 }
 
-/// Read LUKS opts from BRAID_LUKS_OPTS env var, split using shell words.
-pub fn luks_opts_from_env() -> Vec<String> {
-    let raw = std::env::var("BRAID_LUKS_OPTS").unwrap_or_default();
+fn parse_luks_opts(raw: &str) -> Vec<String> {
     if raw.is_empty() {
         return vec![];
     }
     shell_words::split(&raw).unwrap_or_default()
+}
+
+#[cfg(test)]
+thread_local! {
+    static TEST_LUKS_OPTS_ENV: std::cell::RefCell<Option<String>> =
+        std::cell::RefCell::new(None);
+}
+
+#[cfg(test)]
+pub(crate) struct LuksOptsEnvGuard {
+    previous: Option<String>,
+}
+
+#[cfg(test)]
+impl LuksOptsEnvGuard {
+    pub(crate) fn set(value: &str) -> Self {
+        let previous = TEST_LUKS_OPTS_ENV.with(|slot| slot.replace(Some(value.to_owned())));
+        Self { previous }
+    }
+}
+
+#[cfg(test)]
+impl Drop for LuksOptsEnvGuard {
+    fn drop(&mut self) {
+        TEST_LUKS_OPTS_ENV.with(|slot| {
+            slot.replace(self.previous.take());
+        });
+    }
+}
+
+/// Read LUKS opts from BRAID_LUKS_OPTS env var, split using shell words.
+pub fn luks_opts_from_env() -> Vec<String> {
+    #[cfg(test)]
+    if let Some(raw) = TEST_LUKS_OPTS_ENV.with(|slot| slot.borrow().clone()) {
+        return parse_luks_opts(&raw);
+    }
+
+    let raw = std::env::var("BRAID_LUKS_OPTS").unwrap_or_default();
+    parse_luks_opts(&raw)
 }
 
 /// Open a LUKS device with a binary keyfile (no passphrase, no PBKDF).

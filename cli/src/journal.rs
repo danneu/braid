@@ -1,10 +1,11 @@
 use crate::membership::PoolMembership;
 use crate::state_io::atomic_write;
 use crate::state_paths::StatePaths;
-use crate::types::ByIdPath;
+use crate::types::{ByIdPath, LuksUuid};
 use crate::util::now_iso;
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
+use std::path::PathBuf;
 use thiserror::Error;
 
 /// A pending-operation journal records the full context of a mutation in progress.
@@ -21,10 +22,37 @@ pub struct Journal {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub enum AddPhase {
+    PoolMutation,
+    PostAddBalanceRaid1,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct AddJournalTarget {
+    pub by_id: ByIdPath,
+    pub mapper_name: String,
+    pub mode: AddJournalMode,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub enum AddJournalMode {
+    RecoverableBraidLabeled {
+        verified_pool_fsid: String,
+        luks_uuid: LuksUuid,
+    },
+    FreshLuks {
+        luks_label: String,
+        luks_format_extra_opts: Vec<String>,
+        enroll_key_file: Option<PathBuf>,
+    },
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(tag = "op")]
 pub enum OpKind {
     Add {
-        disks: BTreeMap<String, ByIdPath>,
+        phase: AddPhase,
+        targets: BTreeMap<String, AddJournalTarget>,
     },
     Remove {
         name: String,
@@ -128,7 +156,18 @@ mod tests {
             sample_membership(),
             sample_membership(),
             OpKind::Add {
-                disks: BTreeMap::from([("disk2".into(), ByIdPath("/dev/disk/by-id/ata-Y".into()))]),
+                phase: AddPhase::PoolMutation,
+                targets: BTreeMap::from([(
+                    "disk2".into(),
+                    AddJournalTarget {
+                        by_id: ByIdPath("/dev/disk/by-id/ata-Y".into()),
+                        mapper_name: "braid-disk2".into(),
+                        mode: AddJournalMode::RecoverableBraidLabeled {
+                            verified_pool_fsid: "fsid-1".into(),
+                            luks_uuid: LuksUuid("luks-1".into()),
+                        },
+                    },
+                )]),
             },
         )
     }
@@ -239,6 +278,38 @@ mod tests {
             sample_membership(),
             PoolMembership::empty(),
             OpKind::RemoveMissing { devid: 3 },
+        );
+        write_journal(&paths, &journal).unwrap();
+        let loaded = load_journal(&paths).unwrap().unwrap();
+        assert_eq!(loaded.op, journal.op);
+    }
+
+    #[test]
+    fn roundtrip_add_post_balance_fresh_target() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let paths = StatePaths::custom(tmp.path().into());
+        let journal = build_journal(
+            sample_membership(),
+            sample_membership(),
+            OpKind::Add {
+                phase: AddPhase::PostAddBalanceRaid1,
+                targets: BTreeMap::from([(
+                    "disk2".into(),
+                    AddJournalTarget {
+                        by_id: ByIdPath("/dev/disk/by-id/ata-Y".into()),
+                        mapper_name: "braid-disk2".into(),
+                        mode: AddJournalMode::FreshLuks {
+                            luks_label: "braid-disk2".into(),
+                            luks_format_extra_opts: vec![
+                                "--perf-no_read_workqueue".into(),
+                                "--label".into(),
+                                "braid-disk2".into(),
+                            ],
+                            enroll_key_file: Some(PathBuf::from("/run/keys/braid.key")),
+                        },
+                    },
+                )]),
+            },
         );
         write_journal(&paths, &journal).unwrap();
         let loaded = load_journal(&paths).unwrap().unwrap();

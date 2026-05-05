@@ -80,6 +80,7 @@ pub enum CmdRequest {
     BtrfsDeviceAdd {
         device: String,
         mount_point: MountPoint,
+        force: bool,
     },
     BtrfsDeviceRemove {
         device: String,
@@ -96,6 +97,11 @@ pub enum CmdRequest {
     /// to destroy.
     BtrfsDeviceScanForget {
         devices: Vec<String>,
+    },
+    /// `wipefs --all --types btrfs <device>` -- deliberately narrow stale
+    /// btrfs-signature wipe used only for verified returned add targets.
+    WipefsBtrfs {
+        device: String,
     },
     BtrfsBalanceRaid1 {
         mount_point: MountPoint,
@@ -462,23 +468,19 @@ impl CmdRequest {
             CmdRequest::BtrfsDeviceAdd {
                 device,
                 mount_point,
-            } => CmdArgs {
-                program: "btrfs".to_owned(),
-                args: vec![
-                    "device".into(),
-                    "add".into(),
-                    "--enqueue".into(),
-                    // We don't need '-f' here to bypass `btrfs device add`'s blkid probe
-                    // because at this point we've added a fresh luks header,
-                    // the volume is luks-opened, and mapper will be "decrypting"
-                    // preexisting data that we never encrypted which will look like garbage
-                    // rather than anything blkid will recognize.
-                    //
-                    // "-f".into(),
-                    device.clone(),
-                    mount_point.0.clone(),
-                ],
-            },
+                force,
+            } => {
+                let mut args = vec!["device".into(), "add".into(), "--enqueue".into()];
+                if *force {
+                    args.push("-f".into());
+                }
+                args.push(device.clone());
+                args.push(mount_point.0.clone());
+                CmdArgs {
+                    program: "btrfs".to_owned(),
+                    args,
+                }
+            }
             CmdRequest::BtrfsDeviceRemove {
                 device,
                 mount_point,
@@ -508,6 +510,15 @@ impl CmdRequest {
                     args,
                 }
             }
+            CmdRequest::WipefsBtrfs { device } => CmdArgs {
+                program: "wipefs".to_owned(),
+                args: vec![
+                    "--all".into(),
+                    "--types".into(),
+                    "btrfs".into(),
+                    device.clone(),
+                ],
+            },
             CmdRequest::BtrfsBalanceRaid1 { mount_point } => CmdArgs {
                 program: "btrfs".to_owned(),
                 args: vec![
@@ -950,6 +961,11 @@ impl CommandRunner for RealRunner {
 #[derive(Clone)]
 pub struct MockRunner {
     outputs: std::collections::HashMap<String, RawCommandOutput>,
+    output_sequences: std::sync::Arc<
+        std::sync::Mutex<
+            std::collections::HashMap<String, std::collections::VecDeque<RawCommandOutput>>,
+        >,
+    >,
     stdin_expectations: std::collections::HashMap<String, Vec<u8>>,
     requests: std::sync::Arc<std::sync::Mutex<Vec<CmdRequest>>>,
 }
@@ -958,6 +974,9 @@ impl Default for MockRunner {
     fn default() -> Self {
         Self {
             outputs: std::collections::HashMap::new(),
+            output_sequences: std::sync::Arc::new(std::sync::Mutex::new(
+                std::collections::HashMap::new(),
+            )),
             stdin_expectations: std::collections::HashMap::new(),
             requests: std::sync::Arc::new(std::sync::Mutex::new(Vec::new())),
         }
@@ -967,6 +986,17 @@ impl Default for MockRunner {
 impl MockRunner {
     pub fn with_output(mut self, request: CmdRequest, output: RawCommandOutput) -> Self {
         self.outputs.insert(format!("{request:?}"), output);
+        self
+    }
+
+    pub fn with_output_sequence(self, request: CmdRequest, outputs: Vec<RawCommandOutput>) -> Self {
+        self.output_sequences
+            .lock()
+            .expect("mock runner output sequence map poisoned")
+            .insert(
+                format!("{request:?}"),
+                std::collections::VecDeque::from(outputs),
+            );
         self
     }
 
@@ -1084,11 +1114,23 @@ impl CommandRunner for MockRunner {
             .lock()
             .expect("mock runner request log poisoned")
             .push(request.clone());
-        let output = self
-            .outputs
-            .get(&format!("{request:?}"))
-            .cloned()
-            .ok_or(CmdError::MissingMock)?;
+        let key = format!("{request:?}");
+        let output = {
+            let mut sequences = self
+                .output_sequences
+                .lock()
+                .expect("mock runner output sequence map poisoned");
+            let next = sequences.get_mut(&key).and_then(|queue| queue.pop_front());
+            if sequences
+                .get(&key)
+                .is_some_and(std::collections::VecDeque::is_empty)
+            {
+                sequences.remove(&key);
+            }
+            next
+        }
+        .or_else(|| self.outputs.get(&key).cloned())
+        .ok_or(CmdError::MissingMock)?;
         if let CmdRequest::CryptsetupLuksHeaderBackup { backup_path, .. } = request
             && output.exit_status == 0
         {
@@ -1115,7 +1157,23 @@ impl CommandRunner for MockRunner {
         if let Some(expected) = self.stdin_expectations.get(&key) {
             assert_eq!(stdin, expected.as_slice(), "stdin mismatch for {key}");
         }
-        self.outputs.get(&key).cloned().ok_or(CmdError::MissingMock)
+        let output = {
+            let mut sequences = self
+                .output_sequences
+                .lock()
+                .expect("mock runner output sequence map poisoned");
+            let next = sequences.get_mut(&key).and_then(|queue| queue.pop_front());
+            if sequences
+                .get(&key)
+                .is_some_and(std::collections::VecDeque::is_empty)
+            {
+                sequences.remove(&key);
+            }
+            next
+        }
+        .or_else(|| self.outputs.get(&key).cloned())
+        .ok_or(CmdError::MissingMock)?;
+        Ok(output)
     }
 }
 
@@ -1660,6 +1718,7 @@ mod tests {
         let s = CmdRequest::BtrfsDeviceAdd {
             device: "/dev/mapper/braid-aaa".to_owned(),
             mount_point: MountPoint("/mnt/storage".to_owned()),
+            force: false,
         }
         .to_argv()
         .to_shell_string();
@@ -1667,6 +1726,31 @@ mod tests {
             s,
             "btrfs device add --enqueue /dev/mapper/braid-aaa /mnt/storage"
         );
+    }
+
+    #[test]
+    fn btrfs_device_add_force_renders_f_flag() {
+        let s = CmdRequest::BtrfsDeviceAdd {
+            device: "/dev/mapper/braid-aaa".to_owned(),
+            mount_point: MountPoint("/mnt/storage".to_owned()),
+            force: true,
+        }
+        .to_argv()
+        .to_shell_string();
+        assert_eq!(
+            s,
+            "btrfs device add --enqueue -f /dev/mapper/braid-aaa /mnt/storage"
+        );
+    }
+
+    #[test]
+    fn wipefs_btrfs_renders_narrow_signature_wipe() {
+        let s = CmdRequest::WipefsBtrfs {
+            device: "/dev/mapper/braid-aaa".to_owned(),
+        }
+        .to_argv()
+        .to_shell_string();
+        assert_eq!(s, "wipefs --all --types btrfs /dev/mapper/braid-aaa");
     }
 
     #[test]

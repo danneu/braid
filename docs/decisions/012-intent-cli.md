@@ -42,11 +42,12 @@ The old architecture used a structural code boundary — `luksFormat` was litera
    a. LUKS label must be `braid-<key>` — non-braid LUKS is refused outright.
    b. Pool must be mounted — bootstrap refuses existing LUKS (no pool to verify against).
    c. Opened mapper's btrfs FSID must match the current pool — foreign-pool disks are refused.
-   d. Braid-labeled LUKS with no btrfs superblock is refused — this state is ambiguous (clean eviction, partial init, manual wipe, stale data) and cannot be distinguished without tombstones. A previously removed disk must be wiped before re-add.
-   e. Superblock guard remains as defense-in-depth within the FSID-matching path.
+   d. Braid-labeled LUKS with no btrfs superblock is refused -- this state is ambiguous (clean eviction, partial init, manual wipe, stale data) and cannot be distinguished without tombstones.
+   e. A braid-labeled LUKS disk with a btrfs superblock whose FSID matches the mounted pool may be accepted as a returned-disk add target. The add journal records that identity before mutation. If the stale btrfs signature would block `btrfs device add`, braid runs only `wipefs --all --types btrfs` on the verified mapper and uses `btrfs device add -f`.
+   f. Superblock guard remains as defense-in-depth within the FSID-matching path.
 3. **Unified confirmation with device context**: all mutating commands (`add`, `remove`, `remove-missing`, `replace`) show a rich device-info block (model, size, serial via lsblk) and confirm with `Type 'yes' to continue:`. Degraded-path warnings are informational text, not special confirmation phrases. `--yes` skips the prompt for scripting.
 4. **Disk name immutability**: mutating commands validate names against recorded disk identity and reject name rename/reassignment. Operators must use explicit `replace` or `remove`+`add` workflows instead of renaming.
-5. **Journal-protected mutations**: mutating commands write `pending-op.json` before the first irreversible step; it is cleared only after the full operation (including follow-up work like soft balance) succeeds. On any error exit, the journal persists to enable `braid recover`.
+5. **Journal-protected mutations**: mutating commands write `pending-op.json` before the first irreversible step; it is cleared only after the full operation (including follow-up work like soft balance) succeeds. Existing-pool add journals are phased: `PoolMutation` may finish target preparation and btrfs membership, while `PostAddBalanceRaid1` may only validate committed membership and finish the owed RAID1 balance. On any error exit, the journal persists to enable `braid recover`.
 
 `--dry-run` performs side-effect-free, passphrase-free LUKS probes only -- LUKS label reads, and the keyfile credential test used by `braid enroll` (`cryptsetup open --test-passphrase --key-file`, which evaluates a credential without activating the device). Checks that require a passphrase or an open mapper -- e.g. full identity verification (FSID comparison) -- are deferred to execution time when the mapper is closed.
 

@@ -118,6 +118,11 @@
               braid = linuxCrane.braid;
             }
           );
+          add-returned-disk-after-remove-missing = pkgs.testers.nixosTest (
+            import ./tests/cli/add-returned-disk-after-remove-missing.nix {
+              braid = linuxCrane.braid;
+            }
+          );
           braid-add-persists-before-balance = pkgs.testers.nixosTest (
             import ./tests/cli/braid-add-persists-before-balance.nix {
               braid = linuxCrane.braid;

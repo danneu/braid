@@ -25,6 +25,7 @@ use crate::progress::ProgressOutput;
 use crate::state_paths::StatePaths;
 use crate::status_tag::{StatusTag, color_enabled_for_stderr, emit_status, status_line};
 use crate::types::*;
+use std::collections::BTreeMap;
 use std::path::Path;
 
 #[derive(Debug, thiserror::Error)]
@@ -263,6 +264,11 @@ impl<R: CommandRunner> Drop for LuksCleanupGuard<'_, R> {
     }
 }
 
+struct PoolAddExecutionTarget {
+    mapper_path: String,
+    force: bool,
+}
+
 pub struct AddParams<'a> {
     pub config_path: &'a Path,
     pub disk_specs: &'a [String],
@@ -495,10 +501,11 @@ impl AddPlan {
         // Pass 1: validate PresentLuks disk identities before any irreversible operation.
         // Guard closes any mappers we opened for FSID verification if validation fails.
         let mut luks_guard = LuksCleanupGuard::new(runner);
-        let mut needs_pool_add: Vec<usize> = Vec::new();
+        let mut needs_pool_add: Vec<PoolAddExecutionTarget> = Vec::new();
+        let mut journal_targets: BTreeMap<String, journal::AddJournalTarget> = BTreeMap::new();
 
         for (i, p) in self.probed.iter().enumerate() {
-            let ConfigDiskState::PresentLuks { mapper_open, .. } = &p.state else {
+            let ConfigDiskState::PresentLuks { uuid, mapper_open } = &p.state else {
                 continue;
             };
             let name = self.names[i].as_str();
@@ -530,23 +537,62 @@ impl AddPlan {
             match identity {
                 AddLuksIdentity::BraidLabeledAlreadyInPool => continue,
                 AddLuksIdentity::BraidLabeledRecoverable => {
+                    let verified_pool_fsid = self.pool.fsid.clone().ok_or_else(|| {
+                        AddError::Validation(
+                            "mounted pool has no FSID while journaling returned add target".into(),
+                        )
+                    })?;
                     eprintln!(
                         "note: braid-labeled disk '{}' verified as pool member. \
                          Completing recovery add.",
                         name
                     );
-                    needs_pool_add.push(i);
+                    journal_targets.insert(
+                        name.to_owned(),
+                        journal::AddJournalTarget {
+                            by_id: by_id.clone(),
+                            mapper_name: mn.0.clone(),
+                            mode: journal::AddJournalMode::RecoverableBraidLabeled {
+                                verified_pool_fsid,
+                                luks_uuid: uuid.clone(),
+                            },
+                        },
+                    );
+                    needs_pool_add.push(PoolAddExecutionTarget {
+                        mapper_path: format!("/dev/mapper/{}", mn.0),
+                        force: true,
+                    });
                 }
                 _ => unreachable!("error variants handled by identity_to_error above"),
             }
         }
 
-        let has_fresh_disks = self
-            .probed
-            .iter()
-            .any(|p| matches!(p.state, ConfigDiskState::PresentNotLuks));
+        for (i, p) in self.probed.iter().enumerate() {
+            if !matches!(p.state, ConfigDiskState::PresentNotLuks) {
+                continue;
+            }
+            let name = self.names[i].as_str();
+            let by_id = &self.by_ids[i];
+            let mn = mapper_name(name);
+            let luks_label = format!("braid-{name}");
+            let mut luks_opts = luks_opts_from_env();
+            luks_opts.push("--label".into());
+            luks_opts.push(luks_label.clone());
+            journal_targets.insert(
+                name.to_owned(),
+                journal::AddJournalTarget {
+                    by_id: by_id.clone(),
+                    mapper_name: mn.0.clone(),
+                    mode: journal::AddJournalMode::FreshLuks {
+                        luks_label,
+                        luks_format_extra_opts: luks_opts,
+                        enroll_key_file: params.enroll_key_file.map(|p| p.to_path_buf()),
+                    },
+                },
+            );
+        }
 
-        if !has_fresh_disks && needs_pool_add.is_empty() {
+        if journal_targets.is_empty() {
             luks_guard.disarm();
             let label = add_label(&self.names);
             eprintln!("{}", format_add_noop(&label));
@@ -577,21 +623,18 @@ impl AddPlan {
 
         // All identity checks passed. Write journal before irreversible disk operations.
         let mut target_membership = self.pool_membership.clone();
-        for (name, by_id) in &self.parsed {
+        for (name, target) in &journal_targets {
             target_membership.disks.insert(
                 name.clone(),
-                membership::DiskMember::from_by_id(by_id.clone()),
+                membership::DiskMember::from_by_id(target.by_id.clone()),
             );
         }
         let journal = journal::build_journal(
             self.pool_membership.clone(),
             target_membership,
             journal::OpKind::Add {
-                disks: self
-                    .parsed
-                    .iter()
-                    .map(|(n, b)| (n.clone(), b.clone()))
-                    .collect(),
+                phase: journal::AddPhase::PoolMutation,
+                targets: journal_targets.clone(),
             },
         );
         journal::write_journal(params.paths, &journal)
@@ -605,10 +648,19 @@ impl AddPlan {
             let name = self.names[i].as_str();
             let by_id = &self.by_ids[i];
             let mn = mapper_name(name);
+            let luks_opts = match journal_targets.get(name).map(|t| &t.mode) {
+                Some(journal::AddJournalMode::FreshLuks {
+                    luks_format_extra_opts,
+                    ..
+                }) => luks_format_extra_opts.clone(),
+                _ => {
+                    return Err(AddError::Validation(format!(
+                        "fresh add target '{}' missing from journal",
+                        name
+                    )));
+                }
+            };
 
-            let mut luks_opts = luks_opts_from_env();
-            luks_opts.push("--label".into());
-            luks_opts.push(format!("braid-{name}"));
             eprint!(
                 "{}",
                 status_line(
@@ -669,7 +721,10 @@ impl AddPlan {
                 )
             );
 
-            needs_pool_add.push(i);
+            needs_pool_add.push(PoolAddExecutionTarget {
+                mapper_path: format!("/dev/mapper/{}", mn.0),
+                force: false,
+            });
         }
 
         // Both passes complete -- mappers are committed for pool operations.
@@ -678,7 +733,7 @@ impl AddPlan {
         // Pool phase
         let mapper_paths: Vec<String> = needs_pool_add
             .iter()
-            .map(|&i| format!("/dev/mapper/{}", mapper_name(self.names[i].as_str()).0))
+            .map(|target| target.mapper_path.clone())
             .collect();
 
         let mount_point = self.config.mount_point();
@@ -714,21 +769,22 @@ impl AddPlan {
                 .map_err(|e| AddError::Validation(e.to_string()))?;
         } else {
             // Add each to existing pool
-            for mp in &mapper_paths {
-                pool_add_device(runner, mp, mount_point)?;
-                eprintln!("Device added to pool: {}", mp);
+            for target in &needs_pool_add {
+                pool_add_device(runner, &target.mapper_path, mount_point, target.force)?;
+                eprintln!("Device added to pool: {}", target.mapper_path);
                 let pool_after = probe_pool(runner, fs, mount_point).map_err(|e| {
                     AddError::AckCleanupFailed {
                         stage: "post-add probe",
-                        detail: format!("{mp}: {e}"),
+                        detail: format!("{}: {e}", target.mapper_path),
                     }
                 })?;
-                let devid = devid_for_mapper_path(&pool_after, mp).ok_or_else(|| {
-                    AddError::AckCleanupFailed {
-                        stage: "post-add probe",
-                        detail: format!("{mp}: not found in pool after add"),
-                    }
-                })?;
+                let devid =
+                    devid_for_mapper_path(&pool_after, &target.mapper_path).ok_or_else(|| {
+                        AddError::AckCleanupFailed {
+                            stage: "post-add probe",
+                            detail: format!("{}: not found in pool after add", target.mapper_path),
+                        }
+                    })?;
                 alert::drop_ghost_acked_for_devids(params.paths, &[devid]).map_err(|e| {
                     AddError::AckCleanupFailed {
                         stage: "live-pool add",
@@ -740,11 +796,26 @@ impl AddPlan {
             // Membership is committed by btrfs device add. Persist it before
             // the long post-add balance while leaving the journal in place so
             // recovery still knows the balance is owed if interrupted.
-            let mut final_membership = journal.target_membership.clone();
-            if let Ok(pool_after) = probe_pool(runner, fs, mount_point) {
-                membership::enrich_from_pool_state(&pool_after, &mut final_membership);
+            let pool_after = probe_pool(runner, fs, mount_point)?;
+            for target in journal_targets.values() {
+                let mapper = &target.mapper_name;
+                if !pool_after.devices.iter().any(|d| d.mapper.0 == *mapper) {
+                    return Err(AddError::Validation(format!(
+                        "disk '{}' was not found in the live pool after add",
+                        mapper
+                    )));
+                }
             }
+            let mut final_membership = journal.target_membership.clone();
+            membership::enrich_from_pool_state(&pool_after, &mut final_membership);
             membership::save_membership(&final_membership, params.paths)?;
+
+            let mut balance_journal = journal.clone();
+            if let journal::OpKind::Add { phase, .. } = &mut balance_journal.op {
+                *phase = journal::AddPhase::PostAddBalanceRaid1;
+            }
+            journal::write_journal(params.paths, &balance_journal)
+                .map_err(|e| AddError::Validation(e.to_string()))?;
 
             // Balance to RAID1 if total >= 2
             let total_after = self.pool.devices.len() + mapper_paths.len();
@@ -1140,13 +1211,22 @@ fn compile_add_steps_multi<R: CommandRunner>(
                             steps.push(Step {
                                 risk: "safe",
                                 description: format!(
-                                    "btrfs device add /dev/mapper/{} {} (recovery)",
+                                    "btrfs device add -f /dev/mapper/{} {} (verified returned disk)",
                                     mn, input.mount_point
                                 ),
-                                commands: vec![CmdRequest::BtrfsDeviceAdd {
-                                    device: mapper_path,
-                                    mount_point: input.mount_point.clone(),
-                                }],
+                                commands: vec![
+                                    CmdRequest::BtrfsDeviceScanForget {
+                                        devices: vec![mapper_path.clone()],
+                                    },
+                                    CmdRequest::WipefsBtrfs {
+                                        device: mapper_path.clone(),
+                                    },
+                                    CmdRequest::BtrfsDeviceAdd {
+                                        device: mapper_path,
+                                        mount_point: input.mount_point.clone(),
+                                        force: true,
+                                    },
+                                ],
                             });
                             needs_pool_add += 1;
                         }
@@ -1164,6 +1244,27 @@ fn compile_add_steps_multi<R: CommandRunner>(
                             device: by_id.0.clone(),
                             mapper: mn.0.clone(),
                         }],
+                    });
+                    let mapper_path = format!("/dev/mapper/{}", mn);
+                    steps.push(Step {
+                        risk: "safe",
+                        description: format!(
+                            "btrfs device add -f /dev/mapper/{} {} (if verified returned disk)",
+                            mn, input.mount_point
+                        ),
+                        commands: vec![
+                            CmdRequest::BtrfsDeviceScanForget {
+                                devices: vec![mapper_path.clone()],
+                            },
+                            CmdRequest::WipefsBtrfs {
+                                device: mapper_path.clone(),
+                            },
+                            CmdRequest::BtrfsDeviceAdd {
+                                device: mapper_path,
+                                mount_point: input.mount_point.clone(),
+                                force: true,
+                            },
+                        ],
                     });
                     needs_pool_add += 1;
                 }
@@ -1239,6 +1340,7 @@ fn compile_add_steps_multi<R: CommandRunner>(
                     commands: vec![CmdRequest::BtrfsDeviceAdd {
                         device: mapper_path,
                         mount_point: input.mount_point.clone(),
+                        force: false,
                     }],
                 });
             }
@@ -2220,6 +2322,8 @@ mod tests {
         fn run(&self, request: &CmdRequest) -> Result<RawCommandOutput, CmdError> {
             match request {
                 CmdRequest::CryptsetupLuksOpen { .. } => Ok(mock_ok("cryptsetup luksOpen", "")),
+                CmdRequest::BtrfsDeviceScanForget { .. } => Ok(mock_ok("btrfs scan forget", "")),
+                CmdRequest::WipefsBtrfs { .. } => Ok(mock_ok("wipefs", "")),
                 CmdRequest::BtrfsBalanceRaid1 { .. } => Ok(mock_ok("btrfs balance", "")),
                 _ => self.inner.run(request),
             }
@@ -2610,6 +2714,7 @@ mod tests {
         fail_bootstrap_post_mount_probe: bool,
         fail_second_add: bool,
         fail_post_add_probe: bool,
+        fail_luks_format: bool,
         omit_new_mapper_from_probe: bool,
         disk2_devid: u64,
     }
@@ -2622,6 +2727,7 @@ mod tests {
                 fail_bootstrap_post_mount_probe: false,
                 fail_second_add: false,
                 fail_post_add_probe: false,
+                fail_luks_format: false,
                 omit_new_mapper_from_probe: false,
                 disk2_devid: 2,
             }
@@ -2645,6 +2751,11 @@ mod tests {
 
         fn with_post_add_probe_failure(mut self) -> Self {
             self.fail_post_add_probe = true;
+            self
+        }
+
+        fn with_luks_format_failure(mut self) -> Self {
+            self.fail_luks_format = true;
             self
         }
 
@@ -2792,6 +2903,14 @@ mod tests {
                     &format!("cryptsetup open --test-passphrase {device}"),
                     "",
                 )),
+                CmdRequest::CryptsetupLuksFormat { device, .. } if self.fail_luks_format => {
+                    Ok(RawCommandOutput {
+                        cmd: format!("cryptsetup luksFormat {device}"),
+                        stdout: String::new(),
+                        stderr: "mock: luksFormat failed after journal write".into(),
+                        exit_status: 1,
+                    })
+                }
                 CmdRequest::CryptsetupLuksFormat { device, .. } => {
                     Ok(mock_ok(&format!("cryptsetup luksFormat {device}"), ""))
                 }
@@ -3303,6 +3422,84 @@ mod tests {
             1,
             "sleep inhibitor must be acquired exactly once on the path through journal::write_journal"
         );
+    }
+
+    #[test]
+    // Intent: fresh existing-pool add journals the exact LUKS format options
+    //   that the original invocation computed before `luksFormat`.
+    //
+    // Why it exists: recovery must replay a fresh target using the journaled
+    //   format contract, not whatever `BRAID_LUKS_OPTS` happens to contain
+    //   later. The easiest command-level proof is to fail `luksFormat` after
+    //   the journal write and inspect the preserved `pending-op.json`.
+    //
+    // Scenario: the user adds a fresh disk with env-derived LUKS options; the
+    //   machine crashes or the format command fails immediately after the
+    //   journal is durable. Recovery must know the same opts, including the
+    //   generated braid label.
+    fn fresh_add_journal_stores_effective_luks_format_opts() {
+        let (_state_tmp, paths, _tmp, config_path, pass_path) = add_test_setup();
+        let runner = AddFullPathRunner::live().with_luks_format_failure();
+        let fs = runner.fs(vec!["/dev/disk/by-id/virtio-disk2".into()]);
+        let _env = crate::luks::LuksOptsEnvGuard::set("--pbkdf pbkdf2 --iter-time 1");
+        let inhibitor = crate::inhibit::RecordingInhibitor::new();
+
+        let result = cmd_add(
+            &runner,
+            &fs,
+            &AddParams {
+                config_path: &config_path,
+                disk_specs: &["disk2=/dev/disk/by-id/virtio-disk2".into()],
+                dry_run: false,
+                yes: true,
+                passphrase_stdin: false,
+                passphrase_file: Some(pass_path.as_path()),
+                enroll_key_file: None,
+                progress: ProgressOutput::Off,
+                paths: &paths,
+                sleep_inhibitor: &inhibitor,
+                passphrase_reader: &RealTty,
+            },
+        );
+
+        assert!(
+            result.is_err(),
+            "forced luksFormat failure should abort add"
+        );
+        let journal = journal::load_journal(&paths)
+            .unwrap()
+            .expect("journal must survive the post-write format failure");
+        let journal::OpKind::Add { phase, targets } = journal.op else {
+            panic!("expected add journal, got: {:?}", journal.op);
+        };
+        assert_eq!(phase, journal::AddPhase::PoolMutation);
+        let target = targets
+            .get("disk2")
+            .expect("disk2 target should be journaled");
+        assert_eq!(target.by_id.0, "/dev/disk/by-id/virtio-disk2");
+        assert_eq!(target.mapper_name, "braid-disk2");
+        let journal::AddJournalMode::FreshLuks {
+            luks_label,
+            luks_format_extra_opts,
+            enroll_key_file,
+        } = &target.mode
+        else {
+            panic!("expected fresh LUKS target, got: {:?}", target.mode);
+        };
+        assert_eq!(luks_label, "braid-disk2");
+        assert_eq!(
+            luks_format_extra_opts,
+            &vec![
+                "--pbkdf".to_owned(),
+                "pbkdf2".to_owned(),
+                "--iter-time".to_owned(),
+                "1".to_owned(),
+                "--label".to_owned(),
+                "braid-disk2".to_owned(),
+            ]
+        );
+        assert!(enroll_key_file.is_none());
+        assert_eq!(inhibitor.acquire_count(), 1);
     }
 
     #[test]
@@ -5341,7 +5538,7 @@ mod tests {
         // condition are simultaneously true.
         std::fs::write(
             fixture.paths.pending_op_json(),
-            r#"{"started_at":"2024-01-01T00:00:00Z","op":{"op":"Add","disks":{}},"pre_membership":{"disks":{}},"target_membership":{"disks":{}}}"#,
+            r#"{"started_at":"2024-01-01T00:00:00Z","op":{"op":"Add","phase":"PoolMutation","targets":{}},"pre_membership":{"disks":{}},"target_membership":{"disks":{}}}"#,
         )
         .unwrap();
 

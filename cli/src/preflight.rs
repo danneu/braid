@@ -1277,7 +1277,8 @@ mod tests {
             crate::membership::PoolMembership::empty(),
             crate::membership::PoolMembership::empty(),
             crate::journal::OpKind::Add {
-                disks: std::collections::BTreeMap::new(),
+                phase: crate::journal::AddPhase::PoolMutation,
+                targets: std::collections::BTreeMap::new(),
             },
         );
         crate::journal::write_journal(&paths, &journal).unwrap();

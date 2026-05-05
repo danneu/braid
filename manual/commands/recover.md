@@ -2,7 +2,7 @@
 
 # braid recover
 
-Resumes from an interrupted operation (add, remove, replace) by opening LUKS devices, mounting the pool, rebuilding `pool.json` from live pool state, and clearing the pending-operation journal.
+Resumes from an interrupted operation (add, remove, replace) by opening LUKS devices, mounting the pool, rebuilding `pool.json` from live pool state when appropriate, finishing owed maintenance, and clearing the pending-operation journal.
 
 ## When to use it
 
@@ -66,15 +66,16 @@ sudo braid recover --dry-run
 ## What happens under the hood
 
 1. Loads `pending-op.json` (refuses if absent -- nothing to recover).
-2. Computes a union membership from both the pre-operation and target snapshots in the journal, ensuring every device referenced by the interrupted operation can be opened.
+2. Chooses the mount membership from the journal. For an existing-pool add still in `PoolMutation`, recover mounts from the pre-add membership so a not-yet-added target is never selected as a mount source. For add journals already in `PostAddBalanceRaid1`, recover mounts from the committed target membership.
 3. Opens LUKS devices and mounts the pool (or reuses the existing mount if already mounted). **Exception:** if the journal records a `replace` operation and the pool is already mounted by an external process, recover refuses -- run `sudo braid lock` followed by `sudo braid recover` so a fresh mount session can clear any kernel-resumed-dev_replace staleness via the relock cycle.
 4. If a kernel-resumed btrfs replace is in progress (from a crash during `braid replace`), waits for it to finish.
 5. If the pool was just mounted by this recover run, performs a full relock-and-remount cycle (umount, `btrfs device scan --forget`, close LUKS, reopen, remount) to ensure the kernel's in-memory device topology matches the on-disk state.
 6. Probes the live pool to discover actual membership.
-7. Resolves `/dev/disk/by-id/` paths from the live device identity (not from the journal, which may be stale).
-8. Writes the recovered membership to `pool.json`.
-9. Clears `pending-op.json`.
-10. Warns if a paused btrfs balance is detected.
+7. For add `PoolMutation`, replays only journaled targets that are not already live. Fresh targets use the stored LUKS format options from the original add. Verified returned braid-labeled targets may use `btrfs device add -f` after `wipefs --all --types btrfs`; other targets are not force-added.
+8. For add `PostAddBalanceRaid1`, does not format, enroll, back up headers as target prep, wipe, or add disks. It only validates the committed live pool and finishes the owed RAID1 balance.
+9. Resolves `/dev/disk/by-id/` paths from the live device identity (not from the journal, which may be stale).
+10. Writes or repairs `pool.json` only after the journal phase allows it and live membership is complete.
+11. Clears `pending-op.json` only after membership is complete and any owed balance work is done.
 
 ## Safety checks
 
@@ -82,6 +83,8 @@ sudo braid recover --dry-run
 - Refuses to adopt live pool members that aren't in either the pre-operation or target journal snapshot (guards against devices added outside braid).
 - Hard-fails if a live pool device has no `/dev/disk/by-id/` symlink (recovery can't guess a stable identifier).
 - Detects interrupted bootstrap add (first disk, no filesystem yet) and gives specific wipe-and-retry instructions instead of a confusing mount error.
+- For existing-pool add recovery, refuses to clear the journal while any journaled add target is missing from the live pool.
+- Once an add journal reaches `PostAddBalanceRaid1`, refuses to replay disk preparation or btrfs membership mutation.
 - Without `--allow-degraded`, refuses to mount if devices are missing (exit code 2 for degraded-refused, distinguishing it from other errors).
 - Refuses to recover a `replace` operation when the pool is already mounted (admin-mounted, circumventing braid's pending-op preflight on `unlock`). The kernel may have resumed an interrupted `dev_replace` on that mount session, leaving stale in-memory device state that recover cannot scrub without unmounting -- which it will not do on a mount it does not own. Remediation: `sudo braid lock; sudo braid recover`.
 

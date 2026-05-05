@@ -82,8 +82,8 @@ The name is used in pool.json, LUKS mapper names (`braid-toshiba1`), and all fut
 2. Shows a confirmation prompt with disk model, serial, and size
 3. For fresh disks: LUKS-formats the disk with the pool passphrase, creates a LUKS header backup, and opens the LUKS mapper
 4. If no pool exists: creates a btrfs filesystem (RAID1 if 2+ disks, single if 1 disk)
-5. If a pool exists: adds the device to the existing btrfs filesystem and records the new membership in pool.json
-6. If the pool now has 2+ disks: balances data to RAID1
+5. If a pool exists: writes a phased journal, adds the device to the existing btrfs filesystem, records the new membership in pool.json, then advances the journal to the balance phase
+6. If the pool now has 2+ disks: balances data to RAID1, then clears the journal
 
 A sleep inhibitor is held during all irreversible operations to prevent the system from suspending mid-operation.
 
@@ -92,7 +92,7 @@ A sleep inhibitor is held during all irreversible operations to prevent the syst
 braid classifies each disk before acting:
 
 - **Fresh disk** (no LUKS): accepted. LUKS-formatted with the pool passphrase.
-- **Returning braid disk** (braid-labeled LUKS, btrfs FSID matches the pool): accepted as a recovery add. The disk is re-joined to the pool without reformatting.
+- **Returning braid disk** (braid-labeled LUKS, btrfs FSID matches the pool): accepted as a recovery add. The disk is re-joined to the pool without reformatting. If the old btrfs signature would make `btrfs device add` refuse the disk, braid first runs the narrow wipe `wipefs --all --types btrfs` on the verified mapper, then uses `btrfs device add -f`.
 - **Non-braid LUKS**: refused. braid will not adopt a LUKS device it did not create.
 - **Braid-labeled, wrong pool**: refused. The disk belongs to a different btrfs filesystem.
 - **Braid-labeled, no btrfs superblock**: refused. The disk's identity is ambiguous (could be partial init, clean eviction, or manual wipe). Wipe the disk and add as fresh.
@@ -108,6 +108,13 @@ braid classifies each disk before acting:
 - Warns if existing pool drives have a keyfile but `--enroll` was not passed
 - Refuses to proceed if another braid operation is pending (pending-op.json exists)
 - Refuses if a btrfs exclusive operation (balance, device remove, resize) is already running on the pool
+
+## Interrupted adds
+
+Existing-pool adds recover in two phases:
+
+- **PoolMutation**: disk preparation and btrfs membership are not fully committed yet. `braid recover` may finish formatting a fresh target, re-open a verified returned target, run the narrow btrfs-signature wipe for that returned target, and run `btrfs device add`.
+- **PostAddBalanceRaid1**: membership and `pool.json` are committed. `braid recover` will not format, wipe, or add disks in this phase; it only mounts/probes the committed pool, repairs `pool.json` from the committed live topology if needed, resumes or runs the owed RAID1 balance, and clears `pending-op.json`.
 
 ## Related commands
 
