@@ -295,21 +295,32 @@ fn format_add_missing_devices_warning(missing_count: u64) -> String {
     )
 }
 
-/// Returns the no-op "nothing to do" message, without any channel-specific
-/// formatting. Shared by the dry-run `PreviewNote::Info` and the real-run
-/// stderr `eprintln!` so both paths see byte-identical wording.
-pub fn format_add_noop(label: &str) -> String {
-    format!("Nothing to do -- {label} already in pool.")
-}
-
 /// Labels the disk set for no-op / done messages. Single-disk returns the
 /// bare name; multi-disk joins names with `, `.
-fn add_label(names: &[String]) -> String {
+fn format_disk_name_list(names: &[String]) -> String {
     if names.len() == 1 {
         names[0].clone()
     } else {
         names.join(", ")
     }
+}
+
+/// Returns the no-op "nothing to do" message, without any channel-specific
+/// formatting. Shared by the dry-run `PreviewNote::Info` and the real-run
+/// stderr `eprintln!` so both paths see byte-identical wording.
+fn format_add_noop(names: &[String]) -> String {
+    format!(
+        "Nothing to do -- {} already in pool.",
+        format_disk_name_list(names)
+    )
+}
+
+fn format_add_done(names: &[String]) -> String {
+    let verb = if names.len() == 1 { "is" } else { "are" };
+    format!(
+        "Done. {} {verb} now part of the pool.",
+        format_disk_name_list(names)
+    )
 }
 
 fn devid_for_mapper_path(pool: &PoolState, mapper_path: &str) -> Option<u64> {
@@ -590,8 +601,7 @@ impl AddPlan {
 
         if journal_targets.is_empty() {
             luks_guard.disarm();
-            let label = add_label(&self.names);
-            eprintln!("{}", format_add_noop(&label));
+            eprintln!("{}", format_add_noop(&self.names));
             return Ok(());
         }
 
@@ -837,12 +847,7 @@ impl AddPlan {
                 .map_err(|e| AddError::Validation(e.to_string()))?;
         }
 
-        let label = if self.names.len() == 1 {
-            format!("{} is", self.names[0])
-        } else {
-            format!("{} are", self.names.join(", "))
-        };
-        eprintln!("Done. {} now part of the pool.", label);
+        eprintln!("{}", format_add_done(&self.names));
         Ok(())
     }
 }
@@ -1061,7 +1066,7 @@ pub fn plan_add<R: CommandRunner + Sync, F: Filesystem + ?Sized>(
     // `eprintln!("Nothing to do -- ...")` wording via the shared
     // `format_add_noop` helper.
     if steps.is_empty() {
-        notes.push(PreviewNote::Info(format_add_noop(&add_label(&names))));
+        notes.push(PreviewNote::Info(format_add_noop(&names)));
     }
 
     let plan = AddPlan {
@@ -5404,9 +5409,40 @@ mod tests {
         );
     }
 
+    // Intent: pin the shared `braid add` no-op and done message helpers.
+    //
+    // Why it exists: the no-op and done paths both need the same disk-name
+    //   list formatting; keeping their exact grammar under one test prevents
+    //   a future inline formatter from drifting again.
+    //
+    // Scenario: the operator adds one disk or multiple disks, and the CLI
+    //   reports either an already-in-pool no-op or a completed add.
+    #[test]
+    fn format_add_messages_pin_disk_name_list_and_grammar() {
+        let single = vec!["disk2".to_string()];
+        let multi = vec!["disk1".to_string(), "disk2".to_string()];
+
+        assert_eq!(
+            format_add_noop(&single),
+            "Nothing to do -- disk2 already in pool."
+        );
+        assert_eq!(
+            format_add_noop(&multi),
+            "Nothing to do -- disk1, disk2 already in pool."
+        );
+        assert_eq!(
+            format_add_done(&single),
+            "Done. disk2 is now part of the pool."
+        );
+        assert_eq!(
+            format_add_done(&multi),
+            "Done. disk1, disk2 are now part of the pool."
+        );
+    }
+
     /* Intent: adding a disk that is already in the pool is a note-only
      * success: plan.preview().render() outputs exactly the
-     * format_add_noop(label) line, no `nothing to do.` fallback, no step
+     * no-op message line, no `nothing to do.` fallback, no step
      * lines.
      * Why it exists: PR 7's dry-run contract requires already-in-pool to
      * become a Preview with zero steps + one Info note. A regression that
@@ -5457,7 +5493,7 @@ mod tests {
         );
 
         let rendered = plan.preview().render();
-        let expected = format!("{}\n", format_add_noop("disk2"));
+        let expected = "Nothing to do -- disk2 already in pool.\n";
         assert_eq!(rendered, expected, "exact render must match noop Info line");
         assert!(
             !rendered.contains("nothing to do."),
