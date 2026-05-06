@@ -16,6 +16,7 @@ use crate::types::{ByIdPath, ConfigDiskState, MountPoint};
 use std::io::Read;
 use std::os::unix::fs::OpenOptionsExt;
 use std::path::Path;
+use zeroize::Zeroizing;
 
 #[derive(Debug, thiserror::Error)]
 pub enum EnrollKeyFileError {
@@ -323,15 +324,18 @@ fn generate_key_file(path: &Path) -> Result<(), std::io::Error> {
     use std::io::Write;
 
     let mut rng = std::fs::File::open("/dev/urandom")?;
-    let mut buf = vec![0u8; KEYFILE_SIZE];
-    rng.read_exact(&mut buf)?;
+    let f = {
+        let mut buf: Zeroizing<[u8; KEYFILE_SIZE]> = Zeroizing::new([0u8; KEYFILE_SIZE]);
+        rng.read_exact(&mut buf[..])?;
 
-    let mut f = std::fs::OpenOptions::new()
-        .write(true)
-        .create_new(true)
-        .mode(0o400)
-        .open(path)?;
-    f.write_all(&buf)?;
+        let mut f = std::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .mode(0o400)
+            .open(path)?;
+        f.write_all(&buf[..])?;
+        f
+    };
     f.sync_all()?;
 
     // LUKS slots are mutated after this returns, so make the new directory
