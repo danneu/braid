@@ -341,7 +341,7 @@ with subtest("Test 4a: missing disk -- refuses degraded, probe context precedes 
     out = machine.succeed("cat /tmp/r4a-stdout")
     err = machine.succeed("cat /tmp/r4a-stderr")
 
-    assert ret[0] != 0, "expected non-zero exit for degraded refusal"
+    assert ret[0] == 2, f"expected exit 2 for degraded refusal, got {ret[0]}"
     assert out == "", (
         "stdout must be empty on failure path; got: {!r}".format(out)
     )
@@ -391,7 +391,7 @@ with subtest("Test 4a_dry: dry-run missing disk -- stderr has probe + refusal, s
     out = machine.succeed("cat /tmp/d4a-stdout")
     err = machine.succeed("cat /tmp/d4a-stderr")
 
-    assert ret[0] != 0, "expected non-zero exit for dry-run degraded refusal"
+    assert ret[0] == 2, f"expected exit 2 for dry-run degraded refusal, got {ret[0]}"
     assert out == "", (
         "stdout must be empty on dry-run failure; got: {!r}".format(out)
     )
@@ -439,7 +439,7 @@ with subtest("Test 6: wrong passphrase rejected"):
     close_all()
 
     ret = machine.execute(unlock_cmd("wrongpassphrase"))
-    assert ret[0] != 0, "Expected non-zero exit for wrong passphrase"
+    assert ret[0] == 1, f"expected exit 1 for wrong passphrase, got {ret[0]}"
 
     # No mappers should have been opened
     machine.fail("test -e /dev/mapper/braid-disk1")
@@ -482,7 +482,7 @@ with subtest("Test 7: uninitialized disk detected — degraded-refused enumerate
     # Redirect stderr to stdout so we can capture the error message
     cmd = unlock_cmd(passphrase) + " 2>&1"
     ret = machine.execute(cmd)
-    assert ret[0] != 0, f"Expected non-zero exit for raw member in pool, got: {ret}"
+    assert ret[0] == 2, f"expected exit 2 for raw member in pool, got: {ret}"
     output = ret[1]
 
     # Deterministic: must reach the structured DegradedRefused path.

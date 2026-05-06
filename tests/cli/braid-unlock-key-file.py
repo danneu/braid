@@ -101,8 +101,37 @@ with subtest("Test 1: correct keyfile unlocks"):
 with subtest("Test 2: wrong keyfile rejected"):
     close_all()
     ret = machine.execute("braid unlock --key-file /tmp/wrong.key 2>&1")
-    assert ret[0] != 0, "Expected non-zero exit for wrong keyfile"
+    assert ret[0] == 1, f"expected exit 1 for wrong keyfile, got {ret[0]}"
     machine.fail("mountpoint -q /mnt/storage")
+
+# --- Test 2b: keyfile + missing disk -- exit 2 + --allow-degraded hint ---
+#
+# Intent: --key-file with a missing pool member and no --allow-degraded must
+#   exit 2 and print the --allow-degraded hint. This is the exact contract
+#   braid-auto-unlock.service consumes at storage.nix:265.
+# Why it exists: Existing DegradedRefused tests all run via passphrase
+#   (braid-unlock.py Tests 4a/4a_dry/7). A future refactor that routes
+#   keyfile DegradedRefused through a different exit code would break the
+#   auto-unlock unit's hint route while every other assertion still passed.
+#   This subtest pins the keyfile branch directly.
+# Scenario: 2-disk pool unlocked with keyfile so far. Close the pool, delete
+#   disk2's by-id symlink so plan_open_pool classifies disk2 as Absent.
+#   Re-run with --key-file (no --allow-degraded). Expect exit 2,
+#   "--allow-degraded" on stderr, no mount. Restore symlink before Test 3.
+with subtest("Test 2b: --key-file with missing disk -- exit 2 + --allow-degraded hint"):
+    close_all()
+    machine.succeed("rm -f /dev/disk/by-id/virtio-disk2")
+
+    ret = machine.execute("braid unlock --key-file /tmp/braid.key 2>&1")
+    assert ret[0] == 2, f"expected exit 2 for keyfile degraded refusal, got {ret[0]}"
+    assert "--allow-degraded" in ret[1], (
+        f"expected --allow-degraded hint on stderr, got: {ret[1]!r}"
+    )
+    machine.fail("mountpoint -q /mnt/storage")
+
+    # Restore symlink for Test 3 (the virtio symlinks are managed by udev).
+    machine.succeed("udevadm trigger && udevadm settle")
+    machine.succeed("test -e /dev/disk/by-id/virtio-disk2")
 
 # --- Test 3: Passphrase still works ---
 
