@@ -79,33 +79,6 @@ fn umount_stderr_is_busy(stderr: &str) -> bool {
     s == "target is busy" || s.ends_with(": target is busy")
 }
 
-/// Build the scoped `btrfs device scan --forget` argument list: every
-/// LUKS mapper path `cmd_lock` is about to destroy (membership +
-/// orphan), filtered through fs.exists. The kernel forget path is
-/// per-device (reference/linux/fs/btrfs/volumes.c
-/// btrfs_free_stale_devices), and `btrfs device scan --forget <path>`
-/// rejects non-block-device arguments and aborts on the first failing
-/// path, so the list must only contain currently-present mappers.
-fn lock_forget_devices<F: Filesystem + ?Sized>(
-    fs: &F,
-    membership: &PoolMembership,
-    orphan_mappers: &[String],
-) -> Vec<String> {
-    let mut devs: Vec<String> = membership
-        .disks
-        .keys()
-        .map(|name| format!("/dev/mapper/{}", mapper_name(name).0))
-        .filter(|p| fs.exists(p))
-        .collect();
-    for entry in orphan_mappers {
-        let p = format!("/dev/mapper/{entry}");
-        if fs.exists(&p) {
-            devs.push(p);
-        }
-    }
-    devs
-}
-
 /// Compile dry-run steps for lock.
 pub fn compile_lock_steps(
     pool_was_mounted: bool,
@@ -162,15 +135,18 @@ pub fn compile_lock_steps(
     steps
 }
 
-/// The dry-run preview source of truth for `braid lock` and the set of
-/// execute inputs pre-computed during planning. `notes` + `steps` are
-/// both rendered by `preview()`; `execute()` consumes the preflight
-/// result (`pool_was_mounted`), the already-scanned `orphan_mappers`
-/// set, and emits accumulated `Warn` notes to stderr before mutating.
+/// The dry-run preview source of truth for `braid lock` and the sets
+/// pre-computed during planning. The membership close decision and
+/// forget set are driven by `open_mappers`; `fs.exists` during execute
+/// is only a disappearance guard before mutating an already-planned
+/// mapper.
 pub struct LockPlan {
     pub notes: Vec<PreviewNote>,
     pub steps: Vec<Step>,
     pub pool_was_mounted: bool,
+    /// Membership mappers observed open during planning. Bare mapper
+    /// names so preview, forget, and close all share one planned set.
+    pub open_mappers: Vec<String>,
     pub orphan_mappers: Vec<String>,
     pub mount_point: MountPoint,
 }
@@ -259,7 +235,13 @@ impl LockPlan {
                 // pools. Scope to the close set (membership + orphan mappers)
                 // -- the no-arg form is kernel-global and would invalidate
                 // scan entries for unrelated btrfs filesystems on the host.
-                let forget_devs = lock_forget_devices(fs, membership, orphan_mappers);
+                let forget_devs: Vec<String> = self
+                    .open_mappers
+                    .iter()
+                    .chain(orphan_mappers.iter())
+                    .map(|m| format!("/dev/mapper/{m}"))
+                    .filter(|p| fs.exists(p))
+                    .collect();
                 if !forget_devs.is_empty() {
                     let forget_result = runner.run(&CmdRequest::BtrfsDeviceScanForget {
                         devices: forget_devs,
@@ -294,44 +276,55 @@ impl LockPlan {
         }
 
         // 3. Close each mapper
+        let open_set: std::collections::HashSet<&str> =
+            self.open_mappers.iter().map(String::as_str).collect();
         let mut all_already_closed = true;
         for name in membership.disks.keys() {
             let mn = mapper_name(name);
-            let mapper_path = format!("/dev/mapper/{}", mn.0);
 
-            if fs.exists(&mapper_path) {
-                eprint!(
-                    "{}",
-                    line(StatusTag::Wait, &format!("disk {name}: locking..."))
-                );
-                match close_mapper_with_retry(runner, sleeper, &mn.0, color_enabled) {
-                    Ok(()) => {
-                        eprint!("{}", line(StatusTag::Ok, &format!("disk {name}: locked")));
-                    }
-                    Err(CloseMapperError::DeviceBusy(msg)) if umount_error.is_some() => {
-                        eprint!(
-                            "{}",
-                            line(
-                                StatusTag::Warn,
-                                &format!("disk {name}: close failed (umount was stuck): {msg}")
-                            )
-                        );
-                    }
-                    Err(e) => {
-                        let err = LockError::from(e);
-                        eprint!("{}", line(StatusTag::Fail, &format!("disk {name}: {err}")));
-                        if first_mapper_error.is_none() {
-                            first_mapper_error = Some(err);
-                        }
-                    }
-                }
-                all_already_closed = false;
-            } else {
+            if !open_set.contains(mn.0.as_str()) {
                 eprint!(
                     "{}",
                     line(StatusTag::Ok, &format!("disk {name}: already closed"))
                 );
+                continue;
             }
+
+            let mapper_path = format!("/dev/mapper/{}", mn.0);
+            if !fs.exists(&mapper_path) {
+                eprint!(
+                    "{}",
+                    line(StatusTag::Ok, &format!("disk {name}: already closed"))
+                );
+                continue;
+            }
+
+            eprint!(
+                "{}",
+                line(StatusTag::Wait, &format!("disk {name}: locking..."))
+            );
+            match close_mapper_with_retry(runner, sleeper, &mn.0, color_enabled) {
+                Ok(()) => {
+                    eprint!("{}", line(StatusTag::Ok, &format!("disk {name}: locked")));
+                }
+                Err(CloseMapperError::DeviceBusy(msg)) if umount_error.is_some() => {
+                    eprint!(
+                        "{}",
+                        line(
+                            StatusTag::Warn,
+                            &format!("disk {name}: close failed (umount was stuck): {msg}")
+                        )
+                    );
+                }
+                Err(e) => {
+                    let err = LockError::from(e);
+                    eprint!("{}", line(StatusTag::Fail, &format!("disk {name}: {err}")));
+                    if first_mapper_error.is_none() {
+                        first_mapper_error = Some(err);
+                    }
+                }
+            }
+            all_already_closed = false;
         }
 
         // 3b. Close orphaned braid-* mappers (precomputed during
@@ -463,6 +456,7 @@ where
         notes,
         steps,
         pool_was_mounted,
+        open_mappers,
         orphan_mappers,
         mount_point,
     })
@@ -757,6 +751,61 @@ mod tests {
 
         cmd_lock_impl(&runner, &fs, &NoopSleeper, &config, &membership, false)
             .expect("lock should succeed");
+    }
+
+    // Intent: LockPlan::execute honors the planned open_mappers set
+    //   and does not close a membership mapper that appeared in
+    //   /dev/mapper only after planning.
+    // Why it exists: closing a mapper that was not in the plan reopens
+    //   the cryptsetup-close-btrfs-held race because the forget call's
+    //   argv is plan-derived.
+    // Scenario: plan_lock runs while braid-aaa is closed; between plan
+    //   and execute braid-aaa reappears. Execute must not issue
+    //   CryptsetupClose or BtrfsDeviceScanForget for that unplanned
+    //   mapper.
+    #[test]
+    fn execute_does_not_close_membership_mapper_absent_from_plan() {
+        let runner = with_fsid_probe_mocks(
+            MockRunner::default()
+                .with_output(
+                    CmdRequest::MountpointCheck {
+                        path: MountPoint("/mnt/storage".into()),
+                    },
+                    ok_raw("mountpoint -q /mnt/storage"),
+                )
+                .with_output(
+                    CmdRequest::Umount {
+                        mount_point: MountPoint("/mnt/storage".into()),
+                    },
+                    ok_raw("umount /mnt/storage"),
+                ),
+        );
+        let plan_fs = MockFs::new(&[]);
+        let config = test_config();
+        let membership = test_membership();
+
+        let plan =
+            plan_lock(&runner, &plan_fs, &config, &membership).expect("plan_lock should succeed");
+        assert!(
+            plan.open_mappers.is_empty(),
+            "precondition: plan should record no membership opens"
+        );
+
+        let execute_fs = MockFs::new(&["/dev/mapper/braid-aaa"]);
+        let recording = RecordingRunner::new(runner);
+        plan.execute(&recording, &execute_fs, &NoopSleeper, &membership)
+            .expect("execute should succeed without closing the unplanned mapper");
+
+        assert!(
+            recording.close_calls().is_empty(),
+            "execute must not close mappers absent from open_mappers; got {:?}",
+            recording.close_calls()
+        );
+        assert!(
+            recording.forget_calls().is_empty(),
+            "execute must not invoke forget when open_mappers is empty; got {:?}",
+            recording.forget_calls()
+        );
     }
 
     #[test]
