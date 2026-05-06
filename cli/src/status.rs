@@ -4152,6 +4152,7 @@ mod tests {
             by_id_path: ByIdPath("/dev/disk/by-id/disk1".to_owned()),
             state: ConfigDiskState::PresentLuks {
                 uuid: LuksUuid("11111111-1111-1111-1111-111111111111".to_owned()),
+                label: None,
                 mapper_open: true,
             },
         }];

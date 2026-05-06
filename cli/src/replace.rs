@@ -2158,6 +2158,7 @@ mod tests {
             by_id_path: new_by_id.clone(),
             state: ConfigDiskState::PresentLuks {
                 uuid: luks_uuid.clone(),
+                label: Some("braid-disk3".to_owned()),
                 mapper_open: false,
             },
         };

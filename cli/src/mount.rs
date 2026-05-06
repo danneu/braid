@@ -295,7 +295,9 @@ fn plan_open_pool_inner<R: CommandRunner, F: Filesystem + ?Sized>(
                 });
                 missing.push((name.clone(), reason));
             }
-            ConfigDiskState::PresentLuks { uuid, mapper_open } => {
+            ConfigDiskState::PresentLuks {
+                uuid, mapper_open, ..
+            } => {
                 if let Some(expected) = &member.luks_uuid
                     && expected != uuid
                 {

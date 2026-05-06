@@ -1509,7 +1509,12 @@ fn discover_add_targets_before_mount<R: CommandRunner, F: Filesystem + ?Sized>(
         }
 
         let probed = probe::probe_config_disk(runner, fs, name, &target.by_id)?;
-        let ConfigDiskState::PresentLuks { uuid, mapper_open } = probed.state else {
+        let ConfigDiskState::PresentLuks {
+            uuid,
+            label,
+            mapper_open,
+        } = probed.state
+        else {
             continue;
         };
 
@@ -1520,8 +1525,7 @@ fn discover_add_targets_before_mount<R: CommandRunner, F: Filesystem + ?Sized>(
                 }
             }
             journal::AddJournalMode::FreshLuks { luks_label, .. } => {
-                if read_luks_label(runner, &target.by_id.0)?.as_deref() != Some(luks_label.as_str())
-                {
+                if label.as_deref() != Some(luks_label.as_str()) {
                     continue;
                 }
             }
@@ -1580,7 +1584,7 @@ fn verify_recover_passphrase_for_add_replay<R: CommandRunner, F: Filesystem + ?S
             continue;
         }
         let probed = probe::probe_config_disk(runner, fs, name, &target.by_id)?;
-        let ConfigDiskState::PresentLuks { uuid, .. } = probed.state else {
+        let ConfigDiskState::PresentLuks { uuid, label, .. } = probed.state else {
             continue;
         };
         match &target.mode {
@@ -1593,8 +1597,7 @@ fn verify_recover_passphrase_for_add_replay<R: CommandRunner, F: Filesystem + ?S
                 }
             }
             journal::AddJournalMode::FreshLuks { luks_label, .. } => {
-                if read_luks_label(runner, &target.by_id.0)?.as_deref() != Some(luks_label.as_str())
-                {
+                if label.as_deref() != Some(luks_label.as_str()) {
                     return Err(RecoverError::Failed(format!(
                         "recover add target '{}' has unexpected LUKS label",
                         name
@@ -1629,16 +1632,6 @@ fn verify_recover_passphrase_for_add_replay<R: CommandRunner, F: Filesystem + ?S
             ))
         }
     })
-}
-
-fn read_luks_label<R: CommandRunner>(
-    runner: &R,
-    device: &str,
-) -> Result<Option<String>, RecoverError> {
-    let raw = runner.run(&CmdRequest::CryptsetupLuksDumpText {
-        device: device.to_owned(),
-    })?;
-    Ok(crate::parse::parse_cryptsetup_luks_label(&raw)?.label)
 }
 
 fn visible_btrfs_fsid<R: CommandRunner>(
@@ -1769,7 +1762,12 @@ fn execute_add_pool_mutation_recovery<R: CommandRunner + Sync, F: Filesystem + ?
                 continue;
             }
             let probed = probe::probe_config_disk(runner, fs, name, &target.by_id)?;
-            let ConfigDiskState::PresentLuks { uuid, mapper_open } = probed.state else {
+            let ConfigDiskState::PresentLuks {
+                uuid,
+                label,
+                mapper_open,
+            } = probed.state
+            else {
                 continue;
             };
 
@@ -1780,9 +1778,7 @@ fn execute_add_pool_mutation_recovery<R: CommandRunner + Sync, F: Filesystem + ?
                     }
                 }
                 journal::AddJournalMode::FreshLuks { luks_label, .. } => {
-                    if read_luks_label(runner, &target.by_id.0)?.as_deref()
-                        != Some(luks_label.as_str())
-                    {
+                    if label.as_deref() != Some(luks_label.as_str()) {
                         continue;
                     }
                 }
@@ -1828,7 +1824,10 @@ fn execute_add_pool_mutation_recovery<R: CommandRunner + Sync, F: Filesystem + ?
                     luks_uuid,
                 } => {
                     let probed = probe::probe_config_disk(runner, fs, name, &target.by_id)?;
-                    let ConfigDiskState::PresentLuks { uuid, mapper_open } = probed.state else {
+                    let ConfigDiskState::PresentLuks {
+                        uuid, mapper_open, ..
+                    } = probed.state
+                    else {
                         return Err(RecoverError::Failed(format!(
                             "recover add target '{}' is not a LUKS device",
                             name
@@ -1875,10 +1874,8 @@ fn execute_add_pool_mutation_recovery<R: CommandRunner + Sync, F: Filesystem + ?
                                 luks_format_extra_opts,
                             )?;
                         }
-                        ConfigDiskState::PresentLuks { .. } => {
-                            if read_luks_label(runner, &target.by_id.0)?.as_deref()
-                                != Some(luks_label.as_str())
-                            {
+                        ConfigDiskState::PresentLuks { label, .. } => {
+                            if label.as_deref() != Some(luks_label.as_str()) {
                                 return Err(RecoverError::Failed(format!(
                                     "recover add target '{}' has unexpected LUKS label",
                                     name
@@ -2158,10 +2155,8 @@ fn finish_uncommitted_replace_recovery<R: CommandRunner + Sync, F: Filesystem + 
                     journal::clear_journal(params.paths)
                         .map_err(|e| RecoverError::Journal(e.to_string()))?;
                 }
-                ConfigDiskState::PresentLuks { .. } => {
-                    if read_luks_label(runner, &new_target.by_id.0)?.as_deref()
-                        != Some(luks_label.as_str())
-                    {
+                ConfigDiskState::PresentLuks { label, .. } => {
+                    if label.as_deref() != Some(luks_label.as_str()) {
                         return Err(RecoverError::Failed(format!(
                             "recover replace target '{}' has unexpected LUKS label",
                             new_name
@@ -3942,6 +3937,19 @@ mod tests {
         )
     }
 
+    fn luks_dump_text_request_count(requests: &[CmdRequest], device: &str) -> usize {
+        requests
+            .iter()
+            .filter(|r| {
+                matches!(
+                    r,
+                    CmdRequest::CryptsetupLuksDumpText { device: requested }
+                        if requested == device
+                )
+            })
+            .count()
+    }
+
     fn btrfs_show_target_fsid(fsid: &str) -> RawCommandOutput {
         ok_raw(
             "btrfs filesystem show target",
@@ -4212,6 +4220,11 @@ mod tests {
         );
 
         let requests = request_log.requests();
+        assert_eq!(
+            luks_dump_text_request_count(&requests, "/dev/disk/by-id/virtio-disk2"),
+            1,
+            "pre-mount FreshLuks discovery must use the label captured by probe_config_disk"
+        );
         let disk2_open = requests
             .iter()
             .position(|r| {
@@ -5636,15 +5649,20 @@ mod tests {
         )
         .expect("fresh replay should continue after preexisting LUKS format");
 
+        let requests = request_log.requests();
+        assert_eq!(
+            luks_dump_text_request_count(&requests, "/dev/disk/by-id/virtio-disk2"),
+            3,
+            "fresh add replay must use cached labels across pre-scan, credential verification, and replay"
+        );
         assert!(
-            !request_log
-                .requests()
+            !requests
                 .iter()
                 .any(|r| matches!(r, CmdRequest::CryptsetupLuksFormat { .. })),
             "already-formatted fresh target must not be reformatted"
         );
         assert!(
-            !request_log.requests().iter().any(|r| {
+            !requests.iter().any(|r| {
                 matches!(
                     r,
                     CmdRequest::BtrfsDeviceScan { device }
@@ -5900,8 +5918,14 @@ mod tests {
             0,
             "bad add recovery credential must fail before acquiring the inhibitor"
         );
+        let requests = runner.requests();
+        assert_eq!(
+            luks_dump_text_request_count(&requests, "/dev/disk/by-id/virtio-disk2"),
+            2,
+            "fresh add credential verification must use cached labels from its probe calls"
+        );
         assert!(
-            !runner.requests().iter().any(|r| matches!(
+            !requests.iter().any(|r| matches!(
                 r,
                 CmdRequest::CryptsetupLuksFormat { .. }
                     | CmdRequest::BtrfsDeviceAdd { .. }
@@ -6586,6 +6610,11 @@ mod tests {
         .expect("fresh prepared target should be reconciled without replace start");
 
         let requests = runner.requests();
+        assert_eq!(
+            luks_dump_text_request_count(&requests, "/dev/disk/by-id/virtio-new"),
+            1,
+            "fresh replace recovery must use the label captured by probe_config_disk"
+        );
         assert_eq!(inhibitor.acquire_count(), 1);
         let acquire_at = inhibitor
             .first_acquire_request_count()

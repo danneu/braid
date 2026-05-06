@@ -1,8 +1,8 @@
 use crate::cmd::{CmdError, CmdRequest, CommandRunner};
 use crate::config::mapper_name;
 use crate::parse::{
-    ParseError, parse_btrfs_filesystem_show, parse_cryptsetup_luks_uuid,
-    parse_cryptsetup_luks_version, parse_cryptsetup_status,
+    ParseError, parse_btrfs_filesystem_show, parse_cryptsetup_luks_label,
+    parse_cryptsetup_luks_uuid, parse_cryptsetup_luks_version, parse_cryptsetup_status,
 };
 use crate::types::*;
 
@@ -148,6 +148,7 @@ pub fn probe_config_disk<R: CommandRunner, F: Filesystem + ?Sized>(
             version,
         });
     }
+    let label = parse_cryptsetup_luks_label(&dump_raw)?.label;
 
     let mn = mapper_name(name);
     let mapper_open = probe_mapper_open(runner, name, &mn, &uuid)?;
@@ -155,7 +156,11 @@ pub fn probe_config_disk<R: CommandRunner, F: Filesystem + ?Sized>(
     Ok(ConfigDisk {
         name: name.to_owned(),
         by_id_path: by_id.clone(),
-        state: ConfigDiskState::PresentLuks { uuid, mapper_open },
+        state: ConfigDiskState::PresentLuks {
+            uuid,
+            label,
+            mapper_open,
+        },
     })
 }
 
@@ -608,6 +613,7 @@ mod tests {
             result.state,
             ConfigDiskState::PresentLuks {
                 uuid: LuksUuid("a1b2c3d4-e5f6-7890-abcd-ef1234567890".into()),
+                label: Some("braid-toshiba".to_owned()),
                 mapper_open: false,
             }
         );
@@ -665,6 +671,7 @@ mod tests {
             result.state,
             ConfigDiskState::PresentLuks {
                 uuid: LuksUuid("a1b2c3d4-e5f6-7890-abcd-ef1234567890".into()),
+                label: Some("braid-toshiba".to_owned()),
                 mapper_open: true,
             }
         );
@@ -787,6 +794,7 @@ mod tests {
             result.state,
             ConfigDiskState::PresentLuks {
                 uuid: LuksUuid("a1b2c3d4-e5f6-7890-abcd-ef1234567890".into()),
+                label: Some("braid-toshiba".to_owned()),
                 mapper_open: false,
             }
         );
