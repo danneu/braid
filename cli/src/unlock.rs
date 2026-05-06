@@ -166,6 +166,9 @@ pub fn plan_unlock<R: CommandRunner, F: Filesystem + ?Sized>(
     fs: &F,
     params: &UnlockParams<'_>,
 ) -> UnlockPlanReport {
+    // `plan_add` also runs `check_pool_unlocked_if_membership_exists`
+    // here; unlock skips it because unlock never writes pool.json
+    // membership -- see the "Contract:" block in `UnlockPlan::execute`.
     if let Err(msg) = preflight::check_no_pending_operation(params.paths) {
         return UnlockPlanReport {
             notes: Vec::new(),
