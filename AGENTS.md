@@ -130,6 +130,41 @@ Example: `pool is not mounted -- nothing to acknowledge`
 
 For the LUKS header backup workflow and the messaging invariant for `doctor`/`status`/`unlock` recovery hints, see [`docs/luks-unlock.md`](docs/luks-unlock.md#header-backup-workflow-and-messaging).
 
+## Doc Comments
+
+When adding a new top-level function, type, module, trait, or
+`pub`/`pub(crate)` item in the Rust CLI, add a `///` doc comment justifying
+why it exists at that boundary. Capture intent, invariant, ownership, or
+call-site coupling -- not the signature.
+
+Prefer one to three lines. If removing the comment would not lose any
+information a reader could not recover from the code, do not write it.
+
+Skip:
+
+- Trait impls whose purpose is the trait (`Display`, `Debug`, `From`,
+  `Default`, ...)
+- Enum variants already covered by an enum-level doc
+- `#[cfg(test)]` items and test fixtures
+
+Good:
+
+- "Shared mapper ownership classifier so planner and executor use the
+  same LUKS UUID invariant."
+- "Separate from `MountState` because we observe LUKS state without
+  holding the pool lock."
+
+Bad:
+
+- "Returns mapper ownership." (restates signature)
+- "Helper used by the planner." (vague)
+- "Caller must ensure path is canonical." (fabricated invariant nothing
+  enforces)
+
+Rust CLI only. Nix module options use NixOS option `description` fields;
+shell scripts and Python tests follow their own conventions (see Test
+Conventions).
+
 ## Commands
 
 - `just test-vm` — Run NixOS VM tests (excludes repro tests).
