@@ -348,7 +348,9 @@ pub fn print_probe_events(events: &[ProbeEvent]) {
     }
 }
 
-/// Compile dry-run steps from a validated OpenPlan.
+/// Compile output-only dry-run preview steps from a validated `OpenPlan`.
+/// Real execution consumes the `OpenPlan` directly and constructs LUKS
+/// requests through `luks::ensure_luks_open` / `ensure_luks_open_with_key_file`.
 pub fn compile_open_steps(
     plan: &OpenPlan,
     mount_point: &MountPoint,

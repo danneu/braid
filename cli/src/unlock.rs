@@ -1254,6 +1254,111 @@ mod tests {
         );
     }
 
+    // Intent: with `--key-file <path>`, the dry-run preview emits the
+    //   keyfile cryptsetup invocation (`cryptsetup open --type luks
+    //   --key-file <path> --keyfile-size 4096`), not the
+    //   passphrase-via-stdin form.
+    // Why it exists: `compile_open_steps` is the only place the
+    //   passphrase-vs-keyfile dry-run branch is rendered, and today's
+    //   only `plan_unlock` dry-run test exercises the `None` arm.
+    //   Without this test, deleting the keyfile branch silently
+    //   regresses the preview fidelity that auto-unlock operators rely
+    //   on when sanity-checking `braid unlock --key-file <path>
+    //   --dry-run`.
+    // Scenario: auto-unlock user runs `braid unlock --key-file
+    //   /run/keys/braid.key --dry-run` against a 2-disk closed pool.
+    #[test]
+    fn plan_unlock_dry_run_render_2_closed_disks_with_key_file() {
+        let (_state_dir, sp) = test_paths();
+        let config = Config::new(MountPoint("/mnt/storage".to_owned())).unwrap();
+        let mut disks = BTreeMap::new();
+        for (name, path) in [
+            ("disk1", "/dev/disk/by-id/virtio-disk1"),
+            ("disk2", "/dev/disk/by-id/virtio-disk2"),
+        ] {
+            disks.insert(
+                name.to_owned(),
+                DiskMember::from_by_id(ByIdPath(path.to_owned())),
+            );
+        }
+        let membership = PoolMembership { disks };
+        let fs = MockFs::new(&[
+            "/dev/disk/by-id/virtio-disk1",
+            "/dev/disk/by-id/virtio-disk2",
+        ]);
+
+        let runner = MockRunner::default()
+            .with_output(
+                CmdRequest::MountpointCheck {
+                    path: MountPoint("/mnt/storage".to_owned()),
+                },
+                err_raw("mountpoint", 1, ""),
+            )
+            .with_output(
+                CmdRequest::CryptsetupLuksUuid {
+                    device: "/dev/disk/by-id/virtio-disk1".into(),
+                },
+                RawCommandOutput {
+                    cmd: "cryptsetup luksUUID".into(),
+                    stdout: "aaaaaaaa-1111-2222-3333-444444444444\n".into(),
+                    stderr: String::new(),
+                    exit_status: 0,
+                },
+            )
+            .with_output(
+                CmdRequest::CryptsetupLuksUuid {
+                    device: "/dev/disk/by-id/virtio-disk2".into(),
+                },
+                RawCommandOutput {
+                    cmd: "cryptsetup luksUUID".into(),
+                    stdout: "bbbbbbbb-1111-2222-3333-444444444444\n".into(),
+                    stderr: String::new(),
+                    exit_status: 0,
+                },
+            )
+            .with_luks_dump_text_luks2_for(&[
+                "/dev/disk/by-id/virtio-disk1",
+                "/dev/disk/by-id/virtio-disk2",
+            ])
+            .with_mappers_closed(&["braid-disk1", "braid-disk2"]);
+
+        let params = UnlockParams {
+            config: &config,
+            membership: &membership,
+            paths: &sp,
+            passphrase_stdin: false,
+            passphrase_file: None,
+            key_file: Some(Path::new("/run/keys/braid.key")),
+            allow_degraded: false,
+            dry_run: true,
+        };
+
+        let rendered = plan_unlock(&runner, &fs, &params)
+            .result
+            .expect("plan_unlock should succeed on 2-disk closed pool")
+            .preview()
+            .render();
+
+        assert!(
+            rendered.contains("LUKS open /dev/disk/by-id/virtio-disk1"),
+            "expected disk1 LUKS open step, got: {rendered:?}",
+        );
+        assert!(
+            rendered.contains("LUKS open /dev/disk/by-id/virtio-disk2"),
+            "expected disk2 LUKS open step, got: {rendered:?}",
+        );
+        assert!(
+            rendered.contains(
+                "cryptsetup open --type luks --key-file /run/keys/braid.key --keyfile-size 4096"
+            ),
+            "expected keyfile LUKS open argv, got: {rendered:?}",
+        );
+        assert!(
+            !rendered.contains("--key-file=-"),
+            "dry-run should not render passphrase-via-stdin argv, got: {rendered:?}",
+        );
+    }
+
     /* Intent: when the pool is already mounted, `plan_unlock` returns
      * an `UnlockPlan` with `open_plan: None`, the `AlreadyMounted`
      * Info note on `plan.notes`, and zero steps; `preview().render()`
