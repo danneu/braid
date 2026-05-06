@@ -68,9 +68,6 @@ pub struct ReplaceParams<'a> {
 /// remains confirmation-only behind the `!params.yes` gate.
 pub struct ReplacePlan {
     pub notes: Vec<PreviewNote>,
-    /// Cached preview output for tests and callers that inspect the plan.
-    /// Execution uses `work_plan`, and `preview()` re-renders from it.
-    pub steps: Vec<Step>,
     work_plan: ReplaceWorkPlan,
 }
 
@@ -262,11 +259,7 @@ impl ReplacePlan {
         params: &ReplaceParams<'_>,
     ) -> Result<(), ReplaceError> {
         let color_enabled = color_enabled_for_stderr();
-        let ReplacePlan {
-            notes,
-            steps: _,
-            work_plan,
-        } = self;
+        let ReplacePlan { notes, work_plan } = self;
         let ReplaceWorkPlan {
             config,
             old_name,
@@ -966,14 +959,7 @@ pub fn plan_replace<R: CommandRunner + Sync, F: Filesystem + ?Sized>(
 
     ReplacePlanReport {
         notes: Vec::new(),
-        result: {
-            let steps = work_plan.render_steps();
-            Ok(ReplacePlan {
-                notes,
-                steps,
-                work_plan,
-            })
-        },
+        result: Ok(ReplacePlan { notes, work_plan }),
     }
 }
 
@@ -1225,7 +1211,7 @@ fn resolve_replace_source<R: CommandRunner>(
 }
 
 #[cfg(test)]
-struct ReplaceStepsInput<'a> {
+struct ReplaceWorkPlanTestInput<'a> {
     new_name: &'a str,
     new_by_id: &'a ByIdPath,
     new_probed: &'a ConfigDisk,
@@ -1239,14 +1225,16 @@ struct ReplaceStepsInput<'a> {
 }
 
 #[cfg(test)]
-fn compile_replace_steps(input: &ReplaceStepsInput<'_>) -> Result<Vec<Step>, ReplaceError> {
+fn replace_work_plan_for_test(
+    input: &ReplaceWorkPlanTestInput<'_>,
+) -> Result<ReplaceWorkPlan, ReplaceError> {
     let config = Config::new(input.mount_point.clone()).expect("valid test mount point");
-    let pool = replace_steps_test_pool(
+    let pool = replace_work_plan_test_pool(
         input.replace_source,
         input.will_clear_last_missing,
         input.total_devices,
     );
-    let work_plan = build_replace_work_plan(ReplaceWorkPlanInput {
+    build_replace_work_plan(ReplaceWorkPlanInput {
         config,
         old_name: "disk2",
         new_name: input.new_name,
@@ -1259,12 +1247,11 @@ fn compile_replace_steps(input: &ReplaceStepsInput<'_>) -> Result<Vec<Step>, Rep
         paths: input.paths,
         enroll_key_file: input.enroll_key_file,
         luks_format_extra_opts: input.luks_format_extra_opts,
-    })?;
-    Ok(work_plan.render_steps())
+    })
 }
 
 #[cfg(test)]
-fn replace_steps_test_pool(
+fn replace_work_plan_test_pool(
     replace_source: &ReplaceSource,
     will_clear_last_missing: bool,
     total_devices: u64,
@@ -1954,7 +1941,7 @@ mod tests {
             mapper: MapperName("braid-disk2".into()),
             devid: 2,
         };
-        let steps = compile_replace_steps(&ReplaceStepsInput {
+        let steps = replace_work_plan_for_test(&ReplaceWorkPlanTestInput {
             new_name: "disk3",
             new_by_id: &ByIdPath("/dev/disk/by-id/virtio-disk3".into()),
             new_probed: &new_probed,
@@ -1966,7 +1953,8 @@ mod tests {
             enroll_key_file: None,
             luks_format_extra_opts: &[],
         })
-        .unwrap();
+        .unwrap()
+        .render_steps();
         let descriptions: Vec<&str> = steps.iter().map(|s| s.description.as_str()).collect();
         assert!(
             descriptions
@@ -2015,7 +2003,7 @@ mod tests {
             state: ConfigDiskState::PresentNotLuks,
         };
         let source = ReplaceSource::Missing { devid: 2 };
-        let steps = compile_replace_steps(&ReplaceStepsInput {
+        let steps = replace_work_plan_for_test(&ReplaceWorkPlanTestInput {
             new_name: "disk3",
             new_by_id: &ByIdPath("/dev/disk/by-id/virtio-disk3".into()),
             new_probed: &new_probed,
@@ -2027,7 +2015,8 @@ mod tests {
             enroll_key_file: None,
             luks_format_extra_opts: &[],
         })
-        .unwrap();
+        .unwrap()
+        .render_steps();
         let descriptions: Vec<&str> = steps.iter().map(|s| s.description.as_str()).collect();
         assert!(
             descriptions
@@ -2371,7 +2360,7 @@ mod tests {
         let _config = make_replace_config();
         let new_probed = new_probed_not_luks();
         let source = ReplaceSource::Missing { devid: 2 };
-        let steps = compile_replace_steps(&ReplaceStepsInput {
+        let steps = replace_work_plan_for_test(&ReplaceWorkPlanTestInput {
             new_name: "disk3",
             new_by_id: &ByIdPath("/dev/disk/by-id/virtio-disk3".into()),
             new_probed: &new_probed,
@@ -2383,7 +2372,8 @@ mod tests {
             enroll_key_file: None,
             luks_format_extra_opts: &[],
         })
-        .unwrap();
+        .unwrap()
+        .render_steps();
         let descriptions: Vec<&str> = steps.iter().map(|s| s.description.as_str()).collect();
         assert!(
             !descriptions
@@ -2401,7 +2391,7 @@ mod tests {
         let _config = make_replace_config();
         let new_probed = new_probed_not_luks();
         let source = ReplaceSource::Missing { devid: 2 };
-        let steps = compile_replace_steps(&ReplaceStepsInput {
+        let steps = replace_work_plan_for_test(&ReplaceWorkPlanTestInput {
             new_name: "disk3",
             new_by_id: &ByIdPath("/dev/disk/by-id/virtio-disk3".into()),
             new_probed: &new_probed,
@@ -2413,7 +2403,8 @@ mod tests {
             enroll_key_file: None,
             luks_format_extra_opts: &[],
         })
-        .unwrap();
+        .unwrap()
+        .render_steps();
         let descriptions: Vec<&str> = steps.iter().map(|s| s.description.as_str()).collect();
         assert!(
             !descriptions
@@ -3369,7 +3360,7 @@ mod tests {
             mapper: MapperName("braid-disk2".into()),
             devid: 2,
         };
-        let steps = compile_replace_steps(&ReplaceStepsInput {
+        let steps = replace_work_plan_for_test(&ReplaceWorkPlanTestInput {
             new_name: "disk3",
             new_by_id: &ByIdPath("/dev/disk/by-id/virtio-disk3".into()),
             new_probed: &new_probed,
@@ -3381,7 +3372,8 @@ mod tests {
             enroll_key_file: None,
             luks_format_extra_opts: &[],
         })
-        .unwrap();
+        .unwrap()
+        .render_steps();
         let descriptions: Vec<&str> = steps.iter().map(|s| s.description.as_str()).collect();
         assert!(
             !descriptions
@@ -3408,7 +3400,7 @@ mod tests {
             "--iter-time".to_owned(),
             "1".to_owned(),
         ];
-        let steps = compile_replace_steps(&ReplaceStepsInput {
+        let steps = replace_work_plan_for_test(&ReplaceWorkPlanTestInput {
             new_name: "disk3",
             new_by_id: &ByIdPath("/dev/disk/by-id/virtio-disk3".into()),
             new_probed: &new_probed,
@@ -3420,7 +3412,8 @@ mod tests {
             enroll_key_file: Some(kf),
             luks_format_extra_opts: &luks_format_extra_opts,
         })
-        .unwrap();
+        .unwrap()
+        .render_steps();
         let output = Step::render_dry_run(&steps);
         let lines: Vec<&str> = output.lines().collect();
 
@@ -3483,7 +3476,7 @@ mod tests {
     fn dry_run_render_missing_path_ordering() {
         let new_probed = new_probed_not_luks();
         let source = ReplaceSource::Missing { devid: 2 };
-        let steps = compile_replace_steps(&ReplaceStepsInput {
+        let steps = replace_work_plan_for_test(&ReplaceWorkPlanTestInput {
             new_name: "disk3",
             new_by_id: &ByIdPath("/dev/disk/by-id/virtio-disk3".into()),
             new_probed: &new_probed,
@@ -3495,7 +3488,8 @@ mod tests {
             enroll_key_file: None,
             luks_format_extra_opts: &[],
         })
-        .unwrap();
+        .unwrap()
+        .render_steps();
         let output = Step::render_dry_run(&steps);
         let lines: Vec<&str> = output.lines().collect();
 
@@ -4658,7 +4652,7 @@ mod tests {
 
         let preview = plan.preview();
         let rendered = preview.render();
-        let legacy = Step::render_dry_run(&plan.steps);
+        let legacy = Step::render_dry_run(&preview.steps);
         // Byte-equivalence holds because this fixture produces zero
         // notes (clean preflight on a rw pool with no busy op). A
         // future fixture with real preflight notes would render them
@@ -4666,7 +4660,7 @@ mod tests {
         // hold.
         assert_eq!(
             rendered, legacy,
-            "plan.preview().render() must be byte-equivalent to Step::render_dry_run(&plan.steps) for the live path",
+            "plan.preview().render() must be byte-equivalent to Step::render_dry_run(&plan.preview().steps) for the live path",
         );
 
         assert!(
@@ -4767,7 +4761,7 @@ mod tests {
 
         let preview = plan.preview();
         let rendered = preview.render();
-        let legacy = Step::render_dry_run(&plan.steps);
+        let legacy = Step::render_dry_run(&preview.steps);
         // Byte-equivalence holds because this fixture produces zero
         // notes (clean preflight on a rw pool with no busy op). A
         // future fixture with real preflight notes would render them
@@ -4775,7 +4769,7 @@ mod tests {
         // hold.
         assert_eq!(
             rendered, legacy,
-            "plan.preview().render() must be byte-equivalent to Step::render_dry_run(&plan.steps) for the missing path",
+            "plan.preview().render() must be byte-equivalent to Step::render_dry_run(&plan.preview().steps) for the missing path",
         );
 
         assert!(

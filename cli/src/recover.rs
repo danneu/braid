@@ -154,10 +154,11 @@ pub struct RecoverParams<'a> {
 }
 
 /// Dry-run preview source of truth for `braid recover` plus the
-/// execute inputs pre-computed during planning. `notes` + `steps` are
-/// both rendered by `preview()`; `execute()` renders `notes` to stderr
-/// with `STDERR_STYLE` before any mutation, preserving today's
-/// "entry banner then probe context then work" real-run sequence.
+/// execute inputs pre-computed during planning. `preview()` renders
+/// accumulated notes plus steps from the semantic work plan; `execute()`
+/// renders `notes` to stderr with `STDERR_STYLE` before any mutation,
+/// preserving today's "entry banner then probe context then work"
+/// real-run sequence.
 ///
 /// `open_plan` is `None` when the pool was already mounted at probe
 /// time. `notes` carries the entry-banner `Info` note first, then the
@@ -166,9 +167,6 @@ pub struct RecoverParams<'a> {
 #[derive(Debug)]
 pub struct RecoverPlan {
     pub notes: Vec<PreviewNote>,
-    /// Cached preview output for tests and callers that inspect the plan.
-    /// Execution uses `work_plan`, and `preview()` re-renders from it.
-    pub steps: Vec<Step>,
     work_plan: RecoverWorkPlan,
 }
 
@@ -969,7 +967,6 @@ impl RecoverPlan {
 
         let RecoverPlan {
             notes: _,
-            steps: _,
             work_plan,
         } = self;
         work_plan.execute(runner, fs, by_id_resolver, params)
@@ -1261,15 +1258,9 @@ pub fn plan_recover<R: CommandRunner + Sync, F: Filesystem + ?Sized>(
         luks_headers_dir: params.paths.luks_headers_dir(),
         actions,
     };
-    let steps = work_plan.render_steps();
-
     RecoverPlanReport {
         notes: Vec::new(),
-        result: Ok(RecoverPlan {
-            notes,
-            steps,
-            work_plan,
-        }),
+        result: Ok(RecoverPlan { notes, work_plan }),
     }
 }
 

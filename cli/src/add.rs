@@ -598,16 +598,13 @@ fn devid_for_mapper_path(pool: &PoolState, mapper_path: &str) -> Option<u64> {
 }
 
 /// Dry-run preview source of truth for `braid add` plus the execute
-/// inputs pre-computed during planning. `notes` + `steps` are both
-/// rendered by `preview()`; `execute()` renders the accumulated notes
-/// to stderr through `preview::render_notes_for_stderr` before any
-/// mutation. Warn notes use canonical `[warn] <body>` wording and
-/// Info notes render bare.
+/// inputs pre-computed during planning. `preview()` renders accumulated
+/// notes plus steps from the semantic work plan; `execute()` renders
+/// the accumulated notes to stderr through
+/// `preview::render_notes_for_stderr` before any mutation. Warn notes
+/// use canonical `[warn] <body>` wording and Info notes render bare.
 pub struct AddPlan {
     pub notes: Vec<PreviewNote>,
-    /// Cached preview output for tests and callers that inspect the plan.
-    /// Execution uses `work_plan`, and `preview()` re-renders from it.
-    pub steps: Vec<Step>,
     work_plan: AddWorkPlan,
     pub config: Config,
     pub parsed: Vec<(String, ByIdPath)>,
@@ -1269,21 +1266,18 @@ pub fn plan_add<R: CommandRunner + Sync, F: Filesystem + ?Sized>(
             };
         }
     };
-    let steps = work_plan.render_steps();
-
     // No-op preview: zero steps + Info note naming the already-in-pool
     // target(s). The Info note suppresses `Preview::render`'s
     // `nothing to do.` fallback (see `preview.rs`:
     // `render_info_note_suppresses_nothing_to_do`), matching real-run's
     // `eprintln!("Nothing to do -- ...")` wording via the shared
     // `format_add_noop` helper.
-    if steps.is_empty() {
+    if work_plan.is_noop() {
         notes.push(PreviewNote::Info(format_add_noop(&names)));
     }
 
     let plan = AddPlan {
         notes,
-        steps,
         work_plan,
         config,
         parsed,
@@ -1521,14 +1515,6 @@ fn build_add_work_plan<R: CommandRunner>(
         pool_was_mounted: input.pool.mounted,
         existing_pool_device_count: input.pool.devices.len(),
     })
-}
-
-#[cfg(test)]
-fn render_add_work_plan_steps<R: CommandRunner>(
-    runner: &R,
-    input: &AddStepsInput<'_>,
-) -> Result<Vec<Step>, AddError> {
-    Ok(build_add_work_plan(runner, input)?.render_steps())
 }
 
 struct AddConfirmDisk<'a> {
@@ -1943,7 +1929,7 @@ mod tests {
         let probed = vec![probed_present_luks("disk1", true, None)];
         let pool = pool_mounted_with_fsid("aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee");
 
-        let result = render_add_work_plan_steps(
+        let result = build_add_work_plan(
             &runner,
             &AddStepsInput {
                 names: &["disk1"],
@@ -1982,7 +1968,7 @@ mod tests {
         )];
         let pool = pool_mounted_with_fsid(pool_fsid);
 
-        let result = render_add_work_plan_steps(
+        let result = build_add_work_plan(
             &runner,
             &AddStepsInput {
                 names: &["disk1"],
@@ -2013,7 +1999,7 @@ mod tests {
         )];
         let pool = pool_mounted_with_fsid("aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee");
 
-        let steps = render_add_work_plan_steps(
+        let steps = build_add_work_plan(
             &runner,
             &AddStepsInput {
                 names: &["disk1"],
@@ -2026,7 +2012,8 @@ mod tests {
                 luks_format_extra_opts: &[],
             },
         )
-        .unwrap();
+        .unwrap()
+        .render_steps();
 
         assert!(
             steps.iter().any(|s| s
@@ -2047,7 +2034,7 @@ mod tests {
         )];
         let pool = pool_unmounted();
 
-        let result = render_add_work_plan_steps(
+        let result = build_add_work_plan(
             &runner,
             &AddStepsInput {
                 names: &["disk1"],
@@ -2078,7 +2065,7 @@ mod tests {
         }];
         let pool = pool_unmounted();
 
-        let steps = render_add_work_plan_steps(
+        let steps = build_add_work_plan(
             &runner,
             &AddStepsInput {
                 names: &["disk1"],
@@ -2091,7 +2078,8 @@ mod tests {
                 luks_format_extra_opts: &[],
             },
         )
-        .unwrap();
+        .unwrap()
+        .render_steps();
 
         assert!(
             steps
@@ -2184,7 +2172,6 @@ mod tests {
 
         let plan = AddPlan {
             notes: vec![],
-            steps,
             work_plan,
             config: Config::new(MountPoint("/mnt/storage".into())).unwrap(),
             parsed: vec![("disk2".into(), by_id.clone())],
@@ -2337,7 +2324,7 @@ mod tests {
         )];
         let pool = pool_mounted_with_fsid("aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee");
 
-        let dry_err = render_add_work_plan_steps(
+        let dry_err = build_add_work_plan(
             &runner,
             &AddStepsInput {
                 names: &["disk1"],
@@ -2717,10 +2704,8 @@ mod tests {
             },
         )
         .expect("closed recoverable target should plan");
-        let steps = work_plan.render_steps();
         let plan = AddPlan {
             notes: vec![],
-            steps,
             work_plan,
             config,
             parsed: vec![("disk2".into(), by_id_disk2.clone())],
@@ -4398,7 +4383,7 @@ mod tests {
             "1".to_owned(),
         ];
 
-        let steps = render_add_work_plan_steps(
+        let steps = build_add_work_plan(
             &runner,
             &AddStepsInput {
                 names: &["disk1"],
@@ -4411,7 +4396,8 @@ mod tests {
                 luks_format_extra_opts: &luks_format_extra_opts,
             },
         )
-        .unwrap();
+        .unwrap()
+        .render_steps();
         let output = Step::render_dry_run(&steps);
         let lines: Vec<&str> = output.lines().collect();
 
@@ -4469,7 +4455,7 @@ mod tests {
         let pool = pool_unmounted();
         let kf = std::path::Path::new("/mnt/usb/braid.key");
 
-        let steps = render_add_work_plan_steps(
+        let steps = build_add_work_plan(
             &runner,
             &AddStepsInput {
                 names: &["disk1"],
@@ -4482,7 +4468,8 @@ mod tests {
                 luks_format_extra_opts: &[],
             },
         )
-        .unwrap();
+        .unwrap()
+        .render_steps();
         let output = Step::render_dry_run(&steps);
         let lines: Vec<&str> = output.lines().collect();
 
@@ -4524,7 +4511,7 @@ mod tests {
         }];
         let pool = pool_mounted_with_fsid("aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee");
 
-        let steps = render_add_work_plan_steps(
+        let steps = build_add_work_plan(
             &runner,
             &AddStepsInput {
                 names: &["disk2"],
@@ -4537,7 +4524,8 @@ mod tests {
                 luks_format_extra_opts: &[],
             },
         )
-        .unwrap();
+        .unwrap()
+        .render_steps();
         let output = Step::render_dry_run(&steps);
 
         // Should contain: LUKS format, header backup, LUKS open, device add, balance
@@ -5821,13 +5809,14 @@ mod tests {
             },
         );
         let plan = report.result.expect("plan_add should succeed for noop");
+        let preview = plan.preview();
         assert!(
-            plan.steps.is_empty(),
+            preview.steps.is_empty(),
             "note-only success must have zero steps, got: {:?}",
-            plan.steps
+            preview.steps
         );
 
-        let rendered = plan.preview().render();
+        let rendered = preview.render();
         let expected = "Nothing to do -- disk2 already in pool.\n";
         assert_eq!(rendered, expected, "exact render must match noop Info line");
         assert!(

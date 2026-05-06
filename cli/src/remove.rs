@@ -70,17 +70,14 @@ pub struct RemoveParams<'a> {
 }
 
 /// Dry-run preview source of truth for `braid remove` plus the execute
-/// inputs pre-computed during planning. `notes` + `steps` are both
-/// rendered by `preview()`; `execute()` consumes the preflight state
-/// (target device, remaining/total counts, mount point) and renders
-/// any accumulated notes to stderr via the shared
+/// inputs pre-computed during planning. `preview()` renders accumulated
+/// notes plus steps from the semantic work plan; `execute()` consumes
+/// the preflight state (target device, remaining/total counts, mount
+/// point) and renders any accumulated notes to stderr via the shared
 /// `preview::render_notes_for_stderr` helper (canonical `[warn] <body>`
 /// wording) before mutating.
 pub struct RemovePlan {
     pub notes: Vec<PreviewNote>,
-    /// Cached preview output for tests and callers that inspect the plan.
-    /// Execution uses `work_plan`, and `preview()` re-renders from it.
-    pub steps: Vec<Step>,
     work_plan: RemoveWorkPlan,
 }
 
@@ -199,7 +196,6 @@ impl RemovePlan {
 
         let RemovePlan {
             notes: _,
-            steps: _,
             work_plan,
         } = self;
 
@@ -286,7 +282,7 @@ impl RemovePlan {
 /// Plan a `braid remove` run. Owns everything above today's `--dry-run`
 /// gate: pending-op preflight, config read, pool probe / mounted
 /// validation, mutation preflight, UPS preflight, target device lookup,
-/// missing-device guard, `compile_remove_present_steps`, and the
+/// missing-device guard, work-plan construction, and the
 /// eviction-space preflight. Returns a `RemovePlanReport`: on success,
 /// accumulated notes move into `plan.notes`; on post-preflight failure,
 /// accumulated notes stay on `report.notes` so `cmd_remove` can render
@@ -418,11 +414,7 @@ pub fn plan_remove<R: CommandRunner + Sync, F: Filesystem + ?Sized>(
         }
     }
 
-    let plan = RemovePlan {
-        notes,
-        steps: work_plan.render_steps(),
-        work_plan,
-    };
+    let plan = RemovePlan { notes, work_plan };
 
     RemovePlanReport {
         notes: Vec::new(),
@@ -508,8 +500,8 @@ pub(crate) enum EvictionCheck {
 ///   uncertainty is fail-closed here by design. Do **not** unify the two
 ///   error policies -- the asymmetry is the point.
 ///
-/// `remaining == 0` is not a valid input; `compile_remove_present_steps` has
-/// already rejected the last-disk case upstream.
+/// `remaining == 0` is not a valid input; `RemoveWorkPlan::new` has already
+/// rejected the last-disk case upstream.
 pub(crate) fn check_eviction_space<R: CommandRunner>(
     runner: &R,
     mount_point: &MountPoint,
@@ -639,11 +631,11 @@ fn check_single_survivor<R: CommandRunner>(
 }
 
 #[cfg(test)]
-fn compile_remove_present_steps(
+fn remove_present_work_plan_for_test(
     mn: &MapperName,
     pool: &PoolState,
     mount_point: &MountPoint,
-) -> Result<Vec<Step>, RemoveError> {
+) -> Result<RemoveWorkPlan, RemoveError> {
     let target = pool
         .devices
         .iter()
@@ -663,7 +655,6 @@ fn compile_remove_present_steps(
         pool.devices.len(),
         mount_point.clone(),
     )
-    .map(|plan| plan.render_steps())
 }
 
 // ---------------------------------------------------------------------------
@@ -1260,7 +1251,9 @@ mod tests {
             null_underlying: vec![],
         };
         let mount_point = MountPoint("/mnt/storage".into());
-        let steps = compile_remove_present_steps(&mn, &pool, &mount_point).unwrap();
+        let steps = remove_present_work_plan_for_test(&mn, &pool, &mount_point)
+            .unwrap()
+            .render_steps();
         let output = Step::render_dry_run(&steps);
         let lines: Vec<&str> = output.lines().collect();
 
@@ -1306,7 +1299,9 @@ mod tests {
             null_underlying: vec![],
         };
         let mount_point = MountPoint("/mnt/storage".into());
-        let steps = compile_remove_present_steps(&mn, &pool, &mount_point).unwrap();
+        let steps = remove_present_work_plan_for_test(&mn, &pool, &mount_point)
+            .unwrap()
+            .render_steps();
         let output = Step::render_dry_run(&steps);
         let lines: Vec<&str> = output.lines().collect();
 
@@ -2304,11 +2299,12 @@ mod tests {
         // Steps for a 3->2 remove are: device remove + cryptsetup close.
         // The planner still emits the full step list even when the
         // preflight soft-warned.
+        let steps = plan.preview().steps;
         assert_eq!(
-            plan.steps.len(),
+            steps.len(),
             2,
             "3->2 remove plan must emit 2 steps; got {:?}",
-            plan.steps,
+            steps,
         );
     }
 
@@ -2365,11 +2361,12 @@ mod tests {
             }
             other => panic!("expected PreviewNote::Warn, got {other:?}"),
         }
+        let steps = plan.preview().steps;
         assert_eq!(
-            plan.steps.len(),
+            steps.len(),
             2,
             "3->2 remove plan must emit 2 steps; got {:?}",
-            plan.steps,
+            steps,
         );
     }
 

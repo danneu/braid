@@ -70,17 +70,14 @@ pub struct RemoveMissingParams<'a> {
 }
 
 /// Dry-run preview source of truth for `braid remove-missing` plus the
-/// execute inputs pre-computed during planning. `notes` + `steps` are
-/// both rendered by `preview()`; `execute()` consumes the preflight
-/// state (`missing_id`, `missing_count`, `remaining_present`) and
-/// renders any accumulated notes to stderr via the shared
-/// `preview::render_notes_for_stderr` helper (canonical `[warn] <body>`
-/// wording) before mutating.
+/// execute inputs pre-computed during planning. `preview()` renders
+/// accumulated notes plus steps from the semantic work plan; `execute()`
+/// consumes the preflight state (`missing_id`, `missing_count`,
+/// `remaining_present`) and renders any accumulated notes to stderr via
+/// the shared `preview::render_notes_for_stderr` helper (canonical
+/// `[warn] <body>` wording) before mutating.
 pub struct RemoveMissingPlan {
     pub notes: Vec<PreviewNote>,
-    /// Cached preview output for tests and callers that inspect the plan.
-    /// Execution uses `work_plan`, and `preview()` re-renders from it.
-    pub steps: Vec<Step>,
     work_plan: RemoveMissingWorkPlan,
 }
 
@@ -173,7 +170,6 @@ impl RemoveMissingPlan {
 
         let RemoveMissingPlan {
             notes: _,
-            steps: _,
             work_plan,
         } = self;
 
@@ -312,7 +308,7 @@ impl RemoveMissingPlan {
 /// `--dry-run` gate: pending-op preflight, config read, pool probe /
 /// mounted validation, mutation preflight, UPS preflight,
 /// missing-device validations, the relocation-space preflight, and
-/// `compile_steps`. Returns a
+/// work-plan construction. Returns a
 /// `RemoveMissingPlanReport`: on success, accumulated notes move into
 /// `plan.notes`; on post-preflight failure, accumulated notes stay on
 /// `report.notes` so `cmd_remove_missing` can render them before
@@ -437,15 +433,9 @@ pub fn plan_remove_missing<R: CommandRunner + Sync, F: Filesystem + ?Sized>(
         missing_count: pool.missing_count,
         mount_point: config.mount_point().clone(),
     };
-    let steps = work_plan.render_steps();
-
     RemoveMissingPlanReport {
         notes: Vec::new(),
-        result: Ok(RemoveMissingPlan {
-            notes,
-            steps,
-            work_plan,
-        }),
+        result: Ok(RemoveMissingPlan { notes, work_plan }),
     }
 }
 
@@ -552,12 +542,12 @@ pub(crate) fn check_relocation_space<R: CommandRunner>(
 }
 
 #[cfg(test)]
-fn compile_steps(
+fn remove_missing_work_plan_for_test(
     missing_id: u64,
     will_clear_last_missing: bool,
     remaining_present: usize,
     mount_point: &MountPoint,
-) -> Vec<Step> {
+) -> RemoveMissingWorkPlan {
     RemoveMissingWorkPlan {
         missing_id,
         will_clear_last_missing,
@@ -565,7 +555,6 @@ fn compile_steps(
         missing_count: if will_clear_last_missing { 1 } else { 2 },
         mount_point: mount_point.clone(),
     }
-    .render_steps()
 }
 
 // ---------------------------------------------------------------------------
@@ -1076,14 +1065,16 @@ mod tests {
         assert!(result.is_ok(), "should proceed on error: {result:?}");
     }
 
-    // --- compile_steps tests ---
+    // --- work-plan render tests ---
 
     #[test]
     // Intent: dry-run with 1 missing + ≥2 survivors shows rebalance step.
     // Why: operator should see the soft balance step in the plan.
     // Scenario: 3-disk pool, 1 disk failed. Dry run should show the balance.
-    fn compile_steps_shows_rebalance_when_clearing_last_missing() {
-        let steps = compile_steps(3, true, 2, &MountPoint("/mnt/storage".into()));
+    fn work_plan_steps_show_rebalance_when_clearing_last_missing() {
+        let steps =
+            remove_missing_work_plan_for_test(3, true, 2, &MountPoint("/mnt/storage".into()))
+                .render_steps();
         assert!(
             steps
                 .iter()
@@ -1097,8 +1088,10 @@ mod tests {
     // Intent: dry-run with 1 survivor omits rebalance step.
     // Why: can't have RAID1 with only 1 device.
     // Scenario: 2-disk pool, 1 died. Only 1 survivor -- no balance.
-    fn compile_steps_omits_rebalance_with_single_survivor() {
-        let steps = compile_steps(3, true, 1, &MountPoint("/mnt/storage".into()));
+    fn work_plan_steps_omit_rebalance_with_single_survivor() {
+        let steps =
+            remove_missing_work_plan_for_test(3, true, 1, &MountPoint("/mnt/storage".into()))
+                .render_steps();
         assert!(
             !steps
                 .iter()
@@ -1112,8 +1105,10 @@ mod tests {
     // Intent: dry-run when not clearing last missing omits rebalance step.
     // Why: if more missing devices remain, balance would be premature.
     // Scenario: 4-disk pool, 2 missing, removing 1 of them.
-    fn compile_steps_omits_rebalance_when_not_last_missing() {
-        let steps = compile_steps(3, false, 2, &MountPoint("/mnt/storage".into()));
+    fn work_plan_steps_omit_rebalance_when_not_last_missing() {
+        let steps =
+            remove_missing_work_plan_for_test(3, false, 2, &MountPoint("/mnt/storage".into()))
+                .render_steps();
         assert!(
             !steps
                 .iter()
@@ -1948,7 +1943,7 @@ mod tests {
     // Scenario: one missing device (devid 2), last missing, 2 present -> includes balance.
     fn dry_run_render_targeted_removal_with_balance() {
         let mount_point = MountPoint("/mnt/storage".into());
-        let steps = compile_steps(2, true, 2, &mount_point);
+        let steps = remove_missing_work_plan_for_test(2, true, 2, &mount_point).render_steps();
         let output = Step::render_dry_run(&steps);
         let lines: Vec<&str> = output.lines().collect();
 
@@ -2125,9 +2120,14 @@ mod tests {
             }
             other => panic!("expected PreviewNote::Warn, got {other:?}"),
         }
-        // Steps are still compiled: devid 3 is the last missing in a
+        // Steps still render: devid 3 is the last missing in a
         // 2-survivor pool so the soft balance step must be present.
-        let descriptions: Vec<&str> = plan.steps.iter().map(|s| s.description.as_str()).collect();
+        let preview = plan.preview();
+        let descriptions: Vec<&str> = preview
+            .steps
+            .iter()
+            .map(|s| s.description.as_str())
+            .collect();
         assert!(
             descriptions
                 .iter()
@@ -2191,7 +2191,7 @@ mod tests {
             }
             other => panic!("expected PreviewNote::Warn, got {other:?}"),
         }
-        assert!(!plan.steps.is_empty(), "steps must still be compiled");
+        assert!(!plan.preview().steps.is_empty(), "steps must still render");
     }
 
     /* Intent: `plan.preview().render()` places the ENOSPC soft-warn
@@ -2224,7 +2224,6 @@ mod tests {
             notes: vec![PreviewNote::Warn(
                 "ENOSPC pre-flight check failed: boom; proceeding anyway".into(),
             )],
-            steps: work_plan.render_steps(),
             work_plan,
         };
         let rendered = plan.preview().render();
