@@ -1,4 +1,5 @@
-use std::io::BufRead;
+use std::io::Read;
+use zeroize::Zeroizing;
 
 use crate::cmd::{CmdRequest, CommandRunner, LsblkFieldKind};
 use crate::parse::parse_lsblk_field;
@@ -96,14 +97,35 @@ pub fn format_hw_info_line(info: &DiskHwInfo) -> Option<String> {
 // confirm_yes
 // ---------------------------------------------------------------------------
 
-/// Read a line and check it equals "yes".
-/// Accepts a reader for testability.
-pub fn confirm_yes_from<R: BufRead>(reader: &mut R) -> Result<(), String> {
+/// Maximum accepted confirmation bytes before the newline.
+///
+/// Confirmation text is normally just `yes`; the cap keeps accidental pasted
+/// secrets or hostile pipes out of a growable heap allocation.
+const CONFIRM_MAX_BYTES: usize = 256;
+
+/// Read a confirmation line from an unbuffered reader and require `yes`.
+///
+/// This helper intentionally accepts `Read`, not `BufRead`, so confirmation
+/// cannot pre-drain bytes needed by a later `--passphrase-stdin` read.
+pub fn confirm_yes_from<R: Read + ?Sized>(reader: &mut R) -> Result<(), String> {
     eprint!("Type 'yes' to continue: ");
-    let mut input = String::new();
-    reader
-        .read_line(&mut input)
-        .map_err(|e| format!("failed to read confirmation: {e}"))?;
+    let mut buf: Zeroizing<[u8; CONFIRM_MAX_BYTES]> = Zeroizing::new([0u8; CONFIRM_MAX_BYTES]);
+    let mut len = 0usize;
+    let mut byte: Zeroizing<[u8; 1]> = Zeroizing::new([0u8; 1]);
+    loop {
+        let n = reader
+            .read(&mut *byte)
+            .map_err(|e| format!("failed to read confirmation: {e}"))?;
+        if n == 0 || byte[0] == b'\n' {
+            break;
+        }
+        if len >= CONFIRM_MAX_BYTES {
+            return Err("aborted by user".into());
+        }
+        buf[len] = byte[0];
+        len += 1;
+    }
+    let input = std::str::from_utf8(&buf[..len]).unwrap_or("").trim();
     if input.trim() == "yes" {
         Ok(())
     } else {
@@ -113,8 +135,9 @@ pub fn confirm_yes_from<R: BufRead>(reader: &mut R) -> Result<(), String> {
 
 /// Interactive confirmation: read "yes" from stdin.
 pub fn confirm_yes() -> Result<(), String> {
-    let mut stdin = std::io::stdin().lock();
-    confirm_yes_from(&mut stdin)
+    use std::os::unix::io::FromRawFd;
+    let mut stdin_file = std::mem::ManuallyDrop::new(unsafe { std::fs::File::from_raw_fd(0) });
+    confirm_yes_from(&mut *stdin_file)
 }
 
 // ---------------------------------------------------------------------------
@@ -197,5 +220,33 @@ mod tests {
     fn confirm_trims_whitespace() {
         let mut input = std::io::Cursor::new(b"  yes  \n");
         assert!(confirm_yes_from(&mut input).is_ok());
+    }
+
+    // Intent: overlong confirmation lines are rejected outright.
+    // Why it exists: truncating and then trimming could accept crafted input
+    //   whose visible prefix is "yes" but whose full line is not.
+    // Scenario: hostile or accidentally-large input reaches the confirm prompt.
+    #[test]
+    fn confirm_rejects_overlong_line() {
+        let line: Vec<u8> = std::iter::repeat(b' ')
+            .take(CONFIRM_MAX_BYTES + 1)
+            .chain([b'\n'])
+            .collect();
+        let mut input = std::io::Cursor::new(line);
+        let err = confirm_yes_from(&mut input).unwrap_err();
+        assert_eq!(err, "aborted by user");
+    }
+
+    // Intent: "yes" followed by enough garbage to cross the cap rejects.
+    // Why it exists: this directly pins the old truncate-collision shape.
+    // Scenario: crafted input tries to make the capped prefix trim to "yes".
+    #[test]
+    fn confirm_rejects_yes_with_trailing_garbage_past_cap() {
+        let mut line: Vec<u8> = b"yes".to_vec();
+        line.extend(std::iter::repeat(b' ').take(CONFIRM_MAX_BYTES));
+        line.extend(b"no\n");
+        let mut input = std::io::Cursor::new(line);
+        let err = confirm_yes_from(&mut input).unwrap_err();
+        assert_eq!(err, "aborted by user");
     }
 }

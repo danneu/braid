@@ -6,10 +6,10 @@ use crate::parse::{
 };
 use crate::state_paths::StatePaths;
 use crate::types::{ByIdPath, LuksUuid, MapperName, PoolDevice};
-use std::io::{BufRead, Write};
+use std::io::{Read, Write};
 use std::os::unix::fs::PermissionsExt;
 use std::os::unix::io::{AsRawFd, RawFd};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use zeroize::Zeroizing;
 
 /// LUKS key slot 1: binary random keyfile (no PBKDF, raw key material).
@@ -19,6 +19,13 @@ pub const LUKS_SLOT_KEYFILE: u8 = 1;
 pub const KEYFILE_NAME: &str = "braid.key";
 /// Keyfile size in bytes: 4096 bytes of random data from /dev/urandom.
 pub const KEYFILE_SIZE: usize = 4096;
+
+/// Maximum accepted passphrase bytes for every source.
+///
+/// The raw passphrase buffer is allocated at this cap plus one byte before
+/// reading, so malformed input cannot force Vec/String growth and leave stale
+/// heap copies behind.
+const PASSPHRASE_MAX_BYTES: usize = 64 * 1024;
 
 /// State of a LUKS key slot, as reported by `cryptsetup luksDump`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -91,14 +98,14 @@ pub trait PassphraseReader {
     /// Read a passphrase from the terminal with the given prompt label,
     /// suppressing echo. Returns the validated (non-empty, no embedded
     /// line-break characters) passphrase.
-    fn read_tty(&self, label: &str) -> Result<String, LuksError>;
+    fn read_tty(&self, label: &str) -> Result<Zeroizing<String>, LuksError>;
 }
 
 /// Production TTY reader backed by /dev/tty and libc termios.
 pub struct RealTty;
 
 impl PassphraseReader for RealTty {
-    fn read_tty(&self, label: &str) -> Result<String, LuksError> {
+    fn read_tty(&self, label: &str) -> Result<Zeroizing<String>, LuksError> {
         let mut tty = std::fs::OpenOptions::new()
             .read(true)
             .write(true)
@@ -115,7 +122,10 @@ impl PassphraseReader for RealTty {
 }
 
 #[doc(hidden)]
-pub fn read_tty_from_file(tty: &mut std::fs::File, label: &str) -> Result<String, LuksError> {
+pub fn read_tty_from_file(
+    tty: &mut std::fs::File,
+    label: &str,
+) -> Result<Zeroizing<String>, LuksError> {
     let fd = tty.as_raw_fd();
     let orig = tcgetattr(fd)?;
     let mut modified = orig;
@@ -126,9 +136,8 @@ pub fn read_tty_from_file(tty: &mut std::fs::File, label: &str) -> Result<String
     tty.write_all(label.as_bytes())?;
     tty.flush()?;
 
-    let mut raw: Zeroizing<String> = Zeroizing::new(String::new());
-    std::io::BufReader::new(&mut *tty).read_line(&mut *raw)?;
-    validate_passphrase(&raw, "terminal")
+    let raw = read_line_into_zeroizing(tty, "terminal")?;
+    finalize_passphrase_bytes(&raw, "terminal")
 }
 
 fn tcgetattr(fd: RawFd) -> std::io::Result<libc::termios> {
@@ -199,9 +208,9 @@ impl ScriptedPassphraseReader {
 
 #[cfg(test)]
 impl PassphraseReader for ScriptedPassphraseReader {
-    fn read_tty(&self, _label: &str) -> Result<String, LuksError> {
+    fn read_tty(&self, _label: &str) -> Result<Zeroizing<String>, LuksError> {
         match self.queue.borrow_mut().pop_front() {
-            Some(s) => Ok(s),
+            Some(s) => Ok(Zeroizing::new(s)),
             None => Err(LuksError::Validation(
                 "ScriptedPassphraseReader: queue exhausted".into(),
             )),
@@ -215,7 +224,7 @@ impl PassphraseReader for ScriptedPassphraseReader {
 pub fn read_passphrase(
     passphrase_file: Option<&std::path::Path>,
     passphrase_stdin: bool,
-) -> Result<String, LuksError> {
+) -> Result<Zeroizing<String>, LuksError> {
     read_passphrase_with(passphrase_file, passphrase_stdin, false, &RealTty)
 }
 
@@ -232,14 +241,15 @@ pub fn read_passphrase_with(
     passphrase_stdin: bool,
     confirm_new: bool,
     tty: &dyn PassphraseReader,
-) -> Result<String, LuksError> {
+) -> Result<Zeroizing<String>, LuksError> {
     if passphrase_file.is_none() && passphrase_stdin {
-        let mut stdin = std::io::stdin().lock();
+        use std::os::unix::io::FromRawFd;
+        let mut stdin = std::mem::ManuallyDrop::new(unsafe { std::fs::File::from_raw_fd(0) });
         return read_passphrase_with_readers(
             passphrase_file,
             passphrase_stdin,
             confirm_new,
-            &mut stdin,
+            &mut *stdin,
             tty,
         );
     }
@@ -259,20 +269,16 @@ fn read_passphrase_with_readers(
     passphrase_file: Option<&std::path::Path>,
     passphrase_stdin: bool,
     confirm_new: bool,
-    stdin: &mut dyn BufRead,
+    stdin: &mut dyn Read,
     tty: &dyn PassphraseReader,
-) -> Result<String, LuksError> {
+) -> Result<Zeroizing<String>, LuksError> {
     if let Some(path) = passphrase_file {
-        let contents = std::fs::read_to_string(path).map_err(|e| {
-            LuksError::Validation(format!(
-                "failed to read passphrase file {}: {e}",
-                path.display()
-            ))
-        })?;
-        return validate_passphrase(&contents, &format!("file {}", path.display()));
+        let raw = read_file_into_zeroizing(path)?;
+        return finalize_passphrase_bytes(&raw, &format!("file {}", path.display()));
     }
     if passphrase_stdin {
-        return read_passphrase_stdin_from(stdin);
+        let raw = read_line_into_zeroizing(stdin, "stdin")?;
+        return finalize_passphrase_bytes(&raw, "stdin");
     }
     let first = tty.read_tty("LUKS passphrase: ")?;
     if !confirm_new {
@@ -282,39 +288,98 @@ fn read_passphrase_with_readers(
     check_passphrase_match(first, second)
 }
 
-/// Normalize and validate a raw passphrase string.
-/// Strips trailing line-break characters, then rejects empty values
-/// and embedded line-breaks.
-fn validate_passphrase(raw: &str, source: &str) -> Result<String, LuksError> {
-    let passphrase = raw.trim_end_matches(['\n', '\r']).to_owned();
-    if passphrase.is_empty() {
+/// Read one unbuffered line into a pre-sized zeroizing byte buffer.
+///
+/// Shared by stdin and TTY passphrase sources so neither path can introduce a
+/// std-owned buffer or grow the heap allocation that contains plaintext.
+fn read_line_into_zeroizing<R: Read + ?Sized>(
+    reader: &mut R,
+    source: &str,
+) -> Result<Zeroizing<Vec<u8>>, LuksError> {
+    let mut zbuf: Zeroizing<Vec<u8>> = Zeroizing::new(Vec::with_capacity(PASSPHRASE_MAX_BYTES + 1));
+    let mut byte: Zeroizing<[u8; 1]> = Zeroizing::new([0u8; 1]);
+    loop {
+        let n = reader.read(&mut *byte)?;
+        if n == 0 || byte[0] == b'\n' {
+            break;
+        }
+        if zbuf.len() >= PASSPHRASE_MAX_BYTES {
+            return Err(LuksError::Validation(format!(
+                "passphrase from {source} exceeds {PASSPHRASE_MAX_BYTES} bytes"
+            )));
+        }
+        zbuf.push(byte[0]);
+    }
+    Ok(zbuf)
+}
+
+/// Read a complete passphrase file into zeroizing storage with a hard cap.
+///
+/// Separate from stdin/TTY because files must preserve embedded line breaks
+/// until final validation can reject multi-line passphrase files.
+fn read_file_into_zeroizing(path: &Path) -> Result<Zeroizing<Vec<u8>>, LuksError> {
+    let f = std::fs::File::open(path).map_err(|e| {
+        LuksError::Validation(format!(
+            "failed to read passphrase file {}: {e}",
+            path.display()
+        ))
+    })?;
+    let mut limited = f.take((PASSPHRASE_MAX_BYTES as u64) + 1);
+    let mut zbuf: Zeroizing<Vec<u8>> = Zeroizing::new(Vec::with_capacity(PASSPHRASE_MAX_BYTES + 1));
+    let mut chunk: Zeroizing<[u8; 512]> = Zeroizing::new([0u8; 512]);
+    loop {
+        let n = limited.read(&mut *chunk).map_err(LuksError::Io)?;
+        if n == 0 {
+            break;
+        }
+        zbuf.extend_from_slice(&chunk[..n]);
+    }
+    if zbuf.len() > PASSPHRASE_MAX_BYTES {
+        return Err(LuksError::Validation(format!(
+            "passphrase file {} exceeds {PASSPHRASE_MAX_BYTES} bytes",
+            path.display()
+        )));
+    }
+    Ok(zbuf)
+}
+
+/// Convert raw passphrase bytes into the validated zeroizing string form.
+///
+/// All branches trim only trailing line breaks, reject embedded line breaks,
+/// and perform the one plaintext String allocation inside `Zeroizing`.
+fn finalize_passphrase_bytes(raw: &[u8], source: &str) -> Result<Zeroizing<String>, LuksError> {
+    let mut end = raw.len();
+    while end > 0 && (raw[end - 1] == b'\n' || raw[end - 1] == b'\r') {
+        end -= 1;
+    }
+    let trimmed = &raw[..end];
+    let s = std::str::from_utf8(trimmed).map_err(|_| {
+        LuksError::Validation(format!("passphrase from {source} is not valid UTF-8"))
+    })?;
+    if s.is_empty() {
         return Err(LuksError::Validation(format!(
             "passphrase from {source} must not be empty"
         )));
     }
-    if passphrase.contains('\n') || passphrase.contains('\r') {
+    if s.contains('\n') || s.contains('\r') {
         return Err(LuksError::Validation(format!(
             "passphrase from {source} contains line-break characters -- \
              this passphrase would be impossible to enter interactively"
         )));
     }
-    Ok(passphrase)
-}
-
-/// Read a single line from the given reader and validate it as a
-/// passphrase. Parallels `confirm_yes_from` -- the production caller
-/// locks stdin and passes it in; tests pass `Cursor`.
-fn read_passphrase_stdin_from(r: &mut dyn BufRead) -> Result<String, LuksError> {
-    let mut buf = String::new();
-    r.read_line(&mut buf)?;
-    validate_passphrase(&buf, "stdin")
+    let mut z: Zeroizing<String> = Zeroizing::new(String::with_capacity(s.len()));
+    z.push_str(s);
+    Ok(z)
 }
 
 /// Require two passphrase reads to match byte-for-byte. Returns the
 /// passphrase on match, Validation error on mismatch. Used to catch
 /// typos on the fresh-format path where the typoed passphrase would
 /// otherwise become the canonical pool passphrase.
-fn check_passphrase_match(first: String, second: String) -> Result<String, LuksError> {
+fn check_passphrase_match(
+    first: Zeroizing<String>,
+    second: Zeroizing<String>,
+) -> Result<Zeroizing<String>, LuksError> {
     if first == second {
         Ok(first)
     } else {
@@ -896,6 +961,10 @@ mod tests {
     use crate::cmd::{CmdRequest, MockRunner, RawCommandOutput};
     use crate::types::ByIdPath;
     use std::os::unix::io::{AsRawFd, FromRawFd, RawFd};
+
+    fn zpass(s: &str) -> Zeroizing<String> {
+        Zeroizing::new(String::from(s))
+    }
 
     fn open_pty_pair() -> (std::fs::File, std::fs::File) {
         let mut master = -1;
@@ -2022,7 +2091,7 @@ mod tests {
         let file = dir.path().join("pw.txt");
         std::fs::write(&file, "hunter2\n").unwrap();
         let result = read_passphrase(Some(file.as_path()), false).unwrap();
-        assert_eq!(result, "hunter2");
+        assert_eq!(result.as_str(), "hunter2");
     }
 
     /*
@@ -2036,7 +2105,7 @@ mod tests {
         let file = dir.path().join("pw.txt");
         std::fs::write(&file, "hunter2").unwrap();
         let result = read_passphrase(Some(file.as_path()), false).unwrap();
-        assert_eq!(result, "hunter2");
+        assert_eq!(result.as_str(), "hunter2");
     }
 
     /*
@@ -2051,7 +2120,7 @@ mod tests {
         let file = dir.path().join("pw.txt");
         std::fs::write(&file, "hunter2\r\n").unwrap();
         let result = read_passphrase(Some(file.as_path()), false).unwrap();
-        assert_eq!(result, "hunter2");
+        assert_eq!(result.as_str(), "hunter2");
     }
 
     /*
@@ -2136,7 +2205,7 @@ mod tests {
         let file = dir.path().join("pw.txt");
         std::fs::write(&file, " spaced \n").unwrap();
         let result = read_passphrase(Some(file.as_path()), false).unwrap();
-        assert_eq!(result, " spaced ");
+        assert_eq!(result.as_str(), " spaced ");
     }
 
     /*
@@ -2148,6 +2217,24 @@ mod tests {
     fn read_passphrase_file_missing() {
         let result = read_passphrase(Some(std::path::Path::new("/no/such/file")), false);
         assert!(result.is_err());
+    }
+
+    // Intent: oversized passphrase files are rejected at the file-reader cap.
+    // Why it exists: the file branch has its own read loop, and it must not grow
+    //   the zeroizing raw buffer past the pre-allocated capacity.
+    // Scenario: operator points --passphrase-file at a large binary file.
+    #[test]
+    fn read_passphrase_file_rejects_oversized() {
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("pw.bin");
+        std::fs::write(&file, vec![b'x'; PASSPHRASE_MAX_BYTES + 1]).unwrap();
+        let err = read_passphrase(Some(file.as_path()), false).unwrap_err();
+        match err {
+            LuksError::Validation(msg) => {
+                assert!(msg.contains("exceeds"), "expected 'exceeds' in: {msg}")
+            }
+            other => panic!("expected Validation, got {other:?}"),
+        }
     }
 
     // ── check_passphrase_match ───────────────────────────────────────
@@ -2163,8 +2250,8 @@ mod tests {
      */
     #[test]
     fn check_passphrase_match_ok_on_equal() {
-        let got = check_passphrase_match("secret".into(), "secret".into()).unwrap();
-        assert_eq!(got, "secret");
+        let got = check_passphrase_match(zpass("secret"), zpass("secret")).unwrap();
+        assert_eq!(got.as_str(), "secret");
     }
 
     /*
@@ -2175,7 +2262,7 @@ mod tests {
      */
     #[test]
     fn check_passphrase_match_err_on_differ() {
-        let err = check_passphrase_match("abc".into(), "xyz".into()).unwrap_err();
+        let err = check_passphrase_match(zpass("abc"), zpass("xyz")).unwrap_err();
         match err {
             LuksError::Validation(msg) => assert!(
                 msg.contains("do not match"),
@@ -2193,7 +2280,7 @@ mod tests {
      */
     #[test]
     fn check_passphrase_match_case_sensitive() {
-        assert!(check_passphrase_match("ABC".into(), "abc".into()).is_err());
+        assert!(check_passphrase_match(zpass("ABC"), zpass("abc")).is_err());
     }
 
     /*
@@ -2204,14 +2291,13 @@ mod tests {
      */
     #[test]
     fn check_passphrase_match_trailing_whitespace_sensitive() {
-        assert!(check_passphrase_match("abc".into(), "abc ".into()).is_err());
+        assert!(check_passphrase_match(zpass("abc"), zpass("abc ")).is_err());
     }
 
-    // ── read_passphrase_stdin_from ───────────────────────────────────
+    // ── read_passphrase_with_readers (stdin branch) ──────────────────
     //
-    // Mirrors the `confirm_yes_from` pattern in cli/src/confirm.rs:101.
-    // Tests feed a Cursor so the production stdin path is unchanged but
-    // behavior is pinned at unit level.
+    // Tests feed a Cursor through the full stdin branch so the line reader
+    // and shared finalization step are covered together.
 
     /*
      * Intent: a well-formed line returns the trimmed passphrase.
@@ -2221,8 +2307,9 @@ mod tests {
     #[test]
     fn read_passphrase_stdin_from_ok() {
         let mut cur = std::io::Cursor::new(b"secret\n");
-        let got = read_passphrase_stdin_from(&mut cur).unwrap();
-        assert_eq!(got, "secret");
+        let tty = ScriptedPassphraseReader::new(Vec::<String>::new());
+        let got = read_passphrase_with_readers(None, true, false, &mut cur, &tty).unwrap();
+        assert_eq!(got.as_str(), "secret");
     }
 
     /*
@@ -2234,7 +2321,8 @@ mod tests {
     #[test]
     fn read_passphrase_stdin_from_empty_rejected() {
         let mut cur = std::io::Cursor::new(b"\n");
-        let err = read_passphrase_stdin_from(&mut cur).unwrap_err();
+        let tty = ScriptedPassphraseReader::new(Vec::<String>::new());
+        let err = read_passphrase_with_readers(None, true, false, &mut cur, &tty).unwrap_err();
         match err {
             LuksError::Validation(msg) => {
                 assert!(msg.contains("empty"), "expected 'empty' in: {msg}")
@@ -2252,8 +2340,26 @@ mod tests {
     #[test]
     fn read_passphrase_stdin_from_strips_crlf() {
         let mut cur = std::io::Cursor::new(b"secret\r\n");
-        let got = read_passphrase_stdin_from(&mut cur).unwrap();
-        assert_eq!(got, "secret");
+        let tty = ScriptedPassphraseReader::new(Vec::<String>::new());
+        let got = read_passphrase_with_readers(None, true, false, &mut cur, &tty).unwrap();
+        assert_eq!(got.as_str(), "secret");
+    }
+
+    // Intent: oversized piped passphrases are rejected before the buffer grows.
+    // Why it exists: stdin uses the byte-by-byte line reader; this pins the hard
+    //   cap that protects against Vec reallocation with plaintext bytes.
+    // Scenario: operator pipes an accidentally-large blob to --passphrase-stdin.
+    #[test]
+    fn read_passphrase_stdin_rejects_oversized() {
+        let mut cur = std::io::Cursor::new(vec![b'x'; PASSPHRASE_MAX_BYTES + 1]);
+        let tty = ScriptedPassphraseReader::new(Vec::<String>::new());
+        let err = read_passphrase_with_readers(None, true, false, &mut cur, &tty).unwrap_err();
+        match err {
+            LuksError::Validation(msg) => {
+                assert!(msg.contains("exceeds"), "expected 'exceeds' in: {msg}")
+            }
+            other => panic!("expected Validation, got {other:?}"),
+        }
     }
 
     // ── read_passphrase_with_readers (branch selection) ──────────────
@@ -2276,7 +2382,7 @@ mod tests {
         let tty = ScriptedPassphraseReader::new(["pw", "SENTINEL"]);
         let mut stdin = std::io::Cursor::new(&[][..]);
         let got = read_passphrase_with_readers(None, false, false, &mut stdin, &tty).unwrap();
-        assert_eq!(got, "pw");
+        assert_eq!(got.as_str(), "pw");
         assert_eq!(tty.remaining(), 1, "SENTINEL must remain unconsumed");
     }
 
@@ -2290,7 +2396,7 @@ mod tests {
         let tty = ScriptedPassphraseReader::new(["pw", "pw"]);
         let mut stdin = std::io::Cursor::new(&[][..]);
         let got = read_passphrase_with_readers(None, false, true, &mut stdin, &tty).unwrap();
-        assert_eq!(got, "pw");
+        assert_eq!(got.as_str(), "pw");
         assert_eq!(tty.remaining(), 0);
     }
 
@@ -2329,7 +2435,7 @@ mod tests {
         let tty = ScriptedPassphraseReader::new(["SENTINEL"]);
         let mut stdin = std::io::Cursor::new(b"STDIN_SHOULD_NOT_BE_READ\n".to_vec());
         let got = read_passphrase_with_readers(Some(&file), false, true, &mut stdin, &tty).unwrap();
-        assert_eq!(got, "from-file");
+        assert_eq!(got.as_str(), "from-file");
         assert_eq!(tty.remaining(), 1, "SENTINEL must remain unconsumed");
         assert_eq!(
             stdin.position(),
@@ -2353,7 +2459,7 @@ mod tests {
         let tty = ScriptedPassphraseReader::new(["SENTINEL"]);
         let mut stdin = std::io::Cursor::new(b"from-stdin\n".to_vec());
         let got = read_passphrase_with_readers(None, true, true, &mut stdin, &tty).unwrap();
-        assert_eq!(got, "from-stdin");
+        assert_eq!(got.as_str(), "from-stdin");
         assert_eq!(tty.remaining(), 1, "SENTINEL must remain unconsumed");
     }
 

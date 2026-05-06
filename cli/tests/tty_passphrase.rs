@@ -118,7 +118,7 @@ fn probe_pty_integration() -> Result<(), String> {
             .expect("reader thread panicked")
             .map_err(|e| e.to_string())
     })?;
-    assert_eq!(got, "hunter2");
+    assert_eq!(got.as_str(), "hunter2");
 
     let after = tcgetattr(slave_file.as_raw_fd())?;
     assert_termios_eq(&before, &after);
@@ -133,7 +133,7 @@ fn probe_deadlock_immunity() -> Result<(), String> {
         .map_err(|e| format!("failed to write passphrase to pty master: {e}"))?;
     let got =
         braid_cli::luks::read_tty_from_file(&mut slave_file, PROMPT).map_err(|e| e.to_string())?;
-    assert_eq!(got, "x");
+    assert_eq!(got.as_str(), "x");
     Ok(())
 }
 

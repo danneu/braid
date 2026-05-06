@@ -16,10 +16,10 @@ use crate::state_paths::StatePaths;
 use crate::status::{BalanceReport, get_balance_report};
 use crate::status_tag::{StatusTag, color_enabled_for_stderr, emit_status, status_line};
 use crate::types::{ByIdPath, ConfigDiskState, MountPoint, PoolState};
-use std::borrow::Cow;
 use std::path::PathBuf;
 use std::time::Duration;
 use thiserror::Error;
+use zeroize::Zeroizing;
 
 #[derive(Debug, Error)]
 pub enum RecoverError {
@@ -39,6 +39,25 @@ pub enum RecoverError {
     Luks(#[from] crate::luks::LuksError),
     #[error("{0}")]
     Failed(String),
+}
+
+/// Recovery-local passphrase holder that preserves zeroizing ownership.
+///
+/// Borrowed values refer to the already-resolved `OpenCredential`; owned values
+/// are freshly read for recovery and must still zeroize on drop.
+enum RecoverPassphrase<'a> {
+    Borrowed(&'a Zeroizing<String>),
+    Owned(Zeroizing<String>),
+}
+
+impl RecoverPassphrase<'_> {
+    /// Expose passphrase text only at subprocess handoff call sites.
+    fn as_str(&self) -> &str {
+        match self {
+            Self::Borrowed(z) => z.as_str(),
+            Self::Owned(z) => z.as_str(),
+        }
+    }
 }
 
 /// Resolve `/dev/disk/by-id/` symlinks against live device identity during recovery.
@@ -1727,13 +1746,13 @@ fn write_add_phase(
 fn recover_passphrase<'a>(
     existing: Option<&'a OpenCredential>,
     params: &RecoverParams<'_>,
-) -> Result<Cow<'a, str>, RecoverError> {
+) -> Result<RecoverPassphrase<'a>, RecoverError> {
     match existing {
-        Some(OpenCredential::Passphrase(passphrase)) => Ok(Cow::Borrowed(passphrase.as_str())),
+        Some(OpenCredential::Passphrase(passphrase)) => Ok(RecoverPassphrase::Borrowed(passphrase)),
         Some(OpenCredential::KeyFile(_)) => Err(RecoverError::Failed(
             "add recovery requires a passphrase for delayed LUKS format".into(),
         )),
-        None => Ok(Cow::Owned(luks::read_passphrase(
+        None => Ok(RecoverPassphrase::Owned(luks::read_passphrase(
             params.passphrase_file,
             params.passphrase_stdin,
         )?)),
@@ -2020,7 +2039,7 @@ fn execute_add_pool_mutation_recovery<R: CommandRunner + Sync, F: Filesystem + ?
 
     if !add_targets_all_live(&pool, targets) {
         let mut opened_or_scanned = false;
-        let mut passphrase: Option<Cow<'_, str>> = None;
+        let mut passphrase: Option<RecoverPassphrase<'_>> = None;
         for (name, target) in targets {
             if live_member_names(&pool).contains(name) {
                 continue;
@@ -2053,7 +2072,8 @@ fn execute_add_pool_mutation_recovery<R: CommandRunner + Sync, F: Filesystem + ?
                     passphrase = Some(recover_passphrase(credential, params)?);
                 }
                 let passphrase = passphrase
-                    .as_deref()
+                    .as_ref()
+                    .map(|p| p.as_str())
                     .expect("passphrase was resolved above");
                 luks::ensure_luks_open(runner, name, &target.by_id, passphrase)?;
             }
@@ -2071,7 +2091,7 @@ fn execute_add_pool_mutation_recovery<R: CommandRunner + Sync, F: Filesystem + ?
 
     if !add_targets_all_live(&pool, targets) {
         let passphrase = recover_passphrase(credential, params)?;
-        verify_recover_passphrase_for_add_replay(runner, fs, &pool, targets, passphrase.as_ref())?;
+        verify_recover_passphrase_for_add_replay(runner, fs, &pool, targets, passphrase.as_str())?;
         let _guard = params
             .sleep_inhibitor
             .acquire("replaying interrupted add")
@@ -2104,7 +2124,7 @@ fn execute_add_pool_mutation_recovery<R: CommandRunner + Sync, F: Filesystem + ?
                         )));
                     }
                     if !mapper_open {
-                        luks::ensure_luks_open(runner, name, &target.by_id, passphrase.as_ref())?;
+                        luks::ensure_luks_open(runner, name, &target.by_id, passphrase.as_str())?;
                     }
                     if let Some(fsid) = visible_btrfs_fsid(runner, &mapper_path)?
                         && &fsid != verified_pool_fsid
@@ -2128,7 +2148,7 @@ fn execute_add_pool_mutation_recovery<R: CommandRunner + Sync, F: Filesystem + ?
                             luks::luks_format(
                                 runner,
                                 &target.by_id.0,
-                                passphrase.as_ref(),
+                                passphrase.as_str(),
                                 luks_format_extra_opts,
                             )?;
                         }
@@ -2152,7 +2172,7 @@ fn execute_add_pool_mutation_recovery<R: CommandRunner + Sync, F: Filesystem + ?
                         ensure_keyfile_enrolled(
                             runner,
                             &target.by_id.0,
-                            passphrase.as_ref(),
+                            passphrase.as_str(),
                             key_file,
                         )?;
                     }
@@ -2162,7 +2182,7 @@ fn execute_add_pool_mutation_recovery<R: CommandRunner + Sync, F: Filesystem + ?
                         &target.mapper_name,
                         params.paths,
                     )?;
-                    luks::ensure_luks_open(runner, name, &target.by_id, passphrase.as_ref())?;
+                    luks::ensure_luks_open(runner, name, &target.by_id, passphrase.as_str())?;
                     crate::pool::pool_add_device(runner, &mapper_path, mount_point, false)
                         .map_err(|e| RecoverError::Failed(format!("recover add replay: {e}")))?;
                 }
@@ -2328,13 +2348,13 @@ fn recover_passphrase_for_context<'a>(
     existing: Option<&'a OpenCredential>,
     params: &RecoverParams<'_>,
     context: &str,
-) -> Result<Cow<'a, str>, RecoverError> {
+) -> Result<RecoverPassphrase<'a>, RecoverError> {
     match existing {
-        Some(OpenCredential::Passphrase(passphrase)) => Ok(Cow::Borrowed(passphrase.as_str())),
+        Some(OpenCredential::Passphrase(passphrase)) => Ok(RecoverPassphrase::Borrowed(passphrase)),
         Some(OpenCredential::KeyFile(_)) => Err(RecoverError::Failed(format!(
             "{context} requires a passphrase"
         ))),
-        None => Ok(Cow::Owned(luks::read_passphrase(
+        None => Ok(RecoverPassphrase::Owned(luks::read_passphrase(
             params.passphrase_file,
             params.passphrase_stdin,
         )?)),
@@ -2428,7 +2448,7 @@ fn finish_uncommitted_replace_recovery<R: CommandRunner + Sync, F: Filesystem + 
                         pool,
                         new_name,
                         &new_target.by_id,
-                        passphrase.as_ref(),
+                        passphrase.as_str(),
                     )?;
                     let _guard = params
                         .sleep_inhibitor
@@ -2440,7 +2460,7 @@ fn finish_uncommitted_replace_recovery<R: CommandRunner + Sync, F: Filesystem + 
                         ensure_keyfile_enrolled(
                             runner,
                             &new_target.by_id.0,
-                            passphrase.as_ref(),
+                            passphrase.as_str(),
                             key_file,
                         )?;
                     }

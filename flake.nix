@@ -153,6 +153,11 @@
               braid = linuxCrane.braid;
             }
           );
+          confirm-then-passphrase-on-stdin = pkgs.testers.nixosTest (
+            import ./tests/cli/confirm-then-passphrase-on-stdin.nix {
+              braid = linuxCrane.braid;
+            }
+          );
           add-inhibits-suspend = pkgs.testers.nixosTest (
             import ./tests/cli/add-inhibits-suspend.nix {
               braid = linuxCrane.braid;

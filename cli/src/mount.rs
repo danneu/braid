@@ -77,7 +77,7 @@ pub fn resolve_credential(
         return Ok(OpenCredential::KeyFile(kf.to_path_buf()));
     }
     let pp = luks::read_passphrase(passphrase_file, passphrase_stdin)?;
-    Ok(OpenCredential::Passphrase(Zeroizing::new(pp)))
+    Ok(OpenCredential::Passphrase(pp))
 }
 
 /// Why a membership disk is missing from the pool at unlock time.
