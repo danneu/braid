@@ -26,7 +26,7 @@ use crate::state_paths::StatePaths;
 use crate::status_tag::{StatusTag, color_enabled_for_stderr, emit_status, status_line};
 use crate::types::*;
 use std::collections::BTreeMap;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 #[derive(Debug, thiserror::Error)]
 pub enum AddError {
@@ -259,6 +259,270 @@ struct PoolAddExecutionTarget {
     force: bool,
 }
 
+#[derive(Debug, Clone)]
+struct AddConfirmDiskPlan {
+    name: String,
+    by_id: ByIdPath,
+    needs_luks_format: bool,
+}
+
+#[derive(Debug, Clone)]
+struct AddCredentialPrelude {
+    confirm_disks: Vec<AddConfirmDiskPlan>,
+    confirm_new: bool,
+    verify_targets: Vec<CredentialVerifyTarget>,
+    pool_target_count: usize,
+}
+
+#[derive(Debug, Clone)]
+struct FreshLuksTarget {
+    name: String,
+    by_id: ByIdPath,
+    mapper_name: String,
+    mapper_path: String,
+    luks_label: String,
+    luks_format_extra_opts: Vec<String>,
+    enroll_key_file: Option<PathBuf>,
+    header_backup_path: PathBuf,
+}
+
+#[derive(Debug, Clone)]
+struct RecoverableBraidTarget {
+    name: String,
+    by_id: ByIdPath,
+    mapper_name: String,
+    mapper_path: String,
+    luks_uuid: LuksUuid,
+    verified_pool_fsid: String,
+}
+
+#[derive(Debug, Clone)]
+struct ClosedPresentLuksCandidate {
+    name: String,
+    by_id: ByIdPath,
+    mapper_name: String,
+    mapper_path: String,
+    luks_uuid: LuksUuid,
+}
+
+#[derive(Debug, Clone)]
+enum AddTargetWork {
+    Fresh(FreshLuksTarget),
+    OpenRecoverable(RecoverableBraidTarget),
+    ClosedPresentLuks(ClosedPresentLuksCandidate),
+}
+
+impl AddTargetWork {
+    fn mapper_path(&self) -> &str {
+        match self {
+            AddTargetWork::Fresh(target) => &target.mapper_path,
+            AddTargetWork::OpenRecoverable(target) => &target.mapper_path,
+            AddTargetWork::ClosedPresentLuks(target) => &target.mapper_path,
+        }
+    }
+}
+
+#[derive(Debug, Clone)]
+struct AddWorkPlan {
+    prelude: AddCredentialPrelude,
+    targets: Vec<AddTargetWork>,
+    initial_journal_targets: BTreeMap<String, journal::AddJournalTarget>,
+    mount_point: MountPoint,
+    pool_was_mounted: bool,
+    existing_pool_device_count: usize,
+}
+
+impl AddWorkPlan {
+    fn is_noop(&self) -> bool {
+        self.targets.is_empty()
+    }
+
+    fn target_count(&self) -> usize {
+        self.targets.len()
+    }
+
+    fn mapper_paths(&self) -> Vec<String> {
+        self.targets
+            .iter()
+            .map(|target| target.mapper_path().to_owned())
+            .collect()
+    }
+
+    fn render_steps(&self) -> Vec<Step> {
+        let mut steps = Vec::new();
+
+        for target in &self.targets {
+            match target {
+                AddTargetWork::Fresh(target) => {
+                    steps.push(Step {
+                        risk: "destructive",
+                        description: format!("LUKS format {}", target.by_id),
+                        commands: vec![CmdRequest::CryptsetupLuksFormat {
+                            device: target.by_id.0.clone(),
+                            extra_opts: target.luks_format_extra_opts.clone(),
+                        }],
+                    });
+                    if let Some(kf) = &target.enroll_key_file {
+                        steps.push(Step {
+                            risk: "safe",
+                            description: format!(
+                                "enroll keyfile → LUKS slot 1 on {}",
+                                target.by_id
+                            ),
+                            commands: vec![CmdRequest::CryptsetupLuksAddKeyFile {
+                                device: target.by_id.0.clone(),
+                                key_file_path: kf.display().to_string(),
+                            }],
+                        });
+                    }
+                    steps.push(Step {
+                        risk: "safe",
+                        description: format!(
+                            "LUKS header backup → {}",
+                            target.header_backup_path.display()
+                        ),
+                        commands: vec![CmdRequest::CryptsetupLuksHeaderBackup {
+                            device: target.by_id.0.clone(),
+                            backup_path: target.header_backup_path.display().to_string(),
+                        }],
+                    });
+                    steps.push(Step {
+                        risk: "safe",
+                        description: format!("LUKS open → {}", target.mapper_name),
+                        commands: vec![CmdRequest::CryptsetupLuksOpen {
+                            device: target.by_id.0.clone(),
+                            mapper: target.mapper_name.clone(),
+                        }],
+                    });
+                }
+                AddTargetWork::OpenRecoverable(target) => {
+                    steps.push(forced_returned_device_add_step(
+                        &target.mapper_path,
+                        &self.mount_point,
+                        "verified returned disk",
+                    ));
+                }
+                AddTargetWork::ClosedPresentLuks(target) => {
+                    steps.push(Step {
+                        risk: "safe",
+                        description: format!(
+                            "LUKS open + identity verification at execution time → {}",
+                            target.mapper_name
+                        ),
+                        commands: vec![CmdRequest::CryptsetupLuksOpen {
+                            device: target.by_id.0.clone(),
+                            mapper: target.mapper_name.clone(),
+                        }],
+                    });
+                    steps.push(forced_returned_device_add_step(
+                        &target.mapper_path,
+                        &self.mount_point,
+                        "if verified returned disk",
+                    ));
+                }
+            }
+        }
+
+        if self.is_noop() {
+            return steps;
+        }
+
+        if !self.pool_was_mounted {
+            let mapper_paths = self.mapper_paths();
+            if mapper_paths.len() >= 2 {
+                steps.push(Step {
+                    risk: "safe",
+                    description: format!("mkfs.btrfs RAID1 {}", mapper_paths.join(" ")),
+                    commands: vec![CmdRequest::MkfsBtrfsRaid1 {
+                        devices: mapper_paths.clone(),
+                    }],
+                });
+                steps.push(Step {
+                    risk: "safe",
+                    description: format!("mount → {}", self.mount_point),
+                    commands: vec![CmdRequest::Mount {
+                        device: mapper_paths[0].clone(),
+                        mount_point: self.mount_point.clone(),
+                    }],
+                });
+            } else {
+                let mapper_path = mapper_paths
+                    .first()
+                    .expect("non-noop bootstrap plan must have a mapper path")
+                    .clone();
+                steps.push(Step {
+                    risk: "safe",
+                    description: format!("mkfs.btrfs {mapper_path}"),
+                    commands: vec![CmdRequest::MkfsBtrfs {
+                        device: mapper_path.clone(),
+                    }],
+                });
+                steps.push(Step {
+                    risk: "safe",
+                    description: format!("mount → {}", self.mount_point),
+                    commands: vec![CmdRequest::Mount {
+                        device: mapper_path,
+                        mount_point: self.mount_point.clone(),
+                    }],
+                });
+            }
+        } else {
+            for target in &self.targets {
+                if let AddTargetWork::Fresh(target) = target {
+                    steps.push(Step {
+                        risk: "safe",
+                        description: format!(
+                            "btrfs device add {} {}",
+                            target.mapper_path, self.mount_point
+                        ),
+                        commands: vec![CmdRequest::BtrfsDeviceAdd {
+                            device: target.mapper_path.clone(),
+                            mount_point: self.mount_point.clone(),
+                            force: false,
+                        }],
+                    });
+                }
+            }
+            let total_after = self.existing_pool_device_count + self.target_count();
+            if total_after >= 2 {
+                steps.push(Step {
+                    risk: "long",
+                    description: "btrfs balance to RAID1".into(),
+                    commands: vec![CmdRequest::BtrfsBalanceRaid1 {
+                        mount_point: self.mount_point.clone(),
+                    }],
+                });
+            }
+        }
+
+        steps
+    }
+}
+
+fn forced_returned_device_add_step(
+    mapper_path: &str,
+    mount_point: &MountPoint,
+    condition: &str,
+) -> Step {
+    Step {
+        risk: "safe",
+        description: format!("btrfs device add -f {mapper_path} {mount_point} ({condition})"),
+        commands: vec![
+            CmdRequest::BtrfsDeviceScanForget {
+                devices: vec![mapper_path.to_owned()],
+            },
+            CmdRequest::WipefsBtrfs {
+                device: mapper_path.to_owned(),
+            },
+            CmdRequest::BtrfsDeviceAdd {
+                device: mapper_path.to_owned(),
+                mount_point: mount_point.clone(),
+                force: true,
+            },
+        ],
+    }
+}
+
 pub struct AddParams<'a> {
     pub config_path: &'a Path,
     pub disk_specs: &'a [String],
@@ -341,7 +605,10 @@ fn devid_for_mapper_path(pool: &PoolState, mapper_path: &str) -> Option<u64> {
 /// Info notes render bare.
 pub struct AddPlan {
     pub notes: Vec<PreviewNote>,
+    /// Cached preview output for tests and callers that inspect the plan.
+    /// Execution uses `work_plan`, and `preview()` re-renders from it.
     pub steps: Vec<Step>,
+    work_plan: AddWorkPlan,
     pub config: Config,
     pub parsed: Vec<(String, ByIdPath)>,
     pub names: Vec<String>,
@@ -373,7 +640,7 @@ impl AddPlan {
         Preview {
             completeness: PreviewCompleteness::Complete,
             notes: self.notes.clone(),
-            steps: self.steps.clone(),
+            steps: self.work_plan.render_steps(),
         }
     }
 
@@ -400,24 +667,24 @@ impl AddPlan {
         // note emitted above is the whole user-visible output for
         // this add. Must return BEFORE inhibitor acquisition and
         // BEFORE journal write (pinned by `no_journal_on_noop_add`).
-        if self.steps.is_empty() {
+        if self.work_plan.is_noop() {
             return Ok(());
         }
 
         // Confirmation -- show device details for sanity-check
         if !params.yes {
             let confirm_disks: Vec<AddConfirmDisk> = self
-                .names
+                .work_plan
+                .prelude
+                .confirm_disks
                 .iter()
-                .zip(self.by_ids.iter())
-                .zip(self.probed.iter())
-                .map(|((name, by_id), p)| {
-                    let hw = confirm::query_disk_hw_info(runner, &by_id.0);
+                .map(|disk| {
+                    let hw = confirm::query_disk_hw_info(runner, &disk.by_id.0);
                     AddConfirmDisk {
-                        name: name.as_str(),
-                        by_id: &by_id.0,
+                        name: disk.name.as_str(),
+                        by_id: &disk.by_id.0,
                         hw,
-                        needs_luks_format: matches!(p.state, ConfigDiskState::PresentNotLuks),
+                        needs_luks_format: disk.needs_luks_format,
                     }
                 })
                 .collect();
@@ -425,52 +692,21 @@ impl AddPlan {
             confirm::confirm_yes().map_err(AddError::Validation)?;
         }
 
-        let any_needs_format = self
-            .probed
-            .iter()
-            .any(|p| matches!(p.state, ConfigDiskState::PresentNotLuks));
-
         // Confirm the new passphrase iff this add will `luks_format` without
-        // a live keyslot to verify against. Otherwise a typo either (a) gets
-        // caught by the `verify_passphrase` block below against the live pool
-        // member, or (b) lands on a no-format path where subsequent open/
-        // identity validation aborts -- both recoverable. Bootstrap and
-        // fresh-disk-into-unassembled-pool have no such safety net, so a typo
-        // becomes the canonical pool passphrase; see plans/wip for details.
-        let confirm_new = any_needs_format && self.pool.devices.is_empty();
+        // a live keyslot to verify against. The planner records that gate so
+        // preview and execution agree about whether fresh work exists.
         let passphrase = read_passphrase_with(
             params.passphrase_file,
             params.passphrase_stdin,
-            confirm_new,
+            self.work_plan.prelude.confirm_new,
             params.passphrase_reader,
         )?;
 
-        let pool_target_count = self.pool.devices.len();
-        let mut credential_targets: Vec<CredentialVerifyTarget> = self
-            .pool
-            .devices
-            .iter()
-            .map(|device| CredentialVerifyTarget {
-                name: name_from_mapper(&device.mapper.0)
-                    .unwrap_or(device.mapper.0.as_str())
-                    .to_owned(),
-                device: device.underlying.clone(),
-            })
-            .collect();
-        credential_targets.extend(self.probed.iter().enumerate().filter_map(|(i, probed)| {
-            match &probed.state {
-                ConfigDiskState::PresentLuks { .. } => Some(CredentialVerifyTarget {
-                    name: self.names[i].clone(),
-                    device: self.by_ids[i].0.clone(),
-                }),
-                ConfigDiskState::Absent | ConfigDiskState::PresentNotLuks => None,
-            }
-        }));
-
+        let credential_targets = &self.work_plan.prelude.verify_targets;
         if !credential_targets.is_empty() {
             match verify_credential_for_targets(
                 runner,
-                &credential_targets,
+                credential_targets,
                 Credential::Passphrase(&passphrase),
                 color_enabled,
                 |line| eprint!("{line}"),
@@ -481,18 +717,20 @@ impl AddPlan {
                         .iter()
                         .position(|t| t == &target)
                         .expect("rejected target should come from target list");
-                    return Err(AddError::Validation(if target_idx < pool_target_count {
-                        format!(
-                            "passphrase does not match existing pool member '{}'. \
+                    return Err(AddError::Validation(
+                        if target_idx < self.work_plan.prelude.pool_target_count {
+                            format!(
+                                "passphrase does not match existing pool member '{}'. \
                              All disks must use the same passphrase.",
-                            target.name
-                        )
-                    } else {
-                        format!(
-                            "passphrase rejected by candidate disk '{}' ({})",
-                            target.name, target.device
-                        )
-                    }));
+                                target.name
+                            )
+                        } else {
+                            format!(
+                                "passphrase rejected by candidate disk '{}' ({})",
+                                target.name, target.device
+                            )
+                        },
+                    ));
                 }
                 Err(CredentialVerifyError::Luks { source, .. }) => {
                     return Err(AddError::Luks(source));
@@ -500,45 +738,48 @@ impl AddPlan {
             }
         }
 
-        // Pass 1: validate PresentLuks disk identities before any irreversible operation.
+        // Pass 1: execute deferred closed-PresentLuks identity checks before
+        // any irreversible operation. Open recoverable targets were already
+        // verified during planning and live in the initial journal target set.
         // Guard closes any mappers we opened for FSID verification if validation fails.
         let mut luks_guard = LuksCleanupGuard::new(runner);
         let mut needs_pool_add: Vec<PoolAddExecutionTarget> = Vec::new();
-        let mut journal_targets: BTreeMap<String, journal::AddJournalTarget> = BTreeMap::new();
+        let mut journal_targets = self.work_plan.initial_journal_targets.clone();
 
-        for (i, p) in self.probed.iter().enumerate() {
-            let ConfigDiskState::PresentLuks {
-                uuid,
-                label,
-                mapper_open,
-            } = &p.state
-            else {
+        for target in &self.work_plan.targets {
+            if let AddTargetWork::OpenRecoverable(target) = target {
+                eprintln!(
+                    "note: braid-labeled disk '{}' verified as pool member. \
+                     Completing recovery add.",
+                    target.name
+                );
+                needs_pool_add.push(PoolAddExecutionTarget {
+                    mapper_path: target.mapper_path.clone(),
+                    force: true,
+                });
+            }
+        }
+
+        for target in &self.work_plan.targets {
+            let AddTargetWork::ClosedPresentLuks(target) = target else {
                 continue;
             };
-            let name = self.names[i].as_str();
-            let by_id = &self.by_ids[i];
-            let mn = mapper_name(name);
+            emit_status(&status_line(
+                StatusTag::Wait,
+                color_enabled,
+                &format!("disk {}: unlocking...", target.name),
+            ));
+            ensure_luks_open(runner, &target.name, &target.by_id, &passphrase)?;
+            luks_guard.track(target.mapper_name.clone());
+            emit_status(&status_line(
+                StatusTag::Ok,
+                color_enabled,
+                &format!("disk {}: unlocked", target.name),
+            ));
 
-            validate_braid_preconditions(name, &by_id.0, label.as_deref(), &self.pool)?;
-
-            // Open mapper if closed (now we know it's braid-labeled + pool is up)
-            if !mapper_open {
-                emit_status(&status_line(
-                    StatusTag::Wait,
-                    color_enabled,
-                    &format!("disk {name}: unlocking..."),
-                ));
-                ensure_luks_open(runner, name, by_id, &passphrase)?;
-                luks_guard.track(mn.0.clone());
-                emit_status(&status_line(
-                    StatusTag::Ok,
-                    color_enabled,
-                    &format!("disk {name}: unlocked"),
-                ));
-            }
-
-            let identity = classify_braid_disk_fsid(runner, name, &mn, &self.pool)?;
-            if let Some(err) = identity_to_error(&identity, name) {
+            let mapper = MapperName(target.mapper_name.clone());
+            let identity = classify_braid_disk_fsid(runner, &target.name, &mapper, &self.pool)?;
+            if let Some(err) = identity_to_error(&identity, &target.name) {
                 return Err(err);
             }
             match identity {
@@ -552,51 +793,25 @@ impl AddPlan {
                     eprintln!(
                         "note: braid-labeled disk '{}' verified as pool member. \
                          Completing recovery add.",
-                        name
+                        target.name
                     );
-                    journal_targets.insert(
-                        name.to_owned(),
-                        journal::AddJournalTarget {
-                            by_id: by_id.clone(),
-                            mapper_name: mn.0.clone(),
-                            mode: journal::AddJournalMode::RecoverableBraidLabeled {
-                                verified_pool_fsid,
-                                luks_uuid: uuid.clone(),
-                            },
-                        },
-                    );
+                    let verified = RecoverableBraidTarget {
+                        name: target.name.clone(),
+                        by_id: target.by_id.clone(),
+                        mapper_name: target.mapper_name.clone(),
+                        mapper_path: target.mapper_path.clone(),
+                        luks_uuid: target.luks_uuid.clone(),
+                        verified_pool_fsid,
+                    };
+                    journal_targets
+                        .insert(verified.name.clone(), recoverable_journal_target(&verified));
                     needs_pool_add.push(PoolAddExecutionTarget {
-                        mapper_path: format!("/dev/mapper/{}", mn.0),
+                        mapper_path: verified.mapper_path,
                         force: true,
                     });
                 }
                 _ => unreachable!("error variants handled by identity_to_error above"),
             }
-        }
-
-        for (i, p) in self.probed.iter().enumerate() {
-            if !matches!(p.state, ConfigDiskState::PresentNotLuks) {
-                continue;
-            }
-            let name = self.names[i].as_str();
-            let by_id = &self.by_ids[i];
-            let mn = mapper_name(name);
-            let luks_label = format!("braid-{name}");
-            let mut luks_opts = params.luks_format_extra_opts.to_vec();
-            luks_opts.push("--label".into());
-            luks_opts.push(luks_label.clone());
-            journal_targets.insert(
-                name.to_owned(),
-                journal::AddJournalTarget {
-                    by_id: by_id.clone(),
-                    mapper_name: mn.0.clone(),
-                    mode: journal::AddJournalMode::FreshLuks {
-                        luks_label,
-                        luks_format_extra_opts: luks_opts,
-                        enroll_key_file: params.enroll_key_file.map(|p| p.to_path_buf()),
-                    },
-                },
-            );
         }
 
         if journal_targets.is_empty() {
@@ -646,26 +861,22 @@ impl AddPlan {
         journal::write_journal(params.paths, &journal)
             .map_err(|e| AddError::Validation(e.to_string()))?;
 
-        // Pass 2: execute irreversible operations for PresentNotLuks disks.
-        for (i, p) in self.probed.iter().enumerate() {
-            if !matches!(p.state, ConfigDiskState::PresentNotLuks) {
+        // Pass 2: execute irreversible operations for fresh disks.
+        for target in &self.work_plan.targets {
+            let AddTargetWork::Fresh(target) = target else {
                 continue;
-            }
-            let name = self.names[i].as_str();
-            let by_id = &self.by_ids[i];
-            let mn = mapper_name(name);
-            let luks_opts = match journal_targets.get(name).map(|t| &t.mode) {
-                Some(journal::AddJournalMode::FreshLuks {
-                    luks_format_extra_opts,
-                    ..
-                }) => luks_format_extra_opts.clone(),
-                _ => {
-                    return Err(AddError::Validation(format!(
-                        "fresh add target '{}' missing from journal",
-                        name
-                    )));
-                }
             };
+            let name = target.name.as_str();
+
+            if !matches!(
+                journal_targets.get(name).map(|t| &t.mode),
+                Some(journal::AddJournalMode::FreshLuks { .. })
+            ) {
+                return Err(AddError::Validation(format!(
+                    "fresh add target '{}' missing from journal",
+                    name
+                )));
+            }
 
             eprint!(
                 "{}",
@@ -675,7 +886,12 @@ impl AddPlan {
                     &format!("disk {name}: formatting LUKS..."),
                 )
             );
-            luks_format(runner, &by_id.0, &passphrase, &luks_opts)?;
+            luks_format(
+                runner,
+                &target.by_id.0,
+                &passphrase,
+                &target.luks_format_extra_opts,
+            )?;
             eprint!(
                 "{}",
                 status_line(
@@ -685,27 +901,22 @@ impl AddPlan {
                 )
             );
 
-            if let Some(kf) = params.enroll_key_file {
-                eprint!(
-                    "{}",
-                    status_line(
-                        StatusTag::Wait,
-                        color_enabled,
-                        &format!("disk {name}: enrolling keyfile in slot 1..."),
-                    )
-                );
-                crate::luks::enroll_key_file(runner, &by_id.0, &passphrase, kf)?;
-                eprint!(
-                    "{}",
-                    status_line(
-                        StatusTag::Ok,
-                        color_enabled,
-                        &format!("disk {name}: keyfile enrolled in slot 1"),
-                    )
-                );
+            if let Some(kf) = &target.enroll_key_file {
+                emit_status(&status_line(
+                    StatusTag::Wait,
+                    color_enabled,
+                    &format!("disk {name}: enrolling keyfile in slot 1..."),
+                ));
+                crate::luks::enroll_key_file(runner, &target.by_id.0, &passphrase, kf)?;
+                emit_status(&status_line(
+                    StatusTag::Ok,
+                    color_enabled,
+                    &format!("disk {name}: keyfile enrolled in slot 1"),
+                ));
             }
 
-            let backup_path = backup_luks_header(runner, &by_id.0, &mn.0, params.paths)?;
+            let backup_path =
+                backup_luks_header(runner, &target.by_id.0, &target.mapper_name, params.paths)?;
             eprintln!("LUKS header backed up: {}", backup_path.display());
 
             eprint!(
@@ -716,8 +927,8 @@ impl AddPlan {
                     &format!("disk {name}: unlocking..."),
                 )
             );
-            ensure_luks_open(runner, name, by_id, &passphrase)?;
-            luks_guard.track(mn.0.clone());
+            ensure_luks_open(runner, name, &target.by_id, &passphrase)?;
+            luks_guard.track(target.mapper_name.clone());
             eprint!(
                 "{}",
                 status_line(
@@ -728,7 +939,7 @@ impl AddPlan {
             );
 
             needs_pool_add.push(PoolAddExecutionTarget {
-                mapper_path: format!("/dev/mapper/{}", mn.0),
+                mapper_path: target.mapper_path.clone(),
                 force: false,
             });
         }
@@ -857,7 +1068,7 @@ impl AddPlan {
 /// duplicate-by-id validation, keyfile path validation, membership load,
 /// conflict validation, per-disk probe, pool probe, mutation preflight, UPS
 /// preflight, the missing-devices warning, the keyfile-asymmetry warning,
-/// and `compile_add_steps_multi`. On success, every accumulated note lives
+/// and the semantic add work planner. On success, every accumulated note lives
 /// on `plan.notes`; on failure after note accumulation, notes survive on
 /// `report.notes` so `cmd_add` can render them to stderr before the error.
 pub fn plan_add<R: CommandRunner + Sync, F: Filesystem + ?Sized>(
@@ -1031,13 +1242,13 @@ pub fn plan_add<R: CommandRunner + Sync, F: Filesystem + ?Sized>(
         }
     }
 
-    // Compile steps. This can fail on PresentLuks identity / foreign-pool
+    // Build the semantic work plan. This can fail on PresentLuks identity / foreign-pool
     // guards -- any accumulated notes up to here (missing-devices,
     // keyfile-asymmetry) must survive on `report.notes` so the caller can
     // render them to stderr before the error.
     let names_refs: Vec<&str> = names.iter().map(String::as_str).collect();
     let by_ids_refs: Vec<&ByIdPath> = by_ids.iter().collect();
-    let steps = match compile_add_steps_multi(
+    let work_plan = match build_add_work_plan(
         runner,
         &AddStepsInput {
             names: &names_refs,
@@ -1058,6 +1269,7 @@ pub fn plan_add<R: CommandRunner + Sync, F: Filesystem + ?Sized>(
             };
         }
     };
+    let steps = work_plan.render_steps();
 
     // No-op preview: zero steps + Info note naming the already-in-pool
     // target(s). The Info note suppresses `Preview::render`'s
@@ -1072,6 +1284,7 @@ pub fn plan_add<R: CommandRunner + Sync, F: Filesystem + ?Sized>(
     let plan = AddPlan {
         notes,
         steps,
+        work_plan,
         config,
         parsed,
         names,
@@ -1133,17 +1346,91 @@ struct AddStepsInput<'a> {
     luks_format_extra_opts: &'a [String],
 }
 
-fn compile_add_steps_multi<R: CommandRunner>(
+fn build_add_credential_prelude(input: &AddStepsInput<'_>) -> AddCredentialPrelude {
+    let confirm_disks = input
+        .names
+        .iter()
+        .zip(input.by_ids.iter())
+        .zip(input.probed.iter())
+        .map(|((name, by_id), probed)| AddConfirmDiskPlan {
+            name: (*name).to_owned(),
+            by_id: (*by_id).clone(),
+            needs_luks_format: matches!(probed.state, ConfigDiskState::PresentNotLuks),
+        })
+        .collect();
+
+    let any_needs_format = input
+        .probed
+        .iter()
+        .any(|p| matches!(p.state, ConfigDiskState::PresentNotLuks));
+    let confirm_new = any_needs_format && input.pool.devices.is_empty();
+    let pool_target_count = input.pool.devices.len();
+
+    let mut verify_targets: Vec<CredentialVerifyTarget> = input
+        .pool
+        .devices
+        .iter()
+        .map(|device| CredentialVerifyTarget {
+            name: name_from_mapper(&device.mapper.0)
+                .unwrap_or(device.mapper.0.as_str())
+                .to_owned(),
+            device: device.underlying.clone(),
+        })
+        .collect();
+    verify_targets.extend(input.probed.iter().enumerate().filter_map(|(i, probed)| {
+        match &probed.state {
+            ConfigDiskState::PresentLuks { .. } => Some(CredentialVerifyTarget {
+                name: input.names[i].to_owned(),
+                device: input.by_ids[i].0.clone(),
+            }),
+            ConfigDiskState::Absent | ConfigDiskState::PresentNotLuks => None,
+        }
+    }));
+
+    AddCredentialPrelude {
+        confirm_disks,
+        confirm_new,
+        verify_targets,
+        pool_target_count,
+    }
+}
+
+fn fresh_journal_target(target: &FreshLuksTarget) -> journal::AddJournalTarget {
+    journal::AddJournalTarget {
+        by_id: target.by_id.clone(),
+        mapper_name: target.mapper_name.clone(),
+        mode: journal::AddJournalMode::FreshLuks {
+            luks_label: target.luks_label.clone(),
+            luks_format_extra_opts: target.luks_format_extra_opts.clone(),
+            enroll_key_file: target.enroll_key_file.clone(),
+        },
+    }
+}
+
+fn recoverable_journal_target(target: &RecoverableBraidTarget) -> journal::AddJournalTarget {
+    journal::AddJournalTarget {
+        by_id: target.by_id.clone(),
+        mapper_name: target.mapper_name.clone(),
+        mode: journal::AddJournalMode::RecoverableBraidLabeled {
+            verified_pool_fsid: target.verified_pool_fsid.clone(),
+            luks_uuid: target.luks_uuid.clone(),
+        },
+    }
+}
+
+fn build_add_work_plan<R: CommandRunner>(
     runner: &R,
     input: &AddStepsInput<'_>,
-) -> Result<Vec<Step>, AddError> {
-    let mut steps = Vec::new();
-    let mut needs_pool_add = 0usize;
+) -> Result<AddWorkPlan, AddError> {
+    let mut targets = Vec::new();
+    let mut initial_journal_targets: BTreeMap<String, journal::AddJournalTarget> = BTreeMap::new();
 
     for (i, p) in input.probed.iter().enumerate() {
         let name = input.names[i];
         let by_id = input.by_ids[i];
         let mn = mapper_name(name);
+        let mapper_name = mn.0.clone();
+        let mapper_path = format!("/dev/mapper/{mapper_name}");
 
         match &p.state {
             ConfigDiskState::Absent => {
@@ -1154,50 +1441,29 @@ fn compile_add_steps_multi<R: CommandRunner>(
             }
             ConfigDiskState::PresentNotLuks => {
                 let mut extra_opts = input.luks_format_extra_opts.to_vec();
+                let luks_label = format!("braid-{name}");
                 extra_opts.push("--label".into());
-                extra_opts.push(format!("braid-{name}"));
-                steps.push(Step {
-                    risk: "destructive",
-                    description: format!("LUKS format {}", by_id),
-                    commands: vec![CmdRequest::CryptsetupLuksFormat {
-                        device: by_id.0.clone(),
-                        extra_opts,
-                    }],
-                });
-                if let Some(kf) = input.enroll_key_file {
-                    steps.push(Step {
-                        risk: "safe",
-                        description: format!("enroll keyfile → LUKS slot 1 on {}", by_id),
-                        commands: vec![CmdRequest::CryptsetupLuksAddKeyFile {
-                            device: by_id.0.clone(),
-                            key_file_path: kf.display().to_string(),
-                        }],
-                    });
-                }
-                let backup_path = input
-                    .paths
-                    .luks_headers_dir()
-                    .join(format!("{}.luksheader", mn.0));
-                steps.push(Step {
-                    risk: "safe",
-                    description: format!("LUKS header backup → {}", backup_path.display()),
-                    commands: vec![CmdRequest::CryptsetupLuksHeaderBackup {
-                        device: by_id.0.clone(),
-                        backup_path: backup_path.display().to_string(),
-                    }],
-                });
-                steps.push(Step {
-                    risk: "safe",
-                    description: format!("LUKS open → {}", mn),
-                    commands: vec![CmdRequest::CryptsetupLuksOpen {
-                        device: by_id.0.clone(),
-                        mapper: mn.0.clone(),
-                    }],
-                });
-                needs_pool_add += 1;
+                extra_opts.push(luks_label.clone());
+                let target = FreshLuksTarget {
+                    name: name.to_owned(),
+                    by_id: (*by_id).clone(),
+                    mapper_name,
+                    mapper_path,
+                    luks_label,
+                    luks_format_extra_opts: extra_opts,
+                    enroll_key_file: input.enroll_key_file.map(Path::to_path_buf),
+                    header_backup_path: input
+                        .paths
+                        .luks_headers_dir()
+                        .join(format!("{}.luksheader", mn.0)),
+                };
+                initial_journal_targets.insert(name.to_owned(), fresh_journal_target(&target));
+                targets.push(AddTargetWork::Fresh(target));
             }
             ConfigDiskState::PresentLuks {
-                mapper_open, label, ..
+                uuid,
+                mapper_open,
+                label,
             } => {
                 // Preconditions always checked — no mapper required.
                 validate_braid_preconditions(name, &by_id.0, label.as_deref(), input.pool)?;
@@ -1211,158 +1477,58 @@ fn compile_add_steps_multi<R: CommandRunner>(
                     match identity {
                         AddLuksIdentity::BraidLabeledAlreadyInPool => continue,
                         AddLuksIdentity::BraidLabeledRecoverable => {
-                            let mapper_path = format!("/dev/mapper/{}", mn);
-                            steps.push(Step {
-                                risk: "safe",
-                                description: format!(
-                                    "btrfs device add -f /dev/mapper/{} {} (verified returned disk)",
-                                    mn, input.mount_point
-                                ),
-                                commands: vec![
-                                    CmdRequest::BtrfsDeviceScanForget {
-                                        devices: vec![mapper_path.clone()],
-                                    },
-                                    CmdRequest::WipefsBtrfs {
-                                        device: mapper_path.clone(),
-                                    },
-                                    CmdRequest::BtrfsDeviceAdd {
-                                        device: mapper_path,
-                                        mount_point: input.mount_point.clone(),
-                                        force: true,
-                                    },
-                                ],
-                            });
-                            needs_pool_add += 1;
+                            let verified_pool_fsid = input.pool.fsid.clone().ok_or_else(|| {
+                                AddError::Validation(
+                                    "mounted pool has no FSID while planning returned add target"
+                                        .into(),
+                                )
+                            })?;
+                            let target = RecoverableBraidTarget {
+                                name: name.to_owned(),
+                                by_id: (*by_id).clone(),
+                                mapper_name,
+                                mapper_path,
+                                luks_uuid: uuid.clone(),
+                                verified_pool_fsid,
+                            };
+                            initial_journal_targets
+                                .insert(name.to_owned(), recoverable_journal_target(&target));
+                            targets.push(AddTargetWork::OpenRecoverable(target));
                         }
                         _ => unreachable!("error variants handled by identity_to_error above"),
                     }
                 } else {
                     // Mapper closed — FSID verification deferred to execution time.
-                    steps.push(Step {
-                        risk: "safe",
-                        description: format!(
-                            "LUKS open + identity verification at execution time → {}",
-                            mn
-                        ),
-                        commands: vec![CmdRequest::CryptsetupLuksOpen {
-                            device: by_id.0.clone(),
-                            mapper: mn.0.clone(),
-                        }],
-                    });
-                    let mapper_path = format!("/dev/mapper/{}", mn);
-                    steps.push(Step {
-                        risk: "safe",
-                        description: format!(
-                            "btrfs device add -f /dev/mapper/{} {} (if verified returned disk)",
-                            mn, input.mount_point
-                        ),
-                        commands: vec![
-                            CmdRequest::BtrfsDeviceScanForget {
-                                devices: vec![mapper_path.clone()],
-                            },
-                            CmdRequest::WipefsBtrfs {
-                                device: mapper_path.clone(),
-                            },
-                            CmdRequest::BtrfsDeviceAdd {
-                                device: mapper_path,
-                                mount_point: input.mount_point.clone(),
-                                force: true,
-                            },
-                        ],
-                    });
-                    needs_pool_add += 1;
+                    targets.push(AddTargetWork::ClosedPresentLuks(
+                        ClosedPresentLuksCandidate {
+                            name: name.to_owned(),
+                            by_id: (*by_id).clone(),
+                            mapper_name,
+                            mapper_path,
+                            luks_uuid: uuid.clone(),
+                        },
+                    ));
                 }
             }
         }
     }
 
-    if needs_pool_add == 0 {
-        return Ok(vec![]);
-    }
+    Ok(AddWorkPlan {
+        prelude: build_add_credential_prelude(input),
+        targets,
+        initial_journal_targets,
+        mount_point: input.mount_point.clone(),
+        pool_was_mounted: input.pool.mounted,
+        existing_pool_device_count: input.pool.devices.len(),
+    })
+}
 
-    if !input.pool.mounted {
-        if needs_pool_add >= 2 {
-            let mapper_list: Vec<String> = input
-                .names
-                .iter()
-                .map(|n| format!("/dev/mapper/{}", mapper_name(n).0))
-                .collect();
-            steps.push(Step {
-                risk: "safe",
-                description: format!("mkfs.btrfs RAID1 {}", mapper_list.join(" ")),
-                commands: vec![CmdRequest::MkfsBtrfsRaid1 {
-                    devices: mapper_list.clone(),
-                }],
-            });
-            // Mount uses first device
-            steps.push(Step {
-                risk: "safe",
-                description: format!("mount → {}", input.mount_point),
-                commands: vec![CmdRequest::Mount {
-                    device: mapper_list[0].clone(),
-                    mount_point: input.mount_point.clone(),
-                }],
-            });
-        } else {
-            // Single disk — find the one that needs pool add
-            for (i, p) in input.probed.iter().enumerate() {
-                let mn = mapper_name(input.names[i]);
-                let skip = matches!(&p.state, ConfigDiskState::PresentLuks { mapper_open, .. } if *mapper_open && input.pool.devices.iter().any(|d| d.mapper == mn));
-                if !skip {
-                    let mapper_path = format!("/dev/mapper/{}", mn);
-                    steps.push(Step {
-                        risk: "safe",
-                        description: format!("mkfs.btrfs /dev/mapper/{}", mn),
-                        commands: vec![CmdRequest::MkfsBtrfs {
-                            device: mapper_path.clone(),
-                        }],
-                    });
-                    steps.push(Step {
-                        risk: "safe",
-                        description: format!("mount → {}", input.mount_point),
-                        commands: vec![CmdRequest::Mount {
-                            device: mapper_path,
-                            mount_point: input.mount_point.clone(),
-                        }],
-                    });
-                    break;
-                }
-            }
-        }
-    } else {
-        for (i, p) in input.probed.iter().enumerate() {
-            let mn = mapper_name(input.names[i]);
-            // PresentNotLuks disks still need the device-add step
-            if matches!(&p.state, ConfigDiskState::PresentNotLuks) {
-                let mapper_path = format!("/dev/mapper/{}", mn);
-                steps.push(Step {
-                    risk: "safe",
-                    description: format!(
-                        "btrfs device add /dev/mapper/{} {}",
-                        mn, input.mount_point
-                    ),
-                    commands: vec![CmdRequest::BtrfsDeviceAdd {
-                        device: mapper_path,
-                        mount_point: input.mount_point.clone(),
-                        force: false,
-                    }],
-                });
-            }
-            // PresentLuks recovery steps already added above
-        }
-        let total_after = input.pool.devices.len() + needs_pool_add;
-        if total_after >= 2 {
-            steps.push(Step {
-                risk: "long",
-                description: "btrfs balance to RAID1".into(),
-                commands: vec![CmdRequest::BtrfsBalanceRaid1 {
-                    mount_point: input.mount_point.clone(),
-                }],
-            });
-        }
-    }
-
-    Ok(steps)
+#[cfg(test)]
+fn compile_add_steps_multi<R: CommandRunner>(
+    runner: &R,
+    input: &AddStepsInput<'_>,
+) -> Result<Vec<Step>, AddError> {
+    Ok(build_add_work_plan(runner, input)?.render_steps())
 }
 
 struct AddConfirmDisk<'a> {
@@ -1955,15 +2121,15 @@ mod tests {
             passphrase_file.as_file().write_all(b"testpass").unwrap();
         }
 
-        let pool_fsid = "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee";
-        let by_id = ByIdPath("/dev/disk/by-id/disk1".into());
+        let pool_fsid = POOL_FSID;
+        let by_id = ByIdPath("/dev/disk/by-id/virtio-disk2".into());
         let luks_uuid = LuksUuid("a1b2c3d4-e5f6-7890-abcd-ef1234567890".into());
         let probed = vec![ConfigDisk {
-            name: "disk1".into(),
+            name: "disk2".into(),
             by_id_path: by_id.clone(),
             state: ConfigDiskState::PresentLuks {
                 uuid: luks_uuid.clone(),
-                label: Some("braid-disk1".to_owned()),
+                label: Some("braid-disk2".to_owned()),
                 mapper_open: true,
             },
         }];
@@ -1971,9 +2137,9 @@ mod tests {
             mounted: true,
             devices: vec![PoolDevice {
                 mapper: MapperName("braid-disk1".into()),
-                luks_uuid,
+                luks_uuid: LuksUuid("11111111-1111-1111-1111-111111111111".into()),
                 devid: 1,
-                underlying: by_id.0.clone(),
+                underlying: "/dev/vdb".into(),
             }],
             missing_count: 0,
             missing_devids: vec![],
@@ -1984,32 +2150,22 @@ mod tests {
         let mut pool_membership = PoolMembership::empty();
         pool_membership.disks.insert(
             "disk1".into(),
-            membership::DiskMember::from_by_id(by_id.clone()),
+            membership::DiskMember::from_by_id(ByIdPath("/dev/disk/by-id/virtio-disk1".into())),
         );
-        let runner = MockRunner::default()
-            .with_output(
-                CmdRequest::BtrfsFilesystemShowTarget {
-                    target: "/dev/mapper/braid-disk1".into(),
+        let runner = NoDumpRunner {
+            inner: UnlockingAddRunner {
+                inner: AddTestRunner {
+                    disk_in_pool: true,
+                    fail_device_add: false,
+                    no_btrfs_superblock: false,
                 },
-                btrfs_show_with_uuid(pool_fsid),
-            )
-            .with_output_stdin(
-                CmdRequest::CryptsetupTestPassphrase {
-                    device: by_id.0.clone(),
-                },
-                b"testpass".to_vec(),
-                RawCommandOutput {
-                    cmd: "cryptsetup open --test-passphrase".into(),
-                    stdout: String::new(),
-                    stderr: String::new(),
-                    exit_status: 0,
-                },
-            );
+            },
+        };
 
-        let steps = compile_add_steps_multi(
+        let work_plan = build_add_work_plan(
             &runner,
             &AddStepsInput {
-                names: &["disk1"],
+                names: &["disk2"],
                 by_ids: &[&by_id],
                 probed: &probed,
                 pool: &pool,
@@ -2020,21 +2176,19 @@ mod tests {
             },
         )
         .expect("planning should use cached LUKS label");
+        let steps = work_plan.render_steps();
         assert!(
-            steps.is_empty(),
-            "already-in-pool PresentLuks disk should be a no-op: {steps:?}"
+            !steps.is_empty(),
+            "recoverable PresentLuks disk should plan returned-disk work: {steps:?}"
         );
 
         let plan = AddPlan {
             notes: vec![],
-            steps: vec![Step {
-                risk: "safe",
-                description: "force Pass 1 execution".into(),
-                commands: vec![],
-            }],
+            steps,
+            work_plan,
             config: Config::new(MountPoint("/mnt/storage".into())).unwrap(),
-            parsed: vec![("disk1".into(), by_id.clone())],
-            names: vec!["disk1".into()],
+            parsed: vec![("disk2".into(), by_id.clone())],
+            names: vec!["disk2".into()],
             by_ids: vec![by_id.clone()],
             probed,
             pool,
@@ -2061,21 +2215,9 @@ mod tests {
         )
         .expect("execute Pass 1 should use cached LUKS label");
 
-        let dumps = runner
-            .requests()
-            .iter()
-            .filter(|r| {
-                matches!(
-                    r,
-                    CmdRequest::CryptsetupLuksDumpText { device }
-                        if device == "/dev/disk/by-id/disk1"
-                )
-            })
-            .count();
-        assert_eq!(
-            dumps, 0,
-            "validate_braid_preconditions must read the cached label, not redispatch luksDump"
-        );
+        // The runner rejects CryptsetupLuksDumpText, so the successful
+        // execution above proves the add path used the cached label instead
+        // of redispatching luksDump.
     }
 
     // -----------------------------------------------------------------------
@@ -2411,6 +2553,95 @@ mod tests {
         }
     }
 
+    struct NoDumpRunner<R> {
+        inner: R,
+    }
+
+    impl<R: CommandRunner> CommandRunner for NoDumpRunner<R> {
+        fn run(&self, request: &CmdRequest) -> Result<RawCommandOutput, CmdError> {
+            if matches!(request, CmdRequest::CryptsetupLuksDumpText { .. }) {
+                return Err(CmdError::Failed(
+                    "test runner must not redispatch luksDump".into(),
+                ));
+            }
+            self.inner.run(request)
+        }
+
+        fn run_with_stdin(
+            &self,
+            request: &CmdRequest,
+            stdin: &[u8],
+        ) -> Result<RawCommandOutput, CmdError> {
+            if matches!(request, CmdRequest::CryptsetupLuksDumpText { .. }) {
+                return Err(CmdError::Failed(
+                    "test runner must not redispatch luksDump".into(),
+                ));
+            }
+            self.inner.run_with_stdin(request, stdin)
+        }
+    }
+
+    struct RequestRecordingRunner<R> {
+        inner: R,
+        requests: Mutex<Vec<CmdRequest>>,
+    }
+
+    impl<R> RequestRecordingRunner<R> {
+        fn new(inner: R) -> Self {
+            Self {
+                inner,
+                requests: Mutex::new(Vec::new()),
+            }
+        }
+
+        fn requests(&self) -> Vec<CmdRequest> {
+            self.requests.lock().unwrap().clone()
+        }
+    }
+
+    impl<R: CommandRunner> CommandRunner for RequestRecordingRunner<R> {
+        fn run(&self, request: &CmdRequest) -> Result<RawCommandOutput, CmdError> {
+            self.requests.lock().unwrap().push(request.clone());
+            self.inner.run(request)
+        }
+
+        fn run_with_stdin(
+            &self,
+            request: &CmdRequest,
+            stdin: &[u8],
+        ) -> Result<RawCommandOutput, CmdError> {
+            self.requests.lock().unwrap().push(request.clone());
+            self.inner.run_with_stdin(request, stdin)
+        }
+    }
+
+    struct ClosedNoBtrfsRunner {
+        inner: AddTestRunner,
+    }
+
+    impl CommandRunner for ClosedNoBtrfsRunner {
+        fn run(&self, request: &CmdRequest) -> Result<RawCommandOutput, CmdError> {
+            match request {
+                CmdRequest::CryptsetupStatus { mapper } if mapper == "braid-disk2" => {
+                    Ok(mock_status_inactive(mapper))
+                }
+                CmdRequest::CryptsetupLuksOpen { .. } => Ok(mock_ok("cryptsetup luksOpen", "")),
+                _ => self.inner.run(request),
+            }
+        }
+
+        fn run_with_stdin(
+            &self,
+            request: &CmdRequest,
+            stdin: &[u8],
+        ) -> Result<RawCommandOutput, CmdError> {
+            if let CmdRequest::CryptsetupLuksOpen { .. } = request {
+                return Ok(mock_ok("cryptsetup luksOpen", ""));
+            }
+            self.inner.run_with_stdin(request, stdin)
+        }
+    }
+
     /* Intent: add Pass-1's closed PresentLuks recoverable branch announces the
      * cryptsetup luksOpen with the canonical [wait]/[ok] rows.
      * Why it exists: Principle 13 requires every cryptsetup Argon2 wait window
@@ -2463,27 +2694,39 @@ mod tests {
             fsid: Some(POOL_FSID.into()),
             null_underlying: vec![],
         };
+        let probed = vec![ConfigDisk {
+            name: "disk2".into(),
+            by_id_path: by_id_disk2.clone(),
+            state: ConfigDiskState::PresentLuks {
+                uuid: LuksUuid("22222222-2222-2222-2222-222222222222".into()),
+                label: Some("braid-disk2".to_owned()),
+                mapper_open: false,
+            },
+        }];
+        let work_plan = build_add_work_plan(
+            &runner,
+            &AddStepsInput {
+                names: &["disk2"],
+                by_ids: &[&by_id_disk2],
+                probed: &probed,
+                pool: &pool,
+                mount_point: config.mount_point(),
+                paths: &paths,
+                enroll_key_file: None,
+                luks_format_extra_opts: &[],
+            },
+        )
+        .expect("closed recoverable target should plan");
+        let steps = work_plan.render_steps();
         let plan = AddPlan {
             notes: vec![],
-            // Steps non-empty so execute() does not no-op early.
-            steps: vec![Step {
-                risk: "irreversible",
-                description: "stub".into(),
-                commands: vec![],
-            }],
+            steps,
+            work_plan,
             config,
             parsed: vec![("disk2".into(), by_id_disk2.clone())],
             names: vec!["disk2".into()],
             by_ids: vec![by_id_disk2.clone()],
-            probed: vec![ConfigDisk {
-                name: "disk2".into(),
-                by_id_path: by_id_disk2,
-                state: ConfigDiskState::PresentLuks {
-                    uuid: LuksUuid("22222222-2222-2222-2222-222222222222".into()),
-                    label: Some("braid-disk2".to_owned()),
-                    mapper_open: false,
-                },
-            }],
+            probed,
             pool,
             pool_membership,
         };
@@ -3696,6 +3939,98 @@ mod tests {
             inhibitor.acquire_count(),
             0,
             "pre-mutation identity failure must NOT acquire the sleep inhibitor"
+        );
+    }
+
+    #[test]
+    // Intent: a closed PresentLuks candidate that fails deferred identity
+    //   verification still authenticates the shared passphrase first, then
+    //   fails before sleep-inhibitor acquisition and journal write.
+    //
+    // Why it exists: closed returned disks cannot be FSID-checked during
+    //   dry-run-safe planning. The execution path must keep the credential
+    //   prelude ahead of mapper open/identity work, while still refusing
+    //   BraidLabeledNoBtrfs before pending-op.json can be stranded.
+    //
+    // Scenario: disk2 is braid-labeled and closed during planning, unlocks
+    //   with the shared passphrase, but contains no btrfs superblock after
+    //   open. The command fails as ambiguous identity with no journal.
+    fn closed_present_luks_identity_failure_verifies_credentials_before_no_journal() {
+        let (_state_tmp, paths, _tmp, config_path, pass_path) = add_test_setup();
+        let fs = AddMockFs(vec!["/dev/disk/by-id/virtio-disk2".into()]);
+        let runner = RequestRecordingRunner::new(ClosedNoBtrfsRunner {
+            inner: AddTestRunner {
+                disk_in_pool: false,
+                fail_device_add: false,
+                no_btrfs_superblock: true,
+            },
+        });
+        let inhibitor = crate::inhibit::RecordingInhibitor::new();
+
+        let mut result = Ok(());
+        crate::status_tag::testing::capture_with_color(false, || {
+            result = cmd_add(
+                &runner,
+                &fs,
+                &AddParams {
+                    config_path: &config_path,
+                    disk_specs: &["disk2=/dev/disk/by-id/virtio-disk2".into()],
+                    dry_run: false,
+                    yes: true,
+                    passphrase_stdin: false,
+                    passphrase_file: Some(pass_path.as_path()),
+                    enroll_key_file: None,
+                    luks_format_extra_opts: &[],
+                    progress: ProgressOutput::Off,
+                    paths: &paths,
+                    sleep_inhibitor: &inhibitor,
+                    passphrase_reader: &RealTty,
+                },
+            );
+        });
+
+        let err = result.expect_err("closed identity failure should abort");
+        assert!(
+            err.to_string().contains("contains no btrfs superblock"),
+            "expected BraidLabeledNoBtrfs refusal, got: {err}"
+        );
+        let requests = runner.requests();
+        let credential = requests
+            .iter()
+            .position(|request| {
+                matches!(
+                    request,
+                    CmdRequest::CryptsetupTestPassphrase { device }
+                        if device == "/dev/disk/by-id/virtio-disk2"
+                )
+            })
+            .unwrap_or_else(|| {
+                panic!(
+                    "candidate credential verification must run before identity check: {requests:?}"
+                )
+            });
+        let identity = requests
+            .iter()
+            .position(|request| {
+                matches!(
+                    request,
+                    CmdRequest::BtrfsFilesystemShowTarget { target }
+                        if target == "/dev/mapper/braid-disk2"
+                )
+            })
+            .expect("closed candidate should then enter the identity path");
+        assert!(
+            credential < identity,
+            "credential verification must precede closed-candidate identity check: {requests:?}"
+        );
+        assert!(
+            journal::load_journal(&paths).unwrap().is_none(),
+            "no journal should exist after deferred identity failure"
+        );
+        assert_eq!(
+            inhibitor.acquire_count(),
+            0,
+            "deferred identity failure must NOT acquire the sleep inhibitor"
         );
     }
 
