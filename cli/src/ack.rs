@@ -1,6 +1,5 @@
 use crate::alert::{
-    self, AlertCause, AlertState, load_acked_stats_fallible, mark_missing_acked, save_acked_stats,
-    snapshot_current,
+    self, AlertCause, AlertState, load_acked_stats_fallible, save_acked_stats, snapshot_current,
 };
 use crate::cmd::{CmdRequest, CommandRunner};
 use crate::parse::parse_btrfs_device_stats;
@@ -146,8 +145,8 @@ fn ack_offline(
 
     if !missing_devids.is_empty() {
         let mut acked = load_acked_stats_fallible(paths)?;
-        for devid in &missing_devids {
-            mark_missing_acked(&mut acked, *devid);
+        for devid in missing_devids {
+            acked.0.entry(devid.to_string()).or_default().missing_acked = true;
         }
         save_acked_stats(&acked, paths)?;
     }
@@ -256,9 +255,9 @@ pub enum AckError {
     Io(#[from] std::io::Error),
     /// Cleanup of latch + smartd-alert + corrupt-latch and the beeper hook
     /// failed after ack had already started persisting state: after
-    /// `save_acked_stats` in the mounted path, after `mark_missing_acked`
-    /// was persisted in the offline path, or after one cleanup file was
-    /// already removed. Re-running `braid ack` after fixing the I/O issue is
+    /// `save_acked_stats` in the mounted path, after offline missing-device
+    /// ack state was persisted, or after one cleanup file was already
+    /// removed. Re-running `braid ack` after fixing the I/O issue is
     /// idempotent.
     #[error(
         "alert state cleanup failed -- some files may be in a partial state; \
@@ -1061,7 +1060,7 @@ mod tests {
 
     /*
      * Intent: Offline ack with a latched MissingDevice cause persists the
-     * mark_missing_acked update to acked-stats.json before invoking
+     * missing-device ack update to acked-stats.json before invoking
      * cleanup_alert_files_and_beeper. When cleanup then fails, the user-
      * visible error names the partial state and points at the recovery
      * path -- same contract as the mounted branch, pinned independently.
@@ -1094,7 +1093,7 @@ mod tests {
         );
 
         // Witnesses for the partial-apply state in the offline branch:
-        // mark_missing_acked was persisted (acked-stats exists), latch was
+        // missing-device ack state was persisted (acked-stats exists), latch was
         // not removed (cleanup short-circuited on remove_smartd_alert_flag).
         assert!(
             paths.acked_stats_json().exists(),
@@ -1154,7 +1153,7 @@ mod tests {
      * acked-stats entry sets missing_acked=true while preserving the
      * existing device_stats baseline.
      *
-     * Why it exists: Pins the helper's insert-or-update contract. A
+     * Why it exists: Pins the offline ack insert-or-update behavior. A
      * regression that overwrote the entry with a default device_stats would
      * silently zero out a previously-acked counter baseline, making the
      * next online monitor cycle re-alert on the same counters.

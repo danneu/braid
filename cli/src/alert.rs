@@ -41,7 +41,7 @@ pub enum AlertCause {
 #[derive(Default)]
 pub struct AckedStats(pub BTreeMap<String, AckedDisk>);
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
 pub struct AckedDisk {
     pub missing_acked: bool,
     pub device_stats: AckedDeviceCounters,
@@ -180,37 +180,14 @@ pub fn snapshot_current(
         );
     }
 
-    // Missing devices get missing_acked = true. Use insert-or-update so
-    // that devices which appear in both stats (mapper still exists) and
-    // missing_devids (null-underlying) get missing_acked = true.
+    // Missing devices get missing_acked = true. Preserve any existing
+    // device_stats snapshot for null-underlying devices that also appeared
+    // in stats above.
     for &devid in missing_devids {
-        let key = devid.to_string();
-        map.entry(key)
-            .and_modify(|d| d.missing_acked = true)
-            .or_insert(AckedDisk {
-                missing_acked: true,
-                device_stats: AckedDeviceCounters::default(),
-            });
+        map.entry(devid.to_string()).or_default().missing_acked = true;
     }
 
     AckedStats(map)
-}
-
-/// Mark a devid as missing-acked in acked-stats. Inserts an entry with
-/// default device_stats if the devid is absent, preserves any existing
-/// device_stats baseline if the devid is already present.
-///
-/// Used by offline `braid ack` to apply latched `MissingDevice` causes
-/// without access to live `btrfs device stats` output.
-pub fn mark_missing_acked(acked: &mut AckedStats, devid: u64) {
-    acked
-        .0
-        .entry(devid.to_string())
-        .and_modify(|d| d.missing_acked = true)
-        .or_insert(AckedDisk {
-            missing_acked: true,
-            device_stats: AckedDeviceCounters::default(),
-        });
 }
 
 /// Drop the acked entry for `devid`. Returns true if an entry was removed.
@@ -787,6 +764,33 @@ mod tests {
 
         let disk2 = snapshot.0.get("2").unwrap();
         assert!(disk2.missing_acked);
+    }
+
+    // Intent: snapshot_current marks a null-underlying devid as
+    // missing-acked while preserving the stats row counters for that devid.
+    // Why it exists: the missing-devid pass must update the existing snapshot
+    // entry, not overwrite it with default counters.
+    // Scenario: btrfs still reports the mapper for devid 2 after hot-unplug,
+    // while probe also classifies devid 2 as alert-local missing.
+    #[test]
+    fn snapshot_current_preserves_null_underlying_stats() {
+        let mut dev = zero_device("/dev/mapper/braid-disk2", 2);
+        dev.read_io_errs = 3;
+        dev.write_io_errs = 4;
+        dev.flush_io_errs = 5;
+        dev.corruption_errs = 6;
+        dev.generation_errs = 7;
+        let stats = make_stats(vec![dev]);
+
+        let snapshot = snapshot_current(&stats, &[2]);
+
+        let disk2 = snapshot.0.get("2").unwrap();
+        assert!(disk2.missing_acked);
+        assert_eq!(disk2.device_stats.read_io_errs, 3);
+        assert_eq!(disk2.device_stats.write_io_errs, 4);
+        assert_eq!(disk2.device_stats.flush_io_errs, 5);
+        assert_eq!(disk2.device_stats.corruption_errs, 6);
+        assert_eq!(disk2.device_stats.generation_errs, 7);
     }
 
     #[test]
