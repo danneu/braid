@@ -6,6 +6,11 @@ pub mod cmd;
 pub mod config;
 pub mod confirm;
 pub mod credential_verify;
+
+/// Owned, fully-resolved credential values (`OpenCredential`) shared
+/// by `unlock` and `recover` plus the flag-router that produces them.
+/// Sibling to `credential_verify` (borrowed-credential verification).
+pub mod credential;
 pub mod discover;
 pub mod doctor;
 pub mod enroll_key_file;

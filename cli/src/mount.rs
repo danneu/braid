@@ -11,8 +11,7 @@ use crate::probe::{self, Filesystem, ProbeError};
 use crate::progress::Sleeper;
 use crate::status_tag::{StatusTag, color_enabled_for_stderr, emit_status, status_line};
 use crate::types::{ByIdPath, ConfigDiskState, MapperName, MountPoint};
-use std::path::{Path, PathBuf};
-use zeroize::Zeroizing;
+use std::path::Path;
 
 #[derive(Debug, thiserror::Error)]
 pub enum MountError {
@@ -30,54 +29,10 @@ pub enum MountError {
     DegradedRefused(String),
 }
 
-/// A fully-resolved credential ready to drive `cryptsetup open`. Owned (no
-/// lifetime parameter); plaintext is scrubbed on drop via `Zeroizing`.
-///
-/// Produced by `resolve_credential`. Callers hold the resolved value and
-/// pass it by reference to `execute_unlock_and_mount`. The mount-only
-/// entry point (`execute_mount_only`) takes no credential.
-pub enum OpenCredential {
-    Passphrase(Zeroizing<String>),
-    KeyFile(PathBuf),
-}
-
 #[derive(Debug)]
 pub struct UnlockAndMountFailure {
     pub error: MountError,
     pub opened_mappers: Vec<MapperName>,
-}
-
-impl std::fmt::Debug for OpenCredential {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            OpenCredential::Passphrase(_) => f.write_str("Passphrase(<redacted>)"),
-            OpenCredential::KeyFile(path) => f.debug_tuple("KeyFile").field(path).finish(),
-        }
-    }
-}
-
-/// Resolve credential flag inputs into an owned, fully-resolved
-/// `OpenCredential`. ALWAYS reads -- callers decide whether to invoke this,
-/// because the "should we prompt now?" rule differs by command:
-///
-/// - `cmd_unlock` skips this call entirely when `plan.to_unlock` is empty
-///   (the no-prompt-when-all-mappers-open UX rule).
-/// - `cmd_recover` calls this whenever the pool is not yet mounted, even
-///   if the initial plan's `to_unlock` is empty, because the post-mount
-///   relock cycle will close every mapper and need to reopen them.
-///
-/// Resolution order: `key_file` (if provided) -> passphrase
-/// (file/stdin/TTY).
-pub fn resolve_credential(
-    passphrase_stdin: bool,
-    passphrase_file: Option<&Path>,
-    key_file: Option<&Path>,
-) -> Result<OpenCredential, MountError> {
-    if let Some(kf) = key_file {
-        return Ok(OpenCredential::KeyFile(kf.to_path_buf()));
-    }
-    let pp = luks::read_passphrase(passphrase_file, passphrase_stdin)?;
-    Ok(OpenCredential::Passphrase(pp))
 }
 
 /// Why a membership disk is missing from the pool at unlock time.
@@ -679,7 +634,7 @@ pub fn execute_unlock_and_mount<R: CommandRunner, F: Filesystem + ?Sized>(
     fs: &F,
     config: &Config,
     plan: &OpenPlan,
-    credential: &OpenCredential,
+    credential: &crate::credential::OpenCredential,
 ) -> Result<bool, UnlockAndMountFailure> {
     let color_enabled = color_enabled_for_stderr();
     if plan.to_unlock.is_empty() {
@@ -692,10 +647,7 @@ pub fn execute_unlock_and_mount<R: CommandRunner, F: Filesystem + ?Sized>(
     }
 
     let mut opened_mappers = Vec::new();
-    let cred = match credential {
-        OpenCredential::Passphrase(pp) => Credential::Passphrase(pp.as_str()),
-        OpenCredential::KeyFile(kf) => Credential::KeyFile(kf.as_path()),
-    };
+    let cred = credential.as_borrowed();
     open_disks_with_credential(
         runner,
         &plan.to_unlock,
@@ -876,9 +828,11 @@ mod tests {
     use super::*;
     use crate::cmd::{CmdRequest, MockRunner, RawCommandOutput};
     use crate::config::Config;
+    use crate::credential::OpenCredential;
     use crate::membership::{DiskMember, PoolMembership};
     use crate::types::{ByIdPath, LuksUuid, MountPoint};
     use std::collections::BTreeMap;
+    use zeroize::Zeroizing;
 
     struct MockFs {
         paths: Vec<String>,

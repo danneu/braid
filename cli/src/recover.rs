@@ -1,12 +1,13 @@
 use crate::cmd::{CmdRequest, CommandRunner, Step};
 use crate::config::{self, Config};
+use crate::credential::{self, OpenCredential};
 use crate::credential_verify::{Credential, CredentialVerifyTarget, verify_credential_for_targets};
 use crate::discover;
 use crate::inhibit::AcquireSleepInhibitor;
 use crate::journal::{self, Journal};
 use crate::luks::{self, VerifyOutcome};
 use crate::membership::{self, DiskMember, PoolMembership};
-use crate::mount::{self, MountError, OpenCredential, OpenPlan};
+use crate::mount::{self, MountError, OpenPlan};
 use crate::parse::btrfs_filesystem_show::{DeviceBtrfsProbe, classify_btrfs_probe};
 use crate::parse::{ReplaceState, parse_btrfs_replace_status};
 use crate::preview::{self, PerDiskStyle, Preview, PreviewCompleteness, PreviewNote};
@@ -826,7 +827,7 @@ fn execute_recover_initial_open<R: CommandRunner + Sync, F: Filesystem + ?Sized>
     // reopen them with the same credential.
     if state.credential.is_none() {
         state.credential = Some(
-            mount::resolve_credential(
+            credential::resolve_credential(
                 params.passphrase_stdin,
                 params.passphrase_file,
                 None, // recover does not expose --key-file today
@@ -1817,7 +1818,7 @@ fn discover_add_targets_before_mount<R: CommandRunner, F: Filesystem + ?Sized>(
         if !mapper_open {
             if credential.is_none() {
                 credential = Some(
-                    mount::resolve_credential(
+                    credential::resolve_credential(
                         params.passphrase_stdin,
                         params.passphrase_file,
                         None,

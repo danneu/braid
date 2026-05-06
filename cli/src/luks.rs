@@ -219,7 +219,7 @@ impl PassphraseReader for ScriptedPassphraseReader {
 }
 
 /// Existing API -- read a passphrase without new-format confirmation.
-/// Used by `replace`, `enroll-key-file`, and `mount::resolve_credential`
+/// Used by `replace`, `enroll-key-file`, and `credential::resolve_credential`
 /// where a typo is caught by a live verification target.
 pub fn read_passphrase(
     passphrase_file: Option<&std::path::Path>,
@@ -933,11 +933,9 @@ pub fn format_keyfile_asymmetry_warning() -> String {
 /// Extracted so tests can pass a tempdir instead of the real path.
 fn header_backup_advisories_in(dir: &std::path::Path) -> Vec<String> {
     let has_backups = match std::fs::read_dir(dir) {
-        Ok(entries) => entries.filter_map(|e| e.ok()).any(|e| {
-            e.path()
-                .extension()
-                .is_some_and(|ext| ext == "luksheader")
-        }),
+        Ok(entries) => entries
+            .filter_map(|e| e.ok())
+            .any(|e| e.path().extension().is_some_and(|ext| ext == "luksheader")),
         Err(_) => false,
     };
     if has_backups {

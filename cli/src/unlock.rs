@@ -113,11 +113,12 @@ impl UnlockPlan {
         if plan.to_unlock.is_empty() {
             mount::execute_mount_only(runner, fs, params.config, &plan)?;
         } else {
-            let credential = mount::resolve_credential(
+            let credential = crate::credential::resolve_credential(
                 params.passphrase_stdin,
                 params.passphrase_file,
                 params.key_file,
-            )?;
+            )
+            .map_err(MountError::from)?;
             match mount::execute_unlock_and_mount(runner, fs, params.config, &plan, &credential) {
                 Ok(_) => {}
                 Err(failure) => {
