@@ -61,6 +61,17 @@ fn orphan_scan_warn_body(e: &std::io::Error) -> String {
     format!("could not scan /dev/mapper for orphans: {e} (skipping)")
 }
 
+/// Classify umount EBUSY from libmount's diagnostic segment.
+/// Exit 32 is generic for umount syscall failures, so the lock hint must
+/// not rely on exit status alone.
+fn umount_stderr_is_busy(stderr: &str) -> bool {
+    // util-linux prints `"<target>: <diagnostic>."`; with LC_ALL=C, EBUSY's
+    // diagnostic is exactly "target is busy". Match the segment ending so a
+    // path containing that phrase does not false-positive.
+    let s = stderr.trim().trim_end_matches('.');
+    s == "target is busy" || s.ends_with(": target is busy")
+}
+
 /// Build the scoped `btrfs device scan --forget` argument list: every
 /// LUKS mapper path `cmd_lock` is about to destroy (membership +
 /// orphan), filtered through fs.exists. The kernel forget path is
@@ -208,14 +219,18 @@ impl LockPlan {
                 mount_point: mount_point.clone(),
             })?;
             if umount_result.exit_status != 0 {
-                let err = LockError::Failed(format!(
-                    "umount {mount_point} failed (exit {}): {}\n\
-                     hint: a process may be using files on the mount. \
-                     Run 'lsof {mount_point}' or 'fuser -vm {mount_point}' to identify it.",
+                let stderr = umount_result.stderr.trim();
+                let mut msg = format!(
+                    "umount {mount_point} failed (exit {}): {stderr}",
                     umount_result.exit_status,
-                    umount_result.stderr.trim(),
-                    mount_point = mount_point,
-                ));
+                );
+                if umount_stderr_is_busy(stderr) {
+                    msg.push_str(&format!(
+                        "\nhint: a process may be using files on the mount. \
+                         Run 'lsof {mount_point}' or 'fuser -vm {mount_point}' to identify it."
+                    ));
+                }
+                let err = LockError::Failed(msg);
                 eprint!("{}", line(StatusTag::Fail, &format!("{err}")));
                 eprint!(
                     "{}",
@@ -875,6 +890,112 @@ mod tests {
         assert!(
             msg.contains("lsof") && msg.contains("fuser"),
             "expected lsof/fuser hint in error, got: {msg}"
+        );
+    }
+
+    // Intent: non-busy umount failures omit the lsof/fuser hint because it
+    //   would send users hunting for a holder that does not exist.
+    // Why it exists: libmount routes every umount syscall errno through exit
+    //   32, so exit-code gating cannot distinguish busy from non-busy. The
+    //   hint must be gated on the EBUSY diagnostic "target is busy" instead.
+    // Scenario: umount returns exit 32 with stderr ending in "can't write
+    //   superblock" from a failing disk; LockError echoes that stderr but does
+    //   not suggest lsof/fuser.
+    #[test]
+    fn lock_umount_non_busy_omits_hint() {
+        let runner = with_fsid_probe_mocks(MockRunner::default().with_output(
+            CmdRequest::MountpointCheck {
+                path: MountPoint("/mnt/storage".to_owned()),
+            },
+            ok_raw("mountpoint -q /mnt/storage"),
+        ))
+        .with_output(
+            CmdRequest::Umount {
+                mount_point: MountPoint("/mnt/storage".to_owned()),
+            },
+            err_raw(
+                "umount /mnt/storage",
+                32,
+                "umount: /mnt/storage: can't write superblock.",
+            ),
+        )
+        .with_output(
+            CmdRequest::CryptsetupClose {
+                mapper: "braid-aaa".into(),
+            },
+            ok_raw("cryptsetup close braid-aaa"),
+        )
+        .with_output(
+            CmdRequest::CryptsetupClose {
+                mapper: "braid-bbb".into(),
+            },
+            ok_raw("cryptsetup close braid-bbb"),
+        );
+        let fs = MockFs::new(&["/dev/mapper/braid-aaa", "/dev/mapper/braid-bbb"]);
+        let config = test_config();
+        let membership = test_membership();
+
+        let err = cmd_lock_impl(&runner, &fs, &NoopSleeper, &config, &membership, false)
+            .expect_err("should fail on non-busy umount");
+        let msg = err.to_string();
+        assert!(
+            msg.contains("can't write superblock"),
+            "expected raw stderr in msg, got: {msg}"
+        );
+        assert!(
+            !msg.contains("lsof") && !msg.contains("fuser"),
+            "expected no lsof/fuser hint for non-busy failure, got: {msg}"
+        );
+    }
+
+    // Intent: a mount path containing the literal phrase "target is busy" does
+    //   not trip the hint gate when the actual diagnostic is non-busy.
+    // Why it exists: util-linux formats umount stderr as
+    //   "<target>: <diagnostic>.". MountPoint only rejects empty strings, so a
+    //   path containing "target is busy" is structurally legal. A naive
+    //   stderr.contains("target is busy") would emit the hint even on EIO.
+    // Scenario: stderr's path component contains the phrase but the diagnostic
+    //   at the end is "can't write superblock"; hint must not appear.
+    #[test]
+    fn lock_umount_path_containing_busy_phrase_omits_hint() {
+        let runner = with_fsid_probe_mocks(MockRunner::default().with_output(
+            CmdRequest::MountpointCheck {
+                path: MountPoint("/mnt/storage".to_owned()),
+            },
+            ok_raw("mountpoint -q /mnt/storage"),
+        ))
+        .with_output(
+            CmdRequest::Umount {
+                mount_point: MountPoint("/mnt/storage".to_owned()),
+            },
+            err_raw(
+                "umount /mnt/storage",
+                32,
+                "umount: /mnt/has target is busy here/storage: can't write superblock.",
+            ),
+        )
+        .with_output(
+            CmdRequest::CryptsetupClose {
+                mapper: "braid-aaa".into(),
+            },
+            ok_raw("cryptsetup close braid-aaa"),
+        )
+        .with_output(
+            CmdRequest::CryptsetupClose {
+                mapper: "braid-bbb".into(),
+            },
+            ok_raw("cryptsetup close braid-bbb"),
+        );
+        let fs = MockFs::new(&["/dev/mapper/braid-aaa", "/dev/mapper/braid-bbb"]);
+        let config = test_config();
+        let membership = test_membership();
+
+        let err = cmd_lock_impl(&runner, &fs, &NoopSleeper, &config, &membership, false)
+            .expect_err("should fail on non-busy umount with busy-phrase path");
+        let msg = err.to_string();
+        assert!(
+            !msg.contains("lsof") && !msg.contains("fuser"),
+            "expected no lsof/fuser hint when only the path contains the phrase, got: {msg}"
         );
     }
 
