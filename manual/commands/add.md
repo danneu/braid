@@ -50,11 +50,14 @@ echo -n 'hunter2' | sudo braid add toshiba1=/dev/disk/by-id/ata-TOSHIBA_MN07ACA1
 sudo braid add toshiba1=/dev/disk/by-id/ata-TOSHIBA_MN07ACA12T_1234 --passphrase-file /tmp/pass.txt
 ```
 
-Enroll a keyfile for auto-unlock at the same time:
+Enroll a keyfile for auto-unlock from a mounted USB drive at the same time:
 
 ```
-sudo braid add toshiba1=/dev/disk/by-id/ata-TOSHIBA_MN07ACA12T_1234 --enroll /etc/braid/keys
+sudo braid add toshiba1=/dev/disk/by-id/ata-TOSHIBA_MN07ACA12T_1234 --enroll /mnt/usb
 ```
+
+Mount the USB first so the `--enroll` directory refers to removable media,
+not persistent host storage.
 
 ## Important flags
 

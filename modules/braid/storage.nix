@@ -45,8 +45,12 @@ in
       "d ${cfg.mountPoint} 0755 root root -"
     ]
     ++ lib.optionals cfg.autoUnlock.enable [
-      # 0700 root:root — keyfile is sensitive; non-root must not traverse.
+      # Locked parent -- non-root cannot traverse into the mounted USB.
       "d /run/braid-key 0700 root root -"
+      # Mount point for the USB. Permissions of this dir itself are
+      # irrelevant once the USB is mounted on top, but the parent's 0700
+      # blocks all non-root traversal.
+      "d /run/braid-key/mnt 0700 root root -"
     ];
 
     # --- Scrub scheduling ---
@@ -176,7 +180,7 @@ in
 
     # --- Auto-unlock via USB keyfile ---
 
-    fileSystems."/run/braid-key" = lib.mkIf cfg.autoUnlock.enable {
+    fileSystems."/run/braid-key/mnt" = lib.mkIf cfg.autoUnlock.enable {
       device = cfg.autoUnlock.keyDevice;
       fsType = "auto";
       options = [
@@ -211,15 +215,20 @@ in
       ];
       script =
         let
-          keyPath = "/run/braid-key/braid.key";
+          keyPath = "/run/braid-key/mnt/braid.key";
         in
         ''
+          # Always unmount USB after use. Never leave keyfile accessible -- this
+          # is the Unraid CVE pattern (plaintext credential on a mounted FS).
+          # Install before mounting so every exit path cleans up.
+          trap 'umount /run/braid-key/mnt 2>/dev/null || true' EXIT
+
           # Mount USB via systemd mount unit — this respects the device-timeout
           # configured on the mount unit, so slow USB enumeration gets the full
           # wait window. A direct `mount` call would bypass that timeout.
           # The escaped unit name matches systemd's path encoding for
-          # /run/braid-key → run-braid\x2dkey.mount.
-          if ! ${pkgs.systemd}/bin/systemctl start run-braid\\x2dkey.mount 2>/dev/null; then
+          # /run/braid-key/mnt -> run-braid\x2dkey-mnt.mount.
+          if ! ${pkgs.systemd}/bin/systemctl start run-braid\\x2dkey-mnt.mount 2>/dev/null; then
             echo "braid-auto-unlock: USB key device not available, skipping" >&2
             exit 0
           fi
@@ -228,28 +237,26 @@ in
           # ("braid.key"), not user-configurable, so CWE-22 via config is
           # eliminated by construction. However, the USB filesystem is
           # attacker-controlled, so we still verify the resolved path stays
-          # within /run/braid-key/ to guard against:
+          # within /run/braid-key/mnt/ to guard against:
           #   - CWE-59: symlinked keyfile (braid.key -> /etc/shadow)
           # realpath -e also fails if the file doesn't exist, so this
           # subsumes the existence check.
           resolved=$(${pkgs.coreutils}/bin/realpath -e "${keyPath}" 2>/dev/null) || {
             echo "braid-auto-unlock: keyfile not found at ${keyPath}, skipping" >&2
-            umount /run/braid-key 2>/dev/null || true
             exit 0
           }
           case "$resolved" in
-            /run/braid-key/*)
+            /run/braid-key/mnt/*)
               ;;
             *)
               echo "braid-auto-unlock: keyfile resolves outside mount root ($resolved), refusing" >&2
-              umount /run/braid-key 2>/dev/null || true
               exit 0
               ;;
           esac
 
           # Warn if keyfile is world/group-readable. On vfat (no Unix perms),
           # files are typically 0755 — we can't fix that (vfat doesn't support
-          # chmod), so warn rather than fail. The mount point perms (0700) and
+          # chmod), so warn rather than fail. The locked parent directory and
           # short mount window limit exposure. Hard-failing here would break
           # the most common USB format.
           perms=$(${pkgs.coreutils}/bin/stat -c '%a' "$resolved" 2>/dev/null || echo "???")
@@ -270,9 +277,6 @@ in
             fi
           fi
 
-          # Always unmount USB after use. Never leave keyfile accessible — this
-          # is the Unraid CVE pattern (plaintext credential on a mounted FS).
-          umount /run/braid-key 2>/dev/null || true
           exit 0
         '';
     };

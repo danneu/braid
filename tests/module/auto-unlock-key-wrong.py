@@ -33,7 +33,7 @@ with subtest("Journal has warning about failed unlock"):
         f"Expected warning in journal about failed unlock, got:\n{journal}"
 
 with subtest("USB is unmounted after auto-unlock attempt"):
-    ret = machine.execute("mountpoint -q /run/braid-key")
-    assert ret[0] != 0, "USB should NOT be mounted at /run/braid-key"
+    ret = machine.execute("mountpoint -q /run/braid-key/mnt")
+    assert ret[0] != 0, "USB should NOT be mounted at /run/braid-key/mnt"
 
 machine.shutdown()

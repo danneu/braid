@@ -1,11 +1,14 @@
-# Test: auto-unlock-key-wrong
+# Test: auto-unlock-runtime-dir-mode
 #
-# What: Verifies that when autoUnlock is enabled and a USB device is
-# present but contains a wrong/invalid keyfile, boot succeeds with the
-# pool remaining locked.
+# Intent: Verify that /run/braid-key remains 0700 root:root while the USB is
+# mounted at /run/braid-key/mnt, so non-root users cannot traverse to it.
 #
-# Why: A corrupted or swapped USB must not block boot, cause error loops,
-# or leave the system in a degraded state.
+# Why it exists: The auto-unlock key is plaintext while mounted. A permissive
+# USB filesystem root must not make the key reachable during that mount window.
+#
+# Scenario: NixOS module test with a vfat "USB" disk. The test starts the mount
+# unit directly, observes the mounted state, verifies the locked parent blocks
+# nobody from listing either the parent or child path, then stops the unit.
 { braid }:
 { pkgs, ... }:
 let
@@ -13,7 +16,7 @@ let
   diskNames = [ "disk1" ];
 in
 {
-  name = "auto-unlock-key-wrong";
+  name = "auto-unlock-runtime-dir-mode";
 
   nodes.machine =
     { pkgs, ... }:
@@ -23,21 +26,17 @@ in
         (import ./lib/initrd-fixture.nix {
           inherit passphrase diskNames;
           extraWaitDevices = [ "/dev/disk/by-id/virtio-usbkey" ];
-          extraStorePaths = [ pkgs.e2fsprogs ];
-          extraPath = [ pkgs.e2fsprogs ];
-          description = "Prepare LUKS + btrfs + wrong USB key fixture";
+          extraStorePaths = [ pkgs.dosfstools ];
+          extraPath = [ pkgs.dosfstools ];
+          description = "Prepare LUKS + btrfs + vfat USB fixture";
           postScript = ''
-            # Format USB with WRONG random keyfile (not enrolled in LUKS)
             usb="/dev/disk/by-id/virtio-usbkey"
-            mkfs.ext4 -F "$usb"
-            mkdir -p /tmp/usb-mnt
-            mount "$usb" /tmp/usb-mnt
-            dd if=/dev/urandom of=/tmp/usb-mnt/braid.key bs=4096 count=1 iflag=fullblock
-            chmod 400 /tmp/usb-mnt/braid.key
-            umount /tmp/usb-mnt
+            mkfs.vfat -F 32 "$usb"
           '';
         })
       ];
+
+      boot.supportedFilesystems = [ "vfat" ];
 
       braid = {
         enable = true;
@@ -49,25 +48,21 @@ in
         };
       };
 
-      # Seed pool.json — the initrd fixture bypasses `braid add`, so there is
-      # no pool membership file.  braid unlock requires it.
-      systemd.tmpfiles.rules = [
-        "d /var/lib/braid 0755 root root -"
-        ''f /var/lib/braid/pool.json 0644 root root - {"disks":{"disk1":{"by_id":"/dev/disk/by-id/virtio-disk1"}}}''
-      ];
-
       virtualisation.emptyDiskImages = [
         {
           size = 512;
           driveConfig.deviceExtraOpts.serial = "disk1";
         }
-        # USB with WRONG keyfile
         {
           size = 64;
           driveConfig.deviceExtraOpts.serial = "usbkey";
         }
       ];
       virtualisation.memorySize = 2048;
+
+      environment.systemPackages = [
+        pkgs.util-linux
+      ];
 
       # Re-declare mounts for VM compat (virtualisation.fileSystems uses
       # mkVMOverride which replaces all fileSystems entries, so entries
@@ -88,5 +83,5 @@ in
 
     };
 
-  testScript = builtins.readFile ./auto-unlock-key-wrong.py;
+  testScript = builtins.readFile ./auto-unlock-runtime-dir-mode.py;
 }

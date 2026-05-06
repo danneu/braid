@@ -41,8 +41,8 @@ same bytes will produce different LUKS decryption keys because the
 passphrase path applies PBKDF while the keyfile path does not.
 
 Each mechanism occupies a separate LUKS key slot (up to 8 slots per
-device). Braid's shared passphrase uses slot 0; a future binary keyfile
-would use a different slot.
+device). Braid's shared passphrase uses slot 0; the binary keyfile uses
+slot 1.
 
 See: [cryptsetup(8) — key-file processing](https://man7.org/linux/man-pages/man8/cryptsetup.8.html),
 [Arch Wiki — dm-crypt/Device encryption](https://wiki.archlinux.org/title/Dm-crypt/Device_encryption)
@@ -63,7 +63,7 @@ mount point:
 - `braid add --enroll DIR`
 - `braid replace --enroll DIR`
 - `braid unlock --key-file PATH`
-- `braid.autoUnlock` reading `/run/braid-key/braid.key`
+- `braid.autoUnlock` reading `/run/braid-key/mnt/braid.key`
 
 ## Plaintext keyfile exposure (Unraid CVE)
 
@@ -81,9 +81,11 @@ Braid avoids this in three ways:
 2. **Mount-read-unmount.** The auto-unlock service mounts the USB read-only,
    reads the passphrase, then unmounts immediately. The passphrase is not
    accessible on the filesystem after unlock completes.
-3. **Restricted mount point.** `/run/braid-key` is created with mode 0700
-   root:root, so even during the brief mount window, non-root users cannot
-   traverse to the passphrase file.
+3. **Restricted mount root.** The USB is mounted at `/run/braid-key/mnt`,
+   under a parent directory `/run/braid-key` that remains 0700 root:root.
+   Non-root users cannot traverse the parent regardless of the USB
+   filesystem's root inode permissions, so the passphrase file stays
+   unreachable during the mount window.
 
 ## Boot resilience: nofail + device-timeout
 
@@ -158,8 +160,9 @@ cleanup output is secondary guidance and never replaces it.
 
 Standard guidance for directories containing LUKS key material: the
 directory should be mode 0700 owned by root, and keyfiles should be mode
-0400. Since braid mounts the USB read-only at `/run/braid-key`, file
-permissions are whatever the USB filesystem has — but the mount point
-directory itself is locked down so non-root users cannot reach the files.
+0400. Since braid mounts the USB read-only at `/run/braid-key/mnt`, file
+permissions are whatever the USB filesystem has -- but the locked parent
+directory `/run/braid-key` prevents non-root users from traversing to the
+mounted files.
 
 See: [LUKS key file permissions](https://itsfoss.gitlab.io/post/luks-key-file-correct-permissions/)

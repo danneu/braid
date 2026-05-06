@@ -1,10 +1,14 @@
-# Test: auto-unlock-key-missing
+# Test: auto-unlock-key-file-missing
 #
-# What: Verifies that when autoUnlock is enabled but no USB device is
-# present, boot succeeds normally with the pool locked.
+# Intent: Verify that auto-unlock skips cleanly when the USB is present but
+# braid.key is missing.
 #
-# Why: Principle 1 (resilient by default). A missing USB key must NEVER
-# block boot or cause systemd to enter degraded state.
+# Why it exists: The realpath -e missing-file path must still unmount via the
+# EXIT trap, leave the pool locked, and keep boot healthy.
+#
+# Scenario: NixOS module test with an ext4 "USB" disk that contains no
+# braid.key. The auto-unlock service mounts the USB, cannot resolve the
+# keyfile, unmounts, and exits successfully.
 { braid }:
 { pkgs, ... }:
 let
@@ -12,7 +16,7 @@ let
   diskNames = [ "disk1" ];
 in
 {
-  name = "auto-unlock-key-missing";
+  name = "auto-unlock-key-file-missing";
 
   nodes.machine =
     { pkgs, ... }:
@@ -21,7 +25,14 @@ in
         ../../modules/braid
         (import ./lib/initrd-fixture.nix {
           inherit passphrase diskNames;
-          description = "Prepare LUKS + btrfs fixture";
+          extraWaitDevices = [ "/dev/disk/by-id/virtio-usbkey" ];
+          extraStorePaths = [ pkgs.e2fsprogs ];
+          extraPath = [ pkgs.e2fsprogs ];
+          description = "Prepare LUKS + btrfs + empty USB key fixture";
+          postScript = ''
+            usb="/dev/disk/by-id/virtio-usbkey"
+            mkfs.ext4 -F "$usb"
+          '';
         })
       ];
 
@@ -30,9 +41,8 @@ in
         package = braid;
         autoUnlock = {
           enable = true;
-          # Point at a device that does NOT exist in this VM
           keyDevice = "/dev/disk/by-id/virtio-usbkey";
-          timeoutSec = 2;
+          timeoutSec = 10;
         };
       };
 
@@ -41,7 +51,10 @@ in
           size = 512;
           driveConfig.deviceExtraOpts.serial = "disk1";
         }
-        # No usbkey disk — that's the whole point
+        {
+          size = 64;
+          driveConfig.deviceExtraOpts.serial = "usbkey";
+        }
       ];
       virtualisation.memorySize = 2048;
 
@@ -58,11 +71,11 @@ in
           "noexec"
           "nofail"
           "noauto"
-          "x-systemd.device-timeout=2s"
+          "x-systemd.device-timeout=10s"
         ];
       };
 
     };
 
-  testScript = builtins.readFile ./auto-unlock-key-missing.py;
+  testScript = builtins.readFile ./auto-unlock-key-file-missing.py;
 }

@@ -1,11 +1,14 @@
-# Test: auto-unlock-key-wrong
+# Test: auto-unlock-key-file-symlink
 #
-# What: Verifies that when autoUnlock is enabled and a USB device is
-# present but contains a wrong/invalid keyfile, boot succeeds with the
-# pool remaining locked.
+# Intent: Verify that auto-unlock refuses a braid.key symlink that resolves
+# outside the USB mount root.
 #
-# Why: A corrupted or swapped USB must not block boot, cause error loops,
-# or leave the system in a degraded state.
+# Why it exists: The USB filesystem is attacker-controlled. A symlink escape
+# must not let auto-unlock read a host file as key material.
+#
+# Scenario: NixOS module test with an ext4 "USB" disk whose braid.key is a
+# symlink to /etc/shadow. The auto-unlock service resolves the path, refuses
+# the escape, unmounts, and exits successfully.
 { braid }:
 { pkgs, ... }:
 let
@@ -13,7 +16,7 @@ let
   diskNames = [ "disk1" ];
 in
 {
-  name = "auto-unlock-key-wrong";
+  name = "auto-unlock-key-file-symlink";
 
   nodes.machine =
     { pkgs, ... }:
@@ -25,15 +28,13 @@ in
           extraWaitDevices = [ "/dev/disk/by-id/virtio-usbkey" ];
           extraStorePaths = [ pkgs.e2fsprogs ];
           extraPath = [ pkgs.e2fsprogs ];
-          description = "Prepare LUKS + btrfs + wrong USB key fixture";
+          description = "Prepare LUKS + btrfs + symlink USB key fixture";
           postScript = ''
-            # Format USB with WRONG random keyfile (not enrolled in LUKS)
             usb="/dev/disk/by-id/virtio-usbkey"
             mkfs.ext4 -F "$usb"
             mkdir -p /tmp/usb-mnt
             mount "$usb" /tmp/usb-mnt
-            dd if=/dev/urandom of=/tmp/usb-mnt/braid.key bs=4096 count=1 iflag=fullblock
-            chmod 400 /tmp/usb-mnt/braid.key
+            ln -s /etc/shadow /tmp/usb-mnt/braid.key
             umount /tmp/usb-mnt
           '';
         })
@@ -49,19 +50,11 @@ in
         };
       };
 
-      # Seed pool.json — the initrd fixture bypasses `braid add`, so there is
-      # no pool membership file.  braid unlock requires it.
-      systemd.tmpfiles.rules = [
-        "d /var/lib/braid 0755 root root -"
-        ''f /var/lib/braid/pool.json 0644 root root - {"disks":{"disk1":{"by_id":"/dev/disk/by-id/virtio-disk1"}}}''
-      ];
-
       virtualisation.emptyDiskImages = [
         {
           size = 512;
           driveConfig.deviceExtraOpts.serial = "disk1";
         }
-        # USB with WRONG keyfile
         {
           size = 64;
           driveConfig.deviceExtraOpts.serial = "usbkey";
@@ -88,5 +81,5 @@ in
 
     };
 
-  testScript = builtins.readFile ./auto-unlock-key-wrong.py;
+  testScript = builtins.readFile ./auto-unlock-key-file-symlink.py;
 }

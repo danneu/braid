@@ -27,11 +27,14 @@ echo -n 'hunter2' | sudo braid unlock --passphrase-stdin
 sudo braid unlock --passphrase-file /tmp/pass.txt
 ```
 
-Unlock with a binary keyfile (e.g. for auto-unlock via systemd):
+Unlock with a binary keyfile from a mounted USB drive (e.g. for auto-unlock via systemd):
 
 ```
-sudo braid unlock --key-file /etc/braid/keys/braid.key
+sudo braid unlock --key-file /mnt/usb/braid.key
 ```
+
+Mount the USB first so the keyfile path refers to removable media, not
+persistent host storage.
 
 Mount in degraded mode when a disk is missing:
 

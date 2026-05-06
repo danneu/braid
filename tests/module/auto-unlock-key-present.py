@@ -12,7 +12,7 @@
 # formatted ext4 containing /braid.key. Fixture pre-creates LUKS+btrfs
 # pool and enrolls keyfile. Initrd does NOT unlock LUKS — the
 # braid-auto-unlock service opens LUKS and mounts the pool in stage 2.
-# USB is NOT still mounted at /run/braid-key.
+# USB is NOT still mounted at /run/braid-key/mnt.
 
 start_all()
 machine.wait_for_unit("multi-user.target", timeout=120)
@@ -36,8 +36,8 @@ with subtest("braid-online.service is active after auto-unlock"):
     machine.succeed("systemctl is-active braid-online.service")
 
 with subtest("USB is unmounted after auto-unlock"):
-    ret = machine.execute("mountpoint -q /run/braid-key")
-    assert ret[0] != 0, "USB should NOT be mounted at /run/braid-key after auto-unlock"
+    ret = machine.execute("mountpoint -q /run/braid-key/mnt")
+    assert ret[0] != 0, "USB should NOT be mounted at /run/braid-key/mnt after auto-unlock"
 
 with subtest("Mount point has correct group permissions after auto-unlock"):
     stat = machine.succeed("stat -c '%U:%G %a' /mnt/storage").strip()

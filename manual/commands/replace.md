@@ -52,14 +52,17 @@ Preview what would happen:
 sudo braid replace --old toshiba1 --new toshiba4=/dev/disk/by-id/ata-TOSHIBA_MN07ACA12T_NEW1 --dry-run
 ```
 
-Enroll a keyfile on the new disk:
+Enroll a keyfile from a mounted USB drive on the new disk:
 
 ```
 sudo braid replace \
   --old toshiba1 \
   --new toshiba4=/dev/disk/by-id/ata-TOSHIBA_MN07ACA12T_NEW1 \
-  --enroll /etc/braid/keys
+  --enroll /mnt/usb
 ```
+
+Mount the USB first so the `--enroll` directory refers to removable media,
+not persistent host storage.
 
 Pass passphrase non-interactively:
 

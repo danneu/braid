@@ -92,7 +92,7 @@ in
       # Re-declare mounts for VM compat (virtualisation.fileSystems uses
       # mkVMOverride which replaces all fileSystems entries, so entries
       # from the braid module must be re-declared here).
-      virtualisation.fileSystems."/run/braid-key" = {
+      virtualisation.fileSystems."/run/braid-key/mnt" = {
         device = "/dev/disk/by-id/virtio-usbkey";
         fsType = "auto";
         options = [
