@@ -39,7 +39,10 @@ fn cmd_ack_impl<R: CommandRunner, F: Filesystem + ?Sized>(
             (None, true)
         }
     };
-    let latch_count = latch_state.as_ref().map(|s| s.causes.len()).unwrap_or(0);
+    let causes: &[AlertCause] = latch_state
+        .as_ref()
+        .map(|s| s.causes.as_slice())
+        .unwrap_or(&[]);
     let smartd_active = alert::smartd_alert_active(paths);
 
     // 2. Check if pool is mounted
@@ -58,7 +61,7 @@ fn cmd_ack_impl<R: CommandRunner, F: Filesystem + ?Sized>(
         );
     }
 
-    if latch_count == 0 && !smartd_active && !latch_corrupt {
+    if causes.is_empty() && !smartd_active && !latch_corrupt {
         println!("no active alerts");
         return Ok(());
     }
@@ -77,11 +80,9 @@ fn cmd_ack_impl<R: CommandRunner, F: Filesystem + ?Sized>(
     let new_acked = snapshot_current(&device_stats, &alert_missing_devids);
     save_acked_stats(&new_acked, paths)?;
 
-    let latch_had_smartd = latch_state.as_ref().is_some_and(|s| {
-        s.causes
-            .iter()
-            .any(|c| matches!(c, AlertCause::SmartdAlert))
-    });
+    let latch_had_smartd = causes
+        .iter()
+        .any(|c| matches!(c, AlertCause::SmartdAlert));
     let remove_smartd = smartd_active || latch_had_smartd;
     if let Err(e) = cleanup_alert_files_and_beeper(paths, stop_beeper, remove_smartd) {
         return Err(AckError::CleanupFailed(e));
@@ -90,8 +91,8 @@ fn cmd_ack_impl<R: CommandRunner, F: Filesystem + ?Sized>(
     // 8. Print a count for latched causes. Smartd-only and corrupt-latch
     // gated acknowledgments still completed real cleanup, but have no
     // meaningful latch count to report.
-    if latch_count > 0 {
-        println!("acknowledged {latch_count} alert(s)");
+    if !causes.is_empty() {
+        println!("acknowledged {} alert(s)", causes.len());
     } else {
         println!("acknowledged current alerts");
     }
@@ -106,9 +107,12 @@ fn ack_offline(
     paths: &StatePaths,
     stop_beeper: &dyn Fn(),
 ) -> Result<(), AckError> {
-    let latch_count = latch_state.as_ref().map(|s| s.causes.len()).unwrap_or(0);
+    let causes: &[AlertCause] = latch_state
+        .as_ref()
+        .map(|s| s.causes.as_slice())
+        .unwrap_or(&[]);
 
-    let has_alert = latch_count > 0 || smartd_active || latch_corrupt;
+    let has_alert = !causes.is_empty() || smartd_active || latch_corrupt;
     if !has_alert {
         return Err(AckError::PoolNotMounted);
     }
@@ -118,11 +122,9 @@ fn ack_offline(
     // output, which we cannot produce with the pool offline. Refusing the
     // *whole* ack (rather than partial-acking other causes) avoids leaving
     // the user in an ambiguous "I acked but it still says ALERT" state.
-    if let Some(state) = latch_state.as_ref()
-        && state
-            .causes
-            .iter()
-            .any(|c| matches!(c, AlertCause::BtrfsDeviceErrors { .. }))
+    if causes
+        .iter()
+        .any(|c| matches!(c, AlertCause::BtrfsDeviceErrors { .. }))
     {
         return Err(AckError::OfflineBtrfsErrorsRefused);
     }
@@ -132,18 +134,13 @@ fn ack_offline(
     // only SmartdAlert / ComputationError causes does not need ack-state
     // updates, and coupling them would let an unrelated corrupt acked-stats
     // file fail an otherwise-fine offline ack.
-    let missing_devids: Vec<u64> = latch_state
-        .as_ref()
-        .map(|s| {
-            s.causes
-                .iter()
-                .filter_map(|c| match c {
-                    AlertCause::MissingDevice { devid } => Some(*devid),
-                    _ => None,
-                })
-                .collect()
+    let missing_devids: Vec<u64> = causes
+        .iter()
+        .filter_map(|c| match c {
+            AlertCause::MissingDevice { devid } => Some(*devid),
+            _ => None,
         })
-        .unwrap_or_default();
+        .collect();
 
     if !missing_devids.is_empty() {
         let mut acked = load_acked_stats_fallible(paths)?;
@@ -153,11 +150,9 @@ fn ack_offline(
         save_acked_stats(&acked, paths)?;
     }
 
-    let latch_had_smartd = latch_state.as_ref().is_some_and(|s| {
-        s.causes
-            .iter()
-            .any(|c| matches!(c, AlertCause::SmartdAlert))
-    });
+    let latch_had_smartd = causes
+        .iter()
+        .any(|c| matches!(c, AlertCause::SmartdAlert));
     let remove_smartd = smartd_active || latch_had_smartd;
     if let Err(e) = cleanup_alert_files_and_beeper(paths, stop_beeper, remove_smartd) {
         return Err(AckError::CleanupFailed(e));
