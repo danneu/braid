@@ -78,12 +78,10 @@ pub struct RemoveMissingParams<'a> {
 /// wording) before mutating.
 pub struct RemoveMissingPlan {
     pub notes: Vec<PreviewNote>,
+    /// Cached preview output for tests and callers that inspect the plan.
+    /// Execution uses `work_plan`, and `preview()` re-renders from it.
     pub steps: Vec<Step>,
-    pub missing_id: u64,
-    pub will_clear_last_missing: bool,
-    pub remaining_present: usize,
-    pub missing_count: u64,
-    pub mount_point: MountPoint,
+    work_plan: RemoveMissingWorkPlan,
 }
 
 /// Report returned by `plan_remove_missing`. On the `Ok` branch,
@@ -94,6 +92,48 @@ pub struct RemoveMissingPlan {
 pub struct RemoveMissingPlanReport {
     pub notes: Vec<PreviewNote>,
     pub result: Result<RemoveMissingPlan, RemoveMissingError>,
+}
+
+#[derive(Debug, Clone)]
+struct RemoveMissingWorkPlan {
+    missing_id: u64,
+    will_clear_last_missing: bool,
+    remaining_present: usize,
+    missing_count: u64,
+    mount_point: MountPoint,
+}
+
+impl RemoveMissingWorkPlan {
+    fn restore_raid1_after_commit(&self) -> bool {
+        self.will_clear_last_missing && self.remaining_present >= 2
+    }
+
+    fn render_steps(&self) -> Vec<Step> {
+        let mut steps = Vec::new();
+        steps.push(Step {
+            risk: "long",
+            description: format!(
+                "btrfs device remove {} (target specific missing device)",
+                self.missing_id
+            ),
+            commands: vec![CmdRequest::BtrfsDeviceRemove {
+                device: self.missing_id.to_string(),
+                mount_point: self.mount_point.clone(),
+            }],
+        });
+        if self.restore_raid1_after_commit() {
+            steps.push(Step {
+                risk: "long",
+                description:
+                    "btrfs balance -dconvert=raid1,soft -mconvert=raid1,soft (restore redundancy)"
+                        .into(),
+                commands: vec![CmdRequest::BtrfsBalanceRaid1Soft {
+                    mount_point: self.mount_point.clone(),
+                }],
+            });
+        }
+        steps
+    }
 }
 
 impl RemoveMissingPlan {
@@ -108,7 +148,7 @@ impl RemoveMissingPlan {
         Preview {
             completeness: PreviewCompleteness::Complete,
             notes: self.notes.clone(),
-            steps: self.steps.clone(),
+            steps: self.work_plan.render_steps(),
         }
     }
 
@@ -131,12 +171,18 @@ impl RemoveMissingPlan {
             ),
         );
 
+        let RemoveMissingPlan {
+            notes: _,
+            steps: _,
+            work_plan,
+        } = self;
+
         // Resolve devid->name from enriched pool.json before confirmation and journal.
         let pre_membership = membership::load_membership(params.paths).map_err(|e| {
             RemoveMissingError::Validation(format!("failed to load pool membership: {e}"))
         })?;
         let (resolved_devid, name_to_remove) =
-            resolve_removal_target(self.missing_id, &pre_membership)?;
+            resolve_removal_target(work_plan.missing_id, &pre_membership)?;
 
         // Confirm
         if !params.yes {
@@ -145,8 +191,8 @@ impl RemoveMissingPlan {
                 format_remove_missing_confirm(
                     &name_to_remove,
                     resolved_devid,
-                    self.remaining_present,
-                    self.missing_count,
+                    work_plan.remaining_present,
+                    work_plan.missing_count,
                 )
             );
             confirm::confirm_yes().map_err(RemoveMissingError::Validation)?;
@@ -176,8 +222,7 @@ impl RemoveMissingPlan {
         // Build journal before btrfs operation.
         let mut target_membership = pre_membership.clone();
         target_membership.disks.remove(&name_to_remove);
-        let restore_raid1_after_commit =
-            self.will_clear_last_missing && self.remaining_present >= 2;
+        let restore_raid1_after_commit = work_plan.restore_raid1_after_commit();
         let journal = journal::build_journal(
             pre_membership,
             target_membership.clone(),
@@ -203,7 +248,7 @@ impl RemoveMissingPlan {
         pool_remove_device_using(
             runner,
             &resolved_devid.to_string(),
-            &self.mount_point,
+            &work_plan.mount_point,
             params.progress,
             params.sleeper,
             &progress::StderrSink,
@@ -244,8 +289,8 @@ impl RemoveMissingPlan {
             crate::pool::maybe_restore_raid1(
                 runner,
                 fs,
-                &self.mount_point,
-                self.missing_count,
+                &work_plan.mount_point,
+                work_plan.missing_count,
                 params.progress,
             )
             .map_err(RemoveMissingError::Pool)?;
@@ -385,23 +430,21 @@ pub fn plan_remove_missing<R: CommandRunner + Sync, F: Filesystem + ?Sized>(
 
     let will_clear_last_missing = pool.missing_count == 1;
     let remaining_present = pool.devices.len();
-    let steps = compile_steps(
-        params.missing_id,
+    let work_plan = RemoveMissingWorkPlan {
+        missing_id: params.missing_id,
         will_clear_last_missing,
         remaining_present,
-        config.mount_point(),
-    );
+        missing_count: pool.missing_count,
+        mount_point: config.mount_point().clone(),
+    };
+    let steps = work_plan.render_steps();
 
     RemoveMissingPlanReport {
         notes: Vec::new(),
         result: Ok(RemoveMissingPlan {
             notes,
             steps,
-            missing_id: params.missing_id,
-            will_clear_last_missing,
-            remaining_present,
-            missing_count: pool.missing_count,
-            mount_point: config.mount_point().clone(),
+            work_plan,
         }),
     }
 }
@@ -508,36 +551,21 @@ pub(crate) fn check_relocation_space<R: CommandRunner>(
         })
 }
 
+#[cfg(test)]
 fn compile_steps(
     missing_id: u64,
     will_clear_last_missing: bool,
     remaining_present: usize,
     mount_point: &MountPoint,
 ) -> Vec<Step> {
-    let mut steps = Vec::new();
-    steps.push(Step {
-        risk: "long",
-        description: format!(
-            "btrfs device remove {} (target specific missing device)",
-            missing_id
-        ),
-        commands: vec![CmdRequest::BtrfsDeviceRemove {
-            device: missing_id.to_string(),
-            mount_point: mount_point.clone(),
-        }],
-    });
-    if will_clear_last_missing && remaining_present >= 2 {
-        steps.push(Step {
-            risk: "long",
-            description:
-                "btrfs balance -dconvert=raid1,soft -mconvert=raid1,soft (restore redundancy)"
-                    .into(),
-            commands: vec![CmdRequest::BtrfsBalanceRaid1Soft {
-                mount_point: mount_point.clone(),
-            }],
-        });
+    RemoveMissingWorkPlan {
+        missing_id,
+        will_clear_last_missing,
+        remaining_present,
+        missing_count: if will_clear_last_missing { 1 } else { 2 },
+        mount_point: mount_point.clone(),
     }
-    steps
+    .render_steps()
 }
 
 // ---------------------------------------------------------------------------
@@ -2185,16 +2213,19 @@ mod tests {
      */
     #[test]
     fn plan_preview_renders_warn_above_steps() {
-        let plan = RemoveMissingPlan {
-            notes: vec![PreviewNote::Warn(
-                "ENOSPC pre-flight check failed: boom; proceeding anyway".into(),
-            )],
-            steps: compile_steps(3, true, 2, &MountPoint("/mnt/storage".into())),
+        let work_plan = RemoveMissingWorkPlan {
             missing_id: 3,
             will_clear_last_missing: true,
             remaining_present: 2,
             missing_count: 1,
             mount_point: MountPoint("/mnt/storage".into()),
+        };
+        let plan = RemoveMissingPlan {
+            notes: vec![PreviewNote::Warn(
+                "ENOSPC pre-flight check failed: boom; proceeding anyway".into(),
+            )],
+            steps: work_plan.render_steps(),
+            work_plan,
         };
         let rendered = plan.preview().render();
         let lines: Vec<&str> = rendered.lines().collect();

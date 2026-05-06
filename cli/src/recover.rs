@@ -17,6 +17,7 @@ use crate::status::{BalanceReport, get_balance_report};
 use crate::status_tag::{StatusTag, color_enabled_for_stderr, emit_status, status_line};
 use crate::types::{ByIdPath, ConfigDiskState, MountPoint, PoolState};
 use std::borrow::Cow;
+use std::path::PathBuf;
 use std::time::Duration;
 use thiserror::Error;
 
@@ -165,11 +166,10 @@ pub struct RecoverParams<'a> {
 #[derive(Debug)]
 pub struct RecoverPlan {
     pub notes: Vec<PreviewNote>,
+    /// Cached preview output for tests and callers that inspect the plan.
+    /// Execution uses `work_plan`, and `preview()` re-renders from it.
     pub steps: Vec<Step>,
-    pub open_plan: Option<OpenPlan>,
-    pub pre_resolved_credential: Option<OpenCredential>,
-    pub journal: Journal,
-    pub union: PoolMembership,
+    work_plan: RecoverWorkPlan,
 }
 
 /// Report returned by `plan_recover`. On the `Ok` branch, all
@@ -181,6 +181,744 @@ pub struct RecoverPlan {
 pub struct RecoverPlanReport {
     pub notes: Vec<PreviewNote>,
     pub result: Result<RecoverPlan, RecoverError>,
+}
+
+#[derive(Debug)]
+struct RecoverWorkPlan {
+    open_plan: Option<OpenPlan>,
+    pre_resolved_credential: Option<OpenCredential>,
+    journal: Journal,
+    union: PoolMembership,
+    mount_point: MountPoint,
+    pool_json_path: PathBuf,
+    pending_op_path: PathBuf,
+    luks_headers_dir: PathBuf,
+    actions: Vec<RecoverWorkAction>,
+}
+
+#[derive(Debug)]
+enum RecoverWorkAction {
+    InitialOpenPool,
+    WaitForKernelReplace,
+    RemountCycle {
+        close_names: Vec<String>,
+        reopen_names: Vec<String>,
+        any_missing_member: bool,
+    },
+    Complete(RecoverCompletion),
+}
+
+#[derive(Debug)]
+enum RecoverCompletion {
+    AddPoolMutation {
+        targets: std::collections::BTreeMap<String, journal::AddJournalTarget>,
+        all_targets_already_live: bool,
+        live_names: Option<std::collections::BTreeSet<String>>,
+    },
+    AddPostBalance,
+    RemoveMissingPoolMutation {
+        devid: u64,
+        restore_raid1_after_commit: bool,
+    },
+    RemoveMissingPostMaintenance {
+        devid: u64,
+        restore_raid1_after_commit: bool,
+    },
+    ReplacePoolMutation {
+        old_name: String,
+        new_name: String,
+        new_target: journal::ReplaceJournalTarget,
+        source: journal::ReplaceJournalSource,
+        restore_raid1_after_commit: bool,
+    },
+    ReplacePostMaintenance {
+        new_name: String,
+        source: journal::ReplaceJournalSource,
+        restore_raid1_after_commit: bool,
+    },
+    GenericLivePool {
+        replay_raid1_maintenance: bool,
+    },
+}
+
+struct RecoverExecutionState {
+    credential: Option<OpenCredential>,
+    just_mounted: bool,
+}
+
+impl RecoverWorkPlan {
+    fn render_steps(&self) -> Vec<Step> {
+        let mut steps = Vec::new();
+        for action in &self.actions {
+            action.render_into(self, &mut steps);
+        }
+        steps
+    }
+
+    fn execute<R: CommandRunner + Sync, F: Filesystem + ?Sized>(
+        mut self,
+        runner: &R,
+        fs: &F,
+        by_id_resolver: &dyn ByIdResolver,
+        params: &RecoverParams<'_>,
+    ) -> Result<(), RecoverError> {
+        let mut state = RecoverExecutionState {
+            credential: self.pre_resolved_credential.take(),
+            just_mounted: false,
+        };
+        for action in &self.actions {
+            if action.execute(&self, &mut state, runner, fs, by_id_resolver, params)? {
+                return Ok(());
+            }
+        }
+        Err(RecoverError::Failed(
+            "internal error: recover work plan had no terminal action".into(),
+        ))
+    }
+}
+
+impl RecoverWorkAction {
+    fn render_into(&self, plan: &RecoverWorkPlan, steps: &mut Vec<Step>) {
+        match self {
+            RecoverWorkAction::InitialOpenPool => {
+                if let Some(open_plan) = &plan.open_plan {
+                    steps.extend(mount::compile_open_steps(
+                        open_plan,
+                        &plan.mount_point,
+                        None,
+                    ));
+                }
+            }
+            RecoverWorkAction::WaitForKernelReplace => {
+                steps.push(Step {
+                    risk: "long",
+                    description:
+                        "wait for kernel dev_replace to finish (skipped if no running replace)"
+                            .into(),
+                    commands: vec![],
+                });
+            }
+            RecoverWorkAction::RemountCycle {
+                close_names,
+                reopen_names,
+                any_missing_member,
+            } => {
+                steps.push(Step {
+                    risk: "safe",
+                    description: format!("unmount {} (recover remount cycle)", plan.mount_point),
+                    commands: vec![CmdRequest::Umount {
+                        mount_point: plan.mount_point.clone(),
+                    }],
+                });
+
+                let forget_devs: Vec<String> = close_names
+                    .iter()
+                    .map(|name| format!("/dev/mapper/{}", config::mapper_name(name).0))
+                    .collect();
+                if !forget_devs.is_empty() {
+                    steps.push(Step {
+                        risk: "safe",
+                        description: "btrfs device scan --forget (recover remount cycle)".into(),
+                        commands: vec![CmdRequest::BtrfsDeviceScanForget {
+                            devices: forget_devs,
+                        }],
+                    });
+                }
+
+                for name in close_names {
+                    let mn = config::mapper_name(name);
+                    steps.push(Step {
+                        risk: "safe",
+                        description: format!("close LUKS mapper {} (recover remount cycle)", mn),
+                        commands: vec![CmdRequest::CryptsetupClose {
+                            mapper: mn.0.clone(),
+                        }],
+                    });
+                }
+
+                for name in reopen_names {
+                    let member = plan
+                        .union
+                        .disks
+                        .get(name)
+                        .expect("remount-cycle reopen target validated during planning");
+                    let mn = config::mapper_name(name);
+                    steps.push(Step {
+                        risk: "safe",
+                        description: format!(
+                            "LUKS open {} → {} (recover remount cycle)",
+                            member.by_id, mn,
+                        ),
+                        commands: vec![CmdRequest::CryptsetupLuksOpen {
+                            device: member.by_id.0.clone(),
+                            mapper: mn.0.clone(),
+                        }],
+                    });
+                }
+
+                steps.push(Step {
+                    risk: "safe",
+                    description: "btrfs device scan (recover remount cycle)".into(),
+                    commands: vec![CmdRequest::BtrfsDeviceScanAll],
+                });
+
+                let first_reopen_name = reopen_names
+                    .first()
+                    .expect("remount-cycle mount target validated during planning");
+                let mount_device =
+                    format!("/dev/mapper/{}", config::mapper_name(first_reopen_name).0);
+                if *any_missing_member {
+                    steps.push(Step {
+                        risk: "safe",
+                        description: format!(
+                            "mount → {} (recover remount cycle, degraded)",
+                            plan.mount_point
+                        ),
+                        commands: vec![CmdRequest::MountWithOptions {
+                            device: mount_device,
+                            mount_point: plan.mount_point.clone(),
+                            options: vec!["degraded".to_owned()],
+                        }],
+                    });
+                } else {
+                    steps.push(Step {
+                        risk: "safe",
+                        description: format!(
+                            "mount → {} (recover remount cycle)",
+                            plan.mount_point
+                        ),
+                        commands: vec![CmdRequest::Mount {
+                            device: mount_device,
+                            mount_point: plan.mount_point.clone(),
+                        }],
+                    });
+                }
+            }
+            RecoverWorkAction::Complete(completion) => completion.render_into(plan, steps),
+        }
+    }
+
+    fn execute<R: CommandRunner + Sync, F: Filesystem + ?Sized>(
+        &self,
+        plan: &RecoverWorkPlan,
+        state: &mut RecoverExecutionState,
+        runner: &R,
+        fs: &F,
+        by_id_resolver: &dyn ByIdResolver,
+        params: &RecoverParams<'_>,
+    ) -> Result<bool, RecoverError> {
+        match self {
+            RecoverWorkAction::InitialOpenPool => {
+                execute_recover_initial_open(plan, state, runner, fs, params)?;
+                Ok(false)
+            }
+            RecoverWorkAction::WaitForKernelReplace => {
+                if state.just_mounted {
+                    wait_for_kernel_replace_to_finish(
+                        runner,
+                        &plan.mount_point,
+                        &progress::RealSleeper,
+                        color_enabled_for_stderr(),
+                    );
+                }
+                Ok(false)
+            }
+            RecoverWorkAction::RemountCycle { .. } => {
+                if state.just_mounted {
+                    let recovery_mount_membership =
+                        mount_membership_for_recover(&plan.journal, &plan.union).clone();
+                    let cred = state.credential.as_ref().expect(
+                        "just_mounted implies open_plan was Some and credential was resolved",
+                    );
+                    relock_and_remount(
+                        runner,
+                        fs,
+                        params.config,
+                        &recovery_mount_membership,
+                        params.allow_degraded,
+                        cred,
+                    )?;
+                }
+                Ok(false)
+            }
+            RecoverWorkAction::Complete(completion) => {
+                completion.execute(plan, state, runner, fs, by_id_resolver, params)?;
+                Ok(true)
+            }
+        }
+    }
+}
+
+impl RecoverCompletion {
+    fn render_into(&self, plan: &RecoverWorkPlan, steps: &mut Vec<Step>) {
+        match self {
+            RecoverCompletion::AddPoolMutation {
+                targets,
+                all_targets_already_live,
+                live_names,
+            } => {
+                render_add_pool_mutation_recovery_steps(
+                    plan,
+                    steps,
+                    targets,
+                    *all_targets_already_live,
+                    live_names.as_ref(),
+                );
+                render_recovery_tail(plan, steps, None, true);
+            }
+            RecoverCompletion::AddPostBalance => {
+                render_recovery_tail(plan, steps, None, true);
+            }
+            RecoverCompletion::RemoveMissingPoolMutation {
+                restore_raid1_after_commit,
+                ..
+            }
+            | RecoverCompletion::RemoveMissingPostMaintenance {
+                restore_raid1_after_commit,
+                ..
+            } => {
+                render_recovery_tail(plan, steps, None, *restore_raid1_after_commit);
+            }
+            RecoverCompletion::ReplacePoolMutation {
+                new_name,
+                restore_raid1_after_commit,
+                ..
+            } => {
+                render_recovery_tail(
+                    plan,
+                    steps,
+                    Some(ReplaceResizePreview {
+                        new_name,
+                        skipped_if_replacement_not_committed: true,
+                    }),
+                    *restore_raid1_after_commit,
+                );
+            }
+            RecoverCompletion::ReplacePostMaintenance {
+                new_name,
+                restore_raid1_after_commit,
+                ..
+            } => {
+                render_recovery_tail(
+                    plan,
+                    steps,
+                    Some(ReplaceResizePreview {
+                        new_name,
+                        skipped_if_replacement_not_committed: false,
+                    }),
+                    *restore_raid1_after_commit,
+                );
+            }
+            RecoverCompletion::GenericLivePool {
+                replay_raid1_maintenance,
+            } => {
+                render_recovery_tail(plan, steps, None, *replay_raid1_maintenance);
+            }
+        }
+    }
+
+    fn execute<R: CommandRunner + Sync, F: Filesystem + ?Sized>(
+        &self,
+        plan: &RecoverWorkPlan,
+        state: &RecoverExecutionState,
+        runner: &R,
+        fs: &F,
+        by_id_resolver: &dyn ByIdResolver,
+        params: &RecoverParams<'_>,
+    ) -> Result<(), RecoverError> {
+        let pool = probe::probe_pool(runner, fs, &plan.mount_point)?;
+        match self {
+            RecoverCompletion::AddPoolMutation { targets, .. } => {
+                execute_add_pool_mutation_recovery(
+                    runner,
+                    fs,
+                    by_id_resolver,
+                    params,
+                    state.credential.as_ref(),
+                    &plan.journal,
+                    &plan.union,
+                    targets,
+                    pool,
+                )
+            }
+            RecoverCompletion::AddPostBalance => execute_add_post_balance_recovery(
+                runner,
+                by_id_resolver,
+                params,
+                &plan.journal,
+                &plan.union,
+                pool,
+                false,
+            ),
+            RecoverCompletion::RemoveMissingPoolMutation {
+                devid,
+                restore_raid1_after_commit,
+            } => execute_remove_missing_pool_mutation_recovery(
+                runner,
+                by_id_resolver,
+                params,
+                &plan.journal,
+                pool,
+                *devid,
+                *restore_raid1_after_commit,
+            ),
+            RecoverCompletion::RemoveMissingPostMaintenance {
+                devid,
+                restore_raid1_after_commit,
+            } => execute_remove_missing_post_maintenance_recovery(
+                runner,
+                by_id_resolver,
+                params,
+                &plan.journal,
+                pool,
+                *devid,
+                *restore_raid1_after_commit,
+                false,
+            ),
+            RecoverCompletion::ReplacePoolMutation {
+                old_name,
+                new_name,
+                new_target,
+                source,
+                restore_raid1_after_commit,
+            } => execute_replace_pool_mutation_recovery(
+                runner,
+                fs,
+                by_id_resolver,
+                params,
+                state.credential.as_ref(),
+                &plan.journal,
+                &plan.union,
+                pool,
+                old_name,
+                new_name,
+                new_target,
+                source,
+                *restore_raid1_after_commit,
+            ),
+            RecoverCompletion::ReplacePostMaintenance {
+                new_name,
+                source,
+                restore_raid1_after_commit,
+            } => execute_replace_post_maintenance_recovery(
+                runner,
+                by_id_resolver,
+                params,
+                &plan.journal,
+                pool,
+                new_name,
+                source,
+                fs,
+                *restore_raid1_after_commit,
+                false,
+            ),
+            RecoverCompletion::GenericLivePool { .. } => {
+                execute_generic_live_pool_recovery(runner, by_id_resolver, params, plan, pool)
+            }
+        }
+    }
+}
+
+struct ReplaceResizePreview<'a> {
+    new_name: &'a str,
+    skipped_if_replacement_not_committed: bool,
+}
+
+fn render_add_pool_mutation_recovery_steps(
+    plan: &RecoverWorkPlan,
+    steps: &mut Vec<Step>,
+    targets: &std::collections::BTreeMap<String, journal::AddJournalTarget>,
+    all_targets_already_live: bool,
+    live_names: Option<&std::collections::BTreeSet<String>>,
+) {
+    steps.push(Step {
+        risk: "safe",
+        description: if all_targets_already_live {
+            "reconcile journaled add targets against live pool (no replay needed: all targets already live)"
+                .into()
+        } else {
+            "reconcile journaled add targets against live pool".into()
+        },
+        commands: vec![],
+    });
+    let conditional_suffix =
+        " (skipped at runtime if open/scan reconciliation makes target live before replay)";
+    for (name, target) in targets {
+        let mapper_path = format!("/dev/mapper/{}", target.mapper_name);
+        if live_names.is_some_and(|live| live.contains(name)) {
+            let (kind, label) = match &target.mode {
+                journal::AddJournalMode::RecoverableBraidLabeled { .. } => {
+                    ("verified returned-disk add", mapper_path.clone())
+                }
+                journal::AddJournalMode::FreshLuks { .. } => {
+                    ("fresh add target", target.by_id.0.clone())
+                }
+            };
+            steps.push(Step {
+                risk: "safe",
+                description: format!(
+                    "replay {kind} {label} (skipped: target already live in pool)"
+                ),
+                commands: vec![],
+            });
+            continue;
+        }
+        match &target.mode {
+            journal::AddJournalMode::RecoverableBraidLabeled { .. } => {
+                steps.push(Step {
+                    risk: "safe",
+                    description: format!(
+                        "replay verified returned-disk add {mapper_path}{conditional_suffix}"
+                    ),
+                    commands: vec![
+                        CmdRequest::BtrfsDeviceScanForget {
+                            devices: vec![mapper_path.clone()],
+                        },
+                        CmdRequest::WipefsBtrfs {
+                            device: mapper_path.clone(),
+                        },
+                        CmdRequest::BtrfsDeviceAdd {
+                            device: mapper_path,
+                            mount_point: plan.mount_point.clone(),
+                            force: true,
+                        },
+                    ],
+                });
+            }
+            journal::AddJournalMode::FreshLuks {
+                luks_format_extra_opts,
+                enroll_key_file,
+                ..
+            } => {
+                let mut commands = vec![CmdRequest::CryptsetupLuksFormat {
+                    device: target.by_id.0.clone(),
+                    extra_opts: luks_format_extra_opts.clone(),
+                }];
+                if let Some(key_file) = enroll_key_file {
+                    commands.push(CmdRequest::CryptsetupLuksAddKeyFile {
+                        device: target.by_id.0.clone(),
+                        key_file_path: key_file.display().to_string(),
+                    });
+                }
+                commands.push(CmdRequest::CryptsetupLuksHeaderBackup {
+                    device: target.by_id.0.clone(),
+                    backup_path: plan
+                        .luks_headers_dir
+                        .join(format!("{}.luksheader", target.mapper_name))
+                        .display()
+                        .to_string(),
+                });
+                commands.push(CmdRequest::CryptsetupLuksOpen {
+                    device: target.by_id.0.clone(),
+                    mapper: target.mapper_name.clone(),
+                });
+                commands.push(CmdRequest::BtrfsDeviceAdd {
+                    device: mapper_path,
+                    mount_point: plan.mount_point.clone(),
+                    force: false,
+                });
+                steps.push(Step {
+                    risk: "destructive",
+                    description: format!(
+                        "replay fresh add target {}{conditional_suffix}",
+                        target.by_id
+                    ),
+                    commands,
+                });
+            }
+        }
+    }
+}
+
+fn render_recovery_tail(
+    plan: &RecoverWorkPlan,
+    steps: &mut Vec<Step>,
+    resize: Option<ReplaceResizePreview<'_>>,
+    show_raid1_maintenance: bool,
+) {
+    steps.push(Step {
+        risk: "safe",
+        description: format!(
+            "write recovered pool.json → {}",
+            plan.pool_json_path.display()
+        ),
+        commands: vec![],
+    });
+
+    if let Some(resize) = resize {
+        let suffix = if resize.skipped_if_replacement_not_committed {
+            format!(
+                " (skipped if replacement did not commit; devid for '{}' resolved post-mount)",
+                resize.new_name
+            )
+        } else {
+            format!(" (devid for '{}' resolved post-mount)", resize.new_name)
+        };
+        steps.push(Step {
+            risk: "safe",
+            description: format!(
+                "btrfs filesystem resize <devid>:max {}{}",
+                plan.mount_point, suffix
+            ),
+            commands: vec![],
+        });
+    }
+
+    if show_raid1_maintenance {
+        steps.push(Step {
+            risk: "long",
+            description: format!(
+                "btrfs balance resume {} (skipped if no paused balance)",
+                plan.mount_point
+            ),
+            commands: vec![],
+        });
+        steps.push(Step {
+            risk: "long",
+            description: format!(
+                "btrfs balance -dconvert=raid1,soft -mconvert=raid1,soft {} \
+                     (skipped if pool has <2 devices)",
+                plan.mount_point
+            ),
+            commands: vec![],
+        });
+    }
+
+    steps.push(Step {
+        risk: "safe",
+        description: format!("clear pending-op.json → {}", plan.pending_op_path.display()),
+        commands: vec![],
+    });
+}
+
+fn execute_recover_initial_open<R: CommandRunner + Sync, F: Filesystem + ?Sized>(
+    plan: &RecoverWorkPlan,
+    state: &mut RecoverExecutionState,
+    runner: &R,
+    fs: &F,
+    params: &RecoverParams<'_>,
+) -> Result<(), RecoverError> {
+    let Some(open_plan) = plan.open_plan.as_ref() else {
+        state.just_mounted = false;
+        return Ok(());
+    };
+
+    // Recover-specific gate: resolve a credential whenever we have an
+    // initial mount plan. This is eager on purpose -- even if every mapper
+    // is already open, a replace remount cycle closes every mapper and must
+    // reopen them with the same credential.
+    if state.credential.is_none() {
+        state.credential = Some(
+            mount::resolve_credential(
+                params.passphrase_stdin,
+                params.passphrase_file,
+                None, // recover does not expose --key-file today
+            )
+            .map_err(|e| RecoverError::Failed(format!("recover: {e}")))?,
+        );
+    }
+
+    let res = if open_plan.to_unlock.is_empty() {
+        mount::execute_mount_only(runner, fs, params.config, open_plan)
+    } else {
+        let cred = state
+            .credential
+            .as_ref()
+            .expect("credential resolved above when open_plan is Some");
+        mount::execute_unlock_and_mount(runner, fs, params.config, open_plan, cred)
+    };
+
+    state.just_mounted = match res {
+        Ok(just_mounted) => just_mounted,
+        Err(e) => {
+            // Bootstrap mount failure: probe the target devices to confirm
+            // no btrfs superblock exists -- only then is it safe to advise
+            // wiping.
+            if plan.journal.pre_membership.disks.is_empty()
+                && let mount::MountError::MountFailed(_) = &e
+                && let journal::OpKind::Add { targets, .. } = &plan.journal.op
+            {
+                let all_no_btrfs = targets.values().all(|target| {
+                    let mapper = format!("/dev/mapper/{}", target.mapper_name);
+                    match runner.run(&CmdRequest::BtrfsFilesystemShowTarget { target: mapper }) {
+                        Ok(raw) => matches!(classify_btrfs_probe(&raw), DeviceBtrfsProbe::NoBtrfs),
+                        Err(_) => false,
+                    }
+                });
+                if all_no_btrfs {
+                    let disk_list: Vec<_> = plan
+                        .union
+                        .disks
+                        .iter()
+                        .map(|(name, m)| format!("  {} ({})", name, m.by_id))
+                        .collect();
+                    return Err(RecoverError::Failed(format!(
+                        "bootstrap add was interrupted before the filesystem was \
+                         created.\n\
+                         The pool does not exist yet, so there is nothing to \
+                         recover.\n\n\
+                         To return to a clean state:\n\
+                         1. rm {}\n\
+                         2. Wipe the LUKS container from each disk that was being \
+                            added:\n{}\n\
+                            e.g.: wipefs -a /dev/disk/by-id/<device>\n\
+                         3. Re-run braid add",
+                        params.paths.pending_op_json().display(),
+                        disk_list.join("\n"),
+                    )));
+                }
+            }
+            return Err(e.into());
+        }
+    };
+    Ok(())
+}
+
+fn execute_generic_live_pool_recovery<R: CommandRunner + Sync>(
+    runner: &R,
+    by_id_resolver: &dyn ByIdResolver,
+    params: &RecoverParams<'_>,
+    plan: &RecoverWorkPlan,
+    pool: PoolState,
+) -> Result<(), RecoverError> {
+    let prior = membership::load_membership(params.paths).ok();
+    let recovered =
+        build_membership_from_live_pool(&pool, &plan.union, prior.as_ref(), by_id_resolver)?;
+
+    let pre_names: std::collections::BTreeSet<_> =
+        plan.journal.pre_membership.disks.keys().collect();
+    let target_names: std::collections::BTreeSet<_> =
+        plan.journal.target_membership.disks.keys().collect();
+    let recovered_names: std::collections::BTreeSet<_> = recovered.disks.keys().collect();
+
+    eprintln!("  pre-operation membership:  {:?}", pre_names);
+    eprintln!("  target membership:         {:?}", target_names);
+    eprintln!("  recovered (live pool):     {:?}", recovered_names);
+
+    eprintln!(
+        "note: {}",
+        recovery_guidance(
+            &plan.journal.op,
+            &pre_names,
+            &target_names,
+            &recovered_names
+        )
+    );
+
+    membership::save_membership(&recovered, params.paths)?;
+    eprintln!("pool.json written from live pool state.");
+
+    replay_post_mutation(
+        runner,
+        &plan.mount_point,
+        &plan.journal.op,
+        &pool,
+        params.progress,
+    )?;
+
+    journal::clear_journal(params.paths).map_err(|e| RecoverError::Journal(e.to_string()))?;
+    eprintln!("pending-op.json cleared. Recovery complete.");
+    Ok(())
 }
 
 /// Format the entry-banner line that both dry-run preview and real-run
@@ -205,7 +943,7 @@ impl RecoverPlan {
         Preview {
             completeness: PreviewCompleteness::Complete,
             notes: self.notes.clone(),
-            steps: self.steps.clone(),
+            steps: self.work_plan.render_steps(),
         }
     }
 
@@ -232,300 +970,9 @@ impl RecoverPlan {
         let RecoverPlan {
             notes: _,
             steps: _,
-            open_plan,
-            pre_resolved_credential,
-            journal,
-            union,
+            work_plan,
         } = self;
-
-        let color_enabled = color_enabled_for_stderr();
-        let recovery_mount_membership = mount_membership_for_recover(&journal, &union).clone();
-
-        // Recover-specific gate: resolve a credential whenever we have
-        // an initial mount plan (i.e. the pool is not already mounted).
-        // This is EAGER on purpose -- even if the initial plan's
-        // `to_unlock` is empty (every mapper already open), the
-        // post-mount relock cycle below closes every mapper and must
-        // reopen them, so a credential is required regardless. The
-        // resolved credential lives in this local across both execute
-        // calls (initial mount and the cycle remount).
-        let credential = match (open_plan.as_ref(), pre_resolved_credential) {
-            (Some(_), Some(credential)) => Some(credential),
-            (Some(_), None) => Some(
-                mount::resolve_credential(
-                    params.passphrase_stdin,
-                    params.passphrase_file,
-                    None, // recover does not expose --key-file today
-                )
-                .map_err(|e| RecoverError::Failed(format!("recover: {e}")))?,
-            ),
-            (None, credential) => credential,
-        };
-
-        // Initial mount. Dispatch on `p.to_unlock.is_empty()` to the
-        // matching execute entry point. The `expect` in the else arm
-        // is load-bearing: the match above guarantees `credential` is
-        // `Some` whenever `open_plan` is `Some`.
-        let just_mounted = match open_plan.as_ref() {
-            None => false, // already mounted
-            Some(p) => {
-                let res = if p.to_unlock.is_empty() {
-                    mount::execute_mount_only(runner, fs, params.config, p)
-                } else {
-                    let cred = credential
-                        .as_ref()
-                        .expect("credential resolved above when open_plan is Some");
-                    mount::execute_unlock_and_mount(runner, fs, params.config, p, cred)
-                };
-                match res {
-                    Ok(b) => b,
-                    Err(e) => {
-                        // Bootstrap mount failure: probe the target devices to confirm no btrfs
-                        // superblock exists — only then is it safe to advise wiping.
-                        if journal.pre_membership.disks.is_empty()
-                            && let mount::MountError::MountFailed(_) = &e
-                            && let journal::OpKind::Add { ref targets, .. } = journal.op
-                        {
-                            let all_no_btrfs = targets.values().all(|target| {
-                                let mapper = format!("/dev/mapper/{}", target.mapper_name);
-                                match runner
-                                    .run(&CmdRequest::BtrfsFilesystemShowTarget { target: mapper })
-                                {
-                                    Ok(raw) => matches!(
-                                        classify_btrfs_probe(&raw),
-                                        DeviceBtrfsProbe::NoBtrfs
-                                    ),
-                                    Err(_) => false,
-                                }
-                            });
-                            if all_no_btrfs {
-                                let disk_list: Vec<_> = union
-                                    .disks
-                                    .iter()
-                                    .map(|(name, m)| format!("  {} ({})", name, m.by_id))
-                                    .collect();
-                                return Err(RecoverError::Failed(format!(
-                                    "bootstrap add was interrupted before the filesystem was \
-                                     created.\n\
-                                     The pool does not exist yet, so there is nothing to \
-                                     recover.\n\n\
-                                     To return to a clean state:\n\
-                                     1. rm {}\n\
-                                     2. Wipe the LUKS container from each disk that was being \
-                                        added:\n{}\n\
-                                        e.g.: wipefs -a /dev/disk/by-id/<device>\n\
-                                     3. Re-run braid add",
-                                    params.paths.pending_op_json().display(),
-                                    disk_list.join("\n"),
-                                )));
-                            }
-                        }
-                        return Err(e.into());
-                    }
-                }
-            }
-        };
-
-        // Force fresh kernel state before probing when we just mounted.
-        //
-        // When the kernel resumes an interrupted btrfs replace during the
-        // mount call above, two problems compound:
-        //
-        //   (a) The resume worker (btrfs_resume_dev_replace_async) runs
-        //       asynchronously in a kthread, so umount does NOT wait for it
-        //       to finish. probe_pool can run while the resume is still in
-        //       progress and read transient mid-resume topology.
-        //   (b) The kernel commits the post-completion devid swap to disk
-        //       correctly but the in-memory `btrfs_fs_devices` for this
-        //       mount session retains the pre-resume topology — including a
-        //       phantom MISSING devid for the temporary replace target —
-        //       even after the resume finishes.
-        //
-        // Skipped when the pool was already mounted before recover started:
-        // we don't know who's using that mount and umount could fail with
-        // EBUSY.
-        //
-        // Pre-condition for reaching this branch with `just_mounted == false`:
-        // the planner-level fail-fast in `plan_recover` rejects the
-        // (already-mounted, OpKind::Replace) combination outright, directing
-        // the operator to `braid lock; braid recover`. So when execute()
-        // reaches an already-mounted pool here, the journal op is Add /
-        // Remove / RemoveMissing -- none of which trigger the kernel
-        // dev_replace resume bug -- and skipping the cycle is sound.
-        if just_mounted && is_replace_pool_mutation(&journal.op) {
-            wait_for_kernel_replace_to_finish(
-                runner,
-                params.config.mount_point(),
-                &progress::RealSleeper,
-                color_enabled,
-            );
-            // We mounted, so open_plan was Some, so credential was eagerly resolved
-            // above (recover always reads the passphrase when not already mounted).
-            let cred = credential
-                .as_ref()
-                .expect("just_mounted implies open_plan was Some and credential was resolved");
-            relock_and_remount(
-                runner,
-                fs,
-                params.config,
-                &recovery_mount_membership,
-                params.allow_degraded,
-                cred,
-            )?;
-        }
-
-        // 3. Probe live pool state
-        let mount_point = params.config.mount_point();
-        let pool = probe::probe_pool(runner, fs, mount_point)?;
-
-        match &journal.op {
-            journal::OpKind::Add {
-                phase: journal::AddPhase::PoolMutation,
-                targets,
-            } if !journal.pre_membership.disks.is_empty() => {
-                return execute_add_pool_mutation_recovery(
-                    runner,
-                    fs,
-                    by_id_resolver,
-                    params,
-                    credential.as_ref(),
-                    &journal,
-                    &union,
-                    targets,
-                    pool,
-                );
-            }
-            journal::OpKind::Add {
-                phase: journal::AddPhase::PostAddBalanceRaid1,
-                ..
-            } => {
-                return execute_add_post_balance_recovery(
-                    runner,
-                    by_id_resolver,
-                    params,
-                    &journal,
-                    &union,
-                    pool,
-                    false,
-                );
-            }
-            journal::OpKind::RemoveMissing {
-                phase: journal::RemoveMissingPhase::PoolMutation,
-                devid,
-                restore_raid1_after_commit,
-            } => {
-                return execute_remove_missing_pool_mutation_recovery(
-                    runner,
-                    by_id_resolver,
-                    params,
-                    &journal,
-                    pool,
-                    *devid,
-                    *restore_raid1_after_commit,
-                );
-            }
-            journal::OpKind::RemoveMissing {
-                phase: journal::RemoveMissingPhase::PostRemoveMissingMaintenance,
-                devid,
-                restore_raid1_after_commit,
-            } => {
-                return execute_remove_missing_post_maintenance_recovery(
-                    runner,
-                    by_id_resolver,
-                    params,
-                    &journal,
-                    pool,
-                    *devid,
-                    *restore_raid1_after_commit,
-                    false,
-                );
-            }
-            journal::OpKind::Replace {
-                phase: journal::ReplacePhase::PoolMutation,
-                old_name,
-                new_name,
-                new_target,
-                source,
-                restore_raid1_after_commit,
-                ..
-            } => {
-                return execute_replace_pool_mutation_recovery(
-                    runner,
-                    fs,
-                    by_id_resolver,
-                    params,
-                    credential.as_ref(),
-                    &journal,
-                    &union,
-                    pool,
-                    old_name,
-                    new_name,
-                    new_target,
-                    source,
-                    *restore_raid1_after_commit,
-                );
-            }
-            journal::OpKind::Replace {
-                phase: journal::ReplacePhase::PostReplaceMaintenance,
-                new_name,
-                source,
-                restore_raid1_after_commit,
-                ..
-            } => {
-                return execute_replace_post_maintenance_recovery(
-                    runner,
-                    by_id_resolver,
-                    params,
-                    &journal,
-                    pool,
-                    new_name,
-                    source,
-                    fs,
-                    *restore_raid1_after_commit,
-                    false,
-                );
-            }
-            journal::OpKind::Add {
-                phase: journal::AddPhase::PoolMutation,
-                ..
-            } => {}
-            journal::OpKind::Remove { .. } => {}
-        }
-
-        // 4. Build new membership from live pool state
-        let prior = membership::load_membership(params.paths).ok();
-        let recovered =
-            build_membership_from_live_pool(&pool, &union, prior.as_ref(), by_id_resolver)?;
-
-        // 5. Report what changed
-        let pre_names: std::collections::BTreeSet<_> =
-            journal.pre_membership.disks.keys().collect();
-        let target_names: std::collections::BTreeSet<_> =
-            journal.target_membership.disks.keys().collect();
-        let recovered_names: std::collections::BTreeSet<_> = recovered.disks.keys().collect();
-
-        eprintln!("  pre-operation membership:  {:?}", pre_names);
-        eprintln!("  target membership:         {:?}", target_names);
-        eprintln!("  recovered (live pool):     {:?}", recovered_names);
-
-        eprintln!(
-            "note: {}",
-            recovery_guidance(&journal.op, &pre_names, &target_names, &recovered_names)
-        );
-
-        // 6. Write recovered membership
-        membership::save_membership(&recovered, params.paths)?;
-        eprintln!("pool.json written from live pool state.");
-
-        // 7. Replay any post-mutation steps the original command would have run
-        //    after its slow phase but before clearing the journal.
-        replay_post_mutation(runner, mount_point, &journal.op, &pool, params.progress)?;
-
-        // 8. Clear journal LAST.
-        journal::clear_journal(params.paths).map_err(|e| RecoverError::Journal(e.to_string()))?;
-        eprintln!("pending-op.json cleared. Recovery complete.");
-
-        Ok(())
+        work_plan.execute(runner, fs, by_id_resolver, params)
     }
 }
 
@@ -696,331 +1143,132 @@ pub fn plan_recover<R: CommandRunner + Sync, F: Filesystem + ?Sized>(
         None
     };
 
-    // Build dry-run steps.
-    let mut steps = Vec::new();
-    if let Some(op) = &open_plan {
-        steps.extend(mount::compile_open_steps(
-            op,
-            params.config.mount_point(),
-            None,
-        ));
+    let mut actions = Vec::new();
+    if open_plan.is_some() {
+        actions.push(RecoverWorkAction::InitialOpenPool);
     }
 
     if is_replace_pool_mutation(&journal.op) && open_plan.is_some() {
-        steps.push(Step {
-            risk: "long",
-            description: "wait for kernel dev_replace to finish (skipped if no running replace)"
-                .into(),
-            commands: vec![],
-        });
+        actions.push(RecoverWorkAction::WaitForKernelReplace);
     }
 
     if let Some(initial_open_plan) = &open_plan
         && is_replace_pool_mutation(&journal.op)
     {
-        let mount_point = params.config.mount_point();
-        steps.push(Step {
-            risk: "safe",
-            description: format!("unmount {mount_point} (recover remount cycle)"),
-            commands: vec![CmdRequest::Umount {
-                mount_point: mount_point.clone(),
-            }],
-        });
-
-        let forget_devs: Vec<String> = cycle_close_names
-            .iter()
-            .map(|name| format!("/dev/mapper/{}", config::mapper_name(name).0))
-            .collect();
-        if !forget_devs.is_empty() {
-            steps.push(Step {
-                risk: "safe",
-                description: "btrfs device scan --forget (recover remount cycle)".into(),
-                commands: vec![CmdRequest::BtrfsDeviceScanForget {
-                    devices: forget_devs,
-                }],
-            });
-        }
-
-        for name in &cycle_close_names {
-            let mn = config::mapper_name(name);
-            steps.push(Step {
-                risk: "safe",
-                description: format!("close LUKS mapper {} (recover remount cycle)", mn),
-                commands: vec![CmdRequest::CryptsetupClose {
-                    mapper: mn.0.clone(),
-                }],
-            });
-        }
-
         for name in &cycle_reopen_names {
-            let member = match union.disks.get(name) {
-                Some(member) => member,
-                None => {
-                    return RecoverPlanReport {
-                        notes,
-                        result: Err(RecoverError::Failed(format!(
-                            "recover remount cycle preview: disk '{name}' missing from membership union"
-                        ))),
-                    };
-                }
-            };
-            let mn = config::mapper_name(name);
-            steps.push(Step {
-                risk: "safe",
-                description: format!(
-                    "LUKS open {} → {} (recover remount cycle)",
-                    member.by_id, mn,
-                ),
-                commands: vec![CmdRequest::CryptsetupLuksOpen {
-                    device: member.by_id.0.clone(),
-                    mapper: mn.0.clone(),
-                }],
-            });
+            if !union.disks.contains_key(name) {
+                return RecoverPlanReport {
+                    notes,
+                    result: Err(RecoverError::Failed(format!(
+                        "recover remount cycle preview: disk '{name}' missing from membership union"
+                    ))),
+                };
+            }
         }
-
-        steps.push(Step {
-            risk: "safe",
-            description: "btrfs device scan (recover remount cycle)".into(),
-            commands: vec![CmdRequest::BtrfsDeviceScanAll],
-        });
-
-        let Some(first_reopen_name) = cycle_reopen_names.first() else {
+        if cycle_reopen_names.is_empty() {
             return RecoverPlanReport {
                 notes,
                 result: Err(RecoverError::Failed(
                     "recover remount cycle preview: no disks available to reopen".into(),
                 )),
             };
-        };
-        let mount_device = format!("/dev/mapper/{}", config::mapper_name(first_reopen_name).0);
-        if initial_open_plan.any_missing_member {
-            steps.push(Step {
-                risk: "safe",
-                description: format!("mount → {mount_point} (recover remount cycle, degraded)"),
-                commands: vec![CmdRequest::MountWithOptions {
-                    device: mount_device,
-                    mount_point: mount_point.clone(),
-                    options: vec!["degraded".to_owned()],
-                }],
-            });
-        } else {
-            steps.push(Step {
-                risk: "safe",
-                description: format!("mount → {mount_point} (recover remount cycle)"),
-                commands: vec![CmdRequest::Mount {
-                    device: mount_device,
-                    mount_point: mount_point.clone(),
-                }],
-            });
         }
-    }
-
-    if let journal::OpKind::Add {
-        phase: journal::AddPhase::PoolMutation,
-        targets,
-    } = &journal.op
-        && !journal.pre_membership.disks.is_empty()
-    {
-        let all_targets_already_live = probed_live_pool
-            .as_ref()
-            .is_some_and(|pool| add_targets_all_live(pool, targets));
-        steps.push(Step {
-            risk: "safe",
-            description: if all_targets_already_live {
-                "reconcile journaled add targets against live pool (no replay needed: all targets already live)"
-                    .into()
-            } else {
-                "reconcile journaled add targets against live pool".into()
-            },
-            commands: vec![],
+        actions.push(RecoverWorkAction::RemountCycle {
+            close_names: cycle_close_names,
+            reopen_names: cycle_reopen_names,
+            any_missing_member: initial_open_plan.any_missing_member,
         });
-        let live_names = probed_live_pool.as_ref().map(live_member_names);
-        let conditional_suffix =
-            " (skipped at runtime if open/scan reconciliation makes target live before replay)";
-        for (name, target) in targets {
-            let mapper_path = format!("/dev/mapper/{}", target.mapper_name);
-            if live_names.as_ref().is_some_and(|live| live.contains(name)) {
-                let (kind, label) = match &target.mode {
-                    journal::AddJournalMode::RecoverableBraidLabeled { .. } => {
-                        ("verified returned-disk add", mapper_path.clone())
-                    }
-                    journal::AddJournalMode::FreshLuks { .. } => {
-                        ("fresh add target", target.by_id.0.clone())
-                    }
-                };
-                steps.push(Step {
-                    risk: "safe",
-                    description: format!(
-                        "replay {kind} {label} (skipped: target already live in pool)"
-                    ),
-                    commands: vec![],
-                });
-                continue;
-            }
-            match &target.mode {
-                journal::AddJournalMode::RecoverableBraidLabeled { .. } => {
-                    steps.push(Step {
-                        risk: "safe",
-                        description: format!(
-                            "replay verified returned-disk add {mapper_path}{conditional_suffix}"
-                        ),
-                        commands: vec![
-                            CmdRequest::BtrfsDeviceScanForget {
-                                devices: vec![mapper_path.clone()],
-                            },
-                            CmdRequest::WipefsBtrfs {
-                                device: mapper_path.clone(),
-                            },
-                            CmdRequest::BtrfsDeviceAdd {
-                                device: mapper_path,
-                                mount_point: params.config.mount_point().clone(),
-                                force: true,
-                            },
-                        ],
-                    });
-                }
-                journal::AddJournalMode::FreshLuks {
-                    luks_format_extra_opts,
-                    enroll_key_file,
-                    ..
-                } => {
-                    let mut commands = vec![CmdRequest::CryptsetupLuksFormat {
-                        device: target.by_id.0.clone(),
-                        extra_opts: luks_format_extra_opts.clone(),
-                    }];
-                    if let Some(key_file) = enroll_key_file {
-                        commands.push(CmdRequest::CryptsetupLuksAddKeyFile {
-                            device: target.by_id.0.clone(),
-                            key_file_path: key_file.display().to_string(),
-                        });
-                    }
-                    commands.push(CmdRequest::CryptsetupLuksHeaderBackup {
-                        device: target.by_id.0.clone(),
-                        backup_path: params
-                            .paths
-                            .luks_headers_dir()
-                            .join(format!("{}.luksheader", target.mapper_name))
-                            .display()
-                            .to_string(),
-                    });
-                    commands.push(CmdRequest::CryptsetupLuksOpen {
-                        device: target.by_id.0.clone(),
-                        mapper: target.mapper_name.clone(),
-                    });
-                    commands.push(CmdRequest::BtrfsDeviceAdd {
-                        device: mapper_path,
-                        mount_point: params.config.mount_point().clone(),
-                        force: false,
-                    });
-                    steps.push(Step {
-                        risk: "destructive",
-                        description: format!(
-                            "replay fresh add target {}{conditional_suffix}",
-                            target.by_id
-                        ),
-                        commands,
-                    });
-                }
-            }
-        }
     }
 
-    // State recovery steps are always shown (recover writes pool.json
-    // even when mounted).
-    steps.push(Step {
-        risk: "safe",
-        description: format!(
-            "write recovered pool.json → {}",
-            params.paths.pool_json().display()
-        ),
-        commands: vec![],
-    });
-
-    match &journal.op {
+    let completion = match &journal.op {
+        journal::OpKind::Add {
+            phase: journal::AddPhase::PoolMutation,
+            targets,
+        } if !journal.pre_membership.disks.is_empty() => {
+            let all_targets_already_live = probed_live_pool
+                .as_ref()
+                .is_some_and(|pool| add_targets_all_live(pool, targets));
+            let live_names = probed_live_pool.as_ref().map(live_member_names);
+            RecoverCompletion::AddPoolMutation {
+                targets: targets.clone(),
+                all_targets_already_live,
+                live_names,
+            }
+        }
+        journal::OpKind::Add {
+            phase: journal::AddPhase::PostAddBalanceRaid1,
+            ..
+        } => RecoverCompletion::AddPostBalance,
+        journal::OpKind::RemoveMissing {
+            phase: journal::RemoveMissingPhase::PoolMutation,
+            devid,
+            restore_raid1_after_commit,
+        } => RecoverCompletion::RemoveMissingPoolMutation {
+            devid: *devid,
+            restore_raid1_after_commit: *restore_raid1_after_commit,
+        },
+        journal::OpKind::RemoveMissing {
+            phase: journal::RemoveMissingPhase::PostRemoveMissingMaintenance,
+            devid,
+            restore_raid1_after_commit,
+        } => RecoverCompletion::RemoveMissingPostMaintenance {
+            devid: *devid,
+            restore_raid1_after_commit: *restore_raid1_after_commit,
+        },
         journal::OpKind::Replace {
             phase: journal::ReplacePhase::PoolMutation,
             new_name,
+            old_name,
+            new_target,
+            source,
+            restore_raid1_after_commit,
             ..
-        } => {
-            steps.push(Step {
-                risk: "safe",
-                description: format!(
-                    "btrfs filesystem resize <devid>:max {} \
-                     (skipped if replacement did not commit; devid for '{}' resolved post-mount)",
-                    params.config.mount_point(),
-                    new_name,
-                ),
-                commands: vec![],
-            });
-        }
+        } => RecoverCompletion::ReplacePoolMutation {
+            old_name: old_name.clone(),
+            new_name: new_name.clone(),
+            new_target: new_target.clone(),
+            source: source.clone(),
+            restore_raid1_after_commit: *restore_raid1_after_commit,
+        },
         journal::OpKind::Replace {
             phase: journal::ReplacePhase::PostReplaceMaintenance,
             new_name,
-            ..
-        } => {
-            steps.push(Step {
-                risk: "safe",
-                description: format!(
-                    "btrfs filesystem resize <devid>:max {} (devid for '{}' resolved post-mount)",
-                    params.config.mount_point(),
-                    new_name,
-                ),
-                commands: vec![],
-            });
-        }
-        journal::OpKind::Add { .. } | journal::OpKind::RemoveMissing { .. } => {}
-        journal::OpKind::Remove { .. } => {}
-    }
-
-    let show_raid1_maintenance = match &journal.op {
-        journal::OpKind::Add { .. } => true,
-        journal::OpKind::RemoveMissing {
+            source,
             restore_raid1_after_commit,
             ..
-        }
-        | journal::OpKind::Replace {
-            restore_raid1_after_commit,
-            ..
-        } => *restore_raid1_after_commit,
-        journal::OpKind::Remove { .. } => false,
+        } => RecoverCompletion::ReplacePostMaintenance {
+            new_name: new_name.clone(),
+            source: source.clone(),
+            restore_raid1_after_commit: *restore_raid1_after_commit,
+        },
+        journal::OpKind::Add { .. } => RecoverCompletion::GenericLivePool {
+            replay_raid1_maintenance: true,
+        },
+        journal::OpKind::Remove { .. } => RecoverCompletion::GenericLivePool {
+            replay_raid1_maintenance: false,
+        },
     };
-    if show_raid1_maintenance {
-        let mount_point = params.config.mount_point();
-        steps.push(Step {
-            risk: "long",
-            description: format!(
-                "btrfs balance resume {mount_point} (skipped if no paused balance)"
-            ),
-            commands: vec![],
-        });
-        steps.push(Step {
-            risk: "long",
-            description: format!(
-                "btrfs balance -dconvert=raid1,soft -mconvert=raid1,soft {mount_point} \
-                     (skipped if pool has <2 devices)"
-            ),
-            commands: vec![],
-        });
-    }
+    actions.push(RecoverWorkAction::Complete(completion));
 
-    steps.push(Step {
-        risk: "safe",
-        description: format!(
-            "clear pending-op.json → {}",
-            params.paths.pending_op_json().display()
-        ),
-        commands: vec![],
-    });
+    let work_plan = RecoverWorkPlan {
+        open_plan,
+        pre_resolved_credential,
+        journal,
+        union,
+        mount_point: params.config.mount_point().clone(),
+        pool_json_path: params.paths.pool_json(),
+        pending_op_path: params.paths.pending_op_json(),
+        luks_headers_dir: params.paths.luks_headers_dir(),
+        actions,
+    };
+    let steps = work_plan.render_steps();
 
     RecoverPlanReport {
         notes: Vec::new(),
         result: Ok(RecoverPlan {
             notes,
             steps,
-            open_plan,
-            pre_resolved_credential,
-            journal,
-            union,
+            work_plan,
         }),
     }
 }
@@ -4199,10 +4447,11 @@ mod tests {
             .result
             .expect("planner should discover add target, then plan from pre-membership");
         assert!(
-            plan.pre_resolved_credential.is_some(),
+            plan.work_plan.pre_resolved_credential.is_some(),
             "pre-mount discovery should carry the resolved passphrase into execution"
         );
         let open_plan = plan
+            .work_plan
             .open_plan
             .expect("pool should still need initial mount");
         assert_eq!(
@@ -4330,6 +4579,7 @@ mod tests {
             .result
             .expect("planner should discover fresh add target, then plan from pre-membership");
         let open_plan = plan
+            .work_plan
             .open_plan
             .expect("pool should still need initial mount");
         assert_eq!(
@@ -4449,10 +4699,11 @@ mod tests {
             .result
             .expect("planner should skip mismatched add target and mount from pre-membership");
         assert!(
-            plan.pre_resolved_credential.is_none(),
+            plan.work_plan.pre_resolved_credential.is_none(),
             "skip must not resolve a credential during pre-mount discovery"
         );
         let open_plan = plan
+            .work_plan
             .open_plan
             .expect("pool should still need initial mount");
         assert_eq!(
@@ -4553,10 +4804,11 @@ mod tests {
             .result
             .expect("planner should skip mislabeled fresh target and mount from pre-membership");
         assert!(
-            plan.pre_resolved_credential.is_none(),
+            plan.work_plan.pre_resolved_credential.is_none(),
             "skip must not resolve a credential during pre-mount discovery"
         );
         let open_plan = plan
+            .work_plan
             .open_plan
             .expect("pool should still need initial mount");
         assert_eq!(
@@ -4694,7 +4946,7 @@ mod tests {
             .result
             .expect("planner should skip disk2 and continue discovering disk3");
         assert!(
-            plan.pre_resolved_credential.is_some(),
+            plan.work_plan.pre_resolved_credential.is_some(),
             "valid later target should resolve a credential during discovery"
         );
 

@@ -78,14 +78,10 @@ pub struct RemoveParams<'a> {
 /// wording) before mutating.
 pub struct RemovePlan {
     pub notes: Vec<PreviewNote>,
+    /// Cached preview output for tests and callers that inspect the plan.
+    /// Execution uses `work_plan`, and `preview()` re-renders from it.
     pub steps: Vec<Step>,
-    pub name: String,
-    pub target_devid: u64,
-    pub target_mapper: MapperName,
-    pub target_underlying: String,
-    pub remaining: usize,
-    pub total: usize,
-    pub mount_point: MountPoint,
+    work_plan: RemoveWorkPlan,
 }
 
 /// Report returned by `plan_remove`. On the `Ok` branch, accumulated
@@ -95,6 +91,76 @@ pub struct RemovePlan {
 pub struct RemovePlanReport {
     pub notes: Vec<PreviewNote>,
     pub result: Result<RemovePlan, RemoveError>,
+}
+
+#[derive(Debug, Clone)]
+struct RemoveWorkPlan {
+    name: String,
+    target_devid: u64,
+    target_mapper: MapperName,
+    target_underlying: String,
+    remaining: usize,
+    total: usize,
+    mount_point: MountPoint,
+}
+
+impl RemoveWorkPlan {
+    fn new(
+        name: String,
+        target: &PoolDevice,
+        total: usize,
+        mount_point: MountPoint,
+    ) -> Result<Self, RemoveError> {
+        let remaining = total - 1;
+        if remaining == 0 {
+            return Err(RemoveError::Validation(
+                "cannot remove the last disk from the pool".into(),
+            ));
+        }
+        Ok(Self {
+            name,
+            target_devid: target.devid,
+            target_mapper: target.mapper.clone(),
+            target_underlying: target.underlying.clone(),
+            remaining,
+            total,
+            mount_point,
+        })
+    }
+
+    fn render_steps(&self) -> Vec<Step> {
+        let mapper_path = format!("/dev/mapper/{}", self.target_mapper);
+        let mut steps = Vec::new();
+        if self.remaining == 1 {
+            steps.push(Step {
+                risk: "long",
+                description: "btrfs balance -dconvert=single -mconvert=dup -f (RAID1 -> single)"
+                    .into(),
+                commands: vec![CmdRequest::BtrfsBalanceSingle {
+                    mount_point: self.mount_point.clone(),
+                }],
+            });
+        }
+        steps.push(Step {
+            risk: "long",
+            description: format!(
+                "btrfs device remove /dev/mapper/{} (data migrates off disk)",
+                self.target_mapper
+            ),
+            commands: vec![CmdRequest::BtrfsDeviceRemove {
+                device: mapper_path,
+                mount_point: self.mount_point.clone(),
+            }],
+        });
+        steps.push(Step {
+            risk: "safe",
+            description: format!("cryptsetup close {}", self.target_mapper),
+            commands: vec![CmdRequest::CryptsetupClose {
+                mapper: self.target_mapper.0.clone(),
+            }],
+        });
+        steps
+    }
 }
 
 impl RemovePlan {
@@ -108,7 +174,7 @@ impl RemovePlan {
         Preview {
             completeness: PreviewCompleteness::Complete,
             notes: self.notes.clone(),
-            steps: self.steps.clone(),
+            steps: self.work_plan.render_steps(),
         }
     }
 
@@ -131,22 +197,28 @@ impl RemovePlan {
             ),
         );
 
+        let RemovePlan {
+            notes: _,
+            steps: _,
+            work_plan,
+        } = self;
+
         // Confirm
         if !params.yes {
-            let hw = confirm::query_disk_hw_info(runner, &self.target_underlying);
+            let hw = confirm::query_disk_hw_info(runner, &work_plan.target_underlying);
             eprintln!(
                 "{}",
                 format_remove_confirm(
                     &RemoveConfirmDisk {
-                        name: &self.name,
+                        name: &work_plan.name,
                         hw: Some(&hw),
-                        devid: self.target_devid,
+                        devid: work_plan.target_devid,
                     },
-                    self.remaining,
-                    self.total,
+                    work_plan.remaining,
+                    work_plan.total,
                 )
             );
-            if self.remaining == 1 {
+            if work_plan.remaining == 1 {
                 eprintln!("WARNING: Pool will have 1 disk -- no RAID1 redundancy.\n");
             }
             confirm::confirm_yes().map_err(RemoveError::Validation)?;
@@ -177,12 +249,12 @@ impl RemovePlan {
         let pre_membership = membership::load_membership(params.paths)
             .map_err(|e| RemoveError::Validation(format!("failed to load pool membership: {e}")))?;
         let mut target_membership = pre_membership.clone();
-        target_membership.disks.remove(&self.name);
+        target_membership.disks.remove(&work_plan.name);
         let journal = journal::build_journal(
             pre_membership,
             target_membership.clone(),
             journal::OpKind::Remove {
-                name: self.name.clone(),
+                name: work_plan.name.clone(),
             },
         );
         journal::write_journal(params.paths, &journal)
@@ -192,8 +264,8 @@ impl RemovePlan {
         evict_present_device(
             runner,
             fs,
-            &self.target_mapper.0,
-            &self.mount_point,
+            &work_plan.target_mapper.0,
+            &work_plan.mount_point,
             params.progress,
         )?;
 
@@ -201,11 +273,12 @@ impl RemovePlan {
         membership::save_membership(&target_membership, params.paths)
             .map_err(map_membership_persist_failure)?;
         journal::clear_journal(params.paths).map_err(map_journal_clear_failure)?;
-        if let Err(e) = alert::drop_ghost_acked_for_devids(params.paths, &[self.target_devid]) {
+        if let Err(e) = alert::drop_ghost_acked_for_devids(params.paths, &[work_plan.target_devid])
+        {
             eprintln!("Warning: failed to update acked stats: {e}");
         }
 
-        eprintln!("Done. Disk '{}' removed from pool.", self.name);
+        eprintln!("Done. Disk '{}' removed from pool.", work_plan.name);
         Ok(())
     }
 }
@@ -305,12 +378,17 @@ pub fn plan_remove<R: CommandRunner + Sync, F: Filesystem + ?Sized>(
         };
     }
 
-    // compile_remove_present_steps owns the remaining == 0 rejection
-    // (last-disk gate). Run it first so that `check_eviction_space` is
-    // always reached with `remaining >= 1`; the capacity helper does not
-    // need to handle the 0-case.
-    let steps = match compile_remove_present_steps(&mn, &pool, config.mount_point()) {
-        Ok(s) => s,
+    // RemoveWorkPlan::new owns the remaining == 0 rejection (last-disk
+    // gate). Run it first so that `check_eviction_space` is always reached
+    // with `remaining >= 1`; the capacity helper does not need to handle
+    // the 0-case.
+    let work_plan = match RemoveWorkPlan::new(
+        params.name.to_owned(),
+        target,
+        pool.devices.len(),
+        config.mount_point().clone(),
+    ) {
+        Ok(plan) => plan,
         Err(e) => {
             return RemovePlanReport {
                 notes: std::mem::take(&mut notes),
@@ -319,8 +397,6 @@ pub fn plan_remove<R: CommandRunner + Sync, F: Filesystem + ?Sized>(
         }
     };
 
-    let remaining = pool.devices.len() - 1;
-    let total = pool.devices.len();
     // Pre-flight: reject if the surviving devices lack space to absorb
     // data from the device being removed. Without this, btrfs will
     // either ENOSPC instantly or crash the filesystem to read-only
@@ -329,7 +405,7 @@ pub fn plan_remove<R: CommandRunner + Sync, F: Filesystem + ?Sized>(
     // different models and different error policies. A soft-warn on
     // the >=2 path becomes a `PreviewNote::Warn`; any hard failure
     // returns `Err`.
-    match check_eviction_space(runner, config.mount_point(), target, remaining) {
+    match check_eviction_space(runner, config.mount_point(), target, work_plan.remaining) {
         Ok(EvictionCheck::Proceed) => {}
         Ok(EvictionCheck::ProceedWithWarning(body)) => {
             notes.push(PreviewNote::Warn(body));
@@ -344,14 +420,8 @@ pub fn plan_remove<R: CommandRunner + Sync, F: Filesystem + ?Sized>(
 
     let plan = RemovePlan {
         notes,
-        steps,
-        name: params.name.to_owned(),
-        target_devid: target.devid,
-        target_mapper: mn,
-        target_underlying: target.underlying.clone(),
-        remaining,
-        total,
-        mount_point: config.mount_point().clone(),
+        steps: work_plan.render_steps(),
+        work_plan,
     };
 
     RemovePlanReport {
@@ -568,48 +638,32 @@ fn check_single_survivor<R: CommandRunner>(
     preflight::check_single_survivor_capacity(&df, survivor).map_err(RemoveError::Validation)
 }
 
+#[cfg(test)]
 fn compile_remove_present_steps(
     mn: &MapperName,
     pool: &PoolState,
     mount_point: &MountPoint,
 ) -> Result<Vec<Step>, RemoveError> {
-    let remaining = pool.devices.len() - 1;
-    if remaining == 0 {
-        return Err(RemoveError::Validation(
-            "cannot remove the last disk from the pool".into(),
-        ));
-    }
-
-    let mapper_path = format!("/dev/mapper/{}", mn);
-    let mut steps = Vec::new();
-    if remaining == 1 {
-        steps.push(Step {
-            risk: "long",
-            description: "btrfs balance -dconvert=single -mconvert=dup -f (RAID1 -> single)".into(),
-            commands: vec![CmdRequest::BtrfsBalanceSingle {
-                mount_point: mount_point.clone(),
-            }],
+    let target = pool
+        .devices
+        .iter()
+        .find(|device| device.mapper == *mn)
+        .cloned()
+        .unwrap_or_else(|| PoolDevice {
+            devid: 0,
+            mapper: mn.clone(),
+            luks_uuid: LuksUuid(String::new()),
+            underlying: String::new(),
         });
-    }
-    steps.push(Step {
-        risk: "long",
-        description: format!(
-            "btrfs device remove /dev/mapper/{} (data migrates off disk)",
-            mn
-        ),
-        commands: vec![CmdRequest::BtrfsDeviceRemove {
-            device: mapper_path,
-            mount_point: mount_point.clone(),
-        }],
-    });
-    steps.push(Step {
-        risk: "safe",
-        description: format!("cryptsetup close {}", mn),
-        commands: vec![CmdRequest::CryptsetupClose {
-            mapper: mn.0.clone(),
-        }],
-    });
-    Ok(steps)
+    RemoveWorkPlan::new(
+        mn.0.strip_prefix("braid-")
+            .unwrap_or(mn.0.as_str())
+            .to_owned(),
+        &target,
+        pool.devices.len(),
+        mount_point.clone(),
+    )
+    .map(|plan| plan.render_steps())
 }
 
 // ---------------------------------------------------------------------------

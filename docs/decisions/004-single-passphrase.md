@@ -29,7 +29,7 @@ The CLI reads which devices are in the btrfs pool and verifies the supplied pass
 
 For `add`, this widened preflight changes one mixed-failure precedence case. If a non-first pool member has a divergent slot 0 and a closed `PresentLuks { mapper_open: false }` candidate would later surface a foreign-FSID or no-btrfs identity error during `execute` Pass 1, the pool-member credential error now wins. The old identity-first ordering in that shape came from the former first-disk-only verify and was not a documented invariant. A divergent slot 0 is a pool-wide integrity issue that affects future operations; surfacing it before the candidate's one-off selection error is intentional.
 
-Identity errors found during planning are unchanged. `compile_add_steps_multi` still validates every `PresentLuks` candidate's braid label and classifies already-open candidates before `AddPlan::execute` runs, before any passphrase read, and before the widened verify.
+Identity errors found during planning are unchanged. The add work-plan builder still validates every `PresentLuks` candidate's braid label and classifies already-open candidates before `AddPlan::execute` runs, before any passphrase read, and before the widened verify.
 
 ## Scope
 

@@ -115,7 +115,7 @@ with subtest("Real-run missing-device warning renders as canonical [warn]"):
 # --- Phase 4: preserved-context failure uses canonical [warn] on stderr ---
 #
 # Intent: when `plan_add` accumulates the missing-devices warn and then
-# fails later inside `compile_add_steps_multi` (BraidLabeledNoBtrfs
+# fails later inside add work-plan rendering (BraidLabeledNoBtrfs
 # identity), stderr must show the canonical `[warn] pool has ...`
 # line BEFORE the refusal error -- the SAME bytes the Ok path
 # (`AddPlan::execute`) emits on real-run stderr and `Preview::render`
@@ -137,7 +137,7 @@ with subtest("Phase 4: preserved-context failure renders canonical [warn]"):
     # LUKS-format disk4 with the braid-<name> label, then open the
     # mapper so plan_add's probe_config_disk sees PresentLuks with
     # mapper_open. No btrfs superblock inside -- that is the ambiguous
-    # identity that compile_add_steps_multi rejects via
+    # identity that add work-plan rendering rejects via
     # BraidLabeledNoBtrfs.
     machine.succeed(
         f"echo -n '{passphrase}' | cryptsetup luksFormat --batch-mode --key-file=- "

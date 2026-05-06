@@ -21,7 +21,7 @@ use crate::progress::ProgressOutput;
 use crate::state_paths::StatePaths;
 use crate::status_tag::{StatusTag, color_enabled_for_stderr, emit_status, status_line};
 use crate::types::*;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 #[derive(Debug, thiserror::Error)]
 pub enum ReplaceError {
@@ -68,15 +68,10 @@ pub struct ReplaceParams<'a> {
 /// remains confirmation-only behind the `!params.yes` gate.
 pub struct ReplacePlan {
     pub notes: Vec<PreviewNote>,
+    /// Cached preview output for tests and callers that inspect the plan.
+    /// Execution uses `work_plan`, and `preview()` re-renders from it.
     pub steps: Vec<Step>,
-    pub config: Config,
-    pub new_name: String,
-    pub new_by_id: ByIdPath,
-    pub pool: PoolState,
-    pub replace_source: ReplaceSource,
-    pub new_probed: ConfigDisk,
-    pub pre_membership: PoolMembership,
-    pub target_membership: PoolMembership,
+    work_plan: ReplaceWorkPlan,
 }
 
 /// Report returned by `plan_replace`. Shape A: when planning fails after
@@ -87,6 +82,159 @@ pub struct ReplacePlan {
 pub struct ReplacePlanReport {
     pub notes: Vec<PreviewNote>,
     pub result: Result<ReplacePlan, ReplaceError>,
+}
+
+#[derive(Debug, Clone)]
+enum ReplaceTargetPrep {
+    FreshLuks {
+        luks_format_extra_opts: Vec<String>,
+        enroll_key_file: Option<PathBuf>,
+        header_backup_path: PathBuf,
+    },
+    ExistingLuks {
+        mapper_open: bool,
+    },
+}
+
+impl ReplaceTargetPrep {
+    fn needs_luks_format(&self) -> bool {
+        matches!(self, ReplaceTargetPrep::FreshLuks { .. })
+    }
+}
+
+#[derive(Debug, Clone)]
+struct ReplaceWorkPlan {
+    config: Config,
+    old_name: String,
+    new_name: String,
+    new_by_id: ByIdPath,
+    pool: PoolState,
+    replace_source: ReplaceSource,
+    target_prep: ReplaceTargetPrep,
+    pre_membership: PoolMembership,
+    target_membership: PoolMembership,
+    journal_target: journal::ReplaceJournalTarget,
+    journal_source: journal::ReplaceJournalSource,
+    restore_raid1_after_commit: bool,
+    new_mapper: MapperName,
+    new_mapper_path: String,
+}
+
+impl ReplaceWorkPlan {
+    fn render_steps(&self) -> Vec<Step> {
+        let mut steps = Vec::new();
+
+        match &self.target_prep {
+            ReplaceTargetPrep::FreshLuks {
+                luks_format_extra_opts,
+                enroll_key_file,
+                header_backup_path,
+            } => {
+                steps.push(Step {
+                    risk: "destructive",
+                    description: format!("LUKS format {}", self.new_by_id),
+                    commands: vec![CmdRequest::CryptsetupLuksFormat {
+                        device: self.new_by_id.0.clone(),
+                        extra_opts: luks_format_extra_opts.clone(),
+                    }],
+                });
+                if let Some(kf) = enroll_key_file {
+                    steps.push(Step {
+                        risk: "safe",
+                        description: format!("enroll keyfile -> LUKS slot 1 on {}", self.new_by_id),
+                        commands: vec![CmdRequest::CryptsetupLuksAddKeyFile {
+                            device: self.new_by_id.0.clone(),
+                            key_file_path: kf.display().to_string(),
+                        }],
+                    });
+                }
+                steps.push(Step {
+                    risk: "safe",
+                    description: format!("LUKS header backup -> {}", header_backup_path.display()),
+                    commands: vec![CmdRequest::CryptsetupLuksHeaderBackup {
+                        device: self.new_by_id.0.clone(),
+                        backup_path: header_backup_path.display().to_string(),
+                    }],
+                });
+                steps.push(Step {
+                    risk: "safe",
+                    description: format!("LUKS open -> {}", self.new_mapper),
+                    commands: vec![CmdRequest::CryptsetupLuksOpen {
+                        device: self.new_by_id.0.clone(),
+                        mapper: self.new_mapper.0.clone(),
+                    }],
+                });
+            }
+            ReplaceTargetPrep::ExistingLuks { mapper_open, .. } => {
+                if !mapper_open {
+                    steps.push(Step {
+                        risk: "safe",
+                        description: format!("LUKS open -> {}", self.new_mapper),
+                        commands: vec![CmdRequest::CryptsetupLuksOpen {
+                            device: self.new_by_id.0.clone(),
+                            mapper: self.new_mapper.0.clone(),
+                        }],
+                    });
+                }
+            }
+        }
+
+        let devid = match &self.replace_source {
+            ReplaceSource::Live { devid, .. } | ReplaceSource::Missing { devid } => *devid,
+        };
+
+        steps.push(Step {
+            risk: "long",
+            description: format!(
+                "btrfs replace start {} /dev/mapper/{} {}",
+                devid,
+                self.new_mapper,
+                self.config.mount_point()
+            ),
+            commands: vec![CmdRequest::BtrfsReplaceStart {
+                devid,
+                target_device: self.new_mapper_path.clone(),
+                mount_point: self.config.mount_point().clone(),
+            }],
+        });
+
+        if let ReplaceSource::Live { mapper, .. } = &self.replace_source {
+            steps.push(Step {
+                risk: "safe",
+                description: format!("cryptsetup close {}", mapper),
+                commands: vec![CmdRequest::CryptsetupClose {
+                    mapper: mapper.0.clone(),
+                }],
+            });
+        }
+
+        steps.push(Step {
+            risk: "safe",
+            description: format!(
+                "btrfs filesystem resize {}:max {}",
+                devid,
+                self.config.mount_point()
+            ),
+            commands: vec![CmdRequest::BtrfsFilesystemResize {
+                devid,
+                mount_point: self.config.mount_point().clone(),
+            }],
+        });
+
+        if self.restore_raid1_after_commit {
+            steps.push(Step {
+                risk: "long",
+                description:
+                    "btrfs balance -dconvert=raid1,soft -mconvert=raid1,soft (restore redundancy)"
+                        .into(),
+                commands: vec![CmdRequest::BtrfsBalanceRaid1Soft {
+                    mount_point: self.config.mount_point().clone(),
+                }],
+            });
+        }
+
+        steps
+    }
 }
 
 impl ReplacePlan {
@@ -103,7 +251,7 @@ impl ReplacePlan {
         Preview {
             completeness: PreviewCompleteness::Complete,
             notes: self.notes.clone(),
-            steps: self.steps.clone(),
+            steps: self.work_plan.render_steps(),
         }
     }
 
@@ -117,15 +265,24 @@ impl ReplacePlan {
         let ReplacePlan {
             notes,
             steps: _,
+            work_plan,
+        } = self;
+        let ReplaceWorkPlan {
             config,
+            old_name,
             new_name,
             new_by_id,
             pool,
             replace_source,
-            new_probed,
+            target_prep,
             pre_membership,
             target_membership,
-        } = self;
+            journal_target: new_target,
+            journal_source,
+            restore_raid1_after_commit,
+            new_mapper: new_mn,
+            new_mapper_path,
+        } = work_plan;
 
         // Render accumulated notes to stderr via the shared helper
         // BEFORE any mutation. Matches the other Shape A commands so
@@ -133,19 +290,7 @@ impl ReplacePlan {
         // failure, and dry-run stdout.
         emit_replace_notes_to_stderr(&notes);
 
-        let old_mn = mapper_name(params.old_name);
-        let new_mn = mapper_name(&new_name);
-        let new_target = build_replace_journal_target(
-            &new_name,
-            &new_by_id,
-            &new_probed,
-            params.enroll_key_file,
-            params.luks_format_extra_opts,
-        )?;
-        let journal_source = build_replace_journal_source(&replace_source);
-        let restore_raid1_after_commit = matches!(&replace_source, ReplaceSource::Missing { .. })
-            && pool.missing_count == 1
-            && pool.devices.len() + 1 >= 2;
+        let old_mn = mapper_name(&old_name);
 
         // Confirm
         if !params.yes {
@@ -165,7 +310,7 @@ impl ReplacePlan {
                 "{}\n",
                 format_replace_confirm(
                     &ReplaceConfirmOld {
-                        name: params.old_name,
+                        name: &old_name,
                         hw: old_hw.as_ref(),
                         source: &replace_source,
                     },
@@ -173,10 +318,7 @@ impl ReplacePlan {
                         name: new_name.as_str(),
                         by_id: &new_by_id.0,
                         hw: &new_hw,
-                        needs_luks_format: matches!(
-                            new_probed.state,
-                            ConfigDiskState::PresentNotLuks
-                        ),
+                        needs_luks_format: target_prep.needs_luks_format(),
                         is_rebuild: is_missing,
                     },
                     pool.total_devices,
@@ -192,14 +334,6 @@ impl ReplacePlan {
 
         // Read passphrase
         let passphrase = read_passphrase(params.passphrase_file, params.passphrase_stdin)?;
-
-        // Reversible checks: reject absent disk, verify passphrase, check not already in pool.
-        if matches!(new_probed.state, ConfigDiskState::Absent) {
-            return Err(ReplaceError::Validation(format!(
-                "new disk '{}' ({}) is not present. Is it plugged in?",
-                new_name, new_by_id
-            )));
-        }
 
         let retained_members: Vec<_> = match &replace_source {
             ReplaceSource::Live { .. } => pool
@@ -228,12 +362,12 @@ impl ReplacePlan {
                 device: device.underlying.clone(),
             })
             .collect();
-        let new_disk_target = match &new_probed.state {
-            ConfigDiskState::PresentLuks { .. } => Some(CredentialVerifyTarget {
+        let new_disk_target = match &target_prep {
+            ReplaceTargetPrep::ExistingLuks { .. } => Some(CredentialVerifyTarget {
                 name: new_name.clone(),
                 device: new_by_id.0.clone(),
             }),
-            ConfigDiskState::Absent | ConfigDiskState::PresentNotLuks => None,
+            ReplaceTargetPrep::FreshLuks { .. } => None,
         };
         if let Some(target) = &new_disk_target {
             credential_targets.push(target.clone());
@@ -300,7 +434,7 @@ impl ReplacePlan {
             target_membership.clone(),
             journal::OpKind::Replace {
                 phase: journal::ReplacePhase::PoolMutation,
-                old_name: params.old_name.to_owned(),
+                old_name: old_name.clone(),
                 new_name: new_name.clone(),
                 new_by_id: new_by_id.clone(),
                 new_target: new_target.clone(),
@@ -312,12 +446,13 @@ impl ReplacePlan {
             .map_err(|e| ReplaceError::Validation(e.to_string()))?;
 
         // Step 1: Init new disk (LUKS format/open) -- irreversible from here.
-        match new_probed.state {
-            ConfigDiskState::Absent => unreachable!("already checked above"),
-            ConfigDiskState::PresentNotLuks => {
+        match &target_prep {
+            ReplaceTargetPrep::FreshLuks {
+                luks_format_extra_opts,
+                enroll_key_file,
+                ..
+            } => {
                 // Passphrase already verified above.
-                let luks_opts =
-                    effective_luks_format_opts(&new_name, params.luks_format_extra_opts);
                 eprint!(
                     "{}",
                     status_line(
@@ -326,7 +461,7 @@ impl ReplacePlan {
                         &format!("disk {new_name}: formatting LUKS..."),
                     )
                 );
-                luks_format(runner, &new_by_id.0, &passphrase, &luks_opts)?;
+                luks_format(runner, &new_by_id.0, &passphrase, luks_format_extra_opts)?;
                 eprint!(
                     "{}",
                     status_line(
@@ -336,7 +471,7 @@ impl ReplacePlan {
                     )
                 );
 
-                if let Some(kf) = params.enroll_key_file {
+                if let Some(kf) = enroll_key_file {
                     eprint!(
                         "{}",
                         status_line(
@@ -378,8 +513,8 @@ impl ReplacePlan {
                     )
                 );
             }
-            ConfigDiskState::PresentLuks { mapper_open, .. } => {
-                if !mapper_open {
+            ReplaceTargetPrep::ExistingLuks { mapper_open, .. } => {
+                if !*mapper_open {
                     eprint!(
                         "{}",
                         status_line(
@@ -404,8 +539,6 @@ impl ReplacePlan {
                 }
             }
         }
-
-        let new_mapper_path = format!("/dev/mapper/{}", new_mn.0);
 
         // Step 2+: Execute replacement -- both paths use btrfs replace start.
         // Live-only: warn if the source device has accumulated I/O errors.
@@ -482,7 +615,7 @@ impl ReplacePlan {
             &journal,
             journal::OpKind::Replace {
                 phase: journal::ReplacePhase::PostReplaceMaintenance,
-                old_name: params.old_name.to_owned(),
+                old_name: old_name.clone(),
                 new_name: new_name.clone(),
                 new_by_id: new_by_id.clone(),
                 new_target,
@@ -560,7 +693,7 @@ impl ReplacePlan {
         journal::clear_journal(params.paths)
             .map_err(|e| ReplaceError::Validation(e.to_string()))?;
 
-        eprintln!("Done. Replaced {} with {}.", params.old_name, new_name);
+        eprintln!("Done. Replaced {} with {}.", old_name, new_name);
         Ok(())
     }
 }
@@ -808,22 +941,21 @@ pub fn plan_replace<R: CommandRunner + Sync, F: Filesystem + ?Sized>(
         }
     }
 
-    // Compile steps
-    let will_clear_last_missing =
-        matches!(&replace_source, ReplaceSource::Missing { .. }) && pool.missing_count == 1;
-    let steps = match compile_replace_steps(&ReplaceStepsInput {
+    let work_plan = match build_replace_work_plan(ReplaceWorkPlanInput {
+        config,
+        old_name: params.old_name,
         new_name,
-        new_by_id: &new_by_id,
-        new_probed: &new_probed,
-        replace_source: &replace_source,
-        mount_point: config.mount_point(),
-        will_clear_last_missing,
-        total_devices: pool.total_devices,
+        new_by_id,
+        new_probed,
+        replace_source,
+        pool,
+        pre_membership,
+        target_membership,
         paths: params.paths,
         enroll_key_file: params.enroll_key_file,
         luks_format_extra_opts: params.luks_format_extra_opts,
     }) {
-        Ok(s) => s,
+        Ok(plan) => plan,
         Err(e) => {
             return ReplacePlanReport {
                 notes: std::mem::take(&mut notes),
@@ -834,18 +966,14 @@ pub fn plan_replace<R: CommandRunner + Sync, F: Filesystem + ?Sized>(
 
     ReplacePlanReport {
         notes: Vec::new(),
-        result: Ok(ReplacePlan {
-            notes,
-            steps,
-            config,
-            new_name: new_name.to_owned(),
-            new_by_id,
-            pool,
-            replace_source,
-            new_probed,
-            pre_membership,
-            target_membership,
-        }),
+        result: {
+            let steps = work_plan.render_steps();
+            Ok(ReplacePlan {
+                notes,
+                steps,
+                work_plan,
+            })
+        },
     }
 }
 
@@ -874,7 +1002,7 @@ pub fn cmd_replace<R: CommandRunner + Sync, F: Filesystem + ?Sized>(
     plan.execute(runner, fs, params)
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub enum ReplaceSource {
     /// Old disk is alive in the pool -- replace via `btrfs replace start`.
     Live { mapper: MapperName, devid: u64 },
@@ -887,6 +1015,78 @@ fn effective_luks_format_opts(new_name: &str, extra_opts: &[String]) -> Vec<Stri
     opts.push("--label".into());
     opts.push(format!("braid-{new_name}"));
     opts
+}
+
+struct ReplaceWorkPlanInput<'a> {
+    config: Config,
+    old_name: &'a str,
+    new_name: &'a str,
+    new_by_id: ByIdPath,
+    new_probed: ConfigDisk,
+    replace_source: ReplaceSource,
+    pool: PoolState,
+    pre_membership: PoolMembership,
+    target_membership: PoolMembership,
+    paths: &'a StatePaths,
+    enroll_key_file: Option<&'a Path>,
+    luks_format_extra_opts: &'a [String],
+}
+
+fn build_replace_work_plan(
+    input: ReplaceWorkPlanInput<'_>,
+) -> Result<ReplaceWorkPlan, ReplaceError> {
+    let new_mapper = mapper_name(input.new_name);
+    let new_mapper_path = format!("/dev/mapper/{}", new_mapper.0);
+    let journal_target = build_replace_journal_target(
+        input.new_name,
+        &input.new_by_id,
+        &input.new_probed,
+        input.enroll_key_file,
+        input.luks_format_extra_opts,
+    )?;
+    let journal_source = build_replace_journal_source(&input.replace_source);
+    let restore_raid1_after_commit = matches!(&input.replace_source, ReplaceSource::Missing { .. })
+        && input.pool.missing_count == 1
+        && input.pool.devices.len() + 1 >= 2;
+    let target_prep = match input.new_probed.state {
+        ConfigDiskState::Absent => {
+            return Err(ReplaceError::Validation(format!(
+                "new disk '{}' ({}) is not present. Is it plugged in?",
+                input.new_name, input.new_by_id
+            )));
+        }
+        ConfigDiskState::PresentNotLuks => ReplaceTargetPrep::FreshLuks {
+            luks_format_extra_opts: effective_luks_format_opts(
+                input.new_name,
+                input.luks_format_extra_opts,
+            ),
+            enroll_key_file: input.enroll_key_file.map(Path::to_path_buf),
+            header_backup_path: input
+                .paths
+                .luks_headers_dir()
+                .join(format!("{}.luksheader", new_mapper.0)),
+        },
+        ConfigDiskState::PresentLuks { mapper_open, .. } => {
+            ReplaceTargetPrep::ExistingLuks { mapper_open }
+        }
+    };
+
+    Ok(ReplaceWorkPlan {
+        config: input.config,
+        old_name: input.old_name.to_owned(),
+        new_name: input.new_name.to_owned(),
+        new_by_id: input.new_by_id,
+        pool: input.pool,
+        replace_source: input.replace_source,
+        target_prep,
+        pre_membership: input.pre_membership,
+        target_membership: input.target_membership,
+        journal_target,
+        journal_source,
+        restore_raid1_after_commit,
+        new_mapper,
+        new_mapper_path,
+    })
 }
 
 fn build_replace_journal_source(source: &ReplaceSource) -> journal::ReplaceJournalSource {
@@ -1024,6 +1224,7 @@ fn resolve_replace_source<R: CommandRunner>(
     )))
 }
 
+#[cfg(test)]
 struct ReplaceStepsInput<'a> {
     new_name: &'a str,
     new_by_id: &'a ByIdPath,
@@ -1037,137 +1238,76 @@ struct ReplaceStepsInput<'a> {
     luks_format_extra_opts: &'a [String],
 }
 
+#[cfg(test)]
 fn compile_replace_steps(input: &ReplaceStepsInput<'_>) -> Result<Vec<Step>, ReplaceError> {
-    let new_mn = mapper_name(input.new_name);
-    let mut steps = Vec::new();
+    let config = Config::new(input.mount_point.clone()).expect("valid test mount point");
+    let pool = replace_steps_test_pool(
+        input.replace_source,
+        input.will_clear_last_missing,
+        input.total_devices,
+    );
+    let work_plan = build_replace_work_plan(ReplaceWorkPlanInput {
+        config,
+        old_name: "disk2",
+        new_name: input.new_name,
+        new_by_id: (*input.new_by_id).clone(),
+        new_probed: input.new_probed.clone(),
+        replace_source: input.replace_source.clone(),
+        pool,
+        pre_membership: PoolMembership::empty(),
+        target_membership: PoolMembership::empty(),
+        paths: input.paths,
+        enroll_key_file: input.enroll_key_file,
+        luks_format_extra_opts: input.luks_format_extra_opts,
+    })?;
+    Ok(work_plan.render_steps())
+}
 
-    match &input.new_probed.state {
-        ConfigDiskState::Absent => {
-            return Err(ReplaceError::Validation(format!(
-                "new disk '{}' ({}) is not present. Is it plugged in?",
-                input.new_name, input.new_by_id
-            )));
-        }
-        ConfigDiskState::PresentNotLuks => {
-            let extra_opts =
-                effective_luks_format_opts(input.new_name, input.luks_format_extra_opts);
-            steps.push(Step {
-                risk: "destructive",
-                description: format!("LUKS format {}", input.new_by_id),
-                commands: vec![CmdRequest::CryptsetupLuksFormat {
-                    device: input.new_by_id.0.clone(),
-                    extra_opts,
-                }],
-            });
-            if let Some(kf) = input.enroll_key_file {
-                steps.push(Step {
-                    risk: "safe",
-                    description: format!("enroll keyfile -> LUKS slot 1 on {}", input.new_by_id),
-                    commands: vec![CmdRequest::CryptsetupLuksAddKeyFile {
-                        device: input.new_by_id.0.clone(),
-                        key_file_path: kf.display().to_string(),
-                    }],
-                });
-            }
-            let backup_path = input
-                .paths
-                .luks_headers_dir()
-                .join(format!("{}.luksheader", new_mn.0));
-            steps.push(Step {
-                risk: "safe",
-                description: format!("LUKS header backup -> {}", backup_path.display()),
-                commands: vec![CmdRequest::CryptsetupLuksHeaderBackup {
-                    device: input.new_by_id.0.clone(),
-                    backup_path: backup_path.display().to_string(),
-                }],
-            });
-            steps.push(Step {
-                risk: "safe",
-                description: format!("LUKS open -> {}", new_mn),
-                commands: vec![CmdRequest::CryptsetupLuksOpen {
-                    device: input.new_by_id.0.clone(),
-                    mapper: new_mn.0.clone(),
-                }],
-            });
-        }
-        ConfigDiskState::PresentLuks { mapper_open, .. } => {
-            if !mapper_open {
-                steps.push(Step {
-                    risk: "safe",
-                    description: format!("LUKS open -> {}", new_mn),
-                    commands: vec![CmdRequest::CryptsetupLuksOpen {
-                        device: input.new_by_id.0.clone(),
-                        mapper: new_mn.0.clone(),
-                    }],
-                });
-            }
-        }
-    }
-
-    let new_mapper_path = format!("/dev/mapper/{}", new_mn.0);
-    let devid = match input.replace_source {
-        ReplaceSource::Live { devid, .. } | ReplaceSource::Missing { devid } => *devid,
+#[cfg(test)]
+fn replace_steps_test_pool(
+    replace_source: &ReplaceSource,
+    will_clear_last_missing: bool,
+    total_devices: u64,
+) -> PoolState {
+    let missing_count = match replace_source {
+        ReplaceSource::Live { .. } => 0,
+        ReplaceSource::Missing { .. } if will_clear_last_missing => 1,
+        ReplaceSource::Missing { .. } => 2,
     };
+    let live_device_count = total_devices.saturating_sub(missing_count) as usize;
+    let mut devices = Vec::new();
 
-    // Shared: btrfs replace start.
-    steps.push(Step {
-        risk: "long",
-        description: format!(
-            "btrfs replace start {} /dev/mapper/{} {}",
-            devid, new_mn, input.mount_point
-        ),
-        commands: vec![CmdRequest::BtrfsReplaceStart {
-            devid,
-            target_device: new_mapper_path,
-            mount_point: input.mount_point.clone(),
-        }],
-    });
-
-    // Live-only: close old mapper before the resize -- mirrors the ordering
-    // in cmd_replace, which runs the close before resize so a resize error
-    // does not strand the old dm slot.
-    if let ReplaceSource::Live { mapper, .. } = input.replace_source {
-        steps.push(Step {
-            risk: "safe",
-            description: format!("cryptsetup close {}", mapper),
-            commands: vec![CmdRequest::CryptsetupClose {
-                mapper: mapper.0.clone(),
-            }],
-        });
-    }
-
-    // Shared: btrfs filesystem resize.
-    steps.push(Step {
-        risk: "safe",
-        description: format!(
-            "btrfs filesystem resize {}:max {}",
-            devid, input.mount_point
-        ),
-        commands: vec![CmdRequest::BtrfsFilesystemResize {
-            devid,
-            mount_point: input.mount_point.clone(),
-        }],
-    });
-
-    // Missing-only: restore RAID1 redundancy after the last missing device
-    // clears. Live replace never creates single-profile chunks, so this
-    // step is unconditionally absent on the Live path.
-    if let ReplaceSource::Missing { .. } = input.replace_source
-        && input.will_clear_last_missing
-        && input.total_devices >= 2
+    if let ReplaceSource::Live { mapper, devid } = replace_source
+        && live_device_count > 0
     {
-        steps.push(Step {
-            risk: "long",
-            description:
-                "btrfs balance -dconvert=raid1,soft -mconvert=raid1,soft (restore redundancy)"
-                    .into(),
-            commands: vec![CmdRequest::BtrfsBalanceRaid1Soft {
-                mount_point: input.mount_point.clone(),
-            }],
+        devices.push(PoolDevice {
+            mapper: mapper.clone(),
+            luks_uuid: LuksUuid(format!("{devid:032x}")),
+            devid: *devid,
+            underlying: format!("/dev/test-{devid}"),
         });
     }
 
-    Ok(steps)
+    let mut next_devid = 100;
+    while devices.len() < live_device_count {
+        devices.push(PoolDevice {
+            mapper: MapperName(format!("braid-test{}", devices.len() + 1)),
+            luks_uuid: LuksUuid(format!("{next_devid:032x}")),
+            devid: next_devid,
+            underlying: format!("/dev/test-{next_devid}"),
+        });
+        next_devid += 1;
+    }
+
+    PoolState {
+        mounted: true,
+        devices,
+        missing_count,
+        total_devices,
+        fsid: None,
+        missing_devids: Vec::new(),
+        null_underlying: Vec::new(),
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -4077,12 +4217,12 @@ mod tests {
      *   LuksFormat -> LuksAddKeyFile -> LuksHeaderBackup -> LuksOpen
      *   in the real execute path.
      *
-     * Why it exists: `ReplacePlan::execute` discards the precompiled
-     *   `steps` and re-implements the LUKS init sequence inline, so a
-     *   reorder-only fix to `compile_replace_steps` would not protect
-     *   the production path. Pinning the chain at the real-execute layer
-     *   also covers the "no backup before open" guarantee that keeps the
-     *   no-backup window narrow if `LuksAddKeyFile` ever fails between
+     * Why it exists: `ReplacePlan::execute` consumes `ReplaceWorkPlan`
+     *   directly rather than executing rendered `Step`s, so preview
+     *   ordering coverage alone does not protect runtime ordering.
+     *   Pinning the chain at the real-execute layer also covers the
+     *   "no backup before open" guarantee that keeps the no-backup
+     *   window narrow if `LuksAddKeyFile` ever fails between
      *   `LuksFormat` and `LuksHeaderBackup`. The dry-run preview path is
      *   pinned by `dry_run_render_fresh_disk_live_replace_with_keyfile`.
      *

@@ -38,8 +38,8 @@
         # disk4 is the preserved-context fixture: braid-labeled LUKS
         # with no btrfs superblock (ambiguous identity). plan_add
         # accumulates the missing-devices warn from the degraded pool,
-        # then compile_add_steps_multi rejects disk4; stderr must show
-        # the legacy `warning: ...` line BEFORE the refusal error.
+        # then add work-plan rendering rejects disk4; stderr must show
+        # the canonical `[warn] ...` line BEFORE the refusal error.
         {
           size = 1024;
           driveConfig.deviceExtraOpts.serial = "disk4";

@@ -1524,7 +1524,7 @@ fn build_add_work_plan<R: CommandRunner>(
 }
 
 #[cfg(test)]
-fn compile_add_steps_multi<R: CommandRunner>(
+fn render_add_work_plan_steps<R: CommandRunner>(
     runner: &R,
     input: &AddStepsInput<'_>,
 ) -> Result<Vec<Step>, AddError> {
@@ -1923,7 +1923,7 @@ mod tests {
         assert_eq!(devid_for_mapper_path(&pool, "/dev/mapper/missing"), None);
     }
 
-    // --- compile_add_steps_multi identity tests ---
+    // --- add work-plan identity tests ---
 
     fn probed_present_luks(name: &str, mapper_open: bool, label: Option<String>) -> ConfigDisk {
         ConfigDisk {
@@ -1943,7 +1943,7 @@ mod tests {
         let probed = vec![probed_present_luks("disk1", true, None)];
         let pool = pool_mounted_with_fsid("aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee");
 
-        let result = compile_add_steps_multi(
+        let result = render_add_work_plan_steps(
             &runner,
             &AddStepsInput {
                 names: &["disk1"],
@@ -1982,7 +1982,7 @@ mod tests {
         )];
         let pool = pool_mounted_with_fsid(pool_fsid);
 
-        let result = compile_add_steps_multi(
+        let result = render_add_work_plan_steps(
             &runner,
             &AddStepsInput {
                 names: &["disk1"],
@@ -2013,7 +2013,7 @@ mod tests {
         )];
         let pool = pool_mounted_with_fsid("aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee");
 
-        let steps = compile_add_steps_multi(
+        let steps = render_add_work_plan_steps(
             &runner,
             &AddStepsInput {
                 names: &["disk1"],
@@ -2047,7 +2047,7 @@ mod tests {
         )];
         let pool = pool_unmounted();
 
-        let result = compile_add_steps_multi(
+        let result = render_add_work_plan_steps(
             &runner,
             &AddStepsInput {
                 names: &["disk1"],
@@ -2078,7 +2078,7 @@ mod tests {
         }];
         let pool = pool_unmounted();
 
-        let steps = compile_add_steps_multi(
+        let steps = render_add_work_plan_steps(
             &runner,
             &AddStepsInput {
                 names: &["disk1"],
@@ -2227,7 +2227,7 @@ mod tests {
     #[test]
     fn preconditions_non_braid_label_canonical_message() {
         // Intent: validate_braid_preconditions emits the canonical label-mismatch error.
-        // Why it exists: pins the error text so both cmd_add and compile_add_steps_multi
+        // Why it exists: pins the error text so both cmd_add and add work-plan rendering
         //   can't drift — they both call this function.
         // Scenario: user tries to add a LUKS disk that was not created by braid.
         let pool = pool_unmounted();
@@ -2249,7 +2249,7 @@ mod tests {
     #[test]
     fn preconditions_no_pool_canonical_message() {
         // Intent: validate_braid_preconditions emits the canonical no-mounted-pool error.
-        // Why it exists: pins the error text so both cmd_add and compile_add_steps_multi
+        // Why it exists: pins the error text so both cmd_add and add work-plan rendering
         //   can't drift — they both call this function.
         // Scenario: user tries to add a braid-labeled disk when no pool is mounted
         //   (e.g. fresh bootstrap scenario with pre-existing encrypted disk).
@@ -2276,7 +2276,7 @@ mod tests {
     fn identity_to_error_no_btrfs_canonical_message() {
         // Intent: identity_to_error emits the canonical BraidLabeledNoBtrfs error.
         // Why it exists: this was the variant where message text had already diverged
-        //   between cmd_add and compile_add_steps_multi. Pinning it prevents recurrence.
+        //   between cmd_add and add work-plan rendering. Pinning it prevents recurrence.
         // Scenario: a braid-labeled disk has its LUKS contents wiped or is partially
         //   initialized — btrfs superblock is absent.
         let err = identity_to_error(&AddLuksIdentity::BraidLabeledNoBtrfs, "disk1")
@@ -2317,13 +2317,13 @@ mod tests {
 
     #[test]
     fn dry_run_and_execution_produce_same_no_btrfs_error() {
-        // Intent: compile_add_steps_multi and cmd_add produce identical BraidLabeledNoBtrfs
+        // Intent: add work-plan rendering and cmd_add produce identical BraidLabeledNoBtrfs
         //   error text, proving both call sites go through identity_to_error.
         // Why it exists: this is the exact message that had already diverged before the
         //   refactor. This test makes that divergence impossible to reintroduce silently.
         // Scenario: braid-labeled disk with mapper open, but no btrfs superblock inside.
 
-        // dry-run path: compile_add_steps_multi with mapper_open=true
+        // dry-run path: add work-plan rendering with mapper_open=true
         let runner = MockRunner::default().with_output(
             CmdRequest::BtrfsFilesystemShowTarget {
                 target: "/dev/mapper/braid-disk1".into(),
@@ -2337,7 +2337,7 @@ mod tests {
         )];
         let pool = pool_mounted_with_fsid("aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee");
 
-        let dry_err = compile_add_steps_multi(
+        let dry_err = render_add_work_plan_steps(
             &runner,
             &AddStepsInput {
                 names: &["disk1"],
@@ -4121,7 +4121,7 @@ mod tests {
     fn bootstrap_rejects_braid_labeled_luks_disk() {
         let (_state_tmp, paths, _tmp, config_path, pass_path) = add_test_setup();
         // The named contract here is the braid-labeled-LUKS bootstrap guard,
-        // which only fires inside compile_add_steps_multi. Clear the
+        // which only fires inside add work-plan rendering. Clear the
         // pre-seeded pool.json so the earlier locked-pool-with-membership
         // refusal (check_pool_unlocked_if_membership_exists) doesn't preempt
         // it; that earlier refusal has its own dedicated test
@@ -4398,7 +4398,7 @@ mod tests {
             "1".to_owned(),
         ];
 
-        let steps = compile_add_steps_multi(
+        let steps = render_add_work_plan_steps(
             &runner,
             &AddStepsInput {
                 names: &["disk1"],
@@ -4469,7 +4469,7 @@ mod tests {
         let pool = pool_unmounted();
         let kf = std::path::Path::new("/mnt/usb/braid.key");
 
-        let steps = compile_add_steps_multi(
+        let steps = render_add_work_plan_steps(
             &runner,
             &AddStepsInput {
                 names: &["disk1"],
@@ -4524,7 +4524,7 @@ mod tests {
         }];
         let pool = pool_mounted_with_fsid("aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee");
 
-        let steps = compile_add_steps_multi(
+        let steps = render_add_work_plan_steps(
             &runner,
             &AddStepsInput {
                 names: &["disk2"],
@@ -5915,7 +5915,7 @@ mod tests {
      * A regression that reversed the order would surface warnings after
      * the destructive plan, defeating their purpose.
      * Scenario: missing-devices warning on a pool, add a fresh disk with
-     * real work to plan. Pool is mounted so compile_add_steps_multi
+     * real work to plan. Pool is mounted so add work-plan rendering
      * returns the `btrfs device add` + balance steps.
      */
     #[test]
@@ -6002,7 +6002,7 @@ mod tests {
 
     /* Intent: when plan_add accumulates a Warn note (e.g.
      * missing-devices) and then fails later inside
-     * compile_add_steps_multi (e.g. BraidLabeledNoBtrfs identity), the
+     * add work-plan rendering (e.g. BraidLabeledNoBtrfs identity), the
      * accumulated notes survive on `report.notes` and the result is
      * Err(...).
      * Why it exists: Shape A "notes-carrying report" promises preserved
@@ -6012,7 +6012,7 @@ mod tests {
      * Scenario: 2-disk pool with 1 MISSING placeholder, operator tries
      * to add disk2 which is a braid-labeled LUKS with no btrfs
      * superblock (ambiguous identity). plan_add accumulates the
-     * missing-devices warn, then compile_add_steps_multi rejects the
+     * missing-devices warn, then add work-plan rendering rejects the
      * identity.
      */
     #[test]

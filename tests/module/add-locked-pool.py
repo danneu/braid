@@ -61,7 +61,7 @@ with subtest("dry-run add against locked pool refuses without rendering plan"):
     assert "disk1" in out, f"refusal must name locked member disk1, got:\n{out}"
     assert "disk2" in out, f"refusal must name locked member disk2, got:\n{out}"
     # Sanity: no plan rendered. Any of these strings would indicate
-    # compile_add_steps_multi ran past the new check.
+    # add work-plan rendering ran past the new check.
     for forbidden in ["mkfs.btrfs", "luksFormat", "mount /mnt/storage"]:
         assert forbidden not in out, (
             f"refused dry-run must not render any plan steps; "
