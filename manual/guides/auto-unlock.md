@@ -40,7 +40,7 @@ Generate a random keyfile and enroll it into all pool disks:
 sudo braid enroll /mnt/usb --generate
 ```
 
-This creates a 4096-byte random file at `/mnt/usb/braid.key` and enrolls it into LUKS slot 1 on every disk in the pool. braid asks for your existing passphrase to authorize the enrollment.
+`--generate` requires `/mnt/usb` to already be mounted. This creates a 4096-byte random file at `/mnt/usb/braid.key` and enrolls it into LUKS slot 1 on every disk in the pool. braid asks for your existing passphrase to authorize the enrollment.
 
 Unmount the USB:
 

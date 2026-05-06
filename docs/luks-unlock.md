@@ -47,6 +47,24 @@ would use a different slot.
 See: [cryptsetup(8) — key-file processing](https://man7.org/linux/man-pages/man8/cryptsetup.8.html),
 [Arch Wiki — dm-crypt/Device encryption](https://wiki.archlinux.org/title/Dm-crypt/Device_encryption)
 
+## Keyfile creation target invariant
+
+Any braid command path that creates or overwrites `braid.key` in a
+user-supplied directory must first verify that directory exists, is a
+directory, and is an active mount point. This prevents a failed USB mount from
+turning `/mnt/usb/braid.key` into persistent key material on the host root
+filesystem.
+
+This currently applies to `braid enroll DIR --generate`. Existing-keyfile
+consumers may read from ordinary admin-controlled paths and must not require a
+mount point:
+
+- `braid enroll DIR` without `--generate`
+- `braid add --enroll DIR`
+- `braid replace --enroll DIR`
+- `braid unlock --key-file PATH`
+- `braid.autoUnlock` reading `/run/braid-key/braid.key`
+
 ## Plaintext keyfile exposure (Unraid CVE)
 
 Unraid stores the LUKS passphrase in plaintext at `/root/keyfile` on

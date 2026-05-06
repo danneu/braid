@@ -253,7 +253,7 @@ struct UnlockArgs {
 struct EnrollKeyFileArgs {
     /// Directory containing (or to receive) braid.key
     dir: std::path::PathBuf,
-    /// Generate a new 4096-byte random keyfile before enrolling
+    /// Generate a new 4096-byte random keyfile in DIR; DIR must already be a mount point
     #[arg(long)]
     generate: bool,
     /// Read passphrase from stdin

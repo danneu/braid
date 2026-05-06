@@ -12,7 +12,7 @@ use crate::state_paths::StatePaths;
 use crate::status_tag::{
     CredentialKind, StatusTag, color_enabled_for_stderr, emit_credential_wait_line, status_line,
 };
-use crate::types::{ByIdPath, ConfigDiskState};
+use crate::types::{ByIdPath, ConfigDiskState, MountPoint};
 use std::io::Read;
 use std::os::unix::fs::OpenOptionsExt;
 use std::path::Path;
@@ -21,6 +21,8 @@ use std::path::Path;
 pub enum EnrollKeyFileError {
     #[error("{0}")]
     Validation(String),
+    #[error("command error: {0}")]
+    Cmd(#[from] crate::cmd::CmdError),
     #[error("luks error: {0}")]
     Luks(#[from] LuksError),
     #[error("probe error: {0}")]
@@ -530,6 +532,51 @@ pub fn validate_key_file_path(
     Ok(())
 }
 
+fn key_file_directory(key_file_path: &Path) -> &Path {
+    key_file_path
+        .parent()
+        .filter(|parent| !parent.as_os_str().is_empty())
+        .unwrap_or_else(|| Path::new("."))
+}
+
+fn validate_generated_keyfile_target<R: CommandRunner>(
+    runner: &R,
+    key_file_path: &Path,
+) -> Result<(), EnrollKeyFileError> {
+    let dir = key_file_directory(key_file_path);
+    let dir_display = dir.display().to_string();
+
+    let meta = match std::fs::metadata(dir) {
+        Ok(meta) => meta,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+            return Err(EnrollKeyFileError::Validation(format!(
+                "keyfile directory does not exist: {dir_display}"
+            )));
+        }
+        Err(e) => {
+            return Err(EnrollKeyFileError::Validation(format!(
+                "cannot read keyfile directory {dir_display}: {e}"
+            )));
+        }
+    };
+    if !meta.is_dir() {
+        return Err(EnrollKeyFileError::Validation(format!(
+            "keyfile target is not a directory: {dir_display}"
+        )));
+    }
+
+    let mountpoint = runner.run(&CmdRequest::MountpointCheck {
+        path: MountPoint(dir_display.clone()),
+    })?;
+    if mountpoint.exit_status != 0 {
+        return Err(EnrollKeyFileError::Validation(format!(
+            "keyfile directory is not a mount point: {dir_display} -- mount the USB device there before running braid enroll --generate"
+        )));
+    }
+
+    validate_key_file_path(key_file_path, true)
+}
+
 /// Plan a `braid enroll` run. Owns the pending-op preflight,
 /// keyfile-path validation, and pre-passphrase discovery. Per-disk
 /// skip notes land on `EnrollPlan.notes` when discovery produces at
@@ -563,7 +610,12 @@ pub fn plan_enroll<R: CommandRunner, F: Filesystem + ?Sized>(
         };
     }
 
-    if let Err(e) = validate_key_file_path(key_file_path, generate) {
+    let key_file_validation = if generate {
+        validate_generated_keyfile_target(runner, key_file_path)
+    } else {
+        validate_key_file_path(key_file_path, false)
+    };
+    if let Err(e) = key_file_validation {
         return EnrollPlanReport {
             notes: Vec::new(),
             result: Err(e),
@@ -745,6 +797,36 @@ mod tests {
         }
     }
 
+    fn mountpoint_ok(dir: &Path) -> (CmdRequest, RawCommandOutput) {
+        let dir = dir.display().to_string();
+        (
+            CmdRequest::MountpointCheck {
+                path: MountPoint(dir.clone()),
+            },
+            ok_raw(&format!("mountpoint -q {dir}"), ""),
+        )
+    }
+
+    fn mountpoint_fail(dir: &Path) -> (CmdRequest, RawCommandOutput) {
+        let dir = dir.display().to_string();
+        (
+            CmdRequest::MountpointCheck {
+                path: MountPoint(dir.clone()),
+            },
+            err_raw(&format!("mountpoint -q {dir}"), 1, ""),
+        )
+    }
+
+    fn with_mountpoint_ok(runner: MockRunner, dir: &Path) -> MockRunner {
+        let (req, out) = mountpoint_ok(dir);
+        runner.with_output(req, out)
+    }
+
+    fn with_mountpoint_fail(runner: MockRunner, dir: &Path) -> MockRunner {
+        let (req, out) = mountpoint_fail(dir);
+        runner.with_output(req, out)
+    }
+
     fn make_membership(disks: &[(&str, &str)]) -> PoolMembership {
         let mut map = BTreeMap::new();
         for (key, path) in disks {
@@ -873,9 +955,9 @@ mod tests {
     //
     // These tests exercise `plan_enroll(..., generate=true, ...)` because
     // `--generate` requires the keyfile path to NOT exist, so the temp
-    // path (never created) satisfies the pre-discovery validation with
-    // zero setup. Mode choice is irrelevant to the discovery behavior
-    // being asserted here.
+    // path (never created) satisfies the no-overwrite validation. The
+    // mountpoint probe is mocked as successful so these tests stay focused on
+    // discovery behavior.
 
     /*
      * Intent: verify that two present LUKS disks are both returned as
@@ -902,6 +984,7 @@ mod tests {
         ]);
         let (tmp, paths) = test_paths();
         let kf = tmp.path().join("braid.key");
+        let runner = with_mountpoint_ok(runner, tmp.path());
 
         let report = plan_enroll(&runner, &fs, &membership, &kf, true, false, &paths);
         assert!(
@@ -941,6 +1024,7 @@ mod tests {
         ]);
         let (tmp, paths) = test_paths();
         let kf = tmp.path().join("braid.key");
+        let runner = with_mountpoint_ok(runner, tmp.path());
 
         let report = plan_enroll(&runner, &fs, &membership, &kf, true, false, &paths);
         assert!(
@@ -990,6 +1074,7 @@ mod tests {
         ]);
         let (tmp, paths) = test_paths();
         let kf = tmp.path().join("braid.key");
+        let runner = with_mountpoint_ok(runner, tmp.path());
 
         let report = plan_enroll(&runner, &fs, &membership, &kf, true, false, &paths);
         assert!(report.notes.is_empty());
@@ -1032,6 +1117,7 @@ mod tests {
         ]);
         let (tmp, paths) = test_paths();
         let kf = tmp.path().join("braid.key");
+        let runner = with_mountpoint_ok(runner, tmp.path());
 
         let report = plan_enroll(&runner, &fs, &membership, &kf, true, false, &paths);
         let err = report.result.expect_err("expected no-candidates error");
@@ -1076,6 +1162,7 @@ mod tests {
         let membership = make_membership(&[("disk1", "/dev/disk/by-id/d1")]);
         let (tmp, paths) = test_paths();
         let kf = tmp.path().join("braid.key");
+        let runner = with_mountpoint_ok(runner, tmp.path());
 
         let report = plan_enroll(&runner, &fs, &membership, &kf, true, false, &paths);
         let err = report.result.expect_err("expected no-candidates error");
@@ -1124,6 +1211,7 @@ mod tests {
         ]);
         let (tmp, paths) = test_paths();
         let kf = tmp.path().join("braid.key");
+        let runner = with_mountpoint_ok(runner, tmp.path());
 
         let plan = plan_enroll(&runner, &fs, &membership, &kf, true, false, &paths)
             .result
@@ -1164,6 +1252,249 @@ mod tests {
             .with_output(req2, out2)
             .with_luks_dump_text_luks2_for(&[d1, d2])
             .with_mappers_closed(&["braid-disk1", "braid-disk2"])
+    }
+
+    /*
+     * Intent: `--generate` rejects a missing target directory before
+     *   probing pool disks.
+     * Why it exists: generated key material must only be written under an
+     *   existing mounted directory; a missing USB mount path must not fall
+     *   through to LUKS discovery or passphrase work.
+     * Scenario: user runs `braid enroll /mnt/usb --generate` before
+     *   creating or mounting `/mnt/usb`.
+     */
+    #[test]
+    fn generate_rejects_missing_directory_before_luks_discovery() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let paths = StatePaths::custom(tmp.path().join("state"));
+        let kf = tmp.path().join("missing").join("braid.key");
+        let runner = MockRunner::default();
+        let fs = MockFs::new(&["/dev/disk/by-id/d1"]);
+        let membership = make_membership(&[("disk1", "/dev/disk/by-id/d1")]);
+
+        let report = plan_enroll(&runner, &fs, &membership, &kf, true, false, &paths);
+        let err = report
+            .result
+            .expect_err("missing target directory must fail");
+
+        assert!(
+            err.to_string().contains("keyfile directory does not exist"),
+            "unexpected error: {err}"
+        );
+        assert!(
+            runner.requests().is_empty(),
+            "missing directory must fail before any command runs; got {:?}",
+            runner.requests()
+        );
+    }
+
+    /*
+     * Intent: `--generate` rejects a non-directory target before command
+     *   execution.
+     * Why it exists: a typo that points DIR at a regular file must not reach
+     *   mountpoint checks, LUKS discovery, passphrase reads, or key creation.
+     * Scenario: user passes a path whose parent component exists as a file.
+     */
+    #[test]
+    fn generate_rejects_non_directory_target() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let paths = StatePaths::custom(tmp.path().join("state"));
+        let not_dir = tmp.path().join("not-dir");
+        std::fs::write(&not_dir, b"not a directory").unwrap();
+        let kf = not_dir.join("braid.key");
+        let runner = MockRunner::default();
+        let fs = MockFs::new(&["/dev/disk/by-id/d1"]);
+        let membership = make_membership(&[("disk1", "/dev/disk/by-id/d1")]);
+
+        let report = plan_enroll(&runner, &fs, &membership, &kf, true, false, &paths);
+        let err = report.result.expect_err("non-directory target must fail");
+
+        assert!(
+            err.to_string()
+                .contains("keyfile target is not a directory"),
+            "unexpected error: {err}"
+        );
+        assert!(
+            runner.requests().is_empty(),
+            "non-directory target must fail before commands run; got {:?}",
+            runner.requests()
+        );
+    }
+
+    /*
+     * Intent: `--generate` rejects an ordinary existing directory when
+     *   `mountpoint -q` reports that it is not mounted.
+     * Why it exists: this is the root-filesystem footgun the feature hardens:
+     *   if the USB mount failed, braid must not create `DIR/braid.key` on the
+     *   host filesystem.
+     * Scenario: `/tmp/not-mounted` exists, but no USB or tmpfs is mounted
+     *   there.
+     */
+    #[test]
+    fn generate_rejects_plain_directory_before_luks_discovery() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let paths = StatePaths::custom(tmp.path().join("state"));
+        let target = tmp.path().join("not-mounted");
+        std::fs::create_dir(&target).unwrap();
+        let kf = target.join("braid.key");
+        let runner = with_mountpoint_fail(MockRunner::default(), &target);
+        let fs = MockFs::new(&["/dev/disk/by-id/d1"]);
+        let membership = make_membership(&[("disk1", "/dev/disk/by-id/d1")]);
+
+        let report = plan_enroll(&runner, &fs, &membership, &kf, true, false, &paths);
+        let err = report.result.expect_err("plain directory must fail");
+
+        assert_eq!(
+            err.to_string(),
+            format!(
+                "keyfile directory is not a mount point: {} -- mount the USB device there before running braid enroll --generate",
+                target.display()
+            )
+        );
+        assert_eq!(
+            runner.requests(),
+            vec![CmdRequest::MountpointCheck {
+                path: MountPoint(target.display().to_string()),
+            }],
+            "mountpoint failure must stop before LUKS discovery"
+        );
+        assert!(!kf.exists(), "failed validation must not create braid.key");
+    }
+
+    /*
+     * Intent: `--generate --dry-run` rejects an ordinary existing directory
+     *   before producing a preview.
+     * Why it exists: dry-run must enforce the same target safety gate as a
+     *   real run and must not need LUKS/passphrase mocks to reject a bad
+     *   generated-keyfile target.
+     * Scenario: user previews key generation against a plain host directory
+     *   where the USB mount did not happen.
+     */
+    #[test]
+    fn generate_dry_run_rejects_plain_directory_without_key_creation() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let paths = StatePaths::custom(tmp.path().join("state"));
+        let target = tmp.path().join("not-mounted");
+        std::fs::create_dir(&target).unwrap();
+        let kf = target.join("braid.key");
+        let runner = with_mountpoint_fail(MockRunner::default(), &target);
+        let fs = MockFs::new(&["/dev/disk/by-id/d1"]);
+        let membership = make_membership(&[("disk1", "/dev/disk/by-id/d1")]);
+
+        let err = cmd_enroll_key_file(
+            &runner,
+            &fs,
+            &EnrollKeyFileParams {
+                membership: &membership,
+                key_file_path: &kf,
+                generate: true,
+                passphrase_stdin: false,
+                passphrase_file: None,
+                dry_run: true,
+                paths: &paths,
+            },
+        )
+        .expect_err("dry-run must reject a plain directory");
+
+        assert!(
+            err.to_string()
+                .contains("keyfile directory is not a mount point"),
+            "unexpected error: {err}"
+        );
+        assert_eq!(
+            runner.requests(),
+            vec![CmdRequest::MountpointCheck {
+                path: MountPoint(target.display().to_string()),
+            }],
+            "dry-run target validation must stop before LUKS discovery"
+        );
+        assert!(!kf.exists(), "dry-run failure must not create braid.key");
+    }
+
+    /*
+     * Intent: `--generate` still refuses an existing `braid.key` when the
+     *   target directory is mounted.
+     * Why it exists: adding the mountpoint gate must not weaken the existing
+     *   no-overwrite contract.
+     * Scenario: USB is mounted at DIR, but DIR already contains braid.key.
+     */
+    #[test]
+    fn generate_rejects_existing_keyfile_after_mountpoint_check() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let paths = StatePaths::custom(tmp.path().join("state"));
+        let kf = tmp.path().join("braid.key");
+        std::fs::write(&kf, b"existing").unwrap();
+        let runner = with_mountpoint_ok(MockRunner::default(), tmp.path());
+        let fs = MockFs::new(&["/dev/disk/by-id/d1"]);
+        let membership = make_membership(&[("disk1", "/dev/disk/by-id/d1")]);
+
+        let report = plan_enroll(&runner, &fs, &membership, &kf, true, false, &paths);
+        let err = report
+            .result
+            .expect_err("existing generated keyfile must fail");
+
+        assert!(
+            err.to_string().contains("braid.key already exists"),
+            "unexpected error: {err}"
+        );
+        assert_eq!(
+            runner.requests(),
+            vec![CmdRequest::MountpointCheck {
+                path: MountPoint(tmp.path().display().to_string()),
+            }],
+            "existing-keyfile refusal must happen before LUKS discovery"
+        );
+    }
+
+    /*
+     * Intent: non-generate enroll does not require the keyfile directory to
+     *   be a mount point.
+     * Why it exists: only command paths that create `braid.key` need the
+     *   mountpoint gate. Existing-keyfile consumers can read ordinary
+     *   admin-controlled paths.
+     * Scenario: user enrolls an existing keyfile from a temp directory.
+     */
+    #[test]
+    fn non_generate_plan_does_not_require_mountpoint() {
+        let d1 = "/dev/disk/by-id/d1";
+        let d2 = "/dev/disk/by-id/d2";
+        let (tmp, paths) = test_paths();
+        let (kf, _) = make_existing_keyfile(&tmp);
+        let runner = discovery_two_disks(d1, d2);
+        let fs = MockFs::new(&[d1, d2]);
+        let membership = make_membership(&[("disk1", d1), ("disk2", d2)]);
+
+        let plan = plan_enroll(&runner, &fs, &membership, &kf, false, false, &paths)
+            .result
+            .expect("existing keyfile in ordinary directory should plan");
+
+        assert_eq!(plan.candidates.len(), 2);
+        assert!(
+            runner
+                .requests()
+                .iter()
+                .all(|request| !matches!(request, CmdRequest::MountpointCheck { .. })),
+            "non-generate enroll must not call mountpoint -q; got {:?}",
+            runner.requests()
+        );
+    }
+
+    /*
+     * Intent: direct existing-keyfile validation still accepts a regular file
+     *   in an ordinary directory.
+     * Why it exists: `add --enroll`, `replace --enroll`, and
+     *   non-generate `enroll` share this helper and must not inherit the
+     *   generate-only mountpoint requirement.
+     * Scenario: `/run/keys/braid.key` or another admin-controlled regular
+     *   file is used as an existing keyfile source.
+     */
+    #[test]
+    fn validate_existing_keyfile_accepts_regular_file_without_mountpoint() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let kf = dir.path().join("braid.key");
+        std::fs::write(&kf, b"existing").unwrap();
+
+        validate_key_file_path(&kf, false).expect("existing regular keyfile should validate");
     }
 
     /*
@@ -1311,6 +1642,7 @@ mod tests {
 
         let (tmp, paths) = test_paths();
         let kf = tmp.path().join("braid.key");
+        let runner = with_mountpoint_ok(runner, tmp.path());
 
         let _plan = plan_enroll(&runner, &fs, &membership, &kf, true, true, &paths)
             .result
@@ -2363,6 +2695,7 @@ mod tests {
             .with_luks_dump_text_luks2(d1)
             .with_mappers_closed(&["braid-disk1"])
             .with_output_stdin(tp_req, tp_stdin, tp_out);
+        let runner = with_mountpoint_ok(runner, tmp.path());
 
         let fs = MockFs::new(&[d1]);
         let membership = make_membership(&[("disk1", d1)]);
@@ -2421,6 +2754,7 @@ mod tests {
             .with_output(uuid_req, uuid_out)
             .with_luks_dump_text_luks2(d1)
             .with_mappers_closed(&["braid-disk1"]);
+        let runner = with_mountpoint_ok(runner, tmp.path());
 
         let fs = MockFs::new(&[d1]);
         let membership = make_membership(&[("disk1", d1)]);

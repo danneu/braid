@@ -3,16 +3,17 @@
 # Intent: Verify that `braid enroll --generate` atomically creates a
 # 4096-byte keyfile with mode 400, enrolls it into all pool disks, and that
 # generated keyfile can unlock the pool. Also verifies --generate refuses to
-# overwrite an existing keyfile.
+# write into a non-mounted directory or overwrite an existing keyfile.
 #
 # Why it exists: The --generate flag replaces the manual dd/chmod workflow.
 # If the keyfile is created before preflight validation (e.g., wrong
 # passphrase), a useless keyfile is left behind. The two-phase approach
 # (validate first, generate only on success) prevents this.
 #
-# Scenario: 2-disk RAID1 pool. --generate creates keyfile and enrolls.
-# Lock, unlock with generated keyfile. --generate refuses overwrite.
-# Slot conflict prevents keyfile creation.
+# Scenario: 2-disk RAID1 pool. --generate rejects a plain directory, then
+# creates keyfile on a mounted USB-like tmpfs and enrolls it. Lock, unlock
+# with generated keyfile. --generate refuses overwrite. Slot conflict prevents
+# keyfile creation.
 
 import shlex
 
@@ -45,10 +46,34 @@ with subtest("Setup: create 2-disk pool"):
     machine.succeed("echo 'generate test data' > /mnt/storage/gentest.txt")
     machine.succeed("sync")
 
+# --- Test 0: --generate rejects a plain directory ---
+
+with subtest("Test 0: --generate rejects plain directory"):
+    machine.succeed("mkdir -p /tmp/not-mounted")
+    pq = shlex.quote(passphrase)
+    machine.succeed(
+        f"rc=0; printf '%s\\n' {pq} | "
+        f"braid enroll /tmp/not-mounted --generate --passphrase-stdin "
+        f">/tmp/not-mounted.out 2>/tmp/not-mounted.err || rc=$?; echo $rc > /tmp/not-mounted.rc"
+    )
+    rc = machine.succeed("cat /tmp/not-mounted.rc").strip()
+    out = machine.succeed("cat /tmp/not-mounted.out")
+    err = machine.succeed("cat /tmp/not-mounted.err")
+    assert rc != "0", f"expected nonzero exit for non-mounted directory; got rc={rc}"
+    assert out == "", f"stdout must be empty on failure, got: {out!r}"
+    expected = (
+        "keyfile directory is not a mount point: /tmp/not-mounted -- "
+        "mount the USB device there before running braid enroll --generate"
+    )
+    assert expected in err, f"expected mountpoint error, got: {err!r}"
+    machine.fail("test -f /tmp/not-mounted/braid.key")
+
 # --- Test 1: --generate creates keyfile and enrolls ---
 
 with subtest("Test 1: --generate creates keyfile and enrolls into all disks"):
     machine.succeed("mkdir -p /tmp/usb")
+    machine.succeed("mount -t tmpfs -o size=1m,mode=700 tmpfs /tmp/usb")
+    machine.succeed("mountpoint -q /tmp/usb")
     pq = shlex.quote(passphrase)
     machine.succeed(
         f"printf '%s\\n' {pq} | braid enroll /tmp/usb --generate --passphrase-stdin"
