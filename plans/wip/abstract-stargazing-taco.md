@@ -22,7 +22,6 @@ Existing VM tests already exercise 15 of 18 parsers through real braid commands,
 | `parse_btrfs_scrub_status` | status, idle | braid-status-rust, braid-idle | golden_btrfs_scrub_* |
 | `parse_btrfs_balance_status` | status, idle | braid-status-during-balance | golden_btrfs_balance_* |
 | `parse_btrfs_device_stats` | status, monitor | braid-status-rust | golden_btrfs_device_stats |
-| `parse_lsblk_field` | status | braid-status-rust | — |
 | `parse_btrfs_replace_status` | idle | braid-idle | — |
 | `parse_cryptsetup_luks_label` | add, discover | braid-discover, braid-add-disk | — |
 | `parse_btrfs_subvolume_list` | browse | braid-browse | **MISSING** |

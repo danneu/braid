@@ -3,7 +3,7 @@ use serde::Deserialize;
 use crate::cmd::RawCommandOutput;
 
 use super::ParseError;
-use super::types::{LsblkDevice, LsblkFieldOutput, LsblkOutput};
+use super::types::{LsblkDevice, LsblkOutput};
 
 // --- Serde helper structs (not exposed to domain code) ---
 
@@ -69,25 +69,6 @@ pub fn parse_lsblk_json(raw: &RawCommandOutput) -> Result<LsblkOutput, ParseErro
     })
 }
 
-pub fn parse_lsblk_field(raw: &RawCommandOutput) -> Result<LsblkFieldOutput, ParseError> {
-    if raw.exit_status != 0 {
-        return Err(ParseError::CommandFailed {
-            cmd: raw.cmd.clone(),
-            exit_code: raw.exit_status,
-            stderr: raw.stderr.clone(),
-        });
-    }
-
-    let trimmed = raw.stdout.trim();
-    let value = if trimmed.is_empty() {
-        None
-    } else {
-        Some(trimmed.to_owned())
-    };
-
-    Ok(LsblkFieldOutput { value })
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -142,44 +123,6 @@ mod tests {
             exit_status: 1,
         };
         let err = parse_lsblk_json(&raw).unwrap_err();
-        assert!(matches!(err, ParseError::CommandFailed { .. }));
-    }
-
-    // --- parse_lsblk_field ---
-
-    #[test]
-    fn lsblk_field_extracts_value() {
-        let raw = RawCommandOutput {
-            cmd: "lsblk".into(),
-            stdout: "  Samsung SSD 870  \n".into(),
-            stderr: String::new(),
-            exit_status: 0,
-        };
-        let out = parse_lsblk_field(&raw).unwrap();
-        assert_eq!(out.value.as_deref(), Some("Samsung SSD 870"));
-    }
-
-    #[test]
-    fn lsblk_field_returns_none_for_empty() {
-        let raw = RawCommandOutput {
-            cmd: "lsblk".into(),
-            stdout: "  \n".into(),
-            stderr: String::new(),
-            exit_status: 0,
-        };
-        let out = parse_lsblk_field(&raw).unwrap();
-        assert_eq!(out.value, None);
-    }
-
-    #[test]
-    fn lsblk_field_errors_on_nonzero_exit() {
-        let raw = RawCommandOutput {
-            cmd: "lsblk".into(),
-            stdout: String::new(),
-            stderr: "not a block device".into(),
-            exit_status: 32,
-        };
-        let err = parse_lsblk_field(&raw).unwrap_err();
         assert!(matches!(err, ParseError::CommandFailed { .. }));
     }
 }

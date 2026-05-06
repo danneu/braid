@@ -2,7 +2,6 @@ use std::io::Read;
 use zeroize::Zeroizing;
 
 use crate::cmd::{CmdRequest, CommandRunner, LsblkFieldKind};
-use crate::parse::parse_lsblk_field;
 
 // ---------------------------------------------------------------------------
 // format_bytes
@@ -42,7 +41,15 @@ pub fn get_lsblk_field<R: CommandRunner>(
             field,
         })
         .ok()?;
-    parse_lsblk_field(&raw).ok()?.value
+    if raw.exit_status != 0 {
+        return None;
+    }
+    let trimmed = raw.stdout.trim();
+    if trimmed.is_empty() {
+        None
+    } else {
+        Some(trimmed.to_owned())
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -147,6 +154,7 @@ pub fn confirm_yes() -> Result<(), String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::cmd::{MockRunner, RawCommandOutput};
 
     // --- format_bytes ---
 
@@ -192,6 +200,66 @@ mod tests {
     fn hw_info_none_when_empty() {
         let info = DiskHwInfo::default();
         assert!(format_hw_info_line(&info).is_none());
+    }
+
+    // --- get_lsblk_field ---
+
+    fn lsblk_field_runner(output: RawCommandOutput) -> MockRunner {
+        MockRunner::default().with_output(
+            CmdRequest::LsblkField {
+                device: "/dev/sda".into(),
+                field: LsblkFieldKind::Model,
+            },
+            output,
+        )
+    }
+
+    // Intent: single-field lsblk queries trim successful output.
+    // Why it exists: callers display plain hardware labels and should not
+    //   inherit lsblk padding or trailing newlines.
+    // Scenario: lsblk prints a disk model with surrounding whitespace.
+    #[test]
+    fn lsblk_field_trim_returns_value() {
+        let runner = lsblk_field_runner(RawCommandOutput {
+            cmd: "lsblk".into(),
+            stdout: "  Samsung SSD 870  \n".into(),
+            stderr: String::new(),
+            exit_status: 0,
+        });
+        let value = get_lsblk_field(&runner, "/dev/sda", LsblkFieldKind::Model);
+        assert_eq!(value.as_deref(), Some("Samsung SSD 870"));
+    }
+
+    // Intent: whitespace-only lsblk output is treated as a missing field.
+    // Why it exists: callers use `None` for unavailable model, serial, or size
+    //   values instead of displaying blank metadata.
+    // Scenario: lsblk succeeds but the requested disk field is empty.
+    #[test]
+    fn lsblk_field_whitespace_only_returns_none() {
+        let runner = lsblk_field_runner(RawCommandOutput {
+            cmd: "lsblk".into(),
+            stdout: "  \n".into(),
+            stderr: String::new(),
+            exit_status: 0,
+        });
+        let value = get_lsblk_field(&runner, "/dev/sda", LsblkFieldKind::Model);
+        assert_eq!(value, None);
+    }
+
+    // Intent: failed lsblk field queries collapse to `None`.
+    // Why it exists: hardware metadata is best-effort, so missing disks and
+    //   lsblk failures should not abort status or confirmation flows.
+    // Scenario: lsblk rejects a path that is not a block device.
+    #[test]
+    fn lsblk_field_nonzero_exit_returns_none() {
+        let runner = lsblk_field_runner(RawCommandOutput {
+            cmd: "lsblk".into(),
+            stdout: String::new(),
+            stderr: "not a block device".into(),
+            exit_status: 32,
+        });
+        let value = get_lsblk_field(&runner, "/dev/sda", LsblkFieldKind::Model);
+        assert_eq!(value, None);
     }
 
     // --- confirm_yes_from ---

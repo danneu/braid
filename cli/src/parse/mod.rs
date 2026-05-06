@@ -84,6 +84,6 @@ pub use cryptsetup_luks_label::parse_cryptsetup_luks_label;
 pub use cryptsetup_luks_uuid::{cryptsetup_luks_uuid_reports_not_luks, parse_cryptsetup_luks_uuid};
 pub use cryptsetup_luks_version::parse_cryptsetup_luks_version;
 pub use cryptsetup_status::parse_cryptsetup_status;
-pub use lsblk::{parse_lsblk_field, parse_lsblk_json};
+pub use lsblk::parse_lsblk_json;
 pub use smartctl::parse_smartctl;
 pub use upsc::parse_upsc;

@@ -347,12 +347,6 @@ pub struct BtrfsDeviceStatsOutput {
     pub devices: Vec<DeviceErrorStats>,
 }
 
-/// lsblk -ndo FIELD
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct LsblkFieldOutput {
-    pub value: Option<String>,
-}
-
 /// btrfs balance status
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum BalanceState {
