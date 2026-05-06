@@ -92,8 +92,8 @@ cycle, `lock`, and `enroll` were brought into compliance.
 
 ## See
 
-- `cli/src/mount.rs` -- `open_disks_with_passphrase`,
-  `open_disks_with_key_file`, and `scan_and_mount` host the new rows.
+- `cli/src/mount.rs` -- `open_disks_with_credential` and
+  `scan_and_mount` host the new rows.
 - `cli/src/status_tag.rs` -- the canonical `StatusTag::Wait` and
   `status_line` helpers.
 - `cli/src/unlock.rs:93-96` -- the already-mounted short-circuit

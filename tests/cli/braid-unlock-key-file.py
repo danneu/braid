@@ -102,6 +102,9 @@ with subtest("Test 2: wrong keyfile rejected"):
     close_all()
     ret = machine.execute("braid unlock --key-file /tmp/wrong.key 2>&1")
     assert ret[0] == 1, f"expected exit 1 for wrong keyfile, got {ret[0]}"
+    assert "wrong keyfile (rejected by disk1)" in ret[1], (
+        f"expected wrong-keyfile wording, got: {ret[1]!r}"
+    )
     machine.fail("mountpoint -q /mnt/storage")
 
 # --- Test 2b: keyfile + missing disk -- exit 2 + --allow-degraded hint ---

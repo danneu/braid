@@ -512,134 +512,35 @@ fn credential_verify_targets(to_unlock: &[(String, ByIdPath)]) -> Vec<Credential
         .collect()
 }
 
-/// Verify a passphrase against every to-unlock disk and then open every
-/// to-unlock disk with it. Called from the `OpenCredential::Passphrase`
-/// arm of `execute_unlock_and_mount`. Mirrors `open_disks_with_key_file`:
-/// `explain_open_failure` handles header-state classification for both
-/// verification and per-disk open failures.
-fn open_disks_with_passphrase<R: CommandRunner>(
-    runner: &R,
-    to_unlock: &[(String, ByIdPath)],
-    passphrase: &str,
-    color_enabled: bool,
-    opened: &mut Vec<MapperName>,
-) -> Result<(), MountError> {
-    let targets = credential_verify_targets(to_unlock);
-    match verify_credential_for_targets(
-        runner,
-        &targets,
-        Credential::Passphrase(passphrase),
-        color_enabled,
-        |line| eprint!("{line}"),
-    ) {
-        Ok(()) => {}
-        Err(CredentialVerifyError::Rejected { target }) => {
-            let original_summary = format!("passphrase rejected on '{}'", target.name);
-            let ok_fallback =
-                MountError::Failed(format!("wrong passphrase (rejected by {})", target.name));
-            let header_state = luks::probe_luks_header(runner, &target.device);
-            return Err(explain_open_failure(
-                &target.name,
-                &target.device,
-                header_state,
-                &original_summary,
-                ok_fallback,
-            ));
-        }
-        Err(CredentialVerifyError::Luks {
-            target,
-            source: e @ LuksError::OpenFailed { .. },
-        }) => {
-            let original_summary = format!("verify failed on '{}': {e}", target.name);
-            let header_state = luks::probe_luks_header(runner, &target.device);
-            return Err(explain_open_failure(
-                &target.name,
-                &target.device,
-                header_state,
-                &original_summary,
-                MountError::Luks(e),
-            ));
-        }
-        Err(CredentialVerifyError::Luks { source, .. }) => return Err(MountError::Luks(source)),
+/// Mount-local noun for credential error messages that must match the
+/// concrete unlock path the user selected.
+fn credential_noun(c: Credential<'_>) -> &'static str {
+    match c {
+        Credential::Passphrase(_) => "passphrase",
+        Credential::KeyFile(_) => "keyfile",
     }
-
-    for (name, by_id) in to_unlock {
-        eprint!(
-            "{}",
-            status_line(
-                StatusTag::Wait,
-                color_enabled,
-                &format!("disk {name}: unlocking..."),
-            )
-        );
-        match luks::ensure_luks_open(runner, name, by_id, passphrase) {
-            Ok(OpenOutcome::Opened) => opened.push(mapper_name(name)),
-            Ok(OpenOutcome::AlreadyOwned) => {}
-            Err(e) => {
-                let header_state = luks::probe_luks_header(runner, &by_id.0);
-                let (original_summary, ok_fallback) = match &e {
-                    LuksError::OpenFailed {
-                        exit_code: 2,
-                        hint,
-                        stderr,
-                        ..
-                    } => (
-                        format!(
-                            "cryptsetup open rejected on '{name}' after all planned-disk passphrase verification -- {hint} ({stderr})"
-                        ),
-                        MountError::Failed(format!(
-                            "cryptsetup open rejected on '{name}' even though the passphrase was just \
-                             verified against every planned disk. The credential likely changed between \
-                             preflight and open (race or external LUKS manipulation)."
-                        )),
-                    ),
-                    _ => {
-                        let summary = format!("cryptsetup open failed on '{name}': {e}");
-                        (summary, MountError::Luks(e))
-                    }
-                };
-                return Err(explain_open_failure(
-                    name,
-                    &by_id.0,
-                    header_state,
-                    &original_summary,
-                    ok_fallback,
-                ));
-            }
-        }
-        eprint!(
-            "{}",
-            status_line(
-                StatusTag::Ok,
-                color_enabled,
-                &format!("disk {name}: unlocked")
-            )
-        );
-    }
-
-    Ok(())
 }
 
-fn open_disks_with_key_file<R: CommandRunner>(
+/// Verify the selected credential against every to-unlock disk and then
+/// open every to-unlock disk with the same credential. Keeps header-state
+/// classification shared across passphrase and keyfile unlock paths.
+fn open_disks_with_credential<R: CommandRunner>(
     runner: &R,
     to_unlock: &[(String, ByIdPath)],
-    key_file_path: &Path,
+    credential: Credential<'_>,
     color_enabled: bool,
     opened: &mut Vec<MapperName>,
 ) -> Result<(), MountError> {
+    let noun = credential_noun(credential);
     let targets = credential_verify_targets(to_unlock);
-    match verify_credential_for_targets(
-        runner,
-        &targets,
-        Credential::KeyFile(key_file_path),
-        color_enabled,
-        |line| eprint!("{line}"),
-    ) {
+    match verify_credential_for_targets(runner, &targets, credential, color_enabled, |line| {
+        eprint!("{line}")
+    }) {
         Ok(()) => {}
         Err(CredentialVerifyError::Rejected { target }) => {
-            let original_summary = format!("keyfile rejected on '{}'", target.name);
+            let original_summary = format!("{noun} rejected on '{}'", target.name);
             let ok_fallback =
-                MountError::Failed(format!("wrong keyfile (rejected by {})", target.name));
+                MountError::Failed(format!("wrong {noun} (rejected by {})", target.name));
             let header_state = luks::probe_luks_header(runner, &target.device);
             return Err(explain_open_failure(
                 &target.name,
@@ -675,7 +576,13 @@ fn open_disks_with_key_file<R: CommandRunner>(
                 &format!("disk {name}: unlocking..."),
             )
         );
-        match luks::ensure_luks_open_with_key_file(runner, name, by_id, key_file_path) {
+        let outcome = match credential {
+            Credential::Passphrase(pp) => luks::ensure_luks_open(runner, name, by_id, pp),
+            Credential::KeyFile(kf) => {
+                luks::ensure_luks_open_with_key_file(runner, name, by_id, kf)
+            }
+        };
+        match outcome {
             Ok(OpenOutcome::Opened) => opened.push(mapper_name(name)),
             Ok(OpenOutcome::AlreadyOwned) => {}
             Err(e) => {
@@ -688,10 +595,10 @@ fn open_disks_with_key_file<R: CommandRunner>(
                         ..
                     } => (
                         format!(
-                            "cryptsetup open rejected on '{name}' after all planned-disk keyfile verification -- {hint} ({stderr})"
+                            "cryptsetup open rejected on '{name}' after all planned-disk {noun} verification -- {hint} ({stderr})"
                         ),
                         MountError::Failed(format!(
-                            "cryptsetup open rejected on '{name}' even though the keyfile was just \
+                            "cryptsetup open rejected on '{name}' even though the {noun} was just \
                              verified against every planned disk. The credential likely changed between \
                              preflight and open (race or external LUKS manipulation)."
                         )),
@@ -785,35 +692,21 @@ pub fn execute_unlock_and_mount<R: CommandRunner, F: Filesystem + ?Sized>(
     }
 
     let mut opened_mappers = Vec::new();
-    match credential {
-        OpenCredential::KeyFile(kf) => {
-            let kf = kf.as_path();
-            open_disks_with_key_file(
-                runner,
-                &plan.to_unlock,
-                kf,
-                color_enabled,
-                &mut opened_mappers,
-            )
-            .map_err(|error| UnlockAndMountFailure {
-                error,
-                opened_mappers: opened_mappers.clone(),
-            })?;
-        }
-        OpenCredential::Passphrase(pp) => {
-            open_disks_with_passphrase(
-                runner,
-                &plan.to_unlock,
-                pp.as_str(),
-                color_enabled,
-                &mut opened_mappers,
-            )
-            .map_err(|error| UnlockAndMountFailure {
-                error,
-                opened_mappers: opened_mappers.clone(),
-            })?;
-        }
-    }
+    let cred = match credential {
+        OpenCredential::Passphrase(pp) => Credential::Passphrase(pp.as_str()),
+        OpenCredential::KeyFile(kf) => Credential::KeyFile(kf.as_path()),
+    };
+    open_disks_with_credential(
+        runner,
+        &plan.to_unlock,
+        cred,
+        color_enabled,
+        &mut opened_mappers,
+    )
+    .map_err(|error| UnlockAndMountFailure {
+        error,
+        opened_mappers: opened_mappers.clone(),
+    })?;
 
     scan_and_mount(runner, fs, config, plan, color_enabled).map_err(|error| UnlockAndMountFailure {
         error,

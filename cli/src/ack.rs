@@ -80,9 +80,7 @@ fn cmd_ack_impl<R: CommandRunner, F: Filesystem + ?Sized>(
     let new_acked = snapshot_current(&device_stats, &alert_missing_devids);
     save_acked_stats(&new_acked, paths)?;
 
-    let latch_had_smartd = causes
-        .iter()
-        .any(|c| matches!(c, AlertCause::SmartdAlert));
+    let latch_had_smartd = causes.iter().any(|c| matches!(c, AlertCause::SmartdAlert));
     let remove_smartd = smartd_active || latch_had_smartd;
     if let Err(e) = cleanup_alert_files_and_beeper(paths, stop_beeper, remove_smartd) {
         return Err(AckError::CleanupFailed(e));
@@ -150,9 +148,7 @@ fn ack_offline(
         save_acked_stats(&acked, paths)?;
     }
 
-    let latch_had_smartd = causes
-        .iter()
-        .any(|c| matches!(c, AlertCause::SmartdAlert));
+    let latch_had_smartd = causes.iter().any(|c| matches!(c, AlertCause::SmartdAlert));
     let remove_smartd = smartd_active || latch_had_smartd;
     if let Err(e) = cleanup_alert_files_and_beeper(paths, stop_beeper, remove_smartd) {
         return Err(AckError::CleanupFailed(e));
