@@ -368,7 +368,7 @@ impl ReplacePlan {
                         &format!("disk {new_name}: unlocking..."),
                     )
                 );
-                ensure_luks_open(runner, fs, &new_name, &new_by_id, &passphrase)?;
+                ensure_luks_open(runner, &new_name, &new_by_id, &passphrase)?;
                 eprint!(
                     "{}",
                     status_line(
@@ -388,7 +388,7 @@ impl ReplacePlan {
                             &format!("disk {new_name}: unlocking..."),
                         )
                     );
-                    ensure_luks_open(runner, fs, &new_name, &new_by_id, &passphrase)?;
+                    ensure_luks_open(runner, &new_name, &new_by_id, &passphrase)?;
                     eprint!(
                         "{}",
                         status_line(
@@ -3985,18 +3985,21 @@ mod tests {
                      \tdevid    1 size 496.00MiB used 121.56MiB path /dev/mapper/braid-disk1\n\
                      \t*** Some devices missing\n",
                 )),
-                CmdRequest::CryptsetupStatus { mapper } => {
-                    let dev = match mapper.as_str() {
-                        "braid-disk1" => "/dev/vdb",
-                        _ => return Err(CmdError::MissingMock),
-                    };
-                    Ok(mock_ok(
+                CmdRequest::CryptsetupStatus { mapper } => match mapper.as_str() {
+                    "braid-disk1" => Ok(mock_ok(
                         &format!("cryptsetup status {mapper}"),
                         &format!(
-                            "{mapper} is active and is in use.\n  type:    LUKS2\n  device:  {dev}\n  mode:    read/write\n"
+                            "{mapper} is active and is in use.\n  type:    LUKS2\n  device:  /dev/vdb\n  mode:    read/write\n"
                         ),
-                    ))
-                }
+                    )),
+                    "braid-disk3" => Ok(RawCommandOutput {
+                        cmd: format!("cryptsetup status {mapper}"),
+                        stdout: String::new(),
+                        stderr: format!("/dev/mapper/{mapper} is inactive.\n"),
+                        exit_status: 4,
+                    }),
+                    _ => Err(CmdError::MissingMock),
+                },
                 CmdRequest::CryptsetupLuksUuid { device } => match device.as_str() {
                     "/dev/vdb" | "/dev/disk/by-id/virtio-disk1" => Ok(mock_ok(
                         &format!("cryptsetup luksUUID {device}"),
@@ -4119,8 +4122,9 @@ mod tests {
         let kf_path = kf_dir.path().join("braid.key");
         std::fs::write(&kf_path, [0u8; crate::luks::KEYFILE_SIZE]).unwrap();
 
-        // Only disk3's by_id exists; the mapper /dev/mapper/braid-disk3 is
-        // absent so `ensure_luks_open` proceeds to issue `LuksOpen`.
+        // Only disk3's by_id exists; cryptsetup status reports
+        // /dev/mapper/braid-disk3 inactive so `ensure_luks_open` proceeds to
+        // issue `LuksOpen`.
         let fs = ReplaceMockFs(vec!["/dev/disk/by-id/virtio-disk3".into()]);
         let log = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
         let runner = KeyfileOrderingReplaceRunner { log: log.clone() };

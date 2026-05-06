@@ -81,7 +81,7 @@ pub use btrfs_scrub_status_per_device::parse_btrfs_scrub_status_per_device;
 pub use btrfs_subvolume_list::parse_btrfs_subvolume_list;
 pub use cryptsetup_luks_dump::parse_cryptsetup_luks_dump;
 pub use cryptsetup_luks_label::parse_cryptsetup_luks_label;
-pub use cryptsetup_luks_uuid::parse_cryptsetup_luks_uuid;
+pub use cryptsetup_luks_uuid::{cryptsetup_luks_uuid_reports_not_luks, parse_cryptsetup_luks_uuid};
 pub use cryptsetup_luks_version::parse_cryptsetup_luks_version;
 pub use cryptsetup_status::parse_cryptsetup_status;
 pub use lsblk::{parse_lsblk_field, parse_lsblk_json};

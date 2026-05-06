@@ -4,6 +4,14 @@ use crate::types::LuksUuid;
 use super::ParseError;
 use super::types::CryptsetupLuksUuidOutput;
 
+pub fn cryptsetup_luks_uuid_reports_not_luks(raw: &RawCommandOutput) -> bool {
+    raw.exit_status != 0
+        && raw
+            .stderr
+            .to_ascii_lowercase()
+            .contains("not a valid luks device")
+}
+
 pub fn parse_cryptsetup_luks_uuid(
     raw: &RawCommandOutput,
 ) -> Result<CryptsetupLuksUuidOutput, ParseError> {
@@ -79,5 +87,16 @@ mod tests {
         };
         let err = parse_cryptsetup_luks_uuid(&raw).unwrap_err();
         assert!(matches!(err, ParseError::CommandFailed { .. }));
+    }
+
+    #[test]
+    fn luks_uuid_classifies_not_luks_error() {
+        let raw = RawCommandOutput {
+            cmd: "cryptsetup luksUUID".into(),
+            stdout: String::new(),
+            stderr: "Device /dev/vdz is not a valid LUKS device.\n".into(),
+            exit_status: 1,
+        };
+        assert!(cryptsetup_luks_uuid_reports_not_luks(&raw));
     }
 }

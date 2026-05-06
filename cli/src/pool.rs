@@ -1,5 +1,4 @@
 use crate::cmd::{CmdError, CmdRequest, CommandRunner, RawCommandOutput};
-use crate::parse::btrfs_filesystem_show::{DeviceBtrfsProbe, classify_btrfs_probe};
 use crate::probe::{Filesystem, probe_pool};
 use crate::progress::{
     self, ProgressOutput, run_device_remove_with_progress, run_replace_with_progress,
@@ -428,34 +427,12 @@ pub fn evict_present_device<R: CommandRunner + Sync, F: Filesystem + ?Sized>(
     Ok(())
 }
 
-/// Refuse to bootstrap on a device unless the btrfs probe definitively
-/// reports no existing btrfs superblock.
-fn assert_no_btrfs_superblock<R: CommandRunner + Sync>(
-    runner: &R,
-    device: &str,
-) -> Result<(), PoolError> {
-    let raw = runner.run(&CmdRequest::BtrfsFilesystemShowTarget {
-        target: device.to_owned(),
-    })?;
-    match classify_btrfs_probe(&raw) {
-        DeviceBtrfsProbe::NoBtrfs => Ok(()),
-        DeviceBtrfsProbe::HasBtrfs => Err(PoolError::Failed(format!(
-            "device {device} already has a btrfs superblock -- bootstrap aborts to avoid overwriting an existing filesystem"
-        ))),
-        DeviceBtrfsProbe::Unknown(msg) => Err(PoolError::Failed(format!(
-            "device {device}: btrfs probe returned an ambiguous error ({msg}); refusing to mkfs without confirmation that the device is empty"
-        ))),
-    }
-}
-
-/// Bootstrap the pool: fail-closed btrfs probe, mkfs.btrfs, then mount.
+/// Bootstrap the pool: mkfs.btrfs, then mount.
 pub fn pool_bootstrap_mount<R: CommandRunner + Sync>(
     runner: &R,
     device: &str,
     mount_point: &MountPoint,
 ) -> Result<(), PoolError> {
-    assert_no_btrfs_superblock(runner, device)?;
-
     let mkfs = runner.run(&CmdRequest::MkfsBtrfs {
         device: device.to_owned(),
     })?;
@@ -484,17 +461,13 @@ pub fn pool_bootstrap_mount<R: CommandRunner + Sync>(
     Ok(())
 }
 
-/// Bootstrap the pool with multiple devices in RAID1: fail-closed btrfs
-/// probes, mkfs.btrfs -d raid1 -m raid1, then mount.
+/// Bootstrap the pool with multiple devices in RAID1: mkfs.btrfs -d raid1
+/// -m raid1, then mount.
 pub fn pool_bootstrap_mount_raid1<R: CommandRunner + Sync>(
     runner: &R,
     devices: &[String],
     mount_point: &MountPoint,
 ) -> Result<(), PoolError> {
-    for device in devices {
-        assert_no_btrfs_superblock(runner, device)?;
-    }
-
     let mkfs = runner.run(&CmdRequest::MkfsBtrfsRaid1 {
         devices: devices.to_vec(),
     })?;
@@ -544,50 +517,17 @@ mod tests {
         MountPoint("/mnt/storage".into())
     }
 
-    fn btrfs_probe_no_btrfs(device: &str) -> RawCommandOutput {
-        RawCommandOutput {
-            cmd: format!("btrfs filesystem show {device}"),
-            stdout: String::new(),
-            stderr: format!("ERROR: not a valid btrfs filesystem on {device}"),
-            exit_status: 1,
-        }
-    }
-
-    fn btrfs_probe_has_btrfs(device: &str) -> RawCommandOutput {
-        RawCommandOutput {
-            cmd: format!("btrfs filesystem show {device}"),
-            stdout: "Label: none  uuid: aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee\n".into(),
-            stderr: String::new(),
-            exit_status: 0,
-        }
-    }
-
-    fn btrfs_probe_unknown(device: &str) -> RawCommandOutput {
-        RawCommandOutput {
-            cmd: format!("btrfs filesystem show {device}"),
-            stdout: String::new(),
-            stderr: "open: Permission denied".into(),
-            exit_status: 1,
-        }
-    }
-
     #[test]
-    // Intent: single-device bootstrap formats and mounts when the btrfs
-    // probe definitively reports no existing superblock.
-    // Why it exists: bootstrap owns the local fail-closed guard before mkfs,
-    // and the success path must still reach mkfs on a fresh mapper.
+    // Intent: single-device bootstrap formats and mounts without a btrfs
+    // probe round-trip.
+    // Why it exists: mapper ownership is enforced before this helper, so the
+    // helper should be a narrow mkfs + mount wrapper.
     // Scenario: first disk in a new pool was just LUKS-formatted and opened;
     // the mapper has no btrfs filesystem yet.
     fn pool_bootstrap_mount_runs_mkfs_when_fresh() {
         let device = "/dev/mapper/braid-disk1";
         let mount_point = mp();
         let runner = MockRunner::default()
-            .with_output(
-                CmdRequest::BtrfsFilesystemShowTarget {
-                    target: device.into(),
-                },
-                btrfs_probe_no_btrfs(device),
-            )
             .with_output(
                 CmdRequest::MkfsBtrfs {
                     device: device.into(),
@@ -607,9 +547,6 @@ mod tests {
         assert_eq!(
             runner.requests(),
             vec![
-                CmdRequest::BtrfsFilesystemShowTarget {
-                    target: device.into(),
-                },
                 CmdRequest::MkfsBtrfs {
                     device: device.into(),
                 },
@@ -622,78 +559,10 @@ mod tests {
     }
 
     #[test]
-    // Intent: single-device bootstrap refuses a device that already has a
-    // btrfs superblock before mkfs or mount can run.
-    // Why it exists: exit 0 from `btrfs filesystem show <device>` means the
-    // device is not fresh and must never fall through to formatting.
-    // Scenario: a future caller accidentally routes an existing filesystem
-    // through the bootstrap helper.
-    fn pool_bootstrap_mount_refuses_existing_superblock() {
-        let device = "/dev/mapper/braid-disk1";
-        let mount_point = mp();
-        let runner = MockRunner::default().with_output(
-            CmdRequest::BtrfsFilesystemShowTarget {
-                target: device.into(),
-            },
-            btrfs_probe_has_btrfs(device),
-        );
-
-        let err = pool_bootstrap_mount(&runner, device, &mount_point).unwrap_err();
-
-        assert!(
-            err.to_string().contains("already has a btrfs superblock"),
-            "unexpected error: {err}"
-        );
-        assert_eq!(
-            runner.requests(),
-            vec![CmdRequest::BtrfsFilesystemShowTarget {
-                target: device.into(),
-            }]
-        );
-    }
-
-    #[test]
-    // Intent: single-device bootstrap refuses an ambiguous btrfs probe
-    // failure before mkfs or mount can run.
-    // Why it exists: `btrfs filesystem show` can collapse read/open errors
-    // into non-zero output, so only explicit no-btrfs classifications may
-    // proceed to formatting.
-    // Scenario: the probe cannot read the mapper because permissions or I/O
-    // fail; bootstrap must fail closed instead of assuming the disk is empty.
-    fn pool_bootstrap_mount_refuses_ambiguous_probe_error() {
-        let device = "/dev/mapper/braid-disk1";
-        let mount_point = mp();
-        let runner = MockRunner::default().with_output(
-            CmdRequest::BtrfsFilesystemShowTarget {
-                target: device.into(),
-            },
-            btrfs_probe_unknown(device),
-        );
-
-        let err = pool_bootstrap_mount(&runner, device, &mount_point).unwrap_err();
-
-        assert!(
-            err.to_string().contains("ambiguous error"),
-            "unexpected error: {err}"
-        );
-        assert!(
-            err.to_string().contains("open: Permission denied"),
-            "unexpected error: {err}"
-        );
-        assert_eq!(
-            runner.requests(),
-            vec![CmdRequest::BtrfsFilesystemShowTarget {
-                target: device.into(),
-            }]
-        );
-    }
-
-    #[test]
-    // Intent: RAID1 bootstrap formats and mounts when every device probe
-    // definitively reports no existing btrfs superblock.
-    // Why it exists: the multi-device bootstrap path needs the same local
-    // guard as the single-device path while still formatting once all
-    // devices pass.
+    // Intent: RAID1 bootstrap formats and mounts without per-device btrfs
+    // probe round-trips.
+    // Why it exists: mapper ownership is enforced before this helper, so the
+    // helper should be a narrow mkfs RAID1 + mount wrapper.
     // Scenario: a new pool is bootstrapped from two freshly opened LUKS
     // mappers.
     fn pool_bootstrap_mount_raid1_runs_mkfs_when_all_fresh() {
@@ -703,18 +572,6 @@ mod tests {
         ];
         let mount_point = mp();
         let runner = MockRunner::default()
-            .with_output(
-                CmdRequest::BtrfsFilesystemShowTarget {
-                    target: devices[0].clone(),
-                },
-                btrfs_probe_no_btrfs(&devices[0]),
-            )
-            .with_output(
-                CmdRequest::BtrfsFilesystemShowTarget {
-                    target: devices[1].clone(),
-                },
-                btrfs_probe_no_btrfs(&devices[1]),
-            )
             .with_output(
                 CmdRequest::MkfsBtrfsRaid1 {
                     devices: devices.clone(),
@@ -734,98 +591,12 @@ mod tests {
         assert_eq!(
             runner.requests(),
             vec![
-                CmdRequest::BtrfsFilesystemShowTarget {
-                    target: devices[0].clone(),
-                },
-                CmdRequest::BtrfsFilesystemShowTarget {
-                    target: devices[1].clone(),
-                },
                 CmdRequest::MkfsBtrfsRaid1 {
                     devices: devices.clone(),
                 },
                 CmdRequest::Mount {
                     device: devices[0].clone(),
                     mount_point,
-                },
-            ]
-        );
-    }
-
-    #[test]
-    // Intent: RAID1 bootstrap refuses immediately when the first device
-    // already has a btrfs superblock.
-    // Why it exists: the helper must not wait until mkfs.btrfs to discover
-    // an existing filesystem on any bootstrap target.
-    // Scenario: the first mapper in a multi-disk bootstrap is not actually
-    // fresh.
-    fn pool_bootstrap_mount_raid1_refuses_first_device_with_superblock() {
-        let devices = vec![
-            "/dev/mapper/braid-disk1".to_owned(),
-            "/dev/mapper/braid-disk2".to_owned(),
-        ];
-        let mount_point = mp();
-        let runner = MockRunner::default().with_output(
-            CmdRequest::BtrfsFilesystemShowTarget {
-                target: devices[0].clone(),
-            },
-            btrfs_probe_has_btrfs(&devices[0]),
-        );
-
-        let err = pool_bootstrap_mount_raid1(&runner, &devices, &mount_point).unwrap_err();
-
-        assert!(
-            err.to_string().contains(&devices[0]),
-            "unexpected error: {err}"
-        );
-        assert_eq!(
-            runner.requests(),
-            vec![CmdRequest::BtrfsFilesystemShowTarget {
-                target: devices[0].clone(),
-            }]
-        );
-    }
-
-    #[test]
-    // Intent: RAID1 bootstrap probes every device and refuses when a later
-    // device already has a btrfs superblock.
-    // Why it exists: checking only the first device leaves the multi-disk
-    // path asymmetric and can still send an unsafe target to mkfs.btrfs.
-    // Scenario: the first mapper is fresh but the second mapper belongs to
-    // an existing filesystem.
-    fn pool_bootstrap_mount_raid1_refuses_second_device_with_superblock() {
-        let devices = vec![
-            "/dev/mapper/braid-disk1".to_owned(),
-            "/dev/mapper/braid-disk2".to_owned(),
-        ];
-        let mount_point = mp();
-        let runner = MockRunner::default()
-            .with_output(
-                CmdRequest::BtrfsFilesystemShowTarget {
-                    target: devices[0].clone(),
-                },
-                btrfs_probe_no_btrfs(&devices[0]),
-            )
-            .with_output(
-                CmdRequest::BtrfsFilesystemShowTarget {
-                    target: devices[1].clone(),
-                },
-                btrfs_probe_has_btrfs(&devices[1]),
-            );
-
-        let err = pool_bootstrap_mount_raid1(&runner, &devices, &mount_point).unwrap_err();
-
-        assert!(
-            err.to_string().contains(&devices[1]),
-            "unexpected error: {err}"
-        );
-        assert_eq!(
-            runner.requests(),
-            vec![
-                CmdRequest::BtrfsFilesystemShowTarget {
-                    target: devices[0].clone(),
-                },
-                CmdRequest::BtrfsFilesystemShowTarget {
-                    target: devices[1].clone(),
                 },
             ]
         );

@@ -1546,7 +1546,7 @@ fn discover_add_targets_before_mount<R: CommandRunner, F: Filesystem + ?Sized>(
                 credential.as_ref().expect("credential was resolved above"),
                 "add recovery pre-mount discovery",
             )?;
-            luks::ensure_luks_open(runner, fs, name, &target.by_id, passphrase)?;
+            luks::ensure_luks_open(runner, name, &target.by_id, passphrase)?;
         }
 
         scan_mapper_if_btrfs_visible(runner, &format!("/dev/mapper/{}", target.mapper_name))?;
@@ -1791,7 +1791,7 @@ fn execute_add_pool_mutation_recovery<R: CommandRunner + Sync, F: Filesystem + ?
                 let passphrase = passphrase
                     .as_deref()
                     .expect("passphrase was resolved above");
-                luks::ensure_luks_open(runner, fs, name, &target.by_id, passphrase)?;
+                luks::ensure_luks_open(runner, name, &target.by_id, passphrase)?;
             }
             if scan_mapper_if_btrfs_visible(runner, &format!("/dev/mapper/{}", target.mapper_name))?
             {
@@ -1840,13 +1840,7 @@ fn execute_add_pool_mutation_recovery<R: CommandRunner + Sync, F: Filesystem + ?
                         )));
                     }
                     if !mapper_open {
-                        luks::ensure_luks_open(
-                            runner,
-                            fs,
-                            name,
-                            &target.by_id,
-                            passphrase.as_ref(),
-                        )?;
+                        luks::ensure_luks_open(runner, name, &target.by_id, passphrase.as_ref())?;
                     }
                     if let Some(fsid) = visible_btrfs_fsid(runner, &mapper_path)?
                         && &fsid != verified_pool_fsid
@@ -1904,7 +1898,7 @@ fn execute_add_pool_mutation_recovery<R: CommandRunner + Sync, F: Filesystem + ?
                         &target.mapper_name,
                         params.paths,
                     )?;
-                    luks::ensure_luks_open(runner, fs, name, &target.by_id, passphrase.as_ref())?;
+                    luks::ensure_luks_open(runner, name, &target.by_id, passphrase.as_ref())?;
                     crate::pool::pool_add_device(runner, &mapper_path, mount_point, false)
                         .map_err(|e| RecoverError::Failed(format!("recover add replay: {e}")))?;
                 }
@@ -5354,8 +5348,10 @@ mod tests {
                 },
                 // Status probes for disk1, in order:
                 // 1. initial mount planning sees disk1 closed;
-                // 2. post-mount probe_pool sees disk1 active.
+                // 2. ensure_luks_open sees disk1 closed and opens it;
+                // 3. post-mount probe_pool sees disk1 active.
                 vec![
+                    MapperClosingRunner::inactive_status("braid-disk1"),
                     MapperClosingRunner::inactive_status("braid-disk1"),
                     cryptsetup_status_active("braid-disk1", "/dev/vda"),
                 ],

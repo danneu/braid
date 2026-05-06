@@ -1,8 +1,11 @@
 use crate::cmd::{CmdError, CmdRequest, CommandRunner, RawCommandOutput};
 use crate::config::mapper_name;
-use crate::probe::Filesystem;
+use crate::parse::{
+    ParseError, cryptsetup_luks_uuid_reports_not_luks, parse_cryptsetup_luks_uuid,
+    parse_cryptsetup_status,
+};
 use crate::state_paths::StatePaths;
-use crate::types::{ByIdPath, PoolDevice};
+use crate::types::{ByIdPath, LuksUuid, MapperName, PoolDevice};
 use std::io::{BufRead, Write};
 use std::os::unix::fs::PermissionsExt;
 use std::os::unix::io::{AsRawFd, RawFd};
@@ -54,10 +57,31 @@ pub enum LuksError {
         hint: &'static str,
         stderr: String,
     },
+    #[error(
+        "disk '{name}' mapper '/dev/mapper/braid-{name}' is open but not \
+         backed by the configured disk. Expected LUKS UUID {expected}, \
+         found {}. Close the conflicting mapper with \
+         'sudo cryptsetup close braid-{name}' and re-run.",
+        luks_found_display(found)
+    )]
+    MapperConflict {
+        name: String,
+        expected: LuksUuid,
+        found: Option<LuksUuid>,
+    },
+    #[error("parse error: {0}")]
+    Parse(#[from] ParseError),
     #[error("command failed: {0}")]
     Cmd(#[from] CmdError),
     #[error("I/O error: {0}")]
     Io(#[from] std::io::Error),
+}
+
+fn luks_found_display(found: &Option<LuksUuid>) -> String {
+    match found {
+        Some(uuid) => uuid.to_string(),
+        None => "no backing (stale mapper)".to_owned(),
+    }
 }
 
 /// Abstraction over the TTY passphrase read. Production uses
@@ -537,17 +561,81 @@ pub(crate) fn luks_header_damaged_guidance(device: &str) -> String {
     )
 }
 
-/// Open a LUKS device if not already open.
-pub fn ensure_luks_open<R: CommandRunner, F: Filesystem + ?Sized>(
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum MapperOwnership {
+    Inactive,
+    Owned,
+}
+
+fn luks_uuid_for_device<R: CommandRunner>(runner: &R, device: &str) -> Result<LuksUuid, LuksError> {
+    let raw = runner.run(&CmdRequest::CryptsetupLuksUuid {
+        device: device.to_owned(),
+    })?;
+    Ok(parse_cryptsetup_luks_uuid(&raw)?.uuid)
+}
+
+fn mapper_ownership<R: CommandRunner>(
     runner: &R,
-    fs: &F,
+    name: &str,
+    by_id: &ByIdPath,
+    mapper: &MapperName,
+) -> Result<MapperOwnership, LuksError> {
+    let status_raw = runner.run(&CmdRequest::CryptsetupStatus {
+        mapper: mapper.0.clone(),
+    })?;
+    let status = parse_cryptsetup_status(&status_raw)?;
+
+    if !status.is_active {
+        return Ok(MapperOwnership::Inactive);
+    }
+
+    let expected = luks_uuid_for_device(runner, &by_id.0)?;
+    let underlying = match status.device.as_deref() {
+        None | Some("") | Some("(null)") => {
+            return Err(LuksError::MapperConflict {
+                name: name.to_owned(),
+                expected,
+                found: None,
+            });
+        }
+        Some(device) => device,
+    };
+
+    let backing_raw = runner.run(&CmdRequest::CryptsetupLuksUuid {
+        device: underlying.to_owned(),
+    })?;
+    let found = match parse_cryptsetup_luks_uuid(&backing_raw) {
+        Ok(out) => out.uuid,
+        Err(_) if cryptsetup_luks_uuid_reports_not_luks(&backing_raw) => {
+            return Err(LuksError::MapperConflict {
+                name: name.to_owned(),
+                expected,
+                found: None,
+            });
+        }
+        Err(e) => return Err(LuksError::Parse(e)),
+    };
+
+    if found == expected {
+        Ok(MapperOwnership::Owned)
+    } else {
+        Err(LuksError::MapperConflict {
+            name: name.to_owned(),
+            expected,
+            found: Some(found),
+        })
+    }
+}
+
+/// Open a LUKS device if not already open.
+pub fn ensure_luks_open<R: CommandRunner>(
+    runner: &R,
     name: &str,
     by_id: &ByIdPath,
     passphrase: &str,
 ) -> Result<(), LuksError> {
     let mn = mapper_name(name);
-    let mapper_path = format!("/dev/mapper/{}", mn.0);
-    if fs.exists(&mapper_path) {
+    if mapper_ownership(runner, name, by_id, &mn)? == MapperOwnership::Owned {
         return Ok(());
     }
 
@@ -583,16 +671,14 @@ pub fn device_has_btrfs_superblock<R: CommandRunner>(
 }
 
 /// Open a LUKS device with a binary keyfile (no passphrase, no PBKDF).
-pub fn ensure_luks_open_with_key_file<R: CommandRunner, F: Filesystem + ?Sized>(
+pub fn ensure_luks_open_with_key_file<R: CommandRunner>(
     runner: &R,
-    fs: &F,
     name: &str,
     by_id: &ByIdPath,
     key_file_path: &std::path::Path,
 ) -> Result<(), LuksError> {
     let mn = mapper_name(name);
-    let mapper_path = format!("/dev/mapper/{}", mn.0);
-    if fs.exists(&mapper_path) {
+    if mapper_ownership(runner, name, by_id, &mn)? == MapperOwnership::Owned {
         return Ok(());
     }
 
@@ -755,39 +841,8 @@ pub fn header_backup_advisories(paths: &StatePaths) -> Vec<String> {
 mod tests {
     use super::*;
     use crate::cmd::{CmdRequest, MockRunner, RawCommandOutput};
-    use crate::probe::Filesystem;
     use crate::types::ByIdPath;
     use std::os::unix::io::{AsRawFd, FromRawFd, RawFd};
-
-    struct MockFs {
-        paths: Vec<String>,
-    }
-
-    impl MockFs {
-        fn new(paths: &[&str]) -> Self {
-            Self {
-                paths: paths.iter().map(|s| s.to_string()).collect(),
-            }
-        }
-    }
-
-    impl Filesystem for MockFs {
-        fn exists(&self, path: &str) -> bool {
-            self.paths.contains(&path.to_string())
-        }
-
-        fn is_block_device(&self, _path: &str) -> bool {
-            false
-        }
-
-        fn read_to_string(&self, _path: &str) -> Result<String, std::io::Error> {
-            Err(std::io::Error::new(std::io::ErrorKind::NotFound, "mock"))
-        }
-
-        fn list_dir(&self, _path: &str) -> Result<Vec<String>, std::io::Error> {
-            Ok(vec![])
-        }
-    }
 
     fn open_pty_pair() -> (std::fs::File, std::fs::File) {
         let mut master = -1;
@@ -1079,6 +1134,69 @@ mod tests {
         }
     }
 
+    fn crypt_status_inactive(mapper: &str) -> RawCommandOutput {
+        RawCommandOutput {
+            cmd: format!("cryptsetup status {mapper}"),
+            stdout: String::new(),
+            stderr: format!("/dev/mapper/{mapper} is inactive.\n"),
+            exit_status: 4,
+        }
+    }
+
+    fn crypt_status_active(mapper: &str, device: &str) -> RawCommandOutput {
+        RawCommandOutput {
+            cmd: format!("cryptsetup status {mapper}"),
+            stdout: format!(
+                "/dev/mapper/{mapper} is active and is in use.\n\
+                 \ttype:    LUKS2\n\
+                 \tdevice:  {device}\n\
+                 \tmode:    read/write\n"
+            ),
+            stderr: String::new(),
+            exit_status: 0,
+        }
+    }
+
+    fn crypt_status_active_missing_device(mapper: &str) -> RawCommandOutput {
+        RawCommandOutput {
+            cmd: format!("cryptsetup status {mapper}"),
+            stdout: format!(
+                "/dev/mapper/{mapper} is active and is in use.\n\
+                 \ttype:    LUKS2\n\
+                 \tmode:    read/write\n"
+            ),
+            stderr: String::new(),
+            exit_status: 0,
+        }
+    }
+
+    fn luks_uuid_output(device: &str, uuid: &str) -> RawCommandOutput {
+        RawCommandOutput {
+            cmd: format!("cryptsetup luksUUID {device}"),
+            stdout: format!("{uuid}\n"),
+            stderr: String::new(),
+            exit_status: 0,
+        }
+    }
+
+    fn luks_uuid_not_luks(device: &str) -> RawCommandOutput {
+        RawCommandOutput {
+            cmd: format!("cryptsetup luksUUID {device}"),
+            stdout: String::new(),
+            stderr: format!("Device {device} is not a valid LUKS device.\n"),
+            exit_status: 1,
+        }
+    }
+
+    fn luks_uuid_invalid(device: &str) -> RawCommandOutput {
+        RawCommandOutput {
+            cmd: format!("cryptsetup luksUUID {device}"),
+            stdout: "not-a-uuid\n".into(),
+            stderr: String::new(),
+            exit_status: 0,
+        }
+    }
+
     /*
      * Intent: verify ensure_luks_open produces an exit-code-specific error for exit 2.
      * Why: previously all failures said "Wrong passphrase?" regardless of cause.
@@ -1086,23 +1204,28 @@ mod tests {
      */
     #[test]
     fn ensure_luks_open_exit_2_mentions_passphrase() {
-        let fs = MockFs::new(&[]);
-        let runner = MockRunner::default().with_output_stdin(
-            CmdRequest::CryptsetupLuksOpen {
-                device: "/dev/disk/by-id/test-disk".into(),
-                mapper: "braid-testdisk".into(),
-            },
-            b"wrong".to_vec(),
-            RawCommandOutput {
-                cmd: "cryptsetup open".into(),
-                stdout: String::new(),
-                stderr: "No key available with this passphrase.\n".into(),
-                exit_status: 2,
-            },
-        );
+        let runner = MockRunner::default()
+            .with_output(
+                CmdRequest::CryptsetupStatus {
+                    mapper: "braid-testdisk".into(),
+                },
+                crypt_status_inactive("braid-testdisk"),
+            )
+            .with_output_stdin(
+                CmdRequest::CryptsetupLuksOpen {
+                    device: "/dev/disk/by-id/test-disk".into(),
+                    mapper: "braid-testdisk".into(),
+                },
+                b"wrong".to_vec(),
+                RawCommandOutput {
+                    cmd: "cryptsetup open".into(),
+                    stdout: String::new(),
+                    stderr: "No key available with this passphrase.\n".into(),
+                    exit_status: 2,
+                },
+            );
         let err = ensure_luks_open(
             &runner,
-            &fs,
             "testdisk",
             &ByIdPath("/dev/disk/by-id/test-disk".into()),
             "wrong",
@@ -1130,23 +1253,28 @@ mod tests {
      */
     #[test]
     fn ensure_luks_open_exit_4_mentions_device_not_found() {
-        let fs = MockFs::new(&[]);
-        let runner = MockRunner::default().with_output_stdin(
-            CmdRequest::CryptsetupLuksOpen {
-                device: "/dev/disk/by-id/vanished-disk".into(),
-                mapper: "braid-vanished".into(),
-            },
-            b"pass".to_vec(),
-            RawCommandOutput {
-                cmd: "cryptsetup open".into(),
-                stdout: String::new(),
-                stderr: "Device /dev/disk/by-id/vanished-disk does not exist.\n".into(),
-                exit_status: 4,
-            },
-        );
+        let runner = MockRunner::default()
+            .with_output(
+                CmdRequest::CryptsetupStatus {
+                    mapper: "braid-vanished".into(),
+                },
+                crypt_status_inactive("braid-vanished"),
+            )
+            .with_output_stdin(
+                CmdRequest::CryptsetupLuksOpen {
+                    device: "/dev/disk/by-id/vanished-disk".into(),
+                    mapper: "braid-vanished".into(),
+                },
+                b"pass".to_vec(),
+                RawCommandOutput {
+                    cmd: "cryptsetup open".into(),
+                    stdout: String::new(),
+                    stderr: "Device /dev/disk/by-id/vanished-disk does not exist.\n".into(),
+                    exit_status: 4,
+                },
+            );
         let err = ensure_luks_open(
             &runner,
-            &fs,
             "vanished",
             &ByIdPath("/dev/disk/by-id/vanished-disk".into()),
             "pass",
@@ -1171,25 +1299,30 @@ mod tests {
      */
     #[test]
     fn ensure_luks_open_with_key_file_exit_2_mentions_passphrase() {
-        let fs = MockFs::new(&[]);
         let kf = tempfile::NamedTempFile::new().unwrap();
         std::fs::write(kf.path(), b"badkey").unwrap();
-        let runner = MockRunner::default().with_output(
-            CmdRequest::CryptsetupLuksOpenKeyFile {
-                device: "/dev/disk/by-id/test-disk".into(),
-                mapper: "braid-testdisk".into(),
-                key_file_path: kf.path().display().to_string(),
-            },
-            RawCommandOutput {
-                cmd: "cryptsetup open".into(),
-                stdout: String::new(),
-                stderr: "No key available with this passphrase.\n".into(),
-                exit_status: 2,
-            },
-        );
+        let runner = MockRunner::default()
+            .with_output(
+                CmdRequest::CryptsetupStatus {
+                    mapper: "braid-testdisk".into(),
+                },
+                crypt_status_inactive("braid-testdisk"),
+            )
+            .with_output(
+                CmdRequest::CryptsetupLuksOpenKeyFile {
+                    device: "/dev/disk/by-id/test-disk".into(),
+                    mapper: "braid-testdisk".into(),
+                    key_file_path: kf.path().display().to_string(),
+                },
+                RawCommandOutput {
+                    cmd: "cryptsetup open".into(),
+                    stdout: String::new(),
+                    stderr: "No key available with this passphrase.\n".into(),
+                    exit_status: 2,
+                },
+            );
         let err = ensure_luks_open_with_key_file(
             &runner,
-            &fs,
             "testdisk",
             &ByIdPath("/dev/disk/by-id/test-disk".into()),
             kf.path(),
@@ -1214,25 +1347,30 @@ mod tests {
      */
     #[test]
     fn ensure_luks_open_with_key_file_exit_4_mentions_device_not_found() {
-        let fs = MockFs::new(&[]);
         let kf = tempfile::NamedTempFile::new().unwrap();
         std::fs::write(kf.path(), b"key").unwrap();
-        let runner = MockRunner::default().with_output(
-            CmdRequest::CryptsetupLuksOpenKeyFile {
-                device: "/dev/disk/by-id/vanished-disk".into(),
-                mapper: "braid-vanished".into(),
-                key_file_path: kf.path().display().to_string(),
-            },
-            RawCommandOutput {
-                cmd: "cryptsetup open".into(),
-                stdout: String::new(),
-                stderr: "Device does not exist.\n".into(),
-                exit_status: 4,
-            },
-        );
+        let runner = MockRunner::default()
+            .with_output(
+                CmdRequest::CryptsetupStatus {
+                    mapper: "braid-vanished".into(),
+                },
+                crypt_status_inactive("braid-vanished"),
+            )
+            .with_output(
+                CmdRequest::CryptsetupLuksOpenKeyFile {
+                    device: "/dev/disk/by-id/vanished-disk".into(),
+                    mapper: "braid-vanished".into(),
+                    key_file_path: kf.path().display().to_string(),
+                },
+                RawCommandOutput {
+                    cmd: "cryptsetup open".into(),
+                    stdout: String::new(),
+                    stderr: "Device does not exist.\n".into(),
+                    exit_status: 4,
+                },
+            );
         let err = ensure_luks_open_with_key_file(
             &runner,
-            &fs,
             "vanished",
             &ByIdPath("/dev/disk/by-id/vanished-disk".into()),
             kf.path(),
@@ -1247,6 +1385,424 @@ mod tests {
             msg.contains("device not found"),
             "should contain hint, got: {msg}"
         );
+    }
+
+    /*
+     * Intent: inactive mapper ownership checks fall through to cryptsetup open.
+     * Why it exists: the new ownership gate must preserve normal unlock behavior
+     *   when cryptsetup status reports the mapper is closed.
+     * Scenario: fresh add has just formatted LUKS and now opens the new mapper.
+     */
+    #[test]
+    fn ensure_luks_open_inactive_mapper_runs_open() {
+        let by_id = ByIdPath("/dev/disk/by-id/disk1".into());
+        let runner = MockRunner::default()
+            .with_output(
+                CmdRequest::CryptsetupStatus {
+                    mapper: "braid-disk1".into(),
+                },
+                crypt_status_inactive("braid-disk1"),
+            )
+            .with_output_stdin(
+                CmdRequest::CryptsetupLuksOpen {
+                    device: by_id.0.clone(),
+                    mapper: "braid-disk1".into(),
+                },
+                b"pass".to_vec(),
+                RawCommandOutput {
+                    cmd: "cryptsetup open".into(),
+                    stdout: String::new(),
+                    stderr: String::new(),
+                    exit_status: 0,
+                },
+            );
+
+        ensure_luks_open(&runner, "disk1", &by_id, "pass").unwrap();
+
+        assert_eq!(
+            runner.requests(),
+            vec![
+                CmdRequest::CryptsetupStatus {
+                    mapper: "braid-disk1".into(),
+                },
+                CmdRequest::CryptsetupLuksOpen {
+                    device: by_id.0,
+                    mapper: "braid-disk1".into(),
+                },
+            ]
+        );
+    }
+
+    /*
+     * Intent: an active mapper backed by the requested LUKS UUID is accepted
+     *   and does not run cryptsetup open again.
+     * Why it exists: idempotent unlock should be safe without trusting only
+     *   the presence of /dev/mapper/braid-<name>.
+     * Scenario: a previous command already opened the correct disk.
+     */
+    #[test]
+    fn ensure_luks_open_active_mapper_matching_uuid_skips_open() {
+        let by_id = ByIdPath("/dev/disk/by-id/disk1".into());
+        let uuid = "11111111-1111-1111-1111-111111111111";
+        let runner = MockRunner::default()
+            .with_output(
+                CmdRequest::CryptsetupStatus {
+                    mapper: "braid-disk1".into(),
+                },
+                crypt_status_active("braid-disk1", "/dev/vdb"),
+            )
+            .with_output(
+                CmdRequest::CryptsetupLuksUuid {
+                    device: by_id.0.clone(),
+                },
+                luks_uuid_output(&by_id.0, uuid),
+            )
+            .with_output(
+                CmdRequest::CryptsetupLuksUuid {
+                    device: "/dev/vdb".into(),
+                },
+                luks_uuid_output("/dev/vdb", uuid),
+            );
+
+        ensure_luks_open(&runner, "disk1", &by_id, "pass").unwrap();
+
+        assert_eq!(
+            runner.requests(),
+            vec![
+                CmdRequest::CryptsetupStatus {
+                    mapper: "braid-disk1".into(),
+                },
+                CmdRequest::CryptsetupLuksUuid { device: by_id.0 },
+                CmdRequest::CryptsetupLuksUuid {
+                    device: "/dev/vdb".into(),
+                },
+            ]
+        );
+    }
+
+    /*
+     * Intent: an active mapper backed by a different LUKS UUID is rejected
+     *   before cryptsetup open can run.
+     * Why it exists: a stale or manually-created mapper using braid's mapper
+     *   name must not let bootstrap format or mount the wrong disk.
+     * Scenario: /dev/mapper/braid-disk1 points at another encrypted device.
+     */
+    #[test]
+    fn ensure_luks_open_active_mapper_different_uuid_conflicts() {
+        let by_id = ByIdPath("/dev/disk/by-id/disk1".into());
+        let expected_uuid = "11111111-1111-1111-1111-111111111111";
+        let found_uuid = "99999999-9999-9999-9999-999999999999";
+        let runner = MockRunner::default()
+            .with_output(
+                CmdRequest::CryptsetupStatus {
+                    mapper: "braid-disk1".into(),
+                },
+                crypt_status_active("braid-disk1", "/dev/vdz"),
+            )
+            .with_output(
+                CmdRequest::CryptsetupLuksUuid {
+                    device: by_id.0.clone(),
+                },
+                luks_uuid_output(&by_id.0, expected_uuid),
+            )
+            .with_output(
+                CmdRequest::CryptsetupLuksUuid {
+                    device: "/dev/vdz".into(),
+                },
+                luks_uuid_output("/dev/vdz", found_uuid),
+            );
+
+        let err = ensure_luks_open(&runner, "disk1", &by_id, "pass").unwrap_err();
+
+        match err {
+            LuksError::MapperConflict {
+                name,
+                expected,
+                found,
+            } => {
+                assert_eq!(name, "disk1");
+                assert_eq!(expected.0, expected_uuid);
+                assert_eq!(found.map(|uuid| uuid.0), Some(found_uuid.to_owned()));
+            }
+            other => panic!("expected MapperConflict, got {other:?}"),
+        }
+        assert!(
+            !runner
+                .requests()
+                .iter()
+                .any(|request| matches!(request, CmdRequest::CryptsetupLuksOpen { .. })),
+            "must not run cryptsetup open after mapper conflict"
+        );
+    }
+
+    /*
+     * Intent: an active mapper with `device: (null)` is rejected as a mapper
+     *   conflict with no found UUID.
+     * Why it exists: hot-unplug can leave a stale dm-crypt mapper with no
+     *   backing device; that must not count as ownership.
+     * Scenario: cryptsetup status reports an active mapper with null backing.
+     */
+    #[test]
+    fn ensure_luks_open_active_mapper_null_device_conflicts() {
+        let by_id = ByIdPath("/dev/disk/by-id/disk1".into());
+        let expected_uuid = "11111111-1111-1111-1111-111111111111";
+        let runner = MockRunner::default()
+            .with_output(
+                CmdRequest::CryptsetupStatus {
+                    mapper: "braid-disk1".into(),
+                },
+                crypt_status_active("braid-disk1", "(null)"),
+            )
+            .with_output(
+                CmdRequest::CryptsetupLuksUuid {
+                    device: by_id.0.clone(),
+                },
+                luks_uuid_output(&by_id.0, expected_uuid),
+            );
+
+        let err = ensure_luks_open(&runner, "disk1", &by_id, "pass").unwrap_err();
+
+        match err {
+            LuksError::MapperConflict {
+                name,
+                expected,
+                found,
+            } => {
+                assert_eq!(name, "disk1");
+                assert_eq!(expected.0, expected_uuid);
+                assert_eq!(found, None);
+            }
+            other => panic!("expected MapperConflict, got {other:?}"),
+        }
+    }
+
+    /*
+     * Intent: an active mapper backed by a non-LUKS device is rejected as a
+     *   mapper conflict with no found UUID.
+     * Why it exists: a mapper name can be aliased to something that no longer
+     *   reports a LUKS header; this is ownership failure, not successful reuse.
+     * Scenario: cryptsetup status names /dev/vdz, but luksUUID says it is not LUKS.
+     */
+    #[test]
+    fn ensure_luks_open_active_mapper_non_luks_backing_conflicts() {
+        let by_id = ByIdPath("/dev/disk/by-id/disk1".into());
+        let expected_uuid = "11111111-1111-1111-1111-111111111111";
+        let runner = MockRunner::default()
+            .with_output(
+                CmdRequest::CryptsetupStatus {
+                    mapper: "braid-disk1".into(),
+                },
+                crypt_status_active("braid-disk1", "/dev/vdz"),
+            )
+            .with_output(
+                CmdRequest::CryptsetupLuksUuid {
+                    device: by_id.0.clone(),
+                },
+                luks_uuid_output(&by_id.0, expected_uuid),
+            )
+            .with_output(
+                CmdRequest::CryptsetupLuksUuid {
+                    device: "/dev/vdz".into(),
+                },
+                luks_uuid_not_luks("/dev/vdz"),
+            );
+
+        let err = ensure_luks_open(&runner, "disk1", &by_id, "pass").unwrap_err();
+
+        assert!(matches!(err, LuksError::MapperConflict { found: None, .. }));
+        assert!(
+            !runner
+                .requests()
+                .iter()
+                .any(|request| matches!(request, CmdRequest::CryptsetupLuksOpen { .. })),
+            "must not run cryptsetup open after mapper conflict"
+        );
+    }
+
+    /*
+     * Intent: keyfile open accepts an already-open mapper only when its
+     *   backing LUKS UUID matches the requested by-id disk.
+     * Why it exists: the keyfile path shares the same ownership invariant as
+     *   passphrase unlock.
+     * Scenario: auto-unlock retries after the correct mapper is already open.
+     */
+    #[test]
+    fn ensure_luks_open_with_key_file_active_mapper_matching_uuid_skips_open() {
+        let by_id = ByIdPath("/dev/disk/by-id/disk1".into());
+        let uuid = "11111111-1111-1111-1111-111111111111";
+        let kf = tempfile::NamedTempFile::new().unwrap();
+        let runner = MockRunner::default()
+            .with_output(
+                CmdRequest::CryptsetupStatus {
+                    mapper: "braid-disk1".into(),
+                },
+                crypt_status_active("braid-disk1", "/dev/vdb"),
+            )
+            .with_output(
+                CmdRequest::CryptsetupLuksUuid {
+                    device: by_id.0.clone(),
+                },
+                luks_uuid_output(&by_id.0, uuid),
+            )
+            .with_output(
+                CmdRequest::CryptsetupLuksUuid {
+                    device: "/dev/vdb".into(),
+                },
+                luks_uuid_output("/dev/vdb", uuid),
+            );
+
+        ensure_luks_open_with_key_file(&runner, "disk1", &by_id, kf.path()).unwrap();
+
+        assert!(
+            !runner
+                .requests()
+                .iter()
+                .any(|request| matches!(request, CmdRequest::CryptsetupLuksOpenKeyFile { .. })),
+            "must not run cryptsetup open with keyfile for already-owned mapper"
+        );
+    }
+
+    /*
+     * Intent: keyfile open rejects an active mapper backed by a different
+     *   LUKS UUID.
+     * Why it exists: keyfile unlock must not trust mapper existence more than
+     *   passphrase unlock does.
+     * Scenario: auto-unlock sees /dev/mapper/braid-disk1, but it belongs to
+     *   another encrypted device.
+     */
+    #[test]
+    fn ensure_luks_open_with_key_file_active_mapper_different_uuid_conflicts() {
+        let by_id = ByIdPath("/dev/disk/by-id/disk1".into());
+        let expected_uuid = "11111111-1111-1111-1111-111111111111";
+        let found_uuid = "99999999-9999-9999-9999-999999999999";
+        let kf = tempfile::NamedTempFile::new().unwrap();
+        let runner = MockRunner::default()
+            .with_output(
+                CmdRequest::CryptsetupStatus {
+                    mapper: "braid-disk1".into(),
+                },
+                crypt_status_active("braid-disk1", "/dev/vdz"),
+            )
+            .with_output(
+                CmdRequest::CryptsetupLuksUuid {
+                    device: by_id.0.clone(),
+                },
+                luks_uuid_output(&by_id.0, expected_uuid),
+            )
+            .with_output(
+                CmdRequest::CryptsetupLuksUuid {
+                    device: "/dev/vdz".into(),
+                },
+                luks_uuid_output("/dev/vdz", found_uuid),
+            );
+
+        let err = ensure_luks_open_with_key_file(&runner, "disk1", &by_id, kf.path()).unwrap_err();
+
+        assert!(matches!(
+            err,
+            LuksError::MapperConflict { found: Some(_), .. }
+        ));
+        assert!(
+            !runner
+                .requests()
+                .iter()
+                .any(|request| matches!(request, CmdRequest::CryptsetupLuksOpenKeyFile { .. })),
+            "must not run keyfile open after mapper conflict"
+        );
+    }
+
+    /*
+     * Intent: keyfile open rejects active mappers with `device: (null)`.
+     * Why it exists: null backing means the mapper is stale, not owned by the
+     *   requested by-id disk.
+     * Scenario: auto-unlock runs after a drive vanished while its mapper stayed active.
+     */
+    #[test]
+    fn ensure_luks_open_with_key_file_active_mapper_null_device_conflicts() {
+        let by_id = ByIdPath("/dev/disk/by-id/disk1".into());
+        let expected_uuid = "11111111-1111-1111-1111-111111111111";
+        let kf = tempfile::NamedTempFile::new().unwrap();
+        let runner = MockRunner::default()
+            .with_output(
+                CmdRequest::CryptsetupStatus {
+                    mapper: "braid-disk1".into(),
+                },
+                crypt_status_active("braid-disk1", "(null)"),
+            )
+            .with_output(
+                CmdRequest::CryptsetupLuksUuid {
+                    device: by_id.0.clone(),
+                },
+                luks_uuid_output(&by_id.0, expected_uuid),
+            );
+
+        let err = ensure_luks_open_with_key_file(&runner, "disk1", &by_id, kf.path()).unwrap_err();
+
+        assert!(matches!(err, LuksError::MapperConflict { found: None, .. }));
+    }
+
+    /*
+     * Intent: malformed active cryptsetup status output propagates as
+     *   LuksError::Parse, not MapperConflict.
+     * Why it exists: parser failures should stay parser failures; treating
+     *   malformed tool output as an ownership conflict hides compatibility drift.
+     * Scenario: cryptsetup status says active but omits the required device line.
+     */
+    #[test]
+    fn ensure_luks_open_malformed_active_status_returns_parse_error() {
+        let by_id = ByIdPath("/dev/disk/by-id/disk1".into());
+        let runner = MockRunner::default().with_output(
+            CmdRequest::CryptsetupStatus {
+                mapper: "braid-disk1".into(),
+            },
+            crypt_status_active_missing_device("braid-disk1"),
+        );
+
+        let err = ensure_luks_open(&runner, "disk1", &by_id, "pass").unwrap_err();
+
+        assert!(matches!(
+            err,
+            LuksError::Parse(crate::parse::ParseError::MissingField { .. })
+        ));
+    }
+
+    /*
+     * Intent: invalid UUID text from an active backing device propagates as
+     *   LuksError::Parse, not MapperConflict.
+     * Why it exists: an exit-0 luksUUID response with malformed text is parser
+     *   drift, while a non-LUKS exit is an ownership conflict.
+     * Scenario: requested by-id UUID parses, but backing luksUUID emits junk.
+     */
+    #[test]
+    fn ensure_luks_open_invalid_backing_uuid_returns_parse_error() {
+        let by_id = ByIdPath("/dev/disk/by-id/disk1".into());
+        let expected_uuid = "11111111-1111-1111-1111-111111111111";
+        let runner = MockRunner::default()
+            .with_output(
+                CmdRequest::CryptsetupStatus {
+                    mapper: "braid-disk1".into(),
+                },
+                crypt_status_active("braid-disk1", "/dev/vdb"),
+            )
+            .with_output(
+                CmdRequest::CryptsetupLuksUuid {
+                    device: by_id.0.clone(),
+                },
+                luks_uuid_output(&by_id.0, expected_uuid),
+            )
+            .with_output(
+                CmdRequest::CryptsetupLuksUuid {
+                    device: "/dev/vdb".into(),
+                },
+                luks_uuid_invalid("/dev/vdb"),
+            );
+
+        let err = ensure_luks_open(&runner, "disk1", &by_id, "pass").unwrap_err();
+
+        assert!(matches!(
+            err,
+            LuksError::Parse(crate::parse::ParseError::InvalidText { .. })
+        ));
     }
 
     /*

@@ -509,9 +509,8 @@ fn credential_verify_targets(to_unlock: &[(String, ByIdPath)]) -> Vec<Credential
 /// arm of `execute_unlock_and_mount`. Mirrors `open_disks_with_key_file`:
 /// `explain_open_failure` handles header-state classification for both
 /// verification and per-disk open failures.
-fn open_disks_with_passphrase<R: CommandRunner, F: Filesystem + ?Sized>(
+fn open_disks_with_passphrase<R: CommandRunner>(
     runner: &R,
-    fs: &F,
     to_unlock: &[(String, ByIdPath)],
     passphrase: &str,
     color_enabled: bool,
@@ -564,7 +563,7 @@ fn open_disks_with_passphrase<R: CommandRunner, F: Filesystem + ?Sized>(
                 &format!("disk {name}: unlocking..."),
             )
         );
-        if let Err(e) = luks::ensure_luks_open(runner, fs, name, by_id, passphrase) {
+        if let Err(e) = luks::ensure_luks_open(runner, name, by_id, passphrase) {
             let header_state = luks::probe_luks_header(runner, &by_id.0);
             let (original_summary, ok_fallback) = match &e {
                 LuksError::OpenFailed {
@@ -608,9 +607,8 @@ fn open_disks_with_passphrase<R: CommandRunner, F: Filesystem + ?Sized>(
     Ok(())
 }
 
-fn open_disks_with_key_file<R: CommandRunner, F: Filesystem + ?Sized>(
+fn open_disks_with_key_file<R: CommandRunner>(
     runner: &R,
-    fs: &F,
     to_unlock: &[(String, ByIdPath)],
     key_file_path: &Path,
     color_enabled: bool,
@@ -663,8 +661,7 @@ fn open_disks_with_key_file<R: CommandRunner, F: Filesystem + ?Sized>(
                 &format!("disk {name}: unlocking..."),
             )
         );
-        if let Err(e) = luks::ensure_luks_open_with_key_file(runner, fs, name, by_id, key_file_path)
-        {
+        if let Err(e) = luks::ensure_luks_open_with_key_file(runner, name, by_id, key_file_path) {
             let header_state = luks::probe_luks_header(runner, &by_id.0);
             let (original_summary, ok_fallback) = match &e {
                 LuksError::OpenFailed {
@@ -769,10 +766,10 @@ pub fn execute_unlock_and_mount<R: CommandRunner, F: Filesystem + ?Sized>(
     match credential {
         OpenCredential::KeyFile(kf) => {
             let kf = kf.as_path();
-            open_disks_with_key_file(runner, fs, &plan.to_unlock, kf, color_enabled)?;
+            open_disks_with_key_file(runner, &plan.to_unlock, kf, color_enabled)?;
         }
         OpenCredential::Passphrase(pp) => {
-            open_disks_with_passphrase(runner, fs, &plan.to_unlock, pp.as_str(), color_enabled)?;
+            open_disks_with_passphrase(runner, &plan.to_unlock, pp.as_str(), color_enabled)?;
         }
     }
 

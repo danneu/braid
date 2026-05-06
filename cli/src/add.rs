@@ -517,7 +517,7 @@ impl AddPlan {
                     color_enabled,
                     &format!("disk {name}: unlocking..."),
                 ));
-                ensure_luks_open(runner, fs, name, by_id, &passphrase)?;
+                ensure_luks_open(runner, name, by_id, &passphrase)?;
                 luks_guard.track(mn.0.clone());
                 emit_status(&status_line(
                     StatusTag::Ok,
@@ -706,7 +706,7 @@ impl AddPlan {
                     &format!("disk {name}: unlocking..."),
                 )
             );
-            ensure_luks_open(runner, fs, name, by_id, &passphrase)?;
+            ensure_luks_open(runner, name, by_id, &passphrase)?;
             luks_guard.track(mn.0.clone());
             eprint!(
                 "{}",
@@ -2535,6 +2535,40 @@ mod tests {
         }
     }
 
+    fn mock_not_luks(cmd: &str) -> RawCommandOutput {
+        RawCommandOutput {
+            cmd: cmd.to_owned(),
+            stdout: String::new(),
+            stderr: "Device is not a valid LUKS device.\n".into(),
+            exit_status: 1,
+        }
+    }
+
+    fn mock_luks_uuid(device: &str, uuid: &str) -> RawCommandOutput {
+        mock_ok(
+            &format!("cryptsetup luksUUID {device}"),
+            &format!("{uuid}\n"),
+        )
+    }
+
+    fn mock_status_active(mapper: &str, device: &str) -> RawCommandOutput {
+        mock_ok(
+            &format!("cryptsetup status {mapper}"),
+            &format!(
+                "{mapper} is active and is in use.\n  type:    LUKS2\n  device:  {device}\n  mode:    read/write\n"
+            ),
+        )
+    }
+
+    fn mock_status_inactive(mapper: &str) -> RawCommandOutput {
+        RawCommandOutput {
+            cmd: format!("cryptsetup status {mapper}"),
+            stdout: String::new(),
+            stderr: format!("/dev/mapper/{mapper} is inactive.\n"),
+            exit_status: 4,
+        }
+    }
+
     struct AddMockFs(Vec<String>);
     impl crate::probe::Filesystem for AddMockFs {
         fn exists(&self, path: &str) -> bool {
@@ -2779,6 +2813,7 @@ mod tests {
     struct AddFullPathRunner {
         mounted: Arc<AtomicBool>,
         added: Mutex<Vec<String>>,
+        opened: Mutex<Vec<String>>,
         fail_bootstrap_post_mount_probe: bool,
         fail_second_add: bool,
         fail_post_add_probe: bool,
@@ -2792,6 +2827,7 @@ mod tests {
             Self {
                 mounted: Arc::new(AtomicBool::new(true)),
                 added: Mutex::new(Vec::new()),
+                opened: Mutex::new(vec!["braid-disk1".to_owned()]),
                 fail_bootstrap_post_mount_probe: false,
                 fail_second_add: false,
                 fail_post_add_probe: false,
@@ -2804,6 +2840,7 @@ mod tests {
         fn bootstrap() -> Self {
             let runner = Self::live();
             runner.mounted.store(false, Ordering::SeqCst);
+            runner.opened.lock().unwrap().clear();
             runner
         }
 
@@ -2945,13 +2982,24 @@ mod tests {
                         &self.pool_show(),
                     ))
                 }
-                CmdRequest::CryptsetupStatus { mapper } => Ok(mock_ok(
-                    &format!("cryptsetup status {mapper}"),
-                    &format!(
-                        "{mapper} is active and is in use.\n  type:    LUKS2\n  device:  {}\n  mode:    read/write\n",
-                        Self::mapper_underlying(mapper)
-                    ),
-                )),
+                CmdRequest::CryptsetupStatus { mapper } => {
+                    if self.opened.lock().unwrap().iter().any(|m| m == mapper) {
+                        Ok(mock_ok(
+                            &format!("cryptsetup status {mapper}"),
+                            &format!(
+                                "{mapper} is active and is in use.\n  type:    LUKS2\n  device:  {}\n  mode:    read/write\n",
+                                Self::mapper_underlying(mapper)
+                            ),
+                        ))
+                    } else {
+                        Ok(RawCommandOutput {
+                            cmd: format!("cryptsetup status {mapper}"),
+                            stdout: String::new(),
+                            stderr: format!("/dev/mapper/{mapper} is inactive.\n"),
+                            exit_status: 4,
+                        })
+                    }
+                }
                 CmdRequest::CryptsetupLuksUuid { device } => {
                     if let Some(uuid) = Self::luks_uuid_for_underlying(device) {
                         Ok(mock_ok(
@@ -2992,10 +3040,13 @@ mod tests {
                         "",
                     ))
                 }
-                CmdRequest::CryptsetupLuksOpen { device, mapper } => Ok(mock_ok(
-                    &format!("cryptsetup open --type luks {device} {mapper}"),
-                    "",
-                )),
+                CmdRequest::CryptsetupLuksOpen { device, mapper } => {
+                    self.opened.lock().unwrap().push(mapper.clone());
+                    Ok(mock_ok(
+                        &format!("cryptsetup open --type luks {device} {mapper}"),
+                        "",
+                    ))
+                }
                 CmdRequest::BtrfsFilesystemShowTarget { target } => Ok(RawCommandOutput {
                     cmd: format!("btrfs filesystem show {target}"),
                     stdout: String::new(),
@@ -3719,10 +3770,10 @@ mod tests {
     #[test]
     // Intent: unmounted bootstrap rejects braid-labeled PresentLuks disks.
     //
-    // Why it exists: the guard at line 367 ("bootstrap only accepts fresh
-    //   disks") is the invariant that makes the bootstrap path unreachable for
-    //   PresentLuks disks. This test locks that invariant so a future refactor
-    //   can't silently remove it.
+    // Why it exists: the "bootstrap only accepts fresh disks" guard is the
+    //   invariant that makes the bootstrap path unreachable for PresentLuks
+    //   disks. This test locks that invariant so a future refactor can't
+    //   silently remove it.
     //
     // Scenario: user has a braid-labeled LUKS disk and no mounted pool. Running
     //   `braid add` must refuse rather than attempting bootstrap with an
@@ -3793,6 +3844,198 @@ mod tests {
             inhibitor.acquire_count(),
             0,
             "bootstrap rejection must NOT acquire the sleep inhibitor"
+        );
+    }
+
+    #[test]
+    // Intent: fresh bootstrap add rejects a pre-existing mapper name conflict
+    // before mkfs.btrfs or mount can run.
+    //
+    // Why it exists: bootstrap helpers no longer probe btrfs themselves, so
+    // the LUKS open helper's mapper ownership check is the boundary that
+    // prevents an already-open `/dev/mapper/braid-disk1` from being treated as
+    // the just-formatted disk.
+    //
+    // Scenario: an empty host adds disk1 as a fresh disk, but
+    // `/dev/mapper/braid-disk1` already points at a non-LUKS backing device.
+    fn cmd_add_fresh_bootstrap_mapper_conflict_stops_before_mkfs() {
+        let (_state_tmp, paths, _tmp, config_path, pass_path) = fresh_add_setup();
+        let by_id = "/dev/disk/by-id/virtio-disk1";
+        let expected_uuid = "11111111-1111-1111-1111-111111111111";
+        let backup_tmp = paths
+            .luks_headers_dir()
+            .join("braid-disk1.luksheader.tmp")
+            .display()
+            .to_string();
+        let runner = MockRunner::default()
+            .with_output_sequence(
+                CmdRequest::CryptsetupLuksUuid {
+                    device: by_id.into(),
+                },
+                vec![
+                    mock_not_luks(&format!("cryptsetup luksUUID {by_id}")),
+                    mock_luks_uuid(by_id, expected_uuid),
+                ],
+            )
+            .with_output_stdin(
+                CmdRequest::CryptsetupLuksFormat {
+                    device: by_id.into(),
+                    extra_opts: vec!["--label".into(), "braid-disk1".into()],
+                },
+                b"test-passphrase".to_vec(),
+                mock_ok("cryptsetup luksFormat", ""),
+            )
+            .with_output(
+                CmdRequest::CryptsetupLuksHeaderBackup {
+                    device: by_id.into(),
+                    backup_path: backup_tmp,
+                },
+                mock_ok("cryptsetup luksHeaderBackup", ""),
+            )
+            .with_output(
+                CmdRequest::CryptsetupStatus {
+                    mapper: "braid-disk1".into(),
+                },
+                mock_status_active("braid-disk1", "/dev/vdz"),
+            )
+            .with_output(
+                CmdRequest::CryptsetupLuksUuid {
+                    device: "/dev/vdz".into(),
+                },
+                mock_not_luks("cryptsetup luksUUID /dev/vdz"),
+            );
+        let fs = AddOfflineMockFs(vec![by_id.into()]);
+        let inhibitor = crate::inhibit::RecordingInhibitor::new();
+
+        let result = cmd_add(
+            &runner,
+            &fs,
+            &AddParams {
+                config_path: &config_path,
+                disk_specs: &["disk1=/dev/disk/by-id/virtio-disk1".into()],
+                dry_run: false,
+                yes: true,
+                passphrase_stdin: false,
+                passphrase_file: Some(pass_path.as_path()),
+                enroll_key_file: None,
+                luks_format_extra_opts: &[],
+                progress: ProgressOutput::Off,
+                paths: &paths,
+                sleep_inhibitor: &inhibitor,
+                passphrase_reader: &RealTty,
+            },
+        );
+
+        match result {
+            Err(AddError::Luks(crate::luks::LuksError::MapperConflict { found: None, .. })) => {}
+            other => panic!("expected MapperConflict with found=None, got {other:?}"),
+        }
+        let requests = runner.requests();
+        assert!(
+            !requests.iter().any(|request| matches!(
+                request,
+                CmdRequest::MkfsBtrfs { .. }
+                    | CmdRequest::MkfsBtrfsRaid1 { .. }
+                    | CmdRequest::Mount { .. }
+            )),
+            "mapper conflict must stop before mkfs or mount: {requests:?}"
+        );
+    }
+
+    #[test]
+    // Intent: mixed fresh + braid-labeled LUKS bootstrap is rejected before
+    // journal write, inhibitor acquisition, or mkfs.btrfs RAID1.
+    //
+    // Why it exists: a multi-disk bootstrap must not let one fresh disk carry
+    // an existing braid-labeled LUKS disk into the RAID1 bootstrap path.
+    //
+    // Scenario: an empty host runs `braid add disk1=<fresh> disk2=<luks>`;
+    // disk2 cannot be identity-verified because there is no mounted pool.
+    fn cmd_add_mixed_bootstrap_rejects_present_luks_before_raid1_mkfs() {
+        let (_state_tmp, paths, _tmp, config_path, pass_path) = fresh_add_setup();
+        let disk1 = "/dev/disk/by-id/virtio-disk1";
+        let disk2 = "/dev/disk/by-id/virtio-disk2";
+        let disk2_uuid = "22222222-2222-2222-2222-222222222222";
+        let runner = MockRunner::default()
+            .with_output(
+                CmdRequest::CryptsetupLuksUuid {
+                    device: disk1.into(),
+                },
+                mock_not_luks(&format!("cryptsetup luksUUID {disk1}")),
+            )
+            .with_output(
+                CmdRequest::CryptsetupLuksUuid {
+                    device: disk2.into(),
+                },
+                mock_luks_uuid(disk2, disk2_uuid),
+            )
+            .with_output(
+                CmdRequest::CryptsetupLuksDumpText {
+                    device: disk2.into(),
+                },
+                mock_ok(
+                    &format!("cryptsetup luksDump {disk2}"),
+                    "LUKS header information\nVersion:       \t2\nLabel:         \tbraid-disk2\nSubsystem:     \t(no subsystem)\n",
+                ),
+            )
+            .with_output(
+                CmdRequest::CryptsetupStatus {
+                    mapper: "braid-disk2".into(),
+                },
+                mock_status_inactive("braid-disk2"),
+            )
+            .with_output_stdin(
+                CmdRequest::CryptsetupTestPassphrase {
+                    device: disk2.into(),
+                },
+                b"test-passphrase".to_vec(),
+                mock_ok("cryptsetup open --test-passphrase", ""),
+            );
+        let fs = AddOfflineMockFs(vec![disk1.into(), disk2.into()]);
+        let inhibitor = crate::inhibit::RecordingInhibitor::new();
+
+        let result = cmd_add(
+            &runner,
+            &fs,
+            &AddParams {
+                config_path: &config_path,
+                disk_specs: &[
+                    "disk1=/dev/disk/by-id/virtio-disk1".into(),
+                    "disk2=/dev/disk/by-id/virtio-disk2".into(),
+                ],
+                dry_run: false,
+                yes: true,
+                passphrase_stdin: false,
+                passphrase_file: Some(pass_path.as_path()),
+                enroll_key_file: None,
+                luks_format_extra_opts: &[],
+                progress: ProgressOutput::Off,
+                paths: &paths,
+                sleep_inhibitor: &inhibitor,
+                passphrase_reader: &RealTty,
+            },
+        );
+
+        let err = result.unwrap_err().to_string();
+        assert!(
+            err.contains("bootstrap only accepts fresh disks"),
+            "expected bootstrap rejection, got: {err}"
+        );
+        assert!(
+            journal::load_journal(&paths).unwrap().is_none(),
+            "no journal should exist after mixed bootstrap validation failure"
+        );
+        assert_eq!(
+            inhibitor.acquire_count(),
+            0,
+            "mixed bootstrap rejection must NOT acquire the sleep inhibitor"
+        );
+        let requests = runner.requests();
+        assert!(
+            !requests
+                .iter()
+                .any(|request| matches!(request, CmdRequest::MkfsBtrfsRaid1 { .. })),
+            "mixed bootstrap rejection must stop before RAID1 mkfs: {requests:?}"
         );
     }
 
@@ -4010,6 +4253,7 @@ mod tests {
     struct AddRecordingRunner {
         log: CmdLog,
         stdin_log: StdinLog,
+        opened: Arc<Mutex<Vec<String>>>,
         /// When true, `CryptsetupLuksHeaderBackup` returns success and writes
         /// the backup file (matching `MockRunner`'s behavior). Default `false`
         /// preserves the historical "fail at backup so cmd_add aborts" abort
@@ -4021,10 +4265,15 @@ mod tests {
     }
 
     impl AddRecordingRunner {
-        fn new(_pool_mounted: bool) -> Self {
+        fn new(pool_mounted: bool) -> Self {
             Self {
                 log: Arc::new(Mutex::new(Vec::new())),
                 stdin_log: Arc::new(Mutex::new(Vec::new())),
+                opened: Arc::new(Mutex::new(if pool_mounted {
+                    vec!["braid-disk1".to_owned()]
+                } else {
+                    vec![]
+                })),
                 backup_succeeds: false,
             }
         }
@@ -4073,16 +4322,30 @@ mod tests {
                     stderr: String::new(),
                     exit_status: 0,
                 }),
-                CmdRequest::CryptsetupStatus { mapper } if mapper == "braid-disk1" => {
-                    Ok(RawCommandOutput {
-                        cmd: format!("cryptsetup status {mapper}"),
-                        stdout: format!(
-                            "{mapper} is active and is in use.\n  \
-                             type:    LUKS2\n  device:  /dev/vdb\n  mode:    read/write\n"
-                        ),
-                        stderr: String::new(),
-                        exit_status: 0,
-                    })
+                CmdRequest::CryptsetupStatus { mapper } => {
+                    if self.opened.lock().unwrap().iter().any(|m| m == mapper) {
+                        let underlying = match mapper.as_str() {
+                            "braid-disk1" => "/dev/vdb",
+                            "braid-disk2" => "/dev/vdc",
+                            other => panic!("unexpected active mapper: {other}"),
+                        };
+                        Ok(RawCommandOutput {
+                            cmd: format!("cryptsetup status {mapper}"),
+                            stdout: format!(
+                                "{mapper} is active and is in use.\n  \
+                                 type:    LUKS2\n  device:  {underlying}\n  mode:    read/write\n"
+                            ),
+                            stderr: String::new(),
+                            exit_status: 0,
+                        })
+                    } else {
+                        Ok(RawCommandOutput {
+                            cmd: format!("cryptsetup status {mapper}"),
+                            stdout: String::new(),
+                            stderr: format!("/dev/mapper/{mapper} is inactive.\n"),
+                            exit_status: 4,
+                        })
+                    }
                 }
                 CmdRequest::CryptsetupLuksUuid { device } if device == "/dev/vdb" => {
                     Ok(RawCommandOutput {
