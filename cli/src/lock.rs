@@ -61,6 +61,13 @@ fn orphan_scan_warn_body(e: &std::io::Error) -> String {
     format!("could not scan /dev/mapper for orphans: {e} (skipping)")
 }
 
+/// Message body (no `[warn]` prefix) for a per-orphan mapper note.
+/// Shared between the dry-run preview and the real-run prelude so both
+/// branches use identical wording.
+fn orphan_mapper_warn_body(entry: &str) -> String {
+    format!("orphaned mapper {entry} (not in pool.json -- likely a prior crash)")
+}
+
 /// Classify umount EBUSY from libmount's diagnostic segment.
 /// Exit 32 is generic for umount syscall failures, so the lock hint must
 /// not rely on exit status alone.
@@ -192,9 +199,10 @@ impl LockPlan {
         let color_enabled = color_enabled_for_stderr();
         let line = |t, body: &str| status_line(t, color_enabled, body);
 
-        // Emit accumulated Warn notes to stderr before any mutation --
-        // today's real-run orphan-scan warn sits at the top of the work
-        // section, and the plan carries that warn as a PreviewNote::Warn.
+        // Emit accumulated Warn notes to stderr before any mutation.
+        // The plan carries the orphan-scan-failure warn and one warn
+        // per detected orphan mapper as PreviewNote::Warn; this loop
+        // is the single emit point for both.
         for note in &self.notes {
             if let PreviewNote::Warn(body) = note {
                 eprint!("{}", line(StatusTag::Warn, body));
@@ -339,13 +347,6 @@ impl LockPlan {
             eprint!(
                 "{}",
                 line(
-                    StatusTag::Warn,
-                    &format!("orphaned mapper {entry} (not in pool.json -- likely a prior crash)")
-                )
-            );
-            eprint!(
-                "{}",
-                line(
                     StatusTag::Wait,
                     &format!("disk {disk_name}: locking (orphan)..."),
                 )
@@ -401,9 +402,10 @@ impl LockPlan {
 
 /// Plan a `braid lock` run. Owns the mountpoint probe, preflight,
 /// open-mapper discovery, orphan scan, step compilation, and any
-/// `PreviewNote::Warn` accumulated from a failed orphan scan. The
-/// returned `LockPlan` is the single source of truth for both
-/// `--dry-run` preview and real execution.
+/// `PreviewNote::Warn` notes: one per detected orphan mapper, or a
+/// single warn from a failed orphan scan. The returned `LockPlan` is
+/// the single source of truth for both `--dry-run` preview and real
+/// execution.
 pub fn plan_lock<R, F>(
     runner: &R,
     fs: &F,
@@ -438,7 +440,12 @@ where
 
     let mut notes: Vec<PreviewNote> = Vec::new();
     let orphan_mappers = match scan_orphan_mappers(fs, membership) {
-        Ok(v) => v,
+        Ok(v) => {
+            for entry in &v {
+                notes.push(PreviewNote::Warn(orphan_mapper_warn_body(entry)));
+            }
+            v
+        }
         Err(e) => {
             notes.push(PreviewNote::Warn(orphan_scan_warn_body(&e)));
             Vec::new()
@@ -1244,6 +1251,46 @@ mod tests {
     }
 
     /*
+     * Intent: `braid lock --dry-run` preview surfaces a `[warn]` line per
+     *   orphan mapper found in /dev/mapper.
+     * Why it exists: the dry-run branch previously omitted the per-orphan
+     *   warn that the real run prints, so users could not see why an
+     *   `(orphan)` close step was about to run from the preview alone.
+     * Scenario: prior crash left braid-ccc as an orphan; user runs
+     *   `braid lock --dry-run` and must see the explanatory warn body
+     *   above the orphan close step, identical to the real-run wording.
+     */
+    #[test]
+    fn dry_run_preview_warns_per_orphan_mapper() {
+        let runner = with_fsid_probe_mocks(MockRunner::default().with_output(
+            CmdRequest::MountpointCheck {
+                path: MountPoint("/mnt/storage".to_owned()),
+            },
+            ok_raw("mountpoint -q /mnt/storage"),
+        ));
+        let fs = MockFs::new(&[
+            "/dev/mapper/braid-aaa",
+            "/dev/mapper/braid-bbb",
+            "/dev/mapper/braid-ccc",
+        ]);
+        let config = test_config();
+        let plan = plan_lock(&runner, &fs, &config, &test_membership())
+            .expect("plan_lock should succeed with one orphan mapper");
+        let output = plan.preview().render();
+        let warn_line =
+            "[warn] orphaned mapper braid-ccc (not in pool.json -- likely a prior crash)\n";
+
+        assert!(
+            output.starts_with(warn_line),
+            "preview must start with the exact per-orphan [warn] line, got:\n{output}"
+        );
+        assert!(
+            output.contains("close LUKS mapper braid-ccc (orphan)"),
+            "preview must still render the orphan close step, got:\n{output}"
+        );
+    }
+
+    /*
      * Intent: `plan_lock(...).preview().render()` produces the full
      *   happy-path preview -- umount + scoped forget + per-mapper
      *   closes (membership and orphan).
@@ -1274,10 +1321,22 @@ mod tests {
         let plan = plan_lock(&runner, &fs, &config, &test_membership())
             .expect("plan_lock should succeed on mounted pool");
         let output = plan.preview().render();
+        let warn_line =
+            "[warn] orphaned mapper braid-ccc (not in pool.json -- likely a prior crash)\n";
 
         assert!(
-            !output.contains("[warn]"),
-            "happy path must not emit a scan warning, got:\n{output}"
+            output.contains(warn_line),
+            "preview must include the orphan warning, got:\n{output}"
+        );
+        let warn_pos = output
+            .find(warn_line)
+            .expect("orphan warning should be present");
+        let first_step_pos = output
+            .find("[safe       ]")
+            .expect("preview should include at least one step");
+        assert!(
+            warn_pos < first_step_pos,
+            "orphan warning must render before the first step row, got:\n{output}"
         );
         assert!(
             output.contains("unmount /mnt/storage"),

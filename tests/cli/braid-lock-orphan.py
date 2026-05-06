@@ -80,8 +80,19 @@ with subtest("braid lock closes membership mappers and orphan"):
     # before cryptsetup close, closed by the existing [ok] orphan row.
     # Both rows use the user-friendly disk_name (mapper name stripped of
     # the braid- prefix) so subject pairing is consistent.
+    orphan_warn = (
+        "[warn] orphaned mapper braid-orphan "
+        "(not in pool.json -- likely a prior crash)"
+    )
     orphan_wait = "[wait] disk orphan: locking (orphan)..."
     orphan_ok = "[ok]   disk orphan: locked (orphan)"
+    pool_wait = "[wait] pool: unmounting /mnt/storage..."
+    assert lock_err.count(orphan_warn) == 1, (
+        f"expected exactly one orphan warning, got: {lock_err!r}"
+    )
+    assert lock_err.find(orphan_warn) < lock_err.find(pool_wait), (
+        f"orphan warning must precede first work row, got: {lock_err!r}"
+    )
     assert orphan_wait in lock_err, (
         f"expected orphan locking wait row, got: {lock_err!r}"
     )
