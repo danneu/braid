@@ -93,6 +93,7 @@ Recover will:
 - Open the LUKS devices needed for the journal phase
 - Mount the btrfs pool
 - Probe the live btrfs topology to determine what actually happened
+- For existing-pool add `PoolMutation`, first open and scan any already-committed journaled add targets that can be reconciled without wiping or adding
 - For add `PoolMutation`, finish only the journaled add targets that are not already live
 - For add `PostAddBalanceRaid1`, skip all disk preparation and btrfs add steps, then finish the owed RAID1 balance
 - Rebuild or repair pool.json only when live membership is complete
@@ -103,6 +104,28 @@ Recover will:
 ```sh
 sudo braid status
 ```
+
+### Interrupted between returned-disk wipe and add
+
+If an existing braid-labeled disk was being returned to the pool and the add was interrupted after `wipefs --types btrfs` but before `btrfs device add`, run:
+
+```sh
+sudo braid recover
+```
+
+Recover replays the add from the journaled returned-disk target. Do not wipe the disk and retry it as a fresh add; the journal still records the checked LUKS identity and expected pool FSID.
+
+### Interrupted fresh-disk add
+
+For an interrupted fresh-disk add, recover replays the format, optional keyfile enrollment, LUKS header backup, mapper open, and `btrfs device add` from the journaled options when the disk is present.
+
+If the disk is absent or has a different LUKS label than the journal records, recover fails and leaves `pending-op.json` in place. Reconnect the original disk or replace the target, then rerun `sudo braid recover`.
+
+### Committed-but-closed add target
+
+If the journaled add target is already a live pool member but its mapper is closed when recover starts, recover opens and scans it during the reconciliation pass. After the live-pool re-probe, the target is included in `pool.json` and is not re-added.
+
+This can still prompt for the pool passphrase even when the pool is already mounted, because the target mapper may need to be opened before recover can discover that it already committed.
 
 ### With missing devices
 

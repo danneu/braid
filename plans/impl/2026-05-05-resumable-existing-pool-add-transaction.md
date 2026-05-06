@@ -392,8 +392,10 @@ fault injection.
 - Docs state that once recovery reaches PostAddBalanceRaid1, it will not format,
   wipe, or add disks.
 - No broad `wipefs --all` exists in this implementation path.
-- `PoolAddTarget` or its replacement carries semantic target mode and mapper
-  identity, not parallel-vector indexes.
+- The pool-phase carrier (`PoolAddExecutionTarget`, `cli/src/add.rs:257`)
+  carries the mapper path and a per-target force flag derived from
+  `AddJournalMode` at construction time; nothing depends on `probed_idx` or
+  parallel-vector alignment.
 - Existing-pool Add recovery uses phase-specific mount membership:
   `pre_membership` during PoolMutation and `target_membership` during
   PostAddBalanceRaid1.

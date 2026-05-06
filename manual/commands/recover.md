@@ -71,13 +71,14 @@ sudo braid recover --dry-run
 4. For `Replace::PoolMutation` only, if a kernel-resumed btrfs replace is in progress, waits for it to finish.
 5. For `Replace::PoolMutation` only, if the pool was just mounted by this recover run, performs a full relock-and-remount cycle (umount, `btrfs device scan --forget`, close LUKS, reopen, remount) to ensure the kernel's in-memory device topology matches the on-disk state.
 6. Probes the live pool to discover actual membership.
-7. For add `PoolMutation`, replays only journaled targets that are not already live. Fresh targets use the stored LUKS format options from the original add. Verified returned braid-labeled targets may use `btrfs device add -f` after `wipefs --all --types btrfs`; other targets are not force-added.
-8. For add `PostAddBalanceRaid1`, does not format, enroll, back up headers as target prep, wipe, or add disks. It only validates the committed live pool and finishes the owed RAID1 balance.
-9. For replace and remove-missing `PoolMutation`, detects whether the primary btrfs membership mutation committed. If it did not commit, recover restores/keeps the pre-operation `pool.json`, clears the journal, and tells you to rerun the original command. It does not rerun `btrfs replace start` or `btrfs device remove`.
-10. For replace and remove-missing post-maintenance phases, validates committed live membership, repairs `pool.json` if needed, and finishes only owed maintenance such as resize, paused-balance resume, or soft RAID1 balance.
-11. Resolves `/dev/disk/by-id/` paths from the live device identity (not from the journal, which may be stale).
-12. Writes or repairs `pool.json` only after the journal phase allows it and live membership is complete.
-13. Clears `pending-op.json` only after membership is complete and any owed balance work is done.
+7. For interrupted existing-pool add `PoolMutation`, first runs a non-destructive Add target reconciliation pass: any journaled add target whose underlying disk is physically present and LUKS-openable is opened, scanned, and followed by a live-pool re-probe. Targets that turn out to be live pool members are adopted into the recovered `pool.json` without `wipefs` or `btrfs device add`.
+8. For add `PoolMutation`, replays only journaled targets that are not already live. `RecoverableBraidLabeled` targets are replayed via `wipefs --all --types btrfs` plus `btrfs device add -f` after LUKS UUID and visible-FSID checks. `FreshLuks` targets that are physically present are replayed from the journaled format options, skipping format if the disk already has the expected LUKS label; if the journal carried `enroll_key_file`, the keyfile is re-enrolled, then the LUKS header is backed up, the mapper is opened, and `btrfs device add` runs without `-f`. `FreshLuks` targets that are physically absent or carry an unexpected LUKS label make recover fail and leave `pending-op.json` in place so the disk can be reattached or replaced and recovery rerun.
+9. For add `PostAddBalanceRaid1`, does not format, enroll, back up headers as target prep, wipe, or add disks. It only validates the committed live pool and finishes the owed RAID1 balance.
+10. For replace and remove-missing `PoolMutation`, detects whether the primary btrfs membership mutation committed. If it did not commit, recover restores/keeps the pre-operation `pool.json`, clears the journal, and tells you to rerun the original command. It does not rerun `btrfs replace start` or `btrfs device remove`.
+11. For replace and remove-missing post-maintenance phases, validates committed live membership, repairs `pool.json` if needed, and finishes only owed maintenance such as resize, paused-balance resume, or soft RAID1 balance.
+12. Resolves `/dev/disk/by-id/` paths from the live device identity (not from the journal, which may be stale).
+13. Writes or repairs `pool.json` only after the journal phase allows it and live membership is complete.
+14. Clears `pending-op.json` only after membership is complete and any owed balance work is done.
 
 ## Safety checks
 
@@ -86,6 +87,7 @@ sudo braid recover --dry-run
 - Hard-fails if a live pool device has no `/dev/disk/by-id/` symlink (recovery can't guess a stable identifier).
 - Detects interrupted bootstrap add (first disk, no filesystem yet) and gives specific wipe-and-retry instructions instead of a confusing mount error.
 - For existing-pool add recovery, refuses to clear the journal while any journaled add target is missing from the live pool.
+- Returned-disk replay may need a pool passphrase even when the pool is already mounted, because the mapper for the journaled target may still be closed.
 - Once an add journal reaches `PostAddBalanceRaid1`, refuses to replay disk preparation or btrfs membership mutation.
 - Once replace or remove-missing reaches its post-maintenance phase, refuses to rerun the primary btrfs membership mutation.
 - Without `--allow-degraded`, refuses to mount if devices are missing (exit code 2 for degraded-refused, distinguishing it from other errors).
