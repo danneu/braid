@@ -3,12 +3,14 @@ use crate::config::{Config, mapper_name};
 use crate::credential_verify::{
     Credential, CredentialVerifyError, CredentialVerifyTarget, verify_credential_for_targets,
 };
-use crate::luks::{self, LuksError};
+use crate::luks::{self, LuksError, OpenOutcome};
+use crate::mapper_close::{CloseMapperError, close_mapper_with_retry};
 use crate::membership::PoolMembership;
 use crate::preview::{self, NoteLevel, PerDiskStyle, PreviewNote};
 use crate::probe::{self, Filesystem, ProbeError};
-use crate::status_tag::{StatusTag, color_enabled_for_stderr, status_line};
-use crate::types::{ByIdPath, ConfigDiskState, MountPoint};
+use crate::progress::Sleeper;
+use crate::status_tag::{StatusTag, color_enabled_for_stderr, emit_status, status_line};
+use crate::types::{ByIdPath, ConfigDiskState, MapperName, MountPoint};
 use std::path::{Path, PathBuf};
 use zeroize::Zeroizing;
 
@@ -37,6 +39,12 @@ pub enum MountError {
 pub enum OpenCredential {
     Passphrase(Zeroizing<String>),
     KeyFile(PathBuf),
+}
+
+#[derive(Debug)]
+pub struct UnlockAndMountFailure {
+    pub error: MountError,
+    pub opened_mappers: Vec<MapperName>,
 }
 
 impl std::fmt::Debug for OpenCredential {
@@ -514,6 +522,7 @@ fn open_disks_with_passphrase<R: CommandRunner>(
     to_unlock: &[(String, ByIdPath)],
     passphrase: &str,
     color_enabled: bool,
+    opened: &mut Vec<MapperName>,
 ) -> Result<(), MountError> {
     let targets = credential_verify_targets(to_unlock);
     match verify_credential_for_targets(
@@ -563,36 +572,40 @@ fn open_disks_with_passphrase<R: CommandRunner>(
                 &format!("disk {name}: unlocking..."),
             )
         );
-        if let Err(e) = luks::ensure_luks_open(runner, name, by_id, passphrase) {
-            let header_state = luks::probe_luks_header(runner, &by_id.0);
-            let (original_summary, ok_fallback) = match &e {
-                LuksError::OpenFailed {
-                    exit_code: 2,
-                    hint,
-                    stderr,
-                    ..
-                } => (
-                    format!(
-                        "cryptsetup open rejected on '{name}' after all planned-disk passphrase verification -- {hint} ({stderr})"
+        match luks::ensure_luks_open(runner, name, by_id, passphrase) {
+            Ok(OpenOutcome::Opened) => opened.push(mapper_name(name)),
+            Ok(OpenOutcome::AlreadyOwned) => {}
+            Err(e) => {
+                let header_state = luks::probe_luks_header(runner, &by_id.0);
+                let (original_summary, ok_fallback) = match &e {
+                    LuksError::OpenFailed {
+                        exit_code: 2,
+                        hint,
+                        stderr,
+                        ..
+                    } => (
+                        format!(
+                            "cryptsetup open rejected on '{name}' after all planned-disk passphrase verification -- {hint} ({stderr})"
+                        ),
+                        MountError::Failed(format!(
+                            "cryptsetup open rejected on '{name}' even though the passphrase was just \
+                             verified against every planned disk. The credential likely changed between \
+                             preflight and open (race or external LUKS manipulation)."
+                        )),
                     ),
-                    MountError::Failed(format!(
-                        "cryptsetup open rejected on '{name}' even though the passphrase was just \
-                         verified against every planned disk. The credential likely changed between \
-                         preflight and open (race or external LUKS manipulation)."
-                    )),
-                ),
-                _ => {
-                    let summary = format!("cryptsetup open failed on '{name}': {e}");
-                    (summary, MountError::Luks(e))
-                }
-            };
-            return Err(explain_open_failure(
-                name,
-                &by_id.0,
-                header_state,
-                &original_summary,
-                ok_fallback,
-            ));
+                    _ => {
+                        let summary = format!("cryptsetup open failed on '{name}': {e}");
+                        (summary, MountError::Luks(e))
+                    }
+                };
+                return Err(explain_open_failure(
+                    name,
+                    &by_id.0,
+                    header_state,
+                    &original_summary,
+                    ok_fallback,
+                ));
+            }
         }
         eprint!(
             "{}",
@@ -612,6 +625,7 @@ fn open_disks_with_key_file<R: CommandRunner>(
     to_unlock: &[(String, ByIdPath)],
     key_file_path: &Path,
     color_enabled: bool,
+    opened: &mut Vec<MapperName>,
 ) -> Result<(), MountError> {
     let targets = credential_verify_targets(to_unlock);
     match verify_credential_for_targets(
@@ -661,36 +675,40 @@ fn open_disks_with_key_file<R: CommandRunner>(
                 &format!("disk {name}: unlocking..."),
             )
         );
-        if let Err(e) = luks::ensure_luks_open_with_key_file(runner, name, by_id, key_file_path) {
-            let header_state = luks::probe_luks_header(runner, &by_id.0);
-            let (original_summary, ok_fallback) = match &e {
-                LuksError::OpenFailed {
-                    exit_code: 2,
-                    hint,
-                    stderr,
-                    ..
-                } => (
-                    format!(
-                        "cryptsetup open rejected on '{name}' after all planned-disk keyfile verification -- {hint} ({stderr})"
+        match luks::ensure_luks_open_with_key_file(runner, name, by_id, key_file_path) {
+            Ok(OpenOutcome::Opened) => opened.push(mapper_name(name)),
+            Ok(OpenOutcome::AlreadyOwned) => {}
+            Err(e) => {
+                let header_state = luks::probe_luks_header(runner, &by_id.0);
+                let (original_summary, ok_fallback) = match &e {
+                    LuksError::OpenFailed {
+                        exit_code: 2,
+                        hint,
+                        stderr,
+                        ..
+                    } => (
+                        format!(
+                            "cryptsetup open rejected on '{name}' after all planned-disk keyfile verification -- {hint} ({stderr})"
+                        ),
+                        MountError::Failed(format!(
+                            "cryptsetup open rejected on '{name}' even though the keyfile was just \
+                             verified against every planned disk. The credential likely changed between \
+                             preflight and open (race or external LUKS manipulation)."
+                        )),
                     ),
-                    MountError::Failed(format!(
-                        "cryptsetup open rejected on '{name}' even though the keyfile was just \
-                         verified against every planned disk. The credential likely changed between \
-                         preflight and open (race or external LUKS manipulation)."
-                    )),
-                ),
-                _ => {
-                    let summary = format!("cryptsetup open failed on '{name}': {e}");
-                    (summary, MountError::Luks(e))
-                }
-            };
-            return Err(explain_open_failure(
-                name,
-                &by_id.0,
-                header_state,
-                &original_summary,
-                ok_fallback,
-            ));
+                    _ => {
+                        let summary = format!("cryptsetup open failed on '{name}': {e}");
+                        (summary, MountError::Luks(e))
+                    }
+                };
+                return Err(explain_open_failure(
+                    name,
+                    &by_id.0,
+                    header_state,
+                    &original_summary,
+                    ok_fallback,
+                ));
+            }
         }
         eprint!(
             "{}",
@@ -755,25 +773,144 @@ pub fn execute_unlock_and_mount<R: CommandRunner, F: Filesystem + ?Sized>(
     config: &Config,
     plan: &OpenPlan,
     credential: &OpenCredential,
-) -> Result<bool, MountError> {
+) -> Result<bool, UnlockAndMountFailure> {
     let color_enabled = color_enabled_for_stderr();
     if plan.to_unlock.is_empty() {
-        return Err(MountError::Failed(
-            "internal: execute_unlock_and_mount called with empty plan.to_unlock".into(),
-        ));
+        return Err(UnlockAndMountFailure {
+            error: MountError::Failed(
+                "internal: execute_unlock_and_mount called with empty plan.to_unlock".into(),
+            ),
+            opened_mappers: Vec::new(),
+        });
     }
 
+    let mut opened_mappers = Vec::new();
     match credential {
         OpenCredential::KeyFile(kf) => {
             let kf = kf.as_path();
-            open_disks_with_key_file(runner, &plan.to_unlock, kf, color_enabled)?;
+            open_disks_with_key_file(
+                runner,
+                &plan.to_unlock,
+                kf,
+                color_enabled,
+                &mut opened_mappers,
+            )
+            .map_err(|error| UnlockAndMountFailure {
+                error,
+                opened_mappers: opened_mappers.clone(),
+            })?;
         }
         OpenCredential::Passphrase(pp) => {
-            open_disks_with_passphrase(runner, &plan.to_unlock, pp.as_str(), color_enabled)?;
+            open_disks_with_passphrase(
+                runner,
+                &plan.to_unlock,
+                pp.as_str(),
+                color_enabled,
+                &mut opened_mappers,
+            )
+            .map_err(|error| UnlockAndMountFailure {
+                error,
+                opened_mappers: opened_mappers.clone(),
+            })?;
         }
     }
 
-    scan_and_mount(runner, fs, config, plan, color_enabled)
+    scan_and_mount(runner, fs, config, plan, color_enabled).map_err(|error| UnlockAndMountFailure {
+        error,
+        opened_mappers,
+    })
+}
+
+pub(crate) fn close_opened_mappers<R, S, F>(
+    runner: &R,
+    sleeper: &S,
+    fs: &F,
+    opened: &[MapperName],
+    color_enabled: bool,
+) -> Result<(), CloseMapperError>
+where
+    R: CommandRunner,
+    S: Sleeper,
+    F: Filesystem + ?Sized,
+{
+    if opened.is_empty() {
+        return Ok(());
+    }
+
+    let forget_devs: Vec<String> = opened
+        .iter()
+        .map(|mapper| format!("/dev/mapper/{}", mapper.0))
+        .filter(|path| fs.exists(path))
+        .collect();
+    if !forget_devs.is_empty() {
+        let forget_result = runner.run(&CmdRequest::BtrfsDeviceScanForget {
+            devices: forget_devs,
+        });
+        match forget_result {
+            Ok(r) if r.exit_status == 0 => {}
+            Ok(r) => {
+                emit_status(&status_line(
+                    StatusTag::Warn,
+                    color_enabled,
+                    &format!(
+                        "btrfs device scan --forget failed (exit {}): {} (continuing)",
+                        r.exit_status,
+                        r.stderr.trim()
+                    ),
+                ));
+            }
+            Err(e) => {
+                emit_status(&status_line(
+                    StatusTag::Warn,
+                    color_enabled,
+                    &format!("btrfs device scan --forget failed: {e} (continuing)"),
+                ));
+            }
+        }
+    }
+
+    let mut first_error = None;
+    for mapper in opened {
+        let label = mapper.0.strip_prefix("braid-").unwrap_or(mapper.0.as_str());
+        emit_status(&status_line(
+            StatusTag::Wait,
+            color_enabled,
+            &format!("disk {label}: locking..."),
+        ));
+        match close_mapper_with_retry(runner, sleeper, &mapper.0, color_enabled) {
+            Ok(()) => {
+                emit_status(&status_line(
+                    StatusTag::Ok,
+                    color_enabled,
+                    &format!("disk {label}: locked"),
+                ));
+            }
+            Err(e) => {
+                emit_status(&status_line(
+                    StatusTag::Fail,
+                    color_enabled,
+                    &format!("disk {label}: {e}"),
+                ));
+                if first_error.is_none() {
+                    first_error = Some(e);
+                }
+            }
+        }
+    }
+
+    match first_error {
+        None => {
+            emit_status("cleanup: closed LUKS mappers opened by this command.\n");
+            Ok(())
+        }
+        Some(e) => {
+            emit_status(&format!(
+                "cleanup failed: one or more LUKS mappers opened by this command could not be \
+                 closed; run 'braid lock' after resolving the issue. First cleanup error: {e}\n"
+            ));
+            Err(e)
+        }
+    }
 }
 
 /// Shared tail for both execute entry points: btrfs device scan, ensure the
@@ -929,6 +1066,7 @@ mod tests {
                 .as_ref()
                 .expect("test passed empty credential with non-empty plan");
             execute_unlock_and_mount(runner, fs, config, &plan, credential)
+                .map_err(|failure| failure.error)
         }
     }
 
@@ -1021,7 +1159,14 @@ mod tests {
         let cred = test_passphrase();
         let res = execute_unlock_and_mount(&runner, &fs, &config, &plan, &cred);
         match res {
-            Err(MountError::Failed(msg)) => {
+            Err(UnlockAndMountFailure {
+                error: MountError::Failed(msg),
+                opened_mappers,
+            }) => {
+                assert!(
+                    opened_mappers.is_empty(),
+                    "internal precondition failure must not report opened mappers"
+                );
                 assert!(
                     msg.contains("execute_unlock_and_mount called with empty plan.to_unlock"),
                     "unexpected message: {msg}"
@@ -2829,6 +2974,598 @@ pool already mounted at /mnt/storage
             "/dev/disk/by-id/virtio-disk1",
             "/dev/disk/by-id/virtio-disk2",
         ])
+    }
+
+    struct NoopSleeper;
+
+    impl Sleeper for NoopSleeper {
+        fn sleep(&self, _duration: std::time::Duration) {}
+    }
+
+    fn direct_two_disk_plan() -> OpenPlan {
+        OpenPlan {
+            to_unlock: vec![
+                (
+                    "disk1".to_owned(),
+                    ByIdPath("/dev/disk/by-id/virtio-disk1".to_owned()),
+                ),
+                (
+                    "disk2".to_owned(),
+                    ByIdPath("/dev/disk/by-id/virtio-disk2".to_owned()),
+                ),
+            ],
+            any_open: false,
+            any_missing_member: false,
+            mount_device: "/dev/mapper/braid-disk1".to_owned(),
+        }
+    }
+
+    fn direct_two_disk_fs_with_mappers() -> MockFs {
+        MockFs::new(&[
+            "/dev/disk/by-id/virtio-disk1",
+            "/dev/disk/by-id/virtio-disk2",
+            "/dev/mapper/braid-disk1",
+            "/dev/mapper/braid-disk2",
+        ])
+    }
+
+    fn direct_two_disk_open_runner() -> MockRunner {
+        MockRunner::default()
+            .with_output_stdin(
+                CmdRequest::CryptsetupTestPassphrase {
+                    device: "/dev/disk/by-id/virtio-disk1".into(),
+                },
+                b"testpass".to_vec(),
+                ok_raw("cryptsetup open --test-passphrase"),
+            )
+            .with_output_stdin(
+                CmdRequest::CryptsetupTestPassphrase {
+                    device: "/dev/disk/by-id/virtio-disk2".into(),
+                },
+                b"testpass".to_vec(),
+                ok_raw("cryptsetup open --test-passphrase"),
+            )
+            .with_mappers_closed(&["braid-disk1", "braid-disk2"])
+            .with_output_stdin(
+                CmdRequest::CryptsetupLuksOpen {
+                    device: "/dev/disk/by-id/virtio-disk1".into(),
+                    mapper: "braid-disk1".into(),
+                },
+                b"testpass".to_vec(),
+                ok_raw("cryptsetup open"),
+            )
+            .with_output_stdin(
+                CmdRequest::CryptsetupLuksOpen {
+                    device: "/dev/disk/by-id/virtio-disk2".into(),
+                    mapper: "braid-disk2".into(),
+                },
+                b"testpass".to_vec(),
+                ok_raw("cryptsetup open"),
+            )
+    }
+
+    // Intent: Mount failure after two successful opens reports both mappers
+    // as cleanup-owned and cleanup forgets those mapper paths before close.
+    // Why it exists: fail-closed unlock depends on preserving the primary
+    // mount error while still giving callers the exact mappers this command
+    // opened.
+    // Scenario: two closed LUKS members unlock, btrfs scan succeeds, mount
+    // fails before the pool comes online.
+    #[test]
+    fn unlock_failure_after_two_opens_closes_both_after_scoped_forget() {
+        let config = test_config();
+        let fs = direct_two_disk_fs_with_mappers();
+        let plan = direct_two_disk_plan();
+        let runner = direct_two_disk_open_runner()
+            .with_output(CmdRequest::BtrfsDeviceScanAll, ok_raw("btrfs device scan"))
+            .with_output(
+                CmdRequest::Mount {
+                    device: "/dev/mapper/braid-disk1".into(),
+                    mount_point: MountPoint("/mnt/storage".to_owned()),
+                },
+                err_raw("mount", 32, "wrong fs type"),
+            )
+            .with_output(
+                CmdRequest::BtrfsDeviceScanForget {
+                    devices: vec![
+                        "/dev/mapper/braid-disk1".into(),
+                        "/dev/mapper/braid-disk2".into(),
+                    ],
+                },
+                ok_raw("btrfs device scan --forget"),
+            )
+            .with_output(
+                CmdRequest::CryptsetupClose {
+                    mapper: "braid-disk1".into(),
+                },
+                ok_raw("cryptsetup close"),
+            )
+            .with_output(
+                CmdRequest::CryptsetupClose {
+                    mapper: "braid-disk2".into(),
+                },
+                ok_raw("cryptsetup close"),
+            );
+
+        let failure = execute_unlock_and_mount(&runner, &fs, &config, &plan, &test_passphrase())
+            .expect_err("mount should fail");
+        assert!(
+            failure.error.to_string().starts_with("mount failed"),
+            "primary error should be mount failure: {}",
+            failure.error
+        );
+        assert_eq!(
+            failure.opened_mappers,
+            vec![
+                MapperName("braid-disk1".into()),
+                MapperName("braid-disk2".into()),
+            ]
+        );
+
+        let captured = crate::status_tag::testing::capture_with_color(false, || {
+            close_opened_mappers(&runner, &NoopSleeper, &fs, &failure.opened_mappers, false)
+                .unwrap();
+        });
+        assert!(
+            captured.contains("cleanup: closed LUKS mappers opened by this command."),
+            "missing cleanup success summary: {captured:?}"
+        );
+
+        let requests = runner.requests();
+        let forget_pos = requests
+            .iter()
+            .position(|r| matches!(r, CmdRequest::BtrfsDeviceScanForget { .. }))
+            .expect("missing forget");
+        let close_pos = requests
+            .iter()
+            .position(|r| matches!(r, CmdRequest::CryptsetupClose { .. }))
+            .expect("missing close");
+        assert!(forget_pos < close_pos, "forget must precede close");
+    }
+
+    // Intent: Btrfs scan failure after successful opens carries the same
+    // opened-mapper cleanup set as mount failure.
+    // Why it exists: btrfs device scan is post-open and pre-mount, so a
+    // failure there would otherwise strand newly-opened LUKS mappers.
+    // Scenario: both disks open, but `btrfs device scan` returns non-zero.
+    #[test]
+    fn unlock_scan_failure_reports_opened_mappers_for_cleanup() {
+        let config = test_config();
+        let fs = direct_two_disk_fs_with_mappers();
+        let plan = direct_two_disk_plan();
+        let runner = direct_two_disk_open_runner().with_output(
+            CmdRequest::BtrfsDeviceScanAll,
+            err_raw("btrfs device scan", 1, "scan failed"),
+        );
+
+        let failure = execute_unlock_and_mount(&runner, &fs, &config, &plan, &test_passphrase())
+            .expect_err("scan should fail");
+
+        assert!(
+            failure
+                .error
+                .to_string()
+                .starts_with("btrfs device scan failed"),
+            "primary error should be scan failure: {}",
+            failure.error
+        );
+        assert_eq!(
+            failure.opened_mappers,
+            vec![
+                MapperName("braid-disk1".into()),
+                MapperName("braid-disk2".into()),
+            ]
+        );
+    }
+
+    // Intent: A mapper that becomes already-owned at execute time is not
+    // included in the fail-closed cleanup set.
+    // Why it exists: plan.to_unlock is not authoritative after planning; the
+    // LUKS helper's OpenOutcome is the ownership boundary.
+    // Scenario: disk1 was closed during planning but manually opened before
+    // execution, while disk2 is opened by this command.
+    #[test]
+    fn already_owned_execute_race_is_filtered_from_cleanup_set() {
+        let config = test_config();
+        let fs = direct_two_disk_fs_with_mappers();
+        let plan = direct_two_disk_plan();
+        let runner = MockRunner::default()
+            .with_output_stdin(
+                CmdRequest::CryptsetupTestPassphrase {
+                    device: "/dev/disk/by-id/virtio-disk1".into(),
+                },
+                b"testpass".to_vec(),
+                ok_raw("cryptsetup open --test-passphrase"),
+            )
+            .with_output_stdin(
+                CmdRequest::CryptsetupTestPassphrase {
+                    device: "/dev/disk/by-id/virtio-disk2".into(),
+                },
+                b"testpass".to_vec(),
+                ok_raw("cryptsetup open --test-passphrase"),
+            )
+            .with_mapper_open(
+                "braid-disk1",
+                "/dev/vdb",
+                "aaaaaaaa-1111-2222-3333-444444444444",
+            )
+            .with_output(
+                CmdRequest::CryptsetupLuksUuid {
+                    device: "/dev/disk/by-id/virtio-disk1".into(),
+                },
+                RawCommandOutput {
+                    cmd: "cryptsetup luksUUID".into(),
+                    stdout: "aaaaaaaa-1111-2222-3333-444444444444\n".into(),
+                    stderr: String::new(),
+                    exit_status: 0,
+                },
+            )
+            .with_mapper_closed("braid-disk2")
+            .with_output_stdin(
+                CmdRequest::CryptsetupLuksOpen {
+                    device: "/dev/disk/by-id/virtio-disk2".into(),
+                    mapper: "braid-disk2".into(),
+                },
+                b"testpass".to_vec(),
+                ok_raw("cryptsetup open"),
+            )
+            .with_output(
+                CmdRequest::BtrfsDeviceScanAll,
+                err_raw("btrfs device scan", 1, "scan failed"),
+            )
+            .with_output(
+                CmdRequest::BtrfsDeviceScanForget {
+                    devices: vec!["/dev/mapper/braid-disk2".into()],
+                },
+                ok_raw("btrfs device scan --forget"),
+            )
+            .with_output(
+                CmdRequest::CryptsetupClose {
+                    mapper: "braid-disk2".into(),
+                },
+                ok_raw("cryptsetup close"),
+            );
+
+        let failure = execute_unlock_and_mount(&runner, &fs, &config, &plan, &test_passphrase())
+            .expect_err("scan should fail");
+        assert_eq!(
+            failure.opened_mappers,
+            vec![MapperName("braid-disk2".into())]
+        );
+
+        close_opened_mappers(&runner, &NoopSleeper, &fs, &failure.opened_mappers, false).unwrap();
+        assert!(
+            !runner.requests().iter().any(
+                |r| matches!(r, CmdRequest::CryptsetupClose { mapper } if mapper == "braid-disk1")
+            ),
+            "must not close already-owned disk1"
+        );
+    }
+
+    // Intent: If disk2 fails to open after disk1 opened, cleanup is scoped to
+    // disk1 and the disk2 open failure remains primary.
+    // Why it exists: a mid-open failure is the narrowest path where the open
+    // loop must preserve both ownership and error precedence.
+    // Scenario: disk1 opens, disk2 rejects during `cryptsetup open`.
+    #[test]
+    fn second_open_failure_preserves_error_and_cleans_first_open() {
+        let config = test_config();
+        let fs = direct_two_disk_fs_with_mappers();
+        let plan = direct_two_disk_plan();
+        let (is_req, is_out) = is_luks_ok("/dev/disk/by-id/virtio-disk2");
+        let (dump_req, dump_out) = luks_dump_text_ok("/dev/disk/by-id/virtio-disk2");
+        let runner = direct_two_disk_open_runner()
+            .with_output_stdin(
+                CmdRequest::CryptsetupLuksOpen {
+                    device: "/dev/disk/by-id/virtio-disk2".into(),
+                    mapper: "braid-disk2".into(),
+                },
+                b"testpass".to_vec(),
+                err_raw("cryptsetup open", 1, "open failed"),
+            )
+            .with_output(is_req, is_out)
+            .with_output(dump_req, dump_out)
+            .with_output(
+                CmdRequest::BtrfsDeviceScanForget {
+                    devices: vec!["/dev/mapper/braid-disk1".into()],
+                },
+                ok_raw("btrfs device scan --forget"),
+            )
+            .with_output(
+                CmdRequest::CryptsetupClose {
+                    mapper: "braid-disk1".into(),
+                },
+                ok_raw("cryptsetup close"),
+            );
+
+        let failure = execute_unlock_and_mount(&runner, &fs, &config, &plan, &test_passphrase())
+            .expect_err("disk2 open should fail");
+        assert!(
+            failure.error.to_string().contains("disk2"),
+            "primary error should name disk2: {}",
+            failure.error
+        );
+        assert_eq!(
+            failure.opened_mappers,
+            vec![MapperName("braid-disk1".into())]
+        );
+
+        close_opened_mappers(&runner, &NoopSleeper, &fs, &failure.opened_mappers, false).unwrap();
+    }
+
+    // Intent: Cleanup attempts every opened mapper even when one close stays
+    // busy through all retries.
+    // Why it exists: a failed cleanup for disk1 must not strand disk2 without
+    // even trying to close it.
+    // Scenario: disk1 close returns exit 5 for all retries; disk2 closes.
+    #[test]
+    fn cleanup_busy_close_attempts_later_mappers_and_reports_guidance() {
+        let fs = direct_two_disk_fs_with_mappers();
+        let opened = vec![
+            MapperName("braid-disk1".into()),
+            MapperName("braid-disk2".into()),
+        ];
+        let runner = MockRunner::default()
+            .with_output(
+                CmdRequest::BtrfsDeviceScanForget {
+                    devices: vec![
+                        "/dev/mapper/braid-disk1".into(),
+                        "/dev/mapper/braid-disk2".into(),
+                    ],
+                },
+                ok_raw("btrfs device scan --forget"),
+            )
+            .with_output(
+                CmdRequest::CryptsetupClose {
+                    mapper: "braid-disk1".into(),
+                },
+                err_raw("cryptsetup close", 5, "busy"),
+            )
+            .with_output(
+                CmdRequest::CryptsetupClose {
+                    mapper: "braid-disk2".into(),
+                },
+                ok_raw("cryptsetup close"),
+            );
+
+        let captured = crate::status_tag::testing::capture_with_color(false, || {
+            let err = close_opened_mappers(&runner, &NoopSleeper, &fs, &opened, false)
+                .expect_err("cleanup should report busy disk1");
+            assert!(
+                err.to_string().contains("device busy"),
+                "expected busy cleanup error, got: {err}"
+            );
+        });
+
+        assert!(
+            captured.contains("cleanup failed: one or more LUKS mappers opened by this command"),
+            "missing cleanup failure guidance: {captured:?}"
+        );
+        assert!(
+            runner.requests().iter().any(
+                |r| matches!(r, CmdRequest::CryptsetupClose { mapper } if mapper == "braid-disk2")
+            ),
+            "cleanup must still attempt disk2"
+        );
+    }
+
+    // Intent: Credential verification rejection with zero opens does not run
+    // forget, close, or trailing cleanup summary.
+    // Why it exists: wrong-passphrase failures must not emit cleanup noise or
+    // attempt to close operator-owned mappers.
+    // Scenario: disk1 rejects the passphrase during the all-disk verification
+    // pass before any `cryptsetup open` command runs.
+    #[test]
+    fn wrong_passphrase_zero_open_cleanup_is_noop() {
+        let config = test_config();
+        let fs = direct_two_disk_fs_with_mappers();
+        let plan = direct_two_disk_plan();
+        let (tp_req, tp_out) = test_passphrase_fail("/dev/disk/by-id/virtio-disk1");
+        let (is_req, is_out) = is_luks_ok("/dev/disk/by-id/virtio-disk1");
+        let (dump_req, dump_out) = luks_dump_text_ok("/dev/disk/by-id/virtio-disk1");
+        let runner = MockRunner::default()
+            .with_output_stdin(tp_req, b"testpass".to_vec(), tp_out)
+            .with_output(is_req, is_out)
+            .with_output(dump_req, dump_out);
+
+        let failure = execute_unlock_and_mount(&runner, &fs, &config, &plan, &test_passphrase())
+            .expect_err("credential verify should fail");
+        assert!(
+            failure.opened_mappers.is_empty(),
+            "wrong passphrase should not report opened mappers"
+        );
+
+        let captured = crate::status_tag::testing::capture_with_color(false, || {
+            close_opened_mappers(&runner, &NoopSleeper, &fs, &failure.opened_mappers, false)
+                .unwrap();
+        });
+        assert_eq!(captured, "", "zero-open cleanup should be silent");
+        assert!(
+            !runner.requests().iter().any(|r| matches!(
+                r,
+                CmdRequest::BtrfsDeviceScanForget { .. } | CmdRequest::CryptsetupClose { .. }
+            )),
+            "zero-open cleanup must not forget or close"
+        );
+    }
+
+    // Intent: Keyfile unlock uses the same opened-mapper cleanup tracking as
+    // passphrase unlock.
+    // Why it exists: a passphrase-only fix would leave auto-unlock failures
+    // able to strand mappers.
+    // Scenario: two keyfile opens succeed, then btrfs scan fails.
+    #[test]
+    fn keyfile_post_open_failure_reports_opened_mappers_for_cleanup() {
+        let config = test_config();
+        let fs = direct_two_disk_fs_with_mappers();
+        let plan = direct_two_disk_plan();
+        let keyfile = tempfile::NamedTempFile::new().unwrap();
+        let keyfile_path = keyfile.path().display().to_string();
+        let runner = MockRunner::default()
+            .with_output(
+                CmdRequest::CryptsetupTestKeyFile {
+                    device: "/dev/disk/by-id/virtio-disk1".into(),
+                    key_file_path: keyfile_path.clone(),
+                },
+                ok_raw("cryptsetup open --test-passphrase"),
+            )
+            .with_output(
+                CmdRequest::CryptsetupTestKeyFile {
+                    device: "/dev/disk/by-id/virtio-disk2".into(),
+                    key_file_path: keyfile_path.clone(),
+                },
+                ok_raw("cryptsetup open --test-passphrase"),
+            )
+            .with_mappers_closed(&["braid-disk1", "braid-disk2"])
+            .with_output(
+                CmdRequest::CryptsetupLuksOpenKeyFile {
+                    device: "/dev/disk/by-id/virtio-disk1".into(),
+                    mapper: "braid-disk1".into(),
+                    key_file_path: keyfile_path.clone(),
+                },
+                ok_raw("cryptsetup open"),
+            )
+            .with_output(
+                CmdRequest::CryptsetupLuksOpenKeyFile {
+                    device: "/dev/disk/by-id/virtio-disk2".into(),
+                    mapper: "braid-disk2".into(),
+                    key_file_path: keyfile_path,
+                },
+                ok_raw("cryptsetup open"),
+            )
+            .with_output(
+                CmdRequest::BtrfsDeviceScanAll,
+                err_raw("btrfs device scan", 1, "scan failed"),
+            )
+            .with_output(
+                CmdRequest::BtrfsDeviceScanForget {
+                    devices: vec![
+                        "/dev/mapper/braid-disk1".into(),
+                        "/dev/mapper/braid-disk2".into(),
+                    ],
+                },
+                ok_raw("btrfs device scan --forget"),
+            )
+            .with_output(
+                CmdRequest::CryptsetupClose {
+                    mapper: "braid-disk1".into(),
+                },
+                ok_raw("cryptsetup close"),
+            )
+            .with_output(
+                CmdRequest::CryptsetupClose {
+                    mapper: "braid-disk2".into(),
+                },
+                ok_raw("cryptsetup close"),
+            );
+
+        let failure = execute_unlock_and_mount(
+            &runner,
+            &fs,
+            &config,
+            &plan,
+            &OpenCredential::KeyFile(keyfile.path().to_path_buf()),
+        )
+        .expect_err("scan should fail");
+
+        assert_eq!(
+            failure.opened_mappers,
+            vec![
+                MapperName("braid-disk1".into()),
+                MapperName("braid-disk2".into()),
+            ]
+        );
+
+        close_opened_mappers(&runner, &NoopSleeper, &fs, &failure.opened_mappers, false)
+            .expect("cleanup should close keyfile-opened mappers");
+
+        let requests = runner.requests();
+        let expected_forget_devices = vec![
+            "/dev/mapper/braid-disk1".to_owned(),
+            "/dev/mapper/braid-disk2".to_owned(),
+        ];
+        let forget_pos = requests
+            .iter()
+            .position(|r| {
+                matches!(
+                    r,
+                    CmdRequest::BtrfsDeviceScanForget { devices }
+                        if devices == &expected_forget_devices
+                )
+            })
+            .expect("cleanup should issue scoped btrfs device scan --forget");
+        let close_positions: Vec<_> = requests
+            .iter()
+            .enumerate()
+            .filter_map(|(idx, request)| match request {
+                CmdRequest::CryptsetupClose { mapper } => Some((idx, mapper.as_str())),
+                _ => None,
+            })
+            .collect();
+
+        assert_eq!(
+            close_positions,
+            vec![
+                (forget_pos + 1, "braid-disk1"),
+                (forget_pos + 2, "braid-disk2"),
+            ],
+            "cleanup should forget the opened mapper paths before closing both mappers"
+        );
+    }
+
+    // Intent: Cleanup warns and continues when scoped `btrfs device scan
+    // --forget` fails.
+    // Why it exists: forget is a stale-cache mitigation, not a reason to skip
+    // closing mappers opened by this command.
+    // Scenario: forget returns non-zero, but both close calls succeed.
+    #[test]
+    fn cleanup_forget_failure_warns_and_still_closes_all_mappers() {
+        let fs = direct_two_disk_fs_with_mappers();
+        let opened = vec![
+            MapperName("braid-disk1".into()),
+            MapperName("braid-disk2".into()),
+        ];
+        let runner = MockRunner::default()
+            .with_output(
+                CmdRequest::BtrfsDeviceScanForget {
+                    devices: vec![
+                        "/dev/mapper/braid-disk1".into(),
+                        "/dev/mapper/braid-disk2".into(),
+                    ],
+                },
+                err_raw("btrfs device scan --forget", 1, "forget failed"),
+            )
+            .with_output(
+                CmdRequest::CryptsetupClose {
+                    mapper: "braid-disk1".into(),
+                },
+                ok_raw("cryptsetup close"),
+            )
+            .with_output(
+                CmdRequest::CryptsetupClose {
+                    mapper: "braid-disk2".into(),
+                },
+                ok_raw("cryptsetup close"),
+            );
+
+        let captured = crate::status_tag::testing::capture_with_color(false, || {
+            close_opened_mappers(&runner, &NoopSleeper, &fs, &opened, false).unwrap();
+        });
+
+        assert!(
+            captured.contains("btrfs device scan --forget failed"),
+            "missing forget warning: {captured:?}"
+        );
+        assert!(
+            captured.contains("cleanup: closed LUKS mappers opened by this command."),
+            "successful close summary should still print: {captured:?}"
+        );
+        let closes = runner
+            .requests()
+            .iter()
+            .filter(|r| matches!(r, CmdRequest::CryptsetupClose { .. }))
+            .count();
+        assert_eq!(closes, 2, "forget failure must not skip closes");
     }
 
     /*

@@ -5,7 +5,9 @@ use crate::mount::{self, MountError, OpenPlan, ProbeEvent};
 use crate::preflight;
 use crate::preview::{self, PerDiskStyle, Preview, PreviewCompleteness, PreviewNote};
 use crate::probe::{self, Filesystem};
+use crate::progress::RealSleeper;
 use crate::state_paths::StatePaths;
+use crate::status_tag::color_enabled_for_stderr;
 use std::path::Path;
 
 #[derive(Debug, thiserror::Error)]
@@ -116,7 +118,19 @@ impl UnlockPlan {
                 params.passphrase_file,
                 params.key_file,
             )?;
-            mount::execute_unlock_and_mount(runner, fs, params.config, &plan, &credential)?;
+            match mount::execute_unlock_and_mount(runner, fs, params.config, &plan, &credential) {
+                Ok(_) => {}
+                Err(failure) => {
+                    let _ = mount::close_opened_mappers(
+                        runner,
+                        &RealSleeper,
+                        fs,
+                        &failure.opened_mappers,
+                        color_enabled_for_stderr(),
+                    );
+                    return Err(failure.error.into());
+                }
+            }
         }
 
         let mount_point = params.config.mount_point();
@@ -773,6 +787,179 @@ mod tests {
         assert!(
             !msg.contains("Wrong passphrase?"),
             "error should not say 'Wrong passphrase?', got: {msg}"
+        );
+    }
+
+    // Intent: unlock reports the original post-open mount failure even if
+    // best-effort cleanup also fails.
+    // Why it exists: a cleanup regression must not replace the primary user
+    // action failure with a secondary `cryptsetup close` error.
+    // Scenario: two disks open successfully, mount fails, and one mapper stays
+    // busy through cleanup retries.
+    #[test]
+    fn cmd_unlock_preserves_mount_error_when_cleanup_close_fails() {
+        let (_state_dir, sp) = test_paths();
+        let config = Config::new(MountPoint("/mnt/storage".to_owned())).unwrap();
+        let mut disks = BTreeMap::new();
+        for (name, path) in [
+            ("disk1", "/dev/disk/by-id/virtio-disk1"),
+            ("disk2", "/dev/disk/by-id/virtio-disk2"),
+        ] {
+            disks.insert(
+                name.to_owned(),
+                DiskMember::from_by_id(ByIdPath(path.to_owned())),
+            );
+        }
+        let membership = PoolMembership { disks };
+        let fs = MockFs::new(&[
+            "/dev/disk/by-id/virtio-disk1",
+            "/dev/disk/by-id/virtio-disk2",
+            "/dev/mapper/braid-disk1",
+            "/dev/mapper/braid-disk2",
+        ]);
+
+        let runner = MockRunner::default()
+            .with_output(
+                CmdRequest::MountpointCheck {
+                    path: MountPoint("/mnt/storage".to_owned()),
+                },
+                err_raw("mountpoint", 1, ""),
+            )
+            .with_output(
+                CmdRequest::CryptsetupLuksUuid {
+                    device: "/dev/disk/by-id/virtio-disk1".into(),
+                },
+                RawCommandOutput {
+                    cmd: "cryptsetup luksUUID".into(),
+                    stdout: "aaaaaaaa-1111-2222-3333-444444444444\n".into(),
+                    stderr: String::new(),
+                    exit_status: 0,
+                },
+            )
+            .with_output(
+                CmdRequest::CryptsetupLuksUuid {
+                    device: "/dev/disk/by-id/virtio-disk2".into(),
+                },
+                RawCommandOutput {
+                    cmd: "cryptsetup luksUUID".into(),
+                    stdout: "bbbbbbbb-1111-2222-3333-444444444444\n".into(),
+                    stderr: String::new(),
+                    exit_status: 0,
+                },
+            )
+            .with_luks_dump_text_luks2_for(&[
+                "/dev/disk/by-id/virtio-disk1",
+                "/dev/disk/by-id/virtio-disk2",
+            ])
+            .with_mappers_closed(&["braid-disk1", "braid-disk2"])
+            .with_output_stdin(
+                CmdRequest::CryptsetupTestPassphrase {
+                    device: "/dev/disk/by-id/virtio-disk1".into(),
+                },
+                b"testpass".to_vec(),
+                ok_raw("cryptsetup open --test-passphrase"),
+            )
+            .with_output_stdin(
+                CmdRequest::CryptsetupTestPassphrase {
+                    device: "/dev/disk/by-id/virtio-disk2".into(),
+                },
+                b"testpass".to_vec(),
+                ok_raw("cryptsetup open --test-passphrase"),
+            )
+            .with_output_stdin(
+                CmdRequest::CryptsetupLuksOpen {
+                    device: "/dev/disk/by-id/virtio-disk1".into(),
+                    mapper: "braid-disk1".into(),
+                },
+                b"testpass".to_vec(),
+                ok_raw("cryptsetup open"),
+            )
+            .with_output_stdin(
+                CmdRequest::CryptsetupLuksOpen {
+                    device: "/dev/disk/by-id/virtio-disk2".into(),
+                    mapper: "braid-disk2".into(),
+                },
+                b"testpass".to_vec(),
+                ok_raw("cryptsetup open"),
+            )
+            .with_output(CmdRequest::BtrfsDeviceScanAll, ok_raw("btrfs device scan"))
+            .with_output(
+                CmdRequest::Mount {
+                    device: "/dev/mapper/braid-disk1".into(),
+                    mount_point: MountPoint("/mnt/storage".to_owned()),
+                },
+                err_raw("mount", 32, "wrong fs type"),
+            )
+            .with_output(
+                CmdRequest::BtrfsDeviceScanForget {
+                    devices: vec![
+                        "/dev/mapper/braid-disk1".into(),
+                        "/dev/mapper/braid-disk2".into(),
+                    ],
+                },
+                ok_raw("btrfs device scan --forget"),
+            )
+            .with_output(
+                CmdRequest::CryptsetupClose {
+                    mapper: "braid-disk1".into(),
+                },
+                err_raw("cryptsetup close", 5, "busy"),
+            )
+            .with_output(
+                CmdRequest::CryptsetupClose {
+                    mapper: "braid-disk2".into(),
+                },
+                ok_raw("cryptsetup close"),
+            );
+
+        let tmp = tempfile::NamedTempFile::new().unwrap();
+        {
+            use std::io::Write;
+            tmp.as_file().write_all(b"testpass").unwrap();
+        }
+
+        let mut result = None;
+        let captured = crate::status_tag::testing::capture_with_color(false, || {
+            result = Some(cmd_unlock(
+                &runner,
+                &fs,
+                &UnlockParams {
+                    config: &config,
+                    membership: &membership,
+                    paths: &sp,
+                    passphrase_stdin: false,
+                    passphrase_file: Some(tmp.path()),
+                    key_file: None,
+                    allow_degraded: false,
+                    dry_run: false,
+                },
+            ));
+        });
+        let err = result
+            .expect("cmd_unlock should run")
+            .expect_err("mount failure should fail unlock");
+
+        match &err {
+            UnlockError::Mount(MountError::MountFailed(msg)) => {
+                assert!(
+                    msg.contains("mount failed (exit 32): wrong fs type"),
+                    "primary error should remain the mount failure, got: {msg}"
+                );
+            }
+            other => panic!("expected mount failure, got: {other:?}"),
+        }
+        assert!(
+            captured.contains("cleanup failed: one or more LUKS mappers opened by this command"),
+            "cleanup failure guidance should be emitted, got: {captured:?}"
+        );
+        assert!(
+            runner.requests().iter().any(|r| matches!(
+                r,
+                CmdRequest::CryptsetupClose {
+                    mapper
+                } if mapper == "braid-disk2"
+            )),
+            "cleanup should keep closing later mappers after the busy close"
         );
     }
 

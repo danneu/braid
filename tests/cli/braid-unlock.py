@@ -605,6 +605,41 @@ with subtest("Test 8: paused balance survives unlock"):
     machine.succeed("btrfs balance cancel /mnt/storage")
     machine.succeed("rm /mnt/storage/balancedata")
 
+# --- Test 9: Failed post-open mount closes mappers opened by unlock ---
+
+with subtest("Test 9: mount failure closes mappers opened by unlock"):
+    close_all()
+
+    # Destructive final subtest: wipe the btrfs signature inside disk1's LUKS
+    # payload so unlock can open every mapper but cannot mount using disk1 as
+    # the mount device.
+    pq = shlex.quote(passphrase)
+    machine.succeed(
+        f"printf '%s' {pq} | cryptsetup luksOpen --key-file=- "
+        "/dev/disk/by-id/virtio-disk1 braid-disk1"
+    )
+    machine.succeed("wipefs -a /dev/mapper/braid-disk1")
+    machine.succeed("cryptsetup close braid-disk1")
+
+    ret = machine.execute(
+        f"{unlock_cmd(passphrase)} >/tmp/fc-stdout 2>/tmp/fc-stderr"
+    )
+    out = machine.succeed("cat /tmp/fc-stdout")
+    err = machine.succeed("cat /tmp/fc-stderr")
+
+    assert ret[0] != 0, "expected non-zero exit for corrupted btrfs signature"
+    assert out == "", "stdout must stay empty on mount failure; got: {!r}".format(out)
+    assert "mount failed" in err, "expected mount failure on stderr; got: {!r}".format(err)
+    assert "cleanup: closed LUKS mappers opened by this command." in err, (
+        "expected cleanup success summary; got: {!r}".format(err)
+    )
+    assert "[wait] disk disk1: locking..." in err, (
+        "expected cleanup lock wait row; got: {!r}".format(err)
+    )
+
+    machine.fail("mountpoint -q /mnt/storage")
+    machine.fail("ls /dev/mapper/ | grep '^braid-'")
+
 # NOTE on LUKS-header-corruption testing at the VM level:
 #
 # The new unlock error-enrichment path (verify/open-loop failure → probe

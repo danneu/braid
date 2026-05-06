@@ -16,6 +16,7 @@ pub mod journal;
 
 pub mod lock;
 pub mod luks;
+pub(crate) mod mapper_close;
 pub mod membership;
 pub mod monitor;
 pub mod mount;

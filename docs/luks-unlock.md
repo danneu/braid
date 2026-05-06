@@ -121,6 +121,39 @@ If `doctor` pointed users at the local files, the product would be internally in
 
 Red flags when reviewing recovery messaging: `/var/lib/braid/luks-headers/`, `.luksheader`, `luks_headers_dir()`, and any `Path::exists` against a backup path.
 
+## Failed unlock cleanup
+
+If `braid unlock` or a recovery mount path opens one or more LUKS mappers
+but fails before mounting the pool, braid fails closed for only the mappers
+opened by that command invocation.
+
+Cleanup is scoped by the LUKS open helper's ownership result:
+
+- `Opened`: braid created the mapper during this command and may close it on
+  failure.
+- `AlreadyOwned`: the mapper was already open at execution time, including
+  races where an operator opened it after planning. braid must not close it.
+
+The cleanup sequence is:
+
+1. If any opened mapper path still exists under `/dev/mapper`, run scoped
+   `btrfs device scan --forget <paths>` for those paths. Failure warns and
+   cleanup continues.
+2. Close every opened mapper with the same retry-on-busy behavior as
+   `braid lock`.
+
+When no mapper was opened, cleanup is a silent no-op: there is no
+`btrfs device scan --forget`, no `cryptsetup close`, and no trailing cleanup
+summary. This is the expected wrong-passphrase shape.
+
+After attempting non-empty cleanup, stderr includes one trailing summary line:
+
+- Success: `cleanup: closed LUKS mappers opened by this command.`
+- Failure: `cleanup failed: one or more LUKS mappers opened by this command could not be closed; run 'braid lock' after resolving the issue. First cleanup error: ...`
+
+The original unlock or mount error remains the command's primary error;
+cleanup output is secondary guidance and never replaces it.
+
 ## Mount point permissions
 
 Standard guidance for directories containing LUKS key material: the

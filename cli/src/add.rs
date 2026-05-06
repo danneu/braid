@@ -8,10 +8,11 @@ use crate::credential_verify::{
 use crate::inhibit::AcquireSleepInhibitor;
 use crate::journal;
 use crate::luks::{
-    PassphraseReader, backup_luks_header, ensure_luks_open, format_keyfile_asymmetry_warning,
-    format_keyfile_enrollment_probe_failure, luks_format, probe_pool_keyfile_enrollment,
-    read_passphrase_with,
+    OpenOutcome, PassphraseReader, backup_luks_header, ensure_luks_open,
+    format_keyfile_asymmetry_warning, format_keyfile_enrollment_probe_failure, luks_format,
+    probe_pool_keyfile_enrollment, read_passphrase_with,
 };
+use crate::mapper_close::close_mapper_with_retry;
 use crate::membership::{self, PoolMembership};
 use crate::parse::btrfs_filesystem_show::{DeviceBtrfsProbe, classify_btrfs_probe};
 use crate::parse::parse_btrfs_filesystem_show;
@@ -22,6 +23,7 @@ use crate::preflight;
 use crate::preview::{self, PerDiskStyle, Preview, PreviewCompleteness, PreviewNote};
 use crate::probe::{Filesystem, ProbeError, probe_config_disk, probe_pool};
 use crate::progress::ProgressOutput;
+use crate::progress::RealSleeper;
 use crate::state_paths::StatePaths;
 use crate::status_tag::{StatusTag, color_enabled_for_stderr, emit_status, status_line};
 use crate::types::*;
@@ -210,6 +212,7 @@ impl<R: CommandRunner> Drop for LuksCleanupGuard<'_, R> {
             return;
         }
         let color_enabled = color_enabled_for_stderr();
+        let sleeper = RealSleeper;
         for mapper in self.mappers.iter().rev() {
             let label = mapper.strip_prefix("braid-").unwrap_or(mapper);
             emit_status(&status_line(
@@ -217,30 +220,13 @@ impl<R: CommandRunner> Drop for LuksCleanupGuard<'_, R> {
                 color_enabled,
                 &format!("disk {label}: locking (cleanup)..."),
             ));
-            match self.runner.run(&CmdRequest::CryptsetupClose {
-                mapper: mapper.clone(),
-            }) {
-                Ok(r) if r.exit_status == 0 => {
+            match close_mapper_with_retry(self.runner, &sleeper, mapper, color_enabled) {
+                Ok(()) => {
                     emit_status(&status_line(
                         StatusTag::Ok,
                         color_enabled,
                         &format!("disk {label}: locked (cleanup)"),
                     ));
-                }
-                Ok(r) => {
-                    let detail = r.stderr.trim();
-                    let body = if detail.is_empty() {
-                        format!(
-                            "disk {label}: lock failed (cleanup, exit {})",
-                            r.exit_status
-                        )
-                    } else {
-                        format!(
-                            "disk {label}: lock failed (cleanup, exit {}: {detail})",
-                            r.exit_status
-                        )
-                    };
-                    emit_status(&status_line(StatusTag::Warn, color_enabled, &body));
                 }
                 Err(e) => {
                     emit_status(&status_line(
@@ -766,8 +752,11 @@ impl AddPlan {
                 color_enabled,
                 &format!("disk {}: unlocking...", target.name),
             ));
-            ensure_luks_open(runner, &target.name, &target.by_id, &passphrase)?;
-            luks_guard.track(target.mapper_name.clone());
+            if ensure_luks_open(runner, &target.name, &target.by_id, &passphrase)?
+                == OpenOutcome::Opened
+            {
+                luks_guard.track(target.mapper_name.clone());
+            }
             emit_status(&status_line(
                 StatusTag::Ok,
                 color_enabled,
@@ -924,8 +913,9 @@ impl AddPlan {
                     &format!("disk {name}: unlocking..."),
                 )
             );
-            ensure_luks_open(runner, name, &target.by_id, &passphrase)?;
-            luks_guard.track(target.mapper_name.clone());
+            if ensure_luks_open(runner, name, &target.by_id, &passphrase)? == OpenOutcome::Opened {
+                luks_guard.track(target.mapper_name.clone());
+            }
             eprint!(
                 "{}",
                 status_line(
@@ -2459,12 +2449,63 @@ mod tests {
             // guard drops here while still armed
         });
         let wait = "[wait] disk aaa: locking (cleanup)...";
-        let warn = "[warn] disk aaa: lock failed (cleanup, exit 5: device is busy)";
+        let warn = "[warn] disk aaa: lock failed (cleanup, device busy: cryptsetup close braid-aaa failed (exit 5): device is busy)";
         assert!(captured.contains(wait), "missing wait row: {captured:?}");
         assert!(captured.contains(warn), "missing warn row: {captured:?}");
         assert!(
             captured.find(wait) < captured.find(warn),
             "cleanup wait must precede warn, got: {captured:?}"
+        );
+    }
+
+    #[test]
+    fn guard_retries_busy_close_before_success() {
+        // Intent: add cleanup uses the shared retry-on-exit-5 close helper.
+        // Why it exists: add and unlock must share close mechanics even though
+        // add keeps its own best-effort warning policy.
+        // Scenario: cleanup close for a mapper is busy once, then succeeds.
+        let runner = MockRunner::default().with_output_sequence(
+            CmdRequest::CryptsetupClose {
+                mapper: "braid-aaa".into(),
+            },
+            vec![
+                RawCommandOutput {
+                    cmd: "cryptsetup close".into(),
+                    stdout: String::new(),
+                    stderr: "device is busy".into(),
+                    exit_status: 5,
+                },
+                RawCommandOutput {
+                    cmd: "cryptsetup close".into(),
+                    stdout: String::new(),
+                    stderr: String::new(),
+                    exit_status: 0,
+                },
+            ],
+        );
+        let captured = crate::status_tag::testing::capture_with_color(false, || {
+            let mut guard = LuksCleanupGuard::new(&runner);
+            guard.track("braid-aaa".into());
+            // guard drops here while still armed
+        });
+
+        let close_count = runner
+            .requests()
+            .iter()
+            .filter(|r| matches!(r, CmdRequest::CryptsetupClose { .. }))
+            .count();
+        assert_eq!(close_count, 2, "busy close should be retried once");
+        assert!(
+            captured.contains("cryptsetup close braid-aaa busy, retrying (1/3)..."),
+            "missing shared retry warning: {captured:?}"
+        );
+        assert!(
+            captured.contains("[ok]   disk aaa: locked (cleanup)"),
+            "cleanup should finish with ok row: {captured:?}"
+        );
+        assert!(
+            !captured.contains("lock failed (cleanup"),
+            "successful retry must not emit final cleanup warning: {captured:?}"
         );
     }
 
@@ -2508,6 +2549,50 @@ mod tests {
         assert!(
             !closed.contains(&"braid-existing".to_string()),
             "must not close a mapper we didn't open"
+        );
+    }
+
+    #[test]
+    fn already_owned_open_outcome_is_not_tracked_by_guard() {
+        // Intent: LuksCleanupGuard tracks only ensure_luks_open outcomes that
+        // actually opened a mapper.
+        // Why it exists: an already-owned mapper at execute time can come from
+        // operator action between plan and execution; add must not close it on
+        // a later failure.
+        // Scenario: ensure_luks_open finds braid-existing already active with
+        // the requested LUKS UUID, then the armed guard drops.
+        let by_id = ByIdPath("/dev/disk/by-id/existing".into());
+        let uuid = "11111111-1111-1111-1111-111111111111";
+        let runner = MockRunner::default()
+            .with_mapper_open("braid-existing", "/dev/vdb", uuid)
+            .with_output(
+                CmdRequest::CryptsetupLuksUuid {
+                    device: by_id.0.clone(),
+                },
+                RawCommandOutput {
+                    cmd: "cryptsetup luksUUID".into(),
+                    stdout: format!("{uuid}\n"),
+                    stderr: String::new(),
+                    exit_status: 0,
+                },
+            );
+
+        {
+            let mut guard = LuksCleanupGuard::new(&runner);
+            if ensure_luks_open(&runner, "existing", &by_id, "testpass").unwrap()
+                == OpenOutcome::Opened
+            {
+                guard.track("braid-existing".into());
+            }
+            // guard drops here while still armed
+        }
+
+        assert!(
+            !runner
+                .requests()
+                .iter()
+                .any(|r| matches!(r, CmdRequest::CryptsetupClose { mapper } if mapper == "braid-existing")),
+            "already-owned mapper must not be closed by add cleanup guard"
         );
     }
 

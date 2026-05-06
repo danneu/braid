@@ -567,6 +567,12 @@ enum MapperOwnership {
     Owned,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum OpenOutcome {
+    Opened,
+    AlreadyOwned,
+}
+
 fn luks_uuid_for_device<R: CommandRunner>(runner: &R, device: &str) -> Result<LuksUuid, LuksError> {
     let raw = runner.run(&CmdRequest::CryptsetupLuksUuid {
         device: device.to_owned(),
@@ -633,10 +639,10 @@ pub fn ensure_luks_open<R: CommandRunner>(
     name: &str,
     by_id: &ByIdPath,
     passphrase: &str,
-) -> Result<(), LuksError> {
+) -> Result<OpenOutcome, LuksError> {
     let mn = mapper_name(name);
     if mapper_ownership(runner, name, by_id, &mn)? == MapperOwnership::Owned {
-        return Ok(());
+        return Ok(OpenOutcome::AlreadyOwned);
     }
 
     let result = runner.run_with_stdin(
@@ -654,7 +660,7 @@ pub fn ensure_luks_open<R: CommandRunner>(
             stderr: result.stderr.trim().to_owned(),
         });
     }
-    Ok(())
+    Ok(OpenOutcome::Opened)
 }
 
 /// Check if a mapper device has a btrfs superblock.
@@ -676,10 +682,10 @@ pub fn ensure_luks_open_with_key_file<R: CommandRunner>(
     name: &str,
     by_id: &ByIdPath,
     key_file_path: &std::path::Path,
-) -> Result<(), LuksError> {
+) -> Result<OpenOutcome, LuksError> {
     let mn = mapper_name(name);
     if mapper_ownership(runner, name, by_id, &mn)? == MapperOwnership::Owned {
-        return Ok(());
+        return Ok(OpenOutcome::AlreadyOwned);
     }
 
     let result = runner.run(&CmdRequest::CryptsetupLuksOpenKeyFile {
@@ -695,7 +701,7 @@ pub fn ensure_luks_open_with_key_file<R: CommandRunner>(
             stderr: result.stderr.trim().to_owned(),
         });
     }
-    Ok(())
+    Ok(OpenOutcome::Opened)
 }
 
 /// Verify a binary keyfile against an existing LUKS device.

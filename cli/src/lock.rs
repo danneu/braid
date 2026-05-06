@@ -1,12 +1,11 @@
-use std::thread;
-use std::time::Duration;
-
 use crate::cmd::{CmdError, CmdRequest, CommandRunner, Step};
 use crate::config::{Config, mapper_name, name_from_mapper};
+use crate::mapper_close::{CloseMapperError, close_mapper_with_retry};
 use crate::membership::PoolMembership;
 use crate::preflight;
 use crate::preview::{Preview, PreviewCompleteness, PreviewNote};
 use crate::probe::{Filesystem, probe_fsid};
+use crate::progress::{RealSleeper, Sleeper};
 use crate::status_tag::{StatusTag, color_enabled_for_stderr, status_line};
 use crate::types::MountPoint;
 
@@ -20,70 +19,14 @@ pub enum LockError {
     DeviceBusy(String),
 }
 
-const CLOSE_RETRY_ATTEMPTS: u32 = 3;
-const CLOSE_RETRY_DELAY: Duration = Duration::from_millis(500);
-
-/// Abstraction over `thread::sleep` so unit tests can drive the retry
-/// loop without paying real wall-clock time. The production path uses
-/// `RealSleeper`; tests inject a noop or recording sleeper.
-pub(crate) trait Sleeper {
-    fn sleep(&self, duration: Duration);
-}
-
-struct RealSleeper;
-
-impl Sleeper for RealSleeper {
-    fn sleep(&self, duration: Duration) {
-        thread::sleep(duration);
+impl From<CloseMapperError> for LockError {
+    fn from(value: CloseMapperError) -> Self {
+        match value {
+            CloseMapperError::Cmd(e) => LockError::Cmd(e),
+            CloseMapperError::Failed(msg) => LockError::Failed(msg),
+            CloseMapperError::DeviceBusy(msg) => LockError::DeviceBusy(msg),
+        }
     }
-}
-
-/// Close a LUKS mapper, retrying up to 3 times if the error indicates the
-/// device is busy. Non-busy errors fail immediately.
-fn close_mapper_with_retry<R: CommandRunner, S: Sleeper>(
-    runner: &R,
-    sleeper: &S,
-    mapper: &str,
-    color_enabled: bool,
-) -> Result<(), LockError> {
-    for attempt in 1..=CLOSE_RETRY_ATTEMPTS {
-        let result = runner.run(&CmdRequest::CryptsetupClose {
-            mapper: mapper.to_owned(),
-        })?;
-        if result.exit_status == 0 {
-            return Ok(());
-        }
-        let msg = format!(
-            "cryptsetup close {} failed (exit {}): {}",
-            mapper,
-            result.exit_status,
-            result.stderr.trim()
-        );
-        // cryptsetup close (lib/setup.c:5763-5811) returns -EBUSY for a held
-        // mapper, translated to exit 5 by src/utils_tools.c translate_errno.
-        // On the close path exit 5 is EBUSY-exclusive (no -EEXIST branch),
-        // so matching exit status is wording- and locale-agnostic and
-        // survives upstream phrasing drift.
-        let is_busy = result.exit_status == 5;
-        if !is_busy {
-            return Err(LockError::Failed(msg));
-        }
-        if attempt == CLOSE_RETRY_ATTEMPTS {
-            return Err(LockError::DeviceBusy(msg));
-        }
-        eprint!(
-            "{}",
-            status_line(
-                StatusTag::Warn,
-                color_enabled,
-                &format!(
-                    "cryptsetup close {mapper} busy, retrying ({attempt}/{CLOSE_RETRY_ATTEMPTS})..."
-                )
-            )
-        );
-        sleeper.sleep(CLOSE_RETRY_DELAY);
-    }
-    unreachable!()
 }
 
 /// Enumerate braid-* mappers under /dev/mapper that are NOT in the pool
@@ -342,7 +285,7 @@ impl LockPlan {
                     Ok(()) => {
                         eprint!("{}", line(StatusTag::Ok, &format!("disk {name}: locked")));
                     }
-                    Err(LockError::DeviceBusy(msg)) if umount_error.is_some() => {
+                    Err(CloseMapperError::DeviceBusy(msg)) if umount_error.is_some() => {
                         eprint!(
                             "{}",
                             line(
@@ -352,9 +295,10 @@ impl LockPlan {
                         );
                     }
                     Err(e) => {
-                        eprint!("{}", line(StatusTag::Fail, &format!("disk {name}: {e}")));
+                        let err = LockError::from(e);
+                        eprint!("{}", line(StatusTag::Fail, &format!("disk {name}: {err}")));
                         if first_mapper_error.is_none() {
-                            first_mapper_error = Some(e);
+                            first_mapper_error = Some(err);
                         }
                     }
                 }
@@ -398,7 +342,7 @@ impl LockPlan {
                         line(StatusTag::Ok, &format!("disk {disk_name}: locked (orphan)"))
                     );
                 }
-                Err(LockError::DeviceBusy(msg)) if umount_error.is_some() => {
+                Err(CloseMapperError::DeviceBusy(msg)) if umount_error.is_some() => {
                     eprint!(
                         "{}",
                         line(
@@ -410,12 +354,13 @@ impl LockPlan {
                     );
                 }
                 Err(e) => {
+                    let err = LockError::from(e);
                     eprint!(
                         "{}",
-                        line(StatusTag::Fail, &format!("disk {disk_name}: orphan: {e}"))
+                        line(StatusTag::Fail, &format!("disk {disk_name}: orphan: {err}"))
                     );
                     if first_mapper_error.is_none() {
-                        first_mapper_error = Some(e);
+                        first_mapper_error = Some(err);
                     }
                 }
             }
@@ -537,10 +482,12 @@ mod tests {
     use super::*;
     use crate::cmd::{CmdError, MockRunner, RawCommandOutput};
     use crate::config::Config;
+    use crate::mapper_close::{CLOSE_RETRY_ATTEMPTS, CLOSE_RETRY_DELAY};
     use crate::membership::{DiskMember, PoolMembership};
     use crate::types::{ByIdPath, MountPoint};
     use std::collections::{BTreeMap, HashMap, VecDeque};
     use std::sync::Mutex;
+    use std::time::Duration;
 
     /// A runner that delegates to MockRunner but records which
     /// CryptsetupClose requests were made. Optionally serves a per-mapper
@@ -2208,7 +2155,7 @@ mod tests {
         let err = close_mapper_with_retry(&runner, &sleeper, "braid-aaa", false)
             .expect_err("should exhaust retries and return DeviceBusy");
         assert!(
-            matches!(err, LockError::DeviceBusy(_)),
+            matches!(err, CloseMapperError::DeviceBusy(_)),
             "expected DeviceBusy after retry exhaustion, got: {err:?}"
         );
 

@@ -11,7 +11,7 @@ use crate::parse::btrfs_filesystem_show::{DeviceBtrfsProbe, classify_btrfs_probe
 use crate::parse::{ReplaceState, parse_btrfs_replace_status};
 use crate::preview::{self, PerDiskStyle, Preview, PreviewCompleteness, PreviewNote};
 use crate::probe::{self, Filesystem, ProbeError};
-use crate::progress::{self, ProgressOutput, Sleeper};
+use crate::progress::{self, ProgressOutput, RealSleeper, Sleeper};
 use crate::state_paths::StatePaths;
 use crate::status::{BalanceReport, get_balance_report};
 use crate::status_tag::{StatusTag, color_enabled_for_stderr, emit_status, status_line};
@@ -816,24 +816,34 @@ fn execute_recover_initial_open<R: CommandRunner + Sync, F: Filesystem + ?Sized>
         );
     }
 
-    let res = if open_plan.to_unlock.is_empty() {
+    enum InitialOpenFailure {
+        MountOnly(MountError),
+        Unlock(mount::UnlockAndMountFailure),
+    }
+
+    let res: Result<bool, InitialOpenFailure> = if open_plan.to_unlock.is_empty() {
         mount::execute_mount_only(runner, fs, params.config, open_plan)
+            .map_err(InitialOpenFailure::MountOnly)
     } else {
         let cred = state
             .credential
             .as_ref()
             .expect("credential resolved above when open_plan is Some");
         mount::execute_unlock_and_mount(runner, fs, params.config, open_plan, cred)
+            .map_err(InitialOpenFailure::Unlock)
     };
 
     state.just_mounted = match res {
         Ok(just_mounted) => just_mounted,
-        Err(e) => {
+        Err(InitialOpenFailure::MountOnly(e)) => {
+            return Err(e.into());
+        }
+        Err(InitialOpenFailure::Unlock(failure)) => {
             // Bootstrap mount failure: probe the target devices to confirm
             // no btrfs superblock exists -- only then is it safe to advise
             // wiping.
             if plan.journal.pre_membership.disks.is_empty()
-                && let mount::MountError::MountFailed(_) = &e
+                && let mount::MountError::MountFailed(_) = &failure.error
                 && let journal::OpKind::Add { targets, .. } = &plan.journal.op
             {
                 let all_no_btrfs = targets.values().all(|target| {
@@ -843,6 +853,13 @@ fn execute_recover_initial_open<R: CommandRunner + Sync, F: Filesystem + ?Sized>
                         Err(_) => false,
                     }
                 });
+                let _ = mount::close_opened_mappers(
+                    runner,
+                    &RealSleeper,
+                    fs,
+                    &failure.opened_mappers,
+                    color_enabled_for_stderr(),
+                );
                 if all_no_btrfs {
                     let disk_list: Vec<_> = plan
                         .union
@@ -865,8 +882,16 @@ fn execute_recover_initial_open<R: CommandRunner + Sync, F: Filesystem + ?Sized>
                         disk_list.join("\n"),
                     )));
                 }
+                return Err(failure.error.into());
             }
-            return Err(e.into());
+            let _ = mount::close_opened_mappers(
+                runner,
+                &RealSleeper,
+                fs,
+                &failure.opened_mappers,
+                color_enabled_for_stderr(),
+            );
+            return Err(failure.error.into());
         }
     };
     Ok(())
@@ -2874,8 +2899,22 @@ fn relock_and_remount<R: CommandRunner, F: Filesystem + ?Sized>(
         .ok_or_else(|| {
             RecoverError::Failed("recover remount cycle: pool already mounted after umount?".into())
         })?;
-    mount::execute_unlock_and_mount(runner, fs, config, &cycle_plan, credential)
-        .map_err(|e| RecoverError::Failed(format!("recover remount cycle: re-mount: {e}")))?;
+    match mount::execute_unlock_and_mount(runner, fs, config, &cycle_plan, credential) {
+        Ok(_) => {}
+        Err(failure) => {
+            let _ = mount::close_opened_mappers(
+                runner,
+                &RealSleeper,
+                fs,
+                &failure.opened_mappers,
+                color_enabled,
+            );
+            return Err(RecoverError::Failed(format!(
+                "recover remount cycle: re-mount: {}",
+                failure.error
+            )));
+        }
+    }
 
     Ok(())
 }
@@ -5561,7 +5600,7 @@ mod tests {
         let tmp = tempfile::TempDir::new().unwrap();
         let paths = StatePaths::custom(tmp.path().into());
         let config = Config::new(MountPoint("/mnt/storage".into())).unwrap();
-        let fs = MockFs::new(&["/dev/disk/by-id/virtio-disk1"]);
+        let fs = MockFs::new(&["/dev/disk/by-id/virtio-disk1", "/dev/mapper/braid-disk1"]);
         let journal = recoverable_pool_mutation_add_journal();
         journal::write_journal(&paths, &journal).unwrap();
 
@@ -8686,6 +8725,154 @@ mod tests {
         );
     }
 
+    // Intent: A post-open failure in the recover remount cycle closes the
+    // mappers reopened by that cycle.
+    // Why it exists: the cycle intentionally destroys and recreates dm-crypt
+    // devices; if re-mount then fails, those newly-opened mappers belong to
+    // recover and must not be left open.
+    // Scenario: relock/remount closes two membership mappers, reopens both,
+    // then the final mount fails.
+    #[test]
+    fn recover_remount_cycle_mount_failure_closes_reopened_mappers() {
+        let config = Config::new(MountPoint("/mnt/storage".into())).unwrap();
+        let fs = MockFs::new(&[
+            "/dev/disk/by-id/virtio-disk1",
+            "/dev/disk/by-id/virtio-disk2",
+            "/dev/mapper/braid-disk1",
+            "/dev/mapper/braid-disk2",
+        ]);
+        let membership = PoolMembership {
+            disks: BTreeMap::from([
+                (
+                    "disk1".to_owned(),
+                    DiskMember::from_by_id(ByIdPath("/dev/disk/by-id/virtio-disk1".into())),
+                ),
+                (
+                    "disk2".to_owned(),
+                    DiskMember::from_by_id(ByIdPath("/dev/disk/by-id/virtio-disk2".into())),
+                ),
+            ]),
+        };
+        let (mp_req, mp_out) = mountpoint_fail();
+        let runner = MockRunner::default()
+            .with_output(
+                CmdRequest::Umount {
+                    mount_point: MountPoint("/mnt/storage".into()),
+                },
+                ok_raw_empty("umount"),
+            )
+            .with_output(
+                CmdRequest::BtrfsDeviceScanForget {
+                    devices: vec![
+                        "/dev/mapper/braid-disk1".into(),
+                        "/dev/mapper/braid-disk2".into(),
+                    ],
+                },
+                ok_raw_empty("btrfs device scan --forget"),
+            )
+            .with_output(
+                CmdRequest::CryptsetupClose {
+                    mapper: "braid-disk1".into(),
+                },
+                ok_raw_empty("cryptsetup close"),
+            )
+            .with_output(
+                CmdRequest::CryptsetupClose {
+                    mapper: "braid-disk2".into(),
+                },
+                ok_raw_empty("cryptsetup close"),
+            )
+            .with_output(mp_req, mp_out)
+            .with_output(
+                CmdRequest::CryptsetupLuksUuid {
+                    device: "/dev/disk/by-id/virtio-disk1".into(),
+                },
+                cryptsetup_uuid_ok(
+                    "/dev/disk/by-id/virtio-disk1",
+                    "11111111-1111-1111-1111-111111111111",
+                ),
+            )
+            .with_output(
+                CmdRequest::CryptsetupLuksUuid {
+                    device: "/dev/disk/by-id/virtio-disk2".into(),
+                },
+                cryptsetup_uuid_ok(
+                    "/dev/disk/by-id/virtio-disk2",
+                    "22222222-2222-2222-2222-222222222222",
+                ),
+            )
+            .with_luks_dump_text_luks2_for(&[
+                "/dev/disk/by-id/virtio-disk1",
+                "/dev/disk/by-id/virtio-disk2",
+            ])
+            .with_mappers_closed(&["braid-disk1", "braid-disk2"])
+            .with_output_stdin(
+                CmdRequest::CryptsetupTestPassphrase {
+                    device: "/dev/disk/by-id/virtio-disk1".into(),
+                },
+                b"testpass".to_vec(),
+                ok_raw_empty("cryptsetup open --test-passphrase"),
+            )
+            .with_output_stdin(
+                CmdRequest::CryptsetupTestPassphrase {
+                    device: "/dev/disk/by-id/virtio-disk2".into(),
+                },
+                b"testpass".to_vec(),
+                ok_raw_empty("cryptsetup open --test-passphrase"),
+            )
+            .with_output_stdin(
+                CmdRequest::CryptsetupLuksOpen {
+                    device: "/dev/disk/by-id/virtio-disk1".into(),
+                    mapper: "braid-disk1".into(),
+                },
+                b"testpass".to_vec(),
+                ok_raw_empty("cryptsetup open"),
+            )
+            .with_output_stdin(
+                CmdRequest::CryptsetupLuksOpen {
+                    device: "/dev/disk/by-id/virtio-disk2".into(),
+                    mapper: "braid-disk2".into(),
+                },
+                b"testpass".to_vec(),
+                ok_raw_empty("cryptsetup open"),
+            )
+            .with_output(
+                CmdRequest::BtrfsDeviceScanAll,
+                ok_raw_empty("btrfs device scan"),
+            )
+            .with_output(
+                CmdRequest::Mount {
+                    device: "/dev/mapper/braid-disk1".into(),
+                    mount_point: MountPoint("/mnt/storage".into()),
+                },
+                err_raw("mount", 32, "mount failed"),
+            );
+
+        let err = relock_and_remount(
+            &runner,
+            &fs,
+            &config,
+            &membership,
+            false,
+            &OpenCredential::Passphrase(zeroize::Zeroizing::new("testpass".to_owned())),
+        )
+        .expect_err("final mount should fail");
+        assert!(
+            err.to_string().contains("recover remount cycle: re-mount"),
+            "error should preserve re-mount context: {err}"
+        );
+
+        let closes = runner
+            .requests()
+            .iter()
+            .filter(|r| matches!(r, CmdRequest::CryptsetupClose { .. }))
+            .count();
+        assert_eq!(
+            closes, 4,
+            "two cycle closes plus two cleanup closes should run"
+        );
+    }
+
     /// Intent: When a disk is absent and --allow-degraded is not passed, recover
     /// must refuse with a structured DegradedRefused error.
     ///
@@ -9310,6 +9497,18 @@ mod tests {
                     "not a valid btrfs filesystem on /dev/mapper/braid-disk1",
                 ),
             )
+            .with_output(
+                CmdRequest::BtrfsDeviceScanForget {
+                    devices: vec!["/dev/mapper/braid-disk1".into()],
+                },
+                ok_raw_empty("btrfs device scan --forget"),
+            )
+            .with_output(
+                CmdRequest::CryptsetupClose {
+                    mapper: "braid-disk1".into(),
+                },
+                ok_raw_empty("cryptsetup close"),
+            )
             .with_luks_dump_text_luks2("/dev/disk/by-id/virtio-disk1")
             .with_mapper_closed("braid-disk1");
 
@@ -9358,6 +9557,19 @@ mod tests {
         );
         // pool.json must NOT have been written
         assert!(!paths.pool_json().exists(), "pool.json should not exist");
+        let requests = runner.requests();
+        let probe_pos = requests
+            .iter()
+            .position(|r| matches!(r, CmdRequest::BtrfsFilesystemShowTarget { .. }))
+            .expect("bootstrap probe should run");
+        let close_pos = requests
+            .iter()
+            .position(|r| matches!(r, CmdRequest::CryptsetupClose { .. }))
+            .expect("cleanup close should run");
+        assert!(
+            probe_pos < close_pos,
+            "bootstrap probe must precede cleanup"
+        );
     }
 
     /// Intent: when bootstrap recover fails due to wrong passphrase, the error
@@ -9376,7 +9588,7 @@ mod tests {
         let tmp = tempfile::TempDir::new().unwrap();
         let paths = StatePaths::custom(tmp.path().into());
         let config = Config::new(MountPoint("/mnt/storage".into())).unwrap();
-        let fs = MockFs::new(&["/dev/disk/by-id/virtio-disk1"]);
+        let fs = MockFs::new(&["/dev/disk/by-id/virtio-disk1", "/dev/mapper/braid-disk1"]);
 
         let journal = bootstrap_journal();
         journal::write_journal(&paths, &journal).unwrap();
@@ -9613,6 +9825,18 @@ mod tests {
                      \tdevid    1 size 10.00GiB used 536.00MiB path /dev/mapper/braid-disk1\n",
                 ),
             )
+            .with_output(
+                CmdRequest::BtrfsDeviceScanForget {
+                    devices: vec!["/dev/mapper/braid-disk1".into()],
+                },
+                ok_raw_empty("btrfs device scan --forget"),
+            )
+            .with_output(
+                CmdRequest::CryptsetupClose {
+                    mapper: "braid-disk1".into(),
+                },
+                ok_raw_empty("cryptsetup close"),
+            )
             .with_luks_dump_text_luks2("/dev/disk/by-id/virtio-disk1")
             .with_mapper_closed("braid-disk1");
 
@@ -9653,6 +9877,12 @@ mod tests {
         assert!(
             paths.pending_op_json().exists(),
             "journal should still exist"
+        );
+        assert!(
+            runner.requests().iter().any(
+                |r| matches!(r, CmdRequest::CryptsetupClose { mapper } if mapper == "braid-disk1")
+            ),
+            "bootstrap mount failure with btrfs superblock should still cleanup opened mapper"
         );
     }
 

@@ -107,8 +107,8 @@ with subtest("braid recover prints bootstrap escape instructions"):
 
 # --- Phase 4: Verify state ---
 
-with subtest("LUKS mapper was opened (proves MountFailed path was reached)"):
-    machine.succeed("test -e /dev/mapper/braid-disk1")
+with subtest("LUKS mapper was closed after failed recover"):
+    machine.fail("test -e /dev/mapper/braid-disk1")
 
 with subtest("No state mutation after bootstrap crash"):
     # Journal preserved — user needs it to follow escape instructions
