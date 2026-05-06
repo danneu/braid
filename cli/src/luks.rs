@@ -561,10 +561,46 @@ pub(crate) fn luks_header_damaged_guidance(device: &str) -> String {
     )
 }
 
+/// Shared mapper ownership classifier surface. Keep this top-level so
+/// planner-time probes and executor-time unlocks use the same ownership
+/// invariant: an active braid mapper is ours only when its backing LUKS
+/// UUID matches the configured by-id disk.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum MapperOwnership {
+pub(crate) enum MapperOwnership {
     Inactive,
     Owned,
+}
+
+#[derive(Debug, thiserror::Error)]
+pub(crate) enum OwnershipError {
+    #[error("mapper conflict on '{name}': expected {expected}, found {found:?}")]
+    Conflict {
+        name: String,
+        expected: LuksUuid,
+        found: Option<LuksUuid>,
+    },
+    #[error("parse error: {0}")]
+    Parse(#[from] ParseError),
+    #[error("command failed: {0}")]
+    Cmd(#[from] CmdError),
+}
+
+impl From<OwnershipError> for LuksError {
+    fn from(err: OwnershipError) -> Self {
+        match err {
+            OwnershipError::Conflict {
+                name,
+                expected,
+                found,
+            } => LuksError::MapperConflict {
+                name,
+                expected,
+                found,
+            },
+            OwnershipError::Parse(err) => LuksError::Parse(err),
+            OwnershipError::Cmd(err) => LuksError::Cmd(err),
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -573,19 +609,26 @@ pub enum OpenOutcome {
     AlreadyOwned,
 }
 
-fn luks_uuid_for_device<R: CommandRunner>(runner: &R, device: &str) -> Result<LuksUuid, LuksError> {
+fn luks_uuid_for_device<R: CommandRunner>(
+    runner: &R,
+    device: &str,
+) -> Result<LuksUuid, OwnershipError> {
     let raw = runner.run(&CmdRequest::CryptsetupLuksUuid {
         device: device.to_owned(),
     })?;
     Ok(parse_cryptsetup_luks_uuid(&raw)?.uuid)
 }
 
-fn mapper_ownership<R: CommandRunner>(
+pub(crate) fn classify_mapper_ownership<R, F>(
     runner: &R,
     name: &str,
-    by_id: &ByIdPath,
     mapper: &MapperName,
-) -> Result<MapperOwnership, LuksError> {
+    expected_uuid: F,
+) -> Result<MapperOwnership, OwnershipError>
+where
+    R: CommandRunner,
+    F: FnOnce() -> Result<LuksUuid, OwnershipError>,
+{
     let status_raw = runner.run(&CmdRequest::CryptsetupStatus {
         mapper: mapper.0.clone(),
     })?;
@@ -595,10 +638,10 @@ fn mapper_ownership<R: CommandRunner>(
         return Ok(MapperOwnership::Inactive);
     }
 
-    let expected = luks_uuid_for_device(runner, &by_id.0)?;
+    let expected = expected_uuid()?;
     let underlying = match status.device.as_deref() {
         None | Some("") | Some("(null)") => {
-            return Err(LuksError::MapperConflict {
+            return Err(OwnershipError::Conflict {
                 name: name.to_owned(),
                 expected,
                 found: None,
@@ -613,19 +656,19 @@ fn mapper_ownership<R: CommandRunner>(
     let found = match parse_cryptsetup_luks_uuid(&backing_raw) {
         Ok(out) => out.uuid,
         Err(_) if cryptsetup_luks_uuid_reports_not_luks(&backing_raw) => {
-            return Err(LuksError::MapperConflict {
+            return Err(OwnershipError::Conflict {
                 name: name.to_owned(),
                 expected,
                 found: None,
             });
         }
-        Err(e) => return Err(LuksError::Parse(e)),
+        Err(e) => return Err(OwnershipError::Parse(e)),
     };
 
     if found == expected {
         Ok(MapperOwnership::Owned)
     } else {
-        Err(LuksError::MapperConflict {
+        Err(OwnershipError::Conflict {
             name: name.to_owned(),
             expected,
             found: Some(found),
@@ -641,7 +684,9 @@ pub fn ensure_luks_open<R: CommandRunner>(
     passphrase: &str,
 ) -> Result<OpenOutcome, LuksError> {
     let mn = mapper_name(name);
-    if mapper_ownership(runner, name, by_id, &mn)? == MapperOwnership::Owned {
+    if classify_mapper_ownership(runner, name, &mn, || luks_uuid_for_device(runner, &by_id.0))?
+        == MapperOwnership::Owned
+    {
         return Ok(OpenOutcome::AlreadyOwned);
     }
 
@@ -684,7 +729,9 @@ pub fn ensure_luks_open_with_key_file<R: CommandRunner>(
     key_file_path: &std::path::Path,
 ) -> Result<OpenOutcome, LuksError> {
     let mn = mapper_name(name);
-    if mapper_ownership(runner, name, by_id, &mn)? == MapperOwnership::Owned {
+    if classify_mapper_ownership(runner, name, &mn, || luks_uuid_for_device(runner, &by_id.0))?
+        == MapperOwnership::Owned
+    {
         return Ok(OpenOutcome::AlreadyOwned);
     }
 

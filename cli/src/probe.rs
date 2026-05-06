@@ -1,5 +1,6 @@
 use crate::cmd::{CmdError, CmdRequest, CommandRunner};
 use crate::config::mapper_name;
+use crate::luks::{MapperOwnership, OwnershipError, classify_mapper_ownership};
 use crate::parse::{
     ParseError, parse_btrfs_filesystem_show, parse_cryptsetup_luks_label,
     parse_cryptsetup_luks_uuid, parse_cryptsetup_luks_version, parse_cryptsetup_status,
@@ -93,6 +94,24 @@ fn found_display(found: &Option<LuksUuid>) -> String {
     }
 }
 
+impl From<OwnershipError> for ProbeError {
+    fn from(err: OwnershipError) -> Self {
+        match err {
+            OwnershipError::Conflict {
+                name,
+                expected,
+                found,
+            } => ProbeError::MapperConflict {
+                name,
+                expected,
+                found,
+            },
+            OwnershipError::Parse(err) => ProbeError::Parse(err),
+            OwnershipError::Cmd(err) => ProbeError::Cmd(err),
+        }
+    }
+}
+
 // ---------------------------------------------------------------------------
 // probe_config_disk
 // ---------------------------------------------------------------------------
@@ -180,37 +199,9 @@ fn probe_mapper_open<R: CommandRunner>(
     mapper: &MapperName,
     expected_uuid: &LuksUuid,
 ) -> Result<bool, ProbeError> {
-    let status_raw = runner.run(&CmdRequest::CryptsetupStatus {
-        mapper: mapper.0.clone(),
-    })?;
-    let status = parse_cryptsetup_status(&status_raw)?;
-
-    if !status.is_active {
-        return Ok(false);
-    }
-
-    let underlying = match status.device.as_deref() {
-        None | Some("") | Some("(null)") => {
-            return Err(ProbeError::MapperConflict {
-                name: name.to_owned(),
-                expected: expected_uuid.clone(),
-                found: None,
-            });
-        }
-        Some(dev) => dev.to_owned(),
-    };
-
-    let uuid_raw = runner.run(&CmdRequest::CryptsetupLuksUuid { device: underlying })?;
-    let backing_uuid = parse_cryptsetup_luks_uuid(&uuid_raw)?.uuid;
-
-    if &backing_uuid == expected_uuid {
-        Ok(true)
-    } else {
-        Err(ProbeError::MapperConflict {
-            name: name.to_owned(),
-            expected: expected_uuid.clone(),
-            found: Some(backing_uuid),
-        })
+    match classify_mapper_ownership(runner, name, mapper, || Ok(expected_uuid.clone()))? {
+        MapperOwnership::Inactive => Ok(false),
+        MapperOwnership::Owned => Ok(true),
     }
 }
 
@@ -744,6 +735,83 @@ mod tests {
                     found,
                     Some(LuksUuid("bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb".into()))
                 );
+            }
+            other => panic!("expected ProbeError::MapperConflict, got: {other:?}"),
+        }
+        let by_id_luks_uuid_requests = runner
+            .requests()
+            .iter()
+            .filter(|request| {
+                matches!(
+                    request,
+                    CmdRequest::CryptsetupLuksUuid { device }
+                        if device.as_str() == "/dev/disk/by-id/disk-1"
+                )
+            })
+            .count();
+        assert_eq!(
+            by_id_luks_uuid_requests, 1,
+            "planner must not refetch the configured by-id LUKS UUID during mapper ownership check"
+        );
+    }
+
+    // Intent: when an active mapper is backed by a non-LUKS device, the
+    //   probe surfaces ProbeError::MapperConflict with found=None.
+    // Why it exists: mapper ownership failure should use the same recovery
+    //   path as executor-time checks, not a generic parse error.
+    // Scenario: a foreign mapper is aliased over braid's mapper name but its
+    //   backing device no longer reports a LUKS header.
+    #[test]
+    fn probe_config_disk_mapper_backing_non_luks_errors() {
+        let runner = MockRunner::default()
+            .with_output(
+                CmdRequest::CryptsetupLuksUuid {
+                    device: "/dev/disk/by-id/disk-1".into(),
+                },
+                ok_raw(
+                    "cryptsetup luksUUID /dev/disk/by-id/disk-1",
+                    "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa\n",
+                ),
+            )
+            .with_output(
+                CmdRequest::CryptsetupLuksDumpText {
+                    device: "/dev/disk/by-id/disk-1".into(),
+                },
+                luks_dump_text_luks2(),
+            )
+            .with_output(
+                CmdRequest::CryptsetupStatus {
+                    mapper: "braid-toshiba".into(),
+                },
+                cryptsetup_status_active("braid-toshiba", "/dev/vdz"),
+            )
+            .with_output(
+                CmdRequest::CryptsetupLuksUuid {
+                    device: "/dev/vdz".into(),
+                },
+                err_raw(
+                    "cryptsetup luksUUID /dev/vdz",
+                    1,
+                    "Device /dev/vdz is not a valid LUKS device.\n",
+                ),
+            );
+        let fs = MockFs::new(&["/dev/disk/by-id/disk-1"]);
+        let d = by_id("/dev/disk/by-id/disk-1");
+
+        let err = probe_config_disk(&runner, &fs, "toshiba", &d).unwrap_err();
+
+        match err {
+            ProbeError::MapperConflict {
+                name,
+                expected,
+                found,
+            } => {
+                assert_eq!(name, "toshiba");
+                assert_eq!(
+                    expected,
+                    LuksUuid("aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa".into())
+                );
+                assert_eq!(found, None);
             }
             other => panic!("expected ProbeError::MapperConflict, got: {other:?}"),
         }
