@@ -38,6 +38,24 @@ with subtest("Healthy pool: no ALERT"):
     output = machine.succeed("braid status")
     assert "ALERT" not in output, f"Expected no ALERT, got: {output}"
 
+# This pins the smartd-only mounted ack path before monitor has latched the
+# flag. It must report that an alert was acknowledged, not the healthy no-op
+# confirmation, because cleanup really removes an active smartd alert source.
+with subtest("Mounted smartd flag ack before monitor acknowledges current alerts"):
+    machine.succeed("touch /var/lib/braid/smartd-alert")
+    status, _stdout = machine.execute(
+        "braid ack >/tmp/ack-pre-monitor.out 2>/tmp/ack-pre-monitor.err"
+    )
+    assert status == 0, f"braid ack exited {status}"
+    stdout = machine.succeed("cat /tmp/ack-pre-monitor.out")
+    assert stdout == "acknowledged current alerts\n", (
+        f"expected generic mounted smartd-only ack confirmation, got: {stdout!r}"
+    )
+    assert "no active alerts" not in stdout, (
+        f"mounted smartd-only ack must not report no active alerts: {stdout!r}"
+    )
+    machine.fail("test -f /var/lib/braid/smartd-alert")
+
 with subtest("Simulate smartd alert"):
     machine.succeed("touch /var/lib/braid/smartd-alert")
 

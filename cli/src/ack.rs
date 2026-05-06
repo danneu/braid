@@ -87,11 +87,13 @@ fn cmd_ack_impl<R: CommandRunner, F: Filesystem + ?Sized>(
         return Err(AckError::CleanupFailed(e));
     }
 
-    // 8. Print confirmation using latch count
+    // 8. Print a count for latched causes. Smartd-only and corrupt-latch
+    // gated acknowledgments still completed real cleanup, but have no
+    // meaningful latch count to report.
     if latch_count > 0 {
         println!("acknowledged {latch_count} alert(s)");
     } else {
-        println!("no active alerts");
+        println!("acknowledged current alerts");
     }
 
     Ok(())
