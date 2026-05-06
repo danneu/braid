@@ -42,6 +42,14 @@ write_io_errs, read_io_errs, flush_io_errs, corruption_errs, generation_errs. An
 
 Alerts persist until `braid ack` — even if the triggering condition disappears. This means "something happened that needs acknowledgment," not "something is currently true." This avoids cross-source bugs where one source clearing could hide another source's alert, and matches Synology UX.
 
+### Ack snapshots gating inputs before probing
+
+`cmd_ack` reads the alert latch and the smartd flag (`smartd-alert`) once at function entry, before `probe_pool`. Every decision in that ack -- the gate that decides whether to proceed and the cleanup that removes alert files -- references that single snapshot. The pool lock at `/run/braid-pool.lock` already serializes monitor vs ack vs add/remove writers, but the smartd hook is intentionally unlocked, so a per-ack snapshot is the only mechanism that gives ack a coherent view of smartd state.
+
+The smartd flag is cleared during cleanup when either the snapshot observed the flag active or the snapshot's latch carried a `SmartdAlert` cause. The first arm covers the normal "flag present, ack silences it" case. The second arm is an explicit exception for the crash-recovery case where a prior cycle latched `SmartdAlert` but the flag was already absent at snapshot, such as a partially-applied earlier ack, manual state, or filesystem-level divergence. The user's ack is aimed at the latched smartd source, so a flag that the smartd hook writes during the probe is part of that source and is cleared.
+
+A flag that exists at cleanup time when the snapshot saw neither active smartd state nor a latched `SmartdAlert` cause arrived after the snapshot and is left in place: the next monitor cycle is responsible for latching it cleanly.
+
 ### Ack state keyed by btrfs devid
 
 devid is btrfs-native — no cross-referencing config or disk-map needed. The parser captures missing device devids from MISSING sentinel lines.
