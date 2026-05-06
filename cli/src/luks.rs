@@ -929,14 +929,14 @@ pub fn format_keyfile_asymmetry_warning() -> String {
         .to_owned()
 }
 
-/// Scan `dir` for `.luksheader` or `.img` files and return advisories.
+/// Scan `dir` for `.luksheader` files and return advisories.
 /// Extracted so tests can pass a tempdir instead of the real path.
 fn header_backup_advisories_in(dir: &std::path::Path) -> Vec<String> {
     let has_backups = match std::fs::read_dir(dir) {
         Ok(entries) => entries.filter_map(|e| e.ok()).any(|e| {
             e.path()
                 .extension()
-                .is_some_and(|ext| ext == "luksheader" || ext == "img")
+                .is_some_and(|ext| ext == "luksheader")
         }),
         Err(_) => false,
     };
@@ -2032,17 +2032,22 @@ mod tests {
     }
 
     /*
-     * Intent: verify advisory fires when old .img files are present.
-     * Why: pre-migration backups should still trigger the security nudge.
-     * Scenario: user has old-format backups that haven't been migrated yet.
+     * Intent: verify the advisory does NOT fire for legacy `.img` files.
+     * Why it exists: `.img` was the original header-backup extension
+     *   before the rename to `.luksheader`. Per the project's
+     *   no-backwards-compat policy, `.img` is no longer a supported
+     *   input. This test pins that removal so a future regression that
+     *   re-adds legacy `.img` matching to the extension predicate fails
+     *   loudly instead of silently re-enabling legacy support.
+     * Scenario: an `.img` file from before the rename sits in the
+     *   headers directory; the advisory must treat it as an unrelated
+     *   file.
      */
     #[test]
-    fn advisory_present_for_img() {
+    fn advisory_ignores_legacy_img_files() {
         let dir = tempfile::tempdir().unwrap();
         std::fs::write(dir.path().join("braid-disk1.img"), b"fake").unwrap();
-        let advisories = header_backup_advisories_in(dir.path());
-        assert_eq!(advisories.len(), 1);
-        assert!(advisories[0].contains("copy offsite"));
+        assert!(header_backup_advisories_in(dir.path()).is_empty());
     }
 
     /*
