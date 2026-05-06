@@ -1,3 +1,7 @@
+---
+intent: Directory of braid design docs and decision records. Read to find the authoritative doc before changing behavior.
+---
+
 # docs/
 
 ## Frontmatter
@@ -50,6 +54,7 @@ Architecture decision records. Each has a status: `Draft`, `Active`, `Superseded
 - [decisions/019-inhibit-sleep.md](decisions/019-inhibit-sleep.md) — When braid should hold a systemd sleep inhibitor: only for the non-interruptible mutation window, not during prompts or reversible preflight.
 - [decisions/020-ups-integration.md](decisions/020-ups-integration.md) — **Active.** Opinionated `braid.ups.*` wrapper over nixpkgs' `power.ups`: standalone USB single-host; guarantees orderly shutdown for ordinary operation + preflight reject on battery + live UPS state in `braid ups status`/TUI; mid-mutation power loss is a supported recovery case proven by the per-mutation `ups-lb-during-*` VM matrix; alert-model integration deferred to a future ADR.
 - [decisions/021-wait-in-unlock.md](decisions/021-wait-in-unlock.md) — **Superseded by [Principle 13](principles.md#13-announce-long-running-work).** `braid unlock` (and `braid recover`'s shared mount tail) emitted a `[wait]` row before per-disk LUKS open and before the mount phase; promotion to a project-wide principle landed once the rest of the interactive commands complied.
+- [decisions/022-dry-run-preview-model.md](decisions/022-dry-run-preview-model.md) — **Active.** Dry-run previews for migrated mutating commands render from the same typed work plans that execution consumes; `Step` is output-only.
 
 ## tool-behavior/
 

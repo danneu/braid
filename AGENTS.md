@@ -54,6 +54,8 @@ Any change to behavior or invariants must update those docs. Code that contradic
 
 Decision docs must include an explicit status: `Draft`, `Active`, `Superseded`, or `Deprecated`.
 
+Before modifying dry-run, preview, or mutating command planning/execution, read [`docs/decisions/022-dry-run-preview-model.md`](docs/decisions/022-dry-run-preview-model.md).
+
 ## User Guide
 
 [`README.md`](README.md) is the end-user guide. Keep it updated when adding features or changing behavior. Style: brief, cookbook-like — short descriptions with copy-paste examples. Not reference material.

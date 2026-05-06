@@ -1,9 +1,10 @@
 //! Shared preview model for `--dry-run` rendering.
 //!
 //! Successful `--dry-run` prints exactly one rendered `Preview` to
-//! stdout; stderr is empty. Anything that affects how a user
-//! interprets the preview is a `PreviewNote`, not stray stderr.
-//! See `plans/wip/plan-this-migration-if-radiant-pinwheel.md`.
+//! stdout. Anything that affects how a user interprets the structured
+//! preview is a `PreviewNote`, not stray stderr. Long-running
+//! side-effect-free probes may still emit status rows to stderr; see
+//! `docs/decisions/022-dry-run-preview-model.md`.
 //!
 //! PR 0 lands the types and rendering primitives only -- no command
 //! migrations.

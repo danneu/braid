@@ -1,3 +1,7 @@
+---
+intent: Canonical braid invariants. Read before changing behavior, safety model, storage lifecycle, CLI command semantics, or module defaults.
+---
+
 # Principles
 
 Canonical invariants for braid. Each principle is authoritative — if code or config contradicts a principle, the code is wrong.
@@ -21,6 +25,7 @@ Disk membership is runtime state owned by the CLI, stored in `/var/lib/braid/poo
 - `mkfs.btrfs` is gated on bootstrap only -- bootstrap accepts only disks classified as fresh non-LUKS during add planning, and the LUKS open helpers verify that any pre-existing `braid-<name>` mapper is backed by the requested by-id disk before pool creation proceeds. `mkfs.btrfs` is invoked without `-f` so its own libblkid signature check is the final fail-closed guard.
 - An existing LUKS device or pool member is never reformatted — a multi-layer identity check (LUKS label match, LUKS UUID cross-check against pool.json, pool-mounted requirement, btrfs FSID comparison) prevents accidental data loss, with the btrfs superblock guard as defense-in-depth.
 - Mounts always include `skip_balance` — btrfs silently resumes interrupted balances on mount by default, which can re-trigger ENOSPC or surprise the user with heavy I/O. braid manages balance lifecycle explicitly; `unlock` warns if a paused balance is detected.
+- Dry-run previews for migrated mutating commands are rendered from the same typed work plans that execution consumes; `Step` is output-only. [Why ->](decisions/022-dry-run-preview-model.md)
 - [Why →](decisions/012-intent-cli.md)
 
 ## 4. Single passphrase
