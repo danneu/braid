@@ -440,14 +440,7 @@ impl EnrollPlan {
         // Pre-passphrase: emit accumulated skip notes to stderr, same
         // wording as today's `skip: <name> ...` lines from the direct
         // `eprintln!` path.
-        eprint!(
-            "{}",
-            preview::render_notes_for_stderr_with(
-                &self.notes,
-                Self::STDERR_STYLE,
-                crate::status_tag::color_enabled_for_stderr(),
-            )
-        );
+        preview::emit_notes_to_stderr(&self.notes, Self::STDERR_STYLE);
 
         let passphrase = luks::read_passphrase(params.passphrase_file, params.passphrase_stdin)?;
 
@@ -676,14 +669,7 @@ pub fn cmd_enroll_key_file<R: CommandRunner, F: Filesystem + ?Sized>(
             // to stderr before the error message, mirroring today's
             // `eprintln!("skip: ...")` + validation-error sequence on
             // the no-candidates path.
-            eprint!(
-                "{}",
-                preview::render_notes_for_stderr_with(
-                    &report.notes,
-                    EnrollPlan::STDERR_STYLE,
-                    crate::status_tag::color_enabled_for_stderr(),
-                )
-            );
+            preview::emit_notes_to_stderr(&report.notes, EnrollPlan::STDERR_STYLE);
             return Err(e);
         }
     };

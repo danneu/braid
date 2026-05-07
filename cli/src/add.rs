@@ -704,10 +704,7 @@ impl AddPlan {
         // `cmd_add`'s preserved-context Err branch pipes `report.notes`
         // through the same helper, so success, failure, and dry-run
         // stdout share one render contract for these notes.
-        eprint!(
-            "{}",
-            preview::render_notes_for_stderr_with(&self.notes, Self::STDERR_STYLE, color_enabled,),
-        );
+        preview::emit_notes_to_stderr(&self.notes, Self::STDERR_STYLE);
 
         // No-op early-return: if the plan has zero steps, the Info
         // note emitted above is the whole user-visible output for
@@ -1406,14 +1403,7 @@ pub fn cmd_add<R: CommandRunner + Sync, F: Filesystem + ?Sized>(
             // emitted on the refusal path is byte-identical to the
             // same note emitted on dry-run stdout and real-run
             // success stderr.
-            eprint!(
-                "{}",
-                preview::render_notes_for_stderr_with(
-                    &report.notes,
-                    AddPlan::STDERR_STYLE,
-                    crate::status_tag::color_enabled_for_stderr(),
-                ),
-            );
+            preview::emit_notes_to_stderr(&report.notes, AddPlan::STDERR_STYLE);
             return Err(e);
         }
     };

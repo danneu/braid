@@ -186,6 +186,20 @@ pub fn render_notes_for_stderr_with(
     out
 }
 
+/// Render `notes` and emit the result to stderr with the per-command
+/// `style`. Wraps `render_notes_for_stderr_with` plus the standard
+/// `color_enabled_for_stderr()` resolution so Shape A commands
+/// (`XxxPlan::execute` and `cmd_xxx` Err arms) collapse to a single
+/// call. `replace` does not use this helper -- its capture-aware
+/// wrapper owns the write side.
+pub fn emit_notes_to_stderr(notes: &[PreviewNote], style: PerDiskStyle) {
+    let color_enabled = crate::status_tag::color_enabled_for_stderr();
+    eprint!(
+        "{}",
+        render_notes_for_stderr_with(notes, style, color_enabled),
+    );
+}
+
 impl Preview {
     /// Render the preview to a single string in the canonical order:
     ///

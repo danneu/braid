@@ -1053,14 +1053,7 @@ impl RecoverPlan {
         // stderr before any mutation. This replaces today's pair of
         // `eprintln!(entry)` + `mount::print_probe_events(&events)`
         // calls with byte-identical output in the same order.
-        eprint!(
-            "{}",
-            preview::render_notes_for_stderr_with(
-                &self.notes,
-                Self::STDERR_STYLE,
-                crate::status_tag::color_enabled_for_stderr(),
-            ),
-        );
+        preview::emit_notes_to_stderr(&self.notes, Self::STDERR_STYLE);
 
         let RecoverPlan {
             notes: _,
@@ -1375,14 +1368,7 @@ pub fn cmd_recover<R: CommandRunner + Sync, F: Filesystem + ?Sized>(
             // banner + per-disk probe events) render to stderr before
             // the error, mirroring today's `eprintln!(entry)` +
             // `mount::print_probe_events` + `?` sequence.
-            eprint!(
-                "{}",
-                preview::render_notes_for_stderr_with(
-                    &report.notes,
-                    RecoverPlan::STDERR_STYLE,
-                    crate::status_tag::color_enabled_for_stderr(),
-                ),
-            );
+            preview::emit_notes_to_stderr(&report.notes, RecoverPlan::STDERR_STYLE);
             return Err(e);
         }
     };

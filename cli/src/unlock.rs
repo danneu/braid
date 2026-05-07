@@ -83,14 +83,7 @@ impl UnlockPlan {
         // In the already-mounted case this emits the "pool already
         // mounted at <mp>" Info note (byte-identical to today's
         // `print_probe_events` output for that event).
-        eprint!(
-            "{}",
-            preview::render_notes_for_stderr_with(
-                &self.notes,
-                Self::STDERR_STYLE,
-                crate::status_tag::color_enabled_for_stderr(),
-            ),
-        );
+        preview::emit_notes_to_stderr(&self.notes, Self::STDERR_STYLE);
 
         let Some(plan) = self.open_plan else {
             // Pool was already mounted (plan_open_pool returned None).
@@ -227,14 +220,7 @@ pub fn cmd_unlock<R: CommandRunner, F: Filesystem + ?Sized>(
             // Preserved-context failure: accumulated probe notes render
             // to stderr before the error, mirroring today's
             // `print_probe_events` + `?` sequence.
-            eprint!(
-                "{}",
-                preview::render_notes_for_stderr_with(
-                    &report.notes,
-                    UnlockPlan::STDERR_STYLE,
-                    crate::status_tag::color_enabled_for_stderr(),
-                ),
-            );
+            preview::emit_notes_to_stderr(&report.notes, UnlockPlan::STDERR_STYLE);
             return Err(e);
         }
     };

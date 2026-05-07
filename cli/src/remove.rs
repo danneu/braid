@@ -185,14 +185,7 @@ impl RemovePlan {
         // before any mutation. Warn notes emit as the canonical
         // `[warn] <body>` (same as dry-run stdout), so both modes
         // share one render contract for plan-derived notes.
-        eprint!(
-            "{}",
-            preview::render_notes_for_stderr_with(
-                &self.notes,
-                Self::STDERR_STYLE,
-                crate::status_tag::color_enabled_for_stderr(),
-            ),
-        );
+        preview::emit_notes_to_stderr(&self.notes, Self::STDERR_STYLE);
 
         let RemovePlan {
             notes: _,
@@ -436,14 +429,7 @@ pub fn cmd_remove<R: CommandRunner + Sync, F: Filesystem + ?Sized>(
             // path (`RemovePlan::execute`), so preflight diagnostics
             // surface identically across success, failure, and dry-run
             // stdout.
-            eprint!(
-                "{}",
-                preview::render_notes_for_stderr_with(
-                    &report.notes,
-                    RemovePlan::STDERR_STYLE,
-                    crate::status_tag::color_enabled_for_stderr(),
-                ),
-            );
+            preview::emit_notes_to_stderr(&report.notes, RemovePlan::STDERR_STYLE);
             return Err(e);
         }
     };
