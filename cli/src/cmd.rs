@@ -951,6 +951,12 @@ impl CommandRunner for RealRunner {
     }
 }
 
+/// Closure-based dispatch handler for `MockRunner`. `Arc<dyn Fn>` so
+/// `MockRunner` stays `Clone + Sync` and handlers can capture borrowed-state
+/// proxies (e.g. `Arc<AtomicBool>` flags shared with the test body).
+type MockHandler =
+    std::sync::Arc<dyn Fn(&CmdRequest) -> Option<Result<RawCommandOutput, CmdError>> + Send + Sync>;
+
 #[derive(Clone)]
 pub struct MockRunner {
     outputs: std::collections::HashMap<String, RawCommandOutput>,
@@ -961,6 +967,7 @@ pub struct MockRunner {
     >,
     stdin_expectations: std::collections::HashMap<String, Vec<u8>>,
     requests: std::sync::Arc<std::sync::Mutex<Vec<CmdRequest>>>,
+    handlers: Vec<MockHandler>,
 }
 
 impl Default for MockRunner {
@@ -972,6 +979,7 @@ impl Default for MockRunner {
             )),
             stdin_expectations: std::collections::HashMap::new(),
             requests: std::sync::Arc::new(std::sync::Mutex::new(Vec::new())),
+            handlers: Vec::new(),
         }
     }
 }
@@ -1003,6 +1011,64 @@ impl MockRunner {
         self.outputs.insert(key.clone(), output);
         self.stdin_expectations.insert(key, expected_stdin);
         self
+    }
+
+    /// Closure-based fall-through handler so tests can dispatch by request
+    /// fields (e.g. mapper -> backing device) without enumerating every variant.
+    /// Handlers are tried in reverse registration order (last `with_handler` wins),
+    /// so generic fixture handlers can register first and per-test overrides last.
+    /// Returning `None` defers to the next handler, then to `with_output`.
+    pub fn with_handler<F>(mut self, handler: F) -> Self
+    where
+        F: Fn(&CmdRequest) -> Option<Result<RawCommandOutput, CmdError>> + Send + Sync + 'static,
+    {
+        self.handlers.push(std::sync::Arc::new(handler));
+        self
+    }
+
+    /// Resolve `request` against handlers (reverse order) then the static-key
+    /// path. Shared by `run` and `run_with_stdin` so dispatch order is identical.
+    fn dispatch(&self, request: &CmdRequest) -> Result<RawCommandOutput, CmdError> {
+        for handler in self.handlers.iter().rev() {
+            if let Some(result) = handler(request) {
+                return result;
+            }
+        }
+        let key = format!("{request:?}");
+        let mut sequences = self
+            .output_sequences
+            .lock()
+            .expect("mock runner output sequence map poisoned");
+        let next = sequences.get_mut(&key).and_then(|queue| queue.pop_front());
+        if sequences
+            .get(&key)
+            .is_some_and(std::collections::VecDeque::is_empty)
+        {
+            sequences.remove(&key);
+        }
+        drop(sequences);
+        next.or_else(|| self.outputs.get(&key).cloned())
+            .ok_or(CmdError::MissingMock)
+    }
+
+    /// Apply side-effects required to keep downstream code paths consistent
+    /// with the mocked output -- runs after dispatch resolves an `Ok(_)`,
+    /// regardless of whether a handler or the static-key path produced it.
+    /// Today the only side-effect is creating the temp backup file on a
+    /// successful `CryptsetupLuksHeaderBackup` so `backup_luks_header_to`'s
+    /// chmod+rename does not hit `ENOENT`.
+    fn apply_side_effects(request: &CmdRequest, output: &RawCommandOutput) -> Result<(), CmdError> {
+        if let CmdRequest::CryptsetupLuksHeaderBackup { backup_path, .. } = request
+            && output.exit_status == 0
+        {
+            if let Some(parent) = std::path::Path::new(backup_path.as_str()).parent() {
+                std::fs::create_dir_all(parent)
+                    .map_err(|e| CmdError::Failed(format!("mock: create_dir_all: {e}")))?;
+            }
+            std::fs::write(backup_path, b"")
+                .map_err(|e| CmdError::Failed(format!("mock: write backup: {e}")))?;
+        }
+        Ok(())
     }
 
     pub fn requests(&self) -> Vec<CmdRequest> {
@@ -1107,33 +1173,8 @@ impl CommandRunner for MockRunner {
             .lock()
             .expect("mock runner request log poisoned")
             .push(request.clone());
-        let key = format!("{request:?}");
-        let output = {
-            let mut sequences = self
-                .output_sequences
-                .lock()
-                .expect("mock runner output sequence map poisoned");
-            let next = sequences.get_mut(&key).and_then(|queue| queue.pop_front());
-            if sequences
-                .get(&key)
-                .is_some_and(std::collections::VecDeque::is_empty)
-            {
-                sequences.remove(&key);
-            }
-            next
-        }
-        .or_else(|| self.outputs.get(&key).cloned())
-        .ok_or(CmdError::MissingMock)?;
-        if let CmdRequest::CryptsetupLuksHeaderBackup { backup_path, .. } = request
-            && output.exit_status == 0
-        {
-            if let Some(parent) = std::path::Path::new(backup_path.as_str()).parent() {
-                std::fs::create_dir_all(parent)
-                    .map_err(|e| CmdError::Failed(format!("mock: create_dir_all: {e}")))?;
-            }
-            std::fs::write(backup_path, b"")
-                .map_err(|e| CmdError::Failed(format!("mock: write backup: {e}")))?;
-        }
+        let output = self.dispatch(request)?;
+        Self::apply_side_effects(request, &output)?;
         Ok(output)
     }
 
@@ -1142,30 +1183,18 @@ impl CommandRunner for MockRunner {
         request: &CmdRequest,
         stdin: &[u8],
     ) -> Result<RawCommandOutput, CmdError> {
-        let key = format!("{request:?}");
         self.requests
             .lock()
             .expect("mock runner request log poisoned")
             .push(request.clone());
+        let key = format!("{request:?}");
+        // stdin validation runs BEFORE handler dispatch so a handler returning
+        // Some(_) cannot mask a passphrase-bytes regression.
         if let Some(expected) = self.stdin_expectations.get(&key) {
             assert_eq!(stdin, expected.as_slice(), "stdin mismatch for {key}");
         }
-        let output = {
-            let mut sequences = self
-                .output_sequences
-                .lock()
-                .expect("mock runner output sequence map poisoned");
-            let next = sequences.get_mut(&key).and_then(|queue| queue.pop_front());
-            if sequences
-                .get(&key)
-                .is_some_and(std::collections::VecDeque::is_empty)
-            {
-                sequences.remove(&key);
-            }
-            next
-        }
-        .or_else(|| self.outputs.get(&key).cloned())
-        .ok_or(CmdError::MissingMock)?;
+        let output = self.dispatch(request)?;
+        Self::apply_side_effects(request, &output)?;
         Ok(output)
     }
 }
@@ -1252,6 +1281,241 @@ mod tests {
                 exit_status: 0,
             },
         );
+
+        let _ = mock.run_with_stdin(&req, b"wrong");
+    }
+
+    fn raw_ok(cmd: &str, stdout: &str) -> RawCommandOutput {
+        RawCommandOutput {
+            cmd: cmd.to_owned(),
+            stdout: stdout.to_owned(),
+            stderr: String::new(),
+            exit_status: 0,
+        }
+    }
+
+    #[test]
+    // Intent: a `with_handler` closure intercepts a request before the
+    // static-key path resolves it.
+    // Why: handler dispatch must precede `with_output` so generic fixture
+    // handlers and per-test overrides can shadow seeded keys without
+    // re-seeding them.
+    // Scenario: same request seeded both via `with_output` (key "static")
+    // and via `with_handler` (returns "from-handler"); `run` returns
+    // the handler's output.
+    fn mock_runner_handler_runs_before_static_keys() {
+        let req = CmdRequest::LsblkJson;
+        let mock = MockRunner::default()
+            .with_output(req.clone(), raw_ok("lsblk", "static"))
+            .with_handler(|r| match r {
+                CmdRequest::LsblkJson => Some(Ok(raw_ok("lsblk", "from-handler"))),
+                _ => None,
+            });
+
+        let out = mock.run(&req).expect("handler should service request");
+        assert_eq!(out.stdout, "from-handler");
+    }
+
+    #[test]
+    // Intent: a handler returning `None` defers to the static-key path.
+    // Why: handlers must be additive -- registering a handler that does
+    // not match a request must not break tests that rely on
+    // `with_output` for that request.
+    // Scenario: handler returns None for LsblkJson; static-key seed
+    // services the request.
+    fn mock_runner_handler_none_falls_through_to_static_key() {
+        let req = CmdRequest::LsblkJson;
+        let mock = MockRunner::default()
+            .with_output(req.clone(), raw_ok("lsblk", "static"))
+            .with_handler(|_| None);
+
+        let out = mock.run(&req).expect("static key should service request");
+        assert_eq!(out.stdout, "static");
+    }
+
+    #[test]
+    // Intent: the request log captures every call regardless of which
+    // dispatch path served it.
+    // Why: tests rely on `requests()` for ordering and arity assertions;
+    // a handler that bypasses logging would silently break those.
+    // Scenario: one handler-serviced request and one static-key serviced
+    // request -- both appear in `requests()` in call order.
+    fn mock_runner_handler_does_not_skip_request_log() {
+        let req_handler = CmdRequest::LsblkJson;
+        let req_static = CmdRequest::BtrfsDeviceScanAll;
+        let mock = MockRunner::default()
+            .with_output(req_static.clone(), raw_ok("btrfs scan", ""))
+            .with_handler(|r| match r {
+                CmdRequest::LsblkJson => Some(Ok(raw_ok("lsblk", "via-handler"))),
+                _ => None,
+            });
+
+        mock.run(&req_handler).expect("handler services lsblk");
+        mock.run(&req_static).expect("static-key services scan");
+
+        assert_eq!(mock.requests(), vec![req_handler, req_static]);
+    }
+
+    #[test]
+    // Intent: handlers and `with_output_sequence` compose -- a handler
+    // returning `None` lets the sequence drain in registration order.
+    // Why: tests that mix per-request sequences with topology handlers
+    // must not lose sequence elements to a bypass.
+    // Scenario: seed a 2-element sequence for LsblkJson; register a
+    // handler that returns None for it; two `run` calls drain both
+    // sequence elements in order.
+    fn mock_runner_handler_stacks_with_output_sequence() {
+        let req = CmdRequest::LsblkJson;
+        let mock = MockRunner::default()
+            .with_output_sequence(
+                req.clone(),
+                vec![raw_ok("lsblk", "first"), raw_ok("lsblk", "second")],
+            )
+            .with_handler(|_| None);
+
+        let first = mock.run(&req).expect("first sequence element");
+        let second = mock.run(&req).expect("second sequence element");
+        assert_eq!(first.stdout, "first");
+        assert_eq!(second.stdout, "second");
+    }
+
+    #[test]
+    // Intent: when two handlers both return `Some(_)` for a request, the
+    // last-registered handler wins.
+    // Why: pool-topology fixtures register a generic handler first, then
+    // tests register per-test overrides; reverse-order dispatch is the
+    // only contract that lets the override actually win.
+    // Scenario: handler A returns "first", handler B returns "second";
+    // `run` returns "second".
+    fn mock_runner_last_handler_wins_when_both_match() {
+        let req = CmdRequest::LsblkJson;
+        let mock = MockRunner::default()
+            .with_handler(|r| match r {
+                CmdRequest::LsblkJson => Some(Ok(raw_ok("lsblk", "first"))),
+                _ => None,
+            })
+            .with_handler(|r| match r {
+                CmdRequest::LsblkJson => Some(Ok(raw_ok("lsblk", "second"))),
+                _ => None,
+            });
+
+        let out = mock.run(&req).expect("a handler should match");
+        assert_eq!(out.stdout, "second");
+    }
+
+    #[test]
+    // Intent: a later handler returning `None` does not mask an earlier
+    // handler that returns `Some(_)`.
+    // Why: reverse-order dispatch with proper `None` fall-through is
+    // what lets tests stack overrides without removing the underlying
+    // generic handler.
+    // Scenario: handler A returns "first", handler B returns None;
+    // `run` returns "first".
+    fn mock_runner_later_handler_none_falls_through_to_earlier() {
+        let req = CmdRequest::LsblkJson;
+        let mock = MockRunner::default()
+            .with_handler(|r| match r {
+                CmdRequest::LsblkJson => Some(Ok(raw_ok("lsblk", "first"))),
+                _ => None,
+            })
+            .with_handler(|_| None);
+
+        let out = mock.run(&req).expect("earlier handler should match");
+        assert_eq!(out.stdout, "first");
+    }
+
+    #[test]
+    // Intent: a handler-serviced `CryptsetupLuksHeaderBackup` with
+    // exit_status=0 still triggers the temp backup-file write.
+    // Why: `backup_luks_header_to` (cli/src/luks.rs) chmod+renames the
+    // backup file after the cryptsetup call returns; if a handler
+    // bypasses the file-write side-effect, the chmod hits ENOENT and
+    // the test fails for an unrelated reason.
+    // Scenario: handler returns Ok(exit_status=0) for a header backup
+    // request; assert the file exists at backup_path after `run`.
+    fn mock_runner_header_backup_side_effect_fires_on_handler_success() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let backup_path = tmp.path().join("hdr.img");
+        let req = CmdRequest::CryptsetupLuksHeaderBackup {
+            device: "/dev/vda".to_owned(),
+            backup_path: backup_path.to_string_lossy().into_owned(),
+        };
+        let mock = MockRunner::default().with_handler(|r| match r {
+            CmdRequest::CryptsetupLuksHeaderBackup { .. } => {
+                Some(Ok(raw_ok("cryptsetup luksHeaderBackup", "")))
+            }
+            _ => None,
+        });
+
+        mock.run(&req).expect("handler services request");
+
+        assert!(
+            backup_path.exists(),
+            "post-processing must create the backup file after handler success"
+        );
+    }
+
+    #[test]
+    // Intent: a handler-serviced `CryptsetupLuksHeaderBackup` with
+    // non-zero exit_status leaves no file on disk -- matches the
+    // static-key behavior.
+    // Why: braid's error path expects a missing backup file when
+    // cryptsetup fails; if the side-effect fired on failure, recovery
+    // logic would see a stale empty file.
+    // Scenario: handler returns Ok(exit_status=1); assert the file does
+    // NOT exist after `run`.
+    fn mock_runner_header_backup_side_effect_skipped_on_handler_failure() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let backup_path = tmp.path().join("hdr.img");
+        let backup_path_str = backup_path.to_string_lossy().into_owned();
+        let req = CmdRequest::CryptsetupLuksHeaderBackup {
+            device: "/dev/vda".to_owned(),
+            backup_path: backup_path_str.clone(),
+        };
+        let mock = MockRunner::default().with_handler(|r| match r {
+            CmdRequest::CryptsetupLuksHeaderBackup { .. } => Some(Ok(RawCommandOutput {
+                cmd: "cryptsetup luksHeaderBackup".to_owned(),
+                stdout: String::new(),
+                stderr: "ERROR: failed".to_owned(),
+                exit_status: 1,
+            })),
+            _ => None,
+        });
+
+        mock.run(&req).expect("handler services request");
+
+        assert!(
+            !backup_path.exists(),
+            "post-processing must NOT create backup file when handler reports failure"
+        );
+    }
+
+    #[test]
+    #[should_panic(expected = "stdin mismatch")]
+    // Intent: stdin validation runs BEFORE handler dispatch, so a handler
+    // returning `Some(Ok(_))` cannot mask a passphrase-bytes regression.
+    // Why: `with_output_stdin` is the line of defense for passphrase-
+    // sensitive tests. Handler dispatch must not be a side-channel that
+    // bypasses stdin assertions.
+    // Scenario: seed `with_output_stdin(req, b"secret", ok)` AND a
+    // `with_handler` returning Some(Ok(...)) for `req`; call
+    // `run_with_stdin(req, b"wrong")`; runner panics with "stdin
+    // mismatch" even though the handler would have served a successful
+    // response.
+    fn mock_runner_stdin_mismatch_trumps_handler_success() {
+        let req = CmdRequest::CryptsetupTestPassphrase {
+            device: "/dev/x".to_owned(),
+        };
+        let mock = MockRunner::default()
+            .with_output_stdin(
+                req.clone(),
+                b"secret".to_vec(),
+                raw_ok("cryptsetup open --test-passphrase /dev/x", ""),
+            )
+            .with_handler(|r| match r {
+                CmdRequest::CryptsetupTestPassphrase { .. } => Some(Ok(raw_ok("from-handler", ""))),
+                _ => None,
+            });
 
         let _ = mock.run_with_stdin(&req, b"wrong");
     }
