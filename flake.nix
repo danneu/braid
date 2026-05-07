@@ -303,6 +303,16 @@
               braid = linuxCrane.braid;
             }
           );
+          replace-enroll-existing-luks = pkgs.testers.nixosTest (
+            import ./tests/cli/replace-enroll-existing-luks.nix {
+              braid = linuxCrane.braid;
+            }
+          );
+          replace-enroll-existing-luks-slot-conflict = pkgs.testers.nixosTest (
+            import ./tests/cli/replace-enroll-existing-luks-slot-conflict.nix {
+              braid = linuxCrane.braid;
+            }
+          );
           replace-passphrase-mismatch = pkgs.testers.nixosTest (
             import ./tests/cli/replace-passphrase-mismatch.nix {
               braid = linuxCrane.braid;
@@ -437,6 +447,16 @@
               braid = linuxCrane.braid;
             }
           );
+          recover-replace-existing-luks-enroll = pkgs.testers.nixosTest (
+            import ./tests/cli/recover-replace-existing-luks-enroll.nix {
+              braid = linuxCrane.braid;
+            }
+          );
+          recover-replace-existing-luks-uuid-mismatch = pkgs.testers.nixosTest (
+            import ./tests/cli/recover-replace-existing-luks-uuid-mismatch.nix {
+              braid = linuxCrane.braid;
+            }
+          );
           braid-remove-disk-busy = pkgs.testers.nixosTest (
             import ./tests/cli/braid-remove-disk-busy.nix {
               braid = linuxCrane.braid;
@@ -545,6 +565,11 @@
           );
           braid-add-enroll = pkgs.testers.nixosTest (
             import ./tests/cli/braid-add-enroll.nix {
+              braid = linuxCrane.braid;
+            }
+          );
+          add-enroll-recoverable = pkgs.testers.nixosTest (
+            import ./tests/cli/add-enroll-recoverable.nix {
               braid = linuxCrane.braid;
             }
           );

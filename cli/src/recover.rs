@@ -688,25 +688,50 @@ fn render_add_pool_mutation_recovery_steps(
             continue;
         }
         match &target.mode {
-            journal::AddJournalMode::RecoverableBraidLabeled { .. } => {
+            journal::AddJournalMode::RecoverableBraidLabeled {
+                enroll_key_file, ..
+            } => {
+                // Mirror the executor's order: when `enroll_key_file:
+                // Some(kf)`, addKey + luksHeaderBackup run BEFORE
+                // pool_add_device (which expands to scanForget +
+                // wipefs + btrfs device add). Putting them ahead of
+                // scanForget keeps `recover --dry-run` byte-aligned
+                // with replay; placing them between wipefs and
+                // btrfs-add would falsely show wipefs running before
+                // the slot 1 mutation. None branch is unchanged.
+                let mut commands = Vec::new();
+                if let Some(key_file) = enroll_key_file {
+                    commands.push(CmdRequest::CryptsetupLuksAddKeyFile {
+                        device: target.by_id.0.clone(),
+                        key_file_path: key_file.display().to_string(),
+                    });
+                    commands.push(CmdRequest::CryptsetupLuksHeaderBackup {
+                        device: target.by_id.0.clone(),
+                        backup_path: plan
+                            .luks_headers_dir
+                            .join(format!("{}.luksheader", target.mapper_name))
+                            .display()
+                            .to_string(),
+                    });
+                }
+                commands.push(CmdRequest::BtrfsDeviceScanForget {
+                    devices: vec![mapper_path.clone()],
+                });
+                commands.push(CmdRequest::WipefsBtrfs {
+                    device: mapper_path.clone(),
+                });
+                commands.push(CmdRequest::BtrfsDeviceAdd {
+                    device: mapper_path,
+                    mount_point: plan.mount_point.clone(),
+                    force: true,
+                });
+                let mapper_path_for_description = format!("/dev/mapper/{}", target.mapper_name);
                 steps.push(Step {
                     risk: "safe",
                     description: format!(
-                        "replay verified returned-disk add {mapper_path}{conditional_suffix}"
+                        "replay verified returned-disk add {mapper_path_for_description}{conditional_suffix}"
                     ),
-                    commands: vec![
-                        CmdRequest::BtrfsDeviceScanForget {
-                            devices: vec![mapper_path.clone()],
-                        },
-                        CmdRequest::WipefsBtrfs {
-                            device: mapper_path.clone(),
-                        },
-                        CmdRequest::BtrfsDeviceAdd {
-                            device: mapper_path,
-                            mount_point: plan.mount_point.clone(),
-                            force: true,
-                        },
-                    ],
+                    commands,
                 });
             }
             journal::AddJournalMode::FreshLuks {
@@ -2135,6 +2160,7 @@ fn execute_add_pool_mutation_recovery<R: CommandRunner + Sync, F: Filesystem + ?
                 journal::AddJournalMode::RecoverableBraidLabeled {
                     verified_pool_fsid,
                     luks_uuid,
+                    enroll_key_file,
                 } => {
                     let probed = probe::probe_config_disk(runner, fs, name, &target.by_id)?;
                     let ConfigDiskState::PresentLuks {
@@ -2167,6 +2193,26 @@ fn execute_add_pool_mutation_recovery<R: CommandRunner + Sync, F: Filesystem + ?
                             "recover add target '{}' btrfs FSID mismatch: expected {}, found {}",
                             name, verified_pool_fsid, fsid
                         )));
+                    }
+                    // Crashed mid-add: if the journaled plan called for keyfile
+                    // enrollment on this returning disk, replay it before the
+                    // pool_add_device. Mirrors the FreshLuks branch above and
+                    // the live add execute path. ensure_keyfile_enrolled is
+                    // idempotent (skips if slot 1 already authenticates), so a
+                    // partially-completed pre-crash enrollment is safe to replay.
+                    if let Some(key_file) = enroll_key_file {
+                        ensure_keyfile_enrolled(
+                            runner,
+                            &target.by_id.0,
+                            passphrase.expose_secret(),
+                            key_file,
+                        )?;
+                        luks::backup_luks_header(
+                            runner,
+                            &target.by_id.0,
+                            &target.mapper_name,
+                            params.paths,
+                        )?;
                     }
                     crate::pool::pool_add_device(runner, &mapper_path, mount_point, true)
                         .map_err(|e| RecoverError::Failed(format!("recover add replay: {e}")))?;
@@ -2486,7 +2532,76 @@ fn finish_uncommitted_replace_recovery<R: CommandRunner + Sync, F: Filesystem + 
         new_target,
     } = ctx;
     match &new_target.mode {
-        journal::ReplaceJournalMode::ExistingLuks { .. } => {
+        journal::ReplaceJournalMode::ExistingLuks {
+            luks_uuid,
+            enroll_key_file,
+        } => {
+            // Identity probe before any mutation. Wrong disk replugged
+            // or header zeroed -> preserve the journal; matches the
+            // FreshLuks `luks_label` guard at finish-time. We use LUKS
+            // UUID (not a braid label) because ExistingLuks targets
+            // carry no braid label by definition.
+            let probed = probe::probe_config_disk(runner, fs, new_name, &new_target.by_id)?;
+            match &probed.state {
+                ConfigDiskState::PresentLuks { uuid, .. } if uuid == luks_uuid => {}
+                ConfigDiskState::PresentLuks { uuid, .. } => {
+                    return Err(RecoverError::Failed(format!(
+                        "recover replace target '{}' LUKS UUID mismatch: \
+                         expected {}, found {} -- preserving pending-op.json",
+                        new_name, luks_uuid, uuid,
+                    )));
+                }
+                ConfigDiskState::PresentNotLuks => {
+                    return Err(RecoverError::Failed(format!(
+                        "recover replace target '{}' is no longer LUKS-formatted; \
+                         preserving pending-op.json",
+                        new_name,
+                    )));
+                }
+                ConfigDiskState::Absent => {
+                    return Err(RecoverError::Failed(format!(
+                        "recover replace target '{}' ({}) is not present; \
+                         preserving pending-op.json",
+                        new_name, new_target.by_id,
+                    )));
+                }
+            }
+
+            if let Some(key_file) = enroll_key_file {
+                // Replay the planned keyfile enrollment + header backup.
+                // Identical credential discipline to the FreshLuks arm
+                // below: passphrase is verified against existing pool
+                // members AND the new disk before any LUKS mutation, so
+                // wrong-passphrase aborts with the journal preserved.
+                let passphrase =
+                    recover_passphrase_for_context(credential, params, "replace recovery")?;
+                verify_replace_fresh_prep_passphrase(
+                    runner,
+                    pool,
+                    new_name,
+                    &new_target.by_id,
+                    passphrase.expose_secret(),
+                )?;
+                let _guard = params
+                    .sleep_inhibitor
+                    .acquire("finishing interrupted replace preparation")
+                    .map_err(|e| {
+                        RecoverError::Failed(format!("could not acquire sleep inhibitor: {e}"))
+                    })?;
+                ensure_keyfile_enrolled(
+                    runner,
+                    &new_target.by_id.0,
+                    passphrase.expose_secret(),
+                    key_file,
+                )?;
+                luks::backup_luks_header(
+                    runner,
+                    &new_target.by_id.0,
+                    &new_target.mapper_name,
+                    params.paths,
+                )?;
+            }
+
             membership::save_membership(&journal.pre_membership, params.paths)?;
             journal::clear_journal(params.paths)
                 .map_err(|e| RecoverError::Journal(e.to_string()))?;
@@ -4250,6 +4365,30 @@ mod tests {
         }
     }
 
+    /// Variant of `recoverable_pool_mutation_add_journal` carrying an
+    /// `enroll_key_file: Some(kf)` -- models a crash mid-`add --enroll
+    /// DIR` where the journaled plan calls for keyfile enrollment on
+    /// the returning braid disk.
+    fn recoverable_pool_mutation_add_journal_with_enroll(
+        enroll_key_file: std::path::PathBuf,
+    ) -> journal::Journal {
+        let mut journal = recoverable_pool_mutation_add_journal();
+        if let OpKind::Add { targets, .. } = &mut journal.op {
+            for target in targets.values_mut() {
+                if let journal::AddJournalMode::RecoverableBraidLabeled {
+                    enroll_key_file: stored,
+                    ..
+                } = &mut target.mode
+                {
+                    *stored = Some(enroll_key_file.clone());
+                }
+            }
+        } else {
+            unreachable!("returns Add");
+        }
+        journal
+    }
+
     fn recoverable_pool_mutation_add_journal() -> journal::Journal {
         let mut pre_disks = BTreeMap::new();
         pre_disks.insert(
@@ -4276,6 +4415,7 @@ mod tests {
                 mode: journal::AddJournalMode::RecoverableBraidLabeled {
                     verified_pool_fsid: "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee".into(),
                     luks_uuid: LuksUuid("22222222-2222-2222-2222-222222222222".into()),
+                    enroll_key_file: None,
                 },
             },
         );
@@ -4321,6 +4461,7 @@ mod tests {
                 mode: journal::AddJournalMode::RecoverableBraidLabeled {
                     verified_pool_fsid: "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee".into(),
                     luks_uuid: LuksUuid("33333333-3333-3333-3333-333333333333".into()),
+                    enroll_key_file: None,
                 },
             },
         );
@@ -4368,6 +4509,7 @@ mod tests {
                     mode: journal::AddJournalMode::RecoverableBraidLabeled {
                         verified_pool_fsid: "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee".into(),
                         luks_uuid: LuksUuid(uuid.into()),
+                        enroll_key_file: None,
                     },
                 },
             );
@@ -4412,6 +4554,7 @@ mod tests {
                 mode: journal::AddJournalMode::RecoverableBraidLabeled {
                     verified_pool_fsid: "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee".into(),
                     luks_uuid: LuksUuid("22222222-2222-2222-2222-222222222222".into()),
+                    enroll_key_file: None,
                 },
             },
         );
@@ -6179,6 +6322,298 @@ mod tests {
         assert!(recovered.disks.contains_key("disk2"));
     }
 
+    // Intent: ExistingLuks add recovery with `enroll_key_file:
+    //   Some(kf)` runs `cryptsetup luksAddKey` + `luksHeaderBackup`
+    //   BEFORE `pool_add_device` (which expands to scanForget +
+    //   wipefs + btrfs device add).
+    // Why it exists: this is the silent-drop bug fix landing in add
+    //   recovery. Pre-refactor, mid-`add --enroll DIR` crash recovery
+    //   never re-ran the enrollment, so the returning disk shipped
+    //   without slot 1 enrolled and could not be auto-unlocked. Pin
+    //   the order (addKey before scanForget/wipefs/add) so a future
+    //   change cannot silently regress to "no replay" or shift the
+    //   mutation past the irreversible btrfs commit.
+    // Scenario: braid add --enroll DIR against a returning braid disk
+    //   crashed between journal write and pool_add_device. Recovery
+    //   resumes and replays the planned enrollment.
+    #[test]
+    fn add_pool_mutation_replays_keyfile_enrollment_before_pool_add() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let paths = StatePaths::custom(tmp.path().into());
+        let config = Config::new(MountPoint("/mnt/storage".into())).unwrap();
+        let fs = MockFs::new(&["/dev/disk/by-id/virtio-disk2", "/dev/mapper/braid-disk2"]);
+        let key_file = write_valid_keyfile(&tmp, "braid.key");
+        let journal = recoverable_pool_mutation_add_journal_with_enroll(key_file.clone());
+        journal::write_journal(&paths, &journal).unwrap();
+        let union = union_memberships(&journal);
+        let targets = match &journal.op {
+            OpKind::Add { targets, .. } => targets,
+            _ => unreachable!("test journal is Add"),
+        };
+
+        let passphrase_file = tempfile::NamedTempFile::new().unwrap();
+        {
+            use std::io::Write;
+            passphrase_file.as_file().write_all(b"testpass").unwrap();
+        }
+
+        let runner = with_balance_replay(with_two_disk_pool_probe(
+            MockRunner::default()
+                .with_output(
+                    CmdRequest::CryptsetupLuksUuid {
+                        device: "/dev/disk/by-id/virtio-disk2".into(),
+                    },
+                    cryptsetup_uuid_ok(
+                        "/dev/disk/by-id/virtio-disk2",
+                        "22222222-2222-2222-2222-222222222222",
+                    ),
+                )
+                .with_luks_dump_text_luks2("/dev/disk/by-id/virtio-disk2")
+                .with_mapper_open(
+                    "braid-disk2",
+                    "/dev/vdb",
+                    "22222222-2222-2222-2222-222222222222",
+                )
+                .with_output_stdin(
+                    CmdRequest::CryptsetupTestPassphrase {
+                        device: "/dev/vda".into(),
+                    },
+                    b"testpass".to_vec(),
+                    ok_raw_empty("cryptsetup open --test-passphrase"),
+                )
+                .with_output_stdin(
+                    CmdRequest::CryptsetupTestPassphrase {
+                        device: "/dev/disk/by-id/virtio-disk2".into(),
+                    },
+                    b"testpass".to_vec(),
+                    ok_raw_empty("cryptsetup open --test-passphrase"),
+                )
+                .with_output(
+                    CmdRequest::BtrfsFilesystemShowTarget {
+                        target: "/dev/mapper/braid-disk2".into(),
+                    },
+                    btrfs_show_target_no_btrfs("/dev/mapper/braid-disk2"),
+                )
+                // ensure_keyfile_enrolled probes the keyfile, then enrolls
+                // since slot 1 has not yet been populated post-crash.
+                .with_output(
+                    CmdRequest::CryptsetupTestKeyFile {
+                        device: "/dev/disk/by-id/virtio-disk2".into(),
+                        key_file_path: key_file.display().to_string(),
+                    },
+                    err_raw("cryptsetup open --test-passphrase --key-file", 2, "No key"),
+                )
+                .with_output_stdin(
+                    CmdRequest::CryptsetupLuksAddKeyFile {
+                        device: "/dev/disk/by-id/virtio-disk2".into(),
+                        key_file_path: key_file.display().to_string(),
+                    },
+                    b"testpass".to_vec(),
+                    ok_raw_empty("cryptsetup luksAddKey"),
+                )
+                .with_output(
+                    CmdRequest::CryptsetupLuksHeaderBackup {
+                        device: "/dev/disk/by-id/virtio-disk2".into(),
+                        backup_path: paths
+                            .luks_headers_dir()
+                            .join("braid-disk2.luksheader.tmp")
+                            .display()
+                            .to_string(),
+                    },
+                    ok_raw_empty("cryptsetup luksHeaderBackup"),
+                )
+                .with_output(
+                    CmdRequest::BtrfsDeviceScanForget {
+                        devices: vec!["/dev/mapper/braid-disk2".into()],
+                    },
+                    ok_raw_empty("btrfs device scan --forget"),
+                )
+                .with_output(
+                    CmdRequest::WipefsBtrfs {
+                        device: "/dev/mapper/braid-disk2".into(),
+                    },
+                    ok_raw_empty("wipefs"),
+                )
+                .with_output(
+                    CmdRequest::BtrfsDeviceAdd {
+                        device: "/dev/mapper/braid-disk2".into(),
+                        mount_point: MountPoint("/mnt/storage".into()),
+                        force: true,
+                    },
+                    ok_raw_empty("btrfs device add"),
+                ),
+        ));
+        let resolver = resolver_for(&[("/dev/vda", "virtio-disk1"), ("/dev/vdb", "virtio-disk2")]);
+        let inhibitor = RequestCountInhibitor::new(runner.clone());
+        let params = recover_params_with_inhibitor(
+            &config,
+            &paths,
+            Some(passphrase_file.path()),
+            false,
+            &inhibitor,
+        );
+
+        execute_add_pool_mutation_recovery(
+            &runner,
+            &fs,
+            &resolver,
+            &params,
+            AddPoolReplayCtx {
+                credential: None,
+                journal: &journal,
+                union: &union,
+                targets,
+                pool: pool_state_one_disk(),
+            },
+        )
+        .expect("replay with enroll_key_file should complete");
+
+        let requests = runner.requests();
+        let addkey = requests
+            .iter()
+            .position(|r| matches!(r, CmdRequest::CryptsetupLuksAddKeyFile { .. }))
+            .expect("replay must run luksAddKey");
+        let backup = requests
+            .iter()
+            .position(|r| matches!(r, CmdRequest::CryptsetupLuksHeaderBackup { .. }))
+            .expect("replay must back up the header");
+        let scan_forget = requests
+            .iter()
+            .position(|r| matches!(r, CmdRequest::BtrfsDeviceScanForget { .. }))
+            .expect("replay must scan-forget");
+        let wipe = requests
+            .iter()
+            .position(|r| matches!(r, CmdRequest::WipefsBtrfs { .. }))
+            .expect("replay must wipefs");
+        let add = requests
+            .iter()
+            .position(|r| matches!(r, CmdRequest::BtrfsDeviceAdd { .. }))
+            .expect("replay must btrfs-device-add");
+        assert!(
+            addkey < backup && backup < scan_forget && scan_forget < wipe && wipe < add,
+            "expected addKey({addkey}) < backup({backup}) < scan-forget({scan_forget}) < wipefs({wipe}) < device-add({add}); got: {requests:?}"
+        );
+        assert!(!paths.pending_op_json().exists());
+    }
+
+    // Intent: dry-run preview for add recovery with a journaled
+    //   `RecoverableBraidLabeled { enroll_key_file: Some(_) }` target
+    //   renders `cryptsetup luksAddKey` + `cryptsetup luksHeaderBackup`
+    //   BEFORE `btrfs device scan --forget`, `wipefs`, and
+    //   `btrfs device add`.
+    // Why it exists: per `docs/decisions/022-dry-run-preview-model.md`,
+    //   the preview must stay byte-aligned with the executor. The
+    //   add-recovery executor inserts addKey + headerBackup before
+    //   pool_add_device when the journal carries `enroll_key_file:
+    //   Some`; this test pins that the renderer agrees. A regression
+    //   that put the keyfile mutation between wipefs and btrfs-add
+    //   would falsely show wipefs running before the slot 1 mutation
+    //   in dry-run output, contradicting the actual replay order.
+    // Scenario: operator runs `braid recover --dry-run` after a crash
+    //   mid-`add --enroll DIR` of a returning braid disk. The journal
+    //   is `RecoverableBraidLabeled` with the keyfile path set.
+    #[test]
+    fn render_add_recovery_existing_luks_with_enroll_renders_addkey_before_scanforget() {
+        let mut targets = BTreeMap::new();
+        targets.insert(
+            "disk2".to_owned(),
+            journal::AddJournalTarget {
+                by_id: ByIdPath("/dev/disk/by-id/virtio-disk2".into()),
+                mapper_name: "braid-disk2".into(),
+                mode: journal::AddJournalMode::RecoverableBraidLabeled {
+                    verified_pool_fsid: "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee".into(),
+                    luks_uuid: LuksUuid("22222222-2222-2222-2222-222222222222".into()),
+                    enroll_key_file: Some(std::path::PathBuf::from("/run/keys/braid.key")),
+                },
+            },
+        );
+
+        let plan = RecoverWorkPlan {
+            open_plan: None,
+            pre_resolved_credential: None,
+            journal: recoverable_pool_mutation_add_journal(),
+            union: PoolMembership::empty(),
+            mount_point: MountPoint("/mnt/storage".into()),
+            pool_json_path: std::path::PathBuf::from("/var/lib/braid/pool.json"),
+            pending_op_path: std::path::PathBuf::from("/var/lib/braid/pending-op.json"),
+            luks_headers_dir: std::path::PathBuf::from("/var/lib/braid/luks-headers"),
+            actions: Vec::new(),
+        };
+
+        let mut steps = Vec::new();
+        render_add_pool_mutation_recovery_steps(&plan, &mut steps, &targets, false, None);
+        let output = Step::render_dry_run(&steps);
+
+        let find = |needle: &str| -> usize {
+            output
+                .lines()
+                .position(|line| line.contains(needle))
+                .unwrap_or_else(|| panic!("missing {needle:?} in:\n{output}"))
+        };
+        let addkey = find("$ cryptsetup luksAddKey");
+        let backup = find("$ cryptsetup luksHeaderBackup");
+        let scan_forget = find("$ btrfs device scan --forget");
+        let wipefs = find("$ wipefs");
+        let add = find("$ btrfs device add");
+        assert!(
+            addkey < backup && backup < scan_forget && scan_forget < wipefs && wipefs < add,
+            "expected luksAddKey({addkey}) < luksHeaderBackup({backup}) < scan-forget({scan_forget}) < wipefs({wipefs}) < device-add({add}); got:\n{output}"
+        );
+    }
+
+    // Intent: dry-run preview for add recovery with `enroll_key_file:
+    //   None` is unchanged from the pre-refactor render: only
+    //   `scan-forget`, `wipefs`, `btrfs device add` -- no
+    //   `luksAddKey` / `luksHeaderBackup`.
+    // Why it exists: regression guard against the renderer
+    //   unconditionally emitting the keyfile pair when no keyfile is
+    //   journaled. Locks the no-enroll preview at byte-equivalence.
+    // Scenario: pre-`--enroll`-fix journal, recovery dry-run.
+    #[test]
+    fn render_add_recovery_existing_luks_without_enroll_emits_no_keyfile_steps() {
+        let mut targets = BTreeMap::new();
+        targets.insert(
+            "disk2".to_owned(),
+            journal::AddJournalTarget {
+                by_id: ByIdPath("/dev/disk/by-id/virtio-disk2".into()),
+                mapper_name: "braid-disk2".into(),
+                mode: journal::AddJournalMode::RecoverableBraidLabeled {
+                    verified_pool_fsid: "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee".into(),
+                    luks_uuid: LuksUuid("22222222-2222-2222-2222-222222222222".into()),
+                    enroll_key_file: None,
+                },
+            },
+        );
+
+        let plan = RecoverWorkPlan {
+            open_plan: None,
+            pre_resolved_credential: None,
+            journal: recoverable_pool_mutation_add_journal(),
+            union: PoolMembership::empty(),
+            mount_point: MountPoint("/mnt/storage".into()),
+            pool_json_path: std::path::PathBuf::from("/var/lib/braid/pool.json"),
+            pending_op_path: std::path::PathBuf::from("/var/lib/braid/pending-op.json"),
+            luks_headers_dir: std::path::PathBuf::from("/var/lib/braid/luks-headers"),
+            actions: Vec::new(),
+        };
+
+        let mut steps = Vec::new();
+        render_add_pool_mutation_recovery_steps(&plan, &mut steps, &targets, false, None);
+        let output = Step::render_dry_run(&steps);
+        assert!(
+            !output.contains("$ cryptsetup luksAddKey"),
+            "no-enroll renderer must not emit luksAddKey; got:\n{output}"
+        );
+        assert!(
+            !output.contains("$ cryptsetup luksHeaderBackup"),
+            "no-enroll renderer must not emit luksHeaderBackup; got:\n{output}"
+        );
+        assert!(
+            output.contains("$ btrfs device scan --forget"),
+            "no-enroll renderer must still emit scan-forget; got:\n{output}"
+        );
+    }
+
     #[test]
     fn add_pool_mutation_committed_target_scans_without_wipe_or_add() {
         let tmp = tempfile::TempDir::new().unwrap();
@@ -7629,11 +8064,31 @@ mod tests {
         let tmp = tempfile::TempDir::new().unwrap();
         let paths = StatePaths::custom(tmp.path().into());
         let config = Config::new(MountPoint("/mnt/storage".into())).unwrap();
-        let fs = MockFs::new(&[]);
+        // ExistingLuks recovery now probes the new disk's LUKS UUID before
+        // rollback (defensive: refuses to silently roll back if the wrong
+        // disk is replugged or the header was zeroed). Seed the probe so
+        // the disk reads as PresentLuks with the journaled UUID.
+        let fs = MockFs::new(&["/dev/disk/by-id/virtio-new"]);
         let journal = replace_journal();
         journal::write_journal(&paths, &journal).unwrap();
         let union = union_memberships(&journal);
-        let runner = MockRunner::default();
+        let runner = MockRunner::default()
+            .with_output(
+                CmdRequest::CryptsetupLuksUuid {
+                    device: "/dev/disk/by-id/virtio-new".into(),
+                },
+                cryptsetup_uuid_ok(
+                    "/dev/disk/by-id/virtio-new",
+                    "44444444-4444-4444-4444-444444444444",
+                ),
+            )
+            .with_output(
+                CmdRequest::CryptsetupLuksDumpText {
+                    device: "/dev/disk/by-id/virtio-new".into(),
+                },
+                luks_dump_label("braid-new"),
+            )
+            .with_mapper_closed("braid-new");
         let inhibitor = crate::inhibit::RecordingInhibitor::new();
         let params = recover_params_with_inhibitor(&config, &paths, None, false, &inhibitor);
         let OpKind::Replace {
@@ -7660,8 +8115,19 @@ mod tests {
         )
         .expect("uncommitted replace should restore pre state and clear journal");
 
+        // No-enroll rollback gates inhibitor + credential prompt on the
+        // mutation phase, so neither fires when `enroll_key_file: None`.
         assert_eq!(inhibitor.acquire_count(), 0);
-        assert!(runner.requests().is_empty());
+        let requests = runner.requests();
+        assert!(
+            !requests.iter().any(|r| matches!(
+                r,
+                CmdRequest::CryptsetupTestPassphrase { .. }
+                    | CmdRequest::CryptsetupLuksAddKeyFile { .. }
+                    | CmdRequest::CryptsetupLuksHeaderBackup { .. }
+            )),
+            "no-enroll rollback must not run credential or LUKS-mutation commands: {requests:?}"
+        );
         assert!(!paths.pending_op_json().exists());
         let recovered = membership::load_membership(&paths).unwrap();
         assert!(recovered.disks.contains_key("old"));
@@ -8241,6 +8707,369 @@ mod tests {
         );
         assert!(paths.pending_op_json().exists());
         assert!(!paths.pool_json().exists());
+    }
+
+    // Intent: ExistingLuks recovery with `enroll_key_file: Some` aborts
+    //   when the live LUKS UUID does not match the journaled one, and
+    //   preserves the journal (does NOT clear pending-op.json).
+    // Why it exists: this is the silent-drop bug fix's defensive guard
+    //   in recovery -- before the refactor, ExistingLuks recovery had no
+    //   identity probe and would silently roll back even if the user
+    //   had swapped the disk between crash and recover. Pinning that a
+    //   UUID mismatch preserves the journal blocks a regression that
+    //   would let recovery proceed (potentially trashing a different
+    //   pool's pre-replace topology). The "preserving pending-op.json"
+    //   wording is the operator-facing signal.
+    // Scenario: braid replace --enroll DIR crashes between journal
+    //   write and pool mutation; before recover runs, the operator
+    //   replugs a different pre-formatted LUKS disk into the same
+    //   slot.
+    #[test]
+    fn replace_pool_mutation_existing_luks_with_enroll_uuid_mismatch_preserves_journal() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let paths = StatePaths::custom(tmp.path().into());
+        let config = Config::new(MountPoint("/mnt/storage".into())).unwrap();
+        let fs = MockFs::new(&["/dev/disk/by-id/virtio-new"]);
+        let key_file = write_valid_keyfile(&tmp, "braid-new.key");
+        let journal = replace_existing_luks_with_enroll_journal(key_file.clone());
+        journal::write_journal(&paths, &journal).unwrap();
+        let union = union_memberships(&journal);
+        // probe returns a DIFFERENT UUID than the journaled one.
+        let runner = MockRunner::default()
+            .with_output(
+                CmdRequest::CryptsetupLuksUuid {
+                    device: "/dev/disk/by-id/virtio-new".into(),
+                },
+                cryptsetup_uuid_ok(
+                    "/dev/disk/by-id/virtio-new",
+                    "55555555-5555-5555-5555-555555555555",
+                ),
+            )
+            .with_output(
+                CmdRequest::CryptsetupLuksDumpText {
+                    device: "/dev/disk/by-id/virtio-new".into(),
+                },
+                luks_dump_label("braid-new"),
+            )
+            .with_mapper_closed("braid-new");
+        let inhibitor = crate::inhibit::RecordingInhibitor::new();
+        let params = recover_params_with_inhibitor(&config, &paths, None, false, &inhibitor);
+        let OpKind::Replace {
+            new_target, source, ..
+        } = &journal.op
+        else {
+            unreachable!("returns Replace");
+        };
+
+        let err = execute_replace_pool_mutation_recovery(
+            &runner,
+            &fs,
+            &MockByIdResolver::default(),
+            &params,
+            None,
+            &journal,
+            &union,
+            pool_state_disk1_and_old(),
+            "old",
+            "new",
+            new_target,
+            source,
+            false,
+        )
+        .unwrap_err();
+
+        assert!(err.to_string().contains("LUKS UUID mismatch"), "{err}");
+        assert!(
+            err.to_string().contains("preserving pending-op.json"),
+            "{err}"
+        );
+        assert_eq!(inhibitor.acquire_count(), 0);
+        let requests = runner.requests();
+        assert!(
+            !requests.iter().any(|r| matches!(
+                r,
+                CmdRequest::CryptsetupLuksAddKeyFile { .. }
+                    | CmdRequest::CryptsetupLuksHeaderBackup { .. }
+                    | CmdRequest::CryptsetupTestPassphrase { .. }
+            )),
+            "uuid mismatch must abort before any LUKS mutation or credential prompt: {requests:?}"
+        );
+        assert!(paths.pending_op_json().exists());
+        assert!(!paths.pool_json().exists());
+    }
+
+    // Intent: ExistingLuks recovery with `enroll_key_file: Some` aborts
+    //   on bad passphrase before any LUKS mutation, and preserves the
+    //   journal.
+    // Why it exists: ensures the credential discipline matches the
+    //   FreshLuks recovery arm -- wrong passphrase must NOT proceed to
+    //   `cryptsetup luksAddKey` or header backup. Preserves the
+    //   single-passphrase invariant.
+    // Scenario: operator types the wrong passphrase during recovery of
+    //   an interrupted `replace --enroll DIR` against a `PresentLuks`
+    //   target.
+    #[test]
+    fn replace_pool_mutation_existing_luks_with_enroll_bad_passphrase_preserves_journal() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let paths = StatePaths::custom(tmp.path().into());
+        let config = Config::new(MountPoint("/mnt/storage".into())).unwrap();
+        let fs = MockFs::new(&["/dev/disk/by-id/virtio-new"]);
+        let key_file = write_valid_keyfile(&tmp, "braid-new.key");
+        let journal = replace_existing_luks_with_enroll_journal(key_file.clone());
+        journal::write_journal(&paths, &journal).unwrap();
+        let union = union_memberships(&journal);
+        let passphrase_file = tempfile::NamedTempFile::new().unwrap();
+        {
+            use std::io::Write;
+            passphrase_file.as_file().write_all(b"wrongpass").unwrap();
+        }
+        let runner = MockRunner::default()
+            .with_output(
+                CmdRequest::CryptsetupLuksUuid {
+                    device: "/dev/disk/by-id/virtio-new".into(),
+                },
+                cryptsetup_uuid_ok(
+                    "/dev/disk/by-id/virtio-new",
+                    "44444444-4444-4444-4444-444444444444",
+                ),
+            )
+            .with_output(
+                CmdRequest::CryptsetupLuksDumpText {
+                    device: "/dev/disk/by-id/virtio-new".into(),
+                },
+                luks_dump_label("braid-new"),
+            )
+            .with_mapper_closed("braid-new")
+            // Existing pool members verify OK; new disk rejects the
+            // wrong passphrase. The verifier walks targets in order,
+            // so seeding the pool members keeps the failure on the new
+            // disk specifically.
+            .with_output_stdin(
+                CmdRequest::CryptsetupTestPassphrase {
+                    device: "/dev/vda".into(),
+                },
+                b"wrongpass".to_vec(),
+                ok_raw_empty("cryptsetup open --test-passphrase"),
+            )
+            .with_output_stdin(
+                CmdRequest::CryptsetupTestPassphrase {
+                    device: "/dev/vdb".into(),
+                },
+                b"wrongpass".to_vec(),
+                ok_raw_empty("cryptsetup open --test-passphrase"),
+            )
+            .with_output_stdin(
+                CmdRequest::CryptsetupTestPassphrase {
+                    device: "/dev/disk/by-id/virtio-new".into(),
+                },
+                b"wrongpass".to_vec(),
+                err_raw(
+                    "cryptsetup open --test-passphrase",
+                    2,
+                    "No key available with this passphrase.",
+                ),
+            );
+        let inhibitor = crate::inhibit::RecordingInhibitor::new();
+        let params = recover_params_with_inhibitor(
+            &config,
+            &paths,
+            Some(passphrase_file.path()),
+            false,
+            &inhibitor,
+        );
+        let OpKind::Replace {
+            new_target, source, ..
+        } = &journal.op
+        else {
+            unreachable!("returns Replace");
+        };
+
+        let err = execute_replace_pool_mutation_recovery(
+            &runner,
+            &fs,
+            &MockByIdResolver::default(),
+            &params,
+            None,
+            &journal,
+            &union,
+            pool_state_disk1_and_old(),
+            "old",
+            "new",
+            new_target,
+            source,
+            false,
+        )
+        .unwrap_err();
+
+        assert!(
+            err.to_string()
+                .contains("recover replace passphrase was rejected by 'new'"),
+            "{err}"
+        );
+        assert_eq!(inhibitor.acquire_count(), 0);
+        let requests = runner.requests();
+        assert!(
+            !requests.iter().any(|r| matches!(
+                r,
+                CmdRequest::CryptsetupLuksAddKeyFile { .. }
+                    | CmdRequest::CryptsetupLuksHeaderBackup { .. }
+            )),
+            "wrong passphrase must stop before any LUKS mutation: {requests:?}"
+        );
+        assert!(paths.pending_op_json().exists());
+        assert!(!paths.pool_json().exists());
+    }
+
+    // Intent: ExistingLuks recovery with `enroll_key_file: Some` replays
+    //   `cryptsetup luksAddKey` + `luksHeaderBackup` after the identity
+    //   probe + credential check, then writes pre-replace pool.json and
+    //   clears the journal.
+    // Why it exists: the silent-drop bug fix landing in recovery. Pre-
+    //   refactor, recovery never ran the addKey replay -- a crash mid-
+    //   replace meant the user's `--enroll DIR` was lost forever. This
+    //   test pins the happy-path behavior end-to-end so a regression
+    //   that drops the addKey/backup step is caught immediately.
+    // Scenario: `braid replace --enroll DIR` against a PresentLuks
+    //   target crashes between journal write and pool_replace_start;
+    //   `braid recover` resumes, identity probe passes, credential
+    //   verifies, slot 1 is enrolled, header backup captures it, and
+    //   the journal clears.
+    #[test]
+    fn replace_pool_mutation_existing_luks_with_enroll_replays_keyfile_then_clears_journal() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let paths = StatePaths::custom(tmp.path().into());
+        let config = Config::new(MountPoint("/mnt/storage".into())).unwrap();
+        let fs = MockFs::new(&["/dev/disk/by-id/virtio-new"]);
+        let key_file = write_valid_keyfile(&tmp, "braid-new.key");
+        let journal = replace_existing_luks_with_enroll_journal(key_file.clone());
+        journal::write_journal(&paths, &journal).unwrap();
+        let union = union_memberships(&journal);
+        let passphrase_file = tempfile::NamedTempFile::new().unwrap();
+        {
+            use std::io::Write;
+            passphrase_file.as_file().write_all(b"testpass").unwrap();
+        }
+        let runner = MockRunner::default()
+            .with_output(
+                CmdRequest::CryptsetupLuksUuid {
+                    device: "/dev/disk/by-id/virtio-new".into(),
+                },
+                cryptsetup_uuid_ok(
+                    "/dev/disk/by-id/virtio-new",
+                    "44444444-4444-4444-4444-444444444444",
+                ),
+            )
+            .with_output(
+                CmdRequest::CryptsetupLuksDumpText {
+                    device: "/dev/disk/by-id/virtio-new".into(),
+                },
+                luks_dump_label("braid-new"),
+            )
+            .with_mapper_closed("braid-new")
+            .with_output_stdin(
+                CmdRequest::CryptsetupTestPassphrase {
+                    device: "/dev/vda".into(),
+                },
+                b"testpass".to_vec(),
+                ok_raw_empty("cryptsetup open --test-passphrase"),
+            )
+            .with_output_stdin(
+                CmdRequest::CryptsetupTestPassphrase {
+                    device: "/dev/vdb".into(),
+                },
+                b"testpass".to_vec(),
+                ok_raw_empty("cryptsetup open --test-passphrase"),
+            )
+            .with_output_stdin(
+                CmdRequest::CryptsetupTestPassphrase {
+                    device: "/dev/disk/by-id/virtio-new".into(),
+                },
+                b"testpass".to_vec(),
+                ok_raw_empty("cryptsetup open --test-passphrase"),
+            )
+            // ensure_keyfile_enrolled probes the keyfile first and
+            // skips luksAddKey if it already authenticates. We let it
+            // probe (Rejected) and then run the real enroll command.
+            .with_output(
+                CmdRequest::CryptsetupTestKeyFile {
+                    device: "/dev/disk/by-id/virtio-new".into(),
+                    key_file_path: key_file.display().to_string(),
+                },
+                err_raw("cryptsetup open --test-passphrase --key-file", 2, "No key"),
+            )
+            .with_output_stdin(
+                CmdRequest::CryptsetupLuksAddKeyFile {
+                    device: "/dev/disk/by-id/virtio-new".into(),
+                    key_file_path: key_file.display().to_string(),
+                },
+                b"testpass".to_vec(),
+                ok_raw_empty("cryptsetup luksAddKey"),
+            )
+            .with_output(
+                CmdRequest::CryptsetupLuksHeaderBackup {
+                    device: "/dev/disk/by-id/virtio-new".into(),
+                    backup_path: paths
+                        .luks_headers_dir()
+                        .join("braid-new.luksheader.tmp")
+                        .display()
+                        .to_string(),
+                },
+                ok_raw_empty("cryptsetup luksHeaderBackup"),
+            );
+        let inhibitor = crate::inhibit::RecordingInhibitor::new();
+        let params = recover_params_with_inhibitor(
+            &config,
+            &paths,
+            Some(passphrase_file.path()),
+            false,
+            &inhibitor,
+        );
+        let OpKind::Replace {
+            new_target, source, ..
+        } = &journal.op
+        else {
+            unreachable!("returns Replace");
+        };
+
+        execute_replace_pool_mutation_recovery(
+            &runner,
+            &fs,
+            &MockByIdResolver::default(),
+            &params,
+            None,
+            &journal,
+            &union,
+            pool_state_disk1_and_old(),
+            "old",
+            "new",
+            new_target,
+            source,
+            false,
+        )
+        .expect("happy path replays enrollment + clears journal");
+
+        assert_eq!(inhibitor.acquire_count(), 1);
+        let requests = runner.requests();
+        assert!(
+            requests.iter().any(|r| matches!(
+                r,
+                CmdRequest::CryptsetupLuksAddKeyFile { device, .. }
+                    if device == "/dev/disk/by-id/virtio-new"
+            )),
+            "happy path must replay luksAddKey: {requests:?}"
+        );
+        assert!(
+            requests
+                .iter()
+                .any(|r| matches!(r, CmdRequest::CryptsetupLuksHeaderBackup { .. })),
+            "happy path must back up the header after the addKey: {requests:?}"
+        );
+        assert!(!paths.pending_op_json().exists());
+        let recovered = membership::load_membership(&paths).unwrap();
+        // Replay re-establishes pre-replace topology (the op didn't
+        // commit, so we roll back to {disk1, old}).
+        assert!(recovered.disks.contains_key("old"));
+        assert!(!recovered.disks.contains_key("new"));
     }
 
     // Intent: Replace::PostReplaceMaintenance skips unowed balance work.
@@ -11083,7 +11912,8 @@ mod tests {
                 by_id: ByIdPath("/dev/disk/by-id/x".into()),
                 mapper_name: "braid-new".into(),
                 mode: journal::ReplaceJournalMode::ExistingLuks {
-                    luks_uuid: LuksUuid("luks-new".into()),
+                    luks_uuid: LuksUuid("44444444-4444-4444-4444-444444444444".into()),
+                    enroll_key_file: None,
                 },
             },
             source: journal::ReplaceJournalSource::Live {
@@ -11113,7 +11943,8 @@ mod tests {
                 by_id: ByIdPath("/dev/disk/by-id/x".into()),
                 mapper_name: "braid-new".into(),
                 mode: journal::ReplaceJournalMode::ExistingLuks {
-                    luks_uuid: LuksUuid("luks-new".into()),
+                    luks_uuid: LuksUuid("44444444-4444-4444-4444-444444444444".into()),
+                    enroll_key_file: None,
                 },
             },
             source: journal::ReplaceJournalSource::Live {
@@ -11187,7 +12018,8 @@ mod tests {
                     by_id: ByIdPath("/dev/disk/by-id/virtio-new".into()),
                     mapper_name: "braid-new".into(),
                     mode: journal::ReplaceJournalMode::ExistingLuks {
-                        luks_uuid: LuksUuid("luks-new".into()),
+                        luks_uuid: LuksUuid("44444444-4444-4444-4444-444444444444".into()),
+                        enroll_key_file: None,
                     },
                 },
                 source: journal::ReplaceJournalSource::Live {
@@ -11242,6 +12074,29 @@ mod tests {
             },
         };
         *restore_raid1_after_commit = false;
+        journal
+    }
+
+    /// Existing-LUKS replace journal with `enroll_key_file: Some(kf)`.
+    /// Models the silent-drop bug fix: `replace --enroll DIR` against a
+    /// pre-formatted target and slot 1 was empty, so the planner picked
+    /// `NeedsEnroll` and the journal carries the keyfile for replay.
+    fn replace_existing_luks_with_enroll_journal(
+        enroll_key_file: std::path::PathBuf,
+    ) -> journal::Journal {
+        let mut journal = replace_journal();
+        let OpKind::Replace { new_target, .. } = &mut journal.op else {
+            unreachable!("replace_journal returns Replace");
+        };
+        if let journal::ReplaceJournalMode::ExistingLuks {
+            enroll_key_file: stored,
+            ..
+        } = &mut new_target.mode
+        {
+            *stored = Some(enroll_key_file);
+        } else {
+            unreachable!("replace_journal returns ExistingLuks");
+        }
         journal
     }
 

@@ -33,20 +33,21 @@ pub enum EnrollKeyFileError {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub enum DiskEnrollAction {
+pub(crate) enum DiskEnrollAction {
     AlreadyEnrolled { name: String, by_id: ByIdPath },
     NeedsEnroll { name: String, by_id: ByIdPath },
 }
 
-/// Mode dispatch for `plan_enrollment`. The two modes share passphrase
-/// verification and slot-1 conflict detection but differ on whether the
-/// keyfile probe (`luks::verify_key_file`) runs.
+/// Mode dispatch for `plan_single_disk_enrollment` (and the per-candidate
+/// loop in `plan_enrollment`). The two modes share slot-1 conflict
+/// detection but differ on whether the keyfile probe
+/// (`luks::verify_key_file`) runs.
 ///
 /// `GenerateNew` must skip the keyfile probe -- the keyfile does not exist
 /// yet, so probing it would always fail with "Failed to open key file" and
 /// abort enrollment before the file is created.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum EnrollmentPlanMode {
+pub(crate) enum EnrollmentPlanMode {
     /// User-supplied keyfile already on disk. Probe it on each candidate
     /// to support idempotent re-enroll, then check slot 1 on disks that
     /// don't already have it.
@@ -135,17 +136,73 @@ fn check_slot_one_available<R: CommandRunner>(
     Ok(())
 }
 
+/// Per-disk enrollment classifier shared by `plan_enrollment` (the
+/// standalone `braid enroll` planner) and the `add` / `replace` planners
+/// when their `--enroll DIR` flag targets an already-LUKS disk. Owns the
+/// `Some(kf) + already-LUKS target` decision in one place so no caller
+/// can silently drop the keyfile -- the silent-drop bug this refactor
+/// fixes.
+///
+/// No passphrase verification: callers verify credentials before invoking
+/// this helper (standalone enroll batches up-front; add/replace verify
+/// against the new disk's existing slot 0). Probe and slot-1 check are
+/// non-mutating reads, so dry-run callers can use this too.
+///
+/// Mode dispatch:
+/// - `ExistingKeyfile`: probe the keyfile (`[wait]/[ok]/[skip]` rows
+///   emit via `probe_keyfile_enrollment`); `Authenticated` -> return
+///   `AlreadyEnrolled`. `Rejected` falls through to slot-1 check.
+/// - `GenerateNew`: skip the probe entirely (keyfile does not exist on
+///   the standalone enroll `--generate` flow) and only run the slot-1
+///   check.
+///
+/// Slot-1 outcomes:
+/// - `Empty` -> `NeedsEnroll`.
+/// - `Occupied` -> `Err(EnrollKeyFileError::Validation(..))` with the
+///   canonical `cryptsetup luksKillSlot` remediation text.
+pub(crate) fn plan_single_disk_enrollment<R: CommandRunner>(
+    runner: &R,
+    name: &str,
+    by_id: &ByIdPath,
+    key_file_path: &Path,
+    mode: EnrollmentPlanMode,
+) -> Result<DiskEnrollAction, EnrollKeyFileError> {
+    if let EnrollmentPlanMode::ExistingKeyfile = mode {
+        // Only `Authenticated` means the keyfile is already installed.
+        // `Rejected` is the normal "not yet enrolled" signal. Any other
+        // non-zero exit (busy/missing/generic) propagates via `?` and
+        // must NOT be silently treated as "not enrolled" -- doing so
+        // would let the flow proceed to slot preflight on a device that
+        // may not even be readable.
+        let target = CredentialVerifyTarget {
+            name: name.to_owned(),
+            device: by_id.0.clone(),
+        };
+        let color_enabled = color_enabled_for_stderr();
+        if matches!(
+            probe_keyfile_enrollment(runner, &target, key_file_path, color_enabled, emit_status,)?,
+            VerifyOutcome::Authenticated
+        ) {
+            return Ok(DiskEnrollAction::AlreadyEnrolled {
+                name: name.to_owned(),
+                by_id: by_id.clone(),
+            });
+        }
+    }
+
+    check_slot_one_available(runner, name, by_id)?;
+
+    Ok(DiskEnrollAction::NeedsEnroll {
+        name: name.to_owned(),
+        by_id: by_id.clone(),
+    })
+}
+
 /// Planning phase: verify passphrase, then classify each candidate disk.
 /// Returns an immutable plan -- no mutations occur. Fails immediately on
 /// wrong passphrase or slot-1 conflict.
 ///
-/// Mode dispatch:
-/// - `ExistingKeyfile`: probe the keyfile per-disk (idempotent re-enroll
-///   collapses to `AlreadyEnrolled`); slot 1 only checked when the probe
-///   was rejected.
-/// - `GenerateNew`: keyfile does not exist yet, so the probe is skipped
-///   entirely and every candidate gets a slot-1 check, producing only
-///   `NeedsEnroll` actions.
+/// Mode dispatch is delegated to `plan_single_disk_enrollment`.
 fn plan_enrollment<R: CommandRunner>(
     runner: &R,
     candidates: &[EnrollmentCandidate],
@@ -182,46 +239,14 @@ fn plan_enrollment<R: CommandRunner>(
 
     // Passphrase has been verified against every candidate up-front, matching
     // sibling commands (mount/add/replace). The loop below only handles
-    // mode-specific keyfile probing and slot-1 preflight.
+    // mode-specific keyfile probing and slot-1 preflight via the shared helper.
     let mut plan = Vec::new();
     for (name, by_id) in candidates {
-        if let EnrollmentPlanMode::ExistingKeyfile = mode {
-            // Check if keyfile already works (idempotent). Only `Authenticated`
-            // means the keyfile is already installed in a slot -- `Rejected` is
-            // the normal "not yet enrolled" signal. Any other non-zero exit
-            // (busy/missing/generic) propagates via the `?` on the helper
-            // and must NOT be silently treated as "not enrolled" -- doing so
-            // would let the flow proceed to slot preflight on a device that
-            // may not even be readable.
-            let target = CredentialVerifyTarget {
-                name: name.clone(),
-                device: by_id.0.clone(),
-            };
-            if matches!(
-                probe_keyfile_enrollment(
-                    runner,
-                    &target,
-                    key_file_path,
-                    color_enabled,
-                    emit_status,
-                )?,
-                VerifyOutcome::Authenticated
-            ) {
-                plan.push(DiskEnrollAction::AlreadyEnrolled {
-                    name: name.clone(),
-                    by_id: by_id.clone(),
-                });
-                continue;
-            }
+        let action = plan_single_disk_enrollment(runner, name, by_id, key_file_path, mode)?;
+        if matches!(action, DiskEnrollAction::NeedsEnroll { .. }) {
+            eprintln!("enroll: {} -- will add keyfile to slot 1", name);
         }
-
-        check_slot_one_available(runner, name, by_id)?;
-
-        eprintln!("enroll: {} -- will add keyfile to slot 1", name);
-        plan.push(DiskEnrollAction::NeedsEnroll {
-            name: name.clone(),
-            by_id: by_id.clone(),
-        });
+        plan.push(action);
     }
 
     Ok(plan)
@@ -2128,6 +2153,97 @@ mod tests {
         assert!(
             err.to_string().contains("occupied by an unknown key"),
             "unexpected error: {err}"
+        );
+    }
+
+    // Intent: `plan_single_disk_enrollment` returns one of three outcomes
+    //   per candidate (AlreadyEnrolled / NeedsEnroll / Err on slot-1
+    //   conflict) and emits the keyfile-probe wait/ok rows when in
+    //   `ExistingKeyfile` mode and the keyfile authenticates.
+    // Why it exists: this helper is the single entry point that
+    //   `add` / `replace` / `enroll` all route through after this
+    //   refactor. Pinning each branch directly (instead of only via
+    //   `plan_enrollment`) prevents a regression where one caller's
+    //   integration drifts and silently no-ops on a `Some(kf) +
+    //   already-LUKS` target -- the bug this refactor fixes.
+    // Scenario: an operator passes `--enroll DIR` to `replace` /
+    //   `add` against a returning braid disk; the helper decides
+    //   whether the disk needs a fresh `luksAddKey`, is idempotently
+    //   skippable, or has slot 1 occupied by an unknown key.
+    #[test]
+    fn plan_single_disk_existing_keyfile_already_enrolled() {
+        let d = "/dev/disk/by-id/d1";
+        let kf = "/tmp/braid.key";
+        let (tkf_req, tkf_out) = test_keyfile_ok(d, kf);
+        let runner = MockRunner::default().with_output(tkf_req, tkf_out);
+
+        let action = plan_single_disk_enrollment(
+            &runner,
+            "disk1",
+            &by_id(d),
+            Path::new(kf),
+            EnrollmentPlanMode::ExistingKeyfile,
+        )
+        .expect("Authenticated probe should yield AlreadyEnrolled");
+        assert_eq!(
+            action,
+            DiskEnrollAction::AlreadyEnrolled {
+                name: "disk1".to_owned(),
+                by_id: by_id(d),
+            },
+        );
+    }
+
+    #[test]
+    fn plan_single_disk_existing_keyfile_needs_enroll() {
+        let d = "/dev/disk/by-id/d1";
+        let kf = "/tmp/braid.key";
+        let (tkf_req, tkf_out) = test_keyfile_fail(d, kf);
+        let (ld_req, ld_out) = luks_dump_slot1_empty(d);
+        let runner = MockRunner::default()
+            .with_output(tkf_req, tkf_out)
+            .with_output(ld_req, ld_out);
+
+        let action = plan_single_disk_enrollment(
+            &runner,
+            "disk1",
+            &by_id(d),
+            Path::new(kf),
+            EnrollmentPlanMode::ExistingKeyfile,
+        )
+        .expect("Rejected probe + empty slot 1 should yield NeedsEnroll");
+        assert_eq!(
+            action,
+            DiskEnrollAction::NeedsEnroll {
+                name: "disk1".to_owned(),
+                by_id: by_id(d),
+            },
+        );
+    }
+
+    #[test]
+    fn plan_single_disk_existing_keyfile_slot_one_occupied_errors() {
+        let d = "/dev/disk/by-id/d1";
+        let kf = "/tmp/braid.key";
+        let (tkf_req, tkf_out) = test_keyfile_fail(d, kf);
+        let (ld_req, ld_out) = luks_dump_slot1_occupied(d);
+        let runner = MockRunner::default()
+            .with_output(tkf_req, tkf_out)
+            .with_output(ld_req, ld_out);
+
+        let err = plan_single_disk_enrollment(
+            &runner,
+            "disk1",
+            &by_id(d),
+            Path::new(kf),
+            EnrollmentPlanMode::ExistingKeyfile,
+        )
+        .expect_err("slot-1-occupied must reject");
+        let msg = err.to_string();
+        assert!(msg.contains("slot 1 on disk1"), "unexpected error: {msg}");
+        assert!(
+            msg.contains("occupied by an unknown key"),
+            "unexpected error: {msg}",
         );
     }
 

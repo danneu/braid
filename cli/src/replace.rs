@@ -90,6 +90,19 @@ enum ReplaceTargetPrep {
     },
     ExistingLuks {
         mapper_open: bool,
+        /// Resolved keyfile to enroll into LUKS slot 1 on the new disk.
+        /// `Some(kf)` only when `--enroll DIR` was passed AND the new
+        /// disk classified as `NeedsEnroll` (slot 1 empty). `None` for
+        /// no-`--enroll`, or for the idempotent `AlreadyEnrolled` skip
+        /// where slot 1 already authenticates with `kf`. Slot-1
+        /// conflicts are rejected at planning time before any journal
+        /// write.
+        enroll_key_file: Option<PathBuf>,
+        /// Where the post-enrollment LUKS header backup should land.
+        /// Always populated so render_steps can reference it without
+        /// re-deriving from `paths` (mirrors the FreshLuks variant).
+        /// Unused when `enroll_key_file` is `None`.
+        header_backup_path: PathBuf,
     },
 }
 
@@ -162,7 +175,32 @@ impl ReplaceWorkPlan {
                     }],
                 });
             }
-            ReplaceTargetPrep::ExistingLuks { mapper_open, .. } => {
+            ReplaceTargetPrep::ExistingLuks {
+                mapper_open,
+                enroll_key_file,
+                header_backup_path,
+            } => {
+                if let Some(kf) = enroll_key_file {
+                    steps.push(Step {
+                        risk: "safe",
+                        description: format!("enroll keyfile -> LUKS slot 1 on {}", self.new_by_id),
+                        commands: vec![CmdRequest::CryptsetupLuksAddKeyFile {
+                            device: self.new_by_id.0.clone(),
+                            key_file_path: kf.display().to_string(),
+                        }],
+                    });
+                    steps.push(Step {
+                        risk: "safe",
+                        description: format!(
+                            "LUKS header backup -> {}",
+                            header_backup_path.display()
+                        ),
+                        commands: vec![CmdRequest::CryptsetupLuksHeaderBackup {
+                            device: self.new_by_id.0.clone(),
+                            backup_path: header_backup_path.display().to_string(),
+                        }],
+                    });
+                }
                 if !mapper_open {
                     steps.push(Step {
                         risk: "safe",
@@ -510,7 +548,45 @@ impl ReplacePlan {
                     )
                 );
             }
-            ReplaceTargetPrep::ExistingLuks { mapper_open, .. } => {
+            ReplaceTargetPrep::ExistingLuks {
+                mapper_open,
+                enroll_key_file,
+                ..
+            } => {
+                // Enroll the keyfile + back up the header BEFORE unlock so
+                // the slot 1 mutation is captured in the post-mutation
+                // backup. Mirrors the FreshLuks ordering (luksFormat ->
+                // addKey -> headerBackup -> open) the dry-run snapshot
+                // pins. cryptsetup luksAddKey works whether the mapper is
+                // currently open or closed -- it operates on the
+                // underlying block device, not the dm slot.
+                if let Some(kf) = enroll_key_file {
+                    eprint!(
+                        "{}",
+                        status_line(
+                            StatusTag::Wait,
+                            color_enabled,
+                            &format!("disk {new_name}: enrolling keyfile in slot 1..."),
+                        )
+                    );
+                    crate::luks::enroll_key_file(runner, &new_by_id.0, &passphrase, kf)?;
+                    eprint!(
+                        "{}",
+                        status_line(
+                            StatusTag::Ok,
+                            color_enabled,
+                            &format!("disk {new_name}: keyfile enrolled in slot 1"),
+                        )
+                    );
+                    let backup_path = backup_luks_header_post_mutation(
+                        runner,
+                        &new_by_id.0,
+                        &new_mn.0,
+                        params.paths,
+                    )?;
+                    eprintln!("LUKS header backed up: {}", backup_path.display());
+                }
+
                 if !*mapper_open {
                     eprint!(
                         "{}",
@@ -938,6 +1014,40 @@ pub fn plan_replace<R: CommandRunner + Sync, F: Filesystem + ?Sized>(
         }
     }
 
+    // Resolve the keyfile decision for `--enroll DIR` against an
+    // already-LUKS new disk via the shared per-disk classifier. This is
+    // the silent-drop fix: `Some(kf) + PresentLuks` was the case the
+    // old code dropped on the floor; routing it through
+    // `plan_single_disk_enrollment` makes idempotent skip / refuse-on-
+    // slot-conflict / will-enroll structurally explicit and shared
+    // with `add` and `enroll`. Refusal happens before journal write.
+    // For PresentNotLuks targets (fresh format) the user input flows
+    // through directly -- no keyfile probe, no slot-1 check.
+    let resolved_enroll_key_file: Option<PathBuf> =
+        match (&new_probed.state, params.enroll_key_file) {
+            (ConfigDiskState::PresentLuks { .. }, Some(kf)) => {
+                match crate::enroll_key_file::plan_single_disk_enrollment(
+                    runner,
+                    new_name,
+                    &new_by_id,
+                    kf,
+                    crate::enroll_key_file::EnrollmentPlanMode::ExistingKeyfile,
+                ) {
+                    Ok(crate::enroll_key_file::DiskEnrollAction::AlreadyEnrolled { .. }) => None,
+                    Ok(crate::enroll_key_file::DiskEnrollAction::NeedsEnroll { .. }) => {
+                        Some(kf.to_path_buf())
+                    }
+                    Err(e) => {
+                        return ReplacePlanReport {
+                            notes: std::mem::take(&mut notes),
+                            result: Err(ReplaceError::Validation(e.to_string())),
+                        };
+                    }
+                }
+            }
+            (_, kf) => kf.map(Path::to_path_buf),
+        };
+
     let work_plan = match build_replace_work_plan(ReplaceWorkPlanInput {
         config,
         old_name: params.old_name,
@@ -949,7 +1059,7 @@ pub fn plan_replace<R: CommandRunner + Sync, F: Filesystem + ?Sized>(
         pre_membership,
         target_membership,
         paths: params.paths,
-        enroll_key_file: params.enroll_key_file,
+        enroll_key_file: resolved_enroll_key_file,
         luks_format_extra_opts: params.luks_format_extra_opts,
     }) {
         Ok(plan) => plan,
@@ -1018,7 +1128,13 @@ struct ReplaceWorkPlanInput<'a> {
     pre_membership: PoolMembership,
     target_membership: PoolMembership,
     paths: &'a StatePaths,
-    enroll_key_file: Option<&'a Path>,
+    /// Resolved keyfile decision after `plan_single_disk_enrollment`
+    /// for `PresentLuks` targets. `Some(kf)` means an enrollment will
+    /// run. `None` covers the no-`--enroll` case AND the idempotent
+    /// `AlreadyEnrolled` skip. For `PresentNotLuks` (fresh format) and
+    /// `Absent` paths, resolution is a no-op so this carries the raw
+    /// user input.
+    enroll_key_file: Option<PathBuf>,
     luks_format_extra_opts: &'a [String],
 }
 
@@ -1031,7 +1147,7 @@ fn build_replace_work_plan(
         input.new_name,
         &input.new_by_id,
         &input.new_probed,
-        input.enroll_key_file,
+        input.enroll_key_file.as_deref(),
         input.luks_format_extra_opts,
     )?;
     let journal_source = build_replace_journal_source(&input.replace_source);
@@ -1050,15 +1166,20 @@ fn build_replace_work_plan(
                 input.new_name,
                 input.luks_format_extra_opts,
             ),
-            enroll_key_file: input.enroll_key_file.map(Path::to_path_buf),
+            enroll_key_file: input.enroll_key_file.clone(),
             header_backup_path: input
                 .paths
                 .luks_headers_dir()
                 .join(format!("{}.luksheader", new_mapper.0)),
         },
-        ConfigDiskState::PresentLuks { mapper_open, .. } => {
-            ReplaceTargetPrep::ExistingLuks { mapper_open }
-        }
+        ConfigDiskState::PresentLuks { mapper_open, .. } => ReplaceTargetPrep::ExistingLuks {
+            mapper_open,
+            enroll_key_file: input.enroll_key_file.clone(),
+            header_backup_path: input
+                .paths
+                .luks_headers_dir()
+                .join(format!("{}.luksheader", new_mapper.0)),
+        },
     };
 
     Ok(ReplaceWorkPlan {
@@ -1106,6 +1227,7 @@ fn build_replace_journal_target(
         },
         ConfigDiskState::PresentLuks { uuid, .. } => journal::ReplaceJournalMode::ExistingLuks {
             luks_uuid: uuid.clone(),
+            enroll_key_file: enroll_key_file.map(|p| p.to_path_buf()),
         },
         ConfigDiskState::Absent => {
             return Err(ReplaceError::Validation(format!(
@@ -1249,7 +1371,7 @@ fn replace_work_plan_for_test(
         pre_membership: PoolMembership::empty(),
         target_membership: PoolMembership::empty(),
         paths: input.paths,
-        enroll_key_file: input.enroll_key_file,
+        enroll_key_file: input.enroll_key_file.map(Path::to_path_buf),
         luks_format_extra_opts: input.luks_format_extra_opts,
     })
 }
@@ -2308,8 +2430,12 @@ mod tests {
         assert_eq!(target.by_id, new_by_id);
         assert_eq!(target.mapper_name, "braid-disk3");
         match target.mode {
-            journal::ReplaceJournalMode::ExistingLuks { luks_uuid: got } => {
+            journal::ReplaceJournalMode::ExistingLuks {
+                luks_uuid: got,
+                enroll_key_file,
+            } => {
                 assert_eq!(got, luks_uuid);
+                assert_eq!(enroll_key_file, None);
             }
             other => panic!("expected ExistingLuks journal target, got {other:?}"),
         }
@@ -3457,6 +3583,99 @@ mod tests {
 
         // Resize
         assert!(lines[12].contains("btrfs filesystem resize"));
+    }
+
+    // Intent: dry-run for an already-LUKS replace target with `--enroll
+    //   DIR` shows `cryptsetup luksAddKey` + `cryptsetup
+    //   luksHeaderBackup` BEFORE `cryptsetup open`. This is the silent-
+    //   drop fix landing in the dry-run preview surface.
+    // Why it exists: pre-refactor, `--enroll DIR` against a
+    //   `PresentLuks` new disk silently dropped the keyfile -- dry-run
+    //   showed only `cryptsetup open` and the new disk shipped without
+    //   slot 1 enrolled. After the refactor, the planner routes
+    //   `Some(kf) + PresentLuks` through `plan_single_disk_enrollment`,
+    //   resolves to `NeedsEnroll` when slot 1 is empty, and renders the
+    //   addKey + headerBackup pair. This test pins both the presence
+    //   and the order (addKey < headerBackup < open) so the slot-1
+    //   mutation lands in the post-mutation backup the way the FreshLuks
+    //   ordering pin requires.
+    // Scenario: returning braid disk that was originally added without a
+    //   keyfile gets re-installed via `replace --enroll DIR` against a
+    //   pre-formatted `PresentLuks` new disk with empty slot 1.
+    #[test]
+    fn dry_run_render_existing_luks_replace_with_enroll_renders_addkey_and_backup() {
+        let luks_uuid = LuksUuid("33333333-3333-3333-3333-333333333333".into());
+        let new_probed = ConfigDisk {
+            name: "disk3".into(),
+            by_id_path: ByIdPath("/dev/disk/by-id/virtio-disk3".into()),
+            state: ConfigDiskState::PresentLuks {
+                uuid: luks_uuid,
+                label: Some("braid-disk3".to_owned()),
+                mapper_open: false,
+            },
+        };
+        let source = ReplaceSource::Live {
+            mapper: MapperName("braid-disk2".into()),
+            devid: 2,
+        };
+        let kf = Path::new("/mnt/usb/braid.key");
+        let (_tmp, paths) = test_paths();
+
+        let work_plan = build_replace_work_plan(ReplaceWorkPlanInput {
+            config: Config::new(MountPoint("/mnt/storage".into())).unwrap(),
+            old_name: "disk2",
+            new_name: "disk3",
+            new_by_id: ByIdPath("/dev/disk/by-id/virtio-disk3".into()),
+            new_probed,
+            replace_source: source,
+            pool: replace_work_plan_test_pool(
+                &ReplaceSource::Live {
+                    mapper: MapperName("braid-disk2".into()),
+                    devid: 2,
+                },
+                false,
+                2,
+            ),
+            pre_membership: PoolMembership::empty(),
+            target_membership: PoolMembership::empty(),
+            paths: &paths,
+            // Resolved value as `plan_replace` would compute it for a
+            // `NeedsEnroll` outcome: the planner would have run
+            // `plan_single_disk_enrollment` and the slot-1 check
+            // returned `Empty`, so the keyfile path flows in as `Some`.
+            enroll_key_file: Some(kf.to_path_buf()),
+            luks_format_extra_opts: &[],
+        })
+        .expect("ExistingLuks + enroll should plan");
+
+        let steps = work_plan.render_steps();
+        let output = Step::render_dry_run(&steps);
+        let lines: Vec<&str> = output.lines().collect();
+
+        let pos_of = |needle: &str| {
+            lines
+                .iter()
+                .position(|line| line.contains(needle))
+                .unwrap_or_else(|| panic!("missing {needle:?} in render:\n{output}"))
+        };
+
+        let p_addkey = pos_of("$ cryptsetup luksAddKey");
+        let p_backup = pos_of("$ cryptsetup luksHeaderBackup");
+        let p_open = pos_of("$ cryptsetup open --type luks");
+
+        assert!(
+            p_addkey < p_backup,
+            "luksAddKey must precede luksHeaderBackup so slot 1 is captured in the backup; got addKey@{p_addkey} backup@{p_backup}"
+        );
+        assert!(
+            p_backup < p_open,
+            "luksHeaderBackup must precede luksOpen; got backup@{p_backup} open@{p_open}"
+        );
+        assert!(
+            lines[p_addkey].contains("/mnt/usb/braid.key"),
+            "addKey command must reference the keyfile path: {}",
+            lines[p_addkey]
+        );
     }
 
     #[test]

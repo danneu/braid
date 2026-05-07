@@ -39,6 +39,13 @@ pub enum AddJournalMode {
     RecoverableBraidLabeled {
         verified_pool_fsid: String,
         luks_uuid: LuksUuid,
+        /// Keyfile to enroll into LUKS slot 1 if `add --enroll DIR` was
+        /// passed against this returning braid disk and slot 1 was empty
+        /// at planning time. `None` covers both the no-`--enroll` case
+        /// and the idempotent-skip case (slot 1 already authenticates).
+        /// Recovery replays `cryptsetup luksAddKey` + `luksHeaderBackup`
+        /// before pool_add_device when this is `Some`.
+        enroll_key_file: Option<PathBuf>,
     },
     FreshLuks {
         luks_label: String,
@@ -86,6 +93,13 @@ pub enum ReplaceJournalMode {
     },
     ExistingLuks {
         luks_uuid: LuksUuid,
+        /// Keyfile to enroll into LUKS slot 1 if `replace --enroll DIR`
+        /// was passed against an already-formatted new disk and slot 1
+        /// was empty at planning time. `None` covers both no-`--enroll`
+        /// and the idempotent-skip case. Recovery replays
+        /// `cryptsetup luksAddKey` + `luksHeaderBackup` after the LUKS
+        /// UUID identity probe and credential verification when `Some`.
+        enroll_key_file: Option<PathBuf>,
     },
 }
 
@@ -234,6 +248,7 @@ mod tests {
                         mode: AddJournalMode::RecoverableBraidLabeled {
                             verified_pool_fsid: "fsid-1".into(),
                             luks_uuid: LuksUuid("luks-1".into()),
+                            enroll_key_file: None,
                         },
                     },
                 )]),
@@ -338,6 +353,7 @@ mod tests {
                     mapper_name: "braid-disk2".into(),
                     mode: ReplaceJournalMode::ExistingLuks {
                         luks_uuid: LuksUuid("luks-new".into()),
+                        enroll_key_file: None,
                     },
                 },
                 source: ReplaceJournalSource::Live {
@@ -345,6 +361,78 @@ mod tests {
                     old_mapper: MapperName("braid-disk1".into()),
                 },
                 restore_raid1_after_commit: false,
+            },
+        );
+        write_journal(&paths, &journal).unwrap();
+        let loaded = load_journal(&paths).unwrap().unwrap();
+        assert_eq!(loaded.op, journal.op);
+    }
+
+    /// Roundtrip the `Some(kf)` shape of `ReplaceJournalMode::ExistingLuks`.
+    /// Why it exists: this PR widens the variant with `enroll_key_file:
+    /// Option<PathBuf>` so `replace --enroll DIR` against an already-LUKS
+    /// new disk journals the keyfile for crash-recovery replay. Catching
+    /// a serde drift on the populated arm specifically (not just `None`)
+    /// keeps the recovery contract observable.
+    #[test]
+    fn roundtrip_replace_existing_luks_with_enroll_key_file() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let paths = StatePaths::custom(tmp.path().into());
+        let journal = build_journal(
+            sample_membership(),
+            sample_membership(),
+            OpKind::Replace {
+                phase: ReplacePhase::PoolMutation,
+                old_name: "disk1".into(),
+                new_name: "disk2".into(),
+                new_by_id: ByIdPath("/dev/disk/by-id/ata-NEW".into()),
+                new_target: ReplaceJournalTarget {
+                    by_id: ByIdPath("/dev/disk/by-id/ata-NEW".into()),
+                    mapper_name: "braid-disk2".into(),
+                    mode: ReplaceJournalMode::ExistingLuks {
+                        luks_uuid: LuksUuid("luks-new".into()),
+                        enroll_key_file: Some(PathBuf::from("/run/keys/braid.key")),
+                    },
+                },
+                source: ReplaceJournalSource::Live {
+                    old_devid: 1,
+                    old_mapper: MapperName("braid-disk1".into()),
+                },
+                restore_raid1_after_commit: false,
+            },
+        );
+        write_journal(&paths, &journal).unwrap();
+        let loaded = load_journal(&paths).unwrap().unwrap();
+        assert_eq!(loaded.op, journal.op);
+    }
+
+    /// Roundtrip the `Some(kf)` shape of
+    /// `AddJournalMode::RecoverableBraidLabeled`. Same rationale as
+    /// `roundtrip_replace_existing_luks_with_enroll_key_file`: this PR
+    /// extends the existing recoverable-add variant with `enroll_key_file`
+    /// so `add --enroll DIR` against an `OpenRecoverable` /
+    /// `ClosedPresentLuks` target journals the keyfile for replay.
+    #[test]
+    fn roundtrip_add_recoverable_with_enroll_key_file() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let paths = StatePaths::custom(tmp.path().into());
+        let journal = build_journal(
+            sample_membership(),
+            sample_membership(),
+            OpKind::Add {
+                phase: AddPhase::PoolMutation,
+                targets: BTreeMap::from([(
+                    "disk2".into(),
+                    AddJournalTarget {
+                        by_id: ByIdPath("/dev/disk/by-id/ata-Y".into()),
+                        mapper_name: "braid-disk2".into(),
+                        mode: AddJournalMode::RecoverableBraidLabeled {
+                            verified_pool_fsid: "fsid-1".into(),
+                            luks_uuid: LuksUuid("luks-1".into()),
+                            enroll_key_file: Some(PathBuf::from("/run/keys/braid.key")),
+                        },
+                    },
+                )]),
             },
         );
         write_journal(&paths, &journal).unwrap();
@@ -452,6 +540,7 @@ mod tests {
                     mapper_name: "braid-disk2".into(),
                     mode: ReplaceJournalMode::ExistingLuks {
                         luks_uuid: LuksUuid("luks-2".into()),
+                        enroll_key_file: None,
                     },
                 },
                 source: ReplaceJournalSource::Live {
@@ -482,6 +571,7 @@ mod tests {
                     mapper_name: "braid-disk2".into(),
                     mode: ReplaceJournalMode::ExistingLuks {
                         luks_uuid: LuksUuid("luks-2".into()),
+                        enroll_key_file: None,
                     },
                 },
                 source: ReplaceJournalSource::Live {
