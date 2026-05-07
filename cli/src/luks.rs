@@ -21,6 +21,39 @@ pub const KEYFILE_NAME: &str = "braid.key";
 /// Keyfile size in bytes: 4096 bytes of random data from /dev/urandom.
 pub const KEYFILE_SIZE: usize = 4096;
 
+/// Shared user-keyfile boundary so every caller rejects symlinks and
+/// wrong-size files before invoking cryptsetup with the path.
+pub fn validate_user_keyfile_path(path: &Path) -> Result<(), LuksError> {
+    let meta = std::fs::symlink_metadata(path).map_err(|e| {
+        if e.kind() == std::io::ErrorKind::NotFound {
+            LuksError::Validation(format!("keyfile not found: {}", path.display()))
+        } else {
+            LuksError::Validation(format!("cannot read keyfile {}: {e}", path.display()))
+        }
+    })?;
+    if meta.file_type().is_symlink() {
+        return Err(LuksError::Validation(format!(
+            "keyfile must be a regular file, not a symlink: {}",
+            path.display()
+        )));
+    }
+    if !meta.is_file() {
+        return Err(LuksError::Validation(format!(
+            "keyfile is not a regular file: {}",
+            path.display()
+        )));
+    }
+    if meta.len() != KEYFILE_SIZE as u64 {
+        return Err(LuksError::Validation(format!(
+            "keyfile must be exactly {} bytes, got {} bytes: {}",
+            KEYFILE_SIZE,
+            meta.len(),
+            path.display()
+        )));
+    }
+    Ok(())
+}
+
 /// Maximum accepted passphrase bytes for every source.
 ///
 /// The raw passphrase buffer is allocated at this cap plus one byte before
@@ -957,6 +990,103 @@ mod tests {
 
     fn zpass(s: &str) -> Passphrase {
         Passphrase::from_zeroizing(Zeroizing::new(String::from(s)))
+    }
+
+    fn write_keyfile(path: &Path, size: usize) {
+        std::fs::write(path, vec![0u8; size]).unwrap();
+    }
+
+    fn validation_message(err: LuksError) -> String {
+        match err {
+            LuksError::Validation(msg) => msg,
+            other => panic!("expected Validation, got {other:?}"),
+        }
+    }
+
+    // Intent: exact-size regular files are accepted as user-supplied keyfiles.
+    // Why it exists: the shared validator is the contract gate for enroll,
+    //   unlock, and recovery replay keyfile consumers.
+    // Scenario: an admin provides a real 4096-byte braid.key file.
+    #[test]
+    fn validate_user_keyfile_path_accepts_exact_size_regular_file() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let key_file = dir.path().join("braid.key");
+        write_keyfile(&key_file, KEYFILE_SIZE);
+
+        validate_user_keyfile_path(&key_file).expect("4096-byte keyfile should validate");
+    }
+
+    // Intent: wrong-size files are rejected with both expected and actual size.
+    // Why it exists: callers must show a braid-level contract error instead of
+    //   surfacing cryptsetup's generic short-read failure.
+    // Scenario: an admin points a keyfile flag at an empty, truncated, or
+    //   oversized placeholder.
+    #[test]
+    fn validate_user_keyfile_path_rejects_wrong_sizes() {
+        for size in [0, KEYFILE_SIZE - 1, KEYFILE_SIZE + 1] {
+            let dir = tempfile::TempDir::new().unwrap();
+            let key_file = dir.path().join("braid.key");
+            write_keyfile(&key_file, size);
+
+            let msg = validation_message(
+                validate_user_keyfile_path(&key_file).expect_err("wrong-size keyfile must fail"),
+            );
+            assert!(msg.contains("4096"), "expected 4096 in: {msg}");
+            assert!(msg.contains(&size.to_string()), "expected {size} in: {msg}");
+        }
+    }
+
+    // Intent: symlinks are rejected even when they point at a valid keyfile.
+    // Why it exists: `metadata().is_file()` follows symlinks, which would let
+    //   a path alias bypass the CLI's keyfile ownership boundary.
+    // Scenario: an admin-supplied path is replaced with `braid.key -> target`.
+    #[test]
+    fn validate_user_keyfile_path_rejects_symlink() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let target = dir.path().join("target.key");
+        let link = dir.path().join("braid.key");
+        write_keyfile(&target, KEYFILE_SIZE);
+        std::os::unix::fs::symlink(&target, &link).unwrap();
+
+        let msg = validation_message(
+            validate_user_keyfile_path(&link).expect_err("symlink keyfile must fail"),
+        );
+        assert!(
+            msg.contains("must be a regular file, not a symlink"),
+            "unexpected error: {msg}"
+        );
+    }
+
+    // Intent: missing keyfile paths surface a clear not-found validation error.
+    // Why it exists: every user-facing keyfile command should fail before any
+    //   cryptsetup invocation when the path is absent.
+    // Scenario: an admin mistypes the keyfile path.
+    #[test]
+    fn validate_user_keyfile_path_reports_missing_path() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let key_file = dir.path().join("missing.key");
+
+        let msg = validation_message(
+            validate_user_keyfile_path(&key_file).expect_err("missing keyfile must fail"),
+        );
+        assert!(msg.contains("keyfile not found"), "unexpected error: {msg}");
+    }
+
+    // Intent: directory paths are rejected as non-regular keyfiles.
+    // Why it exists: a directory typo must stop at validation with a stable
+    //   braid error instead of reaching cryptsetup.
+    // Scenario: an admin passes the containing USB mount directory itself.
+    #[test]
+    fn validate_user_keyfile_path_rejects_directory() {
+        let dir = tempfile::TempDir::new().unwrap();
+
+        let msg = validation_message(
+            validate_user_keyfile_path(dir.path()).expect_err("directory keyfile must fail"),
+        );
+        assert!(
+            msg.contains("keyfile is not a regular file"),
+            "unexpected error: {msg}"
+        );
     }
 
     fn open_pty_pair() -> (std::fs::File, std::fs::File) {

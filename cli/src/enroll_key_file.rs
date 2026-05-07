@@ -515,24 +515,7 @@ pub fn validate_key_file_path(
             )));
         }
     } else {
-        if !key_file_path.exists() {
-            return Err(EnrollKeyFileError::Validation(format!(
-                "keyfile not found: {}",
-                key_file_path.display()
-            )));
-        }
-        let meta = std::fs::metadata(key_file_path).map_err(|e| {
-            EnrollKeyFileError::Validation(format!(
-                "cannot read keyfile {}: {e}",
-                key_file_path.display()
-            ))
-        })?;
-        if !meta.is_file() {
-            return Err(EnrollKeyFileError::Validation(format!(
-                "keyfile is not a regular file: {}",
-                key_file_path.display()
-            )));
-        }
+        luks::validate_user_keyfile_path(key_file_path)?;
     }
     Ok(())
 }
@@ -1245,7 +1228,7 @@ mod tests {
     /// `key_file_path.display().to_string()` inside `CryptsetupTestKeyFile`.
     fn make_existing_keyfile(tmp: &tempfile::TempDir) -> (std::path::PathBuf, String) {
         let kf = tmp.path().join("braid.key");
-        std::fs::write(&kf, b"keyfile-data").unwrap();
+        std::fs::write(&kf, vec![0u8; KEYFILE_SIZE]).unwrap();
         let kf_str = kf.display().to_string();
         (kf, kf_str)
     }
@@ -1501,9 +1484,24 @@ mod tests {
     fn validate_existing_keyfile_accepts_regular_file_without_mountpoint() {
         let dir = tempfile::TempDir::new().unwrap();
         let kf = dir.path().join("braid.key");
-        std::fs::write(&kf, b"existing").unwrap();
+        std::fs::write(&kf, vec![0u8; KEYFILE_SIZE]).unwrap();
 
         validate_key_file_path(&kf, false).expect("existing regular keyfile should validate");
+    }
+
+    // Intent: direct existing-keyfile validation rejects short files.
+    // Why it exists: `add --enroll`, `replace --enroll`, and non-generate
+    //   `enroll` share this helper and must all enforce the 4096-byte contract.
+    // Scenario: user points an existing-keyfile command at a small placeholder.
+    #[test]
+    fn validate_existing_keyfile_rejects_wrong_size() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let kf = dir.path().join("braid.key");
+        std::fs::write(&kf, b"existing").unwrap();
+
+        let err = validate_key_file_path(&kf, false).expect_err("short keyfile must fail");
+
+        assert!(err.to_string().contains("4096"), "unexpected error: {err}");
     }
 
     /*

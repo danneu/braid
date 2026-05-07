@@ -1969,6 +1969,7 @@ fn ensure_keyfile_enrolled<R: CommandRunner>(
     passphrase: &Passphrase,
     key_file: &std::path::Path,
 ) -> Result<(), RecoverError> {
+    luks::validate_user_keyfile_path(key_file)?;
     match luks::verify_key_file(runner, device, key_file)? {
         VerifyOutcome::Authenticated => Ok(()),
         VerifyOutcome::Rejected => {
@@ -3079,6 +3080,12 @@ mod tests {
 
     fn passphrase(s: &str) -> Passphrase {
         Passphrase::from_zeroizing(zeroize::Zeroizing::new(s.to_owned()))
+    }
+
+    fn write_valid_keyfile(dir: &tempfile::TempDir, name: &str) -> std::path::PathBuf {
+        let key_file = dir.path().join(name);
+        std::fs::write(&key_file, vec![0u8; luks::KEYFILE_SIZE]).unwrap();
+        key_file
     }
 
     struct MockFs {
@@ -6484,7 +6491,8 @@ mod tests {
 
     #[test]
     fn ensure_keyfile_enrolled_is_idempotent_and_fails_on_probe_errors() {
-        let key_file = std::path::Path::new("/run/keys/braid.key");
+        let key_dir = tempfile::TempDir::new().unwrap();
+        let key_file = write_valid_keyfile(&key_dir, "braid.key");
         let accepted = MockRunner::default().with_output(
             CmdRequest::CryptsetupTestKeyFile {
                 device: "/dev/disk/by-id/virtio-disk2".into(),
@@ -6496,7 +6504,7 @@ mod tests {
             &accepted,
             "/dev/disk/by-id/virtio-disk2",
             &passphrase("testpass"),
-            key_file,
+            &key_file,
         )
         .expect("accepted keyfile should be treated as already enrolled");
         assert!(
@@ -6531,7 +6539,7 @@ mod tests {
             &rejected,
             "/dev/disk/by-id/virtio-disk2",
             &passphrase("testpass"),
-            key_file,
+            &key_file,
         )
         .expect("rejected keyfile should be enrolled with the passphrase");
         assert!(
@@ -6556,12 +6564,45 @@ mod tests {
             &busy,
             "/dev/disk/by-id/virtio-disk2",
             &passphrase("testpass"),
-            key_file,
+            &key_file,
         )
         .unwrap_err();
         assert!(
             err.to_string().contains("device is already open or busy"),
             "{err}"
+        );
+    }
+
+    // Intent: recovery replay rejects wrong-size journaled keyfiles before
+    //   cryptsetup verification or enrollment.
+    // Why it exists: recovery consumes the original `add --enroll` /
+    //   `replace --enroll` path later, after the file may have changed.
+    // Scenario: a crash journal names a keyfile that has since been truncated.
+    #[test]
+    fn ensure_keyfile_enrolled_rejects_wrong_size_before_cryptsetup() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let key_file = dir.path().join("braid.key");
+        std::fs::write(&key_file, b"too-short").unwrap();
+        let runner = MockRunner::default();
+
+        let err = ensure_keyfile_enrolled(
+            &runner,
+            "/dev/disk/by-id/virtio-disk2",
+            &passphrase("testpass"),
+            &key_file,
+        )
+        .expect_err("wrong-size keyfile must fail");
+
+        match err {
+            RecoverError::Luks(luks::LuksError::Validation(msg)) => {
+                assert!(msg.contains("4096"), "expected 4096 in: {msg}");
+            }
+            other => panic!("expected Luks Validation, got {other:?}"),
+        }
+        assert!(
+            runner.requests().is_empty(),
+            "validation must fail before cryptsetup requests; got {:?}",
+            runner.requests()
         );
     }
 
@@ -7313,7 +7354,7 @@ mod tests {
         let paths = StatePaths::custom(tmp.path().into());
         let config = Config::new(MountPoint("/mnt/storage".into())).unwrap();
         let fs = MockFs::new(&["/dev/disk/by-id/virtio-new"]);
-        let key_file = std::path::PathBuf::from("/run/keys/braid-new.key");
+        let key_file = write_valid_keyfile(&tmp, "braid-new.key");
         let journal = replace_fresh_luks_journal(key_file.clone());
         journal::write_journal(&paths, &journal).unwrap();
         let union = union_memberships(&journal);
@@ -7720,7 +7761,7 @@ mod tests {
         let paths = StatePaths::custom(tmp.path().into());
         let config = Config::new(MountPoint("/mnt/storage".into())).unwrap();
         let fs = MockFs::new(&["/dev/disk/by-id/virtio-new"]);
-        let key_file = std::path::PathBuf::from("/run/keys/braid-new.key");
+        let key_file = write_valid_keyfile(&tmp, "braid-new.key");
         let journal = replace_fresh_luks_journal(key_file.clone());
         journal::write_journal(&paths, &journal).unwrap();
         let union = union_memberships(&journal);

@@ -51,6 +51,7 @@ pub fn resolve_credential(
     key_file: Option<&Path>,
 ) -> Result<OpenCredential, LuksError> {
     if let Some(kf) = key_file {
+        luks::validate_user_keyfile_path(kf)?;
         return Ok(OpenCredential::KeyFile(kf.to_path_buf()));
     }
     let pp = luks::read_passphrase(passphrase_file, passphrase_stdin)?;
@@ -64,6 +65,27 @@ mod tests {
 
     fn passphrase(s: &str) -> Passphrase {
         Passphrase::from_zeroizing(Zeroizing::new(s.to_owned()))
+    }
+
+    // Intent: `--key-file` credential resolution rejects wrong-size keyfiles.
+    // Why it exists: unlock resolves the keyfile path here, so this boundary
+    //   must fail before any cryptsetup open attempt can use an invalid file.
+    // Scenario: an admin runs `braid unlock --key-file` with a short file.
+    #[test]
+    fn resolve_credential_rejects_wrong_size_key_file() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let key_file = dir.path().join("braid.key");
+        std::fs::write(&key_file, b"short").unwrap();
+
+        let err = resolve_credential(false, None, Some(&key_file))
+            .expect_err("wrong-size keyfile must fail");
+
+        match err {
+            LuksError::Validation(msg) => {
+                assert!(msg.contains("4096"), "expected 4096 in: {msg}");
+            }
+            other => panic!("expected Validation, got {other:?}"),
+        }
     }
 
     #[test]

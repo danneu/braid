@@ -107,6 +107,22 @@ with subtest("Test 2: wrong keyfile rejected"):
     )
     machine.fail("mountpoint -q /mnt/storage")
 
+# Intent: braid unlock --key-file rejects a wrong-size keyfile at the CLI
+#   validation boundary, before any cryptsetup keyfile verify/open invocation.
+# Why it exists: prior to the shared validator, unlock surfaced cryptsetup's
+#   generic short-read failure instead of a clear braid-level size error.
+# Scenario: an admin points --key-file at an undersized placeholder and must
+#   see a message that names the 4096-byte contract.
+with subtest("Test 2c: wrong-size keyfile rejected with clear error"):
+    close_all()
+    machine.succeed("printf 'short' > /tmp/wrong-size.key")
+    ret = machine.execute("braid unlock --key-file /tmp/wrong-size.key 2>&1")
+    assert ret[0] == 1, f"expected exit 1 for wrong-size keyfile, got {ret[0]}"
+    assert "4096" in ret[1], (
+        f"error must name 4096-byte contract, got: {ret[1]!r}"
+    )
+    machine.fail("mountpoint -q /mnt/storage")
+
 # --- Test 2b: keyfile + missing disk -- exit 2 + --allow-degraded hint ---
 #
 # Intent: --key-file with a missing pool member and no --allow-degraded must
