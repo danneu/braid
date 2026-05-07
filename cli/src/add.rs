@@ -1541,11 +1541,16 @@ fn format_add_confirm(disks: &[AddConfirmDisk]) -> String {
 mod tests {
     use super::*;
     use crate::luks::{RealTty, ScriptedPassphraseReader};
+    use crate::secret::Passphrase;
 
     fn test_paths() -> (tempfile::TempDir, StatePaths) {
         let tmp = tempfile::TempDir::new().unwrap();
         let paths = StatePaths::custom(tmp.path().into());
         (tmp, paths)
+    }
+
+    fn passphrase(s: &str) -> Passphrase {
+        Passphrase::from_zeroizing(zeroize::Zeroizing::new(s.to_owned()))
     }
 
     #[test]
@@ -2579,7 +2584,7 @@ mod tests {
 
         {
             let mut guard = LuksCleanupGuard::new(&runner);
-            if ensure_luks_open(&runner, "existing", &by_id, "testpass").unwrap()
+            if ensure_luks_open(&runner, "existing", &by_id, &passphrase("testpass")).unwrap()
                 == OpenOutcome::Opened
             {
                 guard.track("braid-existing".into());

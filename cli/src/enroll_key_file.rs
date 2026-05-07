@@ -8,6 +8,7 @@ use crate::membership::PoolMembership;
 use crate::preflight;
 use crate::preview::{self, NoteLevel, PerDiskStyle, Preview, PreviewCompleteness, PreviewNote};
 use crate::probe::{self, Filesystem};
+use crate::secret::Passphrase;
 use crate::state_paths::StatePaths;
 use crate::status_tag::{
     CredentialKind, StatusTag, color_enabled_for_stderr, emit_credential_wait_line, status_line,
@@ -150,7 +151,7 @@ fn plan_enrollment<R: CommandRunner>(
     runner: &R,
     candidates: &[EnrollmentCandidate],
     key_file_path: &Path,
-    passphrase: &str,
+    passphrase: &Passphrase,
     mode: EnrollmentPlanMode,
 ) -> Result<Vec<DiskEnrollAction>, EnrollKeyFileError> {
     let color_enabled = color_enabled_for_stderr();
@@ -268,7 +269,7 @@ fn plan_enrollment<R: CommandRunner>(
 fn apply_enrollment<R: CommandRunner>(
     runner: &R,
     plan: &[DiskEnrollAction],
-    passphrase: &str,
+    passphrase: &Passphrase,
     key_file_path: &Path,
     paths: &StatePaths,
 ) -> Result<(), EnrollKeyFileError> {
@@ -781,6 +782,10 @@ mod tests {
 
     fn by_id(path: &str) -> ByIdPath {
         ByIdPath(path.to_owned())
+    }
+
+    fn passphrase(s: &str) -> Passphrase {
+        Passphrase::from_zeroizing(zeroize::Zeroizing::new(s.to_owned()))
     }
 
     fn ok_raw(cmd: &str, stdout: &str) -> RawCommandOutput {
@@ -1832,7 +1837,7 @@ mod tests {
             &runner,
             &candidates,
             Path::new(kf),
-            pass,
+            &passphrase(pass),
             EnrollmentPlanMode::ExistingKeyfile,
         )
         .unwrap();
@@ -1883,7 +1888,7 @@ mod tests {
             &runner,
             &candidates,
             Path::new(kf),
-            pass,
+            &passphrase(pass),
             EnrollmentPlanMode::ExistingKeyfile,
         )
         .unwrap();
@@ -1930,7 +1935,7 @@ mod tests {
             &runner,
             &candidates,
             Path::new(kf),
-            pass,
+            &passphrase(pass),
             EnrollmentPlanMode::ExistingKeyfile,
         )
         .unwrap();
@@ -1961,7 +1966,7 @@ mod tests {
             &runner,
             &candidates,
             Path::new(kf),
-            pass,
+            &passphrase(pass),
             EnrollmentPlanMode::ExistingKeyfile,
         );
         assert!(result.is_err());
@@ -2012,7 +2017,7 @@ mod tests {
             &runner,
             &candidates,
             Path::new(kf),
-            pass,
+            &passphrase(pass),
             EnrollmentPlanMode::ExistingKeyfile,
         );
         assert!(result.is_err());
@@ -2077,7 +2082,7 @@ mod tests {
             &runner,
             &candidates,
             Path::new(kf),
-            pass,
+            &passphrase(pass),
             EnrollmentPlanMode::ExistingKeyfile,
         )
         .expect_err("expected non-auth verify exit to surface as error");
@@ -2138,7 +2143,7 @@ mod tests {
             &runner,
             &candidates,
             Path::new(kf),
-            pass,
+            &passphrase(pass),
             EnrollmentPlanMode::GenerateNew,
         )
         .unwrap();
@@ -2196,7 +2201,7 @@ mod tests {
             &runner,
             &candidates,
             Path::new(kf),
-            pass,
+            &passphrase(pass),
             EnrollmentPlanMode::GenerateNew,
         )
         .expect("generate-new planning should succeed");
@@ -2271,7 +2276,7 @@ mod tests {
             &runner,
             &candidates,
             Path::new(kf),
-            pass,
+            &passphrase(pass),
             EnrollmentPlanMode::GenerateNew,
         )
         .expect_err("expected slot-1 conflict to surface");
@@ -2338,7 +2343,7 @@ mod tests {
             &runner,
             &candidates,
             Path::new(kf),
-            pass,
+            &passphrase(pass),
             EnrollmentPlanMode::ExistingKeyfile,
         )
         .expect_err("expected divergent passphrase on disk2 to abort planning");
@@ -2398,7 +2403,7 @@ mod tests {
             &runner,
             &candidates,
             Path::new(kf),
-            pass,
+            &passphrase(pass),
             EnrollmentPlanMode::GenerateNew,
         )
         .expect_err("expected divergent passphrase on disk2 to abort planning");
@@ -2469,7 +2474,7 @@ mod tests {
             },
         ];
 
-        apply_enrollment(&runner, &plan, pass, Path::new(kf), &paths).unwrap();
+        apply_enrollment(&runner, &plan, &passphrase(pass), Path::new(kf), &paths).unwrap();
 
         assert!(
             paths
@@ -2506,7 +2511,7 @@ mod tests {
         }];
 
         let (_state_dir, paths) = test_paths();
-        apply_enrollment(&runner, &plan, pass, Path::new(kf), &paths).unwrap();
+        apply_enrollment(&runner, &plan, &passphrase(pass), Path::new(kf), &paths).unwrap();
     }
 
     /*
@@ -2549,7 +2554,7 @@ mod tests {
             },
         ];
 
-        apply_enrollment(&runner, &plan, pass, Path::new(kf), &paths).unwrap();
+        apply_enrollment(&runner, &plan, &passphrase(pass), Path::new(kf), &paths).unwrap();
 
         assert!(
             !paths

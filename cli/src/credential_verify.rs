@@ -1,5 +1,6 @@
 use crate::cmd::CommandRunner;
 use crate::luks::{self, VerifyOutcome};
+use crate::secret::Passphrase;
 use crate::status_tag::{CredentialKind, credential_ok_line, credential_wait_line};
 use std::path::Path;
 
@@ -11,7 +12,7 @@ pub struct CredentialVerifyTarget {
 
 #[derive(Debug, Clone, Copy)]
 pub enum Credential<'a> {
-    Passphrase(&'a str),
+    Passphrase(&'a Passphrase),
     KeyFile(&'a Path),
 }
 
@@ -75,6 +76,11 @@ pub fn verify_credential_for_targets<R: CommandRunner>(
 mod tests {
     use super::*;
     use crate::cmd::{CmdRequest, MockRunner, RawCommandOutput};
+    use zeroize::Zeroizing;
+
+    fn zpass(s: &str) -> Passphrase {
+        Passphrase::from_zeroizing(Zeroizing::new(s.to_owned()))
+    }
 
     fn raw(exit_status: i32) -> RawCommandOutput {
         RawCommandOutput {
@@ -178,7 +184,8 @@ mod tests {
         match case {
             CredentialCase::Passphrase => {
                 let (runner, requests) = passphrase_runner(targets, exits);
-                run(runner, Credential::Passphrase("secret"), requests);
+                let passphrase = zpass("secret");
+                run(runner, Credential::Passphrase(&passphrase), requests);
             }
             CredentialCase::KeyFile => {
                 let (runner, requests) = key_file_runner(targets, exits);
@@ -301,11 +308,12 @@ mod tests {
         let runner = MockRunner::default();
         let targets: Vec<CredentialVerifyTarget> = Vec::new();
         let mut emits = Vec::new();
+        let passphrase = zpass("secret");
 
         verify_credential_for_targets(
             &runner,
             &targets,
-            Credential::Passphrase("secret"),
+            Credential::Passphrase(&passphrase),
             false,
             |line| emits.push(line.to_owned()),
         )

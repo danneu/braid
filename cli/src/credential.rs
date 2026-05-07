@@ -1,15 +1,15 @@
 use crate::credential_verify::Credential;
 use crate::luks::{self, LuksError};
+use crate::secret::Passphrase;
 use std::path::{Path, PathBuf};
-use zeroize::Zeroizing;
 
 /// Owned, fully-resolved credential ready to drive `cryptsetup open`.
-/// Plaintext is scrubbed on drop via `Zeroizing`.
+/// Passphrase plaintext is scrubbed on drop by the `Passphrase` owner.
 ///
 /// Owned (no lifetime parameter) because callers hold the resolved value
 /// across multiple operations, including recover's post-resume relock cycle.
 pub enum OpenCredential {
-    Passphrase(Zeroizing<String>),
+    Passphrase(Passphrase),
     KeyFile(PathBuf),
 }
 
@@ -18,7 +18,7 @@ impl OpenCredential {
     /// taking ownership of the resolved secret or keyfile path.
     pub fn as_borrowed(&self) -> Credential<'_> {
         match self {
-            OpenCredential::Passphrase(pp) => Credential::Passphrase(pp.as_str()),
+            OpenCredential::Passphrase(pp) => Credential::Passphrase(pp),
             OpenCredential::KeyFile(kf) => Credential::KeyFile(kf.as_path()),
         }
     }
@@ -55,4 +55,29 @@ pub fn resolve_credential(
     }
     let pp = luks::read_passphrase(passphrase_file, passphrase_stdin)?;
     Ok(OpenCredential::Passphrase(pp))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use zeroize::Zeroizing;
+
+    fn passphrase(s: &str) -> Passphrase {
+        Passphrase::from_zeroizing(Zeroizing::new(s.to_owned()))
+    }
+
+    #[test]
+    fn open_credential_debug_redacts_passphrase() {
+        let rendered = format!(
+            "{:?}",
+            OpenCredential::Passphrase(passphrase("debug-redaction-secret"))
+        );
+
+        assert!(rendered.contains("<redacted>"));
+        assert!(!rendered.contains("debug-redaction-secret"));
+
+        let key_file = OpenCredential::KeyFile(PathBuf::from("/run/braid/braid.key"));
+        let key_file_rendered = format!("{key_file:?}");
+        assert!(key_file_rendered.contains("/run/braid/braid.key"));
+    }
 }

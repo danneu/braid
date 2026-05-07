@@ -39,6 +39,10 @@ pub mod replace;
 pub mod scrub_cancel;
 pub mod scrub_needs_resume;
 pub mod scrub_resume_or_start;
+/// In-memory secret types (currently `Passphrase`) that scrub on drop and
+/// gate plaintext egress through `expose_secret()`. Sibling to `credential`
+/// and `credential_verify`, which carry resolved and borrowed credentials.
+pub mod secret;
 pub mod state_io;
 pub mod state_paths;
 pub mod status;

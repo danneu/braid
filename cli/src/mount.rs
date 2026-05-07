@@ -832,6 +832,7 @@ mod tests {
     use crate::config::Config;
     use crate::credential::OpenCredential;
     use crate::membership::{DiskMember, PoolMembership};
+    use crate::secret::Passphrase;
     use crate::types::{ByIdPath, LuksUuid, MountPoint};
     use std::collections::BTreeMap;
     use zeroize::Zeroizing;
@@ -921,7 +922,9 @@ mod tests {
 
     /// Convenience constructor used in tests.
     fn test_passphrase() -> OpenCredential {
-        OpenCredential::Passphrase(Zeroizing::new("testpass".to_owned()))
+        OpenCredential::Passphrase(Passphrase::from_zeroizing(Zeroizing::new(
+            "testpass".to_owned(),
+        )))
     }
 
     fn test_config() -> Config {
@@ -3570,8 +3573,8 @@ pool already mounted at /mnt/storage
             &fs,
             &config,
             &membership,
-            Some(OpenCredential::Passphrase(Zeroizing::new(
-                "wrongpass".to_owned(),
+            Some(OpenCredential::Passphrase(Passphrase::from_zeroizing(
+                Zeroizing::new("wrongpass".to_owned()),
             ))),
             false,
             "unlock",

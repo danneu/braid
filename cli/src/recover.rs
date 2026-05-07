@@ -13,6 +13,7 @@ use crate::parse::{ReplaceState, parse_btrfs_replace_status};
 use crate::preview::{self, PerDiskStyle, Preview, PreviewCompleteness, PreviewNote};
 use crate::probe::{self, Filesystem, ProbeError};
 use crate::progress::{self, ProgressOutput, RealSleeper, Sleeper};
+use crate::secret::Passphrase;
 use crate::state_paths::StatePaths;
 use crate::status::{BalanceReport, get_balance_report};
 use crate::status_tag::{StatusTag, color_enabled_for_stderr, emit_status, status_line};
@@ -20,7 +21,6 @@ use crate::types::{ByIdPath, ConfigDiskState, MountPoint, PoolState};
 use std::path::PathBuf;
 use std::time::Duration;
 use thiserror::Error;
-use zeroize::Zeroizing;
 
 #[derive(Debug, Error)]
 pub enum RecoverError {
@@ -47,16 +47,17 @@ pub enum RecoverError {
 /// Borrowed values refer to the already-resolved `OpenCredential`; owned values
 /// are freshly read for recovery and must still zeroize on drop.
 enum RecoverPassphrase<'a> {
-    Borrowed(&'a Zeroizing<String>),
-    Owned(Zeroizing<String>),
+    Borrowed(&'a Passphrase),
+    Owned(Passphrase),
 }
 
 impl RecoverPassphrase<'_> {
-    /// Expose passphrase text only at subprocess handoff call sites.
-    fn as_str(&self) -> &str {
+    /// Return the passphrase boundary while preserving the owned/borrowed
+    /// recovery distinction.
+    fn expose_secret(&self) -> &Passphrase {
         match self {
-            Self::Borrowed(z) => z.as_str(),
-            Self::Owned(z) => z.as_str(),
+            Self::Borrowed(z) => z,
+            Self::Owned(z) => z,
         }
     }
 }
@@ -1764,9 +1765,9 @@ fn recover_passphrase<'a>(
 fn open_credential_passphrase<'a>(
     credential: &'a OpenCredential,
     context: &str,
-) -> Result<&'a str, RecoverError> {
+) -> Result<&'a Passphrase, RecoverError> {
     match credential {
-        OpenCredential::Passphrase(passphrase) => Ok(passphrase.as_str()),
+        OpenCredential::Passphrase(passphrase) => Ok(passphrase),
         OpenCredential::KeyFile(_) => Err(RecoverError::Failed(format!(
             "{context} requires a passphrase"
         ))),
@@ -1845,7 +1846,7 @@ fn verify_recover_passphrase_for_add_replay<R: CommandRunner, F: Filesystem + ?S
     fs: &F,
     pool: &PoolState,
     targets: &std::collections::BTreeMap<String, journal::AddJournalTarget>,
-    passphrase: &str,
+    passphrase: &Passphrase,
 ) -> Result<(), RecoverError> {
     let mut verify_targets: Vec<_> = pool
         .devices
@@ -1965,7 +1966,7 @@ fn scan_mapper_if_btrfs_visible<R: CommandRunner>(
 fn ensure_keyfile_enrolled<R: CommandRunner>(
     runner: &R,
     device: &str,
-    passphrase: &str,
+    passphrase: &Passphrase,
     key_file: &std::path::Path,
 ) -> Result<(), RecoverError> {
     match luks::verify_key_file(runner, device, key_file)? {
@@ -2075,7 +2076,7 @@ fn execute_add_pool_mutation_recovery<R: CommandRunner + Sync, F: Filesystem + ?
                 }
                 let passphrase = passphrase
                     .as_ref()
-                    .map(|p| p.as_str())
+                    .map(|p| p.expose_secret())
                     .expect("passphrase was resolved above");
                 luks::ensure_luks_open(runner, name, &target.by_id, passphrase)?;
             }
@@ -2093,7 +2094,13 @@ fn execute_add_pool_mutation_recovery<R: CommandRunner + Sync, F: Filesystem + ?
 
     if !add_targets_all_live(&pool, targets) {
         let passphrase = recover_passphrase(credential, params)?;
-        verify_recover_passphrase_for_add_replay(runner, fs, &pool, targets, passphrase.as_str())?;
+        verify_recover_passphrase_for_add_replay(
+            runner,
+            fs,
+            &pool,
+            targets,
+            passphrase.expose_secret(),
+        )?;
         let _guard = params
             .sleep_inhibitor
             .acquire("replaying interrupted add")
@@ -2126,7 +2133,12 @@ fn execute_add_pool_mutation_recovery<R: CommandRunner + Sync, F: Filesystem + ?
                         )));
                     }
                     if !mapper_open {
-                        luks::ensure_luks_open(runner, name, &target.by_id, passphrase.as_str())?;
+                        luks::ensure_luks_open(
+                            runner,
+                            name,
+                            &target.by_id,
+                            passphrase.expose_secret(),
+                        )?;
                     }
                     if let Some(fsid) = visible_btrfs_fsid(runner, &mapper_path)?
                         && &fsid != verified_pool_fsid
@@ -2150,7 +2162,7 @@ fn execute_add_pool_mutation_recovery<R: CommandRunner + Sync, F: Filesystem + ?
                             luks::luks_format(
                                 runner,
                                 &target.by_id.0,
-                                passphrase.as_str(),
+                                passphrase.expose_secret(),
                                 luks_format_extra_opts,
                             )?;
                         }
@@ -2174,7 +2186,7 @@ fn execute_add_pool_mutation_recovery<R: CommandRunner + Sync, F: Filesystem + ?
                         ensure_keyfile_enrolled(
                             runner,
                             &target.by_id.0,
-                            passphrase.as_str(),
+                            passphrase.expose_secret(),
                             key_file,
                         )?;
                     }
@@ -2184,7 +2196,12 @@ fn execute_add_pool_mutation_recovery<R: CommandRunner + Sync, F: Filesystem + ?
                         &target.mapper_name,
                         params.paths,
                     )?;
-                    luks::ensure_luks_open(runner, name, &target.by_id, passphrase.as_str())?;
+                    luks::ensure_luks_open(
+                        runner,
+                        name,
+                        &target.by_id,
+                        passphrase.expose_secret(),
+                    )?;
                     crate::pool::pool_add_device(runner, &mapper_path, mount_point, false)
                         .map_err(|e| RecoverError::Failed(format!("recover add replay: {e}")))?;
                 }
@@ -2368,7 +2385,7 @@ fn verify_replace_fresh_prep_passphrase<R: CommandRunner>(
     pool: &PoolState,
     new_name: &str,
     new_by_id: &ByIdPath,
-    passphrase: &str,
+    passphrase: &Passphrase,
 ) -> Result<(), RecoverError> {
     let mut targets: Vec<_> = pool
         .devices
@@ -2450,7 +2467,7 @@ fn finish_uncommitted_replace_recovery<R: CommandRunner + Sync, F: Filesystem + 
                         pool,
                         new_name,
                         &new_target.by_id,
-                        passphrase.as_str(),
+                        passphrase.expose_secret(),
                     )?;
                     let _guard = params
                         .sleep_inhibitor
@@ -2462,7 +2479,7 @@ fn finish_uncommitted_replace_recovery<R: CommandRunner + Sync, F: Filesystem + 
                         ensure_keyfile_enrolled(
                             runner,
                             &new_target.by_id.0,
-                            passphrase.as_str(),
+                            passphrase.expose_secret(),
                             key_file,
                         )?;
                     }
@@ -3059,6 +3076,10 @@ mod tests {
     use crate::types::{ByIdPath, LuksUuid, MapperName, MountPoint, PoolDevice};
     use std::collections::{BTreeMap, VecDeque};
     use std::sync::Mutex;
+
+    fn passphrase(s: &str) -> Passphrase {
+        Passphrase::from_zeroizing(zeroize::Zeroizing::new(s.to_owned()))
+    }
 
     struct MockFs {
         paths: Vec<String>,
@@ -6474,7 +6495,7 @@ mod tests {
         ensure_keyfile_enrolled(
             &accepted,
             "/dev/disk/by-id/virtio-disk2",
-            "testpass",
+            &passphrase("testpass"),
             key_file,
         )
         .expect("accepted keyfile should be treated as already enrolled");
@@ -6509,7 +6530,7 @@ mod tests {
         ensure_keyfile_enrolled(
             &rejected,
             "/dev/disk/by-id/virtio-disk2",
-            "testpass",
+            &passphrase("testpass"),
             key_file,
         )
         .expect("rejected keyfile should be enrolled with the passphrase");
@@ -6531,9 +6552,13 @@ mod tests {
                 "Device busy",
             ),
         );
-        let err =
-            ensure_keyfile_enrolled(&busy, "/dev/disk/by-id/virtio-disk2", "testpass", key_file)
-                .unwrap_err();
+        let err = ensure_keyfile_enrolled(
+            &busy,
+            "/dev/disk/by-id/virtio-disk2",
+            &passphrase("testpass"),
+            key_file,
+        )
+        .unwrap_err();
         assert!(
             err.to_string().contains("device is already open or busy"),
             "{err}"
@@ -8902,7 +8927,9 @@ mod tests {
             &config,
             &membership,
             false,
-            &OpenCredential::Passphrase(zeroize::Zeroizing::new("testpass".to_owned())),
+            &OpenCredential::Passphrase(Passphrase::from_zeroizing(zeroize::Zeroizing::new(
+                "testpass".to_owned(),
+            ))),
             &close_names,
         )
         .expect("remount cycle should succeed without touching unplanned mapper");
@@ -9062,7 +9089,9 @@ mod tests {
             &config,
             &membership,
             false,
-            &OpenCredential::Passphrase(zeroize::Zeroizing::new("testpass".to_owned())),
+            &OpenCredential::Passphrase(Passphrase::from_zeroizing(zeroize::Zeroizing::new(
+                "testpass".to_owned(),
+            ))),
             &close_names,
         )
         .expect("remount cycle should succeed when a planned mapper disappeared");
@@ -9221,7 +9250,9 @@ mod tests {
             &config,
             &membership,
             false,
-            &OpenCredential::Passphrase(zeroize::Zeroizing::new("testpass".to_owned())),
+            &OpenCredential::Passphrase(Passphrase::from_zeroizing(zeroize::Zeroizing::new(
+                "testpass".to_owned(),
+            ))),
             &close_names,
         )
         .expect_err("final mount should fail");
