@@ -23,6 +23,10 @@
           size = 1024;
           driveConfig.deviceExtraOpts.serial = "disk2";
         }
+        {
+          size = 1024;
+          driveConfig.deviceExtraOpts.serial = "disk3";
+        }
       ];
 
       environment.systemPackages = with pkgs; [

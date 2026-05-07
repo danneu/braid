@@ -1,0 +1,10 @@
+UUID:             e009905e-c8fa-4227-a531-0724d7adcb82
+Scrub started:    Thu May  7 03:54:06 2026
+Status:           running
+Duration:         0:00:05
+Time left:        0:00:00
+ETA:              Thu May  7 03:54:11 2026
+Total to scrub:   3224780800
+Bytes scrubbed:   2721447936  (84.39%)
+Rate:             544289587/s
+Error summary:    no errors found

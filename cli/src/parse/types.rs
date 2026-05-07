@@ -393,17 +393,17 @@ pub struct SmartProbe {
 /// btrfs replace status
 #[derive(Debug, Clone, PartialEq)]
 pub enum ReplaceState {
-    /// No replace operation running.
-    None,
+    /// Filesystem has never had a replace issued, or status output was empty
+    /// / idle. Distinguishing those cases is not actionable for callers.
+    NotStarted,
     /// Replace in progress with percentage.
     Running { pct: f64 },
     /// Replace finished.
     Finished,
-}
-
-#[derive(Debug, Clone, PartialEq)]
-pub struct BtrfsReplaceStatusOutput {
-    pub state: ReplaceState,
+    /// Kernel-canceled; topology was reverted and btrfs reports zero progress.
+    Cancelled,
+    /// Kernel-suspended replace; the kernel still treats it as ongoing.
+    Suspended { pct: f64 },
 }
 
 /// btrfs device usage --raw

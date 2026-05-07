@@ -367,7 +367,7 @@ pub fn run_replace_with_progress<R: CommandRunner + Sync>(
             if let Ok(ref raw) = poll
                 && let Ok(status) = parse_btrfs_replace_status(raw)
             {
-                match status.state {
+                match status {
                     ReplaceState::Running { pct } => match output {
                         ProgressOutput::Human => {
                             let msg = format_replace_progress(pct);
@@ -382,7 +382,10 @@ pub fn run_replace_with_progress<R: CommandRunner + Sync>(
                         }
                         ProgressOutput::Off => unreachable!(),
                     },
-                    ReplaceState::Finished | ReplaceState::None => continue,
+                    ReplaceState::NotStarted
+                    | ReplaceState::Finished
+                    | ReplaceState::Cancelled
+                    | ReplaceState::Suspended { .. } => continue,
                 }
             }
         }

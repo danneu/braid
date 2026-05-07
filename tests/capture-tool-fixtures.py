@@ -27,6 +27,11 @@ machine.succeed(
 machine.succeed(f"mkdir -p {MOUNT}")
 machine.succeed(f"mount /dev/mapper/braid-vdb {MOUNT}")
 
+machine.succeed(
+    f"btrfs replace status -1 {MOUNT}"
+    f" > {FIXTURE_DIR}/btrfs-replace-status-never-started.txt"
+)
+
 # Write some data so usage stats are non-trivial
 machine.succeed(f"dd if=/dev/urandom of={MOUNT}/testfile bs=1M count=16")
 machine.succeed("sync")
@@ -191,7 +196,118 @@ machine.execute(
 machine.succeed(f"btrfs balance cancel {MOUNT}")
 machine.succeed(f"rm {MOUNT}/balancedata")
 machine.succeed(f"umount {MOUNT}")
+
+# Rebuild a clean filesystem for replace captures. The balance fixture above
+# intentionally leaves mixed data profiles behind, and that topology can make
+# dev_replace fail with ENOSPC before the canceled fixture observes an
+# in-flight state.
+machine.succeed(
+    "mkfs.btrfs -f -d raid1 -m raid1 /dev/mapper/braid-vdb /dev/mapper/braid-vdc"
+)
 machine.succeed(f"mount /dev/mapper/braid-vdb {MOUNT}")
+
+# Format the third disk as LUKS, open as braid-vdd.
+machine.succeed(
+    f"echo -n '{PASSPHRASE}' | cryptsetup luksFormat --batch-mode /dev/vdd -"
+)
+machine.succeed(f"echo -n '{PASSPHRASE}' | cryptsetup open /dev/vdd braid-vdd -")
+
+# Write a large payload so `btrfs replace` runs long enough to observe
+# an in-flight window before cancel. The post-balance-cleanup filesystem
+# has only ~16 MiB of user data; a replace on that scale can finish faster
+# than the 0.05s polling cadence below, leading to a captured "finished"
+# output instead of "canceled". Keep this below the earlier balance payload so
+# the 1 GiB fixture pool still has room for btrfs to prepare dev_replace.
+machine.succeed(f"dd if=/dev/urandom of={MOUNT}/replacedata bs=1M count=256")
+machine.succeed("sync")
+
+# Capture canceled: start replace vdb -> vdd in background, hard-assert
+# in-flight observation before cancel.
+PCT_RE = re.compile(r"(\d+(?:\.\d+)?)% done")
+
+
+def parse_replace_state(text):
+    if "finished on" in text:
+        return ("finished", 100.0)
+    match = PCT_RE.search(text)
+    if match:
+        return ("running", float(match.group(1)))
+    return ("idle", None)
+
+
+machine.execute(
+    f"btrfs replace start -B 1 /dev/mapper/braid-vdd {MOUNT} "
+    f"> /tmp/btrfs-replace-start.log 2>&1 &"
+)
+saw_in_flight = False
+saw_finished_too_early = False
+last_status = ""
+for _ in range(800):  # 40s budget
+    ret = machine.execute(f"btrfs replace status -1 {MOUNT} 2>&1")
+    last_status = ret[1]
+    state, _ = parse_replace_state(last_status)
+    if state == "running":
+        saw_in_flight = True
+        break
+    if state == "finished":
+        saw_finished_too_early = True
+        break
+    time.sleep(0.05)
+assert not saw_finished_too_early, (
+    "btrfs replace finished before the canceled fixture could observe "
+    "in-flight state. Payload too small or polling cadence too coarse. "
+    "Last status:\n" + last_status
+)
+assert saw_in_flight, (
+    "Never observed btrfs replace in-flight -- canceled fixture cannot "
+    "be captured deterministically. Last status:\n" + last_status
+)
+
+# `btrfs replace cancel` returns once scrub cancel is requested, but the
+# kernel's CANCELED state transition runs in `btrfs_dev_replace_finishing`
+# (dev-replace.c:937-939). Status can still report running for a tick before
+# the flip. Poll until "canceled on" appears; hard-fail on timeout or any
+# unexpected state.
+machine.succeed(f"btrfs replace cancel {MOUNT}")
+saw_canceled = False
+saw_finished_too_early = False
+last_status = ""
+for _ in range(400):  # 20s budget
+    ret = machine.execute(f"btrfs replace status -1 {MOUNT} 2>&1")
+    last_status = ret[1]
+    if "canceled on" in last_status:
+        saw_canceled = True
+        break
+    if "finished on" in last_status:
+        saw_finished_too_early = True
+        break
+    time.sleep(0.05)
+assert not saw_finished_too_early, (
+    "btrfs replace transitioned to FINISHED after cancel -- the cancel raced "
+    "kernel completion and the canceled fixture cannot be captured. Last "
+    "status:\n" + last_status
+)
+assert saw_canceled, (
+    "Kernel never transitioned to CANCELED within budget. Last status:\n"
+    + last_status
+)
+machine.succeed(
+    f"btrfs replace status -1 {MOUNT}"
+    f" > {FIXTURE_DIR}/btrfs-replace-status-canceled.txt"
+)
+
+# Capture finished: rerun replace to completion. The previous tgtdev
+# allocation was destroyed on cancel; pass -f because braid-vdd may carry
+# residual fs signatures from the canceled run. -B blocks until the kernel
+# reports finished, so no in-flight observation needed here.
+machine.succeed(f"btrfs replace start -B -f 1 /dev/mapper/braid-vdd {MOUNT}")
+machine.succeed(
+    f"btrfs replace status -1 {MOUNT}"
+    f" > {FIXTURE_DIR}/btrfs-replace-status-finished.txt"
+)
+
+# Remove the payload before remaining teardown.
+machine.succeed(f"rm {MOUNT}/replacedata")
 
 # 11. cryptsetup status (inactive stderr/stdout)
 # Must unmount before closing mapper; otherwise cryptsetup reports "still in use".

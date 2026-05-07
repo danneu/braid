@@ -1,17 +1,18 @@
 use crate::cmd::RawCommandOutput;
 
 use super::ParseError;
-use super::types::{BtrfsReplaceStatusOutput, ReplaceState};
+use super::types::ReplaceState;
 
 /// Parse the output of `btrfs replace status -1 <mount_point>`.
 ///
 /// Possible outputs (per reference/btrfs-progs/cmds/replace.c:451-505):
 /// - Running:  "45.3% done, 0 write errs, 0 uncorr. read errs"
 /// - Finished: "Started on <t1>, finished on <t2>, 0 write errs, 0 uncorr. read errs"
+/// - Canceled: "Started on <t1>, canceled on <t2> at 0.0%, ..."
+/// - Suspended: "Started on <t1>, suspended on <t2> at 12.5%, ..."
+/// - Never started: "Never started"
 /// - Not running: "no operation running" or empty stdout
-pub fn parse_btrfs_replace_status(
-    raw: &RawCommandOutput,
-) -> Result<BtrfsReplaceStatusOutput, ParseError> {
+pub fn parse_btrfs_replace_status(raw: &RawCommandOutput) -> Result<ReplaceState, ParseError> {
     if raw.exit_status != 0 {
         return Err(ParseError::CommandFailed {
             cmd: raw.cmd.clone(),
@@ -24,29 +25,39 @@ pub fn parse_btrfs_replace_status(
 
     // "finished on" indicates completion
     if stdout.contains("finished on") {
-        return Ok(BtrfsReplaceStatusOutput {
-            state: ReplaceState::Finished,
+        return Ok(ReplaceState::Finished);
+    }
+
+    if stdout.contains("canceled on") {
+        return Ok(ReplaceState::Cancelled);
+    }
+
+    if stdout.contains("suspended on") {
+        return Ok(ReplaceState::Suspended {
+            pct: extract_percent(stdout).unwrap_or(0.0),
         });
     }
 
-    // Look for percentage: "45.3% done" or "100.0% done"
-    if let Some(pct) = extract_percent(stdout) {
-        return Ok(BtrfsReplaceStatusOutput {
-            state: ReplaceState::Running { pct },
-        });
+    if stdout.contains("Never started") {
+        return Ok(ReplaceState::NotStarted);
     }
 
-    // No operation running (or unrecognised output — treat as none)
-    Ok(BtrfsReplaceStatusOutput {
-        state: ReplaceState::None,
-    })
+    // Look for percentage: "45.3% done" or "100.0% done".
+    if stdout.contains("% done")
+        && let Some(pct) = extract_percent(stdout)
+    {
+        return Ok(ReplaceState::Running { pct });
+    }
+
+    // No operation running (or unrecognised output -- treat as not started).
+    Ok(ReplaceState::NotStarted)
 }
 
 fn extract_percent(text: &str) -> Option<f64> {
-    // Match "NN.N% done" anywhere in the output
+    // Match an "NN.N%" token anywhere in the output.
     for line in text.lines() {
         let trimmed = line.trim();
-        if let Some(pos) = trimmed.find("% done") {
+        if let Some(pos) = trimmed.find('%') {
             // Walk backwards from the '%' to find the start of the number
             let before = &trimmed[..pos];
             let num_start = before
@@ -86,7 +97,7 @@ mod tests {
         let out =
             parse_btrfs_replace_status(&raw("45.3% done, 0 write errs, 0 uncorr. read errs\n"))
                 .unwrap();
-        match out.state {
+        match out {
             ReplaceState::Running { pct } => {
                 assert!((pct - 45.3).abs() < 0.01, "expected 45.3, got {pct}");
             }
@@ -100,19 +111,83 @@ mod tests {
             "Started on 27.Feb 10:30:00, finished on 27.Feb 10:35:00, 0 write errs, 0 uncorr. read errs\n",
         ))
         .unwrap();
-        assert_eq!(out.state, ReplaceState::Finished);
+        assert_eq!(out, ReplaceState::Finished);
+    }
+
+    #[test]
+    // Intent: canceled btrfs replace output maps to the kernel-canceled state
+    // without carrying the rendered zero percent.
+    // Why it exists: btrfs-progs replace.c:466-475 emits the canceled row,
+    // while the kernel always renders CANCELED with progress_1000 = 0
+    // (dev-replace.c:1051-1054), so callers should not infer progress.
+    // Scenario: an interrupted replacement was manually canceled by the
+    // operator or kernel and recovery must route it through rollback cleanup.
+    fn canceled_zero_percent() {
+        let out = parse_btrfs_replace_status(&raw(
+            "Started on 27.Feb 10:30:00, canceled on 27.Feb 10:35:00 at 0.0%, 0 write errs, 0 uncorr. read errs\n",
+        ))
+        .unwrap();
+        assert_eq!(out, ReplaceState::Cancelled);
+    }
+
+    #[test]
+    // Intent: suspended btrfs replace output maps to Suspended with its real
+    // progress percentage.
+    // Why it exists: btrfs-progs replace.c:476-485 emits "suspended on ... at
+    // NN.N%" and the kernel can enter this state when the target disappears
+    // (dev-replace.c:1200-1251); recovery must distinguish it from idle.
+    // Scenario: a replacement target became unavailable during shutdown and
+    // the operator needs an explicit manual-cancel recovery path.
+    fn suspended_with_percentage() {
+        let out = parse_btrfs_replace_status(&raw(
+            "Started on 27.Feb 10:30:00, suspended on 27.Feb 10:35:00 at 12.5%, 0 write errs, 0 uncorr. read errs\n",
+        ))
+        .unwrap();
+        match out {
+            ReplaceState::Suspended { pct } => {
+                assert!((pct - 12.5).abs() < 0.01, "expected 12.5, got {pct}");
+            }
+            other => panic!("expected Suspended, got {other:?}"),
+        }
+    }
+
+    #[test]
+    // Intent: "Never started" output maps to the lenient NotStarted bucket.
+    // Why it exists: btrfs-progs replace.c:486-490 emits this exact output
+    // with skip_stats = 1, so no percentage or error counters follow it.
+    // Scenario: a fixture capture checks replace status before any replace
+    // has ever been issued on the filesystem.
+    fn never_started() {
+        let out = parse_btrfs_replace_status(&raw("Never started\n")).unwrap();
+        assert_eq!(out, ReplaceState::NotStarted);
+    }
+
+    #[test]
+    // Intent: suspended output without a percent token still maps to
+    // Suspended with a defensive zero progress value.
+    // Why it exists: the prefix is more important than the rendering detail;
+    // future btrfs-progs formatting drift should not collapse a suspended
+    // kernel operation into NotStarted.
+    // Scenario: status text keeps the suspended state word but omits the
+    // "at NN.N%" fragment.
+    fn suspended_no_percent_token_falls_back_to_zero() {
+        let out = parse_btrfs_replace_status(&raw(
+            "Started on 27.Feb 10:30:00, suspended on 27.Feb 10:35:00, 0 write errs, 0 uncorr. read errs\n",
+        ))
+        .unwrap();
+        assert_eq!(out, ReplaceState::Suspended { pct: 0.0 });
     }
 
     #[test]
     fn not_started() {
         let out = parse_btrfs_replace_status(&raw("")).unwrap();
-        assert_eq!(out.state, ReplaceState::None);
+        assert_eq!(out, ReplaceState::NotStarted);
     }
 
     #[test]
     fn no_operation_running() {
         let out = parse_btrfs_replace_status(&raw("no operation running\n")).unwrap();
-        assert_eq!(out.state, ReplaceState::None);
+        assert_eq!(out, ReplaceState::NotStarted);
     }
 
     #[test]
@@ -124,7 +199,7 @@ mod tests {
         let out =
             parse_btrfs_replace_status(&raw("100.0% done, 0 write errs, 0 uncorr. read errs\n"))
                 .unwrap();
-        match out.state {
+        match out {
             ReplaceState::Running { pct } => {
                 assert!((pct - 100.0).abs() < 0.01, "expected 100.0, got {pct}");
             }
@@ -133,16 +208,16 @@ mod tests {
     }
 
     #[test]
-    fn garbage_output_treated_as_none() {
+    fn garbage_output_treated_as_not_started() {
         let out = parse_btrfs_replace_status(&raw("something unexpected here\n")).unwrap();
-        assert_eq!(out.state, ReplaceState::None);
+        assert_eq!(out, ReplaceState::NotStarted);
     }
 
     #[test]
     // Intent: non-zero exit from btrfs replace status must be a parse error
     //   that preserves the full diagnostic payload (cmd, exit_code, stderr).
-    // Why: the parser previously fell through to Ok(ReplaceState::None) for any
-    //   unrecognised output, silently masking command failures.
+    // Why: the parser's lenient fallback treats unrecognised successful output
+    //   as NotStarted, so non-zero exits must bypass that path.
     // Scenario: typo in mount path → btrfs exits 1 with empty stdout.
     fn nonzero_exit_is_error() {
         let result = parse_btrfs_replace_status(&RawCommandOutput {

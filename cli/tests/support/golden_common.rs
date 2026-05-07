@@ -231,6 +231,36 @@ golden_test!(
 );
 
 golden_test!(
+    golden_btrfs_replace_status_never_started,
+    "btrfs-replace-status-never-started.txt",
+    "btrfs replace status",
+    parse::btrfs_replace_status::parse_btrfs_replace_status,
+    |out: parse::types::ReplaceState| {
+        assert_eq!(out, parse::types::ReplaceState::NotStarted);
+    }
+);
+
+golden_test!(
+    golden_btrfs_replace_status_finished,
+    "btrfs-replace-status-finished.txt",
+    "btrfs replace status",
+    parse::btrfs_replace_status::parse_btrfs_replace_status,
+    |out: parse::types::ReplaceState| {
+        assert_eq!(out, parse::types::ReplaceState::Finished);
+    }
+);
+
+golden_test!(
+    golden_btrfs_replace_status_canceled,
+    "btrfs-replace-status-canceled.txt",
+    "btrfs replace status",
+    parse::btrfs_replace_status::parse_btrfs_replace_status,
+    |out: parse::types::ReplaceState| {
+        assert_eq!(out, parse::types::ReplaceState::Cancelled);
+    }
+);
+
+golden_test!(
     golden_btrfs_device_usage,
     "btrfs-device-usage-2disk.txt",
     "btrfs device usage",

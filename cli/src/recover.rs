@@ -438,7 +438,7 @@ impl RecoverWorkAction {
                         &plan.mount_point,
                         &progress::RealSleeper,
                         color_enabled_for_stderr(),
-                    );
+                    )?;
                 }
                 Ok(false)
             }
@@ -2706,15 +2706,16 @@ const REPLACE_WAIT_HEARTBEAT_INTERVAL: Duration = Duration::from_secs(30);
 /// waited on by umount, so without this wait the relock_and_remount cycle can
 /// race the resume worker and the second mount sees the same in-flight state.
 ///
-/// Best-effort: if the status command fails for any reason, we return early
-/// rather than blocking forever — relock_and_remount and probe_pool will catch
-/// any remaining staleness as a clear test failure rather than a hang.
+/// Best-effort except for `Suspended`, which returns an error so recover
+/// preserves the journal. If the status command fails for any reason, we return
+/// early rather than blocking forever -- relock_and_remount and probe_pool will
+/// catch any remaining staleness as a clear test failure rather than a hang.
 fn wait_for_kernel_replace_to_finish<R: CommandRunner>(
     runner: &R,
     mount_point: &MountPoint,
     sleeper: &dyn Sleeper,
     color_enabled: bool,
-) {
+) -> Result<(), RecoverError> {
     let mut last_pct: Option<f64> = None;
     let mut total_elapsed = Duration::ZERO;
     let mut since_last_emit = Duration::ZERO;
@@ -2732,7 +2733,7 @@ fn wait_for_kernel_replace_to_finish<R: CommandRunner>(
                         "pool: kernel dev_replace status check failed -- proceeding",
                     ));
                 }
-                return;
+                return Ok(());
             }
         };
         let parsed = match parse_btrfs_replace_status(&raw) {
@@ -2745,11 +2746,11 @@ fn wait_for_kernel_replace_to_finish<R: CommandRunner>(
                         "pool: kernel dev_replace status check failed -- proceeding",
                     ));
                 }
-                return;
+                return Ok(());
             }
         };
-        match parsed.state {
-            ReplaceState::Finished | ReplaceState::None => {
+        match parsed {
+            ReplaceState::Finished | ReplaceState::NotStarted => {
                 if wait_emitted {
                     emit_status(&status_line(
                         StatusTag::Ok,
@@ -2757,7 +2758,22 @@ fn wait_for_kernel_replace_to_finish<R: CommandRunner>(
                         "pool: kernel dev_replace finished",
                     ));
                 }
-                return;
+                return Ok(());
+            }
+            ReplaceState::Cancelled => {
+                emit_status(&status_line(
+                    StatusTag::Fail,
+                    color_enabled,
+                    "pool: kernel dev_replace canceled",
+                ));
+                return Ok(());
+            }
+            ReplaceState::Suspended { pct } => {
+                let message = format!(
+                    "pool: kernel dev_replace is suspended at {pct:.1}% (target device unavailable). Run `btrfs replace cancel {mount_point}` to clear it, then re-run `braid recover`."
+                );
+                emit_status(&status_line(StatusTag::Fail, color_enabled, &message));
+                return Err(RecoverError::Failed(message));
             }
             ReplaceState::Running { pct } => {
                 if !wait_emitted {
@@ -3452,7 +3468,8 @@ mod tests {
         ]);
         let mount_point = MountPoint("/mnt/storage".into());
         let captured = crate::status_tag::testing::capture_with(|| {
-            wait_for_kernel_replace_to_finish(&runner, &mount_point, &progress::NoopSleeper, false);
+            wait_for_kernel_replace_to_finish(&runner, &mount_point, &progress::NoopSleeper, false)
+                .unwrap();
         });
         assert_eq!(
             captured.lines().collect::<Vec<_>>(),
@@ -3461,6 +3478,124 @@ mod tests {
                 "  ... 5.0%",
                 "[ok]   pool: kernel dev_replace finished",
             ],
+        );
+    }
+
+    #[test]
+    // Intent: canceled kernel dev_replace reports a fail row but does not abort
+    // recovery after an observed in-flight wait.
+    // Why it exists: canceled means the kernel rolled topology back; downstream
+    // replace recovery can still classify and clean up the journal safely.
+    // Scenario: recover observes one running poll, then the kernel reports
+    // "canceled on" for the same replace.
+    fn wait_for_kernel_replace_emits_fail_on_canceled_returns_ok() {
+        let runner = ReplaceStatusSequenceRunner::new(vec![
+            ReplaceStatusItem::Output(ok_raw(
+                "btrfs replace status -1 /mnt/storage",
+                "5.0% done, 0 write errs, 0 uncorr. read errs\n",
+            )),
+            ReplaceStatusItem::Output(ok_raw(
+                "btrfs replace status -1 /mnt/storage",
+                "Started on 27.Feb 10:30:00, canceled on 27.Feb 10:35:00 at 0.0%, 0 write errs, 0 uncorr. read errs\n",
+            )),
+        ]);
+        let mount_point = MountPoint("/mnt/storage".into());
+        let mut result = None;
+        let captured = crate::status_tag::testing::capture_with(|| {
+            result = Some(wait_for_kernel_replace_to_finish(
+                &runner,
+                &mount_point,
+                &progress::NoopSleeper,
+                false,
+            ));
+        });
+        assert!(result.unwrap().is_ok(), "canceled replace should proceed");
+        assert_eq!(
+            captured.lines().collect::<Vec<_>>(),
+            vec![
+                "[wait] pool: waiting for kernel dev_replace to finish...",
+                "  ... 5.0%",
+                "[fail] pool: kernel dev_replace canceled",
+            ],
+        );
+    }
+
+    #[test]
+    // Intent: suspended kernel dev_replace reports an actionable fail row and
+    // returns a recover-blocking error.
+    // Why it exists: the kernel treats suspended replace as ongoing, so
+    // continuing would clear braid's journal while a retry is still blocked.
+    // Scenario: recover observes one running poll, then the target disappears
+    // and status reports "suspended on" with real progress.
+    fn wait_for_kernel_replace_emits_fail_on_suspended_returns_err() {
+        let runner = ReplaceStatusSequenceRunner::new(vec![
+            ReplaceStatusItem::Output(ok_raw(
+                "btrfs replace status -1 /mnt/storage",
+                "5.0% done, 0 write errs, 0 uncorr. read errs\n",
+            )),
+            ReplaceStatusItem::Output(ok_raw(
+                "btrfs replace status -1 /mnt/storage",
+                "Started on 27.Feb 10:30:00, suspended on 27.Feb 10:35:00 at 12.5%, 0 write errs, 0 uncorr. read errs\n",
+            )),
+        ]);
+        let mount_point = MountPoint("/mnt/storage".into());
+        let mut result = None;
+        let captured = crate::status_tag::testing::capture_with(|| {
+            result = Some(wait_for_kernel_replace_to_finish(
+                &runner,
+                &mount_point,
+                &progress::NoopSleeper,
+                false,
+            ));
+        });
+        let err = result.unwrap().expect_err("suspended replace should abort");
+        let RecoverError::Failed(msg) = err else {
+            panic!("expected RecoverError::Failed, got {err:?}");
+        };
+        assert!(
+            msg.contains("suspended at 12.5%"),
+            "error should carry suspended percentage, got: {msg}"
+        );
+        assert!(
+            msg.contains("btrfs replace cancel /mnt/storage"),
+            "error should give the manual cancel command, got: {msg}"
+        );
+        assert_eq!(
+            captured.lines().collect::<Vec<_>>(),
+            vec![
+                "[wait] pool: waiting for kernel dev_replace to finish...",
+                "  ... 5.0%",
+                "[fail] pool: kernel dev_replace is suspended at 12.5% (target device unavailable). Run `btrfs replace cancel /mnt/storage` to clear it, then re-run `braid recover`.",
+            ],
+        );
+    }
+
+    #[test]
+    // Intent: canceled kernel dev_replace reports a fail row even when it is
+    // the first status observed.
+    // Why it exists: canceled is terminal and diagnostic, not a normal
+    // "nothing to wait for" condition gated by a prior wait row.
+    // Scenario: recover mounts after the kernel already transitioned the
+    // resumed replace to CANCELED.
+    fn wait_for_kernel_replace_emits_fail_on_canceled_first_poll() {
+        let runner = ReplaceStatusSequenceRunner::new(vec![ReplaceStatusItem::Output(ok_raw(
+            "btrfs replace status -1 /mnt/storage",
+            "Started on 27.Feb 10:30:00, canceled on 27.Feb 10:35:00 at 0.0%, 0 write errs, 0 uncorr. read errs\n",
+        ))]);
+        let mount_point = MountPoint("/mnt/storage".into());
+        let mut result = None;
+        let captured = crate::status_tag::testing::capture_with(|| {
+            result = Some(wait_for_kernel_replace_to_finish(
+                &runner,
+                &mount_point,
+                &progress::NoopSleeper,
+                false,
+            ));
+        });
+        assert!(result.unwrap().is_ok(), "canceled replace should proceed");
+        assert_eq!(
+            captured.lines().collect::<Vec<_>>(),
+            vec!["[fail] pool: kernel dev_replace canceled"],
         );
     }
 
@@ -3482,7 +3617,8 @@ mod tests {
         ]);
         let mount_point = MountPoint("/mnt/storage".into());
         let captured = crate::status_tag::testing::capture_with(|| {
-            wait_for_kernel_replace_to_finish(&runner, &mount_point, &progress::NoopSleeper, false);
+            wait_for_kernel_replace_to_finish(&runner, &mount_point, &progress::NoopSleeper, false)
+                .unwrap();
         });
         assert_eq!(
             captured.lines().collect::<Vec<_>>(),
@@ -3513,7 +3649,8 @@ mod tests {
         let runner = ReplaceStatusSequenceRunner::new(items);
         let mount_point = MountPoint("/mnt/storage".into());
         let captured = crate::status_tag::testing::capture_with(|| {
-            wait_for_kernel_replace_to_finish(&runner, &mount_point, &progress::NoopSleeper, false);
+            wait_for_kernel_replace_to_finish(&runner, &mount_point, &progress::NoopSleeper, false)
+                .unwrap();
         });
         assert_eq!(
             captured.lines().collect::<Vec<_>>(),
@@ -3545,7 +3682,8 @@ mod tests {
         let runner = ReplaceStatusSequenceRunner::new(items);
         let mount_point = MountPoint("/mnt/storage".into());
         let captured = crate::status_tag::testing::capture_with(|| {
-            wait_for_kernel_replace_to_finish(&runner, &mount_point, &progress::NoopSleeper, false);
+            wait_for_kernel_replace_to_finish(&runner, &mount_point, &progress::NoopSleeper, false)
+                .unwrap();
         });
         assert_eq!(
             captured.lines().collect::<Vec<_>>(),
@@ -3576,7 +3714,8 @@ mod tests {
         let runner = ReplaceStatusSequenceRunner::new(items);
         let mount_point = MountPoint("/mnt/storage".into());
         let captured = crate::status_tag::testing::capture_with(|| {
-            wait_for_kernel_replace_to_finish(&runner, &mount_point, &progress::NoopSleeper, false);
+            wait_for_kernel_replace_to_finish(&runner, &mount_point, &progress::NoopSleeper, false)
+                .unwrap();
         });
         assert_eq!(
             captured.lines().collect::<Vec<_>>(),
@@ -10884,6 +11023,189 @@ mod tests {
              \tdevid    1 size 10.00GiB used 2.00GiB path /dev/mapper/braid-disk1\n\
              \tdevid    2 size 10.00GiB used 2.00GiB path /dev/mapper/braid-new\n",
         )
+    }
+
+    // Intent: a suspended kernel dev_replace aborts recover before the
+    // remount cycle and keeps the pending journal intact.
+    // Why it exists: suspended replace is still kernel-ongoing; clearing
+    // pending-op.json would remove braid's only structured recovery context
+    // while a fresh replace start is still blocked.
+    // Scenario: power returns after a replace target disappeared; recover
+    // opens the pool, observes "suspended on" at 50%, and tells the operator
+    // to cancel the kernel operation manually before retrying.
+    #[test]
+    fn recover_aborts_and_preserves_journal_on_suspended_replace() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let paths = StatePaths::custom(tmp.path().into());
+        let config = Config::new(MountPoint("/mnt/storage".into())).unwrap();
+
+        let fs = StatefulMockFs::new(&[
+            "/dev/disk/by-id/virtio-disk1",
+            "/dev/disk/by-id/virtio-old",
+            "/dev/disk/by-id/virtio-new",
+        ]);
+        let fs_handle = fs.handle();
+
+        let journal = replace_journal();
+        journal::write_journal(&paths, &journal).unwrap();
+
+        let inner = MockRunner::default()
+            .with_output(mountpoint_fail().0, mountpoint_fail().1)
+            .with_output(
+                CmdRequest::CryptsetupLuksUuid {
+                    device: "/dev/disk/by-id/virtio-disk1".into(),
+                },
+                cryptsetup_uuid_ok(
+                    "/dev/disk/by-id/virtio-disk1",
+                    "11111111-1111-1111-1111-111111111111",
+                ),
+            )
+            .with_output(
+                CmdRequest::CryptsetupLuksUuid {
+                    device: "/dev/disk/by-id/virtio-old".into(),
+                },
+                cryptsetup_uuid_ok(
+                    "/dev/disk/by-id/virtio-old",
+                    "22222222-2222-2222-2222-222222222222",
+                ),
+            )
+            .with_output(
+                CmdRequest::CryptsetupLuksUuid {
+                    device: "/dev/disk/by-id/virtio-new".into(),
+                },
+                cryptsetup_uuid_ok(
+                    "/dev/disk/by-id/virtio-new",
+                    "33333333-3333-3333-3333-333333333333",
+                ),
+            )
+            .with_output_stdin(
+                CmdRequest::CryptsetupTestPassphrase {
+                    device: "/dev/disk/by-id/virtio-disk1".into(),
+                },
+                b"testpass".to_vec(),
+                ok_raw_empty("cryptsetup open --test-passphrase"),
+            )
+            .with_output_stdin(
+                CmdRequest::CryptsetupTestPassphrase {
+                    device: "/dev/disk/by-id/virtio-new".into(),
+                },
+                b"testpass".to_vec(),
+                ok_raw_empty("cryptsetup open --test-passphrase"),
+            )
+            .with_output_stdin(
+                CmdRequest::CryptsetupTestPassphrase {
+                    device: "/dev/disk/by-id/virtio-old".into(),
+                },
+                b"testpass".to_vec(),
+                ok_raw_empty("cryptsetup open --test-passphrase"),
+            )
+            .with_output_stdin(
+                CmdRequest::CryptsetupLuksOpen {
+                    device: "/dev/disk/by-id/virtio-disk1".into(),
+                    mapper: "braid-disk1".into(),
+                },
+                b"testpass".to_vec(),
+                ok_raw_empty("cryptsetup open"),
+            )
+            .with_output_stdin(
+                CmdRequest::CryptsetupLuksOpen {
+                    device: "/dev/disk/by-id/virtio-new".into(),
+                    mapper: "braid-new".into(),
+                },
+                b"testpass".to_vec(),
+                ok_raw_empty("cryptsetup open"),
+            )
+            .with_output_stdin(
+                CmdRequest::CryptsetupLuksOpen {
+                    device: "/dev/disk/by-id/virtio-old".into(),
+                    mapper: "braid-old".into(),
+                },
+                b"testpass".to_vec(),
+                ok_raw_empty("cryptsetup open"),
+            )
+            .with_output(
+                CmdRequest::BtrfsDeviceScanAll,
+                ok_raw_empty("btrfs device scan"),
+            )
+            .with_output(
+                CmdRequest::Mount {
+                    device: "/dev/mapper/braid-disk1".into(),
+                    mount_point: MountPoint("/mnt/storage".into()),
+                },
+                ok_raw_empty("mount"),
+            )
+            .with_output(
+                CmdRequest::BtrfsReplaceStatus {
+                    mount_point: MountPoint("/mnt/storage".into()),
+                },
+                ok_raw(
+                    "btrfs replace status",
+                    "Started on 27.Feb 10:30:00, suspended on 27.Feb 10:35:00 at 50.0%, \
+                     0 write errs, 0 uncorr. read errs\n",
+                ),
+            )
+            .with_luks_dump_text_luks2_for(&[
+                "/dev/disk/by-id/virtio-disk1",
+                "/dev/disk/by-id/virtio-old",
+                "/dev/disk/by-id/virtio-new",
+            ]);
+
+        let mut closed0 = std::collections::HashSet::new();
+        closed0.insert("braid-disk1".to_owned());
+        closed0.insert("braid-new".to_owned());
+        closed0.insert("braid-old".to_owned());
+        let runner = MapperClosingRunner {
+            inner,
+            fs_paths: fs_handle,
+            closed: std::sync::Mutex::new(closed0),
+        };
+
+        let passphrase_file = tempfile::NamedTempFile::new().unwrap();
+        {
+            use std::io::Write;
+            passphrase_file.as_file().write_all(b"testpass").unwrap();
+        }
+        let resolver = resolver_for(&[("/dev/vda", "virtio-disk1"), ("/dev/vdc", "virtio-new")]);
+        let params = RecoverParams {
+            config: &config,
+            paths: &paths,
+            passphrase_stdin: false,
+            passphrase_file: Some(passphrase_file.path()),
+            allow_degraded: false,
+            dry_run: false,
+            progress: ProgressOutput::Off,
+            sleep_inhibitor: &NOOP_INHIBITOR,
+        };
+
+        let report = plan_recover(&runner, &fs, &params);
+        let plan = report.result.expect("recover planning should succeed");
+        let result = plan.execute(&runner, &fs, &resolver, &params);
+
+        let err = result.expect_err("suspended replace should abort recover");
+        let msg = err.to_string();
+        assert!(
+            msg.contains("suspended at 50.0%"),
+            "error should include suspended progress, got: {msg}"
+        );
+        assert!(
+            msg.contains("btrfs replace cancel"),
+            "error should include manual cancel command, got: {msg}"
+        );
+        assert!(
+            journal::load_journal(&paths).unwrap().is_some(),
+            "journal should remain after suspended replace abort"
+        );
+
+        let requests = runner.inner.requests();
+        assert!(
+            !requests.iter().any(|r| matches!(
+                r,
+                CmdRequest::Umount { .. }
+                    | CmdRequest::BtrfsDeviceScanForget { .. }
+                    | CmdRequest::CryptsetupClose { .. }
+            )),
+            "suspended replace must abort before relock_and_remount: {requests:?}"
+        );
     }
 
     /// Intent: After kernel-resumed `btrfs replace` finishes during recover,
