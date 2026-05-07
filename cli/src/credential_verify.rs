@@ -1,7 +1,9 @@
 use crate::cmd::CommandRunner;
-use crate::luks::{self, VerifyOutcome};
+use crate::luks::{self, LuksError, VerifyOutcome};
 use crate::secret::Passphrase;
-use crate::status_tag::{CredentialKind, credential_ok_line, credential_wait_line};
+use crate::status_tag::{
+    CredentialKind, StatusTag, credential_ok_line, credential_wait_line, status_line,
+};
 use std::path::Path;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -70,6 +72,46 @@ pub fn verify_credential_for_targets<R: CommandRunner>(
     }
 
     Ok(())
+}
+
+/// Probe whether a candidate disk already has the keyfile installed.
+///
+/// Sibling to `verify_credential_for_targets`: same wait-line idiom,
+/// but rejection is informational ("not yet enrolled") rather than
+/// fatal. Emits exactly one `[wait]` row, then exactly one closer
+/// (`[ok]` on Authenticated, `[skip]` on Rejected). On `LuksError`
+/// the wait closes via the caller's error propagation per Principle
+/// 13.
+///
+/// Used by `braid enroll`'s dry-run preview (`plan_enroll`) and
+/// real-run planner (`plan_enrollment`, ExistingKeyfile mode) so both
+/// paths render byte-identical rows through the `emit_status` test
+/// seam.
+pub fn probe_keyfile_enrollment<R: CommandRunner>(
+    runner: &R,
+    target: &CredentialVerifyTarget,
+    key_file_path: &Path,
+    color_enabled: bool,
+    mut emit: impl FnMut(&str),
+) -> Result<VerifyOutcome, LuksError> {
+    emit(&credential_wait_line(
+        CredentialKind::KeyFile,
+        color_enabled,
+        &target.name,
+    ));
+    let outcome = luks::verify_key_file(runner, &target.device, key_file_path)?;
+    let (tag, body) = match outcome {
+        VerifyOutcome::Authenticated => (
+            StatusTag::Ok,
+            format!("keyfile: already enrolled on {}", target.name),
+        ),
+        VerifyOutcome::Rejected => (
+            StatusTag::Skip,
+            format!("keyfile: not yet enrolled on {}", target.name),
+        ),
+    };
+    emit(&status_line(tag, color_enabled, &body));
+    Ok(outcome)
 }
 
 #[cfg(test)]
@@ -321,5 +363,127 @@ mod tests {
 
         assert!(emits.is_empty());
         assert!(runner.requests().is_empty());
+    }
+
+    // Intent: probe_keyfile_enrollment emits the [wait] then [ok]
+    //   pair when the keyfile authenticates, in both color modes,
+    //   and returns Authenticated.
+    // Why it exists: the helper's row contract is the unification
+    //   point for the dry-run and real-run probe sites; without
+    //   byte-pinned wait+ok output, a regression in either site
+    //   would diverge from the VM-test wording without surfacing
+    //   in Rust tests.
+    // Scenario: a single-disk probe finds the keyfile already in
+    //   slot 1.
+    #[test]
+    fn probe_keyfile_enrollment_authenticated_emits_wait_then_already_enrolled() {
+        for color_enabled in [false, true] {
+            let targets = targets();
+            let (runner, requests) = key_file_runner(&targets[..1], &[0]);
+            let mut emits = Vec::new();
+
+            let outcome = probe_keyfile_enrollment(
+                &runner,
+                &targets[0],
+                Path::new("/run/braid.key"),
+                color_enabled,
+                |line| emits.push(line.to_owned()),
+            )
+            .expect("keyfile should authenticate");
+
+            assert_eq!(outcome, VerifyOutcome::Authenticated);
+            assert_eq!(
+                emits,
+                vec![
+                    credential_wait_line(CredentialKind::KeyFile, color_enabled, &targets[0].name),
+                    status_line(
+                        StatusTag::Ok,
+                        color_enabled,
+                        &format!("keyfile: already enrolled on {}", targets[0].name),
+                    ),
+                ]
+            );
+            assert_eq!(runner.requests(), requests);
+        }
+    }
+
+    // Intent: probe_keyfile_enrollment emits the [wait] then [skip]
+    //   pair when the keyfile is rejected, and returns Rejected
+    //   without erroring.
+    // Why it exists: pins that rejection closes the wait via a
+    //   visible [skip] row rather than error propagation, so
+    //   plan_enroll's dry-run preview can continue iterating
+    //   candidates without losing per-disk context.
+    // Scenario: a single-disk probe finds the keyfile is not yet
+    //   enrolled (cryptsetup exit 2).
+    #[test]
+    fn probe_keyfile_enrollment_rejected_emits_wait_then_not_yet_enrolled() {
+        let targets = targets();
+        let (runner, requests) = key_file_runner(&targets[..1], &[2]);
+        let mut emits = Vec::new();
+
+        let outcome = probe_keyfile_enrollment(
+            &runner,
+            &targets[0],
+            Path::new("/run/braid.key"),
+            false,
+            |line| emits.push(line.to_owned()),
+        )
+        .expect("rejection is not an error path");
+
+        assert_eq!(outcome, VerifyOutcome::Rejected);
+        assert_eq!(
+            emits,
+            vec![
+                credential_wait_line(CredentialKind::KeyFile, false, &targets[0].name),
+                status_line(
+                    StatusTag::Skip,
+                    false,
+                    &format!("keyfile: not yet enrolled on {}", targets[0].name),
+                ),
+            ]
+        );
+        assert_eq!(runner.requests(), requests);
+    }
+
+    // Intent: a non-auth cryptsetup exit (e.g. EBUSY exit 5) from
+    //   the keyfile probe surfaces as Err(LuksError::OpenFailed)
+    //   with no closer row -- the wait closes via the caller's
+    //   error propagation per Principle 13.
+    // Why it exists: a regression that swallows the LuksError into
+    //   a synthetic [skip] row would let dry-run / real-run probe
+    //   busy devices and pretend they're "not yet enrolled",
+    //   matching the original pre-VerifyOutcome bug.
+    // Scenario: a stale dm-crypt mapper holds the backing device
+    //   busy during a probe.
+    #[test]
+    fn probe_keyfile_enrollment_luks_error_emits_wait_only_and_propagates() {
+        let targets = targets();
+        let (runner, _requests) = key_file_runner(&targets[..1], &[5]);
+        let mut emits = Vec::new();
+
+        let err = probe_keyfile_enrollment(
+            &runner,
+            &targets[0],
+            Path::new("/run/braid.key"),
+            false,
+            |line| emits.push(line.to_owned()),
+        )
+        .expect_err("non-auth exit must surface as LuksError");
+
+        match err {
+            LuksError::OpenFailed { exit_code, .. } => {
+                assert_eq!(exit_code, 5);
+            }
+            other => panic!("expected OpenFailed, got {other:?}"),
+        }
+        assert_eq!(
+            emits,
+            vec![credential_wait_line(
+                CredentialKind::KeyFile,
+                false,
+                &targets[0].name,
+            )]
+        );
     }
 }

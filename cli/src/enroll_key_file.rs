@@ -1,7 +1,8 @@
 use crate::cmd::{CmdRequest, CommandRunner, Step};
 use crate::config::mapper_name;
 use crate::credential_verify::{
-    Credential, CredentialVerifyError, CredentialVerifyTarget, verify_credential_for_targets,
+    Credential, CredentialVerifyError, CredentialVerifyTarget, probe_keyfile_enrollment,
+    verify_credential_for_targets,
 };
 use crate::luks::{self, KEYFILE_SIZE, KeySlotState, LUKS_SLOT_KEYFILE, LuksError, VerifyOutcome};
 use crate::membership::PoolMembership;
@@ -10,9 +11,7 @@ use crate::preview::{self, NoteLevel, PerDiskStyle, Preview, PreviewCompleteness
 use crate::probe::{self, Filesystem};
 use crate::secret::Passphrase;
 use crate::state_paths::StatePaths;
-use crate::status_tag::{
-    CredentialKind, StatusTag, color_enabled_for_stderr, emit_credential_wait_line, status_line,
-};
+use crate::status_tag::{StatusTag, color_enabled_for_stderr, emit_status, status_line};
 use crate::types::{ByIdPath, ConfigDiskState, MountPoint};
 use std::io::Read;
 use std::os::unix::fs::OpenOptionsExt;
@@ -190,37 +189,29 @@ fn plan_enrollment<R: CommandRunner>(
             // Check if keyfile already works (idempotent). Only `Authenticated`
             // means the keyfile is already installed in a slot -- `Rejected` is
             // the normal "not yet enrolled" signal. Any other non-zero exit
-            // (busy/missing/generic) propagates via the `?` on verify_key_file
+            // (busy/missing/generic) propagates via the `?` on the helper
             // and must NOT be silently treated as "not enrolled" -- doing so
             // would let the flow proceed to slot preflight on a device that
             // may not even be readable.
-            emit_credential_wait_line(CredentialKind::KeyFile, color_enabled, name);
-            match luks::verify_key_file(runner, &by_id.0, key_file_path)? {
-                VerifyOutcome::Authenticated => {
-                    eprint!(
-                        "{}",
-                        status_line(
-                            StatusTag::Ok,
-                            color_enabled,
-                            &format!("keyfile: already enrolled on {name}"),
-                        )
-                    );
-                    plan.push(DiskEnrollAction::AlreadyEnrolled {
-                        name: name.clone(),
-                        by_id: by_id.clone(),
-                    });
-                    continue;
-                }
-                VerifyOutcome::Rejected => {
-                    eprint!(
-                        "{}",
-                        status_line(
-                            StatusTag::Skip,
-                            color_enabled,
-                            &format!("keyfile: not yet enrolled on {name}"),
-                        )
-                    );
-                }
+            let target = CredentialVerifyTarget {
+                name: name.clone(),
+                device: by_id.0.clone(),
+            };
+            if matches!(
+                probe_keyfile_enrollment(
+                    runner,
+                    &target,
+                    key_file_path,
+                    color_enabled,
+                    emit_status,
+                )?,
+                VerifyOutcome::Authenticated
+            ) {
+                plan.push(DiskEnrollAction::AlreadyEnrolled {
+                    name: name.clone(),
+                    by_id: by_id.clone(),
+                });
+                continue;
             }
         }
 
@@ -594,17 +585,18 @@ pub fn plan_enroll<R: CommandRunner, F: Filesystem + ?Sized>(
         let color_enabled = color_enabled_for_stderr();
         let mut needs_enroll: Vec<EnrollmentCandidate> = Vec::with_capacity(candidates.len());
         for (name, by_id) in &candidates {
-            emit_credential_wait_line(CredentialKind::KeyFile, color_enabled, name);
-            match luks::verify_key_file(runner, &by_id.0, key_file_path) {
+            let target = CredentialVerifyTarget {
+                name: name.clone(),
+                device: by_id.0.clone(),
+            };
+            match probe_keyfile_enrollment(
+                runner,
+                &target,
+                key_file_path,
+                color_enabled,
+                emit_status,
+            ) {
                 Ok(VerifyOutcome::Authenticated) => {
-                    eprint!(
-                        "{}",
-                        status_line(
-                            StatusTag::Ok,
-                            color_enabled,
-                            &format!("keyfile: already enrolled on {name}"),
-                        )
-                    );
                     notes.push(PreviewNote::PerDisk {
                         name: name.clone(),
                         level: NoteLevel::Skip,
@@ -612,14 +604,6 @@ pub fn plan_enroll<R: CommandRunner, F: Filesystem + ?Sized>(
                     });
                 }
                 Ok(VerifyOutcome::Rejected) => {
-                    eprint!(
-                        "{}",
-                        status_line(
-                            StatusTag::Skip,
-                            color_enabled,
-                            &format!("keyfile: not yet enrolled on {name}"),
-                        )
-                    );
                     needs_enroll.push((name.clone(), by_id.clone()));
                 }
                 Err(e) => {
@@ -1545,6 +1529,60 @@ mod tests {
         );
     }
 
+    // Intent: dry-run plan_enroll routes the keyfile probe's
+    //   wait/ok/skip rows through `emit_status` so they are visible
+    //   to the test capture seam, in candidate order.
+    // Why it exists: same row-emission contract as the real-run
+    //   call-site test, but for the dry-run probe loop. A regression
+    //   to raw `eprint!` would still pass the PreviewNote-shape
+    //   `dry_run_skips_already_enrolled_disks` test while breaking
+    //   the emit_status seam and the VM-test wording. This test
+    //   owns the dry-run call-site row-emission contract.
+    // Scenario: 2-disk pool, disk1 already has the keyfile in slot
+    //   1, disk2 does not; user runs `braid enroll --dry-run`.
+    #[test]
+    fn plan_enroll_dry_run_emits_keyfile_probe_rows_via_emit_status() {
+        let d1 = "/dev/disk/by-id/d1";
+        let d2 = "/dev/disk/by-id/d2";
+
+        let (tmp, paths) = test_paths();
+        let (kf, kf_str) = make_existing_keyfile(&tmp);
+
+        let (tkf1_req, tkf1_out) = test_keyfile_ok(d1, &kf_str);
+        let (tkf2_req, tkf2_out) = test_keyfile_fail(d2, &kf_str);
+        let runner = discovery_two_disks(d1, d2)
+            .with_output(tkf1_req, tkf1_out)
+            .with_output(tkf2_req, tkf2_out);
+        let fs = MockFs::new(&[d1, d2]);
+        let membership = make_membership(&[("disk1", d1), ("disk2", d2)]);
+
+        let captured = crate::status_tag::testing::capture_with_color(false, || {
+            plan_enroll(&runner, &fs, &membership, &kf, false, true, &paths)
+                .result
+                .expect("plan_enroll should succeed");
+        });
+
+        let wait1 = "[wait] keyfile: checking against disk1...\n";
+        let ok1 = "[ok]   keyfile: already enrolled on disk1\n";
+        let wait2 = "[wait] keyfile: checking against disk2...\n";
+        let skip2 = "[skip] keyfile: not yet enrolled on disk2\n";
+        for line in [wait1, ok1, wait2, skip2] {
+            assert!(
+                captured.contains(line),
+                "captured emit_status buffer missing {line:?}; got: {captured:?}"
+            );
+        }
+
+        let pos = |needle: &str| {
+            captured
+                .find(needle)
+                .unwrap_or_else(|| panic!("missing {needle:?} in {captured:?}"))
+        };
+        assert!(pos(wait1) < pos(ok1), "disk1 wait must precede ok");
+        assert!(pos(ok1) < pos(wait2), "disk1 ok must precede disk2 wait");
+        assert!(pos(wait2) < pos(skip2), "disk2 wait must precede skip");
+    }
+
     /*
      * Intent: when every candidate is already enrolled, the dry-run
      *   preview emits zero step lines and surfaces the canonical
@@ -1935,6 +1973,74 @@ mod tests {
             matches!(&plan[0], DiskEnrollAction::AlreadyEnrolled { name, .. } if name == "disk1")
         );
         assert!(matches!(&plan[1], DiskEnrollAction::NeedsEnroll { name, .. } if name == "disk2"));
+    }
+
+    // Intent: real-run plan_enrollment in ExistingKeyfile mode routes
+    //   the keyfile probe's wait/ok/skip rows through `emit_status` so
+    //   they are visible to the test capture seam, in candidate order.
+    // Why it exists: the call site previously emitted these rows via
+    //   raw `eprint!`, bypassing `emit_status` and silently regressing
+    //   the codebase-wide convention. A regression to raw `eprint!`
+    //   here would still pass the existing PreviewNote-shape tests but
+    //   break VM-test wording and the emit_status seam. This test owns
+    //   the row-emission contract for the real-run path.
+    // Scenario: 2-disk pool, disk1 already has the keyfile in slot 1,
+    //   disk2 does not.
+    #[test]
+    fn plan_enrollment_existing_keyfile_emits_keyfile_probe_rows_via_emit_status() {
+        let d1 = "/dev/disk/by-id/d1";
+        let d2 = "/dev/disk/by-id/d2";
+        let kf = "/tmp/braid.key";
+        let pass = "testpass";
+
+        let (tp1_req, tp1_stdin, tp1_out) = test_passphrase_ok(d1, pass);
+        let (tp2_req, tp2_stdin, tp2_out) = test_passphrase_ok(d2, pass);
+        let (tkf1_req, tkf1_out) = test_keyfile_ok(d1, kf);
+        let (tkf2_req, tkf2_out) = test_keyfile_fail(d2, kf);
+        let (ld2_req, ld2_out) = luks_dump_slot1_empty(d2);
+
+        let runner = MockRunner::default()
+            .with_output_stdin(tp1_req, tp1_stdin, tp1_out)
+            .with_output_stdin(tp2_req, tp2_stdin, tp2_out)
+            .with_output(tkf1_req, tkf1_out)
+            .with_output(tkf2_req, tkf2_out)
+            .with_output(ld2_req, ld2_out);
+
+        let candidates = vec![
+            ("disk1".to_owned(), by_id(d1)),
+            ("disk2".to_owned(), by_id(d2)),
+        ];
+
+        let captured = crate::status_tag::testing::capture_with_color(false, || {
+            plan_enrollment(
+                &runner,
+                &candidates,
+                Path::new(kf),
+                &passphrase(pass),
+                EnrollmentPlanMode::ExistingKeyfile,
+            )
+            .expect("plan_enrollment should succeed");
+        });
+
+        let wait1 = "[wait] keyfile: checking against disk1...\n";
+        let ok1 = "[ok]   keyfile: already enrolled on disk1\n";
+        let wait2 = "[wait] keyfile: checking against disk2...\n";
+        let skip2 = "[skip] keyfile: not yet enrolled on disk2\n";
+        for line in [wait1, ok1, wait2, skip2] {
+            assert!(
+                captured.contains(line),
+                "captured emit_status buffer missing {line:?}; got: {captured:?}"
+            );
+        }
+
+        let pos = |needle: &str| {
+            captured
+                .find(needle)
+                .unwrap_or_else(|| panic!("missing {needle:?} in {captured:?}"))
+        };
+        assert!(pos(wait1) < pos(ok1), "disk1 wait must precede ok");
+        assert!(pos(ok1) < pos(wait2), "disk1 ok must precede disk2 wait");
+        assert!(pos(wait2) < pos(skip2), "disk2 wait must precede skip");
     }
 
     /*
