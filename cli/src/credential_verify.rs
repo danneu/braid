@@ -29,6 +29,8 @@ pub enum CredentialVerifyError {
     },
 }
 
+// CLI-level call site -- not a hot path -- so the ~128-byte LuksError variant is held at most once per invocation; boxing would add indirection without measurable benefit.
+#[allow(clippy::result_large_err)]
 pub fn verify_credential_for_targets<R: CommandRunner>(
     runner: &R,
     targets: &[CredentialVerifyTarget],

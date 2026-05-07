@@ -863,7 +863,7 @@ mod tests {
         assert!(result.is_ok(), "device remove should succeed: {result:?}");
         let calls = sleeper.calls();
         assert!(
-            calls.iter().any(|d| *d == HEARTBEAT_INTERVAL),
+            calls.contains(&HEARTBEAT_INTERVAL),
             "expected a sleep call for {HEARTBEAT_INTERVAL:?}, got {calls:?}"
         );
     }

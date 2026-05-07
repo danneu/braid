@@ -92,65 +92,74 @@ fn close_set_paths(open_mappers: &[String], orphan_mappers: &[String]) -> Vec<St
         .collect()
 }
 
-/// Shared close-and-aggregate body for the membership and orphan
-/// loops in `LockPlan::execute`, so status formatting, umount-busy
-/// suppression, and `first_mapper_error` accumulation cannot drift.
-fn close_one_mapper<R, S>(
-    runner: &R,
-    sleeper: &S,
-    mapper: &str,
-    disk_label: &str,
-    is_orphan: bool,
-    color_enabled: bool,
-    umount_error: &Option<LockError>,
-    first_mapper_error: &mut Option<LockError>,
-) where
+/// Shared close-and-aggregate state for the membership and orphan
+/// loops in `LockPlan::execute`. Bundles the loop-invariant inputs
+/// (runner, sleeper, color, umount-busy suppression flag) with the
+/// `&mut first_mapper_error` accumulator so status formatting and
+/// error-aggregation cannot drift between the two callers.
+struct CloseMapperCtx<'a, R, S>
+where
     R: CommandRunner,
     S: Sleeper,
 {
-    let line = |t, body: &str| status_line(t, color_enabled, body);
-    let paren = if is_orphan { " (orphan)" } else { "" };
+    runner: &'a R,
+    sleeper: &'a S,
+    color_enabled: bool,
+    umount_error: &'a Option<LockError>,
+    first_mapper_error: &'a mut Option<LockError>,
+}
 
-    eprint!(
-        "{}",
-        line(
-            StatusTag::Wait,
-            &format!("disk {disk_label}: locking{paren}..."),
-        )
-    );
-    match close_mapper_with_retry(runner, sleeper, mapper, color_enabled) {
-        Ok(()) => {
-            eprint!(
-                "{}",
-                line(StatusTag::Ok, &format!("disk {disk_label}: locked{paren}"))
-            );
-        }
-        Err(CloseMapperError::DeviceBusy(msg)) if umount_error.is_some() => {
-            let phrase = if is_orphan {
-                "orphan close failed"
-            } else {
-                "close failed"
-            };
-            eprint!(
-                "{}",
-                line(
-                    StatusTag::Warn,
-                    &format!("disk {disk_label}: {phrase} (umount was stuck): {msg}")
-                )
-            );
-        }
-        Err(e) => {
-            let err = LockError::from(e);
-            let prefix = if is_orphan { "orphan: " } else { "" };
-            eprint!(
-                "{}",
-                line(
-                    StatusTag::Fail,
-                    &format!("disk {disk_label}: {prefix}{err}")
-                )
-            );
-            if first_mapper_error.is_none() {
-                *first_mapper_error = Some(err);
+impl<R, S> CloseMapperCtx<'_, R, S>
+where
+    R: CommandRunner,
+    S: Sleeper,
+{
+    fn close_one(&mut self, mapper: &str, disk_label: &str, is_orphan: bool) {
+        let color_enabled = self.color_enabled;
+        let line = |t, body: &str| status_line(t, color_enabled, body);
+        let paren = if is_orphan { " (orphan)" } else { "" };
+
+        eprint!(
+            "{}",
+            line(
+                StatusTag::Wait,
+                &format!("disk {disk_label}: locking{paren}..."),
+            )
+        );
+        match close_mapper_with_retry(self.runner, self.sleeper, mapper, color_enabled) {
+            Ok(()) => {
+                eprint!(
+                    "{}",
+                    line(StatusTag::Ok, &format!("disk {disk_label}: locked{paren}"))
+                );
+            }
+            Err(CloseMapperError::DeviceBusy(msg)) if self.umount_error.is_some() => {
+                let phrase = if is_orphan {
+                    "orphan close failed"
+                } else {
+                    "close failed"
+                };
+                eprint!(
+                    "{}",
+                    line(
+                        StatusTag::Warn,
+                        &format!("disk {disk_label}: {phrase} (umount was stuck): {msg}")
+                    )
+                );
+            }
+            Err(e) => {
+                let err = LockError::from(e);
+                let prefix = if is_orphan { "orphan: " } else { "" };
+                eprint!(
+                    "{}",
+                    line(
+                        StatusTag::Fail,
+                        &format!("disk {disk_label}: {prefix}{err}")
+                    )
+                );
+                if self.first_mapper_error.is_none() {
+                    *self.first_mapper_error = Some(err);
+                }
             }
         }
     }
@@ -347,37 +356,37 @@ impl LockPlan {
         let open_set: std::collections::HashSet<&str> =
             self.open_mappers.iter().map(String::as_str).collect();
         let mut all_already_closed = true;
-        for name in membership.disks.keys() {
-            let mn = mapper_name(name);
-
-            if !open_set.contains(mn.0.as_str()) {
-                eprint!(
-                    "{}",
-                    line(StatusTag::Ok, &format!("disk {name}: already closed"))
-                );
-                continue;
-            }
-
-            let mapper_path = format!("/dev/mapper/{}", mn.0);
-            if !fs.exists(&mapper_path) {
-                eprint!(
-                    "{}",
-                    line(StatusTag::Ok, &format!("disk {name}: already closed"))
-                );
-                continue;
-            }
-
-            close_one_mapper(
+        {
+            let mut close_ctx = CloseMapperCtx {
                 runner,
                 sleeper,
-                &mn.0,
-                name,
-                false,
                 color_enabled,
-                &umount_error,
-                &mut first_mapper_error,
-            );
-            all_already_closed = false;
+                umount_error: &umount_error,
+                first_mapper_error: &mut first_mapper_error,
+            };
+            for name in membership.disks.keys() {
+                let mn = mapper_name(name);
+
+                if !open_set.contains(mn.0.as_str()) {
+                    eprint!(
+                        "{}",
+                        line(StatusTag::Ok, &format!("disk {name}: already closed"))
+                    );
+                    continue;
+                }
+
+                let mapper_path = format!("/dev/mapper/{}", mn.0);
+                if !fs.exists(&mapper_path) {
+                    eprint!(
+                        "{}",
+                        line(StatusTag::Ok, &format!("disk {name}: already closed"))
+                    );
+                    continue;
+                }
+
+                close_ctx.close_one(&mn.0, name, false);
+                all_already_closed = false;
+            }
         }
 
         // 3b. Close orphaned braid-* mappers (precomputed during
@@ -385,28 +394,28 @@ impl LockPlan {
         // orphan is detected iff fs.exists was true at plan time;
         // re-check to cover the narrow window where it disappeared on
         // its own.
-        for entry in orphan_mappers {
-            if !fs.exists(&format!("/dev/mapper/{entry}")) {
-                continue;
-            }
-            // scan_orphan_mappers admits only braid-* entries, so
-            // name_from_mapper always returns Some here. Keep
-            // unwrap_or as a graceful fallback if that invariant is
-            // ever bypassed -- the orphan loop's disk_label only
-            // feeds status rows, so degrading the row text is
-            // preferable to crashing the lock.
-            let disk_name = name_from_mapper(entry).unwrap_or(entry);
-            close_one_mapper(
+        {
+            let mut close_ctx = CloseMapperCtx {
                 runner,
                 sleeper,
-                entry,
-                disk_name,
-                true,
                 color_enabled,
-                &umount_error,
-                &mut first_mapper_error,
-            );
-            all_already_closed = false;
+                umount_error: &umount_error,
+                first_mapper_error: &mut first_mapper_error,
+            };
+            for entry in orphan_mappers {
+                if !fs.exists(&format!("/dev/mapper/{entry}")) {
+                    continue;
+                }
+                // scan_orphan_mappers admits only braid-* entries, so
+                // name_from_mapper always returns Some here. Keep
+                // unwrap_or as a graceful fallback if that invariant is
+                // ever bypassed -- the orphan loop's disk_label only
+                // feeds status rows, so degrading the row text is
+                // preferable to crashing the lock.
+                let disk_name = name_from_mapper(entry).unwrap_or(entry);
+                close_ctx.close_one(entry, disk_name, true);
+                all_already_closed = false;
+            }
         }
 
         // 4. Return first fatal mapper error if any, otherwise deferred umount error

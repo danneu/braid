@@ -296,8 +296,7 @@ mod tests {
     // Scenario: hostile or accidentally-large input reaches the confirm prompt.
     #[test]
     fn confirm_rejects_overlong_line() {
-        let line: Vec<u8> = std::iter::repeat(b' ')
-            .take(CONFIRM_MAX_BYTES + 1)
+        let line: Vec<u8> = std::iter::repeat_n(b' ', CONFIRM_MAX_BYTES + 1)
             .chain([b'\n'])
             .collect();
         let mut input = std::io::Cursor::new(line);
@@ -311,7 +310,7 @@ mod tests {
     #[test]
     fn confirm_rejects_yes_with_trailing_garbage_past_cap() {
         let mut line: Vec<u8> = b"yes".to_vec();
-        line.extend(std::iter::repeat(b' ').take(CONFIRM_MAX_BYTES));
+        line.extend(std::iter::repeat_n(b' ', CONFIRM_MAX_BYTES));
         line.extend(b"no\n");
         let mut input = std::io::Cursor::new(line);
         let err = confirm_yes_from(&mut input).unwrap_err();

@@ -851,6 +851,19 @@ fn print_cli_error(message: &str) {
     }
 }
 
+/// Tab completion returns disk names from membership.
+fn disk_name_candidates() -> Vec<CompletionCandidate> {
+    let paths = StatePaths::production();
+    let Ok(membership) = braid_cli::membership::load_membership(&paths) else {
+        return Vec::new();
+    };
+    membership
+        .disks
+        .keys()
+        .map(|name| CompletionCandidate::new(name.clone()))
+        .collect()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -941,17 +954,4 @@ mod tests {
 
         assert!(err.to_string().contains("equal sign is needed"));
     }
-}
-
-/// Tab completion returns disk names from membership.
-fn disk_name_candidates() -> Vec<CompletionCandidate> {
-    let paths = StatePaths::production();
-    let Ok(membership) = braid_cli::membership::load_membership(&paths) else {
-        return Vec::new();
-    };
-    membership
-        .disks
-        .keys()
-        .map(|name| CompletionCandidate::new(name.clone()))
-        .collect()
 }

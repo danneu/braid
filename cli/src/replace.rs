@@ -372,7 +372,7 @@ impl ReplacePlan {
                 &credential_targets,
                 Credential::Passphrase(&passphrase),
                 color_enabled,
-                |line| emit_replace_stderr(line),
+                emit_replace_stderr,
             ) {
                 Ok(()) => {}
                 Err(CredentialVerifyError::Rejected { target }) => {
@@ -733,7 +733,7 @@ mod replace_stderr_capture {
     use std::cell::RefCell;
 
     thread_local! {
-        static CAPTURED_STDERR: RefCell<Option<String>> = RefCell::new(None);
+        static CAPTURED_STDERR: RefCell<Option<String>> = const { RefCell::new(None) };
     }
 
     pub(super) fn capture<F, T>(f: F) -> (T, String)

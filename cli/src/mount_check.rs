@@ -560,9 +560,8 @@ mod tests {
         fn read_to_string(&self, path: &str) -> Result<String, std::io::Error> {
             assert_eq!(path, "/proc/self/mountinfo");
             self.mountinfo
-                .as_ref()
-                .map(|body| body.clone())
-                .map_err(|kind| std::io::Error::new(*kind, "mock mountinfo read failed"))
+                .clone()
+                .map_err(|kind| std::io::Error::new(kind, "mock mountinfo read failed"))
         }
     }
 

@@ -89,6 +89,8 @@ pub enum ReplaceJournalMode {
     },
 }
 
+// One in-flight OpKind per CLI invocation; boxing the ~200-byte ReplaceJournalTarget variant would litter every match arm and serde derive without measurable benefit.
+#[allow(clippy::large_enum_variant)]
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(tag = "op")]
 pub enum OpKind {

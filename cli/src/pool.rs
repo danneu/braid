@@ -826,10 +826,7 @@ mod tests {
         );
         assert_eq!(sink.clears(), 1, "human progress should clear once");
         assert!(
-            sleeper
-                .calls()
-                .iter()
-                .any(|d| *d == progress::HEARTBEAT_INTERVAL),
+            sleeper.calls().contains(&progress::HEARTBEAT_INTERVAL),
             "pool remove should sleep at the configured heartbeat interval"
         );
     }

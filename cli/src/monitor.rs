@@ -268,30 +268,30 @@ mod tests {
 
         fn take_btrfs_show_payload(&self) -> Option<String> {
             let mut guard = self.override_op.lock().unwrap();
-            if matches!(*guard, Some(Override::BtrfsShowPayload(_))) {
-                if let Some(Override::BtrfsShowPayload(s)) = guard.take() {
-                    return Some(s);
-                }
+            if matches!(*guard, Some(Override::BtrfsShowPayload(_)))
+                && let Some(Override::BtrfsShowPayload(s)) = guard.take()
+            {
+                return Some(s);
             }
             None
         }
 
         fn take_btrfs_show_result(&self) -> Option<Result<RawCommandOutput, CmdError>> {
             let mut guard = self.override_op.lock().unwrap();
-            if matches!(*guard, Some(Override::BtrfsShowResult(_))) {
-                if let Some(Override::BtrfsShowResult(r)) = guard.take() {
-                    return Some(r);
-                }
+            if matches!(*guard, Some(Override::BtrfsShowResult(_)))
+                && let Some(Override::BtrfsShowResult(r)) = guard.take()
+            {
+                return Some(r);
             }
             None
         }
 
         fn take_stats_result(&self) -> Option<Result<RawCommandOutput, CmdError>> {
             let mut guard = self.override_op.lock().unwrap();
-            if matches!(*guard, Some(Override::StatsResult(_))) {
-                if let Some(Override::StatsResult(r)) = guard.take() {
-                    return Some(r);
-                }
+            if matches!(*guard, Some(Override::StatsResult(_)))
+                && let Some(Override::StatsResult(r)) = guard.take()
+            {
+                return Some(r);
             }
             None
         }
@@ -398,9 +398,8 @@ mod tests {
         fn read_to_string(&self, path: &str) -> Result<String, std::io::Error> {
             assert_eq!(path, "/proc/self/mountinfo");
             self.mountinfo
-                .as_ref()
-                .map(|body| body.clone())
-                .map_err(|kind| std::io::Error::new(*kind, "mock mountinfo error"))
+                .clone()
+                .map_err(|kind| std::io::Error::new(kind, "mock mountinfo error"))
         }
 
         fn list_dir(&self, _path: &str) -> Result<Vec<String>, std::io::Error> {

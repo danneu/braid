@@ -1311,10 +1311,7 @@ mod tests {
             let mut modified = before;
             flip_echo(&mut modified);
             let _guard = TermiosGuard::install(fd, modified, before)?;
-            Err(std::io::Error::new(
-                std::io::ErrorKind::Other,
-                "forced early return",
-            ))?;
+            Err(std::io::Error::other("forced early return"))?;
             Ok(())
         }
 

@@ -554,11 +554,13 @@ impl RecoverCompletion {
                     fs,
                     by_id_resolver,
                     params,
-                    state.credential.as_ref(),
-                    &plan.journal,
-                    &plan.union,
-                    targets,
-                    pool,
+                    AddPoolReplayCtx {
+                        credential: state.credential.as_ref(),
+                        journal: &plan.journal,
+                        union: &plan.union,
+                        targets,
+                        pool,
+                    },
                 )
             }
             RecoverCompletion::AddPostBalance => execute_add_post_balance_recovery(
@@ -589,11 +591,13 @@ impl RecoverCompletion {
                 runner,
                 by_id_resolver,
                 params,
-                &plan.journal,
-                pool,
-                *devid,
-                *restore_raid1_after_commit,
-                false,
+                RemoveMissingPostCtx {
+                    journal: &plan.journal,
+                    pool,
+                    devid: *devid,
+                    restore_raid1_after_commit: *restore_raid1_after_commit,
+                    inhibitor_already_held: false,
+                },
             ),
             RecoverCompletion::ReplacePoolMutation {
                 old_name,
@@ -2027,17 +2031,32 @@ fn execute_add_post_balance_recovery<R: CommandRunner + Sync>(
     Ok(())
 }
 
+/// Per-replay state for the `add` PoolMutation recovery path: keeps the
+/// replay-time inputs (credential, journal slice, union membership,
+/// per-disk targets) and the live `PoolState` that the helper rebuilds
+/// after opening any returned disks.
+struct AddPoolReplayCtx<'a> {
+    credential: Option<&'a OpenCredential>,
+    journal: &'a Journal,
+    union: &'a PoolMembership,
+    targets: &'a std::collections::BTreeMap<String, journal::AddJournalTarget>,
+    pool: PoolState,
+}
+
 fn execute_add_pool_mutation_recovery<R: CommandRunner + Sync, F: Filesystem + ?Sized>(
     runner: &R,
     fs: &F,
     by_id_resolver: &dyn ByIdResolver,
     params: &RecoverParams<'_>,
-    credential: Option<&OpenCredential>,
-    journal: &Journal,
-    union: &PoolMembership,
-    targets: &std::collections::BTreeMap<String, journal::AddJournalTarget>,
-    mut pool: PoolState,
+    ctx: AddPoolReplayCtx<'_>,
 ) -> Result<(), RecoverError> {
+    let AddPoolReplayCtx {
+        credential,
+        journal,
+        union,
+        targets,
+        mut pool,
+    } = ctx;
     validate_live_members_allowed(&pool, union)?;
     let mount_point = params.config.mount_point();
 
@@ -2298,24 +2317,40 @@ fn execute_remove_missing_pool_mutation_recovery<R: CommandRunner + Sync>(
         runner,
         by_id_resolver,
         params,
-        &journal,
-        pool,
-        devid,
-        restore_raid1_after_commit,
-        false,
+        RemoveMissingPostCtx {
+            journal: &journal,
+            pool,
+            devid,
+            restore_raid1_after_commit,
+            inhibitor_already_held: false,
+        },
     )
+}
+
+/// Per-replay state for the post-remove-missing recovery path: bundles the
+/// journal slice, the resumed `PoolState`, the devid invariants the helper
+/// asserts, and the inhibitor coordination flag set by the caller chain.
+struct RemoveMissingPostCtx<'a> {
+    journal: &'a Journal,
+    pool: PoolState,
+    devid: u64,
+    restore_raid1_after_commit: bool,
+    inhibitor_already_held: bool,
 }
 
 fn execute_remove_missing_post_maintenance_recovery<R: CommandRunner + Sync>(
     runner: &R,
     by_id_resolver: &dyn ByIdResolver,
     params: &RecoverParams<'_>,
-    journal: &Journal,
-    pool: PoolState,
-    devid: u64,
-    restore_raid1_after_commit: bool,
-    inhibitor_already_held: bool,
+    ctx: RemoveMissingPostCtx<'_>,
 ) -> Result<(), RecoverError> {
+    let RemoveMissingPostCtx {
+        journal,
+        pool,
+        devid,
+        restore_raid1_after_commit,
+        inhibitor_already_held,
+    } = ctx;
     if pool.missing_devids.contains(&devid) {
         return Err(RecoverError::Failed(format!(
             "post-remove-missing recovery expected devid {devid} to be gone, \
@@ -2425,16 +2460,31 @@ fn verify_replace_fresh_prep_passphrase<R: CommandRunner>(
     })
 }
 
+/// Finish-time inputs for the uncommitted replace recovery branch: bundles
+/// the credential, journal slice, pool snapshot, and incoming-disk
+/// identifiers needed to retry the prep-only steps without touching the
+/// live pool.
+struct ReplaceFinishCtx<'a> {
+    credential: Option<&'a OpenCredential>,
+    journal: &'a Journal,
+    pool: &'a PoolState,
+    new_name: &'a str,
+    new_target: &'a journal::ReplaceJournalTarget,
+}
+
 fn finish_uncommitted_replace_recovery<R: CommandRunner + Sync, F: Filesystem + ?Sized>(
     runner: &R,
     fs: &F,
     params: &RecoverParams<'_>,
-    credential: Option<&OpenCredential>,
-    journal: &Journal,
-    pool: &PoolState,
-    new_name: &str,
-    new_target: &journal::ReplaceJournalTarget,
+    ctx: ReplaceFinishCtx<'_>,
 ) -> Result<(), RecoverError> {
+    let ReplaceFinishCtx {
+        credential,
+        journal,
+        pool,
+        new_name,
+        new_target,
+    } = ctx;
     match &new_target.mode {
         journal::ReplaceJournalMode::ExistingLuks { .. } => {
             membership::save_membership(&journal.pre_membership, params.paths)?;
@@ -2569,7 +2619,16 @@ fn execute_replace_pool_mutation_recovery<R: CommandRunner + Sync, F: Filesystem
 
     if pre_topology {
         return finish_uncommitted_replace_recovery(
-            runner, fs, params, credential, journal, &pool, new_name, new_target,
+            runner,
+            fs,
+            params,
+            ReplaceFinishCtx {
+                credential,
+                journal,
+                pool: &pool,
+                new_name,
+                new_target,
+            },
         );
     }
 
@@ -5343,11 +5402,13 @@ mod tests {
             &fs,
             &resolver,
             &params,
-            None,
-            &journal,
-            &union,
-            targets,
-            pool_state_one_disk(),
+            AddPoolReplayCtx {
+                credential: None,
+                journal: &journal,
+                union: &union,
+                targets,
+                pool: pool_state_one_disk(),
+            },
         )
         .unwrap_err();
 
@@ -5415,11 +5476,13 @@ mod tests {
             &fs,
             &MockByIdResolver::default(),
             &params,
-            None,
-            &journal,
-            &union,
-            targets,
-            pool,
+            AddPoolReplayCtx {
+                credential: None,
+                journal: &journal,
+                union: &union,
+                targets,
+                pool,
+            },
         )
         .unwrap_err();
 
@@ -5489,11 +5552,13 @@ mod tests {
             &fs,
             &MockByIdResolver::default(),
             &params,
-            None,
-            &journal,
-            &union,
-            targets,
-            pool_state_one_disk(),
+            AddPoolReplayCtx {
+                credential: None,
+                journal: &journal,
+                union: &union,
+                targets,
+                pool: pool_state_one_disk(),
+            },
         )
         .unwrap_err();
 
@@ -5732,11 +5797,13 @@ mod tests {
             &fs,
             &resolver,
             &params,
-            None,
-            &journal,
-            &union,
-            targets,
-            pool_state_one_disk(),
+            AddPoolReplayCtx {
+                credential: None,
+                journal: &journal,
+                union: &union,
+                targets,
+                pool: pool_state_one_disk(),
+            },
         )
         .expect("committed fresh target should be adopted without replay");
 
@@ -5911,11 +5978,13 @@ mod tests {
             &fs,
             &resolver,
             &params,
-            None,
-            &journal,
-            &union,
-            targets,
-            pool_state_one_disk(),
+            AddPoolReplayCtx {
+                credential: None,
+                journal: &journal,
+                union: &union,
+                targets,
+                pool: pool_state_one_disk(),
+            },
         )
         .expect("returned-disk replay should complete recovery");
 
@@ -6022,11 +6091,13 @@ mod tests {
             &fs,
             &resolver,
             &params,
-            None,
-            &journal,
-            &union,
-            targets,
-            pool_state_one_disk(),
+            AddPoolReplayCtx {
+                credential: None,
+                journal: &journal,
+                union: &union,
+                targets,
+                pool: pool_state_one_disk(),
+            },
         )
         .expect("already-committed target should advance to balance recovery");
 
@@ -6093,11 +6164,13 @@ mod tests {
             &fs,
             &resolver,
             &params,
-            None,
-            &journal,
-            &union,
-            targets,
-            pool_state_three_disks(),
+            AddPoolReplayCtx {
+                credential: None,
+                journal: &journal,
+                union: &union,
+                targets,
+                pool: pool_state_three_disks(),
+            },
         )
         .unwrap_err();
 
@@ -6221,11 +6294,13 @@ mod tests {
                 &fs,
                 &MockByIdResolver::default(),
                 &params,
-                None,
-                &journal,
-                &union,
-                targets,
-                pool_state_one_disk(),
+                AddPoolReplayCtx {
+                    credential: None,
+                    journal: &journal,
+                    union: &union,
+                    targets,
+                    pool: pool_state_one_disk(),
+                },
             )
             .unwrap_err();
             let msg = err.to_string();
@@ -6483,11 +6558,13 @@ mod tests {
             &fs,
             &resolver,
             &params,
-            None,
-            &journal,
-            &union,
-            targets,
-            pool_state_one_disk(),
+            AddPoolReplayCtx {
+                credential: None,
+                journal: &journal,
+                union: &union,
+                targets,
+                pool: pool_state_one_disk(),
+            },
         )
         .expect("fresh replay should use stored format options");
     }
@@ -6596,11 +6673,13 @@ mod tests {
             &fs,
             &resolver,
             &params,
-            None,
-            &journal,
-            &union,
-            targets,
-            pool_state_one_disk(),
+            AddPoolReplayCtx {
+                credential: None,
+                journal: &journal,
+                union: &union,
+                targets,
+                pool: pool_state_one_disk(),
+            },
         )
         .expect("fresh replay should continue after preexisting LUKS format");
 
@@ -6801,11 +6880,13 @@ mod tests {
                 &fs,
                 &MockByIdResolver::default(),
                 &params,
-                None,
-                &journal,
-                &union,
-                targets,
-                pool_state_one_disk(),
+                AddPoolReplayCtx {
+                    credential: None,
+                    journal: &journal,
+                    union: &union,
+                    targets,
+                    pool: pool_state_one_disk(),
+                },
             )
             .unwrap_err();
             let msg = err.to_string();
@@ -6894,11 +6975,13 @@ mod tests {
             &fs,
             &MockByIdResolver::default(),
             &params,
-            None,
-            &journal,
-            &union,
-            targets,
-            pool_state_one_disk(),
+            AddPoolReplayCtx {
+                credential: None,
+                journal: &journal,
+                union: &union,
+                targets,
+                pool: pool_state_one_disk(),
+            },
         )
         .unwrap_err();
         assert!(
@@ -7045,11 +7128,13 @@ mod tests {
             &fs,
             &MockByIdResolver::default(),
             &params,
-            None,
-            &journal,
-            &union,
-            targets,
-            pool_state_one_disk(),
+            AddPoolReplayCtx {
+                credential: None,
+                journal: &journal,
+                union: &union,
+                targets,
+                pool: pool_state_one_disk(),
+            },
         )
         .unwrap_err();
         assert!(
@@ -7255,11 +7340,13 @@ mod tests {
             &runner,
             &resolver,
             &params,
-            &journal,
-            pool_state_one_disk(),
-            2,
-            false,
-            false,
+            RemoveMissingPostCtx {
+                journal: &journal,
+                pool: pool_state_one_disk(),
+                devid: 2,
+                restore_raid1_after_commit: false,
+                inhibitor_already_held: false,
+            },
         )
         .expect("unowed post-remove maintenance should only repair state");
 
@@ -7295,11 +7382,13 @@ mod tests {
             &runner,
             &resolver,
             &params,
-            &journal,
-            pool_state_one_disk(),
-            2,
-            true,
-            false,
+            RemoveMissingPostCtx {
+                journal: &journal,
+                pool: pool_state_one_disk(),
+                devid: 2,
+                restore_raid1_after_commit: true,
+                inhibitor_already_held: false,
+            },
         )
         .unwrap_err();
 
