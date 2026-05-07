@@ -41,7 +41,10 @@ pub(crate) fn close_mapper_with_retry<R: CommandRunner, S: Sleeper>(
         // mapper, translated to exit 5 by src/utils_tools.c translate_errno.
         // On the close path exit 5 is EBUSY-exclusive (no -EEXIST branch),
         // so matching exit status is wording- and locale-agnostic and
-        // survives upstream phrasing drift.
+        // survives upstream phrasing drift. The canonical non-busy distractor
+        // (an already-closed mapper -> ENODEV -> exit 4) is runtime-locked by
+        // tests/repro/cryptsetup-close-mounted.py; a regression that routed
+        // that path through exit 5 would fail that assertion.
         let is_busy = result.exit_status == 5;
         if !is_busy {
             return Err(CloseMapperError::Failed(msg));

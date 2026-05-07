@@ -33,8 +33,9 @@ with subtest("cryptsetup close fails while mounted"):
     print(f"Exit code: {exit_code}")
     print(f"Stderr: {stderr}")
     # EBUSY -> translate_errno -> exit 5. Busy classification in
-    # cli/src/lock.rs close_mapper_with_retry relies on this exact code
-    # (wording-independent). Do not relax this assertion to != 0.
+    # cli/src/mapper_close.rs close_mapper_with_retry relies on this
+    # exact code (wording-independent). Do not relax this assertion to
+    # != 0.
     assert exit_code == 5, \
         f"Expected exit 5 (EBUSY) while mounted, got {exit_code}. stderr: {stderr}"
     # Descriptive wording check -- not load-bearing for braid's classifier

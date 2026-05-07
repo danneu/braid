@@ -1893,9 +1893,9 @@ mod tests {
     // Intent: cryptsetup close with exit status 5 goes through the retry
     //   loop and surfaces as LockError::DeviceBusy, regardless of the
     //   specific English phrase in stderr.
-    // Why it exists: the classifier at lock.rs:38-42 is what distinguishes
-    //   "kernel-async release race, retry wins" from "every close
-    //   hard-fails on first attempt". An earlier stderr-substring
+    // Why it exists: the classifier in mapper_close.rs close_mapper_with_retry
+    //   is what distinguishes "kernel-async release race, retry wins" from
+    //   "every close hard-fails on first attempt". An earlier stderr-substring
     //   classifier ("busy" || "in use") would hard-fail on wording drift
     //   like "still active and cannot be removed". This test uses that
     //   non-canonical wording at exit 5 so a regression back to
