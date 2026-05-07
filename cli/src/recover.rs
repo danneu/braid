@@ -441,7 +441,7 @@ impl RecoverWorkAction {
                 }
                 Ok(false)
             }
-            RecoverWorkAction::RemountCycle { .. } => {
+            RecoverWorkAction::RemountCycle { close_names, .. } => {
                 if state.just_mounted {
                     let recovery_mount_membership =
                         mount_membership_for_recover(&plan.journal, &plan.union).clone();
@@ -455,6 +455,7 @@ impl RecoverWorkAction {
                         &recovery_mount_membership,
                         params.allow_degraded,
                         cred,
+                        close_names,
                     )?;
                 }
                 Ok(false)
@@ -2776,9 +2777,9 @@ fn wait_for_kernel_replace_to_finish<R: CommandRunner>(
 /// across a resumed dev_replace.
 ///
 /// This mirrors what `braid lock; braid unlock` does end-to-end: umount,
-/// `btrfs device scan --forget` (drop cached fs_devices), close every LUKS
-/// mapper for the membership union, then re-plan + re-open + remount via
-/// the standard `plan_open_pool` + `execute_unlock_and_mount` flow.
+/// `btrfs device scan --forget` (drop cached fs_devices), close the planned
+/// LUKS mapper set, then re-plan + re-open + remount via the standard
+/// `plan_open_pool` + `execute_unlock_and_mount` flow.
 ///
 /// The LUKS close+reopen is load-bearing: empirically, an `umount + scan
 /// --forget + remount` cycle that leaves the dm devices alive does NOT clear
@@ -2790,6 +2791,7 @@ fn relock_and_remount<R: CommandRunner, F: Filesystem + ?Sized>(
     membership: &PoolMembership,
     allow_degraded: bool,
     credential: &OpenCredential,
+    close_names: &[String],
 ) -> Result<(), RecoverError> {
     let color_enabled = color_enabled_for_stderr();
     let mount_point = config.mount_point();
@@ -2830,14 +2832,12 @@ fn relock_and_remount<R: CommandRunner, F: Filesystem + ?Sized>(
     //    re-attach the next mount to a still-cached structure that retains
     //    the stale post-resume topology, defeating the cycle.
     //
-    //    Scope to the pool's own mapper paths (the close set for this
-    //    cycle). The no-arg form is kernel-global and would invalidate
-    //    unrelated btrfs scan entries; per-device forget is sufficient
-    //    here because the cycle only closes and re-opens membership
-    //    mappers.
-    let forget_devs: Vec<String> = membership
-        .disks
-        .keys()
+    //    Scope to the planned mapper close set for this cycle. The no-arg
+    //    form is kernel-global and would invalidate unrelated btrfs scan
+    //    entries; per-device forget is sufficient here because it only
+    //    needs to cover the mappers this cycle will close.
+    let forget_devs: Vec<String> = close_names
+        .iter()
         .map(|name| format!("/dev/mapper/{}", config::mapper_name(name).0))
         .filter(|p| fs.exists(p))
         .collect();
@@ -2858,10 +2858,10 @@ fn relock_and_remount<R: CommandRunner, F: Filesystem + ?Sized>(
         }
     }
 
-    // 3. Close every LUKS mapper from the union. The dm devices must be
-    //    destroyed (not just unmounted) for the next mount to bypass the
-    //    kernel's stale fs_devices cache.
-    for name in membership.disks.keys() {
+    // 3. Close every planned LUKS mapper. The dm devices must be destroyed
+    //    (not just unmounted) for the next mount to bypass the kernel's
+    //    stale fs_devices cache.
+    for name in close_names {
         let mn = config::mapper_name(name);
         let mapper_path = format!("/dev/mapper/{}", mn.0);
         if !fs.exists(&mapper_path) {
@@ -2908,7 +2908,7 @@ fn relock_and_remount<R: CommandRunner, F: Filesystem + ?Sized>(
     //    kernel reads the chunk tree from disk and rebuilds a fresh
     //    fs_devices reflecting the post-resume on-disk state.
     //
-    // The cycle just closed every mapper, so the cycle's plan ALWAYS has
+    // The cycle just closed planned mappers, so the cycle's plan ALWAYS has
     // `to_unlock` non-empty — we always pass the credential. (If somehow
     // plan_open_pool returns None here it means another mounter raced us.)
     let cycle_report =
@@ -8746,6 +8746,351 @@ mod tests {
         );
     }
 
+    // Intent: relock_and_remount honors the planned close_names and does
+    //   not close or forget a membership mapper that appeared in
+    //   /dev/mapper between plan and execute.
+    // Why it exists: closing a mapper not in the plan reopens the
+    //   cryptsetup-close-btrfs-held race because the forget argv is
+    //   plan-derived; it also breaks the dry-run -> execute contract.
+    // Scenario: plan_recover would have computed close_names =
+    //   [disk1, disk2]. Between plan and execute, /dev/mapper/braid-extra
+    //   appears (membership union also lists 'extra' for the test, to
+    //   prove the new code does not fall back to membership.disks.keys()).
+    //   Execute must not issue CryptsetupClose for braid-extra and the
+    //   BtrfsDeviceScanForget argv must not contain /dev/mapper/braid-extra.
+    #[test]
+    fn recover_remount_cycle_honors_close_names_over_membership() {
+        let config = Config::new(MountPoint("/mnt/storage".into())).unwrap();
+        let fs = MockFs::new(&[
+            "/dev/disk/by-id/virtio-disk1",
+            "/dev/disk/by-id/virtio-disk2",
+            "/dev/disk/by-id/virtio-extra",
+            "/dev/mapper/braid-disk1",
+            "/dev/mapper/braid-disk2",
+            "/dev/mapper/braid-extra",
+        ]);
+        let membership = PoolMembership {
+            disks: BTreeMap::from([
+                (
+                    "disk1".to_owned(),
+                    DiskMember::from_by_id(ByIdPath("/dev/disk/by-id/virtio-disk1".into())),
+                ),
+                (
+                    "disk2".to_owned(),
+                    DiskMember::from_by_id(ByIdPath("/dev/disk/by-id/virtio-disk2".into())),
+                ),
+                (
+                    "extra".to_owned(),
+                    DiskMember::from_by_id(ByIdPath("/dev/disk/by-id/virtio-extra".into())),
+                ),
+            ]),
+        };
+        let (mp_req, mp_out) = mountpoint_fail();
+        let runner = MockRunner::default()
+            .with_output(
+                CmdRequest::Umount {
+                    mount_point: MountPoint("/mnt/storage".into()),
+                },
+                ok_raw_empty("umount"),
+            )
+            .with_output(
+                CmdRequest::BtrfsDeviceScanForget {
+                    devices: vec![
+                        "/dev/mapper/braid-disk1".into(),
+                        "/dev/mapper/braid-disk2".into(),
+                    ],
+                },
+                ok_raw_empty("btrfs device scan --forget"),
+            )
+            .with_output(
+                CmdRequest::CryptsetupClose {
+                    mapper: "braid-disk1".into(),
+                },
+                ok_raw_empty("cryptsetup close"),
+            )
+            .with_output(
+                CmdRequest::CryptsetupClose {
+                    mapper: "braid-disk2".into(),
+                },
+                ok_raw_empty("cryptsetup close"),
+            )
+            .with_output(mp_req, mp_out)
+            .with_output(
+                CmdRequest::CryptsetupLuksUuid {
+                    device: "/dev/disk/by-id/virtio-disk1".into(),
+                },
+                cryptsetup_uuid_ok(
+                    "/dev/disk/by-id/virtio-disk1",
+                    "11111111-1111-1111-1111-111111111111",
+                ),
+            )
+            .with_output(
+                CmdRequest::CryptsetupLuksUuid {
+                    device: "/dev/disk/by-id/virtio-disk2".into(),
+                },
+                cryptsetup_uuid_ok(
+                    "/dev/disk/by-id/virtio-disk2",
+                    "22222222-2222-2222-2222-222222222222",
+                ),
+            )
+            .with_output(
+                CmdRequest::CryptsetupLuksUuid {
+                    device: "/dev/disk/by-id/virtio-extra".into(),
+                },
+                cryptsetup_uuid_ok(
+                    "/dev/disk/by-id/virtio-extra",
+                    "33333333-3333-3333-3333-333333333333",
+                ),
+            )
+            .with_luks_dump_text_luks2_for(&[
+                "/dev/disk/by-id/virtio-disk1",
+                "/dev/disk/by-id/virtio-disk2",
+                "/dev/disk/by-id/virtio-extra",
+            ])
+            .with_mappers_closed(&["braid-disk1", "braid-disk2"])
+            .with_mapper_open(
+                "braid-extra",
+                "/dev/vdc",
+                "33333333-3333-3333-3333-333333333333",
+            )
+            .with_output_stdin(
+                CmdRequest::CryptsetupTestPassphrase {
+                    device: "/dev/disk/by-id/virtio-disk1".into(),
+                },
+                b"testpass".to_vec(),
+                ok_raw_empty("cryptsetup open --test-passphrase"),
+            )
+            .with_output_stdin(
+                CmdRequest::CryptsetupTestPassphrase {
+                    device: "/dev/disk/by-id/virtio-disk2".into(),
+                },
+                b"testpass".to_vec(),
+                ok_raw_empty("cryptsetup open --test-passphrase"),
+            )
+            .with_output_stdin(
+                CmdRequest::CryptsetupLuksOpen {
+                    device: "/dev/disk/by-id/virtio-disk1".into(),
+                    mapper: "braid-disk1".into(),
+                },
+                b"testpass".to_vec(),
+                ok_raw_empty("cryptsetup open"),
+            )
+            .with_output_stdin(
+                CmdRequest::CryptsetupLuksOpen {
+                    device: "/dev/disk/by-id/virtio-disk2".into(),
+                    mapper: "braid-disk2".into(),
+                },
+                b"testpass".to_vec(),
+                ok_raw_empty("cryptsetup open"),
+            )
+            .with_output(
+                CmdRequest::BtrfsDeviceScanAll,
+                ok_raw_empty("btrfs device scan"),
+            )
+            .with_output(
+                CmdRequest::Mount {
+                    device: "/dev/mapper/braid-disk1".into(),
+                    mount_point: MountPoint("/mnt/storage".into()),
+                },
+                ok_raw_empty("mount"),
+            );
+        let close_names = vec!["disk1".to_owned(), "disk2".to_owned()];
+
+        relock_and_remount(
+            &runner,
+            &fs,
+            &config,
+            &membership,
+            false,
+            &OpenCredential::Passphrase(zeroize::Zeroizing::new("testpass".to_owned())),
+            &close_names,
+        )
+        .expect("remount cycle should succeed without touching unplanned mapper");
+
+        let requests = runner.requests();
+        let forget_devices = requests
+            .iter()
+            .find_map(|r| match r {
+                CmdRequest::BtrfsDeviceScanForget { devices } => Some(devices),
+                _ => None,
+            })
+            .expect("scan --forget should run for planned mappers");
+        assert_eq!(
+            forget_devices,
+            &vec![
+                "/dev/mapper/braid-disk1".to_owned(),
+                "/dev/mapper/braid-disk2".to_owned(),
+            ]
+        );
+        assert!(
+            !forget_devices.contains(&"/dev/mapper/braid-extra".to_owned()),
+            "forget argv must not include unplanned mapper"
+        );
+
+        let close_mappers = requests
+            .iter()
+            .filter_map(|r| match r {
+                CmdRequest::CryptsetupClose { mapper } => Some(mapper.as_str()),
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(
+            close_mappers,
+            vec!["braid-disk1", "braid-disk2"],
+            "close requests must be limited to planned close_names"
+        );
+    }
+
+    // Intent: relock_and_remount uses fs.exists only as a disappearance
+    //   guard -- if a planned close target's mapper is gone at execute
+    //   time, neither cryptsetup close nor the forget argv references it.
+    // Why it exists: a previously-open mapper can vanish between plan and
+    //   execute. The cycle must degrade gracefully without spurious errors.
+    // Scenario: close_names = [disk1, disk2]; only /dev/mapper/braid-disk1
+    //   exists at execute time. The forget argv contains exactly
+    //   /dev/mapper/braid-disk1 and CryptsetupClose runs only for disk1.
+    #[test]
+    fn recover_remount_cycle_skips_disappeared_planned_mapper() {
+        let config = Config::new(MountPoint("/mnt/storage".into())).unwrap();
+        let fs = MockFs::new(&[
+            "/dev/disk/by-id/virtio-disk1",
+            "/dev/disk/by-id/virtio-disk2",
+            "/dev/mapper/braid-disk1",
+        ]);
+        let membership = PoolMembership {
+            disks: BTreeMap::from([
+                (
+                    "disk1".to_owned(),
+                    DiskMember::from_by_id(ByIdPath("/dev/disk/by-id/virtio-disk1".into())),
+                ),
+                (
+                    "disk2".to_owned(),
+                    DiskMember::from_by_id(ByIdPath("/dev/disk/by-id/virtio-disk2".into())),
+                ),
+            ]),
+        };
+        let (mp_req, mp_out) = mountpoint_fail();
+        let runner = MockRunner::default()
+            .with_output(
+                CmdRequest::Umount {
+                    mount_point: MountPoint("/mnt/storage".into()),
+                },
+                ok_raw_empty("umount"),
+            )
+            .with_output(
+                CmdRequest::BtrfsDeviceScanForget {
+                    devices: vec!["/dev/mapper/braid-disk1".into()],
+                },
+                ok_raw_empty("btrfs device scan --forget"),
+            )
+            .with_output(
+                CmdRequest::CryptsetupClose {
+                    mapper: "braid-disk1".into(),
+                },
+                ok_raw_empty("cryptsetup close"),
+            )
+            .with_output(mp_req, mp_out)
+            .with_output(
+                CmdRequest::CryptsetupLuksUuid {
+                    device: "/dev/disk/by-id/virtio-disk1".into(),
+                },
+                cryptsetup_uuid_ok(
+                    "/dev/disk/by-id/virtio-disk1",
+                    "11111111-1111-1111-1111-111111111111",
+                ),
+            )
+            .with_output(
+                CmdRequest::CryptsetupLuksUuid {
+                    device: "/dev/disk/by-id/virtio-disk2".into(),
+                },
+                cryptsetup_uuid_ok(
+                    "/dev/disk/by-id/virtio-disk2",
+                    "22222222-2222-2222-2222-222222222222",
+                ),
+            )
+            .with_luks_dump_text_luks2_for(&[
+                "/dev/disk/by-id/virtio-disk1",
+                "/dev/disk/by-id/virtio-disk2",
+            ])
+            .with_mappers_closed(&["braid-disk1", "braid-disk2"])
+            .with_output_stdin(
+                CmdRequest::CryptsetupTestPassphrase {
+                    device: "/dev/disk/by-id/virtio-disk1".into(),
+                },
+                b"testpass".to_vec(),
+                ok_raw_empty("cryptsetup open --test-passphrase"),
+            )
+            .with_output_stdin(
+                CmdRequest::CryptsetupTestPassphrase {
+                    device: "/dev/disk/by-id/virtio-disk2".into(),
+                },
+                b"testpass".to_vec(),
+                ok_raw_empty("cryptsetup open --test-passphrase"),
+            )
+            .with_output_stdin(
+                CmdRequest::CryptsetupLuksOpen {
+                    device: "/dev/disk/by-id/virtio-disk1".into(),
+                    mapper: "braid-disk1".into(),
+                },
+                b"testpass".to_vec(),
+                ok_raw_empty("cryptsetup open"),
+            )
+            .with_output_stdin(
+                CmdRequest::CryptsetupLuksOpen {
+                    device: "/dev/disk/by-id/virtio-disk2".into(),
+                    mapper: "braid-disk2".into(),
+                },
+                b"testpass".to_vec(),
+                ok_raw_empty("cryptsetup open"),
+            )
+            .with_output(
+                CmdRequest::BtrfsDeviceScanAll,
+                ok_raw_empty("btrfs device scan"),
+            )
+            .with_output(
+                CmdRequest::Mount {
+                    device: "/dev/mapper/braid-disk1".into(),
+                    mount_point: MountPoint("/mnt/storage".into()),
+                },
+                ok_raw_empty("mount"),
+            );
+        let close_names = vec!["disk1".to_owned(), "disk2".to_owned()];
+
+        relock_and_remount(
+            &runner,
+            &fs,
+            &config,
+            &membership,
+            false,
+            &OpenCredential::Passphrase(zeroize::Zeroizing::new("testpass".to_owned())),
+            &close_names,
+        )
+        .expect("remount cycle should succeed when a planned mapper disappeared");
+
+        let requests = runner.requests();
+        let forget_devices = requests
+            .iter()
+            .find_map(|r| match r {
+                CmdRequest::BtrfsDeviceScanForget { devices } => Some(devices),
+                _ => None,
+            })
+            .expect("scan --forget should run for surviving planned mapper");
+        assert_eq!(forget_devices, &vec!["/dev/mapper/braid-disk1".to_owned()]);
+
+        let close_mappers = requests
+            .iter()
+            .filter_map(|r| match r {
+                CmdRequest::CryptsetupClose { mapper } => Some(mapper.as_str()),
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(
+            close_mappers,
+            vec!["braid-disk1"],
+            "disappeared planned mapper must not be closed"
+        );
+    }
+
     // Intent: A post-open failure in the recover remount cycle closes the
     // mappers reopened by that cycle.
     // Why it exists: the cycle intentionally destroys and recreates dm-crypt
@@ -8868,6 +9213,7 @@ mod tests {
                 },
                 err_raw("mount", 32, "mount failed"),
             );
+        let close_names = vec!["disk1".to_owned(), "disk2".to_owned()];
 
         let err = relock_and_remount(
             &runner,
@@ -8876,6 +9222,7 @@ mod tests {
             &membership,
             false,
             &OpenCredential::Passphrase(zeroize::Zeroizing::new("testpass".to_owned())),
+            &close_names,
         )
         .expect_err("final mount should fail");
         assert!(
