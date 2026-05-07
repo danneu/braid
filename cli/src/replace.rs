@@ -4096,136 +4096,39 @@ mod tests {
         );
     }
 
-    /// Runner for missing-path fresh-replace LUKS tests. By default it
-    /// succeeds at `LuksFormat`, `LuksAddKeyFile`, and `LuksHeaderBackup`
-    /// (writing the backup file like `MockRunner` does), then leaves
-    /// `LuksOpen` unmocked so ordering tests can inspect the full request log.
-    struct KeyfileOrderingReplaceRunner {
-        log: std::sync::Arc<std::sync::Mutex<Vec<CmdRequest>>>,
-        backup_succeeds: bool,
-        backup_failure_stderr: &'static str,
-    }
-
-    impl KeyfileOrderingReplaceRunner {
-        fn new(log: std::sync::Arc<std::sync::Mutex<Vec<CmdRequest>>>) -> Self {
-            Self {
-                log,
-                backup_succeeds: true,
-                backup_failure_stderr: "mock: header backup forced to fail",
+    /// Override handler for the keyfile-ordering tests: marks disk3
+    /// (the raw replacement) as not-LUKS and answers the LUKS init
+    /// chain (Format/AddKeyFile/HeaderBackup) successfully. LuksOpen is
+    /// intentionally unmocked so cmd_replace falls through to the
+    /// canonical fixture's `None`, then to MissingMock, leaving the
+    /// full LUKS request log intact for ordering assertions.
+    /// Header-backup file-write happens via MockRunner's
+    /// apply_side_effects, not in this handler.
+    fn keyfile_ordering_success_handler()
+    -> impl Fn(&CmdRequest) -> Option<Result<RawCommandOutput, CmdError>> + Send + Sync + 'static
+    {
+        |req| match req {
+            CmdRequest::CryptsetupLuksUuid { device }
+                if device == "/dev/disk/by-id/virtio-disk3" =>
+            {
+                Some(Ok(RawCommandOutput {
+                    cmd: format!("cryptsetup luksUUID {device}"),
+                    stdout: String::new(),
+                    stderr: "Device is not a valid LUKS device.\n".into(),
+                    exit_status: 1,
+                }))
             }
-        }
-
-        fn with_backup_failure_stderr(mut self, stderr: &'static str) -> Self {
-            self.backup_succeeds = false;
-            self.backup_failure_stderr = stderr;
-            self
-        }
-    }
-
-    impl CmdRunner2 for KeyfileOrderingReplaceRunner {
-        fn run(&self, request: &CmdRequest) -> Result<RawCommandOutput, CmdError> {
-            self.log.lock().unwrap().push(request.clone());
-            match request {
-                CmdRequest::BtrfsFilesystemShow { mount_point } => Ok(mock_ok(
-                    &format!("btrfs filesystem show {mount_point}"),
-                    "Label: none  uuid: cc86845b-aec3-408e-bef5-553affc1f2b1\n\
-                     \tTotal devices 2 FS bytes used 16.17MiB\n\
-                     \tdevid    1 size 496.00MiB used 121.56MiB path /dev/mapper/braid-disk1\n\
-                     \t*** Some devices missing\n",
-                )),
-                CmdRequest::CryptsetupStatus { mapper } => match mapper.as_str() {
-                    "braid-disk1" => Ok(mock_ok(
-                        &format!("cryptsetup status {mapper}"),
-                        &format!(
-                            "{mapper} is active and is in use.\n  type:    LUKS2\n  device:  /dev/vdb\n  mode:    read/write\n"
-                        ),
-                    )),
-                    "braid-disk3" => Ok(RawCommandOutput {
-                        cmd: format!("cryptsetup status {mapper}"),
-                        stdout: String::new(),
-                        stderr: format!("/dev/mapper/{mapper} is inactive.\n"),
-                        exit_status: 4,
-                    }),
-                    _ => Err(CmdError::MissingMock),
-                },
-                CmdRequest::CryptsetupLuksUuid { device } => match device.as_str() {
-                    "/dev/vdb" | "/dev/disk/by-id/virtio-disk1" => Ok(mock_ok(
-                        &format!("cryptsetup luksUUID {device}"),
-                        "11111111-1111-1111-1111-111111111111\n",
-                    )),
-                    "/dev/disk/by-id/virtio-disk3" => Ok(RawCommandOutput {
-                        cmd: format!("cryptsetup luksUUID {device}"),
-                        stdout: String::new(),
-                        stderr: "Device is not a valid LUKS device.\n".into(),
-                        exit_status: 1,
-                    }),
-                    _ => Err(CmdError::MissingMock),
-                },
-                CmdRequest::BtrfsBalanceStatus { .. } => Ok(mock_ok(
-                    "btrfs balance status",
-                    "No balance found on '/mnt/storage'\n",
-                )),
-                CmdRequest::BtrfsDeviceUsageRaw { .. } => Ok(mock_ok(
-                    "btrfs device usage --raw",
-                    "/dev/mapper/braid-disk1, ID: 1\n\
-                     \tDevice size:           520093696\n\
-                     \tDevice slack:                  0\n\
-                     \tData,RAID1:            469762048\n\
-                     \tUnallocated:            50331648\n\n\
-                     <missing disk>, ID: 2\n\
-                     \tDevice size:                  0\n\
-                     \tDevice slack:                  0\n\
-                     \tData,RAID1:            469762048\n\
-                     \tUnallocated:                  0\n\n",
-                )),
-                CmdRequest::CryptsetupTestPassphrase { device } => Ok(mock_ok(
-                    &format!("cryptsetup open --test-passphrase {device}"),
-                    "",
-                )),
-                CmdRequest::CryptsetupLuksFormat { device, .. } => {
-                    Ok(mock_ok(&format!("cryptsetup luksFormat {device}"), ""))
-                }
-                CmdRequest::CryptsetupLuksAddKeyFile { device, .. } => {
-                    Ok(mock_ok(&format!("cryptsetup luksAddKey {device}"), ""))
-                }
-                CmdRequest::CryptsetupLuksHeaderBackup {
-                    device,
-                    backup_path,
-                } => {
-                    if self.backup_succeeds {
-                        // Match MockRunner's behavior: write the backup file so
-                        // `backup_luks_header_to`'s rename step succeeds and we
-                        // proceed past the backup step to `ensure_luks_open`.
-                        if let Some(parent) = std::path::Path::new(backup_path.as_str()).parent() {
-                            std::fs::create_dir_all(parent).map_err(|e| {
-                                CmdError::Failed(format!("mock: create_dir_all: {e}"))
-                            })?;
-                        }
-                        std::fs::write(backup_path, b"")
-                            .map_err(|e| CmdError::Failed(format!("mock: write backup: {e}")))?;
-                        Ok(mock_ok(
-                            &format!("cryptsetup luksHeaderBackup {device}"),
-                            "",
-                        ))
-                    } else {
-                        Ok(RawCommandOutput {
-                            cmd: format!("cryptsetup luksHeaderBackup {device}"),
-                            stdout: String::new(),
-                            stderr: self.backup_failure_stderr.into(),
-                            exit_status: 1,
-                        })
-                    }
-                }
-                _ => Err(CmdError::MissingMock),
+            CmdRequest::CryptsetupLuksFormat { device, .. } => {
+                Some(Ok(mock_ok(&format!("cryptsetup luksFormat {device}"), "")))
             }
-        }
-
-        fn run_with_stdin(
-            &self,
-            request: &CmdRequest,
-            _stdin: &[u8],
-        ) -> Result<RawCommandOutput, CmdError> {
-            self.run(request)
+            CmdRequest::CryptsetupLuksAddKeyFile { device, .. } => {
+                Some(Ok(mock_ok(&format!("cryptsetup luksAddKey {device}"), "")))
+            }
+            CmdRequest::CryptsetupLuksHeaderBackup { device, .. } => Some(Ok(mock_ok(
+                &format!("cryptsetup luksHeaderBackup {device}"),
+                "",
+            ))),
+            _ => None,
         }
     }
 
@@ -4253,40 +4156,21 @@ mod tests {
      */
     #[test]
     fn cmd_replace_with_keyfile_orders_format_addkey_backup_open() {
-        let state_tmp = tempfile::tempdir().unwrap();
-        let paths = StatePaths::custom(state_tmp.path().into());
-        let mut m = PoolMembership::empty();
-        m.disks.insert(
-            "disk1".into(),
-            DiskMember::from_by_id(ByIdPath("/dev/disk/by-id/virtio-disk1".into())),
-        );
-        let mut disk2 = DiskMember::from_by_id(ByIdPath("/dev/disk/by-id/virtio-disk2".into()));
-        disk2.devid = Some(2);
-        m.disks.insert("disk2".into(), disk2);
-        membership::save_membership(&m, &paths).unwrap();
-
-        let config_tmp = tempfile::tempdir().unwrap();
-        let config_path = config_tmp.path().join("config.json");
-        std::fs::write(
-            &config_path,
-            serde_json::to_vec(&serde_json::json!({ "mount_point": "/mnt/storage" })).unwrap(),
-        )
-        .unwrap();
-
-        let pass_path = config_tmp.path().join("passphrase");
-        std::fs::write(&pass_path, b"test-passphrase\n").unwrap();
+        let f = PoolFixture::one_live_one_missing();
 
         let kf_dir = tempfile::tempdir().unwrap();
         let kf_path = kf_dir.path().join("braid.key");
         std::fs::write(&kf_path, [0u8; crate::luks::KEYFILE_SIZE]).unwrap();
 
-        // Only disk3's by_id exists; cryptsetup status reports
-        // /dev/mapper/braid-disk3 inactive so `ensure_luks_open` proceeds to
-        // issue `LuksOpen`.
-        let fs = ReplaceMockFs(vec!["/dev/disk/by-id/virtio-disk3".into()]);
-        let log = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
-        let runner = KeyfileOrderingReplaceRunner::new(log.clone());
-        let inhibitor = crate::inhibit::RecordingInhibitor::new();
+        // Only disk3's by_id exists; canonical fixture's CryptsetupStatus
+        // on braid-disk3 reports inactive (via with_mapper_closed) so
+        // `ensure_luks_open` proceeds to issue `LuksOpen`.
+        let fs = MockFs::storage(vec!["/dev/disk/by-id/virtio-disk3".into()]);
+        let replace_done = Arc::new(AtomicBool::new(false));
+        let runner = ReplacementPool::one_live_one_missing()
+            .with_mapper_closed("braid-disk3")
+            .install(MockRunner::default(), replace_done)
+            .with_handler(keyfile_ordering_success_handler());
         let luks_format_extra_opts = vec![
             "--pbkdf".to_owned(),
             "pbkdf2".to_owned(),
@@ -4297,21 +4181,13 @@ mod tests {
         let result = cmd_replace(
             &runner,
             &fs,
-            &ReplaceParams {
-                config_path: &config_path,
-                old_name: "disk2",
-                new_name: "disk3=/dev/disk/by-id/virtio-disk3",
-                missing_id: Some(2),
-                dry_run: false,
-                yes: true,
-                passphrase_stdin: false,
-                passphrase_file: Some(pass_path.as_path()),
-                enroll_key_file: Some(kf_path.as_path()),
-                luks_format_extra_opts: &luks_format_extra_opts,
-                progress: crate::progress::ProgressOutput::Off,
-                paths: &paths,
-                sleep_inhibitor: &inhibitor,
-            },
+            &f.replace_params()
+                .old("disk2")
+                .new("disk3=/dev/disk/by-id/virtio-disk3")
+                .missing_id(Some(2))
+                .enroll_key_file(Some(kf_path.as_path()))
+                .luks_format_extra_opts(&luks_format_extra_opts)
+                .build(),
         );
 
         assert!(
@@ -4319,7 +4195,7 @@ mod tests {
             "cmd_replace must abort at the unmocked LuksOpen request, got: {result:?}"
         );
 
-        let log = log.lock().unwrap();
+        let log = runner.requests();
         let position = |label: &str, pred: fn(&CmdRequest) -> bool| -> usize {
             log.iter()
                 .position(pred)
@@ -4367,53 +4243,48 @@ mod tests {
     // directory cannot accept the local header backup.
     #[test]
     fn replace_returns_enriched_error_when_post_format_backup_fails() {
-        let state_tmp = tempfile::tempdir().unwrap();
-        let paths = StatePaths::custom(state_tmp.path().into());
-        let mut m = PoolMembership::empty();
-        m.disks.insert(
-            "disk1".into(),
-            DiskMember::from_by_id(ByIdPath("/dev/disk/by-id/virtio-disk1".into())),
-        );
-        let mut disk2 = DiskMember::from_by_id(ByIdPath("/dev/disk/by-id/virtio-disk2".into()));
-        disk2.devid = Some(2);
-        m.disks.insert("disk2".into(), disk2);
-        membership::save_membership(&m, &paths).unwrap();
-
-        let config_tmp = tempfile::tempdir().unwrap();
-        let config_path = config_tmp.path().join("config.json");
-        std::fs::write(
-            &config_path,
-            serde_json::to_vec(&serde_json::json!({ "mount_point": "/mnt/storage" })).unwrap(),
-        )
-        .unwrap();
-
-        let pass_path = config_tmp.path().join("passphrase");
-        std::fs::write(&pass_path, b"test-passphrase\n").unwrap();
-
-        let fs = ReplaceMockFs(vec!["/dev/disk/by-id/virtio-disk3".into()]);
-        let log = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
-        let runner = KeyfileOrderingReplaceRunner::new(log)
-            .with_backup_failure_stderr("No space left on device");
-        let inhibitor = crate::inhibit::RecordingInhibitor::new();
+        let f = PoolFixture::one_live_one_missing();
+        let fs = MockFs::storage(vec!["/dev/disk/by-id/virtio-disk3".into()]);
+        let replace_done = Arc::new(AtomicBool::new(false));
+        let runner = ReplacementPool::one_live_one_missing()
+            .with_mapper_closed("braid-disk3")
+            .install(MockRunner::default(), replace_done)
+            .with_handler(|req| match req {
+                CmdRequest::CryptsetupLuksUuid { device }
+                    if device == "/dev/disk/by-id/virtio-disk3" =>
+                {
+                    Some(Ok(RawCommandOutput {
+                        cmd: format!("cryptsetup luksUUID {device}"),
+                        stdout: String::new(),
+                        stderr: "Device is not a valid LUKS device.\n".into(),
+                        exit_status: 1,
+                    }))
+                }
+                CmdRequest::CryptsetupLuksFormat { device, .. } => {
+                    Some(Ok(mock_ok(&format!("cryptsetup luksFormat {device}"), "")))
+                }
+                CmdRequest::CryptsetupLuksAddKeyFile { device, .. } => {
+                    Some(Ok(mock_ok(&format!("cryptsetup luksAddKey {device}"), "")))
+                }
+                CmdRequest::CryptsetupLuksHeaderBackup { device, .. } => {
+                    Some(Ok(RawCommandOutput {
+                        cmd: format!("cryptsetup luksHeaderBackup {device}"),
+                        stdout: String::new(),
+                        stderr: "No space left on device".into(),
+                        exit_status: 1,
+                    }))
+                }
+                _ => None,
+            });
 
         let err = cmd_replace(
             &runner,
             &fs,
-            &ReplaceParams {
-                config_path: &config_path,
-                old_name: "disk2",
-                new_name: "disk3=/dev/disk/by-id/virtio-disk3",
-                missing_id: Some(2),
-                dry_run: false,
-                yes: true,
-                passphrase_stdin: false,
-                passphrase_file: Some(pass_path.as_path()),
-                enroll_key_file: None,
-                luks_format_extra_opts: &[],
-                progress: crate::progress::ProgressOutput::Off,
-                paths: &paths,
-                sleep_inhibitor: &inhibitor,
-            },
+            &f.replace_params()
+                .old("disk2")
+                .new("disk3=/dev/disk/by-id/virtio-disk3")
+                .missing_id(Some(2))
+                .build(),
         )
         .expect_err("post-format header-backup failure should abort replace")
         .to_string();
