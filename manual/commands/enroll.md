@@ -60,7 +60,7 @@ sudo braid enroll /mnt/usb --generate --dry-run
 2. **With `--generate`:** Validates that the target directory exists, is a directory, is already a mount point, and does not already contain `braid.key` (refuses if it does -- remove it manually first).
 3. **Without `--generate`:** Validates that `DIR/braid.key` already exists and is a regular file.
 4. Scans pool membership for present LUKS disks. Absent or non-LUKS disks are skipped with a message.
-5. Verifies the passphrase against the first pool disk.
+5. Verifies the passphrase against every present pool disk before any keyfile probe.
 6. For each disk, checks LUKS slot 1:
    - If the keyfile already works on this disk, reports "already enrolled" and skips.
    - If slot 1 is occupied by an unknown key, refuses with an error (you must manually remove it first with `cryptsetup luksKillSlot`).

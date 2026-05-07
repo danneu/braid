@@ -155,14 +155,16 @@ fn plan_enrollment<R: CommandRunner>(
     mode: EnrollmentPlanMode,
 ) -> Result<Vec<DiskEnrollAction>, EnrollKeyFileError> {
     let color_enabled = color_enabled_for_stderr();
-    let (first_name, first_by_id) = &candidates[0];
-    let first_target = CredentialVerifyTarget {
-        name: first_name.clone(),
-        device: first_by_id.0.clone(),
-    };
+    let verify_targets: Vec<CredentialVerifyTarget> = candidates
+        .iter()
+        .map(|(name, by_id)| CredentialVerifyTarget {
+            name: name.clone(),
+            device: by_id.0.clone(),
+        })
+        .collect();
     match verify_credential_for_targets(
         runner,
-        std::slice::from_ref(&first_target),
+        &verify_targets,
         Credential::Passphrase(passphrase),
         color_enabled,
         |line| eprint!("{line}"),
@@ -170,7 +172,7 @@ fn plan_enrollment<R: CommandRunner>(
         Ok(()) => {}
         Err(CredentialVerifyError::Rejected { target }) => {
             return Err(EnrollKeyFileError::Validation(format!(
-                "wrong passphrase (verified against {})",
+                "wrong passphrase on {}",
                 target.name
             )));
         }
@@ -179,8 +181,11 @@ fn plan_enrollment<R: CommandRunner>(
         }
     }
 
+    // Passphrase has been verified against every candidate up-front, matching
+    // sibling commands (mount/add/replace). The loop below only handles
+    // mode-specific keyfile probing and slot-1 preflight.
     let mut plan = Vec::new();
-    for (i, (name, by_id)) in candidates.iter().enumerate() {
+    for (name, by_id) in candidates {
         if let EnrollmentPlanMode::ExistingKeyfile = mode {
             // Check if keyfile already works (idempotent). Only `Authenticated`
             // means the keyfile is already installed in a slot -- `Rejected` is
@@ -215,37 +220,6 @@ fn plan_enrollment<R: CommandRunner>(
                             &format!("keyfile: not yet enrolled on {name}"),
                         )
                     );
-                }
-            }
-        }
-
-        // Per-disk passphrase verify catches an out-of-band slot-0 divergence
-        // (e.g. `cryptsetup luksChangeKey` on disk2) before apply leaves the
-        // pool partially mutated. Disk[0] is covered by the up-front
-        // `verify_credential_for_targets` call above; that same call also
-        // guards the all-`AlreadyEnrolled` path, where every iteration
-        // `continue`s before reaching this block.
-        if i > 0 {
-            let target = CredentialVerifyTarget {
-                name: name.clone(),
-                device: by_id.0.clone(),
-            };
-            match verify_credential_for_targets(
-                runner,
-                std::slice::from_ref(&target),
-                Credential::Passphrase(passphrase),
-                color_enabled,
-                |line| eprint!("{line}"),
-            ) {
-                Ok(()) => {}
-                Err(CredentialVerifyError::Rejected { target }) => {
-                    return Err(EnrollKeyFileError::Validation(format!(
-                        "wrong passphrase on {}",
-                        target.name
-                    )));
-                }
-                Err(CredentialVerifyError::Luks { source, .. }) => {
-                    return Err(EnrollKeyFileError::Luks(source));
                 }
             }
         }
@@ -1854,7 +1828,7 @@ mod tests {
 
     /*
      * Intent: verify plan correctly identifies disks with keyfile already enrolled.
-     * Why: re-enrollment should be idempotent — no mutation needed.
+     * Why: re-enrollment should be idempotent -- no mutation needed.
      * Scenario: keyfile already in slot 1 on all disks.
      */
     #[test]
@@ -1864,12 +1838,14 @@ mod tests {
         let kf = "/tmp/braid.key";
         let pass = "testpass";
 
-        let (tp_req, tp_stdin, tp_out) = test_passphrase_ok(d1, pass);
+        let (tp1_req, tp1_stdin, tp1_out) = test_passphrase_ok(d1, pass);
+        let (tp2_req, tp2_stdin, tp2_out) = test_passphrase_ok(d2, pass);
         let (tkf1_req, tkf1_out) = test_keyfile_ok(d1, kf);
         let (tkf2_req, tkf2_out) = test_keyfile_ok(d2, kf);
 
         let runner = MockRunner::default()
-            .with_output_stdin(tp_req, tp_stdin, tp_out)
+            .with_output_stdin(tp1_req, tp1_stdin, tp1_out)
+            .with_output_stdin(tp2_req, tp2_stdin, tp2_out)
             .with_output(tkf1_req, tkf1_out)
             .with_output(tkf2_req, tkf2_out);
 
@@ -1892,6 +1868,28 @@ mod tests {
         );
         assert!(
             matches!(&plan[1], DiskEnrollAction::AlreadyEnrolled { name, .. } if name == "disk2")
+        );
+
+        // Pin the "verify all candidates first, then probe" contract:
+        // every passphrase verify happens before any keyfile probe.
+        assert_eq!(
+            runner.requests(),
+            vec![
+                CmdRequest::CryptsetupTestPassphrase {
+                    device: d1.to_owned(),
+                },
+                CmdRequest::CryptsetupTestPassphrase {
+                    device: d2.to_owned(),
+                },
+                CmdRequest::CryptsetupTestKeyFile {
+                    device: d1.to_owned(),
+                    key_file_path: kf.to_owned(),
+                },
+                CmdRequest::CryptsetupTestKeyFile {
+                    device: d2.to_owned(),
+                    key_file_path: kf.to_owned(),
+                },
+            ]
         );
     }
 
@@ -1941,8 +1939,13 @@ mod tests {
     }
 
     /*
-     * Intent: verify wrong passphrase is detected early.
-     * Why: wrong passphrase would cause all luksAddKey calls to fail — catch it up front.
+     * Intent: verify wrong passphrase is detected early with the canonical
+     *   per-disk error wording.
+     * Why: wrong passphrase would cause all luksAddKey calls to fail -- catch
+     *   it up front. Pinning the exact "wrong passphrase on {disk}" string
+     *   prevents a regression that re-introduces the older
+     *   "wrong passphrase (verified against ...)" form from the pre-batched
+     *   verify split.
      * Scenario: user mistyped their passphrase.
      */
     #[test]
@@ -1965,10 +1968,7 @@ mod tests {
         );
         assert!(result.is_err());
         let err = result.unwrap_err();
-        assert!(
-            err.to_string().contains("wrong passphrase"),
-            "unexpected error: {err}"
-        );
+        assert_eq!(err.to_string(), "wrong passphrase on disk1");
     }
 
     /*
@@ -2159,12 +2159,14 @@ mod tests {
     }
 
     /*
-     * Intent: in `GenerateNew` mode, the first candidate's passphrase
+     * Intent: in `GenerateNew` mode, each candidate's passphrase
      *   preflight runs exactly once.
-     * Why it exists: `plan_enrollment` verifies disk1 before the loop and
-     *   verifies later disks inside the loop. A regression that drops the
-     *   `i > 0` guard would verify disk1 twice; MockRunner mocks are
-     *   reusable, so the duplicate call only shows up in the request log.
+     * Why it exists: `plan_enrollment` collects every candidate into a
+     *   single batched `verify_credential_for_targets` call. A regression
+     *   that double-counts a candidate (e.g. emits the same target into
+     *   the slice twice, or re-verifies inside the loop) would still
+     *   succeed because MockRunner mocks are reusable, so the duplicate
+     *   call only shows up in the request log.
      * Scenario: 2-disk pool, new keyfile generation, both disks need
      *   enrollment and both slot-1 checks are empty.
      */
@@ -2287,18 +2289,18 @@ mod tests {
     /*
      * Intent: in `ExistingKeyfile` mode, a divergent passphrase on disk2
      *   (the user ran `cryptsetup luksChangeKey` on disk2 out-of-band) is
-     *   rejected during planning, before any disk is mutated.
+     *   rejected during planning, before any disk is mutated or any
+     *   keyfile probe runs.
      * Why it exists: the two-phase enroll refactor's stated guarantee is
      *   "no partial mutation on preflight failure". This holds for slot-1
      *   conflicts because `check_key_slot` runs per disk, and held for
-     *   wrong-passphrase only against the first candidate. A divergent
-     *   passphrase on disk2 would pass planning and partial-mutate at
-     *   apply time. This test pins the per-disk passphrase verify in
-     *   the planner. No `CryptsetupLuksDump` mock is seeded for disk2 --
-     *   if the planner regresses and reaches disk2's slot-1 check after
-     *   skipping the per-disk passphrase verify, MockRunner returns
-     *   MissingMock and this test fails loudly rather than passing
-     *   silently.
+     *   wrong-passphrase only against the first candidate. The batched
+     *   up-front verify must include disk2 -- a regression that drops
+     *   disk2 from the verify slice would let planning succeed and
+     *   partial-mutate at apply time. The exact-equality assertion on
+     *   the request log pins the new contract: only passphrase verifies
+     *   run before the divergence is detected (no keyfile probes, no
+     *   slot-1 dumps).
      * Scenario: 2-disk pool. Both disks have empty slot 1 (need enroll),
      *   but disk2's slot 0 holds a different passphrase from disk1 due
      *   to a previous out-of-band `cryptsetup luksChangeKey`.
@@ -2311,21 +2313,14 @@ mod tests {
         let pass = "testpass";
 
         let (tp1_req, tp1_stdin, tp1_out) = test_passphrase_ok(d1, pass);
-        let (tkf1_req, tkf1_out) = test_keyfile_fail(d1, kf);
-        let (ld1_req, ld1_out) = luks_dump_slot1_empty(d1);
-        let (tkf2_req, tkf2_out) = test_keyfile_fail(d2, kf);
         let (tp2_req, tp2_stdin, tp2_out) = test_passphrase_fail(d2, pass);
 
-        // Deliberately NO `CryptsetupLuksDump` mock for d2. If the planner
-        // regresses (e.g. skips the per-disk passphrase verify on the
-        // second candidate), it will reach `check_slot_one_available` on
-        // d2 and MockRunner will fail with MissingMock. That signals the
-        // regression — the test must NOT pass silently in that case.
+        // No keyfile-probe or luksDump mocks: the batched passphrase
+        // verify rejects disk2 before any keyfile probe or slot-1 check
+        // runs. A regression that drops disk2 from the verify slice
+        // would reach those mocks and trip MissingMock.
         let runner = MockRunner::default()
             .with_output_stdin(tp1_req, tp1_stdin, tp1_out)
-            .with_output(tkf1_req, tkf1_out)
-            .with_output(ld1_req, ld1_out)
-            .with_output(tkf2_req, tkf2_out)
             .with_output_stdin(tp2_req, tp2_stdin, tp2_out);
 
         let candidates = vec![
@@ -2350,6 +2345,18 @@ mod tests {
         assert!(
             msg.contains("disk2"),
             "expected 'disk2' to be named in error: {msg}"
+        );
+
+        assert_eq!(
+            runner.requests(),
+            vec![
+                CmdRequest::CryptsetupTestPassphrase {
+                    device: d1.to_owned(),
+                },
+                CmdRequest::CryptsetupTestPassphrase {
+                    device: d2.to_owned(),
+                },
+            ]
         );
     }
 
