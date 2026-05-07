@@ -2559,6 +2559,24 @@ mod tests {
         }
     }
 
+    /// Override handler that fails `BtrfsReplaceStart` so live-path
+    /// failure tests can drive cmd_replace through preflight + journal
+    /// write and watch the failure propagate. Layered on top of the
+    /// canonical pool topology via `with_handler`.
+    fn replace_start_fails_handler()
+    -> impl Fn(&CmdRequest) -> Option<Result<RawCommandOutput, CmdError>> + Send + Sync + 'static
+    {
+        |req| match req {
+            CmdRequest::BtrfsReplaceStart { .. } => Some(Ok(RawCommandOutput {
+                cmd: "btrfs replace start".into(),
+                stdout: String::new(),
+                stderr: "ERROR: target device is too small".into(),
+                exit_status: 1,
+            })),
+            _ => None,
+        }
+    }
+
     /// Mock filesystem where specific paths exist.
     struct ReplaceMockFs(Vec<String>);
     impl crate::probe::Filesystem for ReplaceMockFs {
@@ -2585,84 +2603,6 @@ mod tests {
         }
     }
 
-    /// Runner for live replace that fails on BtrfsReplaceStart.
-    /// Handles all preflight/probe commands successfully.
-    struct FailingReplaceRunner;
-
-    impl CmdRunner2 for FailingReplaceRunner {
-        fn run(&self, request: &CmdRequest) -> Result<RawCommandOutput, CmdError> {
-            match request {
-                CmdRequest::BtrfsFilesystemShow { mount_point } => Ok(mock_ok(
-                    &format!("btrfs filesystem show {mount_point}"),
-                    "Label: none  uuid: cc86845b-aec3-408e-bef5-553affc1f2b1\n\tTotal devices 2 FS bytes used 16.17MiB\n\tdevid    1 size 496.00MiB used 121.56MiB path /dev/mapper/braid-disk1\n\tdevid    2 size 496.00MiB used 121.56MiB path /dev/mapper/braid-disk2\n",
-                )),
-                CmdRequest::CryptsetupStatus { mapper } => {
-                    let dev = match mapper.as_str() {
-                        "braid-disk1" => "/dev/vdb",
-                        "braid-disk2" => "/dev/vdc",
-                        "braid-disk3" => "/dev/vdd",
-                        _ => "/dev/vdz",
-                    };
-                    Ok(mock_ok(
-                        &format!("cryptsetup status {mapper}"),
-                        &format!(
-                            "{mapper} is active and is in use.\n  type:    LUKS2\n  device:  {dev}\n  mode:    read/write\n"
-                        ),
-                    ))
-                }
-                CmdRequest::CryptsetupLuksUuid { device } => {
-                    let uuid = match device.as_str() {
-                        "/dev/vdb" | "/dev/disk/by-id/virtio-disk1" => {
-                            "11111111-1111-1111-1111-111111111111"
-                        }
-                        "/dev/vdc" | "/dev/disk/by-id/virtio-disk2" => {
-                            "22222222-2222-2222-2222-222222222222"
-                        }
-                        // new disk: its backing via the braid-disk3 mapper is /dev/vdd
-                        "/dev/vdd" | "/dev/disk/by-id/virtio-disk3" => {
-                            "33333333-3333-3333-3333-333333333333"
-                        }
-                        _ => "99999999-9999-9999-9999-999999999999",
-                    };
-                    Ok(mock_ok(
-                        &format!("cryptsetup luksUUID {device}"),
-                        &format!("{uuid}\n"),
-                    ))
-                }
-                CmdRequest::CryptsetupLuksDumpText { device } => Ok(mock_ok(
-                    &format!("cryptsetup luksDump {device}"),
-                    "LUKS header information\nVersion:       \t2\n",
-                )),
-                CmdRequest::BtrfsBalanceStatus { .. } => Ok(mock_ok(
-                    "btrfs balance status",
-                    "No balance found on '/mnt/storage'\n",
-                )),
-                CmdRequest::BtrfsDeviceStatsJson { .. } => {
-                    Ok(mock_ok("btrfs device stats", r#"{"device-stats": []}"#))
-                }
-                CmdRequest::BtrfsReplaceStart { .. } => Ok(RawCommandOutput {
-                    cmd: "btrfs replace start".into(),
-                    stdout: String::new(),
-                    stderr: "ERROR: target device is too small".into(),
-                    exit_status: 1,
-                }),
-                CmdRequest::CryptsetupTestPassphrase { device } => Ok(mock_ok(
-                    &format!("cryptsetup open --test-passphrase {device}"),
-                    "",
-                )),
-                _ => Err(CmdError::MissingMock),
-            }
-        }
-
-        fn run_with_stdin(
-            &self,
-            request: &CmdRequest,
-            _stdin: &[u8],
-        ) -> Result<RawCommandOutput, CmdError> {
-            self.run(request)
-        }
-    }
-
     #[test]
     // Intent: pending-op.json survives when btrfs replace start fails.
     //
@@ -2673,66 +2613,23 @@ mod tests {
     // Scenario: live replace, new disk already LUKS-open, btrfs replace start
     //   fails (e.g. target too small). Journal must persist for recovery.
     fn journal_survives_replace_failure() {
-        // Set up state
-        let state_tmp = tempfile::tempdir().unwrap();
-        let paths = StatePaths::custom(state_tmp.path().into());
-        let mut m = PoolMembership::empty();
-        m.disks.insert(
-            "disk1".into(),
-            DiskMember::from_by_id(ByIdPath("/dev/disk/by-id/virtio-disk1".into())),
-        );
-        m.disks.insert(
-            "disk2".into(),
-            DiskMember::from_by_id(ByIdPath("/dev/disk/by-id/virtio-disk2".into())),
-        );
-        membership::save_membership(&m, &paths).unwrap();
-
-        let config_tmp = tempfile::tempdir().unwrap();
-        let config_path = config_tmp.path().join("config.json");
-        std::fs::write(
-            &config_path,
-            serde_json::to_vec(&serde_json::json!({ "mount_point": "/mnt/storage" })).unwrap(),
-        )
-        .unwrap();
-
-        // Passphrase file (required by cmd_replace)
-        let pass_path = config_tmp.path().join("passphrase");
-        std::fs::write(&pass_path, b"test-passphrase\n").unwrap();
-
-        // Filesystem mock: new disk and its mapper exist
-        let fs = ReplaceMockFs(vec![
+        let f = PoolFixture::two_disk_healthy();
+        let fs = MockFs::storage(vec![
             "/dev/disk/by-id/virtio-disk3".into(),
             "/dev/mapper/braid-disk3".into(),
         ]);
-
-        let runner = FailingReplaceRunner;
-        let inhibitor = crate::inhibit::RecordingInhibitor::new();
-        let result = cmd_replace(
-            &runner,
-            &fs,
-            &ReplaceParams {
-                config_path: &config_path,
-                old_name: "disk2",
-                new_name: "disk3=/dev/disk/by-id/virtio-disk3",
-                missing_id: None,
-                dry_run: false,
-                yes: true,
-                passphrase_stdin: false,
-                passphrase_file: Some(pass_path.as_path()),
-                enroll_key_file: None,
-                luks_format_extra_opts: &[],
-                progress: crate::progress::ProgressOutput::Off,
-                paths: &paths,
-                sleep_inhibitor: &inhibitor,
-            },
-        );
+        let replace_done = Arc::new(AtomicBool::new(false));
+        let runner = ReplacementPool::two_disk_healthy()
+            .install(MockRunner::default(), replace_done)
+            .with_handler(replace_start_fails_handler());
+        let result = cmd_replace(&runner, &fs, &f.replace_params().build());
 
         assert!(
             result.is_err(),
             "replace should fail when btrfs replace fails"
         );
         assert!(
-            journal::load_journal(&paths).unwrap().is_some(),
+            journal::load_journal(&f.paths).unwrap().is_some(),
             "pending-op.json must survive error exit so braid recover can reconcile"
         );
         // The journal exists, which proves we got past journal::write_journal,
@@ -2740,7 +2637,7 @@ mod tests {
         // Locks in the seam placement: if a refactor moves the acquire to a
         // post-journal point or skips it entirely, this assert flips.
         assert_eq!(
-            inhibitor.acquire_count(),
+            f.inhibitor.acquire_count(),
             1,
             "sleep inhibitor must be acquired exactly once on the path through journal::write_journal"
         );
@@ -2768,55 +2665,22 @@ mod tests {
     //   `braid replace --old disk1 --new disk1=/dev/disk/by-id/virtio-disk3`
     //   -- same name on both sides after parsing the new-name spec.
     fn cmd_replace_rejects_old_equals_new() {
-        let state_tmp = tempfile::tempdir().unwrap();
-        let paths = StatePaths::custom(state_tmp.path().into());
-        let mut m = PoolMembership::empty();
-        m.disks.insert(
-            "disk1".into(),
-            DiskMember::from_by_id(ByIdPath("/dev/disk/by-id/virtio-disk1".into())),
-        );
-        m.disks.insert(
-            "disk2".into(),
-            DiskMember::from_by_id(ByIdPath("/dev/disk/by-id/virtio-disk2".into())),
-        );
-        membership::save_membership(&m, &paths).unwrap();
-
-        let config_tmp = tempfile::tempdir().unwrap();
-        let config_path = config_tmp.path().join("config.json");
-        std::fs::write(
-            &config_path,
-            serde_json::to_vec(&serde_json::json!({ "mount_point": "/mnt/storage" })).unwrap(),
-        )
-        .unwrap();
-
-        let pass_path = config_tmp.path().join("passphrase");
-        std::fs::write(&pass_path, b"test-passphrase\n").unwrap();
-
-        let fs = ReplaceMockFs(vec![
+        let f = PoolFixture::two_disk_healthy();
+        let fs = MockFs::storage(vec![
             "/dev/disk/by-id/virtio-disk3".into(),
             "/dev/mapper/braid-disk3".into(),
         ]);
-
-        let runner = FailingReplaceRunner;
-        let inhibitor = crate::inhibit::RecordingInhibitor::new();
+        let replace_done = Arc::new(AtomicBool::new(false));
+        let runner = ReplacementPool::two_disk_healthy()
+            .install(MockRunner::default(), replace_done)
+            .with_handler(replace_start_fails_handler());
         let result = cmd_replace(
             &runner,
             &fs,
-            &ReplaceParams {
-                config_path: &config_path,
-                old_name: "disk1",
-                new_name: "disk1=/dev/disk/by-id/virtio-disk3",
-                missing_id: None,
-                dry_run: false,
-                yes: true,
-                passphrase_stdin: false,
-                passphrase_file: Some(pass_path.as_path()),
-                enroll_key_file: None,
-                luks_format_extra_opts: &[],
-                progress: crate::progress::ProgressOutput::Off,
-                paths: &paths,
-                sleep_inhibitor: &inhibitor,
-            },
+            &f.replace_params()
+                .old("disk1")
+                .new("disk1=/dev/disk/by-id/virtio-disk3")
+                .build(),
         );
 
         match &result {
@@ -2829,12 +2693,12 @@ mod tests {
             other => panic!("expected Err(ReplaceError::Validation), got: {other:?}"),
         }
         assert_eq!(
-            inhibitor.acquire_count(),
+            f.inhibitor.acquire_count(),
             0,
             "old==new typo must be caught before the inhibitor seam -- a caught typo must not hold logind"
         );
         assert!(
-            journal::load_journal(&paths).unwrap().is_none(),
+            journal::load_journal(&f.paths).unwrap().is_none(),
             "no journal may be written when old==new"
         );
     }
@@ -2852,171 +2716,27 @@ mod tests {
     //   to preview the plan. cmd_replace must short-circuit at the dry-run
     //   branch before the inhibitor seam fires.
     fn dry_run_does_not_acquire_inhibitor() {
-        let state_tmp = tempfile::tempdir().unwrap();
-        let paths = StatePaths::custom(state_tmp.path().into());
-        let mut m = PoolMembership::empty();
-        m.disks.insert(
-            "disk1".into(),
-            DiskMember::from_by_id(ByIdPath("/dev/disk/by-id/virtio-disk1".into())),
-        );
-        m.disks.insert(
-            "disk2".into(),
-            DiskMember::from_by_id(ByIdPath("/dev/disk/by-id/virtio-disk2".into())),
-        );
-        membership::save_membership(&m, &paths).unwrap();
-
-        let config_tmp = tempfile::tempdir().unwrap();
-        let config_path = config_tmp.path().join("config.json");
-        std::fs::write(
-            &config_path,
-            serde_json::to_vec(&serde_json::json!({ "mount_point": "/mnt/storage" })).unwrap(),
-        )
-        .unwrap();
-
-        let pass_path = config_tmp.path().join("passphrase");
-        std::fs::write(&pass_path, b"test-passphrase\n").unwrap();
-
-        let fs = ReplaceMockFs(vec![
+        let f = PoolFixture::two_disk_healthy();
+        let fs = MockFs::storage(vec![
             "/dev/disk/by-id/virtio-disk3".into(),
             "/dev/mapper/braid-disk3".into(),
         ]);
-
-        let runner = FailingReplaceRunner;
-        let inhibitor = crate::inhibit::RecordingInhibitor::new();
-        let result = cmd_replace(
-            &runner,
-            &fs,
-            &ReplaceParams {
-                config_path: &config_path,
-                old_name: "disk2",
-                new_name: "disk3=/dev/disk/by-id/virtio-disk3",
-                missing_id: None,
-                dry_run: true,
-                yes: true,
-                passphrase_stdin: false,
-                passphrase_file: Some(pass_path.as_path()),
-                enroll_key_file: None,
-                luks_format_extra_opts: &[],
-                progress: crate::progress::ProgressOutput::Off,
-                paths: &paths,
-                sleep_inhibitor: &inhibitor,
-            },
-        );
+        let replace_done = Arc::new(AtomicBool::new(false));
+        let runner = ReplacementPool::two_disk_healthy()
+            .install(MockRunner::default(), replace_done)
+            .with_handler(replace_start_fails_handler());
+        let result = cmd_replace(&runner, &fs, &f.replace_params().dry_run(true).build());
 
         assert!(result.is_ok(), "dry-run should succeed: {result:?}");
         assert_eq!(
-            inhibitor.acquire_count(),
+            f.inhibitor.acquire_count(),
             0,
             "dry-run must NOT acquire the sleep inhibitor -- it has no irreversible work to protect"
         );
         assert!(
-            journal::load_journal(&paths).unwrap().is_none(),
+            journal::load_journal(&f.paths).unwrap().is_none(),
             "dry-run must not write the journal"
         );
-    }
-
-    /// Runner for a live replace where btrfs replace + cryptsetup close
-    /// succeed but the post-replace `btrfs filesystem resize` fails.
-    /// Records every request so the test can assert that the close ran
-    /// BEFORE the failing resize (regression for the Live arm ordering
-    /// bug where a resize `?` would skip the close).
-    struct ResizeFailingLoggingRunner {
-        log: std::sync::Arc<std::sync::Mutex<Vec<CmdRequest>>>,
-        // Flips when BtrfsReplaceStart returns success so subsequent
-        // BtrfsFilesystemShow probes report the post-replace topology.
-        // The post-replace early `save_membership` call probes here
-        // before persisting, and the test asserts the new disk is
-        // enriched -- which requires the probe to see disk3, not disk2.
-        replace_done: std::sync::Arc<std::sync::atomic::AtomicBool>,
-    }
-
-    impl CmdRunner2 for ResizeFailingLoggingRunner {
-        fn run(&self, request: &CmdRequest) -> Result<RawCommandOutput, CmdError> {
-            self.log.lock().unwrap().push(request.clone());
-            match request {
-                CmdRequest::BtrfsFilesystemShow { mount_point } => {
-                    let show = if self.replace_done.load(std::sync::atomic::Ordering::Relaxed) {
-                        // post-replace: disk1 + disk3 (devid 2 reassigned to disk3)
-                        "Label: none  uuid: cc86845b-aec3-408e-bef5-553affc1f2b1\n\tTotal devices 2 FS bytes used 16.17MiB\n\tdevid    1 size 496.00MiB used 121.56MiB path /dev/mapper/braid-disk1\n\tdevid    2 size 496.00MiB used 121.56MiB path /dev/mapper/braid-disk3\n"
-                    } else {
-                        // pre-replace: disk1 + disk2
-                        "Label: none  uuid: cc86845b-aec3-408e-bef5-553affc1f2b1\n\tTotal devices 2 FS bytes used 16.17MiB\n\tdevid    1 size 496.00MiB used 121.56MiB path /dev/mapper/braid-disk1\n\tdevid    2 size 496.00MiB used 121.56MiB path /dev/mapper/braid-disk2\n"
-                    };
-                    Ok(mock_ok(
-                        &format!("btrfs filesystem show {mount_point}"),
-                        show,
-                    ))
-                }
-                CmdRequest::CryptsetupStatus { mapper } => {
-                    let dev = match mapper.as_str() {
-                        "braid-disk1" => "/dev/vdb",
-                        "braid-disk2" => "/dev/vdc",
-                        "braid-disk3" => "/dev/vdd",
-                        _ => "/dev/vdz",
-                    };
-                    Ok(mock_ok(
-                        &format!("cryptsetup status {mapper}"),
-                        &format!(
-                            "{mapper} is active and is in use.\n  type:    LUKS2\n  device:  {dev}\n  mode:    read/write\n"
-                        ),
-                    ))
-                }
-                CmdRequest::CryptsetupLuksUuid { device } => {
-                    let uuid = match device.as_str() {
-                        "/dev/vdb" | "/dev/disk/by-id/virtio-disk1" => {
-                            "11111111-1111-1111-1111-111111111111"
-                        }
-                        "/dev/vdc" | "/dev/disk/by-id/virtio-disk2" => {
-                            "22222222-2222-2222-2222-222222222222"
-                        }
-                        "/dev/vdd" | "/dev/disk/by-id/virtio-disk3" => {
-                            "33333333-3333-3333-3333-333333333333"
-                        }
-                        _ => "99999999-9999-9999-9999-999999999999",
-                    };
-                    Ok(mock_ok(
-                        &format!("cryptsetup luksUUID {device}"),
-                        &format!("{uuid}\n"),
-                    ))
-                }
-                CmdRequest::CryptsetupLuksDumpText { device } => Ok(mock_ok(
-                    &format!("cryptsetup luksDump {device}"),
-                    "LUKS header information\nVersion:       \t2\n",
-                )),
-                CmdRequest::BtrfsBalanceStatus { .. } => Ok(mock_ok(
-                    "btrfs balance status",
-                    "No balance found on '/mnt/storage'\n",
-                )),
-                CmdRequest::BtrfsDeviceStatsJson { .. } => {
-                    Ok(mock_ok("btrfs device stats", r#"{"device-stats": []}"#))
-                }
-                CmdRequest::BtrfsReplaceStart { .. } => {
-                    self.replace_done
-                        .store(true, std::sync::atomic::Ordering::Relaxed);
-                    Ok(mock_ok("btrfs replace start", ""))
-                }
-                CmdRequest::CryptsetupClose { .. } => Ok(mock_ok("cryptsetup close", "")),
-                CmdRequest::BtrfsFilesystemResize { .. } => Ok(RawCommandOutput {
-                    cmd: "btrfs filesystem resize".into(),
-                    stdout: String::new(),
-                    stderr: "ERROR: unable to resize".into(),
-                    exit_status: 1,
-                }),
-                CmdRequest::CryptsetupTestPassphrase { device } => Ok(mock_ok(
-                    &format!("cryptsetup open --test-passphrase {device}"),
-                    "",
-                )),
-                _ => Err(CmdError::MissingMock),
-            }
-        }
-
-        fn run_with_stdin(
-            &self,
-            request: &CmdRequest,
-            _stdin: &[u8],
-        ) -> Result<RawCommandOutput, CmdError> {
-            self.run(request)
-        }
     }
 
     #[test]
@@ -3034,61 +2754,32 @@ mod tests {
     //   cmd_replace must still have issued `cryptsetup close braid-disk2`
     //   before the resize error propagated out.
     fn close_runs_before_resize_on_live_replace() {
-        let state_tmp = tempfile::tempdir().unwrap();
-        let paths = StatePaths::custom(state_tmp.path().into());
-        let mut m = PoolMembership::empty();
-        m.disks.insert(
-            "disk1".into(),
-            DiskMember::from_by_id(ByIdPath("/dev/disk/by-id/virtio-disk1".into())),
-        );
-        m.disks.insert(
-            "disk2".into(),
-            DiskMember::from_by_id(ByIdPath("/dev/disk/by-id/virtio-disk2".into())),
-        );
-        membership::save_membership(&m, &paths).unwrap();
-
-        let config_tmp = tempfile::tempdir().unwrap();
-        let config_path = config_tmp.path().join("config.json");
-        std::fs::write(
-            &config_path,
-            serde_json::to_vec(&serde_json::json!({ "mount_point": "/mnt/storage" })).unwrap(),
-        )
-        .unwrap();
-
-        let pass_path = config_tmp.path().join("passphrase");
-        std::fs::write(&pass_path, b"test-passphrase\n").unwrap();
-
-        let fs = ReplaceMockFs(vec![
+        let f = PoolFixture::two_disk_healthy();
+        let fs = MockFs::storage(vec![
             "/dev/disk/by-id/virtio-disk3".into(),
             "/dev/mapper/braid-disk3".into(),
         ]);
-
-        let log = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
-        let replace_done = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
-        let runner = ResizeFailingLoggingRunner {
-            log: log.clone(),
-            replace_done: replace_done.clone(),
-        };
-        let inhibitor = crate::inhibit::RecordingInhibitor::new();
-        let result = cmd_replace(
-            &runner,
-            &fs,
-            &ReplaceParams {
-                config_path: &config_path,
-                old_name: "disk2",
-                new_name: "disk3=/dev/disk/by-id/virtio-disk3",
-                missing_id: None,
-                dry_run: false,
-                yes: true,
-                passphrase_stdin: false,
-                passphrase_file: Some(pass_path.as_path()),
-                enroll_key_file: None,
-                luks_format_extra_opts: &[],
-                progress: crate::progress::ProgressOutput::Off,
-                paths: &paths,
-                sleep_inhibitor: &inhibitor,
-            },
-        );
+        let replace_done = Arc::new(AtomicBool::new(false));
+        let runner = ReplacementPool::two_disk_healthy()
+            .install(MockRunner::default(), replace_done.clone())
+            .with_handler({
+                let replace_done = replace_done.clone();
+                move |req| match req {
+                    CmdRequest::BtrfsReplaceStart { .. } => {
+                        replace_done.store(true, std::sync::atomic::Ordering::Relaxed);
+                        Some(Ok(mock_ok("btrfs replace start", "")))
+                    }
+                    CmdRequest::CryptsetupClose { .. } => Some(Ok(mock_ok("cryptsetup close", ""))),
+                    CmdRequest::BtrfsFilesystemResize { .. } => Some(Ok(RawCommandOutput {
+                        cmd: "btrfs filesystem resize".into(),
+                        stdout: String::new(),
+                        stderr: "ERROR: unable to resize".into(),
+                        exit_status: 1,
+                    })),
+                    _ => None,
+                }
+            });
+        let result = cmd_replace(&runner, &fs, &f.replace_params().build());
 
         match &result {
             Err(ReplaceError::Pool(crate::pool::PoolError::Failed(msg))) => {
@@ -3102,7 +2793,7 @@ mod tests {
             }
         }
 
-        let log = log.lock().unwrap();
+        let log = runner.requests();
         let close_idx = log
             .iter()
             .position(|r| {
@@ -3123,10 +2814,10 @@ mod tests {
         );
 
         assert!(
-            journal::load_journal(&paths).unwrap().is_some(),
+            journal::load_journal(&f.paths).unwrap().is_some(),
             "pending-op.json must survive error exit so braid recover can reconcile"
         );
-        let journal = journal::load_journal(&paths)
+        let journal = journal::load_journal(&f.paths)
             .unwrap()
             .expect("journal should remain after post-replace resize failure");
         assert!(
@@ -3143,7 +2834,7 @@ mod tests {
 
         // Membership commits at btrfs replace start; pool.json must reflect
         // the new topology even when the post-replace resize fails.
-        let saved = membership::load_membership(&paths)
+        let saved = membership::load_membership(&f.paths)
             .expect("pool.json must exist after the membership commit");
         assert!(
             !saved.disks.contains_key("disk2"),
@@ -3164,105 +2855,6 @@ mod tests {
         );
     }
 
-    /// Runner for a live replace where every step succeeds except the
-    /// best-effort `cryptsetup close` of the old mapper, which returns
-    /// non-zero. Mirrors `ResizeFailingLoggingRunner` so the rest of the
-    /// flow reaches the close site.
-    struct CloseFailingReplaceRunner {
-        replace_done: std::sync::Arc<std::sync::atomic::AtomicBool>,
-    }
-
-    impl CmdRunner2 for CloseFailingReplaceRunner {
-        fn run(&self, request: &CmdRequest) -> Result<RawCommandOutput, CmdError> {
-            match request {
-                CmdRequest::BtrfsFilesystemShow { mount_point } => {
-                    let show = if self.replace_done.load(std::sync::atomic::Ordering::Relaxed) {
-                        "Label: none  uuid: cc86845b-aec3-408e-bef5-553affc1f2b1\n\tTotal devices 2 FS bytes used 16.17MiB\n\tdevid    1 size 496.00MiB used 121.56MiB path /dev/mapper/braid-disk1\n\tdevid    2 size 496.00MiB used 121.56MiB path /dev/mapper/braid-disk3\n"
-                    } else {
-                        "Label: none  uuid: cc86845b-aec3-408e-bef5-553affc1f2b1\n\tTotal devices 2 FS bytes used 16.17MiB\n\tdevid    1 size 496.00MiB used 121.56MiB path /dev/mapper/braid-disk1\n\tdevid    2 size 496.00MiB used 121.56MiB path /dev/mapper/braid-disk2\n"
-                    };
-                    Ok(mock_ok(
-                        &format!("btrfs filesystem show {mount_point}"),
-                        show,
-                    ))
-                }
-                CmdRequest::CryptsetupStatus { mapper } => {
-                    let dev = match mapper.as_str() {
-                        "braid-disk1" => "/dev/vdb",
-                        "braid-disk2" => "/dev/vdc",
-                        "braid-disk3" => "/dev/vdd",
-                        _ => "/dev/vdz",
-                    };
-                    Ok(mock_ok(
-                        &format!("cryptsetup status {mapper}"),
-                        &format!(
-                            "{mapper} is active and is in use.\n  type:    LUKS2\n  device:  {dev}\n  mode:    read/write\n"
-                        ),
-                    ))
-                }
-                CmdRequest::CryptsetupLuksUuid { device } => {
-                    let uuid = match device.as_str() {
-                        "/dev/vdb" | "/dev/disk/by-id/virtio-disk1" => {
-                            "11111111-1111-1111-1111-111111111111"
-                        }
-                        "/dev/vdc" | "/dev/disk/by-id/virtio-disk2" => {
-                            "22222222-2222-2222-2222-222222222222"
-                        }
-                        "/dev/vdd" | "/dev/disk/by-id/virtio-disk3" => {
-                            "33333333-3333-3333-3333-333333333333"
-                        }
-                        _ => "99999999-9999-9999-9999-999999999999",
-                    };
-                    Ok(mock_ok(
-                        &format!("cryptsetup luksUUID {device}"),
-                        &format!("{uuid}\n"),
-                    ))
-                }
-                CmdRequest::CryptsetupLuksDumpText { device } => Ok(mock_ok(
-                    &format!("cryptsetup luksDump {device}"),
-                    "LUKS header information\nVersion:       \t2\n",
-                )),
-                CmdRequest::BtrfsBalanceStatus { .. } => Ok(mock_ok(
-                    "btrfs balance status",
-                    "No balance found on '/mnt/storage'\n",
-                )),
-                CmdRequest::BtrfsDeviceStatsJson { .. } => {
-                    Ok(mock_ok("btrfs device stats", r#"{"device-stats": []}"#))
-                }
-                CmdRequest::BtrfsReplaceStart { .. } => {
-                    self.replace_done
-                        .store(true, std::sync::atomic::Ordering::Relaxed);
-                    Ok(mock_ok("btrfs replace start", ""))
-                }
-                CmdRequest::CryptsetupClose { mapper } if mapper == "braid-disk2" => {
-                    Ok(RawCommandOutput {
-                        cmd: "cryptsetup close".into(),
-                        stdout: String::new(),
-                        stderr: "device is busy".into(),
-                        exit_status: 5,
-                    })
-                }
-                CmdRequest::CryptsetupClose { .. } => Ok(mock_ok("cryptsetup close", "")),
-                CmdRequest::BtrfsFilesystemResize { .. } => {
-                    Ok(mock_ok("btrfs filesystem resize", ""))
-                }
-                CmdRequest::CryptsetupTestPassphrase { device } => Ok(mock_ok(
-                    &format!("cryptsetup open --test-passphrase {device}"),
-                    "",
-                )),
-                _ => Err(CmdError::MissingMock),
-            }
-        }
-
-        fn run_with_stdin(
-            &self,
-            request: &CmdRequest,
-            _stdin: &[u8],
-        ) -> Result<RawCommandOutput, CmdError> {
-            self.run(request)
-        }
-    }
-
     /* Intent: live-replace's best-effort close of the old mapper closes its
      * [wait] row with [warn] when cryptsetup returns non-zero exit.
      * Why it exists: Principle 13 forbids dangling [wait] rows; a best-effort
@@ -3273,61 +2865,39 @@ mod tests {
      */
     #[test]
     fn live_replace_old_close_failure_emits_warn_row() {
-        let state_tmp = tempfile::tempdir().unwrap();
-        let paths = StatePaths::custom(state_tmp.path().into());
-        let mut m = PoolMembership::empty();
-        m.disks.insert(
-            "disk1".into(),
-            DiskMember::from_by_id(ByIdPath("/dev/disk/by-id/virtio-disk1".into())),
-        );
-        m.disks.insert(
-            "disk2".into(),
-            DiskMember::from_by_id(ByIdPath("/dev/disk/by-id/virtio-disk2".into())),
-        );
-        membership::save_membership(&m, &paths).unwrap();
-
-        let config_tmp = tempfile::tempdir().unwrap();
-        let config_path = config_tmp.path().join("config.json");
-        std::fs::write(
-            &config_path,
-            serde_json::to_vec(&serde_json::json!({ "mount_point": "/mnt/storage" })).unwrap(),
-        )
-        .unwrap();
-
-        let pass_path = config_tmp.path().join("passphrase");
-        std::fs::write(&pass_path, b"test-passphrase\n").unwrap();
-
-        let fs = ReplaceMockFs(vec![
+        let f = PoolFixture::two_disk_healthy();
+        let fs = MockFs::storage(vec![
             "/dev/disk/by-id/virtio-disk3".into(),
             "/dev/mapper/braid-disk3".into(),
         ]);
-
-        let replace_done = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
-        let runner = CloseFailingReplaceRunner {
-            replace_done: replace_done.clone(),
-        };
-        let inhibitor = crate::inhibit::RecordingInhibitor::new();
+        let replace_done = Arc::new(AtomicBool::new(false));
+        let runner = ReplacementPool::two_disk_healthy()
+            .install(MockRunner::default(), replace_done.clone())
+            .with_handler({
+                let replace_done = replace_done.clone();
+                move |req| match req {
+                    CmdRequest::BtrfsReplaceStart { .. } => {
+                        replace_done.store(true, std::sync::atomic::Ordering::Relaxed);
+                        Some(Ok(mock_ok("btrfs replace start", "")))
+                    }
+                    CmdRequest::CryptsetupClose { mapper } if mapper == "braid-disk2" => {
+                        Some(Ok(RawCommandOutput {
+                            cmd: "cryptsetup close".into(),
+                            stdout: String::new(),
+                            stderr: "device is busy".into(),
+                            exit_status: 5,
+                        }))
+                    }
+                    CmdRequest::CryptsetupClose { .. } => Some(Ok(mock_ok("cryptsetup close", ""))),
+                    CmdRequest::BtrfsFilesystemResize { .. } => {
+                        Some(Ok(mock_ok("btrfs filesystem resize", "")))
+                    }
+                    _ => None,
+                }
+            });
 
         let captured = crate::status_tag::testing::capture_with_color(false, || {
-            let result = cmd_replace(
-                &runner,
-                &fs,
-                &ReplaceParams {
-                    config_path: &config_path,
-                    old_name: "disk2",
-                    new_name: "disk3=/dev/disk/by-id/virtio-disk3",
-                    missing_id: None,
-                    dry_run: false,
-                    yes: true,
-                    passphrase_stdin: false,
-                    passphrase_file: Some(pass_path.as_path()),
-                    enroll_key_file: None,
-                    luks_format_extra_opts: &[],
-                    progress: crate::progress::ProgressOutput::Off,
-                    paths: &paths,
-                    sleep_inhibitor: &inhibitor,
-                },
-            );
+            let result = cmd_replace(&runner, &fs, &f.replace_params().build());
             assert!(
                 result.is_ok(),
                 "best-effort close failure must not fail the replace command, got: {result:?}"
@@ -3670,96 +3240,6 @@ mod tests {
         );
     }
 
-    /// Runner for a replace where the new disk is already LUKS-formatted but
-    /// the mapper is closed (PresentLuks { mapper_open: false }) and the
-    /// supplied passphrase is wrong: CryptsetupTestPassphrase on the new
-    /// disk's by_id returns exit 2 (EPERM). Everything else mirrors
-    /// FailingReplaceRunner except that braid-disk3's mapper is inactive,
-    /// so probe_config_disk reports mapper_open: false.
-    struct ClosedLuksWrongPassRunner;
-
-    impl CmdRunner2 for ClosedLuksWrongPassRunner {
-        fn run(&self, request: &CmdRequest) -> Result<RawCommandOutput, CmdError> {
-            match request {
-                CmdRequest::BtrfsFilesystemShow { mount_point } => Ok(mock_ok(
-                    &format!("btrfs filesystem show {mount_point}"),
-                    "Label: none  uuid: cc86845b-aec3-408e-bef5-553affc1f2b1\n\tTotal devices 2 FS bytes used 16.17MiB\n\tdevid    1 size 496.00MiB used 121.56MiB path /dev/mapper/braid-disk1\n\tdevid    2 size 496.00MiB used 121.56MiB path /dev/mapper/braid-disk2\n",
-                )),
-                CmdRequest::CryptsetupStatus { mapper } => match mapper.as_str() {
-                    "braid-disk1" => Ok(mock_ok(
-                        &format!("cryptsetup status {mapper}"),
-                        &format!(
-                            "{mapper} is active and is in use.\n  type:    LUKS2\n  device:  /dev/vdb\n  mode:    read/write\n"
-                        ),
-                    )),
-                    "braid-disk2" => Ok(mock_ok(
-                        &format!("cryptsetup status {mapper}"),
-                        &format!(
-                            "{mapper} is active and is in use.\n  type:    LUKS2\n  device:  /dev/vdc\n  mode:    read/write\n"
-                        ),
-                    )),
-                    // new disk's mapper is closed -- this is the key
-                    // difference vs FailingReplaceRunner.
-                    "braid-disk3" => Ok(RawCommandOutput {
-                        cmd: format!("cryptsetup status {mapper}"),
-                        stdout: String::new(),
-                        stderr: format!("/dev/mapper/{mapper} is inactive.\n"),
-                        exit_status: 4,
-                    }),
-                    _ => Err(CmdError::MissingMock),
-                },
-                CmdRequest::CryptsetupLuksUuid { device } => {
-                    let uuid = match device.as_str() {
-                        "/dev/vdb" | "/dev/disk/by-id/virtio-disk1" => {
-                            "11111111-1111-1111-1111-111111111111"
-                        }
-                        "/dev/vdc" | "/dev/disk/by-id/virtio-disk2" => {
-                            "22222222-2222-2222-2222-222222222222"
-                        }
-                        "/dev/disk/by-id/virtio-disk3" => "33333333-3333-3333-3333-333333333333",
-                        _ => "99999999-9999-9999-9999-999999999999",
-                    };
-                    Ok(mock_ok(
-                        &format!("cryptsetup luksUUID {device}"),
-                        &format!("{uuid}\n"),
-                    ))
-                }
-                CmdRequest::CryptsetupLuksDumpText { device } => Ok(mock_ok(
-                    &format!("cryptsetup luksDump {device}"),
-                    "LUKS header information\nVersion:       \t2\n",
-                )),
-                CmdRequest::CryptsetupTestPassphrase { device } => {
-                    if device == "/dev/disk/by-id/virtio-disk3" {
-                        Ok(RawCommandOutput {
-                            cmd: format!("cryptsetup luksOpen --test-passphrase {device}"),
-                            stdout: String::new(),
-                            stderr: "No key available with this passphrase.\n".into(),
-                            exit_status: 2,
-                        })
-                    } else {
-                        Ok(mock_ok(
-                            &format!("cryptsetup luksOpen --test-passphrase {device}"),
-                            "",
-                        ))
-                    }
-                }
-                CmdRequest::BtrfsBalanceStatus { .. } => Ok(mock_ok(
-                    "btrfs balance status",
-                    "No balance found on '/mnt/storage'\n",
-                )),
-                _ => Err(CmdError::MissingMock),
-            }
-        }
-
-        fn run_with_stdin(
-            &self,
-            request: &CmdRequest,
-            _stdin: &[u8],
-        ) -> Result<RawCommandOutput, CmdError> {
-            self.run(request)
-        }
-    }
-
     #[test]
     // Intent: wrong passphrase on a PresentLuks { mapper_open: false } new
     //   disk must fail before the journal is written.
@@ -3777,102 +3257,42 @@ mod tests {
     //   wrong passphrase. The command must abort cleanly: no journal, no
     //   inhibitor acquired, Err(Validation).
     fn wrong_passphrase_on_closed_luks_new_disk_does_not_write_journal() {
-        let state_tmp = tempfile::tempdir().unwrap();
-        let paths = StatePaths::custom(state_tmp.path().into());
-        let mut m = PoolMembership::empty();
-        m.disks.insert(
-            "disk1".into(),
-            DiskMember::from_by_id(ByIdPath("/dev/disk/by-id/virtio-disk1".into())),
-        );
-        m.disks.insert(
-            "disk2".into(),
-            DiskMember::from_by_id(ByIdPath("/dev/disk/by-id/virtio-disk2".into())),
-        );
-        membership::save_membership(&m, &paths).unwrap();
-
-        let config_tmp = tempfile::tempdir().unwrap();
-        let config_path = config_tmp.path().join("config.json");
-        std::fs::write(
-            &config_path,
-            serde_json::to_vec(&serde_json::json!({ "mount_point": "/mnt/storage" })).unwrap(),
-        )
-        .unwrap();
-
-        let pass_path = config_tmp.path().join("passphrase");
-        std::fs::write(&pass_path, b"wrong-passphrase\n").unwrap();
-
+        let f = PoolFixture::two_disk_healthy();
         // Only the new disk's by_id exists. /dev/mapper/braid-disk3 is
-        // absent because the mapper is closed.
-        let fs = ReplaceMockFs(vec!["/dev/disk/by-id/virtio-disk3".into()]);
-
-        let runner = ClosedLuksWrongPassRunner;
-        let inhibitor = crate::inhibit::RecordingInhibitor::new();
-        let result = cmd_replace(
-            &runner,
-            &fs,
-            &ReplaceParams {
-                config_path: &config_path,
-                old_name: "disk2",
-                new_name: "disk3=/dev/disk/by-id/virtio-disk3",
-                missing_id: None,
-                dry_run: false,
-                yes: true,
-                passphrase_stdin: false,
-                passphrase_file: Some(pass_path.as_path()),
-                enroll_key_file: None,
-                luks_format_extra_opts: &[],
-                progress: crate::progress::ProgressOutput::Off,
-                paths: &paths,
-                sleep_inhibitor: &inhibitor,
-            },
-        );
+        // absent because the mapper is closed (with_mapper_closed below).
+        let fs = MockFs::storage(vec!["/dev/disk/by-id/virtio-disk3".into()]);
+        let replace_done = Arc::new(AtomicBool::new(false));
+        let runner = ReplacementPool::two_disk_healthy()
+            .with_mapper_closed("braid-disk3")
+            .install(MockRunner::default(), replace_done)
+            .with_handler(|req| match req {
+                CmdRequest::CryptsetupTestPassphrase { device }
+                    if device == "/dev/disk/by-id/virtio-disk3" =>
+                {
+                    Some(Ok(RawCommandOutput {
+                        cmd: format!("cryptsetup luksOpen --test-passphrase {device}"),
+                        stdout: String::new(),
+                        stderr: "No key available with this passphrase.\n".into(),
+                        exit_status: 2,
+                    }))
+                }
+                _ => None,
+            });
+        let result = cmd_replace(&runner, &fs, &f.replace_params().build());
 
         assert!(
             matches!(result, Err(ReplaceError::Validation(_))),
             "expected Err(ReplaceError::Validation(_)) for wrong passphrase on a closed-LUKS new disk, got: {result:?}"
         );
         assert!(
-            journal::load_journal(&paths).unwrap().is_none(),
+            journal::load_journal(&f.paths).unwrap().is_none(),
             "pending-op.json must not be written -- wrong passphrase is a reversible preflight failure"
         );
         assert_eq!(
-            inhibitor.acquire_count(),
+            f.inhibitor.acquire_count(),
             0,
             "sleep inhibitor must not be acquired before passphrase verification"
         );
-    }
-
-    /// Recording wrapper around FailingReplaceRunner that logs every
-    /// CmdRequest before dispatching. Used by the mapper_open: true test to
-    /// assert the new disk is verified but not opened again.
-    struct RecordingReplaceRunner {
-        inner: FailingReplaceRunner,
-        log: std::sync::Arc<std::sync::Mutex<Vec<CmdRequest>>>,
-    }
-
-    impl RecordingReplaceRunner {
-        fn new() -> Self {
-            Self {
-                inner: FailingReplaceRunner,
-                log: std::sync::Arc::new(std::sync::Mutex::new(Vec::new())),
-            }
-        }
-    }
-
-    impl CmdRunner2 for RecordingReplaceRunner {
-        fn run(&self, request: &CmdRequest) -> Result<RawCommandOutput, CmdError> {
-            self.log.lock().unwrap().push(request.clone());
-            self.inner.run(request)
-        }
-
-        fn run_with_stdin(
-            &self,
-            request: &CmdRequest,
-            stdin: &[u8],
-        ) -> Result<RawCommandOutput, CmdError> {
-            self.log.lock().unwrap().push(request.clone());
-            self.inner.run_with_stdin(request, stdin)
-        }
     }
 
     #[test]
@@ -3891,59 +3311,18 @@ mod tests {
     //   the already-open mapper and proceeds to btrfs replace start without
     //   a second LUKS interaction on the new disk.
     fn mapper_open_true_verifies_but_does_not_open_new_disk_luks() {
-        let state_tmp = tempfile::tempdir().unwrap();
-        let paths = StatePaths::custom(state_tmp.path().into());
-        let mut m = PoolMembership::empty();
-        m.disks.insert(
-            "disk1".into(),
-            DiskMember::from_by_id(ByIdPath("/dev/disk/by-id/virtio-disk1".into())),
-        );
-        m.disks.insert(
-            "disk2".into(),
-            DiskMember::from_by_id(ByIdPath("/dev/disk/by-id/virtio-disk2".into())),
-        );
-        membership::save_membership(&m, &paths).unwrap();
-
-        let config_tmp = tempfile::tempdir().unwrap();
-        let config_path = config_tmp.path().join("config.json");
-        std::fs::write(
-            &config_path,
-            serde_json::to_vec(&serde_json::json!({ "mount_point": "/mnt/storage" })).unwrap(),
-        )
-        .unwrap();
-
-        let pass_path = config_tmp.path().join("passphrase");
-        std::fs::write(&pass_path, b"test-passphrase\n").unwrap();
-
-        let fs = ReplaceMockFs(vec![
+        let f = PoolFixture::two_disk_healthy();
+        let fs = MockFs::storage(vec![
             "/dev/disk/by-id/virtio-disk3".into(),
             "/dev/mapper/braid-disk3".into(),
         ]);
+        let replace_done = Arc::new(AtomicBool::new(false));
+        let runner = ReplacementPool::two_disk_healthy()
+            .install(MockRunner::default(), replace_done)
+            .with_handler(replace_start_fails_handler());
+        let result = cmd_replace(&runner, &fs, &f.replace_params().build());
 
-        let runner = RecordingReplaceRunner::new();
-        let log = runner.log.clone();
-        let inhibitor = crate::inhibit::RecordingInhibitor::new();
-        let result = cmd_replace(
-            &runner,
-            &fs,
-            &ReplaceParams {
-                config_path: &config_path,
-                old_name: "disk2",
-                new_name: "disk3=/dev/disk/by-id/virtio-disk3",
-                missing_id: None,
-                dry_run: false,
-                yes: true,
-                passphrase_stdin: false,
-                passphrase_file: Some(pass_path.as_path()),
-                enroll_key_file: None,
-                luks_format_extra_opts: &[],
-                progress: crate::progress::ProgressOutput::Off,
-                paths: &paths,
-                sleep_inhibitor: &inhibitor,
-            },
-        );
-
-        // The inner runner forces BtrfsReplaceStart to fail (exit 1), so
+        // The handler forces BtrfsReplaceStart to fail (exit 1), so
         // cmd_replace must return a Pool error -- this confirms the flow
         // reached the btrfs phase rather than stopping short, which is a
         // prerequisite for the zero-counts below to mean "not called"
@@ -3953,16 +3332,16 @@ mod tests {
             "expected Err(ReplaceError::Pool(_)) from btrfs replace start failure, got: {result:?}"
         );
         assert!(
-            journal::load_journal(&paths).unwrap().is_some(),
+            journal::load_journal(&f.paths).unwrap().is_some(),
             "journal must be written -- the failure is post-journal"
         );
         assert_eq!(
-            inhibitor.acquire_count(),
+            f.inhibitor.acquire_count(),
             1,
             "sleep inhibitor must be acquired exactly once on the way in"
         );
 
-        let log = log.lock().unwrap();
+        let log = runner.requests();
         let new_by_id = "/dev/disk/by-id/virtio-disk3";
 
         let test_passphrase_calls = log
@@ -4557,54 +3936,15 @@ mod tests {
      */
     #[test]
     fn plan_replace_live_preview_has_no_notes_and_matches_legacy_step_render() {
-        let state_tmp = tempfile::tempdir().unwrap();
-        let paths = StatePaths::custom(state_tmp.path().into());
-        let mut m = PoolMembership::empty();
-        m.disks.insert(
-            "disk1".into(),
-            DiskMember::from_by_id(ByIdPath("/dev/disk/by-id/virtio-disk1".into())),
-        );
-        m.disks.insert(
-            "disk2".into(),
-            DiskMember::from_by_id(ByIdPath("/dev/disk/by-id/virtio-disk2".into())),
-        );
-        membership::save_membership(&m, &paths).unwrap();
-
-        let config_tmp = tempfile::tempdir().unwrap();
-        let config_path = config_tmp.path().join("config.json");
-        std::fs::write(
-            &config_path,
-            serde_json::to_vec(&serde_json::json!({ "mount_point": "/mnt/storage" })).unwrap(),
-        )
-        .unwrap();
-        let pass_path = config_tmp.path().join("passphrase");
-        std::fs::write(&pass_path, b"test-passphrase\n").unwrap();
-
-        let fs = ReplaceMockFs(vec![
+        let f = PoolFixture::two_disk_healthy();
+        let fs = MockFs::storage(vec![
             "/dev/disk/by-id/virtio-disk3".into(),
             "/dev/mapper/braid-disk3".into(),
         ]);
-        let runner = FailingReplaceRunner;
-        let inhibitor = crate::inhibit::RecordingInhibitor::new();
-        let report = plan_replace(
-            &runner,
-            &fs,
-            &ReplaceParams {
-                config_path: &config_path,
-                old_name: "disk2",
-                new_name: "disk3=/dev/disk/by-id/virtio-disk3",
-                missing_id: None,
-                dry_run: true,
-                yes: true,
-                passphrase_stdin: false,
-                passphrase_file: Some(pass_path.as_path()),
-                enroll_key_file: None,
-                luks_format_extra_opts: &[],
-                progress: crate::progress::ProgressOutput::Off,
-                paths: &paths,
-                sleep_inhibitor: &inhibitor,
-            },
-        );
+        let replace_done = Arc::new(AtomicBool::new(false));
+        let runner =
+            ReplacementPool::two_disk_healthy().install(MockRunner::default(), replace_done);
+        let report = plan_replace(&runner, &fs, &f.replace_params().dry_run(true).build());
         assert!(
             report.notes.is_empty(),
             "replace preview fixture must not accumulate preflight notes on the Ok path: {:?}",
@@ -4640,7 +3980,7 @@ mod tests {
             "live-path dry-run preview must not leak confirmation-only WARNING lines, got:\n{rendered}",
         );
         assert!(
-            inhibitor.acquire_count() == 0,
+            f.inhibitor.acquire_count() == 0,
             "plan_replace must not acquire the sleep inhibitor",
         );
     }
@@ -4784,57 +4124,16 @@ mod tests {
      */
     #[test]
     fn plan_replace_preflight_busy_op_becomes_info_note() {
-        let state_tmp = tempfile::tempdir().unwrap();
-        let paths = StatePaths::custom(state_tmp.path().into());
-        let mut m = PoolMembership::empty();
-        m.disks.insert(
-            "disk1".into(),
-            DiskMember::from_by_id(ByIdPath("/dev/disk/by-id/virtio-disk1".into())),
-        );
-        m.disks.insert(
-            "disk2".into(),
-            DiskMember::from_by_id(ByIdPath("/dev/disk/by-id/virtio-disk2".into())),
-        );
-        membership::save_membership(&m, &paths).unwrap();
-
-        let config_tmp = tempfile::tempdir().unwrap();
-        let config_path = config_tmp.path().join("config.json");
-        std::fs::write(
-            &config_path,
-            serde_json::to_vec(&serde_json::json!({ "mount_point": "/mnt/storage" })).unwrap(),
-        )
-        .unwrap();
-        let pass_path = config_tmp.path().join("passphrase");
-        std::fs::write(&pass_path, b"test-passphrase\n").unwrap();
-
-        let fs = ReplaceMockFsWithSysfs::new(
-            vec![
-                "/dev/disk/by-id/virtio-disk3".into(),
-                "/dev/mapper/braid-disk3".into(),
-            ],
-            "device add\n",
-        );
-        let runner = FailingReplaceRunner;
-        let inhibitor = crate::inhibit::RecordingInhibitor::new();
-        let report = plan_replace(
-            &runner,
-            &fs,
-            &ReplaceParams {
-                config_path: &config_path,
-                old_name: "disk2",
-                new_name: "disk3=/dev/disk/by-id/virtio-disk3",
-                missing_id: None,
-                dry_run: true,
-                yes: true,
-                passphrase_stdin: false,
-                passphrase_file: Some(pass_path.as_path()),
-                enroll_key_file: None,
-                luks_format_extra_opts: &[],
-                progress: crate::progress::ProgressOutput::Off,
-                paths: &paths,
-                sleep_inhibitor: &inhibitor,
-            },
-        );
+        let f = PoolFixture::two_disk_healthy();
+        let fs = MockFs::storage(vec![
+            "/dev/disk/by-id/virtio-disk3".into(),
+            "/dev/mapper/braid-disk3".into(),
+        ])
+        .with_excl_op("device add\n");
+        let replace_done = Arc::new(AtomicBool::new(false));
+        let runner =
+            ReplacementPool::two_disk_healthy().install(MockRunner::default(), replace_done);
+        let report = plan_replace(&runner, &fs, &f.replace_params().dry_run(true).build());
         let plan = report
             .result
             .expect("plan_replace should succeed on live-path fixture + busy op");
