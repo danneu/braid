@@ -219,15 +219,12 @@ fn plan_enrollment<R: CommandRunner>(
             }
         }
 
-        // Per-disk passphrase verify: every disk that will be mutated has its
-        // passphrase verified during planning. Without this, a divergent
-        // passphrase on a non-first disk (e.g. user ran `cryptsetup
-        // luksChangeKey` on disk2 out-of-band) would not surface until the
-        // apply phase, which leaves the pool partially mutated. The first
-        // candidate is already covered by `verify_first_candidate_passphrase`
-        // above, which also handles the all-`AlreadyEnrolled` case where
-        // this loop never reaches the verify (every iter takes the `continue`
-        // above).
+        // Per-disk passphrase verify catches an out-of-band slot-0 divergence
+        // (e.g. `cryptsetup luksChangeKey` on disk2) before apply leaves the
+        // pool partially mutated. Disk[0] is covered by the up-front
+        // `verify_credential_for_targets` call above; that same call also
+        // guards the all-`AlreadyEnrolled` path, where every iteration
+        // `continue`s before reaching this block.
         if i > 0 {
             let target = CredentialVerifyTarget {
                 name: name.clone(),
