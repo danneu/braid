@@ -593,6 +593,11 @@
               braid = linuxCrane.braid-cli-unwrapped;
             }
           );
+          ups-credential-lifecycle = pkgs.testers.nixosTest (
+            import ./tests/module/ups-credential-lifecycle.nix {
+              braid = linuxCrane.braid-cli-unwrapped;
+            }
+          );
           ups-lb-during-replace = pkgs.testers.nixosTest (
             import ./tests/module/ups-lb-during-replace.nix {
               braid = linuxCrane.braid-cli-unwrapped;

@@ -87,6 +87,18 @@ Braid avoids this in three ways:
    filesystem's root inode permissions, so the passphrase file stays
    unreachable during the mount window.
 
+## Credential memory hygiene
+
+Passphrase buffers in the CLI are `Zeroizing<...>` from read to drop
+(`cli/src/luks.rs::read_line_into_zeroizing`,
+`cli/src/luks.rs::read_file_into_zeroizing`), and subprocess delivery is
+stdin-only with no argv argument or temporary file. Generated keyfile bytes
+are zeroized after write (`cli/src/enroll_key_file.rs::generate_key_file`).
+Passphrases and keyfile bytes never enter the Nix store; the upsmon token is
+generated at runtime per [decision 020](decisions/020-ups-integration.md),
+and the USB keyfile lives only on the USB stick mounted into
+`/run/braid-key/mnt/` as hardened in commit `df706c44875f`.
+
 ## Boot resilience: nofail + device-timeout
 
 The USB mount uses `nofail` and `x-systemd.device-timeout=Ns`. Together
