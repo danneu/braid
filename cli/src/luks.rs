@@ -490,6 +490,28 @@ pub fn backup_luks_header<R: CommandRunner>(
     backup_luks_header_to(runner, device, mapper, &paths.luks_headers_dir())
 }
 
+/// Compose post-mutation backup failures so every caller gives the same
+/// recovery path without claiming the disk is healthy.
+fn header_backup_failure_message(device: &str, underlying: &LuksError) -> String {
+    format!(
+        "LUKS header backup failed after the LUKS mutation completed: {underlying}\n\
+         To capture an off-system header backup directly, run:\n  \
+         cryptsetup luksHeaderBackup --header-backup-file <off-system path> {device}"
+    )
+}
+
+/// Header backup wrapper for callsites that have already completed a LUKS
+/// slot mutation, so the user can retry backup without repeating the mutation.
+pub fn backup_luks_header_post_mutation<R: CommandRunner>(
+    runner: &R,
+    device: &str,
+    mapper: &str,
+    paths: &StatePaths,
+) -> Result<PathBuf, LuksError> {
+    backup_luks_header(runner, device, mapper, paths)
+        .map_err(|e| LuksError::Validation(header_backup_failure_message(device, &e)))
+}
+
 /// Outcome of a keyslot verification attempt. Exit 2 (EPERM) is the only
 /// cryptsetup exit that semantically means "wrong credential" (see
 /// `translate_errno` in `reference/cryptsetup/src/utils_tools.c`). Every
@@ -1001,6 +1023,125 @@ mod tests {
             LuksError::Validation(msg) => msg,
             other => panic!("expected Validation, got {other:?}"),
         }
+    }
+
+    // Intent: post-mutation backup failures keep the underlying error and
+    // include the direct off-system backup command.
+    // Why it exists: the recovery hint is shared across enroll, add, and
+    // replace, so wording drift must fail at the helper boundary.
+    // Scenario: cryptsetup reports ENOSPC after the LUKS mutation already
+    // completed and the local header copy cannot be created.
+    #[test]
+    fn header_backup_failure_message_includes_device_and_remediation() {
+        let device = "/dev/disk/by-id/disk1";
+        let underlying = LuksError::Validation(
+            "LUKS header backup failed (exit 1): No space left on device".into(),
+        );
+
+        let msg = header_backup_failure_message(device, &underlying);
+
+        assert!(
+            msg.contains(&underlying.to_string()),
+            "expected underlying error in: {msg}"
+        );
+        assert!(msg.contains(device), "expected device path in: {msg}");
+        assert!(
+            msg.contains("cryptsetup luksHeaderBackup --header-backup-file"),
+            "expected remediation command in: {msg}"
+        );
+        assert!(
+            msg.contains("after the LUKS mutation completed"),
+            "expected post-mutation framing in: {msg}"
+        );
+        assert!(
+            !msg.contains("intact"),
+            "message must not over-claim disk health: {msg}"
+        );
+    }
+
+    // Intent: backup_luks_header_post_mutation wraps failed local header
+    // backups with post-mutation framing and off-system remediation.
+    // Why it exists: callers should not have to compose their own wording or
+    // remember which LUKS errors need richer context.
+    // Scenario: cryptsetup cannot write the local temporary header backup
+    // because the state directory is full.
+    #[test]
+    fn backup_luks_header_post_mutation_wraps_error_on_failure() {
+        let dir = tempfile::tempdir().unwrap();
+        let paths = StatePaths::custom(dir.path().into());
+        let device = "/dev/disk/by-id/disk1";
+        let mapper = "braid-disk1";
+        let tmp_path = paths
+            .luks_headers_dir()
+            .join("braid-disk1.luksheader.tmp")
+            .display()
+            .to_string();
+        let runner = MockRunner::default().with_output(
+            CmdRequest::CryptsetupLuksHeaderBackup {
+                device: device.to_owned(),
+                backup_path: tmp_path,
+            },
+            RawCommandOutput {
+                cmd: "cryptsetup luksHeaderBackup".into(),
+                stdout: String::new(),
+                stderr: "No space left on device".into(),
+                exit_status: 1,
+            },
+        );
+
+        let msg = validation_message(
+            backup_luks_header_post_mutation(&runner, device, mapper, &paths)
+                .expect_err("backup failure must be wrapped"),
+        );
+
+        assert!(
+            msg.contains("No space left on device"),
+            "expected stderr in: {msg}"
+        );
+        assert!(
+            msg.contains("cryptsetup luksHeaderBackup --header-backup-file"),
+            "expected remediation command in: {msg}"
+        );
+    }
+
+    // Intent: backup_luks_header_post_mutation returns the same success path
+    // as the underlying local backup helper.
+    // Why it exists: enriching errors must not hide or alter successful local
+    // backup creation.
+    // Scenario: cryptsetup writes the temporary header copy and the wrapper
+    // returns the final persisted .luksheader path.
+    #[test]
+    fn backup_luks_header_post_mutation_passes_through_success() {
+        let dir = tempfile::tempdir().unwrap();
+        let paths = StatePaths::custom(dir.path().into());
+        let device = "/dev/disk/by-id/disk1";
+        let mapper = "braid-disk1";
+        let tmp_path = paths
+            .luks_headers_dir()
+            .join("braid-disk1.luksheader.tmp")
+            .display()
+            .to_string();
+        let runner = MockRunner::default().with_output(
+            CmdRequest::CryptsetupLuksHeaderBackup {
+                device: device.to_owned(),
+                backup_path: tmp_path,
+            },
+            RawCommandOutput {
+                cmd: "cryptsetup luksHeaderBackup".into(),
+                stdout: String::new(),
+                stderr: String::new(),
+                exit_status: 0,
+            },
+        );
+
+        let path = backup_luks_header_post_mutation(&runner, device, mapper, &paths)
+            .expect("successful backup should pass through");
+
+        assert_eq!(
+            path,
+            paths.luks_headers_dir().join("braid-disk1.luksheader")
+        );
+        assert!(path.exists(), "final backup file should exist");
     }
 
     // Intent: exact-size regular files are accepted as user-supplied keyfiles.

@@ -7,7 +7,7 @@ use crate::credential_verify::{
 use crate::inhibit::AcquireSleepInhibitor;
 use crate::journal;
 use crate::luks::{
-    backup_luks_header, ensure_luks_open, format_keyfile_asymmetry_warning,
+    backup_luks_header_post_mutation, ensure_luks_open, format_keyfile_asymmetry_warning,
     format_keyfile_enrollment_probe_failure, luks_format, probe_pool_keyfile_enrollment,
     read_passphrase,
 };
@@ -484,8 +484,12 @@ impl ReplacePlan {
                     );
                 }
 
-                let backup_path =
-                    backup_luks_header(runner, &new_by_id.0, &new_mn.0, params.paths)?;
+                let backup_path = backup_luks_header_post_mutation(
+                    runner,
+                    &new_by_id.0,
+                    &new_mn.0,
+                    params.paths,
+                )?;
                 eprintln!("LUKS header backed up: {}", backup_path.display());
 
                 eprint!(
@@ -4096,16 +4100,30 @@ mod tests {
         );
     }
 
-    /// Runner for the keyfile-ordering regression test. Stubs every probe
-    /// command needed to reach `ReplacePlan::execute` for a missing-path
-    /// replace where the new disk is `PresentNotLuks` and `--enroll-key-file`
-    /// is set, then succeeds at `LuksFormat`, `LuksAddKeyFile`, and
-    /// `LuksHeaderBackup` (writing the backup file like `MockRunner` does)
-    /// so execution proceeds to `LuksOpen`. `LuksOpen` is left unmocked so
-    /// it returns `MissingMock`, aborting cleanly with the full LUKS
-    /// request log intact for ordering assertions.
+    /// Runner for missing-path fresh-replace LUKS tests. By default it
+    /// succeeds at `LuksFormat`, `LuksAddKeyFile`, and `LuksHeaderBackup`
+    /// (writing the backup file like `MockRunner` does), then leaves
+    /// `LuksOpen` unmocked so ordering tests can inspect the full request log.
     struct KeyfileOrderingReplaceRunner {
         log: std::sync::Arc<std::sync::Mutex<Vec<CmdRequest>>>,
+        backup_succeeds: bool,
+        backup_failure_stderr: &'static str,
+    }
+
+    impl KeyfileOrderingReplaceRunner {
+        fn new(log: std::sync::Arc<std::sync::Mutex<Vec<CmdRequest>>>) -> Self {
+            Self {
+                log,
+                backup_succeeds: true,
+                backup_failure_stderr: "mock: header backup forced to fail",
+            }
+        }
+
+        fn with_backup_failure_stderr(mut self, stderr: &'static str) -> Self {
+            self.backup_succeeds = false;
+            self.backup_failure_stderr = stderr;
+            self
+        }
     }
 
     impl CmdRunner2 for KeyfileOrderingReplaceRunner {
@@ -4178,19 +4196,29 @@ mod tests {
                     device,
                     backup_path,
                 } => {
-                    // Match MockRunner's behavior: write the backup file so
-                    // `backup_luks_header_to`'s rename step succeeds and we
-                    // proceed past the backup step to `ensure_luks_open`.
-                    if let Some(parent) = std::path::Path::new(backup_path.as_str()).parent() {
-                        std::fs::create_dir_all(parent)
-                            .map_err(|e| CmdError::Failed(format!("mock: create_dir_all: {e}")))?;
+                    if self.backup_succeeds {
+                        // Match MockRunner's behavior: write the backup file so
+                        // `backup_luks_header_to`'s rename step succeeds and we
+                        // proceed past the backup step to `ensure_luks_open`.
+                        if let Some(parent) = std::path::Path::new(backup_path.as_str()).parent() {
+                            std::fs::create_dir_all(parent).map_err(|e| {
+                                CmdError::Failed(format!("mock: create_dir_all: {e}"))
+                            })?;
+                        }
+                        std::fs::write(backup_path, b"")
+                            .map_err(|e| CmdError::Failed(format!("mock: write backup: {e}")))?;
+                        Ok(mock_ok(
+                            &format!("cryptsetup luksHeaderBackup {device}"),
+                            "",
+                        ))
+                    } else {
+                        Ok(RawCommandOutput {
+                            cmd: format!("cryptsetup luksHeaderBackup {device}"),
+                            stdout: String::new(),
+                            stderr: self.backup_failure_stderr.into(),
+                            exit_status: 1,
+                        })
                     }
-                    std::fs::write(backup_path, b"")
-                        .map_err(|e| CmdError::Failed(format!("mock: write backup: {e}")))?;
-                    Ok(mock_ok(
-                        &format!("cryptsetup luksHeaderBackup {device}"),
-                        "",
-                    ))
                 }
                 _ => Err(CmdError::MissingMock),
             }
@@ -4261,7 +4289,7 @@ mod tests {
         // issue `LuksOpen`.
         let fs = ReplaceMockFs(vec!["/dev/disk/by-id/virtio-disk3".into()]);
         let log = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
-        let runner = KeyfileOrderingReplaceRunner { log: log.clone() };
+        let runner = KeyfileOrderingReplaceRunner::new(log.clone());
         let inhibitor = crate::inhibit::RecordingInhibitor::new();
         let luks_format_extra_opts = vec![
             "--pbkdf".to_owned(),
@@ -4332,6 +4360,75 @@ mod tests {
             format < addkey && addkey < backup && backup < open,
             "expected order LuksFormat({format}) < LuksAddKeyFile({addkey}) < \
              LuksHeaderBackup({backup}) < LuksOpen({open}); log = {log:?}"
+        );
+    }
+
+    // Intent: fresh replace enriches a LUKS header-backup failure after
+    // luksFormat has already succeeded.
+    // Why it exists: the replace callsite must keep using the post-mutation
+    // wrapper, not the raw local-backup helper.
+    // Scenario: replacing a missing disk formats the new disk, then the state
+    // directory cannot accept the local header backup.
+    #[test]
+    fn replace_returns_enriched_error_when_post_format_backup_fails() {
+        let state_tmp = tempfile::tempdir().unwrap();
+        let paths = StatePaths::custom(state_tmp.path().into());
+        let mut m = PoolMembership::empty();
+        m.disks.insert(
+            "disk1".into(),
+            DiskMember::from_by_id(ByIdPath("/dev/disk/by-id/virtio-disk1".into())),
+        );
+        let mut disk2 = DiskMember::from_by_id(ByIdPath("/dev/disk/by-id/virtio-disk2".into()));
+        disk2.devid = Some(2);
+        m.disks.insert("disk2".into(), disk2);
+        membership::save_membership(&m, &paths).unwrap();
+
+        let config_tmp = tempfile::tempdir().unwrap();
+        let config_path = config_tmp.path().join("config.json");
+        std::fs::write(
+            &config_path,
+            serde_json::to_vec(&serde_json::json!({ "mount_point": "/mnt/storage" })).unwrap(),
+        )
+        .unwrap();
+
+        let pass_path = config_tmp.path().join("passphrase");
+        std::fs::write(&pass_path, b"test-passphrase\n").unwrap();
+
+        let fs = ReplaceMockFs(vec!["/dev/disk/by-id/virtio-disk3".into()]);
+        let log = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        let runner = KeyfileOrderingReplaceRunner::new(log)
+            .with_backup_failure_stderr("No space left on device");
+        let inhibitor = crate::inhibit::RecordingInhibitor::new();
+
+        let err = cmd_replace(
+            &runner,
+            &fs,
+            &ReplaceParams {
+                config_path: &config_path,
+                old_name: "disk2",
+                new_name: "disk3=/dev/disk/by-id/virtio-disk3",
+                missing_id: Some(2),
+                dry_run: false,
+                yes: true,
+                passphrase_stdin: false,
+                passphrase_file: Some(pass_path.as_path()),
+                enroll_key_file: None,
+                luks_format_extra_opts: &[],
+                progress: crate::progress::ProgressOutput::Off,
+                paths: &paths,
+                sleep_inhibitor: &inhibitor,
+            },
+        )
+        .expect_err("post-format header-backup failure should abort replace")
+        .to_string();
+
+        assert!(
+            err.contains("cryptsetup luksHeaderBackup --header-backup-file"),
+            "expected remediation command in: {err}"
+        );
+        assert!(
+            err.contains("after the LUKS mutation completed"),
+            "expected post-mutation framing in: {err}"
         );
     }
 

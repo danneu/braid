@@ -8,7 +8,7 @@ use crate::credential_verify::{
 use crate::inhibit::AcquireSleepInhibitor;
 use crate::journal;
 use crate::luks::{
-    OpenOutcome, PassphraseReader, backup_luks_header, ensure_luks_open,
+    OpenOutcome, PassphraseReader, backup_luks_header_post_mutation, ensure_luks_open,
     format_keyfile_asymmetry_warning, format_keyfile_enrollment_probe_failure, luks_format,
     probe_pool_keyfile_enrollment, read_passphrase_with,
 };
@@ -901,8 +901,12 @@ impl AddPlan {
                 ));
             }
 
-            let backup_path =
-                backup_luks_header(runner, &target.by_id.0, &target.mapper_name, params.paths)?;
+            let backup_path = backup_luks_header_post_mutation(
+                runner,
+                &target.by_id.0,
+                &target.mapper_name,
+                params.paths,
+            )?;
             eprintln!("LUKS header backed up: {}", backup_path.display());
 
             eprint!(
@@ -4680,6 +4684,7 @@ mod tests {
         /// backup and reaches the `CryptsetupLuksOpen` request, which is
         /// where the test deliberately aborts via `MissingMock`.
         backup_succeeds: bool,
+        backup_failure_stderr: &'static str,
     }
 
     impl AddRecordingRunner {
@@ -4693,10 +4698,15 @@ mod tests {
                     vec![]
                 })),
                 backup_succeeds: false,
+                backup_failure_stderr: "mock: header backup forced to fail",
             }
         }
         fn with_backup_success(mut self) -> Self {
             self.backup_succeeds = true;
+            self
+        }
+        fn with_backup_failure_stderr(mut self, stderr: &'static str) -> Self {
+            self.backup_failure_stderr = stderr;
             self
         }
         fn log(&self) -> std::sync::MutexGuard<'_, Vec<CmdRequest>> {
@@ -4822,7 +4832,7 @@ mod tests {
                         Ok(RawCommandOutput {
                             cmd: format!("cryptsetup luksHeaderBackup {device}"),
                             stdout: String::new(),
-                            stderr: "mock: header backup forced to fail".into(),
+                            stderr: self.backup_failure_stderr.into(),
                             exit_status: 1,
                         })
                     }
@@ -5136,6 +5146,52 @@ mod tests {
             "luks_format must receive the confirmed passphrase as stdin"
         );
         assert_eq!(tty.remaining(), 0, "both prompts must have been read");
+    }
+
+    // Intent: fresh add enriches a LUKS header-backup failure after
+    // luksFormat has already succeeded.
+    // Why it exists: the add callsite must keep using the post-mutation
+    // wrapper, not the raw local-backup helper.
+    // Scenario: bootstrap `braid add disk1=...` formats the new disk, then
+    // local header backup fails because the state directory is full.
+    #[test]
+    fn add_returns_enriched_error_when_post_format_backup_fails() {
+        let (_state_tmp, paths, _tmp, config_path) = confirm_test_setup();
+        let fs = AddOfflineMockFs(vec!["/dev/disk/by-id/virtio-disk1".into()]);
+        let runner =
+            AddRecordingRunner::new(false).with_backup_failure_stderr("No space left on device");
+        let inhibitor = crate::inhibit::RecordingInhibitor::new();
+        let tty = ScriptedPassphraseReader::new(["ok", "ok"]);
+
+        let err = cmd_add(
+            &runner,
+            &fs,
+            &AddParams {
+                config_path: &config_path,
+                disk_specs: &["disk1=/dev/disk/by-id/virtio-disk1".into()],
+                dry_run: false,
+                yes: true,
+                passphrase_stdin: false,
+                passphrase_file: None,
+                enroll_key_file: None,
+                luks_format_extra_opts: &[],
+                progress: ProgressOutput::Off,
+                paths: &paths,
+                sleep_inhibitor: &inhibitor,
+                passphrase_reader: &tty,
+            },
+        )
+        .expect_err("post-format header-backup failure should abort add")
+        .to_string();
+
+        assert!(
+            err.contains("cryptsetup luksHeaderBackup --header-backup-file"),
+            "expected remediation command in: {err}"
+        );
+        assert!(
+            err.contains("after the LUKS mutation completed"),
+            "expected post-mutation framing in: {err}"
+        );
     }
 
     /*

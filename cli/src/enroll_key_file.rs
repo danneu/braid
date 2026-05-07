@@ -274,7 +274,6 @@ fn apply_enrollment<R: CommandRunner>(
     paths: &StatePaths,
 ) -> Result<(), EnrollKeyFileError> {
     let color_enabled = color_enabled_for_stderr();
-    let backup_dir = paths.luks_headers_dir();
     let mut enrolled = 0u32;
     let mut already = 0u32;
 
@@ -304,7 +303,7 @@ fn apply_enrollment<R: CommandRunner>(
 
                 let mn = mapper_name(name);
                 let backup_path =
-                    luks::backup_luks_header_to(runner, &by_id.0, &mn.0, &backup_dir)?;
+                    luks::backup_luks_header_post_mutation(runner, &by_id.0, &mn.0, paths)?;
                 eprintln!("LUKS header backed up: {}", backup_path.display());
 
                 enrolled += 1;
@@ -2565,6 +2564,53 @@ mod tests {
                 .luks_headers_dir()
                 .join("braid-disk2.luksheader")
                 .exists()
+        );
+    }
+
+    // Intent: apply_enrollment enriches a local LUKS header-backup failure
+    // after keyfile enrollment has already succeeded.
+    // Why it exists: rerunning enroll after this point should not imply the
+    // slot mutation failed; the user needs the direct off-system backup path.
+    // Scenario: keyfile enrollment succeeds for one disk, then the state
+    // directory cannot accept the local header backup.
+    #[test]
+    fn apply_enrollment_returns_enriched_error_when_backup_fails() {
+        let d1 = "/dev/disk/by-id/d1";
+        let kf = "/tmp/braid.key";
+        let pass = "testpass";
+        let (_state_dir, paths) = test_paths();
+
+        let (enroll_req, enroll_stdin, enroll_out) = enroll_ok(d1, kf, pass);
+        let runner = MockRunner::default()
+            .with_output_stdin(enroll_req, enroll_stdin, enroll_out)
+            .with_output(
+                CmdRequest::CryptsetupLuksHeaderBackup {
+                    device: d1.to_owned(),
+                    backup_path: paths
+                        .luks_headers_dir()
+                        .join("braid-disk1.luksheader.tmp")
+                        .display()
+                        .to_string(),
+                },
+                err_raw("cryptsetup luksHeaderBackup", 1, "No space left on device"),
+            );
+        let plan = vec![DiskEnrollAction::NeedsEnroll {
+            name: "disk1".to_owned(),
+            by_id: by_id(d1),
+        }];
+
+        let err = apply_enrollment(&runner, &plan, &passphrase(pass), Path::new(kf), &paths)
+            .expect_err("backup failure should abort enrollment apply")
+            .to_string();
+
+        assert!(
+            err.contains("cryptsetup luksHeaderBackup --header-backup-file"),
+            "expected remediation command in: {err}"
+        );
+        assert!(err.contains(d1), "expected disk by-id path in: {err}");
+        assert!(
+            err.contains("after the LUKS mutation completed"),
+            "expected post-mutation framing in: {err}"
         );
     }
 
