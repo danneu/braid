@@ -5338,75 +5338,33 @@ mod tests {
         assert_eq!(inhibitor.acquire_count(), 0);
     }
 
-    #[derive(Clone, Copy)]
-    enum ReplaceKeyfileProbe {
-        Occupied,
-        Failure,
-    }
-
-    struct ReplaceKeyfileProbeRunner {
-        probes: Vec<ReplaceKeyfileProbe>,
-        log: std::sync::Arc<std::sync::Mutex<Vec<CmdRequest>>>,
-    }
-
-    impl ReplaceKeyfileProbeRunner {
-        fn new(probes: Vec<ReplaceKeyfileProbe>) -> Self {
-            Self {
-                probes,
-                log: std::sync::Arc::new(std::sync::Mutex::new(Vec::new())),
+    /// Override handler for the keyfile-probe tests: marks disk3 (the
+    /// raw replacement) as not-LUKS and forces every existing-member
+    /// `CryptsetupLuksDump` to fail with stderr containing the device
+    /// path. Layered on top of the canonical pool topology via
+    /// `with_handler`; reverse-order dispatch means this shadows the
+    /// fixture's disk3 LUKS UUID for the not-LUKS classification.
+    fn keyfile_probe_all_failures_handler()
+    -> impl Fn(&CmdRequest) -> Option<Result<RawCommandOutput, CmdError>> + Send + Sync + 'static
+    {
+        |req| match req {
+            CmdRequest::CryptsetupLuksUuid { device }
+                if device == "/dev/disk/by-id/virtio-disk3" =>
+            {
+                Some(Ok(RawCommandOutput {
+                    cmd: format!("cryptsetup luksUUID {device}"),
+                    stdout: String::new(),
+                    stderr: "Device is not a valid LUKS device.\n".into(),
+                    exit_status: 1,
+                }))
             }
-        }
-
-        fn requests(&self) -> Vec<CmdRequest> {
-            self.log.lock().unwrap().clone()
-        }
-
-        fn probe_for_device(&self, device: &str) -> Option<ReplaceKeyfileProbe> {
-            ["/dev/vda", "/dev/vdb", "/dev/vdc"]
-                .iter()
-                .position(|candidate| *candidate == device)
-                .and_then(|index| self.probes.get(index).copied())
-        }
-    }
-
-    impl CmdRunner2 for ReplaceKeyfileProbeRunner {
-        fn run(&self, request: &CmdRequest) -> Result<RawCommandOutput, CmdError> {
-            self.log.lock().unwrap().push(request.clone());
-            match request {
-                CmdRequest::CryptsetupLuksUuid { device }
-                    if device == "/dev/disk/by-id/virtio-disk3" =>
-                {
-                    Ok(RawCommandOutput {
-                        cmd: format!("cryptsetup luksUUID {device}"),
-                        stdout: String::new(),
-                        stderr: "Device is not a valid LUKS device.\n".into(),
-                        exit_status: 1,
-                    })
-                }
-                CmdRequest::CryptsetupLuksDump { device } => match self.probe_for_device(device) {
-                    Some(ReplaceKeyfileProbe::Occupied) => Ok(mock_ok(
-                        "cryptsetup luksDump --dump-json-metadata",
-                        r#"{"keyslots":{"0":{"type":"luks2"},"1":{"type":"luks2"}}}"#,
-                    )),
-                    Some(ReplaceKeyfileProbe::Failure) => Ok(RawCommandOutput {
-                        cmd: format!("cryptsetup luksDump --dump-json-metadata {device}"),
-                        stdout: String::new(),
-                        stderr: format!("forced luksDump failure on {device}"),
-                        exit_status: 5,
-                    }),
-                    None => Err(CmdError::MissingMock),
-                },
-                _ => FailingReplaceRunner.run(request),
-            }
-        }
-
-        fn run_with_stdin(
-            &self,
-            request: &CmdRequest,
-            _stdin: &[u8],
-        ) -> Result<RawCommandOutput, CmdError> {
-            self.log.lock().unwrap().push(request.clone());
-            self.run(request)
+            CmdRequest::CryptsetupLuksDump { device } => Some(Ok(RawCommandOutput {
+                cmd: format!("cryptsetup luksDump --dump-json-metadata {device}"),
+                stdout: String::new(),
+                stderr: format!("forced luksDump failure on {device}"),
+                exit_status: 5,
+            })),
+            _ => None,
         }
     }
 
@@ -5483,15 +5441,17 @@ mod tests {
      */
     #[test]
     fn plan_replace_keyfile_probe_failure_becomes_warn_notes() {
-        let fixture = plan_replace_fixture();
-        let fs = ReplaceMockFs(vec!["/dev/disk/by-id/virtio-disk3".into()]);
-        let runner = ReplaceKeyfileProbeRunner::new(vec![
-            ReplaceKeyfileProbe::Failure,
-            ReplaceKeyfileProbe::Failure,
-            ReplaceKeyfileProbe::Failure,
-        ]);
-
-        let report = plan_replace(&runner, &fs, &fixture.params(true, false));
+        let f = PoolFixture::two_disk_healthy();
+        let fs = MockFs::storage(vec!["/dev/disk/by-id/virtio-disk3".into()]);
+        let replace_done = Arc::new(AtomicBool::new(false));
+        let runner = ReplacementPool::two_disk_healthy()
+            .install(MockRunner::default(), replace_done)
+            .with_handler(keyfile_probe_all_failures_handler());
+        let report = plan_replace(
+            &runner,
+            &fs,
+            &f.replace_params().dry_run(true).yes(false).build(),
+        );
         let plan = report.result.expect("plan_replace should succeed");
         let rendered = plan.preview().render();
 
@@ -5529,15 +5489,42 @@ mod tests {
      */
     #[test]
     fn plan_replace_keyfile_asymmetry_suppresses_probe_failure_warning() {
-        let fixture = plan_replace_fixture();
-        let fs = ReplaceMockFs(vec!["/dev/disk/by-id/virtio-disk3".into()]);
-        let runner = ReplaceKeyfileProbeRunner::new(vec![
-            ReplaceKeyfileProbe::Failure,
-            ReplaceKeyfileProbe::Failure,
-            ReplaceKeyfileProbe::Occupied,
-        ]);
-
-        let report = plan_replace(&runner, &fs, &fixture.params(true, false));
+        let f = PoolFixture::two_disk_healthy();
+        let fs = MockFs::storage(vec!["/dev/disk/by-id/virtio-disk3".into()]);
+        let replace_done = Arc::new(AtomicBool::new(false));
+        let runner = ReplacementPool::two_disk_healthy()
+            .install(MockRunner::default(), replace_done)
+            .with_handler(|req| match req {
+                CmdRequest::CryptsetupLuksUuid { device }
+                    if device == "/dev/disk/by-id/virtio-disk3" =>
+                {
+                    Some(Ok(RawCommandOutput {
+                        cmd: format!("cryptsetup luksUUID {device}"),
+                        stdout: String::new(),
+                        stderr: "Device is not a valid LUKS device.\n".into(),
+                        exit_status: 1,
+                    }))
+                }
+                CmdRequest::CryptsetupLuksDump { device } => match device.as_str() {
+                    "/dev/vdb" => Some(Ok(RawCommandOutput {
+                        cmd: format!("cryptsetup luksDump --dump-json-metadata {device}"),
+                        stdout: String::new(),
+                        stderr: format!("forced luksDump failure on {device}"),
+                        exit_status: 5,
+                    })),
+                    "/dev/vdc" => Some(Ok(mock_ok(
+                        "cryptsetup luksDump --dump-json-metadata",
+                        r#"{"keyslots":{"0":{"type":"luks2"},"1":{"type":"luks2"}}}"#,
+                    ))),
+                    _ => None,
+                },
+                _ => None,
+            });
+        let report = plan_replace(
+            &runner,
+            &fs,
+            &f.replace_params().dry_run(true).yes(false).build(),
+        );
         let plan = report.result.expect("plan_replace should succeed");
         let rendered = plan.preview().render();
 
