@@ -2544,20 +2544,11 @@ mod tests {
         );
     }
 
-    use crate::cmd::{CmdError, CommandRunner as CmdRunner2};
-    use crate::membership::{self, DiskMember, PoolMembership};
-    use crate::test_fixtures::{MockFs, PoolFixture, ReplacementPool};
+    use crate::cmd::CmdError;
+    use crate::membership::{self, PoolMembership};
+    use crate::test_fixtures::{MockFs, PoolFixture, ReplacementPool, mock_ok};
     use std::sync::Arc;
     use std::sync::atomic::AtomicBool;
-
-    fn mock_ok(cmd: &str, stdout: &str) -> RawCommandOutput {
-        RawCommandOutput {
-            cmd: cmd.to_owned(),
-            stdout: stdout.to_owned(),
-            stderr: String::new(),
-            exit_status: 0,
-        }
-    }
 
     /// Override handler that fails `BtrfsReplaceStart` so live-path
     /// failure tests can drive cmd_replace through preflight + journal
@@ -2574,32 +2565,6 @@ mod tests {
                 exit_status: 1,
             })),
             _ => None,
-        }
-    }
-
-    /// Mock filesystem where specific paths exist.
-    struct ReplaceMockFs(Vec<String>);
-    impl crate::probe::Filesystem for ReplaceMockFs {
-        fn exists(&self, path: &str) -> bool {
-            self.0.iter().any(|p| p == path)
-        }
-        fn is_block_device(&self, _path: &str) -> bool {
-            false
-        }
-        fn read_to_string(&self, path: &str) -> Result<String, std::io::Error> {
-            if path == "/proc/self/mountinfo" {
-                Ok(
-                    "36 35 0:32 / /mnt/storage rw shared:1 - btrfs /dev/mapper/braid-disk1 rw\n"
-                        .to_owned(),
-                )
-            } else if path.ends_with("/exclusive_operation") {
-                Ok("none\n".to_owned())
-            } else {
-                Err(std::io::Error::new(std::io::ErrorKind::NotFound, "mock"))
-            }
-        }
-        fn list_dir(&self, _path: &str) -> Result<Vec<String>, std::io::Error> {
-            Ok(vec![])
         }
     }
 
@@ -3941,47 +3906,6 @@ mod tests {
         );
     }
 
-    /// ReplaceMockFs variant with a configurable sysfs
-    /// exclusive_operation body. Drives preflight's busy-op /
-    /// paused-balance branches from the plan_replace boundary tests.
-    struct ReplaceMockFsWithSysfs {
-        inner: ReplaceMockFs,
-        sysfs_body: String,
-    }
-
-    impl ReplaceMockFsWithSysfs {
-        fn new(paths: Vec<String>, sysfs_body: &str) -> Self {
-            Self {
-                inner: ReplaceMockFs(paths),
-                sysfs_body: sysfs_body.to_owned(),
-            }
-        }
-    }
-
-    impl crate::probe::Filesystem for ReplaceMockFsWithSysfs {
-        fn exists(&self, path: &str) -> bool {
-            self.inner.exists(path)
-        }
-        fn is_block_device(&self, path: &str) -> bool {
-            self.inner.is_block_device(path)
-        }
-        fn read_to_string(&self, path: &str) -> Result<String, std::io::Error> {
-            if path == "/proc/self/mountinfo" {
-                Ok(
-                    "36 35 0:32 / /mnt/storage rw shared:1 - btrfs /dev/mapper/braid-disk1 rw\n"
-                        .to_owned(),
-                )
-            } else if path.ends_with("/exclusive_operation") {
-                Ok(self.sysfs_body.clone())
-            } else {
-                self.inner.read_to_string(path)
-            }
-        }
-        fn list_dir(&self, path: &str) -> Result<Vec<String>, std::io::Error> {
-            self.inner.list_dir(path)
-        }
-    }
-
     /* Intent: plan_replace surfaces an in-flight exclusive op as a
      * PreviewNote::Info on `plan.notes`, and the rendered preview
      * contains the "waiting for in-flight <op>" line. Confirmation-only
@@ -4230,69 +4154,6 @@ mod tests {
                 exit_status: 5,
             })),
             _ => None,
-        }
-    }
-
-    struct PlanReplaceFixture {
-        _state_tmp: tempfile::TempDir,
-        paths: StatePaths,
-        _config_tmp: tempfile::TempDir,
-        config_path: std::path::PathBuf,
-        pass_path: std::path::PathBuf,
-        inhibitor: crate::inhibit::RecordingInhibitor,
-    }
-
-    fn plan_replace_fixture() -> PlanReplaceFixture {
-        let state_tmp = tempfile::tempdir().unwrap();
-        let paths = StatePaths::custom(state_tmp.path().into());
-        let mut m = PoolMembership::empty();
-        m.disks.insert(
-            "disk1".into(),
-            DiskMember::from_by_id(ByIdPath("/dev/disk/by-id/virtio-disk1".into())),
-        );
-        m.disks.insert(
-            "disk2".into(),
-            DiskMember::from_by_id(ByIdPath("/dev/disk/by-id/virtio-disk2".into())),
-        );
-        membership::save_membership(&m, &paths).unwrap();
-
-        let config_tmp = tempfile::tempdir().unwrap();
-        let config_path = config_tmp.path().join("config.json");
-        std::fs::write(
-            &config_path,
-            serde_json::to_vec(&serde_json::json!({ "mount_point": "/mnt/storage" })).unwrap(),
-        )
-        .unwrap();
-        let pass_path = config_tmp.path().join("passphrase");
-        std::fs::write(&pass_path, b"test-passphrase\n").unwrap();
-
-        PlanReplaceFixture {
-            _state_tmp: state_tmp,
-            paths,
-            _config_tmp: config_tmp,
-            config_path,
-            pass_path,
-            inhibitor: crate::inhibit::RecordingInhibitor::new(),
-        }
-    }
-
-    impl PlanReplaceFixture {
-        fn params(&self, dry_run: bool, yes: bool) -> ReplaceParams<'_> {
-            ReplaceParams {
-                config_path: &self.config_path,
-                old_name: "disk2",
-                new_name: "disk3=/dev/disk/by-id/virtio-disk3",
-                missing_id: None,
-                dry_run,
-                yes,
-                passphrase_stdin: false,
-                passphrase_file: Some(self.pass_path.as_path()),
-                enroll_key_file: None,
-                luks_format_extra_opts: &[],
-                progress: crate::progress::ProgressOutput::Off,
-                paths: &self.paths,
-                sleep_inhibitor: &self.inhibitor,
-            }
         }
     }
 
