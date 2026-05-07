@@ -337,7 +337,8 @@ impl LockPlan {
         // re-check to cover the narrow window where it disappeared on
         // its own.
         for entry in orphan_mappers {
-            let disk_name = name_from_mapper(entry).unwrap_or(entry);
+            let disk_name = name_from_mapper(entry)
+                .expect("scan_orphan_mappers returns only braid-* mapper names");
             if !fs.exists(&format!("/dev/mapper/{entry}")) {
                 continue;
             }
