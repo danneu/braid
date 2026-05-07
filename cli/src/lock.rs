@@ -29,6 +29,29 @@ impl From<CloseMapperError> for LockError {
     }
 }
 
+/// Internal scanned-orphan representation. Constructed by
+/// `scan_orphan_mappers`: a `/dev/mapper/braid-*` entry observed at
+/// plan time that is not part of pool membership. Fields are private
+/// and there is no constructor, so the only production code path that
+/// can create one is the struct literal inside `scan_orphan_mappers`
+/// itself -- the prior `unwrap_or`/`expect` fallback for
+/// `name_from_mapper` is unrepresentable.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct OrphanMapper {
+    mapper: String,
+    disk_name: String,
+}
+
+impl OrphanMapper {
+    fn mapper(&self) -> &str {
+        &self.mapper
+    }
+
+    fn disk_name(&self) -> &str {
+        &self.disk_name
+    }
+}
+
 /// Enumerate braid-* mappers under /dev/mapper that are NOT in the pool
 /// membership. These are orphans from interrupted add/replace flows --
 /// see docs/principles.md:18. An unreadable /dev/mapper is surfaced as
@@ -37,7 +60,7 @@ impl From<CloseMapperError> for LockError {
 fn scan_orphan_mappers<F: Filesystem + ?Sized>(
     fs: &F,
     membership: &PoolMembership,
-) -> Result<Vec<String>, std::io::Error> {
+) -> Result<Vec<OrphanMapper>, std::io::Error> {
     let entries = fs.list_dir("/dev/mapper")?;
     let mut orphans = Vec::new();
     for entry in entries {
@@ -48,7 +71,11 @@ fn scan_orphan_mappers<F: Filesystem + ?Sized>(
             continue;
         }
         if fs.exists(&format!("/dev/mapper/{entry}")) {
-            orphans.push(entry);
+            let disk_name = disk_name.to_owned();
+            orphans.push(OrphanMapper {
+                mapper: entry,
+                disk_name,
+            });
         }
     }
     Ok(orphans)
@@ -84,10 +111,11 @@ fn umount_stderr_is_busy(stderr: &str) -> bool {
 /// by orphaned braid-* mappers, in that order. Caller is responsible
 /// for any TOCTOU re-filter -- this helper does not touch the
 /// filesystem.
-fn close_set_paths(open_mappers: &[String], orphan_mappers: &[String]) -> Vec<String> {
+fn close_set_paths(open_mappers: &[String], orphan_mappers: &[OrphanMapper]) -> Vec<String> {
     open_mappers
         .iter()
-        .chain(orphan_mappers.iter())
+        .map(String::as_str)
+        .chain(orphan_mappers.iter().map(OrphanMapper::mapper))
         .map(|m| format!("/dev/mapper/{m}"))
         .collect()
 }
@@ -166,10 +194,10 @@ where
 }
 
 /// Compile dry-run steps for lock.
-pub fn compile_lock_steps(
+fn compile_lock_steps(
     pool_was_mounted: bool,
     open_mappers: &[String],
-    orphan_mappers: &[String],
+    orphan_mappers: &[OrphanMapper],
     mount_point: &MountPoint,
 ) -> Vec<Step> {
     let mut steps = Vec::new();
@@ -204,12 +232,12 @@ pub fn compile_lock_steps(
         });
     }
 
-    for mapper in orphan_mappers {
+    for orphan in orphan_mappers {
         steps.push(Step {
             risk: "safe",
-            description: format!("close LUKS mapper {} (orphan)", mapper),
+            description: format!("close LUKS mapper {} (orphan)", orphan.mapper()),
             commands: vec![CmdRequest::CryptsetupClose {
-                mapper: mapper.clone(),
+                mapper: orphan.mapper().to_owned(),
             }],
         });
     }
@@ -229,7 +257,7 @@ pub struct LockPlan {
     /// Membership mappers observed open during planning. Bare mapper
     /// names so preview, forget, and close all share one planned set.
     pub open_mappers: Vec<String>,
-    pub orphan_mappers: Vec<String>,
+    orphan_mappers: Vec<OrphanMapper>,
     pub mount_point: MountPoint,
 }
 
@@ -402,18 +430,11 @@ impl LockPlan {
                 umount_error: &umount_error,
                 first_mapper_error: &mut first_mapper_error,
             };
-            for entry in orphan_mappers {
-                if !fs.exists(&format!("/dev/mapper/{entry}")) {
+            for orphan in orphan_mappers {
+                if !fs.exists(&format!("/dev/mapper/{}", orphan.mapper())) {
                     continue;
                 }
-                // scan_orphan_mappers admits only braid-* entries, so
-                // name_from_mapper always returns Some here. Keep
-                // unwrap_or as a graceful fallback if that invariant is
-                // ever bypassed -- the orphan loop's disk_label only
-                // feeds status rows, so degrading the row text is
-                // preferable to crashing the lock.
-                let disk_name = name_from_mapper(entry).unwrap_or(entry);
-                close_ctx.close_one(entry, disk_name, true);
+                close_ctx.close_one(orphan.mapper(), orphan.disk_name(), true);
                 all_already_closed = false;
             }
         }
@@ -476,8 +497,8 @@ where
     let mut notes: Vec<PreviewNote> = Vec::new();
     let orphan_mappers = match scan_orphan_mappers(fs, membership) {
         Ok(v) => {
-            for entry in &v {
-                notes.push(PreviewNote::Warn(orphan_mapper_warn_body(entry)));
+            for om in &v {
+                notes.push(PreviewNote::Warn(orphan_mapper_warn_body(om.mapper())));
             }
             v
         }
@@ -2245,7 +2266,10 @@ mod tests {
         use crate::types::MountPoint;
         let mount_point = MountPoint("/mnt/storage".into());
         let open_mappers = vec!["braid-aaa".into()];
-        let orphan_mappers = vec!["braid-orphan".into()];
+        let orphan_mappers = vec![OrphanMapper {
+            mapper: "braid-orphan".into(),
+            disk_name: "orphan".into(),
+        }];
         let steps = compile_lock_steps(true, &open_mappers, &orphan_mappers, &mount_point);
         assert_eq!(
             forget_step_devices(&steps),
