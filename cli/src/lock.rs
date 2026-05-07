@@ -92,6 +92,70 @@ fn close_set_paths(open_mappers: &[String], orphan_mappers: &[String]) -> Vec<St
         .collect()
 }
 
+/// Shared close-and-aggregate body for the membership and orphan
+/// loops in `LockPlan::execute`, so status formatting, umount-busy
+/// suppression, and `first_mapper_error` accumulation cannot drift.
+fn close_one_mapper<R, S>(
+    runner: &R,
+    sleeper: &S,
+    mapper: &str,
+    disk_label: &str,
+    is_orphan: bool,
+    color_enabled: bool,
+    umount_error: &Option<LockError>,
+    first_mapper_error: &mut Option<LockError>,
+) where
+    R: CommandRunner,
+    S: Sleeper,
+{
+    let line = |t, body: &str| status_line(t, color_enabled, body);
+    let paren = if is_orphan { " (orphan)" } else { "" };
+
+    eprint!(
+        "{}",
+        line(
+            StatusTag::Wait,
+            &format!("disk {disk_label}: locking{paren}..."),
+        )
+    );
+    match close_mapper_with_retry(runner, sleeper, mapper, color_enabled) {
+        Ok(()) => {
+            eprint!(
+                "{}",
+                line(StatusTag::Ok, &format!("disk {disk_label}: locked{paren}"))
+            );
+        }
+        Err(CloseMapperError::DeviceBusy(msg)) if umount_error.is_some() => {
+            let phrase = if is_orphan {
+                "orphan close failed"
+            } else {
+                "close failed"
+            };
+            eprint!(
+                "{}",
+                line(
+                    StatusTag::Warn,
+                    &format!("disk {disk_label}: {phrase} (umount was stuck): {msg}")
+                )
+            );
+        }
+        Err(e) => {
+            let err = LockError::from(e);
+            let prefix = if is_orphan { "orphan: " } else { "" };
+            eprint!(
+                "{}",
+                line(
+                    StatusTag::Fail,
+                    &format!("disk {disk_label}: {prefix}{err}")
+                )
+            );
+            if first_mapper_error.is_none() {
+                *first_mapper_error = Some(err);
+            }
+        }
+    }
+}
+
 /// Compile dry-run steps for lock.
 pub fn compile_lock_steps(
     pool_was_mounted: bool,
@@ -303,31 +367,16 @@ impl LockPlan {
                 continue;
             }
 
-            eprint!(
-                "{}",
-                line(StatusTag::Wait, &format!("disk {name}: locking..."))
+            close_one_mapper(
+                runner,
+                sleeper,
+                &mn.0,
+                name,
+                false,
+                color_enabled,
+                &umount_error,
+                &mut first_mapper_error,
             );
-            match close_mapper_with_retry(runner, sleeper, &mn.0, color_enabled) {
-                Ok(()) => {
-                    eprint!("{}", line(StatusTag::Ok, &format!("disk {name}: locked")));
-                }
-                Err(CloseMapperError::DeviceBusy(msg)) if umount_error.is_some() => {
-                    eprint!(
-                        "{}",
-                        line(
-                            StatusTag::Warn,
-                            &format!("disk {name}: close failed (umount was stuck): {msg}")
-                        )
-                    );
-                }
-                Err(e) => {
-                    let err = LockError::from(e);
-                    eprint!("{}", line(StatusTag::Fail, &format!("disk {name}: {err}")));
-                    if first_mapper_error.is_none() {
-                        first_mapper_error = Some(err);
-                    }
-                }
-            }
             all_already_closed = false;
         }
 
@@ -337,47 +386,26 @@ impl LockPlan {
         // re-check to cover the narrow window where it disappeared on
         // its own.
         for entry in orphan_mappers {
-            let disk_name = name_from_mapper(entry)
-                .expect("scan_orphan_mappers returns only braid-* mapper names");
             if !fs.exists(&format!("/dev/mapper/{entry}")) {
                 continue;
             }
-            eprint!(
-                "{}",
-                line(
-                    StatusTag::Wait,
-                    &format!("disk {disk_name}: locking (orphan)..."),
-                )
+            // scan_orphan_mappers admits only braid-* entries, so
+            // name_from_mapper always returns Some here. Keep
+            // unwrap_or as a graceful fallback if that invariant is
+            // ever bypassed -- the orphan loop's disk_label only
+            // feeds status rows, so degrading the row text is
+            // preferable to crashing the lock.
+            let disk_name = name_from_mapper(entry).unwrap_or(entry);
+            close_one_mapper(
+                runner,
+                sleeper,
+                entry,
+                disk_name,
+                true,
+                color_enabled,
+                &umount_error,
+                &mut first_mapper_error,
             );
-            match close_mapper_with_retry(runner, sleeper, entry, color_enabled) {
-                Ok(()) => {
-                    eprint!(
-                        "{}",
-                        line(StatusTag::Ok, &format!("disk {disk_name}: locked (orphan)"))
-                    );
-                }
-                Err(CloseMapperError::DeviceBusy(msg)) if umount_error.is_some() => {
-                    eprint!(
-                        "{}",
-                        line(
-                            StatusTag::Warn,
-                            &format!(
-                                "disk {disk_name}: orphan close failed (umount was stuck): {msg}"
-                            )
-                        )
-                    );
-                }
-                Err(e) => {
-                    let err = LockError::from(e);
-                    eprint!(
-                        "{}",
-                        line(StatusTag::Fail, &format!("disk {disk_name}: orphan: {err}"))
-                    );
-                    if first_mapper_error.is_none() {
-                        first_mapper_error = Some(err);
-                    }
-                }
-            }
             all_already_closed = false;
         }
 
