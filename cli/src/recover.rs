@@ -956,8 +956,29 @@ fn execute_generic_live_pool_recovery<R: CommandRunner + Sync>(
     pool: PoolState,
 ) -> Result<(), RecoverError> {
     let prior = membership::load_membership(params.paths).ok();
-    let recovered =
+    let mut recovered =
         build_membership_from_live_pool(&pool, &plan.union, prior.as_ref(), by_id_resolver)?;
+
+    // OpKind::Remove guard: an absent target may indicate an in-progress race
+    // (mapper went null-underlying or btrfs-MISSING between plan_remove and
+    // helper / between helper and recovery), not a completed eviction.
+    // build_membership_from_live_pool walks pool.devices only; restore the
+    // target from pre_membership when probe_pool's null_underlying or
+    // missing_devids signal that btrfs still owns it.
+    if let journal::OpKind::Remove { name } = &plan.journal.op
+        && !recovered.disks.contains_key(name)
+        && let Some(target_member) = plan.journal.pre_membership.disks.get(name)
+    {
+        let mapper = config::mapper_name(name);
+        let in_null_underlying = pool.null_underlying.iter().any(|n| n.mapper == mapper);
+        let in_missing = target_member
+            .devid
+            .map(|d| pool.missing_devids.contains(&d))
+            .unwrap_or(false);
+        if in_null_underlying || in_missing {
+            recovered.disks.insert(name.clone(), target_member.clone());
+        }
+    }
 
     let pre_names: std::collections::BTreeSet<_> =
         plan.journal.pre_membership.disks.keys().collect();
@@ -12898,6 +12919,284 @@ mod tests {
         assert!(
             !paths.pending_op_json().exists(),
             "journal must be cleared so the operator can re-run braid remove cleanly"
+        );
+    }
+
+    /// Two-disk Remove journal where disk2 is the eviction target and its
+    /// pre-membership entry already carries devid 2. Used by the OpKind::Remove
+    /// recover-guard tests so the missing_devids check (which keys off
+    /// `pre_membership.disks[name].devid`) has the value it needs.
+    fn remove_2to1_journal_with_target_devid() -> journal::Journal {
+        let mut pre_disks = BTreeMap::new();
+        pre_disks.insert(
+            "disk1".to_owned(),
+            disk_member_with_devid("/dev/disk/by-id/virtio-disk1", 1),
+        );
+        pre_disks.insert(
+            "disk2".to_owned(),
+            disk_member_with_devid("/dev/disk/by-id/virtio-disk2", 2),
+        );
+        let pre = PoolMembership { disks: pre_disks };
+
+        let mut target_disks = BTreeMap::new();
+        target_disks.insert(
+            "disk1".to_owned(),
+            disk_member_with_devid("/dev/disk/by-id/virtio-disk1", 1),
+        );
+
+        journal::Journal {
+            started_at: "2026-01-01T00:00:00Z".into(),
+            op: OpKind::Remove {
+                name: "disk2".to_owned(),
+            },
+            pre_membership: pre,
+            target_membership: PoolMembership {
+                disks: target_disks,
+            },
+        }
+    }
+
+    /// btrfs filesystem show output for a 2-disk pool where disk2 is reported
+    /// as MISSING (path MISSING sentinel). probe_pool routes the row into
+    /// `missing_devids` and only iterates disk1 for cryptsetup probes.
+    fn btrfs_show_disk1_and_disk2_missing() -> RawCommandOutput {
+        ok_raw(
+            "btrfs filesystem show /mnt/storage",
+            "Label: none  uuid: aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee\n\
+             \tTotal devices 2 FS bytes used 1.00GiB\n\
+             \tdevid    1 size 10.00GiB used 2.00GiB path /dev/mapper/braid-disk1\n\
+             \tdevid    2 size 0 used 0 path MISSING\n",
+        )
+    }
+
+    /* Intent: cmd_recover for an interrupted OpKind::Remove preserves the
+     * target in pool.json when the live pool reports the target's mapper
+     * as null-underlying, even though it is absent from `pool.devices`.
+     * Why it exists: build_membership_from_live_pool walks pool.devices
+     * only, so without the OpKind::Remove guard, recover would persist a
+     * pool.json that excluded the target and clear the journal -- the
+     * Layer-2 reproduction of the same phantom-success class that Layer 1
+     * (evict_present_device fail-closed) addresses at the helper boundary.
+     * Scenario: a 2-disk pool started `braid remove disk2`. Disk2's
+     * underlying device hot-unplugged before/during the eviction, so
+     * btrfs still tracks it (mapper visible in `filesystem show`) but
+     * cryptsetup reports `device: (null)`. probe_pool sorts disk2 into
+     * `null_underlying`, leaving `pool.devices = [disk1]`. Recover must
+     * keep disk2 in pool.json and still clear the journal.
+     */
+    #[test]
+    fn cmd_recover_remove_with_null_underlying_target_preserves_membership() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let paths = StatePaths::custom(tmp.path().into());
+        let config = Config::new(MountPoint("/mnt/storage".into())).unwrap();
+        let fs = MockFs::new(&[]);
+
+        let journal = remove_2to1_journal_with_target_devid();
+        journal::write_journal(&paths, &journal).unwrap();
+
+        let (mp_req, mp_out) = mountpoint_ok();
+        let runner = MockRunner::default()
+            .with_output(mp_req, mp_out)
+            .with_output(
+                CmdRequest::BtrfsFilesystemShow {
+                    mount_point: MountPoint("/mnt/storage".into()),
+                },
+                btrfs_show_two_disks(),
+            )
+            .with_output(
+                CmdRequest::CryptsetupStatus {
+                    mapper: "braid-disk1".into(),
+                },
+                cryptsetup_status_active("braid-disk1", "/dev/vda"),
+            )
+            .with_output(
+                CmdRequest::CryptsetupLuksUuid {
+                    device: "/dev/vda".into(),
+                },
+                cryptsetup_uuid_ok("/dev/vda", "11111111-1111-1111-1111-111111111111"),
+            )
+            .with_output(
+                CmdRequest::CryptsetupStatus {
+                    mapper: "braid-disk2".into(),
+                },
+                cryptsetup_status_active("braid-disk2", "(null)"),
+            );
+
+        let resolver = resolver_for(&[("/dev/vda", "virtio-disk1"), ("/dev/vdb", "virtio-disk2")]);
+        let result = cmd_recover(
+            &runner,
+            &fs,
+            &resolver,
+            &RecoverParams {
+                config: &config,
+                paths: &paths,
+                passphrase_stdin: false,
+                passphrase_file: None,
+                allow_degraded: false,
+                dry_run: false,
+                progress: ProgressOutput::Off,
+                sleep_inhibitor: &NOOP_INHIBITOR,
+            },
+        );
+        result.expect("recover should succeed and preserve null-underlying target");
+
+        let recovered = membership::load_membership(&paths).unwrap();
+        assert!(
+            recovered.disks.contains_key("disk1"),
+            "recovered membership must keep disk1: {:?}",
+            recovered.disks.keys().collect::<Vec<_>>()
+        );
+        assert!(
+            recovered.disks.contains_key("disk2"),
+            "recovered membership must keep disk2 (null-underlying): {:?}",
+            recovered.disks.keys().collect::<Vec<_>>()
+        );
+        assert!(
+            !paths.pending_op_json().exists(),
+            "journal must be cleared after live-pool recovery"
+        );
+    }
+
+    /* Intent: cmd_recover for an interrupted OpKind::Remove preserves the
+     * target in pool.json when btrfs reports the target's devid in
+     * `missing_devids`.
+     * Why it exists: same Layer-2 phantom-success class as the
+     * null-underlying case but via the btrfs-authoritative MISSING path
+     * (devid sentinel rather than `device: (null)` mapper). The guard
+     * must consult both signals so an in-progress remove against a
+     * MISSING device does not silently drop disk2 from pool.json before
+     * the operator can decide whether to re-run remove or run
+     * remove-missing.
+     * Scenario: a 2-disk pool started `braid remove disk2`. btrfs has
+     * promoted disk2 to MISSING; `filesystem show` emits `path MISSING`
+     * for devid 2. probe_pool sets `missing_devids = [2]` and
+     * `pool.devices = [disk1]`. Recover must keep disk2 in pool.json
+     * and still clear the journal.
+     */
+    #[test]
+    fn cmd_recover_remove_with_missing_target_preserves_membership() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let paths = StatePaths::custom(tmp.path().into());
+        let config = Config::new(MountPoint("/mnt/storage".into())).unwrap();
+        let fs = MockFs::new(&[]);
+
+        let journal = remove_2to1_journal_with_target_devid();
+        journal::write_journal(&paths, &journal).unwrap();
+
+        let (mp_req, mp_out) = mountpoint_ok();
+        let runner = MockRunner::default()
+            .with_output(mp_req, mp_out)
+            .with_output(
+                CmdRequest::BtrfsFilesystemShow {
+                    mount_point: MountPoint("/mnt/storage".into()),
+                },
+                btrfs_show_disk1_and_disk2_missing(),
+            )
+            .with_output(
+                CmdRequest::CryptsetupStatus {
+                    mapper: "braid-disk1".into(),
+                },
+                cryptsetup_status_active("braid-disk1", "/dev/vda"),
+            )
+            .with_output(
+                CmdRequest::CryptsetupLuksUuid {
+                    device: "/dev/vda".into(),
+                },
+                cryptsetup_uuid_ok("/dev/vda", "11111111-1111-1111-1111-111111111111"),
+            );
+
+        let resolver = resolver_for(&[("/dev/vda", "virtio-disk1")]);
+        let result = cmd_recover(
+            &runner,
+            &fs,
+            &resolver,
+            &RecoverParams {
+                config: &config,
+                paths: &paths,
+                passphrase_stdin: false,
+                passphrase_file: None,
+                allow_degraded: false,
+                dry_run: false,
+                progress: ProgressOutput::Off,
+                sleep_inhibitor: &NOOP_INHIBITOR,
+            },
+        );
+        result.expect("recover should succeed and preserve MISSING target");
+
+        let recovered = membership::load_membership(&paths).unwrap();
+        assert!(
+            recovered.disks.contains_key("disk1"),
+            "recovered membership must keep disk1: {:?}",
+            recovered.disks.keys().collect::<Vec<_>>()
+        );
+        assert!(
+            recovered.disks.contains_key("disk2"),
+            "recovered membership must keep disk2 (btrfs MISSING): {:?}",
+            recovered.disks.keys().collect::<Vec<_>>()
+        );
+        assert!(
+            !paths.pending_op_json().exists(),
+            "journal must be cleared after live-pool recovery"
+        );
+    }
+
+    /* Intent: cmd_recover for an interrupted OpKind::Remove still drops
+     * the target from pool.json when the live pool genuinely no longer
+     * tracks it -- not in `pool.devices`, not in `null_underlying`, not
+     * in `missing_devids`.
+     * Why it exists: the OpKind::Remove guard must not over-correct.
+     * The eviction may have completed before the helper crashed, in
+     * which case btrfs has fully removed the device and pool.json must
+     * follow.
+     * Scenario: a 2-disk pool started `braid remove disk2`; the
+     * btrfs device remove succeeded and the LUKS close finished, so the
+     * live pool now reports only disk1. Recover must drop disk2 from
+     * pool.json and clear the journal.
+     */
+    #[test]
+    fn cmd_recover_remove_with_genuinely_evicted_target_drops_membership() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let paths = StatePaths::custom(tmp.path().into());
+        let config = Config::new(MountPoint("/mnt/storage".into())).unwrap();
+        let fs = MockFs::new(&[]);
+
+        let journal = remove_2to1_journal_with_target_devid();
+        journal::write_journal(&paths, &journal).unwrap();
+
+        let runner = already_mounted_one_disk_runner();
+
+        let resolver = resolver_for(&[("/dev/vda", "virtio-disk1")]);
+        let result = cmd_recover(
+            &runner,
+            &fs,
+            &resolver,
+            &RecoverParams {
+                config: &config,
+                paths: &paths,
+                passphrase_stdin: false,
+                passphrase_file: None,
+                allow_degraded: false,
+                dry_run: false,
+                progress: ProgressOutput::Off,
+                sleep_inhibitor: &NOOP_INHIBITOR,
+            },
+        );
+        result.expect("recover should succeed for genuinely evicted target");
+
+        let recovered = membership::load_membership(&paths).unwrap();
+        assert!(
+            recovered.disks.contains_key("disk1"),
+            "recovered membership must keep disk1: {:?}",
+            recovered.disks.keys().collect::<Vec<_>>()
+        );
+        assert!(
+            !recovered.disks.contains_key("disk2"),
+            "recovered membership must drop genuinely evicted disk2: {:?}",
+            recovered.disks.keys().collect::<Vec<_>>()
+        );
+        assert!(
+            !paths.pending_op_json().exists(),
+            "journal must be cleared after live-pool recovery"
         );
     }
 

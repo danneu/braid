@@ -349,7 +349,14 @@ pub fn pool_resize_device<R: CommandRunner + Sync>(
 /// 3. Removes the target device from the pool.
 /// 4. Closes the LUKS mapper (best-effort; warns on failure).
 ///
-/// Returns `Ok(())` as a no-op if the target mapper is not present in the pool.
+/// Fail-closed: returns `PoolError::Failed` if the in-helper re-probe finds the
+/// target mapper absent from `pool.devices` (hot-unplug or btrfs-MISSING
+/// transition between `plan_remove` and here). The caller relies on this to
+/// keep the journal on disk and `pool.json` un-rewritten so the next
+/// `braid recover` reconciles from live state. Layer-2 recovery
+/// (`execute_generic_live_pool_recovery` for `OpKind::Remove`) honors the
+/// same null-underlying / MISSING detection to avoid dropping the target
+/// from `pool.json`.
 #[allow(clippy::doc_overindented_list_items)]
 pub fn evict_present_device<R: CommandRunner + Sync, F: Filesystem + ?Sized>(
     runner: &R,
@@ -364,7 +371,20 @@ pub fn evict_present_device<R: CommandRunner + Sync, F: Filesystem + ?Sized>(
     let in_pool = pool.devices.iter().any(|d| d.mapper.0 == mapper);
 
     if !in_pool {
-        return Ok(());
+        let null_underlying = pool.null_underlying.iter().any(|n| n.mapper.0 == mapper);
+        let detail = if null_underlying {
+            "cryptsetup reports `device: (null)` (hot-unplug). \
+             Run `braid recover` to reconcile pool.json. \
+             The broken mapper does not self-heal on replug; if `cryptsetup status` \
+             still reports `device: (null)` after recover, close + reopen the mappers \
+             (`braid lock` then `braid unlock`, or reboot then `braid unlock`) before \
+             retrying the remove."
+        } else {
+            "remove did not commit. Run `braid recover` to reconcile pool.json."
+        };
+        return Err(PoolError::Failed(format!(
+            "target {mapper} is no longer present in pool: {detail}"
+        )));
     }
 
     let color_enabled = color_enabled_for_stderr();
@@ -1266,13 +1286,43 @@ mod tests {
     }
 
     /// Custom runner for evict_present_device tests. Mocks probe_pool against
-    /// a fixed 3-disk pool layout, the BtrfsDeviceRemove call, and the trailing
-    /// CryptsetupClose with a configurable exit status so the close-failure
-    /// branch is observable.
+    /// a 3-disk pool layout, the BtrfsDeviceRemove call, and the trailing
+    /// CryptsetupClose with a configurable exit status. The target-mapper
+    /// presence and underlying-device shape are configurable so the
+    /// fail-closed paths (target absent, target null-underlying) are
+    /// reachable from tests; mutating commands are recorded so tests can
+    /// assert they did not leak through the fail-closed branches.
     #[derive(Clone)]
     struct EvictRunner {
         close_exit: i32,
+        target_mapper: &'static str,
+        target_present: bool,
+        null_underlying_target: bool,
+        invocations: Arc<Mutex<Vec<&'static str>>>,
     }
+
+    impl Default for EvictRunner {
+        fn default() -> Self {
+            Self {
+                close_exit: 0,
+                target_mapper: "braid-disk2",
+                target_present: true,
+                null_underlying_target: false,
+                invocations: Arc::new(Mutex::new(Vec::new())),
+            }
+        }
+    }
+
+    impl EvictRunner {
+        fn invocations(&self) -> Vec<&'static str> {
+            self.invocations.lock().unwrap().clone()
+        }
+
+        fn record(&self, tag: &'static str) {
+            self.invocations.lock().unwrap().push(tag);
+        }
+    }
+
     impl CommandRunner for EvictRunner {
         fn run(&self, request: &CmdRequest) -> Result<RawCommandOutput, CmdError> {
             match request {
@@ -1281,8 +1331,12 @@ mod tests {
                         String::from("Label: none  uuid: cc86845b-aec3-408e-bef5-553affc1f2b1\n");
                     lines.push_str("\tTotal devices 3 FS bytes used 16.17MiB\n");
                     for i in 1..=3 {
+                        let mapper = format!("braid-disk{i}");
+                        if !self.target_present && mapper == self.target_mapper {
+                            continue;
+                        }
                         lines.push_str(&format!(
-                            "\tdevid    {i} size 496.00MiB used 121.56MiB path /dev/mapper/braid-disk{i}\n"
+                            "\tdevid    {i} size 496.00MiB used 121.56MiB path /dev/mapper/{mapper}\n"
                         ));
                     }
                     Ok(RawCommandOutput {
@@ -1292,31 +1346,44 @@ mod tests {
                         exit_status: 0,
                     })
                 }
-                CmdRequest::CryptsetupStatus { mapper } => Ok(RawCommandOutput {
-                    cmd: String::new(),
-                    stdout: format!(
-                        "{mapper} is active and is in use.\n  type:    LUKS2\n  device:  /dev/sd{mapper}\n  mode:    read/write\n"
-                    ),
-                    stderr: String::new(),
-                    exit_status: 0,
-                }),
+                CmdRequest::CryptsetupStatus { mapper } => {
+                    let device = if self.null_underlying_target && mapper == self.target_mapper {
+                        "(null)".to_owned()
+                    } else {
+                        format!("/dev/sd{mapper}")
+                    };
+                    Ok(RawCommandOutput {
+                        cmd: String::new(),
+                        stdout: format!(
+                            "{mapper} is active and is in use.\n  type:    LUKS2\n  device:  {device}\n  mode:    read/write\n"
+                        ),
+                        stderr: String::new(),
+                        exit_status: 0,
+                    })
+                }
                 CmdRequest::CryptsetupLuksUuid { .. } => Ok(RawCommandOutput {
                     cmd: String::new(),
                     stdout: "11111111-1111-1111-1111-111111111111\n".to_owned(),
                     stderr: String::new(),
                     exit_status: 0,
                 }),
-                CmdRequest::BtrfsDeviceRemove { .. } => Ok(ok_raw()),
-                CmdRequest::CryptsetupClose { .. } => Ok(RawCommandOutput {
-                    cmd: String::new(),
-                    stdout: String::new(),
-                    stderr: if self.close_exit == 0 {
-                        String::new()
-                    } else {
-                        "device is busy".into()
-                    },
-                    exit_status: self.close_exit,
-                }),
+                CmdRequest::BtrfsDeviceRemove { .. } => {
+                    self.record("BtrfsDeviceRemove");
+                    Ok(ok_raw())
+                }
+                CmdRequest::CryptsetupClose { .. } => {
+                    self.record("CryptsetupClose");
+                    Ok(RawCommandOutput {
+                        cmd: String::new(),
+                        stdout: String::new(),
+                        stderr: if self.close_exit == 0 {
+                            String::new()
+                        } else {
+                            "device is busy".into()
+                        },
+                        exit_status: self.close_exit,
+                    })
+                }
                 _ => Err(CmdError::MissingMock),
             }
         }
@@ -1340,7 +1407,10 @@ mod tests {
      */
     #[test]
     fn evict_present_device_close_failure_emits_warn_row() {
-        let runner = EvictRunner { close_exit: 5 };
+        let runner = EvictRunner {
+            close_exit: 5,
+            ..EvictRunner::default()
+        };
         let captured = crate::status_tag::testing::capture_with_color(false, || {
             let result = evict_present_device(
                 &runner,
@@ -1358,6 +1428,125 @@ mod tests {
         assert!(
             captured.find(wait) < captured.find(warn),
             "wait must precede warn, got: {captured:?}"
+        );
+    }
+
+    /* Intent: pool::evict_present_device fails closed when the in-helper
+     * re-probe finds the target absent from the live pool, leaving the
+     * journal and pool.json untouched.
+     * Why it exists: prior to the fix, an early `Ok(())` on absent target
+     * let cmd_remove::execute write pool.json and clear the journal,
+     * producing a phantom-success while btrfs still owned the device --
+     * see the layered race documented at evict_present_device's doc.
+     * Scenario: a target mapper transitions to btrfs-MISSING / outright
+     * absence (its row drops from `btrfs filesystem show`) between
+     * plan_remove and the helper's own probe. The helper must surface an
+     * error pointing at `braid recover` and never invoke BtrfsDeviceRemove
+     * or CryptsetupClose against the missing target.
+     */
+    #[test]
+    fn evict_present_device_target_missing_returns_error_without_mutating() {
+        let runner = EvictRunner {
+            target_present: false,
+            ..EvictRunner::default()
+        };
+        let result = evict_present_device(
+            &runner,
+            &RestoreFs,
+            "braid-disk2",
+            &mp(),
+            ProgressOutput::Off,
+        );
+        let err = result
+            .expect_err("missing target must fail closed")
+            .to_string();
+        assert!(
+            err.contains("braid-disk2"),
+            "error should name the target mapper: {err}"
+        );
+        assert!(
+            err.contains("no longer present in pool"),
+            "error should explain absence: {err}"
+        );
+        assert!(
+            err.contains("remove did not commit"),
+            "error should report remove did not commit: {err}"
+        );
+        assert!(
+            err.contains("braid recover"),
+            "error should point at braid recover: {err}"
+        );
+        let invocations = runner.invocations();
+        assert!(
+            !invocations.contains(&"BtrfsDeviceRemove"),
+            "BtrfsDeviceRemove must not run on absent target: {invocations:?}"
+        );
+        assert!(
+            !invocations.contains(&"CryptsetupClose"),
+            "CryptsetupClose must not run on absent target: {invocations:?}"
+        );
+    }
+
+    /* Intent: pool::evict_present_device fails closed and classifies the
+     * cause as hot-unplug when the target's underlying block device is
+     * gone (cryptsetup reports `device: (null)`).
+     * Why it exists: hot-unplug needs a different recovery story than the
+     * generic "remove did not commit" branch -- the dm-crypt target was
+     * bound to the original SCSI node and does not self-heal on replug,
+     * so the operator must run `braid recover` first (the only mutating
+     * command allowed under pending-op.json) and only then close + reopen
+     * the mapper if it is still null.
+     * Scenario: between plan_remove and the helper's probe, the target's
+     * underlying device is hot-unplugged. The mapper still appears in
+     * `btrfs filesystem show`, but cryptsetup reports `device: (null)`,
+     * so probe_pool sorts it into `null_underlying`. The helper must
+     * raise the hot-unplug message and sequence recover before lock +
+     * unlock.
+     */
+    #[test]
+    fn evict_present_device_target_null_underlying_classifies_hot_unplug() {
+        let runner = EvictRunner {
+            null_underlying_target: true,
+            ..EvictRunner::default()
+        };
+        let result = evict_present_device(
+            &runner,
+            &RestoreFs,
+            "braid-disk2",
+            &mp(),
+            ProgressOutput::Off,
+        );
+        let err = result
+            .expect_err("null-underlying target must fail closed")
+            .to_string();
+        assert!(
+            err.contains("braid-disk2"),
+            "error should name the target mapper: {err}"
+        );
+        assert!(
+            err.contains("device: (null)") && err.contains("hot-unplug"),
+            "error should classify as hot-unplug: {err}"
+        );
+        assert!(
+            err.contains("braid recover"),
+            "error should sequence braid recover first: {err}"
+        );
+        assert!(
+            err.contains("braid lock") && err.contains("braid unlock"),
+            "error should mention lock + unlock follow-up: {err}"
+        );
+        assert!(
+            err.contains("reboot"),
+            "error should mention reboot alternative: {err}"
+        );
+        let invocations = runner.invocations();
+        assert!(
+            !invocations.contains(&"BtrfsDeviceRemove"),
+            "BtrfsDeviceRemove must not run on null-underlying target: {invocations:?}"
+        );
+        assert!(
+            !invocations.contains(&"CryptsetupClose"),
+            "CryptsetupClose must not run on null-underlying target: {invocations:?}"
         );
     }
 }
