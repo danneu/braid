@@ -2765,10 +2765,15 @@ const REPLACE_WAIT_HEARTBEAT_INTERVAL: Duration = Duration::from_secs(30);
 /// waited on by umount, so without this wait the relock_and_remount cycle can
 /// race the resume worker and the second mount sees the same in-flight state.
 ///
-/// Best-effort except for `Suspended`, which returns an error so recover
-/// preserves the journal. If the status command fails for any reason, we return
-/// early rather than blocking forever -- relock_and_remount and probe_pool will
-/// catch any remaining staleness as a clear test failure rather than a hang.
+/// Two failure modes are handled differently. A subprocess error from
+/// `runner.run` (transient races, ENOMEM, signals) is best-effort: emit
+/// `[warn]` and proceed, since a transient runner Err on a never-replaced
+/// pool would otherwise force-fail every recover. `Suspended` and a parser
+/// `Err` (unrecognised zero-exit stdout, e.g. an upstream wording change)
+/// both mean we cannot reason about kernel replace state, so they emit
+/// `[fail]` and return `RecoverError::Failed` -- preserving the journal so
+/// the next `braid recover` can retry instead of racing the resume worker
+/// and clearing `pending-op.json`.
 fn wait_for_kernel_replace_to_finish<R: CommandRunner>(
     runner: &R,
     mount_point: &MountPoint,
@@ -2785,27 +2790,23 @@ fn wait_for_kernel_replace_to_finish<R: CommandRunner>(
         }) {
             Ok(r) => r,
             Err(_) => {
-                if wait_emitted {
-                    emit_status(&status_line(
-                        StatusTag::Warn,
-                        color_enabled,
-                        "pool: kernel dev_replace status check failed -- proceeding",
-                    ));
-                }
+                emit_status(&status_line(
+                    StatusTag::Warn,
+                    color_enabled,
+                    "pool: kernel dev_replace status check failed -- proceeding",
+                ));
                 return Ok(());
             }
         };
         let parsed = match parse_btrfs_replace_status(&raw) {
             Ok(p) => p,
             Err(_) => {
-                if wait_emitted {
-                    emit_status(&status_line(
-                        StatusTag::Warn,
-                        color_enabled,
-                        "pool: kernel dev_replace status check failed -- proceeding",
-                    ));
-                }
-                return Ok(());
+                let stdout = raw.stdout.clone();
+                let message = format!(
+                    "pool: kernel dev_replace status returned unrecognised output (preserving journal; report upstream wording change). Re-run `braid recover` after upgrading braid. stdout: {stdout:?}"
+                );
+                emit_status(&status_line(StatusTag::Fail, color_enabled, &message));
+                return Err(RecoverError::Failed(message));
             }
         };
         match parsed {
@@ -3686,6 +3687,149 @@ mod tests {
                 "  ... 5.0%",
                 "[warn] pool: kernel dev_replace status check failed -- proceeding",
             ],
+        );
+    }
+
+    #[test]
+    // Intent: a runner subprocess failure on the very first poll still emits a
+    //   [warn] row and returns Ok so recover proceeds on the best-effort
+    //   barrier.
+    // Why it exists: a transient runner Err on a never-replaced pool would
+    //   otherwise force-fail every recover; the wait is best-effort against
+    //   subprocess failures specifically. Pins the "subprocess failure is
+    //   best-effort" branch of the split between runner-Err (warn + proceed)
+    //   and parser-Err (fail + preserve journal).
+    // Scenario: the very first `btrfs replace status` call fails to spawn
+    //   before any wait row has been emitted.
+    fn wait_for_kernel_replace_emits_warn_on_status_error_first_poll() {
+        let runner =
+            ReplaceStatusSequenceRunner::new(vec![ReplaceStatusItem::Error("status failed")]);
+        let mount_point = MountPoint("/mnt/storage".into());
+        let captured = crate::status_tag::testing::capture_with(|| {
+            wait_for_kernel_replace_to_finish(&runner, &mount_point, &progress::NoopSleeper, false)
+                .unwrap();
+        });
+        assert_eq!(
+            captured.lines().collect::<Vec<_>>(),
+            vec!["[warn] pool: kernel dev_replace status check failed -- proceeding"],
+        );
+    }
+
+    #[test]
+    // Intent: unrecognised stdout on the very first poll emits a [fail] row
+    //   and returns RecoverError::Failed, preserving the journal.
+    // Why it exists: this is the regression commit b551555 was added to
+    //   prevent. If a future btrfs-progs reworded "% done" to "% complete",
+    //   the old silent NotStarted fallback would exit at the first poll, race
+    //   the kernel resume worker through relock_and_remount, and let
+    //   downstream replace recovery clear pending-op.json. Pinning this as a
+    //   test makes the upstream wording change a clear failure rather than a
+    //   silent skip.
+    // Scenario: the first `btrfs replace status` call exits zero with a
+    //   fictional reworded line; recover must abort and keep the journal.
+    fn wait_for_kernel_replace_emits_fail_on_unrecognised_stdout_first_poll() {
+        let runner = ReplaceStatusSequenceRunner::new(vec![ReplaceStatusItem::Output(ok_raw(
+            "btrfs replace status -1 /mnt/storage",
+            "75.0% complete, 0 write errs, 0 uncorr. read errs\n",
+        ))]);
+        let mount_point = MountPoint("/mnt/storage".into());
+        let mut result = None;
+        let captured = crate::status_tag::testing::capture_with(|| {
+            result = Some(wait_for_kernel_replace_to_finish(
+                &runner,
+                &mount_point,
+                &progress::NoopSleeper,
+                false,
+            ));
+        });
+        let err = result
+            .unwrap()
+            .expect_err("unrecognised stdout should abort recover");
+        let RecoverError::Failed(msg) = err else {
+            panic!("expected RecoverError::Failed, got {err:?}");
+        };
+        assert!(
+            msg.contains("75.0% complete"),
+            "error should carry the offending stdout, got: {msg}"
+        );
+        let lines = captured.lines().collect::<Vec<_>>();
+        assert_eq!(lines.len(), 1, "expected single fail row, got {lines:?}");
+        assert!(
+            lines[0]
+                .starts_with("[fail] pool: kernel dev_replace status returned unrecognised output"),
+            "unexpected fail row: {}",
+            lines[0]
+        );
+        assert!(
+            lines[0].contains("75.0% complete"),
+            "fail row should echo the offending stdout: {}",
+            lines[0]
+        );
+    }
+
+    #[test]
+    // Intent: when the wait window has already been announced, an
+    //   unrecognised reworded line on the next poll closes the window with a
+    //   [fail] row and returns RecoverError::Failed.
+    // Why it exists: closes the announced wait with the correct terminal row
+    //   when the kernel transitions an in-flight replace into stdout we no
+    //   longer recognise; same fail-closed contract as the first-poll case
+    //   but exercises the post-wait path so we cannot regress only one
+    //   branch.
+    // Scenario: recover observes one running poll, then a fictional reworded
+    //   line on the next poll.
+    fn wait_for_kernel_replace_emits_fail_on_unrecognised_stdout_after_wait() {
+        let runner = ReplaceStatusSequenceRunner::new(vec![
+            ReplaceStatusItem::Output(ok_raw(
+                "btrfs replace status -1 /mnt/storage",
+                "5.0% done, 0 write errs, 0 uncorr. read errs\n",
+            )),
+            ReplaceStatusItem::Output(ok_raw(
+                "btrfs replace status -1 /mnt/storage",
+                "75.0% complete, 0 write errs, 0 uncorr. read errs\n",
+            )),
+        ]);
+        let mount_point = MountPoint("/mnt/storage".into());
+        let mut result = None;
+        let captured = crate::status_tag::testing::capture_with(|| {
+            result = Some(wait_for_kernel_replace_to_finish(
+                &runner,
+                &mount_point,
+                &progress::NoopSleeper,
+                false,
+            ));
+        });
+        let err = result
+            .unwrap()
+            .expect_err("unrecognised stdout should abort recover");
+        let RecoverError::Failed(msg) = err else {
+            panic!("expected RecoverError::Failed, got {err:?}");
+        };
+        assert!(
+            msg.contains("75.0% complete"),
+            "error should carry the offending stdout, got: {msg}"
+        );
+        let lines = captured.lines().collect::<Vec<_>>();
+        assert_eq!(
+            lines.len(),
+            3,
+            "expected wait + progress + fail rows, got {lines:?}"
+        );
+        assert_eq!(
+            lines[0],
+            "[wait] pool: waiting for kernel dev_replace to finish..."
+        );
+        assert_eq!(lines[1], "  ... 5.0%");
+        assert!(
+            lines[2]
+                .starts_with("[fail] pool: kernel dev_replace status returned unrecognised output"),
+            "unexpected fail row: {}",
+            lines[2]
+        );
+        assert!(
+            lines[2].contains("75.0% complete"),
+            "fail row should echo the offending stdout: {}",
+            lines[2]
         );
     }
 

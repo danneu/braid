@@ -11,7 +11,11 @@ use super::types::ReplaceState;
 /// - Canceled: "Started on <t1>, canceled on <t2> at 0.0%, ..."
 /// - Suspended: "Started on <t1>, suspended on <t2> at 12.5%, ..."
 /// - Never started: "Never started"
-/// - Not running: "no operation running" or empty stdout
+///
+/// Any other zero-exit stdout returns `Err(ParseError::InvalidText)` --
+/// upstream `btrfs-progs` emits one of the strings above for every
+/// success-exit case, so unrecognised output means the contract drifted and
+/// callers must not silently bucket it as `NotStarted`.
 pub fn parse_btrfs_replace_status(raw: &RawCommandOutput) -> Result<ReplaceState, ParseError> {
     if raw.exit_status != 0 {
         return Err(ParseError::CommandFailed {
@@ -49,8 +53,10 @@ pub fn parse_btrfs_replace_status(raw: &RawCommandOutput) -> Result<ReplaceState
         return Ok(ReplaceState::Running { pct });
     }
 
-    // No operation running (or unrecognised output -- treat as not started).
-    Ok(ReplaceState::NotStarted)
+    Err(ParseError::InvalidText {
+        cmd: raw.cmd.clone(),
+        detail: format!("unrecognised btrfs replace status output: {stdout:?}"),
+    })
 }
 
 fn extract_percent(text: &str) -> Option<f64> {
@@ -179,15 +185,21 @@ mod tests {
     }
 
     #[test]
-    fn not_started() {
-        let out = parse_btrfs_replace_status(&raw("")).unwrap();
-        assert_eq!(out, ReplaceState::NotStarted);
-    }
-
-    #[test]
-    fn no_operation_running() {
-        let out = parse_btrfs_replace_status(&raw("no operation running\n")).unwrap();
-        assert_eq!(out, ReplaceState::NotStarted);
+    // Intent: empty zero-exit stdout is rejected as a parser-contract
+    //   violation rather than silently coerced to NotStarted.
+    // Why it exists: upstream btrfs-progs (reference/btrfs-progs/cmds/replace.c:450-505)
+    //   never prints empty stdout on a zero exit; any zero-exit output that
+    //   doesn't match a recognised prefix means we cannot reason about kernel
+    //   replace state, and callers like wait_for_kernel_replace_to_finish must
+    //   fail closed instead of treating it as "nothing to do".
+    // Scenario: a hypothetical environment where the command prints nothing on
+    //   stdout and exits 0; the parser refuses to invent a state for it.
+    fn empty_stdout_returns_err() {
+        let err = parse_btrfs_replace_status(&raw("")).unwrap_err();
+        assert!(
+            matches!(err, ParseError::InvalidText { .. }),
+            "expected InvalidText, got {err:?}"
+        );
     }
 
     #[test]
@@ -208,16 +220,34 @@ mod tests {
     }
 
     #[test]
-    fn garbage_output_treated_as_not_started() {
-        let out = parse_btrfs_replace_status(&raw("something unexpected here\n")).unwrap();
-        assert_eq!(out, ReplaceState::NotStarted);
+    // Intent: unrecognised zero-exit stdout returns InvalidText carrying the
+    //   offending bytes, instead of silently bucketing it as NotStarted.
+    // Why it exists: a future upstream wording change (e.g. "% done" rendered
+    //   as "% complete") would otherwise make wait_for_kernel_replace_to_finish
+    //   exit at the first poll, racing the kernel resume worker and clearing
+    //   the journal -- the exact regression commit b551555 was added to
+    //   prevent. A loud parse error makes the drift visible in tests and at
+    //   runtime.
+    // Scenario: a fictional reworded line lands on stdout with a zero exit
+    //   and the parser refuses to classify it.
+    fn garbage_output_returns_err() {
+        let err = parse_btrfs_replace_status(&raw("something unexpected here\n")).unwrap_err();
+        match err {
+            ParseError::InvalidText { detail, .. } => {
+                assert!(
+                    detail.contains("something unexpected"),
+                    "detail should echo offending bytes, got: {detail}"
+                );
+            }
+            other => panic!("expected InvalidText, got {other:?}"),
+        }
     }
 
     #[test]
     // Intent: non-zero exit from btrfs replace status must be a parse error
     //   that preserves the full diagnostic payload (cmd, exit_code, stderr).
-    // Why: the parser's lenient fallback treats unrecognised successful output
-    //   as NotStarted, so non-zero exits must bypass that path.
+    // Why: the success-exit path classifies stdout strictly; non-zero exits
+    //   must surface as CommandFailed rather than reaching that classifier.
     // Scenario: typo in mount path → btrfs exits 1 with empty stdout.
     fn nonzero_exit_is_error() {
         let result = parse_btrfs_replace_status(&RawCommandOutput {
