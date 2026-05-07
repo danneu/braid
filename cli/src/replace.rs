@@ -2546,6 +2546,9 @@ mod tests {
 
     use crate::cmd::{CmdError, CommandRunner as CmdRunner2};
     use crate::membership::{self, DiskMember, PoolMembership};
+    use crate::test_fixtures::{MockFs, PoolFixture, ReplacementPool};
+    use std::sync::Arc;
+    use std::sync::atomic::AtomicBool;
 
     fn mock_ok(cmd: &str, stdout: &str) -> RawCommandOutput {
         RawCommandOutput {
@@ -3341,63 +3344,6 @@ mod tests {
         );
     }
 
-    /// Runner for a missing-path replace where --old is a typo'd name absent
-    /// from pool.json. probe_pool sees 1 live disk + 1 missing devid (devid 2);
-    /// probe_missing_devids reports [2]. The runner is scoped narrowly so
-    /// cmd_replace can reach the `build_replacement_membership` guard before
-    /// touching any downstream commands.
-    struct MissingPathReplaceRunner;
-
-    impl CmdRunner2 for MissingPathReplaceRunner {
-        fn run(&self, request: &CmdRequest) -> Result<RawCommandOutput, CmdError> {
-            match request {
-                CmdRequest::BtrfsFilesystemShow { mount_point } => Ok(mock_ok(
-                    &format!("btrfs filesystem show {mount_point}"),
-                    "Label: none  uuid: cc86845b-aec3-408e-bef5-553affc1f2b1\n\
-                     \tTotal devices 2 FS bytes used 16.17MiB\n\
-                     \tdevid    1 size 496.00MiB used 121.56MiB path /dev/mapper/braid-disk1\n\
-                     \t*** Some devices missing\n",
-                )),
-                CmdRequest::CryptsetupStatus { mapper } => Ok(mock_ok(
-                    &format!("cryptsetup status {mapper}"),
-                    &format!(
-                        "{mapper} is active and is in use.\n  type:    LUKS2\n  device:  /dev/vda\n  mode:    read/write\n"
-                    ),
-                )),
-                CmdRequest::CryptsetupLuksUuid { device } => Ok(mock_ok(
-                    &format!("cryptsetup luksUUID {device}"),
-                    "11111111-1111-1111-1111-111111111111\n",
-                )),
-                CmdRequest::BtrfsDeviceUsageRaw { .. } => Ok(mock_ok(
-                    "btrfs device usage --raw",
-                    "/dev/mapper/braid-disk1, ID: 1\n\
-                     \tDevice size:           520093696\n\
-                     \tDevice slack:                  0\n\
-                     \tData,RAID1:            469762048\n\
-                     \tUnallocated:            50331648\n\n\
-                     <missing disk>, ID: 2\n\
-                     \tDevice size:                  0\n\
-                     \tDevice slack:                  0\n\
-                     \tData,RAID1:            469762048\n\
-                     \tUnallocated:                  0\n\n",
-                )),
-                CmdRequest::BtrfsBalanceStatus { .. } => Ok(mock_ok(
-                    "btrfs balance status",
-                    "No balance found on '/mnt/storage'\n",
-                )),
-                _ => Err(CmdError::MissingMock),
-            }
-        }
-
-        fn run_with_stdin(
-            &self,
-            request: &CmdRequest,
-            _stdin: &[u8],
-        ) -> Result<RawCommandOutput, CmdError> {
-            self.run(request)
-        }
-    }
-
     #[test]
     // Intent: cmd_replace's missing path rejects a --old name that is absent
     //   from pool.json, with no inhibitor acquired and no journal written.
@@ -3414,54 +3360,26 @@ mod tests {
     //   must fire before the inhibitor seam at the "reversible preflight
     //   before inhibitor" boundary (cli/src/replace.rs:224-229).
     fn cmd_replace_missing_path_rejects_old_name_absent_from_membership() {
-        let state_tmp = tempfile::tempdir().unwrap();
-        let paths = StatePaths::custom(state_tmp.path().into());
-
-        // Seed pool.json with ONLY disk1 -- no disk2 entry. This is the typo
-        // scenario: btrfs knows devid 2 is missing, but pool.json does not
-        // record any member named "disk2".
-        let mut m = PoolMembership::empty();
-        let mut disk1 = DiskMember::from_by_id(ByIdPath("/dev/disk/by-id/virtio-disk1".into()));
-        disk1.devid = Some(1);
-        m.disks.insert("disk1".into(), disk1);
-        membership::save_membership(&m, &paths).unwrap();
-
-        let config_tmp = tempfile::tempdir().unwrap();
-        let config_path = config_tmp.path().join("config.json");
-        std::fs::write(
-            &config_path,
-            serde_json::to_vec(&serde_json::json!({ "mount_point": "/mnt/storage" })).unwrap(),
-        )
-        .unwrap();
-
-        let pass_path = config_tmp.path().join("passphrase");
-        std::fs::write(&pass_path, b"test-passphrase\n").unwrap();
-
-        let fs = ReplaceMockFs(vec![
+        // pool.json records only disk1 -- the typo scenario where btrfs
+        // reports devid 2 missing but the operator's --old name does not
+        // match any pool.json row. The btrfs side still presents disk1 +
+        // missing-devid-2 via the canonical one-live-one-missing fixture.
+        let f = PoolFixture::one_live_only();
+        let fs = MockFs::storage(vec![
             "/dev/disk/by-id/virtio-disk3".into(),
             "/dev/mapper/braid-disk3".into(),
         ]);
-
-        let runner = MissingPathReplaceRunner;
-        let inhibitor = crate::inhibit::RecordingInhibitor::new();
+        let replace_done = Arc::new(AtomicBool::new(false));
+        let runner =
+            ReplacementPool::one_live_one_missing().install(MockRunner::default(), replace_done);
         let result = cmd_replace(
             &runner,
             &fs,
-            &ReplaceParams {
-                config_path: &config_path,
-                old_name: "disk2",
-                new_name: "disk3=/dev/disk/by-id/virtio-disk3",
-                missing_id: Some(2),
-                dry_run: false,
-                yes: true,
-                passphrase_stdin: false,
-                passphrase_file: Some(pass_path.as_path()),
-                enroll_key_file: None,
-                luks_format_extra_opts: &[],
-                progress: crate::progress::ProgressOutput::Off,
-                paths: &paths,
-                sleep_inhibitor: &inhibitor,
-            },
+            &f.replace_params()
+                .old("disk2")
+                .new("disk3=/dev/disk/by-id/virtio-disk3")
+                .missing_id(Some(2))
+                .build(),
         );
 
         assert!(
@@ -3469,12 +3387,12 @@ mod tests {
             "expected Err(ReplaceError::Validation(_)) for --old absent from pool.json, got: {result:?}"
         );
         assert_eq!(
-            inhibitor.acquire_count(),
+            f.inhibitor.acquire_count(),
             0,
             "validation must fire before the inhibitor seam -- a caught typo must not hold logind"
         );
         assert!(
-            journal::load_journal(&paths).unwrap().is_none(),
+            journal::load_journal(&f.paths).unwrap().is_none(),
             "no journal may be written when --old is absent from pool.json"
         );
     }
