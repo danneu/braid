@@ -245,43 +245,42 @@ fn apply_enrollment<R: CommandRunner>(
     paths: &StatePaths,
 ) -> Result<(), EnrollKeyFileError> {
     let color_enabled = color_enabled_for_stderr();
-    let mut enrolled = 0u32;
-    let mut already = 0u32;
 
     for action in plan {
-        match action {
-            DiskEnrollAction::AlreadyEnrolled { .. } => {
-                already += 1;
-            }
-            DiskEnrollAction::NeedsEnroll { name, by_id } => {
-                eprint!(
-                    "{}",
-                    status_line(
-                        StatusTag::Wait,
-                        color_enabled,
-                        &format!("disk {name}: enrolling keyfile in slot 1..."),
-                    )
-                );
-                luks::enroll_key_file(runner, &by_id.0, passphrase, key_file_path)?;
-                eprint!(
-                    "{}",
-                    status_line(
-                        StatusTag::Ok,
-                        color_enabled,
-                        &format!("disk {name}: keyfile enrolled in slot 1"),
-                    )
-                );
+        if let DiskEnrollAction::NeedsEnroll { name, by_id } = action {
+            eprint!(
+                "{}",
+                status_line(
+                    StatusTag::Wait,
+                    color_enabled,
+                    &format!("disk {name}: enrolling keyfile in slot 1..."),
+                )
+            );
+            luks::enroll_key_file(runner, &by_id.0, passphrase, key_file_path)?;
+            eprint!(
+                "{}",
+                status_line(
+                    StatusTag::Ok,
+                    color_enabled,
+                    &format!("disk {name}: keyfile enrolled in slot 1"),
+                )
+            );
 
-                let mn = mapper_name(name);
-                let backup_path =
-                    luks::backup_luks_header_post_mutation(runner, &by_id.0, &mn.0, paths)?;
-                eprintln!("LUKS header backed up: {}", backup_path.display());
-
-                enrolled += 1;
-            }
+            let mn = mapper_name(name);
+            let backup_path =
+                luks::backup_luks_header_post_mutation(runner, &by_id.0, &mn.0, paths)?;
+            eprintln!("LUKS header backed up: {}", backup_path.display());
         }
     }
 
+    let enrolled = plan
+        .iter()
+        .filter(|a| matches!(a, DiskEnrollAction::NeedsEnroll { .. }))
+        .count();
+    let already = plan
+        .iter()
+        .filter(|a| matches!(a, DiskEnrollAction::AlreadyEnrolled { .. }))
+        .count();
     eprintln!(
         "done: {} enrolled, {} already had keyfile",
         enrolled, already
