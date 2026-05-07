@@ -3678,117 +3678,6 @@ mod tests {
         );
     }
 
-    /// Runner mirror of `MissingPathSuccessRunner` that succeeds through
-    /// `btrfs replace start` and `btrfs filesystem resize` but fails the
-    /// post-replace `btrfs balance start -dconvert=raid1,soft`. Lets the
-    /// regression test pin that `pool.json` was already persisted before
-    /// the soft-balance step ran.
-    struct MissingPathBalanceFailingRunner {
-        log: std::sync::Arc<std::sync::Mutex<Vec<CmdRequest>>>,
-        replace_done: std::sync::Arc<std::sync::atomic::AtomicBool>,
-    }
-
-    impl CmdRunner2 for MissingPathBalanceFailingRunner {
-        fn run(&self, request: &CmdRequest) -> Result<RawCommandOutput, CmdError> {
-            self.log.lock().unwrap().push(request.clone());
-            match request {
-                CmdRequest::BtrfsFilesystemShow { mount_point } => {
-                    let show = if self.replace_done.load(std::sync::atomic::Ordering::Relaxed) {
-                        "Label: none  uuid: cc86845b-aec3-408e-bef5-553affc1f2b1\n\
-                         \tTotal devices 2 FS bytes used 16.17MiB\n\
-                         \tdevid    1 size 496.00MiB used 121.56MiB path /dev/mapper/braid-disk1\n\
-                         \tdevid    2 size 496.00MiB used 121.56MiB path /dev/mapper/braid-disk3\n"
-                    } else {
-                        "Label: none  uuid: cc86845b-aec3-408e-bef5-553affc1f2b1\n\
-                         \tTotal devices 2 FS bytes used 16.17MiB\n\
-                         \tdevid    1 size 496.00MiB used 121.56MiB path /dev/mapper/braid-disk1\n\
-                         \t*** Some devices missing\n"
-                    };
-                    Ok(mock_ok(
-                        &format!("btrfs filesystem show {mount_point}"),
-                        show,
-                    ))
-                }
-                CmdRequest::CryptsetupStatus { mapper } => {
-                    let dev = match mapper.as_str() {
-                        "braid-disk1" => "/dev/vdb",
-                        "braid-disk3" => "/dev/vdd",
-                        _ => return Err(CmdError::MissingMock),
-                    };
-                    Ok(mock_ok(
-                        &format!("cryptsetup status {mapper}"),
-                        &format!(
-                            "{mapper} is active and is in use.\n  type:    LUKS2\n  device:  {dev}\n  mode:    read/write\n"
-                        ),
-                    ))
-                }
-                CmdRequest::CryptsetupLuksUuid { device } => {
-                    let uuid = match device.as_str() {
-                        "/dev/vdb" | "/dev/disk/by-id/virtio-disk1" => {
-                            "11111111-1111-1111-1111-111111111111"
-                        }
-                        "/dev/vdd" | "/dev/disk/by-id/virtio-disk3" => {
-                            "33333333-3333-3333-3333-333333333333"
-                        }
-                        _ => return Err(CmdError::MissingMock),
-                    };
-                    Ok(mock_ok(
-                        &format!("cryptsetup luksUUID {device}"),
-                        &format!("{uuid}\n"),
-                    ))
-                }
-                CmdRequest::CryptsetupLuksDumpText { device } => Ok(mock_ok(
-                    &format!("cryptsetup luksDump {device}"),
-                    "LUKS header information\nVersion:       \t2\n",
-                )),
-                CmdRequest::BtrfsBalanceStatus { .. } => Ok(mock_ok(
-                    "btrfs balance status",
-                    "No balance found on '/mnt/storage'\n",
-                )),
-                CmdRequest::BtrfsDeviceUsageRaw { .. } => Ok(mock_ok(
-                    "btrfs device usage --raw",
-                    "/dev/mapper/braid-disk1, ID: 1\n\
-                     \tDevice size:           520093696\n\
-                     \tDevice slack:                  0\n\
-                     \tData,RAID1:            469762048\n\
-                     \tUnallocated:            50331648\n\n\
-                     <missing disk>, ID: 2\n\
-                     \tDevice size:                  0\n\
-                     \tDevice slack:                  0\n\
-                     \tData,RAID1:            469762048\n\
-                     \tUnallocated:                  0\n\n",
-                )),
-                CmdRequest::BtrfsReplaceStart { .. } => {
-                    self.replace_done
-                        .store(true, std::sync::atomic::Ordering::Relaxed);
-                    Ok(mock_ok("btrfs replace start", ""))
-                }
-                CmdRequest::BtrfsFilesystemResize { .. } => {
-                    Ok(mock_ok("btrfs filesystem resize", ""))
-                }
-                CmdRequest::BtrfsBalanceRaid1Soft { .. } => Ok(RawCommandOutput {
-                    cmd: "btrfs balance raid1 soft".into(),
-                    stdout: String::new(),
-                    stderr: "ERROR: error during balancing".into(),
-                    exit_status: 1,
-                }),
-                CmdRequest::CryptsetupTestPassphrase { device } => Ok(mock_ok(
-                    &format!("cryptsetup open --test-passphrase {device}"),
-                    "",
-                )),
-                _ => Err(CmdError::MissingMock),
-            }
-        }
-
-        fn run_with_stdin(
-            &self,
-            request: &CmdRequest,
-            _stdin: &[u8],
-        ) -> Result<RawCommandOutput, CmdError> {
-            self.run(request)
-        }
-    }
-
     /*
      * Intent: on the missing path, `pool.json` already reflects the new
      * membership (disk2 gone, disk3 enriched) when the post-replace soft
@@ -3817,59 +3706,41 @@ mod tests {
      */
     #[test]
     fn pool_json_persisted_when_missing_path_soft_balance_fails() {
-        let state_tmp = tempfile::tempdir().unwrap();
-        let paths = StatePaths::custom(state_tmp.path().into());
-        let mut m = PoolMembership::empty();
-        m.disks.insert(
-            "disk1".into(),
-            DiskMember::from_by_id(ByIdPath("/dev/disk/by-id/virtio-disk1".into())),
-        );
-        let mut disk2 = DiskMember::from_by_id(ByIdPath("/dev/disk/by-id/virtio-disk2".into()));
-        disk2.devid = Some(2);
-        m.disks.insert("disk2".into(), disk2);
-        membership::save_membership(&m, &paths).unwrap();
-
-        let config_tmp = tempfile::tempdir().unwrap();
-        let config_path = config_tmp.path().join("config.json");
-        std::fs::write(
-            &config_path,
-            serde_json::to_vec(&serde_json::json!({ "mount_point": "/mnt/storage" })).unwrap(),
-        )
-        .unwrap();
-
-        let pass_path = config_tmp.path().join("passphrase");
-        std::fs::write(&pass_path, b"test-passphrase\n").unwrap();
-
-        let fs = ReplaceMockFs(vec![
+        let f = PoolFixture::one_live_one_missing();
+        let fs = MockFs::storage(vec![
             "/dev/disk/by-id/virtio-disk3".into(),
             "/dev/mapper/braid-disk3".into(),
         ]);
-
-        let log = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
-        let replace_done = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
-        let runner = MissingPathBalanceFailingRunner {
-            log: log.clone(),
-            replace_done: replace_done.clone(),
-        };
-        let inhibitor = crate::inhibit::RecordingInhibitor::new();
+        let replace_done = Arc::new(AtomicBool::new(false));
+        let runner = ReplacementPool::one_live_one_missing()
+            .install(MockRunner::default(), replace_done.clone())
+            .with_handler({
+                let replace_done = replace_done.clone();
+                move |req| match req {
+                    CmdRequest::BtrfsReplaceStart { .. } => {
+                        replace_done.store(true, std::sync::atomic::Ordering::Relaxed);
+                        Some(Ok(mock_ok("btrfs replace start", "")))
+                    }
+                    CmdRequest::BtrfsFilesystemResize { .. } => {
+                        Some(Ok(mock_ok("btrfs filesystem resize", "")))
+                    }
+                    CmdRequest::BtrfsBalanceRaid1Soft { .. } => Some(Ok(RawCommandOutput {
+                        cmd: "btrfs balance raid1 soft".into(),
+                        stdout: String::new(),
+                        stderr: "ERROR: error during balancing".into(),
+                        exit_status: 1,
+                    })),
+                    _ => None,
+                }
+            });
         let result = cmd_replace(
             &runner,
             &fs,
-            &ReplaceParams {
-                config_path: &config_path,
-                old_name: "disk2",
-                new_name: "disk3=/dev/disk/by-id/virtio-disk3",
-                missing_id: Some(2),
-                dry_run: false,
-                yes: true,
-                passphrase_stdin: false,
-                passphrase_file: Some(pass_path.as_path()),
-                enroll_key_file: None,
-                luks_format_extra_opts: &[],
-                progress: crate::progress::ProgressOutput::Off,
-                paths: &paths,
-                sleep_inhibitor: &inhibitor,
-            },
+            &f.replace_params()
+                .old("disk2")
+                .new("disk3=/dev/disk/by-id/virtio-disk3")
+                .missing_id(Some(2))
+                .build(),
         );
 
         match &result {
@@ -3878,10 +3749,10 @@ mod tests {
         }
 
         assert!(
-            journal::load_journal(&paths).unwrap().is_some(),
+            journal::load_journal(&f.paths).unwrap().is_some(),
             "pending-op.json must survive error exit so braid recover can reconcile"
         );
-        let journal = journal::load_journal(&paths)
+        let journal = journal::load_journal(&f.paths)
             .unwrap()
             .expect("journal should remain after post-replace balance failure");
         assert!(
@@ -3896,7 +3767,7 @@ mod tests {
             journal.op
         );
 
-        let saved = membership::load_membership(&paths)
+        let saved = membership::load_membership(&f.paths)
             .expect("pool.json must exist after the membership commit");
         assert!(
             !saved.disks.contains_key("disk2"),
@@ -4559,35 +4430,21 @@ mod tests {
     // command returns the validation error and stderr has no busy-op note.
     #[test]
     fn cmd_replace_old_equals_new_aborts_before_any_probe() {
-        let state_tmp = tempfile::tempdir().unwrap();
-        let paths = StatePaths::custom(state_tmp.path().into());
-        let config_tmp = tempfile::tempdir().unwrap();
-        let config_path = config_tmp.path().join("config.json");
-        std::fs::write(
-            &config_path,
-            serde_json::to_vec(&serde_json::json!({ "mount_point": "/mnt/storage" })).unwrap(),
-        )
-        .unwrap();
-        let inhibitor = crate::inhibit::RecordingInhibitor::new();
+        // KEEP &PanicRunner / &PanicFilesystem -- the assertion is precisely
+        // that no probe runs before validation; substituting a regular
+        // runner/fs would let an accidental pre-validation probe pass
+        // silently. PoolFixture::empty supplies the temp dirs + config and
+        // ReplaceParamsBuilder constructs identical params, with
+        // passphrase_file=None preserved.
+        let f = PoolFixture::empty();
         let (result, stderr) = super::replace_stderr_capture::capture(|| {
             cmd_replace(
                 &PanicRunner,
                 &PanicFilesystem,
-                &ReplaceParams {
-                    config_path: &config_path,
-                    old_name: "disk2",
-                    new_name: "disk2=/dev/disk/by-id/virtio-disk2",
-                    missing_id: None,
-                    dry_run: false,
-                    yes: true,
-                    passphrase_stdin: false,
-                    passphrase_file: None,
-                    enroll_key_file: None,
-                    luks_format_extra_opts: &[],
-                    progress: crate::progress::ProgressOutput::Off,
-                    paths: &paths,
-                    sleep_inhibitor: &inhibitor,
-                },
+                &f.replace_params()
+                    .new("disk2=/dev/disk/by-id/virtio-disk2")
+                    .passphrase_file(None)
+                    .build(),
             )
         });
 
@@ -4609,6 +4466,6 @@ mod tests {
             stderr.is_empty(),
             "expected no preserved notes, got:\n{stderr}"
         );
-        assert_eq!(inhibitor.acquire_count(), 0);
+        assert_eq!(f.inhibitor.acquire_count(), 0);
     }
 }
