@@ -79,6 +79,19 @@ fn umount_stderr_is_busy(stderr: &str) -> bool {
     s == "target is busy" || s.ends_with(": target is busy")
 }
 
+/// Compose the lock close set as fully qualified `/dev/mapper/...`
+/// paths: every membership mapper observed open at plan time, followed
+/// by orphaned braid-* mappers, in that order. Caller is responsible
+/// for any TOCTOU re-filter -- this helper does not touch the
+/// filesystem.
+fn close_set_paths(open_mappers: &[String], orphan_mappers: &[String]) -> Vec<String> {
+    open_mappers
+        .iter()
+        .chain(orphan_mappers.iter())
+        .map(|m| format!("/dev/mapper/{m}"))
+        .collect()
+}
+
 /// Compile dry-run steps for lock.
 pub fn compile_lock_steps(
     pool_was_mounted: bool,
@@ -96,11 +109,7 @@ pub fn compile_lock_steps(
                 mount_point: mount_point.clone(),
             }],
         });
-        let forget_devs: Vec<String> = open_mappers
-            .iter()
-            .chain(orphan_mappers.iter())
-            .map(|m| format!("/dev/mapper/{m}"))
-            .collect();
+        let forget_devs = close_set_paths(open_mappers, orphan_mappers);
         if !forget_devs.is_empty() {
             steps.push(Step {
                 risk: "safe",
@@ -235,13 +244,8 @@ impl LockPlan {
                 // pools. Scope to the close set (membership + orphan mappers)
                 // -- the no-arg form is kernel-global and would invalidate
                 // scan entries for unrelated btrfs filesystems on the host.
-                let forget_devs: Vec<String> = self
-                    .open_mappers
-                    .iter()
-                    .chain(orphan_mappers.iter())
-                    .map(|m| format!("/dev/mapper/{m}"))
-                    .filter(|p| fs.exists(p))
-                    .collect();
+                let mut forget_devs = close_set_paths(&self.open_mappers, orphan_mappers);
+                forget_devs.retain(|p| fs.exists(p));
                 if !forget_devs.is_empty() {
                     let forget_result = runner.run(&CmdRequest::BtrfsDeviceScanForget {
                         devices: forget_devs,
