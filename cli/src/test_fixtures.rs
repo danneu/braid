@@ -15,11 +15,6 @@
 //!     passphrase + `RecordingInhibitor`.
 //!   * `ReplaceParamsBuilder` -- per-test builder over `ReplaceParams`
 //!     defaults.
-//!
-//! Items here are populated incrementally; sub-commits 3-8 wire the
-//! consumers in. The `#[allow(dead_code)]` here is the SC2 sentinel and
-//! drops out naturally once the migration completes.
-#![allow(dead_code)]
 
 use crate::cmd::{CmdRequest, MockRunner, RawCommandOutput};
 use crate::inhibit::RecordingInhibitor;
@@ -499,6 +494,7 @@ impl<'a> ReplaceParamsBuilder<'a> {
         self.yes = yes;
         self
     }
+    #[allow(dead_code)]
     pub(crate) fn passphrase_stdin(mut self, on: bool) -> Self {
         self.passphrase_stdin = on;
         self
@@ -515,6 +511,7 @@ impl<'a> ReplaceParamsBuilder<'a> {
         self.luks_format_extra_opts = opts;
         self
     }
+    #[allow(dead_code)]
     pub(crate) fn progress(mut self, p: ProgressOutput) -> Self {
         self.progress = p;
         self
