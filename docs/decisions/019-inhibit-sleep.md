@@ -116,6 +116,61 @@ The no-op early-return path (all requested disks already in the pool) returns be
 
 `braid recover` follows the same boundary for replayed destructive work. In particular, add `PoolMutation` recovery resolves and verifies the needed passphrase before acquiring a sleep inhibitor; the inhibitor is acquired only after reversible credential checks pass and immediately before replaying target preparation or btrfs membership work.
 
+### Excluded: `braid lock`
+
+`braid lock` deliberately does not acquire the sleep inhibitor, even
+though its mutation window (umount + per-mapper `cryptsetup close`) is
+non-trivial in wall-clock time. This is the worked example of the
+deciding question below applied to lock work specifically:
+
+- **Recoverability.** A lock interrupted mid-flight leaves a state that
+  re-running `braid lock` advances on, to the extent its existing
+  probes can detect. Specifically:
+  - `plan_lock`'s `mountpoint -q` skips the umount step when the pool
+    is already unmounted (`cli/src/lock.rs`'s `plan_lock`).
+  - The per-mapper close path checks `fs.exists("/dev/mapper/<name>")`
+    before issuing `cryptsetup close` and reports "already closed"
+    otherwise, so closed membership mappers do not re-error on a
+    follow-up run.
+  - Orphan mappers (`braid-*` paths not in `pool.json`) are re-scanned
+    on each invocation and closed; close failures still surface as
+    fatal errors, and a `/dev/mapper` scan failure is warned and
+    yields an empty orphan list for that run -- not silently swallowed.
+
+  Unlike `replace`/`add`/`remove`/`remove-missing`, there is no
+  kernel-level topology corruption window and no hours-long restart
+  cost. The point is that a partially-completed lock does not poison
+  subsequent invocations -- not that every failure is hidden.
+- **Shutdown-driven `ExecStop`.** When `braid lock` runs as
+  `braid-online.service`'s `ExecStop=` during system shutdown, the
+  system is heading to `shutdown.target`/power-off, not to suspend. A
+  sleep inhibitor acquired during that window is redundant -- logind
+  does not schedule a suspend transition mid-shutdown.
+- **Manual stop and user-lock reentry.** `ExecStop=braid lock` also
+  fires on a manual `systemctl stop braid-online.service` and on the
+  wrapper's post-lock `systemctl stop braid-online.service` for
+  user-initiated `braid lock` (see
+  `docs/decisions/018-systemd-lifecycle.md:131` and
+  `modules/braid/storage.nix`'s `braid-online` definition). Those
+  paths do not enjoy the shutdown-driven guarantee above; their
+  justification is the recoverability + short-duration argument, not
+  the shutdown-target one.
+- **Suspend context.** `braid-online.service` has no
+  `Conflicts = sleep.target` (see `modules/braid/storage.nix`). By the
+  `016-auto-suspend.md` design the pool stays mounted across suspend,
+  so the only realistic mid-lock-suspend race is a user-initiated
+  `braid lock` colliding with autosuspend's idle countdown. That
+  window is narrow (lock is short) and the failure mode is
+  recoverable, per the first bullet.
+- **`ExecStop` budget.** `braid-online.service` runs lock under
+  `TimeoutStopSec = 5min`. Adding subprocess work to that path (a
+  `systemd-inhibit` fork plus its supervised `sh + sleep` child) buys
+  no protection commensurate with the added shutdown-path complexity.
+
+If a future change makes lock's mutation window genuinely long
+(e.g. a multi-minute pre-lock balance), revisit this exclusion under the
+same deciding question.
+
 ## Consequences
 
 - suspend is blocked only when interruption is actually dangerous
