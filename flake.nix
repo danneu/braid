@@ -518,6 +518,9 @@
           repro-btrfs-replace-rejects-smaller = pkgs.testers.nixosTest (
             import ./tests/repro/btrfs-replace-rejects-smaller-target.nix
           );
+          repro-btrfs-replace-rejected-during-scrub = pkgs.testers.nixosTest (
+            import ./tests/repro/btrfs-replace-rejected-during-scrub.nix
+          );
           repro-btrfs-replace-interrupted-mid-flight = pkgs.testers.nixosTest (
             import ./tests/repro/btrfs-replace-interrupted-mid-flight.nix {
               braid = linuxCrane.braid;

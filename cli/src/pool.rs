@@ -80,6 +80,27 @@ fn balance_error(label: &str, mount_point: &MountPoint, result: &RawCommandOutpu
     }
 }
 
+/// Build a `PoolError::Failed` for `btrfs replace start`, detecting the
+/// scrub-collision rejection and appending a recovery hint. The kernel's
+/// `--enqueue` wait does not cover scrub (scrub is not in the `exclusive_op`
+/// set), so the only way out is for the operator to wait or cancel scrub.
+fn replace_error(mount_point: &MountPoint, result: &RawCommandOutput) -> PoolError {
+    let stderr = result.stderr.to_lowercase();
+    if stderr.contains("scrub is in progress") {
+        PoolError::Failed(format!(
+            "btrfs replace failed (exit {}): {}\nhint: a scrub is currently running -- check progress with `braid status`, or run `btrfs scrub cancel {mount_point}` to abort it before retrying",
+            result.exit_status,
+            result.stderr.trim(),
+        ))
+    } else {
+        PoolError::Failed(format!(
+            "btrfs replace failed (exit {}): {}",
+            result.exit_status,
+            result.stderr.trim(),
+        ))
+    }
+}
+
 /// Balance pool to RAID1 with progress display.
 pub fn pool_balance_raid1<R: CommandRunner + Sync>(
     runner: &R,
@@ -294,11 +315,7 @@ pub fn pool_replace_device<R: CommandRunner + Sync>(
         progress,
     )?;
     if result.exit_status != 0 {
-        return Err(PoolError::Failed(format!(
-            "btrfs replace failed (exit {}): {}",
-            result.exit_status,
-            result.stderr.trim()
-        )));
+        return Err(replace_error(mount_point, &result));
     }
     Ok(())
 }
@@ -1156,6 +1173,95 @@ mod tests {
         assert!(
             err.contains("target device is too small"),
             "error should include stderr: {err}"
+        );
+    }
+
+    #[test]
+    // Intent: when `btrfs replace start` is rejected because a scrub is
+    // running on the same pool, the surfaced error includes a recovery hint
+    // pointing at `btrfs scrub cancel` and the pool's mount point so the
+    // operator knows the exact next command to run.
+    // Why it exists: scrub is not in btrfs' `exclusive_operation` set, so the
+    // `--enqueue` wait braid passes cannot wait it out -- the kernel emits
+    // BTRFS_IOCTL_DEV_REPLACE_RESULT_SCRUB_INPROGRESS and upstream's
+    // `replace_dev_result2string` (reference/btrfs-progs/cmds/replace.c:50-64)
+    // surfaces "scrub is in progress" in the START-ioctl error. Without the
+    // hint the operator sees only the raw upstream stderr.
+    // Scenario: a `braid-scrub.service` run (or manual `btrfs scrub start`)
+    // is in flight when the operator invokes `braid replace`, and the kernel
+    // rejects the START ioctl.
+    fn pool_replace_device_scrub_in_progress_includes_hint() {
+        let runner = MockRunner::default().with_output(
+            CmdRequest::BtrfsReplaceStart {
+                devid: 2,
+                target_device: "/dev/mapper/braid-new".to_owned(),
+                mount_point: MountPoint("/mnt/storage".to_owned()),
+            },
+            RawCommandOutput {
+                cmd: String::new(),
+                stdout: String::new(),
+                stderr: "ERROR: ioctl(DEV_REPLACE_START) failed on \"/mnt/storage\": Operation not permitted, scrub is in progress".to_owned(),
+                exit_status: 1,
+            },
+        );
+
+        let result = pool_replace_device(
+            &runner,
+            2,
+            "/dev/mapper/braid-new",
+            &mp(),
+            ProgressOutput::Off,
+        );
+        assert!(result.is_err(), "should propagate btrfs replace failure");
+        let err = result.unwrap_err().to_string();
+        assert!(err.contains("hint:"), "error should include hint: {err}");
+        assert!(err.contains("scrub"), "hint should mention scrub: {err}");
+        assert!(
+            err.contains("/mnt/storage"),
+            "hint should include mount point: {err}"
+        );
+    }
+
+    #[test]
+    // Intent: an unrelated `btrfs replace start` failure must not get the
+    // scrub-collision recovery hint.
+    // Why it exists: the helper classifies on a single substring; this test
+    // locks in the negative path so a future broadening of the classifier
+    // (or a typo'd substring match) cannot silently misroute every replace
+    // failure into the scrub recovery hint.
+    // Scenario: target device is too small -- a wholly different rejection
+    // path that has nothing to do with scrub.
+    fn pool_replace_device_no_hint_for_unrelated_failure() {
+        let runner = MockRunner::default().with_output(
+            CmdRequest::BtrfsReplaceStart {
+                devid: 2,
+                target_device: "/dev/mapper/braid-new".to_owned(),
+                mount_point: MountPoint("/mnt/storage".to_owned()),
+            },
+            RawCommandOutput {
+                cmd: String::new(),
+                stdout: String::new(),
+                stderr: "target device is too small".to_owned(),
+                exit_status: 1,
+            },
+        );
+
+        let result = pool_replace_device(
+            &runner,
+            2,
+            "/dev/mapper/braid-new",
+            &mp(),
+            ProgressOutput::Off,
+        );
+        assert!(result.is_err(), "should propagate btrfs replace failure");
+        let err = result.unwrap_err().to_string();
+        assert!(
+            err.contains("target device is too small"),
+            "error should include stderr: {err}"
+        );
+        assert!(
+            !err.contains("hint:"),
+            "unrelated failure must not include scrub hint: {err}"
         );
     }
 
