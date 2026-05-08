@@ -64,7 +64,6 @@ impl PoolFixture {
 /// pass a custom `&dyn AcquireSleepInhibitor` via `.sleep_inhibitor(...)`
 /// to thread `FailingInhibitor` or `RequestCountInhibitor`; no need to
 /// extend the shared `inhibitor` field on `PoolFixture`.
-#[allow(dead_code)]
 pub(crate) struct RecoverParamsBuilder<'a> {
     config: &'a Config,
     paths: &'a StatePaths,
@@ -76,7 +75,6 @@ pub(crate) struct RecoverParamsBuilder<'a> {
     sleep_inhibitor: &'a dyn AcquireSleepInhibitor,
 }
 
-#[allow(dead_code)]
 impl<'a> RecoverParamsBuilder<'a> {
     pub(crate) fn dry_run(mut self, dry_run: bool) -> Self {
         self.dry_run = dry_run;
@@ -93,18 +91,8 @@ impl<'a> RecoverParamsBuilder<'a> {
         self
     }
 
-    pub(crate) fn passphrase_stdin(mut self, on: bool) -> Self {
-        self.passphrase_stdin = on;
-        self
-    }
-
     pub(crate) fn sleep_inhibitor(mut self, inhibitor: &'a dyn AcquireSleepInhibitor) -> Self {
         self.sleep_inhibitor = inhibitor;
-        self
-    }
-
-    pub(crate) fn progress(mut self, p: ProgressOutput) -> Self {
-        self.progress = p;
         self
     }
 
@@ -240,25 +228,21 @@ impl CommandRunner for RemountRunner {
 
 /// Bundled `RemountFs` + `RemountRunner` so tests can build the
 /// stateful FS, hand a fully-configured `MockRunner` to the harness,
-/// and observe both the wrapped runner and the harness-owned
-/// closed-mappers set with one struct.
+/// and observe the wrapped runner with one struct.
 ///
 /// Wraps a fully-built `MockRunner` (with all `with_output` /
 /// `with_handler` calls already applied). Tests configure the inner
 /// `MockRunner` first, then hand it to `RemountHarness::new`. The
 /// returned harness exposes `&self.fs` and `&self.runner` for passing
 /// to `cmd_recover` / `plan_recover`, plus `requests()` (delegating to
-/// the wrapped runner's request log) and `closed_mappers()` for the
-/// post-condition assertions the existing tests already make.
-#[allow(dead_code)]
+/// the wrapped runner's request log) for the post-condition assertions
+/// the existing tests already make.
 pub(crate) struct RemountHarness {
     pub(crate) fs: RemountFs,
     pub(crate) runner: RemountRunner,
     inner_log: MockRunner,
-    closed: SharedClosed,
 }
 
-#[allow(dead_code)]
 impl RemountHarness {
     /// Build the harness. `initial_paths` are seeded into the FS;
     /// `already_closed` are seeded into the closed-mappers set so a
@@ -281,10 +265,9 @@ impl RemountHarness {
             runner: RemountRunner {
                 inner,
                 fs_paths: paths,
-                closed: Arc::clone(&closed),
+                closed,
             },
             inner_log,
-            closed,
         }
     }
 
@@ -296,13 +279,5 @@ impl RemountHarness {
     /// NOT appear, which matches pre-migration behavior.
     pub(crate) fn requests(&self) -> Vec<CmdRequest> {
         self.inner_log.requests()
-    }
-
-    /// Snapshot of the harness-owned closed-mappers set. Mappers in
-    /// this set make `CryptsetupStatus` short-circuit to `inactive`.
-    pub(crate) fn closed_mappers(&self) -> Vec<String> {
-        let mut v: Vec<String> = self.closed.lock().unwrap().iter().cloned().collect();
-        v.sort();
-        v
     }
 }
