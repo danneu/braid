@@ -834,8 +834,9 @@ mod tests {
     use crate::membership::{DiskMember, PoolMembership};
     use crate::secret::Passphrase;
     use crate::test_fixtures::{
-        NoopSleeper, direct_two_disk_fs_with_mappers, direct_two_disk_open_runner,
-        direct_two_disk_plan,
+        MOUNT_TEST_PASSPHRASE_BYTES, NoopSleeper, base_two_disk_runner,
+        direct_two_disk_fs_with_mappers, direct_two_disk_open_runner, direct_two_disk_plan,
+        mount_fs,
     };
     use crate::types::{ByIdPath, LuksUuid, MountPoint};
     use std::collections::BTreeMap;
@@ -999,7 +1000,7 @@ mod tests {
     #[test]
     fn execute_unlock_and_mount_rejects_empty_plan() {
         let config = test_config();
-        let fs = MockFs::new(&[]);
+        let fs = mount_fs(&[]);
         // Runner with no outputs wired — if the guard lets us through,
         // the first real command (btrfs device scan or cryptsetup verify)
         // will panic on lookup, which would also fail the test.
@@ -1050,7 +1051,7 @@ mod tests {
     #[test]
     fn execute_mount_only_rejects_non_empty_plan() {
         let config = test_config();
-        let fs = MockFs::new(&[]);
+        let fs = mount_fs(&[]);
         let runner = MockRunner::default();
 
         let plan = OpenPlan {
@@ -1087,7 +1088,7 @@ mod tests {
     fn mount_already_mounted_returns_false() {
         let config = test_config();
         let membership = two_disk_membership();
-        let fs = MockFs::new(&[]);
+        let fs = mount_fs(&[]);
 
         let runner = MockRunner::default().with_output(
             CmdRequest::MountpointCheck {
@@ -1113,52 +1114,18 @@ mod tests {
     fn mount_two_disk_happy_path() {
         let config = test_config();
         let membership = two_disk_membership();
-        let fs = MockFs::new(&[
+        let fs = mount_fs(&[
             "/dev/disk/by-id/virtio-disk1",
             "/dev/disk/by-id/virtio-disk2",
         ]);
 
-        let (uuid1_req, uuid1_out) = luks_uuid_ok(
-            "/dev/disk/by-id/virtio-disk1",
-            "aaaaaaaa-1111-2222-3333-444444444444",
-        );
-        let (uuid2_req, uuid2_out) = luks_uuid_ok(
-            "/dev/disk/by-id/virtio-disk2",
-            "bbbbbbbb-1111-2222-3333-444444444444",
-        );
-
-        let runner = MockRunner::default()
-            .with_output(
-                CmdRequest::MountpointCheck {
-                    path: MountPoint("/mnt/storage".to_owned()),
-                },
-                err_raw("mountpoint", 1, ""),
-            )
-            .with_output(uuid1_req, uuid1_out)
-            .with_output(uuid2_req, uuid2_out)
-            .with_luks_dump_text_luks2("/dev/disk/by-id/virtio-disk1")
-            .with_luks_dump_text_luks2("/dev/disk/by-id/virtio-disk2")
-            .with_mappers_closed(&["braid-disk1", "braid-disk2"])
-            .with_output_stdin(
-                CmdRequest::CryptsetupTestPassphrase {
-                    device: "/dev/disk/by-id/virtio-disk1".into(),
-                },
-                b"testpass".to_vec(),
-                ok_raw("cryptsetup open --test-passphrase"),
-            )
-            .with_output_stdin(
-                CmdRequest::CryptsetupTestPassphrase {
-                    device: "/dev/disk/by-id/virtio-disk2".into(),
-                },
-                b"testpass".to_vec(),
-                ok_raw("cryptsetup open --test-passphrase"),
-            )
+        let runner = base_two_disk_runner()
             .with_output_stdin(
                 CmdRequest::CryptsetupLuksOpen {
                     device: "/dev/disk/by-id/virtio-disk1".into(),
                     mapper: "braid-disk1".into(),
                 },
-                b"testpass".to_vec(),
+                MOUNT_TEST_PASSPHRASE_BYTES.to_vec(),
                 ok_raw("cryptsetup open"),
             )
             .with_output_stdin(
@@ -1166,7 +1133,7 @@ mod tests {
                     device: "/dev/disk/by-id/virtio-disk2".into(),
                     mapper: "braid-disk2".into(),
                 },
-                b"testpass".to_vec(),
+                MOUNT_TEST_PASSPHRASE_BYTES.to_vec(),
                 ok_raw("cryptsetup open"),
             )
             .with_output(CmdRequest::BtrfsDeviceScanAll, ok_raw("btrfs device scan"))
@@ -1674,50 +1641,14 @@ mod tests {
     fn mount_passphrase_mismatch_names_disk() {
         let config = test_config();
         let membership = two_disk_membership();
-        let fs = MockFs::new(&[
+        let fs = mount_fs(&[
             "/dev/disk/by-id/virtio-disk1",
             "/dev/disk/by-id/virtio-disk2",
         ]);
 
-        let (uuid1_req, uuid1_out) = luks_uuid_ok(
-            "/dev/disk/by-id/virtio-disk1",
-            "aaaaaaaa-1111-2222-3333-444444444444",
-        );
-        let (uuid2_req, uuid2_out) = luks_uuid_ok(
-            "/dev/disk/by-id/virtio-disk2",
-            "bbbbbbbb-1111-2222-3333-444444444444",
-        );
-
-        let runner = MockRunner::default()
-            .with_output(
-                CmdRequest::MountpointCheck {
-                    path: MountPoint("/mnt/storage".to_owned()),
-                },
-                err_raw("mountpoint", 1, ""),
-            )
-            .with_output(uuid1_req, uuid1_out)
-            .with_output(uuid2_req, uuid2_out)
-            .with_luks_dump_text_luks2("/dev/disk/by-id/virtio-disk1")
-            .with_luks_dump_text_luks2("/dev/disk/by-id/virtio-disk2")
-            .with_mappers_closed(&["braid-disk1", "braid-disk2"])
-            .with_output_stdin(
-                CmdRequest::CryptsetupTestPassphrase {
-                    device: "/dev/disk/by-id/virtio-disk1".into(),
-                },
-                b"testpass".to_vec(),
-                ok_raw("cryptsetup open --test-passphrase"),
-            )
-            .with_output_stdin(
-                CmdRequest::CryptsetupTestPassphrase {
-                    device: "/dev/disk/by-id/virtio-disk2".into(),
-                },
-                b"testpass".to_vec(),
-                err_raw(
-                    "cryptsetup open --test-passphrase",
-                    2,
-                    "No key available with this passphrase.",
-                ),
-            )
+        let (tp_req, tp_out) = test_passphrase_fail("/dev/disk/by-id/virtio-disk2");
+        let runner = base_two_disk_runner()
+            .with_output_stdin(tp_req, MOUNT_TEST_PASSPHRASE_BYTES.to_vec(), tp_out)
             .with_output(
                 CmdRequest::CryptsetupIsLuks {
                     device: "/dev/disk/by-id/virtio-disk2".into(),
@@ -1729,7 +1660,7 @@ mod tests {
                     device: "/dev/disk/by-id/virtio-disk1".into(),
                     mapper: "braid-disk1".into(),
                 },
-                b"testpass".to_vec(),
+                MOUNT_TEST_PASSPHRASE_BYTES.to_vec(),
                 ok_raw("cryptsetup open"),
             )
             .with_output_stdin(
@@ -1737,7 +1668,7 @@ mod tests {
                     device: "/dev/disk/by-id/virtio-disk2".into(),
                     mapper: "braid-disk2".into(),
                 },
-                b"testpass".to_vec(),
+                MOUNT_TEST_PASSPHRASE_BYTES.to_vec(),
                 err_raw(
                     "cryptsetup open",
                     2,
@@ -1777,7 +1708,7 @@ mod tests {
     fn mount_no_unlockable_disks() {
         let config = test_config();
         let membership = two_disk_membership();
-        let fs = MockFs::new(&[]); // no devices present
+        let fs = mount_fs(&[]); // no devices present
 
         let runner = MockRunner::default().with_output(
             CmdRequest::MountpointCheck {
@@ -2110,33 +2041,13 @@ pool already mounted at /mnt/storage
     fn plan_open_pool_emits_events_before_degraded_refused() {
         let config = test_config();
         let membership = three_disk_membership();
-        let fs = MockFs::new(&[
+        let fs = mount_fs(&[
             "/dev/disk/by-id/virtio-disk1",
             "/dev/disk/by-id/virtio-disk2",
             // disk3 absent -- not in fs paths
         ]);
 
-        let (uuid1_req, uuid1_out) = luks_uuid_ok(
-            "/dev/disk/by-id/virtio-disk1",
-            "aaaaaaaa-1111-2222-3333-444444444444",
-        );
-        let (uuid2_req, uuid2_out) = luks_uuid_ok(
-            "/dev/disk/by-id/virtio-disk2",
-            "bbbbbbbb-1111-2222-3333-444444444444",
-        );
-
-        let runner = MockRunner::default()
-            .with_output(
-                CmdRequest::MountpointCheck {
-                    path: MountPoint("/mnt/storage".to_owned()),
-                },
-                err_raw("mountpoint", 1, ""),
-            )
-            .with_output(uuid1_req, uuid1_out)
-            .with_output(uuid2_req, uuid2_out)
-            .with_luks_dump_text_luks2("/dev/disk/by-id/virtio-disk1")
-            .with_luks_dump_text_luks2("/dev/disk/by-id/virtio-disk2")
-            .with_mappers_closed(&["braid-disk1", "braid-disk2"]);
+        let runner = base_two_disk_runner();
 
         let report = plan_open_pool(&runner, &fs, &config, &membership, false, "unlock");
 
@@ -2253,32 +2164,18 @@ pool already mounted at /mnt/storage
         membership.disks.get_mut("disk1").unwrap().luks_uuid =
             Some(LuksUuid("aaaaaaaa-1111-2222-3333-444444444444".into()));
 
-        let fs = MockFs::new(&[
+        let fs = mount_fs(&[
             "/dev/disk/by-id/virtio-disk1",
             "/dev/disk/by-id/virtio-disk2",
         ]);
 
+        // Override base's disk1 UUID seed with a value that mismatches the
+        // stored luks_uuid (HashMap insert semantics on `with_output`).
         let (uuid1_req, uuid1_out) = luks_uuid_ok(
             "/dev/disk/by-id/virtio-disk1",
-            "ffffffff-ffff-ffff-ffff-ffffffffffff", // different from stored
+            "ffffffff-ffff-ffff-ffff-ffffffffffff",
         );
-        let (uuid2_req, uuid2_out) = luks_uuid_ok(
-            "/dev/disk/by-id/virtio-disk2",
-            "bbbbbbbb-1111-2222-3333-444444444444",
-        );
-
-        let runner = MockRunner::default()
-            .with_output(
-                CmdRequest::MountpointCheck {
-                    path: MountPoint("/mnt/storage".to_owned()),
-                },
-                err_raw("mountpoint", 1, ""),
-            )
-            .with_output(uuid1_req, uuid1_out)
-            .with_output(uuid2_req, uuid2_out)
-            .with_luks_dump_text_luks2("/dev/disk/by-id/virtio-disk1")
-            .with_luks_dump_text_luks2("/dev/disk/by-id/virtio-disk2")
-            .with_mappers_closed(&["braid-disk1", "braid-disk2"]);
+        let runner = base_two_disk_runner().with_output(uuid1_req, uuid1_out);
 
         let result =
             open_and_mount_for_test(&runner, &fs, &config, &membership, None, false, "unlock");
@@ -2379,52 +2276,18 @@ pool already mounted at /mnt/storage
     fn mount_non_auth_open_failure_propagates_passphrase() {
         let config = test_config();
         let membership = two_disk_membership();
-        let fs = MockFs::new(&[
+        let fs = mount_fs(&[
             "/dev/disk/by-id/virtio-disk1",
             "/dev/disk/by-id/virtio-disk2",
         ]);
 
-        let (uuid1_req, uuid1_out) = luks_uuid_ok(
-            "/dev/disk/by-id/virtio-disk1",
-            "aaaaaaaa-1111-2222-3333-444444444444",
-        );
-        let (uuid2_req, uuid2_out) = luks_uuid_ok(
-            "/dev/disk/by-id/virtio-disk2",
-            "bbbbbbbb-1111-2222-3333-444444444444",
-        );
-
-        let runner = MockRunner::default()
-            .with_output(
-                CmdRequest::MountpointCheck {
-                    path: MountPoint("/mnt/storage".to_owned()),
-                },
-                err_raw("mountpoint", 1, ""),
-            )
-            .with_output(uuid1_req, uuid1_out)
-            .with_output(uuid2_req, uuid2_out)
-            .with_luks_dump_text_luks2("/dev/disk/by-id/virtio-disk1")
-            .with_luks_dump_text_luks2("/dev/disk/by-id/virtio-disk2")
-            .with_mappers_closed(&["braid-disk1", "braid-disk2"])
-            .with_output_stdin(
-                CmdRequest::CryptsetupTestPassphrase {
-                    device: "/dev/disk/by-id/virtio-disk1".into(),
-                },
-                b"testpass".to_vec(),
-                ok_raw("cryptsetup open --test-passphrase"),
-            )
-            .with_output_stdin(
-                CmdRequest::CryptsetupTestPassphrase {
-                    device: "/dev/disk/by-id/virtio-disk2".into(),
-                },
-                b"testpass".to_vec(),
-                ok_raw("cryptsetup open --test-passphrase"),
-            )
+        let runner = base_two_disk_runner()
             .with_output_stdin(
                 CmdRequest::CryptsetupLuksOpen {
                     device: "/dev/disk/by-id/virtio-disk1".into(),
                     mapper: "braid-disk1".into(),
                 },
-                b"testpass".to_vec(),
+                MOUNT_TEST_PASSPHRASE_BYTES.to_vec(),
                 ok_raw("cryptsetup open"),
             )
             // disk2 disappears → exit 4 (ENODEV)
@@ -2433,7 +2296,7 @@ pool already mounted at /mnt/storage
                     device: "/dev/disk/by-id/virtio-disk2".into(),
                     mapper: "braid-disk2".into(),
                 },
-                b"testpass".to_vec(),
+                MOUNT_TEST_PASSPHRASE_BYTES.to_vec(),
                 err_raw(
                     "cryptsetup open",
                     4,
@@ -2474,19 +2337,10 @@ pool already mounted at /mnt/storage
     fn mount_non_auth_open_failure_propagates_keyfile() {
         let config = test_config();
         let membership = two_disk_membership();
-        let fs = MockFs::new(&[
+        let fs = mount_fs(&[
             "/dev/disk/by-id/virtio-disk1",
             "/dev/disk/by-id/virtio-disk2",
         ]);
-
-        let (uuid1_req, uuid1_out) = luks_uuid_ok(
-            "/dev/disk/by-id/virtio-disk1",
-            "aaaaaaaa-1111-2222-3333-444444444444",
-        );
-        let (uuid2_req, uuid2_out) = luks_uuid_ok(
-            "/dev/disk/by-id/virtio-disk2",
-            "bbbbbbbb-1111-2222-3333-444444444444",
-        );
 
         let kf = tempfile::NamedTempFile::new().unwrap();
         {
@@ -2494,18 +2348,7 @@ pool already mounted at /mnt/storage
             kf.as_file().write_all(b"keydata").unwrap();
         }
 
-        let runner = MockRunner::default()
-            .with_output(
-                CmdRequest::MountpointCheck {
-                    path: MountPoint("/mnt/storage".to_owned()),
-                },
-                err_raw("mountpoint", 1, ""),
-            )
-            .with_output(uuid1_req, uuid1_out)
-            .with_output(uuid2_req, uuid2_out)
-            .with_luks_dump_text_luks2("/dev/disk/by-id/virtio-disk1")
-            .with_luks_dump_text_luks2("/dev/disk/by-id/virtio-disk2")
-            .with_mappers_closed(&["braid-disk1", "braid-disk2"])
+        let runner = base_two_disk_runner()
             // verify keyfile against disk1 → success
             .with_output(
                 CmdRequest::CryptsetupTestKeyFile {
@@ -2784,45 +2627,6 @@ pool already mounted at /mnt/storage
                 "Cannot read LUKS header metadata.",
             ),
         )
-    }
-
-    /// Common setup: a 2-disk pool where both disks are probed as LUKS ok.
-    /// Returns a MockRunner with the base cryptsetup mocks seeded.
-    fn base_two_disk_runner() -> MockRunner {
-        let (uuid1_req, uuid1_out) = luks_uuid_ok(
-            "/dev/disk/by-id/virtio-disk1",
-            "aaaaaaaa-1111-2222-3333-444444444444",
-        );
-        let (uuid2_req, uuid2_out) = luks_uuid_ok(
-            "/dev/disk/by-id/virtio-disk2",
-            "bbbbbbbb-1111-2222-3333-444444444444",
-        );
-        MockRunner::default()
-            .with_output(
-                CmdRequest::MountpointCheck {
-                    path: MountPoint("/mnt/storage".to_owned()),
-                },
-                err_raw("mountpoint", 1, ""),
-            )
-            .with_output(uuid1_req, uuid1_out)
-            .with_output(uuid2_req, uuid2_out)
-            .with_luks_dump_text_luks2("/dev/disk/by-id/virtio-disk1")
-            .with_luks_dump_text_luks2("/dev/disk/by-id/virtio-disk2")
-            .with_mappers_closed(&["braid-disk1", "braid-disk2"])
-            .with_output_stdin(
-                CmdRequest::CryptsetupTestPassphrase {
-                    device: "/dev/disk/by-id/virtio-disk1".into(),
-                },
-                b"testpass".to_vec(),
-                ok_raw("cryptsetup open --test-passphrase"),
-            )
-            .with_output_stdin(
-                CmdRequest::CryptsetupTestPassphrase {
-                    device: "/dev/disk/by-id/virtio-disk2".into(),
-                },
-                b"testpass".to_vec(),
-                ok_raw("cryptsetup open --test-passphrase"),
-            )
     }
 
     fn two_disk_fs() -> MockFs {
