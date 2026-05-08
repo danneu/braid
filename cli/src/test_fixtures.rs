@@ -1,5 +1,5 @@
 //! Test-only shared fixtures for `replace`, `add`, `remove`,
-//! `remove_missing`, `recover`, `doctor`, and `mount`.
+//! `remove_missing`, `recover`, `doctor`, `mount`, and `enroll_key_file`.
 //!
 //! These fixtures consolidate the per-test scaffolding that previously
 //! lived as one-off `*Runner` structs and inline `tempdir + config + pass +
@@ -34,6 +34,21 @@
 //!     builder) because mount's planner/executor entry points take
 //!     positional args and ProbeFailed-uncertainty tests deliberately
 //!     omit specific probes -- a broad handler would silently break them.
+//!   * `enroll_key_file` -- flat collection of `enroll_`-prefixed
+//!     leaf helpers (`enroll_fs`, `enroll_by_id`, `enroll_passphrase`,
+//!     `enroll_luks_uuid_ok`, `enroll_test_passphrase_*`,
+//!     `enroll_add_keyfile_ok`, `enroll_with_mountpoint_*`,
+//!     `enroll_make_membership`, `enroll_make_existing_keyfile`,
+//!     `enroll_discovery_two_disks`). Ships flat for the same reason
+//!     mount does -- per-test request-set composition and
+//!     load-bearing missing-mock contracts. The `enroll_` prefix is
+//!     load-bearing: it sidesteps facade collisions with `doctor`'s
+//!     `mountpoint_*` and `mount`'s `err_raw` / `luks_uuid_ok` /
+//!     `test_passphrase_fail` / `ok_raw`, and it lets the staged
+//!     migration import a fixture helper while the same-purpose local
+//!     still exists for unmigrated tests. The `err_raw` reuse is
+//!     re-imported under the alias `enroll_err_raw` for the same
+//!     reason; the alias stays after the locals are deleted.
 //!   * `PoolFixture` -- bundled tempdirs + `StatePaths` + config +
 //!     passphrase + `RecordingInhibitor`.
 //!   * `ReplaceParamsBuilder` / `AddParamsBuilder` / `RemoveParamsBuilder`
@@ -42,10 +57,12 @@
 //!
 //! Layout: this file is a facade. `shared` holds cross-scope items;
 //! `replace`, `add`, `remove`, `remove_missing`, `recover`, `doctor`,
-//! and `mount` hold their per-scope topologies, builders, and helpers.
+//! `mount`, and `enroll_key_file` hold their per-scope topologies,
+//! builders, and helpers.
 
 mod add;
 mod doctor;
+mod enroll_key_file;
 mod mount;
 mod recover;
 mod remove;
@@ -60,6 +77,15 @@ pub(crate) use doctor::{
     config_with_ups_enabled, config_without_ups, device_usage_healthy, device_usage_with_missing,
     df_json, df_json_fail, human_options, isolated_paths, mountpoint_fail, mountpoint_ok,
     parsed_doctor_ctx, systemctl_is_active_output, ups_ctx, valid_config_json, write_temp,
+};
+#[allow(unused_imports)]
+pub(crate) use enroll_key_file::{
+    enroll_add_keyfile_ok, enroll_by_id, enroll_discovery_two_disks, enroll_fs,
+    enroll_luks_dump_slot1_empty, enroll_luks_dump_slot1_occupied, enroll_luks_uuid_not_luks,
+    enroll_luks_uuid_ok, enroll_make_existing_keyfile, enroll_make_membership,
+    enroll_mountpoint_fail, enroll_mountpoint_ok, enroll_passphrase, enroll_test_keyfile_fail,
+    enroll_test_keyfile_ok, enroll_test_passphrase_fail, enroll_test_passphrase_ok,
+    enroll_with_mountpoint_fail, enroll_with_mountpoint_ok,
 };
 pub(crate) use mount::{
     MOUNT_TEST_PASSPHRASE_BYTES, NoopSleeper, arbitrary_fallback, base_two_disk_runner,
