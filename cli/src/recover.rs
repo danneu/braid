@@ -9137,7 +9137,7 @@ mod tests {
                 ok_raw_empty("btrfs device scan --forget"),
             )
             // remount cycle: close both mappers (the wrapper runner removes
-            // mapper paths from the StatefulMockFs after each success and
+            // mapper paths from the RemountFs after each success and
             // flips status queries to inactive so the re-probe opens them).
             .with_output(
                 CmdRequest::CryptsetupClose {
@@ -9348,7 +9348,7 @@ mod tests {
                 "/dev/disk/by-id/virtio-disk2",
             ]);
 
-        // StatefulMockFs starts with both by-id paths AND both mapper paths.
+        // RemountFs starts with both by-id paths AND both mapper paths.
         // Both mapper paths are already present, modeling an operator who
         // opened LUKS manually before invoking recover.
         let harness = RemountHarness::new(
@@ -11841,8 +11841,8 @@ mod tests {
                 },
                 ok_raw_empty("btrfs device scan --forget"),
             )
-            // 3. Close each union mapper. MapperClosingRunner removes the
-            //    mapper path from StatefulMockFs and adds the name to its
+            // 3. Close each union mapper. RemountRunner removes the
+            //    mapper path from RemountFs and adds the name to its
             //    `closed` set after each successful close.
             .with_output(
                 CmdRequest::CryptsetupClose {
@@ -11864,7 +11864,7 @@ mod tests {
             )
             // 4. Cycle re-plan: mountpoint check + LuksUuid mocks reused
             //    via MockRunner's HashMap lookup. Mappers report inactive
-            //    via MapperClosingRunner's `closed` set. TestPassphrase +
+            //    via RemountRunner's `closed` set. TestPassphrase +
             //    LuksOpen mocks above are reused for the cycle reopen.
             // 5. Cycle execute mount: same Mount mock as above.
             // ── Post-cycle probe_pool ───────────────────────────────────
@@ -11923,7 +11923,7 @@ mod tests {
         // not owe post-commit RAID1 maintenance, so any balance replay would
         // fail with MissingMock.
 
-        // StatefulMockFs starts with by-id paths for the union {disk1, old,
+        // RemountFs starts with by-id paths for the union {disk1, old,
         // new}. No mapper paths -- everything starts closed.
         // RemountRunner adds mapper paths after each successful
         // CryptsetupLuksOpen and removes them after each CryptsetupClose.
