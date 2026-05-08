@@ -9068,10 +9068,8 @@ mod tests {
 
     #[test]
     fn recover_dry_run_does_not_acquire_sleep_inhibitor() {
-        let tmp = tempfile::TempDir::new().unwrap();
-        let paths = StatePaths::custom(tmp.path().into());
-        let config = Config::new(MountPoint("/mnt/storage".into())).unwrap();
-        journal::write_journal(&paths, &recoverable_pool_mutation_add_journal()).unwrap();
+        let f = PoolFixture::empty();
+        journal::write_journal(&f.paths, &recoverable_pool_mutation_add_journal()).unwrap();
         let fs = MockFs::new(&["/dev/disk/by-id/virtio-disk1"]);
         let runner = MockRunner::default()
             .with_output(mountpoint_fail().0, mountpoint_fail().1)
@@ -9086,12 +9084,16 @@ mod tests {
             )
             .with_luks_dump_text_luks2("/dev/disk/by-id/virtio-disk1")
             .with_mapper_closed("braid-disk1");
-        let inhibitor = crate::inhibit::RecordingInhibitor::new();
-        let params = recover_params_with_inhibitor(&config, &paths, None, true, &inhibitor);
+        let params = f
+            .recover_params()
+            .passphrase_file(None)
+            .dry_run(true)
+            .sleep_inhibitor(&f.inhibitor)
+            .build();
         plan_recover(&runner, &fs, &params)
             .result
             .expect("dry-run planning should not acquire inhibitor");
-        assert_eq!(inhibitor.acquire_count(), 0);
+        assert_eq!(f.inhibitor.acquire_count(), 0);
     }
 
     // Intent: verify that when the live pool contains a braid-prefixed
@@ -12868,16 +12870,14 @@ mod tests {
      */
     #[test]
     fn plan_recover_dry_run_stepful_not_mounted() {
-        let tmp = tempfile::TempDir::new().unwrap();
-        let paths = StatePaths::custom(tmp.path().into());
-        let config = Config::new(MountPoint("/mnt/storage".into())).unwrap();
+        let f = PoolFixture::empty();
         let fs = MockFs::new(&[
             "/dev/disk/by-id/virtio-disk1",
             "/dev/disk/by-id/virtio-disk2",
         ]);
 
         let journal = two_disk_journal();
-        journal::write_journal(&paths, &journal).unwrap();
+        journal::write_journal(&f.paths, &journal).unwrap();
 
         let (mp_req, mp_out) = mountpoint_fail();
         let runner = MockRunner::default()
@@ -12906,16 +12906,12 @@ mod tests {
             ])
             .with_mappers_closed(&["braid-disk1", "braid-disk2"]);
 
-        let params = RecoverParams {
-            config: &config,
-            paths: &paths,
-            passphrase_stdin: false,
-            passphrase_file: None,
-            allow_degraded: true,
-            dry_run: true,
-            progress: ProgressOutput::Off,
-            sleep_inhibitor: &NOOP_INHIBITOR,
-        };
+        let params = f
+            .recover_params()
+            .passphrase_file(None)
+            .allow_degraded(true)
+            .dry_run(true)
+            .build();
 
         let rendered = plan_recover(&runner, &fs, &params)
             .result
@@ -12989,13 +12985,11 @@ mod tests {
      */
     #[test]
     fn plan_recover_dry_run_stepful_already_mounted() {
-        let tmp = tempfile::TempDir::new().unwrap();
-        let paths = StatePaths::custom(tmp.path().into());
-        let config = Config::new(MountPoint("/mnt/storage".into())).unwrap();
+        let f = PoolFixture::empty();
         let fs = MockFs::new(&[]);
 
         let journal = two_disk_journal();
-        journal::write_journal(&paths, &journal).unwrap();
+        journal::write_journal(&f.paths, &journal).unwrap();
 
         let (mp_req, mp_out) = mountpoint_ok();
         let runner = MockRunner::default()
@@ -13032,16 +13026,11 @@ mod tests {
                 cryptsetup_uuid_ok("/dev/vdb", "22222222-2222-2222-2222-222222222222"),
             );
 
-        let params = RecoverParams {
-            config: &config,
-            paths: &paths,
-            passphrase_stdin: false,
-            passphrase_file: None,
-            allow_degraded: false,
-            dry_run: true,
-            progress: ProgressOutput::Off,
-            sleep_inhibitor: &NOOP_INHIBITOR,
-        };
+        let params = f
+            .recover_params()
+            .passphrase_file(None)
+            .dry_run(true)
+            .build();
 
         let rendered = plan_recover(&runner, &fs, &params)
             .result
@@ -13094,13 +13083,11 @@ mod tests {
     #[test]
     fn plan_recover_refuses_replace_on_externally_mounted_pool() {
         for dry_run in [false, true] {
-            let tmp = tempfile::TempDir::new().unwrap();
-            let paths = StatePaths::custom(tmp.path().into());
-            let config = Config::new(MountPoint("/mnt/storage".into())).unwrap();
+            let f = PoolFixture::empty();
             let fs = MockFs::new(&[]);
 
             let journal = replace_journal();
-            journal::write_journal(&paths, &journal).unwrap();
+            journal::write_journal(&f.paths, &journal).unwrap();
 
             // Only mock the mountpoint check. plan_open_pool short-circuits to
             // Ok(None) before any per-disk probe, so no further mocks are
@@ -13110,16 +13097,11 @@ mod tests {
             let (mp_req, mp_out) = mountpoint_ok();
             let runner = MockRunner::default().with_output(mp_req, mp_out);
 
-            let params = RecoverParams {
-                config: &config,
-                paths: &paths,
-                passphrase_stdin: false,
-                passphrase_file: None,
-                allow_degraded: false,
-                dry_run,
-                progress: ProgressOutput::Off,
-                sleep_inhibitor: &NOOP_INHIBITOR,
-            };
+            let params = f
+                .recover_params()
+                .passphrase_file(None)
+                .dry_run(dry_run)
+                .build();
 
             let report = plan_recover(&runner, &fs, &params);
             let err = match report.result {
@@ -13175,22 +13157,16 @@ mod tests {
         runner: MockRunner,
         allow_degraded: bool,
     ) -> String {
-        let tmp = tempfile::TempDir::new().unwrap();
-        let paths = StatePaths::custom(tmp.path().into());
-        let config = Config::new(MountPoint("/mnt/storage".into())).unwrap();
+        let f = PoolFixture::empty();
         let fs = MockFs::new(fs_paths);
-        journal::write_journal(&paths, &journal).unwrap();
+        journal::write_journal(&f.paths, &journal).unwrap();
 
-        let params = RecoverParams {
-            config: &config,
-            paths: &paths,
-            passphrase_stdin: false,
-            passphrase_file: None,
-            allow_degraded,
-            dry_run: true,
-            progress: ProgressOutput::Off,
-            sleep_inhibitor: &NOOP_INHIBITOR,
-        };
+        let params = f
+            .recover_params()
+            .passphrase_file(None)
+            .allow_degraded(allow_degraded)
+            .dry_run(true)
+            .build();
 
         plan_recover(&runner, &fs, &params)
             .result
@@ -14027,16 +14003,14 @@ mod tests {
      */
     #[test]
     fn plan_recover_preserves_notes_on_degraded_refused() {
-        let tmp = tempfile::TempDir::new().unwrap();
-        let paths = StatePaths::custom(tmp.path().into());
-        let config = Config::new(MountPoint("/mnt/storage".into())).unwrap();
+        let f = PoolFixture::empty();
         let fs = MockFs::new(&[
             "/dev/disk/by-id/virtio-disk1",
             "/dev/disk/by-id/virtio-disk2",
         ]);
 
         let journal = two_disk_journal();
-        journal::write_journal(&paths, &journal).unwrap();
+        journal::write_journal(&f.paths, &journal).unwrap();
 
         let (mp_req, mp_out) = mountpoint_fail();
         let runner = MockRunner::default()
@@ -14065,16 +14039,11 @@ mod tests {
             ])
             .with_mappers_closed(&["braid-disk1", "braid-disk2"]);
 
-        let params = RecoverParams {
-            config: &config,
-            paths: &paths,
-            passphrase_stdin: false,
-            passphrase_file: None,
-            allow_degraded: false,
-            dry_run: true,
-            progress: ProgressOutput::Off,
-            sleep_inhibitor: &NOOP_INHIBITOR,
-        };
+        let params = f
+            .recover_params()
+            .passphrase_file(None)
+            .dry_run(true)
+            .build();
 
         let report = plan_recover(&runner, &fs, &params);
 
