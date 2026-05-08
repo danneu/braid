@@ -95,7 +95,11 @@ enum DfSnapshot {
     Ok(BtrfsDfOutput),
 }
 
-struct DoctorContext<'a, R: CommandRunner> {
+/// Per-run state for `braid doctor`: caches mount-probe and df-snapshot
+/// results across checks so the orchestrator avoids re-querying
+/// btrfs/mountpoint, and threads the parsed config plus `&CommandRunner`
+/// borrow that every check needs.
+pub(crate) struct DoctorContext<'a, R: CommandRunner> {
     config_path: PathBuf,
     config_value: Option<serde_json::Value>,
     config: Option<Config>,
@@ -111,8 +115,11 @@ pub struct DoctorOptions {
     pub beep: bool,
 }
 
+/// Triple-gate inputs (`is_root`, `json_output`, `play_beep`) for
+/// `check_beep_path_inner`. Bundled into a struct so test code can vary
+/// one axis at a time without growing the call signature.
 #[derive(Debug, Clone, Copy)]
-struct BeepCheckOptions {
+pub(crate) struct BeepCheckOptions {
     is_root: bool,
     json_output: bool,
     play_beep: bool,
@@ -229,14 +236,12 @@ fn check_config_permissions_for_path(path: &Path) -> CheckResult {
     }
 }
 
-/// Per-disk health classification used by `check_declared_disks`.
-///
-/// The `Luks*` variants describe what cryptsetup probes saw on disk; the rest
-/// describe earlier failure modes (filesystem-level or runner-level) where we
-/// never reached a probe. Keeping them in one enum lets `summarize_declared_disks`
-/// produce a single aggregated finding per disk.
+/// Classification of a single declared disk after the doctor's LUKS probe.
+/// `summarize_declared_disks` translates a slice of these into a `CheckResult`;
+/// the variants pin the four reachable outcomes (header Ok, header unreadable,
+/// header damaged, missing/non-block/probe-failed).
 #[derive(Debug, Clone)]
-enum DiskState {
+pub(crate) enum DiskState {
     /// Both `cryptsetup isLuks` and `cryptsetup luksDump` succeeded.
     LuksHeaderOk,
     /// `std::fs::metadata` returned `Err` — the by-id symlink target is gone.
@@ -952,54 +957,89 @@ pub fn cmd_doctor(
 }
 
 // ---------------------------------------------------------------------------
+// Test-only constructors
+//
+// The fixture module `crate::test_fixtures::doctor` cannot field-construct
+// `DoctorContext` / `BeepCheckOptions` directly because their fields stay
+// module-private (and `DoctorContext::df_snapshot` references the
+// module-private `DfSnapshot`). These `#[cfg(test)] pub(crate)` constructors
+// keep production-side internals encapsulated while letting fixture code
+// build the same shapes.
+// ---------------------------------------------------------------------------
+
+#[cfg(test)]
+impl<'a, R: CommandRunner> DoctorContext<'a, R> {
+    pub(crate) fn for_test_parsed(runner: &'a R, paths: &'a StatePaths, config_json: &str) -> Self {
+        let value: serde_json::Value =
+            serde_json::from_str(config_json).expect("test config JSON parses");
+        let config: Config = serde_json::from_value(value.clone()).expect("test config parses");
+        Self {
+            config_path: PathBuf::new(),
+            config_value: Some(value),
+            config: Some(config),
+            runner,
+            paths,
+            mountpoint_is_mounted: None,
+            df_snapshot: None,
+        }
+    }
+
+    pub(crate) fn for_test_beep(runner: &'a R, paths: &'a StatePaths) -> Self {
+        Self {
+            config_path: PathBuf::new(),
+            config_value: None,
+            config: None,
+            runner,
+            paths,
+            mountpoint_is_mounted: None,
+            df_snapshot: None,
+        }
+    }
+
+    pub(crate) fn for_test_ups(runner: &'a R, paths: &'a StatePaths, config_json: &str) -> Self {
+        let value: serde_json::Value =
+            serde_json::from_str(config_json).expect("test config parses");
+        let config: Option<Config> = serde_json::from_str(config_json).ok();
+        Self {
+            config_path: PathBuf::new(),
+            config_value: Some(value),
+            config,
+            runner,
+            paths,
+            mountpoint_is_mounted: None,
+            df_snapshot: None,
+        }
+    }
+}
+
+#[cfg(test)]
+impl BeepCheckOptions {
+    pub(crate) fn for_test(is_root: bool, json_output: bool, play_beep: bool) -> Self {
+        Self {
+            is_root,
+            json_output,
+            play_beep,
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
 // Tests
 // ---------------------------------------------------------------------------
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::cmd::{CmdError, MockRunner, RawCommandOutput};
-    use crate::state_paths::StatePaths;
+    use crate::cmd::{MockRunner, RawCommandOutput};
+    use crate::test_fixtures::{
+        DF_MIXED, DF_MIXED_METADATA, DF_RAID1_CLEAN, DfQueryFailureRunner,
+        PoolMissingDevicesRunner, UpscSpawnFailureRunner, beep_check_options, beep_ctx, cls,
+        config_with_ups_disabled, config_with_ups_enabled, config_without_ups,
+        device_usage_healthy, device_usage_with_missing, df_json, df_json_fail, human_options,
+        isolated_paths, mountpoint_fail, mountpoint_ok, parsed_doctor_ctx,
+        systemctl_is_active_output, ups_ctx, valid_config_json, write_temp,
+    };
     use crate::types::MountPoint;
-    use std::io::Write;
-    use std::sync::Mutex;
-    use tempfile::{NamedTempFile, TempDir};
-
-    fn isolated_paths() -> (TempDir, StatePaths) {
-        let dir = TempDir::new().unwrap();
-        let paths = StatePaths::custom(dir.path().to_owned());
-        (dir, paths)
-    }
-
-    fn valid_config_json() -> &'static str {
-        r#"{"disks":{"toshiba":{"by_id":"/dev/disk/by-id/a"}},"mount_point":"/mnt/storage"}"#
-    }
-
-    fn mock() -> MockRunner {
-        MockRunner::default()
-    }
-
-    fn human_options() -> DoctorOptions {
-        DoctorOptions {
-            json: false,
-            beep: false,
-        }
-    }
-
-    fn beep_check_options(is_root: bool, json_output: bool, play_beep: bool) -> BeepCheckOptions {
-        BeepCheckOptions {
-            is_root,
-            json_output,
-            play_beep,
-        }
-    }
-
-    fn write_temp(content: &str) -> NamedTempFile {
-        let mut f = NamedTempFile::new().unwrap();
-        f.write_all(content.as_bytes()).unwrap();
-        f.flush().unwrap();
-        f
-    }
 
     fn find_check<'a>(report: &'a DoctorReport, name: &str) -> &'a CheckResult {
         report
@@ -1013,7 +1053,7 @@ mod tests {
     fn valid_config_parses_ok_disks_warn() {
         let f = write_temp(valid_config_json());
         let (_dir, paths) = isolated_paths();
-        let report = run_doctor(f.path(), &mock(), &paths, human_options());
+        let report = run_doctor(f.path(), &MockRunner::default(), &paths, human_options());
         assert_eq!(report.checks.len(), 10);
         assert_eq!(find_check(&report, "config_file").status, CheckStatus::Ok);
         assert_eq!(find_check(&report, "config_schema").status, CheckStatus::Ok);
@@ -1038,7 +1078,7 @@ mod tests {
     fn valid_custom_config_skips_permissions() {
         let f = write_temp(valid_config_json());
         let (_dir, paths) = isolated_paths();
-        let report = run_doctor(f.path(), &mock(), &paths, human_options());
+        let report = run_doctor(f.path(), &MockRunner::default(), &paths, human_options());
 
         assert_eq!(find_check(&report, "config_file").status, CheckStatus::Ok);
         assert_eq!(find_check(&report, "config_schema").status, CheckStatus::Ok);
@@ -1056,7 +1096,7 @@ mod tests {
      */
     #[test]
     fn dotted_default_path_skips_permissions_lexically() {
-        let runner = mock();
+        let runner = MockRunner::default();
         let (_dir, paths) = isolated_paths();
         let mut ctx = parsed_doctor_ctx(&runner, &paths);
         ctx.config_path = PathBuf::from("/etc/braid/./config.json");
@@ -1071,7 +1111,7 @@ mod tests {
     fn missing_file_fail_skip() {
         let report = run_doctor(
             Path::new("/tmp/nonexistent-braid-doctor-test.json"),
-            &mock(),
+            &MockRunner::default(),
             &isolated_paths().1,
             human_options(),
         );
@@ -1090,7 +1130,12 @@ mod tests {
     #[test]
     fn invalid_json_fail_skip() {
         let f = write_temp("not json at all {{{");
-        let report = run_doctor(f.path(), &mock(), &isolated_paths().1, human_options());
+        let report = run_doctor(
+            f.path(),
+            &MockRunner::default(),
+            &isolated_paths().1,
+            human_options(),
+        );
         assert_eq!(report.status, CheckStatus::Fail);
         assert_eq!(find_check(&report, "config_file").status, CheckStatus::Fail);
         assert_eq!(
@@ -1107,7 +1152,12 @@ mod tests {
     fn valid_json_with_extra_fields_parses_ok() {
         // Config no longer has disks — extra fields are ignored.
         let f = write_temp(r#"{"disks":{},"mount_point":"/mnt/storage"}"#);
-        let report = run_doctor(f.path(), &mock(), &isolated_paths().1, human_options());
+        let report = run_doctor(
+            f.path(),
+            &MockRunner::default(),
+            &isolated_paths().1,
+            human_options(),
+        );
         assert_eq!(find_check(&report, "config_file").status, CheckStatus::Ok);
         assert_eq!(find_check(&report, "config_schema").status, CheckStatus::Ok);
     }
@@ -1115,7 +1165,12 @@ mod tests {
     #[test]
     fn valid_json_bad_schema_empty_mount() {
         let f = write_temp(r#"{"disks":{"a":{"by_id":"/dev/disk/by-id/a"}},"mount_point":""}"#);
-        let report = run_doctor(f.path(), &mock(), &isolated_paths().1, human_options());
+        let report = run_doctor(
+            f.path(),
+            &MockRunner::default(),
+            &isolated_paths().1,
+            human_options(),
+        );
         assert_eq!(find_check(&report, "config_file").status, CheckStatus::Ok);
         let schema = find_check(&report, "config_schema");
         assert_eq!(schema.status, CheckStatus::Fail);
@@ -1141,7 +1196,12 @@ mod tests {
                 "ups": { "enable": true, "name": "ups" }
             }"#,
         );
-        let report = run_doctor(f.path(), &mock(), &isolated_paths().1, human_options());
+        let report = run_doctor(
+            f.path(),
+            &MockRunner::default(),
+            &isolated_paths().1,
+            human_options(),
+        );
 
         assert_eq!(find_check(&report, "config_file").status, CheckStatus::Ok);
 
@@ -1252,7 +1312,12 @@ mod tests {
     #[test]
     fn human_format_contains_tags() {
         let f = write_temp(valid_config_json());
-        let report = run_doctor(f.path(), &mock(), &isolated_paths().1, human_options());
+        let report = run_doctor(
+            f.path(),
+            &MockRunner::default(),
+            &isolated_paths().1,
+            human_options(),
+        );
         let human = format_doctor_human(&report);
         assert!(human.contains("[ok]"), "expected [ok] tag:\n{human}");
         assert!(
@@ -1269,7 +1334,7 @@ mod tests {
     fn human_format_fail_tag() {
         let report = run_doctor(
             Path::new("/tmp/nonexistent-braid-doctor-test.json"),
-            &mock(),
+            &MockRunner::default(),
             &isolated_paths().1,
             human_options(),
         );
@@ -1369,7 +1434,7 @@ mod tests {
     fn permissions_skip_when_no_config() {
         let report = run_doctor(
             Path::new("/tmp/nonexistent-braid-doctor-test.json"),
-            &mock(),
+            &MockRunner::default(),
             &isolated_paths().1,
             human_options(),
         );
@@ -1380,7 +1445,12 @@ mod tests {
     #[test]
     fn human_format_contains_perms_label() {
         let f = write_temp(valid_config_json());
-        let report = run_doctor(f.path(), &mock(), &isolated_paths().1, human_options());
+        let report = run_doctor(
+            f.path(),
+            &MockRunner::default(),
+            &isolated_paths().1,
+            human_options(),
+        );
         let human = format_doctor_human(&report);
         assert!(
             human.contains("config perms"),
@@ -1392,7 +1462,7 @@ mod tests {
     fn declared_disks_skips_when_no_membership() {
         let f = write_temp(r#"{"mount_point":"/mnt/storage"}"#);
         let (_dir, paths) = isolated_paths();
-        let report = run_doctor(f.path(), &mock(), &paths, human_options());
+        let report = run_doctor(f.path(), &MockRunner::default(), &paths, human_options());
         let check = find_check(&report, "declared_disks");
         assert_eq!(check.status, CheckStatus::Skip);
     }
@@ -1402,7 +1472,7 @@ mod tests {
         let (_dir, paths) = isolated_paths();
         let report = run_doctor(
             Path::new("/tmp/nonexistent-braid-doctor-test.json"),
-            &mock(),
+            &MockRunner::default(),
             &paths,
             human_options(),
         );
@@ -1414,7 +1484,7 @@ mod tests {
     fn declared_disks_skip_when_bad_schema() {
         let f = write_temp(r#"{"disks":{},"mount_point":"/mnt/storage"}"#);
         let (_dir, paths) = isolated_paths();
-        let report = run_doctor(f.path(), &mock(), &paths, human_options());
+        let report = run_doctor(f.path(), &MockRunner::default(), &paths, human_options());
         let check = find_check(&report, "declared_disks");
         assert_eq!(check.status, CheckStatus::Skip);
     }
@@ -1425,10 +1495,6 @@ mod tests {
     // classifications by hand. They never touch the filesystem, the runner,
     // or StatePaths — by design, since the impure classifier is exercised by
     // the VM test in tests/cli/braid-doctor.py.
-
-    fn cls(name: &str, by_id: &str, state: DiskState) -> (String, String, DiskState) {
-        (name.to_owned(), by_id.to_owned(), state)
-    }
 
     #[test]
     fn summarize_ok_when_all_headers_intact() {
@@ -1645,7 +1711,12 @@ mod tests {
     #[test]
     fn human_format_contains_declared_disks_label() {
         let f = write_temp(valid_config_json());
-        let report = run_doctor(f.path(), &mock(), &isolated_paths().1, human_options());
+        let report = run_doctor(
+            f.path(),
+            &MockRunner::default(),
+            &isolated_paths().1,
+            human_options(),
+        );
         let human = format_doctor_human(&report);
         assert!(
             human.contains("declared disks"),
@@ -1655,112 +1726,11 @@ mod tests {
 
     // --- data_profile_mismatch tests ---
 
-    fn mountpoint_ok() -> (CmdRequest, RawCommandOutput) {
-        (
-            CmdRequest::MountpointCheck {
-                path: MountPoint("/mnt/storage".to_owned()),
-            },
-            RawCommandOutput {
-                cmd: "mountpoint -q /mnt/storage".into(),
-                stdout: String::new(),
-                stderr: String::new(),
-                exit_status: 0,
-            },
-        )
-    }
-
-    fn mountpoint_fail() -> (CmdRequest, RawCommandOutput) {
-        (
-            CmdRequest::MountpointCheck {
-                path: MountPoint("/mnt/storage".to_owned()),
-            },
-            RawCommandOutput {
-                cmd: "mountpoint -q /mnt/storage".into(),
-                stdout: String::new(),
-                stderr: "/mnt/storage is not a mountpoint\n".into(),
-                exit_status: 1,
-            },
-        )
-    }
-
-    fn df_json(json: &str) -> (CmdRequest, RawCommandOutput) {
-        (
-            CmdRequest::BtrfsFilesystemDfJson {
-                mount_point: MountPoint("/mnt/storage".to_owned()),
-            },
-            RawCommandOutput {
-                cmd: "btrfs --format json filesystem df /mnt/storage".into(),
-                stdout: json.into(),
-                stderr: String::new(),
-                exit_status: 0,
-            },
-        )
-    }
-
-    fn df_json_fail() -> (CmdRequest, RawCommandOutput) {
-        (
-            CmdRequest::BtrfsFilesystemDfJson {
-                mount_point: MountPoint("/mnt/storage".to_owned()),
-            },
-            RawCommandOutput {
-                cmd: "btrfs --format json filesystem df /mnt/storage".into(),
-                stdout: String::new(),
-                stderr: "ERROR: not a btrfs filesystem".into(),
-                exit_status: 1,
-            },
-        )
-    }
-
-    struct DfQueryFailureRunner;
-
-    impl CommandRunner for DfQueryFailureRunner {
-        fn run(&self, request: &CmdRequest) -> Result<RawCommandOutput, CmdError> {
-            match request {
-                CmdRequest::MountpointCheck { path } if path.0 == "/mnt/storage" => {
-                    Ok(mountpoint_ok().1)
-                }
-                CmdRequest::BtrfsFilesystemDfJson { mount_point }
-                    if mount_point.0 == "/mnt/storage" =>
-                {
-                    Err(CmdError::Failed("df query failed".into()))
-                }
-                _ => Err(CmdError::MissingMock),
-            }
-        }
-
-        fn run_with_stdin(
-            &self,
-            _request: &CmdRequest,
-            _stdin: &[u8],
-        ) -> Result<RawCommandOutput, CmdError> {
-            Err(CmdError::MissingMock)
-        }
-    }
-
-    const DF_RAID1_CLEAN: &str = r#"{
-        "filesystem-df": [
-            { "bg-type": "Data", "bg-profile": "RAID1", "total": 67108864, "used": 16777216 },
-            { "bg-type": "System", "bg-profile": "RAID1", "total": 8388608, "used": 16384 },
-            { "bg-type": "Metadata", "bg-profile": "RAID1", "total": 33554432, "used": 262144 },
-            { "bg-type": "GlobalReserve", "bg-profile": "single", "total": 3407872, "used": 0 }
-        ]
-    }"#;
-
-    const DF_MIXED: &str = r#"{
-        "filesystem-df": [
-            { "bg-type": "Data", "bg-profile": "RAID1", "total": 67108864, "used": 16777216 },
-            { "bg-type": "Data", "bg-profile": "single", "total": 8388608, "used": 4194304 },
-            { "bg-type": "System", "bg-profile": "RAID1", "total": 8388608, "used": 16384 },
-            { "bg-type": "Metadata", "bg-profile": "RAID1", "total": 33554432, "used": 262144 },
-            { "bg-type": "GlobalReserve", "bg-profile": "single", "total": 3407872, "used": 0 }
-        ]
-    }"#;
-
     #[test]
     fn data_profile_clean_raid1_ok() {
         let (mp_req, mp_out) = mountpoint_ok();
         let (df_req, df_out) = df_json(DF_RAID1_CLEAN);
-        let runner = mock()
+        let runner = MockRunner::default()
             .with_output(mp_req, mp_out)
             .with_output(df_req, df_out);
         let f = write_temp(valid_config_json());
@@ -1778,7 +1748,7 @@ mod tests {
     fn data_profile_mixed_warns() {
         let (mp_req, mp_out) = mountpoint_ok();
         let (df_req, df_out) = df_json(DF_MIXED);
-        let runner = mock()
+        let runner = MockRunner::default()
             .with_output(mp_req, mp_out)
             .with_output(df_req, df_out);
         let f = write_temp(valid_config_json());
@@ -1808,7 +1778,7 @@ mod tests {
         }"#;
         let (mp_req, mp_out) = mountpoint_ok();
         let (df_req, df_out) = df_json(json);
-        let runner = mock()
+        let runner = MockRunner::default()
             .with_output(mp_req, mp_out)
             .with_output(df_req, df_out);
         let f = write_temp(valid_config_json());
@@ -1821,7 +1791,7 @@ mod tests {
     fn data_profile_skip_when_config_unavailable() {
         let report = run_doctor(
             Path::new("/tmp/nonexistent-braid-doctor-test.json"),
-            &mock(),
+            &MockRunner::default(),
             &isolated_paths().1,
             human_options(),
         );
@@ -1837,7 +1807,7 @@ mod tests {
     #[test]
     fn data_profile_skip_when_pool_not_mounted() {
         let (mp_req, mp_out) = mountpoint_fail();
-        let runner = mock().with_output(mp_req, mp_out);
+        let runner = MockRunner::default().with_output(mp_req, mp_out);
         let f = write_temp(valid_config_json());
         let report = run_doctor(f.path(), &runner, &isolated_paths().1, human_options());
         let check = find_check(&report, "data_profile_mismatch");
@@ -1849,7 +1819,7 @@ mod tests {
     fn data_profile_warn_when_df_fails() {
         let (mp_req, mp_out) = mountpoint_ok();
         let (df_req, df_out) = df_json_fail();
-        let runner = mock()
+        let runner = MockRunner::default()
             .with_output(mp_req, mp_out)
             .with_output(df_req, df_out);
         let f = write_temp(valid_config_json());
@@ -1905,7 +1875,7 @@ mod tests {
     fn data_profile_warn_when_df_json_malformed() {
         let (mp_req, mp_out) = mountpoint_ok();
         let (df_req, df_out) = df_json("{not json");
-        let runner = mock()
+        let runner = MockRunner::default()
             .with_output(mp_req, mp_out)
             .with_output(df_req, df_out);
         let f = write_temp(valid_config_json());
@@ -1929,7 +1899,7 @@ mod tests {
     fn profile_checks_warn_when_df_json_malformed() {
         let (mp_req, mp_out) = mountpoint_ok();
         let (df_req, df_out) = df_json("{not json");
-        let runner = mock()
+        let runner = MockRunner::default()
             .with_output(mp_req, mp_out)
             .with_output(df_req, df_out);
         let f = write_temp(valid_config_json());
@@ -1956,16 +1926,6 @@ mod tests {
 
     // --- metadata_profile_mismatch tests ---
 
-    const DF_MIXED_METADATA: &str = r#"{
-        "filesystem-df": [
-            { "bg-type": "Data", "bg-profile": "RAID1", "total": 67108864, "used": 16777216 },
-            { "bg-type": "Metadata", "bg-profile": "RAID1", "total": 33554432, "used": 262144 },
-            { "bg-type": "Metadata", "bg-profile": "single", "total": 8388608, "used": 65536 },
-            { "bg-type": "System", "bg-profile": "RAID1", "total": 8388608, "used": 16384 },
-            { "bg-type": "GlobalReserve", "bg-profile": "single", "total": 3407872, "used": 0 }
-        ]
-    }"#;
-
     // Intent: Verify metadata_profile_mismatch reports Ok for uniform RAID1 metadata.
     // Why: Ensures the check doesn't false-positive on a healthy pool.
     // Scenario: A clean 2-disk RAID1 pool has all metadata block groups as RAID1.
@@ -1973,7 +1933,7 @@ mod tests {
     fn metadata_profile_clean_raid1_ok() {
         let (mp_req, mp_out) = mountpoint_ok();
         let (df_req, df_out) = df_json(DF_RAID1_CLEAN);
-        let runner = mock()
+        let runner = MockRunner::default()
             .with_output(mp_req, mp_out)
             .with_output(df_req, df_out);
         let f = write_temp(valid_config_json());
@@ -1996,7 +1956,7 @@ mod tests {
     fn metadata_profile_mixed_warns() {
         let (mp_req, mp_out) = mountpoint_ok();
         let (df_req, df_out) = df_json(DF_MIXED_METADATA);
-        let runner = mock()
+        let runner = MockRunner::default()
             .with_output(mp_req, mp_out)
             .with_output(df_req, df_out);
         let f = write_temp(valid_config_json());
@@ -2023,7 +1983,7 @@ mod tests {
     fn metadata_profile_skip_when_config_unavailable() {
         let report = run_doctor(
             Path::new("/tmp/nonexistent-braid-doctor-test.json"),
-            &mock(),
+            &MockRunner::default(),
             &isolated_paths().1,
             human_options(),
         );
@@ -2042,7 +2002,7 @@ mod tests {
     #[test]
     fn metadata_profile_skip_when_pool_not_mounted() {
         let (mp_req, mp_out) = mountpoint_fail();
-        let runner = mock().with_output(mp_req, mp_out);
+        let runner = MockRunner::default().with_output(mp_req, mp_out);
         let f = write_temp(valid_config_json());
         let report = run_doctor(f.path(), &runner, &isolated_paths().1, human_options());
         let check = find_check(&report, "metadata_profile_mismatch");
@@ -2057,7 +2017,7 @@ mod tests {
     fn human_format_contains_meta_profiles_label() {
         let (mp_req, mp_out) = mountpoint_ok();
         let (df_req, df_out) = df_json(DF_RAID1_CLEAN);
-        let runner = mock()
+        let runner = MockRunner::default()
             .with_output(mp_req, mp_out)
             .with_output(df_req, df_out);
         let f = write_temp(valid_config_json());
@@ -2071,108 +2031,6 @@ mod tests {
 
     // --- pool_missing_devices tests ---
 
-    fn device_usage_healthy() -> (CmdRequest, RawCommandOutput) {
-        (
-            CmdRequest::BtrfsDeviceUsageRaw {
-                mount_point: MountPoint("/mnt/storage".to_owned()),
-            },
-            RawCommandOutput {
-                cmd: "btrfs device usage --raw /mnt/storage".into(),
-                stdout: "\
-/dev/mapper/braid-toshiba, ID: 1
-   Device size:           520093696
-   Device slack:                  0
-   Data,RAID1:            469762048
-   Unallocated:            50331648
-
-"
-                .into(),
-                stderr: String::new(),
-                exit_status: 0,
-            },
-        )
-    }
-
-    fn device_usage_with_missing() -> (CmdRequest, RawCommandOutput) {
-        (
-            CmdRequest::BtrfsDeviceUsageRaw {
-                mount_point: MountPoint("/mnt/storage".to_owned()),
-            },
-            RawCommandOutput {
-                cmd: "btrfs device usage --raw /mnt/storage".into(),
-                stdout: "\
-/dev/mapper/braid-toshiba, ID: 1
-   Device size:           520093696
-   Device slack:                  0
-   Data,RAID1:            469762048
-   Unallocated:            50331648
-
-<missing disk>, ID: 2
-   Device size:                  0
-   Device slack:                  0
-   Data,RAID1:            469762048
-   Unallocated:                  0
-
-"
-                .into(),
-                stderr: String::new(),
-                exit_status: 0,
-            },
-        )
-    }
-
-    #[derive(Default)]
-    struct PoolMissingDevicesRunner {
-        calls: Mutex<Vec<CmdRequest>>,
-    }
-
-    impl CommandRunner for PoolMissingDevicesRunner {
-        fn run(&self, request: &CmdRequest) -> Result<RawCommandOutput, CmdError> {
-            self.calls.lock().unwrap().push(request.clone());
-
-            match request {
-                CmdRequest::MountpointCheck { path } if path.0 == "/mnt/storage" => {
-                    Ok(mountpoint_ok().1)
-                }
-                CmdRequest::BtrfsDeviceUsageRaw { mount_point }
-                    if mount_point.0 == "/mnt/storage" =>
-                {
-                    Ok(device_usage_healthy().1)
-                }
-                CmdRequest::BtrfsFilesystemDfJson { .. } => {
-                    panic!("pool_missing_devices must not query filesystem df")
-                }
-                _ => Err(CmdError::MissingMock),
-            }
-        }
-
-        fn run_with_stdin(
-            &self,
-            _request: &CmdRequest,
-            _stdin: &[u8],
-        ) -> Result<RawCommandOutput, CmdError> {
-            Err(CmdError::MissingMock)
-        }
-    }
-
-    fn parsed_doctor_ctx<'a, R: CommandRunner>(
-        runner: &'a R,
-        paths: &'a StatePaths,
-    ) -> DoctorContext<'a, R> {
-        let value: serde_json::Value =
-            serde_json::from_str(valid_config_json()).expect("test config JSON parses");
-        let config: Config = serde_json::from_value(value.clone()).expect("test config parses");
-        DoctorContext {
-            config_path: PathBuf::new(),
-            config_value: Some(value),
-            config: Some(config),
-            runner,
-            paths,
-            mountpoint_is_mounted: None,
-            df_snapshot: None,
-        }
-    }
-
     // Intent: pool_missing_devices reports Ok when no devices are missing.
     // Why: ensures the check doesn't false-positive on a healthy pool.
     // Scenario: healthy 1-disk pool, all present.
@@ -2181,7 +2039,7 @@ mod tests {
         let (mp_req, mp_out) = mountpoint_ok();
         let (df_req, df_out) = df_json(DF_RAID1_CLEAN);
         let (du_req, du_out) = device_usage_healthy();
-        let runner = mock()
+        let runner = MockRunner::default()
             .with_output(mp_req, mp_out)
             .with_output(df_req, df_out)
             .with_output(du_req, du_out);
@@ -2239,7 +2097,7 @@ mod tests {
         let (mp_req, mp_out) = mountpoint_ok();
         let (df_req, df_out) = df_json(DF_RAID1_CLEAN);
         let (du_req, du_out) = device_usage_with_missing();
-        let runner = mock()
+        let runner = MockRunner::default()
             .with_output(mp_req, mp_out)
             .with_output(df_req, df_out)
             .with_output(du_req, du_out);
@@ -2275,7 +2133,7 @@ mod tests {
     #[test]
     fn pool_missing_devices_skip_when_not_mounted() {
         let (mp_req, mp_out) = mountpoint_fail();
-        let runner = mock().with_output(mp_req, mp_out);
+        let runner = MockRunner::default().with_output(mp_req, mp_out);
         let f = write_temp(valid_config_json());
         let report = run_doctor(f.path(), &runner, &isolated_paths().1, human_options());
         let check = find_check(&report, "pool_missing_devices");
@@ -2290,7 +2148,7 @@ mod tests {
         let (mp_req, mp_out) = mountpoint_ok();
         let (df_req, df_out) = df_json(DF_RAID1_CLEAN);
         let (du_req, du_out) = device_usage_healthy();
-        let runner = mock()
+        let runner = MockRunner::default()
             .with_output(mp_req, mp_out)
             .with_output(df_req, df_out)
             .with_output(du_req, du_out);
@@ -2313,21 +2171,6 @@ mod tests {
     // is mocked via MockRunner::with_output for the success/failure branches.
     // -----------------------------------------------------------------------
 
-    fn beep_ctx<'a, R: CommandRunner>(
-        runner: &'a R,
-        paths: &'a StatePaths,
-    ) -> DoctorContext<'a, R> {
-        DoctorContext {
-            config_path: PathBuf::new(),
-            config_value: None,
-            config: None,
-            runner,
-            paths,
-            mountpoint_is_mounted: None,
-            df_snapshot: None,
-        }
-    }
-
     // Intent: when the notifier config file does not exist, the check skips
     //   with a clear message that points at the missing braid monitor.
     // Why: a bare braid install (no monitor module imported) must produce
@@ -2338,7 +2181,7 @@ mod tests {
     #[test]
     fn beep_path_skips_when_notifier_config_absent() {
         let (_dir, paths) = isolated_paths();
-        let runner = mock();
+        let runner = MockRunner::default();
         let mut ctx = beep_ctx(&runner, &paths);
         let result = check_beep_path_inner(
             &mut ctx,
@@ -2368,7 +2211,7 @@ mod tests {
     fn beep_path_fail_on_malformed_config() {
         let f = write_temp("not json {");
         let (_dir, paths) = isolated_paths();
-        let runner = mock();
+        let runner = MockRunner::default();
         let mut ctx = beep_ctx(&runner, &paths);
         let result =
             check_beep_path_inner(&mut ctx, f.path(), beep_check_options(true, false, false));
@@ -2391,7 +2234,7 @@ mod tests {
     fn beep_path_skips_when_beep_disabled() {
         let f = write_temp(r#"{"beep_probe_path": null}"#);
         let (_dir, paths) = isolated_paths();
-        let runner = mock();
+        let runner = MockRunner::default();
         let mut ctx = beep_ctx(&runner, &paths);
         let result =
             check_beep_path_inner(&mut ctx, f.path(), beep_check_options(true, false, false));
@@ -2422,7 +2265,7 @@ mod tests {
         // No BraidBeepProbe output configured: if the check tries to run
         // the wrapper, MockRunner returns MissingMock, which becomes a
         // Fail message — pinning the runner-not-invoked invariant.
-        let runner = mock();
+        let runner = MockRunner::default();
         let mut ctx = beep_ctx(&runner, &paths);
         let result =
             check_beep_path_inner(&mut ctx, f.path(), beep_check_options(false, false, true));
@@ -2459,7 +2302,7 @@ mod tests {
         // No BraidBeepProbe output configured: if the check tries to run
         // the wrapper, MockRunner returns MissingMock, which becomes a
         // Fail message — pinning the runner-not-invoked invariant.
-        let runner = mock();
+        let runner = MockRunner::default();
         let mut ctx = beep_ctx(&runner, &paths);
         let result = check_beep_path_inner(
             &mut ctx,
@@ -2488,7 +2331,7 @@ mod tests {
     fn beep_path_skips_by_default_without_invoking_runner() {
         let f = write_temp(r#"{"beep_probe_path": "/nix/store/fake/bin/braid-beep-probe"}"#);
         let (_dir, paths) = isolated_paths();
-        let runner = mock();
+        let runner = MockRunner::default();
         let mut ctx = beep_ctx(&runner, &paths);
         let result =
             check_beep_path_inner(&mut ctx, f.path(), beep_check_options(true, false, false));
@@ -2510,7 +2353,7 @@ mod tests {
         let probe_path = "/nix/store/fake/bin/braid-beep-probe";
         let f = write_temp(&format!(r#"{{"beep_probe_path": "{probe_path}"}}"#));
         let (_dir, paths) = isolated_paths();
-        let runner = mock().with_output(
+        let runner = MockRunner::default().with_output(
             CmdRequest::BraidBeepProbe {
                 path: probe_path.into(),
             },
@@ -2545,7 +2388,7 @@ mod tests {
         let probe_path = "/nix/store/fake/bin/braid-beep-probe";
         let f = write_temp(&format!(r#"{{"beep_probe_path": "{probe_path}"}}"#));
         let (_dir, paths) = isolated_paths();
-        let runner = mock().with_output(
+        let runner = MockRunner::default().with_output(
             CmdRequest::BraidBeepProbe {
                 path: probe_path.into(),
             },
@@ -2580,72 +2423,6 @@ mod tests {
     // ---------------------------------------------------------------------
     // UPS doctor checks
     // ---------------------------------------------------------------------
-
-    fn ups_ctx<'a, R: CommandRunner>(
-        runner: &'a R,
-        paths: &'a StatePaths,
-        config_json: &str,
-    ) -> DoctorContext<'a, R> {
-        let config: Option<Config> = serde_json::from_str(config_json).ok();
-        DoctorContext {
-            config_path: PathBuf::new(),
-            config_value: Some(serde_json::from_str(config_json).expect("test config parses")),
-            config,
-            runner,
-            paths,
-            mountpoint_is_mounted: None,
-            df_snapshot: None,
-        }
-    }
-
-    fn config_with_ups_enabled() -> &'static str {
-        r#"{"mount_point":"/mnt/storage","ups":{"enable":true,"name":"ups"}}"#
-    }
-
-    fn config_without_ups() -> &'static str {
-        r#"{"mount_point":"/mnt/storage"}"#
-    }
-
-    fn config_with_ups_disabled() -> &'static str {
-        r#"{"mount_point":"/mnt/storage","ups":{"enable":false,"name":"ups"}}"#
-    }
-
-    fn systemctl_is_active_output(state: &str) -> RawCommandOutput {
-        RawCommandOutput {
-            cmd: "systemctl is-active braid-online.service".into(),
-            stdout: if state.is_empty() {
-                String::new()
-            } else {
-                format!("{state}\n")
-            },
-            stderr: String::new(),
-            exit_status: match state {
-                "active" | "reloading" | "refreshing" => 0,
-                _ => 3,
-            },
-        }
-    }
-
-    struct UpscSpawnFailureRunner;
-
-    impl CommandRunner for UpscSpawnFailureRunner {
-        fn run(&self, request: &CmdRequest) -> Result<RawCommandOutput, CmdError> {
-            match request {
-                CmdRequest::UpscQuery { name } => Err(CmdError::Failed(format!(
-                    "upsc {name}: No such file or directory"
-                ))),
-                _ => Err(CmdError::MissingMock),
-            }
-        }
-
-        fn run_with_stdin(
-            &self,
-            _request: &CmdRequest,
-            _stdin: &[u8],
-        ) -> Result<RawCommandOutput, CmdError> {
-            Err(CmdError::MissingMock)
-        }
-    }
 
     // Intent: check_ups_daemon_up reports Ok when upsc returns a healthy
     // OL status.
