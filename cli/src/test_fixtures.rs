@@ -31,6 +31,7 @@
 
 mod add;
 mod remove;
+mod remove_missing;
 mod replace;
 mod shared;
 
@@ -39,5 +40,7 @@ pub(crate) use remove::{
     RemovalPool, RemoveParamsBuilder, target_device, valid_three_disk_df_json,
     valid_three_disk_usage_stdout, valid_two_disk_df_json, valid_two_disk_usage_stdout,
 };
+#[allow(unused_imports)]
+pub(crate) use remove_missing::{RemoveMissingParamsBuilder, RemoveMissingPool};
 pub(crate) use replace::ReplacementPool;
 pub(crate) use shared::{MockFs, PoolFixture, mock_ok};

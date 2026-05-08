@@ -580,55 +580,13 @@ fn format_remove_missing_confirm(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::cmd::{CmdError, CmdRequest, CommandRunner, RawCommandOutput};
+    use crate::cmd::{CmdError, CmdRequest, CommandRunner, MockRunner, RawCommandOutput};
     use crate::membership::{DiskMember, PoolMembership};
-    use crate::probe::Filesystem;
-    use crate::state_paths::StatePaths;
+    use crate::test_fixtures::{MockFs, PoolFixture, RemoveMissingPool, mock_ok};
     use crate::types::ByIdPath;
 
     fn mp() -> MountPoint {
         MountPoint("/mnt/storage".into())
-    }
-
-    struct MockFs;
-
-    impl Filesystem for MockFs {
-        fn exists(&self, _path: &str) -> bool {
-            false
-        }
-        fn is_block_device(&self, _path: &str) -> bool {
-            false
-        }
-        fn read_to_string(&self, path: &str) -> Result<String, std::io::Error> {
-            if path == "/proc/self/mountinfo" {
-                Ok(
-                    "36 35 0:32 / /mnt/storage rw shared:1 - btrfs /dev/mapper/braid-disk1 rw\n"
-                        .to_owned(),
-                )
-            } else if path.ends_with("/exclusive_operation") {
-                Ok("none\n".to_owned())
-            } else {
-                Err(std::io::Error::new(std::io::ErrorKind::NotFound, "mock"))
-            }
-        }
-        fn list_dir(&self, _path: &str) -> Result<Vec<String>, std::io::Error> {
-            Ok(vec![])
-        }
-    }
-
-    /// Create a StatePaths backed by a temp dir, with pool.json pre-populated.
-    /// Each entry is (name, by_id_path, optional_devid).
-    fn test_paths(disks: &[(&str, &str, Option<u64>)]) -> (tempfile::TempDir, StatePaths) {
-        let tmp = tempfile::tempdir().unwrap();
-        let paths = StatePaths::custom(tmp.path().into());
-        let mut m = PoolMembership::empty();
-        for (name, by_id, devid) in disks {
-            let mut member = DiskMember::from_by_id(ByIdPath(by_id.to_string()));
-            member.devid = *devid;
-            m.disks.insert(name.to_string(), member);
-        }
-        membership::save_membership(&m, &paths).unwrap();
-        (tmp, paths)
     }
 
     struct EnospcRunner {
@@ -660,28 +618,6 @@ mod tests {
     use std::sync::atomic::{AtomicBool, Ordering};
     use std::sync::{Arc, Mutex};
 
-    /// End-to-end runner that records all calls, modeling a pool with
-    /// 1 present device + 1 missing device.
-    #[derive(Clone)]
-    struct RecordingRunner {
-        log: Arc<Mutex<Vec<CmdRequest>>>,
-    }
-
-    impl RecordingRunner {
-        fn new(log: Arc<Mutex<Vec<CmdRequest>>>) -> Self {
-            Self { log }
-        }
-    }
-
-    fn mock_out(cmd: &str, stdout: &str, exit_status: i32) -> RawCommandOutput {
-        RawCommandOutput {
-            cmd: cmd.to_owned(),
-            stdout: stdout.to_owned(),
-            stderr: String::new(),
-            exit_status,
-        }
-    }
-
     fn acked_disk(missing_acked: bool, read_io_errs: u64) -> alert::AckedDisk {
         alert::AckedDisk {
             missing_acked,
@@ -697,27 +633,23 @@ mod tests {
     impl CommandRunner for HealthyPoolRunner {
         fn run(&self, request: &CmdRequest) -> Result<RawCommandOutput, CmdError> {
             match request {
-                CmdRequest::BtrfsFilesystemShow { mount_point } => Ok(mock_out(
+                CmdRequest::BtrfsFilesystemShow { mount_point } => Ok(mock_ok(
                     &format!("btrfs filesystem show {mount_point}"),
                     "Label: none  uuid: cc86845b-aec3-408e-bef5-553affc1f2b1\n\tTotal devices 2 FS bytes used 16.17MiB\n\tdevid    1 size 496.00MiB used 121.56MiB path /dev/mapper/braid-disk1\n\tdevid    2 size 496.00MiB used 121.56MiB path /dev/mapper/braid-disk2\n",
-                    0,
                 )),
-                CmdRequest::CryptsetupStatus { mapper } => Ok(mock_out(
+                CmdRequest::CryptsetupStatus { mapper } => Ok(mock_ok(
                     &format!("cryptsetup status {mapper}"),
                     &format!(
                         "{mapper} is active and is in use.\n  type:    LUKS2\n  device:  /dev/vdb\n  mode:    read/write\n"
                     ),
-                    0,
                 )),
-                CmdRequest::CryptsetupLuksUuid { .. } => Ok(mock_out(
+                CmdRequest::CryptsetupLuksUuid { .. } => Ok(mock_ok(
                     "cryptsetup luksUUID",
                     "11111111-1111-1111-1111-111111111111\n",
-                    0,
                 )),
-                CmdRequest::BtrfsBalanceStatus { .. } => Ok(mock_out(
+                CmdRequest::BtrfsBalanceStatus { .. } => Ok(mock_ok(
                     "btrfs balance status",
                     "No balance found on '/mnt/storage'\n",
-                    0,
                 )),
                 _ => Err(CmdError::MissingMock),
             }
@@ -737,76 +669,30 @@ mod tests {
     impl CommandRunner for NullUnderlyingPoolRunner {
         fn run(&self, request: &CmdRequest) -> Result<RawCommandOutput, CmdError> {
             match request {
-                CmdRequest::BtrfsFilesystemShow { mount_point } => Ok(mock_out(
+                CmdRequest::BtrfsFilesystemShow { mount_point } => Ok(mock_ok(
                     &format!("btrfs filesystem show {mount_point}"),
                     "Label: none  uuid: cc86845b-aec3-408e-bef5-553affc1f2b1\n\tTotal devices 2 FS bytes used 16.17MiB\n\tdevid    1 size 496.00MiB used 121.56MiB path /dev/mapper/braid-disk1\n\tdevid    2 size 496.00MiB used 121.56MiB path /dev/mapper/braid-disk2\n",
-                    0,
                 )),
-                CmdRequest::CryptsetupStatus { mapper } if mapper == "braid-disk2" => Ok(mock_out(
+                CmdRequest::CryptsetupStatus { mapper } if mapper == "braid-disk2" => Ok(mock_ok(
                     &format!("cryptsetup status {mapper}"),
                     &format!(
                         "{mapper} is active and is in use.\n  type:    LUKS2\n  device:  (null)\n  mode:    read/write\n"
                     ),
-                    0,
                 )),
-                CmdRequest::CryptsetupStatus { mapper } => Ok(mock_out(
+                CmdRequest::CryptsetupStatus { mapper } => Ok(mock_ok(
                     &format!("cryptsetup status {mapper}"),
                     &format!(
                         "{mapper} is active and is in use.\n  type:    LUKS2\n  device:  /dev/vdb\n  mode:    read/write\n"
                     ),
-                    0,
                 )),
-                CmdRequest::CryptsetupLuksUuid { .. } => Ok(mock_out(
+                CmdRequest::CryptsetupLuksUuid { .. } => Ok(mock_ok(
                     "cryptsetup luksUUID",
                     "11111111-1111-1111-1111-111111111111\n",
-                    0,
                 )),
-                CmdRequest::BtrfsBalanceStatus { .. } => Ok(mock_out(
+                CmdRequest::BtrfsBalanceStatus { .. } => Ok(mock_ok(
                     "btrfs balance status",
                     "No balance found on '/mnt/storage'\n",
-                    0,
                 )),
-                _ => Err(CmdError::MissingMock),
-            }
-        }
-
-        fn run_with_stdin(
-            &self,
-            request: &CmdRequest,
-            _stdin: &[u8],
-        ) -> Result<RawCommandOutput, CmdError> {
-            self.run(request)
-        }
-    }
-
-    impl CommandRunner for RecordingRunner {
-        fn run(&self, request: &CmdRequest) -> Result<RawCommandOutput, CmdError> {
-            self.log.lock().unwrap().push(request.clone());
-
-            match request {
-                CmdRequest::BtrfsFilesystemShow { mount_point } => Ok(mock_out(
-                    &format!("btrfs filesystem show {mount_point}"),
-                    "Label: none  uuid: cc86845b-aec3-408e-bef5-553affc1f2b1\n\tTotal devices 2 FS bytes used 16.17MiB\n\tdevid    1 size 496.00MiB used 121.56MiB path /dev/mapper/braid-disk1\n\tdevid    2 size 0 used 0 path MISSING\n",
-                    0,
-                )),
-                CmdRequest::CryptsetupStatus { mapper } => Ok(mock_out(
-                    &format!("cryptsetup status {mapper}"),
-                    &format!(
-                        "{mapper} is active and is in use.\n  type:    LUKS2\n  device:  /dev/vdb\n  mode:    read/write\n"
-                    ),
-                    0,
-                )),
-                CmdRequest::CryptsetupLuksUuid { .. } => Ok(mock_out(
-                    "cryptsetup luksUUID",
-                    "11111111-1111-1111-1111-111111111111\n",
-                    0,
-                )),
-                CmdRequest::BtrfsBalanceStatus { .. } => Ok(mock_out(
-                    "btrfs balance status",
-                    "No balance found on '/mnt/storage'\n",
-                    0,
-                )),
-                CmdRequest::BtrfsDeviceRemove { .. } => Ok(mock_out("btrfs device remove", "", 0)),
                 _ => Err(CmdError::MissingMock),
             }
         }
@@ -834,40 +720,21 @@ mod tests {
      */
     #[test]
     fn no_usage_probe_for_single_survivor() {
-        let (_state_tmp, state_paths) = test_paths(&[
-            ("disk1", "/dev/disk/by-id/virtio-disk1", Some(1)),
-            ("disk2", "/dev/disk/by-id/virtio-disk2", Some(2)),
-        ]);
-        let tmp = tempfile::tempdir().unwrap();
-        let config_path = tmp.path().join("config.json");
-        let config_json = serde_json::json!({ "mount_point": "/mnt/storage" });
-        std::fs::write(&config_path, serde_json::to_vec(&config_json).unwrap()).unwrap();
-
-        let log = Arc::new(Mutex::new(Vec::new()));
-        let runner = RecordingRunner::new(log.clone());
-        let inhibitor = crate::inhibit::RecordingInhibitor::new();
+        let f = PoolFixture::two_disk_devids_pinned();
+        let (runner, _remove_done) =
+            RemoveMissingPool::two_disk_one_missing().install(MockRunner::default());
         cmd_remove_missing(
             &runner,
-            &MockFs,
-            &RemoveMissingParams {
-                config_path: &config_path,
-                missing_id: 2,
-                dry_run: false,
-                yes: true,
-                progress: crate::progress::ProgressOutput::Off,
-                paths: &state_paths,
-                sleep_inhibitor: &inhibitor,
-                sleeper: &crate::progress::NoopSleeper,
-            },
+            &MockFs::storage(vec![]),
+            &f.remove_missing_params().missing_id(2).build(),
         )
         .expect("remove-missing should succeed");
 
         // No BtrfsDeviceUsageRaw calls are expected: missing-id validation
         // uses PoolState::missing_devids, and check_relocation_space is
         // skipped for single-survivor removal.
-        let usage_calls = log
-            .lock()
-            .unwrap()
+        let usage_calls = runner
+            .requests()
             .iter()
             .filter(|c| matches!(c, CmdRequest::BtrfsDeviceUsageRaw { .. }))
             .count();
@@ -880,7 +747,7 @@ mod tests {
         // Locks in the seam placement: a successful remove-missing must take
         // the inhibitor exactly once before journal::write_journal.
         assert_eq!(
-            inhibitor.acquire_count(),
+            f.inhibitor.acquire_count(),
             1,
             "sleep inhibitor must be acquired exactly once on the path through journal::write_journal"
         );
@@ -1106,137 +973,6 @@ mod tests {
 
     // --- RecordingRunner for 3-device pool scenarios ---
 
-    /// 3-device pool RecordingRunner: 2 present + 1 missing.
-    /// After remove-missing, shows 2 present + 0 missing (healthy).
-    #[derive(Clone)]
-    struct ThreeDeviceRunner {
-        log: Arc<Mutex<Vec<CmdRequest>>>,
-        /// If true, post-op probe still shows 1 missing
-        still_degraded_after: bool,
-        remove_thread_id: Option<Arc<Mutex<Option<std::thread::ThreadId>>>>,
-        remove_done: Option<Arc<AtomicBool>>,
-    }
-
-    impl ThreeDeviceRunner {
-        fn new(log: Arc<Mutex<Vec<CmdRequest>>>, still_degraded: bool) -> Self {
-            Self {
-                log,
-                still_degraded_after: still_degraded,
-                remove_thread_id: None,
-                remove_done: None,
-            }
-        }
-
-        fn with_thread_recorder(
-            log: Arc<Mutex<Vec<CmdRequest>>>,
-            still_degraded: bool,
-            remove_thread_id: Arc<Mutex<Option<std::thread::ThreadId>>>,
-            remove_done: Arc<AtomicBool>,
-        ) -> Self {
-            Self {
-                log,
-                still_degraded_after: still_degraded,
-                remove_thread_id: Some(remove_thread_id),
-                remove_done: Some(remove_done),
-            }
-        }
-    }
-
-    impl CommandRunner for ThreeDeviceRunner {
-        fn run(&self, request: &CmdRequest) -> Result<RawCommandOutput, CmdError> {
-            self.log.lock().unwrap().push(request.clone());
-
-            // Track whether we've already removed the missing device
-            let remove_done = self
-                .log
-                .lock()
-                .unwrap()
-                .iter()
-                .any(|c| matches!(c, CmdRequest::BtrfsDeviceRemove { .. }));
-
-            match request {
-                CmdRequest::BtrfsFilesystemShow { mount_point } => {
-                    let (missing_line, total) = if remove_done && !self.still_degraded_after {
-                        ("", 2)
-                    } else {
-                        ("\tdevid    3 size 0 used 0 path MISSING\n", 3)
-                    };
-                    Ok(mock_out(
-                        &format!("btrfs filesystem show {mount_point}"),
-                        &format!(
-                            "Label: none  uuid: cc86845b-aec3-408e-bef5-553affc1f2b1\n\tTotal devices {total} FS bytes used 16.17MiB\n\tdevid    1 size 496.00MiB used 121.56MiB path /dev/mapper/braid-disk1\n\tdevid    2 size 496.00MiB used 121.56MiB path /dev/mapper/braid-disk2\n{missing_line}",
-                        ),
-                        0,
-                    ))
-                }
-                CmdRequest::CryptsetupStatus { mapper } => Ok(mock_out(
-                    &format!("cryptsetup status {mapper}"),
-                    &format!(
-                        "{mapper} is active and is in use.\n  type:    LUKS2\n  device:  /dev/vdb\n  mode:    read/write\n"
-                    ),
-                    0,
-                )),
-                CmdRequest::CryptsetupLuksUuid { .. } => Ok(mock_out(
-                    "cryptsetup luksUUID",
-                    "11111111-1111-1111-1111-111111111111\n",
-                    0,
-                )),
-                CmdRequest::BtrfsBalanceStatus { .. } => Ok(mock_out(
-                    "btrfs balance status",
-                    "No balance found on '/mnt/storage'\n",
-                    0,
-                )),
-                CmdRequest::BtrfsDeviceRemove { .. } => {
-                    if let Some(remove_thread_id) = &self.remove_thread_id {
-                        *remove_thread_id.lock().unwrap() = Some(std::thread::current().id());
-                    }
-                    if let Some(remove_done) = &self.remove_done {
-                        remove_done.store(true, Ordering::SeqCst);
-                    }
-                    Ok(mock_out("btrfs device remove", "", 0))
-                }
-                CmdRequest::BtrfsBalanceRaid1Soft { .. } => {
-                    Ok(mock_out("btrfs balance start -dconvert=raid1,soft", "", 0))
-                }
-                CmdRequest::BtrfsDeviceUsageRaw { .. } => {
-                    // Return enough space for relocation check to pass
-                    Ok(mock_out(
-                        "btrfs device usage --raw",
-                        "/dev/mapper/braid-disk1, ID: 1\n   Device size:           520093696\n   Device slack:                  0\n   Data,RAID1:            67108864\n   Unallocated:           452984832\n\n/dev/mapper/braid-disk2, ID: 2\n   Device size:           520093696\n   Device slack:                  0\n   Data,RAID1:            67108864\n   Unallocated:           452984832\n\n<missing disk>, ID: 3\n   Device size:                  0\n   Device slack:                  0\n   Data,RAID1:            67108864\n   Unallocated:                  0\n\n",
-                        0,
-                    ))
-                }
-                _ => Err(CmdError::MissingMock),
-            }
-        }
-
-        fn run_with_stdin(
-            &self,
-            request: &CmdRequest,
-            _stdin: &[u8],
-        ) -> Result<RawCommandOutput, CmdError> {
-            self.run(request)
-        }
-    }
-
-    fn three_device_config() -> (
-        tempfile::TempDir,
-        std::path::PathBuf,
-        tempfile::TempDir,
-        StatePaths,
-    ) {
-        let tmp = tempfile::tempdir().unwrap();
-        let config_path = tmp.path().join("config.json");
-        let config_json = serde_json::json!({ "mount_point": "/mnt/storage" });
-        std::fs::write(&config_path, serde_json::to_vec(&config_json).unwrap()).unwrap();
-        let (state_tmp, state_paths) = test_paths(&[
-            ("disk1", "/dev/disk/by-id/virtio-disk1", Some(1)),
-            ("disk2", "/dev/disk/by-id/virtio-disk2", Some(2)),
-            ("disk3", "/dev/disk/by-id/virtio-disk3", Some(3)),
-        ]);
-        (tmp, config_path, state_tmp, state_paths)
-    }
-
     /*
      * Intent: a successful command-level `braid remove-missing` prunes the
      * acked-stats entry for the removed missing devid while preserving an
@@ -1253,7 +989,7 @@ mod tests {
      */
     #[test]
     fn cmd_remove_missing_prunes_acked_stats_for_removed_devid() {
-        let (_tmp, config_path, _state_tmp, state_paths) = three_device_config();
+        let f = PoolFixture::three_disk_devids_pinned();
         let control = acked_disk(false, 11);
         let target = acked_disk(true, 33);
         alert::save_acked_stats(
@@ -1261,30 +997,20 @@ mod tests {
                 ("1".to_owned(), control.clone()),
                 ("3".to_owned(), target),
             ])),
-            &state_paths,
+            &f.paths,
         )
         .unwrap();
 
-        let log = Arc::new(Mutex::new(Vec::new()));
-        let runner = ThreeDeviceRunner::new(log, false);
-        let inhibitor = crate::inhibit::RecordingInhibitor::new();
+        let (runner, _remove_done) =
+            RemoveMissingPool::three_disk_one_missing().install(MockRunner::default());
         cmd_remove_missing(
             &runner,
-            &MockFs,
-            &RemoveMissingParams {
-                config_path: &config_path,
-                missing_id: 3,
-                dry_run: false,
-                yes: true,
-                progress: crate::progress::ProgressOutput::Off,
-                paths: &state_paths,
-                sleep_inhibitor: &inhibitor,
-                sleeper: &crate::progress::NoopSleeper,
-            },
+            &MockFs::storage(vec![]),
+            &f.remove_missing_params().build(),
         )
         .expect("remove-missing should succeed");
 
-        let reloaded = alert::load_acked_stats(&state_paths);
+        let reloaded = alert::load_acked_stats(&f.paths);
         assert_eq!(
             reloaded.0.get("1"),
             Some(&control),
@@ -1310,7 +1036,7 @@ mod tests {
      */
     #[test]
     fn plan_remove_missing_rejects_wrong_missing_id_from_pool_state() {
-        let (_tmp, config_path, _state_tmp, state_paths) = three_device_config();
+        let f = PoolFixture::three_disk_devids_pinned();
 
         struct WrongMissingIdRunner {
             log: Arc<Mutex<Vec<CmdRequest>>>,
@@ -1320,27 +1046,23 @@ mod tests {
             fn run(&self, request: &CmdRequest) -> Result<RawCommandOutput, CmdError> {
                 self.log.lock().unwrap().push(request.clone());
                 match request {
-                    CmdRequest::BtrfsFilesystemShow { mount_point } => Ok(mock_out(
+                    CmdRequest::BtrfsFilesystemShow { mount_point } => Ok(mock_ok(
                         &format!("btrfs filesystem show {mount_point}"),
                         "Label: none  uuid: cc86845b-aec3-408e-bef5-553affc1f2b1\n\tTotal devices 3 FS bytes used 16.17MiB\n\tdevid    1 size 496.00MiB used 121.56MiB path /dev/mapper/braid-disk1\n\tdevid    2 size 496.00MiB used 121.56MiB path /dev/mapper/braid-disk2\n\tdevid    3 size 0 used 0 path MISSING\n",
-                        0,
                     )),
-                    CmdRequest::CryptsetupStatus { mapper } => Ok(mock_out(
+                    CmdRequest::CryptsetupStatus { mapper } => Ok(mock_ok(
                         &format!("cryptsetup status {mapper}"),
                         &format!(
                             "{mapper} is active and is in use.\n  type:    LUKS2\n  device:  /dev/vdb\n  mode:    read/write\n"
                         ),
-                        0,
                     )),
-                    CmdRequest::CryptsetupLuksUuid { .. } => Ok(mock_out(
+                    CmdRequest::CryptsetupLuksUuid { .. } => Ok(mock_ok(
                         "cryptsetup luksUUID",
                         "11111111-1111-1111-1111-111111111111\n",
-                        0,
                     )),
-                    CmdRequest::BtrfsBalanceStatus { .. } => Ok(mock_out(
+                    CmdRequest::BtrfsBalanceStatus { .. } => Ok(mock_ok(
                         "btrfs balance status",
                         "No balance found on '/mnt/storage'\n",
-                        0,
                     )),
                     _ => Err(CmdError::MissingMock),
                 }
@@ -1359,20 +1081,13 @@ mod tests {
         let runner = WrongMissingIdRunner {
             log: Arc::clone(&log),
         };
-        let inhibitor = crate::inhibit::RecordingInhibitor::new();
         let report = plan_remove_missing(
             &runner,
-            &MockFs,
-            &RemoveMissingParams {
-                config_path: &config_path,
-                missing_id: 99,
-                dry_run: true,
-                yes: true,
-                progress: crate::progress::ProgressOutput::Off,
-                paths: &state_paths,
-                sleep_inhibitor: &inhibitor,
-                sleeper: &crate::progress::NoopSleeper,
-            },
+            &MockFs::storage(vec![]),
+            &f.remove_missing_params()
+                .missing_id(99)
+                .dry_run(true)
+                .build(),
         );
 
         match &report.result {
@@ -1399,27 +1114,17 @@ mod tests {
     // Scenario: 3-disk NAS, one drive dies. Operator runs remove-missing.
     // After the removal, pool is healthy with 2 survivors -> soft balance runs.
     fn three_device_pool_soft_rebalance_runs() {
-        let (_tmp, config_path, _state_tmp, state_paths) = three_device_config();
-        let log = Arc::new(Mutex::new(Vec::new()));
-        let runner = ThreeDeviceRunner::new(log.clone(), false);
-        let inhibitor = crate::inhibit::RecordingInhibitor::new();
+        let f = PoolFixture::three_disk_devids_pinned();
+        let (runner, _remove_done) =
+            RemoveMissingPool::three_disk_one_missing().install(MockRunner::default());
         cmd_remove_missing(
             &runner,
-            &MockFs,
-            &RemoveMissingParams {
-                config_path: &config_path,
-                missing_id: 3,
-                dry_run: false,
-                yes: true,
-                progress: crate::progress::ProgressOutput::Off,
-                paths: &state_paths,
-                sleep_inhibitor: &inhibitor,
-                sleeper: &crate::progress::NoopSleeper,
-            },
+            &MockFs::storage(vec![]),
+            &f.remove_missing_params().build(),
         )
         .expect("remove-missing should succeed");
 
-        let calls = log.lock().unwrap();
+        let calls = runner.requests();
         let remove_pos = calls
             .iter()
             .position(|c| matches!(c, CmdRequest::BtrfsDeviceRemove { .. }));
@@ -1442,7 +1147,7 @@ mod tests {
         // balance must take the inhibitor exactly once before journal::write_journal,
         // and hold it across both the device remove and the soft balance.
         assert_eq!(
-            inhibitor.acquire_count(),
+            f.inhibitor.acquire_count(),
             1,
             "sleep inhibitor must be acquired exactly once on the path through journal::write_journal"
         );
@@ -1454,27 +1159,18 @@ mod tests {
     // Scenario: 3-disk NAS, 2 drives die. Operator removes 1 missing entry.
     // Pool still has 1 missing device -> no rebalance.
     fn three_device_two_missing_no_rebalance() {
-        let (_tmp, config_path, _state_tmp, state_paths) = three_device_config();
-        let log = Arc::new(Mutex::new(Vec::new()));
-        let runner = ThreeDeviceRunner::new(log.clone(), true);
-        let inhibitor = crate::inhibit::RecordingInhibitor::new();
+        let f = PoolFixture::three_disk_devids_pinned();
+        let (runner, _remove_done) = RemoveMissingPool::three_disk_one_missing()
+            .still_degraded_after(true)
+            .install(MockRunner::default());
         cmd_remove_missing(
             &runner,
-            &MockFs,
-            &RemoveMissingParams {
-                config_path: &config_path,
-                missing_id: 3,
-                dry_run: false,
-                yes: true,
-                progress: crate::progress::ProgressOutput::Off,
-                paths: &state_paths,
-                sleep_inhibitor: &inhibitor,
-                sleeper: &crate::progress::NoopSleeper,
-            },
+            &MockFs::storage(vec![]),
+            &f.remove_missing_params().build(),
         )
         .expect("remove-missing should succeed");
 
-        let calls = log.lock().unwrap();
+        let calls = runner.requests();
         assert!(
             !calls
                 .iter()
@@ -1485,7 +1181,7 @@ mod tests {
         // unconditionally before journal::write_journal -- the rule is "acquire
         // before journal", not "acquire when slow phase will run".
         assert_eq!(
-            inhibitor.acquire_count(),
+            f.inhibitor.acquire_count(),
             1,
             "sleep inhibitor must be acquired exactly once before journal::write_journal, \
              even when no soft balance runs"
@@ -1504,17 +1200,22 @@ mod tests {
      */
     #[test]
     fn device_remove_runs_on_progress_worker_thread() {
-        let (_tmp, config_path, _state_tmp, state_paths) = three_device_config();
-        let log = Arc::new(Mutex::new(Vec::new()));
-        let recorded = Arc::new(Mutex::new(None));
-        let remove_done = Arc::new(AtomicBool::new(false));
-        let runner = ThreeDeviceRunner::with_thread_recorder(
-            log,
-            true,
-            Arc::clone(&recorded),
-            Arc::clone(&remove_done),
-        );
-        let inhibitor = crate::inhibit::RecordingInhibitor::new();
+        let f = PoolFixture::three_disk_devids_pinned();
+        let (runner, remove_done) = RemoveMissingPool::three_disk_one_missing()
+            .still_degraded_after(true)
+            .install(MockRunner::default());
+        let recorded: Arc<Mutex<Option<std::thread::ThreadId>>> = Arc::new(Mutex::new(None));
+        let recorded_handler = Arc::clone(&recorded);
+        let remove_done_handler = Arc::clone(&remove_done);
+        let runner = runner.with_handler(move |req| match req {
+            CmdRequest::BtrfsDeviceRemove { .. } => {
+                *recorded_handler.lock().unwrap() = Some(std::thread::current().id());
+                remove_done_handler.store(true, Ordering::SeqCst);
+                Some(Ok(mock_ok("btrfs device remove", "")))
+            }
+            _ => None,
+        });
+
         struct WaitForRemoveDoneSleeper {
             remove_done: Arc<AtomicBool>,
         }
@@ -1533,17 +1234,11 @@ mod tests {
 
         cmd_remove_missing(
             &runner,
-            &MockFs,
-            &RemoveMissingParams {
-                config_path: &config_path,
-                missing_id: 3,
-                dry_run: false,
-                yes: true,
-                progress: crate::progress::ProgressOutput::Human,
-                paths: &state_paths,
-                sleep_inhibitor: &inhibitor,
-                sleeper: &sleeper,
-            },
+            &MockFs::storage(vec![]),
+            &f.remove_missing_params()
+                .progress(crate::progress::ProgressOutput::Human)
+                .sleeper(&sleeper)
+                .build(),
         )
         .expect("remove-missing should succeed");
 
@@ -1556,148 +1251,6 @@ mod tests {
             "BtrfsDeviceRemove must run on the progress helper worker thread when \
              ProgressOutput::Human is threaded through"
         );
-    }
-
-    /// Runner for 3-device pool where the soft balance fails after successful
-    /// device removal. Everything succeeds except BtrfsBalanceRaid1Soft.
-    struct FailingSoftBalanceRunner {
-        log: Arc<Mutex<Vec<CmdRequest>>>,
-    }
-
-    impl FailingSoftBalanceRunner {
-        fn new(log: Arc<Mutex<Vec<CmdRequest>>>) -> Self {
-            Self { log }
-        }
-    }
-
-    impl CommandRunner for FailingSoftBalanceRunner {
-        fn run(&self, request: &CmdRequest) -> Result<RawCommandOutput, CmdError> {
-            self.log.lock().unwrap().push(request.clone());
-
-            let remove_done = self
-                .log
-                .lock()
-                .unwrap()
-                .iter()
-                .any(|c| matches!(c, CmdRequest::BtrfsDeviceRemove { .. }));
-
-            match request {
-                CmdRequest::BtrfsFilesystemShow { mount_point } => {
-                    let (missing_line, total) = if remove_done {
-                        ("", 2)
-                    } else {
-                        ("\tdevid    3 size 0 used 0 path MISSING\n", 3)
-                    };
-                    Ok(mock_out(
-                        &format!("btrfs filesystem show {mount_point}"),
-                        &format!(
-                            "Label: none  uuid: cc86845b-aec3-408e-bef5-553affc1f2b1\n\tTotal devices {total} FS bytes used 16.17MiB\n\tdevid    1 size 496.00MiB used 121.56MiB path /dev/mapper/braid-disk1\n\tdevid    2 size 496.00MiB used 121.56MiB path /dev/mapper/braid-disk2\n{missing_line}",
-                        ),
-                        0,
-                    ))
-                }
-                CmdRequest::CryptsetupStatus { mapper } => Ok(mock_out(
-                    &format!("cryptsetup status {mapper}"),
-                    &format!(
-                        "{mapper} is active and is in use.\n  type:    LUKS2\n  device:  /dev/vdb\n  mode:    read/write\n"
-                    ),
-                    0,
-                )),
-                CmdRequest::CryptsetupLuksUuid { .. } => Ok(mock_out(
-                    "cryptsetup luksUUID",
-                    "11111111-1111-1111-1111-111111111111\n",
-                    0,
-                )),
-                CmdRequest::BtrfsBalanceStatus { .. } => Ok(mock_out(
-                    "btrfs balance status",
-                    "No balance found on '/mnt/storage'\n",
-                    0,
-                )),
-                CmdRequest::BtrfsDeviceRemove { .. } => Ok(mock_out("btrfs device remove", "", 0)),
-                CmdRequest::BtrfsDeviceUsageRaw { .. } => Ok(mock_out(
-                    "btrfs device usage --raw",
-                    "/dev/mapper/braid-disk1, ID: 1\n   Device size:           520093696\n   Device slack:                  0\n   Data,RAID1:            67108864\n   Unallocated:           452984832\n\n/dev/mapper/braid-disk2, ID: 2\n   Device size:           520093696\n   Device slack:                  0\n   Data,RAID1:            67108864\n   Unallocated:           452984832\n\n<missing disk>, ID: 3\n   Device size:                  0\n   Device slack:                  0\n   Data,RAID1:            67108864\n   Unallocated:                  0\n\n",
-                    0,
-                )),
-                CmdRequest::BtrfsBalanceRaid1Soft { .. } => Ok(RawCommandOutput {
-                    cmd: "btrfs balance start -dconvert=raid1,soft".into(),
-                    stdout: String::new(),
-                    stderr: "ERROR: error during balancing: No space left on device".into(),
-                    exit_status: 1,
-                }),
-                _ => Err(CmdError::MissingMock),
-            }
-        }
-
-        fn run_with_stdin(
-            &self,
-            request: &CmdRequest,
-            _stdin: &[u8],
-        ) -> Result<RawCommandOutput, CmdError> {
-            self.run(request)
-        }
-    }
-
-    /// Runner for 3-device pool where btrfs device remove itself fails.
-    struct FailingRemoveRunner {
-        log: Arc<Mutex<Vec<CmdRequest>>>,
-    }
-
-    impl FailingRemoveRunner {
-        fn new(log: Arc<Mutex<Vec<CmdRequest>>>) -> Self {
-            Self { log }
-        }
-    }
-
-    impl CommandRunner for FailingRemoveRunner {
-        fn run(&self, request: &CmdRequest) -> Result<RawCommandOutput, CmdError> {
-            self.log.lock().unwrap().push(request.clone());
-
-            match request {
-                CmdRequest::BtrfsFilesystemShow { mount_point } => Ok(mock_out(
-                    &format!("btrfs filesystem show {mount_point}"),
-                    "Label: none  uuid: cc86845b-aec3-408e-bef5-553affc1f2b1\n\tTotal devices 3 FS bytes used 16.17MiB\n\tdevid    1 size 496.00MiB used 121.56MiB path /dev/mapper/braid-disk1\n\tdevid    2 size 496.00MiB used 121.56MiB path /dev/mapper/braid-disk2\n\tdevid    3 size 0 used 0 path MISSING\n",
-                    0,
-                )),
-                CmdRequest::CryptsetupStatus { mapper } => Ok(mock_out(
-                    &format!("cryptsetup status {mapper}"),
-                    &format!(
-                        "{mapper} is active and is in use.\n  type:    LUKS2\n  device:  /dev/vdb\n  mode:    read/write\n"
-                    ),
-                    0,
-                )),
-                CmdRequest::CryptsetupLuksUuid { .. } => Ok(mock_out(
-                    "cryptsetup luksUUID",
-                    "11111111-1111-1111-1111-111111111111\n",
-                    0,
-                )),
-                CmdRequest::BtrfsBalanceStatus { .. } => Ok(mock_out(
-                    "btrfs balance status",
-                    "No balance found on '/mnt/storage'\n",
-                    0,
-                )),
-                CmdRequest::BtrfsDeviceUsageRaw { .. } => Ok(mock_out(
-                    "btrfs device usage --raw",
-                    "/dev/mapper/braid-disk1, ID: 1\n   Device size:           520093696\n   Device slack:                  0\n   Data,RAID1:            67108864\n   Unallocated:           452984832\n\n/dev/mapper/braid-disk2, ID: 2\n   Device size:           520093696\n   Device slack:                  0\n   Data,RAID1:            67108864\n   Unallocated:           452984832\n\n<missing disk>, ID: 3\n   Device size:                  0\n   Device slack:                  0\n   Data,RAID1:            67108864\n   Unallocated:                  0\n\n",
-                    0,
-                )),
-                CmdRequest::BtrfsDeviceRemove { .. } => Ok(RawCommandOutput {
-                    cmd: "btrfs device remove 3 /mnt/storage".into(),
-                    stdout: String::new(),
-                    stderr: "ERROR: error removing device: No space left on device".into(),
-                    exit_status: 1,
-                }),
-                _ => Err(CmdError::MissingMock),
-            }
-        }
-
-        fn run_with_stdin(
-            &self,
-            request: &CmdRequest,
-            _stdin: &[u8],
-        ) -> Result<RawCommandOutput, CmdError> {
-            self.run(request)
-        }
     }
 
     /*
@@ -1717,24 +1270,22 @@ mod tests {
      */
     #[test]
     fn journal_survives_device_remove_failure() {
-        let (_tmp, config_path, _state_tmp, state_paths) = three_device_config();
-
-        let log = Arc::new(Mutex::new(Vec::new()));
-        let runner = FailingRemoveRunner::new(log.clone());
-        let inhibitor = crate::inhibit::RecordingInhibitor::new();
+        let f = PoolFixture::three_disk_devids_pinned();
+        let (runner, _remove_done) =
+            RemoveMissingPool::three_disk_one_missing().install(MockRunner::default());
+        let runner = runner.with_handler(|req| match req {
+            CmdRequest::BtrfsDeviceRemove { .. } => Some(Ok(RawCommandOutput {
+                cmd: "btrfs device remove 3 /mnt/storage".into(),
+                stdout: String::new(),
+                stderr: "ERROR: error removing device: No space left on device".into(),
+                exit_status: 1,
+            })),
+            _ => None,
+        });
         let result = cmd_remove_missing(
             &runner,
-            &MockFs,
-            &RemoveMissingParams {
-                config_path: &config_path,
-                missing_id: 3,
-                dry_run: false,
-                yes: true,
-                progress: crate::progress::ProgressOutput::Off,
-                paths: &state_paths,
-                sleep_inhibitor: &inhibitor,
-                sleeper: &crate::progress::NoopSleeper,
-            },
+            &MockFs::storage(vec![]),
+            &f.remove_missing_params().build(),
         );
 
         let err = result.unwrap_err().to_string();
@@ -1743,17 +1294,17 @@ mod tests {
             "remove-missing should fail from the device-remove step: {err}"
         );
         assert!(
-            journal::load_journal(&state_paths).unwrap().is_some(),
+            journal::load_journal(&f.paths).unwrap().is_some(),
             "pending-op.json must survive error exit so braid recover can reconcile"
         );
         assert!(
-            membership::load_membership(&state_paths)
+            membership::load_membership(&f.paths)
                 .unwrap()
                 .disks
                 .contains_key("disk3"),
             "pool.json must still contain the target disk when device remove fails"
         );
-        let calls = log.lock().unwrap();
+        let calls = runner.requests();
         assert!(
             calls
                 .iter()
@@ -1769,7 +1320,7 @@ mod tests {
         // The journal exists, which proves we got past journal::write_journal,
         // which proves the inhibitor was acquired exactly once on the way in.
         assert_eq!(
-            inhibitor.acquire_count(),
+            f.inhibitor.acquire_count(),
             1,
             "sleep inhibitor must be acquired exactly once on the path through journal::write_journal"
         );
@@ -1788,24 +1339,22 @@ mod tests {
     //   device removal succeeds but the post-removal soft balance fails. The
     //   journal must persist so `braid recover` can reconcile.
     fn journal_survives_soft_balance_failure() {
-        let (_tmp, config_path, _state_tmp, state_paths) = three_device_config();
-
-        let log = Arc::new(Mutex::new(Vec::new()));
-        let runner = FailingSoftBalanceRunner::new(log.clone());
-        let inhibitor = crate::inhibit::RecordingInhibitor::new();
+        let f = PoolFixture::three_disk_devids_pinned();
+        let (runner, _remove_done) =
+            RemoveMissingPool::three_disk_one_missing().install(MockRunner::default());
+        let runner = runner.with_handler(|req| match req {
+            CmdRequest::BtrfsBalanceRaid1Soft { .. } => Some(Ok(RawCommandOutput {
+                cmd: "btrfs balance start -dconvert=raid1,soft".into(),
+                stdout: String::new(),
+                stderr: "ERROR: error during balancing: No space left on device".into(),
+                exit_status: 1,
+            })),
+            _ => None,
+        });
         let result = cmd_remove_missing(
             &runner,
-            &MockFs,
-            &RemoveMissingParams {
-                config_path: &config_path,
-                missing_id: 3,
-                dry_run: false,
-                yes: true,
-                progress: crate::progress::ProgressOutput::Off,
-                paths: &state_paths,
-                sleep_inhibitor: &inhibitor,
-                sleeper: &crate::progress::NoopSleeper,
-            },
+            &MockFs::storage(vec![]),
+            &f.remove_missing_params().build(),
         );
 
         assert!(
@@ -1813,10 +1362,10 @@ mod tests {
             "remove-missing should fail when soft balance fails"
         );
         assert!(
-            journal::load_journal(&state_paths).unwrap().is_some(),
+            journal::load_journal(&f.paths).unwrap().is_some(),
             "pending-op.json must survive error exit so braid recover can reconcile"
         );
-        let journal = journal::load_journal(&state_paths)
+        let journal = journal::load_journal(&f.paths)
             .unwrap()
             .expect("journal should remain after post-remove maintenance failure");
         assert!(
@@ -1834,7 +1383,7 @@ mod tests {
         // the removed missing disk even when the post-remove soft balance
         // fails. Reverting save_membership back to its old position (after
         // maybe_restore_raid1) makes these assertions fail.
-        let saved = membership::load_membership(&state_paths)
+        let saved = membership::load_membership(&f.paths)
             .expect("pool.json must exist after the membership commit");
         assert!(
             !saved.disks.contains_key("disk3"),
@@ -1850,7 +1399,7 @@ mod tests {
         // The journal exists, which proves we got past journal::write_journal,
         // which proves the inhibitor was acquired exactly once on the way in.
         assert_eq!(
-            inhibitor.acquire_count(),
+            f.inhibitor.acquire_count(),
             1,
             "sleep inhibitor must be acquired exactly once on the path through journal::write_journal"
         );
@@ -1865,24 +1414,22 @@ mod tests {
     //   removal succeeds but the post-removal soft balance hits ENOSPC. The error
     //   message should guide the user to free empty block groups.
     fn enospc_hint_surfaces_through_error_chain() {
-        let (_tmp, config_path, _state_tmp, state_paths) = three_device_config();
-
-        let log = Arc::new(Mutex::new(Vec::new()));
-        let runner = FailingSoftBalanceRunner::new(log.clone());
-        let inhibitor = crate::inhibit::RecordingInhibitor::new();
+        let f = PoolFixture::three_disk_devids_pinned();
+        let (runner, _remove_done) =
+            RemoveMissingPool::three_disk_one_missing().install(MockRunner::default());
+        let runner = runner.with_handler(|req| match req {
+            CmdRequest::BtrfsBalanceRaid1Soft { .. } => Some(Ok(RawCommandOutput {
+                cmd: "btrfs balance start -dconvert=raid1,soft".into(),
+                stdout: String::new(),
+                stderr: "ERROR: error during balancing: No space left on device".into(),
+                exit_status: 1,
+            })),
+            _ => None,
+        });
         let result = cmd_remove_missing(
             &runner,
-            &MockFs,
-            &RemoveMissingParams {
-                config_path: &config_path,
-                missing_id: 3,
-                dry_run: false,
-                yes: true,
-                progress: crate::progress::ProgressOutput::Off,
-                paths: &state_paths,
-                sleep_inhibitor: &inhibitor,
-                sleeper: &crate::progress::NoopSleeper,
-            },
+            &MockFs::storage(vec![]),
+            &f.remove_missing_params().build(),
         );
 
         let err = result.unwrap_err().to_string();
@@ -1969,85 +1516,6 @@ mod tests {
 
     // --- plan_remove_missing soft-warn tests ---
 
-    /// 3-device pool runner where the single `BtrfsDeviceUsageRaw`
-    /// call comes from `check_relocation_space` and fails per
-    /// `failure_mode`. Lets us exercise the soft-warn paths from
-    /// `plan_remove_missing` without tripping the earlier validations.
-    #[derive(Clone, Copy)]
-    enum UsageFailureMode {
-        /// Command error from the relocation-space preflight (models a failing
-        /// `btrfs device usage --raw` invocation).
-        CmdError,
-        /// Unparseable output from the relocation-space preflight (models upstream
-        /// output drift that breaks `parse_btrfs_device_usage`).
-        ParseError,
-    }
-
-    struct ThreeDeviceSoftWarnRunner {
-        failure_mode: UsageFailureMode,
-    }
-
-    impl ThreeDeviceSoftWarnRunner {
-        fn new(failure_mode: UsageFailureMode) -> Self {
-            Self { failure_mode }
-        }
-    }
-
-    impl CommandRunner for ThreeDeviceSoftWarnRunner {
-        fn run(&self, request: &CmdRequest) -> Result<RawCommandOutput, CmdError> {
-            match request {
-                CmdRequest::BtrfsFilesystemShow { mount_point } => Ok(mock_out(
-                    &format!("btrfs filesystem show {mount_point}"),
-                    "Label: none  uuid: cc86845b-aec3-408e-bef5-553affc1f2b1\n\tTotal devices 3 FS bytes used 16.17MiB\n\tdevid    1 size 496.00MiB used 121.56MiB path /dev/mapper/braid-disk1\n\tdevid    2 size 496.00MiB used 121.56MiB path /dev/mapper/braid-disk2\n\tdevid    3 size 0 used 0 path MISSING\n",
-                    0,
-                )),
-                CmdRequest::CryptsetupStatus { mapper } => Ok(mock_out(
-                    &format!("cryptsetup status {mapper}"),
-                    &format!(
-                        "{mapper} is active and is in use.\n  type:    LUKS2\n  device:  /dev/vdb\n  mode:    read/write\n"
-                    ),
-                    0,
-                )),
-                CmdRequest::CryptsetupLuksUuid { .. } => Ok(mock_out(
-                    "cryptsetup luksUUID",
-                    "11111111-1111-1111-1111-111111111111\n",
-                    0,
-                )),
-                CmdRequest::BtrfsBalanceStatus { .. } => Ok(mock_out(
-                    "btrfs balance status",
-                    "No balance found on '/mnt/storage'\n",
-                    0,
-                )),
-                CmdRequest::BtrfsDeviceUsageRaw { .. } => match self.failure_mode {
-                    UsageFailureMode::CmdError => Err(CmdError::MissingMock),
-                    UsageFailureMode::ParseError => {
-                        // Nonzero exit_status funnels through
-                        // `ParseError::CommandFailed` inside
-                        // `parse_btrfs_device_usage`; the parser itself
-                        // is forgiving of unknown lines, so this is the
-                        // narrowest way to force the parse-error soft-warn
-                        // branch.
-                        Ok(RawCommandOutput {
-                            cmd: "btrfs device usage --raw".to_owned(),
-                            stdout: String::new(),
-                            stderr: "boom".to_owned(),
-                            exit_status: 1,
-                        })
-                    }
-                },
-                _ => Err(CmdError::MissingMock),
-            }
-        }
-
-        fn run_with_stdin(
-            &self,
-            request: &CmdRequest,
-            _stdin: &[u8],
-        ) -> Result<RawCommandOutput, CmdError> {
-            self.run(request)
-        }
-    }
-
     /* Intent: when the relocation-space preflight fails with a command
      * error, `plan_remove_missing` returns a successful plan carrying
      * one `PreviewNote::Warn` with the ENOSPC soft-warn body and the
@@ -2066,22 +1534,17 @@ mod tests {
      */
     #[test]
     fn plan_remove_missing_surfaces_soft_warn_on_command_error() {
-        let (_tmp, config_path, _state_tmp, state_paths) = three_device_config();
-        let runner = ThreeDeviceSoftWarnRunner::new(UsageFailureMode::CmdError);
-        let inhibitor = crate::inhibit::RecordingInhibitor::new();
+        let f = PoolFixture::three_disk_devids_pinned();
+        let (runner, _remove_done) =
+            RemoveMissingPool::three_disk_one_missing().install(MockRunner::default());
+        let runner = runner.with_handler(|req| match req {
+            CmdRequest::BtrfsDeviceUsageRaw { .. } => Some(Err(CmdError::MissingMock)),
+            _ => None,
+        });
         let report = plan_remove_missing(
             &runner,
-            &MockFs,
-            &RemoveMissingParams {
-                config_path: &config_path,
-                missing_id: 3,
-                dry_run: true,
-                yes: true,
-                progress: crate::progress::ProgressOutput::Off,
-                paths: &state_paths,
-                sleep_inhibitor: &inhibitor,
-                sleeper: &crate::progress::NoopSleeper,
-            },
+            &MockFs::storage(vec![]),
+            &f.remove_missing_params().dry_run(true).build(),
         );
         assert!(
             report.notes.is_empty(),
@@ -2145,22 +1608,22 @@ mod tests {
      */
     #[test]
     fn plan_remove_missing_surfaces_soft_warn_on_parse_error() {
-        let (_tmp, config_path, _state_tmp, state_paths) = three_device_config();
-        let runner = ThreeDeviceSoftWarnRunner::new(UsageFailureMode::ParseError);
-        let inhibitor = crate::inhibit::RecordingInhibitor::new();
+        let f = PoolFixture::three_disk_devids_pinned();
+        let (runner, _remove_done) =
+            RemoveMissingPool::three_disk_one_missing().install(MockRunner::default());
+        let runner = runner.with_handler(|req| match req {
+            CmdRequest::BtrfsDeviceUsageRaw { .. } => Some(Ok(RawCommandOutput {
+                cmd: "btrfs device usage --raw".to_owned(),
+                stdout: String::new(),
+                stderr: "boom".to_owned(),
+                exit_status: 1,
+            })),
+            _ => None,
+        });
         let report = plan_remove_missing(
             &runner,
-            &MockFs,
-            &RemoveMissingParams {
-                config_path: &config_path,
-                missing_id: 3,
-                dry_run: true,
-                yes: true,
-                progress: crate::progress::ProgressOutput::Off,
-                paths: &state_paths,
-                sleep_inhibitor: &inhibitor,
-                sleeper: &crate::progress::NoopSleeper,
-            },
+            &MockFs::storage(vec![]),
+            &f.remove_missing_params().dry_run(true).build(),
         );
         let plan = report.result.expect("planning should succeed");
         assert_eq!(plan.notes.len(), 1, "expected exactly one soft-warn note");
@@ -2261,35 +1724,6 @@ mod tests {
         );
     }
 
-    /// MockFs variant serving a configurable sysfs exclusive_operation
-    /// body. Drives preflight's busy-op / paused-balance branches from
-    /// the plan_remove_missing boundary tests.
-    struct MockFsWithExclop(String);
-
-    impl Filesystem for MockFsWithExclop {
-        fn exists(&self, _path: &str) -> bool {
-            false
-        }
-        fn is_block_device(&self, _path: &str) -> bool {
-            false
-        }
-        fn read_to_string(&self, path: &str) -> Result<String, std::io::Error> {
-            if path == "/proc/self/mountinfo" {
-                Ok(
-                    "36 35 0:32 / /mnt/storage rw shared:1 - btrfs /dev/mapper/braid-disk1 rw\n"
-                        .to_owned(),
-                )
-            } else if path.ends_with("/exclusive_operation") {
-                Ok(format!("{}\n", self.0))
-            } else {
-                Err(std::io::Error::new(std::io::ErrorKind::NotFound, "mock"))
-            }
-        }
-        fn list_dir(&self, _path: &str) -> Result<Vec<String>, std::io::Error> {
-            Ok(vec![])
-        }
-    }
-
     /* Intent: plan_remove_missing surfaces an in-flight exclusive op
      * as a PreviewNote::Info on `plan.notes`, and the rendered preview
      * contains the "waiting for in-flight <op>" line.
@@ -2303,23 +1737,13 @@ mod tests {
      */
     #[test]
     fn plan_remove_missing_preflight_busy_op_becomes_info_note() {
-        let (_tmp, config_path, _state_tmp, state_paths) = three_device_config();
-        let log = Arc::new(Mutex::new(Vec::new()));
-        let runner = ThreeDeviceRunner::new(log.clone(), false);
-        let inhibitor = crate::inhibit::RecordingInhibitor::new();
+        let f = PoolFixture::three_disk_devids_pinned();
+        let (runner, _remove_done) =
+            RemoveMissingPool::three_disk_one_missing().install(MockRunner::default());
         let report = plan_remove_missing(
             &runner,
-            &MockFsWithExclop("device add".into()),
-            &RemoveMissingParams {
-                config_path: &config_path,
-                missing_id: 3,
-                dry_run: true,
-                yes: true,
-                progress: crate::progress::ProgressOutput::Off,
-                paths: &state_paths,
-                sleep_inhibitor: &inhibitor,
-                sleeper: &crate::progress::NoopSleeper,
-            },
+            &MockFs::storage(vec![]).with_excl_op("device add\n"),
+            &f.remove_missing_params().dry_run(true).build(),
         );
         let plan = report
             .result
@@ -2369,30 +1793,15 @@ mod tests {
      */
     #[test]
     fn plan_remove_missing_preserves_preflight_notes_on_no_missing_devices() {
-        let (_state_tmp, state_paths) = test_paths(&[
-            ("disk1", "/dev/disk/by-id/virtio-disk1", Some(1)),
-            ("disk2", "/dev/disk/by-id/virtio-disk2", Some(2)),
-        ]);
-        let tmp = tempfile::tempdir().unwrap();
-        let config_path = tmp.path().join("config.json");
-        let config_json = serde_json::json!({ "mount_point": "/mnt/storage" });
-        std::fs::write(&config_path, serde_json::to_vec(&config_json).unwrap()).unwrap();
-
+        let f = PoolFixture::two_disk_devids_pinned();
         let runner = HealthyPoolRunner;
-        let inhibitor = crate::inhibit::RecordingInhibitor::new();
         let report = plan_remove_missing(
             &runner,
-            &MockFsWithExclop("device add".into()),
-            &RemoveMissingParams {
-                config_path: &config_path,
-                missing_id: 999,
-                dry_run: true,
-                yes: true,
-                progress: crate::progress::ProgressOutput::Off,
-                paths: &state_paths,
-                sleep_inhibitor: &inhibitor,
-                sleeper: &crate::progress::NoopSleeper,
-            },
+            &MockFs::storage(vec![]).with_excl_op("device add\n"),
+            &f.remove_missing_params()
+                .missing_id(999)
+                .dry_run(true)
+                .build(),
         );
         match &report.result {
             Err(RemoveMissingError::Validation(msg)) => {
@@ -2435,29 +1844,14 @@ mod tests {
      */
     #[test]
     fn plan_remove_missing_zero_missing_precedes_live_device_validation() {
-        let (_state_tmp, state_paths) = test_paths(&[
-            ("disk1", "/dev/disk/by-id/virtio-disk1", Some(1)),
-            ("disk2", "/dev/disk/by-id/virtio-disk2", Some(2)),
-        ]);
-        let tmp = tempfile::tempdir().unwrap();
-        let config_path = tmp.path().join("config.json");
-        let config_json = serde_json::json!({ "mount_point": "/mnt/storage" });
-        std::fs::write(&config_path, serde_json::to_vec(&config_json).unwrap()).unwrap();
-
-        let inhibitor = crate::inhibit::RecordingInhibitor::new();
+        let f = PoolFixture::two_disk_devids_pinned();
         let report = plan_remove_missing(
             &HealthyPoolRunner,
-            &MockFs,
-            &RemoveMissingParams {
-                config_path: &config_path,
-                missing_id: 1,
-                dry_run: true,
-                yes: true,
-                progress: crate::progress::ProgressOutput::Off,
-                paths: &state_paths,
-                sleep_inhibitor: &inhibitor,
-                sleeper: &crate::progress::NoopSleeper,
-            },
+            &MockFs::storage(vec![]),
+            &f.remove_missing_params()
+                .missing_id(1)
+                .dry_run(true)
+                .build(),
         );
 
         match &report.result {
@@ -2492,29 +1886,14 @@ mod tests {
      */
     #[test]
     fn plan_remove_missing_null_underlying_empty_missing_devids_not_no_missing() {
-        let (_state_tmp, state_paths) = test_paths(&[
-            ("disk1", "/dev/disk/by-id/virtio-disk1", Some(1)),
-            ("disk2", "/dev/disk/by-id/virtio-disk2", Some(2)),
-        ]);
-        let tmp = tempfile::tempdir().unwrap();
-        let config_path = tmp.path().join("config.json");
-        let config_json = serde_json::json!({ "mount_point": "/mnt/storage" });
-        std::fs::write(&config_path, serde_json::to_vec(&config_json).unwrap()).unwrap();
-
-        let inhibitor = crate::inhibit::RecordingInhibitor::new();
+        let f = PoolFixture::two_disk_devids_pinned();
         let report = plan_remove_missing(
             &NullUnderlyingPoolRunner,
-            &MockFs,
-            &RemoveMissingParams {
-                config_path: &config_path,
-                missing_id: 2,
-                dry_run: true,
-                yes: true,
-                progress: crate::progress::ProgressOutput::Off,
-                paths: &state_paths,
-                sleep_inhibitor: &inhibitor,
-                sleeper: &crate::progress::NoopSleeper,
-            },
+            &MockFs::storage(vec![]),
+            &f.remove_missing_params()
+                .missing_id(2)
+                .dry_run(true)
+                .build(),
         );
 
         match &report.result {
