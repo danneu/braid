@@ -834,9 +834,10 @@ mod tests {
     use crate::membership::{DiskMember, PoolMembership};
     use crate::secret::Passphrase;
     use crate::test_fixtures::{
-        MOUNT_TEST_PASSPHRASE_BYTES, NoopSleeper, base_two_disk_runner,
+        MOUNT_TEST_PASSPHRASE_BYTES, NoopSleeper, arbitrary_fallback, base_two_disk_runner,
         direct_two_disk_fs_with_mappers, direct_two_disk_open_runner, direct_two_disk_plan,
-        luks_uuid_ok, mount_fs,
+        is_luks_fail, is_luks_ok, luks_dump_text_fail, luks_dump_text_ok, luks_uuid_ok, mount_fs,
+        test_passphrase_fail,
     };
     use crate::types::{ByIdPath, LuksUuid, MountPoint};
     use std::collections::BTreeMap;
@@ -2402,10 +2403,6 @@ pool already mounted at /mnt/storage
     // correctly; these tests prove the helper itself picks the right
     // branch for each header state.
 
-    fn arbitrary_fallback() -> MountError {
-        MountError::Failed("ARBITRARY FALLBACK TEXT".into())
-    }
-
     /*
      * Intent: Unreadable overrides whatever cryptsetup originally reported.
      * Why it exists: the whole point of probing is that header corruption
@@ -2552,75 +2549,6 @@ pool already mounted at /mnt/storage
     // These prove the four call sites pass the right arguments into
     // `explain_open_failure`. The pure helper tests (above) cover each
     // classification branch; these cover the wiring.
-
-    fn test_passphrase_fail(device: &str) -> (CmdRequest, RawCommandOutput) {
-        (
-            CmdRequest::CryptsetupTestPassphrase {
-                device: device.into(),
-            },
-            err_raw(
-                "cryptsetup open --test-passphrase",
-                2,
-                "No key available with this passphrase.",
-            ),
-        )
-    }
-
-    fn is_luks_fail(device: &str) -> (CmdRequest, RawCommandOutput) {
-        (
-            CmdRequest::CryptsetupIsLuks {
-                device: device.into(),
-            },
-            err_raw(
-                "cryptsetup isLuks",
-                1,
-                &format!("Device {device} is not a valid LUKS device.\n"),
-            ),
-        )
-    }
-
-    fn is_luks_ok(device: &str) -> (CmdRequest, RawCommandOutput) {
-        (
-            CmdRequest::CryptsetupIsLuks {
-                device: device.into(),
-            },
-            ok_raw("cryptsetup isLuks"),
-        )
-    }
-
-    fn luks_dump_text_ok(device: &str) -> (CmdRequest, RawCommandOutput) {
-        (
-            CmdRequest::CryptsetupLuksDumpText {
-                device: device.into(),
-            },
-            RawCommandOutput {
-                cmd: "cryptsetup luksDump".into(),
-                stdout: "LUKS header information\nVersion: 2\n".into(),
-                stderr: String::new(),
-                exit_status: 0,
-            },
-        )
-    }
-
-    fn luks_dump_text_fail(device: &str) -> (CmdRequest, RawCommandOutput) {
-        (
-            CmdRequest::CryptsetupLuksDumpText {
-                device: device.into(),
-            },
-            err_raw(
-                "cryptsetup luksDump",
-                1,
-                "Cannot read LUKS header metadata.",
-            ),
-        )
-    }
-
-    fn two_disk_fs() -> MockFs {
-        MockFs::new(&[
-            "/dev/disk/by-id/virtio-disk1",
-            "/dev/disk/by-id/virtio-disk2",
-        ])
-    }
 
     // Intent: Mount failure after two successful opens reports both mappers
     // as cleanup-owned and cleanup forgets those mapper paths before close.
@@ -3162,7 +3090,7 @@ pool already mounted at /mnt/storage
     fn unlock_passphrase_verify_fails_unreadable_header_emits_guidance() {
         let config = test_config();
         let membership = two_disk_membership();
-        let fs = two_disk_fs();
+        let fs = mount_fs(&["/dev/disk/by-id/virtio-disk1", "/dev/disk/by-id/virtio-disk2"]);
 
         let (tp_req, tp_out) = test_passphrase_fail("/dev/disk/by-id/virtio-disk1");
         let (is_req, is_out) = is_luks_fail("/dev/disk/by-id/virtio-disk1");
@@ -3226,7 +3154,7 @@ pool already mounted at /mnt/storage
     fn unlock_damaged_luks2_metadata_fails_at_gateway() {
         let config = test_config();
         let membership = two_disk_membership();
-        let fs = two_disk_fs();
+        let fs = mount_fs(&["/dev/disk/by-id/virtio-disk1", "/dev/disk/by-id/virtio-disk2"]);
 
         let kf = tempfile::NamedTempFile::new().unwrap();
         {
@@ -3283,7 +3211,7 @@ pool already mounted at /mnt/storage
     fn unlock_passphrase_verify_fails_ok_header_preserves_wrong_passphrase() {
         let config = test_config();
         let membership = two_disk_membership();
-        let fs = two_disk_fs();
+        let fs = mount_fs(&["/dev/disk/by-id/virtio-disk1", "/dev/disk/by-id/virtio-disk2"]);
 
         let (tp_req, tp_out) = test_passphrase_fail("/dev/disk/by-id/virtio-disk1");
         let (is_req, is_out) = is_luks_ok("/dev/disk/by-id/virtio-disk1");
@@ -3338,7 +3266,7 @@ pool already mounted at /mnt/storage
     fn unlock_passphrase_open_exit2_probe_failed_does_not_blame_invariant() {
         let config = test_config();
         let membership = two_disk_membership();
-        let fs = two_disk_fs();
+        let fs = mount_fs(&["/dev/disk/by-id/virtio-disk1", "/dev/disk/by-id/virtio-disk2"]);
 
         let (tp_req, tp_out) = (
             CmdRequest::CryptsetupTestPassphrase {
@@ -3416,7 +3344,7 @@ pool already mounted at /mnt/storage
     fn unlock_keyfile_open_exit_nonzero_unreadable_header_emits_guidance() {
         let config = test_config();
         let membership = two_disk_membership();
-        let fs = two_disk_fs();
+        let fs = mount_fs(&["/dev/disk/by-id/virtio-disk1", "/dev/disk/by-id/virtio-disk2"]);
 
         let kf = tempfile::NamedTempFile::new().unwrap();
         {
@@ -3592,7 +3520,7 @@ pool already mounted at /mnt/storage
     fn unlock_passphrase_verify_exit_5_ok_header_surfaces_open_failed() {
         let config = test_config();
         let membership = two_disk_membership();
-        let fs = two_disk_fs();
+        let fs = mount_fs(&["/dev/disk/by-id/virtio-disk1", "/dev/disk/by-id/virtio-disk2"]);
 
         let (tp_req, tp_out) = (
             CmdRequest::CryptsetupTestPassphrase {
@@ -3651,7 +3579,7 @@ pool already mounted at /mnt/storage
     fn unlock_passphrase_verify_exit_1_unreadable_header_emits_guidance() {
         let config = test_config();
         let membership = two_disk_membership();
-        let fs = two_disk_fs();
+        let fs = mount_fs(&["/dev/disk/by-id/virtio-disk1", "/dev/disk/by-id/virtio-disk2"]);
 
         let (tp_req, tp_out) = (
             CmdRequest::CryptsetupTestPassphrase {
@@ -3710,7 +3638,7 @@ pool already mounted at /mnt/storage
     fn unlock_keyfile_verify_exit_5_ok_header_surfaces_open_failed() {
         let config = test_config();
         let membership = two_disk_membership();
-        let fs = two_disk_fs();
+        let fs = mount_fs(&["/dev/disk/by-id/virtio-disk1", "/dev/disk/by-id/virtio-disk2"]);
 
         let kf = tempfile::NamedTempFile::new().unwrap();
         {
@@ -3775,7 +3703,7 @@ pool already mounted at /mnt/storage
     fn unlock_keyfile_verify_exit_1_unreadable_header_emits_guidance() {
         let config = test_config();
         let membership = two_disk_membership();
-        let fs = two_disk_fs();
+        let fs = mount_fs(&["/dev/disk/by-id/virtio-disk1", "/dev/disk/by-id/virtio-disk2"]);
 
         let kf = tempfile::NamedTempFile::new().unwrap();
         {
