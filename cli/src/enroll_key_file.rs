@@ -690,11 +690,12 @@ mod tests {
     use crate::probe::Filesystem;
     use crate::test_fixtures::err_raw as enroll_err_raw;
     use crate::test_fixtures::{
-        enroll_by_id, enroll_discovery_two_disks, enroll_fs, enroll_luks_dump_slot1_empty,
-        enroll_luks_uuid_not_luks, enroll_luks_uuid_ok, enroll_make_existing_keyfile,
-        enroll_make_membership, enroll_passphrase, enroll_test_keyfile_fail,
-        enroll_test_keyfile_ok, enroll_test_passphrase_fail, enroll_test_passphrase_ok,
-        enroll_with_mountpoint_ok, isolated_paths,
+        enroll_add_keyfile_ok, enroll_by_id, enroll_discovery_two_disks, enroll_fs,
+        enroll_luks_dump_slot1_empty, enroll_luks_dump_slot1_occupied, enroll_luks_uuid_not_luks,
+        enroll_luks_uuid_ok, enroll_make_existing_keyfile, enroll_make_membership,
+        enroll_passphrase, enroll_test_keyfile_fail, enroll_test_keyfile_ok,
+        enroll_test_passphrase_fail, enroll_test_passphrase_ok, enroll_with_mountpoint_fail,
+        enroll_with_mountpoint_ok, isolated_paths, mock_ok,
     };
     use crate::types::ByIdPath;
     use std::collections::BTreeMap;
@@ -1233,8 +1234,8 @@ mod tests {
         let paths = StatePaths::custom(tmp.path().join("state"));
         let kf = tmp.path().join("missing").join("braid.key");
         let runner = MockRunner::default();
-        let fs = MockFs::new(&["/dev/disk/by-id/d1"]);
-        let membership = make_membership(&[("disk1", "/dev/disk/by-id/d1")]);
+        let fs = enroll_fs(&["/dev/disk/by-id/d1"]);
+        let membership = enroll_make_membership(&[("disk1", "/dev/disk/by-id/d1")]);
 
         let report = plan_enroll(&runner, &fs, &membership, &kf, true, false, &paths);
         let err = report
@@ -1267,8 +1268,8 @@ mod tests {
         std::fs::write(&not_dir, b"not a directory").unwrap();
         let kf = not_dir.join("braid.key");
         let runner = MockRunner::default();
-        let fs = MockFs::new(&["/dev/disk/by-id/d1"]);
-        let membership = make_membership(&[("disk1", "/dev/disk/by-id/d1")]);
+        let fs = enroll_fs(&["/dev/disk/by-id/d1"]);
+        let membership = enroll_make_membership(&[("disk1", "/dev/disk/by-id/d1")]);
 
         let report = plan_enroll(&runner, &fs, &membership, &kf, true, false, &paths);
         let err = report.result.expect_err("non-directory target must fail");
@@ -1301,9 +1302,9 @@ mod tests {
         let target = tmp.path().join("not-mounted");
         std::fs::create_dir(&target).unwrap();
         let kf = target.join("braid.key");
-        let runner = with_mountpoint_fail(MockRunner::default(), &target);
-        let fs = MockFs::new(&["/dev/disk/by-id/d1"]);
-        let membership = make_membership(&[("disk1", "/dev/disk/by-id/d1")]);
+        let runner = enroll_with_mountpoint_fail(MockRunner::default(), &target);
+        let fs = enroll_fs(&["/dev/disk/by-id/d1"]);
+        let membership = enroll_make_membership(&[("disk1", "/dev/disk/by-id/d1")]);
 
         let report = plan_enroll(&runner, &fs, &membership, &kf, true, false, &paths);
         let err = report.result.expect_err("plain directory must fail");
@@ -1341,9 +1342,9 @@ mod tests {
         let target = tmp.path().join("not-mounted");
         std::fs::create_dir(&target).unwrap();
         let kf = target.join("braid.key");
-        let runner = with_mountpoint_fail(MockRunner::default(), &target);
-        let fs = MockFs::new(&["/dev/disk/by-id/d1"]);
-        let membership = make_membership(&[("disk1", "/dev/disk/by-id/d1")]);
+        let runner = enroll_with_mountpoint_fail(MockRunner::default(), &target);
+        let fs = enroll_fs(&["/dev/disk/by-id/d1"]);
+        let membership = enroll_make_membership(&[("disk1", "/dev/disk/by-id/d1")]);
 
         let err = cmd_enroll_key_file(
             &runner,
@@ -1388,9 +1389,9 @@ mod tests {
         let paths = StatePaths::custom(tmp.path().join("state"));
         let kf = tmp.path().join("braid.key");
         std::fs::write(&kf, b"existing").unwrap();
-        let runner = with_mountpoint_ok(MockRunner::default(), tmp.path());
-        let fs = MockFs::new(&["/dev/disk/by-id/d1"]);
-        let membership = make_membership(&[("disk1", "/dev/disk/by-id/d1")]);
+        let runner = enroll_with_mountpoint_ok(MockRunner::default(), tmp.path());
+        let fs = enroll_fs(&["/dev/disk/by-id/d1"]);
+        let membership = enroll_make_membership(&[("disk1", "/dev/disk/by-id/d1")]);
 
         let report = plan_enroll(&runner, &fs, &membership, &kf, true, false, &paths);
         let err = report
@@ -1837,12 +1838,12 @@ mod tests {
         let kf = "/tmp/braid.key";
         let pass = "testpass";
 
-        let (tp1_req, tp1_stdin, tp1_out) = test_passphrase_ok(d1, pass);
-        let (tp2_req, tp2_stdin, tp2_out) = test_passphrase_ok(d2, pass);
-        let (tkf1_req, tkf1_out) = test_keyfile_fail(d1, kf);
-        let (tkf2_req, tkf2_out) = test_keyfile_fail(d2, kf);
-        let (ld1_req, ld1_out) = luks_dump_slot1_empty(d1);
-        let (ld2_req, ld2_out) = luks_dump_slot1_empty(d2);
+        let (tp1_req, tp1_stdin, tp1_out) = enroll_test_passphrase_ok(d1, pass);
+        let (tp2_req, tp2_stdin, tp2_out) = enroll_test_passphrase_ok(d2, pass);
+        let (tkf1_req, tkf1_out) = enroll_test_keyfile_fail(d1, kf);
+        let (tkf2_req, tkf2_out) = enroll_test_keyfile_fail(d2, kf);
+        let (ld1_req, ld1_out) = enroll_luks_dump_slot1_empty(d1);
+        let (ld2_req, ld2_out) = enroll_luks_dump_slot1_empty(d2);
 
         let runner = MockRunner::default()
             .with_output_stdin(tp1_req, tp1_stdin, tp1_out)
@@ -1853,15 +1854,15 @@ mod tests {
             .with_output(ld2_req, ld2_out);
 
         let candidates = vec![
-            ("disk1".to_owned(), by_id(d1)),
-            ("disk2".to_owned(), by_id(d2)),
+            ("disk1".to_owned(), enroll_by_id(d1)),
+            ("disk2".to_owned(), enroll_by_id(d2)),
         ];
 
         let plan = plan_enrollment(
             &runner,
             &candidates,
             Path::new(kf),
-            &passphrase(pass),
+            &enroll_passphrase(pass),
             EnrollmentPlanMode::ExistingKeyfile,
         )
         .unwrap();
@@ -1870,14 +1871,14 @@ mod tests {
             plan[0],
             DiskEnrollAction::NeedsEnroll {
                 name: "disk1".to_owned(),
-                by_id: by_id(d1),
+                by_id: enroll_by_id(d1),
             }
         );
         assert_eq!(
             plan[1],
             DiskEnrollAction::NeedsEnroll {
                 name: "disk2".to_owned(),
-                by_id: by_id(d2),
+                by_id: enroll_by_id(d2),
             }
         );
     }
@@ -1961,11 +1962,11 @@ mod tests {
         let kf = "/tmp/braid.key";
         let pass = "testpass";
 
-        let (tp1_req, tp1_stdin, tp1_out) = test_passphrase_ok(d1, pass);
-        let (tp2_req, tp2_stdin, tp2_out) = test_passphrase_ok(d2, pass);
-        let (tkf1_req, tkf1_out) = test_keyfile_ok(d1, kf);
-        let (tkf2_req, tkf2_out) = test_keyfile_fail(d2, kf);
-        let (ld2_req, ld2_out) = luks_dump_slot1_empty(d2);
+        let (tp1_req, tp1_stdin, tp1_out) = enroll_test_passphrase_ok(d1, pass);
+        let (tp2_req, tp2_stdin, tp2_out) = enroll_test_passphrase_ok(d2, pass);
+        let (tkf1_req, tkf1_out) = enroll_test_keyfile_ok(d1, kf);
+        let (tkf2_req, tkf2_out) = enroll_test_keyfile_fail(d2, kf);
+        let (ld2_req, ld2_out) = enroll_luks_dump_slot1_empty(d2);
 
         let runner = MockRunner::default()
             .with_output_stdin(tp1_req, tp1_stdin, tp1_out)
@@ -1975,15 +1976,15 @@ mod tests {
             .with_output(ld2_req, ld2_out);
 
         let candidates = vec![
-            ("disk1".to_owned(), by_id(d1)),
-            ("disk2".to_owned(), by_id(d2)),
+            ("disk1".to_owned(), enroll_by_id(d1)),
+            ("disk2".to_owned(), enroll_by_id(d2)),
         ];
 
         let plan = plan_enrollment(
             &runner,
             &candidates,
             Path::new(kf),
-            &passphrase(pass),
+            &enroll_passphrase(pass),
             EnrollmentPlanMode::ExistingKeyfile,
         )
         .unwrap();
@@ -2012,11 +2013,11 @@ mod tests {
         let kf = "/tmp/braid.key";
         let pass = "testpass";
 
-        let (tp1_req, tp1_stdin, tp1_out) = test_passphrase_ok(d1, pass);
-        let (tp2_req, tp2_stdin, tp2_out) = test_passphrase_ok(d2, pass);
-        let (tkf1_req, tkf1_out) = test_keyfile_ok(d1, kf);
-        let (tkf2_req, tkf2_out) = test_keyfile_fail(d2, kf);
-        let (ld2_req, ld2_out) = luks_dump_slot1_empty(d2);
+        let (tp1_req, tp1_stdin, tp1_out) = enroll_test_passphrase_ok(d1, pass);
+        let (tp2_req, tp2_stdin, tp2_out) = enroll_test_passphrase_ok(d2, pass);
+        let (tkf1_req, tkf1_out) = enroll_test_keyfile_ok(d1, kf);
+        let (tkf2_req, tkf2_out) = enroll_test_keyfile_fail(d2, kf);
+        let (ld2_req, ld2_out) = enroll_luks_dump_slot1_empty(d2);
 
         let runner = MockRunner::default()
             .with_output_stdin(tp1_req, tp1_stdin, tp1_out)
@@ -2026,8 +2027,8 @@ mod tests {
             .with_output(ld2_req, ld2_out);
 
         let candidates = vec![
-            ("disk1".to_owned(), by_id(d1)),
-            ("disk2".to_owned(), by_id(d2)),
+            ("disk1".to_owned(), enroll_by_id(d1)),
+            ("disk2".to_owned(), enroll_by_id(d2)),
         ];
 
         let captured = crate::status_tag::testing::capture_with_color(false, || {
@@ -2035,7 +2036,7 @@ mod tests {
                 &runner,
                 &candidates,
                 Path::new(kf),
-                &passphrase(pass),
+                &enroll_passphrase(pass),
                 EnrollmentPlanMode::ExistingKeyfile,
             )
             .expect("plan_enrollment should succeed");
@@ -2078,16 +2079,16 @@ mod tests {
         let kf = "/tmp/braid.key";
         let pass = "wrongpass";
 
-        let (tp_req, tp_stdin, tp_out) = test_passphrase_fail(d1, pass);
+        let (tp_req, tp_stdin, tp_out) = enroll_test_passphrase_fail(d1, pass);
         let runner = MockRunner::default().with_output_stdin(tp_req, tp_stdin, tp_out);
 
-        let candidates = vec![("disk1".to_owned(), by_id(d1))];
+        let candidates = vec![("disk1".to_owned(), enroll_by_id(d1))];
 
         let result = plan_enrollment(
             &runner,
             &candidates,
             Path::new(kf),
-            &passphrase(pass),
+            &enroll_passphrase(pass),
             EnrollmentPlanMode::ExistingKeyfile,
         );
         assert!(result.is_err());
@@ -2111,12 +2112,12 @@ mod tests {
         let kf = "/tmp/braid.key";
         let pass = "testpass";
 
-        let (tp1_req, tp1_stdin, tp1_out) = test_passphrase_ok(d1, pass);
-        let (tp2_req, tp2_stdin, tp2_out) = test_passphrase_ok(d2, pass);
-        let (tkf1_req, tkf1_out) = test_keyfile_fail(d1, kf);
-        let (tkf2_req, tkf2_out) = test_keyfile_fail(d2, kf);
-        let (ld1_req, ld1_out) = luks_dump_slot1_empty(d1);
-        let (ld2_req, ld2_out) = luks_dump_slot1_occupied(d2);
+        let (tp1_req, tp1_stdin, tp1_out) = enroll_test_passphrase_ok(d1, pass);
+        let (tp2_req, tp2_stdin, tp2_out) = enroll_test_passphrase_ok(d2, pass);
+        let (tkf1_req, tkf1_out) = enroll_test_keyfile_fail(d1, kf);
+        let (tkf2_req, tkf2_out) = enroll_test_keyfile_fail(d2, kf);
+        let (ld1_req, ld1_out) = enroll_luks_dump_slot1_empty(d1);
+        let (ld2_req, ld2_out) = enroll_luks_dump_slot1_occupied(d2);
 
         let runner = MockRunner::default()
             .with_output_stdin(tp1_req, tp1_stdin, tp1_out)
@@ -2127,15 +2128,15 @@ mod tests {
             .with_output(ld2_req, ld2_out);
 
         let candidates = vec![
-            ("disk1".to_owned(), by_id(d1)),
-            ("disk2".to_owned(), by_id(d2)),
+            ("disk1".to_owned(), enroll_by_id(d1)),
+            ("disk2".to_owned(), enroll_by_id(d2)),
         ];
 
         let result = plan_enrollment(
             &runner,
             &candidates,
             Path::new(kf),
-            &passphrase(pass),
+            &enroll_passphrase(pass),
             EnrollmentPlanMode::ExistingKeyfile,
         );
         assert!(result.is_err());
@@ -2168,13 +2169,13 @@ mod tests {
     fn plan_single_disk_existing_keyfile_already_enrolled() {
         let d = "/dev/disk/by-id/d1";
         let kf = "/tmp/braid.key";
-        let (tkf_req, tkf_out) = test_keyfile_ok(d, kf);
+        let (tkf_req, tkf_out) = enroll_test_keyfile_ok(d, kf);
         let runner = MockRunner::default().with_output(tkf_req, tkf_out);
 
         let action = plan_single_disk_enrollment(
             &runner,
             "disk1",
-            &by_id(d),
+            &enroll_by_id(d),
             Path::new(kf),
             EnrollmentPlanMode::ExistingKeyfile,
         )
@@ -2183,7 +2184,7 @@ mod tests {
             action,
             DiskEnrollAction::AlreadyEnrolled {
                 name: "disk1".to_owned(),
-                by_id: by_id(d),
+                by_id: enroll_by_id(d),
             },
         );
     }
@@ -2192,8 +2193,8 @@ mod tests {
     fn plan_single_disk_existing_keyfile_needs_enroll() {
         let d = "/dev/disk/by-id/d1";
         let kf = "/tmp/braid.key";
-        let (tkf_req, tkf_out) = test_keyfile_fail(d, kf);
-        let (ld_req, ld_out) = luks_dump_slot1_empty(d);
+        let (tkf_req, tkf_out) = enroll_test_keyfile_fail(d, kf);
+        let (ld_req, ld_out) = enroll_luks_dump_slot1_empty(d);
         let runner = MockRunner::default()
             .with_output(tkf_req, tkf_out)
             .with_output(ld_req, ld_out);
@@ -2201,7 +2202,7 @@ mod tests {
         let action = plan_single_disk_enrollment(
             &runner,
             "disk1",
-            &by_id(d),
+            &enroll_by_id(d),
             Path::new(kf),
             EnrollmentPlanMode::ExistingKeyfile,
         )
@@ -2210,7 +2211,7 @@ mod tests {
             action,
             DiskEnrollAction::NeedsEnroll {
                 name: "disk1".to_owned(),
-                by_id: by_id(d),
+                by_id: enroll_by_id(d),
             },
         );
     }
@@ -2219,8 +2220,8 @@ mod tests {
     fn plan_single_disk_existing_keyfile_slot_one_occupied_errors() {
         let d = "/dev/disk/by-id/d1";
         let kf = "/tmp/braid.key";
-        let (tkf_req, tkf_out) = test_keyfile_fail(d, kf);
-        let (ld_req, ld_out) = luks_dump_slot1_occupied(d);
+        let (tkf_req, tkf_out) = enroll_test_keyfile_fail(d, kf);
+        let (ld_req, ld_out) = enroll_luks_dump_slot1_occupied(d);
         let runner = MockRunner::default()
             .with_output(tkf_req, tkf_out)
             .with_output(ld_req, ld_out);
@@ -2228,7 +2229,7 @@ mod tests {
         let err = plan_single_disk_enrollment(
             &runner,
             "disk1",
-            &by_id(d),
+            &enroll_by_id(d),
             Path::new(kf),
             EnrollmentPlanMode::ExistingKeyfile,
         )
@@ -2467,10 +2468,10 @@ mod tests {
         let kf = "/mnt/usb/braid.key";
         let pass = "testpass";
 
-        let (tp1_req, tp1_stdin, tp1_out) = test_passphrase_ok(d1, pass);
-        let (tp2_req, tp2_stdin, tp2_out) = test_passphrase_ok(d2, pass);
-        let (ld1_req, ld1_out) = luks_dump_slot1_empty(d1);
-        let (ld2_req, ld2_out) = luks_dump_slot1_occupied(d2);
+        let (tp1_req, tp1_stdin, tp1_out) = enroll_test_passphrase_ok(d1, pass);
+        let (tp2_req, tp2_stdin, tp2_out) = enroll_test_passphrase_ok(d2, pass);
+        let (ld1_req, ld1_out) = enroll_luks_dump_slot1_empty(d1);
+        let (ld2_req, ld2_out) = enroll_luks_dump_slot1_occupied(d2);
 
         let runner = MockRunner::default()
             .with_output_stdin(tp1_req, tp1_stdin, tp1_out)
@@ -2479,15 +2480,15 @@ mod tests {
             .with_output(ld2_req, ld2_out);
 
         let candidates = vec![
-            ("disk1".to_owned(), by_id(d1)),
-            ("disk2".to_owned(), by_id(d2)),
+            ("disk1".to_owned(), enroll_by_id(d1)),
+            ("disk2".to_owned(), enroll_by_id(d2)),
         ];
 
         let err = plan_enrollment(
             &runner,
             &candidates,
             Path::new(kf),
-            &passphrase(pass),
+            &enroll_passphrase(pass),
             EnrollmentPlanMode::GenerateNew,
         )
         .expect_err("expected slot-1 conflict to surface");
@@ -2648,10 +2649,10 @@ mod tests {
         let d2 = "/dev/disk/by-id/d2";
         let kf = "/tmp/braid.key";
         let pass = "testpass";
-        let (_state_dir, paths) = test_paths();
+        let (_state_dir, paths) = isolated_paths();
 
-        let (e1_req, e1_stdin, e1_out) = enroll_ok(d1, kf, pass);
-        let (e2_req, e2_stdin, e2_out) = enroll_ok(d2, kf, pass);
+        let (e1_req, e1_stdin, e1_out) = enroll_add_keyfile_ok(d1, kf, pass);
+        let (e2_req, e2_stdin, e2_out) = enroll_add_keyfile_ok(d2, kf, pass);
 
         let runner = MockRunner::default()
             .with_output_stdin(e1_req, e1_stdin, e1_out)
@@ -2665,7 +2666,7 @@ mod tests {
                         .display()
                         .to_string(),
                 },
-                ok_raw("cryptsetup luksHeaderBackup", ""),
+                mock_ok("cryptsetup luksHeaderBackup", ""),
             )
             .with_output(
                 CmdRequest::CryptsetupLuksHeaderBackup {
@@ -2676,21 +2677,28 @@ mod tests {
                         .display()
                         .to_string(),
                 },
-                ok_raw("cryptsetup luksHeaderBackup", ""),
+                mock_ok("cryptsetup luksHeaderBackup", ""),
             );
 
         let plan = vec![
             DiskEnrollAction::NeedsEnroll {
                 name: "disk1".to_owned(),
-                by_id: by_id(d1),
+                by_id: enroll_by_id(d1),
             },
             DiskEnrollAction::NeedsEnroll {
                 name: "disk2".to_owned(),
-                by_id: by_id(d2),
+                by_id: enroll_by_id(d2),
             },
         ];
 
-        apply_enrollment(&runner, &plan, &passphrase(pass), Path::new(kf), &paths).unwrap();
+        apply_enrollment(
+            &runner,
+            &plan,
+            &enroll_passphrase(pass),
+            Path::new(kf),
+            &paths,
+        )
+        .unwrap();
 
         assert!(
             paths
@@ -2748,10 +2756,10 @@ mod tests {
         let d2 = "/dev/disk/by-id/d2";
         let kf = "/tmp/braid.key";
         let pass = "testpass";
-        let (_state_dir, paths) = test_paths();
+        let (_state_dir, paths) = isolated_paths();
 
         // Only d2 should have enroll called — d1 is AlreadyEnrolled
-        let (e2_req, e2_stdin, e2_out) = enroll_ok(d2, kf, pass);
+        let (e2_req, e2_stdin, e2_out) = enroll_add_keyfile_ok(d2, kf, pass);
         let runner = MockRunner::default()
             .with_output_stdin(e2_req, e2_stdin, e2_out)
             .with_output(
@@ -2763,21 +2771,28 @@ mod tests {
                         .display()
                         .to_string(),
                 },
-                ok_raw("cryptsetup luksHeaderBackup", ""),
+                mock_ok("cryptsetup luksHeaderBackup", ""),
             );
 
         let plan = vec![
             DiskEnrollAction::AlreadyEnrolled {
                 name: "disk1".to_owned(),
-                by_id: by_id(d1),
+                by_id: enroll_by_id(d1),
             },
             DiskEnrollAction::NeedsEnroll {
                 name: "disk2".to_owned(),
-                by_id: by_id(d2),
+                by_id: enroll_by_id(d2),
             },
         ];
 
-        apply_enrollment(&runner, &plan, &passphrase(pass), Path::new(kf), &paths).unwrap();
+        apply_enrollment(
+            &runner,
+            &plan,
+            &enroll_passphrase(pass),
+            Path::new(kf),
+            &paths,
+        )
+        .unwrap();
 
         assert!(
             !paths
@@ -2804,9 +2819,9 @@ mod tests {
         let d1 = "/dev/disk/by-id/d1";
         let kf = "/tmp/braid.key";
         let pass = "testpass";
-        let (_state_dir, paths) = test_paths();
+        let (_state_dir, paths) = isolated_paths();
 
-        let (enroll_req, enroll_stdin, enroll_out) = enroll_ok(d1, kf, pass);
+        let (enroll_req, enroll_stdin, enroll_out) = enroll_add_keyfile_ok(d1, kf, pass);
         let runner = MockRunner::default()
             .with_output_stdin(enroll_req, enroll_stdin, enroll_out)
             .with_output(
@@ -2818,16 +2833,22 @@ mod tests {
                         .display()
                         .to_string(),
                 },
-                err_raw("cryptsetup luksHeaderBackup", 1, "No space left on device"),
+                enroll_err_raw("cryptsetup luksHeaderBackup", 1, "No space left on device"),
             );
         let plan = vec![DiskEnrollAction::NeedsEnroll {
             name: "disk1".to_owned(),
-            by_id: by_id(d1),
+            by_id: enroll_by_id(d1),
         }];
 
-        let err = apply_enrollment(&runner, &plan, &passphrase(pass), Path::new(kf), &paths)
-            .expect_err("backup failure should abort enrollment apply")
-            .to_string();
+        let err = apply_enrollment(
+            &runner,
+            &plan,
+            &enroll_passphrase(pass),
+            Path::new(kf),
+            &paths,
+        )
+        .expect_err("backup failure should abort enrollment apply")
+        .to_string();
 
         assert!(
             err.contains("cryptsetup luksHeaderBackup --header-backup-file"),
@@ -2957,26 +2978,25 @@ mod tests {
      */
     #[test]
     fn cmd_generate_wrong_passphrase_no_keyfile_created() {
-        let tmp = tempfile::TempDir::new().unwrap();
-        let paths = StatePaths::custom(tmp.path().into());
+        let (tmp, paths) = isolated_paths();
 
         let kf = tmp.path().join("braid.key");
         let pass_path = tmp.path().join("pass");
         std::fs::write(&pass_path, "wrongpass\n").unwrap();
 
         let d1 = "/dev/disk/by-id/d1";
-        let (uuid_req, uuid_out) = luks_uuid_ok(d1);
-        let (tp_req, tp_stdin, tp_out) = test_passphrase_fail(d1, "wrongpass");
+        let (uuid_req, uuid_out) = enroll_luks_uuid_ok(d1);
+        let (tp_req, tp_stdin, tp_out) = enroll_test_passphrase_fail(d1, "wrongpass");
 
         let runner = MockRunner::default()
             .with_output(uuid_req, uuid_out)
             .with_luks_dump_text_luks2(d1)
             .with_mappers_closed(&["braid-disk1"])
             .with_output_stdin(tp_req, tp_stdin, tp_out);
-        let runner = with_mountpoint_ok(runner, tmp.path());
+        let runner = enroll_with_mountpoint_ok(runner, tmp.path());
 
-        let fs = MockFs::new(&[d1]);
-        let membership = make_membership(&[("disk1", d1)]);
+        let fs = enroll_fs(&[d1]);
+        let membership = enroll_make_membership(&[("disk1", d1)]);
 
         let err = cmd_enroll_key_file(
             &runner,
@@ -3063,11 +3083,11 @@ mod tests {
     // Scenario: 3-disk pool, all present LUKS, --generate --dry-run.
     fn dry_run_render_enroll_generate_3_disks() {
         let candidates = vec![
-            ("aaa".to_owned(), by_id("/dev/disk/by-id/disk-aaa")),
-            ("bbb".to_owned(), by_id("/dev/disk/by-id/disk-bbb")),
-            ("ccc".to_owned(), by_id("/dev/disk/by-id/disk-ccc")),
+            ("aaa".to_owned(), enroll_by_id("/dev/disk/by-id/disk-aaa")),
+            ("bbb".to_owned(), enroll_by_id("/dev/disk/by-id/disk-bbb")),
+            ("ccc".to_owned(), enroll_by_id("/dev/disk/by-id/disk-ccc")),
         ];
-        let (_state_dir, paths) = test_paths();
+        let (_state_dir, paths) = isolated_paths();
         let steps =
             compile_enroll_steps(&candidates, Path::new("/mnt/usb/braid.key"), true, &paths);
         let output = Step::render_dry_run(&steps);
@@ -3092,10 +3112,10 @@ mod tests {
     // Scenario: 2-disk pool, existing keyfile, --dry-run (no --generate).
     fn dry_run_render_enroll_existing_keyfile() {
         let candidates = vec![
-            ("aaa".to_owned(), by_id("/dev/disk/by-id/disk-aaa")),
-            ("bbb".to_owned(), by_id("/dev/disk/by-id/disk-bbb")),
+            ("aaa".to_owned(), enroll_by_id("/dev/disk/by-id/disk-aaa")),
+            ("bbb".to_owned(), enroll_by_id("/dev/disk/by-id/disk-bbb")),
         ];
-        let (_state_dir, paths) = test_paths();
+        let (_state_dir, paths) = isolated_paths();
         let steps =
             compile_enroll_steps(&candidates, Path::new("/mnt/usb/braid.key"), false, &paths);
         let output = Step::render_dry_run(&steps);
