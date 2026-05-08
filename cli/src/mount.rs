@@ -836,7 +836,7 @@ mod tests {
     use crate::test_fixtures::{
         MOUNT_TEST_PASSPHRASE_BYTES, NoopSleeper, base_two_disk_runner,
         direct_two_disk_fs_with_mappers, direct_two_disk_open_runner, direct_two_disk_plan,
-        mount_fs,
+        luks_uuid_ok, mount_fs,
     };
     use crate::types::{ByIdPath, LuksUuid, MountPoint};
     use std::collections::BTreeMap;
@@ -963,20 +963,6 @@ mod tests {
             );
         }
         PoolMembership { disks }
-    }
-
-    fn luks_uuid_ok(device: &str, uuid: &str) -> (CmdRequest, RawCommandOutput) {
-        (
-            CmdRequest::CryptsetupLuksUuid {
-                device: device.into(),
-            },
-            RawCommandOutput {
-                cmd: "cryptsetup luksUUID".into(),
-                stdout: format!("{uuid}\n"),
-                stderr: String::new(),
-                exit_status: 0,
-            },
-        )
     }
 
     /// Intent: `execute_unlock_and_mount` must reject an empty `to_unlock`
@@ -1171,7 +1157,7 @@ mod tests {
         let config = test_config();
         let membership = three_disk_membership();
         // disk3 is absent — not in fs paths
-        let fs = MockFs::new(&[
+        let fs = mount_fs(&[
             "/dev/disk/by-id/virtio-disk1",
             "/dev/disk/by-id/virtio-disk2",
         ]);
@@ -1261,7 +1247,7 @@ mod tests {
     fn mount_degraded_refused() {
         let config = test_config();
         let membership = three_disk_membership();
-        let fs = MockFs::new(&[
+        let fs = mount_fs(&[
             "/dev/disk/by-id/virtio-disk1",
             "/dev/disk/by-id/virtio-disk2",
         ]);
@@ -1740,7 +1726,7 @@ mod tests {
         let config = test_config();
         let membership = two_disk_membership();
         // Devices exist and mappers exist
-        let fs = MockFs::new(&[
+        let fs = mount_fs(&[
             "/dev/disk/by-id/virtio-disk1",
             "/dev/disk/by-id/virtio-disk2",
             "/dev/mapper/braid-disk1",
@@ -1815,7 +1801,7 @@ mod tests {
     fn plan_open_pool_degraded_first_absent_picks_open_mapper() {
         let config = test_config();
         let membership = three_disk_membership();
-        let fs = MockFs::new(&[
+        let fs = mount_fs(&[
             // disk1 absent -- not in fs paths
             "/dev/disk/by-id/virtio-disk2",
             "/dev/disk/by-id/virtio-disk3",
@@ -2092,7 +2078,7 @@ pool already mounted at /mnt/storage
     fn mount_degraded_first_absent_all_open_uses_open_mapper() {
         let config = test_config();
         let membership = three_disk_membership();
-        let fs = MockFs::new(&[
+        let fs = mount_fs(&[
             "/dev/disk/by-id/virtio-disk2",
             "/dev/disk/by-id/virtio-disk3",
             "/dev/mapper/braid-disk2",
@@ -2211,7 +2197,7 @@ pool already mounted at /mnt/storage
         membership.disks.get_mut("disk1").unwrap().luks_uuid =
             Some(LuksUuid("aaaaaaaa-1111-2222-3333-444444444444".into()));
 
-        let fs = MockFs::new(&[
+        let fs = mount_fs(&[
             "/dev/disk/by-id/virtio-disk1",
             "/dev/disk/by-id/virtio-disk2",
             "/dev/mapper/braid-disk1", // mapper already open
