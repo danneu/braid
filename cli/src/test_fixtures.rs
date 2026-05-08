@@ -1,5 +1,5 @@
-//! Test-only shared fixtures for `replace` and `add` (and, in follow-ups,
-//! `remove`, `remove_missing`, `recover`, `doctor`).
+//! Test-only shared fixtures for `replace`, `add`, and `remove` (and, in
+//! follow-ups, `remove_missing`, `recover`, `doctor`).
 //!
 //! These fixtures consolidate the per-test scaffolding that previously
 //! lived as one-off `*Runner` structs and inline `tempdir + config + pass +
@@ -18,18 +18,26 @@
 //!     observe mount/device-add commits and per-mapper opens.
 //!   * `AddPlanTopology` -- `plan_add` boundary topology with
 //!     parameterised keyfile-probe responses and missing-device count.
+//!   * `RemovalPool` -- canonical pool-topology mock-handler installer
+//!     for `remove` tests that exercise 2->1 and 3->2 success paths.
 //!   * `PoolFixture` -- bundled tempdirs + `StatePaths` + config +
 //!     passphrase + `RecordingInhibitor`.
-//!   * `ReplaceParamsBuilder` / `AddParamsBuilder` -- per-test builders
-//!     over the `ReplaceParams` / `AddParams` defaults.
+//!   * `ReplaceParamsBuilder` / `AddParamsBuilder` /
+//!     `RemoveParamsBuilder` -- per-test builders over command defaults.
 //!
 //! Layout: this file is a facade. `shared` holds cross-scope items;
-//! `replace` and `add` hold their per-scope topologies, builders, and
+//! `replace`, `add`, and `remove` hold their per-scope topologies, builders, and
 //! `PoolFixture` constructors.
 
 mod add;
+mod remove;
 mod replace;
 mod shared;
 
+#[allow(unused_imports)]
+pub(crate) use remove::{
+    RemovalPool, RemoveParamsBuilder, target_device, valid_three_disk_df_json,
+    valid_three_disk_usage_stdout, valid_two_disk_df_json, valid_two_disk_usage_stdout,
+};
 pub(crate) use replace::ReplacementPool;
 pub(crate) use shared::{MockFs, PoolFixture, mock_ok};

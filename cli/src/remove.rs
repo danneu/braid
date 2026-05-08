@@ -682,98 +682,14 @@ fn format_remove_confirm(disk: &RemoveConfirmDisk, remaining: usize, total: usiz
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::cmd::{CmdError, CmdRequest, CommandRunner, RawCommandOutput};
-    use crate::membership::{self, PoolMembership};
-    use crate::probe::Filesystem;
-    use crate::progress::ProgressOutput;
+    use crate::cmd::{CmdError, CmdRequest, MockRunner, RawCommandOutput};
+    use crate::membership::PoolMembership;
     use crate::state_paths::StatePaths;
-    use crate::types::ByIdPath;
+    use crate::test_fixtures::{
+        MockFs, PoolFixture, RemovalPool, mock_ok, target_device, valid_two_disk_df_json,
+        valid_two_disk_usage_stdout,
+    };
     use std::collections::BTreeMap;
-    use std::sync::{Arc, Mutex};
-
-    struct MockFs;
-
-    impl Filesystem for MockFs {
-        fn exists(&self, _path: &str) -> bool {
-            false
-        }
-        fn is_block_device(&self, _path: &str) -> bool {
-            false
-        }
-        fn read_to_string(&self, path: &str) -> Result<String, std::io::Error> {
-            if path == "/proc/self/mountinfo" {
-                Ok(
-                    "36 35 0:32 / /mnt/storage rw shared:1 - btrfs /dev/mapper/braid-disk1 rw\n"
-                        .to_owned(),
-                )
-            } else if path.ends_with("/exclusive_operation") {
-                Ok("none\n".to_owned())
-            } else {
-                Err(std::io::Error::new(std::io::ErrorKind::NotFound, "mock"))
-            }
-        }
-        fn list_dir(&self, _path: &str) -> Result<Vec<String>, std::io::Error> {
-            Ok(vec![])
-        }
-    }
-
-    struct MockFsWithExclop(String);
-
-    impl Filesystem for MockFsWithExclop {
-        fn exists(&self, _path: &str) -> bool {
-            false
-        }
-        fn is_block_device(&self, _path: &str) -> bool {
-            false
-        }
-        fn read_to_string(&self, path: &str) -> Result<String, std::io::Error> {
-            if path == "/proc/self/mountinfo" {
-                Ok(
-                    "36 35 0:32 / /mnt/storage rw shared:1 - btrfs /dev/mapper/braid-disk1 rw\n"
-                        .to_owned(),
-                )
-            } else if path.ends_with("/exclusive_operation") {
-                Ok(format!("{}\n", self.0))
-            } else {
-                Err(std::io::Error::new(std::io::ErrorKind::NotFound, "mock"))
-            }
-        }
-        fn list_dir(&self, _path: &str) -> Result<Vec<String>, std::io::Error> {
-            Ok(vec![])
-        }
-    }
-
-    fn setup_membership(disks: &[(&str, &str)]) -> (tempfile::TempDir, StatePaths) {
-        let tmp = tempfile::tempdir().unwrap();
-        let paths = StatePaths::custom(tmp.path().into());
-        let mut m = PoolMembership::empty();
-        for (name, by_id) in disks {
-            m.disks.insert(
-                name.to_string(),
-                membership::DiskMember::from_by_id(ByIdPath(by_id.to_string())),
-            );
-        }
-        membership::save_membership_to(&m, &paths.pool_json()).unwrap();
-        (tmp, paths)
-    }
-
-    fn mock_out(cmd: &str, stdout: &str, exit_status: i32) -> RawCommandOutput {
-        RawCommandOutput {
-            cmd: cmd.to_owned(),
-            stdout: stdout.to_owned(),
-            stderr: String::new(),
-            exit_status,
-        }
-    }
-
-    fn test_target_device() -> PoolDevice {
-        PoolDevice {
-            devid: 1,
-            mapper: MapperName("braid-disk1".into()),
-            luks_uuid: LuksUuid("11111111-1111-1111-1111-111111111111".into()),
-            underlying: "/dev/vda".into(),
-        }
-    }
 
     fn acked_disk(missing_acked: bool, read_io_errs: u64) -> alert::AckedDisk {
         alert::AckedDisk {
@@ -782,132 +698,6 @@ mod tests {
                 read_io_errs,
                 ..Default::default()
             },
-        }
-    }
-
-    #[derive(Clone)]
-    struct RecordingRunner {
-        log: Arc<Mutex<Vec<CmdRequest>>>,
-        fail_device_remove: bool,
-    }
-
-    impl RecordingRunner {
-        fn new(log: Arc<Mutex<Vec<CmdRequest>>>) -> Self {
-            Self {
-                log,
-                fail_device_remove: false,
-            }
-        }
-
-        fn with_device_remove_failure(log: Arc<Mutex<Vec<CmdRequest>>>) -> Self {
-            Self {
-                log,
-                fail_device_remove: true,
-            }
-        }
-    }
-
-    impl CommandRunner for RecordingRunner {
-        fn run(&self, request: &CmdRequest) -> Result<RawCommandOutput, CmdError> {
-            self.log.lock().unwrap().push(request.clone());
-
-            match request {
-                CmdRequest::BtrfsFilesystemShow { mount_point } => Ok(mock_out(
-                    &format!("btrfs filesystem show {mount_point}"),
-                    "Label: none  uuid: cc86845b-aec3-408e-bef5-553affc1f2b1\n\tTotal devices 2 FS bytes used 16.17MiB\n\tdevid    1 size 496.00MiB used 121.56MiB path /dev/mapper/braid-disk1\n\tdevid    2 size 496.00MiB used 121.56MiB path /dev/mapper/braid-disk2\n",
-                    0,
-                )),
-                CmdRequest::CryptsetupStatus { mapper } => {
-                    let dev = if mapper == "braid-disk1" {
-                        "/dev/vdb"
-                    } else {
-                        "/dev/vdc"
-                    };
-                    Ok(mock_out(
-                        &format!("cryptsetup status {mapper}"),
-                        &format!(
-                            "{mapper} is active and is in use.\n  type:    LUKS2\n  device:  {dev}\n  mode:    read/write\n"
-                        ),
-                        0,
-                    ))
-                }
-                CmdRequest::CryptsetupLuksUuid { device } => {
-                    let uuid = if device == "/dev/vdb" {
-                        "11111111-1111-1111-1111-111111111111"
-                    } else {
-                        "22222222-2222-2222-2222-222222222222"
-                    };
-                    Ok(mock_out(
-                        &format!("cryptsetup luksUUID {device}"),
-                        &format!("{uuid}\n"),
-                        0,
-                    ))
-                }
-                CmdRequest::BtrfsBalanceStatus { .. } => Ok(mock_out(
-                    "btrfs balance status",
-                    "No balance found on '/mnt/storage'\n",
-                    0,
-                )),
-                CmdRequest::BtrfsDeviceUsageRaw { .. } => Ok(mock_out(
-                    "btrfs device usage --raw /mnt/storage",
-                    // 2-disk RAID1, each device 1 GiB physical, small
-                    // allocations. Used by the 2->1 preflight to resolve
-                    // the survivor entry (device_size - device_slack is
-                    // the usable capacity).
-                    "/dev/mapper/braid-disk1, ID: 1\n\
-                     \x20  Device size:         1073741824\n\
-                     \x20  Device slack:                 0\n\
-                     \x20  Data,RAID1:            52428800\n\
-                     \x20  Metadata,RAID1:        10485760\n\
-                     \x20  System,RAID1:             32768\n\
-                     \x20  Unallocated:         1010794496\n\n\
-                     /dev/mapper/braid-disk2, ID: 2\n\
-                     \x20  Device size:         1073741824\n\
-                     \x20  Device slack:                 0\n\
-                     \x20  Data,RAID1:            52428800\n\
-                     \x20  Metadata,RAID1:        10485760\n\
-                     \x20  System,RAID1:             32768\n\
-                     \x20  Unallocated:         1010794496\n",
-                    0,
-                )),
-                CmdRequest::BtrfsFilesystemDfJson { .. } => Ok(mock_out(
-                    "btrfs --format json filesystem df /mnt/storage",
-                    // Logical usage: Data=50 MiB, Metadata=10 MiB,
-                    // System=32 KiB. needed_post_single = 50 + 20 +
-                    // 0.06 = ~70 MiB, well under 1 GiB usable.
-                    r#"{
-  "filesystem-df": [
-    { "bg-type": "Data", "bg-profile": "RAID1", "total": 52428800, "used": 52428800 },
-    { "bg-type": "Metadata", "bg-profile": "RAID1", "total": 10485760, "used": 10485760 },
-    { "bg-type": "System", "bg-profile": "RAID1", "total": 32768, "used": 32768 }
-  ]
-}"#,
-                    0,
-                )),
-                CmdRequest::BtrfsBalanceSingle { .. } => Ok(mock_out("btrfs balance start", "", 0)),
-                CmdRequest::BtrfsDeviceRemove { .. } => {
-                    if self.fail_device_remove {
-                        Ok(RawCommandOutput {
-                            cmd: "btrfs device remove".into(),
-                            stdout: String::new(),
-                            stderr: "ERROR: error removing device".into(),
-                            exit_status: 1,
-                        })
-                    } else {
-                        Ok(mock_out("btrfs device remove", "", 0))
-                    }
-                }
-                CmdRequest::CryptsetupClose { .. } => Ok(mock_out("cryptsetup close", "", 0)),
-                _ => Err(CmdError::MissingMock),
-            }
-        }
-
-        fn run_with_stdin(
-            &self,
-            request: &CmdRequest,
-            _stdin: &[u8],
-        ) -> Result<RawCommandOutput, CmdError> {
-            self.run(request)
         }
     }
 
@@ -929,47 +719,12 @@ mod tests {
     //   Preflight runs, reports pass, and the operation proceeds to balance
     //   + device remove. Pre-fix, the preflight calls would be absent.
     fn two_to_one_remove_invokes_survivor_capacity_preflight() {
-        let (_state_dir, paths) = setup_membership(&[
-            ("disk1", "/dev/disk/by-id/virtio-disk1"),
-            ("disk2", "/dev/disk/by-id/virtio-disk2"),
-        ]);
-        let tmp = tempfile::tempdir().unwrap();
-        let config_path = tmp.path().join("config.json");
+        let f = PoolFixture::two_disk_healthy();
+        let runner = RemovalPool::two_disk().install(MockRunner::default());
+        let fs = MockFs::storage(vec![]);
+        cmd_remove(&runner, &fs, &f.remove_params().build()).expect("remove should succeed");
 
-        let mut disks = BTreeMap::new();
-        disks.insert(
-            "disk1".to_owned(),
-            serde_json::json!({ "by_id": "/dev/disk/by-id/virtio-disk1" }),
-        );
-        disks.insert(
-            "disk2".to_owned(),
-            serde_json::json!({ "by_id": "/dev/disk/by-id/virtio-disk2" }),
-        );
-        let config_json = serde_json::json!({
-            "disks": disks,
-            "mount_point": "/mnt/storage"
-        });
-        std::fs::write(&config_path, serde_json::to_vec(&config_json).unwrap()).unwrap();
-
-        let log = Arc::new(Mutex::new(Vec::new()));
-        let runner = RecordingRunner::new(log.clone());
-        let inhibitor = crate::inhibit::RecordingInhibitor::new();
-        cmd_remove(
-            &runner,
-            &MockFs,
-            &RemoveParams {
-                config_path: Path::new(&config_path),
-                name: "disk2",
-                dry_run: false,
-                yes: true,
-                progress: ProgressOutput::Off,
-                paths: &paths,
-                sleep_inhibitor: &inhibitor,
-            },
-        )
-        .expect("remove should succeed");
-
-        let calls = log.lock().unwrap();
+        let calls = runner.requests();
         let usage_idx = calls
             .iter()
             .position(|c| matches!(c, CmdRequest::BtrfsDeviceUsageRaw { .. }))
@@ -989,7 +744,7 @@ mod tests {
         // Locks in the seam placement: a successful 2->1 remove must take the
         // inhibitor exactly once before journal::write_journal.
         assert_eq!(
-            inhibitor.acquire_count(),
+            f.inhibitor.acquire_count(),
             1,
             "sleep inhibitor must be acquired exactly once on the path through journal::write_journal"
         );
@@ -1009,53 +764,19 @@ mod tests {
      */
     #[test]
     fn cmd_remove_prunes_acked_stats_for_removed_devid() {
-        let (_state_dir, paths) = setup_membership(&[
-            ("disk1", "/dev/disk/by-id/virtio-disk1"),
-            ("disk2", "/dev/disk/by-id/virtio-disk2"),
-        ]);
+        let f = PoolFixture::two_disk_healthy();
         let control = acked_disk(false, 11);
         let target = acked_disk(true, 22);
         let mut acked = BTreeMap::new();
         acked.insert("1".to_owned(), control.clone());
         acked.insert("2".to_owned(), target);
-        alert::save_acked_stats(&alert::AckedStats(acked), &paths).unwrap();
+        alert::save_acked_stats(&alert::AckedStats(acked), &f.paths).unwrap();
 
-        let tmp = tempfile::tempdir().unwrap();
-        let config_path = tmp.path().join("config.json");
-        let mut disks = BTreeMap::new();
-        disks.insert(
-            "disk1".to_owned(),
-            serde_json::json!({ "by_id": "/dev/disk/by-id/virtio-disk1" }),
-        );
-        disks.insert(
-            "disk2".to_owned(),
-            serde_json::json!({ "by_id": "/dev/disk/by-id/virtio-disk2" }),
-        );
-        let config_json = serde_json::json!({
-            "disks": disks,
-            "mount_point": "/mnt/storage"
-        });
-        std::fs::write(&config_path, serde_json::to_vec(&config_json).unwrap()).unwrap();
+        let runner = RemovalPool::two_disk().install(MockRunner::default());
+        let fs = MockFs::storage(vec![]);
+        cmd_remove(&runner, &fs, &f.remove_params().build()).expect("remove should succeed");
 
-        let log = Arc::new(Mutex::new(Vec::new()));
-        let runner = RecordingRunner::new(log);
-        let inhibitor = crate::inhibit::RecordingInhibitor::new();
-        cmd_remove(
-            &runner,
-            &MockFs,
-            &RemoveParams {
-                config_path: Path::new(&config_path),
-                name: "disk2",
-                dry_run: false,
-                yes: true,
-                progress: ProgressOutput::Off,
-                paths: &paths,
-                sleep_inhibitor: &inhibitor,
-            },
-        )
-        .expect("remove should succeed");
-
-        let reloaded = alert::load_acked_stats(&paths);
+        let reloaded = alert::load_acked_stats(&f.paths);
         assert_eq!(
             reloaded.0.get("1"),
             Some(&control),
@@ -1081,47 +802,12 @@ mod tests {
     //   specific scenario that inspired this test (like a real world bug).
     //   - Operator removes one disk from a healthy two-disk pool and expects the operation to succeed end-to-end.
     fn remove_two_disk_pool_balances_single_before_device_remove() {
-        let (_state_dir, paths) = setup_membership(&[
-            ("disk1", "/dev/disk/by-id/virtio-disk1"),
-            ("disk2", "/dev/disk/by-id/virtio-disk2"),
-        ]);
-        let tmp = tempfile::tempdir().unwrap();
-        let config_path = tmp.path().join("config.json");
+        let f = PoolFixture::two_disk_healthy();
+        let runner = RemovalPool::two_disk().install(MockRunner::default());
+        let fs = MockFs::storage(vec![]);
+        cmd_remove(&runner, &fs, &f.remove_params().build()).expect("remove should succeed");
 
-        let mut disks = BTreeMap::new();
-        disks.insert(
-            "disk1".to_owned(),
-            serde_json::json!({ "by_id": "/dev/disk/by-id/virtio-disk1" }),
-        );
-        disks.insert(
-            "disk2".to_owned(),
-            serde_json::json!({ "by_id": "/dev/disk/by-id/virtio-disk2" }),
-        );
-        let config_json = serde_json::json!({
-            "disks": disks,
-            "mount_point": "/mnt/storage"
-        });
-        std::fs::write(&config_path, serde_json::to_vec(&config_json).unwrap()).unwrap();
-
-        let log = Arc::new(Mutex::new(Vec::new()));
-        let runner = RecordingRunner::new(log.clone());
-        let inhibitor = crate::inhibit::RecordingInhibitor::new();
-        cmd_remove(
-            &runner,
-            &MockFs,
-            &RemoveParams {
-                config_path: Path::new(&config_path),
-                name: "disk2",
-                dry_run: false,
-                yes: true,
-                progress: ProgressOutput::Off,
-                paths: &paths,
-                sleep_inhibitor: &inhibitor,
-            },
-        )
-        .expect("remove should succeed");
-
-        let calls = log.lock().unwrap();
+        let calls = runner.requests();
         let balance_idx = calls
             .iter()
             .position(|c| matches!(c, CmdRequest::BtrfsBalanceSingle { .. }))
@@ -1147,56 +833,43 @@ mod tests {
     // Scenario: 2-disk pool, btrfs device remove fails mid-eviction. The journal
     //   must persist so `braid recover` can reconcile pool.json from live state.
     fn journal_survives_evict_failure() {
-        let (_state_dir, paths) = setup_membership(&[
-            ("disk1", "/dev/disk/by-id/virtio-disk1"),
-            ("disk2", "/dev/disk/by-id/virtio-disk2"),
-        ]);
-        let tmp = tempfile::tempdir().unwrap();
-        let config_path = tmp.path().join("config.json");
-
-        let mut disks = BTreeMap::new();
-        disks.insert(
-            "disk1".to_owned(),
-            serde_json::json!({ "by_id": "/dev/disk/by-id/virtio-disk1" }),
-        );
-        disks.insert(
-            "disk2".to_owned(),
-            serde_json::json!({ "by_id": "/dev/disk/by-id/virtio-disk2" }),
-        );
-        let config_json = serde_json::json!({
-            "disks": disks,
-            "mount_point": "/mnt/storage"
-        });
-        std::fs::write(&config_path, serde_json::to_vec(&config_json).unwrap()).unwrap();
-
-        let log = Arc::new(Mutex::new(Vec::new()));
-        let runner = RecordingRunner::with_device_remove_failure(log);
-        let inhibitor = crate::inhibit::RecordingInhibitor::new();
-        let result = cmd_remove(
-            &runner,
-            &MockFs,
-            &RemoveParams {
-                config_path: Path::new(&config_path),
-                name: "disk2",
-                dry_run: false,
-                yes: true,
-                progress: ProgressOutput::Off,
-                paths: &paths,
-                sleep_inhibitor: &inhibitor,
-            },
-        );
+        let f = PoolFixture::two_disk_healthy();
+        let runner = RemovalPool::two_disk()
+            .install(MockRunner::default())
+            .with_handler(|req| match req {
+                CmdRequest::BtrfsDeviceRemove { .. } => Some(Ok(RawCommandOutput {
+                    cmd: "btrfs device remove".into(),
+                    stdout: String::new(),
+                    stderr: "ERROR: error removing device".into(),
+                    exit_status: 1,
+                })),
+                _ => None,
+            });
+        let fs = MockFs::storage(vec![]);
+        let result = cmd_remove(&runner, &fs, &f.remove_params().build());
 
         assert!(result.is_err(), "remove should fail when eviction fails");
         assert!(
-            journal::load_journal(&paths).unwrap().is_some(),
+            journal::load_journal(&f.paths).unwrap().is_some(),
             "pending-op.json must survive error exit so braid recover can reconcile"
+        );
+        let calls = runner.requests();
+        assert!(
+            matches!(calls.last(), Some(CmdRequest::BtrfsDeviceRemove { .. })),
+            "request sequence must stop at failed device-remove; calls: {calls:?}",
+        );
+        assert!(
+            !calls
+                .iter()
+                .any(|c| matches!(c, CmdRequest::CryptsetupClose { .. })),
+            "cryptsetup close must not run after failed device-remove; calls: {calls:?}",
         );
         // The journal exists, which proves we got past journal::write_journal,
         // which proves the inhibitor was acquired exactly once on the way in.
         // Locks in the seam placement: if a refactor moves the acquire to a
         // post-journal point or skips it entirely, this assert flips.
         assert_eq!(
-            inhibitor.acquire_count(),
+            f.inhibitor.acquire_count(),
             1,
             "sleep inhibitor must be acquired exactly once on the path through journal::write_journal"
         );
@@ -1306,37 +979,11 @@ mod tests {
     //   --enqueue would hang forever waiting for it.
     // Scenario: operator paused a balance and forgot, then runs `braid remove`.
     fn remove_fails_fast_on_paused_balance() {
-        let (_state_dir, paths) = setup_membership(&[("disk1", "/dev/disk/by-id/virtio-disk1")]);
-        let tmp = tempfile::tempdir().unwrap();
-        let config_path = tmp.path().join("config.json");
-        let mut disks = BTreeMap::new();
-        disks.insert(
-            "disk1".to_owned(),
-            serde_json::json!({ "by_id": "/dev/disk/by-id/virtio-disk1" }),
-        );
-        let config_json = serde_json::json!({
-            "disks": disks,
-            "mount_point": "/mnt/storage"
-        });
-        std::fs::write(&config_path, serde_json::to_vec(&config_json).unwrap()).unwrap();
-
-        let log = Arc::new(Mutex::new(Vec::new()));
-        let runner = RecordingRunner::new(log.clone());
-        let inhibitor = crate::inhibit::RecordingInhibitor::new();
-        let err = cmd_remove(
-            &runner,
-            &MockFsWithExclop("balance paused".into()),
-            &RemoveParams {
-                config_path: Path::new(&config_path),
-                name: "disk1",
-                dry_run: false,
-                yes: true,
-                progress: ProgressOutput::Off,
-                paths: &paths,
-                sleep_inhibitor: &inhibitor,
-            },
-        )
-        .expect_err("should fail -- balance is paused");
+        let f = PoolFixture::two_disk_healthy();
+        let runner = RemovalPool::two_disk().install(MockRunner::default());
+        let fs = MockFs::storage(vec![]).with_excl_op("balance paused\n");
+        let err = cmd_remove(&runner, &fs, &f.remove_params().name("disk1").build())
+            .expect_err("should fail -- balance is paused");
         let msg = err.to_string();
         assert!(msg.contains("paused"), "expected 'paused' in error: {msg}");
         // Preflight failure must NOT acquire the inhibitor -- the failure is
@@ -1344,7 +991,7 @@ mod tests {
         // logind unavailability and a paused balance both have to clear before
         // the same braid command can run.
         assert_eq!(
-            inhibitor.acquire_count(),
+            f.inhibitor.acquire_count(),
             0,
             "preflight failure (paused balance) must NOT acquire the sleep inhibitor"
         );
@@ -1357,53 +1004,12 @@ mod tests {
     // Scenario: a device remove is already in progress, operator runs `braid remove`.
     //   The preflight detects the active op, prints a warning, and proceeds.
     fn remove_warns_and_proceeds_on_active_op() {
-        let (_state_dir, paths) = setup_membership(&[
-            ("disk1", "/dev/disk/by-id/virtio-disk1"),
-            ("disk2", "/dev/disk/by-id/virtio-disk2"),
-            ("disk3", "/dev/disk/by-id/virtio-disk3"),
-        ]);
-        let tmp = tempfile::tempdir().unwrap();
-        let config_path = tmp.path().join("config.json");
-        let mut disks = BTreeMap::new();
-        disks.insert(
-            "disk1".to_owned(),
-            serde_json::json!({ "by_id": "/dev/disk/by-id/virtio-disk1" }),
-        );
-        disks.insert(
-            "disk2".to_owned(),
-            serde_json::json!({ "by_id": "/dev/disk/by-id/virtio-disk2" }),
-        );
-        disks.insert(
-            "disk3".to_owned(),
-            serde_json::json!({ "by_id": "/dev/disk/by-id/virtio-disk3" }),
-        );
-        let config_json = serde_json::json!({
-            "disks": disks,
-            "mount_point": "/mnt/storage"
-        });
-        std::fs::write(&config_path, serde_json::to_vec(&config_json).unwrap()).unwrap();
-
-        let log = Arc::new(Mutex::new(Vec::new()));
-        let runner = RecordingRunner::new(log.clone());
-        let inhibitor = crate::inhibit::RecordingInhibitor::new();
+        let f = PoolFixture::three_disk_healthy();
+        let runner = RemovalPool::three_disk().install(MockRunner::default());
+        let fs = MockFs::storage(vec![]).with_excl_op("balance\n");
         // With an active balance, cmd_remove should NOT error on the preflight --
-        // it prints a warning and proceeds. The command itself will eventually
-        // fail because our mock doesn't seed all the downstream commands,
-        // but the important thing is it does NOT return a Validation error
-        // about the exclusive op.
-        let result = cmd_remove(
-            &runner,
-            &MockFsWithExclop("balance".into()),
-            &RemoveParams {
-                config_path: Path::new(&config_path),
-                name: "disk2",
-                dry_run: true,
-                yes: true,
-                progress: ProgressOutput::Off,
-                paths: &paths,
-                sleep_inhibitor: &inhibitor,
-            },
-        );
+        // it prints a warning and proceeds.
+        let result = cmd_remove(&runner, &fs, &f.remove_params().dry_run(true).build());
         // dry_run should succeed (no actual btrfs commands executed)
         assert!(
             result.is_ok(),
@@ -1412,7 +1018,7 @@ mod tests {
         // dry-run must NOT acquire the inhibitor -- it has no irreversible work
         // to protect.
         assert_eq!(
-            inhibitor.acquire_count(),
+            f.inhibitor.acquire_count(),
             0,
             "dry-run must NOT acquire the sleep inhibitor"
         );
@@ -1573,35 +1179,20 @@ mod tests {
     //   `btrfs device usage --raw`. Before this fix the warning was printed
     //   and remove proceeded; after the fix, remove stops at validation.
     fn check_eviction_space_surfaces_command_failed_as_validation() {
-        struct FailingUsageRunner;
-
-        impl CommandRunner for FailingUsageRunner {
-            fn run(&self, request: &CmdRequest) -> Result<RawCommandOutput, CmdError> {
-                match request {
-                    CmdRequest::BtrfsDeviceUsageRaw { .. } => Ok(RawCommandOutput {
-                        cmd: "btrfs device usage --raw /mnt/storage".into(),
-                        stdout: String::new(),
-                        stderr: "ERROR: not a btrfs filesystem: /mnt/storage".into(),
-                        exit_status: 1,
-                    }),
-                    _ => Err(CmdError::MissingMock),
-                }
-            }
-
-            fn run_with_stdin(
-                &self,
-                request: &CmdRequest,
-                _stdin: &[u8],
-            ) -> Result<RawCommandOutput, CmdError> {
-                self.run(request)
-            }
-        }
-
+        let runner = MockRunner::default().with_handler(|req| match req {
+            CmdRequest::BtrfsDeviceUsageRaw { .. } => Some(Ok(RawCommandOutput {
+                cmd: "btrfs device usage --raw /mnt/storage".into(),
+                stdout: String::new(),
+                stderr: "ERROR: not a btrfs filesystem: /mnt/storage".into(),
+                exit_status: 1,
+            })),
+            _ => None,
+        });
         let mount = MountPoint("/mnt/storage".to_owned());
-        let target = test_target_device();
+        let target = target_device("disk1");
         // remaining: 2 exercises the >= 2 branch (3->2 remove), which is the
         // scenario the CommandFailed surfacing was written for.
-        let err = check_eviction_space(&FailingUsageRunner, &mount, &target, 2)
+        let err = check_eviction_space(&runner, &mount, &target, 2)
             .expect_err("non-zero btrfs exit must surface as validation error");
         match err {
             RemoveError::Validation(msg) => {
@@ -1621,25 +1212,10 @@ mod tests {
     // Scenario: 2->1 remove where the preflight cannot invoke `btrfs device
     //   usage --raw` at all.
     fn check_eviction_space_2to1_fails_closed_on_device_usage_spawn_error() {
-        struct UsageSpawnFailRunner;
-
-        impl CommandRunner for UsageSpawnFailRunner {
-            fn run(&self, _request: &CmdRequest) -> Result<RawCommandOutput, CmdError> {
-                Err(CmdError::MissingMock)
-            }
-
-            fn run_with_stdin(
-                &self,
-                request: &CmdRequest,
-                _stdin: &[u8],
-            ) -> Result<RawCommandOutput, CmdError> {
-                self.run(request)
-            }
-        }
-
+        let runner = MockRunner::default();
         let mount = MountPoint("/mnt/storage".to_owned());
-        let target = test_target_device();
-        let err = check_eviction_space(&UsageSpawnFailRunner, &mount, &target, 1)
+        let target = target_device("disk1");
+        let err = check_eviction_space(&runner, &mount, &target, 1)
             .expect_err("2->1 preflight must fail closed on usage spawn error");
         match err {
             RemoveError::Validation(msg) => {
@@ -1662,33 +1238,17 @@ mod tests {
     // Scenario: 2->1 remove where `btrfs device usage --raw` exits 0 but the
     //   output cannot be parsed.
     fn check_eviction_space_2to1_fails_closed_on_device_usage_parse_error() {
-        struct UsageParseFailRunner;
-
-        impl CommandRunner for UsageParseFailRunner {
-            fn run(&self, request: &CmdRequest) -> Result<RawCommandOutput, CmdError> {
-                match request {
-                    CmdRequest::BtrfsDeviceUsageRaw { .. } => Ok(mock_out(
-                        "btrfs device usage --raw /mnt/storage",
-                        "/dev/mapper/braid-disk1, ID: 1\n\
-                         \x20  Device size:         1073741824\n",
-                        0,
-                    )),
-                    _ => Err(CmdError::MissingMock),
-                }
-            }
-
-            fn run_with_stdin(
-                &self,
-                request: &CmdRequest,
-                _stdin: &[u8],
-            ) -> Result<RawCommandOutput, CmdError> {
-                self.run(request)
-            }
-        }
-
+        let runner = MockRunner::default().with_handler(|req| match req {
+            CmdRequest::BtrfsDeviceUsageRaw { .. } => Some(Ok(mock_ok(
+                "btrfs device usage --raw /mnt/storage",
+                "/dev/mapper/braid-disk1, ID: 1\n\
+                 \x20  Device size:         1073741824\n",
+            ))),
+            _ => None,
+        });
         let mount = MountPoint("/mnt/storage".to_owned());
-        let target = test_target_device();
-        let err = check_eviction_space(&UsageParseFailRunner, &mount, &target, 1)
+        let target = target_device("disk1");
+        let err = check_eviction_space(&runner, &mount, &target, 1)
             .expect_err("2->1 preflight must fail closed on usage parse error");
         match err {
             RemoveError::Validation(msg) => {
@@ -1710,46 +1270,16 @@ mod tests {
     // Scenario: valid device-usage output is available, but the df command
     //   itself cannot be invoked.
     fn check_eviction_space_2to1_fails_closed_on_df_spawn_error() {
-        struct DfSpawnFailRunner;
-
-        impl CommandRunner for DfSpawnFailRunner {
-            fn run(&self, request: &CmdRequest) -> Result<RawCommandOutput, CmdError> {
-                match request {
-                    CmdRequest::BtrfsDeviceUsageRaw { .. } => Ok(mock_out(
-                        "btrfs device usage --raw /mnt/storage",
-                        "/dev/mapper/braid-disk1, ID: 1\n\
-                         \x20  Device size:         1073741824\n\
-                         \x20  Device slack:                 0\n\
-                         \x20  Data,RAID1:            52428800\n\
-                         \x20  Metadata,RAID1:        10485760\n\
-                         \x20  System,RAID1:             32768\n\
-                         \x20  Unallocated:         1010794496\n\n\
-                         /dev/mapper/braid-disk2, ID: 2\n\
-                         \x20  Device size:         1073741824\n\
-                         \x20  Device slack:                 0\n\
-                         \x20  Data,RAID1:            52428800\n\
-                         \x20  Metadata,RAID1:        10485760\n\
-                         \x20  System,RAID1:             32768\n\
-                         \x20  Unallocated:         1010794496\n",
-                        0,
-                    )),
-                    CmdRequest::BtrfsFilesystemDfJson { .. } => Err(CmdError::MissingMock),
-                    _ => Err(CmdError::MissingMock),
-                }
-            }
-
-            fn run_with_stdin(
-                &self,
-                request: &CmdRequest,
-                _stdin: &[u8],
-            ) -> Result<RawCommandOutput, CmdError> {
-                self.run(request)
-            }
-        }
-
+        let runner = MockRunner::default().with_handler(|req| match req {
+            CmdRequest::BtrfsDeviceUsageRaw { .. } => Some(Ok(mock_ok(
+                "btrfs device usage --raw /mnt/storage",
+                valid_two_disk_usage_stdout(),
+            ))),
+            _ => None,
+        });
         let mount = MountPoint("/mnt/storage".to_owned());
-        let target = test_target_device();
-        let err = check_eviction_space(&DfSpawnFailRunner, &mount, &target, 1)
+        let target = target_device("disk1");
+        let err = check_eviction_space(&runner, &mount, &target, 1)
             .expect_err("2->1 preflight must fail closed on df spawn error");
         match err {
             RemoveError::Validation(msg) => {
@@ -1771,50 +1301,20 @@ mod tests {
     //   single-survivor risk surface and must be rejected.
     // Scenario: valid device-usage output, but df exits 0 with malformed JSON.
     fn check_eviction_space_2to1_fails_closed_on_df_parse_error() {
-        struct DfParseFailRunner;
-
-        impl CommandRunner for DfParseFailRunner {
-            fn run(&self, request: &CmdRequest) -> Result<RawCommandOutput, CmdError> {
-                match request {
-                    CmdRequest::BtrfsDeviceUsageRaw { .. } => Ok(mock_out(
-                        "btrfs device usage --raw /mnt/storage",
-                        "/dev/mapper/braid-disk1, ID: 1\n\
-                         \x20  Device size:         1073741824\n\
-                         \x20  Device slack:                 0\n\
-                         \x20  Data,RAID1:            52428800\n\
-                         \x20  Metadata,RAID1:        10485760\n\
-                         \x20  System,RAID1:             32768\n\
-                         \x20  Unallocated:         1010794496\n\n\
-                         /dev/mapper/braid-disk2, ID: 2\n\
-                         \x20  Device size:         1073741824\n\
-                         \x20  Device slack:                 0\n\
-                         \x20  Data,RAID1:            52428800\n\
-                         \x20  Metadata,RAID1:        10485760\n\
-                         \x20  System,RAID1:             32768\n\
-                         \x20  Unallocated:         1010794496\n",
-                        0,
-                    )),
-                    CmdRequest::BtrfsFilesystemDfJson { .. } => Ok(mock_out(
-                        "btrfs --format json filesystem df /mnt/storage",
-                        "{\"filesystem-df\":",
-                        0,
-                    )),
-                    _ => Err(CmdError::MissingMock),
-                }
-            }
-
-            fn run_with_stdin(
-                &self,
-                request: &CmdRequest,
-                _stdin: &[u8],
-            ) -> Result<RawCommandOutput, CmdError> {
-                self.run(request)
-            }
-        }
-
+        let runner = MockRunner::default().with_handler(|req| match req {
+            CmdRequest::BtrfsDeviceUsageRaw { .. } => Some(Ok(mock_ok(
+                "btrfs device usage --raw /mnt/storage",
+                valid_two_disk_usage_stdout(),
+            ))),
+            CmdRequest::BtrfsFilesystemDfJson { .. } => Some(Ok(mock_ok(
+                "btrfs --format json filesystem df /mnt/storage",
+                "{\"filesystem-df\":",
+            ))),
+            _ => None,
+        });
         let mount = MountPoint("/mnt/storage".to_owned());
-        let target = test_target_device();
-        let err = check_eviction_space(&DfParseFailRunner, &mount, &target, 1)
+        let target = target_device("disk1");
+        let err = check_eviction_space(&runner, &mount, &target, 1)
             .expect_err("2->1 preflight must fail closed on df parse error");
         match err {
             RemoveError::Validation(msg) => {
@@ -1836,47 +1336,26 @@ mod tests {
     // Scenario: valid df output is available, but usage output only lists the
     //   target device.
     fn check_eviction_space_2to1_fails_closed_when_survivor_missing() {
-        struct SurvivorMissingRunner;
-
-        impl CommandRunner for SurvivorMissingRunner {
-            fn run(&self, request: &CmdRequest) -> Result<RawCommandOutput, CmdError> {
-                match request {
-                    CmdRequest::BtrfsDeviceUsageRaw { .. } => Ok(mock_out(
-                        "btrfs device usage --raw /mnt/storage",
-                        "/dev/mapper/braid-disk1, ID: 1\n\
-                         \x20  Device size:         1073741824\n\
-                         \x20  Device slack:                 0\n\
-                         \x20  Data,RAID1:            52428800\n\
-                         \x20  Metadata,RAID1:        10485760\n\
-                         \x20  System,RAID1:             32768\n\
-                         \x20  Unallocated:         1010794496\n",
-                        0,
-                    )),
-                    CmdRequest::BtrfsFilesystemDfJson { .. } => Ok(mock_out(
-                        "btrfs --format json filesystem df /mnt/storage",
-                        r#"{
-  "filesystem-df": [
-    { "bg-type": "Data", "bg-profile": "RAID1", "total": 52428800, "used": 52428800 }
-  ]
-}"#,
-                        0,
-                    )),
-                    _ => Err(CmdError::MissingMock),
-                }
-            }
-
-            fn run_with_stdin(
-                &self,
-                request: &CmdRequest,
-                _stdin: &[u8],
-            ) -> Result<RawCommandOutput, CmdError> {
-                self.run(request)
-            }
-        }
-
+        let runner = MockRunner::default().with_handler(|req| match req {
+            CmdRequest::BtrfsDeviceUsageRaw { .. } => Some(Ok(mock_ok(
+                "btrfs device usage --raw /mnt/storage",
+                "/dev/mapper/braid-disk1, ID: 1\n\
+                 \x20  Device size:         1073741824\n\
+                 \x20  Device slack:                 0\n\
+                 \x20  Data,RAID1:            52428800\n\
+                 \x20  Metadata,RAID1:        10485760\n\
+                 \x20  System,RAID1:             32768\n\
+                 \x20  Unallocated:         1010794496\n",
+            ))),
+            CmdRequest::BtrfsFilesystemDfJson { .. } => Some(Ok(mock_ok(
+                "btrfs --format json filesystem df /mnt/storage",
+                valid_two_disk_df_json(),
+            ))),
+            _ => None,
+        });
         let mount = MountPoint("/mnt/storage".to_owned());
-        let target = test_target_device();
-        let err = check_eviction_space(&SurvivorMissingRunner, &mount, &target, 1)
+        let target = target_device("disk1");
+        let err = check_eviction_space(&runner, &mount, &target, 1)
             .expect_err("2->1 preflight must fail closed when survivor is missing");
         match err {
             RemoveError::Validation(msg) => {
@@ -1898,51 +1377,22 @@ mod tests {
     // Scenario: valid usage output is available, but `btrfs filesystem df`
     //   exits non-zero.
     fn check_eviction_space_2to1_surfaces_df_command_failed_as_validation() {
-        struct DfCommandFailedRunner;
-
-        impl CommandRunner for DfCommandFailedRunner {
-            fn run(&self, request: &CmdRequest) -> Result<RawCommandOutput, CmdError> {
-                match request {
-                    CmdRequest::BtrfsDeviceUsageRaw { .. } => Ok(mock_out(
-                        "btrfs device usage --raw /mnt/storage",
-                        "/dev/mapper/braid-disk1, ID: 1\n\
-                         \x20  Device size:         1073741824\n\
-                         \x20  Device slack:                 0\n\
-                         \x20  Data,RAID1:            52428800\n\
-                         \x20  Metadata,RAID1:        10485760\n\
-                         \x20  System,RAID1:             32768\n\
-                         \x20  Unallocated:         1010794496\n\n\
-                         /dev/mapper/braid-disk2, ID: 2\n\
-                         \x20  Device size:         1073741824\n\
-                         \x20  Device slack:                 0\n\
-                         \x20  Data,RAID1:            52428800\n\
-                         \x20  Metadata,RAID1:        10485760\n\
-                         \x20  System,RAID1:             32768\n\
-                         \x20  Unallocated:         1010794496\n",
-                        0,
-                    )),
-                    CmdRequest::BtrfsFilesystemDfJson { .. } => Ok(RawCommandOutput {
-                        cmd: "btrfs --format json filesystem df /mnt/storage".into(),
-                        stdout: String::new(),
-                        stderr: "ERROR: filesystem is read-only".into(),
-                        exit_status: 1,
-                    }),
-                    _ => Err(CmdError::MissingMock),
-                }
-            }
-
-            fn run_with_stdin(
-                &self,
-                request: &CmdRequest,
-                _stdin: &[u8],
-            ) -> Result<RawCommandOutput, CmdError> {
-                self.run(request)
-            }
-        }
-
+        let runner = MockRunner::default().with_handler(|req| match req {
+            CmdRequest::BtrfsDeviceUsageRaw { .. } => Some(Ok(mock_ok(
+                "btrfs device usage --raw /mnt/storage",
+                valid_two_disk_usage_stdout(),
+            ))),
+            CmdRequest::BtrfsFilesystemDfJson { .. } => Some(Ok(RawCommandOutput {
+                cmd: "btrfs --format json filesystem df /mnt/storage".into(),
+                stdout: String::new(),
+                stderr: "ERROR: filesystem is read-only".into(),
+                exit_status: 1,
+            })),
+            _ => None,
+        });
         let mount = MountPoint("/mnt/storage".to_owned());
-        let target = test_target_device();
-        let err = check_eviction_space(&DfCommandFailedRunner, &mount, &target, 1)
+        let target = target_device("disk1");
+        let err = check_eviction_space(&runner, &mount, &target, 1)
             .expect_err("2->1 preflight must surface df command failure");
         match err {
             RemoveError::Validation(msg) => {
@@ -1961,156 +1411,11 @@ mod tests {
     // and its surfacing as a `PreviewNote::Warn` on `RemovePlan.notes`.
     // ---------------------------------------------------------------
 
-    /// Runner for 3-disk remove scenarios where `btrfs device usage
-    /// --raw` is the only request we want to override -- every other
-    /// request delegates to the base `RecordingRunner`. Used to force
-    /// the soft-warn branch of `check_eviction_space` on the
-    /// `remaining >= 2` path.
-    #[derive(Clone)]
-    enum UsageOverride {
-        /// Runner spawn error (simulates "btrfs binary missing / EACCES").
-        SpawnError,
-        /// btrfs exit 0 with a device header but no required fields --
-        /// the parser returns `ParseError::MissingField`, which is a
-        /// non-`CommandFailed` parse error (soft-warn branch).
-        ParseShapeError,
-    }
-
-    /// Canonical stdout used by `UsageOverride::ParseShapeError`.
+    /// Canonical stdout used to trigger the parse-shape soft-warn branch.
     /// A single device header with no `Device size` / `Device slack` /
     /// `Unallocated` lines triggers `ParseError::MissingField` when
     /// the parser finalizes the partial device.
     const PARSE_SHAPE_ERROR_STDOUT: &str = "/dev/mapper/braid-disk1, ID: 1\n";
-
-    fn three_disk_pool_setup(
-        tmp_state: &tempfile::TempDir,
-        tmp_cfg: &tempfile::TempDir,
-    ) -> (StatePaths, std::path::PathBuf) {
-        let paths = StatePaths::custom(tmp_state.path().into());
-        let mut m = PoolMembership::empty();
-        for name in ["disk1", "disk2", "disk3"] {
-            m.disks.insert(
-                name.to_string(),
-                membership::DiskMember::from_by_id(ByIdPath(format!(
-                    "/dev/disk/by-id/virtio-{name}"
-                ))),
-            );
-        }
-        membership::save_membership_to(&m, &paths.pool_json()).unwrap();
-
-        let config_path = tmp_cfg.path().join("config.json");
-        let mut disks = BTreeMap::new();
-        for name in ["disk1", "disk2", "disk3"] {
-            disks.insert(
-                name.to_string(),
-                serde_json::json!({ "by_id": format!("/dev/disk/by-id/virtio-{name}") }),
-            );
-        }
-        let config_json = serde_json::json!({
-            "disks": disks,
-            "mount_point": "/mnt/storage",
-        });
-        std::fs::write(&config_path, serde_json::to_vec(&config_json).unwrap()).unwrap();
-
-        (paths, config_path)
-    }
-
-    /// Extend the base `RecordingRunner` to respond to the 3-disk
-    /// `btrfs fi show` layout that `probe_pool` expects. Without
-    /// overriding `BtrfsFilesystemShow`, probe_pool reports only 2
-    /// devices and the membership lookup fails before the preflight
-    /// runs.
-    #[derive(Clone)]
-    struct ThreeDiskRecordingRunner {
-        log: Arc<Mutex<Vec<CmdRequest>>>,
-    }
-
-    impl CommandRunner for ThreeDiskRecordingRunner {
-        fn run(&self, request: &CmdRequest) -> Result<RawCommandOutput, CmdError> {
-            self.log.lock().unwrap().push(request.clone());
-            match request {
-                CmdRequest::BtrfsFilesystemShow { mount_point } => Ok(mock_out(
-                    &format!("btrfs filesystem show {mount_point}"),
-                    "Label: none  uuid: cc86845b-aec3-408e-bef5-553affc1f2b1\n\tTotal devices 3 FS bytes used 16.17MiB\n\tdevid    1 size 496.00MiB used 121.56MiB path /dev/mapper/braid-disk1\n\tdevid    2 size 496.00MiB used 121.56MiB path /dev/mapper/braid-disk2\n\tdevid    3 size 496.00MiB used 121.56MiB path /dev/mapper/braid-disk3\n",
-                    0,
-                )),
-                CmdRequest::CryptsetupStatus { mapper } => {
-                    let dev = match mapper.as_str() {
-                        "braid-disk1" => "/dev/vda",
-                        "braid-disk2" => "/dev/vdb",
-                        _ => "/dev/vdc",
-                    };
-                    Ok(mock_out(
-                        &format!("cryptsetup status {mapper}"),
-                        &format!(
-                            "{mapper} is active and is in use.\n  type:    LUKS2\n  device:  {dev}\n  mode:    read/write\n"
-                        ),
-                        0,
-                    ))
-                }
-                CmdRequest::CryptsetupLuksUuid { device } => {
-                    let uuid = match device.as_str() {
-                        "/dev/vda" => "11111111-1111-1111-1111-111111111111",
-                        "/dev/vdb" => "22222222-2222-2222-2222-222222222222",
-                        _ => "33333333-3333-3333-3333-333333333333",
-                    };
-                    Ok(mock_out(
-                        &format!("cryptsetup luksUUID {device}"),
-                        &format!("{uuid}\n"),
-                        0,
-                    ))
-                }
-                CmdRequest::BtrfsBalanceStatus { .. } => Ok(mock_out(
-                    "btrfs balance status",
-                    "No balance found on '/mnt/storage'\n",
-                    0,
-                )),
-                _ => Err(CmdError::MissingMock),
-            }
-        }
-
-        fn run_with_stdin(
-            &self,
-            request: &CmdRequest,
-            _stdin: &[u8],
-        ) -> Result<RawCommandOutput, CmdError> {
-            self.run(request)
-        }
-    }
-
-    /// Wraps `ThreeDiskRecordingRunner` with an override for
-    /// `BtrfsDeviceUsageRaw`, mirroring `UsageOverrideRunner` but on
-    /// the 3-disk (remaining == 2) flow the planner needs.
-    #[derive(Clone)]
-    struct ThreeDiskUsageOverrideRunner {
-        inner: ThreeDiskRecordingRunner,
-        usage_override: UsageOverride,
-    }
-
-    impl CommandRunner for ThreeDiskUsageOverrideRunner {
-        fn run(&self, request: &CmdRequest) -> Result<RawCommandOutput, CmdError> {
-            if let CmdRequest::BtrfsDeviceUsageRaw { .. } = request {
-                self.inner.log.lock().unwrap().push(request.clone());
-                return match self.usage_override {
-                    UsageOverride::SpawnError => Err(CmdError::MissingMock),
-                    UsageOverride::ParseShapeError => Ok(mock_out(
-                        "btrfs device usage --raw /mnt/storage",
-                        PARSE_SHAPE_ERROR_STDOUT,
-                        0,
-                    )),
-                };
-            }
-            self.inner.run(request)
-        }
-
-        fn run_with_stdin(
-            &self,
-            request: &CmdRequest,
-            _stdin: &[u8],
-        ) -> Result<RawCommandOutput, CmdError> {
-            self.run(request)
-        }
-    }
 
     /* Intent: `check_eviction_space` returns `ProceedWithWarning(body)`
      * on the `remaining >= 2` path when the underlying `btrfs device
@@ -2128,22 +1433,10 @@ mod tests {
      */
     #[test]
     fn check_eviction_space_ge2_soft_warns_on_usage_spawn_error() {
-        struct UsageSpawnFailRunner;
-        impl CommandRunner for UsageSpawnFailRunner {
-            fn run(&self, _request: &CmdRequest) -> Result<RawCommandOutput, CmdError> {
-                Err(CmdError::MissingMock)
-            }
-            fn run_with_stdin(
-                &self,
-                request: &CmdRequest,
-                _stdin: &[u8],
-            ) -> Result<RawCommandOutput, CmdError> {
-                self.run(request)
-            }
-        }
+        let runner = MockRunner::default();
         let mount = MountPoint("/mnt/storage".to_owned());
-        let target = test_target_device();
-        let outcome = check_eviction_space(&UsageSpawnFailRunner, &mount, &target, 2)
+        let target = target_device("disk1");
+        let outcome = check_eviction_space(&runner, &mount, &target, 2)
             .expect("soft-warn branch must not return Err");
         match outcome {
             EvictionCheck::ProceedWithWarning(body) => {
@@ -2180,29 +1473,16 @@ mod tests {
      */
     #[test]
     fn check_eviction_space_ge2_soft_warns_on_parse_shape_error() {
-        struct UsageParseShapeRunner;
-        impl CommandRunner for UsageParseShapeRunner {
-            fn run(&self, request: &CmdRequest) -> Result<RawCommandOutput, CmdError> {
-                match request {
-                    CmdRequest::BtrfsDeviceUsageRaw { .. } => Ok(mock_out(
-                        "btrfs device usage --raw /mnt/storage",
-                        PARSE_SHAPE_ERROR_STDOUT,
-                        0,
-                    )),
-                    _ => Err(CmdError::MissingMock),
-                }
-            }
-            fn run_with_stdin(
-                &self,
-                request: &CmdRequest,
-                _stdin: &[u8],
-            ) -> Result<RawCommandOutput, CmdError> {
-                self.run(request)
-            }
-        }
+        let runner = MockRunner::default().with_handler(|req| match req {
+            CmdRequest::BtrfsDeviceUsageRaw { .. } => Some(Ok(mock_ok(
+                "btrfs device usage --raw /mnt/storage",
+                PARSE_SHAPE_ERROR_STDOUT,
+            ))),
+            _ => None,
+        });
         let mount = MountPoint("/mnt/storage".to_owned());
-        let target = test_target_device();
-        let outcome = check_eviction_space(&UsageParseShapeRunner, &mount, &target, 2)
+        let target = target_device("disk1");
+        let outcome = check_eviction_space(&runner, &mount, &target, 2)
             .expect("soft-warn branch must not return Err");
         match outcome {
             EvictionCheck::ProceedWithWarning(body) => {
@@ -2234,28 +1514,17 @@ mod tests {
      */
     #[test]
     fn plan_remove_surfaces_soft_warn_as_preview_note_on_spawn_error() {
-        let state_tmp = tempfile::tempdir().unwrap();
-        let cfg_tmp = tempfile::tempdir().unwrap();
-        let (paths, config_path) = three_disk_pool_setup(&state_tmp, &cfg_tmp);
+        let f = PoolFixture::three_disk_healthy();
+        let runner = RemovalPool::three_disk()
+            .install(MockRunner::default())
+            .with_handler(|req| match req {
+                CmdRequest::BtrfsDeviceUsageRaw { .. } => Some(Err(CmdError::MissingMock)),
+                _ => None,
+            });
+        let fs = MockFs::storage(vec![]);
+        let params = f.remove_params().name("disk3").dry_run(true).build();
 
-        let log = Arc::new(Mutex::new(Vec::new()));
-        let inner = ThreeDiskRecordingRunner { log: log.clone() };
-        let runner = ThreeDiskUsageOverrideRunner {
-            inner,
-            usage_override: UsageOverride::SpawnError,
-        };
-        let inhibitor = crate::inhibit::RecordingInhibitor::new();
-        let params = RemoveParams {
-            config_path: Path::new(&config_path),
-            name: "disk3",
-            dry_run: true,
-            yes: true,
-            progress: ProgressOutput::Off,
-            paths: &paths,
-            sleep_inhibitor: &inhibitor,
-        };
-
-        let report = plan_remove(&runner, &MockFs, &params);
+        let report = plan_remove(&runner, &fs, &params);
         assert!(
             report.notes.is_empty(),
             "report.notes must be empty (no pre-validation probing)",
@@ -2307,28 +1576,20 @@ mod tests {
      */
     #[test]
     fn plan_remove_surfaces_soft_warn_as_preview_note_on_parse_error() {
-        let state_tmp = tempfile::tempdir().unwrap();
-        let cfg_tmp = tempfile::tempdir().unwrap();
-        let (paths, config_path) = three_disk_pool_setup(&state_tmp, &cfg_tmp);
+        let f = PoolFixture::three_disk_healthy();
+        let runner = RemovalPool::three_disk()
+            .install(MockRunner::default())
+            .with_handler(|req| match req {
+                CmdRequest::BtrfsDeviceUsageRaw { .. } => Some(Ok(mock_ok(
+                    "btrfs device usage --raw /mnt/storage",
+                    PARSE_SHAPE_ERROR_STDOUT,
+                ))),
+                _ => None,
+            });
+        let fs = MockFs::storage(vec![]);
+        let params = f.remove_params().name("disk3").dry_run(true).build();
 
-        let log = Arc::new(Mutex::new(Vec::new()));
-        let inner = ThreeDiskRecordingRunner { log: log.clone() };
-        let runner = ThreeDiskUsageOverrideRunner {
-            inner,
-            usage_override: UsageOverride::ParseShapeError,
-        };
-        let inhibitor = crate::inhibit::RecordingInhibitor::new();
-        let params = RemoveParams {
-            config_path: Path::new(&config_path),
-            name: "disk3",
-            dry_run: true,
-            yes: true,
-            progress: ProgressOutput::Off,
-            paths: &paths,
-            sleep_inhibitor: &inhibitor,
-        };
-
-        let report = plan_remove(&runner, &MockFs, &params);
+        let report = plan_remove(&runner, &fs, &params);
         let plan = report
             .result
             .expect("soft-warn case must produce an Ok plan");
@@ -2370,28 +1631,17 @@ mod tests {
      */
     #[test]
     fn plan_preview_renders_soft_warn_above_dry_run_steps() {
-        let state_tmp = tempfile::tempdir().unwrap();
-        let cfg_tmp = tempfile::tempdir().unwrap();
-        let (paths, config_path) = three_disk_pool_setup(&state_tmp, &cfg_tmp);
+        let f = PoolFixture::three_disk_healthy();
+        let runner = RemovalPool::three_disk()
+            .install(MockRunner::default())
+            .with_handler(|req| match req {
+                CmdRequest::BtrfsDeviceUsageRaw { .. } => Some(Err(CmdError::MissingMock)),
+                _ => None,
+            });
+        let fs = MockFs::storage(vec![]);
+        let params = f.remove_params().name("disk3").dry_run(true).build();
 
-        let log = Arc::new(Mutex::new(Vec::new()));
-        let inner = ThreeDiskRecordingRunner { log: log.clone() };
-        let runner = ThreeDiskUsageOverrideRunner {
-            inner,
-            usage_override: UsageOverride::SpawnError,
-        };
-        let inhibitor = crate::inhibit::RecordingInhibitor::new();
-        let params = RemoveParams {
-            config_path: Path::new(&config_path),
-            name: "disk3",
-            dry_run: true,
-            yes: true,
-            progress: ProgressOutput::Off,
-            paths: &paths,
-            sleep_inhibitor: &inhibitor,
-        };
-
-        let plan = plan_remove(&runner, &MockFs, &params)
+        let plan = plan_remove(&runner, &fs, &params)
             .result
             .expect("soft-warn case must produce an Ok plan");
         let rendered = plan.preview().render();
@@ -2455,48 +1705,11 @@ mod tests {
      */
     #[test]
     fn plan_remove_preflight_busy_op_becomes_info_note() {
-        let (_state_dir, paths) = setup_membership(&[
-            ("disk1", "/dev/disk/by-id/virtio-disk1"),
-            ("disk2", "/dev/disk/by-id/virtio-disk2"),
-            ("disk3", "/dev/disk/by-id/virtio-disk3"),
-        ]);
-        let tmp = tempfile::tempdir().unwrap();
-        let config_path = tmp.path().join("config.json");
-        let mut disks = BTreeMap::new();
-        disks.insert(
-            "disk1".to_owned(),
-            serde_json::json!({ "by_id": "/dev/disk/by-id/virtio-disk1" }),
-        );
-        disks.insert(
-            "disk2".to_owned(),
-            serde_json::json!({ "by_id": "/dev/disk/by-id/virtio-disk2" }),
-        );
-        disks.insert(
-            "disk3".to_owned(),
-            serde_json::json!({ "by_id": "/dev/disk/by-id/virtio-disk3" }),
-        );
-        let config_json = serde_json::json!({
-            "disks": disks,
-            "mount_point": "/mnt/storage"
-        });
-        std::fs::write(&config_path, serde_json::to_vec(&config_json).unwrap()).unwrap();
-
-        let log = Arc::new(Mutex::new(Vec::new()));
-        let runner = RecordingRunner::new(log.clone());
-        let inhibitor = crate::inhibit::RecordingInhibitor::new();
-        let report = plan_remove(
-            &runner,
-            &MockFsWithExclop("device add".into()),
-            &RemoveParams {
-                config_path: Path::new(&config_path),
-                name: "disk2",
-                dry_run: true,
-                yes: true,
-                progress: ProgressOutput::Off,
-                paths: &paths,
-                sleep_inhibitor: &inhibitor,
-            },
-        );
+        let f = PoolFixture::three_disk_healthy();
+        let runner = RemovalPool::three_disk().install(MockRunner::default());
+        let fs = MockFs::storage(vec![]).with_excl_op("device add\n");
+        let params = f.remove_params().dry_run(true).build();
+        let report = plan_remove(&runner, &fs, &params);
         let plan = report
             .result
             .expect("plan_remove should succeed on healthy pool + busy op");
@@ -2533,48 +1746,11 @@ mod tests {
      */
     #[test]
     fn plan_remove_preserves_preflight_notes_on_disk_not_found() {
-        let (_state_dir, paths) = setup_membership(&[
-            ("disk1", "/dev/disk/by-id/virtio-disk1"),
-            ("disk2", "/dev/disk/by-id/virtio-disk2"),
-            ("disk3", "/dev/disk/by-id/virtio-disk3"),
-        ]);
-        let tmp = tempfile::tempdir().unwrap();
-        let config_path = tmp.path().join("config.json");
-        let mut disks = BTreeMap::new();
-        disks.insert(
-            "disk1".to_owned(),
-            serde_json::json!({ "by_id": "/dev/disk/by-id/virtio-disk1" }),
-        );
-        disks.insert(
-            "disk2".to_owned(),
-            serde_json::json!({ "by_id": "/dev/disk/by-id/virtio-disk2" }),
-        );
-        disks.insert(
-            "disk3".to_owned(),
-            serde_json::json!({ "by_id": "/dev/disk/by-id/virtio-disk3" }),
-        );
-        let config_json = serde_json::json!({
-            "disks": disks,
-            "mount_point": "/mnt/storage"
-        });
-        std::fs::write(&config_path, serde_json::to_vec(&config_json).unwrap()).unwrap();
-
-        let log = Arc::new(Mutex::new(Vec::new()));
-        let runner = RecordingRunner::new(log.clone());
-        let inhibitor = crate::inhibit::RecordingInhibitor::new();
-        let report = plan_remove(
-            &runner,
-            &MockFsWithExclop("device add".into()),
-            &RemoveParams {
-                config_path: Path::new(&config_path),
-                name: "typo-name",
-                dry_run: true,
-                yes: true,
-                progress: ProgressOutput::Off,
-                paths: &paths,
-                sleep_inhibitor: &inhibitor,
-            },
-        );
+        let f = PoolFixture::three_disk_healthy();
+        let runner = RemovalPool::three_disk().install(MockRunner::default());
+        let fs = MockFs::storage(vec![]).with_excl_op("device add\n");
+        let params = f.remove_params().name("typo-name").dry_run(true).build();
+        let report = plan_remove(&runner, &fs, &params);
         match &report.result {
             Err(RemoveError::Validation(msg)) => {
                 assert!(msg.contains("not found"), "expected 'not found' in: {msg}");
