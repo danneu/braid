@@ -48,7 +48,6 @@ use zeroize::Zeroizing;
 /// `runner.run(MountpointCheck)`, never via `fs.read_to_string`. The only
 /// `Filesystem` method called on the mount-test call graph is
 /// `fs.exists` (probe.rs:125, mount.rs:690).
-#[allow(dead_code)]
 pub(crate) fn mount_fs(paths: &[&str]) -> shared::MockFs {
     shared::MockFs::unmounted(paths.iter().map(|p| (*p).to_string()).collect())
 }
@@ -60,7 +59,6 @@ pub(crate) fn mount_fs(paths: &[&str]) -> shared::MockFs {
 /// No-op sleeper for `close_opened_mappers` cleanup tests so retry loops
 /// don't burn wall time. Local to the mount fixture because only mount
 /// tests consume it; promoted to `shared` if a future scope needs it.
-#[allow(dead_code)]
 pub(crate) struct NoopSleeper;
 
 impl Sleeper for NoopSleeper {
@@ -71,7 +69,6 @@ impl Sleeper for NoopSleeper {
 // RawCommandOutput primitives
 // ---------------------------------------------------------------------------
 
-#[allow(dead_code)]
 pub(crate) fn ok_raw(cmd: &str) -> RawCommandOutput {
     RawCommandOutput {
         cmd: cmd.to_owned(),
@@ -81,7 +78,6 @@ pub(crate) fn ok_raw(cmd: &str) -> RawCommandOutput {
     }
 }
 
-#[allow(dead_code)]
 pub(crate) fn err_raw(cmd: &str, exit_code: i32, stderr: &str) -> RawCommandOutput {
     RawCommandOutput {
         cmd: cmd.to_owned(),
@@ -95,7 +91,6 @@ pub(crate) fn err_raw(cmd: &str, exit_code: i32, stderr: &str) -> RawCommandOutp
 // (CmdRequest, RawCommandOutput) factories for chaining onto MockRunner
 // ---------------------------------------------------------------------------
 
-#[allow(dead_code)]
 pub(crate) fn luks_uuid_ok(device: &str, uuid: &str) -> (CmdRequest, RawCommandOutput) {
     (
         CmdRequest::CryptsetupLuksUuid {
@@ -110,7 +105,6 @@ pub(crate) fn luks_uuid_ok(device: &str, uuid: &str) -> (CmdRequest, RawCommandO
     )
 }
 
-#[allow(dead_code)]
 pub(crate) fn test_passphrase_fail(device: &str) -> (CmdRequest, RawCommandOutput) {
     (
         CmdRequest::CryptsetupTestPassphrase {
@@ -124,7 +118,6 @@ pub(crate) fn test_passphrase_fail(device: &str) -> (CmdRequest, RawCommandOutpu
     )
 }
 
-#[allow(dead_code)]
 pub(crate) fn is_luks_ok(device: &str) -> (CmdRequest, RawCommandOutput) {
     (
         CmdRequest::CryptsetupIsLuks {
@@ -134,7 +127,6 @@ pub(crate) fn is_luks_ok(device: &str) -> (CmdRequest, RawCommandOutput) {
     )
 }
 
-#[allow(dead_code)]
 pub(crate) fn is_luks_fail(device: &str) -> (CmdRequest, RawCommandOutput) {
     (
         CmdRequest::CryptsetupIsLuks {
@@ -148,7 +140,6 @@ pub(crate) fn is_luks_fail(device: &str) -> (CmdRequest, RawCommandOutput) {
     )
 }
 
-#[allow(dead_code)]
 pub(crate) fn luks_dump_text_ok(device: &str) -> (CmdRequest, RawCommandOutput) {
     (
         CmdRequest::CryptsetupLuksDumpText {
@@ -163,7 +154,6 @@ pub(crate) fn luks_dump_text_ok(device: &str) -> (CmdRequest, RawCommandOutput) 
     )
 }
 
-#[allow(dead_code)]
 pub(crate) fn luks_dump_text_fail(device: &str) -> (CmdRequest, RawCommandOutput) {
     (
         CmdRequest::CryptsetupLuksDumpText {
@@ -186,22 +176,18 @@ pub(crate) fn luks_dump_text_fail(device: &str) -> (CmdRequest, RawCommandOutput
 /// `shared::TEST_PASSPHRASE_BYTES = b"test-passphrase"`) because the 27
 /// existing `with_output_stdin` calls in `mount.rs::tests` all encode
 /// `b"testpass"` -- unifying would touch every chained override.
-#[allow(dead_code)]
 pub(crate) const MOUNT_TEST_PASSPHRASE_BYTES: &[u8] = b"testpass";
 
-#[allow(dead_code)]
 pub(crate) fn test_config() -> Config {
     Config::new(MountPoint("/mnt/storage".to_owned())).unwrap()
 }
 
-#[allow(dead_code)]
 pub(crate) fn test_passphrase() -> OpenCredential {
     OpenCredential::Passphrase(Passphrase::from_zeroizing(Zeroizing::new(
         "testpass".to_owned(),
     )))
 }
 
-#[allow(dead_code)]
 pub(crate) fn two_disk_membership() -> PoolMembership {
     let mut disks = BTreeMap::new();
     for (name, path) in [
@@ -216,7 +202,6 @@ pub(crate) fn two_disk_membership() -> PoolMembership {
     PoolMembership { disks }
 }
 
-#[allow(dead_code)]
 pub(crate) fn three_disk_membership() -> PoolMembership {
     let mut disks = BTreeMap::new();
     for (name, path) in [
@@ -236,7 +221,6 @@ pub(crate) fn three_disk_membership() -> PoolMembership {
 /// prove which branches override the caller's fallback and which preserve
 /// it verbatim. The literal text is asserted (positively or negatively)
 /// in those tests so don't change it without updating the assertions.
-#[allow(dead_code)]
 pub(crate) fn arbitrary_fallback() -> MountError {
     MountError::Failed("ARBITRARY FALLBACK TEXT".into())
 }
@@ -269,7 +253,6 @@ pub(crate) fn arbitrary_fallback() -> MountError {
 /// `MockRunner::with_output_stdin` overwrites both `outputs` and
 /// `stdin_expectations` (cmd.rs:1004-1014), pinned by the regression test
 /// `mock_runner_with_output_stdin_override_after_base_wins` in cmd.rs.
-#[allow(dead_code)]
 pub(crate) fn base_two_disk_runner() -> MockRunner {
     let (uuid1_req, uuid1_out) = luks_uuid_ok(
         "/dev/disk/by-id/virtio-disk1",
@@ -315,7 +298,6 @@ pub(crate) fn base_two_disk_runner() -> MockRunner {
 /// the cleanup-ordering tests that call `execute_unlock_and_mount`
 /// directly (bypassing `plan_open_pool`). `to_unlock` lists both members
 /// in stable order; `mount_device` points at disk1's mapper.
-#[allow(dead_code)]
 pub(crate) fn direct_two_disk_plan() -> OpenPlan {
     OpenPlan {
         to_unlock: vec![
@@ -337,7 +319,6 @@ pub(crate) fn direct_two_disk_plan() -> OpenPlan {
 /// `MockFs` seeded with both `virtio-diskN` device paths plus both
 /// `braid-diskN` mapper paths. Cleanup-ordering tests need the mapper
 /// paths visible so post-open `fs.exists` checks match.
-#[allow(dead_code)]
 pub(crate) fn direct_two_disk_fs_with_mappers() -> shared::MockFs {
     mount_fs(&[
         "/dev/disk/by-id/virtio-disk1",
@@ -351,7 +332,6 @@ pub(crate) fn direct_two_disk_fs_with_mappers() -> shared::MockFs {
 /// against `direct_two_disk_plan`: verify-passphrase ok for both disks,
 /// mappers closed, LUKS open ok for both. Tests layer their post-open
 /// failure (mount, scan, etc.) on top.
-#[allow(dead_code)]
 pub(crate) fn direct_two_disk_open_runner() -> MockRunner {
     MockRunner::default()
         .with_output_stdin(
@@ -401,7 +381,6 @@ pub(crate) fn direct_two_disk_open_runner() -> MockRunner {
 /// unlock-and-mount otherwise. Tests that need to pin the per-entry-point
 /// boundary checks must call the production functions directly (not
 /// through this helper).
-#[allow(dead_code)]
 pub(crate) fn open_and_mount_for_test<R: CommandRunner, F: Filesystem + ?Sized>(
     runner: &R,
     fs: &F,

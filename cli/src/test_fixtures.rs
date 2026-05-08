@@ -61,7 +61,6 @@ pub(crate) use doctor::{
     df_json, df_json_fail, human_options, isolated_paths, mountpoint_fail, mountpoint_ok,
     parsed_doctor_ctx, systemctl_is_active_output, ups_ctx, valid_config_json, write_temp,
 };
-#[allow(unused_imports)]
 pub(crate) use mount::{
     MOUNT_TEST_PASSPHRASE_BYTES, NoopSleeper, arbitrary_fallback, base_two_disk_runner,
     direct_two_disk_fs_with_mappers, direct_two_disk_open_runner, direct_two_disk_plan, err_raw,

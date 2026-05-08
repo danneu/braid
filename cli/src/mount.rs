@@ -829,142 +829,17 @@ fn scan_and_mount<R: CommandRunner, F: Filesystem + ?Sized>(
 mod tests {
     use super::*;
     use crate::cmd::{CmdRequest, MockRunner, RawCommandOutput};
-    use crate::config::Config;
     use crate::credential::OpenCredential;
-    use crate::membership::{DiskMember, PoolMembership};
     use crate::secret::Passphrase;
     use crate::test_fixtures::{
         MOUNT_TEST_PASSPHRASE_BYTES, NoopSleeper, arbitrary_fallback, base_two_disk_runner,
         direct_two_disk_fs_with_mappers, direct_two_disk_open_runner, direct_two_disk_plan,
-        is_luks_fail, is_luks_ok, luks_dump_text_fail, luks_dump_text_ok, luks_uuid_ok, mount_fs,
-        test_passphrase_fail,
+        err_raw, is_luks_fail, is_luks_ok, luks_dump_text_fail, luks_dump_text_ok, luks_uuid_ok,
+        mount_fs, ok_raw, open_and_mount_for_test, test_config, test_passphrase,
+        test_passphrase_fail, three_disk_membership, two_disk_membership,
     };
     use crate::types::{ByIdPath, LuksUuid, MountPoint};
-    use std::collections::BTreeMap;
     use zeroize::Zeroizing;
-
-    struct MockFs {
-        paths: Vec<String>,
-    }
-
-    impl MockFs {
-        fn new(paths: &[&str]) -> Self {
-            Self {
-                paths: paths.iter().map(|s| s.to_string()).collect(),
-            }
-        }
-    }
-
-    impl Filesystem for MockFs {
-        fn exists(&self, path: &str) -> bool {
-            self.paths.contains(&path.to_string())
-        }
-
-        fn is_block_device(&self, _path: &str) -> bool {
-            false
-        }
-
-        fn read_to_string(&self, _path: &str) -> Result<String, std::io::Error> {
-            Err(std::io::Error::new(std::io::ErrorKind::NotFound, "mock"))
-        }
-
-        fn list_dir(&self, _path: &str) -> Result<Vec<String>, std::io::Error> {
-            Ok(vec![])
-        }
-    }
-
-    fn ok_raw(cmd: &str) -> RawCommandOutput {
-        RawCommandOutput {
-            cmd: cmd.to_owned(),
-            stdout: String::new(),
-            stderr: String::new(),
-            exit_status: 0,
-        }
-    }
-
-    fn err_raw(cmd: &str, exit_code: i32, stderr: &str) -> RawCommandOutput {
-        RawCommandOutput {
-            cmd: cmd.to_owned(),
-            stdout: String::new(),
-            stderr: stderr.to_owned(),
-            exit_status: exit_code,
-        }
-    }
-
-    /// Test-only helper that mirrors the legacy `open_and_mount_pool` flow
-    /// (plan + optional resolve + execute) so existing test bodies don't
-    /// need to spell out both phases. Production callers (`cmd_unlock`,
-    /// `cmd_recover`) compose the phases explicitly per the refactor's
-    /// design — this helper exists ONLY for the test module.
-    ///
-    /// Dispatches on `plan.to_unlock.is_empty()`: mount-only when empty,
-    /// unlock-and-mount otherwise. Tests that need to pin the per-entry-
-    /// point boundary checks must call the production functions directly
-    /// (not through this helper).
-    fn open_and_mount_for_test<R: CommandRunner, F: Filesystem + ?Sized>(
-        runner: &R,
-        fs: &F,
-        config: &Config,
-        membership: &PoolMembership,
-        credential: Option<OpenCredential>,
-        allow_degraded: bool,
-        command_hint: &str,
-    ) -> Result<bool, MountError> {
-        let report = plan_open_pool(runner, fs, config, membership, allow_degraded, command_hint);
-        let plan = match report.result? {
-            Some(p) => p,
-            None => return Ok(false),
-        };
-        if plan.to_unlock.is_empty() {
-            execute_mount_only(runner, fs, config, &plan)
-        } else {
-            let credential = credential
-                .as_ref()
-                .expect("test passed empty credential with non-empty plan");
-            execute_unlock_and_mount(runner, fs, config, &plan, credential)
-                .map_err(|failure| failure.error)
-        }
-    }
-
-    /// Convenience constructor used in tests.
-    fn test_passphrase() -> OpenCredential {
-        OpenCredential::Passphrase(Passphrase::from_zeroizing(Zeroizing::new(
-            "testpass".to_owned(),
-        )))
-    }
-
-    fn test_config() -> Config {
-        Config::new(MountPoint("/mnt/storage".to_owned())).unwrap()
-    }
-
-    fn two_disk_membership() -> PoolMembership {
-        let mut disks = BTreeMap::new();
-        for (name, path) in [
-            ("disk1", "/dev/disk/by-id/virtio-disk1"),
-            ("disk2", "/dev/disk/by-id/virtio-disk2"),
-        ] {
-            disks.insert(
-                name.to_owned(),
-                DiskMember::from_by_id(ByIdPath(path.to_owned())),
-            );
-        }
-        PoolMembership { disks }
-    }
-
-    fn three_disk_membership() -> PoolMembership {
-        let mut disks = BTreeMap::new();
-        for (name, path) in [
-            ("disk1", "/dev/disk/by-id/virtio-disk1"),
-            ("disk2", "/dev/disk/by-id/virtio-disk2"),
-            ("disk3", "/dev/disk/by-id/virtio-disk3"),
-        ] {
-            disks.insert(
-                name.to_owned(),
-                DiskMember::from_by_id(ByIdPath(path.to_owned())),
-            );
-        }
-        PoolMembership { disks }
-    }
 
     /// Intent: `execute_unlock_and_mount` must reject an empty `to_unlock`
     /// plan with a typed internal error BEFORE running any LUKS or mount
@@ -3090,7 +2965,10 @@ pool already mounted at /mnt/storage
     fn unlock_passphrase_verify_fails_unreadable_header_emits_guidance() {
         let config = test_config();
         let membership = two_disk_membership();
-        let fs = mount_fs(&["/dev/disk/by-id/virtio-disk1", "/dev/disk/by-id/virtio-disk2"]);
+        let fs = mount_fs(&[
+            "/dev/disk/by-id/virtio-disk1",
+            "/dev/disk/by-id/virtio-disk2",
+        ]);
 
         let (tp_req, tp_out) = test_passphrase_fail("/dev/disk/by-id/virtio-disk1");
         let (is_req, is_out) = is_luks_fail("/dev/disk/by-id/virtio-disk1");
@@ -3154,7 +3032,10 @@ pool already mounted at /mnt/storage
     fn unlock_damaged_luks2_metadata_fails_at_gateway() {
         let config = test_config();
         let membership = two_disk_membership();
-        let fs = mount_fs(&["/dev/disk/by-id/virtio-disk1", "/dev/disk/by-id/virtio-disk2"]);
+        let fs = mount_fs(&[
+            "/dev/disk/by-id/virtio-disk1",
+            "/dev/disk/by-id/virtio-disk2",
+        ]);
 
         let kf = tempfile::NamedTempFile::new().unwrap();
         {
@@ -3211,7 +3092,10 @@ pool already mounted at /mnt/storage
     fn unlock_passphrase_verify_fails_ok_header_preserves_wrong_passphrase() {
         let config = test_config();
         let membership = two_disk_membership();
-        let fs = mount_fs(&["/dev/disk/by-id/virtio-disk1", "/dev/disk/by-id/virtio-disk2"]);
+        let fs = mount_fs(&[
+            "/dev/disk/by-id/virtio-disk1",
+            "/dev/disk/by-id/virtio-disk2",
+        ]);
 
         let (tp_req, tp_out) = test_passphrase_fail("/dev/disk/by-id/virtio-disk1");
         let (is_req, is_out) = is_luks_ok("/dev/disk/by-id/virtio-disk1");
@@ -3266,7 +3150,10 @@ pool already mounted at /mnt/storage
     fn unlock_passphrase_open_exit2_probe_failed_does_not_blame_invariant() {
         let config = test_config();
         let membership = two_disk_membership();
-        let fs = mount_fs(&["/dev/disk/by-id/virtio-disk1", "/dev/disk/by-id/virtio-disk2"]);
+        let fs = mount_fs(&[
+            "/dev/disk/by-id/virtio-disk1",
+            "/dev/disk/by-id/virtio-disk2",
+        ]);
 
         let (tp_req, tp_out) = (
             CmdRequest::CryptsetupTestPassphrase {
@@ -3344,7 +3231,10 @@ pool already mounted at /mnt/storage
     fn unlock_keyfile_open_exit_nonzero_unreadable_header_emits_guidance() {
         let config = test_config();
         let membership = two_disk_membership();
-        let fs = mount_fs(&["/dev/disk/by-id/virtio-disk1", "/dev/disk/by-id/virtio-disk2"]);
+        let fs = mount_fs(&[
+            "/dev/disk/by-id/virtio-disk1",
+            "/dev/disk/by-id/virtio-disk2",
+        ]);
 
         let kf = tempfile::NamedTempFile::new().unwrap();
         {
@@ -3520,7 +3410,10 @@ pool already mounted at /mnt/storage
     fn unlock_passphrase_verify_exit_5_ok_header_surfaces_open_failed() {
         let config = test_config();
         let membership = two_disk_membership();
-        let fs = mount_fs(&["/dev/disk/by-id/virtio-disk1", "/dev/disk/by-id/virtio-disk2"]);
+        let fs = mount_fs(&[
+            "/dev/disk/by-id/virtio-disk1",
+            "/dev/disk/by-id/virtio-disk2",
+        ]);
 
         let (tp_req, tp_out) = (
             CmdRequest::CryptsetupTestPassphrase {
@@ -3579,7 +3472,10 @@ pool already mounted at /mnt/storage
     fn unlock_passphrase_verify_exit_1_unreadable_header_emits_guidance() {
         let config = test_config();
         let membership = two_disk_membership();
-        let fs = mount_fs(&["/dev/disk/by-id/virtio-disk1", "/dev/disk/by-id/virtio-disk2"]);
+        let fs = mount_fs(&[
+            "/dev/disk/by-id/virtio-disk1",
+            "/dev/disk/by-id/virtio-disk2",
+        ]);
 
         let (tp_req, tp_out) = (
             CmdRequest::CryptsetupTestPassphrase {
@@ -3638,7 +3534,10 @@ pool already mounted at /mnt/storage
     fn unlock_keyfile_verify_exit_5_ok_header_surfaces_open_failed() {
         let config = test_config();
         let membership = two_disk_membership();
-        let fs = mount_fs(&["/dev/disk/by-id/virtio-disk1", "/dev/disk/by-id/virtio-disk2"]);
+        let fs = mount_fs(&[
+            "/dev/disk/by-id/virtio-disk1",
+            "/dev/disk/by-id/virtio-disk2",
+        ]);
 
         let kf = tempfile::NamedTempFile::new().unwrap();
         {
@@ -3703,7 +3602,10 @@ pool already mounted at /mnt/storage
     fn unlock_keyfile_verify_exit_1_unreadable_header_emits_guidance() {
         let config = test_config();
         let membership = two_disk_membership();
-        let fs = mount_fs(&["/dev/disk/by-id/virtio-disk1", "/dev/disk/by-id/virtio-disk2"]);
+        let fs = mount_fs(&[
+            "/dev/disk/by-id/virtio-disk1",
+            "/dev/disk/by-id/virtio-disk2",
+        ]);
 
         let kf = tempfile::NamedTempFile::new().unwrap();
         {
