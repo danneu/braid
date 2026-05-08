@@ -78,14 +78,12 @@ pub(crate) use doctor::{
     df_json, df_json_fail, human_options, isolated_paths, mountpoint_fail, mountpoint_ok,
     parsed_doctor_ctx, systemctl_is_active_output, ups_ctx, valid_config_json, write_temp,
 };
-#[allow(unused_imports)]
 pub(crate) use enroll_key_file::{
     enroll_add_keyfile_ok, enroll_by_id, enroll_discovery_two_disks, enroll_fs,
     enroll_luks_dump_slot1_empty, enroll_luks_dump_slot1_occupied, enroll_luks_uuid_not_luks,
-    enroll_luks_uuid_ok, enroll_make_existing_keyfile, enroll_make_membership,
-    enroll_mountpoint_fail, enroll_mountpoint_ok, enroll_passphrase, enroll_test_keyfile_fail,
-    enroll_test_keyfile_ok, enroll_test_passphrase_fail, enroll_test_passphrase_ok,
-    enroll_with_mountpoint_fail, enroll_with_mountpoint_ok,
+    enroll_luks_uuid_ok, enroll_make_existing_keyfile, enroll_make_membership, enroll_passphrase,
+    enroll_test_keyfile_fail, enroll_test_keyfile_ok, enroll_test_passphrase_fail,
+    enroll_test_passphrase_ok, enroll_with_mountpoint_fail, enroll_with_mountpoint_ok,
 };
 pub(crate) use mount::{
     MOUNT_TEST_PASSPHRASE_BYTES, NoopSleeper, arbitrary_fallback, base_two_disk_runner,

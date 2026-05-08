@@ -82,7 +82,6 @@ use tempfile::TempDir;
 /// future change adds one of those calls, the shared body's "/" rootfs
 /// answer is still correct for the "pool not yet mounted" scenario every
 /// enroll test models.
-#[allow(dead_code)]
 pub(crate) fn enroll_fs(paths: &[&str]) -> shared::MockFs {
     shared::MockFs::unmounted(paths.iter().map(|p| (*p).to_string()).collect())
 }
@@ -91,12 +90,10 @@ pub(crate) fn enroll_fs(paths: &[&str]) -> shared::MockFs {
 // Identifier / credential primitives
 // ---------------------------------------------------------------------------
 
-#[allow(dead_code)]
 pub(crate) fn enroll_by_id(path: &str) -> ByIdPath {
     ByIdPath(path.to_owned())
 }
 
-#[allow(dead_code)]
 pub(crate) fn enroll_passphrase(s: &str) -> Passphrase {
     Passphrase::from_zeroizing(zeroize::Zeroizing::new(s.to_owned()))
 }
@@ -115,7 +112,6 @@ pub(crate) fn enroll_passphrase(s: &str) -> Passphrase {
 /// arg -- enroll tests never assert on the UUID value, only that the
 /// probe succeeds. Even if the signatures matched, the prefix is still
 /// required to keep both helpers reachable through the same facade.
-#[allow(dead_code)]
 pub(crate) fn enroll_luks_uuid_ok(device: &str) -> (CmdRequest, RawCommandOutput) {
     (
         CmdRequest::CryptsetupLuksUuid {
@@ -128,7 +124,6 @@ pub(crate) fn enroll_luks_uuid_ok(device: &str) -> (CmdRequest, RawCommandOutput
     )
 }
 
-#[allow(dead_code)]
 pub(crate) fn enroll_luks_uuid_not_luks(device: &str) -> (CmdRequest, RawCommandOutput) {
     (
         CmdRequest::CryptsetupLuksUuid {
@@ -147,7 +142,6 @@ pub(crate) fn enroll_luks_uuid_not_luks(device: &str) -> (CmdRequest, RawCommand
 /// empty means ready to enroll a keyfile. Distinct from `mount`'s
 /// `luks_dump_text_*` (text variant) which drives the
 /// `LuksHeaderState` gateway, not slot inventory.
-#[allow(dead_code)]
 pub(crate) fn enroll_luks_dump_slot1_empty(device: &str) -> (CmdRequest, RawCommandOutput) {
     (
         CmdRequest::CryptsetupLuksDump {
@@ -160,7 +154,6 @@ pub(crate) fn enroll_luks_dump_slot1_empty(device: &str) -> (CmdRequest, RawComm
     )
 }
 
-#[allow(dead_code)]
 pub(crate) fn enroll_luks_dump_slot1_occupied(device: &str) -> (CmdRequest, RawCommandOutput) {
     (
         CmdRequest::CryptsetupLuksDump {
@@ -173,7 +166,6 @@ pub(crate) fn enroll_luks_dump_slot1_occupied(device: &str) -> (CmdRequest, RawC
     )
 }
 
-#[allow(dead_code)]
 pub(crate) fn enroll_test_keyfile_ok(
     device: &str,
     key_file: &str,
@@ -187,7 +179,6 @@ pub(crate) fn enroll_test_keyfile_ok(
     )
 }
 
-#[allow(dead_code)]
 pub(crate) fn enroll_test_keyfile_fail(
     device: &str,
     key_file: &str,
@@ -207,7 +198,6 @@ pub(crate) fn enroll_test_keyfile_fail(
 /// already-exported `mountpoint_ok` from `doctor` at
 /// `test_fixtures.rs:61` is the load-bearing reason for the `enroll_`
 /// prefix on this name.
-#[allow(dead_code)]
 pub(crate) fn enroll_mountpoint_ok(dir: &Path) -> (CmdRequest, RawCommandOutput) {
     let dir = dir.display().to_string();
     (
@@ -218,7 +208,6 @@ pub(crate) fn enroll_mountpoint_ok(dir: &Path) -> (CmdRequest, RawCommandOutput)
     )
 }
 
-#[allow(dead_code)]
 pub(crate) fn enroll_mountpoint_fail(dir: &Path) -> (CmdRequest, RawCommandOutput) {
     let dir = dir.display().to_string();
     (
@@ -240,7 +229,6 @@ pub(crate) fn enroll_mountpoint_fail(dir: &Path) -> (CmdRequest, RawCommandOutpu
 // `MOUNT_TEST_PASSPHRASE_BYTES` constant at the call site.
 // `with_output_stdin(req, stdin, out)` consumes the triple verbatim.
 
-#[allow(dead_code)]
 pub(crate) fn enroll_test_passphrase_ok(
     device: &str,
     passphrase: &str,
@@ -254,7 +242,6 @@ pub(crate) fn enroll_test_passphrase_ok(
     )
 }
 
-#[allow(dead_code)]
 pub(crate) fn enroll_test_passphrase_fail(
     device: &str,
     passphrase: &str,
@@ -276,7 +263,6 @@ pub(crate) fn enroll_test_passphrase_fail(
 /// the local `enroll_ok` to make the cryptsetup operation explicit --
 /// the local name reads as "enroll succeeded" but the helper actually
 /// mocks `cryptsetup luksAddKey`.
-#[allow(dead_code)]
 pub(crate) fn enroll_add_keyfile_ok(
     device: &str,
     key_file: &str,
@@ -296,13 +282,11 @@ pub(crate) fn enroll_add_keyfile_ok(
 // Runner-chaining wrappers
 // ---------------------------------------------------------------------------
 
-#[allow(dead_code)]
 pub(crate) fn enroll_with_mountpoint_ok(runner: MockRunner, dir: &Path) -> MockRunner {
     let (req, out) = enroll_mountpoint_ok(dir);
     runner.with_output(req, out)
 }
 
-#[allow(dead_code)]
 pub(crate) fn enroll_with_mountpoint_fail(runner: MockRunner, dir: &Path) -> MockRunner {
     let (req, out) = enroll_mountpoint_fail(dir);
     runner.with_output(req, out)
@@ -317,7 +301,6 @@ pub(crate) fn enroll_with_mountpoint_fail(runner: MockRunner, dir: &Path) -> Moc
 /// hardcode `virtio-diskN`; enroll tests use short by-id strings (`d1`,
 /// `d2`) and arbitrary disk names so a parameterised builder is the
 /// right shape.
-#[allow(dead_code)]
 pub(crate) fn enroll_make_membership(disks: &[(&str, &str)]) -> PoolMembership {
     let mut map = BTreeMap::new();
     for (key, path) in disks {
@@ -332,7 +315,6 @@ pub(crate) fn enroll_make_membership(disks: &[(&str, &str)]) -> PoolMembership {
 /// Writes `KEYFILE_SIZE` zero bytes to `<tmp>/braid.key`. Returns
 /// `(path, str)` because most call sites need the display string for
 /// `CryptsetupTestKeyFile { key_file_path, .. }` seeding.
-#[allow(dead_code)]
 pub(crate) fn enroll_make_existing_keyfile(tmp: &TempDir) -> (PathBuf, String) {
     let kf = tmp.path().join("braid.key");
     std::fs::write(&kf, vec![0u8; KEYFILE_SIZE]).unwrap();
@@ -363,7 +345,6 @@ pub(crate) fn enroll_make_existing_keyfile(tmp: &TempDir) -> (PathBuf, String) {
 ///   * `CryptsetupTestPassphrase` / `CryptsetupTestKeyFile`. Each
 ///     test layers its own per-disk verify outcome with the correct
 ///     passphrase or keyfile path.
-#[allow(dead_code)]
 pub(crate) fn enroll_discovery_two_disks(d1: &str, d2: &str) -> MockRunner {
     let (req1, out1) = enroll_luks_uuid_ok(d1);
     let (req2, out2) = enroll_luks_uuid_ok(d2);
