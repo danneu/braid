@@ -833,6 +833,10 @@ mod tests {
     use crate::credential::OpenCredential;
     use crate::membership::{DiskMember, PoolMembership};
     use crate::secret::Passphrase;
+    use crate::test_fixtures::{
+        NoopSleeper, direct_two_disk_fs_with_mappers, direct_two_disk_open_runner,
+        direct_two_disk_plan,
+    };
     use crate::types::{ByIdPath, LuksUuid, MountPoint};
     use std::collections::BTreeMap;
     use zeroize::Zeroizing;
@@ -2826,74 +2830,6 @@ pool already mounted at /mnt/storage
             "/dev/disk/by-id/virtio-disk1",
             "/dev/disk/by-id/virtio-disk2",
         ])
-    }
-
-    struct NoopSleeper;
-
-    impl Sleeper for NoopSleeper {
-        fn sleep(&self, _duration: std::time::Duration) {}
-    }
-
-    fn direct_two_disk_plan() -> OpenPlan {
-        OpenPlan {
-            to_unlock: vec![
-                (
-                    "disk1".to_owned(),
-                    ByIdPath("/dev/disk/by-id/virtio-disk1".to_owned()),
-                ),
-                (
-                    "disk2".to_owned(),
-                    ByIdPath("/dev/disk/by-id/virtio-disk2".to_owned()),
-                ),
-            ],
-            any_open: false,
-            any_missing_member: false,
-            mount_device: "/dev/mapper/braid-disk1".to_owned(),
-        }
-    }
-
-    fn direct_two_disk_fs_with_mappers() -> MockFs {
-        MockFs::new(&[
-            "/dev/disk/by-id/virtio-disk1",
-            "/dev/disk/by-id/virtio-disk2",
-            "/dev/mapper/braid-disk1",
-            "/dev/mapper/braid-disk2",
-        ])
-    }
-
-    fn direct_two_disk_open_runner() -> MockRunner {
-        MockRunner::default()
-            .with_output_stdin(
-                CmdRequest::CryptsetupTestPassphrase {
-                    device: "/dev/disk/by-id/virtio-disk1".into(),
-                },
-                b"testpass".to_vec(),
-                ok_raw("cryptsetup open --test-passphrase"),
-            )
-            .with_output_stdin(
-                CmdRequest::CryptsetupTestPassphrase {
-                    device: "/dev/disk/by-id/virtio-disk2".into(),
-                },
-                b"testpass".to_vec(),
-                ok_raw("cryptsetup open --test-passphrase"),
-            )
-            .with_mappers_closed(&["braid-disk1", "braid-disk2"])
-            .with_output_stdin(
-                CmdRequest::CryptsetupLuksOpen {
-                    device: "/dev/disk/by-id/virtio-disk1".into(),
-                    mapper: "braid-disk1".into(),
-                },
-                b"testpass".to_vec(),
-                ok_raw("cryptsetup open"),
-            )
-            .with_output_stdin(
-                CmdRequest::CryptsetupLuksOpen {
-                    device: "/dev/disk/by-id/virtio-disk2".into(),
-                    mapper: "braid-disk2".into(),
-                },
-                b"testpass".to_vec(),
-                ok_raw("cryptsetup open"),
-            )
     }
 
     // Intent: Mount failure after two successful opens reports both mappers
