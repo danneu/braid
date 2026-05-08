@@ -691,9 +691,10 @@ mod tests {
     use crate::test_fixtures::err_raw as enroll_err_raw;
     use crate::test_fixtures::{
         enroll_by_id, enroll_discovery_two_disks, enroll_fs, enroll_luks_dump_slot1_empty,
-        enroll_luks_uuid_ok, enroll_make_existing_keyfile, enroll_make_membership,
-        enroll_passphrase, enroll_test_keyfile_ok, enroll_test_passphrase_fail,
-        enroll_test_passphrase_ok, enroll_with_mountpoint_ok, isolated_paths,
+        enroll_luks_uuid_not_luks, enroll_luks_uuid_ok, enroll_make_existing_keyfile,
+        enroll_make_membership, enroll_passphrase, enroll_test_keyfile_fail,
+        enroll_test_keyfile_ok, enroll_test_passphrase_fail, enroll_test_passphrase_ok,
+        enroll_with_mountpoint_ok, isolated_paths,
     };
     use crate::types::ByIdPath;
     use std::collections::BTreeMap;
@@ -932,22 +933,22 @@ mod tests {
      */
     #[test]
     fn plan_discover_two_present_luks_disks() {
-        let (req1, out1) = luks_uuid_ok("/dev/disk/by-id/d1");
-        let (req2, out2) = luks_uuid_ok("/dev/disk/by-id/d2");
+        let (req1, out1) = enroll_luks_uuid_ok("/dev/disk/by-id/d1");
+        let (req2, out2) = enroll_luks_uuid_ok("/dev/disk/by-id/d2");
         let runner = MockRunner::default()
             .with_output(req1, out1)
             .with_output(req2, out2)
             .with_luks_dump_text_luks2("/dev/disk/by-id/d1")
             .with_luks_dump_text_luks2("/dev/disk/by-id/d2")
             .with_mappers_closed(&["braid-disk1", "braid-disk2"]);
-        let fs = MockFs::new(&["/dev/disk/by-id/d1", "/dev/disk/by-id/d2"]);
-        let membership = make_membership(&[
+        let fs = enroll_fs(&["/dev/disk/by-id/d1", "/dev/disk/by-id/d2"]);
+        let membership = enroll_make_membership(&[
             ("disk1", "/dev/disk/by-id/d1"),
             ("disk2", "/dev/disk/by-id/d2"),
         ]);
-        let (tmp, paths) = test_paths();
+        let (tmp, paths) = isolated_paths();
         let kf = tmp.path().join("braid.key");
-        let runner = with_mountpoint_ok(runner, tmp.path());
+        let runner = enroll_with_mountpoint_ok(runner, tmp.path());
 
         let report = plan_enroll(&runner, &fs, &membership, &kf, true, false, &paths);
         assert!(
@@ -975,19 +976,19 @@ mod tests {
      */
     #[test]
     fn plan_discover_absent_disk_accumulates_skip_note() {
-        let (req, out) = luks_uuid_ok("/dev/disk/by-id/d2");
+        let (req, out) = enroll_luks_uuid_ok("/dev/disk/by-id/d2");
         let runner = MockRunner::default()
             .with_output(req, out)
             .with_luks_dump_text_luks2("/dev/disk/by-id/d2")
             .with_mapper_closed("braid-disk2");
-        let fs = MockFs::new(&["/dev/disk/by-id/d2"]);
-        let membership = make_membership(&[
+        let fs = enroll_fs(&["/dev/disk/by-id/d2"]);
+        let membership = enroll_make_membership(&[
             ("disk1", "/dev/disk/by-id/d1"),
             ("disk2", "/dev/disk/by-id/d2"),
         ]);
-        let (tmp, paths) = test_paths();
+        let (tmp, paths) = isolated_paths();
         let kf = tmp.path().join("braid.key");
-        let runner = with_mountpoint_ok(runner, tmp.path());
+        let runner = enroll_with_mountpoint_ok(runner, tmp.path());
 
         let report = plan_enroll(&runner, &fs, &membership, &kf, true, false, &paths);
         assert!(
@@ -1023,21 +1024,21 @@ mod tests {
      */
     #[test]
     fn plan_discover_non_luks_disk_accumulates_skip_note() {
-        let (req1, out1) = luks_uuid_not_luks("/dev/disk/by-id/d1");
-        let (req2, out2) = luks_uuid_ok("/dev/disk/by-id/d2");
+        let (req1, out1) = enroll_luks_uuid_not_luks("/dev/disk/by-id/d1");
+        let (req2, out2) = enroll_luks_uuid_ok("/dev/disk/by-id/d2");
         let runner = MockRunner::default()
             .with_output(req1, out1)
             .with_output(req2, out2)
             .with_luks_dump_text_luks2("/dev/disk/by-id/d2")
             .with_mapper_closed("braid-disk2");
-        let fs = MockFs::new(&["/dev/disk/by-id/d1", "/dev/disk/by-id/d2"]);
-        let membership = make_membership(&[
+        let fs = enroll_fs(&["/dev/disk/by-id/d1", "/dev/disk/by-id/d2"]);
+        let membership = enroll_make_membership(&[
             ("disk1", "/dev/disk/by-id/d1"),
             ("disk2", "/dev/disk/by-id/d2"),
         ]);
-        let (tmp, paths) = test_paths();
+        let (tmp, paths) = isolated_paths();
         let kf = tmp.path().join("braid.key");
-        let runner = with_mountpoint_ok(runner, tmp.path());
+        let runner = enroll_with_mountpoint_ok(runner, tmp.path());
 
         let report = plan_enroll(&runner, &fs, &membership, &kf, true, false, &paths);
         assert!(report.notes.is_empty());
@@ -1073,14 +1074,14 @@ mod tests {
     #[test]
     fn plan_all_absent_preserves_skip_notes_in_err() {
         let runner = MockRunner::default();
-        let fs = MockFs::new(&[]);
-        let membership = make_membership(&[
+        let fs = enroll_fs(&[]);
+        let membership = enroll_make_membership(&[
             ("disk1", "/dev/disk/by-id/d1"),
             ("disk2", "/dev/disk/by-id/d2"),
         ]);
-        let (tmp, paths) = test_paths();
+        let (tmp, paths) = isolated_paths();
         let kf = tmp.path().join("braid.key");
-        let runner = with_mountpoint_ok(runner, tmp.path());
+        let runner = enroll_with_mountpoint_ok(runner, tmp.path());
 
         let report = plan_enroll(&runner, &fs, &membership, &kf, true, false, &paths);
         let err = report.result.expect_err("expected no-candidates error");
@@ -1119,13 +1120,13 @@ mod tests {
      */
     #[test]
     fn plan_all_not_luks_preserves_skip_notes_in_err() {
-        let (req, out) = luks_uuid_not_luks("/dev/disk/by-id/d1");
+        let (req, out) = enroll_luks_uuid_not_luks("/dev/disk/by-id/d1");
         let runner = MockRunner::default().with_output(req, out);
-        let fs = MockFs::new(&["/dev/disk/by-id/d1"]);
-        let membership = make_membership(&[("disk1", "/dev/disk/by-id/d1")]);
-        let (tmp, paths) = test_paths();
+        let fs = enroll_fs(&["/dev/disk/by-id/d1"]);
+        let membership = enroll_make_membership(&[("disk1", "/dev/disk/by-id/d1")]);
+        let (tmp, paths) = isolated_paths();
         let kf = tmp.path().join("braid.key");
-        let runner = with_mountpoint_ok(runner, tmp.path());
+        let runner = enroll_with_mountpoint_ok(runner, tmp.path());
 
         let report = plan_enroll(&runner, &fs, &membership, &kf, true, false, &paths);
         let err = report.result.expect_err("expected no-candidates error");
@@ -1162,19 +1163,19 @@ mod tests {
      */
     #[test]
     fn plan_skip_note_renders_bracketed_in_preview_and_plain_in_stderr() {
-        let (req, out) = luks_uuid_ok("/dev/disk/by-id/d2");
+        let (req, out) = enroll_luks_uuid_ok("/dev/disk/by-id/d2");
         let runner = MockRunner::default()
             .with_output(req, out)
             .with_luks_dump_text_luks2("/dev/disk/by-id/d2")
             .with_mapper_closed("braid-disk2");
-        let fs = MockFs::new(&["/dev/disk/by-id/d2"]);
-        let membership = make_membership(&[
+        let fs = enroll_fs(&["/dev/disk/by-id/d2"]);
+        let membership = enroll_make_membership(&[
             ("disk1", "/dev/disk/by-id/d1"),
             ("disk2", "/dev/disk/by-id/d2"),
         ]);
-        let (tmp, paths) = test_paths();
+        let (tmp, paths) = isolated_paths();
         let kf = tmp.path().join("braid.key");
-        let runner = with_mountpoint_ok(runner, tmp.path());
+        let runner = enroll_with_mountpoint_ok(runner, tmp.path());
 
         let plan = plan_enroll(&runner, &fs, &membership, &kf, true, false, &paths)
             .result
@@ -1421,11 +1422,11 @@ mod tests {
     fn non_generate_plan_does_not_require_mountpoint() {
         let d1 = "/dev/disk/by-id/d1";
         let d2 = "/dev/disk/by-id/d2";
-        let (tmp, paths) = test_paths();
-        let (kf, _) = make_existing_keyfile(&tmp);
-        let runner = discovery_two_disks(d1, d2);
-        let fs = MockFs::new(&[d1, d2]);
-        let membership = make_membership(&[("disk1", d1), ("disk2", d2)]);
+        let (tmp, paths) = isolated_paths();
+        let (kf, _) = enroll_make_existing_keyfile(&tmp);
+        let runner = enroll_discovery_two_disks(d1, d2);
+        let fs = enroll_fs(&[d1, d2]);
+        let membership = enroll_make_membership(&[("disk1", d1), ("disk2", d2)]);
 
         let plan = plan_enroll(&runner, &fs, &membership, &kf, false, false, &paths)
             .result
@@ -1494,16 +1495,16 @@ mod tests {
         let d1 = "/dev/disk/by-id/d1";
         let d2 = "/dev/disk/by-id/d2";
 
-        let (tmp, paths) = test_paths();
-        let (kf, kf_str) = make_existing_keyfile(&tmp);
+        let (tmp, paths) = isolated_paths();
+        let (kf, kf_str) = enroll_make_existing_keyfile(&tmp);
 
-        let (tkf1_req, tkf1_out) = test_keyfile_ok(d1, &kf_str);
-        let (tkf2_req, tkf2_out) = test_keyfile_fail(d2, &kf_str);
-        let runner = discovery_two_disks(d1, d2)
+        let (tkf1_req, tkf1_out) = enroll_test_keyfile_ok(d1, &kf_str);
+        let (tkf2_req, tkf2_out) = enroll_test_keyfile_fail(d2, &kf_str);
+        let runner = enroll_discovery_two_disks(d1, d2)
             .with_output(tkf1_req, tkf1_out)
             .with_output(tkf2_req, tkf2_out);
-        let fs = MockFs::new(&[d1, d2]);
-        let membership = make_membership(&[("disk1", d1), ("disk2", d2)]);
+        let fs = enroll_fs(&[d1, d2]);
+        let membership = enroll_make_membership(&[("disk1", d1), ("disk2", d2)]);
 
         let plan = plan_enroll(&runner, &fs, &membership, &kf, false, true, &paths)
             .result
@@ -1563,16 +1564,16 @@ mod tests {
         let d1 = "/dev/disk/by-id/d1";
         let d2 = "/dev/disk/by-id/d2";
 
-        let (tmp, paths) = test_paths();
-        let (kf, kf_str) = make_existing_keyfile(&tmp);
+        let (tmp, paths) = isolated_paths();
+        let (kf, kf_str) = enroll_make_existing_keyfile(&tmp);
 
-        let (tkf1_req, tkf1_out) = test_keyfile_ok(d1, &kf_str);
-        let (tkf2_req, tkf2_out) = test_keyfile_fail(d2, &kf_str);
-        let runner = discovery_two_disks(d1, d2)
+        let (tkf1_req, tkf1_out) = enroll_test_keyfile_ok(d1, &kf_str);
+        let (tkf2_req, tkf2_out) = enroll_test_keyfile_fail(d2, &kf_str);
+        let runner = enroll_discovery_two_disks(d1, d2)
             .with_output(tkf1_req, tkf1_out)
             .with_output(tkf2_req, tkf2_out);
-        let fs = MockFs::new(&[d1, d2]);
-        let membership = make_membership(&[("disk1", d1), ("disk2", d2)]);
+        let fs = enroll_fs(&[d1, d2]);
+        let membership = enroll_make_membership(&[("disk1", d1), ("disk2", d2)]);
 
         let captured = crate::status_tag::testing::capture_with_color(false, || {
             plan_enroll(&runner, &fs, &membership, &kf, false, true, &paths)
@@ -1618,16 +1619,16 @@ mod tests {
         let d1 = "/dev/disk/by-id/d1";
         let d2 = "/dev/disk/by-id/d2";
 
-        let (tmp, paths) = test_paths();
-        let (kf, kf_str) = make_existing_keyfile(&tmp);
+        let (tmp, paths) = isolated_paths();
+        let (kf, kf_str) = enroll_make_existing_keyfile(&tmp);
 
-        let (tkf1_req, tkf1_out) = test_keyfile_ok(d1, &kf_str);
-        let (tkf2_req, tkf2_out) = test_keyfile_ok(d2, &kf_str);
-        let runner = discovery_two_disks(d1, d2)
+        let (tkf1_req, tkf1_out) = enroll_test_keyfile_ok(d1, &kf_str);
+        let (tkf2_req, tkf2_out) = enroll_test_keyfile_ok(d2, &kf_str);
+        let runner = enroll_discovery_two_disks(d1, d2)
             .with_output(tkf1_req, tkf1_out)
             .with_output(tkf2_req, tkf2_out);
-        let fs = MockFs::new(&[d1, d2]);
-        let membership = make_membership(&[("disk1", d1), ("disk2", d2)]);
+        let fs = enroll_fs(&[d1, d2]);
+        let membership = enroll_make_membership(&[("disk1", d1), ("disk2", d2)]);
 
         let plan = plan_enroll(&runner, &fs, &membership, &kf, false, true, &paths)
             .result
@@ -1713,24 +1714,24 @@ mod tests {
         let d1 = "/dev/disk/by-id/d1";
         let d2 = "/dev/disk/by-id/d2";
 
-        let (tmp, paths) = test_paths();
-        let (kf, kf_str) = make_existing_keyfile(&tmp);
+        let (tmp, paths) = isolated_paths();
+        let (kf, kf_str) = enroll_make_existing_keyfile(&tmp);
 
-        let (tkf1_req, tkf1_out) = test_keyfile_ok(d1, &kf_str);
+        let (tkf1_req, tkf1_out) = enroll_test_keyfile_ok(d1, &kf_str);
         let tkf2_busy_req = CmdRequest::CryptsetupTestKeyFile {
             device: d2.to_owned(),
             key_file_path: kf_str.clone(),
         };
-        let tkf2_busy_out = err_raw(
+        let tkf2_busy_out = enroll_err_raw(
             "cryptsetup open --test-passphrase --key-file",
             5,
             "Device /dev/dm-0 already exists.",
         );
-        let runner = discovery_two_disks(d1, d2)
+        let runner = enroll_discovery_two_disks(d1, d2)
             .with_output(tkf1_req, tkf1_out)
             .with_output(tkf2_busy_req, tkf2_busy_out);
-        let fs = MockFs::new(&[d1, d2]);
-        let membership = make_membership(&[("disk1", d1), ("disk2", d2)]);
+        let fs = enroll_fs(&[d1, d2]);
+        let membership = enroll_make_membership(&[("disk1", d1), ("disk2", d2)]);
 
         let report = plan_enroll(&runner, &fs, &membership, &kf, false, true, &paths);
         let err = report
