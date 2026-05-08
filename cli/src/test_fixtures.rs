@@ -1,5 +1,6 @@
 //! Test-only shared fixtures for `replace`, `add`, `remove`,
-//! `remove_missing`, `recover`, `doctor`, `mount`, and `enroll_key_file`.
+//! `remove_missing`, `recover`, `doctor`, `mount`, `enroll_key_file`,
+//! and `status`.
 //!
 //! These fixtures consolidate the per-test scaffolding that previously
 //! lived as one-off `*Runner` structs and inline `tempdir + config + pass +
@@ -49,6 +50,14 @@
 //!     still exists for unmigrated tests. The `err_raw` reuse is
 //!     re-imported under the alias `enroll_err_raw` for the same
 //!     reason; the alias stays after the locals are deleted.
+//!   * `status` -- flat collection of `status_`-prefixed leaf helpers
+//!     and the two healthy three-disk runner composers for `status` tests.
+//!     Ships flat because status is read-only and many tests deliberately
+//!     compose exact request sets or omit probes to preserve `MissingMock`
+//!     contracts. The `status_` prefix keeps the facade distinct from
+//!     `mount`'s `err_raw` / `ok_raw` and `shared`'s `MockFs`; the
+//!     status-specific filesystem mock stays private so it can preserve the
+//!     stricter mountinfo-only read contract.
 //!   * `PoolFixture` -- bundled tempdirs + `StatePaths` + config +
 //!     passphrase + `RecordingInhibitor`.
 //!   * `ReplaceParamsBuilder` / `AddParamsBuilder` / `RemoveParamsBuilder`
@@ -57,7 +66,7 @@
 //!
 //! Layout: this file is a facade. `shared` holds cross-scope items;
 //! `replace`, `add`, `remove`, `remove_missing`, `recover`, `doctor`,
-//! `mount`, and `enroll_key_file` hold their per-scope topologies,
+//! `mount`, `enroll_key_file`, and `status` hold their per-scope topologies,
 //! builders, and helpers.
 
 mod add;
@@ -69,6 +78,7 @@ mod remove;
 mod remove_missing;
 mod replace;
 mod shared;
+mod status;
 
 #[allow(unused_imports)]
 pub(crate) use doctor::{
@@ -104,3 +114,19 @@ pub(crate) use remove_missing::{RemoveMissingParamsBuilder, RemoveMissingPool};
 pub(crate) use replace::ReplacementPool;
 #[allow(unused_imports)]
 pub(crate) use shared::{MockFs, PoolFixture, TEST_PASSPHRASE_BYTES, mock_ok};
+#[allow(unused_imports)]
+pub(crate) use status::{
+    status_btrfs_device_stats_3disk, status_btrfs_device_usage_raw_1disk,
+    status_btrfs_device_usage_raw_3disk, status_btrfs_df_raid1, status_btrfs_df_single,
+    status_btrfs_scrub_aborted, status_btrfs_scrub_finished,
+    status_btrfs_scrub_finished_with_errors, status_btrfs_scrub_interrupted,
+    status_btrfs_scrub_never, status_btrfs_show_1disk, status_btrfs_show_3disk,
+    status_btrfs_show_3disk_1missing, status_btrfs_show_3disk_1null_underlying_1missing,
+    status_btrfs_usage_raw, status_cfg_present_not_luks, status_config,
+    status_cryptsetup_status_active, status_cryptsetup_uuid_ok, status_disk_report_named,
+    status_fs_ext4, status_fs_mounted, status_fs_not_mounted, status_fs_one_disk,
+    status_fs_three_disk, status_is_luks_raw, status_lsblk_field_ok, status_luks_dump_text_raw,
+    status_membership_1disk, status_mp, status_pool_empty, status_report_with_alerts,
+    status_report_with_scrub, status_runner_healthy_3disk_base,
+    status_runner_healthy_3disk_verbose,
+};
