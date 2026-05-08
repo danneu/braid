@@ -6604,12 +6604,10 @@ mod tests {
     // the preserved journal can be inspected.
     #[test]
     fn add_pool_mutation_initial_all_live_advances_phase_before_balance_inhibitor_failure() {
-        let tmp = tempfile::TempDir::new().unwrap();
-        let paths = StatePaths::custom(tmp.path().into());
-        let config = Config::new(MountPoint("/mnt/storage".into())).unwrap();
+        let f = PoolFixture::empty();
         let fs = MockFs::new(&[]);
         let journal = mixed_pool_mutation_add_journal();
-        journal::write_journal(&paths, &journal).unwrap();
+        journal::write_journal(&f.paths, &journal).unwrap();
         let union = union_memberships(&journal);
         let targets = match &journal.op {
             OpKind::Add { targets, .. } => targets,
@@ -6619,7 +6617,7 @@ mod tests {
             CmdRequest::CryptsetupTestPassphrase {
                 device: "/dev/vda".into(),
             },
-            b"testpass".to_vec(),
+            TEST_PASSPHRASE_BYTES.to_vec(),
             ok_raw_empty("cryptsetup open --test-passphrase"),
         );
         let resolver = resolver_for(&[
@@ -6628,7 +6626,11 @@ mod tests {
             ("/dev/vdc", "virtio-disk3"),
         ]);
         let inhibitor = FailingInhibitor;
-        let params = recover_params_with_inhibitor(&config, &paths, None, false, &inhibitor);
+        let params = f
+            .recover_params()
+            .passphrase_file(None)
+            .sleep_inhibitor(&inhibitor)
+            .build();
 
         let err = execute_add_pool_mutation_recovery(
             &runner,
@@ -6674,16 +6676,16 @@ mod tests {
             "inhibitor failure must stop before balance commands"
         );
 
-        assert!(paths.pool_json().exists(), "pool.json should be written");
-        let recovered = membership::load_membership(&paths).unwrap();
+        assert!(f.paths.pool_json().exists(), "pool.json should be written");
+        let recovered = membership::load_membership(&f.paths).unwrap();
         assert!(recovered.disks.contains_key("disk1"));
         assert!(recovered.disks.contains_key("disk2"));
         assert!(recovered.disks.contains_key("disk3"));
         assert!(
-            paths.pending_op_json().exists(),
+            f.paths.pending_op_json().exists(),
             "failing inhibitor should preserve the journal"
         );
-        let preserved = journal::load_journal(&paths).unwrap().unwrap();
+        let preserved = journal::load_journal(&f.paths).unwrap().unwrap();
         assert!(
             matches!(
                 preserved.op,
@@ -7582,16 +7584,18 @@ mod tests {
 
     #[test]
     fn post_add_inhibitor_failure_stops_before_balance_and_preserves_journal() {
-        let tmp = tempfile::TempDir::new().unwrap();
-        let paths = StatePaths::custom(tmp.path().into());
-        let config = Config::new(MountPoint("/mnt/storage".into())).unwrap();
+        let f = PoolFixture::empty();
         let journal = committed_two_disk_add_journal();
-        journal::write_journal(&paths, &journal).unwrap();
+        journal::write_journal(&f.paths, &journal).unwrap();
         let union = union_memberships(&journal);
         let runner = MockRunner::default();
         let resolver = resolver_for(&[("/dev/vda", "virtio-disk1"), ("/dev/vdb", "virtio-disk2")]);
         let inhibitor = FailingInhibitor;
-        let params = recover_params_with_inhibitor(&config, &paths, None, false, &inhibitor);
+        let params = f
+            .recover_params()
+            .passphrase_file(None)
+            .sleep_inhibitor(&inhibitor)
+            .build();
 
         let err = execute_add_post_balance_recovery(
             &runner,
@@ -7616,7 +7620,7 @@ mod tests {
             )),
             "post-add inhibitor failure must stop before balance"
         );
-        assert!(paths.pending_op_json().exists());
+        assert!(f.paths.pending_op_json().exists());
     }
 
     // Intent: RemoveMissing::PoolMutation recovery treats the primary
