@@ -5848,21 +5848,9 @@ mod tests {
     // source.
     #[test]
     fn returned_committed_but_closed_not_mounted_replays_via_pre_mount_scan() {
-        let tmp = tempfile::TempDir::new().unwrap();
-        let paths = StatePaths::custom(tmp.path().into());
-        let config = Config::new(MountPoint("/mnt/storage".into())).unwrap();
-        let fs = StatefulMockFs::new(&[
-            "/dev/disk/by-id/virtio-disk1",
-            "/dev/disk/by-id/virtio-disk2",
-        ]);
-        let fs_handle = fs.handle();
+        let f = PoolFixture::empty();
         let journal = recoverable_pool_mutation_add_journal();
-        journal::write_journal(&paths, &journal).unwrap();
-        let passphrase_file = tempfile::NamedTempFile::new().unwrap();
-        {
-            use std::io::Write;
-            passphrase_file.as_file().write_all(b"testpass").unwrap();
-        }
+        journal::write_journal(&f.paths, &journal).unwrap();
 
         let inner = with_balance_replay(with_two_disk_pool_probe(
             MockRunner::default()
@@ -5882,7 +5870,7 @@ mod tests {
                         device: "/dev/disk/by-id/virtio-disk2".into(),
                         mapper: "braid-disk2".into(),
                     },
-                    b"testpass".to_vec(),
+                    TEST_PASSPHRASE_BYTES.to_vec(),
                     ok_raw_empty("cryptsetup open"),
                 )
                 .with_output(
@@ -5911,7 +5899,7 @@ mod tests {
                     CmdRequest::CryptsetupTestPassphrase {
                         device: "/dev/disk/by-id/virtio-disk1".into(),
                     },
-                    b"testpass".to_vec(),
+                    TEST_PASSPHRASE_BYTES.to_vec(),
                     ok_raw_empty("cryptsetup open --test-passphrase"),
                 )
                 .with_output_stdin(
@@ -5919,7 +5907,7 @@ mod tests {
                         device: "/dev/disk/by-id/virtio-disk1".into(),
                         mapper: "braid-disk1".into(),
                     },
-                    b"testpass".to_vec(),
+                    TEST_PASSPHRASE_BYTES.to_vec(),
                     ok_raw_empty("cryptsetup open"),
                 )
                 .with_output(
@@ -5934,19 +5922,21 @@ mod tests {
                     ok_raw_empty("mount"),
                 ),
         ));
-        let request_log = inner.clone();
-        let runner = MapperClosingRunner {
+        let harness = RemountHarness::new(
+            &[
+                "/dev/disk/by-id/virtio-disk1",
+                "/dev/disk/by-id/virtio-disk2",
+            ],
             inner,
-            fs_paths: fs_handle,
-            closed: Mutex::new(["braid-disk1".to_owned(), "braid-disk2".to_owned()].into()),
-        };
+            &["braid-disk1", "braid-disk2"],
+        );
         let resolver = resolver_for(&[("/dev/vda", "virtio-disk1"), ("/dev/vdb", "virtio-disk2")]);
-        let params = recover_params(&config, &paths, Some(passphrase_file.path()), false);
+        let params = f.recover_params().build();
 
-        cmd_recover(&runner, &fs, &resolver, &params)
+        cmd_recover(&harness.runner, &harness.fs, &resolver, &params)
             .expect("closed committed target should be discovered and adopted");
 
-        let requests = request_log.requests();
+        let requests = harness.requests();
         assert!(
             requests.iter().any(|r| {
                 matches!(
@@ -5964,8 +5954,8 @@ mod tests {
             )),
             "already committed returned target must not be wiped or re-added"
         );
-        assert!(!paths.pending_op_json().exists());
-        let recovered = membership::load_membership(&paths).unwrap();
+        assert!(!f.paths.pending_op_json().exists());
+        let recovered = membership::load_membership(&f.paths).unwrap();
         assert!(recovered.disks.contains_key("disk1"));
         assert!(recovered.disks.contains_key("disk2"));
     }
@@ -5983,24 +5973,15 @@ mod tests {
     // existing btrfs signature, re-probes disk1+disk2, and advances to balance.
     #[test]
     fn fresh_committed_but_closed_appears_in_recovered_pool_with_balance() {
-        let tmp = tempfile::TempDir::new().unwrap();
-        let paths = StatePaths::custom(tmp.path().into());
-        let config = Config::new(MountPoint("/mnt/storage".into())).unwrap();
-        let fs = StatefulMockFs::new(&["/dev/disk/by-id/virtio-disk2"]);
-        let fs_handle = fs.handle();
+        let f = PoolFixture::empty();
         let stored_opts = vec!["--label".into(), "braid-disk2".into()];
         let journal = fresh_pool_mutation_add_journal(stored_opts, None);
-        journal::write_journal(&paths, &journal).unwrap();
+        journal::write_journal(&f.paths, &journal).unwrap();
         let union = union_memberships(&journal);
         let targets = match &journal.op {
             OpKind::Add { targets, .. } => targets,
             _ => unreachable!("test journal is Add"),
         };
-        let passphrase_file = tempfile::NamedTempFile::new().unwrap();
-        {
-            use std::io::Write;
-            passphrase_file.as_file().write_all(b"testpass").unwrap();
-        }
 
         let inner = with_balance_replay(with_two_disk_pool_probe(
             MockRunner::default()
@@ -6024,7 +6005,7 @@ mod tests {
                         device: "/dev/disk/by-id/virtio-disk2".into(),
                         mapper: "braid-disk2".into(),
                     },
-                    b"testpass".to_vec(),
+                    TEST_PASSPHRASE_BYTES.to_vec(),
                     ok_raw_empty("cryptsetup open"),
                 )
                 .with_output(
@@ -6040,18 +6021,14 @@ mod tests {
                     ok_raw_empty("btrfs device scan"),
                 ),
         ));
-        let request_log = inner.clone();
-        let runner = MapperClosingRunner {
-            inner,
-            fs_paths: fs_handle,
-            closed: Mutex::new(["braid-disk2".to_owned()].into()),
-        };
+        let harness =
+            RemountHarness::new(&["/dev/disk/by-id/virtio-disk2"], inner, &["braid-disk2"]);
         let resolver = resolver_for(&[("/dev/vda", "virtio-disk1"), ("/dev/vdb", "virtio-disk2")]);
-        let params = recover_params(&config, &paths, Some(passphrase_file.path()), false);
+        let params = f.recover_params().build();
 
         execute_add_pool_mutation_recovery(
-            &runner,
-            &fs,
+            &harness.runner,
+            &harness.fs,
             &resolver,
             &params,
             AddPoolReplayCtx {
@@ -6064,7 +6041,7 @@ mod tests {
         )
         .expect("committed fresh target should be adopted without replay");
 
-        let requests = request_log.requests();
+        let requests = harness.requests();
         assert!(
             requests.iter().any(|r| matches!(
                 r,
@@ -6089,8 +6066,8 @@ mod tests {
                 .any(|r| matches!(r, CmdRequest::BtrfsBalanceRaid1Soft { .. })),
             "adopted committed target should still run post-add balance replay"
         );
-        assert!(!paths.pending_op_json().exists());
-        let recovered = membership::load_membership(&paths).unwrap();
+        assert!(!f.paths.pending_op_json().exists());
+        let recovered = membership::load_membership(&f.paths).unwrap();
         assert!(recovered.disks.contains_key("disk1"));
         assert!(recovered.disks.contains_key("disk2"));
     }
@@ -6975,11 +6952,7 @@ mod tests {
 
     #[test]
     fn fresh_replay_formats_with_stored_opts_and_ignores_current_env() {
-        let tmp = tempfile::TempDir::new().unwrap();
-        let paths = StatePaths::custom(tmp.path().into());
-        let config = Config::new(MountPoint("/mnt/storage".into())).unwrap();
-        let fs = StatefulMockFs::new(&["/dev/disk/by-id/virtio-disk2"]);
-        let fs_handle = fs.handle();
+        let f = PoolFixture::empty();
         let stored_opts = vec![
             "--pbkdf".into(),
             "pbkdf2".into(),
@@ -6987,83 +6960,77 @@ mod tests {
             "braid-disk2".into(),
         ];
         let journal = fresh_pool_mutation_add_journal(stored_opts.clone(), None);
-        journal::write_journal(&paths, &journal).unwrap();
+        journal::write_journal(&f.paths, &journal).unwrap();
         let union = union_memberships(&journal);
         let targets = match &journal.op {
             OpKind::Add { targets, .. } => targets,
             _ => unreachable!("test journal is Add"),
         };
-        let passphrase_file = tempfile::NamedTempFile::new().unwrap();
-        {
-            use std::io::Write;
-            passphrase_file.as_file().write_all(b"testpass").unwrap();
-        }
 
-        let runner = MapperClosingRunner {
-            inner: with_balance_replay(with_two_disk_pool_probe(
-                MockRunner::default()
-                    .with_output(
-                        CmdRequest::CryptsetupLuksUuid {
-                            device: "/dev/disk/by-id/virtio-disk2".into(),
-                        },
-                        err_raw(
-                            "cryptsetup luksUUID",
-                            1,
-                            "Device is not a valid LUKS device",
-                        ),
-                    )
-                    .with_output_stdin(
-                        CmdRequest::CryptsetupTestPassphrase {
-                            device: "/dev/vda".into(),
-                        },
-                        b"testpass".to_vec(),
-                        ok_raw_empty("cryptsetup open --test-passphrase"),
-                    )
-                    .with_output_stdin(
-                        CmdRequest::CryptsetupLuksFormat {
-                            device: "/dev/disk/by-id/virtio-disk2".into(),
-                            extra_opts: stored_opts.clone(),
-                        },
-                        b"testpass".to_vec(),
-                        ok_raw_empty("cryptsetup luksFormat"),
-                    )
-                    .with_output(
-                        CmdRequest::CryptsetupLuksHeaderBackup {
-                            device: "/dev/disk/by-id/virtio-disk2".into(),
-                            backup_path: paths
-                                .luks_headers_dir()
-                                .join("braid-disk2.luksheader.tmp")
-                                .display()
-                                .to_string(),
-                        },
-                        ok_raw_empty("cryptsetup luksHeaderBackup"),
-                    )
-                    .with_output_stdin(
-                        CmdRequest::CryptsetupLuksOpen {
-                            device: "/dev/disk/by-id/virtio-disk2".into(),
-                            mapper: "braid-disk2".into(),
-                        },
-                        b"testpass".to_vec(),
-                        ok_raw_empty("cryptsetup open"),
-                    )
-                    .with_output(
-                        CmdRequest::BtrfsDeviceAdd {
-                            device: "/dev/mapper/braid-disk2".into(),
-                            mount_point: MountPoint("/mnt/storage".into()),
-                            force: false,
-                        },
-                        ok_raw_empty("btrfs device add"),
+        let inner = with_balance_replay(with_two_disk_pool_probe(
+            MockRunner::default()
+                .with_output(
+                    CmdRequest::CryptsetupLuksUuid {
+                        device: "/dev/disk/by-id/virtio-disk2".into(),
+                    },
+                    err_raw(
+                        "cryptsetup luksUUID",
+                        1,
+                        "Device is not a valid LUKS device",
                     ),
-            )),
-            fs_paths: fs_handle,
-            closed: Mutex::new(["braid-disk2".to_owned()].into()),
-        };
+                )
+                .with_output_stdin(
+                    CmdRequest::CryptsetupTestPassphrase {
+                        device: "/dev/vda".into(),
+                    },
+                    TEST_PASSPHRASE_BYTES.to_vec(),
+                    ok_raw_empty("cryptsetup open --test-passphrase"),
+                )
+                .with_output_stdin(
+                    CmdRequest::CryptsetupLuksFormat {
+                        device: "/dev/disk/by-id/virtio-disk2".into(),
+                        extra_opts: stored_opts.clone(),
+                    },
+                    TEST_PASSPHRASE_BYTES.to_vec(),
+                    ok_raw_empty("cryptsetup luksFormat"),
+                )
+                .with_output(
+                    CmdRequest::CryptsetupLuksHeaderBackup {
+                        device: "/dev/disk/by-id/virtio-disk2".into(),
+                        backup_path: f
+                            .paths
+                            .luks_headers_dir()
+                            .join("braid-disk2.luksheader.tmp")
+                            .display()
+                            .to_string(),
+                    },
+                    ok_raw_empty("cryptsetup luksHeaderBackup"),
+                )
+                .with_output_stdin(
+                    CmdRequest::CryptsetupLuksOpen {
+                        device: "/dev/disk/by-id/virtio-disk2".into(),
+                        mapper: "braid-disk2".into(),
+                    },
+                    TEST_PASSPHRASE_BYTES.to_vec(),
+                    ok_raw_empty("cryptsetup open"),
+                )
+                .with_output(
+                    CmdRequest::BtrfsDeviceAdd {
+                        device: "/dev/mapper/braid-disk2".into(),
+                        mount_point: MountPoint("/mnt/storage".into()),
+                        force: false,
+                    },
+                    ok_raw_empty("btrfs device add"),
+                ),
+        ));
+        let harness =
+            RemountHarness::new(&["/dev/disk/by-id/virtio-disk2"], inner, &["braid-disk2"]);
         let resolver = resolver_for(&[("/dev/vda", "virtio-disk1"), ("/dev/vdb", "virtio-disk2")]);
-        let params = recover_params(&config, &paths, Some(passphrase_file.path()), false);
+        let params = f.recover_params().build();
 
         execute_add_pool_mutation_recovery(
-            &runner,
-            &fs,
+            &harness.runner,
+            &harness.fs,
             &resolver,
             &params,
             AddPoolReplayCtx {
@@ -7079,24 +7046,15 @@ mod tests {
 
     #[test]
     fn fresh_replay_after_luks_format_does_not_reformat() {
-        let tmp = tempfile::TempDir::new().unwrap();
-        let paths = StatePaths::custom(tmp.path().into());
-        let config = Config::new(MountPoint("/mnt/storage".into())).unwrap();
-        let fs = StatefulMockFs::new(&["/dev/disk/by-id/virtio-disk2"]);
-        let fs_handle = fs.handle();
+        let f = PoolFixture::empty();
         let journal =
             fresh_pool_mutation_add_journal(vec!["--label".into(), "braid-disk2".into()], None);
-        journal::write_journal(&paths, &journal).unwrap();
+        journal::write_journal(&f.paths, &journal).unwrap();
         let union = union_memberships(&journal);
         let targets = match &journal.op {
             OpKind::Add { targets, .. } => targets,
             _ => unreachable!("test journal is Add"),
         };
-        let passphrase_file = tempfile::NamedTempFile::new().unwrap();
-        {
-            use std::io::Write;
-            passphrase_file.as_file().write_all(b"testpass").unwrap();
-        }
         let inner = with_balance_replay(with_two_disk_pool_probe(
             MockRunner::default()
                 .with_output(
@@ -7129,20 +7087,21 @@ mod tests {
                     CmdRequest::CryptsetupTestPassphrase {
                         device: "/dev/vda".into(),
                     },
-                    b"testpass".to_vec(),
+                    TEST_PASSPHRASE_BYTES.to_vec(),
                     ok_raw_empty("cryptsetup open --test-passphrase"),
                 )
                 .with_output_stdin(
                     CmdRequest::CryptsetupTestPassphrase {
                         device: "/dev/disk/by-id/virtio-disk2".into(),
                     },
-                    b"testpass".to_vec(),
+                    TEST_PASSPHRASE_BYTES.to_vec(),
                     ok_raw_empty("cryptsetup open --test-passphrase"),
                 )
                 .with_output(
                     CmdRequest::CryptsetupLuksHeaderBackup {
                         device: "/dev/disk/by-id/virtio-disk2".into(),
-                        backup_path: paths
+                        backup_path: f
+                            .paths
                             .luks_headers_dir()
                             .join("braid-disk2.luksheader.tmp")
                             .display()
@@ -7155,7 +7114,7 @@ mod tests {
                         device: "/dev/disk/by-id/virtio-disk2".into(),
                         mapper: "braid-disk2".into(),
                     },
-                    b"testpass".to_vec(),
+                    TEST_PASSPHRASE_BYTES.to_vec(),
                     ok_raw_empty("cryptsetup open"),
                 )
                 .with_output(
@@ -7167,18 +7126,14 @@ mod tests {
                     ok_raw_empty("btrfs device add"),
                 ),
         ));
-        let request_log = inner.clone();
-        let runner = MapperClosingRunner {
-            inner,
-            fs_paths: fs_handle,
-            closed: Mutex::new(["braid-disk2".to_owned()].into()),
-        };
+        let harness =
+            RemountHarness::new(&["/dev/disk/by-id/virtio-disk2"], inner, &["braid-disk2"]);
         let resolver = resolver_for(&[("/dev/vda", "virtio-disk1"), ("/dev/vdb", "virtio-disk2")]);
-        let params = recover_params(&config, &paths, Some(passphrase_file.path()), false);
+        let params = f.recover_params().build();
 
         execute_add_pool_mutation_recovery(
-            &runner,
-            &fs,
+            &harness.runner,
+            &harness.fs,
             &resolver,
             &params,
             AddPoolReplayCtx {
@@ -7191,7 +7146,7 @@ mod tests {
         )
         .expect("fresh replay should continue after preexisting LUKS format");
 
-        let requests = request_log.requests();
+        let requests = harness.requests();
         assert_eq!(
             luks_dump_text_request_count(&requests, "/dev/disk/by-id/virtio-disk2"),
             3,
@@ -9285,17 +9240,10 @@ mod tests {
     /// are present with LUKS closed. Passphrase provided via file.
     #[test]
     fn recover_self_mounts_when_pool_not_mounted() {
-        let tmp = tempfile::TempDir::new().unwrap();
-        let paths = StatePaths::custom(tmp.path().into());
-        let config = Config::new(MountPoint("/mnt/storage".into())).unwrap();
-        let fs = StatefulMockFs::new(&[
-            "/dev/disk/by-id/virtio-disk1",
-            "/dev/disk/by-id/virtio-disk2",
-        ]);
-        let fs_handle = fs.handle();
+        let f = PoolFixture::empty();
 
         let journal = committed_two_disk_add_journal();
-        journal::write_journal(&paths, &journal).unwrap();
+        journal::write_journal(&f.paths, &journal).unwrap();
 
         let (mp_req, mp_out) = mountpoint_fail();
         let inner = MockRunner::default()
@@ -9326,14 +9274,14 @@ mod tests {
                 CmdRequest::CryptsetupTestPassphrase {
                     device: "/dev/disk/by-id/virtio-disk1".into(),
                 },
-                b"testpass".to_vec(),
+                TEST_PASSPHRASE_BYTES.to_vec(),
                 ok_raw_empty("cryptsetup open --test-passphrase"),
             )
             .with_output_stdin(
                 CmdRequest::CryptsetupTestPassphrase {
                     device: "/dev/disk/by-id/virtio-disk2".into(),
                 },
-                b"testpass".to_vec(),
+                TEST_PASSPHRASE_BYTES.to_vec(),
                 ok_raw_empty("cryptsetup open --test-passphrase"),
             )
             // mount helper: open disk1
@@ -9342,7 +9290,7 @@ mod tests {
                     device: "/dev/disk/by-id/virtio-disk1".into(),
                     mapper: "braid-disk1".into(),
                 },
-                b"testpass".to_vec(),
+                TEST_PASSPHRASE_BYTES.to_vec(),
                 ok_raw_empty("cryptsetup open"),
             )
             // mount helper: open disk2
@@ -9351,7 +9299,7 @@ mod tests {
                     device: "/dev/disk/by-id/virtio-disk2".into(),
                     mapper: "braid-disk2".into(),
                 },
-                b"testpass".to_vec(),
+                TEST_PASSPHRASE_BYTES.to_vec(),
                 ok_raw_empty("cryptsetup open"),
             )
             // mount helper: btrfs device scan
@@ -9460,43 +9408,28 @@ mod tests {
         // After LuksOpen the wrapper removes them from the closed set so the
         // post-mount probe_pool (which needs active) falls through to the
         // seeded `cryptsetup_status_active` stubs.
-        let mut closed0 = std::collections::HashSet::new();
-        closed0.insert("braid-disk1".to_owned());
-        closed0.insert("braid-disk2".to_owned());
-        let runner = MapperClosingRunner {
+        let harness = RemountHarness::new(
+            &[
+                "/dev/disk/by-id/virtio-disk1",
+                "/dev/disk/by-id/virtio-disk2",
+            ],
             inner,
-            fs_paths: fs_handle,
-            closed: std::sync::Mutex::new(closed0),
-        };
-
-        let passphrase_file = tempfile::NamedTempFile::new().unwrap();
-        {
-            use std::io::Write;
-            passphrase_file.as_file().write_all(b"testpass").unwrap();
-        }
+            &["braid-disk1", "braid-disk2"],
+        );
 
         let resolver = resolver_for(&[("/dev/vda", "virtio-disk1"), ("/dev/vdb", "virtio-disk2")]);
         let result = cmd_recover(
-            &runner,
-            &fs,
+            &harness.runner,
+            &harness.fs,
             &resolver,
-            &RecoverParams {
-                config: &config,
-                paths: &paths,
-                passphrase_stdin: false,
-                passphrase_file: Some(passphrase_file.path()),
-                allow_degraded: true, // disk3 is absent
-                dry_run: false,
-                progress: ProgressOutput::Off,
-                sleep_inhibitor: &NOOP_INHIBITOR,
-            },
+            &f.recover_params().allow_degraded(true).build(), // disk3 is absent
         );
 
         result.expect("recover should self-mount and succeed");
 
         // pool.json must have been written with disk1 and disk2
-        assert!(paths.pool_json().exists(), "pool.json should exist");
-        let recovered = membership::load_membership(&paths).unwrap();
+        assert!(f.paths.pool_json().exists(), "pool.json should exist");
+        let recovered = membership::load_membership(&f.paths).unwrap();
         assert!(
             recovered.disks.contains_key("disk1"),
             "recovered membership should contain disk1"
@@ -9508,7 +9441,7 @@ mod tests {
 
         // pending-op.json must have been cleared
         assert!(
-            !paths.pending_op_json().exists(),
+            !f.paths.pending_op_json().exists(),
             "journal should be cleared after recovery"
         );
     }
@@ -9527,23 +9460,10 @@ mod tests {
     /// is not mounted. Recover mounts, probes, balances, and completes.
     #[test]
     fn post_add_recovery_mounts_when_all_mappers_already_open() {
-        let tmp = tempfile::TempDir::new().unwrap();
-        let paths = StatePaths::custom(tmp.path().into());
-        let config = Config::new(MountPoint("/mnt/storage".into())).unwrap();
-
-        // StatefulMockFs starts with both by-id paths AND both mapper paths.
-        // Both mapper paths are already present, modeling an operator who
-        // opened LUKS manually before invoking recover.
-        let fs = StatefulMockFs::new(&[
-            "/dev/disk/by-id/virtio-disk1",
-            "/dev/disk/by-id/virtio-disk2",
-            "/dev/mapper/braid-disk1",
-            "/dev/mapper/braid-disk2",
-        ]);
-        let fs_handle = fs.handle();
+        let f = PoolFixture::empty();
 
         let journal = committed_two_disk_add_journal();
-        journal::write_journal(&paths, &journal).unwrap();
+        journal::write_journal(&f.paths, &journal).unwrap();
 
         let inner = MockRunner::default()
             // ── Initial plan_open_pool ──────────────────────────────────
@@ -9634,42 +9554,33 @@ mod tests {
                 "/dev/disk/by-id/virtio-disk2",
             ]);
 
-        let runner = MapperClosingRunner {
+        // StatefulMockFs starts with both by-id paths AND both mapper paths.
+        // Both mapper paths are already present, modeling an operator who
+        // opened LUKS manually before invoking recover.
+        let harness = RemountHarness::new(
+            &[
+                "/dev/disk/by-id/virtio-disk1",
+                "/dev/disk/by-id/virtio-disk2",
+                "/dev/mapper/braid-disk1",
+                "/dev/mapper/braid-disk2",
+            ],
             inner,
-            fs_paths: fs_handle,
-            closed: std::sync::Mutex::new(std::collections::HashSet::new()),
-        };
-
-        // Passphrase file with the canonical "testpass" — the cycle's
-        // CryptsetupTestPassphrase mock asserts on this exact value.
-        let passphrase_file = tempfile::NamedTempFile::new().unwrap();
-        {
-            use std::io::Write;
-            passphrase_file.as_file().write_all(b"testpass").unwrap();
-        }
+            &[],
+        );
 
         let resolver = resolver_for(&[("/dev/vda", "virtio-disk1"), ("/dev/vdb", "virtio-disk2")]);
         let result = cmd_recover(
-            &runner,
-            &fs,
+            &harness.runner,
+            &harness.fs,
             &resolver,
-            &RecoverParams {
-                config: &config,
-                paths: &paths,
-                passphrase_stdin: false,
-                passphrase_file: Some(passphrase_file.path()),
-                allow_degraded: true, // disk3 is "absent" (not in fs paths)
-                dry_run: false,
-                progress: ProgressOutput::Off,
-                sleep_inhibitor: &NOOP_INHIBITOR,
-            },
+            &f.recover_params().allow_degraded(true).build(), // disk3 is "absent" (not in fs paths)
         );
 
         result.expect(
             "post-add recovery should mount with already-open mappers and finish balance replay",
         );
 
-        let requests = runner.inner.requests();
+        let requests = harness.requests();
         assert!(
             !requests.iter().any(|r| matches!(
                 r,
@@ -9679,8 +9590,8 @@ mod tests {
         );
 
         // pool.json must have been written from live pool state.
-        assert!(paths.pool_json().exists(), "pool.json should exist");
-        let recovered = membership::load_membership(&paths).unwrap();
+        assert!(f.paths.pool_json().exists(), "pool.json should exist");
+        let recovered = membership::load_membership(&f.paths).unwrap();
         assert!(
             recovered.disks.contains_key("disk1"),
             "recovered membership should contain disk1"
@@ -9692,7 +9603,7 @@ mod tests {
 
         // pending-op.json must have been cleared.
         assert!(
-            !paths.pending_op_json().exists(),
+            !f.paths.pending_op_json().exists(),
             "journal should be cleared after recovery"
         );
     }
@@ -11991,19 +11902,10 @@ mod tests {
     // to cancel the kernel operation manually before retrying.
     #[test]
     fn recover_aborts_and_preserves_journal_on_suspended_replace() {
-        let tmp = tempfile::TempDir::new().unwrap();
-        let paths = StatePaths::custom(tmp.path().into());
-        let config = Config::new(MountPoint("/mnt/storage".into())).unwrap();
-
-        let fs = StatefulMockFs::new(&[
-            "/dev/disk/by-id/virtio-disk1",
-            "/dev/disk/by-id/virtio-old",
-            "/dev/disk/by-id/virtio-new",
-        ]);
-        let fs_handle = fs.handle();
+        let f = PoolFixture::empty();
 
         let journal = replace_journal();
-        journal::write_journal(&paths, &journal).unwrap();
+        journal::write_journal(&f.paths, &journal).unwrap();
 
         let inner = MockRunner::default()
             .with_output(mountpoint_fail().0, mountpoint_fail().1)
@@ -12038,21 +11940,21 @@ mod tests {
                 CmdRequest::CryptsetupTestPassphrase {
                     device: "/dev/disk/by-id/virtio-disk1".into(),
                 },
-                b"testpass".to_vec(),
+                TEST_PASSPHRASE_BYTES.to_vec(),
                 ok_raw_empty("cryptsetup open --test-passphrase"),
             )
             .with_output_stdin(
                 CmdRequest::CryptsetupTestPassphrase {
                     device: "/dev/disk/by-id/virtio-new".into(),
                 },
-                b"testpass".to_vec(),
+                TEST_PASSPHRASE_BYTES.to_vec(),
                 ok_raw_empty("cryptsetup open --test-passphrase"),
             )
             .with_output_stdin(
                 CmdRequest::CryptsetupTestPassphrase {
                     device: "/dev/disk/by-id/virtio-old".into(),
                 },
-                b"testpass".to_vec(),
+                TEST_PASSPHRASE_BYTES.to_vec(),
                 ok_raw_empty("cryptsetup open --test-passphrase"),
             )
             .with_output_stdin(
@@ -12060,7 +11962,7 @@ mod tests {
                     device: "/dev/disk/by-id/virtio-disk1".into(),
                     mapper: "braid-disk1".into(),
                 },
-                b"testpass".to_vec(),
+                TEST_PASSPHRASE_BYTES.to_vec(),
                 ok_raw_empty("cryptsetup open"),
             )
             .with_output_stdin(
@@ -12068,7 +11970,7 @@ mod tests {
                     device: "/dev/disk/by-id/virtio-new".into(),
                     mapper: "braid-new".into(),
                 },
-                b"testpass".to_vec(),
+                TEST_PASSPHRASE_BYTES.to_vec(),
                 ok_raw_empty("cryptsetup open"),
             )
             .with_output_stdin(
@@ -12076,7 +11978,7 @@ mod tests {
                     device: "/dev/disk/by-id/virtio-old".into(),
                     mapper: "braid-old".into(),
                 },
-                b"testpass".to_vec(),
+                TEST_PASSPHRASE_BYTES.to_vec(),
                 ok_raw_empty("cryptsetup open"),
             )
             .with_output(
@@ -12106,36 +12008,22 @@ mod tests {
                 "/dev/disk/by-id/virtio-new",
             ]);
 
-        let mut closed0 = std::collections::HashSet::new();
-        closed0.insert("braid-disk1".to_owned());
-        closed0.insert("braid-new".to_owned());
-        closed0.insert("braid-old".to_owned());
-        let runner = MapperClosingRunner {
+        let harness = RemountHarness::new(
+            &[
+                "/dev/disk/by-id/virtio-disk1",
+                "/dev/disk/by-id/virtio-old",
+                "/dev/disk/by-id/virtio-new",
+            ],
             inner,
-            fs_paths: fs_handle,
-            closed: std::sync::Mutex::new(closed0),
-        };
+            &["braid-disk1", "braid-new", "braid-old"],
+        );
 
-        let passphrase_file = tempfile::NamedTempFile::new().unwrap();
-        {
-            use std::io::Write;
-            passphrase_file.as_file().write_all(b"testpass").unwrap();
-        }
         let resolver = resolver_for(&[("/dev/vda", "virtio-disk1"), ("/dev/vdc", "virtio-new")]);
-        let params = RecoverParams {
-            config: &config,
-            paths: &paths,
-            passphrase_stdin: false,
-            passphrase_file: Some(passphrase_file.path()),
-            allow_degraded: false,
-            dry_run: false,
-            progress: ProgressOutput::Off,
-            sleep_inhibitor: &NOOP_INHIBITOR,
-        };
+        let params = f.recover_params().build();
 
-        let report = plan_recover(&runner, &fs, &params);
+        let report = plan_recover(&harness.runner, &harness.fs, &params);
         let plan = report.result.expect("recover planning should succeed");
-        let result = plan.execute(&runner, &fs, &resolver, &params);
+        let result = plan.execute(&harness.runner, &harness.fs, &resolver, &params);
 
         let err = result.expect_err("suspended replace should abort recover");
         let msg = err.to_string();
@@ -12148,11 +12036,11 @@ mod tests {
             "error should include manual cancel command, got: {msg}"
         );
         assert!(
-            journal::load_journal(&paths).unwrap().is_some(),
+            journal::load_journal(&f.paths).unwrap().is_some(),
             "journal should remain after suspended replace abort"
         );
 
-        let requests = runner.inner.requests();
+        let requests = harness.requests();
         assert!(
             !requests.iter().any(|r| matches!(
                 r,
@@ -12196,23 +12084,10 @@ mod tests {
     /// journal.
     #[test]
     fn recover_replays_resize_after_replace_via_mount_cycle() {
-        let tmp = tempfile::TempDir::new().unwrap();
-        let paths = StatePaths::custom(tmp.path().into());
-        let config = Config::new(MountPoint("/mnt/storage".into())).unwrap();
-
-        // StatefulMockFs starts with by-id paths for the union {disk1, old,
-        // new}. No mapper paths -- everything starts closed.
-        // MapperClosingRunner adds mapper paths after each successful
-        // CryptsetupLuksOpen and removes them after each CryptsetupClose.
-        let fs = StatefulMockFs::new(&[
-            "/dev/disk/by-id/virtio-disk1",
-            "/dev/disk/by-id/virtio-old",
-            "/dev/disk/by-id/virtio-new",
-        ]);
-        let fs_handle = fs.handle();
+        let f = PoolFixture::empty();
 
         let journal = replace_journal();
-        journal::write_journal(&paths, &journal).unwrap();
+        journal::write_journal(&f.paths, &journal).unwrap();
 
         let inner = MockRunner::default()
             // ── Initial plan_open_pool ──────────────────────────────────
@@ -12255,21 +12130,21 @@ mod tests {
                 CmdRequest::CryptsetupTestPassphrase {
                     device: "/dev/disk/by-id/virtio-disk1".into(),
                 },
-                b"testpass".to_vec(),
+                TEST_PASSPHRASE_BYTES.to_vec(),
                 ok_raw_empty("cryptsetup open --test-passphrase"),
             )
             .with_output_stdin(
                 CmdRequest::CryptsetupTestPassphrase {
                     device: "/dev/disk/by-id/virtio-new".into(),
                 },
-                b"testpass".to_vec(),
+                TEST_PASSPHRASE_BYTES.to_vec(),
                 ok_raw_empty("cryptsetup open --test-passphrase"),
             )
             .with_output_stdin(
                 CmdRequest::CryptsetupTestPassphrase {
                     device: "/dev/disk/by-id/virtio-old".into(),
                 },
-                b"testpass".to_vec(),
+                TEST_PASSPHRASE_BYTES.to_vec(),
                 ok_raw_empty("cryptsetup open --test-passphrase"),
             )
             .with_output_stdin(
@@ -12277,7 +12152,7 @@ mod tests {
                     device: "/dev/disk/by-id/virtio-disk1".into(),
                     mapper: "braid-disk1".into(),
                 },
-                b"testpass".to_vec(),
+                TEST_PASSPHRASE_BYTES.to_vec(),
                 ok_raw_empty("cryptsetup open"),
             )
             .with_output_stdin(
@@ -12285,7 +12160,7 @@ mod tests {
                     device: "/dev/disk/by-id/virtio-new".into(),
                     mapper: "braid-new".into(),
                 },
-                b"testpass".to_vec(),
+                TEST_PASSPHRASE_BYTES.to_vec(),
                 ok_raw_empty("cryptsetup open"),
             )
             .with_output_stdin(
@@ -12293,7 +12168,7 @@ mod tests {
                     device: "/dev/disk/by-id/virtio-old".into(),
                     mapper: "braid-old".into(),
                 },
-                b"testpass".to_vec(),
+                TEST_PASSPHRASE_BYTES.to_vec(),
                 ok_raw_empty("cryptsetup open"),
             )
             .with_output(
@@ -12425,52 +12300,39 @@ mod tests {
         // not owe post-commit RAID1 maintenance, so any balance replay would
         // fail with MissingMock.
 
+        // StatefulMockFs starts with by-id paths for the union {disk1, old,
+        // new}. No mapper paths -- everything starts closed.
+        // RemountRunner adds mapper paths after each successful
+        // CryptsetupLuksOpen and removes them after each CryptsetupClose.
         // All three union mappers start closed: probe_mapper_open reports
-        // inactive via MapperClosingRunner's `closed`-set fast path, so
+        // inactive via the harness's `closed`-set fast path, so
         // plan_open_pool builds a non-empty to_unlock and the initial
         // mount runs LuksOpen for each. Successful LuksOpen removes the
         // entry from `closed` and adds the mapper path to fs; the cycle's
         // Close re-adds the entry and removes the mapper path; the cycle's
         // LuksOpen reverses again.
-        let mut closed0 = std::collections::HashSet::new();
-        closed0.insert("braid-disk1".to_owned());
-        closed0.insert("braid-new".to_owned());
-        closed0.insert("braid-old".to_owned());
-        let runner = MapperClosingRunner {
+        let harness = RemountHarness::new(
+            &[
+                "/dev/disk/by-id/virtio-disk1",
+                "/dev/disk/by-id/virtio-old",
+                "/dev/disk/by-id/virtio-new",
+            ],
             inner,
-            fs_paths: fs_handle,
-            closed: std::sync::Mutex::new(closed0),
-        };
-
-        // Passphrase file with the canonical "testpass" -- the mocks above
-        // assert on this exact stdin payload.
-        let passphrase_file = tempfile::NamedTempFile::new().unwrap();
-        {
-            use std::io::Write;
-            passphrase_file.as_file().write_all(b"testpass").unwrap();
-        }
+            &["braid-disk1", "braid-new", "braid-old"],
+        );
 
         let resolver = resolver_for(&[("/dev/vda", "virtio-disk1"), ("/dev/vdc", "virtio-new")]);
         let result = cmd_recover(
-            &runner,
-            &fs,
+            &harness.runner,
+            &harness.fs,
             &resolver,
-            &RecoverParams {
-                config: &config,
-                paths: &paths,
-                passphrase_stdin: false,
-                passphrase_file: Some(passphrase_file.path()),
-                allow_degraded: false,
-                dry_run: false,
-                progress: ProgressOutput::Off,
-                sleep_inhibitor: &NOOP_INHIBITOR,
-            },
+            &f.recover_params().build(),
         );
 
         result.expect("recover should succeed via the mount cycle and replay the resize");
-        let requests = runner.inner.requests();
+        let requests = harness.requests();
 
-        let recovered = membership::load_membership(&paths).unwrap();
+        let recovered = membership::load_membership(&f.paths).unwrap();
         assert!(
             recovered.disks.contains_key("disk1") && recovered.disks.contains_key("new"),
             "recovered membership should match the post-replace target"
@@ -12481,7 +12343,7 @@ mod tests {
         );
 
         assert!(
-            !paths.pending_op_json().exists(),
+            !f.paths.pending_op_json().exists(),
             "journal must be cleared after a successful resize replay"
         );
         assert!(
