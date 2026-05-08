@@ -1,5 +1,5 @@
 //! Test-only shared fixtures for `replace`, `add`, `remove`,
-//! `remove_missing`, `recover`, and `doctor`.
+//! `remove_missing`, `recover`, `doctor`, and `mount`.
 //!
 //! These fixtures consolidate the per-test scaffolding that previously
 //! lived as one-off `*Runner` structs and inline `tempdir + config + pass +
@@ -27,6 +27,13 @@
 //!     three named runners (`DfQueryFailureRunner`,
 //!     `PoolMissingDevicesRunner`, `UpscSpawnFailureRunner`), and the
 //!     `cls` summarizer-input builder.
+//!   * `mount` -- flat collection of mount-shaped helpers
+//!     (`base_two_disk_runner`, `direct_two_disk_*`,
+//!     `open_and_mount_for_test`, `mount_fs`, `NoopSleeper`, leaf
+//!     output factories). Ships flat (no topology installer, no params
+//!     builder) because mount's planner/executor entry points take
+//!     positional args and ProbeFailed-uncertainty tests deliberately
+//!     omit specific probes -- a broad handler would silently break them.
 //!   * `PoolFixture` -- bundled tempdirs + `StatePaths` + config +
 //!     passphrase + `RecordingInhibitor`.
 //!   * `ReplaceParamsBuilder` / `AddParamsBuilder` / `RemoveParamsBuilder`
@@ -34,11 +41,12 @@
 //!     builders over command defaults.
 //!
 //! Layout: this file is a facade. `shared` holds cross-scope items;
-//! `replace`, `add`, `remove`, `remove_missing`, `recover`, and `doctor`
-//! hold their per-scope topologies, builders, and helpers.
+//! `replace`, `add`, `remove`, `remove_missing`, `recover`, `doctor`,
+//! and `mount` hold their per-scope topologies, builders, and helpers.
 
 mod add;
 mod doctor;
+mod mount;
 mod recover;
 mod remove;
 mod remove_missing;
@@ -52,6 +60,14 @@ pub(crate) use doctor::{
     config_with_ups_enabled, config_without_ups, device_usage_healthy, device_usage_with_missing,
     df_json, df_json_fail, human_options, isolated_paths, mountpoint_fail, mountpoint_ok,
     parsed_doctor_ctx, systemctl_is_active_output, ups_ctx, valid_config_json, write_temp,
+};
+#[allow(unused_imports)]
+pub(crate) use mount::{
+    MOUNT_TEST_PASSPHRASE_BYTES, NoopSleeper, arbitrary_fallback, base_two_disk_runner,
+    direct_two_disk_fs_with_mappers, direct_two_disk_open_runner, direct_two_disk_plan, err_raw,
+    is_luks_fail, is_luks_ok, luks_dump_text_fail, luks_dump_text_ok, luks_uuid_ok, mount_fs,
+    ok_raw, open_and_mount_for_test, test_config, test_passphrase, test_passphrase_fail,
+    three_disk_membership, two_disk_membership,
 };
 #[allow(unused_imports)]
 pub(crate) use recover::{RecoverParamsBuilder, RemountHarness};

@@ -57,7 +57,6 @@ impl MockFs {
     /// Unmounted host: `/proc/self/mountinfo` reports the rootfs only,
     /// no /mnt/storage entry. Use for bootstrap tests where the pool
     /// is not yet mounted at the start of the run.
-    #[allow(dead_code)]
     pub(crate) fn unmounted(paths: Vec<String>) -> Self {
         Self {
             paths,

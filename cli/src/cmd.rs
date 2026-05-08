@@ -1285,6 +1285,66 @@ mod tests {
         let _ = mock.run_with_stdin(&req, b"wrong");
     }
 
+    // Intent: A second `with_output_stdin` call for the same `CmdRequest`
+    //   must overwrite both the registered output AND the expected stdin
+    //   bytes set by the first call -- not append, not shadow.
+    // Why it exists: the mount-fixture migration relies on this so per-test
+    //   verify overrides chained on top of `base_two_disk_runner()` flip
+    //   both the expected stdin bytes and the resolved output (e.g.
+    //   `mount.rs::tests::unlock_passphrase_verify_fails_ok_header_*`
+    //   chains `.with_output_stdin(tp_req, b"wrongpass", tp_out)` after
+    //   the base seeded `b"testpass"`). If a future MockRunner refactor
+    //   switches `outputs` or `stdin_expectations` to a queue/Vec, that
+    //   override pattern silently regresses; this test fails the moment
+    //   it does.
+    // Scenario: register two `with_output_stdin` calls with the same
+    //   request key but distinct stdin byte strings and distinct outputs;
+    //   call `run_with_stdin` with the SECOND call's stdin bytes and
+    //   assert the SECOND output is returned. Success requires both
+    //   `outputs.insert` and `stdin_expectations.insert` to have
+    //   overwritten -- if outputs did not overwrite the cmd would be
+    //   "first"; if stdin_expectations did not overwrite the call would
+    //   panic on stdin mismatch.
+    #[test]
+    fn mock_runner_with_output_stdin_override_after_base_wins() {
+        let req = CmdRequest::CryptsetupTestPassphrase {
+            device: "/dev/vdb".to_owned(),
+        };
+        let runner = MockRunner::default()
+            .with_output_stdin(
+                req.clone(),
+                b"testpass".to_vec(),
+                RawCommandOutput {
+                    cmd: "first".to_owned(),
+                    stdout: String::new(),
+                    stderr: String::new(),
+                    exit_status: 0,
+                },
+            )
+            .with_output_stdin(
+                req.clone(),
+                b"wrongpass".to_vec(),
+                RawCommandOutput {
+                    cmd: "second".to_owned(),
+                    stdout: String::new(),
+                    stderr: "wrong passphrase".to_owned(),
+                    exit_status: 2,
+                },
+            );
+
+        // Calling with the SECOND registration's bytes proves
+        // stdin_expectations was overwritten (no panic) AND outputs was
+        // overwritten (cmd == "second").
+        let out = runner
+            .run_with_stdin(&req, b"wrongpass")
+            .expect("override stdin should match the second expectation");
+        assert_eq!(
+            out.cmd, "second",
+            "second with_output_stdin must overwrite first output"
+        );
+        assert_eq!(out.exit_status, 2, "override exit status must win");
+    }
+
     fn raw_ok(cmd: &str, stdout: &str) -> RawCommandOutput {
         RawCommandOutput {
             cmd: cmd.to_owned(),
