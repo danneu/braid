@@ -3385,10 +3385,12 @@ mod tests {
     /// device-mapper paths disappearing when `cryptsetup close` runs.
     /// Used together with `MapperClosingRunner` for tests that exercise
     /// the recover relock cycle on initially-open mappers.
+    #[allow(dead_code)] // superseded by RemountHarness; deletion deferred to commit 13
     struct StatefulMockFs {
         paths: SharedPaths,
     }
 
+    #[allow(dead_code)]
     impl StatefulMockFs {
         fn new(initial: &[&str]) -> Self {
             Self {
@@ -5102,24 +5104,11 @@ mod tests {
 
     #[test]
     fn plan_recover_discovers_fresh_add_targets_before_mount_planning() {
-        let tmp = tempfile::TempDir::new().unwrap();
-        let paths = StatePaths::custom(tmp.path().into());
-        let config = Config::new(MountPoint("/mnt/storage".into())).unwrap();
-        let fs = StatefulMockFs::new(&[
-            "/dev/disk/by-id/virtio-disk1",
-            "/dev/disk/by-id/virtio-disk2",
-        ]);
-        let fs_handle = fs.handle();
+        let f = PoolFixture::empty();
 
         let journal =
             fresh_pool_mutation_add_journal(vec!["--label".into(), "braid-disk2".into()], None);
-        journal::write_journal(&paths, &journal).unwrap();
-
-        let passphrase_file = tempfile::NamedTempFile::new().unwrap();
-        {
-            use std::io::Write;
-            passphrase_file.as_file().write_all(b"testpass").unwrap();
-        }
+        journal::write_journal(&f.paths, &journal).unwrap();
 
         let inner = MockRunner::default()
             .with_output(mountpoint_fail().0, mountpoint_fail().1)
@@ -5154,7 +5143,7 @@ mod tests {
                     device: "/dev/disk/by-id/virtio-disk2".into(),
                     mapper: "braid-disk2".into(),
                 },
-                b"testpass".to_vec(),
+                TEST_PASSPHRASE_BYTES.to_vec(),
                 ok_raw_empty("cryptsetup open"),
             )
             .with_output(
@@ -5163,15 +5152,17 @@ mod tests {
                 },
                 btrfs_show_target_no_btrfs("/dev/mapper/braid-disk2"),
             );
-        let request_log = inner.clone();
-        let runner = MapperClosingRunner {
+        let harness = RemountHarness::new(
+            &[
+                "/dev/disk/by-id/virtio-disk1",
+                "/dev/disk/by-id/virtio-disk2",
+            ],
             inner,
-            fs_paths: fs_handle,
-            closed: Mutex::new(["braid-disk1".to_owned(), "braid-disk2".to_owned()].into()),
-        };
+            &["braid-disk1", "braid-disk2"],
+        );
 
-        let params = recover_params(&config, &paths, Some(passphrase_file.path()), false);
-        let plan = plan_recover(&runner, &fs, &params)
+        let params = f.recover_params().build();
+        let plan = plan_recover(&harness.runner, &harness.fs, &params)
             .result
             .expect("planner should discover fresh add target, then plan from pre-membership");
         let open_plan = plan
@@ -5186,7 +5177,7 @@ mod tests {
             )]
         );
 
-        let requests = request_log.requests();
+        let requests = harness.requests();
         let disk2_open = requests
             .iter()
             .position(|r| {
@@ -5243,16 +5234,14 @@ mod tests {
     // container. Recovery should still plan a mount from disk1.
     #[test]
     fn plan_recover_skips_pre_mount_discovery_on_uuid_mismatch() {
-        let tmp = tempfile::TempDir::new().unwrap();
-        let paths = StatePaths::custom(tmp.path().into());
-        let config = Config::new(MountPoint("/mnt/storage".into())).unwrap();
+        let f = PoolFixture::empty();
         let fs = MockFs::new(&[
             "/dev/disk/by-id/virtio-disk1",
             "/dev/disk/by-id/virtio-disk2",
         ]);
 
         let journal = recoverable_pool_mutation_add_journal();
-        journal::write_journal(&paths, &journal).unwrap();
+        journal::write_journal(&f.paths, &journal).unwrap();
 
         let runner = MockRunner::default()
             .with_output(mountpoint_fail().0, mountpoint_fail().1)
@@ -5290,7 +5279,7 @@ mod tests {
             );
         let request_log = runner.clone();
 
-        let params = recover_params(&config, &paths, None, false);
+        let params = f.recover_params().passphrase_file(None).build();
         let plan = plan_recover(&runner, &fs, &params)
             .result
             .expect("planner should skip mismatched add target and mount from pre-membership");
@@ -5342,9 +5331,7 @@ mod tests {
     // but luksDump reports a different label on the live device.
     #[test]
     fn plan_recover_skips_pre_mount_discovery_on_fresh_label_mismatch() {
-        let tmp = tempfile::TempDir::new().unwrap();
-        let paths = StatePaths::custom(tmp.path().into());
-        let config = Config::new(MountPoint("/mnt/storage".into())).unwrap();
+        let f = PoolFixture::empty();
         let fs = MockFs::new(&[
             "/dev/disk/by-id/virtio-disk1",
             "/dev/disk/by-id/virtio-disk2",
@@ -5352,7 +5339,7 @@ mod tests {
 
         let journal =
             fresh_pool_mutation_add_journal(vec!["--label".into(), "braid-disk2".into()], None);
-        journal::write_journal(&paths, &journal).unwrap();
+        journal::write_journal(&f.paths, &journal).unwrap();
 
         let runner = MockRunner::default()
             .with_output(mountpoint_fail().0, mountpoint_fail().1)
@@ -5395,7 +5382,7 @@ mod tests {
             );
         let request_log = runner.clone();
 
-        let params = recover_params(&config, &paths, None, false);
+        let params = f.recover_params().passphrase_file(None).build();
         let plan = plan_recover(&runner, &fs, &params)
             .result
             .expect("planner should skip mislabeled fresh target and mount from pre-membership");
@@ -5447,9 +5434,7 @@ mod tests {
     // matches the journal and has a visible btrfs signature.
     #[test]
     fn plan_recover_continues_pre_mount_discovery_after_mismatched_target() {
-        let tmp = tempfile::TempDir::new().unwrap();
-        let paths = StatePaths::custom(tmp.path().into());
-        let config = Config::new(MountPoint("/mnt/storage".into())).unwrap();
+        let f = PoolFixture::empty();
         let fs = MockFs::new(&[
             "/dev/disk/by-id/virtio-disk1",
             "/dev/disk/by-id/virtio-disk2",
@@ -5457,13 +5442,7 @@ mod tests {
         ]);
 
         let journal = two_target_recoverable_pool_mutation_add_journal();
-        journal::write_journal(&paths, &journal).unwrap();
-
-        let passphrase_file = tempfile::NamedTempFile::new().unwrap();
-        {
-            use std::io::Write;
-            passphrase_file.as_file().write_all(b"testpass").unwrap();
-        }
+        journal::write_journal(&f.paths, &journal).unwrap();
 
         let runner = MockRunner::default()
             .with_output(mountpoint_fail().0, mountpoint_fail().1)
@@ -5504,7 +5483,7 @@ mod tests {
                     device: "/dev/disk/by-id/virtio-disk3".into(),
                     mapper: "braid-disk3".into(),
                 },
-                b"testpass".to_vec(),
+                TEST_PASSPHRASE_BYTES.to_vec(),
                 ok_raw_empty("cryptsetup open"),
             )
             .with_output(
@@ -5537,7 +5516,7 @@ mod tests {
             );
         let request_log = runner.clone();
 
-        let params = recover_params(&config, &paths, Some(passphrase_file.path()), false);
+        let params = f.recover_params().build();
         let plan = plan_recover(&runner, &fs, &params)
             .result
             .expect("planner should skip disk2 and continue discovering disk3");
