@@ -7693,15 +7693,16 @@ mod tests {
     // the journal; recover writes committed membership, balances, and clears.
     #[test]
     fn remove_missing_pool_mutation_committed_finishes_post_maintenance() {
-        let tmp = tempfile::TempDir::new().unwrap();
-        let paths = StatePaths::custom(tmp.path().into());
-        let config = Config::new(MountPoint("/mnt/storage".into())).unwrap();
+        let f = PoolFixture::empty();
         let journal = remove_missing_journal_two_survivors();
-        journal::write_journal(&paths, &journal).unwrap();
+        journal::write_journal(&f.paths, &journal).unwrap();
         let runner = with_balance_replay(MockRunner::default());
         let resolver = resolver_for(&[("/dev/vda", "virtio-disk1"), ("/dev/vdb", "virtio-disk2")]);
-        let inhibitor = crate::inhibit::RecordingInhibitor::new();
-        let params = recover_params_with_inhibitor(&config, &paths, None, false, &inhibitor);
+        let params = f
+            .recover_params()
+            .passphrase_file(None)
+            .sleep_inhibitor(&f.inhibitor)
+            .build();
 
         execute_remove_missing_pool_mutation_recovery(
             &runner,
@@ -7715,7 +7716,7 @@ mod tests {
         .expect("committed remove-missing should finish post maintenance");
 
         let requests = runner.requests();
-        assert_eq!(inhibitor.acquire_count(), 1);
+        assert_eq!(f.inhibitor.acquire_count(), 1);
         assert!(
             requests
                 .iter()
@@ -7728,8 +7729,8 @@ mod tests {
                 .any(|r| matches!(r, CmdRequest::BtrfsDeviceRemove { .. })),
             "recover must never rerun btrfs device remove"
         );
-        assert!(!paths.pending_op_json().exists());
-        let recovered = membership::load_membership(&paths).unwrap();
+        assert!(!f.paths.pending_op_json().exists());
+        let recovered = membership::load_membership(&f.paths).unwrap();
         assert_eq!(
             recovered.disks.keys().cloned().collect::<Vec<_>>(),
             vec!["disk1".to_owned(), "disk2".to_owned()]
@@ -7744,14 +7745,15 @@ mod tests {
     // devid, so recovery restores pre-operation pool.json and asks for rerun.
     #[test]
     fn remove_missing_pool_mutation_not_committed_restores_pre_membership() {
-        let tmp = tempfile::TempDir::new().unwrap();
-        let paths = StatePaths::custom(tmp.path().into());
-        let config = Config::new(MountPoint("/mnt/storage".into())).unwrap();
+        let f = PoolFixture::empty();
         let journal = remove_missing_journal();
-        journal::write_journal(&paths, &journal).unwrap();
+        journal::write_journal(&f.paths, &journal).unwrap();
         let runner = MockRunner::default();
-        let inhibitor = crate::inhibit::RecordingInhibitor::new();
-        let params = recover_params_with_inhibitor(&config, &paths, None, false, &inhibitor);
+        let params = f
+            .recover_params()
+            .passphrase_file(None)
+            .sleep_inhibitor(&f.inhibitor)
+            .build();
 
         execute_remove_missing_pool_mutation_recovery(
             &runner,
@@ -7764,10 +7766,10 @@ mod tests {
         )
         .expect("uncommitted remove-missing should clear journal after restoring pre state");
 
-        assert_eq!(inhibitor.acquire_count(), 0);
+        assert_eq!(f.inhibitor.acquire_count(), 0);
         assert!(runner.requests().is_empty());
-        assert!(!paths.pending_op_json().exists());
-        let recovered = membership::load_membership(&paths).unwrap();
+        assert!(!f.paths.pending_op_json().exists());
+        let recovered = membership::load_membership(&f.paths).unwrap();
         assert!(recovered.disks.contains_key("disk2"));
     }
 
@@ -7778,13 +7780,11 @@ mod tests {
     // old disk name is still live, so recovery preserves pending-op.json.
     #[test]
     fn remove_missing_pool_mutation_mixed_state_preserves_journal() {
-        let tmp = tempfile::TempDir::new().unwrap();
-        let paths = StatePaths::custom(tmp.path().into());
-        let config = Config::new(MountPoint("/mnt/storage".into())).unwrap();
+        let f = PoolFixture::empty();
         let journal = remove_missing_journal();
-        journal::write_journal(&paths, &journal).unwrap();
+        journal::write_journal(&f.paths, &journal).unwrap();
         let runner = MockRunner::default();
-        let params = recover_params(&config, &paths, None, false);
+        let params = f.recover_params().passphrase_file(None).build();
 
         let err = execute_remove_missing_pool_mutation_recovery(
             &runner,
@@ -7802,8 +7802,8 @@ mod tests {
                 .contains("does not match the target membership"),
             "{err}"
         );
-        assert!(paths.pending_op_json().exists());
-        assert!(!paths.pool_json().exists());
+        assert!(f.paths.pending_op_json().exists());
+        assert!(!f.paths.pool_json().exists());
         assert!(runner.requests().is_empty());
     }
 
@@ -7815,20 +7815,21 @@ mod tests {
     // journal clear because another missing device remains.
     #[test]
     fn remove_missing_post_maintenance_skips_unowed_balance() {
-        let tmp = tempfile::TempDir::new().unwrap();
-        let paths = StatePaths::custom(tmp.path().into());
-        let config = Config::new(MountPoint("/mnt/storage".into())).unwrap();
+        let f = PoolFixture::empty();
         let mut journal = remove_missing_journal();
         journal.op = OpKind::RemoveMissing {
             phase: journal::RemoveMissingPhase::PostRemoveMissingMaintenance,
             devid: 2,
             restore_raid1_after_commit: false,
         };
-        journal::write_journal(&paths, &journal).unwrap();
+        journal::write_journal(&f.paths, &journal).unwrap();
         let runner = MockRunner::default();
         let resolver = resolver_for(&[("/dev/vda", "virtio-disk1")]);
-        let inhibitor = crate::inhibit::RecordingInhibitor::new();
-        let params = recover_params_with_inhibitor(&config, &paths, None, false, &inhibitor);
+        let params = f
+            .recover_params()
+            .passphrase_file(None)
+            .sleep_inhibitor(&f.inhibitor)
+            .build();
 
         execute_remove_missing_post_maintenance_recovery(
             &runner,
@@ -7844,9 +7845,9 @@ mod tests {
         )
         .expect("unowed post-remove maintenance should only repair state");
 
-        assert_eq!(inhibitor.acquire_count(), 0);
+        assert_eq!(f.inhibitor.acquire_count(), 0);
         assert!(runner.requests().is_empty());
-        assert!(!paths.pending_op_json().exists());
+        assert!(!f.paths.pending_op_json().exists());
     }
 
     // Intent: post-maintenance inhibitor failure preserves the remove-missing
@@ -7857,20 +7858,22 @@ mod tests {
     // logind refuses the inhibitor.
     #[test]
     fn remove_missing_post_maintenance_inhibitor_failure_preserves_journal() {
-        let tmp = tempfile::TempDir::new().unwrap();
-        let paths = StatePaths::custom(tmp.path().into());
-        let config = Config::new(MountPoint("/mnt/storage".into())).unwrap();
+        let f = PoolFixture::empty();
         let mut journal = remove_missing_journal();
         journal.op = OpKind::RemoveMissing {
             phase: journal::RemoveMissingPhase::PostRemoveMissingMaintenance,
             devid: 2,
             restore_raid1_after_commit: true,
         };
-        journal::write_journal(&paths, &journal).unwrap();
+        journal::write_journal(&f.paths, &journal).unwrap();
         let runner = MockRunner::default();
         let resolver = resolver_for(&[("/dev/vda", "virtio-disk1")]);
         let inhibitor = FailingInhibitor;
-        let params = recover_params_with_inhibitor(&config, &paths, None, false, &inhibitor);
+        let params = f
+            .recover_params()
+            .passphrase_file(None)
+            .sleep_inhibitor(&inhibitor)
+            .build();
 
         let err = execute_remove_missing_post_maintenance_recovery(
             &runner,
@@ -7892,7 +7895,7 @@ mod tests {
             "{err}"
         );
         assert!(runner.requests().is_empty());
-        assert!(paths.pending_op_json().exists());
+        assert!(f.paths.pending_op_json().exists());
     }
 
     // Intent: Replace::PoolMutation recovery advances committed replace to
@@ -12830,13 +12833,11 @@ mod tests {
      */
     #[test]
     fn cmd_recover_remove_with_null_underlying_target_preserves_membership() {
-        let tmp = tempfile::TempDir::new().unwrap();
-        let paths = StatePaths::custom(tmp.path().into());
-        let config = Config::new(MountPoint("/mnt/storage".into())).unwrap();
+        let f = PoolFixture::empty();
         let fs = MockFs::new(&[]);
 
         let journal = remove_2to1_journal_with_target_devid();
-        journal::write_journal(&paths, &journal).unwrap();
+        journal::write_journal(&f.paths, &journal).unwrap();
 
         let (mp_req, mp_out) = mountpoint_ok();
         let runner = MockRunner::default()
@@ -12867,24 +12868,11 @@ mod tests {
             );
 
         let resolver = resolver_for(&[("/dev/vda", "virtio-disk1"), ("/dev/vdb", "virtio-disk2")]);
-        let result = cmd_recover(
-            &runner,
-            &fs,
-            &resolver,
-            &RecoverParams {
-                config: &config,
-                paths: &paths,
-                passphrase_stdin: false,
-                passphrase_file: None,
-                allow_degraded: false,
-                dry_run: false,
-                progress: ProgressOutput::Off,
-                sleep_inhibitor: &NOOP_INHIBITOR,
-            },
-        );
+        let params = f.recover_params().passphrase_file(None).build();
+        let result = cmd_recover(&runner, &fs, &resolver, &params);
         result.expect("recover should succeed and preserve null-underlying target");
 
-        let recovered = membership::load_membership(&paths).unwrap();
+        let recovered = membership::load_membership(&f.paths).unwrap();
         assert!(
             recovered.disks.contains_key("disk1"),
             "recovered membership must keep disk1: {:?}",
@@ -12896,7 +12884,7 @@ mod tests {
             recovered.disks.keys().collect::<Vec<_>>()
         );
         assert!(
-            !paths.pending_op_json().exists(),
+            !f.paths.pending_op_json().exists(),
             "journal must be cleared after live-pool recovery"
         );
     }
@@ -12919,13 +12907,11 @@ mod tests {
      */
     #[test]
     fn cmd_recover_remove_with_missing_target_preserves_membership() {
-        let tmp = tempfile::TempDir::new().unwrap();
-        let paths = StatePaths::custom(tmp.path().into());
-        let config = Config::new(MountPoint("/mnt/storage".into())).unwrap();
+        let f = PoolFixture::empty();
         let fs = MockFs::new(&[]);
 
         let journal = remove_2to1_journal_with_target_devid();
-        journal::write_journal(&paths, &journal).unwrap();
+        journal::write_journal(&f.paths, &journal).unwrap();
 
         let (mp_req, mp_out) = mountpoint_ok();
         let runner = MockRunner::default()
@@ -12950,24 +12936,11 @@ mod tests {
             );
 
         let resolver = resolver_for(&[("/dev/vda", "virtio-disk1")]);
-        let result = cmd_recover(
-            &runner,
-            &fs,
-            &resolver,
-            &RecoverParams {
-                config: &config,
-                paths: &paths,
-                passphrase_stdin: false,
-                passphrase_file: None,
-                allow_degraded: false,
-                dry_run: false,
-                progress: ProgressOutput::Off,
-                sleep_inhibitor: &NOOP_INHIBITOR,
-            },
-        );
+        let params = f.recover_params().passphrase_file(None).build();
+        let result = cmd_recover(&runner, &fs, &resolver, &params);
         result.expect("recover should succeed and preserve MISSING target");
 
-        let recovered = membership::load_membership(&paths).unwrap();
+        let recovered = membership::load_membership(&f.paths).unwrap();
         assert!(
             recovered.disks.contains_key("disk1"),
             "recovered membership must keep disk1: {:?}",
@@ -12979,7 +12952,7 @@ mod tests {
             recovered.disks.keys().collect::<Vec<_>>()
         );
         assert!(
-            !paths.pending_op_json().exists(),
+            !f.paths.pending_op_json().exists(),
             "journal must be cleared after live-pool recovery"
         );
     }
@@ -12999,35 +12972,20 @@ mod tests {
      */
     #[test]
     fn cmd_recover_remove_with_genuinely_evicted_target_drops_membership() {
-        let tmp = tempfile::TempDir::new().unwrap();
-        let paths = StatePaths::custom(tmp.path().into());
-        let config = Config::new(MountPoint("/mnt/storage".into())).unwrap();
+        let f = PoolFixture::empty();
         let fs = MockFs::new(&[]);
 
         let journal = remove_2to1_journal_with_target_devid();
-        journal::write_journal(&paths, &journal).unwrap();
+        journal::write_journal(&f.paths, &journal).unwrap();
 
         let runner = already_mounted_one_disk_runner();
 
         let resolver = resolver_for(&[("/dev/vda", "virtio-disk1")]);
-        let result = cmd_recover(
-            &runner,
-            &fs,
-            &resolver,
-            &RecoverParams {
-                config: &config,
-                paths: &paths,
-                passphrase_stdin: false,
-                passphrase_file: None,
-                allow_degraded: false,
-                dry_run: false,
-                progress: ProgressOutput::Off,
-                sleep_inhibitor: &NOOP_INHIBITOR,
-            },
-        );
+        let params = f.recover_params().passphrase_file(None).build();
+        let result = cmd_recover(&runner, &fs, &resolver, &params);
         result.expect("recover should succeed for genuinely evicted target");
 
-        let recovered = membership::load_membership(&paths).unwrap();
+        let recovered = membership::load_membership(&f.paths).unwrap();
         assert!(
             recovered.disks.contains_key("disk1"),
             "recovered membership must keep disk1: {:?}",
@@ -13039,7 +12997,7 @@ mod tests {
             recovered.disks.keys().collect::<Vec<_>>()
         );
         assert!(
-            !paths.pending_op_json().exists(),
+            !f.paths.pending_op_json().exists(),
             "journal must be cleared after live-pool recovery"
         );
     }
