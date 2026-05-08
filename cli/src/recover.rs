@@ -7950,12 +7950,10 @@ mod tests {
     // Scenario: live pool has disk1+new, journal still says PoolMutation.
     #[test]
     fn replace_pool_mutation_committed_finishes_resize_without_replace_start() {
-        let tmp = tempfile::TempDir::new().unwrap();
-        let paths = StatePaths::custom(tmp.path().into());
-        let config = Config::new(MountPoint("/mnt/storage".into())).unwrap();
+        let f = PoolFixture::empty();
         let fs = MockFs::new(&[]);
         let journal = replace_journal();
-        journal::write_journal(&paths, &journal).unwrap();
+        journal::write_journal(&f.paths, &journal).unwrap();
         let union = union_memberships(&journal);
         let runner = MockRunner::default()
             .with_output(
@@ -7972,8 +7970,11 @@ mod tests {
                 ok_raw_empty("btrfs filesystem resize"),
             );
         let resolver = resolver_for(&[("/dev/vda", "virtio-disk1"), ("/dev/vdc", "virtio-new")]);
-        let inhibitor = crate::inhibit::RecordingInhibitor::new();
-        let params = recover_params_with_inhibitor(&config, &paths, None, false, &inhibitor);
+        let params = f
+            .recover_params()
+            .passphrase_file(None)
+            .sleep_inhibitor(&f.inhibitor)
+            .build();
         let OpKind::Replace {
             new_target, source, ..
         } = &journal.op
@@ -7999,7 +8000,7 @@ mod tests {
         .expect("committed replace should finish post maintenance");
 
         let requests = runner.requests();
-        assert_eq!(inhibitor.acquire_count(), 1);
+        assert_eq!(f.inhibitor.acquire_count(), 1);
         assert!(
             requests
                 .iter()
@@ -8011,8 +8012,8 @@ mod tests {
                 .any(|r| matches!(r, CmdRequest::BtrfsReplaceStart { .. })),
             "recover must not rerun btrfs replace start"
         );
-        assert!(!paths.pending_op_json().exists());
-        let recovered = membership::load_membership(&paths).unwrap();
+        assert!(!f.paths.pending_op_json().exists());
+        let recovered = membership::load_membership(&f.paths).unwrap();
         assert!(recovered.disks.contains_key("new"));
         assert!(!recovered.disks.contains_key("old"));
     }
@@ -8024,16 +8025,14 @@ mod tests {
     // Scenario: live pool still contains disk1+old and no new member.
     #[test]
     fn replace_pool_mutation_not_committed_restores_pre_membership() {
-        let tmp = tempfile::TempDir::new().unwrap();
-        let paths = StatePaths::custom(tmp.path().into());
-        let config = Config::new(MountPoint("/mnt/storage".into())).unwrap();
+        let f = PoolFixture::empty();
         // ExistingLuks recovery now probes the new disk's LUKS UUID before
         // rollback (defensive: refuses to silently roll back if the wrong
         // disk is replugged or the header was zeroed). Seed the probe so
         // the disk reads as PresentLuks with the journaled UUID.
         let fs = MockFs::new(&["/dev/disk/by-id/virtio-new"]);
         let journal = replace_journal();
-        journal::write_journal(&paths, &journal).unwrap();
+        journal::write_journal(&f.paths, &journal).unwrap();
         let union = union_memberships(&journal);
         let runner = MockRunner::default()
             .with_output(
@@ -8052,8 +8051,11 @@ mod tests {
                 luks_dump_label("braid-new"),
             )
             .with_mapper_closed("braid-new");
-        let inhibitor = crate::inhibit::RecordingInhibitor::new();
-        let params = recover_params_with_inhibitor(&config, &paths, None, false, &inhibitor);
+        let params = f
+            .recover_params()
+            .passphrase_file(None)
+            .sleep_inhibitor(&f.inhibitor)
+            .build();
         let OpKind::Replace {
             new_target, source, ..
         } = &journal.op
@@ -8080,7 +8082,7 @@ mod tests {
 
         // No-enroll rollback gates inhibitor + credential prompt on the
         // mutation phase, so neither fires when `enroll_key_file: None`.
-        assert_eq!(inhibitor.acquire_count(), 0);
+        assert_eq!(f.inhibitor.acquire_count(), 0);
         let requests = runner.requests();
         assert!(
             !requests.iter().any(|r| matches!(
@@ -8091,8 +8093,8 @@ mod tests {
             )),
             "no-enroll rollback must not run credential or LUKS-mutation commands: {requests:?}"
         );
-        assert!(!paths.pending_op_json().exists());
-        let recovered = membership::load_membership(&paths).unwrap();
+        assert!(!f.paths.pending_op_json().exists());
+        let recovered = membership::load_membership(&f.paths).unwrap();
         assert!(recovered.disks.contains_key("old"));
         assert!(!recovered.disks.contains_key("new"));
     }
@@ -8104,15 +8106,13 @@ mod tests {
     // journal for manual inspection.
     #[test]
     fn replace_pool_mutation_mixed_state_preserves_journal() {
-        let tmp = tempfile::TempDir::new().unwrap();
-        let paths = StatePaths::custom(tmp.path().into());
-        let config = Config::new(MountPoint("/mnt/storage".into())).unwrap();
+        let f = PoolFixture::empty();
         let fs = MockFs::new(&[]);
         let journal = replace_journal();
-        journal::write_journal(&paths, &journal).unwrap();
+        journal::write_journal(&f.paths, &journal).unwrap();
         let union = union_memberships(&journal);
         let runner = MockRunner::default();
-        let params = recover_params(&config, &paths, None, false);
+        let params = f.recover_params().passphrase_file(None).build();
         let OpKind::Replace {
             new_target, source, ..
         } = &journal.op
@@ -8138,8 +8138,8 @@ mod tests {
         .unwrap_err();
 
         assert!(err.to_string().contains("does not match either"), "{err}");
-        assert!(paths.pending_op_json().exists());
-        assert!(!paths.pool_json().exists());
+        assert!(f.paths.pending_op_json().exists());
+        assert!(!f.paths.pool_json().exists());
     }
 
     // Intent: Replace::PoolMutation FreshLuks recovery finishes committed
@@ -8151,19 +8151,13 @@ mod tests {
     // LUKS2 with the journaled label and needs keyfile enrollment.
     #[test]
     fn replace_pool_mutation_fresh_luks_expected_label_finishes_prep_only() {
-        let tmp = tempfile::TempDir::new().unwrap();
-        let paths = StatePaths::custom(tmp.path().into());
-        let config = Config::new(MountPoint("/mnt/storage".into())).unwrap();
+        let f = PoolFixture::empty();
         let fs = MockFs::new(&["/dev/disk/by-id/virtio-new"]);
-        let key_file = write_valid_keyfile(&tmp, "braid-new.key");
+        let key_dir = tempfile::TempDir::new().unwrap();
+        let key_file = write_valid_keyfile(&key_dir, "braid-new.key");
         let journal = replace_fresh_luks_journal(key_file.clone());
-        journal::write_journal(&paths, &journal).unwrap();
+        journal::write_journal(&f.paths, &journal).unwrap();
         let union = union_memberships(&journal);
-        let passphrase_file = tempfile::NamedTempFile::new().unwrap();
-        {
-            use std::io::Write;
-            passphrase_file.as_file().write_all(b"testpass").unwrap();
-        }
         let runner = MockRunner::default()
             .with_output(
                 CmdRequest::CryptsetupLuksUuid {
@@ -8185,21 +8179,21 @@ mod tests {
                 CmdRequest::CryptsetupTestPassphrase {
                     device: "/dev/vda".into(),
                 },
-                b"testpass".to_vec(),
+                TEST_PASSPHRASE_BYTES.to_vec(),
                 ok_raw_empty("cryptsetup open --test-passphrase"),
             )
             .with_output_stdin(
                 CmdRequest::CryptsetupTestPassphrase {
                     device: "/dev/vdb".into(),
                 },
-                b"testpass".to_vec(),
+                TEST_PASSPHRASE_BYTES.to_vec(),
                 ok_raw_empty("cryptsetup open --test-passphrase"),
             )
             .with_output_stdin(
                 CmdRequest::CryptsetupTestPassphrase {
                     device: "/dev/disk/by-id/virtio-new".into(),
                 },
-                b"testpass".to_vec(),
+                TEST_PASSPHRASE_BYTES.to_vec(),
                 ok_raw_empty("cryptsetup open --test-passphrase"),
             )
             .with_output(
@@ -8218,13 +8212,14 @@ mod tests {
                     device: "/dev/disk/by-id/virtio-new".into(),
                     key_file_path: key_file.display().to_string(),
                 },
-                b"testpass".to_vec(),
+                TEST_PASSPHRASE_BYTES.to_vec(),
                 ok_raw_empty("cryptsetup luksAddKey"),
             )
             .with_output(
                 CmdRequest::CryptsetupLuksHeaderBackup {
                     device: "/dev/disk/by-id/virtio-new".into(),
-                    backup_path: paths
+                    backup_path: f
+                        .paths
                         .luks_headers_dir()
                         .join("braid-new.luksheader.tmp")
                         .display()
@@ -8233,13 +8228,7 @@ mod tests {
                 ok_raw_empty("cryptsetup luksHeaderBackup"),
             );
         let inhibitor = RequestCountInhibitor::new(runner.clone());
-        let params = recover_params_with_inhibitor(
-            &config,
-            &paths,
-            Some(passphrase_file.path()),
-            false,
-            &inhibitor,
-        );
+        let params = f.recover_params().sleep_inhibitor(&inhibitor).build();
         let OpKind::Replace {
             new_target, source, ..
         } = &journal.op
@@ -8303,8 +8292,8 @@ mod tests {
             )),
             "prepared target recovery must not reformat or start replace"
         );
-        assert!(!paths.pending_op_json().exists());
-        let recovered = membership::load_membership(&paths).unwrap();
+        assert!(!f.paths.pending_op_json().exists());
+        let recovered = membership::load_membership(&f.paths).unwrap();
         assert!(recovered.disks.contains_key("old"));
         assert!(!recovered.disks.contains_key("new"));
     }
@@ -8317,12 +8306,10 @@ mod tests {
     // but its label is not the journaled `braid-new` label.
     #[test]
     fn replace_pool_mutation_fresh_luks_wrong_label_preserves_journal() {
-        let tmp = tempfile::TempDir::new().unwrap();
-        let paths = StatePaths::custom(tmp.path().into());
-        let config = Config::new(MountPoint("/mnt/storage".into())).unwrap();
+        let f = PoolFixture::empty();
         let fs = MockFs::new(&["/dev/disk/by-id/virtio-new"]);
         let journal = replace_fresh_luks_journal("/run/keys/braid-new.key".into());
-        journal::write_journal(&paths, &journal).unwrap();
+        journal::write_journal(&f.paths, &journal).unwrap();
         let union = union_memberships(&journal);
         let runner = MockRunner::default()
             .with_output(
@@ -8341,8 +8328,11 @@ mod tests {
                 luks_dump_label("not-braid-new"),
             )
             .with_mapper_closed("braid-new");
-        let inhibitor = crate::inhibit::RecordingInhibitor::new();
-        let params = recover_params_with_inhibitor(&config, &paths, None, false, &inhibitor);
+        let params = f
+            .recover_params()
+            .passphrase_file(None)
+            .sleep_inhibitor(&f.inhibitor)
+            .build();
         let OpKind::Replace {
             new_target, source, ..
         } = &journal.op
@@ -8368,7 +8358,7 @@ mod tests {
         .unwrap_err();
 
         assert!(err.to_string().contains("unexpected LUKS label"), "{err}");
-        assert_eq!(inhibitor.acquire_count(), 0);
+        assert_eq!(f.inhibitor.acquire_count(), 0);
         let requests = runner.requests();
         assert!(
             !requests.iter().any(|r| matches!(
@@ -8381,8 +8371,8 @@ mod tests {
             )),
             "wrong-label target must stop before fresh-target side effects: {requests:?}"
         );
-        assert!(paths.pending_op_json().exists());
-        assert!(!paths.pool_json().exists());
+        assert!(f.paths.pending_op_json().exists());
+        assert!(!f.paths.pool_json().exists());
     }
 
     // Intent: Replace::PoolMutation FreshLuks recovery refuses a missing
@@ -8393,16 +8383,17 @@ mod tests {
     // is no longer present after reboot.
     #[test]
     fn replace_pool_mutation_fresh_luks_absent_target_preserves_journal() {
-        let tmp = tempfile::TempDir::new().unwrap();
-        let paths = StatePaths::custom(tmp.path().into());
-        let config = Config::new(MountPoint("/mnt/storage".into())).unwrap();
+        let f = PoolFixture::empty();
         let fs = MockFs::new(&[]);
         let journal = replace_fresh_luks_journal("/run/keys/braid-new.key".into());
-        journal::write_journal(&paths, &journal).unwrap();
+        journal::write_journal(&f.paths, &journal).unwrap();
         let union = union_memberships(&journal);
         let runner = MockRunner::default();
-        let inhibitor = crate::inhibit::RecordingInhibitor::new();
-        let params = recover_params_with_inhibitor(&config, &paths, None, false, &inhibitor);
+        let params = f
+            .recover_params()
+            .passphrase_file(None)
+            .sleep_inhibitor(&f.inhibitor)
+            .build();
         let OpKind::Replace {
             new_target, source, ..
         } = &journal.op
@@ -8428,13 +8419,13 @@ mod tests {
         .unwrap_err();
 
         assert!(err.to_string().contains("is not present"), "{err}");
-        assert_eq!(inhibitor.acquire_count(), 0);
+        assert_eq!(f.inhibitor.acquire_count(), 0);
         assert!(
             runner.requests().is_empty(),
             "absent target should fail from the filesystem probe only"
         );
-        assert!(paths.pending_op_json().exists());
-        assert!(!paths.pool_json().exists());
+        assert!(f.paths.pending_op_json().exists());
+        assert!(!f.paths.pool_json().exists());
     }
 
     // Intent: Replace::PoolMutation FreshLuks recovery rejects a bad
@@ -8445,13 +8436,11 @@ mod tests {
     // passphrase opens the old pool devices and is rejected by the new target.
     #[test]
     fn replace_pool_mutation_fresh_luks_bad_passphrase_preserves_journal() {
-        let tmp = tempfile::TempDir::new().unwrap();
-        let paths = StatePaths::custom(tmp.path().into());
-        let config = Config::new(MountPoint("/mnt/storage".into())).unwrap();
+        let f = PoolFixture::empty();
         let fs = MockFs::new(&["/dev/disk/by-id/virtio-new"]);
         let key_file = std::path::PathBuf::from("/run/keys/braid-new.key");
         let journal = replace_fresh_luks_journal(key_file);
-        journal::write_journal(&paths, &journal).unwrap();
+        journal::write_journal(&f.paths, &journal).unwrap();
         let union = union_memberships(&journal);
         let passphrase_file = tempfile::NamedTempFile::new().unwrap();
         {
@@ -8497,13 +8486,11 @@ mod tests {
                 err_raw("cryptsetup open --test-passphrase", 2, "No key available"),
             );
         let inhibitor = RequestCountInhibitor::new(runner.clone());
-        let params = recover_params_with_inhibitor(
-            &config,
-            &paths,
-            Some(passphrase_file.path()),
-            false,
-            &inhibitor,
-        );
+        let params = f
+            .recover_params()
+            .passphrase_file(Some(passphrase_file.path()))
+            .sleep_inhibitor(&inhibitor)
+            .build();
         let OpKind::Replace {
             new_target, source, ..
         } = &journal.op
@@ -8546,8 +8533,8 @@ mod tests {
             )),
             "bad credential must stop before fresh-target side effects: {requests:?}"
         );
-        assert!(paths.pending_op_json().exists());
-        assert!(!paths.pool_json().exists());
+        assert!(f.paths.pending_op_json().exists());
+        assert!(!f.paths.pool_json().exists());
     }
 
     // Intent: Replace::PoolMutation FreshLuks recovery preserves the journal
@@ -8558,19 +8545,13 @@ mod tests {
     // but `cryptsetup luksHeaderBackup` fails.
     #[test]
     fn replace_pool_mutation_fresh_luks_header_backup_failure_preserves_journal() {
-        let tmp = tempfile::TempDir::new().unwrap();
-        let paths = StatePaths::custom(tmp.path().into());
-        let config = Config::new(MountPoint("/mnt/storage".into())).unwrap();
+        let f = PoolFixture::empty();
         let fs = MockFs::new(&["/dev/disk/by-id/virtio-new"]);
-        let key_file = write_valid_keyfile(&tmp, "braid-new.key");
+        let key_dir = tempfile::TempDir::new().unwrap();
+        let key_file = write_valid_keyfile(&key_dir, "braid-new.key");
         let journal = replace_fresh_luks_journal(key_file.clone());
-        journal::write_journal(&paths, &journal).unwrap();
+        journal::write_journal(&f.paths, &journal).unwrap();
         let union = union_memberships(&journal);
-        let passphrase_file = tempfile::NamedTempFile::new().unwrap();
-        {
-            use std::io::Write;
-            passphrase_file.as_file().write_all(b"testpass").unwrap();
-        }
         let runner = MockRunner::default()
             .with_output(
                 CmdRequest::CryptsetupLuksUuid {
@@ -8592,21 +8573,21 @@ mod tests {
                 CmdRequest::CryptsetupTestPassphrase {
                     device: "/dev/vda".into(),
                 },
-                b"testpass".to_vec(),
+                TEST_PASSPHRASE_BYTES.to_vec(),
                 ok_raw_empty("cryptsetup open --test-passphrase"),
             )
             .with_output_stdin(
                 CmdRequest::CryptsetupTestPassphrase {
                     device: "/dev/vdb".into(),
                 },
-                b"testpass".to_vec(),
+                TEST_PASSPHRASE_BYTES.to_vec(),
                 ok_raw_empty("cryptsetup open --test-passphrase"),
             )
             .with_output_stdin(
                 CmdRequest::CryptsetupTestPassphrase {
                     device: "/dev/disk/by-id/virtio-new".into(),
                 },
-                b"testpass".to_vec(),
+                TEST_PASSPHRASE_BYTES.to_vec(),
                 ok_raw_empty("cryptsetup open --test-passphrase"),
             )
             .with_output(
@@ -8619,7 +8600,8 @@ mod tests {
             .with_output(
                 CmdRequest::CryptsetupLuksHeaderBackup {
                     device: "/dev/disk/by-id/virtio-new".into(),
-                    backup_path: paths
+                    backup_path: f
+                        .paths
                         .luks_headers_dir()
                         .join("braid-new.luksheader.tmp")
                         .display()
@@ -8627,14 +8609,7 @@ mod tests {
                 },
                 err_raw("cryptsetup luksHeaderBackup", 1, "backup failed"),
             );
-        let inhibitor = crate::inhibit::RecordingInhibitor::new();
-        let params = recover_params_with_inhibitor(
-            &config,
-            &paths,
-            Some(passphrase_file.path()),
-            false,
-            &inhibitor,
-        );
+        let params = f.recover_params().sleep_inhibitor(&f.inhibitor).build();
         let OpKind::Replace {
             new_target, source, ..
         } = &journal.op
@@ -8660,7 +8635,7 @@ mod tests {
         .unwrap_err();
 
         assert!(err.to_string().contains("backup failed"), "{err}");
-        assert_eq!(inhibitor.acquire_count(), 1);
+        assert_eq!(f.inhibitor.acquire_count(), 1);
         assert!(
             !runner
                 .requests()
@@ -8668,8 +8643,8 @@ mod tests {
                 .any(|r| matches!(r, CmdRequest::BtrfsReplaceStart { .. })),
             "fresh-prep recovery must not start btrfs replace"
         );
-        assert!(paths.pending_op_json().exists());
-        assert!(!paths.pool_json().exists());
+        assert!(f.paths.pending_op_json().exists());
+        assert!(!f.paths.pool_json().exists());
     }
 
     // Intent: ExistingLuks recovery with `enroll_key_file: Some` aborts
@@ -8689,13 +8664,12 @@ mod tests {
     //   slot.
     #[test]
     fn replace_pool_mutation_existing_luks_with_enroll_uuid_mismatch_preserves_journal() {
-        let tmp = tempfile::TempDir::new().unwrap();
-        let paths = StatePaths::custom(tmp.path().into());
-        let config = Config::new(MountPoint("/mnt/storage".into())).unwrap();
+        let f = PoolFixture::empty();
         let fs = MockFs::new(&["/dev/disk/by-id/virtio-new"]);
-        let key_file = write_valid_keyfile(&tmp, "braid-new.key");
+        let key_dir = tempfile::TempDir::new().unwrap();
+        let key_file = write_valid_keyfile(&key_dir, "braid-new.key");
         let journal = replace_existing_luks_with_enroll_journal(key_file.clone());
-        journal::write_journal(&paths, &journal).unwrap();
+        journal::write_journal(&f.paths, &journal).unwrap();
         let union = union_memberships(&journal);
         // probe returns a DIFFERENT UUID than the journaled one.
         let runner = MockRunner::default()
@@ -8715,8 +8689,11 @@ mod tests {
                 luks_dump_label("braid-new"),
             )
             .with_mapper_closed("braid-new");
-        let inhibitor = crate::inhibit::RecordingInhibitor::new();
-        let params = recover_params_with_inhibitor(&config, &paths, None, false, &inhibitor);
+        let params = f
+            .recover_params()
+            .passphrase_file(None)
+            .sleep_inhibitor(&f.inhibitor)
+            .build();
         let OpKind::Replace {
             new_target, source, ..
         } = &journal.op
@@ -8746,7 +8723,7 @@ mod tests {
             err.to_string().contains("preserving pending-op.json"),
             "{err}"
         );
-        assert_eq!(inhibitor.acquire_count(), 0);
+        assert_eq!(f.inhibitor.acquire_count(), 0);
         let requests = runner.requests();
         assert!(
             !requests.iter().any(|r| matches!(
@@ -8757,8 +8734,8 @@ mod tests {
             )),
             "uuid mismatch must abort before any LUKS mutation or credential prompt: {requests:?}"
         );
-        assert!(paths.pending_op_json().exists());
-        assert!(!paths.pool_json().exists());
+        assert!(f.paths.pending_op_json().exists());
+        assert!(!f.paths.pool_json().exists());
     }
 
     // Intent: ExistingLuks recovery with `enroll_key_file: Some` aborts
@@ -8773,13 +8750,12 @@ mod tests {
     //   target.
     #[test]
     fn replace_pool_mutation_existing_luks_with_enroll_bad_passphrase_preserves_journal() {
-        let tmp = tempfile::TempDir::new().unwrap();
-        let paths = StatePaths::custom(tmp.path().into());
-        let config = Config::new(MountPoint("/mnt/storage".into())).unwrap();
+        let f = PoolFixture::empty();
         let fs = MockFs::new(&["/dev/disk/by-id/virtio-new"]);
-        let key_file = write_valid_keyfile(&tmp, "braid-new.key");
+        let key_dir = tempfile::TempDir::new().unwrap();
+        let key_file = write_valid_keyfile(&key_dir, "braid-new.key");
         let journal = replace_existing_luks_with_enroll_journal(key_file.clone());
-        journal::write_journal(&paths, &journal).unwrap();
+        journal::write_journal(&f.paths, &journal).unwrap();
         let union = union_memberships(&journal);
         let passphrase_file = tempfile::NamedTempFile::new().unwrap();
         {
@@ -8832,14 +8808,11 @@ mod tests {
                     "No key available with this passphrase.",
                 ),
             );
-        let inhibitor = crate::inhibit::RecordingInhibitor::new();
-        let params = recover_params_with_inhibitor(
-            &config,
-            &paths,
-            Some(passphrase_file.path()),
-            false,
-            &inhibitor,
-        );
+        let params = f
+            .recover_params()
+            .passphrase_file(Some(passphrase_file.path()))
+            .sleep_inhibitor(&f.inhibitor)
+            .build();
         let OpKind::Replace {
             new_target, source, ..
         } = &journal.op
@@ -8869,7 +8842,7 @@ mod tests {
                 .contains("recover replace passphrase was rejected by 'new'"),
             "{err}"
         );
-        assert_eq!(inhibitor.acquire_count(), 0);
+        assert_eq!(f.inhibitor.acquire_count(), 0);
         let requests = runner.requests();
         assert!(
             !requests.iter().any(|r| matches!(
@@ -8879,8 +8852,8 @@ mod tests {
             )),
             "wrong passphrase must stop before any LUKS mutation: {requests:?}"
         );
-        assert!(paths.pending_op_json().exists());
-        assert!(!paths.pool_json().exists());
+        assert!(f.paths.pending_op_json().exists());
+        assert!(!f.paths.pool_json().exists());
     }
 
     // Intent: ExistingLuks recovery with `enroll_key_file: Some` replays
@@ -8899,19 +8872,13 @@ mod tests {
     //   the journal clears.
     #[test]
     fn replace_pool_mutation_existing_luks_with_enroll_replays_keyfile_then_clears_journal() {
-        let tmp = tempfile::TempDir::new().unwrap();
-        let paths = StatePaths::custom(tmp.path().into());
-        let config = Config::new(MountPoint("/mnt/storage".into())).unwrap();
+        let f = PoolFixture::empty();
         let fs = MockFs::new(&["/dev/disk/by-id/virtio-new"]);
-        let key_file = write_valid_keyfile(&tmp, "braid-new.key");
+        let key_dir = tempfile::TempDir::new().unwrap();
+        let key_file = write_valid_keyfile(&key_dir, "braid-new.key");
         let journal = replace_existing_luks_with_enroll_journal(key_file.clone());
-        journal::write_journal(&paths, &journal).unwrap();
+        journal::write_journal(&f.paths, &journal).unwrap();
         let union = union_memberships(&journal);
-        let passphrase_file = tempfile::NamedTempFile::new().unwrap();
-        {
-            use std::io::Write;
-            passphrase_file.as_file().write_all(b"testpass").unwrap();
-        }
         let runner = MockRunner::default()
             .with_output(
                 CmdRequest::CryptsetupLuksUuid {
@@ -8933,21 +8900,21 @@ mod tests {
                 CmdRequest::CryptsetupTestPassphrase {
                     device: "/dev/vda".into(),
                 },
-                b"testpass".to_vec(),
+                TEST_PASSPHRASE_BYTES.to_vec(),
                 ok_raw_empty("cryptsetup open --test-passphrase"),
             )
             .with_output_stdin(
                 CmdRequest::CryptsetupTestPassphrase {
                     device: "/dev/vdb".into(),
                 },
-                b"testpass".to_vec(),
+                TEST_PASSPHRASE_BYTES.to_vec(),
                 ok_raw_empty("cryptsetup open --test-passphrase"),
             )
             .with_output_stdin(
                 CmdRequest::CryptsetupTestPassphrase {
                     device: "/dev/disk/by-id/virtio-new".into(),
                 },
-                b"testpass".to_vec(),
+                TEST_PASSPHRASE_BYTES.to_vec(),
                 ok_raw_empty("cryptsetup open --test-passphrase"),
             )
             // ensure_keyfile_enrolled probes the keyfile first and
@@ -8965,13 +8932,14 @@ mod tests {
                     device: "/dev/disk/by-id/virtio-new".into(),
                     key_file_path: key_file.display().to_string(),
                 },
-                b"testpass".to_vec(),
+                TEST_PASSPHRASE_BYTES.to_vec(),
                 ok_raw_empty("cryptsetup luksAddKey"),
             )
             .with_output(
                 CmdRequest::CryptsetupLuksHeaderBackup {
                     device: "/dev/disk/by-id/virtio-new".into(),
-                    backup_path: paths
+                    backup_path: f
+                        .paths
                         .luks_headers_dir()
                         .join("braid-new.luksheader.tmp")
                         .display()
@@ -8979,14 +8947,7 @@ mod tests {
                 },
                 ok_raw_empty("cryptsetup luksHeaderBackup"),
             );
-        let inhibitor = crate::inhibit::RecordingInhibitor::new();
-        let params = recover_params_with_inhibitor(
-            &config,
-            &paths,
-            Some(passphrase_file.path()),
-            false,
-            &inhibitor,
-        );
+        let params = f.recover_params().sleep_inhibitor(&f.inhibitor).build();
         let OpKind::Replace {
             new_target, source, ..
         } = &journal.op
@@ -9011,7 +8972,7 @@ mod tests {
         )
         .expect("happy path replays enrollment + clears journal");
 
-        assert_eq!(inhibitor.acquire_count(), 1);
+        assert_eq!(f.inhibitor.acquire_count(), 1);
         let requests = runner.requests();
         assert!(
             requests.iter().any(|r| matches!(
@@ -9027,8 +8988,8 @@ mod tests {
                 .any(|r| matches!(r, CmdRequest::CryptsetupLuksHeaderBackup { .. })),
             "happy path must back up the header after the addKey: {requests:?}"
         );
-        assert!(!paths.pending_op_json().exists());
-        let recovered = membership::load_membership(&paths).unwrap();
+        assert!(!f.paths.pending_op_json().exists());
+        let recovered = membership::load_membership(&f.paths).unwrap();
         // Replay re-establishes pre-replace topology (the op didn't
         // commit, so we roll back to {disk1, old}).
         assert!(recovered.disks.contains_key("old"));
@@ -9041,16 +9002,14 @@ mod tests {
     // Scenario: replace committed and only resize remains.
     #[test]
     fn replace_post_maintenance_skips_unowed_balance() {
-        let tmp = tempfile::TempDir::new().unwrap();
-        let paths = StatePaths::custom(tmp.path().into());
-        let config = Config::new(MountPoint("/mnt/storage".into())).unwrap();
+        let f = PoolFixture::empty();
         let fs = MockFs::new(&[]);
         let journal = replace_journal_in_phase(
             journal::ReplacePhase::PostReplaceMaintenance,
             false,
             journal::ReplaceJournalSource::Missing { old_devid: 2 },
         );
-        journal::write_journal(&paths, &journal).unwrap();
+        journal::write_journal(&f.paths, &journal).unwrap();
         let runner = MockRunner::default().with_output(
             CmdRequest::BtrfsFilesystemResize {
                 devid: 2,
@@ -9059,8 +9018,11 @@ mod tests {
             ok_raw_empty("btrfs filesystem resize"),
         );
         let resolver = resolver_for(&[("/dev/vda", "virtio-disk1"), ("/dev/vdc", "virtio-new")]);
-        let inhibitor = crate::inhibit::RecordingInhibitor::new();
-        let params = recover_params_with_inhibitor(&config, &paths, None, false, &inhibitor);
+        let params = f
+            .recover_params()
+            .passphrase_file(None)
+            .sleep_inhibitor(&f.inhibitor)
+            .build();
         let OpKind::Replace { source, .. } = &journal.op else {
             unreachable!("replace_journal_in_phase returns Replace");
         };
@@ -9080,7 +9042,7 @@ mod tests {
         .expect("post-replace maintenance should resize and clear");
 
         let requests = runner.requests();
-        assert_eq!(inhibitor.acquire_count(), 1);
+        assert_eq!(f.inhibitor.acquire_count(), 1);
         assert!(
             requests
                 .iter()
@@ -9095,7 +9057,7 @@ mod tests {
             )),
             "restore_raid1_after_commit=false must skip balance probes and replay"
         );
-        assert!(!paths.pending_op_json().exists());
+        assert!(!f.paths.pending_op_json().exists());
     }
 
     // Intent: Replace::PostReplaceMaintenance runs owed RAID1 maintenance
@@ -9108,16 +9070,14 @@ mod tests {
     // recovery replays the soft RAID1 balance before clearing the journal.
     #[test]
     fn replace_post_maintenance_runs_owed_balance() {
-        let tmp = tempfile::TempDir::new().unwrap();
-        let paths = StatePaths::custom(tmp.path().into());
-        let config = Config::new(MountPoint("/mnt/storage".into())).unwrap();
+        let f = PoolFixture::empty();
         let fs = MockFs::new(&[]);
         let journal = replace_journal_in_phase(
             journal::ReplacePhase::PostReplaceMaintenance,
             true,
             journal::ReplaceJournalSource::Missing { old_devid: 2 },
         );
-        journal::write_journal(&paths, &journal).unwrap();
+        journal::write_journal(&f.paths, &journal).unwrap();
         let runner = with_balance_replay(MockRunner::default()).with_output(
             CmdRequest::BtrfsFilesystemResize {
                 devid: 2,
@@ -9126,8 +9086,11 @@ mod tests {
             ok_raw_empty("btrfs filesystem resize"),
         );
         let resolver = resolver_for(&[("/dev/vda", "virtio-disk1"), ("/dev/vdc", "virtio-new")]);
-        let inhibitor = crate::inhibit::RecordingInhibitor::new();
-        let params = recover_params_with_inhibitor(&config, &paths, None, false, &inhibitor);
+        let params = f
+            .recover_params()
+            .passphrase_file(None)
+            .sleep_inhibitor(&f.inhibitor)
+            .build();
         let OpKind::Replace { source, .. } = &journal.op else {
             unreachable!("replace_journal_in_phase returns Replace");
         };
@@ -9147,14 +9110,14 @@ mod tests {
         .expect("post-replace maintenance should resize, balance, and clear");
 
         let requests = runner.requests();
-        assert_eq!(inhibitor.acquire_count(), 1);
+        assert_eq!(f.inhibitor.acquire_count(), 1);
         assert!(
             requests
                 .iter()
                 .any(|r| matches!(r, CmdRequest::BtrfsBalanceRaid1Soft { .. })),
             "owed RAID1 maintenance should run"
         );
-        assert!(!paths.pending_op_json().exists());
+        assert!(!f.paths.pending_op_json().exists());
     }
 
     // Intent: post-maintenance inhibitor failure preserves the replace
@@ -9164,9 +9127,7 @@ mod tests {
     // Scenario: replace committed, but logind refuses the recovery inhibitor.
     #[test]
     fn replace_post_maintenance_inhibitor_failure_preserves_journal() {
-        let tmp = tempfile::TempDir::new().unwrap();
-        let paths = StatePaths::custom(tmp.path().into());
-        let config = Config::new(MountPoint("/mnt/storage".into())).unwrap();
+        let f = PoolFixture::empty();
         let fs = MockFs::new(&["/dev/mapper/braid-old"]);
         let journal = replace_journal_in_phase(
             journal::ReplacePhase::PostReplaceMaintenance,
@@ -9176,11 +9137,15 @@ mod tests {
                 old_mapper: MapperName("braid-old".into()),
             },
         );
-        journal::write_journal(&paths, &journal).unwrap();
+        journal::write_journal(&f.paths, &journal).unwrap();
         let runner = MockRunner::default();
         let resolver = resolver_for(&[("/dev/vda", "virtio-disk1"), ("/dev/vdc", "virtio-new")]);
         let inhibitor = FailingInhibitor;
-        let params = recover_params_with_inhibitor(&config, &paths, None, false, &inhibitor);
+        let params = f
+            .recover_params()
+            .passphrase_file(None)
+            .sleep_inhibitor(&inhibitor)
+            .build();
         let OpKind::Replace { source, .. } = &journal.op else {
             unreachable!("replace_journal_in_phase returns Replace");
         };
@@ -9205,7 +9170,7 @@ mod tests {
             "{err}"
         );
         assert!(runner.requests().is_empty());
-        assert!(paths.pending_op_json().exists());
+        assert!(f.paths.pending_op_json().exists());
     }
 
     #[test]
