@@ -163,7 +163,7 @@ impl PoolFixture {
     /// membership map; without pinning, `build_replacement_membership`
     /// cannot match the requested id to a pool.json entry.
     pub(crate) fn three_disk_devids_pinned() -> Self {
-        let (state_tmp, paths, config_tmp, config_path, pass_path) = Self::empty_inner();
+        let base = Self::empty_inner();
         let mut m = PoolMembership::empty();
         for (name, devid) in [("disk1", 1u64), ("disk2", 2), ("disk3", 3)] {
             let mut member =
@@ -171,13 +171,14 @@ impl PoolFixture {
             member.devid = Some(devid);
             m.disks.insert(name.to_owned(), member);
         }
-        membership::save_membership(&m, &paths).expect("save_membership");
+        membership::save_membership(&m, &base.paths).expect("save_membership");
         Self {
-            _state_tmp: state_tmp,
-            paths,
-            _config_tmp: config_tmp,
-            config_path,
-            pass_path,
+            _state_tmp: base.state_tmp,
+            paths: base.paths,
+            _config_tmp: base.config_tmp,
+            config_path: base.config_path,
+            config: base.config,
+            pass_path: base.pass_path,
             inhibitor: RecordingInhibitor::new(),
         }
     }
@@ -187,7 +188,7 @@ impl PoolFixture {
     /// device branch reachable in principle) without
     /// `build_replacement_membership` losing the disk1 row.
     pub(crate) fn two_disk_devids_pinned() -> Self {
-        let (state_tmp, paths, config_tmp, config_path, pass_path) = Self::empty_inner();
+        let base = Self::empty_inner();
         let mut m = PoolMembership::empty();
         for (name, devid) in [("disk1", 1u64), ("disk2", 2)] {
             let mut member =
@@ -195,13 +196,14 @@ impl PoolFixture {
             member.devid = Some(devid);
             m.disks.insert(name.to_owned(), member);
         }
-        membership::save_membership(&m, &paths).expect("save_membership");
+        membership::save_membership(&m, &base.paths).expect("save_membership");
         Self {
-            _state_tmp: state_tmp,
-            paths,
-            _config_tmp: config_tmp,
-            config_path,
-            pass_path,
+            _state_tmp: base.state_tmp,
+            paths: base.paths,
+            _config_tmp: base.config_tmp,
+            config_path: base.config_path,
+            config: base.config,
+            pass_path: base.pass_path,
             inhibitor: RecordingInhibitor::new(),
         }
     }

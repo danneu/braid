@@ -2,13 +2,20 @@
 //! struct + ctors shared by every command scope.
 
 use crate::cmd::RawCommandOutput;
+use crate::config::Config;
 use crate::inhibit::RecordingInhibitor;
 use crate::membership::{self, DiskMember, PoolMembership};
 use crate::probe::Filesystem;
 use crate::state_paths::StatePaths;
-use crate::types::ByIdPath;
+use crate::types::{ByIdPath, MountPoint};
 use std::path::PathBuf;
 use tempfile::TempDir;
+
+/// Single source of truth for the passphrase bytes the fixture writes to
+/// `pass_path` and that scope-local stdin expectations match against.
+/// `read_passphrase` strips the trailing newline from the file body, so
+/// these are the bytes that reach `cryptsetup` over stdin.
+pub(crate) const TEST_PASSPHRASE_BYTES: &[u8] = b"test-passphrase";
 
 /// Compact constructor for a successful `RawCommandOutput`. Mirrors the
 /// per-file `mock_ok` helper that lived in `replace.rs`/`add.rs` so
@@ -94,40 +101,67 @@ impl Filesystem for MockFs {
 
 /// Bundled tempdirs + paths + config + passphrase + inhibitor for any
 /// command that takes `ReplaceParams` (and, in follow-ups, `AddParams`,
-/// `RemoveParams`). `_state_tmp` and `_config_tmp` are RAII guards that
-/// keep the temp directories alive for as long as the fixture lives.
+/// `RemoveParams`, `RecoverParams`). `_state_tmp` and `_config_tmp` are
+/// RAII guards that keep the temp directories alive for as long as the
+/// fixture lives. `config` is owned here so the per-scope params builders
+/// can borrow `&'a Config` without round-tripping through disk.
 pub(crate) struct PoolFixture {
     pub(in crate::test_fixtures) _state_tmp: TempDir,
     pub(crate) paths: StatePaths,
     pub(in crate::test_fixtures) _config_tmp: TempDir,
     pub(crate) config_path: PathBuf,
+    pub(crate) config: Config,
     pub(crate) pass_path: PathBuf,
     pub(crate) inhibitor: RecordingInhibitor,
 }
 
+/// Common ground produced by `empty_inner`. Bundled into a struct so
+/// adding a new piece (e.g. the canonical `Config`) does not force every
+/// caller to update its destructure.
+pub(in crate::test_fixtures) struct PoolFixtureBase {
+    pub(in crate::test_fixtures) state_tmp: TempDir,
+    pub(in crate::test_fixtures) paths: StatePaths,
+    pub(in crate::test_fixtures) config_tmp: TempDir,
+    pub(in crate::test_fixtures) config_path: PathBuf,
+    pub(in crate::test_fixtures) config: Config,
+    pub(in crate::test_fixtures) pass_path: PathBuf,
+}
+
 impl PoolFixture {
     /// Build the temp directories + canonical config.json + passphrase
-    /// file used by every constructor.
-    pub(in crate::test_fixtures) fn empty_inner() -> (TempDir, StatePaths, TempDir, PathBuf, PathBuf)
-    {
+    /// file used by every constructor. The same `MountPoint` drives both
+    /// the on-disk config.json (so `config_path` round-trips through
+    /// `Config::load`) and the in-memory `Config` returned alongside.
+    pub(in crate::test_fixtures) fn empty_inner() -> PoolFixtureBase {
         let state_tmp = tempfile::tempdir().expect("state tempdir");
         let paths = StatePaths::custom(state_tmp.path().into());
         let config_tmp = tempfile::tempdir().expect("config tempdir");
         let config_path = config_tmp.path().join("config.json");
+        let mount_point = MountPoint("/mnt/storage".into());
         std::fs::write(
             &config_path,
-            serde_json::to_vec(&serde_json::json!({ "mount_point": "/mnt/storage" })).unwrap(),
+            serde_json::to_vec(&serde_json::json!({ "mount_point": mount_point.0 })).unwrap(),
         )
         .expect("write config.json");
+        let config = Config::new(mount_point).expect("config from canonical mount_point");
         let pass_path = config_tmp.path().join("passphrase");
-        std::fs::write(&pass_path, b"test-passphrase\n").expect("write passphrase file");
-        (state_tmp, paths, config_tmp, config_path, pass_path)
+        let mut pass_bytes = TEST_PASSPHRASE_BYTES.to_vec();
+        pass_bytes.push(b'\n');
+        std::fs::write(&pass_path, &pass_bytes).expect("write passphrase file");
+        PoolFixtureBase {
+            state_tmp,
+            paths,
+            config_tmp,
+            config_path,
+            config,
+            pass_path,
+        }
     }
 
     /// pool.json: disk1 + disk2 (live, no devid pinned). Use for live
     /// replace tests where btrfs reports both members live.
     pub(crate) fn two_disk_healthy() -> Self {
-        let (state_tmp, paths, config_tmp, config_path, pass_path) = Self::empty_inner();
+        let base = Self::empty_inner();
         let mut m = PoolMembership::empty();
         m.disks.insert(
             "disk1".into(),
@@ -137,13 +171,14 @@ impl PoolFixture {
             "disk2".into(),
             DiskMember::from_by_id(ByIdPath("/dev/disk/by-id/virtio-disk2".into())),
         );
-        membership::save_membership(&m, &paths).expect("save_membership");
+        membership::save_membership(&m, &base.paths).expect("save_membership");
         Self {
-            _state_tmp: state_tmp,
-            paths,
-            _config_tmp: config_tmp,
-            config_path,
-            pass_path,
+            _state_tmp: base.state_tmp,
+            paths: base.paths,
+            _config_tmp: base.config_tmp,
+            config_path: base.config_path,
+            config: base.config,
+            pass_path: base.pass_path,
             inhibitor: RecordingInhibitor::new(),
         }
     }
@@ -152,7 +187,7 @@ impl PoolFixture {
     /// path with explicit devid pinning so `build_replacement_membership`
     /// can match `--missing-id 2` to the disk2 row.
     pub(crate) fn one_live_one_missing() -> Self {
-        let (state_tmp, paths, config_tmp, config_path, pass_path) = Self::empty_inner();
+        let base = Self::empty_inner();
         let mut m = PoolMembership::empty();
         m.disks.insert(
             "disk1".into(),
@@ -161,28 +196,31 @@ impl PoolFixture {
         let mut disk2 = DiskMember::from_by_id(ByIdPath("/dev/disk/by-id/virtio-disk2".into()));
         disk2.devid = Some(2);
         m.disks.insert("disk2".into(), disk2);
-        membership::save_membership(&m, &paths).expect("save_membership");
+        membership::save_membership(&m, &base.paths).expect("save_membership");
         Self {
-            _state_tmp: state_tmp,
-            paths,
-            _config_tmp: config_tmp,
-            config_path,
-            pass_path,
+            _state_tmp: base.state_tmp,
+            paths: base.paths,
+            _config_tmp: base.config_tmp,
+            config_path: base.config_path,
+            config: base.config,
+            pass_path: base.pass_path,
             inhibitor: RecordingInhibitor::new(),
         }
     }
 
     /// No pool.json seeded. Use for validation-only tests that abort
     /// before any membership probe (e.g. PanicRunner-backed boundary
-    /// tests).
+    /// tests) and for recover tests that drive state through the journal
+    /// rather than pool.json.
     pub(crate) fn empty() -> Self {
-        let (state_tmp, paths, config_tmp, config_path, pass_path) = Self::empty_inner();
+        let base = Self::empty_inner();
         Self {
-            _state_tmp: state_tmp,
-            paths,
-            _config_tmp: config_tmp,
-            config_path,
-            pass_path,
+            _state_tmp: base.state_tmp,
+            paths: base.paths,
+            _config_tmp: base.config_tmp,
+            config_path: base.config_path,
+            config: base.config,
+            pass_path: base.pass_path,
             inhibitor: RecordingInhibitor::new(),
         }
     }

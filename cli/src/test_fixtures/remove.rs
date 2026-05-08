@@ -73,7 +73,7 @@ impl PoolFixture {
     /// pool.json: disk1 + disk2 + disk3. Kept remove-scoped until another
     /// command needs the same three-member steady-state topology.
     pub(crate) fn three_disk_healthy() -> Self {
-        let (state_tmp, paths, config_tmp, config_path, pass_path) = Self::empty_inner();
+        let base = Self::empty_inner();
         let mut m = PoolMembership::empty();
         for name in ["disk1", "disk2", "disk3"] {
             m.disks.insert(
@@ -81,13 +81,14 @@ impl PoolFixture {
                 DiskMember::from_by_id(ByIdPath(format!("/dev/disk/by-id/virtio-{name}"))),
             );
         }
-        membership::save_membership(&m, &paths).expect("save_membership");
+        membership::save_membership(&m, &base.paths).expect("save_membership");
         Self {
-            _state_tmp: state_tmp,
-            paths,
-            _config_tmp: config_tmp,
-            config_path,
-            pass_path,
+            _state_tmp: base.state_tmp,
+            paths: base.paths,
+            _config_tmp: base.config_tmp,
+            config_path: base.config_path,
+            config: base.config,
+            pass_path: base.pass_path,
             inhibitor: RecordingInhibitor::new(),
         }
     }

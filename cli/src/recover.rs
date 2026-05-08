@@ -3272,6 +3272,7 @@ mod tests {
     use crate::mount::MountError;
     use crate::preview::NoteLevel;
     use crate::probe::Filesystem;
+    use crate::test_fixtures::{PoolFixture, RemountHarness, TEST_PASSPHRASE_BYTES};
     use crate::types::{ByIdPath, LuksUuid, MapperName, MountPoint, PoolDevice};
     use std::collections::{BTreeMap, VecDeque};
     use std::sync::Mutex;
@@ -4978,23 +4979,9 @@ mod tests {
 
     #[test]
     fn plan_recover_discovers_add_targets_before_mount_planning() {
-        let tmp = tempfile::TempDir::new().unwrap();
-        let paths = StatePaths::custom(tmp.path().into());
-        let config = Config::new(MountPoint("/mnt/storage".into())).unwrap();
-        let fs = StatefulMockFs::new(&[
-            "/dev/disk/by-id/virtio-disk1",
-            "/dev/disk/by-id/virtio-disk2",
-        ]);
-        let fs_handle = fs.handle();
-
+        let f = PoolFixture::empty();
         let journal = recoverable_pool_mutation_add_journal();
-        journal::write_journal(&paths, &journal).unwrap();
-
-        let passphrase_file = tempfile::NamedTempFile::new().unwrap();
-        {
-            use std::io::Write;
-            passphrase_file.as_file().write_all(b"testpass").unwrap();
-        }
+        journal::write_journal(&f.paths, &journal).unwrap();
 
         let inner = MockRunner::default()
             .with_output(mountpoint_fail().0, mountpoint_fail().1)
@@ -5026,7 +5013,7 @@ mod tests {
                     device: "/dev/disk/by-id/virtio-disk2".into(),
                     mapper: "braid-disk2".into(),
                 },
-                b"testpass".to_vec(),
+                TEST_PASSPHRASE_BYTES.to_vec(),
                 ok_raw_empty("cryptsetup open"),
             )
             .with_output(
@@ -5041,25 +5028,18 @@ mod tests {
                 },
                 ok_raw_empty("btrfs device scan"),
             );
-        let request_log = inner.clone();
-        let runner = MapperClosingRunner {
+        let harness = RemountHarness::new(
+            &[
+                "/dev/disk/by-id/virtio-disk1",
+                "/dev/disk/by-id/virtio-disk2",
+            ],
             inner,
-            fs_paths: fs_handle,
-            closed: Mutex::new(["braid-disk1".to_owned(), "braid-disk2".to_owned()].into()),
-        };
+            &["braid-disk1", "braid-disk2"],
+        );
 
-        let params = RecoverParams {
-            config: &config,
-            paths: &paths,
-            passphrase_stdin: false,
-            passphrase_file: Some(passphrase_file.path()),
-            allow_degraded: false,
-            dry_run: false,
-            progress: ProgressOutput::Off,
-            sleep_inhibitor: &NOOP_INHIBITOR,
-        };
+        let params = f.recover_params().build();
 
-        let plan = plan_recover(&runner, &fs, &params)
+        let plan = plan_recover(&harness.runner, &harness.fs, &params)
             .result
             .expect("planner should discover add target, then plan from pre-membership");
         assert!(
@@ -5078,7 +5058,7 @@ mod tests {
             )]
         );
 
-        let requests = request_log.requests();
+        let requests = harness.requests();
         assert_eq!(
             luks_dump_text_request_count(&requests, "/dev/disk/by-id/virtio-disk2"),
             1,
@@ -6345,24 +6325,17 @@ mod tests {
     //   resumes and replays the planned enrollment.
     #[test]
     fn add_pool_mutation_replays_keyfile_enrollment_before_pool_add() {
-        let tmp = tempfile::TempDir::new().unwrap();
-        let paths = StatePaths::custom(tmp.path().into());
-        let config = Config::new(MountPoint("/mnt/storage".into())).unwrap();
+        let f = PoolFixture::empty();
         let fs = MockFs::new(&["/dev/disk/by-id/virtio-disk2", "/dev/mapper/braid-disk2"]);
-        let key_file = write_valid_keyfile(&tmp, "braid.key");
+        let key_dir = tempfile::TempDir::new().unwrap();
+        let key_file = write_valid_keyfile(&key_dir, "braid.key");
         let journal = recoverable_pool_mutation_add_journal_with_enroll(key_file.clone());
-        journal::write_journal(&paths, &journal).unwrap();
+        journal::write_journal(&f.paths, &journal).unwrap();
         let union = union_memberships(&journal);
         let targets = match &journal.op {
             OpKind::Add { targets, .. } => targets,
             _ => unreachable!("test journal is Add"),
         };
-
-        let passphrase_file = tempfile::NamedTempFile::new().unwrap();
-        {
-            use std::io::Write;
-            passphrase_file.as_file().write_all(b"testpass").unwrap();
-        }
 
         let runner = with_balance_replay(with_two_disk_pool_probe(
             MockRunner::default()
@@ -6385,14 +6358,14 @@ mod tests {
                     CmdRequest::CryptsetupTestPassphrase {
                         device: "/dev/vda".into(),
                     },
-                    b"testpass".to_vec(),
+                    TEST_PASSPHRASE_BYTES.to_vec(),
                     ok_raw_empty("cryptsetup open --test-passphrase"),
                 )
                 .with_output_stdin(
                     CmdRequest::CryptsetupTestPassphrase {
                         device: "/dev/disk/by-id/virtio-disk2".into(),
                     },
-                    b"testpass".to_vec(),
+                    TEST_PASSPHRASE_BYTES.to_vec(),
                     ok_raw_empty("cryptsetup open --test-passphrase"),
                 )
                 .with_output(
@@ -6415,13 +6388,14 @@ mod tests {
                         device: "/dev/disk/by-id/virtio-disk2".into(),
                         key_file_path: key_file.display().to_string(),
                     },
-                    b"testpass".to_vec(),
+                    TEST_PASSPHRASE_BYTES.to_vec(),
                     ok_raw_empty("cryptsetup luksAddKey"),
                 )
                 .with_output(
                     CmdRequest::CryptsetupLuksHeaderBackup {
                         device: "/dev/disk/by-id/virtio-disk2".into(),
-                        backup_path: paths
+                        backup_path: f
+                            .paths
                             .luks_headers_dir()
                             .join("braid-disk2.luksheader.tmp")
                             .display()
@@ -6452,13 +6426,7 @@ mod tests {
         ));
         let resolver = resolver_for(&[("/dev/vda", "virtio-disk1"), ("/dev/vdb", "virtio-disk2")]);
         let inhibitor = RequestCountInhibitor::new(runner.clone());
-        let params = recover_params_with_inhibitor(
-            &config,
-            &paths,
-            Some(passphrase_file.path()),
-            false,
-            &inhibitor,
-        );
+        let params = f.recover_params().sleep_inhibitor(&inhibitor).build();
 
         execute_add_pool_mutation_recovery(
             &runner,
@@ -6500,7 +6468,8 @@ mod tests {
             addkey < backup && backup < scan_forget && scan_forget < wipe && wipe < add,
             "expected addKey({addkey}) < backup({backup}) < scan-forget({scan_forget}) < wipefs({wipe}) < device-add({add}); got: {requests:?}"
         );
-        assert!(!paths.pending_op_json().exists());
+        assert!(inhibitor.first_acquire_request_count().is_some());
+        assert!(!f.paths.pending_op_json().exists());
     }
 
     // Intent: dry-run preview for add recovery with a journaled
@@ -7678,37 +7647,24 @@ mod tests {
 
     #[test]
     fn pool_mutation_inhibitor_failure_stops_before_destructive_replay() {
-        let tmp = tempfile::TempDir::new().unwrap();
-        let paths = StatePaths::custom(tmp.path().into());
-        let config = Config::new(MountPoint("/mnt/storage".into())).unwrap();
+        let f = PoolFixture::empty();
         let fs = MockFs::new(&[]);
         let journal = recoverable_pool_mutation_add_journal();
-        journal::write_journal(&paths, &journal).unwrap();
+        journal::write_journal(&f.paths, &journal).unwrap();
         let union = union_memberships(&journal);
         let targets = match &journal.op {
             OpKind::Add { targets, .. } => targets,
             _ => unreachable!("test journal is Add"),
         };
-        let passphrase_file = tempfile::NamedTempFile::new().unwrap();
-        {
-            use std::io::Write;
-            passphrase_file.as_file().write_all(b"testpass").unwrap();
-        }
         let runner = MockRunner::default().with_output_stdin(
             CmdRequest::CryptsetupTestPassphrase {
                 device: "/dev/vda".into(),
             },
-            b"testpass".to_vec(),
+            TEST_PASSPHRASE_BYTES.to_vec(),
             ok_raw_empty("cryptsetup open --test-passphrase"),
         );
         let inhibitor = FailingInhibitor;
-        let params = recover_params_with_inhibitor(
-            &config,
-            &paths,
-            Some(passphrase_file.path()),
-            false,
-            &inhibitor,
-        );
+        let params = f.recover_params().sleep_inhibitor(&inhibitor).build();
         let err = execute_add_pool_mutation_recovery(
             &runner,
             &fs,
@@ -7734,8 +7690,8 @@ mod tests {
             )),
             "inhibitor failure must stop before destructive replay"
         );
-        assert!(paths.pending_op_json().exists());
-        assert!(!paths.pool_json().exists());
+        assert!(f.paths.pending_op_json().exists());
+        assert!(!f.paths.pool_json().exists());
     }
 
     #[test]

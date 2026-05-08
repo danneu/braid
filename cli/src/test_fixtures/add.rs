@@ -26,19 +26,20 @@ impl PoolFixture {
     /// replace tests.
     #[allow(dead_code)]
     pub(crate) fn live_one_disk() -> Self {
-        let (state_tmp, paths, config_tmp, config_path, pass_path) = Self::empty_inner();
+        let base = Self::empty_inner();
         let mut m = PoolMembership::empty();
         m.disks.insert(
             "disk1".into(),
             DiskMember::from_by_id(ByIdPath("/dev/disk/by-id/virtio-disk1".into())),
         );
-        membership::save_membership(&m, &paths).expect("save_membership");
+        membership::save_membership(&m, &base.paths).expect("save_membership");
         Self {
-            _state_tmp: state_tmp,
-            paths,
-            _config_tmp: config_tmp,
-            config_path,
-            pass_path,
+            _state_tmp: base.state_tmp,
+            paths: base.paths,
+            _config_tmp: base.config_tmp,
+            config_path: base.config_path,
+            config: base.config,
+            pass_path: base.pass_path,
             inhibitor: RecordingInhibitor::new(),
         }
     }

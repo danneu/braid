@@ -226,18 +226,19 @@ impl PoolFixture {
     /// for `cmd_replace_missing_path_rejects_old_name_absent_from_membership`.
     /// btrfs still reports devid 2 missing; pool.json doesn't record it.
     pub(crate) fn one_live_only() -> Self {
-        let (state_tmp, paths, config_tmp, config_path, pass_path) = Self::empty_inner();
+        let base = Self::empty_inner();
         let mut m = PoolMembership::empty();
         let mut disk1 = DiskMember::from_by_id(ByIdPath("/dev/disk/by-id/virtio-disk1".into()));
         disk1.devid = Some(1);
         m.disks.insert("disk1".into(), disk1);
-        membership::save_membership(&m, &paths).expect("save_membership");
+        membership::save_membership(&m, &base.paths).expect("save_membership");
         Self {
-            _state_tmp: state_tmp,
-            paths,
-            _config_tmp: config_tmp,
-            config_path,
-            pass_path,
+            _state_tmp: base.state_tmp,
+            paths: base.paths,
+            _config_tmp: base.config_tmp,
+            config_path: base.config_path,
+            config: base.config,
+            pass_path: base.pass_path,
             inhibitor: RecordingInhibitor::new(),
         }
     }
