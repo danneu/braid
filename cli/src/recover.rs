@@ -5581,9 +5581,7 @@ mod tests {
 
     #[test]
     fn add_pool_mutation_replay_verifies_open_journaled_target_passphrase() {
-        let tmp = tempfile::TempDir::new().unwrap();
-        let paths = StatePaths::custom(tmp.path().into());
-        let config = Config::new(MountPoint("/mnt/storage".into())).unwrap();
+        let f = PoolFixture::empty();
         let fs = MockFs::new(&["/dev/disk/by-id/virtio-disk2", "/dev/mapper/braid-disk2"]);
 
         let journal = recoverable_pool_mutation_add_journal();
@@ -5592,12 +5590,6 @@ mod tests {
             OpKind::Add { targets, .. } => targets,
             _ => unreachable!("test journal is Add"),
         };
-
-        let passphrase_file = tempfile::NamedTempFile::new().unwrap();
-        {
-            use std::io::Write;
-            passphrase_file.as_file().write_all(b"testpass").unwrap();
-        }
 
         let runner = MockRunner::default()
             .with_output(
@@ -5649,28 +5641,19 @@ mod tests {
                 CmdRequest::CryptsetupTestPassphrase {
                     device: "/dev/vda".into(),
                 },
-                b"testpass".to_vec(),
+                TEST_PASSPHRASE_BYTES.to_vec(),
                 ok_raw_empty("cryptsetup open --test-passphrase"),
             )
             .with_output_stdin(
                 CmdRequest::CryptsetupTestPassphrase {
                     device: "/dev/disk/by-id/virtio-disk2".into(),
                 },
-                b"testpass".to_vec(),
+                TEST_PASSPHRASE_BYTES.to_vec(),
                 err_raw("cryptsetup open --test-passphrase", 2, "No key available"),
             );
 
         let resolver = MockByIdResolver::default();
-        let params = RecoverParams {
-            config: &config,
-            paths: &paths,
-            passphrase_stdin: false,
-            passphrase_file: Some(passphrase_file.path()),
-            allow_degraded: false,
-            dry_run: false,
-            progress: ProgressOutput::Off,
-            sleep_inhibitor: &NOOP_INHIBITOR,
-        };
+        let params = f.recover_params().build();
         let err = execute_add_pool_mutation_recovery(
             &runner,
             &fs,
@@ -6126,12 +6109,10 @@ mod tests {
     // from disk1 and does not require disk2 to be present.
     #[test]
     fn existing_pool_add_recovery_plans_mount_from_pre_membership_only() {
-        let tmp = tempfile::TempDir::new().unwrap();
-        let paths = StatePaths::custom(tmp.path().into());
-        let config = Config::new(MountPoint("/mnt/storage".into())).unwrap();
+        let f = PoolFixture::empty();
         let fs = MockFs::new(&["/dev/disk/by-id/virtio-disk1", "/dev/mapper/braid-disk1"]);
         let journal = recoverable_pool_mutation_add_journal();
-        journal::write_journal(&paths, &journal).unwrap();
+        journal::write_journal(&f.paths, &journal).unwrap();
 
         let runner = MockRunner::default()
             .with_output(mountpoint_fail().0, mountpoint_fail().1)
@@ -6146,7 +6127,7 @@ mod tests {
             )
             .with_luks_dump_text_luks2("/dev/disk/by-id/virtio-disk1")
             .with_mapper_closed("braid-disk1");
-        let params = recover_params(&config, &paths, None, false);
+        let params = f.recover_params().passphrase_file(None).build();
 
         let plan = plan_recover(&runner, &fs, &params)
             .result
@@ -6161,23 +6142,15 @@ mod tests {
 
     #[test]
     fn add_pool_mutation_replays_returned_disk_after_wipefs_crash() {
-        let tmp = tempfile::TempDir::new().unwrap();
-        let paths = StatePaths::custom(tmp.path().into());
-        let config = Config::new(MountPoint("/mnt/storage".into())).unwrap();
+        let f = PoolFixture::empty();
         let fs = MockFs::new(&["/dev/disk/by-id/virtio-disk2", "/dev/mapper/braid-disk2"]);
         let journal = recoverable_pool_mutation_add_journal();
-        journal::write_journal(&paths, &journal).unwrap();
+        journal::write_journal(&f.paths, &journal).unwrap();
         let union = union_memberships(&journal);
         let targets = match &journal.op {
             OpKind::Add { targets, .. } => targets,
             _ => unreachable!("test journal is Add"),
         };
-
-        let passphrase_file = tempfile::NamedTempFile::new().unwrap();
-        {
-            use std::io::Write;
-            passphrase_file.as_file().write_all(b"testpass").unwrap();
-        }
 
         let runner = with_balance_replay(with_two_disk_pool_probe(
             MockRunner::default()
@@ -6200,14 +6173,14 @@ mod tests {
                     CmdRequest::CryptsetupTestPassphrase {
                         device: "/dev/vda".into(),
                     },
-                    b"testpass".to_vec(),
+                    TEST_PASSPHRASE_BYTES.to_vec(),
                     ok_raw_empty("cryptsetup open --test-passphrase"),
                 )
                 .with_output_stdin(
                     CmdRequest::CryptsetupTestPassphrase {
                         device: "/dev/disk/by-id/virtio-disk2".into(),
                     },
-                    b"testpass".to_vec(),
+                    TEST_PASSPHRASE_BYTES.to_vec(),
                     ok_raw_empty("cryptsetup open --test-passphrase"),
                 )
                 .with_output(
@@ -6239,13 +6212,7 @@ mod tests {
         ));
         let resolver = resolver_for(&[("/dev/vda", "virtio-disk1"), ("/dev/vdb", "virtio-disk2")]);
         let inhibitor = RequestCountInhibitor::new(runner.clone());
-        let params = recover_params_with_inhibitor(
-            &config,
-            &paths,
-            Some(passphrase_file.path()),
-            false,
-            &inhibitor,
-        );
+        let params = f.recover_params().sleep_inhibitor(&inhibitor).build();
 
         execute_add_pool_mutation_recovery(
             &runner,
@@ -6304,8 +6271,8 @@ mod tests {
             "destructive replay must stay inside the inhibitor window; \
              acquire_at={acquire_at}, wipe={wipe}, add={add}, requests={requests:?}"
         );
-        assert!(!paths.pending_op_json().exists());
-        let recovered = membership::load_membership(&paths).unwrap();
+        assert!(!f.paths.pending_op_json().exists());
+        let recovered = membership::load_membership(&f.paths).unwrap();
         assert!(recovered.disks.contains_key("disk2"));
     }
 
@@ -6592,22 +6559,15 @@ mod tests {
 
     #[test]
     fn add_pool_mutation_committed_target_scans_without_wipe_or_add() {
-        let tmp = tempfile::TempDir::new().unwrap();
-        let paths = StatePaths::custom(tmp.path().into());
-        let config = Config::new(MountPoint("/mnt/storage".into())).unwrap();
+        let f = PoolFixture::empty();
         let fs = MockFs::new(&["/dev/disk/by-id/virtio-disk2", "/dev/mapper/braid-disk2"]);
         let journal = recoverable_pool_mutation_add_journal();
-        journal::write_journal(&paths, &journal).unwrap();
+        journal::write_journal(&f.paths, &journal).unwrap();
         let union = union_memberships(&journal);
         let targets = match &journal.op {
             OpKind::Add { targets, .. } => targets,
             _ => unreachable!("test journal is Add"),
         };
-        let passphrase_file = tempfile::NamedTempFile::new().unwrap();
-        {
-            use std::io::Write;
-            passphrase_file.as_file().write_all(b"testpass").unwrap();
-        }
         let runner = with_balance_replay(with_two_disk_pool_probe(
             MockRunner::default()
                 .with_output(
@@ -6639,7 +6599,7 @@ mod tests {
                 ),
         ));
         let resolver = resolver_for(&[("/dev/vda", "virtio-disk1"), ("/dev/vdb", "virtio-disk2")]);
-        let params = recover_params(&config, &paths, Some(passphrase_file.path()), false);
+        let params = f.recover_params().build();
 
         execute_add_pool_mutation_recovery(
             &runner,
@@ -6670,7 +6630,7 @@ mod tests {
             )),
             "already live target must not be wiped or re-added"
         );
-        assert!(!paths.pending_op_json().exists());
+        assert!(!f.paths.pending_op_json().exists());
     }
 
     // Intent
@@ -6783,22 +6743,15 @@ mod tests {
     #[test]
     fn returned_replay_wrong_identity_fails_before_wipe_or_add() {
         for wrong_fsid in [false, true] {
-            let tmp = tempfile::TempDir::new().unwrap();
-            let paths = StatePaths::custom(tmp.path().into());
-            let config = Config::new(MountPoint("/mnt/storage".into())).unwrap();
+            let f = PoolFixture::empty();
             let fs = MockFs::new(&["/dev/disk/by-id/virtio-disk2", "/dev/mapper/braid-disk2"]);
             let journal = recoverable_pool_mutation_add_journal();
-            journal::write_journal(&paths, &journal).unwrap();
+            journal::write_journal(&f.paths, &journal).unwrap();
             let union = union_memberships(&journal);
             let targets = match &journal.op {
                 OpKind::Add { targets, .. } => targets,
                 _ => unreachable!("test journal is Add"),
             };
-            let passphrase_file = tempfile::NamedTempFile::new().unwrap();
-            {
-                use std::io::Write;
-                passphrase_file.as_file().write_all(b"testpass").unwrap();
-            }
 
             let uuid = if wrong_fsid {
                 "22222222-2222-2222-2222-222222222222"
@@ -6824,7 +6777,7 @@ mod tests {
                     CmdRequest::CryptsetupTestPassphrase {
                         device: "/dev/vda".into(),
                     },
-                    b"testpass".to_vec(),
+                    TEST_PASSPHRASE_BYTES.to_vec(),
                     ok_raw_empty("cryptsetup open --test-passphrase"),
                 );
             if wrong_fsid {
@@ -6833,7 +6786,7 @@ mod tests {
                         CmdRequest::CryptsetupTestPassphrase {
                             device: "/dev/disk/by-id/virtio-disk2".into(),
                         },
-                        b"testpass".to_vec(),
+                        TEST_PASSPHRASE_BYTES.to_vec(),
                         ok_raw_empty("cryptsetup open --test-passphrase"),
                     )
                     .with_output(
@@ -6843,7 +6796,7 @@ mod tests {
                         btrfs_show_target_fsid("ffffffff-ffff-ffff-ffff-ffffffffffff"),
                     );
             }
-            let params = recover_params(&config, &paths, Some(passphrase_file.path()), false);
+            let params = f.recover_params().build();
             let err = execute_add_pool_mutation_recovery(
                 &runner,
                 &fs,
@@ -6873,8 +6826,8 @@ mod tests {
                 )),
                 "wrong identity must fail before destructive replay"
             );
-            assert!(paths.pending_op_json().exists());
-            assert!(!paths.pool_json().exists());
+            assert!(f.paths.pending_op_json().exists());
+            assert!(!f.paths.pool_json().exists());
         }
     }
 
@@ -7571,16 +7524,17 @@ mod tests {
 
     #[test]
     fn post_add_recovery_never_prepares_or_adds_targets() {
-        let tmp = tempfile::TempDir::new().unwrap();
-        let paths = StatePaths::custom(tmp.path().into());
-        let config = Config::new(MountPoint("/mnt/storage".into())).unwrap();
+        let f = PoolFixture::empty();
         let journal = committed_two_disk_add_journal();
-        journal::write_journal(&paths, &journal).unwrap();
+        journal::write_journal(&f.paths, &journal).unwrap();
         let union = union_memberships(&journal);
         let runner = with_balance_replay(MockRunner::default());
         let resolver = resolver_for(&[("/dev/vda", "virtio-disk1"), ("/dev/vdb", "virtio-disk2")]);
-        let inhibitor = crate::inhibit::RecordingInhibitor::new();
-        let params = recover_params_with_inhibitor(&config, &paths, None, false, &inhibitor);
+        let params = f
+            .recover_params()
+            .passphrase_file(None)
+            .sleep_inhibitor(&f.inhibitor)
+            .build();
 
         execute_add_post_balance_recovery(
             &runner,
@@ -7594,7 +7548,7 @@ mod tests {
         .expect("post-add recovery should only finish balance work");
 
         let requests = runner.requests();
-        assert_eq!(inhibitor.acquire_count(), 1);
+        assert_eq!(f.inhibitor.acquire_count(), 1);
         assert!(
             !requests.iter().any(|r| matches!(
                 r,
@@ -7607,26 +7561,24 @@ mod tests {
             )),
             "PostAddBalanceRaid1 must not replay disk preparation or add"
         );
-        assert!(!paths.pending_op_json().exists());
-        assert!(paths.pool_json().exists());
+        assert!(!f.paths.pending_op_json().exists());
+        assert!(f.paths.pool_json().exists());
     }
 
     #[test]
     fn post_add_recovery_refuses_membership_mismatch_and_preserves_journal() {
-        let tmp = tempfile::TempDir::new().unwrap();
-        let paths = StatePaths::custom(tmp.path().into());
-        let config = Config::new(MountPoint("/mnt/storage".into())).unwrap();
+        let f = PoolFixture::empty();
         let journal = committed_two_disk_add_journal();
-        journal::write_journal(&paths, &journal).unwrap();
+        journal::write_journal(&f.paths, &journal).unwrap();
         let union = union_memberships(&journal);
         let runner = MockRunner::default().with_output_stdin(
             CmdRequest::CryptsetupTestPassphrase {
                 device: "/dev/vda".into(),
             },
-            b"testpass".to_vec(),
+            TEST_PASSPHRASE_BYTES.to_vec(),
             ok_raw_empty("cryptsetup open --test-passphrase"),
         );
-        let params = recover_params(&config, &paths, None, false);
+        let params = f.recover_params().passphrase_file(None).build();
         let err = execute_add_post_balance_recovery(
             &runner,
             &MockByIdResolver::default(),
@@ -7641,8 +7593,8 @@ mod tests {
             err.to_string()
                 .contains("post-add recovery expected live pool membership")
         );
-        assert!(paths.pending_op_json().exists());
-        assert!(!paths.pool_json().exists());
+        assert!(f.paths.pending_op_json().exists());
+        assert!(!f.paths.pool_json().exists());
     }
 
     #[test]
@@ -9222,9 +9174,7 @@ mod tests {
     // pool.json and leave the journal intact so the user can intervene.
     #[test]
     fn recover_fails_when_device_missing_from_both_snapshots() {
-        let tmp = tempfile::TempDir::new().unwrap();
-        let paths = StatePaths::custom(tmp.path().into());
-        let config = Config::new(MountPoint("/mnt/storage".into())).unwrap();
+        let f = PoolFixture::empty();
         let fs = MockFs::new(&[]);
 
         // pre and target both only know about "toshiba"
@@ -9248,7 +9198,7 @@ mod tests {
             pre_membership: pre,
             target_membership: target,
         };
-        journal::write_journal(&paths, &journal).unwrap();
+        journal::write_journal(&f.paths, &journal).unwrap();
 
         // Mock: pool is already mounted with both toshiba and mystery
         let (mp_req, mp_out) = mountpoint_ok();
@@ -9288,21 +9238,8 @@ mod tests {
         // Recovery should fail before by-id resolution; this resolver only
         // satisfies the cmd_recover call signature.
         let resolver = resolver_for(&[("/dev/vda", "ata-TOSHIBA")]);
-        let result = cmd_recover(
-            &runner,
-            &fs,
-            &resolver,
-            &RecoverParams {
-                config: &config,
-                paths: &paths,
-                passphrase_stdin: false,
-                passphrase_file: None,
-                allow_degraded: false,
-                dry_run: false,
-                progress: ProgressOutput::Off,
-                sleep_inhibitor: &NOOP_INHIBITOR,
-            },
-        );
+        let params = f.recover_params().passphrase_file(None).build();
+        let result = cmd_recover(&runner, &fs, &resolver, &params);
 
         // Must fail with the set-equality mismatch message naming the
         // unknown device, without the deleted by-id-path remediation hint.
@@ -9324,13 +9261,13 @@ mod tests {
 
         // pool.json must NOT have been written
         assert!(
-            !paths.pool_json().exists(),
+            !f.paths.pool_json().exists(),
             "pool.json should not exist after failed recovery"
         );
 
         // pending-op.json must NOT have been cleared
         assert!(
-            paths.pending_op_json().exists(),
+            f.paths.pending_op_json().exists(),
             "journal should still exist after failed recovery"
         );
     }
