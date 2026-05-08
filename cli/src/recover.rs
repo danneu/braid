@@ -3323,21 +3323,6 @@ mod tests {
         }
     }
 
-    /// Shared `(Arc<Mutex<HashSet<String>>>)` so the StatefulMockFs and
-    /// MapperClosingRunner can both observe path mutations.
-    /// `CommandRunner: Sync`, so `Rc<RefCell<...>>` is not usable here.
-    type SharedPaths = std::sync::Arc<std::sync::Mutex<std::collections::HashSet<String>>>;
-
-    struct NoopInhibitor;
-
-    impl AcquireSleepInhibitor for NoopInhibitor {
-        fn acquire(&self, _why: &str) -> std::io::Result<Box<dyn crate::inhibit::SleepGuard>> {
-            Ok(Box::new(()))
-        }
-    }
-
-    static NOOP_INHIBITOR: NoopInhibitor = NoopInhibitor;
-
     struct FailingInhibitor;
 
     impl AcquireSleepInhibitor for FailingInhibitor {
@@ -3381,127 +3366,15 @@ mod tests {
         }
     }
 
-    /// Mock filesystem with interior mutability so test code can model
-    /// device-mapper paths disappearing when `cryptsetup close` runs.
-    /// Used together with `MapperClosingRunner` for tests that exercise
-    /// the recover relock cycle on initially-open mappers.
-    #[allow(dead_code)] // superseded by RemountHarness; deletion deferred to commit 13
-    struct StatefulMockFs {
-        paths: SharedPaths,
-    }
-
-    #[allow(dead_code)]
-    impl StatefulMockFs {
-        fn new(initial: &[&str]) -> Self {
-            Self {
-                paths: std::sync::Arc::new(std::sync::Mutex::new(
-                    initial.iter().map(|s| s.to_string()).collect(),
-                )),
-            }
-        }
-
-        fn handle(&self) -> SharedPaths {
-            std::sync::Arc::clone(&self.paths)
-        }
-    }
-
-    impl Filesystem for StatefulMockFs {
-        fn exists(&self, path: &str) -> bool {
-            self.paths.lock().unwrap().contains(path)
-        }
-
-        fn is_block_device(&self, _path: &str) -> bool {
-            false
-        }
-
-        fn read_to_string(&self, path: &str) -> Result<String, std::io::Error> {
-            if path == "/proc/self/mountinfo" {
-                return Ok(
-                    "36 35 0:32 / /mnt/storage rw shared:1 - btrfs /dev/mapper/braid-disk1 rw\n"
-                        .to_owned(),
-                );
-            }
-            Err(std::io::Error::new(std::io::ErrorKind::NotFound, "mock"))
-        }
-
-        fn list_dir(&self, _path: &str) -> Result<Vec<String>, std::io::Error> {
-            Ok(vec![])
-        }
-    }
-
-    /// Wraps a `MockRunner` and removes `/dev/mapper/<mapper>` from a shared
-    /// `StatefulMockFs` whenever a `CryptsetupClose` request succeeds. Also
-    /// tracks which mappers have been closed so subsequent `CryptsetupStatus`
-    /// queries on those mappers report inactive, mirroring real-kernel
-    /// behavior across the recover relock cycle.
-    struct MapperClosingRunner {
-        inner: MockRunner,
-        fs_paths: SharedPaths,
-        closed: std::sync::Mutex<std::collections::HashSet<String>>,
-    }
-
-    impl MapperClosingRunner {
-        fn inactive_status(mapper: &str) -> RawCommandOutput {
-            RawCommandOutput {
-                cmd: format!("cryptsetup status {mapper}"),
-                stdout: String::new(),
-                stderr: format!("/dev/mapper/{mapper} is inactive.\n"),
-                exit_status: 4,
-            }
-        }
-    }
-
-    impl CommandRunner for MapperClosingRunner {
-        fn run(&self, request: &CmdRequest) -> Result<RawCommandOutput, crate::cmd::CmdError> {
-            if let CmdRequest::CryptsetupStatus { mapper } = request
-                && self.closed.lock().unwrap().contains(mapper)
-            {
-                return Ok(Self::inactive_status(mapper));
-            }
-            let result = self.inner.run(request)?;
-            match request {
-                CmdRequest::CryptsetupClose { mapper } if result.exit_status == 0 => {
-                    self.fs_paths
-                        .lock()
-                        .unwrap()
-                        .remove(&format!("/dev/mapper/{}", mapper));
-                    self.closed.lock().unwrap().insert(mapper.clone());
-                }
-                CmdRequest::CryptsetupLuksOpen { mapper, .. }
-                | CmdRequest::CryptsetupLuksOpenKeyFile { mapper, .. }
-                    if result.exit_status == 0 =>
-                {
-                    self.fs_paths
-                        .lock()
-                        .unwrap()
-                        .insert(format!("/dev/mapper/{}", mapper));
-                    self.closed.lock().unwrap().remove(mapper);
-                }
-                _ => {}
-            }
-            Ok(result)
-        }
-
-        fn run_with_stdin(
-            &self,
-            request: &CmdRequest,
-            stdin: &[u8],
-        ) -> Result<RawCommandOutput, crate::cmd::CmdError> {
-            let result = self.inner.run_with_stdin(request, stdin)?;
-            match request {
-                CmdRequest::CryptsetupLuksOpen { mapper, .. }
-                | CmdRequest::CryptsetupLuksOpenKeyFile { mapper, .. }
-                    if result.exit_status == 0 =>
-                {
-                    self.fs_paths
-                        .lock()
-                        .unwrap()
-                        .insert(format!("/dev/mapper/{}", mapper));
-                    self.closed.lock().unwrap().remove(mapper);
-                }
-                _ => {}
-            }
-            Ok(result)
+    /// `cryptsetup status` output for a mapper that is currently closed.
+    /// Matches the exit-status / stderr shape that recover's status parser
+    /// classifies as inactive.
+    fn inactive_mapper_status(mapper: &str) -> RawCommandOutput {
+        RawCommandOutput {
+            cmd: format!("cryptsetup status {mapper}"),
+            stdout: String::new(),
+            stderr: format!("/dev/mapper/{mapper} is inactive.\n"),
+            exit_status: 4,
         }
     }
 
@@ -4951,34 +4824,6 @@ mod tests {
             )
     }
 
-    fn recover_params<'a>(
-        config: &'a Config,
-        paths: &'a StatePaths,
-        passphrase_file: Option<&'a std::path::Path>,
-        dry_run: bool,
-    ) -> RecoverParams<'a> {
-        recover_params_with_inhibitor(config, paths, passphrase_file, dry_run, &NOOP_INHIBITOR)
-    }
-
-    fn recover_params_with_inhibitor<'a>(
-        config: &'a Config,
-        paths: &'a StatePaths,
-        passphrase_file: Option<&'a std::path::Path>,
-        dry_run: bool,
-        sleep_inhibitor: &'a dyn AcquireSleepInhibitor,
-    ) -> RecoverParams<'a> {
-        RecoverParams {
-            config,
-            paths,
-            passphrase_stdin: false,
-            passphrase_file,
-            allow_degraded: false,
-            dry_run,
-            progress: ProgressOutput::Off,
-            sleep_inhibitor,
-        }
-    }
-
     #[test]
     fn plan_recover_discovers_add_targets_before_mount_planning() {
         let f = PoolFixture::empty();
@@ -5259,7 +5104,7 @@ mod tests {
                 CmdRequest::CryptsetupStatus {
                     mapper: "braid-disk2".into(),
                 },
-                MapperClosingRunner::inactive_status("braid-disk2"),
+                inactive_mapper_status("braid-disk2"),
             )
             .with_output(
                 CmdRequest::CryptsetupLuksUuid {
@@ -5275,7 +5120,7 @@ mod tests {
                 CmdRequest::CryptsetupStatus {
                     mapper: "braid-disk1".into(),
                 },
-                MapperClosingRunner::inactive_status("braid-disk1"),
+                inactive_mapper_status("braid-disk1"),
             );
         let request_log = runner.clone();
 
@@ -5362,7 +5207,7 @@ mod tests {
                 CmdRequest::CryptsetupStatus {
                     mapper: "braid-disk2".into(),
                 },
-                MapperClosingRunner::inactive_status("braid-disk2"),
+                inactive_mapper_status("braid-disk2"),
             )
             .with_output(
                 CmdRequest::CryptsetupLuksUuid {
@@ -5378,7 +5223,7 @@ mod tests {
                 CmdRequest::CryptsetupStatus {
                     mapper: "braid-disk1".into(),
                 },
-                MapperClosingRunner::inactive_status("braid-disk1"),
+                inactive_mapper_status("braid-disk1"),
             );
         let request_log = runner.clone();
 
@@ -5460,7 +5305,7 @@ mod tests {
                 CmdRequest::CryptsetupStatus {
                     mapper: "braid-disk2".into(),
                 },
-                MapperClosingRunner::inactive_status("braid-disk2"),
+                inactive_mapper_status("braid-disk2"),
             )
             .with_output(
                 CmdRequest::CryptsetupLuksUuid {
@@ -5476,7 +5321,7 @@ mod tests {
                 CmdRequest::CryptsetupStatus {
                     mapper: "braid-disk3".into(),
                 },
-                MapperClosingRunner::inactive_status("braid-disk3"),
+                inactive_mapper_status("braid-disk3"),
             )
             .with_output_stdin(
                 CmdRequest::CryptsetupLuksOpen {
@@ -5512,7 +5357,7 @@ mod tests {
                 CmdRequest::CryptsetupStatus {
                     mapper: "braid-disk1".into(),
                 },
-                MapperClosingRunner::inactive_status("braid-disk1"),
+                inactive_mapper_status("braid-disk1"),
             );
         let request_log = runner.clone();
 
@@ -5684,12 +5529,10 @@ mod tests {
     // but the live pool already contains an unrelated braid-mystery mapper.
     #[test]
     fn pre_replay_unknown_live_member_aborts_before_mutation() {
-        let tmp = tempfile::TempDir::new().unwrap();
-        let paths = StatePaths::custom(tmp.path().into());
-        let config = Config::new(MountPoint("/mnt/storage".into())).unwrap();
+        let f = PoolFixture::empty();
         let fs = MockFs::new(&[]);
         let journal = two_pre_recoverable_add_disk3_journal();
-        journal::write_journal(&paths, &journal).unwrap();
+        journal::write_journal(&f.paths, &journal).unwrap();
         let union = union_memberships(&journal);
         let targets = match &journal.op {
             OpKind::Add { targets, .. } => targets,
@@ -5705,7 +5548,7 @@ mod tests {
         });
         pool.total_devices = 3;
         let runner = MockRunner::default();
-        let params = recover_params(&config, &paths, None, false);
+        let params = f.recover_params().passphrase_file(None).build();
 
         let err = execute_add_pool_mutation_recovery(
             &runner,
@@ -5741,8 +5584,8 @@ mod tests {
             )),
             "unknown live member must abort before opening the journaled target"
         );
-        assert!(paths.pending_op_json().exists());
-        assert!(!paths.pool_json().exists());
+        assert!(f.paths.pending_op_json().exists());
+        assert!(!f.paths.pool_json().exists());
     }
 
     // Intent
@@ -5758,30 +5601,23 @@ mod tests {
     // the journaled disk2 by-id path is physically absent.
     #[test]
     fn returned_target_absent_preserves_journal_and_pool_json() {
-        let tmp = tempfile::TempDir::new().unwrap();
-        let paths = StatePaths::custom(tmp.path().into());
-        let config = Config::new(MountPoint("/mnt/storage".into())).unwrap();
+        let f = PoolFixture::empty();
         let fs = MockFs::new(&["/dev/mapper/braid-disk1"]);
         let journal = recoverable_pool_mutation_add_journal();
-        journal::write_journal(&paths, &journal).unwrap();
+        journal::write_journal(&f.paths, &journal).unwrap();
         let union = union_memberships(&journal);
         let targets = match &journal.op {
             OpKind::Add { targets, .. } => targets,
             _ => unreachable!("test journal is Add"),
         };
-        let passphrase_file = tempfile::NamedTempFile::new().unwrap();
-        {
-            use std::io::Write;
-            passphrase_file.as_file().write_all(b"testpass").unwrap();
-        }
         let runner = MockRunner::default().with_output_stdin(
             CmdRequest::CryptsetupTestPassphrase {
                 device: "/dev/vda".into(),
             },
-            b"testpass".to_vec(),
+            TEST_PASSPHRASE_BYTES.to_vec(),
             ok_raw_empty("cryptsetup open --test-passphrase"),
         );
-        let params = recover_params(&config, &paths, Some(passphrase_file.path()), false);
+        let params = f.recover_params().build();
 
         let err = execute_add_pool_mutation_recovery(
             &runner,
@@ -5809,8 +5645,8 @@ mod tests {
             )),
             "absent returned target must not scan-forget, wipe, or add"
         );
-        assert!(paths.pending_op_json().exists());
-        assert!(!paths.pool_json().exists());
+        assert!(f.paths.pending_op_json().exists());
+        assert!(!f.paths.pool_json().exists());
     }
 
     // Intent
@@ -6822,7 +6658,7 @@ mod tests {
                 CmdRequest::CryptsetupStatus {
                     mapper: "braid-disk2".into(),
                 },
-                MapperClosingRunner::inactive_status("braid-disk2"),
+                inactive_mapper_status("braid-disk2"),
             )
             .with_output(
                 CmdRequest::CryptsetupLuksUuid {
@@ -6843,8 +6679,8 @@ mod tests {
                 // 2. ensure_luks_open sees disk1 closed and opens it;
                 // 3. post-mount probe_pool sees disk1 active.
                 vec![
-                    MapperClosingRunner::inactive_status("braid-disk1"),
-                    MapperClosingRunner::inactive_status("braid-disk1"),
+                    inactive_mapper_status("braid-disk1"),
+                    inactive_mapper_status("braid-disk1"),
                     cryptsetup_status_active("braid-disk1", "/dev/vda"),
                 ],
             )
@@ -7256,9 +7092,7 @@ mod tests {
     #[test]
     fn fresh_missing_or_wrong_target_preserves_journal_and_pool_json() {
         for wrong_label in [false, true] {
-            let tmp = tempfile::TempDir::new().unwrap();
-            let paths = StatePaths::custom(tmp.path().into());
-            let config = Config::new(MountPoint("/mnt/storage".into())).unwrap();
+            let f = PoolFixture::empty();
             let fs = if wrong_label {
                 MockFs::new(&["/dev/disk/by-id/virtio-disk2"])
             } else {
@@ -7266,22 +7100,17 @@ mod tests {
             };
             let journal =
                 fresh_pool_mutation_add_journal(vec!["--label".into(), "braid-disk2".into()], None);
-            journal::write_journal(&paths, &journal).unwrap();
+            journal::write_journal(&f.paths, &journal).unwrap();
             let union = union_memberships(&journal);
             let targets = match &journal.op {
                 OpKind::Add { targets, .. } => targets,
                 _ => unreachable!("test journal is Add"),
             };
-            let passphrase_file = tempfile::NamedTempFile::new().unwrap();
-            {
-                use std::io::Write;
-                passphrase_file.as_file().write_all(b"testpass").unwrap();
-            }
             let mut runner = MockRunner::default().with_output_stdin(
                 CmdRequest::CryptsetupTestPassphrase {
                     device: "/dev/vda".into(),
                 },
-                b"testpass".to_vec(),
+                TEST_PASSPHRASE_BYTES.to_vec(),
                 ok_raw_empty("cryptsetup open --test-passphrase"),
             );
             if wrong_label {
@@ -7303,7 +7132,7 @@ mod tests {
                     )
                     .with_mapper_closed("braid-disk2");
             }
-            let params = recover_params(&config, &paths, Some(passphrase_file.path()), false);
+            let params = f.recover_params().build();
             let err = execute_add_pool_mutation_recovery(
                 &runner,
                 &fs,
@@ -7324,20 +7153,18 @@ mod tests {
             } else {
                 assert!(msg.contains("is not present"), "{msg}");
             }
-            assert!(paths.pending_op_json().exists());
-            assert!(!paths.pool_json().exists());
+            assert!(f.paths.pending_op_json().exists());
+            assert!(!f.paths.pool_json().exists());
         }
     }
 
     #[test]
     fn fresh_present_target_rejects_bad_credential_before_pool_json() {
-        let tmp = tempfile::TempDir::new().unwrap();
-        let paths = StatePaths::custom(tmp.path().into());
-        let config = Config::new(MountPoint("/mnt/storage".into())).unwrap();
+        let f = PoolFixture::empty();
         let fs = MockFs::new(&["/dev/disk/by-id/virtio-disk2", "/dev/mapper/braid-disk2"]);
         let journal =
             fresh_pool_mutation_add_journal(vec!["--label".into(), "braid-disk2".into()], None);
-        journal::write_journal(&paths, &journal).unwrap();
+        journal::write_journal(&f.paths, &journal).unwrap();
         let union = union_memberships(&journal);
         let targets = match &journal.op {
             OpKind::Add { targets, .. } => targets,
@@ -7391,14 +7218,11 @@ mod tests {
                     err_raw("cryptsetup open --test-passphrase", 2, "No key available"),
                 ),
         );
-        let inhibitor = crate::inhibit::RecordingInhibitor::new();
-        let params = recover_params_with_inhibitor(
-            &config,
-            &paths,
-            Some(passphrase_file.path()),
-            false,
-            &inhibitor,
-        );
+        let params = f
+            .recover_params()
+            .passphrase_file(Some(passphrase_file.path()))
+            .sleep_inhibitor(&f.inhibitor)
+            .build();
         let err = execute_add_pool_mutation_recovery(
             &runner,
             &fs,
@@ -7419,7 +7243,7 @@ mod tests {
             "{err}"
         );
         assert_eq!(
-            inhibitor.acquire_count(),
+            f.inhibitor.acquire_count(),
             0,
             "bad add recovery credential must fail before acquiring the inhibitor"
         );
@@ -7439,8 +7263,8 @@ mod tests {
             )),
             "bad fresh-target credential must stop before mutation"
         );
-        assert!(paths.pending_op_json().exists());
-        assert!(!paths.pool_json().exists());
+        assert!(f.paths.pending_op_json().exists());
+        assert!(!f.paths.pool_json().exists());
     }
 
     #[test]
