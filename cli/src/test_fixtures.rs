@@ -1,6 +1,6 @@
 //! Test-only shared fixtures for `replace`, `add`, `remove`,
 //! `remove_missing`, `recover`, `doctor`, `mount`, `enroll_key_file`,
-//! `unlock`, and `status`.
+//! `unlock`, `status`, and `lock`.
 //!
 //! These fixtures consolidate the per-test scaffolding that previously
 //! lived as one-off `*Runner` structs and inline `tempdir + config + pass +
@@ -63,6 +63,10 @@
 //!     `MissingMock` behavior for request variants, especially
 //!     `Mount` vs `MountWithOptions`; the prefix avoids facade collisions
 //!     with mount's raw-output helpers during the staged migration.
+//!   * `lock` -- flat collection of lock-shaped helpers that preserve
+//!     missing-mock contracts, close/forget recording, and exact dry-run
+//!     step assertions while moving repeated scaffolding out of
+//!     `lock.rs::tests`.
 //!   * `PoolFixture` -- bundled tempdirs + `StatePaths` + config +
 //!     passphrase + `RecordingInhibitor`.
 //!   * `ReplaceParamsBuilder` / `AddParamsBuilder` / `RemoveParamsBuilder`
@@ -71,12 +75,13 @@
 //!
 //! Layout: this file is a facade. `shared` holds cross-scope items;
 //! `replace`, `add`, `remove`, `remove_missing`, `recover`, `doctor`,
-//! `mount`, `enroll_key_file`, `unlock`, and `status` hold their per-scope
-//! topologies, builders, and helpers.
+//! `mount`, `enroll_key_file`, `unlock`, `status`, and `lock` hold their
+//! per-scope topologies, builders, and helpers.
 
 mod add;
 mod doctor;
 mod enroll_key_file;
+mod lock;
 mod mount;
 mod recover;
 mod remove;
@@ -100,6 +105,11 @@ pub(crate) use enroll_key_file::{
     enroll_luks_uuid_ok, enroll_make_existing_keyfile, enroll_make_membership, enroll_passphrase,
     enroll_test_keyfile_fail, enroll_test_keyfile_ok, enroll_test_passphrase_fail,
     enroll_test_passphrase_ok, enroll_with_mountpoint_fail, enroll_with_mountpoint_ok,
+};
+pub(crate) use lock::{
+    LockNoopSleeper, RecordingRunner as LockRecordingRunner, lock_count_forget_steps, lock_err_raw,
+    lock_forget_step_devices, lock_fs, lock_mounted_runner, lock_ok_raw, lock_test_config,
+    lock_test_membership, lock_umount_failed_runner, lock_with_fsid_probe_mocks,
 };
 pub(crate) use mount::{
     MOUNT_TEST_PASSPHRASE_BYTES, NoopSleeper, arbitrary_fallback, base_two_disk_runner,

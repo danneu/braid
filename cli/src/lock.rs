@@ -559,260 +559,36 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::cmd::{CmdError, MockRunner, RawCommandOutput};
-    use crate::config::Config;
+    use crate::cmd::MockRunner;
     use crate::mapper_close::{CLOSE_RETRY_ATTEMPTS, CLOSE_RETRY_DELAY};
-    use crate::membership::{DiskMember, PoolMembership};
-    use crate::types::{ByIdPath, MountPoint};
-    use std::collections::{BTreeMap, HashMap, VecDeque};
+    use crate::test_fixtures::{
+        LockNoopSleeper, LockRecordingRunner, lock_count_forget_steps, lock_err_raw,
+        lock_forget_step_devices, lock_fs, lock_mounted_runner, lock_ok_raw, lock_test_config,
+        lock_test_membership, lock_umount_failed_runner, lock_with_fsid_probe_mocks,
+    };
     use std::sync::Mutex;
     use std::time::Duration;
 
-    /// A runner that delegates to MockRunner but records which
-    /// CryptsetupClose requests were made. Optionally serves a per-mapper
-    /// queue of CryptsetupClose responses (drained in order) before
-    /// falling back to the inner mock -- used to model transient busy
-    /// errors that succeed on retry.
-    struct RecordingRunner {
-        inner: MockRunner,
-        close_calls: Mutex<Vec<String>>,
-        close_sequences: Mutex<HashMap<String, VecDeque<RawCommandOutput>>>,
-        forget_calls: Mutex<Vec<Vec<String>>>,
-    }
-
-    impl RecordingRunner {
-        fn new(inner: MockRunner) -> Self {
-            Self {
-                inner,
-                close_calls: Mutex::new(Vec::new()),
-                close_sequences: Mutex::new(HashMap::new()),
-                forget_calls: Mutex::new(Vec::new()),
-            }
-        }
-
-        fn with_close_sequence(self, mapper: &str, outputs: Vec<RawCommandOutput>) -> Self {
-            self.close_sequences
-                .lock()
-                .unwrap()
-                .insert(mapper.to_owned(), outputs.into());
-            self
-        }
-
-        fn close_calls(&self) -> Vec<String> {
-            self.close_calls.lock().unwrap().clone()
-        }
-
-        fn forget_calls(&self) -> Vec<Vec<String>> {
-            self.forget_calls.lock().unwrap().clone()
-        }
-    }
-
-    impl CommandRunner for RecordingRunner {
-        fn run(&self, request: &CmdRequest) -> Result<RawCommandOutput, CmdError> {
-            if let CmdRequest::CryptsetupClose { mapper } = request {
-                self.close_calls.lock().unwrap().push(mapper.clone());
-                let mut seqs = self.close_sequences.lock().unwrap();
-                if let Some(queue) = seqs.get_mut(mapper)
-                    && let Some(out) = queue.pop_front()
-                {
-                    return Ok(out);
-                }
-            }
-            if let CmdRequest::BtrfsDeviceScanForget { devices } = request {
-                self.forget_calls.lock().unwrap().push(devices.clone());
-            }
-            self.inner.run(request)
-        }
-
-        fn run_with_stdin(
-            &self,
-            request: &CmdRequest,
-            stdin: &[u8],
-        ) -> Result<RawCommandOutput, CmdError> {
-            self.inner.run_with_stdin(request, stdin)
-        }
-    }
-
-    struct MockFs {
-        paths: Vec<String>,
-        exclop: String,
-        mountinfo: String,
-    }
-
-    impl MockFs {
-        fn new(paths: &[&str]) -> Self {
-            Self {
-                paths: paths.iter().map(|s| s.to_string()).collect(),
-                exclop: "none\n".to_owned(),
-                mountinfo:
-                    "36 35 0:32 / /mnt/storage rw,noatime shared:1 - btrfs /dev/mapper/braid-aaa rw\n"
-                        .to_owned(),
-            }
-        }
-
-        fn with_exclop(mut self, exclop: &str) -> Self {
-            self.exclop = format!("{exclop}\n");
-            self
-        }
-
-        fn with_mountinfo(mut self, body: &str) -> Self {
-            self.mountinfo = body.to_owned();
-            self
-        }
-    }
-
-    impl Filesystem for MockFs {
-        fn exists(&self, path: &str) -> bool {
-            self.paths.contains(&path.to_string())
-        }
-
-        fn is_block_device(&self, _path: &str) -> bool {
-            false
-        }
-
-        fn read_to_string(&self, path: &str) -> Result<String, std::io::Error> {
-            if path.ends_with("/exclusive_operation") {
-                Ok(self.exclop.clone())
-            } else if path == "/proc/self/mountinfo" {
-                Ok(self.mountinfo.clone())
-            } else {
-                Err(std::io::Error::new(std::io::ErrorKind::NotFound, "mock"))
-            }
-        }
-
-        fn list_dir(&self, dir: &str) -> Result<Vec<String>, std::io::Error> {
-            let prefix = if dir.ends_with('/') {
-                dir.to_string()
-            } else {
-                format!("{dir}/")
-            };
-            let entries: Vec<String> = self
-                .paths
-                .iter()
-                .filter_map(|p| p.strip_prefix(&prefix).map(|s| s.to_string()))
-                .filter(|s| !s.contains('/'))
-                .collect();
-            Ok(entries)
-        }
-    }
-
-    /// Test sleeper that records zero wall time. Default choice for
-    /// every lock test that drives `cmd_lock_impl`; the retry loop still
-    /// executes the correct number of iterations, just without blocking.
-    struct NoopSleeper;
-    impl Sleeper for NoopSleeper {
-        fn sleep(&self, _duration: Duration) {}
-    }
-
-    fn ok_raw(cmd: &str) -> RawCommandOutput {
-        RawCommandOutput {
-            cmd: cmd.to_owned(),
-            stdout: String::new(),
-            stderr: String::new(),
-            exit_status: 0,
-        }
-    }
-
-    fn err_raw(cmd: &str, exit_code: i32, stderr: &str) -> RawCommandOutput {
-        RawCommandOutput {
-            cmd: cmd.to_owned(),
-            stdout: String::new(),
-            stderr: stderr.to_owned(),
-            exit_status: exit_code,
-        }
-    }
-
-    /// Add the minimal `probe_fsid` preflight mock to a runner. Used by tests
-    /// that build their mock runner from scratch and still need to land in the
-    /// "mounted, btrfs, fsid=aaaa..." preflight path.
-    fn with_fsid_probe_mocks(runner: MockRunner) -> MockRunner {
-        runner.with_output(
-            CmdRequest::BtrfsFilesystemShow {
-                mount_point: MountPoint("/mnt/storage".to_owned()),
-            },
-            RawCommandOutput {
-                cmd: "btrfs filesystem show /mnt/storage".into(),
-                stdout: "Label: none  uuid: aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee\n\
-                             \tTotal devices 2 FS bytes used 16.00MiB\n\
-                             \tdevid    1 size 496.00MiB used 121.56MiB path /dev/mapper/braid-aaa\n\
-                             \tdevid    2 size 496.00MiB used 121.56MiB path /dev/mapper/braid-bbb\n"
-                    .into(),
-                stderr: String::new(),
-                exit_status: 0,
-            },
-        )
-    }
-
-    fn test_config() -> Config {
-        Config::new(MountPoint("/mnt/storage".to_owned())).unwrap()
-    }
-
-    fn test_membership() -> PoolMembership {
-        let mut disks = BTreeMap::new();
-        disks.insert(
-            "aaa".to_owned(),
-            DiskMember::from_by_id(ByIdPath("/dev/disk/by-id/a".to_owned())),
-        );
-        disks.insert(
-            "bbb".to_owned(),
-            DiskMember::from_by_id(ByIdPath("/dev/disk/by-id/b".to_owned())),
-        );
-        PoolMembership { disks }
-    }
-
-    /// Build a MockRunner pre-loaded with the minimal preflight outputs
-    /// cmd_lock actually issues (mountpoint check = mounted,
-    /// probe_fsid mocks, umount = ok, forget = ok).
-    ///
-    /// Only BtrfsFilesystemShow is registered for the preflight path.
-    /// Per-device CryptsetupStatus / CryptsetupLuksUuid are intentionally
-    /// absent: MockRunner panics on any unregistered CmdRequest, so lock tests
-    /// passing without those mocks is the mechanical regression guard that
-    /// cmd_lock no longer issues them.
-    fn mounted_runner() -> MockRunner {
-        with_fsid_probe_mocks(MockRunner::default().with_output(
-            CmdRequest::MountpointCheck {
-                path: MountPoint("/mnt/storage".to_owned()),
-            },
-            ok_raw("mountpoint -q /mnt/storage"),
-        ))
-        .with_output(
-            CmdRequest::Umount {
-                mount_point: MountPoint("/mnt/storage".to_owned()),
-            },
-            ok_raw("umount /mnt/storage"),
-        )
-        .with_output(
-            CmdRequest::BtrfsDeviceScanForget {
-                devices: vec![
-                    "/dev/mapper/braid-aaa".into(),
-                    "/dev/mapper/braid-bbb".into(),
-                ],
-            },
-            ok_raw("btrfs device scan --forget"),
-        )
-    }
-
     #[test]
     fn lock_happy_path_unmounts_and_closes() {
-        let runner = mounted_runner()
+        let runner = lock_mounted_runner()
             .with_output(
                 CmdRequest::CryptsetupClose {
                     mapper: "braid-aaa".into(),
                 },
-                ok_raw("cryptsetup close braid-aaa"),
+                lock_ok_raw("cryptsetup close braid-aaa"),
             )
             .with_output(
                 CmdRequest::CryptsetupClose {
                     mapper: "braid-bbb".into(),
                 },
-                ok_raw("cryptsetup close braid-bbb"),
+                lock_ok_raw("cryptsetup close braid-bbb"),
             );
-        let fs = MockFs::new(&["/dev/mapper/braid-aaa", "/dev/mapper/braid-bbb"]);
-        let config = test_config();
-        let membership = test_membership();
+        let fs = lock_fs(&["/dev/mapper/braid-aaa", "/dev/mapper/braid-bbb"]);
+        let config = lock_test_config();
+        let membership = lock_test_membership();
 
-        cmd_lock_impl(&runner, &fs, &NoopSleeper, &config, &membership, false)
+        cmd_lock_impl(&runner, &fs, &LockNoopSleeper, &config, &membership, false)
             .expect("lock should succeed");
     }
 
@@ -828,24 +604,24 @@ mod tests {
     //   mapper.
     #[test]
     fn execute_does_not_close_membership_mapper_absent_from_plan() {
-        let runner = with_fsid_probe_mocks(
+        let runner = lock_with_fsid_probe_mocks(
             MockRunner::default()
                 .with_output(
                     CmdRequest::MountpointCheck {
                         path: MountPoint("/mnt/storage".into()),
                     },
-                    ok_raw("mountpoint -q /mnt/storage"),
+                    lock_ok_raw("mountpoint -q /mnt/storage"),
                 )
                 .with_output(
                     CmdRequest::Umount {
                         mount_point: MountPoint("/mnt/storage".into()),
                     },
-                    ok_raw("umount /mnt/storage"),
+                    lock_ok_raw("umount /mnt/storage"),
                 ),
         );
-        let plan_fs = MockFs::new(&[]);
-        let config = test_config();
-        let membership = test_membership();
+        let plan_fs = lock_fs(&[]);
+        let config = lock_test_config();
+        let membership = lock_test_membership();
 
         let plan =
             plan_lock(&runner, &plan_fs, &config, &membership).expect("plan_lock should succeed");
@@ -854,9 +630,9 @@ mod tests {
             "precondition: plan should record no membership opens"
         );
 
-        let execute_fs = MockFs::new(&["/dev/mapper/braid-aaa"]);
-        let recording = RecordingRunner::new(runner);
-        plan.execute(&recording, &execute_fs, &NoopSleeper, &membership)
+        let execute_fs = lock_fs(&["/dev/mapper/braid-aaa"]);
+        let recording = LockRecordingRunner::new(runner);
+        plan.execute(&recording, &execute_fs, &LockNoopSleeper, &membership)
             .expect("execute should succeed without closing the unplanned mapper");
 
         assert!(
@@ -877,13 +653,13 @@ mod tests {
             CmdRequest::MountpointCheck {
                 path: MountPoint("/mnt/storage".to_owned()),
             },
-            err_raw("mountpoint -q /mnt/storage", 1, ""),
+            lock_err_raw("mountpoint -q /mnt/storage", 1, ""),
         );
-        let fs = MockFs::new(&[]);
-        let config = test_config();
-        let membership = test_membership();
+        let fs = lock_fs(&[]);
+        let config = lock_test_config();
+        let membership = lock_test_membership();
 
-        cmd_lock_impl(&runner, &fs, &NoopSleeper, &config, &membership, false)
+        cmd_lock_impl(&runner, &fs, &LockNoopSleeper, &config, &membership, false)
             .expect("lock should succeed (already locked)");
     }
 
@@ -895,19 +671,19 @@ mod tests {
                 CmdRequest::MountpointCheck {
                     path: MountPoint("/mnt/storage".to_owned()),
                 },
-                err_raw("mountpoint -q /mnt/storage", 1, ""),
+                lock_err_raw("mountpoint -q /mnt/storage", 1, ""),
             )
             .with_output(
                 CmdRequest::CryptsetupClose {
                     mapper: "braid-aaa".into(),
                 },
-                ok_raw("cryptsetup close braid-aaa"),
+                lock_ok_raw("cryptsetup close braid-aaa"),
             );
-        let fs = MockFs::new(&["/dev/mapper/braid-aaa"]);
-        let config = test_config();
-        let membership = test_membership();
+        let fs = lock_fs(&["/dev/mapper/braid-aaa"]);
+        let config = lock_test_config();
+        let membership = lock_test_membership();
 
-        cmd_lock_impl(&runner, &fs, &NoopSleeper, &config, &membership, false)
+        cmd_lock_impl(&runner, &fs, &LockNoopSleeper, &config, &membership, false)
             .expect("lock should succeed (partial)");
     }
 
@@ -919,23 +695,23 @@ mod tests {
     //   ultimately returns the umount error.
     #[test]
     fn lock_umount_busy_fails() {
-        let runner = with_fsid_probe_mocks(MockRunner::default().with_output(
+        let runner = lock_with_fsid_probe_mocks(MockRunner::default().with_output(
             CmdRequest::MountpointCheck {
                 path: MountPoint("/mnt/storage".to_owned()),
             },
-            ok_raw("mountpoint -q /mnt/storage"),
+            lock_ok_raw("mountpoint -q /mnt/storage"),
         ))
         .with_output(
             CmdRequest::Umount {
                 mount_point: MountPoint("/mnt/storage".to_owned()),
             },
-            err_raw("umount /mnt/storage", 32, "target is busy"),
+            lock_err_raw("umount /mnt/storage", 32, "target is busy"),
         )
         .with_output(
             CmdRequest::CryptsetupClose {
                 mapper: "braid-aaa".into(),
             },
-            err_raw(
+            lock_err_raw(
                 "cryptsetup close braid-aaa",
                 5,
                 "Device braid-aaa is still in use.",
@@ -945,17 +721,17 @@ mod tests {
             CmdRequest::CryptsetupClose {
                 mapper: "braid-bbb".into(),
             },
-            err_raw(
+            lock_err_raw(
                 "cryptsetup close braid-bbb",
                 5,
                 "Device braid-bbb is still in use.",
             ),
         );
-        let fs = MockFs::new(&["/dev/mapper/braid-aaa", "/dev/mapper/braid-bbb"]);
-        let config = test_config();
-        let membership = test_membership();
+        let fs = lock_fs(&["/dev/mapper/braid-aaa", "/dev/mapper/braid-bbb"]);
+        let config = lock_test_config();
+        let membership = lock_test_membership();
 
-        let err = cmd_lock_impl(&runner, &fs, &NoopSleeper, &config, &membership, false)
+        let err = cmd_lock_impl(&runner, &fs, &LockNoopSleeper, &config, &membership, false)
             .expect_err("should fail on busy");
         assert!(err.to_string().contains("target is busy"));
     }
@@ -967,23 +743,23 @@ mod tests {
     //   running lsof or fuser to identify the holder.
     #[test]
     fn lock_umount_busy_includes_hint() {
-        let runner = with_fsid_probe_mocks(MockRunner::default().with_output(
+        let runner = lock_with_fsid_probe_mocks(MockRunner::default().with_output(
             CmdRequest::MountpointCheck {
                 path: MountPoint("/mnt/storage".to_owned()),
             },
-            ok_raw("mountpoint -q /mnt/storage"),
+            lock_ok_raw("mountpoint -q /mnt/storage"),
         ))
         .with_output(
             CmdRequest::Umount {
                 mount_point: MountPoint("/mnt/storage".to_owned()),
             },
-            err_raw("umount /mnt/storage", 32, "target is busy"),
+            lock_err_raw("umount /mnt/storage", 32, "target is busy"),
         )
         .with_output(
             CmdRequest::CryptsetupClose {
                 mapper: "braid-aaa".into(),
             },
-            err_raw(
+            lock_err_raw(
                 "cryptsetup close braid-aaa",
                 5,
                 "Device braid-aaa is still in use.",
@@ -993,17 +769,17 @@ mod tests {
             CmdRequest::CryptsetupClose {
                 mapper: "braid-bbb".into(),
             },
-            err_raw(
+            lock_err_raw(
                 "cryptsetup close braid-bbb",
                 5,
                 "Device braid-bbb is still in use.",
             ),
         );
-        let fs = MockFs::new(&["/dev/mapper/braid-aaa", "/dev/mapper/braid-bbb"]);
-        let config = test_config();
-        let membership = test_membership();
+        let fs = lock_fs(&["/dev/mapper/braid-aaa", "/dev/mapper/braid-bbb"]);
+        let config = lock_test_config();
+        let membership = lock_test_membership();
 
-        let err = cmd_lock_impl(&runner, &fs, &NoopSleeper, &config, &membership, false)
+        let err = cmd_lock_impl(&runner, &fs, &LockNoopSleeper, &config, &membership, false)
             .expect_err("should fail on busy");
         let msg = err.to_string();
         assert!(
@@ -1022,17 +798,17 @@ mod tests {
     //   not suggest lsof/fuser.
     #[test]
     fn lock_umount_non_busy_omits_hint() {
-        let runner = with_fsid_probe_mocks(MockRunner::default().with_output(
+        let runner = lock_with_fsid_probe_mocks(MockRunner::default().with_output(
             CmdRequest::MountpointCheck {
                 path: MountPoint("/mnt/storage".to_owned()),
             },
-            ok_raw("mountpoint -q /mnt/storage"),
+            lock_ok_raw("mountpoint -q /mnt/storage"),
         ))
         .with_output(
             CmdRequest::Umount {
                 mount_point: MountPoint("/mnt/storage".to_owned()),
             },
-            err_raw(
+            lock_err_raw(
                 "umount /mnt/storage",
                 32,
                 "umount: /mnt/storage: can't write superblock.",
@@ -1042,19 +818,19 @@ mod tests {
             CmdRequest::CryptsetupClose {
                 mapper: "braid-aaa".into(),
             },
-            ok_raw("cryptsetup close braid-aaa"),
+            lock_ok_raw("cryptsetup close braid-aaa"),
         )
         .with_output(
             CmdRequest::CryptsetupClose {
                 mapper: "braid-bbb".into(),
             },
-            ok_raw("cryptsetup close braid-bbb"),
+            lock_ok_raw("cryptsetup close braid-bbb"),
         );
-        let fs = MockFs::new(&["/dev/mapper/braid-aaa", "/dev/mapper/braid-bbb"]);
-        let config = test_config();
-        let membership = test_membership();
+        let fs = lock_fs(&["/dev/mapper/braid-aaa", "/dev/mapper/braid-bbb"]);
+        let config = lock_test_config();
+        let membership = lock_test_membership();
 
-        let err = cmd_lock_impl(&runner, &fs, &NoopSleeper, &config, &membership, false)
+        let err = cmd_lock_impl(&runner, &fs, &LockNoopSleeper, &config, &membership, false)
             .expect_err("should fail on non-busy umount");
         let msg = err.to_string();
         assert!(
@@ -1077,17 +853,17 @@ mod tests {
     //   at the end is "can't write superblock"; hint must not appear.
     #[test]
     fn lock_umount_path_containing_busy_phrase_omits_hint() {
-        let runner = with_fsid_probe_mocks(MockRunner::default().with_output(
+        let runner = lock_with_fsid_probe_mocks(MockRunner::default().with_output(
             CmdRequest::MountpointCheck {
                 path: MountPoint("/mnt/storage".to_owned()),
             },
-            ok_raw("mountpoint -q /mnt/storage"),
+            lock_ok_raw("mountpoint -q /mnt/storage"),
         ))
         .with_output(
             CmdRequest::Umount {
                 mount_point: MountPoint("/mnt/storage".to_owned()),
             },
-            err_raw(
+            lock_err_raw(
                 "umount /mnt/storage",
                 32,
                 "umount: /mnt/has target is busy here/storage: can't write superblock.",
@@ -1097,19 +873,19 @@ mod tests {
             CmdRequest::CryptsetupClose {
                 mapper: "braid-aaa".into(),
             },
-            ok_raw("cryptsetup close braid-aaa"),
+            lock_ok_raw("cryptsetup close braid-aaa"),
         )
         .with_output(
             CmdRequest::CryptsetupClose {
                 mapper: "braid-bbb".into(),
             },
-            ok_raw("cryptsetup close braid-bbb"),
+            lock_ok_raw("cryptsetup close braid-bbb"),
         );
-        let fs = MockFs::new(&["/dev/mapper/braid-aaa", "/dev/mapper/braid-bbb"]);
-        let config = test_config();
-        let membership = test_membership();
+        let fs = lock_fs(&["/dev/mapper/braid-aaa", "/dev/mapper/braid-bbb"]);
+        let config = lock_test_config();
+        let membership = lock_test_membership();
 
-        let err = cmd_lock_impl(&runner, &fs, &NoopSleeper, &config, &membership, false)
+        let err = cmd_lock_impl(&runner, &fs, &LockNoopSleeper, &config, &membership, false)
             .expect_err("should fail on non-busy umount with busy-phrase path");
         let msg = err.to_string();
         assert!(
@@ -1120,42 +896,42 @@ mod tests {
 
     #[test]
     fn lock_adds_forget_after_umount() {
-        let runner = mounted_runner()
+        let runner = lock_mounted_runner()
             .with_output(
                 CmdRequest::CryptsetupClose {
                     mapper: "braid-aaa".into(),
                 },
-                ok_raw("cryptsetup close braid-aaa"),
+                lock_ok_raw("cryptsetup close braid-aaa"),
             )
             .with_output(
                 CmdRequest::CryptsetupClose {
                     mapper: "braid-bbb".into(),
                 },
-                ok_raw("cryptsetup close braid-bbb"),
+                lock_ok_raw("cryptsetup close braid-bbb"),
             );
-        let fs = MockFs::new(&["/dev/mapper/braid-aaa", "/dev/mapper/braid-bbb"]);
-        let config = test_config();
-        let membership = test_membership();
+        let fs = lock_fs(&["/dev/mapper/braid-aaa", "/dev/mapper/braid-bbb"]);
+        let config = lock_test_config();
+        let membership = lock_test_membership();
 
         // If BtrfsDeviceScanForget were not called, MockRunner would return
         // MissingMock and the test would fail.
-        cmd_lock_impl(&runner, &fs, &NoopSleeper, &config, &membership, false)
+        cmd_lock_impl(&runner, &fs, &LockNoopSleeper, &config, &membership, false)
             .expect("lock should succeed with forget");
     }
 
     #[test]
     fn lock_forget_failure_is_nonfatal() {
-        let runner = with_fsid_probe_mocks(MockRunner::default().with_output(
+        let runner = lock_with_fsid_probe_mocks(MockRunner::default().with_output(
             CmdRequest::MountpointCheck {
                 path: MountPoint("/mnt/storage".to_owned()),
             },
-            ok_raw("mountpoint -q /mnt/storage"),
+            lock_ok_raw("mountpoint -q /mnt/storage"),
         ))
         .with_output(
             CmdRequest::Umount {
                 mount_point: MountPoint("/mnt/storage".to_owned()),
             },
-            ok_raw("umount /mnt/storage"),
+            lock_ok_raw("umount /mnt/storage"),
         )
         .with_output(
             CmdRequest::BtrfsDeviceScanForget {
@@ -1164,25 +940,25 @@ mod tests {
                     "/dev/mapper/braid-bbb".into(),
                 ],
             },
-            err_raw("btrfs device scan --forget", 1, "some error"),
+            lock_err_raw("btrfs device scan --forget", 1, "some error"),
         )
         .with_output(
             CmdRequest::CryptsetupClose {
                 mapper: "braid-aaa".into(),
             },
-            ok_raw("cryptsetup close braid-aaa"),
+            lock_ok_raw("cryptsetup close braid-aaa"),
         )
         .with_output(
             CmdRequest::CryptsetupClose {
                 mapper: "braid-bbb".into(),
             },
-            ok_raw("cryptsetup close braid-bbb"),
+            lock_ok_raw("cryptsetup close braid-bbb"),
         );
-        let fs = MockFs::new(&["/dev/mapper/braid-aaa", "/dev/mapper/braid-bbb"]);
-        let config = test_config();
-        let membership = test_membership();
+        let fs = lock_fs(&["/dev/mapper/braid-aaa", "/dev/mapper/braid-bbb"]);
+        let config = lock_test_config();
+        let membership = lock_test_membership();
 
-        cmd_lock_impl(&runner, &fs, &NoopSleeper, &config, &membership, false)
+        cmd_lock_impl(&runner, &fs, &LockNoopSleeper, &config, &membership, false)
             .expect("lock should succeed even when forget fails");
     }
 
@@ -1195,7 +971,7 @@ mod tests {
     //   pool.json write; next `braid lock` must still close the orphan.
     #[test]
     fn lock_closes_orphaned_mapper() {
-        let runner = mounted_runner()
+        let runner = lock_mounted_runner()
             // Override forget mock: with an orphan present, the forget
             // set must include it (close-set-scoped).
             .with_output(
@@ -1206,36 +982,36 @@ mod tests {
                         "/dev/mapper/braid-ccc".into(),
                     ],
                 },
-                ok_raw("btrfs device scan --forget"),
+                lock_ok_raw("btrfs device scan --forget"),
             )
             .with_output(
                 CmdRequest::CryptsetupClose {
                     mapper: "braid-aaa".into(),
                 },
-                ok_raw("cryptsetup close braid-aaa"),
+                lock_ok_raw("cryptsetup close braid-aaa"),
             )
             .with_output(
                 CmdRequest::CryptsetupClose {
                     mapper: "braid-bbb".into(),
                 },
-                ok_raw("cryptsetup close braid-bbb"),
+                lock_ok_raw("cryptsetup close braid-bbb"),
             )
             .with_output(
                 CmdRequest::CryptsetupClose {
                     mapper: "braid-ccc".into(),
                 },
-                ok_raw("cryptsetup close braid-ccc"),
+                lock_ok_raw("cryptsetup close braid-ccc"),
             );
         // ccc is not in membership but exists as a mapper → orphan
-        let fs = MockFs::new(&[
+        let fs = lock_fs(&[
             "/dev/mapper/braid-aaa",
             "/dev/mapper/braid-bbb",
             "/dev/mapper/braid-ccc",
         ]);
-        let config = test_config();
-        let membership = test_membership();
+        let config = lock_test_config();
+        let membership = lock_test_membership();
 
-        cmd_lock_impl(&runner, &fs, &NoopSleeper, &config, &membership, false)
+        cmd_lock_impl(&runner, &fs, &LockNoopSleeper, &config, &membership, false)
             .expect("lock should close orphan too");
     }
 
@@ -1247,59 +1023,26 @@ mod tests {
     //   permissions; lock must still close membership-known mappers.
     #[test]
     fn lock_orphan_scan_failure_is_nonfatal() {
-        struct FailListDirFs;
-        impl Filesystem for FailListDirFs {
-            fn exists(&self, path: &str) -> bool {
-                path == "/dev/mapper/braid-aaa" || path == "/dev/mapper/braid-bbb"
-            }
-            fn is_block_device(&self, _path: &str) -> bool {
-                false
-            }
-            fn read_to_string(&self, path: &str) -> Result<String, std::io::Error> {
-                if path == "/proc/self/mountinfo" {
-                    Ok(
-                        "36 35 0:32 / /mnt/storage rw,noatime shared:1 - btrfs /dev/mapper/braid-aaa rw\n"
-                            .to_owned(),
-                    )
-                } else if path.ends_with("/exclusive_operation") {
-                    Ok("none\n".to_owned())
-                } else {
-                    Err(std::io::Error::new(std::io::ErrorKind::NotFound, "mock"))
-                }
-            }
-            fn list_dir(&self, _path: &str) -> Result<Vec<String>, std::io::Error> {
-                Err(std::io::Error::new(
-                    std::io::ErrorKind::PermissionDenied,
-                    "permission denied",
-                ))
-            }
-        }
-
-        let runner = mounted_runner()
+        let runner = lock_mounted_runner()
             .with_output(
                 CmdRequest::CryptsetupClose {
                     mapper: "braid-aaa".into(),
                 },
-                ok_raw("cryptsetup close braid-aaa"),
+                lock_ok_raw("cryptsetup close braid-aaa"),
             )
             .with_output(
                 CmdRequest::CryptsetupClose {
                     mapper: "braid-bbb".into(),
                 },
-                ok_raw("cryptsetup close braid-bbb"),
+                lock_ok_raw("cryptsetup close braid-bbb"),
             );
-        let config = test_config();
-        let membership = test_membership();
+        let fs =
+            lock_fs(&["/dev/mapper/braid-aaa", "/dev/mapper/braid-bbb"]).with_dev_mapper_error();
+        let config = lock_test_config();
+        let membership = lock_test_membership();
 
-        cmd_lock_impl(
-            &runner,
-            &FailListDirFs,
-            &NoopSleeper,
-            &config,
-            &membership,
-            false,
-        )
-        .expect("lock should succeed despite list_dir failure");
+        cmd_lock_impl(&runner, &fs, &LockNoopSleeper, &config, &membership, false)
+            .expect("lock should succeed despite list_dir failure");
     }
 
     /*
@@ -1315,34 +1058,17 @@ mod tests {
      */
     #[test]
     fn dry_run_preview_warns_when_list_dir_fails() {
-        struct FailListDirFs;
-        impl Filesystem for FailListDirFs {
-            fn exists(&self, path: &str) -> bool {
-                path == "/dev/mapper/braid-aaa" || path == "/dev/mapper/braid-bbb"
-            }
-            fn is_block_device(&self, _path: &str) -> bool {
-                false
-            }
-            fn read_to_string(&self, _path: &str) -> Result<String, std::io::Error> {
-                Err(std::io::Error::new(std::io::ErrorKind::NotFound, "mock"))
-            }
-            fn list_dir(&self, _path: &str) -> Result<Vec<String>, std::io::Error> {
-                Err(std::io::Error::new(
-                    std::io::ErrorKind::PermissionDenied,
-                    "permission denied",
-                ))
-            }
-        }
-
         // Pool is not mounted -- mountpoint check returns non-zero.
         let runner = MockRunner::default().with_output(
             CmdRequest::MountpointCheck {
                 path: MountPoint("/mnt/storage".to_owned()),
             },
-            err_raw("mountpoint -q /mnt/storage", 1, ""),
+            lock_err_raw("mountpoint -q /mnt/storage", 1, ""),
         );
-        let config = test_config();
-        let plan = plan_lock(&runner, &FailListDirFs, &config, &test_membership())
+        let fs =
+            lock_fs(&["/dev/mapper/braid-aaa", "/dev/mapper/braid-bbb"]).with_dev_mapper_error();
+        let config = lock_test_config();
+        let plan = plan_lock(&runner, &fs, &config, &lock_test_membership())
             .expect("plan_lock should succeed with list_dir failure");
         let output = plan.preview().render();
 
@@ -1374,19 +1100,19 @@ mod tests {
      */
     #[test]
     fn dry_run_preview_warns_per_orphan_mapper() {
-        let runner = with_fsid_probe_mocks(MockRunner::default().with_output(
+        let runner = lock_with_fsid_probe_mocks(MockRunner::default().with_output(
             CmdRequest::MountpointCheck {
                 path: MountPoint("/mnt/storage".to_owned()),
             },
-            ok_raw("mountpoint -q /mnt/storage"),
+            lock_ok_raw("mountpoint -q /mnt/storage"),
         ));
-        let fs = MockFs::new(&[
+        let fs = lock_fs(&[
             "/dev/mapper/braid-aaa",
             "/dev/mapper/braid-bbb",
             "/dev/mapper/braid-ccc",
         ]);
-        let config = test_config();
-        let plan = plan_lock(&runner, &fs, &config, &test_membership())
+        let config = lock_test_config();
+        let plan = plan_lock(&runner, &fs, &config, &lock_test_membership())
             .expect("plan_lock should succeed with one orphan mapper");
         let output = plan.preview().render();
         let warn_line =
@@ -1418,19 +1144,19 @@ mod tests {
     fn dry_run_preview_mounted_happy_path() {
         // Mounted pool needs MountpointCheck ok + probe_fsid mocks for
         // preflight. Plan-only path -- no umount/forget/close mocks.
-        let runner = with_fsid_probe_mocks(MockRunner::default().with_output(
+        let runner = lock_with_fsid_probe_mocks(MockRunner::default().with_output(
             CmdRequest::MountpointCheck {
                 path: MountPoint("/mnt/storage".to_owned()),
             },
-            ok_raw("mountpoint -q /mnt/storage"),
+            lock_ok_raw("mountpoint -q /mnt/storage"),
         ));
-        let fs = MockFs::new(&[
+        let fs = lock_fs(&[
             "/dev/mapper/braid-aaa",
             "/dev/mapper/braid-bbb",
             "/dev/mapper/braid-ccc",
         ]);
-        let config = test_config();
-        let plan = plan_lock(&runner, &fs, &config, &test_membership())
+        let config = lock_test_config();
+        let plan = plan_lock(&runner, &fs, &config, &lock_test_membership())
             .expect("plan_lock should succeed on mounted pool");
         let output = plan.preview().render();
         let warn_line =
@@ -1488,33 +1214,15 @@ mod tests {
             CmdRequest::MountpointCheck {
                 path: MountPoint("/mnt/storage".to_owned()),
             },
-            err_raw("mountpoint -q /mnt/storage", 1, ""),
+            lock_err_raw("mountpoint -q /mnt/storage", 1, ""),
         );
-        let fs = MockFs::new(&[]);
-        let config = test_config();
-        let plan = plan_lock(&runner, &fs, &config, &test_membership())
+        let fs = lock_fs(&[]);
+        let config = lock_test_config();
+        let plan = plan_lock(&runner, &fs, &config, &lock_test_membership())
             .expect("plan_lock should succeed on already-locked pool");
         let output = plan.preview().render();
 
         assert_eq!(output, "nothing to do.\n", "unexpected preview: {output:?}");
-    }
-
-    /// Build a MockRunner pre-loaded with a failed-umount scenario
-    /// (mountpoint check = mounted, balance status = no balance, umount = busy).
-    /// No BtrfsDeviceScanForget — forget is gated on successful unmount.
-    fn umount_failed_runner() -> MockRunner {
-        with_fsid_probe_mocks(MockRunner::default().with_output(
-            CmdRequest::MountpointCheck {
-                path: MountPoint("/mnt/storage".to_owned()),
-            },
-            ok_raw("mountpoint -q /mnt/storage"),
-        ))
-        .with_output(
-            CmdRequest::Umount {
-                mount_point: MountPoint("/mnt/storage".to_owned()),
-            },
-            err_raw("umount /mnt/storage", 32, "target is busy"),
-        )
     }
 
     // Intent: when umount fails, lock still attempts to close LUKS mappers
@@ -1527,24 +1235,24 @@ mod tests {
     //   in an inconsistent state.
     #[test]
     fn lock_umount_fails_but_mappers_close_successfully() {
-        let runner = umount_failed_runner()
+        let runner = lock_umount_failed_runner()
             .with_output(
                 CmdRequest::CryptsetupClose {
                     mapper: "braid-aaa".into(),
                 },
-                ok_raw("cryptsetup close braid-aaa"),
+                lock_ok_raw("cryptsetup close braid-aaa"),
             )
             .with_output(
                 CmdRequest::CryptsetupClose {
                     mapper: "braid-bbb".into(),
                 },
-                ok_raw("cryptsetup close braid-bbb"),
+                lock_ok_raw("cryptsetup close braid-bbb"),
             );
-        let fs = MockFs::new(&["/dev/mapper/braid-aaa", "/dev/mapper/braid-bbb"]);
-        let config = test_config();
-        let membership = test_membership();
+        let fs = lock_fs(&["/dev/mapper/braid-aaa", "/dev/mapper/braid-bbb"]);
+        let config = lock_test_config();
+        let membership = lock_test_membership();
 
-        let err = cmd_lock_impl(&runner, &fs, &NoopSleeper, &config, &membership, false)
+        let err = cmd_lock_impl(&runner, &fs, &LockNoopSleeper, &config, &membership, false)
             .expect_err("should fail — umount error is the root cause");
         let msg = err.to_string();
         assert!(
@@ -1562,12 +1270,12 @@ mod tests {
     //   The returned error is the umount error, not a mapper close error.
     #[test]
     fn lock_umount_fails_busy_mapper_is_warning() {
-        let runner = umount_failed_runner()
+        let runner = lock_umount_failed_runner()
             .with_output(
                 CmdRequest::CryptsetupClose {
                     mapper: "braid-aaa".into(),
                 },
-                err_raw(
+                lock_err_raw(
                     "cryptsetup close braid-aaa",
                     5,
                     "Device braid-aaa is still in use.",
@@ -1577,17 +1285,17 @@ mod tests {
                 CmdRequest::CryptsetupClose {
                     mapper: "braid-bbb".into(),
                 },
-                err_raw(
+                lock_err_raw(
                     "cryptsetup close braid-bbb",
                     5,
                     "Device braid-bbb is still in use.",
                 ),
             );
-        let fs = MockFs::new(&["/dev/mapper/braid-aaa", "/dev/mapper/braid-bbb"]);
-        let config = test_config();
-        let membership = test_membership();
+        let fs = lock_fs(&["/dev/mapper/braid-aaa", "/dev/mapper/braid-bbb"]);
+        let config = lock_test_config();
+        let membership = lock_test_membership();
 
-        let err = cmd_lock_impl(&runner, &fs, &NoopSleeper, &config, &membership, false)
+        let err = cmd_lock_impl(&runner, &fs, &LockNoopSleeper, &config, &membership, false)
             .expect_err("should fail with umount error");
         let msg = err.to_string();
         assert!(
@@ -1607,24 +1315,24 @@ mod tests {
     //   the umount error).
     #[test]
     fn lock_umount_fails_unexpected_mapper_error_is_fatal() {
-        let runner = umount_failed_runner()
+        let runner = lock_umount_failed_runner()
             .with_output(
                 CmdRequest::CryptsetupClose {
                     mapper: "braid-aaa".into(),
                 },
-                err_raw("cryptsetup close braid-aaa", 4, "Device is not active."),
+                lock_err_raw("cryptsetup close braid-aaa", 4, "Device is not active."),
             )
             .with_output(
                 CmdRequest::CryptsetupClose {
                     mapper: "braid-bbb".into(),
                 },
-                ok_raw("cryptsetup close braid-bbb"),
+                lock_ok_raw("cryptsetup close braid-bbb"),
             );
-        let fs = MockFs::new(&["/dev/mapper/braid-aaa", "/dev/mapper/braid-bbb"]);
-        let config = test_config();
-        let membership = test_membership();
+        let fs = lock_fs(&["/dev/mapper/braid-aaa", "/dev/mapper/braid-bbb"]);
+        let config = lock_test_config();
+        let membership = lock_test_membership();
 
-        let err = cmd_lock_impl(&runner, &fs, &NoopSleeper, &config, &membership, false)
+        let err = cmd_lock_impl(&runner, &fs, &LockNoopSleeper, &config, &membership, false)
             .expect_err("should fail with mapper error");
         let msg = err.to_string();
         assert!(
@@ -1640,24 +1348,24 @@ mod tests {
     //   Remaining mappers are still attempted, then the mapper error is returned.
     #[test]
     fn lock_mapper_close_fatal_when_umount_succeeded() {
-        let runner = mounted_runner()
+        let runner = lock_mounted_runner()
             .with_output(
                 CmdRequest::CryptsetupClose {
                     mapper: "braid-aaa".into(),
                 },
-                err_raw("cryptsetup close braid-aaa", 4, "Device is not active."),
+                lock_err_raw("cryptsetup close braid-aaa", 4, "Device is not active."),
             )
             .with_output(
                 CmdRequest::CryptsetupClose {
                     mapper: "braid-bbb".into(),
                 },
-                ok_raw("cryptsetup close braid-bbb"),
+                lock_ok_raw("cryptsetup close braid-bbb"),
             );
-        let fs = MockFs::new(&["/dev/mapper/braid-aaa", "/dev/mapper/braid-bbb"]);
-        let config = test_config();
-        let membership = test_membership();
+        let fs = lock_fs(&["/dev/mapper/braid-aaa", "/dev/mapper/braid-bbb"]);
+        let config = lock_test_config();
+        let membership = lock_test_membership();
 
-        let err = cmd_lock_impl(&runner, &fs, &NoopSleeper, &config, &membership, false)
+        let err = cmd_lock_impl(&runner, &fs, &LockNoopSleeper, &config, &membership, false)
             .expect_err("should fail on mapper close");
         let msg = err.to_string();
         assert!(
@@ -1676,38 +1384,38 @@ mod tests {
     //   umount error.
     #[test]
     fn lock_umount_fails_orphan_busy_is_warning() {
-        let runner = umount_failed_runner()
+        let runner = lock_umount_failed_runner()
             .with_output(
                 CmdRequest::CryptsetupClose {
                     mapper: "braid-aaa".into(),
                 },
-                ok_raw("cryptsetup close braid-aaa"),
+                lock_ok_raw("cryptsetup close braid-aaa"),
             )
             .with_output(
                 CmdRequest::CryptsetupClose {
                     mapper: "braid-bbb".into(),
                 },
-                ok_raw("cryptsetup close braid-bbb"),
+                lock_ok_raw("cryptsetup close braid-bbb"),
             )
             .with_output(
                 CmdRequest::CryptsetupClose {
                     mapper: "braid-ccc".into(),
                 },
-                err_raw(
+                lock_err_raw(
                     "cryptsetup close braid-ccc",
                     5,
                     "Device braid-ccc is still in use.",
                 ),
             );
-        let fs = MockFs::new(&[
+        let fs = lock_fs(&[
             "/dev/mapper/braid-aaa",
             "/dev/mapper/braid-bbb",
             "/dev/mapper/braid-ccc",
         ]);
-        let config = test_config();
-        let membership = test_membership();
+        let config = lock_test_config();
+        let membership = lock_test_membership();
 
-        let err = cmd_lock_impl(&runner, &fs, &NoopSleeper, &config, &membership, false)
+        let err = cmd_lock_impl(&runner, &fs, &LockNoopSleeper, &config, &membership, false)
             .expect_err("should fail with umount error");
         let msg = err.to_string();
         assert!(
@@ -1726,34 +1434,34 @@ mod tests {
     //   over the umount error).
     #[test]
     fn lock_umount_fails_orphan_unexpected_error_is_fatal() {
-        let runner = umount_failed_runner()
+        let runner = lock_umount_failed_runner()
             .with_output(
                 CmdRequest::CryptsetupClose {
                     mapper: "braid-aaa".into(),
                 },
-                ok_raw("cryptsetup close braid-aaa"),
+                lock_ok_raw("cryptsetup close braid-aaa"),
             )
             .with_output(
                 CmdRequest::CryptsetupClose {
                     mapper: "braid-bbb".into(),
                 },
-                ok_raw("cryptsetup close braid-bbb"),
+                lock_ok_raw("cryptsetup close braid-bbb"),
             )
             .with_output(
                 CmdRequest::CryptsetupClose {
                     mapper: "braid-ccc".into(),
                 },
-                err_raw("cryptsetup close braid-ccc", 4, "Device is not active."),
+                lock_err_raw("cryptsetup close braid-ccc", 4, "Device is not active."),
             );
-        let fs = MockFs::new(&[
+        let fs = lock_fs(&[
             "/dev/mapper/braid-aaa",
             "/dev/mapper/braid-bbb",
             "/dev/mapper/braid-ccc",
         ]);
-        let config = test_config();
-        let membership = test_membership();
+        let config = lock_test_config();
+        let membership = lock_test_membership();
 
-        let err = cmd_lock_impl(&runner, &fs, &NoopSleeper, &config, &membership, false)
+        let err = cmd_lock_impl(&runner, &fs, &LockNoopSleeper, &config, &membership, false)
             .expect_err("should fail with orphan error");
         let msg = err.to_string();
         assert!(
@@ -1770,7 +1478,7 @@ mod tests {
     //   surface the failure.
     #[test]
     fn lock_orphan_close_failure_is_fatal() {
-        let runner = mounted_runner()
+        let runner = lock_mounted_runner()
             .with_output(
                 CmdRequest::BtrfsDeviceScanForget {
                     devices: vec![
@@ -1779,35 +1487,35 @@ mod tests {
                         "/dev/mapper/braid-orphan".into(),
                     ],
                 },
-                ok_raw("btrfs device scan --forget"),
+                lock_ok_raw("btrfs device scan --forget"),
             )
             .with_output(
                 CmdRequest::CryptsetupClose {
                     mapper: "braid-aaa".into(),
                 },
-                ok_raw("cryptsetup close braid-aaa"),
+                lock_ok_raw("cryptsetup close braid-aaa"),
             )
             .with_output(
                 CmdRequest::CryptsetupClose {
                     mapper: "braid-bbb".into(),
                 },
-                ok_raw("cryptsetup close braid-bbb"),
+                lock_ok_raw("cryptsetup close braid-bbb"),
             )
             .with_output(
                 CmdRequest::CryptsetupClose {
                     mapper: "braid-orphan".into(),
                 },
-                err_raw("cryptsetup close braid-orphan", 4, "Device is not active."),
+                lock_err_raw("cryptsetup close braid-orphan", 4, "Device is not active."),
             );
-        let fs = MockFs::new(&[
+        let fs = lock_fs(&[
             "/dev/mapper/braid-aaa",
             "/dev/mapper/braid-bbb",
             "/dev/mapper/braid-orphan",
         ]);
-        let config = test_config();
-        let membership = test_membership();
+        let config = lock_test_config();
+        let membership = lock_test_membership();
 
-        let err = cmd_lock_impl(&runner, &fs, &NoopSleeper, &config, &membership, false)
+        let err = cmd_lock_impl(&runner, &fs, &LockNoopSleeper, &config, &membership, false)
             .expect_err("should fail on orphan close");
         assert!(
             err.to_string().contains("braid-orphan"),
@@ -1824,25 +1532,25 @@ mod tests {
     //   active"; bbb mapper close succeeds. Both mappers were attempted.
     #[test]
     fn lock_continues_closing_after_mapper_error() {
-        let inner = mounted_runner()
+        let inner = lock_mounted_runner()
             .with_output(
                 CmdRequest::CryptsetupClose {
                     mapper: "braid-aaa".into(),
                 },
-                err_raw("cryptsetup close braid-aaa", 4, "Device is not active."),
+                lock_err_raw("cryptsetup close braid-aaa", 4, "Device is not active."),
             )
             .with_output(
                 CmdRequest::CryptsetupClose {
                     mapper: "braid-bbb".into(),
                 },
-                ok_raw("cryptsetup close braid-bbb"),
+                lock_ok_raw("cryptsetup close braid-bbb"),
             );
-        let runner = RecordingRunner::new(inner);
-        let fs = MockFs::new(&["/dev/mapper/braid-aaa", "/dev/mapper/braid-bbb"]);
-        let config = test_config();
-        let membership = test_membership();
+        let runner = LockRecordingRunner::new(inner);
+        let fs = lock_fs(&["/dev/mapper/braid-aaa", "/dev/mapper/braid-bbb"]);
+        let config = lock_test_config();
+        let membership = lock_test_membership();
 
-        let err = cmd_lock_impl(&runner, &fs, &NoopSleeper, &config, &membership, false)
+        let err = cmd_lock_impl(&runner, &fs, &LockNoopSleeper, &config, &membership, false)
             .expect_err("should fail with mapper error");
         assert!(
             err.to_string().contains("braid-aaa"),
@@ -1863,25 +1571,25 @@ mod tests {
     //   The returned error mentions aaa (first in iteration order).
     #[test]
     fn lock_collects_first_mapper_error() {
-        let inner = mounted_runner()
+        let inner = lock_mounted_runner()
             .with_output(
                 CmdRequest::CryptsetupClose {
                     mapper: "braid-aaa".into(),
                 },
-                err_raw("cryptsetup close braid-aaa", 4, "Device is not active."),
+                lock_err_raw("cryptsetup close braid-aaa", 4, "Device is not active."),
             )
             .with_output(
                 CmdRequest::CryptsetupClose {
                     mapper: "braid-bbb".into(),
                 },
-                err_raw("cryptsetup close braid-bbb", 1, "permission denied"),
+                lock_err_raw("cryptsetup close braid-bbb", 1, "permission denied"),
             );
-        let runner = RecordingRunner::new(inner);
-        let fs = MockFs::new(&["/dev/mapper/braid-aaa", "/dev/mapper/braid-bbb"]);
-        let config = test_config();
-        let membership = test_membership();
+        let runner = LockRecordingRunner::new(inner);
+        let fs = lock_fs(&["/dev/mapper/braid-aaa", "/dev/mapper/braid-bbb"]);
+        let config = lock_test_config();
+        let membership = lock_test_membership();
 
-        let err = cmd_lock_impl(&runner, &fs, &NoopSleeper, &config, &membership, false)
+        let err = cmd_lock_impl(&runner, &fs, &LockNoopSleeper, &config, &membership, false)
             .expect_err("should fail with first mapper error");
         let msg = err.to_string();
         assert!(
@@ -1916,28 +1624,28 @@ mod tests {
      */
     #[test]
     fn lock_retries_busy_close_then_succeeds() {
-        let inner = mounted_runner().with_output(
+        let inner = lock_mounted_runner().with_output(
             CmdRequest::CryptsetupClose {
                 mapper: "braid-bbb".into(),
             },
-            ok_raw("cryptsetup close braid-bbb"),
+            lock_ok_raw("cryptsetup close braid-bbb"),
         );
-        let runner = RecordingRunner::new(inner).with_close_sequence(
+        let runner = LockRecordingRunner::new(inner).with_close_sequence(
             "braid-aaa",
             vec![
-                err_raw(
+                lock_err_raw(
                     "cryptsetup close braid-aaa",
                     5,
                     "Device braid-aaa is still in use.",
                 ),
-                ok_raw("cryptsetup close braid-aaa"),
+                lock_ok_raw("cryptsetup close braid-aaa"),
             ],
         );
-        let fs = MockFs::new(&["/dev/mapper/braid-aaa", "/dev/mapper/braid-bbb"]);
-        let config = test_config();
-        let membership = test_membership();
+        let fs = lock_fs(&["/dev/mapper/braid-aaa", "/dev/mapper/braid-bbb"]);
+        let config = lock_test_config();
+        let membership = lock_test_membership();
 
-        cmd_lock_impl(&runner, &fs, &NoopSleeper, &config, &membership, false)
+        cmd_lock_impl(&runner, &fs, &LockNoopSleeper, &config, &membership, false)
             .expect("lock should succeed after retry");
 
         let calls = runner.close_calls();
@@ -1969,12 +1677,12 @@ mod tests {
     //   LockError::DeviceBusy.
     #[test]
     fn lock_mapper_close_exit5_is_busy_regardless_of_wording() {
-        let inner = mounted_runner()
+        let inner = lock_mounted_runner()
             .with_output(
                 CmdRequest::CryptsetupClose {
                     mapper: "braid-aaa".into(),
                 },
-                err_raw(
+                lock_err_raw(
                     "cryptsetup close braid-aaa",
                     5,
                     "Target braid-aaa is still active and cannot be removed.",
@@ -1984,14 +1692,14 @@ mod tests {
                 CmdRequest::CryptsetupClose {
                     mapper: "braid-bbb".into(),
                 },
-                ok_raw("cryptsetup close braid-bbb"),
+                lock_ok_raw("cryptsetup close braid-bbb"),
             );
-        let runner = RecordingRunner::new(inner);
-        let fs = MockFs::new(&["/dev/mapper/braid-aaa", "/dev/mapper/braid-bbb"]);
-        let config = test_config();
-        let membership = test_membership();
+        let runner = LockRecordingRunner::new(inner);
+        let fs = lock_fs(&["/dev/mapper/braid-aaa", "/dev/mapper/braid-bbb"]);
+        let config = lock_test_config();
+        let membership = lock_test_membership();
 
-        let err = cmd_lock_impl(&runner, &fs, &NoopSleeper, &config, &membership, false)
+        let err = cmd_lock_impl(&runner, &fs, &LockNoopSleeper, &config, &membership, false)
             .expect_err("busy close should bubble up after retries exhaust");
         assert!(
             matches!(err, LockError::DeviceBusy(_)),
@@ -2025,24 +1733,24 @@ mod tests {
     #[test]
     fn lock_busy_close_exhausts_retries_preserves_stderr_contract() {
         let busy_stderr = "  Device braid-aaa IS STILL IN USE.\n";
-        let runner = mounted_runner()
+        let runner = lock_mounted_runner()
             .with_output(
                 CmdRequest::CryptsetupClose {
                     mapper: "braid-aaa".into(),
                 },
-                err_raw("cryptsetup close braid-aaa", 5, busy_stderr),
+                lock_err_raw("cryptsetup close braid-aaa", 5, busy_stderr),
             )
             .with_output(
                 CmdRequest::CryptsetupClose {
                     mapper: "braid-bbb".into(),
                 },
-                ok_raw("cryptsetup close braid-bbb"),
+                lock_ok_raw("cryptsetup close braid-bbb"),
             );
-        let fs = MockFs::new(&["/dev/mapper/braid-aaa", "/dev/mapper/braid-bbb"]);
-        let config = test_config();
-        let membership = test_membership();
+        let fs = lock_fs(&["/dev/mapper/braid-aaa", "/dev/mapper/braid-bbb"]);
+        let config = lock_test_config();
+        let membership = lock_test_membership();
 
-        let err = cmd_lock_impl(&runner, &fs, &NoopSleeper, &config, &membership, false)
+        let err = cmd_lock_impl(&runner, &fs, &LockNoopSleeper, &config, &membership, false)
             .expect_err("should fail: busy retries exhausted");
         // Variant check is orthogonal to text check: guards against a rename
         // that also updates the #[error(...)] attribute and still renders
@@ -2069,18 +1777,18 @@ mod tests {
     // Scenario: a RAID1 balance is in progress, operator runs `braid lock`.
     //   Lock must refuse without unmounting or closing any mappers.
     fn lock_refuses_when_exclusive_op_active() {
-        let runner = with_fsid_probe_mocks(MockRunner::default().with_output(
+        let runner = lock_with_fsid_probe_mocks(MockRunner::default().with_output(
             CmdRequest::MountpointCheck {
                 path: MountPoint("/mnt/storage".to_owned()),
             },
-            ok_raw("mountpoint -q /mnt/storage"),
+            lock_ok_raw("mountpoint -q /mnt/storage"),
         ));
         let fs =
-            MockFs::new(&["/dev/mapper/braid-aaa", "/dev/mapper/braid-bbb"]).with_exclop("balance");
-        let config = test_config();
-        let membership = test_membership();
+            lock_fs(&["/dev/mapper/braid-aaa", "/dev/mapper/braid-bbb"]).with_excl_op("balance");
+        let config = lock_test_config();
+        let membership = lock_test_membership();
 
-        let err = cmd_lock_impl(&runner, &fs, &NoopSleeper, &config, &membership, false)
+        let err = cmd_lock_impl(&runner, &fs, &LockNoopSleeper, &config, &membership, false)
             .expect_err("should refuse — balance is active");
         let msg = err.to_string();
         assert!(
@@ -2094,18 +1802,18 @@ mod tests {
     // Why: a paused balance still holds the exclusive lock — unmounting is unsafe.
     // Scenario: operator paused a balance and forgot, then runs `braid lock`.
     fn lock_refuses_when_balance_paused() {
-        let runner = with_fsid_probe_mocks(MockRunner::default().with_output(
+        let runner = lock_with_fsid_probe_mocks(MockRunner::default().with_output(
             CmdRequest::MountpointCheck {
                 path: MountPoint("/mnt/storage".to_owned()),
             },
-            ok_raw("mountpoint -q /mnt/storage"),
+            lock_ok_raw("mountpoint -q /mnt/storage"),
         ));
-        let fs = MockFs::new(&["/dev/mapper/braid-aaa", "/dev/mapper/braid-bbb"])
-            .with_exclop("balance paused");
-        let config = test_config();
-        let membership = test_membership();
+        let fs = lock_fs(&["/dev/mapper/braid-aaa", "/dev/mapper/braid-bbb"])
+            .with_excl_op("balance paused");
+        let config = lock_test_config();
+        let membership = lock_test_membership();
 
-        let err = cmd_lock_impl(&runner, &fs, &NoopSleeper, &config, &membership, false)
+        let err = cmd_lock_impl(&runner, &fs, &LockNoopSleeper, &config, &membership, false)
             .expect_err("should refuse — balance is paused");
         let msg = err.to_string();
         assert!(
@@ -2132,14 +1840,14 @@ mod tests {
             CmdRequest::MountpointCheck {
                 path: MountPoint("/mnt/storage".to_owned()),
             },
-            ok_raw("mountpoint -q /mnt/storage"),
+            lock_ok_raw("mountpoint -q /mnt/storage"),
         );
-        let fs = MockFs::new(&["/dev/mapper/braid-aaa", "/dev/mapper/braid-bbb"])
+        let fs = lock_fs(&["/dev/mapper/braid-aaa", "/dev/mapper/braid-bbb"])
             .with_mountinfo("36 35 0:32 / /mnt/storage rw,noatime shared:1 - ext4 /dev/sda1 rw\n");
-        let config = test_config();
-        let membership = test_membership();
+        let config = lock_test_config();
+        let membership = lock_test_membership();
 
-        let err = cmd_lock_impl(&runner, &fs, &NoopSleeper, &config, &membership, false)
+        let err = cmd_lock_impl(&runner, &fs, &LockNoopSleeper, &config, &membership, false)
             .expect_err("should refuse -- mount is not btrfs");
         let msg = err.to_string();
         assert!(
@@ -2205,30 +1913,6 @@ mod tests {
         assert!(steps.is_empty());
     }
 
-    /// Extract the `devices` list from the single forget step in a
-    /// compiled lock plan. Panics if there is not exactly one forget
-    /// step, so the caller's assertion is anchored to a present step.
-    fn forget_step_devices(steps: &[Step]) -> Vec<String> {
-        let mut found: Option<Vec<String>> = None;
-        for step in steps {
-            for cmd in &step.commands {
-                if let CmdRequest::BtrfsDeviceScanForget { devices } = cmd {
-                    assert!(found.is_none(), "multiple forget steps in plan: {steps:?}");
-                    found = Some(devices.clone());
-                }
-            }
-        }
-        found.expect("no forget step in plan")
-    }
-
-    fn count_forget_steps(steps: &[Step]) -> usize {
-        steps
-            .iter()
-            .flat_map(|s| &s.commands)
-            .filter(|c| matches!(c, CmdRequest::BtrfsDeviceScanForget { .. }))
-            .count()
-    }
-
     // Intent: the compiled dry-run plan's forget step lists the pool's
     // own mapper paths, never the kernel-global no-arg form.
     // Why: the no-arg form (btrfs_forget_devices(NULL) in
@@ -2244,7 +1928,7 @@ mod tests {
         let open_mappers = vec!["braid-aaa".into(), "braid-bbb".into()];
         let steps = compile_lock_steps(true, &open_mappers, &[], &mount_point);
         assert_eq!(
-            forget_step_devices(&steps),
+            lock_forget_step_devices(&steps),
             vec![
                 "/dev/mapper/braid-aaa".to_string(),
                 "/dev/mapper/braid-bbb".to_string(),
@@ -2272,7 +1956,7 @@ mod tests {
         }];
         let steps = compile_lock_steps(true, &open_mappers, &orphan_mappers, &mount_point);
         assert_eq!(
-            forget_step_devices(&steps),
+            lock_forget_step_devices(&steps),
             vec![
                 "/dev/mapper/braid-aaa".to_string(),
                 "/dev/mapper/braid-orphan".to_string(),
@@ -2292,7 +1976,11 @@ mod tests {
         use crate::types::MountPoint;
         let mount_point = MountPoint("/mnt/storage".into());
         let steps = compile_lock_steps(true, &[], &[], &mount_point);
-        assert_eq!(count_forget_steps(&steps), 0, "no forget step expected");
+        assert_eq!(
+            lock_count_forget_steps(&steps),
+            0,
+            "no forget step expected"
+        );
         assert!(
             steps.iter().any(|s| s
                 .commands
@@ -2312,25 +2000,25 @@ mod tests {
     // carries exactly the pool's mapper paths.
     #[test]
     fn lock_forget_is_pool_scoped() {
-        let inner = mounted_runner()
+        let inner = lock_mounted_runner()
             .with_output(
                 CmdRequest::CryptsetupClose {
                     mapper: "braid-aaa".into(),
                 },
-                ok_raw("cryptsetup close braid-aaa"),
+                lock_ok_raw("cryptsetup close braid-aaa"),
             )
             .with_output(
                 CmdRequest::CryptsetupClose {
                     mapper: "braid-bbb".into(),
                 },
-                ok_raw("cryptsetup close braid-bbb"),
+                lock_ok_raw("cryptsetup close braid-bbb"),
             );
-        let runner = RecordingRunner::new(inner);
-        let fs = MockFs::new(&["/dev/mapper/braid-aaa", "/dev/mapper/braid-bbb"]);
-        let config = test_config();
-        let membership = test_membership();
+        let runner = LockRecordingRunner::new(inner);
+        let fs = lock_fs(&["/dev/mapper/braid-aaa", "/dev/mapper/braid-bbb"]);
+        let config = lock_test_config();
+        let membership = lock_test_membership();
 
-        cmd_lock_impl(&runner, &fs, &NoopSleeper, &config, &membership, false)
+        cmd_lock_impl(&runner, &fs, &LockNoopSleeper, &config, &membership, false)
             .expect("lock should succeed");
 
         assert_eq!(
@@ -2355,7 +2043,7 @@ mod tests {
     // call carries all three mapper paths.
     #[test]
     fn lock_forget_includes_orphan_mappers() {
-        let inner = mounted_runner()
+        let inner = lock_mounted_runner()
             .with_output(
                 CmdRequest::BtrfsDeviceScanForget {
                     devices: vec![
@@ -2364,36 +2052,36 @@ mod tests {
                         "/dev/mapper/braid-ccc".into(),
                     ],
                 },
-                ok_raw("btrfs device scan --forget"),
+                lock_ok_raw("btrfs device scan --forget"),
             )
             .with_output(
                 CmdRequest::CryptsetupClose {
                     mapper: "braid-aaa".into(),
                 },
-                ok_raw("cryptsetup close braid-aaa"),
+                lock_ok_raw("cryptsetup close braid-aaa"),
             )
             .with_output(
                 CmdRequest::CryptsetupClose {
                     mapper: "braid-bbb".into(),
                 },
-                ok_raw("cryptsetup close braid-bbb"),
+                lock_ok_raw("cryptsetup close braid-bbb"),
             )
             .with_output(
                 CmdRequest::CryptsetupClose {
                     mapper: "braid-ccc".into(),
                 },
-                ok_raw("cryptsetup close braid-ccc"),
+                lock_ok_raw("cryptsetup close braid-ccc"),
             );
-        let runner = RecordingRunner::new(inner);
-        let fs = MockFs::new(&[
+        let runner = LockRecordingRunner::new(inner);
+        let fs = lock_fs(&[
             "/dev/mapper/braid-aaa",
             "/dev/mapper/braid-bbb",
             "/dev/mapper/braid-ccc",
         ]);
-        let config = test_config();
-        let membership = test_membership();
+        let config = lock_test_config();
+        let membership = lock_test_membership();
 
-        cmd_lock_impl(&runner, &fs, &NoopSleeper, &config, &membership, false)
+        cmd_lock_impl(&runner, &fs, &LockNoopSleeper, &config, &membership, false)
             .expect("lock should succeed and close orphan");
 
         assert_eq!(
@@ -2440,7 +2128,7 @@ mod tests {
             CmdRequest::CryptsetupClose {
                 mapper: "braid-aaa".into(),
             },
-            err_raw(
+            lock_err_raw(
                 "cryptsetup close braid-aaa",
                 5,
                 "Device braid-aaa is still in use.",
@@ -2479,12 +2167,12 @@ mod tests {
      * Intent: public cmd_lock wires a real sleeper. An always-busy
      *   mapper makes the wrapper pay measurable wall-clock sleep time
      *   before returning DeviceBusy, proving &RealSleeper (not
-     *   &NoopSleeper) is on the hot path.
+     *   &LockNoopSleeper) is on the hot path.
      *
      * Why it exists: the helper-level RecordingSleeper test proves
      *   close_mapper_with_retry uses CLOSE_RETRY_DELAY, but does not
      *   prove the public wrapper hands in &RealSleeper. A regression
-     *   that shipped &NoopSleeper (or dropped the sleeper entirely) in
+     *   that shipped &LockNoopSleeper (or dropped the sleeper entirely) in
      *   production would leave lock reliability race-dependent and
      *   pass every helper-level unit test -- including
      *   braid-lock-btrfs-held.py, which only asserts success and does
@@ -2503,12 +2191,12 @@ mod tests {
     fn cmd_lock_wrapper_uses_real_sleeper() {
         use std::time::Instant;
 
-        let runner = mounted_runner()
+        let runner = lock_mounted_runner()
             .with_output(
                 CmdRequest::CryptsetupClose {
                     mapper: "braid-aaa".into(),
                 },
-                err_raw(
+                lock_err_raw(
                     "cryptsetup close braid-aaa",
                     5,
                     "Device braid-aaa is still in use.",
@@ -2518,15 +2206,15 @@ mod tests {
                 CmdRequest::CryptsetupClose {
                     mapper: "braid-bbb".into(),
                 },
-                err_raw(
+                lock_err_raw(
                     "cryptsetup close braid-bbb",
                     5,
                     "Device braid-bbb is still in use.",
                 ),
             );
-        let fs = MockFs::new(&["/dev/mapper/braid-aaa", "/dev/mapper/braid-bbb"]);
-        let config = test_config();
-        let membership = test_membership();
+        let fs = lock_fs(&["/dev/mapper/braid-aaa", "/dev/mapper/braid-bbb"]);
+        let config = lock_test_config();
+        let membership = lock_test_membership();
 
         let start = Instant::now();
         let err = cmd_lock(&runner, &fs, &config, &membership, false)
@@ -2542,7 +2230,7 @@ mod tests {
         // sleep is 2 * (CLOSE_RETRY_ATTEMPTS - 1) * CLOSE_RETRY_DELAY =
         // 2s. We assert a tolerant lower bound of one mapper's worth
         // (~900ms) so scheduler jitter on slow CI does not cause flake,
-        // while still catching a NoopSleeper regression (which would
+        // while still catching a LockNoopSleeper regression (which would
         // complete in microseconds).
         let min_expected =
             CLOSE_RETRY_DELAY * (CLOSE_RETRY_ATTEMPTS - 1) - Duration::from_millis(100);

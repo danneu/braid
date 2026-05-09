@@ -33,13 +33,22 @@ pub(crate) fn mock_ok(cmd: &str, stdout: &str) -> RawCommandOutput {
 // MockFs
 // ---------------------------------------------------------------------------
 
-/// Generic `Filesystem` mock: a configurable set of paths reported as
-/// existing, the canonical `/proc/self/mountinfo` body, and an
-/// overridable sysfs `exclusive_operation` body for preflight tests.
+/// Generic `Filesystem` mock: configurable existing paths, mountinfo,
+/// sysfs `exclusive_operation`, and `/dev/mapper` listing behavior for
+/// command tests that need filesystem probes without touching the host.
 pub(crate) struct MockFs {
     paths: Vec<String>,
     mountinfo: String,
     excl_op: String,
+    dev_mapper: DevMapperListing,
+}
+
+/// `/dev/mapper` listing behavior, kept explicit so tests can distinguish
+/// an empty directory, a populated directory, and an unreadable directory.
+enum DevMapperListing {
+    Empty,
+    Entries(Vec<String>),
+    Error(std::io::ErrorKind),
 }
 
 impl MockFs {
@@ -51,6 +60,7 @@ impl MockFs {
             mountinfo: "36 35 0:32 / /mnt/storage rw shared:1 - btrfs /dev/mapper/braid-disk1 rw\n"
                 .into(),
             excl_op: "none\n".into(),
+            dev_mapper: DevMapperListing::Empty,
         }
     }
 
@@ -62,13 +72,36 @@ impl MockFs {
             paths,
             mountinfo: "26 25 0:23 / / rw shared:1 - ext4 /dev/sda1 rw\n".into(),
             excl_op: "none\n".into(),
+            dev_mapper: DevMapperListing::Empty,
         }
+    }
+
+    /// Override `/proc/self/mountinfo` for tests that exercise mounted
+    /// non-btrfs, malformed, or otherwise custom mount table branches.
+    pub(crate) fn with_mountinfo(mut self, body: &str) -> Self {
+        self.mountinfo = body.to_owned();
+        self
     }
 
     /// Override the sysfs exclusive_operation body. Use to drive
     /// preflight's busy-op / paused-balance branches.
     pub(crate) fn with_excl_op(mut self, body: &str) -> Self {
         self.excl_op = body.to_owned();
+        self
+    }
+
+    /// Override `list_dir("/dev/mapper")` for tests that need a mapper
+    /// listing distinct from the set of paths reported by `exists`.
+    pub(crate) fn with_dev_mapper(mut self, entries: &[&str]) -> Self {
+        self.dev_mapper =
+            DevMapperListing::Entries(entries.iter().map(|entry| (*entry).to_owned()).collect());
+        self
+    }
+
+    /// Make `list_dir("/dev/mapper")` fail with PermissionDenied so
+    /// callers can verify degraded orphan-scan behavior.
+    pub(crate) fn with_dev_mapper_error(mut self) -> Self {
+        self.dev_mapper = DevMapperListing::Error(std::io::ErrorKind::PermissionDenied);
         self
     }
 }
@@ -89,8 +122,18 @@ impl Filesystem for MockFs {
             Err(std::io::Error::new(std::io::ErrorKind::NotFound, "mock"))
         }
     }
-    fn list_dir(&self, _path: &str) -> Result<Vec<String>, std::io::Error> {
-        Ok(vec![])
+    fn list_dir(&self, path: &str) -> Result<Vec<String>, std::io::Error> {
+        if path == "/dev/mapper" || path == "/dev/mapper/" {
+            match &self.dev_mapper {
+                DevMapperListing::Empty => Ok(vec![]),
+                DevMapperListing::Entries(entries) => Ok(entries.clone()),
+                DevMapperListing::Error(kind) => {
+                    Err(std::io::Error::new(*kind, "permission denied"))
+                }
+            }
+        } else {
+            Ok(vec![])
+        }
     }
 }
 
