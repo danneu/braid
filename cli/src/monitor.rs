@@ -158,264 +158,11 @@ pub fn cmd_monitor<R: CommandRunner, F: Filesystem + ?Sized>(
 mod tests {
     use super::*;
     use crate::cmd::{CmdError, RawCommandOutput};
-    use std::sync::Mutex;
-
-    const MOUNTINFO_BTRFS: &str =
-        "36 35 0:32 / /mnt/storage rw,noatime shared:1 - btrfs /dev/mapper/braid-vdb rw\n";
-    const MOUNTINFO_EXT4: &str =
-        "36 35 0:32 / /mnt/storage rw,noatime shared:1 - ext4 /dev/sda1 rw\n";
-
-    const BTRFS_SHOW_2DISK: &str = "Label: none  uuid: de2b8517-f972-45fc-b121-3e160c8ea432\n\
-        \tTotal devices 2 FS bytes used 16.17MiB\n\
-        \tdevid    1 size 1008.00MiB used 209.50MiB path /dev/mapper/braid-vdb\n\
-        \tdevid    2 size 1008.00MiB used 209.50MiB path /dev/mapper/braid-vdc\n";
-
-    const CRYPTSETUP_STATUS_VDB: &str = "/dev/mapper/braid-vdb is active and is in use.\n\
-          type:    LUKS2\n\
-          cipher:  aes-xts-plain64\n\
-          keysize: 512 [bits]\n\
-          key location: keyring\n\
-          device:  /dev/vdb\n\
-          sector size:  512 [bytes]\n\
-          offset:  32768 [512-byte units] (16777216 [bytes])\n\
-          size:    2064384 [512-byte units] (1056964608 [bytes])\n\
-          mode:    read/write\n";
-
-    const CRYPTSETUP_STATUS_VDC: &str = "/dev/mapper/braid-vdc is active and is in use.\n\
-          type:    LUKS2\n\
-          cipher:  aes-xts-plain64\n\
-          keysize: 512 [bits]\n\
-          key location: keyring\n\
-          device:  /dev/vdc\n\
-          sector size:  512 [bytes]\n\
-          offset:  32768 [512-byte units] (16777216 [bytes])\n\
-          size:    2064384 [512-byte units] (1056964608 [bytes])\n\
-          mode:    read/write\n";
-
-    const LUKS_UUID: &str = "8c78a966-ef17-4610-b835-5b376ef10b4e\n";
-
-    const STATS_2DISK_HEALTHY: &str = r#"{
-        "__header": {"version": "1"},
-        "device-stats": [
-            {"device": "/dev/mapper/braid-vdb", "devid": 1, "write_io_errs": 0, "read_io_errs": 0, "flush_io_errs": 0, "corruption_errs": 0, "generation_errs": 0},
-            {"device": "/dev/mapper/braid-vdc", "devid": 2, "write_io_errs": 0, "read_io_errs": 0, "flush_io_errs": 0, "corruption_errs": 0, "generation_errs": 0}
-        ]
-    }"#;
-
-    const STATS_WITH_STALE_MAPPER: &str = r#"{
-        "__header": {"version": "1"},
-        "device-stats": [
-            {"device": "/dev/mapper/braid-vdb", "devid": 1, "write_io_errs": 0, "read_io_errs": 0, "flush_io_errs": 0, "corruption_errs": 0, "generation_errs": 0},
-            {"device": "/dev/mapper/braid-vdc", "devid": 2, "write_io_errs": 0, "read_io_errs": 0, "flush_io_errs": 0, "corruption_errs": 0, "generation_errs": 0},
-            {"device": "/dev/mapper/braid-stale", "devid": 99, "write_io_errs": 0, "read_io_errs": 0, "flush_io_errs": 0, "corruption_errs": 0, "generation_errs": 0}
-        ]
-    }"#;
-
-    const BTRFS_SHOW_PRESENT_NULL_MISSING: &str = "Label: none  uuid: de2b8517-f972-45fc-b121-3e160c8ea432\n\
-        \tTotal devices 3 FS bytes used 16.17MiB\n\
-        \tdevid    1 size 1008.00MiB used 209.50MiB path /dev/mapper/braid-vdb\n\
-        \tdevid    2 size 1008.00MiB used 209.50MiB path /dev/mapper/braid-vdc\n\
-        \tdevid    3 size 0 used 0 path MISSING\n";
-
-    const CRYPTSETUP_STATUS_VDC_NULL: &str = "/dev/mapper/braid-vdc is active and is in use.\n\
-          type:    LUKS2\n\
-          cipher:  aes-xts-plain64\n\
-          keysize: 512 [bits]\n\
-          key location: keyring\n\
-          device:  (null)\n\
-          sector size:  512 [bytes]\n\
-          offset:  32768 [512-byte units] (16777216 [bytes])\n\
-          size:    2064384 [512-byte units] (1056964608 [bytes])\n\
-          mode:    read/write\n";
-
-    fn ok_output(stdout: &str) -> RawCommandOutput {
-        RawCommandOutput {
-            cmd: "test".to_owned(),
-            stdout: stdout.to_owned(),
-            stderr: String::new(),
-            exit_status: 0,
-        }
-    }
-
-    /// Override response for one CmdRequest variant; everything else uses the
-    /// healthy-2disk default. Each entry is matched by variant + key fields.
-    enum Override {
-        BtrfsShowResult(Result<RawCommandOutput, CmdError>),
-        BtrfsShowPayload(String),
-        StatsResult(Result<RawCommandOutput, CmdError>),
-    }
-
-    struct MonitorTestRunner {
-        // Stats payload returned for BtrfsDeviceStatsJson on the success path.
-        stats_payload: String,
-        override_op: Mutex<Option<Override>>,
-    }
-
-    impl MonitorTestRunner {
-        fn with_unmapped_stats() -> Self {
-            Self {
-                stats_payload: STATS_WITH_STALE_MAPPER.to_owned(),
-                override_op: Mutex::new(None),
-            }
-        }
-
-        fn with_override(o: Override) -> Self {
-            Self {
-                stats_payload: STATS_2DISK_HEALTHY.to_owned(),
-                override_op: Mutex::new(Some(o)),
-            }
-        }
-
-        fn take_btrfs_show_payload(&self) -> Option<String> {
-            let mut guard = self.override_op.lock().unwrap();
-            if matches!(*guard, Some(Override::BtrfsShowPayload(_)))
-                && let Some(Override::BtrfsShowPayload(s)) = guard.take()
-            {
-                return Some(s);
-            }
-            None
-        }
-
-        fn take_btrfs_show_result(&self) -> Option<Result<RawCommandOutput, CmdError>> {
-            let mut guard = self.override_op.lock().unwrap();
-            if matches!(*guard, Some(Override::BtrfsShowResult(_)))
-                && let Some(Override::BtrfsShowResult(r)) = guard.take()
-            {
-                return Some(r);
-            }
-            None
-        }
-
-        fn take_stats_result(&self) -> Option<Result<RawCommandOutput, CmdError>> {
-            let mut guard = self.override_op.lock().unwrap();
-            if matches!(*guard, Some(Override::StatsResult(_)))
-                && let Some(Override::StatsResult(r)) = guard.take()
-            {
-                return Some(r);
-            }
-            None
-        }
-    }
-
-    impl CommandRunner for MonitorTestRunner {
-        fn run(&self, request: &CmdRequest) -> Result<RawCommandOutput, CmdError> {
-            match request {
-                CmdRequest::BtrfsFilesystemShow { .. } => {
-                    if let Some(r) = self.take_btrfs_show_result() {
-                        return r;
-                    }
-                    if let Some(payload) = self.take_btrfs_show_payload() {
-                        return Ok(ok_output(&payload));
-                    }
-                    Ok(ok_output(BTRFS_SHOW_2DISK))
-                }
-                CmdRequest::CryptsetupStatus { mapper } => match mapper.as_str() {
-                    "braid-vdb" => Ok(ok_output(CRYPTSETUP_STATUS_VDB)),
-                    "braid-vdc" => Ok(ok_output(CRYPTSETUP_STATUS_VDC)),
-                    other => panic!("unexpected CryptsetupStatus mapper: {other}"),
-                },
-                CmdRequest::CryptsetupLuksUuid { .. } => Ok(ok_output(LUKS_UUID)),
-                CmdRequest::BtrfsDeviceStatsJson { .. } => {
-                    if let Some(r) = self.take_stats_result() {
-                        return r;
-                    }
-                    Ok(ok_output(&self.stats_payload))
-                }
-                other => panic!("unexpected CmdRequest in monitor test: {other:?}"),
-            }
-        }
-
-        fn run_with_stdin(
-            &self,
-            _request: &CmdRequest,
-            _stdin: &[u8],
-        ) -> Result<RawCommandOutput, CmdError> {
-            Err(CmdError::MissingMock)
-        }
-    }
-
-    struct MonitorReconcileRunner;
-
-    impl CommandRunner for MonitorReconcileRunner {
-        fn run(&self, request: &CmdRequest) -> Result<RawCommandOutput, CmdError> {
-            match request {
-                CmdRequest::BtrfsFilesystemShow { .. } => {
-                    Ok(ok_output(BTRFS_SHOW_PRESENT_NULL_MISSING))
-                }
-                CmdRequest::CryptsetupStatus { mapper } => match mapper.as_str() {
-                    "braid-vdb" => Ok(ok_output(CRYPTSETUP_STATUS_VDB)),
-                    "braid-vdc" => Ok(ok_output(CRYPTSETUP_STATUS_VDC_NULL)),
-                    other => panic!("unexpected CryptsetupStatus mapper: {other}"),
-                },
-                CmdRequest::CryptsetupLuksUuid { .. } => Ok(ok_output(LUKS_UUID)),
-                CmdRequest::BtrfsDeviceStatsJson { .. } => Ok(ok_output(STATS_2DISK_HEALTHY)),
-                other => panic!("unexpected CmdRequest in monitor reconcile test: {other:?}"),
-            }
-        }
-
-        fn run_with_stdin(
-            &self,
-            request: &CmdRequest,
-            _stdin: &[u8],
-        ) -> Result<RawCommandOutput, CmdError> {
-            self.run(request)
-        }
-    }
-
-    struct MonitorFs {
-        mountinfo: Result<String, std::io::ErrorKind>,
-    }
-
-    impl MonitorFs {
-        fn btrfs() -> Self {
-            Self {
-                mountinfo: Ok(MOUNTINFO_BTRFS.to_string()),
-            }
-        }
-
-        fn ext4() -> Self {
-            Self {
-                mountinfo: Ok(MOUNTINFO_EXT4.to_string()),
-            }
-        }
-
-        fn read_error(kind: std::io::ErrorKind) -> Self {
-            Self {
-                mountinfo: Err(kind),
-            }
-        }
-    }
-
-    impl Filesystem for MonitorFs {
-        fn exists(&self, _path: &str) -> bool {
-            false
-        }
-
-        fn is_block_device(&self, _path: &str) -> bool {
-            false
-        }
-
-        fn read_to_string(&self, path: &str) -> Result<String, std::io::Error> {
-            assert_eq!(path, "/proc/self/mountinfo");
-            self.mountinfo
-                .clone()
-                .map_err(|kind| std::io::Error::new(kind, "mock mountinfo error"))
-        }
-
-        fn list_dir(&self, _path: &str) -> Result<Vec<String>, std::io::Error> {
-            Ok(vec![])
-        }
-    }
-
-    fn mp() -> MountPoint {
-        MountPoint("/mnt/storage".to_owned())
-    }
-
-    fn fresh_paths() -> (tempfile::TempDir, StatePaths) {
-        let dir = tempfile::tempdir().unwrap();
-        let paths = StatePaths::custom(dir.path().into());
-        (dir, paths)
-    }
+    use crate::test_fixtures::{
+        MonitorOverride, MonitorReconcileRunner, MonitorTestRunner,
+        assert_monitor_single_computation_error, isolated_paths, monitor_fs_btrfs, monitor_fs_ext4,
+        monitor_fs_mountinfo_error, monitor_mp,
+    };
 
     fn acked_disk(missing_acked: bool, read_io_errs: u64) -> alert::AckedDisk {
         alert::AckedDisk {
@@ -424,25 +171,6 @@ mod tests {
                 read_io_errs,
                 ..Default::default()
             },
-        }
-    }
-
-    fn assert_single_computation_error(result: &MonitorResult) -> &str {
-        match result {
-            MonitorResult::Alert(state) => {
-                assert!(state.active(), "AlertState must be active");
-                assert_eq!(
-                    state.causes.len(),
-                    1,
-                    "expected exactly one cause, got {:?}",
-                    state.causes
-                );
-                match &state.causes[0] {
-                    AlertCause::ComputationError { detail } => detail.as_str(),
-                    other => panic!("expected ComputationError, got {other:?}"),
-                }
-            }
-            other => panic!("expected MonitorResult::Alert, got {other:?}"),
         }
     }
 
@@ -463,7 +191,7 @@ mod tests {
      */
     #[test]
     fn cmd_monitor_reconciles_acked_stats_across_pool_axes() {
-        let (_dir, paths) = fresh_paths();
+        let (_dir, paths) = isolated_paths();
         let disk1 = acked_disk(true, 1);
         let disk2 = acked_disk(true, 2);
         let disk3 = acked_disk(true, 3);
@@ -479,7 +207,12 @@ mod tests {
         )
         .unwrap();
 
-        let result = cmd_monitor(&MonitorReconcileRunner, &MonitorFs::btrfs(), &mp(), &paths);
+        let result = cmd_monitor(
+            &MonitorReconcileRunner,
+            &monitor_fs_btrfs(),
+            &monitor_mp(),
+            &paths,
+        );
 
         assert_eq!(result, MonitorResult::Ok);
         let reloaded = alert::load_acked_stats(&paths);
@@ -518,10 +251,10 @@ mod tests {
      */
     #[test]
     fn stale_mapper_row_no_longer_latches_computation_error() {
-        let (_dir, paths) = fresh_paths();
-        let runner = MonitorTestRunner::with_unmapped_stats();
+        let (_dir, paths) = isolated_paths();
+        let runner = MonitorTestRunner::with_stale_mapper_stats();
 
-        let result = cmd_monitor(&runner, &MonitorFs::btrfs(), &mp(), &paths);
+        let result = cmd_monitor(&runner, &monitor_fs_btrfs(), &monitor_mp(), &paths);
 
         assert_eq!(
             result,
@@ -552,13 +285,13 @@ mod tests {
      */
     #[test]
     fn probe_error_returns_alert_with_latched_computation_error() {
-        let (_dir, paths) = fresh_paths();
-        let runner = MonitorTestRunner::with_override(Override::BtrfsShowResult(Err(
+        let (_dir, paths) = isolated_paths();
+        let runner = MonitorTestRunner::with_override(MonitorOverride::BtrfsShowResult(Err(
             CmdError::Failed("btrfs filesystem show: spawn failed".into()),
         )));
 
-        let result = cmd_monitor(&runner, &MonitorFs::btrfs(), &mp(), &paths);
-        assert_single_computation_error(&result);
+        let result = cmd_monitor(&runner, &monitor_fs_btrfs(), &monitor_mp(), &paths);
+        assert_monitor_single_computation_error(&result);
 
         let latch_path = paths.alert_latch_json();
         assert!(
@@ -576,16 +309,16 @@ mod tests {
      */
     #[test]
     fn cmd_monitor_latches_computation_error_on_mountinfo_io_failure() {
-        let (_dir, paths) = fresh_paths();
-        let runner = MonitorTestRunner::with_unmapped_stats();
+        let (_dir, paths) = isolated_paths();
+        let runner = MonitorTestRunner::with_stale_mapper_stats();
 
         let result = cmd_monitor(
             &runner,
-            &MonitorFs::read_error(std::io::ErrorKind::PermissionDenied),
-            &mp(),
+            &monitor_fs_mountinfo_error(std::io::ErrorKind::PermissionDenied),
+            &monitor_mp(),
             &paths,
         );
-        let detail = assert_single_computation_error(&result);
+        let detail = assert_monitor_single_computation_error(&result);
         assert!(
             detail.contains("mountinfo error"),
             "detail should name mountinfo failure, got {detail}"
@@ -628,15 +361,24 @@ mod tests {
                 "stats-cmd-failure",
                 Err(CmdError::Failed("btrfs device stats: spawn failed".into())),
             ),
-            ("stats-parse-failure", Ok(ok_output("not valid json {{{"))),
+            (
+                "stats-parse-failure",
+                Ok(RawCommandOutput {
+                    cmd: "test".to_owned(),
+                    stdout: "not valid json {{{".to_owned(),
+                    stderr: String::new(),
+                    exit_status: 0,
+                }),
+            ),
         ];
 
         for (label, stats_result) in cases {
-            let (_dir, paths) = fresh_paths();
-            let runner = MonitorTestRunner::with_override(Override::StatsResult(stats_result));
+            let (_dir, paths) = isolated_paths();
+            let runner =
+                MonitorTestRunner::with_override(MonitorOverride::StatsResult(stats_result));
 
-            let result = cmd_monitor(&runner, &MonitorFs::btrfs(), &mp(), &paths);
-            assert_single_computation_error(&result);
+            let result = cmd_monitor(&runner, &monitor_fs_btrfs(), &monitor_mp(), &paths);
+            assert_monitor_single_computation_error(&result);
 
             assert!(
                 paths.alert_latch_json().exists(),
@@ -663,10 +405,10 @@ mod tests {
      */
     #[test]
     fn monitor_classifies_non_btrfs_mount_as_offline() {
-        let (_dir, paths) = fresh_paths();
-        let runner = MonitorTestRunner::with_unmapped_stats();
+        let (_dir, paths) = isolated_paths();
+        let runner = MonitorTestRunner::with_stale_mapper_stats();
 
-        let result = cmd_monitor(&runner, &MonitorFs::ext4(), &mp(), &paths);
+        let result = cmd_monitor(&runner, &monitor_fs_ext4(), &monitor_mp(), &paths);
 
         assert_eq!(result, MonitorResult::PoolOffline);
         assert!(
@@ -695,17 +437,18 @@ mod tests {
      */
     #[test]
     fn probe_parse_failure_returns_alert_with_latched_computation_error() {
-        let (_dir, paths) = fresh_paths();
+        let (_dir, paths) = isolated_paths();
         let show_failure = RawCommandOutput {
             cmd: "btrfs filesystem show /mnt/storage".to_owned(),
             stdout: String::new(),
             stderr: "ERROR: cannot read filesystem info\n".to_owned(),
             exit_status: 1,
         };
-        let runner = MonitorTestRunner::with_override(Override::BtrfsShowResult(Ok(show_failure)));
+        let runner =
+            MonitorTestRunner::with_override(MonitorOverride::BtrfsShowResult(Ok(show_failure)));
 
-        let result = cmd_monitor(&runner, &MonitorFs::btrfs(), &mp(), &paths);
-        assert_single_computation_error(&result);
+        let result = cmd_monitor(&runner, &monitor_fs_btrfs(), &monitor_mp(), &paths);
+        assert_monitor_single_computation_error(&result);
 
         assert!(
             paths.alert_latch_json().exists(),
@@ -734,16 +477,16 @@ mod tests {
      */
     #[test]
     fn probe_pool_device_failure_returns_alert_with_latched_computation_error() {
-        let (_dir, paths) = fresh_paths();
+        let (_dir, paths) = isolated_paths();
         let btrfs_show_non_mapper = "Label: none  uuid: de2b8517-f972-45fc-b121-3e160c8ea432\n\
             \tTotal devices 1 FS bytes used 16.17MiB\n\
             \tdevid    1 size 1008.00MiB used 209.50MiB path /dev/sda1\n";
-        let runner = MonitorTestRunner::with_override(Override::BtrfsShowPayload(
+        let runner = MonitorTestRunner::with_override(MonitorOverride::BtrfsShowPayload(
             btrfs_show_non_mapper.to_owned(),
         ));
 
-        let result = cmd_monitor(&runner, &MonitorFs::btrfs(), &mp(), &paths);
-        assert_single_computation_error(&result);
+        let result = cmd_monitor(&runner, &monitor_fs_btrfs(), &monitor_mp(), &paths);
+        assert_monitor_single_computation_error(&result);
 
         assert!(
             paths.alert_latch_json().exists(),

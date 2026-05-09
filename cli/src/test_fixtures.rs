@@ -1,6 +1,6 @@
 //! Test-only shared fixtures for `replace`, `add`, `remove`,
 //! `remove_missing`, `recover`, `doctor`, `mount`, `enroll_key_file`,
-//! `unlock`, `status`, `lock`, and `ack`.
+//! `unlock`, `status`, `lock`, `ack`, and `monitor`.
 //!
 //! These fixtures consolidate the per-test scaffolding that previously
 //! lived as one-off `*Runner` structs and inline `tempdir + config + pass +
@@ -72,6 +72,9 @@
 //!     side-effect contracts. It intentionally avoids a broad topology
 //!     installer so new probes surface as missing mocks or request-list
 //!     failures.
+//!   * `monitor` -- flat collection of monitor-shaped helpers with strict
+//!     probe runners and mountinfo-only filesystem fixtures so fail-closed
+//!     branches and state-file side effects remain visible in the tests.
 //!   * `PoolFixture` -- bundled tempdirs + `StatePaths` + config +
 //!     passphrase + `RecordingInhibitor`.
 //!   * `ReplaceParamsBuilder` / `AddParamsBuilder` / `RemoveParamsBuilder`
@@ -80,14 +83,15 @@
 //!
 //! Layout: this file is a facade. `shared` holds cross-scope items;
 //! `replace`, `add`, `remove`, `remove_missing`, `recover`, `doctor`,
-//! `mount`, `enroll_key_file`, `unlock`, `status`, `lock`, and `ack` hold their
-//! per-scope topologies, builders, and helpers.
+//! `mount`, `enroll_key_file`, `unlock`, `status`, `lock`, `ack`, and
+//! `monitor` hold their per-scope topologies, builders, and helpers.
 
 mod ack;
 mod add;
 mod doctor;
 mod enroll_key_file;
 mod lock;
+mod monitor;
 mod mount;
 mod recover;
 mod remove;
@@ -123,6 +127,12 @@ pub(crate) use lock::{
     LockNoopSleeper, RecordingRunner as LockRecordingRunner, lock_count_forget_steps, lock_err_raw,
     lock_forget_step_devices, lock_fs, lock_mounted_runner, lock_ok_raw, lock_test_config,
     lock_test_membership, lock_umount_failed_runner, lock_with_fsid_probe_mocks,
+};
+#[allow(unused_imports)]
+pub(crate) use monitor::{
+    MonitorOverride, MonitorReconcileRunner, MonitorTestRunner,
+    assert_monitor_single_computation_error, monitor_fs_btrfs, monitor_fs_ext4,
+    monitor_fs_mountinfo_error, monitor_mp,
 };
 pub(crate) use mount::{
     MOUNT_TEST_PASSPHRASE_BYTES, NoopSleeper, arbitrary_fallback, base_two_disk_runner,
