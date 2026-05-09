@@ -262,254 +262,18 @@ pub enum AckError {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::alert::{
-        AckedDeviceCounters, AckedDisk, AckedStats, load_acked_stats, save_alert_latch,
+    use crate::alert::{AckedDeviceCounters, AckedDisk, AckedStats, load_acked_stats};
+    use crate::test_fixtures::{
+        AckPanicRunner, ack_fs_btrfs, ack_fs_ext4, ack_fs_not_mounted,
+        ack_mounted_fs_that_touches_smartd, ack_mounted_probe_runner,
+        ack_mounted_probe_runner_with_device_stats, ack_mp, ack_offline_fs_that_touches_smartd,
+        ack_write_latch, isolated_paths,
     };
-    use crate::cmd::{CmdError, MockRunner, RawCommandOutput};
     use std::collections::BTreeMap;
     #[cfg(unix)]
     use std::os::unix::process::ExitStatusExt;
     #[cfg(unix)]
     use std::process::{ExitStatus, Output};
-
-    /// Mountinfo where /mnt/storage is held by ext4 -> probe_pool returns
-    /// ProbeError::NotBtrfs. The runner is never called on this path.
-    const MOUNTINFO_EXT4: &str =
-        "36 35 0:32 / /mnt/storage rw,noatime shared:1 - ext4 /dev/sda1 rw\n";
-    const MOUNTINFO_BTRFS: &str =
-        "36 35 0:32 / /mnt/storage rw,noatime shared:1 - btrfs /dev/mapper/braid-disk1 rw\n";
-
-    struct PanicRunner;
-
-    impl CommandRunner for PanicRunner {
-        fn run(&self, request: &CmdRequest) -> Result<RawCommandOutput, CmdError> {
-            panic!("offline ack must not invoke the runner; got: {request:?}");
-        }
-        fn run_with_stdin(
-            &self,
-            request: &CmdRequest,
-            _stdin: &[u8],
-        ) -> Result<RawCommandOutput, CmdError> {
-            panic!("offline ack must not invoke run_with_stdin; got: {request:?}");
-        }
-    }
-
-    struct Ext4Fs;
-
-    impl Filesystem for Ext4Fs {
-        fn exists(&self, _path: &str) -> bool {
-            false
-        }
-        fn is_block_device(&self, _path: &str) -> bool {
-            false
-        }
-        fn read_to_string(&self, path: &str) -> Result<String, std::io::Error> {
-            assert_eq!(path, "/proc/self/mountinfo");
-            Ok(MOUNTINFO_EXT4.to_owned())
-        }
-        fn list_dir(&self, _path: &str) -> Result<Vec<String>, std::io::Error> {
-            Ok(vec![])
-        }
-    }
-
-    struct NotMountedFs;
-
-    impl Filesystem for NotMountedFs {
-        fn exists(&self, _path: &str) -> bool {
-            false
-        }
-        fn is_block_device(&self, _path: &str) -> bool {
-            false
-        }
-        fn read_to_string(&self, path: &str) -> Result<String, std::io::Error> {
-            assert_eq!(path, "/proc/self/mountinfo");
-            Ok(String::new())
-        }
-        fn list_dir(&self, _path: &str) -> Result<Vec<String>, std::io::Error> {
-            Ok(vec![])
-        }
-    }
-
-    struct BtrfsFs;
-
-    impl Filesystem for BtrfsFs {
-        fn exists(&self, _path: &str) -> bool {
-            false
-        }
-        fn is_block_device(&self, _path: &str) -> bool {
-            false
-        }
-        fn read_to_string(&self, path: &str) -> Result<String, std::io::Error> {
-            assert_eq!(path, "/proc/self/mountinfo");
-            Ok(MOUNTINFO_BTRFS.to_owned())
-        }
-        fn list_dir(&self, _path: &str) -> Result<Vec<String>, std::io::Error> {
-            Ok(vec![])
-        }
-    }
-
-    struct OfflineFsThatTouchesSmartd<'a> {
-        paths: &'a StatePaths,
-    }
-
-    impl Filesystem for OfflineFsThatTouchesSmartd<'_> {
-        fn exists(&self, _path: &str) -> bool {
-            false
-        }
-        fn is_block_device(&self, _path: &str) -> bool {
-            false
-        }
-        fn read_to_string(&self, path: &str) -> Result<String, std::io::Error> {
-            assert_eq!(path, "/proc/self/mountinfo");
-            std::fs::write(self.paths.smartd_alert(), b"").unwrap();
-            Ok(String::new())
-        }
-        fn list_dir(&self, _path: &str) -> Result<Vec<String>, std::io::Error> {
-            Ok(vec![])
-        }
-    }
-
-    struct MountedFsThatTouchesSmartd<'a> {
-        paths: &'a StatePaths,
-    }
-
-    impl Filesystem for MountedFsThatTouchesSmartd<'_> {
-        fn exists(&self, _path: &str) -> bool {
-            false
-        }
-        fn is_block_device(&self, _path: &str) -> bool {
-            false
-        }
-        fn read_to_string(&self, path: &str) -> Result<String, std::io::Error> {
-            assert_eq!(path, "/proc/self/mountinfo");
-            std::fs::write(self.paths.smartd_alert(), b"").unwrap();
-            Ok(MOUNTINFO_BTRFS.to_owned())
-        }
-        fn list_dir(&self, _path: &str) -> Result<Vec<String>, std::io::Error> {
-            Ok(vec![])
-        }
-    }
-
-    fn mp() -> MountPoint {
-        MountPoint("/mnt/storage".to_owned())
-    }
-
-    fn fresh_paths() -> (tempfile::TempDir, StatePaths) {
-        let dir = tempfile::tempdir().unwrap();
-        let paths = StatePaths::custom(dir.path().to_path_buf());
-        (dir, paths)
-    }
-
-    fn write_latch(paths: &StatePaths, causes: Vec<AlertCause>) {
-        let state = AlertState { causes };
-        save_alert_latch(&state, paths).unwrap();
-    }
-
-    fn ok_raw(cmd: &str, stdout: &str) -> RawCommandOutput {
-        RawCommandOutput {
-            cmd: cmd.to_owned(),
-            stdout: stdout.to_owned(),
-            stderr: String::new(),
-            exit_status: 0,
-        }
-    }
-
-    fn btrfs_show_2disk() -> RawCommandOutput {
-        ok_raw(
-            "btrfs filesystem show /mnt/storage",
-            "Label: none  uuid: aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee\n\
-             \tTotal devices 2 FS bytes used 1.00GiB\n\
-             \tdevid    1 size 10.00GiB used 2.00GiB path /dev/mapper/braid-disk1\n\
-             \tdevid    3 size 10.00GiB used 2.00GiB path /dev/mapper/braid-disk3\n",
-        )
-    }
-
-    fn cryptsetup_status_active(mapper: &str, device: &str) -> RawCommandOutput {
-        ok_raw(
-            &format!("cryptsetup status {mapper}"),
-            &format!(
-                "/dev/mapper/{mapper} is active and is in use.\n\
-                 \ttype:    LUKS2\n\
-                 \tcipher:  aes-xts-plain64\n\
-                 \tdevice:  {device}\n\
-                 \tsector size:  512\n"
-            ),
-        )
-    }
-
-    fn cryptsetup_uuid_ok(device: &str, uuid: &str) -> RawCommandOutput {
-        ok_raw(
-            &format!("cryptsetup luksUUID {device}"),
-            &format!("{uuid}\n"),
-        )
-    }
-
-    fn btrfs_device_stats_healthy() -> RawCommandOutput {
-        ok_raw(
-            "btrfs --format json device stats /mnt/storage",
-            r#"{
-                "device-stats": [
-                    {
-                        "device": "/dev/mapper/braid-disk1",
-                        "devid": 1,
-                        "write_io_errs": 0,
-                        "read_io_errs": 0,
-                        "flush_io_errs": 0,
-                        "corruption_errs": 0,
-                        "generation_errs": 0
-                    },
-                    {
-                        "device": "/dev/mapper/braid-disk3",
-                        "devid": 3,
-                        "write_io_errs": 0,
-                        "read_io_errs": 0,
-                        "flush_io_errs": 0,
-                        "corruption_errs": 0,
-                        "generation_errs": 0
-                    }
-                ]
-            }"#,
-        )
-    }
-
-    fn mounted_probe_runner() -> MockRunner {
-        MockRunner::default()
-            .with_output(
-                CmdRequest::BtrfsFilesystemShow { mount_point: mp() },
-                btrfs_show_2disk(),
-            )
-            .with_output(
-                CmdRequest::CryptsetupStatus {
-                    mapper: "braid-disk1".into(),
-                },
-                cryptsetup_status_active("braid-disk1", "/dev/vda"),
-            )
-            .with_output(
-                CmdRequest::CryptsetupLuksUuid {
-                    device: "/dev/vda".into(),
-                },
-                cryptsetup_uuid_ok("/dev/vda", "11111111-1111-1111-1111-111111111111"),
-            )
-            .with_output(
-                CmdRequest::CryptsetupStatus {
-                    mapper: "braid-disk3".into(),
-                },
-                cryptsetup_status_active("braid-disk3", "/dev/vdc"),
-            )
-            .with_output(
-                CmdRequest::CryptsetupLuksUuid {
-                    device: "/dev/vdc".into(),
-                },
-                cryptsetup_uuid_ok("/dev/vdc", "33333333-3333-3333-3333-333333333333"),
-            )
-    }
-
-    fn mounted_probe_runner_with_device_stats() -> MockRunner {
-        mounted_probe_runner().with_output(
-            CmdRequest::BtrfsDeviceStatsJson { mount_point: mp() },
-            btrfs_device_stats_healthy(),
-        )
-    }
 
     /*
      * Intent: Mounted ack with no latched alert, no smartd flag, and no
@@ -523,10 +287,10 @@ mod tests {
      */
     #[test]
     fn cmd_ack_noop_when_no_alerts_does_not_query_btrfs_or_write_acked_stats() {
-        let (_dir, paths) = fresh_paths();
-        let runner = mounted_probe_runner();
+        let (_dir, paths) = isolated_paths();
+        let runner = ack_mounted_probe_runner();
 
-        let result = cmd_ack(&runner, &BtrfsFs, &mp(), &paths);
+        let result = cmd_ack(&runner, &ack_fs_btrfs(), &ack_mp(), &paths);
 
         assert!(result.is_ok(), "no-op ack should succeed, got {result:?}");
         assert!(
@@ -551,11 +315,11 @@ mod tests {
      */
     #[test]
     fn cmd_ack_with_mounted_pool_and_corrupt_latch_runs_full_ack_path() {
-        let (_dir, paths) = fresh_paths();
+        let (_dir, paths) = isolated_paths();
         std::fs::write(paths.alert_latch_json(), b"not json").unwrap();
-        let runner = mounted_probe_runner_with_device_stats();
+        let runner = ack_mounted_probe_runner_with_device_stats();
 
-        let result = cmd_ack(&runner, &BtrfsFs, &mp(), &paths);
+        let result = cmd_ack(&runner, &ack_fs_btrfs(), &ack_mp(), &paths);
 
         assert!(
             result.is_ok(),
@@ -589,11 +353,11 @@ mod tests {
      */
     #[test]
     fn cmd_ack_with_mounted_pool_and_smartd_flag_no_latch_runs_full_ack_path() {
-        let (_dir, paths) = fresh_paths();
+        let (_dir, paths) = isolated_paths();
         std::fs::write(paths.smartd_alert(), b"").unwrap();
-        let runner = mounted_probe_runner_with_device_stats();
+        let runner = ack_mounted_probe_runner_with_device_stats();
 
-        let result = cmd_ack(&runner, &BtrfsFs, &mp(), &paths);
+        let result = cmd_ack(&runner, &ack_fs_btrfs(), &ack_mp(), &paths);
 
         assert!(
             result.is_ok(),
@@ -625,10 +389,10 @@ mod tests {
     // smartd writes the flag while ack is probing the mount point.
     #[test]
     fn ack_offline_does_not_consume_smartd_flag_arriving_during_probe() {
-        let (_dir, paths) = fresh_paths();
-        let fs = OfflineFsThatTouchesSmartd { paths: &paths };
+        let (_dir, paths) = isolated_paths();
+        let fs = ack_offline_fs_that_touches_smartd(&paths);
 
-        let result = cmd_ack(&PanicRunner, &fs, &mp(), &paths);
+        let result = cmd_ack(&AckPanicRunner, &fs, &ack_mp(), &paths);
 
         assert!(
             matches!(result, Err(AckError::PoolNotMounted)),
@@ -657,11 +421,11 @@ mod tests {
     // entry, but smartd writes the flag while ack is probing the pool.
     #[test]
     fn cmd_ack_mounted_does_not_consume_smartd_flag_arriving_during_probe() {
-        let (_dir, paths) = fresh_paths();
-        let fs = MountedFsThatTouchesSmartd { paths: &paths };
-        let runner = mounted_probe_runner();
+        let (_dir, paths) = isolated_paths();
+        let fs = ack_mounted_fs_that_touches_smartd(&paths);
+        let runner = ack_mounted_probe_runner();
 
-        let result = cmd_ack(&runner, &fs, &mp(), &paths);
+        let result = cmd_ack(&runner, &fs, &ack_mp(), &paths);
 
         assert!(
             result.is_ok(),
@@ -693,12 +457,12 @@ mod tests {
     // ack entry, and then smartd writes the flag during the mounted probe.
     #[test]
     fn cmd_ack_mounted_with_btrfs_errors_preserves_mid_probe_smartd_flag() {
-        let (_dir, paths) = fresh_paths();
-        write_latch(&paths, vec![AlertCause::BtrfsDeviceErrors { devid: 1 }]);
-        let fs = MountedFsThatTouchesSmartd { paths: &paths };
-        let runner = mounted_probe_runner_with_device_stats();
+        let (_dir, paths) = isolated_paths();
+        ack_write_latch(&paths, vec![AlertCause::BtrfsDeviceErrors { devid: 1 }]);
+        let fs = ack_mounted_fs_that_touches_smartd(&paths);
+        let runner = ack_mounted_probe_runner_with_device_stats();
 
-        let result = cmd_ack(&runner, &fs, &mp(), &paths);
+        let result = cmd_ack(&runner, &fs, &ack_mp(), &paths);
 
         assert!(
             result.is_ok(),
@@ -724,11 +488,11 @@ mod tests {
     // offline.
     #[test]
     fn ack_offline_with_missing_device_preserves_mid_probe_smartd_flag() {
-        let (_dir, paths) = fresh_paths();
-        write_latch(&paths, vec![AlertCause::MissingDevice { devid: 2 }]);
-        let fs = OfflineFsThatTouchesSmartd { paths: &paths };
+        let (_dir, paths) = isolated_paths();
+        ack_write_latch(&paths, vec![AlertCause::MissingDevice { devid: 2 }]);
+        let fs = ack_offline_fs_that_touches_smartd(&paths);
 
-        let result = cmd_ack(&PanicRunner, &fs, &mp(), &paths);
+        let result = cmd_ack(&AckPanicRunner, &fs, &ack_mp(), &paths);
 
         assert!(
             result.is_ok(),
@@ -754,11 +518,11 @@ mod tests {
     // probe.
     #[test]
     fn ack_offline_with_smartd_latch_cleans_mid_probe_smartd_flag() {
-        let (_dir, paths) = fresh_paths();
-        write_latch(&paths, vec![AlertCause::SmartdAlert]);
-        let fs = OfflineFsThatTouchesSmartd { paths: &paths };
+        let (_dir, paths) = isolated_paths();
+        ack_write_latch(&paths, vec![AlertCause::SmartdAlert]);
+        let fs = ack_offline_fs_that_touches_smartd(&paths);
 
-        let result = cmd_ack(&PanicRunner, &fs, &mp(), &paths);
+        let result = cmd_ack(&AckPanicRunner, &fs, &ack_mp(), &paths);
 
         assert!(
             result.is_ok(),
@@ -780,12 +544,12 @@ mod tests {
     // probe.
     #[test]
     fn cmd_ack_mounted_with_smartd_latch_cleans_mid_probe_smartd_flag() {
-        let (_dir, paths) = fresh_paths();
-        write_latch(&paths, vec![AlertCause::SmartdAlert]);
-        let fs = MountedFsThatTouchesSmartd { paths: &paths };
-        let runner = mounted_probe_runner_with_device_stats();
+        let (_dir, paths) = isolated_paths();
+        ack_write_latch(&paths, vec![AlertCause::SmartdAlert]);
+        let fs = ack_mounted_fs_that_touches_smartd(&paths);
+        let runner = ack_mounted_probe_runner_with_device_stats();
 
-        let result = cmd_ack(&runner, &fs, &mp(), &paths);
+        let result = cmd_ack(&runner, &fs, &ack_mp(), &paths);
 
         assert!(
             result.is_ok(),
@@ -822,16 +586,16 @@ mod tests {
      */
     #[test]
     fn cmd_ack_returns_cleanup_failed_when_remove_smartd_alert_errors_after_baseline_saved() {
-        let (_dir, paths) = fresh_paths();
-        write_latch(&paths, vec![AlertCause::BtrfsDeviceErrors { devid: 1 }]);
+        let (_dir, paths) = isolated_paths();
+        ack_write_latch(&paths, vec![AlertCause::BtrfsDeviceErrors { devid: 1 }]);
         // remove_file on a directory returns EISDIR (Linux) / EPERM (macOS)
         // -- a platform-portable non-NotFound io::Error from
         // remove_smartd_alert_flag.
         std::fs::create_dir(paths.smartd_alert()).unwrap();
 
-        let runner = mounted_probe_runner_with_device_stats();
-        let err =
-            cmd_ack(&runner, &BtrfsFs, &mp(), &paths).expect_err("cleanup failure must propagate");
+        let runner = ack_mounted_probe_runner_with_device_stats();
+        let err = cmd_ack(&runner, &ack_fs_btrfs(), &ack_mp(), &paths)
+            .expect_err("cleanup failure must propagate");
 
         assert!(
             matches!(err, AckError::CleanupFailed(_)),
@@ -870,12 +634,12 @@ mod tests {
      */
     #[test]
     fn cmd_ack_with_foreign_fstype_and_alerts_returns_probe_error_and_preserves_state() {
-        let (_dir, paths) = fresh_paths();
-        write_latch(&paths, vec![AlertCause::MissingDevice { devid: 2 }]);
+        let (_dir, paths) = isolated_paths();
+        ack_write_latch(&paths, vec![AlertCause::MissingDevice { devid: 2 }]);
         let original_latch_bytes = std::fs::read(paths.alert_latch_json()).unwrap();
         std::fs::write(paths.smartd_alert(), b"").unwrap();
 
-        let err = cmd_ack(&PanicRunner, &Ext4Fs, &mp(), &paths)
+        let err = cmd_ack(&AckPanicRunner, &ack_fs_ext4(), &ack_mp(), &paths)
             .expect_err("must refuse -- mount is not btrfs");
 
         match &err {
@@ -917,9 +681,9 @@ mod tests {
      */
     #[test]
     fn cmd_ack_with_foreign_fstype_and_no_alerts_returns_probe_error() {
-        let (_dir, paths) = fresh_paths();
+        let (_dir, paths) = isolated_paths();
 
-        let err = cmd_ack(&PanicRunner, &Ext4Fs, &mp(), &paths)
+        let err = cmd_ack(&AckPanicRunner, &ack_fs_ext4(), &ack_mp(), &paths)
             .expect_err("must refuse -- mount is not btrfs");
 
         match &err {
@@ -959,11 +723,11 @@ mod tests {
      */
     #[test]
     fn cmd_ack_with_foreign_fstype_and_corrupt_latch_preserves_latch_bytes() {
-        let (_dir, paths) = fresh_paths();
+        let (_dir, paths) = isolated_paths();
         std::fs::write(paths.alert_latch_json(), b"not json").unwrap();
         let original_latch_bytes = std::fs::read(paths.alert_latch_json()).unwrap();
 
-        let err = cmd_ack(&PanicRunner, &Ext4Fs, &mp(), &paths)
+        let err = cmd_ack(&AckPanicRunner, &ack_fs_ext4(), &ack_mp(), &paths)
             .expect_err("must refuse -- mount is not btrfs");
 
         assert!(
@@ -997,12 +761,12 @@ mod tests {
      */
     #[test]
     fn cmd_ack_impl_with_foreign_fstype_does_not_invoke_beeper() {
-        let (_dir, paths) = fresh_paths();
-        write_latch(&paths, vec![AlertCause::MissingDevice { devid: 2 }]);
+        let (_dir, paths) = isolated_paths();
+        ack_write_latch(&paths, vec![AlertCause::MissingDevice { devid: 2 }]);
         let beeper_calls = std::cell::Cell::new(0u32);
         let beeper = || beeper_calls.set(beeper_calls.get() + 1);
 
-        let err = cmd_ack_impl(&PanicRunner, &Ext4Fs, &mp(), &paths, &beeper)
+        let err = cmd_ack_impl(&AckPanicRunner, &ack_fs_ext4(), &ack_mp(), &paths, &beeper)
             .expect_err("must refuse -- mount is not btrfs");
 
         assert!(
@@ -1033,12 +797,19 @@ mod tests {
      */
     #[test]
     fn ack_offline_with_missing_device_cause_marks_missing_acked() {
-        let (_dir, paths) = fresh_paths();
-        write_latch(&paths, vec![AlertCause::MissingDevice { devid: 2 }]);
+        let (_dir, paths) = isolated_paths();
+        ack_write_latch(&paths, vec![AlertCause::MissingDevice { devid: 2 }]);
         let beeper_calls = std::cell::Cell::new(0u32);
         let beeper = || beeper_calls.set(beeper_calls.get() + 1);
 
-        cmd_ack_impl(&PanicRunner, &NotMountedFs, &mp(), &paths, &beeper).unwrap();
+        cmd_ack_impl(
+            &AckPanicRunner,
+            &ack_fs_not_mounted(),
+            &ack_mp(),
+            &paths,
+            &beeper,
+        )
+        .unwrap();
         assert_eq!(
             beeper_calls.get(),
             1,
@@ -1068,11 +839,11 @@ mod tests {
      */
     #[test]
     fn ack_offline_cleanup_failure_after_missing_acked_returns_cleanup_failed() {
-        let (_dir, paths) = fresh_paths();
-        write_latch(&paths, vec![AlertCause::MissingDevice { devid: 1 }]);
+        let (_dir, paths) = isolated_paths();
+        ack_write_latch(&paths, vec![AlertCause::MissingDevice { devid: 1 }]);
         std::fs::create_dir(paths.smartd_alert()).unwrap();
 
-        let err = cmd_ack(&PanicRunner, &NotMountedFs, &mp(), &paths)
+        let err = cmd_ack(&AckPanicRunner, &ack_fs_not_mounted(), &ack_mp(), &paths)
             .expect_err("offline cleanup failure must propagate");
 
         assert!(
@@ -1116,8 +887,8 @@ mod tests {
      */
     #[test]
     fn ack_offline_refuses_when_btrfs_errors_mixed_with_missing() {
-        let (_dir, paths) = fresh_paths();
-        write_latch(
+        let (_dir, paths) = isolated_paths();
+        ack_write_latch(
             &paths,
             vec![
                 AlertCause::BtrfsDeviceErrors { devid: 1 },
@@ -1127,7 +898,7 @@ mod tests {
         let original_latch_bytes = std::fs::read(paths.alert_latch_json()).unwrap();
         assert!(!paths.acked_stats_json().exists());
 
-        let result = cmd_ack(&PanicRunner, &NotMountedFs, &mp(), &paths);
+        let result = cmd_ack(&AckPanicRunner, &ack_fs_not_mounted(), &ack_mp(), &paths);
         assert!(
             matches!(result, Err(AckError::OfflineBtrfsErrorsRefused)),
             "expected OfflineBtrfsErrorsRefused, got {result:?}"
@@ -1157,7 +928,7 @@ mod tests {
      */
     #[test]
     fn ack_offline_preserves_existing_device_stats_baseline() {
-        let (_dir, paths) = fresh_paths();
+        let (_dir, paths) = isolated_paths();
         let mut map = BTreeMap::new();
         map.insert(
             "1".to_owned(),
@@ -1171,9 +942,9 @@ mod tests {
         );
         save_acked_stats(&AckedStats(map), &paths).unwrap();
 
-        write_latch(&paths, vec![AlertCause::MissingDevice { devid: 1 }]);
+        ack_write_latch(&paths, vec![AlertCause::MissingDevice { devid: 1 }]);
 
-        cmd_ack(&PanicRunner, &NotMountedFs, &mp(), &paths).unwrap();
+        cmd_ack(&AckPanicRunner, &ack_fs_not_mounted(), &ack_mp(), &paths).unwrap();
 
         let acked = load_acked_stats(&paths);
         let entry = acked.0.get("1").unwrap();
@@ -1201,10 +972,10 @@ mod tests {
      */
     #[test]
     fn ack_offline_corrupt_latch_still_clears_files() {
-        let (_dir, paths) = fresh_paths();
+        let (_dir, paths) = isolated_paths();
         std::fs::write(paths.alert_latch_json(), b"not json").unwrap();
 
-        cmd_ack(&PanicRunner, &NotMountedFs, &mp(), &paths).unwrap();
+        cmd_ack(&AckPanicRunner, &ack_fs_not_mounted(), &ack_mp(), &paths).unwrap();
 
         assert!(!paths.alert_latch_json().exists());
         assert!(!paths.alert_latch_corrupt().exists());
@@ -1232,13 +1003,13 @@ mod tests {
      */
     #[test]
     fn ack_offline_corrupt_acked_stats_propagates_io_error_when_missing_cause() {
-        let (_dir, paths) = fresh_paths();
+        let (_dir, paths) = isolated_paths();
         std::fs::write(paths.acked_stats_json(), b"not json").unwrap();
         let original_bytes = std::fs::read(paths.acked_stats_json()).unwrap();
 
-        write_latch(&paths, vec![AlertCause::MissingDevice { devid: 1 }]);
+        ack_write_latch(&paths, vec![AlertCause::MissingDevice { devid: 1 }]);
 
-        let result = cmd_ack(&PanicRunner, &NotMountedFs, &mp(), &paths);
+        let result = cmd_ack(&AckPanicRunner, &ack_fs_not_mounted(), &ack_mp(), &paths);
         assert!(
             matches!(result, Err(AckError::Io(_))),
             "expected AckError::Io, got {result:?}"
@@ -1269,14 +1040,14 @@ mod tests {
      */
     #[test]
     fn ack_offline_smartd_only_latch_does_not_load_acked_stats() {
-        let (_dir, paths) = fresh_paths();
+        let (_dir, paths) = isolated_paths();
         std::fs::write(paths.acked_stats_json(), b"not json").unwrap();
         let original_bytes = std::fs::read(paths.acked_stats_json()).unwrap();
 
-        write_latch(&paths, vec![AlertCause::SmartdAlert]);
+        ack_write_latch(&paths, vec![AlertCause::SmartdAlert]);
         std::fs::write(paths.smartd_alert(), b"").unwrap();
 
-        cmd_ack(&PanicRunner, &NotMountedFs, &mp(), &paths).unwrap();
+        cmd_ack(&AckPanicRunner, &ack_fs_not_mounted(), &ack_mp(), &paths).unwrap();
 
         assert!(!paths.smartd_alert().exists());
         assert!(!paths.alert_latch_json().exists());
@@ -1303,18 +1074,18 @@ mod tests {
      */
     #[test]
     fn ack_offline_computation_error_only_latch_does_not_load_acked_stats() {
-        let (_dir, paths) = fresh_paths();
+        let (_dir, paths) = isolated_paths();
         std::fs::write(paths.acked_stats_json(), b"not json").unwrap();
         let original_bytes = std::fs::read(paths.acked_stats_json()).unwrap();
 
-        write_latch(
+        ack_write_latch(
             &paths,
             vec![AlertCause::ComputationError {
                 detail: "test".to_owned(),
             }],
         );
 
-        cmd_ack(&PanicRunner, &NotMountedFs, &mp(), &paths).unwrap();
+        cmd_ack(&AckPanicRunner, &ack_fs_not_mounted(), &ack_mp(), &paths).unwrap();
 
         assert!(!paths.alert_latch_json().exists());
         let after_bytes = std::fs::read(paths.acked_stats_json()).unwrap();

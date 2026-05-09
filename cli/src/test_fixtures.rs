@@ -1,6 +1,6 @@
 //! Test-only shared fixtures for `replace`, `add`, `remove`,
 //! `remove_missing`, `recover`, `doctor`, `mount`, `enroll_key_file`,
-//! `unlock`, `status`, and `lock`.
+//! `unlock`, `status`, `lock`, and `ack`.
 //!
 //! These fixtures consolidate the per-test scaffolding that previously
 //! lived as one-off `*Runner` structs and inline `tempdir + config + pass +
@@ -67,6 +67,11 @@
 //!     missing-mock contracts, close/forget recording, and exact dry-run
 //!     step assertions while moving repeated scaffolding out of
 //!     `lock.rs::tests`.
+//!   * `ack` -- flat collection of ack-shaped helpers that preserve exact
+//!     no-run, no-device-stats, mid-probe smartd race, and state-file
+//!     side-effect contracts. It intentionally avoids a broad topology
+//!     installer so new probes surface as missing mocks or request-list
+//!     failures.
 //!   * `PoolFixture` -- bundled tempdirs + `StatePaths` + config +
 //!     passphrase + `RecordingInhibitor`.
 //!   * `ReplaceParamsBuilder` / `AddParamsBuilder` / `RemoveParamsBuilder`
@@ -75,9 +80,10 @@
 //!
 //! Layout: this file is a facade. `shared` holds cross-scope items;
 //! `replace`, `add`, `remove`, `remove_missing`, `recover`, `doctor`,
-//! `mount`, `enroll_key_file`, `unlock`, `status`, and `lock` hold their
+//! `mount`, `enroll_key_file`, `unlock`, `status`, `lock`, and `ack` hold their
 //! per-scope topologies, builders, and helpers.
 
+mod ack;
 mod add;
 mod doctor;
 mod enroll_key_file;
@@ -91,6 +97,13 @@ mod shared;
 mod status;
 mod unlock;
 
+#[allow(unused_imports)]
+pub(crate) use ack::{
+    AckPanicRunner, ack_fs_btrfs, ack_fs_ext4, ack_fs_not_mounted,
+    ack_mounted_fs_that_touches_smartd, ack_mounted_probe_runner,
+    ack_mounted_probe_runner_with_device_stats, ack_mp, ack_offline_fs_that_touches_smartd,
+    ack_write_latch,
+};
 #[allow(unused_imports)]
 pub(crate) use doctor::{
     DF_MIXED, DF_MIXED_METADATA, DF_RAID1_CLEAN, DfQueryFailureRunner, PoolMissingDevicesRunner,
