@@ -236,234 +236,75 @@ pub fn cmd_unlock<R: CommandRunner, F: Filesystem + ?Sized>(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::cmd::{CmdRequest, MockRunner, RawCommandOutput};
-    use crate::config::Config;
-    use crate::membership::{DiskMember, PoolMembership};
+    use crate::cmd::{CmdRequest, MockRunner};
     use crate::mount::MountError;
     use crate::preview::NoteLevel;
-    use crate::probe::Filesystem;
-    use crate::state_paths::StatePaths;
-    use crate::types::{ByIdPath, MountPoint};
-    use std::collections::BTreeMap;
+    use crate::test_fixtures::{
+        MOUNT_TEST_PASSPHRASE_BYTES, base_two_disk_runner, err_raw as unlock_err_raw,
+        isolated_paths, luks_uuid_ok, mount_fs, ok_raw as unlock_ok_raw, test_config,
+        test_passphrase_fail, three_disk_membership as unlock_three_disk_membership,
+        two_disk_membership, unlock_btrfs_balance_status_idle, unlock_btrfs_balance_status_paused,
+        unlock_btrfs_device_scan_ok, unlock_luks_uuid_not_luks, unlock_passphrase_file,
+        unlock_storage_fs, unlock_with_mount_degraded_ok, unlock_with_mount_ok,
+        unlock_with_open_mapper_ok, unlock_with_test_passphrase_ok, unlock_with_three_mappers_open,
+    };
+    use crate::types::MountPoint;
 
-    fn test_paths() -> (tempfile::TempDir, StatePaths) {
-        let tmp = tempfile::TempDir::new().unwrap();
-        let paths = StatePaths::custom(tmp.path().into());
-        (tmp, paths)
-    }
-
-    const MOUNTINFO_BTRFS: &str =
-        "36 35 0:32 / /mnt/storage rw shared:1 - btrfs /dev/mapper/braid-disk1 rw\n";
-    const MOUNTINFO_WITHOUT_TARGET: &str = "26 25 0:23 / / rw shared:1 - ext4 /dev/sda1 rw\n";
-
-    struct MockFs {
-        paths: Vec<String>,
-        mountinfo: String,
-    }
-
-    impl MockFs {
-        fn new(paths: &[&str]) -> Self {
-            Self::with_mountinfo(paths, MOUNTINFO_BTRFS)
-        }
-
-        fn with_mountinfo(paths: &[&str], mountinfo: &str) -> Self {
-            Self {
-                paths: paths.iter().map(|s| s.to_string()).collect(),
-                mountinfo: mountinfo.to_owned(),
-            }
-        }
-    }
-
-    impl Filesystem for MockFs {
-        fn exists(&self, path: &str) -> bool {
-            self.paths.contains(&path.to_string())
-        }
-
-        fn is_block_device(&self, _path: &str) -> bool {
-            false
-        }
-
-        fn read_to_string(&self, path: &str) -> Result<String, std::io::Error> {
-            if path == "/proc/self/mountinfo" {
-                return Ok(self.mountinfo.clone());
-            }
-            Err(std::io::Error::new(std::io::ErrorKind::NotFound, "mock"))
-        }
-
-        fn list_dir(&self, _path: &str) -> Result<Vec<String>, std::io::Error> {
-            Ok(vec![])
-        }
-    }
-
-    fn ok_raw(cmd: &str) -> RawCommandOutput {
-        RawCommandOutput {
-            cmd: cmd.to_owned(),
-            stdout: String::new(),
-            stderr: String::new(),
-            exit_status: 0,
-        }
-    }
-
-    fn err_raw(cmd: &str, exit_code: i32, stderr: &str) -> RawCommandOutput {
-        RawCommandOutput {
-            cmd: cmd.to_owned(),
-            stdout: String::new(),
-            stderr: stderr.to_owned(),
-            exit_status: exit_code,
-        }
-    }
-
-    fn three_disk_config() -> Config {
-        Config::new(MountPoint("/mnt/storage".to_owned())).unwrap()
-    }
-
-    fn three_disk_membership() -> PoolMembership {
-        let mut disks = BTreeMap::new();
-        for (name, path) in [
-            ("disk1", "/dev/disk/by-id/virtio-disk1"),
-            ("disk2", "/dev/disk/by-id/virtio-disk2"),
-            ("disk3", "/dev/disk/by-id/virtio-disk3"),
-        ] {
-            disks.insert(
-                name.to_owned(),
-                DiskMember::from_by_id(ByIdPath(path.to_owned())),
-            );
-        }
-        PoolMembership { disks }
-    }
-
-    /// Bricked LUKS header (PresentNotLuks) on a known pool member must trigger
-    /// degraded mount when --allow-degraded is passed.
-    ///
-    /// Scenario: 3-disk RAID1, disk3's LUKS header is zeroed. Probe sees disk3
-    /// as PresentNotLuks (device exists, but cryptsetup luksUUID fails). The
-    /// surviving 2 disks unlock normally. Mount must use `-o degraded` because
-    /// btrfs will see a missing member device.
+    // Intent: a bricked LUKS header (PresentNotLuks) on a known pool member
+    //   must trigger a degraded mount when --allow-degraded is passed.
+    // Why it exists: a regression that picks plain Mount over MountWithOptions
+    //   would mount without the degraded flag and turn a recoverable missing
+    //   member into a hard failure.
+    // Scenario: 3-disk RAID1, disk3's LUKS header is zeroed. Probe sees disk3
+    //   as PresentNotLuks; the surviving two disks unlock normally; Mount must
+    //   use `-o degraded`.
     #[test]
     fn unlock_bricked_disk_uses_degraded_mount() {
-        let (_state_dir, sp) = test_paths();
-        let config = three_disk_config();
-        let membership = three_disk_membership();
-
-        // disk1 & disk2: exist, are LUKS, mapper not yet open
-        // disk3: exists but not LUKS (bricked header)
-        let fs = MockFs::new(&[
+        let (_state_dir, sp) = isolated_paths();
+        let config = test_config();
+        let membership = unlock_three_disk_membership();
+        let fs = unlock_storage_fs(&[
             "/dev/disk/by-id/virtio-disk1",
             "/dev/disk/by-id/virtio-disk2",
             "/dev/disk/by-id/virtio-disk3",
         ]);
 
+        let mp = MountPoint("/mnt/storage".to_owned());
+        let (uuid1_req, uuid1_out) = luks_uuid_ok(
+            "/dev/disk/by-id/virtio-disk1",
+            "aaaaaaaa-1111-2222-3333-444444444444",
+        );
+        let (uuid2_req, uuid2_out) = luks_uuid_ok(
+            "/dev/disk/by-id/virtio-disk2",
+            "bbbbbbbb-1111-2222-3333-444444444444",
+        );
+        let (uuid3_req, uuid3_out) = unlock_luks_uuid_not_luks("/dev/disk/by-id/virtio-disk3");
+        let (scan_req, scan_out) = unlock_btrfs_device_scan_ok();
+        let (balance_req, balance_out) = unlock_btrfs_balance_status_idle(&mp);
+
         let runner = MockRunner::default()
-            // 1. mountpoint check → not mounted
             .with_output(
-                CmdRequest::MountpointCheck {
-                    path: MountPoint("/mnt/storage".to_owned()),
-                },
-                err_raw("mountpoint", 1, ""),
+                CmdRequest::MountpointCheck { path: mp.clone() },
+                unlock_err_raw("mountpoint", 1, ""),
             )
-            // 2. probe: disk1 is LUKS
-            .with_output(
-                CmdRequest::CryptsetupLuksUuid {
-                    device: "/dev/disk/by-id/virtio-disk1".into(),
-                },
-                RawCommandOutput {
-                    cmd: "cryptsetup luksUUID".into(),
-                    stdout: "aaaaaaaa-1111-2222-3333-444444444444\n".into(),
-                    stderr: String::new(),
-                    exit_status: 0,
-                },
-            )
-            // 2. probe: disk2 is LUKS
-            .with_output(
-                CmdRequest::CryptsetupLuksUuid {
-                    device: "/dev/disk/by-id/virtio-disk2".into(),
-                },
-                RawCommandOutput {
-                    cmd: "cryptsetup luksUUID".into(),
-                    stdout: "bbbbbbbb-1111-2222-3333-444444444444\n".into(),
-                    stderr: String::new(),
-                    exit_status: 0,
-                },
-            )
-            // 2. probe: disk3 NOT LUKS (bricked)
-            .with_output(
-                CmdRequest::CryptsetupLuksUuid {
-                    device: "/dev/disk/by-id/virtio-disk3".into(),
-                },
-                err_raw(
-                    "cryptsetup luksUUID",
-                    1,
-                    "Device is not a valid LUKS device.",
-                ),
-            )
-            // 4. verify passphrase against every unlockable disk
-            .with_output_stdin(
-                CmdRequest::CryptsetupTestPassphrase {
-                    device: "/dev/disk/by-id/virtio-disk1".into(),
-                },
-                b"testpass".to_vec(),
-                ok_raw("cryptsetup open --test-passphrase"),
-            )
-            .with_output_stdin(
-                CmdRequest::CryptsetupTestPassphrase {
-                    device: "/dev/disk/by-id/virtio-disk2".into(),
-                },
-                b"testpass".to_vec(),
-                ok_raw("cryptsetup open --test-passphrase"),
-            )
-            // 4. open disk1
-            .with_output_stdin(
-                CmdRequest::CryptsetupLuksOpen {
-                    device: "/dev/disk/by-id/virtio-disk1".into(),
-                    mapper: "braid-disk1".into(),
-                },
-                b"testpass".to_vec(),
-                ok_raw("cryptsetup open"),
-            )
-            // 4. open disk2
-            .with_output_stdin(
-                CmdRequest::CryptsetupLuksOpen {
-                    device: "/dev/disk/by-id/virtio-disk2".into(),
-                    mapper: "braid-disk2".into(),
-                },
-                b"testpass".to_vec(),
-                ok_raw("cryptsetup open"),
-            )
-            // 5. btrfs device scan
-            .with_output(CmdRequest::BtrfsDeviceScanAll, ok_raw("btrfs device scan"))
-            // 6. mount WITH degraded (this is what the test asserts)
-            .with_output(
-                CmdRequest::MountWithOptions {
-                    device: "/dev/mapper/braid-disk1".into(),
-                    mount_point: MountPoint("/mnt/storage".to_owned()),
-                    options: vec!["degraded".to_owned()],
-                },
-                ok_raw("mount -o noatime,skip_balance,degraded"),
-            )
-            // 7. balance status check after mount (best-effort)
-            .with_output(
-                CmdRequest::BtrfsBalanceStatus {
-                    mount_point: MountPoint("/mnt/storage".to_owned()),
-                },
-                RawCommandOutput {
-                    cmd: "btrfs balance status".into(),
-                    stdout: "No balance found on '/mnt/storage'\n".into(),
-                    stderr: String::new(),
-                    exit_status: 0,
-                },
-            )
+            .with_output(uuid1_req, uuid1_out)
+            .with_output(uuid2_req, uuid2_out)
+            .with_output(uuid3_req, uuid3_out)
             .with_luks_dump_text_luks2_for(&[
                 "/dev/disk/by-id/virtio-disk1",
                 "/dev/disk/by-id/virtio-disk2",
             ])
             .with_mappers_closed(&["braid-disk1", "braid-disk2"]);
-
-        // Write passphrase to a temp file for the test (avoid stdin TTY)
-        let tmp = tempfile::NamedTempFile::new().unwrap();
-        {
-            use std::io::Write;
-            tmp.as_file().write_all(b"testpass").unwrap();
-        }
+        let runner = unlock_with_test_passphrase_ok(runner, "/dev/disk/by-id/virtio-disk1");
+        let runner = unlock_with_test_passphrase_ok(runner, "/dev/disk/by-id/virtio-disk2");
+        let runner =
+            unlock_with_open_mapper_ok(runner, "/dev/disk/by-id/virtio-disk1", "braid-disk1");
+        let runner =
+            unlock_with_open_mapper_ok(runner, "/dev/disk/by-id/virtio-disk2", "braid-disk2");
+        let runner = runner.with_output(scan_req, scan_out);
+        let runner = unlock_with_mount_degraded_ok(runner, "/dev/mapper/braid-disk1", &mp)
+            .with_output(balance_req, balance_out);
+        let tmp = unlock_passphrase_file();
 
         let result = cmd_unlock(
             &runner,
@@ -481,114 +322,61 @@ mod tests {
         );
 
         // If the code incorrectly uses Mount instead of MountWithOptions,
-        // MockRunner returns MissingMock → the test fails.
+        // MockRunner returns MissingMock -- the test fails.
         result.expect("unlock with bricked disk should use degraded mount and succeed");
     }
 
-    /// Bricked LUKS header on a known pool member must refuse degraded mount
-    /// when --allow-degraded is NOT passed.
-    ///
-    /// Scenario: Same as unlock_bricked_disk_uses_degraded_mount but without
-    /// the flag. The error must tell the user how to proceed.
+    // Intent: a bricked LUKS header on a known pool member must refuse a
+    //   degraded mount when --allow-degraded is not passed.
+    // Why it exists: degraded operation must stay explicit so users do not
+    //   unknowingly mount a pool with a missing member.
+    // Scenario: same topology as unlock_bricked_disk_uses_degraded_mount, but
+    //   without the flag. The error must tell the user how to proceed.
     #[test]
     fn unlock_bricked_disk_refuses_without_flag() {
-        let (_state_dir, sp) = test_paths();
-        let config = three_disk_config();
-        let membership = three_disk_membership();
-
-        let fs = MockFs::new(&[
+        let (_state_dir, sp) = isolated_paths();
+        let config = test_config();
+        let membership = unlock_three_disk_membership();
+        let fs = unlock_storage_fs(&[
             "/dev/disk/by-id/virtio-disk1",
             "/dev/disk/by-id/virtio-disk2",
             "/dev/disk/by-id/virtio-disk3",
         ]);
 
+        let mp = MountPoint("/mnt/storage".to_owned());
+        let (uuid1_req, uuid1_out) = luks_uuid_ok(
+            "/dev/disk/by-id/virtio-disk1",
+            "aaaaaaaa-1111-2222-3333-444444444444",
+        );
+        let (uuid2_req, uuid2_out) = luks_uuid_ok(
+            "/dev/disk/by-id/virtio-disk2",
+            "bbbbbbbb-1111-2222-3333-444444444444",
+        );
+        let (uuid3_req, uuid3_out) = unlock_luks_uuid_not_luks("/dev/disk/by-id/virtio-disk3");
+        let (scan_req, scan_out) = unlock_btrfs_device_scan_ok();
+
         let runner = MockRunner::default()
             .with_output(
-                CmdRequest::MountpointCheck {
-                    path: MountPoint("/mnt/storage".to_owned()),
-                },
-                err_raw("mountpoint", 1, ""),
+                CmdRequest::MountpointCheck { path: mp },
+                unlock_err_raw("mountpoint", 1, ""),
             )
-            .with_output(
-                CmdRequest::CryptsetupLuksUuid {
-                    device: "/dev/disk/by-id/virtio-disk1".into(),
-                },
-                RawCommandOutput {
-                    cmd: "cryptsetup luksUUID".into(),
-                    stdout: "aaaaaaaa-1111-2222-3333-444444444444\n".into(),
-                    stderr: String::new(),
-                    exit_status: 0,
-                },
-            )
-            .with_output(
-                CmdRequest::CryptsetupLuksUuid {
-                    device: "/dev/disk/by-id/virtio-disk2".into(),
-                },
-                RawCommandOutput {
-                    cmd: "cryptsetup luksUUID".into(),
-                    stdout: "bbbbbbbb-1111-2222-3333-444444444444\n".into(),
-                    stderr: String::new(),
-                    exit_status: 0,
-                },
-            )
-            // disk3 NOT LUKS (bricked)
-            .with_output(
-                CmdRequest::CryptsetupLuksUuid {
-                    device: "/dev/disk/by-id/virtio-disk3".into(),
-                },
-                err_raw(
-                    "cryptsetup luksUUID",
-                    1,
-                    "Device is not a valid LUKS device.",
-                ),
-            )
-            // verify passphrase against every unlockable disk
-            .with_output_stdin(
-                CmdRequest::CryptsetupTestPassphrase {
-                    device: "/dev/disk/by-id/virtio-disk1".into(),
-                },
-                b"testpass".to_vec(),
-                ok_raw("cryptsetup open --test-passphrase"),
-            )
-            .with_output_stdin(
-                CmdRequest::CryptsetupTestPassphrase {
-                    device: "/dev/disk/by-id/virtio-disk2".into(),
-                },
-                b"testpass".to_vec(),
-                ok_raw("cryptsetup open --test-passphrase"),
-            )
-            // open disk1
-            .with_output_stdin(
-                CmdRequest::CryptsetupLuksOpen {
-                    device: "/dev/disk/by-id/virtio-disk1".into(),
-                    mapper: "braid-disk1".into(),
-                },
-                b"testpass".to_vec(),
-                ok_raw("cryptsetup open"),
-            )
-            // open disk2
-            .with_output_stdin(
-                CmdRequest::CryptsetupLuksOpen {
-                    device: "/dev/disk/by-id/virtio-disk2".into(),
-                    mapper: "braid-disk2".into(),
-                },
-                b"testpass".to_vec(),
-                ok_raw("cryptsetup open"),
-            )
-            // btrfs device scan
-            .with_output(CmdRequest::BtrfsDeviceScanAll, ok_raw("btrfs device scan"))
+            .with_output(uuid1_req, uuid1_out)
+            .with_output(uuid2_req, uuid2_out)
+            .with_output(uuid3_req, uuid3_out)
             .with_luks_dump_text_luks2_for(&[
                 "/dev/disk/by-id/virtio-disk1",
                 "/dev/disk/by-id/virtio-disk2",
             ])
             .with_mappers_closed(&["braid-disk1", "braid-disk2"]);
-        // No mount mock — should never reach mount
-
-        let tmp = tempfile::NamedTempFile::new().unwrap();
-        {
-            use std::io::Write;
-            tmp.as_file().write_all(b"testpass").unwrap();
-        }
+        let runner = unlock_with_test_passphrase_ok(runner, "/dev/disk/by-id/virtio-disk1");
+        let runner = unlock_with_test_passphrase_ok(runner, "/dev/disk/by-id/virtio-disk2");
+        let runner =
+            unlock_with_open_mapper_ok(runner, "/dev/disk/by-id/virtio-disk1", "braid-disk1");
+        let runner =
+            unlock_with_open_mapper_ok(runner, "/dev/disk/by-id/virtio-disk2", "braid-disk2")
+                .with_output(scan_req, scan_out);
+        // No mount mock -- should never reach mount.
+        let tmp = unlock_passphrase_file();
 
         let result = cmd_unlock(
             &runner,
@@ -621,133 +409,47 @@ mod tests {
         );
     }
 
-    /// Passphrase mismatch on a non-first disk must identify the failing disk.
-    ///
-    /// Intent: When the single-passphrase invariant (Principle 4) is violated
-    /// by external LUKS manipulation, the error message must name the specific
-    /// disk that rejected the passphrase.
-    ///
-    /// Why it exists: Previously, ensure_luks_open failed with a generic
-    /// "Wrong passphrase?" error — misleading because the passphrase had
-    /// already been verified against another disk.
-    ///
-    /// Scenario: 2-disk RAID1 where someone ran `cryptsetup luksChangeKey` on
-    /// disk2 outside of braid. `braid unlock` verifies against disk1
-    /// (succeeds), opens disk1 (succeeds), then fails on disk2 with a message
-    /// naming both disks.
+    // Intent: passphrase mismatch on a non-first disk must identify the
+    //   failing disk.
+    // Why it exists: when the single-passphrase invariant is violated by
+    //   external LUKS manipulation, the error must not degrade into a generic
+    //   "Wrong passphrase?" message.
+    // Scenario: 2-disk RAID1 where someone changed disk2's passphrase outside
+    //   braid. `braid unlock` verifies against disk1, then fails on disk2.
     #[test]
     fn passphrase_mismatch_names_failing_disk() {
-        let (_state_dir, sp) = test_paths();
-        let config = Config::new(MountPoint("/mnt/storage".to_owned())).unwrap();
-        let mut membership_disks = BTreeMap::new();
-        for (name, path) in [
-            ("disk1", "/dev/disk/by-id/virtio-disk1"),
-            ("disk2", "/dev/disk/by-id/virtio-disk2"),
-        ] {
-            membership_disks.insert(
-                name.to_owned(),
-                DiskMember::from_by_id(ByIdPath(path.to_owned())),
-            );
-        }
-        let membership = PoolMembership {
-            disks: membership_disks,
-        };
-
-        let fs = MockFs::new(&[
+        let (_state_dir, sp) = isolated_paths();
+        let config = test_config();
+        let membership = two_disk_membership();
+        let fs = unlock_storage_fs(&[
             "/dev/disk/by-id/virtio-disk1",
             "/dev/disk/by-id/virtio-disk2",
         ]);
 
-        let runner = MockRunner::default()
-            // mountpoint check → not mounted
-            .with_output(
-                CmdRequest::MountpointCheck {
-                    path: MountPoint("/mnt/storage".to_owned()),
-                },
-                err_raw("mountpoint", 1, ""),
-            )
-            // probe: disk1 is LUKS
-            .with_output(
-                CmdRequest::CryptsetupLuksUuid {
-                    device: "/dev/disk/by-id/virtio-disk1".into(),
-                },
-                RawCommandOutput {
-                    cmd: "cryptsetup luksUUID".into(),
-                    stdout: "aaaaaaaa-1111-2222-3333-444444444444\n".into(),
-                    stderr: String::new(),
-                    exit_status: 0,
-                },
-            )
-            // probe: disk2 is LUKS
-            .with_output(
-                CmdRequest::CryptsetupLuksUuid {
-                    device: "/dev/disk/by-id/virtio-disk2".into(),
-                },
-                RawCommandOutput {
-                    cmd: "cryptsetup luksUUID".into(),
-                    stdout: "bbbbbbbb-1111-2222-3333-444444444444\n".into(),
-                    stderr: String::new(),
-                    exit_status: 0,
-                },
-            )
-            // verify passphrase against disk1 -> success, disk2 -> rejected
-            .with_output_stdin(
-                CmdRequest::CryptsetupTestPassphrase {
-                    device: "/dev/disk/by-id/virtio-disk1".into(),
-                },
-                b"testpass".to_vec(),
-                ok_raw("cryptsetup open --test-passphrase"),
-            )
-            .with_output_stdin(
-                CmdRequest::CryptsetupTestPassphrase {
-                    device: "/dev/disk/by-id/virtio-disk2".into(),
-                },
-                b"testpass".to_vec(),
-                err_raw(
-                    "cryptsetup open --test-passphrase",
-                    2,
-                    "No key available with this passphrase.",
-                ),
-            )
+        let (fail_req, fail_out) = test_passphrase_fail("/dev/disk/by-id/virtio-disk2");
+        let runner = base_two_disk_runner()
+            .with_output_stdin(fail_req, MOUNT_TEST_PASSPHRASE_BYTES.to_vec(), fail_out)
             .with_output(
                 CmdRequest::CryptsetupIsLuks {
                     device: "/dev/disk/by-id/virtio-disk2".into(),
                 },
-                ok_raw("cryptsetup isLuks"),
-            )
-            // open disk1 → success
-            .with_output_stdin(
-                CmdRequest::CryptsetupLuksOpen {
-                    device: "/dev/disk/by-id/virtio-disk1".into(),
-                    mapper: "braid-disk1".into(),
-                },
-                b"testpass".to_vec(),
-                ok_raw("cryptsetup open"),
-            )
-            // open disk2 → FAILURE (different passphrase)
-            .with_output_stdin(
-                CmdRequest::CryptsetupLuksOpen {
-                    device: "/dev/disk/by-id/virtio-disk2".into(),
-                    mapper: "braid-disk2".into(),
-                },
-                b"testpass".to_vec(),
-                err_raw(
-                    "cryptsetup open",
-                    2,
-                    "No key available with this passphrase.",
-                ),
-            )
-            .with_luks_dump_text_luks2_for(&[
-                "/dev/disk/by-id/virtio-disk1",
-                "/dev/disk/by-id/virtio-disk2",
-            ])
-            .with_mappers_closed(&["braid-disk1", "braid-disk2"]);
-
-        let tmp = tempfile::NamedTempFile::new().unwrap();
-        {
-            use std::io::Write;
-            tmp.as_file().write_all(b"testpass").unwrap();
-        }
+                unlock_ok_raw("cryptsetup isLuks"),
+            );
+        let runner =
+            unlock_with_open_mapper_ok(runner, "/dev/disk/by-id/virtio-disk1", "braid-disk1")
+                .with_output_stdin(
+                    CmdRequest::CryptsetupLuksOpen {
+                        device: "/dev/disk/by-id/virtio-disk2".into(),
+                        mapper: "braid-disk2".into(),
+                    },
+                    MOUNT_TEST_PASSPHRASE_BYTES.to_vec(),
+                    unlock_err_raw(
+                        "cryptsetup open",
+                        2,
+                        "No key available with this passphrase.",
+                    ),
+                );
+        let tmp = unlock_passphrase_file();
 
         let result = cmd_unlock(
             &runner,
@@ -781,132 +483,60 @@ mod tests {
     }
 
     // Intent: unlock reports the original post-open mount failure even if
-    // best-effort cleanup also fails.
+    //   best-effort cleanup also fails.
     // Why it exists: a cleanup regression must not replace the primary user
-    // action failure with a secondary `cryptsetup close` error.
+    //   action failure with a secondary `cryptsetup close` error.
     // Scenario: two disks open successfully, mount fails, and one mapper stays
-    // busy through cleanup retries.
+    //   busy through cleanup retries.
     #[test]
     fn cmd_unlock_preserves_mount_error_when_cleanup_close_fails() {
-        let (_state_dir, sp) = test_paths();
-        let config = Config::new(MountPoint("/mnt/storage".to_owned())).unwrap();
-        let mut disks = BTreeMap::new();
-        for (name, path) in [
-            ("disk1", "/dev/disk/by-id/virtio-disk1"),
-            ("disk2", "/dev/disk/by-id/virtio-disk2"),
-        ] {
-            disks.insert(
-                name.to_owned(),
-                DiskMember::from_by_id(ByIdPath(path.to_owned())),
-            );
-        }
-        let membership = PoolMembership { disks };
-        let fs = MockFs::new(&[
+        let (_state_dir, sp) = isolated_paths();
+        let config = test_config();
+        let membership = two_disk_membership();
+        let fs = unlock_storage_fs(&[
             "/dev/disk/by-id/virtio-disk1",
             "/dev/disk/by-id/virtio-disk2",
             "/dev/mapper/braid-disk1",
             "/dev/mapper/braid-disk2",
         ]);
 
-        let runner = MockRunner::default()
-            .with_output(
-                CmdRequest::MountpointCheck {
-                    path: MountPoint("/mnt/storage".to_owned()),
-                },
-                err_raw("mountpoint", 1, ""),
-            )
-            .with_output(
-                CmdRequest::CryptsetupLuksUuid {
-                    device: "/dev/disk/by-id/virtio-disk1".into(),
-                },
-                RawCommandOutput {
-                    cmd: "cryptsetup luksUUID".into(),
-                    stdout: "aaaaaaaa-1111-2222-3333-444444444444\n".into(),
-                    stderr: String::new(),
-                    exit_status: 0,
-                },
-            )
-            .with_output(
-                CmdRequest::CryptsetupLuksUuid {
-                    device: "/dev/disk/by-id/virtio-disk2".into(),
-                },
-                RawCommandOutput {
-                    cmd: "cryptsetup luksUUID".into(),
-                    stdout: "bbbbbbbb-1111-2222-3333-444444444444\n".into(),
-                    stderr: String::new(),
-                    exit_status: 0,
-                },
-            )
-            .with_luks_dump_text_luks2_for(&[
-                "/dev/disk/by-id/virtio-disk1",
-                "/dev/disk/by-id/virtio-disk2",
-            ])
-            .with_mappers_closed(&["braid-disk1", "braid-disk2"])
-            .with_output_stdin(
-                CmdRequest::CryptsetupTestPassphrase {
-                    device: "/dev/disk/by-id/virtio-disk1".into(),
-                },
-                b"testpass".to_vec(),
-                ok_raw("cryptsetup open --test-passphrase"),
-            )
-            .with_output_stdin(
-                CmdRequest::CryptsetupTestPassphrase {
-                    device: "/dev/disk/by-id/virtio-disk2".into(),
-                },
-                b"testpass".to_vec(),
-                ok_raw("cryptsetup open --test-passphrase"),
-            )
-            .with_output_stdin(
-                CmdRequest::CryptsetupLuksOpen {
-                    device: "/dev/disk/by-id/virtio-disk1".into(),
-                    mapper: "braid-disk1".into(),
-                },
-                b"testpass".to_vec(),
-                ok_raw("cryptsetup open"),
-            )
-            .with_output_stdin(
-                CmdRequest::CryptsetupLuksOpen {
-                    device: "/dev/disk/by-id/virtio-disk2".into(),
-                    mapper: "braid-disk2".into(),
-                },
-                b"testpass".to_vec(),
-                ok_raw("cryptsetup open"),
-            )
-            .with_output(CmdRequest::BtrfsDeviceScanAll, ok_raw("btrfs device scan"))
-            .with_output(
-                CmdRequest::Mount {
-                    device: "/dev/mapper/braid-disk1".into(),
-                    mount_point: MountPoint("/mnt/storage".to_owned()),
-                },
-                err_raw("mount", 32, "wrong fs type"),
-            )
-            .with_output(
-                CmdRequest::BtrfsDeviceScanForget {
-                    devices: vec![
-                        "/dev/mapper/braid-disk1".into(),
-                        "/dev/mapper/braid-disk2".into(),
-                    ],
-                },
-                ok_raw("btrfs device scan --forget"),
-            )
-            .with_output(
-                CmdRequest::CryptsetupClose {
-                    mapper: "braid-disk1".into(),
-                },
-                err_raw("cryptsetup close", 5, "busy"),
-            )
-            .with_output(
-                CmdRequest::CryptsetupClose {
-                    mapper: "braid-disk2".into(),
-                },
-                ok_raw("cryptsetup close"),
-            );
-
-        let tmp = tempfile::NamedTempFile::new().unwrap();
-        {
-            use std::io::Write;
-            tmp.as_file().write_all(b"testpass").unwrap();
-        }
+        let mp = MountPoint("/mnt/storage".to_owned());
+        let (scan_req, scan_out) = unlock_btrfs_device_scan_ok();
+        let runner = base_two_disk_runner();
+        let runner =
+            unlock_with_open_mapper_ok(runner, "/dev/disk/by-id/virtio-disk1", "braid-disk1");
+        let runner =
+            unlock_with_open_mapper_ok(runner, "/dev/disk/by-id/virtio-disk2", "braid-disk2")
+                .with_output(scan_req, scan_out)
+                .with_output(
+                    CmdRequest::Mount {
+                        device: "/dev/mapper/braid-disk1".into(),
+                        mount_point: mp,
+                    },
+                    unlock_err_raw("mount", 32, "wrong fs type"),
+                )
+                .with_output(
+                    CmdRequest::BtrfsDeviceScanForget {
+                        devices: vec![
+                            "/dev/mapper/braid-disk1".into(),
+                            "/dev/mapper/braid-disk2".into(),
+                        ],
+                    },
+                    unlock_ok_raw("btrfs device scan --forget"),
+                )
+                .with_output(
+                    CmdRequest::CryptsetupClose {
+                        mapper: "braid-disk1".into(),
+                    },
+                    unlock_err_raw("cryptsetup close", 5, "busy"),
+                )
+                .with_output(
+                    CmdRequest::CryptsetupClose {
+                        mapper: "braid-disk2".into(),
+                    },
+                    unlock_ok_raw("cryptsetup close"),
+                );
+        let tmp = unlock_passphrase_file();
 
         let mut result = None;
         let captured = crate::status_tag::testing::capture_with_color(false, || {
@@ -953,154 +583,93 @@ mod tests {
         );
     }
 
-    /// Paused balance after unlock succeeds (warning is informational only).
-    ///
-    /// Intent: When a paused balance is detected after mount, unlock must still
-    /// return Ok(()) — the warning is informational, not an error.
-    ///
-    /// Why it exists: The post-mount balance check must not accidentally convert
-    /// an informational warning into a failure that breaks auto-unlock.
-    ///
-    /// Scenario: 3-disk RAID1, all healthy. A balance was paused before lock.
-    /// On re-unlock, skip_balance prevents kernel auto-resume, and the CLI
-    /// prints a warning. Unlock still succeeds.
+    // Intent: the unlock_btrfs_balance_status_paused fixture body is the
+    //   bytes that classify as Paused through the same parser and emitter path
+    //   cmd_unlock takes post-mount, and the warning text matches production.
+    // Why it exists: unlock_warns_on_paused_balance only asserts Ok(()), so
+    //   parser, fixture-body, or warning-literal drift could otherwise silently
+    //   downgrade the warning.
+    // Scenario: feed the fixture output through status::emit_paused_balance_warning
+    //   against a Vec<u8> writer; expect the warning flag and exact output.
+    #[test]
+    fn unlock_btrfs_balance_status_paused_classifies_as_paused() {
+        let mp = MountPoint("/mnt/storage".to_owned());
+        let (req, out) = unlock_btrfs_balance_status_paused(&mp);
+        let runner = MockRunner::default().with_output(req, out);
+        let mut sink = Vec::new();
+
+        let warned = crate::status::emit_paused_balance_warning(&runner, &mp, &mut sink);
+
+        assert!(warned, "fixture body should classify as paused balance");
+        let output = String::from_utf8(sink).expect("warning is utf-8");
+        let expected = concat!(
+            "\n",
+            "  paused balance detected -- will not auto-resume\n",
+            "    resume:  btrfs balance resume /mnt/storage\n",
+            "    cancel:  btrfs balance cancel /mnt/storage\n",
+        );
+        assert_eq!(output, expected);
+    }
+
+    // Intent: when a paused balance is detected after mount, unlock must still
+    //   return Ok(()); the warning is informational, not an error.
+    // Why it exists: the post-mount balance check must not accidentally convert
+    //   an informational warning into a failure that breaks auto-unlock.
+    // Scenario: 3-disk RAID1, all healthy. A balance was paused before lock; on
+    //   re-unlock, skip_balance prevents kernel auto-resume and unlock succeeds.
     #[test]
     fn unlock_warns_on_paused_balance() {
-        let (_state_dir, sp) = test_paths();
-        let config = three_disk_config();
-        let membership = three_disk_membership();
-        let fs = MockFs::new(&[
+        let (_state_dir, sp) = isolated_paths();
+        let config = test_config();
+        let membership = unlock_three_disk_membership();
+        let fs = unlock_storage_fs(&[
             "/dev/disk/by-id/virtio-disk1",
             "/dev/disk/by-id/virtio-disk2",
             "/dev/disk/by-id/virtio-disk3",
         ]);
 
+        let mp = MountPoint("/mnt/storage".to_owned());
+        let (uuid1_req, uuid1_out) = luks_uuid_ok(
+            "/dev/disk/by-id/virtio-disk1",
+            "aaaaaaaa-1111-2222-3333-444444444444",
+        );
+        let (uuid2_req, uuid2_out) = luks_uuid_ok(
+            "/dev/disk/by-id/virtio-disk2",
+            "bbbbbbbb-1111-2222-3333-444444444444",
+        );
+        let (uuid3_req, uuid3_out) = luks_uuid_ok(
+            "/dev/disk/by-id/virtio-disk3",
+            "cccccccc-1111-2222-3333-444444444444",
+        );
+        let (scan_req, scan_out) = unlock_btrfs_device_scan_ok();
+        let (balance_req, balance_out) = unlock_btrfs_balance_status_paused(&mp);
         let runner = MockRunner::default()
-            // mountpoint check → not mounted
             .with_output(
-                CmdRequest::MountpointCheck {
-                    path: MountPoint("/mnt/storage".to_owned()),
-                },
-                err_raw("mountpoint", 1, ""),
+                CmdRequest::MountpointCheck { path: mp.clone() },
+                unlock_err_raw("mountpoint", 1, ""),
             )
-            // probe: all 3 disks are LUKS
-            .with_output(
-                CmdRequest::CryptsetupLuksUuid {
-                    device: "/dev/disk/by-id/virtio-disk1".into(),
-                },
-                RawCommandOutput {
-                    cmd: "cryptsetup luksUUID".into(),
-                    stdout: "aaaaaaaa-1111-2222-3333-444444444444\n".into(),
-                    stderr: String::new(),
-                    exit_status: 0,
-                },
-            )
-            .with_output(
-                CmdRequest::CryptsetupLuksUuid {
-                    device: "/dev/disk/by-id/virtio-disk2".into(),
-                },
-                RawCommandOutput {
-                    cmd: "cryptsetup luksUUID".into(),
-                    stdout: "bbbbbbbb-1111-2222-3333-444444444444\n".into(),
-                    stderr: String::new(),
-                    exit_status: 0,
-                },
-            )
-            .with_output(
-                CmdRequest::CryptsetupLuksUuid {
-                    device: "/dev/disk/by-id/virtio-disk3".into(),
-                },
-                RawCommandOutput {
-                    cmd: "cryptsetup luksUUID".into(),
-                    stdout: "cccccccc-1111-2222-3333-444444444444\n".into(),
-                    stderr: String::new(),
-                    exit_status: 0,
-                },
-            )
-            // verify passphrase against every planned disk
-            .with_output_stdin(
-                CmdRequest::CryptsetupTestPassphrase {
-                    device: "/dev/disk/by-id/virtio-disk1".into(),
-                },
-                b"testpass".to_vec(),
-                ok_raw("cryptsetup open --test-passphrase"),
-            )
-            .with_output_stdin(
-                CmdRequest::CryptsetupTestPassphrase {
-                    device: "/dev/disk/by-id/virtio-disk2".into(),
-                },
-                b"testpass".to_vec(),
-                ok_raw("cryptsetup open --test-passphrase"),
-            )
-            .with_output_stdin(
-                CmdRequest::CryptsetupTestPassphrase {
-                    device: "/dev/disk/by-id/virtio-disk3".into(),
-                },
-                b"testpass".to_vec(),
-                ok_raw("cryptsetup open --test-passphrase"),
-            )
-            // open all 3 disks
-            .with_output_stdin(
-                CmdRequest::CryptsetupLuksOpen {
-                    device: "/dev/disk/by-id/virtio-disk1".into(),
-                    mapper: "braid-disk1".into(),
-                },
-                b"testpass".to_vec(),
-                ok_raw("cryptsetup open"),
-            )
-            .with_output_stdin(
-                CmdRequest::CryptsetupLuksOpen {
-                    device: "/dev/disk/by-id/virtio-disk2".into(),
-                    mapper: "braid-disk2".into(),
-                },
-                b"testpass".to_vec(),
-                ok_raw("cryptsetup open"),
-            )
-            .with_output_stdin(
-                CmdRequest::CryptsetupLuksOpen {
-                    device: "/dev/disk/by-id/virtio-disk3".into(),
-                    mapper: "braid-disk3".into(),
-                },
-                b"testpass".to_vec(),
-                ok_raw("cryptsetup open"),
-            )
-            // btrfs device scan
-            .with_output(CmdRequest::BtrfsDeviceScanAll, ok_raw("btrfs device scan"))
-            // normal mount (all present)
-            .with_output(
-                CmdRequest::Mount {
-                    device: "/dev/mapper/braid-disk1".into(),
-                    mount_point: MountPoint("/mnt/storage".to_owned()),
-                },
-                ok_raw("mount -o noatime,skip_balance"),
-            )
-            // balance status → PAUSED
-            .with_output(
-                CmdRequest::BtrfsBalanceStatus {
-                    mount_point: MountPoint("/mnt/storage".to_owned()),
-                },
-                RawCommandOutput {
-                    cmd: "btrfs balance status".into(),
-                    stdout: "Balance on '/mnt/storage' is paused\n\
-                             3 out of about 10 chunks balanced (7 considered), \
-                             70% left\n"
-                        .into(),
-                    stderr: String::new(),
-                    exit_status: 0,
-                },
-            )
+            .with_output(uuid1_req, uuid1_out)
+            .with_output(uuid2_req, uuid2_out)
+            .with_output(uuid3_req, uuid3_out)
             .with_luks_dump_text_luks2_for(&[
                 "/dev/disk/by-id/virtio-disk1",
                 "/dev/disk/by-id/virtio-disk2",
                 "/dev/disk/by-id/virtio-disk3",
             ])
             .with_mappers_closed(&["braid-disk1", "braid-disk2", "braid-disk3"]);
-
-        let tmp = tempfile::NamedTempFile::new().unwrap();
-        {
-            use std::io::Write;
-            tmp.as_file().write_all(b"testpass").unwrap();
-        }
+        let runner = unlock_with_test_passphrase_ok(runner, "/dev/disk/by-id/virtio-disk1");
+        let runner = unlock_with_test_passphrase_ok(runner, "/dev/disk/by-id/virtio-disk2");
+        let runner = unlock_with_test_passphrase_ok(runner, "/dev/disk/by-id/virtio-disk3");
+        let runner =
+            unlock_with_open_mapper_ok(runner, "/dev/disk/by-id/virtio-disk1", "braid-disk1");
+        let runner =
+            unlock_with_open_mapper_ok(runner, "/dev/disk/by-id/virtio-disk2", "braid-disk2");
+        let runner =
+            unlock_with_open_mapper_ok(runner, "/dev/disk/by-id/virtio-disk3", "braid-disk3");
+        let runner = runner.with_output(scan_req, scan_out);
+        let runner = unlock_with_mount_ok(runner, "/dev/mapper/braid-disk1", &mp)
+            .with_output(balance_req, balance_out);
+        let tmp = unlock_passphrase_file();
 
         let result = cmd_unlock(
             &runner,
@@ -1121,74 +690,22 @@ mod tests {
         result.expect("unlock should succeed even with paused balance");
     }
 
-    /* Intent: dry-run success for two closed disks renders probe notes
-     * above the step block, and the block still carries the expected
-     * open/scan/mount steps.
-     *
-     * Why it exists: the PR 5 migration routes unlock through
-     * `plan_unlock().result.unwrap().preview().render()`. A regression
-     * that either drops the probe notes, drops the steps, or swaps
-     * their order would break the "probe context before steps" dry-run
-     * contract. Pins the new planner boundary.
-     *
-     * Scenario: 2-disk pool, both present and closed, `--dry-run`.
-     * `plan_open_pool` emits two `DiskAvailable` events; planner
-     * converts them to `PerDisk { level: Ok, message: "found" }` notes.
-     */
+    // Intent: dry-run success for two closed disks renders probe notes above
+    //   the step block, and the block still carries the expected open, scan,
+    //   and mount steps.
+    // Why it exists: a regression that drops probe notes, drops steps, or swaps
+    //   their order would break the probe-context-before-steps contract.
+    // Scenario: 2-disk pool, both present and closed, `--dry-run`.
     #[test]
     fn plan_unlock_dry_run_render_2_closed_disks() {
-        let (_state_dir, sp) = test_paths();
-        let config = Config::new(MountPoint("/mnt/storage".to_owned())).unwrap();
-        let mut disks = BTreeMap::new();
-        for (name, path) in [
-            ("disk1", "/dev/disk/by-id/virtio-disk1"),
-            ("disk2", "/dev/disk/by-id/virtio-disk2"),
-        ] {
-            disks.insert(
-                name.to_owned(),
-                DiskMember::from_by_id(ByIdPath(path.to_owned())),
-            );
-        }
-        let membership = PoolMembership { disks };
-        let fs = MockFs::new(&[
+        let (_state_dir, sp) = isolated_paths();
+        let config = test_config();
+        let membership = two_disk_membership();
+        let fs = unlock_storage_fs(&[
             "/dev/disk/by-id/virtio-disk1",
             "/dev/disk/by-id/virtio-disk2",
         ]);
-
-        let runner = MockRunner::default()
-            .with_output(
-                CmdRequest::MountpointCheck {
-                    path: MountPoint("/mnt/storage".to_owned()),
-                },
-                err_raw("mountpoint", 1, ""),
-            )
-            .with_output(
-                CmdRequest::CryptsetupLuksUuid {
-                    device: "/dev/disk/by-id/virtio-disk1".into(),
-                },
-                RawCommandOutput {
-                    cmd: "cryptsetup luksUUID".into(),
-                    stdout: "aaaaaaaa-1111-2222-3333-444444444444\n".into(),
-                    stderr: String::new(),
-                    exit_status: 0,
-                },
-            )
-            .with_output(
-                CmdRequest::CryptsetupLuksUuid {
-                    device: "/dev/disk/by-id/virtio-disk2".into(),
-                },
-                RawCommandOutput {
-                    cmd: "cryptsetup luksUUID".into(),
-                    stdout: "bbbbbbbb-1111-2222-3333-444444444444\n".into(),
-                    stderr: String::new(),
-                    exit_status: 0,
-                },
-            )
-            .with_luks_dump_text_luks2_for(&[
-                "/dev/disk/by-id/virtio-disk1",
-                "/dev/disk/by-id/virtio-disk2",
-            ])
-            .with_mappers_closed(&["braid-disk1", "braid-disk2"]);
+        let runner = base_two_disk_runner();
 
         let params = UnlockParams {
             config: &config,
@@ -1240,73 +757,22 @@ mod tests {
         );
     }
 
-    // Intent: with `--key-file <path>`, the dry-run preview emits the
-    //   keyfile cryptsetup invocation (`cryptsetup open --type luks
-    //   --key-file <path> --keyfile-size 4096`), not the
-    //   passphrase-via-stdin form.
-    // Why it exists: `compile_open_steps` is the only place the
-    //   passphrase-vs-keyfile dry-run branch is rendered, and today's
-    //   only `plan_unlock` dry-run test exercises the `None` arm.
-    //   Without this test, deleting the keyfile branch silently
-    //   regresses the preview fidelity that auto-unlock operators rely
-    //   on when sanity-checking `braid unlock --key-file <path>
-    //   --dry-run`.
+    // Intent: with `--key-file <path>`, dry-run preview emits the keyfile
+    //   cryptsetup invocation, not the passphrase-via-stdin form.
+    // Why it exists: `compile_open_steps` is the only place the keyfile dry-run
+    //   branch is rendered, so the preview needs a direct assertion.
     // Scenario: auto-unlock user runs `braid unlock --key-file
     //   /run/keys/braid.key --dry-run` against a 2-disk closed pool.
     #[test]
     fn plan_unlock_dry_run_render_2_closed_disks_with_key_file() {
-        let (_state_dir, sp) = test_paths();
-        let config = Config::new(MountPoint("/mnt/storage".to_owned())).unwrap();
-        let mut disks = BTreeMap::new();
-        for (name, path) in [
-            ("disk1", "/dev/disk/by-id/virtio-disk1"),
-            ("disk2", "/dev/disk/by-id/virtio-disk2"),
-        ] {
-            disks.insert(
-                name.to_owned(),
-                DiskMember::from_by_id(ByIdPath(path.to_owned())),
-            );
-        }
-        let membership = PoolMembership { disks };
-        let fs = MockFs::new(&[
+        let (_state_dir, sp) = isolated_paths();
+        let config = test_config();
+        let membership = two_disk_membership();
+        let fs = unlock_storage_fs(&[
             "/dev/disk/by-id/virtio-disk1",
             "/dev/disk/by-id/virtio-disk2",
         ]);
-
-        let runner = MockRunner::default()
-            .with_output(
-                CmdRequest::MountpointCheck {
-                    path: MountPoint("/mnt/storage".to_owned()),
-                },
-                err_raw("mountpoint", 1, ""),
-            )
-            .with_output(
-                CmdRequest::CryptsetupLuksUuid {
-                    device: "/dev/disk/by-id/virtio-disk1".into(),
-                },
-                RawCommandOutput {
-                    cmd: "cryptsetup luksUUID".into(),
-                    stdout: "aaaaaaaa-1111-2222-3333-444444444444\n".into(),
-                    stderr: String::new(),
-                    exit_status: 0,
-                },
-            )
-            .with_output(
-                CmdRequest::CryptsetupLuksUuid {
-                    device: "/dev/disk/by-id/virtio-disk2".into(),
-                },
-                RawCommandOutput {
-                    cmd: "cryptsetup luksUUID".into(),
-                    stdout: "bbbbbbbb-1111-2222-3333-444444444444\n".into(),
-                    stderr: String::new(),
-                    exit_status: 0,
-                },
-            )
-            .with_luks_dump_text_luks2_for(&[
-                "/dev/disk/by-id/virtio-disk1",
-                "/dev/disk/by-id/virtio-disk2",
-            ])
-            .with_mappers_closed(&["braid-disk1", "braid-disk2"]);
+        let runner = base_two_disk_runner();
 
         let params = UnlockParams {
             config: &config,
@@ -1345,49 +811,26 @@ mod tests {
         );
     }
 
-    /* Intent: when the pool is already mounted, `plan_unlock` returns
-     * an `UnlockPlan` with `open_plan: None`, the `AlreadyMounted`
-     * Info note on `plan.notes`, and zero steps; `preview().render()`
-     * produces exactly `pool already mounted at /mnt/storage\n`.
-     *
-     * Why it exists: the note-only success path is the guardrail
-     * against silent regression of the new "notes with zero steps"
-     * dry-run contract. Without this test, a refactor that routed the
-     * already-mounted message back through the generic
-     * `nothing to do.` fallback (or appended spurious step lines)
-     * would slip through.
-     *
-     * Scenario: 2-disk pool whose mountpoint check returns exit 0.
-     * `plan_open_pool` short-circuits to `Ok(None)` with a single
-     * `AlreadyMounted` event, which becomes the sole `Info` note on
-     * the returned `UnlockPlan`.
-     */
+    // Intent: when the pool is already mounted, `plan_unlock` returns an
+    //   `UnlockPlan` with no open plan, the AlreadyMounted Info note, and zero
+    //   steps; preview rendering emits exactly that note.
+    // Why it exists: the note-only success path must not regress to the generic
+    //   `nothing to do.` fallback or append spurious steps.
+    // Scenario: 2-disk pool whose mountpoint check returns exit 0.
     #[test]
     fn plan_unlock_note_only_success_when_already_mounted() {
-        let (_state_dir, sp) = test_paths();
-        let config = Config::new(MountPoint("/mnt/storage".to_owned())).unwrap();
-        let mut disks = BTreeMap::new();
-        for (name, path) in [
-            ("disk1", "/dev/disk/by-id/virtio-disk1"),
-            ("disk2", "/dev/disk/by-id/virtio-disk2"),
-        ] {
-            disks.insert(
-                name.to_owned(),
-                DiskMember::from_by_id(ByIdPath(path.to_owned())),
-            );
-        }
-        let membership = PoolMembership { disks };
-        let fs = MockFs::new(&[
+        let (_state_dir, sp) = isolated_paths();
+        let config = test_config();
+        let membership = two_disk_membership();
+        let fs = unlock_storage_fs(&[
             "/dev/disk/by-id/virtio-disk1",
             "/dev/disk/by-id/virtio-disk2",
         ]);
-
-        // mountpoint check returns 0 -> pool already mounted.
-        let runner = MockRunner::default().with_output(
+        let runner = base_two_disk_runner().with_output(
             CmdRequest::MountpointCheck {
                 path: MountPoint("/mnt/storage".to_owned()),
             },
-            ok_raw("mountpoint"),
+            unlock_ok_raw("mountpoint"),
         );
 
         let params = UnlockParams {
@@ -1422,77 +865,41 @@ mod tests {
         );
     }
 
-    /* Intent: a degraded refusal at the planner boundary preserves
-     * per-disk probe notes on `UnlockPlanReport.notes` in probe order,
-     * and routes the error as
-     * `UnlockError::Mount(MountError::DegradedRefused(_))`.
-     *
-     * Why it exists: Shape A's preserved-context contract says
-     * accumulated notes survive the `Err` path so `cmd_unlock` can
-     * render them to stderr before the refusal message -- mirroring
-     * today's `print_probe_events` + `?` sequence. Without this
-     * boundary test, a regression that either dropped the notes or
-     * reordered them would still pass the end-to-end CLI test (which
-     * only greps for substring markers) while breaking the planner's
-     * documented contract.
-     *
-     * Scenario: 3-disk pool, disk3 classified as PresentNotLuks
-     * (Unreadable), no `--allow-degraded`. `plan_open_pool` emits
-     * DiskAvailable(disk1), DiskAvailable(disk2),
-     * DiskLuksHeaderUnreadable(disk3), then returns DegradedRefused.
-     * `plan_unlock` converts those three events into notes on
-     * `report.notes` in that order and surfaces the error via
-     * `report.result`.
-     */
+    // Intent: a degraded refusal at the planner boundary preserves per-disk
+    //   probe notes on `UnlockPlanReport.notes` in probe order and routes the
+    //   error as `UnlockError::Mount(MountError::DegradedRefused(_))`.
+    // Why it exists: accumulated notes must survive the Err path so cmd_unlock
+    //   can render context before the refusal message.
+    // Scenario: 3-disk pool, disk3 classified as PresentNotLuks, no
+    //   `--allow-degraded`.
     #[test]
     fn plan_unlock_preserves_notes_on_degraded_refused() {
-        let (_state_dir, sp) = test_paths();
-        let config = three_disk_config();
-        let membership = three_disk_membership();
-        let fs = MockFs::new(&[
+        let (_state_dir, sp) = isolated_paths();
+        let config = test_config();
+        let membership = unlock_three_disk_membership();
+        let fs = unlock_storage_fs(&[
             "/dev/disk/by-id/virtio-disk1",
             "/dev/disk/by-id/virtio-disk2",
         ]);
 
+        let mp = MountPoint("/mnt/storage".to_owned());
+        let (uuid1_req, uuid1_out) = luks_uuid_ok(
+            "/dev/disk/by-id/virtio-disk1",
+            "aaaaaaaa-1111-2222-3333-444444444444",
+        );
+        let (uuid2_req, uuid2_out) = luks_uuid_ok(
+            "/dev/disk/by-id/virtio-disk2",
+            "bbbbbbbb-1111-2222-3333-444444444444",
+        );
+        let (uuid3_req, uuid3_out) = unlock_luks_uuid_not_luks("/dev/disk/by-id/virtio-disk3");
         let runner = MockRunner::default()
             .with_output(
-                CmdRequest::MountpointCheck {
-                    path: MountPoint("/mnt/storage".to_owned()),
-                },
-                err_raw("mountpoint", 1, ""),
+                CmdRequest::MountpointCheck { path: mp },
+                unlock_err_raw("mountpoint", 1, ""),
             )
-            .with_output(
-                CmdRequest::CryptsetupLuksUuid {
-                    device: "/dev/disk/by-id/virtio-disk1".into(),
-                },
-                RawCommandOutput {
-                    cmd: "cryptsetup luksUUID".into(),
-                    stdout: "aaaaaaaa-1111-2222-3333-444444444444\n".into(),
-                    stderr: String::new(),
-                    exit_status: 0,
-                },
-            )
-            .with_output(
-                CmdRequest::CryptsetupLuksUuid {
-                    device: "/dev/disk/by-id/virtio-disk2".into(),
-                },
-                RawCommandOutput {
-                    cmd: "cryptsetup luksUUID".into(),
-                    stdout: "bbbbbbbb-1111-2222-3333-444444444444\n".into(),
-                    stderr: String::new(),
-                    exit_status: 0,
-                },
-            )
-            .with_output(
-                CmdRequest::CryptsetupLuksUuid {
-                    device: "/dev/disk/by-id/virtio-disk3".into(),
-                },
-                err_raw(
-                    "cryptsetup luksUUID",
-                    1,
-                    "Device is not a valid LUKS device.",
-                ),
-            )
+            .with_output(uuid1_req, uuid1_out)
+            .with_output(uuid2_req, uuid2_out)
+            .with_output(uuid3_req, uuid3_out)
             .with_luks_dump_text_luks2_for(&[
                 "/dev/disk/by-id/virtio-disk1",
                 "/dev/disk/by-id/virtio-disk2",
@@ -1557,163 +964,72 @@ mod tests {
         );
     }
 
-    /// Intent: `cmd_unlock` must tolerate a post-mount `probe_pool` that
-    /// returns `Ok(PoolState { mounted: false, devices: vec![], ... })`
-    /// without enriching pool.json and without failing.
-    ///
-    /// Why it exists: the post-mount enrichment at `cli/src/unlock.rs:94`
-    /// is best-effort. If the mount probe observes readable mountinfo without
-    /// the target, `probe_pool` returns `Ok(mounted=false)`, which still
-    /// enters the `if let Ok(...)` arm. Without a pinning test,
-    /// nothing prevents a future refactor from propagating that `Ok` as a
-    /// hard failure or from silently enriching with stale data.
-    ///
-    /// Scenario: 3-disk pool, clean mount. The best-effort post-mount probe
-    /// sees well-formed mountinfo with no `/mnt/storage` entry. pool.json was
-    /// seeded with `luks_uuid=None`/`devid=None`; those fields must remain
-    /// `None` after `cmd_unlock` returns `Ok(())`, proving no enrichment
-    /// occurred and no hard error escaped.
+    // Intent: `cmd_unlock` must tolerate a post-mount `probe_pool` that returns
+    //   `Ok(PoolState { mounted: false, devices: vec![], ... })` without
+    //   enriching pool.json and without failing.
+    // Why it exists: post-mount enrichment is best-effort; a readable
+    //   mountinfo without the target must not become a hard failure or stale
+    //   metadata write.
+    // Scenario: 3-disk pool, clean mount. The best-effort post-mount probe sees
+    //   well-formed mountinfo with no `/mnt/storage` entry.
     #[test]
     fn unlock_tolerates_post_mount_probe_mounted_false() {
-        let (_state_dir, sp) = test_paths();
-        let config = three_disk_config();
-        let membership = three_disk_membership();
-        // Seed pool.json with None metadata so we can assert non-enrichment.
+        let (_state_dir, sp) = isolated_paths();
+        let config = test_config();
+        let membership = unlock_three_disk_membership();
         membership::save_membership(&membership, &sp)
             .expect("seed pool.json for assertion baseline");
 
-        let fs = MockFs::with_mountinfo(
-            &[
-                "/dev/disk/by-id/virtio-disk1",
-                "/dev/disk/by-id/virtio-disk2",
-                "/dev/disk/by-id/virtio-disk3",
-            ],
-            MOUNTINFO_WITHOUT_TARGET,
-        );
+        // Use the rootfs-only mountinfo body so the post-mount probe sees no
+        // `/mnt/storage` entry and must leave pool.json unenriched.
+        let fs = mount_fs(&[
+            "/dev/disk/by-id/virtio-disk1",
+            "/dev/disk/by-id/virtio-disk2",
+            "/dev/disk/by-id/virtio-disk3",
+        ]);
 
+        let mp = MountPoint("/mnt/storage".to_owned());
+        let (uuid1_req, uuid1_out) = luks_uuid_ok(
+            "/dev/disk/by-id/virtio-disk1",
+            "aaaaaaaa-1111-2222-3333-444444444444",
+        );
+        let (uuid2_req, uuid2_out) = luks_uuid_ok(
+            "/dev/disk/by-id/virtio-disk2",
+            "bbbbbbbb-1111-2222-3333-444444444444",
+        );
+        let (uuid3_req, uuid3_out) = luks_uuid_ok(
+            "/dev/disk/by-id/virtio-disk3",
+            "cccccccc-1111-2222-3333-444444444444",
+        );
+        let (scan_req, scan_out) = unlock_btrfs_device_scan_ok();
+        let (balance_req, balance_out) = unlock_btrfs_balance_status_idle(&mp);
         let runner = MockRunner::default()
-            // mountpoint check -> not mounted
             .with_output(
-                CmdRequest::MountpointCheck {
-                    path: MountPoint("/mnt/storage".to_owned()),
-                },
-                err_raw("mountpoint", 1, ""),
+                CmdRequest::MountpointCheck { path: mp.clone() },
+                unlock_err_raw("mountpoint", 1, ""),
             )
-            // probe: all 3 disks are LUKS
-            .with_output(
-                CmdRequest::CryptsetupLuksUuid {
-                    device: "/dev/disk/by-id/virtio-disk1".into(),
-                },
-                RawCommandOutput {
-                    cmd: "cryptsetup luksUUID".into(),
-                    stdout: "aaaaaaaa-1111-2222-3333-444444444444\n".into(),
-                    stderr: String::new(),
-                    exit_status: 0,
-                },
-            )
-            .with_output(
-                CmdRequest::CryptsetupLuksUuid {
-                    device: "/dev/disk/by-id/virtio-disk2".into(),
-                },
-                RawCommandOutput {
-                    cmd: "cryptsetup luksUUID".into(),
-                    stdout: "bbbbbbbb-1111-2222-3333-444444444444\n".into(),
-                    stderr: String::new(),
-                    exit_status: 0,
-                },
-            )
-            .with_output(
-                CmdRequest::CryptsetupLuksUuid {
-                    device: "/dev/disk/by-id/virtio-disk3".into(),
-                },
-                RawCommandOutput {
-                    cmd: "cryptsetup luksUUID".into(),
-                    stdout: "cccccccc-1111-2222-3333-444444444444\n".into(),
-                    stderr: String::new(),
-                    exit_status: 0,
-                },
-            )
-            // verify passphrase against every planned disk
-            .with_output_stdin(
-                CmdRequest::CryptsetupTestPassphrase {
-                    device: "/dev/disk/by-id/virtio-disk1".into(),
-                },
-                b"testpass".to_vec(),
-                ok_raw("cryptsetup open --test-passphrase"),
-            )
-            .with_output_stdin(
-                CmdRequest::CryptsetupTestPassphrase {
-                    device: "/dev/disk/by-id/virtio-disk2".into(),
-                },
-                b"testpass".to_vec(),
-                ok_raw("cryptsetup open --test-passphrase"),
-            )
-            .with_output_stdin(
-                CmdRequest::CryptsetupTestPassphrase {
-                    device: "/dev/disk/by-id/virtio-disk3".into(),
-                },
-                b"testpass".to_vec(),
-                ok_raw("cryptsetup open --test-passphrase"),
-            )
-            // open all 3 disks
-            .with_output_stdin(
-                CmdRequest::CryptsetupLuksOpen {
-                    device: "/dev/disk/by-id/virtio-disk1".into(),
-                    mapper: "braid-disk1".into(),
-                },
-                b"testpass".to_vec(),
-                ok_raw("cryptsetup open"),
-            )
-            .with_output_stdin(
-                CmdRequest::CryptsetupLuksOpen {
-                    device: "/dev/disk/by-id/virtio-disk2".into(),
-                    mapper: "braid-disk2".into(),
-                },
-                b"testpass".to_vec(),
-                ok_raw("cryptsetup open"),
-            )
-            .with_output_stdin(
-                CmdRequest::CryptsetupLuksOpen {
-                    device: "/dev/disk/by-id/virtio-disk3".into(),
-                    mapper: "braid-disk3".into(),
-                },
-                b"testpass".to_vec(),
-                ok_raw("cryptsetup open"),
-            )
-            // btrfs device scan
-            .with_output(CmdRequest::BtrfsDeviceScanAll, ok_raw("btrfs device scan"))
-            // normal mount (all present)
-            .with_output(
-                CmdRequest::Mount {
-                    device: "/dev/mapper/braid-disk1".into(),
-                    mount_point: MountPoint("/mnt/storage".to_owned()),
-                },
-                ok_raw("mount -o noatime,skip_balance"),
-            )
-            // balance status -> no balance (post-enrichment warn step)
-            .with_output(
-                CmdRequest::BtrfsBalanceStatus {
-                    mount_point: MountPoint("/mnt/storage".to_owned()),
-                },
-                RawCommandOutput {
-                    cmd: "btrfs balance status".into(),
-                    stdout: "No balance found on '/mnt/storage'\n".into(),
-                    stderr: String::new(),
-                    exit_status: 0,
-                },
-            )
+            .with_output(uuid1_req, uuid1_out)
+            .with_output(uuid2_req, uuid2_out)
+            .with_output(uuid3_req, uuid3_out)
             .with_luks_dump_text_luks2_for(&[
                 "/dev/disk/by-id/virtio-disk1",
                 "/dev/disk/by-id/virtio-disk2",
                 "/dev/disk/by-id/virtio-disk3",
             ])
             .with_mappers_closed(&["braid-disk1", "braid-disk2", "braid-disk3"]);
-
-        let tmp = tempfile::NamedTempFile::new().unwrap();
-        {
-            use std::io::Write;
-            tmp.as_file().write_all(b"testpass").unwrap();
-        }
+        let runner = unlock_with_test_passphrase_ok(runner, "/dev/disk/by-id/virtio-disk1");
+        let runner = unlock_with_test_passphrase_ok(runner, "/dev/disk/by-id/virtio-disk2");
+        let runner = unlock_with_test_passphrase_ok(runner, "/dev/disk/by-id/virtio-disk3");
+        let runner =
+            unlock_with_open_mapper_ok(runner, "/dev/disk/by-id/virtio-disk1", "braid-disk1");
+        let runner =
+            unlock_with_open_mapper_ok(runner, "/dev/disk/by-id/virtio-disk2", "braid-disk2");
+        let runner =
+            unlock_with_open_mapper_ok(runner, "/dev/disk/by-id/virtio-disk3", "braid-disk3");
+        let runner = runner.with_output(scan_req, scan_out);
+        let runner = unlock_with_mount_ok(runner, "/dev/mapper/braid-disk1", &mp)
+            .with_output(balance_req, balance_out);
+        let tmp = unlock_passphrase_file();
 
         let result = cmd_unlock(
             &runner,
@@ -1754,138 +1070,68 @@ mod tests {
         }
     }
 
-    /// Intent: When every membership disk's mapper is already open,
-    /// `cmd_unlock` must take the mount-only branch and NEVER call
-    /// `resolve_credential` -- preserving the UX rule that a redundant
-    /// unlock does not prompt for or read a passphrase.
-    ///
-    /// Why it exists: This is the cross-file counterpart to
-    /// `execute_mount_only_rejects_non_empty_plan`/`execute_unlock_and_mount_rejects_empty_plan`
-    /// in mount.rs. Those two tests pin the entry-point contracts; this
-    /// test pins the caller-side dispatch. A natural-looking refactor
-    /// (hoisting `resolve_credential` above the `plan.to_unlock.is_empty()`
-    /// branch) would break the no-prompt UX and also start erroring on
-    /// operators who don't supply credentials for an already-open pool.
-    /// Without this test, that regression passes `mount.rs`'s boundary
-    /// tests because they bypass `cmd_unlock`'s dispatch entirely.
-    ///
-    /// Scenario: 3-disk pool, all mappers already open at probe time. The
-    /// `UnlockParams` point `passphrase_file` at a path that does not
-    /// exist -- if `resolve_credential` is called, `read_passphrase` would
-    /// fail with a "failed to read passphrase file" error and surface
-    /// through `cmd_unlock`. A clean `Ok(())` proves the mount-only
-    /// branch was taken.
+    // Intent: when every membership disk's mapper is already open, `cmd_unlock`
+    //   must take the mount-only branch and never call `resolve_credential`.
+    // Why it exists: a refactor that hoists credential resolution above the
+    //   empty-unlock branch would break redundant unlock UX and error on
+    //   operators who supplied no real credentials for an already-open pool.
+    // Scenario: 3-disk pool, all mappers already open, with `passphrase_file`
+    //   pointing at a path that does not exist.
     #[test]
     fn cmd_unlock_skips_credential_resolution_when_nothing_to_unlock() {
-        let (_state_dir, sp) = test_paths();
-        let config = three_disk_config();
-        let membership = three_disk_membership();
+        let (_state_dir, sp) = isolated_paths();
+        let config = test_config();
+        let membership = unlock_three_disk_membership();
 
-        // All three by-id devices AND all three mapper paths exist.
-        let fs = MockFs::with_mountinfo(
-            &[
-                "/dev/disk/by-id/virtio-disk1",
-                "/dev/disk/by-id/virtio-disk2",
-                "/dev/disk/by-id/virtio-disk3",
-                "/dev/mapper/braid-disk1",
-                "/dev/mapper/braid-disk2",
-                "/dev/mapper/braid-disk3",
-            ],
-            MOUNTINFO_WITHOUT_TARGET,
+        // Use the rootfs-only mountinfo body; the pool starts unmounted while
+        // all three by-id devices and all three mapper paths exist.
+        let fs = mount_fs(&[
+            "/dev/disk/by-id/virtio-disk1",
+            "/dev/disk/by-id/virtio-disk2",
+            "/dev/disk/by-id/virtio-disk3",
+            "/dev/mapper/braid-disk1",
+            "/dev/mapper/braid-disk2",
+            "/dev/mapper/braid-disk3",
+        ]);
+
+        let mp = MountPoint("/mnt/storage".to_owned());
+        let (uuid1_req, uuid1_out) = luks_uuid_ok(
+            "/dev/disk/by-id/virtio-disk1",
+            "aaaaaaaa-1111-2222-3333-444444444444",
         );
-
+        let (uuid2_req, uuid2_out) = luks_uuid_ok(
+            "/dev/disk/by-id/virtio-disk2",
+            "bbbbbbbb-1111-2222-3333-444444444444",
+        );
+        let (uuid3_req, uuid3_out) = luks_uuid_ok(
+            "/dev/disk/by-id/virtio-disk3",
+            "cccccccc-1111-2222-3333-444444444444",
+        );
+        let (scan_req, scan_out) = unlock_btrfs_device_scan_ok();
+        let (balance_req, balance_out) = unlock_btrfs_balance_status_idle(&mp);
         let runner = MockRunner::default()
-            // Pool not mounted yet.
             .with_output(
-                CmdRequest::MountpointCheck {
-                    path: MountPoint("/mnt/storage".to_owned()),
-                },
-                err_raw("mountpoint", 1, ""),
+                CmdRequest::MountpointCheck { path: mp.clone() },
+                unlock_err_raw("mountpoint", 1, ""),
             )
-            // probe: each disk reports its LUKS UUID.
-            .with_output(
-                CmdRequest::CryptsetupLuksUuid {
-                    device: "/dev/disk/by-id/virtio-disk1".into(),
-                },
-                RawCommandOutput {
-                    cmd: "cryptsetup luksUUID".into(),
-                    stdout: "aaaaaaaa-1111-2222-3333-444444444444\n".into(),
-                    stderr: String::new(),
-                    exit_status: 0,
-                },
-            )
-            .with_output(
-                CmdRequest::CryptsetupLuksUuid {
-                    device: "/dev/disk/by-id/virtio-disk2".into(),
-                },
-                RawCommandOutput {
-                    cmd: "cryptsetup luksUUID".into(),
-                    stdout: "bbbbbbbb-1111-2222-3333-444444444444\n".into(),
-                    stderr: String::new(),
-                    exit_status: 0,
-                },
-            )
-            .with_output(
-                CmdRequest::CryptsetupLuksUuid {
-                    device: "/dev/disk/by-id/virtio-disk3".into(),
-                },
-                RawCommandOutput {
-                    cmd: "cryptsetup luksUUID".into(),
-                    stdout: "cccccccc-1111-2222-3333-444444444444\n".into(),
-                    stderr: String::new(),
-                    exit_status: 0,
-                },
-            )
-            // All mappers already open with matching backing-device UUIDs.
-            .with_mapper_open(
-                "braid-disk1",
-                "/dev/vda",
-                "aaaaaaaa-1111-2222-3333-444444444444",
-            )
-            .with_mapper_open(
-                "braid-disk2",
-                "/dev/vdb",
-                "bbbbbbbb-1111-2222-3333-444444444444",
-            )
-            .with_mapper_open(
-                "braid-disk3",
-                "/dev/vdc",
-                "cccccccc-1111-2222-3333-444444444444",
-            )
+            .with_output(uuid1_req, uuid1_out)
+            .with_output(uuid2_req, uuid2_out)
+            .with_output(uuid3_req, uuid3_out)
             .with_luks_dump_text_luks2_for(&[
                 "/dev/disk/by-id/virtio-disk1",
                 "/dev/disk/by-id/virtio-disk2",
                 "/dev/disk/by-id/virtio-disk3",
-            ])
+            ]);
+        let runner = unlock_with_three_mappers_open(runner)
             // No CryptsetupTestPassphrase / CryptsetupLuksOpen mocks -- if
-            // the code takes the unlock-and-mount branch, these lookups
-            // miss and MockRunner fails the test.
-            .with_output(CmdRequest::BtrfsDeviceScanAll, ok_raw("btrfs device scan"))
-            .with_output(
-                CmdRequest::Mount {
-                    device: "/dev/mapper/braid-disk1".into(),
-                    mount_point: MountPoint("/mnt/storage".to_owned()),
-                },
-                ok_raw("mount"),
-            )
-            // balance status post-mount
-            .with_output(
-                CmdRequest::BtrfsBalanceStatus {
-                    mount_point: MountPoint("/mnt/storage".to_owned()),
-                },
-                RawCommandOutput {
-                    cmd: "btrfs balance status".into(),
-                    stdout: "No balance found on '/mnt/storage'\n".into(),
-                    stderr: String::new(),
-                    exit_status: 0,
-                },
-            );
+            // the code takes the unlock-and-mount branch, these lookups miss.
+            .with_output(scan_req, scan_out);
+        let runner = unlock_with_mount_ok(runner, "/dev/mapper/braid-disk1", &mp)
+            .with_output(balance_req, balance_out);
 
-        // passphrase_file points at a path that does not exist. If the
-        // dispatch regresses and hoists resolve_credential above the
-        // `plan.to_unlock.is_empty()` check, read_passphrase will fail
-        // with a "failed to read passphrase file" error and this test
-        // will no longer reach Ok(()).
+        // passphrase_file points at a path that does not exist. If dispatch
+        // regresses and hoists resolve_credential above the empty-unlock check,
+        // read_passphrase will fail before this test reaches Ok(()).
         let bogus = std::path::PathBuf::from("/definitely/not/a/real/path/passphrase");
 
         let result = cmd_unlock(

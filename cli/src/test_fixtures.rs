@@ -1,6 +1,6 @@
 //! Test-only shared fixtures for `replace`, `add`, `remove`,
 //! `remove_missing`, `recover`, `doctor`, `mount`, `enroll_key_file`,
-//! and `status`.
+//! `unlock`, and `status`.
 //!
 //! These fixtures consolidate the per-test scaffolding that previously
 //! lived as one-off `*Runner` structs and inline `tempdir + config + pass +
@@ -58,6 +58,11 @@
 //!     `mount`'s `err_raw` / `ok_raw` and `shared`'s `MockFs`; the
 //!     status-specific filesystem mock stays private so it can preserve the
 //!     stricter mountinfo-only read contract.
+//!   * `unlock` -- flat collection of `unlock_`-prefixed leaf helpers for
+//!     unlock tests. Ships flat because several tests rely on exact
+//!     `MissingMock` behavior for request variants, especially
+//!     `Mount` vs `MountWithOptions`; the prefix avoids facade collisions
+//!     with mount's raw-output helpers during the staged migration.
 //!   * `PoolFixture` -- bundled tempdirs + `StatePaths` + config +
 //!     passphrase + `RecordingInhibitor`.
 //!   * `ReplaceParamsBuilder` / `AddParamsBuilder` / `RemoveParamsBuilder`
@@ -66,8 +71,8 @@
 //!
 //! Layout: this file is a facade. `shared` holds cross-scope items;
 //! `replace`, `add`, `remove`, `remove_missing`, `recover`, `doctor`,
-//! `mount`, `enroll_key_file`, and `status` hold their per-scope topologies,
-//! builders, and helpers.
+//! `mount`, `enroll_key_file`, `unlock`, and `status` hold their per-scope
+//! topologies, builders, and helpers.
 
 mod add;
 mod doctor;
@@ -79,6 +84,7 @@ mod remove_missing;
 mod replace;
 mod shared;
 mod status;
+mod unlock;
 
 #[allow(unused_imports)]
 pub(crate) use doctor::{
@@ -129,4 +135,11 @@ pub(crate) use status::{
     status_membership_1disk, status_mp, status_pool_empty, status_report_with_alerts,
     status_report_with_scrub, status_runner_healthy_3disk_base,
     status_runner_healthy_3disk_verbose,
+};
+#[allow(unused_imports)]
+pub(crate) use unlock::{
+    unlock_btrfs_balance_status_idle, unlock_btrfs_balance_status_paused,
+    unlock_btrfs_device_scan_ok, unlock_luks_uuid_not_luks, unlock_passphrase_file,
+    unlock_storage_fs, unlock_with_mount_degraded_ok, unlock_with_mount_ok,
+    unlock_with_open_mapper_ok, unlock_with_test_passphrase_ok, unlock_with_three_mappers_open,
 };
