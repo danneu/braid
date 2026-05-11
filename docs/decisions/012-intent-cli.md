@@ -78,9 +78,15 @@ Single-survivor cases use a path-specific check:
   logical usage -- `data + 2 * metadata + 2 * system`, reflecting the
   post-balance single + DUP profile on one device -- and compares it
   to the survivor's `device_size - device_slack`.
-- **`remove-missing` (1 present + 1 missing):** the check is skipped.
-  In 2-device RAID1, the surviving device already mirrors all data,
-  so no relocation is needed.
+- **`remove-missing` on a 2-device RAID1 pool with 1 missing
+  (`pool.total_devices == 2 && pool.devices.len() == 1 && pool.missing_count == 1`):**
+  rejected at preflight. `btrfs_rm_device` runs
+  `btrfs_check_raid_min_devices(num_devices - 1)` and returns
+  `BTRFS_ERROR_DEV_RAID1_MIN_NOT_MET` whenever the remaining device
+  count would drop below the RAID1 minimum of 2, so the call is
+  guaranteed to fail at the kernel level. The supported repair paths
+  for that case are `braid replace --missing-id <devid>` (preferred)
+  or `braid add` followed by `braid remove-missing`.
 
 ### NixOS-native automation
 

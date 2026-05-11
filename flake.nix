@@ -193,6 +193,11 @@
               braid = linuxCrane.braid;
             }
           );
+          remove-missing-2disk-rejected = pkgs.testers.nixosTest (
+            import ./tests/cli/remove-missing-2disk-rejected.nix {
+              braid = linuxCrane.braid;
+            }
+          );
           braid-status = pkgs.testers.nixosTest (
             import ./tests/cli/braid-status.nix {
               braid = linuxCrane.braid;

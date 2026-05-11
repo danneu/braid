@@ -395,6 +395,35 @@ pub fn plan_remove_missing<R: CommandRunner + Sync, F: Filesystem + ?Sized>(
         };
     }
 
+    // Pre-flight: reject the exact 2-device RAID1 + 1 missing case. The
+    // kernel's btrfs_rm_device calls btrfs_check_raid_min_devices on
+    // `num_devices - 1` (where num_devices is fs_devices->num_devices,
+    // counting present + missing) and rejects with
+    // BTRFS_ERROR_DEV_RAID1_MIN_NOT_MET when that drops below devs_min=2.
+    // Per docs/decisions/012-intent-cli.md, remove-missing is cleanup-only;
+    // the documented repair path for a dead disk on a 2-disk pool is
+    // `braid replace --missing-id <devid>`. Pools with total_devices > 2
+    // are intentionally out of scope here -- the kernel accepts those
+    // calls, and reasoning about data integrity in multi-missing states
+    // (where the survivor is not guaranteed to mirror every chunk under
+    // btrfs RAID1's ncopies=2 layout) is left to existing/future logic.
+    if pool.total_devices == 2 && pool.devices.len() == 1 && pool.missing_count == 1 {
+        return RemoveMissingPlanReport {
+            notes: std::mem::take(&mut notes),
+            result: Err(RemoveMissingError::Validation(format!(
+                "cannot remove missing devid {devid} -- this is a 2-disk \
+                 RAID1 pool with one disk missing, and the kernel refuses \
+                 to drop a RAID1 pool below two devices. Repair the dead \
+                 disk with `braid replace --old <missing-name> \
+                 --new <new-name>=/dev/disk/by-id/<...> --missing-id \
+                 {devid}`, or run `braid add <new-name>=/dev/disk/by-id/<...>` \
+                 first and then re-run `braid remove-missing`. \
+                 Use `braid status` to see device names and IDs.",
+                devid = params.missing_id,
+            ))),
+        };
+    }
+
     // Pre-flight: reject if survivors lack space to absorb the missing
     // device's data. Without this check, btrfs will either ENOSPC or
     // crash the filesystem to read-only mid-relocation (see tests/repro/).
@@ -707,49 +736,121 @@ mod tests {
     }
 
     /*
-     * Intent: cmd_remove_missing succeeds when the pool has 1 present device
-     * and 1 missing device without invoking `btrfs device usage --raw`.
+     * Intent: cmd_remove_missing rejects the exact 2-disk RAID1 + 1-missing
+     * case at preflight, with no side effects (no inhibitor acquire, no
+     * journal write, no BtrfsDeviceRemove call).
      *
-     * Why it exists: Single-survivor removal skips the ENOSPC pre-flight
-     * check, and missing-id validation must use the already-probed pool
-     * state instead of a redundant device-usage probe.
+     * Why it exists: The kernel's
+     * btrfs_check_raid_min_devices(num_devices - 1) rejects going below
+     * two devices on RAID1; without this preflight braid would strand
+     * pending-op.json and the sleep inhibitor for a doomed call, then
+     * force the operator into `braid recover` for an operation that was
+     * never going to succeed.
      *
-     * Scenario: User's 2-disk NAS has one drive die. They run
-     * `braid remove-missing`. The operation succeeds because no data
-     * relocation is needed.
+     * Scenario: 2-disk NAS, disk2 dies. Operator reaches for
+     * `braid remove-missing --missing-id 2`. braid rejects up-front and
+     * names the supported repair paths.
      */
     #[test]
-    fn no_usage_probe_for_single_survivor() {
+    fn single_survivor_rejected_at_preflight() {
         let f = PoolFixture::two_disk_devids_pinned();
         let (runner, _remove_done) =
             RemoveMissingPool::two_disk_one_missing().install(MockRunner::default());
-        cmd_remove_missing(
-            &runner,
-            &MockFs::storage(vec![]),
-            &f.remove_missing_params().missing_id(2).build(),
-        )
-        .expect("remove-missing should succeed");
+        let params = f.remove_missing_params().missing_id(2).build();
+        let result = cmd_remove_missing(&runner, &MockFs::storage(vec![]), &params);
 
-        // No BtrfsDeviceUsageRaw calls are expected: missing-id validation
-        // uses PoolState::missing_devids, and check_relocation_space is
-        // skipped for single-survivor removal.
-        let usage_calls = runner
-            .requests()
-            .iter()
-            .filter(|c| matches!(c, CmdRequest::BtrfsDeviceUsageRaw { .. }))
-            .count();
-        assert_eq!(
-            usage_calls, 0,
-            "Expected no BtrfsDeviceUsageRaw calls; missing-id validation should \
-             use the pool probe and ENOSPC pre-flight should be skipped for \
-             single-survivor removal"
+        let err = result.expect_err("remove-missing must reject 2-disk RAID1 + 1 missing");
+        let msg = match err {
+            RemoveMissingError::Validation(m) => m,
+            other => panic!("expected Validation, got {other:?}"),
+        };
+        assert!(
+            msg.contains("2-disk RAID1 pool with one disk missing"),
+            "error must name the rejected topology; got: {msg}"
         );
-        // Locks in the seam placement: a successful remove-missing must take
-        // the inhibitor exactly once before journal::write_journal.
+        assert!(
+            msg.contains("braid replace"),
+            "error must name the replace command as the repair path; got: {msg}"
+        );
+        assert!(
+            msg.contains("--missing-id"),
+            "error must name the --missing-id flag of replace; got: {msg}"
+        );
+
         assert_eq!(
             f.inhibitor.acquire_count(),
-            1,
-            "sleep inhibitor must be acquired exactly once on the path through journal::write_journal"
+            0,
+            "reject must land before the sleep inhibitor is acquired"
+        );
+        assert!(
+            journal::load_journal(&f.paths).unwrap().is_none(),
+            "reject must land before pending-op.json is written"
+        );
+        assert!(
+            !runner
+                .requests()
+                .iter()
+                .any(|c| matches!(c, CmdRequest::BtrfsDeviceRemove { .. })),
+            "reject must land before any btrfs device remove call"
+        );
+    }
+
+    /*
+     * Intent: the 2-disk RAID1 + 1-missing reject fires in dry-run too --
+     * `cmd_remove_missing` runs `plan_remove_missing` first and surfaces
+     * its `Err` before reaching the `if params.dry_run` branch.
+     *
+     * Why it exists: pins the invariant that the reject lives in
+     * `plan_remove_missing`, not in `execute()`. A future refactor that
+     * moved the check downstream would silently let `--dry-run` print a
+     * doomed plan; this test fails first.
+     *
+     * Scenario: Same 2-disk NAS as the real-run case, operator runs
+     * `braid remove-missing --missing-id 2 --dry-run`. braid still
+     * rejects up-front -- no inhibitor, no journal, no btrfs calls.
+     */
+    #[test]
+    fn single_survivor_rejected_in_dry_run() {
+        let f = PoolFixture::two_disk_devids_pinned();
+        let (runner, _remove_done) =
+            RemoveMissingPool::two_disk_one_missing().install(MockRunner::default());
+        let params = f
+            .remove_missing_params()
+            .missing_id(2)
+            .dry_run(true)
+            .build();
+        let result = cmd_remove_missing(&runner, &MockFs::storage(vec![]), &params);
+
+        let err =
+            result.expect_err("remove-missing --dry-run must reject 2-disk RAID1 + 1 missing");
+        let msg = match err {
+            RemoveMissingError::Validation(m) => m,
+            other => panic!("expected Validation, got {other:?}"),
+        };
+        assert!(
+            msg.contains("2-disk RAID1 pool with one disk missing"),
+            "error must name the rejected topology; got: {msg}"
+        );
+        assert!(
+            msg.contains("braid replace"),
+            "error must name the replace command as the repair path; got: {msg}"
+        );
+        assert!(
+            msg.contains("--missing-id"),
+            "error must name the --missing-id flag of replace; got: {msg}"
+        );
+
+        assert_eq!(
+            f.inhibitor.acquire_count(),
+            0,
+            "dry-run reject must not acquire the sleep inhibitor"
+        );
+        assert!(
+            !runner
+                .requests()
+                .iter()
+                .any(|c| matches!(c, CmdRequest::BtrfsDeviceRemove { .. })),
+            "dry-run reject must not call btrfs device remove"
         );
     }
 
