@@ -57,6 +57,15 @@ fn map_journal_clear_failure(e: journal::JournalError) -> RemoveError {
     RemoveError::JournalClearFailure(e.to_string())
 }
 
+/// Shared pool.json drift error so the planner and executor reject the
+/// same absent-name state before journaling can record a misleading remove.
+fn absent_from_membership_error(name: &str) -> RemoveError {
+    RemoveError::Validation(format!(
+        "'{name}' not found in pool.json membership -- \
+         no disk entry has this name. Pool membership may need manual repair."
+    ))
+}
+
 pub struct RemoveParams<'a> {
     pub config_path: &'a Path,
     pub name: &'a str,
@@ -290,6 +299,9 @@ impl RemovePlan {
         // Build target membership and write journal before irreversible disk op.
         let pre_membership = membership::load_membership(params.paths)
             .map_err(|e| RemoveError::Validation(format!("failed to load pool membership: {e}")))?;
+        if !pre_membership.disks.contains_key(&work_plan.name) {
+            return Err(absent_from_membership_error(&work_plan.name));
+        }
         let mut target_membership = pre_membership.clone();
         target_membership.disks.remove(&work_plan.name);
         let journal = journal::build_journal(
@@ -452,6 +464,28 @@ pub fn plan_remove<R: CommandRunner + Sync, F: Filesystem + ?Sized>(
         return RemovePlanReport {
             notes: std::mem::take(&mut notes),
             result: Err(RemoveError::Validation(msg)),
+        };
+    }
+
+    // The live pool probe above proves btrfs still sees the target mapper.
+    // Pin that against pool.json before dry-run can report a successful plan;
+    // otherwise execute would remove a live device while
+    // target_membership.disks.remove silently no-ops.
+    let pre_membership = match membership::load_membership(params.paths) {
+        Ok(m) => m,
+        Err(e) => {
+            return RemovePlanReport {
+                notes: std::mem::take(&mut notes),
+                result: Err(RemoveError::Validation(format!(
+                    "failed to load pool membership: {e}"
+                ))),
+            };
+        }
+    };
+    if !pre_membership.disks.contains_key(params.name) {
+        return RemovePlanReport {
+            notes: std::mem::take(&mut notes),
+            result: Err(absent_from_membership_error(params.name)),
         };
     }
 
@@ -789,6 +823,19 @@ mod tests {
         }
     }
 
+    fn disk2_disk3_membership() -> PoolMembership {
+        let mut m = PoolMembership::empty();
+        for name in ["disk2", "disk3"] {
+            m.disks.insert(
+                name.to_owned(),
+                membership::DiskMember::from_by_id(ByIdPath(format!(
+                    "/dev/disk/by-id/virtio-{name}"
+                ))),
+            );
+        }
+        m
+    }
+
     #[test]
     // Intent: cmd_remove invokes the 2->1 survivor-capacity preflight before
     //   committing any mutation, and proceeds when the survivor has room.
@@ -873,6 +920,115 @@ mod tests {
         assert!(
             !reloaded.0.contains_key("2"),
             "removed target devid must be pruned"
+        );
+    }
+
+    // Intent: plan_remove must reject pool.json drift before the dry-run
+    // gate, so --dry-run never prints a successful plan that the real run
+    // would later refuse.
+    //
+    // Why it exists: 022-dry-run-preview-model.md puts state loading and
+    // preflight in plan_*(). Without a planner-visible membership check,
+    // dry-run drifts from real-run on the same input.
+    //
+    // Scenario: live btrfs reports disk1+disk2+disk3, but pool.json only
+    // contains disk2+disk3. `braid remove --dry-run disk1` must fail with
+    // no inhibitor acquired, no journal written, and no pool.json rewrite.
+    #[test]
+    fn cmd_remove_dry_run_rejects_when_target_absent_from_pool_json() {
+        let f = PoolFixture::three_disk_healthy();
+        let drifted = disk2_disk3_membership();
+        membership::save_membership(&drifted, &f.paths).unwrap();
+
+        let runner = RemovalPool::three_disk().install(MockRunner::default());
+        let fs = MockFs::storage(vec![]);
+        let result = cmd_remove(
+            &runner,
+            &fs,
+            &f.remove_params()
+                .name("disk1")
+                .dry_run(true)
+                .yes(true)
+                .build(),
+        );
+
+        match result {
+            Err(RemoveError::Validation(msg)) => {
+                assert!(
+                    msg.contains("not found in pool.json membership"),
+                    "expected pool.json membership error: {msg}"
+                );
+                assert!(msg.contains("disk1"), "expected disk1 in error: {msg}");
+            }
+            Err(other) => panic!("expected Validation error, got: {other:?}"),
+            Ok(()) => panic!("expected dry-run drift rejection"),
+        }
+        assert!(
+            !f.paths.pending_op_json().exists(),
+            "dry-run drift rejection must not write pending-op.json",
+        );
+        assert_eq!(
+            f.inhibitor.acquire_count(),
+            0,
+            "planner rejection must not acquire the sleep inhibitor",
+        );
+        assert_eq!(
+            membership::load_membership(&f.paths).unwrap(),
+            drifted,
+            "rejection must leave the drifted pool.json unchanged",
+        );
+    }
+
+    // Intent: RemovePlan::execute must reject pool.json drift introduced
+    // between plan_remove and execute, before journal::build_journal, even
+    // after the inhibitor has been acquired.
+    //
+    // Why it exists: a concurrent pool.json rewrite in the confirmation or
+    // inhibitor window would otherwise let target_membership.disks.remove
+    // silently no-op and write a misleading journal.
+    //
+    // Scenario: plan_remove sees disk1+disk2+disk3 in pool.json and live
+    // btrfs, then pool.json is rewritten to disk2+disk3 before execute.
+    // execute must fail with no journal and no pool.json rewrite.
+    #[test]
+    fn execute_rejects_when_pool_json_drifts_after_planning() {
+        let f = PoolFixture::three_disk_healthy();
+        let runner = RemovalPool::three_disk().install(MockRunner::default());
+        let fs = MockFs::storage(vec![]);
+        let params = f.remove_params().name("disk1").yes(true).build();
+
+        let plan = plan_remove(&runner, &fs, &params)
+            .result
+            .expect("initial plan must succeed before pool.json drift");
+        let drifted = disk2_disk3_membership();
+        membership::save_membership(&drifted, &f.paths).unwrap();
+
+        let result = plan.execute(&runner, &fs, &params);
+
+        match result {
+            Err(RemoveError::Validation(msg)) => {
+                assert!(
+                    msg.contains("not found in pool.json membership"),
+                    "expected pool.json membership error: {msg}"
+                );
+                assert!(msg.contains("disk1"), "expected disk1 in error: {msg}");
+            }
+            Err(other) => panic!("expected Validation error, got: {other:?}"),
+            Ok(()) => panic!("expected execute-time drift rejection"),
+        }
+        assert!(
+            !f.paths.pending_op_json().exists(),
+            "execute-time drift rejection must happen before journal write",
+        );
+        assert_eq!(
+            f.inhibitor.acquire_count(),
+            1,
+            "execute guard must run after acquiring the sleep inhibitor",
+        );
+        assert_eq!(
+            membership::load_membership(&f.paths).unwrap(),
+            drifted,
+            "rejection must leave the drifted pool.json unchanged",
         );
     }
 
