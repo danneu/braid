@@ -6,6 +6,7 @@ use crate::discover;
 use crate::inhibit::AcquireSleepInhibitor;
 use crate::journal::{self, Journal};
 use crate::luks::{self, VerifyOutcome};
+use crate::mapper_close::close_mapper_best_effort;
 use crate::membership::{self, DiskMember, PoolMembership};
 use crate::mount::{self, MountError, OpenPlan};
 use crate::parse::btrfs_filesystem_show::{DeviceBtrfsProbe, classify_btrfs_probe};
@@ -172,6 +173,9 @@ pub struct RecoverParams<'a> {
     /// use because the resume can be long-running.
     pub progress: ProgressOutput,
     pub sleep_inhibitor: &'a dyn AcquireSleepInhibitor,
+    /// Sleeper seam for retrying transiently-busy mapper closes without
+    /// slowing unit tests.
+    pub sleeper: &'a dyn progress::Sleeper,
 }
 
 /// Dry-run preview source of truth for `braid recover` plus the
@@ -626,6 +630,7 @@ impl RecoverCompletion {
                 restore_raid1_after_commit,
             } => execute_replace_post_maintenance_recovery(
                 runner,
+                params.sleeper,
                 by_id_resolver,
                 params,
                 &plan.journal,
@@ -2732,6 +2737,7 @@ fn execute_replace_pool_mutation_recovery<R: CommandRunner + Sync, F: Filesystem
         )?;
         return execute_replace_post_maintenance_recovery(
             runner,
+            params.sleeper,
             by_id_resolver,
             params,
             &journal,
@@ -2766,53 +2772,30 @@ fn execute_replace_pool_mutation_recovery<R: CommandRunner + Sync, F: Filesystem
     ))
 }
 
-fn close_old_mapper_best_effort<R: CommandRunner, F: Filesystem + ?Sized>(
+fn close_old_mapper_best_effort<R, S, F>(
     runner: &R,
+    sleeper: &S,
     fs: &F,
     mapper: &crate::types::MapperName,
-) {
+) where
+    R: CommandRunner,
+    S: Sleeper + ?Sized,
+    F: Filesystem + ?Sized,
+{
     if !fs.exists(&format!("/dev/mapper/{}", mapper.0)) {
         return;
     }
     let color_enabled = color_enabled_for_stderr();
     let old_label = mapper.0.strip_prefix("braid-").unwrap_or(&mapper.0);
-    emit_status(&status_line(
-        StatusTag::Wait,
-        color_enabled,
-        &format!("disk {old_label}: locking..."),
-    ));
-    let close_result = runner.run(&CmdRequest::CryptsetupClose {
-        mapper: mapper.0.clone(),
-    });
-    match close_result {
-        Ok(r) if r.exit_status == 0 => {
-            emit_status(&status_line(
-                StatusTag::Ok,
-                color_enabled,
-                &format!("disk {old_label}: locked"),
-            ));
-            eprintln!("Old device closed. If repurposing the physical disk, wipe it separately.");
-        }
-        Ok(r) => {
-            emit_status(&status_line(
-                StatusTag::Warn,
-                color_enabled,
-                &format!("disk {old_label}: lock failed (exit {})", r.exit_status),
-            ));
-        }
-        Err(e) => {
-            emit_status(&status_line(
-                StatusTag::Warn,
-                color_enabled,
-                &format!("disk {old_label}: lock failed ({e})"),
-            ));
-        }
+    if close_mapper_best_effort(runner, sleeper, &mapper.0, old_label, color_enabled) {
+        eprintln!("Old device closed. If repurposing the physical disk, wipe it separately.");
     }
 }
 
 #[allow(clippy::too_many_arguments)]
-fn execute_replace_post_maintenance_recovery<R: CommandRunner + Sync, F: Filesystem + ?Sized>(
+fn execute_replace_post_maintenance_recovery<R, S, F>(
     runner: &R,
+    sleeper: &S,
     by_id_resolver: &dyn ByIdResolver,
     params: &RecoverParams<'_>,
     journal: &Journal,
@@ -2822,7 +2805,12 @@ fn execute_replace_post_maintenance_recovery<R: CommandRunner + Sync, F: Filesys
     fs: &F,
     restore_raid1_after_commit: bool,
     inhibitor_already_held: bool,
-) -> Result<(), RecoverError> {
+) -> Result<(), RecoverError>
+where
+    R: CommandRunner + Sync,
+    S: Sleeper + ?Sized,
+    F: Filesystem + ?Sized,
+{
     if !live_pool_matches_membership(&pool, &journal.target_membership) {
         return Err(RecoverError::Failed(
             "post-replace recovery live pool does not match target membership".into(),
@@ -2852,7 +2840,7 @@ fn execute_replace_post_maintenance_recovery<R: CommandRunner + Sync, F: Filesys
     };
 
     if let journal::ReplaceJournalSource::Live { old_mapper, .. } = source {
-        close_old_mapper_best_effort(runner, fs, old_mapper);
+        close_old_mapper_best_effort(runner, sleeper, fs, old_mapper);
     }
 
     let new_mn = config::mapper_name(new_name);
@@ -3280,7 +3268,8 @@ mod tests {
     use crate::test_fixtures::{PoolFixture, RemountHarness, TEST_PASSPHRASE_BYTES};
     use crate::types::{ByIdPath, LuksUuid, MapperName, MountPoint, PoolDevice};
     use std::collections::{BTreeMap, VecDeque};
-    use std::sync::Mutex;
+    use std::sync::atomic::{AtomicU32, Ordering};
+    use std::sync::{Arc, Mutex};
 
     fn passphrase(s: &str) -> Passphrase {
         Passphrase::from_zeroizing(zeroize::Zeroizing::new(s.to_owned()))
@@ -8736,6 +8725,7 @@ mod tests {
 
         execute_replace_post_maintenance_recovery(
             &runner,
+            &progress::NoopSleeper,
             &resolver,
             &params,
             &journal,
@@ -8765,6 +8755,95 @@ mod tests {
             "restore_raid1_after_commit=false must skip balance probes and replay"
         );
         assert!(!f.paths.pending_op_json().exists());
+    }
+
+    // Intent: recover's replace post-maintenance path routes the old-mapper
+    // best-effort close through the retry helper when cryptsetup reports busy.
+    // Why it exists: recovery replays the same post-commit close as live
+    // replace, so it must not regress to a single-shot close and leak the old
+    // mapper on transient EBUSY.
+    // Scenario: replace already committed, recovery sees braid-old still
+    // present, the first close is busy, and the second close succeeds before
+    // resize.
+    #[test]
+    fn recover_replace_old_close_retries_on_busy_then_succeeds() {
+        let f = PoolFixture::empty();
+        let fs = MockFs::new(&["/dev/mapper/braid-old"]);
+        let journal = replace_journal_in_phase(
+            journal::ReplacePhase::PostReplaceMaintenance,
+            false,
+            journal::ReplaceJournalSource::Live {
+                old_devid: 2,
+                old_mapper: MapperName("braid-old".into()),
+            },
+        );
+        journal::write_journal(&f.paths, &journal).unwrap();
+        let close_attempts = Arc::new(AtomicU32::new(0));
+        let runner = MockRunner::default()
+            .with_handler({
+                let close_attempts = close_attempts.clone();
+                move |req| match req {
+                    CmdRequest::CryptsetupClose { mapper } if mapper == "braid-old" => {
+                        let attempt = close_attempts.fetch_add(1, Ordering::SeqCst) + 1;
+                        if attempt == 1 {
+                            Some(Ok(err_raw(
+                                "cryptsetup close braid-old",
+                                5,
+                                "device is busy",
+                            )))
+                        } else {
+                            Some(Ok(ok_raw_empty("cryptsetup close braid-old")))
+                        }
+                    }
+                    _ => None,
+                }
+            })
+            .with_output(
+                CmdRequest::BtrfsFilesystemResize {
+                    devid: 2,
+                    mount_point: MountPoint("/mnt/storage".into()),
+                },
+                ok_raw_empty("btrfs filesystem resize"),
+            );
+        let resolver = resolver_for(&[("/dev/vda", "virtio-disk1"), ("/dev/vdc", "virtio-new")]);
+        let params = f
+            .recover_params()
+            .passphrase_file(None)
+            .sleep_inhibitor(&f.inhibitor)
+            .build();
+        let OpKind::Replace { source, .. } = &journal.op else {
+            unreachable!("replace_journal_in_phase returns Replace");
+        };
+
+        let captured = crate::status_tag::testing::capture_with_color(false, || {
+            execute_replace_post_maintenance_recovery(
+                &runner,
+                &progress::NoopSleeper,
+                &resolver,
+                &params,
+                &journal,
+                pool_state_disk1_and_new(),
+                "new",
+                source,
+                &fs,
+                false,
+                false,
+            )
+            .expect("post-replace maintenance should close after retry and resize");
+        });
+
+        let close_count = runner
+            .requests()
+            .iter()
+            .filter(|request| {
+                matches!(request, CmdRequest::CryptsetupClose { mapper } if mapper == "braid-old")
+            })
+            .count();
+        assert_eq!(close_count, 2);
+        assert!(
+            captured.contains("[ok]   disk old: locked"),
+            "missing terminal ok row after retry: {captured:?}"
+        );
     }
 
     // Intent: Replace::PostReplaceMaintenance runs owed RAID1 maintenance
@@ -8804,6 +8883,7 @@ mod tests {
 
         execute_replace_post_maintenance_recovery(
             &runner,
+            &progress::NoopSleeper,
             &resolver,
             &params,
             &journal,
@@ -8859,6 +8939,7 @@ mod tests {
 
         let err = execute_replace_post_maintenance_recovery(
             &runner,
+            &progress::NoopSleeper,
             &resolver,
             &params,
             &journal,

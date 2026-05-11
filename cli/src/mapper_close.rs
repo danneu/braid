@@ -18,7 +18,7 @@ pub(crate) enum CloseMapperError {
 
 /// Close a LUKS mapper, retrying up to 3 times if the error indicates the
 /// device is busy. Non-busy errors fail immediately.
-pub(crate) fn close_mapper_with_retry<R: CommandRunner, S: Sleeper>(
+pub(crate) fn close_mapper_with_retry<R: CommandRunner, S: Sleeper + ?Sized>(
     runner: &R,
     sleeper: &S,
     mapper: &str,
@@ -62,4 +62,153 @@ pub(crate) fn close_mapper_with_retry<R: CommandRunner, S: Sleeper>(
         sleeper.sleep(CLOSE_RETRY_DELAY);
     }
     unreachable!()
+}
+
+/// Best-effort mapper close used by pool maintenance paths that must warn
+/// instead of failing after btrfs has already committed the topology change.
+pub(crate) fn close_mapper_best_effort<R, S>(
+    runner: &R,
+    sleeper: &S,
+    mapper: &str,
+    disk_label: &str,
+    color_enabled: bool,
+) -> bool
+where
+    R: CommandRunner,
+    S: Sleeper + ?Sized,
+{
+    emit_status(&status_line(
+        StatusTag::Wait,
+        color_enabled,
+        &format!("disk {disk_label}: locking..."),
+    ));
+    match close_mapper_with_retry(runner, sleeper, mapper, color_enabled) {
+        Ok(()) => {
+            emit_status(&status_line(
+                StatusTag::Ok,
+                color_enabled,
+                &format!("disk {disk_label}: locked"),
+            ));
+            true
+        }
+        Err(e) => {
+            emit_status(&status_line(
+                StatusTag::Warn,
+                color_enabled,
+                &format!("disk {disk_label}: lock failed ({e})"),
+            ));
+            false
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::cmd::{MockRunner, RawCommandOutput};
+    use crate::progress::NoopSleeper;
+
+    fn close_output(exit_status: i32, stderr: &str) -> RawCommandOutput {
+        RawCommandOutput {
+            cmd: "cryptsetup close".into(),
+            stdout: String::new(),
+            stderr: stderr.into(),
+            exit_status,
+        }
+    }
+
+    fn close_request() -> CmdRequest {
+        CmdRequest::CryptsetupClose {
+            mapper: "braid-disk2".into(),
+        }
+    }
+
+    fn close_request_count(runner: &MockRunner) -> usize {
+        runner
+            .requests()
+            .iter()
+            .filter(|request| matches!(request, CmdRequest::CryptsetupClose { .. }))
+            .count()
+    }
+
+    fn run_best_effort(runner: &MockRunner) -> bool {
+        let mut closed = false;
+        crate::status_tag::testing::capture_with_color(false, || {
+            closed = close_mapper_best_effort(runner, &NoopSleeper, "braid-disk2", "disk2", false);
+        });
+        closed
+    }
+
+    // Intent: best-effort mapper close reports success after one successful
+    // cryptsetup close request.
+    // Why it exists: callers use the returned bool to decide whether to print
+    // a post-success trailer, so the direct success path must stay true.
+    // Scenario: btrfs has already removed/replaced a disk and cryptsetup close
+    // releases the old mapper immediately.
+    #[test]
+    fn close_mapper_best_effort_returns_true_on_success() {
+        let runner = MockRunner::default().with_output(close_request(), close_output(0, ""));
+
+        let closed = run_best_effort(&runner);
+
+        assert!(closed);
+        assert_eq!(close_request_count(&runner), 1);
+    }
+
+    // Intent: best-effort mapper close retries a busy close and returns true
+    // when a later attempt succeeds.
+    // Why it exists: this is the transient EBUSY race the shared helper is
+    // meant to dissolve across remove, replace, and recover.
+    // Scenario: a short-lived holder keeps the mapper busy for the first close
+    // attempt, then releases it before the second attempt.
+    #[test]
+    fn close_mapper_best_effort_retries_busy_then_succeeds() {
+        let runner = MockRunner::default().with_output_sequence(
+            close_request(),
+            vec![close_output(5, "device is busy"), close_output(0, "")],
+        );
+
+        let closed = run_best_effort(&runner);
+
+        assert!(closed);
+        assert_eq!(close_request_count(&runner), 2);
+    }
+
+    // Intent: best-effort mapper close exhausts the busy retry budget before
+    // returning false.
+    // Why it exists: callers must not treat a persistently busy mapper as
+    // closed or print a post-success trailer.
+    // Scenario: an external process keeps holding the mapper through all retry
+    // attempts.
+    #[test]
+    fn close_mapper_best_effort_returns_false_after_persistent_busy() {
+        let runner = MockRunner::default().with_output_sequence(
+            close_request(),
+            vec![
+                close_output(5, "device is busy"),
+                close_output(5, "device is busy"),
+                close_output(5, "device is busy"),
+            ],
+        );
+
+        let closed = run_best_effort(&runner);
+
+        assert!(!closed);
+        assert_eq!(close_request_count(&runner), 3);
+    }
+
+    // Intent: best-effort mapper close fails non-busy errors immediately.
+    // Why it exists: retrying ENODEV-style failures would mask a different
+    // close contract from the EBUSY race.
+    // Scenario: the mapper is already absent by the time cleanup runs.
+    #[test]
+    fn close_mapper_best_effort_returns_false_without_retry_on_non_busy() {
+        let runner =
+            MockRunner::default().with_output(close_request(), close_output(4, "device not found"));
+
+        let closed = run_best_effort(&runner);
+
+        assert!(!closed);
+        assert_eq!(close_request_count(&runner), 1);
+    }
 }

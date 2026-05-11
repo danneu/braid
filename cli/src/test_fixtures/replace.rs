@@ -5,7 +5,7 @@ use super::shared::{PoolFixture, mock_ok};
 use crate::cmd::{CmdRequest, MockRunner, RawCommandOutput};
 use crate::inhibit::RecordingInhibitor;
 use crate::membership::{self, DiskMember, PoolMembership};
-use crate::progress::ProgressOutput;
+use crate::progress::{self, ProgressOutput};
 use crate::replace::ReplaceParams;
 use crate::state_paths::StatePaths;
 use crate::types::ByIdPath;
@@ -345,6 +345,7 @@ impl<'a> ReplaceParamsBuilder<'a> {
             progress: self.progress,
             paths: self.paths,
             sleep_inhibitor: self.inhibitor,
+            sleeper: &progress::NoopSleeper,
         }
     }
 }

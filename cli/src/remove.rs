@@ -10,7 +10,7 @@ use crate::pool::{DeviceIdentity, evict_present_device, validate_pool_topology};
 use crate::preflight;
 use crate::preview::{self, PerDiskStyle, Preview, PreviewCompleteness, PreviewNote};
 use crate::probe::{Filesystem, ProbeError, probe_pool};
-use crate::progress::ProgressOutput;
+use crate::progress::{self, ProgressOutput};
 use crate::state_paths::StatePaths;
 use crate::types::*;
 use std::collections::BTreeMap;
@@ -68,6 +68,9 @@ pub struct RemoveParams<'a> {
     /// portion of the remove. Production passes `&RealSleepInhibitor`;
     /// unit tests pass `&RecordingInhibitor` to avoid spawning subprocesses.
     pub sleep_inhibitor: &'a dyn AcquireSleepInhibitor,
+    /// Sleeper seam for retrying transiently-busy mapper closes without
+    /// slowing unit tests.
+    pub sleeper: &'a dyn progress::Sleeper,
 }
 
 /// Dry-run preview source of truth for `braid remove` plus the execute
@@ -333,6 +336,7 @@ impl RemovePlan {
         // Execute
         evict_present_device(
             runner,
+            params.sleeper,
             &work_plan.target_mapper.0,
             &work_plan.mount_point,
             work_plan.remaining == 1,

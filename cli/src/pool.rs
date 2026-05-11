@@ -1,10 +1,11 @@
 use crate::cmd::{CmdError, CmdRequest, CommandRunner, RawCommandOutput};
+use crate::mapper_close::close_mapper_best_effort;
 use crate::probe::{Filesystem, probe_pool};
 use crate::progress::{
-    self, ProgressOutput, run_device_remove_with_progress, run_replace_with_progress,
+    self, ProgressOutput, Sleeper, run_device_remove_with_progress, run_replace_with_progress,
     run_with_progress,
 };
-use crate::status_tag::{StatusTag, color_enabled_for_stderr, emit_status, status_line};
+use crate::status_tag::{StatusTag, color_enabled_for_stderr, status_line};
 use crate::types::{LuksUuid, MapperName, MountPoint};
 use std::collections::BTreeMap;
 
@@ -585,13 +586,18 @@ pub fn pool_resize_device<R: CommandRunner + Sync>(
 /// `PoolError::Failed`) and preserves the journal for `braid recover`
 /// to reconcile.
 #[allow(clippy::doc_overindented_list_items)]
-pub fn evict_present_device<R: CommandRunner + Sync>(
+pub fn evict_present_device<R, S>(
     runner: &R,
+    sleeper: &S,
     mapper: &str,
     mount_point: &MountPoint,
     needs_balance: bool,
     progress: ProgressOutput,
-) -> Result<(), PoolError> {
+) -> Result<(), PoolError>
+where
+    R: CommandRunner + Sync,
+    S: Sleeper + ?Sized,
+{
     let device_path = format!("/dev/mapper/{mapper}");
     let color_enabled = color_enabled_for_stderr();
     if needs_balance {
@@ -632,39 +638,8 @@ pub fn evict_present_device<R: CommandRunner + Sync>(
         )
     );
 
-    // Best-effort LUKS close — warn on failure, don't fail the command.
     let close_label = mapper.strip_prefix("braid-").unwrap_or(mapper);
-    emit_status(&status_line(
-        StatusTag::Wait,
-        color_enabled,
-        &format!("disk {close_label}: locking..."),
-    ));
-    let result = runner.run(&CmdRequest::CryptsetupClose {
-        mapper: mapper.to_owned(),
-    });
-    match result {
-        Ok(r) if r.exit_status == 0 => {
-            emit_status(&status_line(
-                StatusTag::Ok,
-                color_enabled,
-                &format!("disk {close_label}: locked"),
-            ));
-        }
-        Ok(r) => {
-            emit_status(&status_line(
-                StatusTag::Warn,
-                color_enabled,
-                &format!("disk {close_label}: lock failed (exit {})", r.exit_status),
-            ));
-        }
-        Err(e) => {
-            emit_status(&status_line(
-                StatusTag::Warn,
-                color_enabled,
-                &format!("disk {close_label}: lock failed ({e})"),
-            ));
-        }
-    }
+    close_mapper_best_effort(runner, sleeper, mapper, close_label, color_enabled);
 
     Ok(())
 }
@@ -742,7 +717,7 @@ mod tests {
     use super::*;
     use crate::cmd::{MockRunner, RawCommandOutput};
     use crate::progress::{self, ProgressOutput};
-    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::sync::atomic::{AtomicU32, AtomicUsize, Ordering};
     use std::sync::{Arc, Condvar, Mutex};
     use std::time::Duration;
 
@@ -1747,6 +1722,8 @@ mod tests {
     #[derive(Clone)]
     struct EvictRunner {
         close_exit: i32,
+        close_busy_then_success: bool,
+        close_attempts: Arc<AtomicU32>,
         invocations: Arc<Mutex<Vec<&'static str>>>,
     }
 
@@ -1754,6 +1731,8 @@ mod tests {
         fn default() -> Self {
             Self {
                 close_exit: 0,
+                close_busy_then_success: false,
+                close_attempts: Arc::new(AtomicU32::new(0)),
                 invocations: Arc::new(Mutex::new(Vec::new())),
             }
         }
@@ -1774,15 +1753,23 @@ mod tests {
                 }
                 CmdRequest::CryptsetupClose { .. } => {
                     self.record("CryptsetupClose");
+                    let attempt = self.close_attempts.fetch_add(1, Ordering::SeqCst) + 1;
+                    let exit_status = if self.close_busy_then_success && attempt == 1 {
+                        5
+                    } else if self.close_busy_then_success {
+                        0
+                    } else {
+                        self.close_exit
+                    };
                     Ok(RawCommandOutput {
                         cmd: String::new(),
                         stdout: String::new(),
-                        stderr: if self.close_exit == 0 {
-                            String::new()
-                        } else {
-                            "device is busy".into()
+                        stderr: match exit_status {
+                            0 => String::new(),
+                            4 => "device does not exist".into(),
+                            _ => "device is busy".into(),
                         },
-                        exit_status: self.close_exit,
+                        exit_status,
                     })
                 }
                 _ => Err(CmdError::MissingMock),
@@ -1798,33 +1785,79 @@ mod tests {
         }
     }
 
-    /* Intent: pool::evict_present_device's trailing best-effort LUKS close
-     * closes its [wait] row with [warn] when cryptsetup returns non-zero.
-     * Why it exists: Principle 13 forbids dangling [wait] rows; a best-effort
-     * close that exits the command 0 must still announce the failure on the
-     * same subject so the wait window is closed for the operator.
-     * Scenario: a 3-disk pool evicts one mapper; pool_remove_device succeeds
-     * but cryptsetup close returns busy.
-     */
+    // Intent: pool::evict_present_device's trailing best-effort LUKS close
+    // closes its [wait] row with [warn] when cryptsetup returns non-zero.
+    // Why it exists: Principle 13 forbids dangling [wait] rows; a best-effort
+    // close that exits the command 0 must still announce the failure on the
+    // same subject so the wait window is closed for the operator.
+    // Scenario: a 3-disk pool evicts one mapper; pool_remove_device succeeds
+    // but cryptsetup close returns ENODEV.
     #[test]
     fn evict_present_device_close_failure_emits_warn_row() {
         let runner = EvictRunner {
-            close_exit: 5,
+            close_exit: 4,
             ..EvictRunner::default()
         };
         let captured = crate::status_tag::testing::capture_with_color(false, || {
             // 3-disk fixture -> remaining == 2 -> no balance needed.
-            let result =
-                evict_present_device(&runner, "braid-disk2", &mp(), false, ProgressOutput::Off);
+            let result = evict_present_device(
+                &runner,
+                &progress::NoopSleeper,
+                "braid-disk2",
+                &mp(),
+                false,
+                ProgressOutput::Off,
+            );
             assert!(result.is_ok(), "evict should still return Ok: {result:?}");
         });
         let wait = "[wait] disk disk2: locking...";
-        let warn = "[warn] disk disk2: lock failed (exit 5)";
+        let warn = "[warn] disk disk2: lock failed (cryptsetup close braid-disk2 failed (exit 4): device does not exist)";
         assert!(captured.contains(wait), "missing wait row: {captured:?}");
         assert!(captured.contains(warn), "missing warn row: {captured:?}");
         assert!(
             captured.find(wait) < captured.find(warn),
             "wait must precede warn, got: {captured:?}"
+        );
+    }
+
+    // Intent: pool::evict_present_device routes its best-effort LUKS close
+    // through the retry helper when cryptsetup reports the mapper busy.
+    // Why it exists: a later refactor must not regress the remove path back to
+    // a single-shot close that leaks the old mapper on transient EBUSY.
+    // Scenario: btrfs removes disk2 from a 3-disk pool, the first close sees a
+    // short-lived holder, and the second close succeeds.
+    #[test]
+    fn evict_present_device_retries_on_busy_then_succeeds() {
+        let runner = EvictRunner {
+            close_busy_then_success: true,
+            ..EvictRunner::default()
+        };
+        let captured = crate::status_tag::testing::capture_with_color(false, || {
+            let result = evict_present_device(
+                &runner,
+                &progress::NoopSleeper,
+                "braid-disk2",
+                &mp(),
+                false,
+                ProgressOutput::Off,
+            );
+            assert!(
+                result.is_ok(),
+                "evict should succeed after retry: {result:?}"
+            );
+        });
+
+        let close_count = runner
+            .invocations
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|tag| **tag == "CryptsetupClose")
+            .count();
+        assert_eq!(close_count, 2);
+        assert!(
+            captured.contains("[ok]   disk disk2: locked"),
+            "missing terminal ok row after retry: {captured:?}"
         );
     }
 

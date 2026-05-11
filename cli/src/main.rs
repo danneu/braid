@@ -384,6 +384,7 @@ fn main() {
                     progress,
                     paths: &paths,
                     sleep_inhibitor: &sleep_inhibitor,
+                    sleeper: &braid_cli::progress::RealSleeper,
                 },
             ) {
                 print_cli_error(&e.to_string());
@@ -445,6 +446,7 @@ fn main() {
                     progress,
                     paths: &paths,
                     sleep_inhibitor: &sleep_inhibitor,
+                    sleeper: &braid_cli::progress::RealSleeper,
                 },
             ) {
                 print_cli_error(&e.to_string());
@@ -782,6 +784,7 @@ fn main() {
                     dry_run: args.dry_run,
                     progress,
                     sleep_inhibitor: &sleep_inhibitor,
+                    sleeper: &braid_cli::progress::RealSleeper,
                 },
             ) {
                 Ok(()) => {}

@@ -5,7 +5,7 @@ use super::shared::{PoolFixture, mock_ok};
 use crate::cmd::{CmdRequest, MockRunner};
 use crate::inhibit::RecordingInhibitor;
 use crate::membership::{self, DiskMember, PoolMembership};
-use crate::progress::ProgressOutput;
+use crate::progress::{self, ProgressOutput};
 use crate::remove::RemoveParams;
 use crate::state_paths::StatePaths;
 use crate::types::{ByIdPath, LuksUuid, MapperName, PoolDevice};
@@ -235,6 +235,7 @@ impl<'a> RemoveParamsBuilder<'a> {
             progress: self.progress,
             paths: self.paths,
             sleep_inhibitor: self.inhibitor,
+            sleeper: &progress::NoopSleeper,
         }
     }
 }

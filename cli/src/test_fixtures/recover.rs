@@ -17,7 +17,7 @@ use crate::cmd::{CmdRequest, CommandRunner, MockRunner, RawCommandOutput};
 use crate::config::Config;
 use crate::inhibit::{AcquireSleepInhibitor, SleepGuard};
 use crate::probe::Filesystem;
-use crate::progress::ProgressOutput;
+use crate::progress::{self, ProgressOutput};
 use crate::recover::RecoverParams;
 use crate::state_paths::StatePaths;
 use std::collections::HashSet;
@@ -106,6 +106,7 @@ impl<'a> RecoverParamsBuilder<'a> {
             dry_run: self.dry_run,
             progress: self.progress,
             sleep_inhibitor: self.sleep_inhibitor,
+            sleeper: &progress::NoopSleeper,
         }
     }
 }

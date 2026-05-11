@@ -11,15 +11,16 @@ use crate::luks::{
     format_keyfile_enrollment_probe_failure, luks_format, probe_pool_keyfile_enrollment,
     read_passphrase,
 };
+use crate::mapper_close::close_mapper_best_effort;
 use crate::membership::{self, PoolMembership};
 use crate::parse::parse_btrfs_device_stats;
 use crate::pool::{pool_replace_device, pool_resize_device};
 use crate::preflight;
 use crate::preview::{self, PerDiskStyle, Preview, PreviewCompleteness, PreviewNote};
 use crate::probe::{Filesystem, ProbeError, probe_config_disk, probe_pool};
-use crate::progress::ProgressOutput;
+use crate::progress::{self, ProgressOutput};
 use crate::state_paths::StatePaths;
-use crate::status_tag::{StatusTag, color_enabled_for_stderr, emit_status, status_line};
+use crate::status_tag::{StatusTag, color_enabled_for_stderr, status_line};
 use crate::types::*;
 use std::path::{Path, PathBuf};
 
@@ -58,6 +59,9 @@ pub struct ReplaceParams<'a> {
     /// portion of the replace. Production passes `&RealSleepInhibitor`;
     /// unit tests pass `&NoopSleepInhibitor` to avoid spawning subprocesses.
     pub sleep_inhibitor: &'a dyn AcquireSleepInhibitor,
+    /// Sleeper seam for retrying transiently-busy mapper closes without
+    /// slowing unit tests.
+    pub sleeper: &'a dyn progress::Sleeper,
 }
 
 /// Dry-run preview source of truth for `braid replace` plus the preflight
@@ -712,39 +716,11 @@ impl ReplacePlan {
         } = &journal.op
         {
             let old_label = mapper.0.strip_prefix("braid-").unwrap_or(&mapper.0);
-            emit_status(&status_line(
-                StatusTag::Wait,
-                color_enabled,
-                &format!("disk {old_label}: locking..."),
-            ));
-            let close_result = runner.run(&CmdRequest::CryptsetupClose {
-                mapper: mapper.0.clone(),
-            });
-            match close_result {
-                Ok(r) if r.exit_status == 0 => {
-                    emit_status(&status_line(
-                        StatusTag::Ok,
-                        color_enabled,
-                        &format!("disk {old_label}: locked"),
-                    ));
-                    eprintln!(
-                        "Old device closed. If repurposing the physical disk, wipe it separately."
-                    );
-                }
-                Ok(r) => {
-                    emit_status(&status_line(
-                        StatusTag::Warn,
-                        color_enabled,
-                        &format!("disk {old_label}: lock failed (exit {})", r.exit_status),
-                    ));
-                }
-                Err(e) => {
-                    emit_status(&status_line(
-                        StatusTag::Warn,
-                        color_enabled,
-                        &format!("disk {old_label}: lock failed ({e})"),
-                    ));
-                }
+            if close_mapper_best_effort(runner, params.sleeper, &mapper.0, old_label, color_enabled)
+            {
+                eprintln!(
+                    "Old device closed. If repurposing the physical disk, wipe it separately."
+                );
             }
         }
 
@@ -2548,7 +2524,7 @@ mod tests {
     use crate::membership::{self, PoolMembership};
     use crate::test_fixtures::{MockFs, PoolFixture, ReplacementPool, mock_ok};
     use std::sync::Arc;
-    use std::sync::atomic::AtomicBool;
+    use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 
     /// Override handler that fails `BtrfsReplaceStart` so live-path
     /// failure tests can drive cmd_replace through preflight + journal
@@ -2820,14 +2796,13 @@ mod tests {
         );
     }
 
-    /* Intent: live-replace's best-effort close of the old mapper closes its
-     * [wait] row with [warn] when cryptsetup returns non-zero exit.
-     * Why it exists: Principle 13 forbids dangling [wait] rows; a best-effort
-     * close that exits the command 0 must still announce the failure on the
-     * same subject so the wait window is closed for the operator.
-     * Scenario: live replace of disk2 -> disk3 succeeds end-to-end except the
-     * trailing cryptsetup close of the old mapper, which returns busy.
-     */
+    // Intent: live-replace's best-effort close of the old mapper closes its
+    // [wait] row with [warn] when cryptsetup returns non-zero exit.
+    // Why it exists: Principle 13 forbids dangling [wait] rows; a best-effort
+    // close that exits the command 0 must still announce the failure on the
+    // same subject so the wait window is closed for the operator.
+    // Scenario: live replace of disk2 -> disk3 succeeds end-to-end except the
+    // trailing cryptsetup close of the old mapper, which returns ENODEV.
     #[test]
     fn live_replace_old_close_failure_emits_warn_row() {
         let f = PoolFixture::two_disk_healthy();
@@ -2849,8 +2824,8 @@ mod tests {
                         Some(Ok(RawCommandOutput {
                             cmd: "cryptsetup close".into(),
                             stdout: String::new(),
-                            stderr: "device is busy".into(),
-                            exit_status: 5,
+                            stderr: "device does not exist".into(),
+                            exit_status: 4,
                         }))
                     }
                     CmdRequest::CryptsetupClose { .. } => Some(Ok(mock_ok("cryptsetup close", ""))),
@@ -2870,12 +2845,80 @@ mod tests {
         });
 
         let wait = "[wait] disk disk2: locking...";
-        let warn = "[warn] disk disk2: lock failed (exit 5)";
+        let warn = "[warn] disk disk2: lock failed (cryptsetup close braid-disk2 failed (exit 4): device does not exist)";
         assert!(captured.contains(wait), "missing wait row: {captured:?}");
         assert!(captured.contains(warn), "missing warn row: {captured:?}");
         assert!(
             captured.find(wait) < captured.find(warn),
             "wait must precede warn, got: {captured:?}"
+        );
+    }
+
+    // Intent: live-replace routes its old-mapper best-effort close through
+    // the retry helper when cryptsetup reports the mapper busy.
+    // Why it exists: replacing a live disk must not leak the old mapper when a
+    // transient holder makes the first close return EBUSY.
+    // Scenario: live replace of disk2 -> disk3 commits, the first close of
+    // braid-disk2 is busy, and the second close succeeds before resize.
+    #[test]
+    fn live_replace_old_retries_on_busy_then_succeeds() {
+        let f = PoolFixture::two_disk_healthy();
+        let fs = MockFs::storage(vec![
+            "/dev/disk/by-id/virtio-disk3".into(),
+            "/dev/mapper/braid-disk3".into(),
+        ]);
+        let replace_done = Arc::new(AtomicBool::new(false));
+        let close_attempts = Arc::new(AtomicU32::new(0));
+        let runner = ReplacementPool::two_disk_healthy()
+            .install(MockRunner::default(), replace_done.clone())
+            .with_handler({
+                let replace_done = replace_done.clone();
+                let close_attempts = close_attempts.clone();
+                move |req| match req {
+                    CmdRequest::BtrfsReplaceStart { .. } => {
+                        replace_done.store(true, Ordering::Relaxed);
+                        Some(Ok(mock_ok("btrfs replace start", "")))
+                    }
+                    CmdRequest::CryptsetupClose { mapper } if mapper == "braid-disk2" => {
+                        let attempt = close_attempts.fetch_add(1, Ordering::SeqCst) + 1;
+                        if attempt == 1 {
+                            Some(Ok(RawCommandOutput {
+                                cmd: "cryptsetup close".into(),
+                                stdout: String::new(),
+                                stderr: "device is busy".into(),
+                                exit_status: 5,
+                            }))
+                        } else {
+                            Some(Ok(mock_ok("cryptsetup close", "")))
+                        }
+                    }
+                    CmdRequest::CryptsetupClose { .. } => Some(Ok(mock_ok("cryptsetup close", ""))),
+                    CmdRequest::BtrfsFilesystemResize { .. } => {
+                        Some(Ok(mock_ok("btrfs filesystem resize", "")))
+                    }
+                    _ => None,
+                }
+            });
+
+        let captured = crate::status_tag::testing::capture_with_color(false, || {
+            let result = cmd_replace(&runner, &fs, &f.replace_params().build());
+            assert!(
+                result.is_ok(),
+                "replace should succeed after retry: {result:?}"
+            );
+        });
+
+        let close_count = runner
+            .requests()
+            .iter()
+            .filter(|request| {
+                matches!(request, CmdRequest::CryptsetupClose { mapper } if mapper == "braid-disk2")
+            })
+            .count();
+        assert_eq!(close_count, 2);
+        assert!(
+            captured.contains("[ok]   disk disk2: locked"),
+            "missing terminal ok row after retry: {captured:?}"
         );
     }
 
@@ -3993,6 +4036,7 @@ mod tests {
                 progress: crate::progress::ProgressOutput::Off,
                 paths: &paths,
                 sleep_inhibitor: &inhibitor,
+                sleeper: &crate::progress::NoopSleeper,
             },
         );
         match &report.result {
@@ -4051,6 +4095,7 @@ mod tests {
                 progress: crate::progress::ProgressOutput::Off,
                 paths: &paths,
                 sleep_inhibitor: &inhibitor,
+                sleeper: &crate::progress::NoopSleeper,
             },
         );
 
@@ -4108,6 +4153,7 @@ mod tests {
                 progress: crate::progress::ProgressOutput::Off,
                 paths: &paths,
                 sleep_inhibitor: &inhibitor,
+                sleeper: &crate::progress::NoopSleeper,
             },
         );
 
