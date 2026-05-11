@@ -347,6 +347,9 @@ impl RemovePlan {
         membership::save_membership(&target_membership, params.paths)
             .map_err(map_membership_persist_failure)?;
         journal::clear_journal(params.paths).map_err(map_journal_clear_failure)?;
+        // Hygiene only -- failure is non-fatal because `cmd_add` is the
+        // fail-closed correctness boundary for reused devids. See
+        // docs/decisions/014-alerts.md "Acked-stats hygiene".
         if let Err(e) = alert::drop_ghost_acked_for_devids(params.paths, &[work_plan.target_devid])
         {
             eprintln!("Warning: failed to update acked stats: {e}");

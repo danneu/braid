@@ -288,6 +288,9 @@ impl RemoveMissingPlan {
         // Maintenance complete -- safe to clear the journal.
         journal::clear_journal(params.paths)
             .map_err(|e| RemoveMissingError::Validation(e.to_string()))?;
+        // Hygiene only -- failure is non-fatal because `cmd_add` is the
+        // fail-closed correctness boundary for reused devids. See
+        // docs/decisions/014-alerts.md "Acked-stats hygiene".
         if let Err(e) = alert::drop_ghost_acked_for_devids(params.paths, &[resolved_devid]) {
             eprintln!("Warning: failed to update acked stats: {e}");
         }
