@@ -234,20 +234,12 @@ fn format_status(flags: &std::collections::HashSet<UpsStatusFlag>) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::cmd::{MockRunner, RawCommandOutput};
+    use crate::cmd::MockRunner;
     use crate::parse::types::{BatteryFields, DeviceFields, InputFields};
-    use std::path::PathBuf;
-    use tempfile::TempDir;
-
-    fn write_ups_config(dir: &TempDir, name: &str) -> PathBuf {
-        let path = dir.path().join("config.json");
-        std::fs::write(
-            &path,
-            format!(r#"{{"mount_point":"/mnt/storage","ups":{{"enable":true,"name":"{name}"}}}}"#),
-        )
-        .unwrap();
-        path
-    }
+    use crate::test_fixtures::{
+        ups_query_connection_refused_no_newline, ups_query_connection_refused_with_newline,
+        ups_query_healthy_minimal, ups_write_config,
+    };
 
     // Intent: format_status renders OL verbatim when the UPS is on utility power.
     // Why: operators triaging preflight failures need the rendered line to
@@ -427,15 +419,8 @@ mod tests {
      */
     #[test]
     fn query_ups_returns_query_failed_on_non_zero_exit() {
-        let runner = MockRunner::default().with_output(
-            CmdRequest::UpscQuery { name: "ups".into() },
-            RawCommandOutput {
-                cmd: "upsc ups".into(),
-                stdout: String::new(),
-                stderr: "Error: Connection failure: Connection refused\n".into(),
-                exit_status: 1,
-            },
-        );
+        let (request, output) = ups_query_connection_refused_with_newline();
+        let runner = MockRunner::default().with_output(request, output);
 
         let err = query_ups(&runner, "ups").expect_err("query failure expected");
 
@@ -477,15 +462,8 @@ mod tests {
      */
     #[test]
     fn query_ups_returns_ok_on_healthy_output() {
-        let runner = MockRunner::default().with_output(
-            CmdRequest::UpscQuery { name: "ups".into() },
-            RawCommandOutput {
-                cmd: "upsc ups".into(),
-                stdout: "ups.status: OL\nbattery.charge: 100\n".into(),
-                stderr: String::new(),
-                exit_status: 0,
-            },
-        );
+        let (request, output) = ups_query_healthy_minimal();
+        let runner = MockRunner::default().with_output(request, output);
 
         let out = query_ups(&runner, "ups").expect("healthy upsc output parses");
 
@@ -503,7 +481,7 @@ mod tests {
     fn cmd_ups_status_invocation_failure_surfaces_typed_error() {
         let runner = MockRunner::default();
         let dir = tempfile::tempdir().unwrap();
-        let cfg = write_ups_config(&dir, "ups");
+        let cfg = ups_write_config(&dir, "ups");
         let err = cmd_ups_status(&runner, &cfg, false).expect_err("query failure expected");
         match &err {
             UpsError::QueryFailed { detail } => {
@@ -526,17 +504,10 @@ mod tests {
     // (the realistic shape when upsd.service is down).
     #[test]
     fn cmd_ups_status_non_zero_exit_is_query_failed() {
-        let runner = MockRunner::default().with_output(
-            CmdRequest::UpscQuery { name: "ups".into() },
-            RawCommandOutput {
-                cmd: "upsc ups".into(),
-                stdout: String::new(),
-                stderr: "Error: Connection failure: Connection refused".into(),
-                exit_status: 1,
-            },
-        );
+        let (request, output) = ups_query_connection_refused_no_newline();
+        let runner = MockRunner::default().with_output(request, output);
         let dir = tempfile::tempdir().unwrap();
-        let cfg = write_ups_config(&dir, "ups");
+        let cfg = ups_write_config(&dir, "ups");
         let err = cmd_ups_status(&runner, &cfg, false).expect_err("query failure expected");
         match &err {
             UpsError::QueryFailed { detail } => {

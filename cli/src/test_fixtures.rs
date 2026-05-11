@@ -1,7 +1,7 @@
 //! Test-only shared fixtures for `replace`, `add`, `remove`,
 //! `remove_missing`, `recover`, `doctor`, `mount`, `enroll_key_file`,
 //! `unlock`, `status`, `lock`, `ack`, `monitor`, `idle`, `scrub`,
-//! and `discover`.
+//! `discover`, and `ups`.
 //!
 //! These fixtures consolidate the per-test scaffolding that previously
 //! lived as one-off `*Runner` structs and inline `tempdir + config + pass +
@@ -92,6 +92,18 @@
 //!     `discover_create_target` and `discover_create_by_id_symlink` keep
 //!     real tempdir and Unix-symlink coverage at each call site. The prefix
 //!     avoids facade collisions with other fixture families.
+//!   * `ups` -- flat ups-shaped helpers for `cli/src/ups.rs::tests`:
+//!     `ups_write_config` (on-disk `config.json` writer for `cmd_ups_status`
+//!     tests) and three `(CmdRequest, RawCommandOutput)` pair factories
+//!     (healthy OL+100%, plus two daemon-down variants -- with and without
+//!     a trailing stderr newline -- that match the current local bodies
+//!     byte-identically so the trim-proof and command-layer Display tests
+//!     each keep the body they have today). Ships flat because the test
+//!     surface is small and tightly scoped to the runner / config boundary.
+//!     No broad runner helper: the missing-mock test deliberately uses
+//!     `MockRunner::default()` to trigger `CmdError::MissingMock`, and a
+//!     multi-test runner would mask that proof. The `ups_` prefix avoids
+//!     facade collisions with the `doctor::config_with_ups_*` family.
 //!   * `PoolFixture` -- bundled tempdirs + `StatePaths` + config +
 //!     passphrase + `RecordingInhibitor`.
 //!   * `ReplaceParamsBuilder` / `AddParamsBuilder` / `RemoveParamsBuilder`
@@ -101,8 +113,8 @@
 //! Layout: this file is a facade. `shared` holds cross-scope items;
 //! `replace`, `add`, `remove`, `remove_missing`, `recover`, `doctor`,
 //! `mount`, `enroll_key_file`, `unlock`, `status`, `lock`, `ack`, `monitor`,
-//! `idle`, `scrub`, and `discover` hold their per-scope topologies, builders,
-//! and helpers.
+//! `idle`, `scrub`, `discover`, and `ups` hold their per-scope topologies,
+//! builders, and helpers.
 
 mod ack;
 mod add;
@@ -121,6 +133,7 @@ mod scrub;
 mod shared;
 mod status;
 mod unlock;
+mod ups;
 
 #[allow(unused_imports)]
 pub(crate) use ack::{
@@ -212,4 +225,9 @@ pub(crate) use unlock::{
     unlock_btrfs_device_scan_ok, unlock_luks_uuid_not_luks, unlock_passphrase_file,
     unlock_storage_fs, unlock_with_mount_degraded_ok, unlock_with_mount_ok,
     unlock_with_open_mapper_ok, unlock_with_test_passphrase_ok, unlock_with_three_mappers_open,
+};
+#[allow(unused_imports)]
+pub(crate) use ups::{
+    ups_query_connection_refused_no_newline, ups_query_connection_refused_with_newline,
+    ups_query_healthy_minimal, ups_write_config,
 };
