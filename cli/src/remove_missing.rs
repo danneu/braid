@@ -587,22 +587,43 @@ fn format_remove_missing_confirm(
         "  {} (devid {})  missing -- no hardware info available\n",
         name, devid
     ));
-    if remaining_present >= 2 {
+    if missing_count == 1 && remaining_present >= 2 {
         msg.push_str("  Data on remaining disks will be rebalanced.\n");
-    } else {
+    } else if missing_count == 1 {
         msg.push_str("  Surviving disk already has all data.\n");
+    } else {
+        let remaining_missing = missing_count.saturating_sub(1);
+        msg.push_str(&format!(
+            "  Pool will remain degraded -- {} missing {} will remain.\n",
+            remaining_missing,
+            if remaining_missing == 1 {
+                "entry"
+            } else {
+                "entries"
+            },
+        ));
     }
-    msg.push_str(&format!(
-        "\nPool: {} present + {} missing -> {} {}\n",
-        remaining_present,
-        missing_count,
-        remaining_present,
-        if remaining_present == 1 {
-            "disk"
-        } else {
-            "disks"
-        },
-    ));
+    if missing_count == 1 {
+        msg.push_str(&format!(
+            "\nPool: {} present + {} missing -> {} {}\n",
+            remaining_present,
+            missing_count,
+            remaining_present,
+            if remaining_present == 1 {
+                "disk"
+            } else {
+                "disks"
+            },
+        ));
+    } else {
+        msg.push_str(&format!(
+            "\nPool: {} present + {} missing -> {} present + {} missing\n",
+            remaining_present,
+            missing_count,
+            remaining_present,
+            missing_count.saturating_sub(1),
+        ));
+    }
     msg
 }
 
@@ -1613,6 +1634,63 @@ mod tests {
         let msg = format_remove_missing_confirm("toshiba", 2, 1, 1);
         assert!(msg.contains("Surviving disk already has all data"));
         assert!(msg.contains("1 present + 1 missing -> 1 disk"));
+    }
+
+    // Intent: verify the confirm prompt accurately describes residual
+    //   degradation and does not promise a rebalance when the pool stays
+    //   degraded -- exercising both new branches added for missing_count >= 2.
+    // Why it exists: regression guard against (a) the "-> X disk(s)" post-op
+    //   shape that previously implied a fully-restored pool when one or more
+    //   missing entries remain, and (b) the "Data on remaining disks will be
+    //   rebalanced" hint that previously promised a balance step that the
+    //   planner does not actually queue when missing_count > 1.
+    // Scenario: pool stays degraded after remove-missing because more than
+    //   one missing entry exists. The (1, 2) case models a 3-disk RAID1 with
+    //   2 dead drives (total_devices = remaining_present + missing_count = 3),
+    //   removing one of the two missing entries. The (2, 2) case models a
+    //   4-disk RAID1 with 2 dead drives, removing the first of two missing
+    //   entries -- this case is the one that catches a regression of the
+    //   rebalance-hint fix.
+    #[test]
+    fn remove_missing_confirm_multiple_missing() {
+        let cases: &[(usize, u64, &str, &str)] = &[
+            (
+                1,
+                2,
+                "1 present + 2 missing -> 1 present + 1 missing",
+                "-> 1 disk",
+            ),
+            (
+                2,
+                2,
+                "2 present + 2 missing -> 2 present + 1 missing",
+                "-> 2 disks",
+            ),
+        ];
+
+        for (rp, mc, expected_shape, forbidden_shape) in cases {
+            let msg = format_remove_missing_confirm("toshiba", 2, *rp, *mc);
+            assert!(
+                msg.contains(expected_shape),
+                "case ({rp}, {mc}): expected post-op shape {expected_shape:?} in:\n{msg}"
+            );
+            assert!(
+                msg.contains("Pool will remain degraded"),
+                "case ({rp}, {mc}): expected degraded hint in:\n{msg}"
+            );
+            assert!(
+                !msg.contains("rebalanced"),
+                "case ({rp}, {mc}): unexpected rebalance promise in:\n{msg}"
+            );
+            assert!(
+                !msg.contains("Surviving disk already has all data"),
+                "case ({rp}, {mc}): unexpected single-survivor hint in:\n{msg}"
+            );
+            assert!(
+                !msg.contains(forbidden_shape),
+                "case ({rp}, {mc}): unexpected fully-restored shape {forbidden_shape:?} in:\n{msg}"
+            );
+        }
     }
 
     // --- plan_remove_missing soft-warn tests ---
