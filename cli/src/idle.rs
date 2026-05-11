@@ -111,9 +111,6 @@ fn busy_unknown(e: impl std::fmt::Display) -> IdleResult {
 
 fn busy_from_exclop(op: ExclusiveOp) -> BusyReason {
     match op {
-        // Should never reach here -- check_no_exclusive_op returns Ok(()) for None.
-        // Map to Balance as a safe fail-busy default rather than panicking.
-        ExclusiveOp::None => BusyReason::Balance,
         ExclusiveOp::Balance => BusyReason::Balance,
         ExclusiveOp::BalancePaused => BusyReason::BalancePaused,
         ExclusiveOp::DeviceAdd => BusyReason::DeviceAdd,

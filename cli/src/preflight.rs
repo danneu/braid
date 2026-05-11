@@ -58,19 +58,21 @@ pub fn check_no_pending_operation(paths: &StatePaths) -> Result<(), String> {
 // Exclusive operation check (sysfs-based)
 // ---------------------------------------------------------------------------
 
-/// Kernel exclusive operation state, read from
-/// `/sys/fs/btrfs/{fsid}/exclusive_operation`.
+/// Recognized btrfs exclusive busy operations, as reported by
+/// `/sys/fs/btrfs/{fsid}/exclusive_operation`. Does not include the
+/// kernel's `"none"` sentinel -- absence of a busy op is modeled as
+/// `Ok(None)` from [`ExclusiveOp::parse`], so consumers cannot
+/// accidentally treat idle as a member of this enum.
 ///
 /// String values follow `exclop_def[]` in btrfs-progs
 /// `common/utils.c:1186-1194` (vendored in `reference/btrfs-progs/`).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum ExclusiveOp {
-    None,
     Balance,
     BalancePaused,
     DeviceAdd,
-    /// The kernel writes "device remove" — not "device delete" as
-    /// btrfs-man5.rst sometimes says.  Follows `exclop_def[]` in
+    /// The kernel writes "device remove" -- not "device delete" as
+    /// btrfs-man5.rst sometimes says. Follows `exclop_def[]` in
     /// `reference/btrfs-progs/common/utils.c:1191`.
     DeviceRemove,
     DeviceReplace,
@@ -79,17 +81,20 @@ pub(crate) enum ExclusiveOp {
 }
 
 impl ExclusiveOp {
-    pub fn parse(s: &str) -> Option<Self> {
+    /// Parse a single value from `/sys/fs/btrfs/{fsid}/exclusive_operation`.
+    /// Expects caller-trimmed input; `"none"` means idle, recognized busy
+    /// values return `Ok(Some(op))`, and unknown values return the input.
+    pub fn parse(s: &str) -> Result<Option<Self>, String> {
         match s {
-            "none" => Some(Self::None),
-            "balance" => Some(Self::Balance),
-            "balance paused" => Some(Self::BalancePaused),
-            "device add" => Some(Self::DeviceAdd),
-            "device remove" => Some(Self::DeviceRemove),
-            "device replace" => Some(Self::DeviceReplace),
-            "resize" => Some(Self::Resize),
-            "swap activate" => Some(Self::SwapActivate),
-            _ => Option::None,
+            "none" => Ok(None),
+            "balance" => Ok(Some(Self::Balance)),
+            "balance paused" => Ok(Some(Self::BalancePaused)),
+            "device add" => Ok(Some(Self::DeviceAdd)),
+            "device remove" => Ok(Some(Self::DeviceRemove)),
+            "device replace" => Ok(Some(Self::DeviceReplace)),
+            "resize" => Ok(Some(Self::Resize)),
+            "swap activate" => Ok(Some(Self::SwapActivate)),
+            other => Err(other.to_owned()),
         }
     }
 }
@@ -97,7 +102,6 @@ impl ExclusiveOp {
 impl fmt::Display for ExclusiveOp {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            Self::None => write!(f, "none"),
             Self::Balance => write!(f, "balance"),
             Self::BalancePaused => write!(f, "balance (paused)"),
             Self::DeviceAdd => write!(f, "device add"),
@@ -180,11 +184,10 @@ pub(crate) fn check_no_exclusive_op<F: Filesystem + ?Sized>(
 ) -> Result<(), ExclusiveOpError> {
     let path = format!("/sys/fs/btrfs/{fsid}/exclusive_operation");
     let contents = fs.read_to_string(&path).map_err(ExclusiveOpError::Read)?;
-    let op = ExclusiveOp::parse(contents.trim())
-        .ok_or_else(|| ExclusiveOpError::Unrecognized(contents.trim().to_owned()))?;
-    match op {
-        ExclusiveOp::None => Ok(()),
-        _ => Err(ExclusiveOpError::Busy(op)),
+    match ExclusiveOp::parse(contents.trim()) {
+        Ok(None) => Ok(()),
+        Ok(Some(op)) => Err(ExclusiveOpError::Busy(op)),
+        Err(s) => Err(ExclusiveOpError::Unrecognized(s)),
     }
 }
 
@@ -233,10 +236,10 @@ pub(crate) fn check_any_btrfs_exclusive_op<F: Filesystem + ?Sized>(
         let path = format!("/sys/fs/btrfs/{entry}/exclusive_operation");
         let contents = fs.read_to_string(&path).map_err(ExclusiveOpError::Read)?;
         found_fsid_dir = true;
-        let op = ExclusiveOp::parse(contents.trim())
-            .ok_or_else(|| ExclusiveOpError::Unrecognized(contents.trim().to_owned()))?;
-        if op != ExclusiveOp::None {
-            return Err(ExclusiveOpError::Busy(op));
+        match ExclusiveOp::parse(contents.trim()) {
+            Ok(None) => continue,
+            Ok(Some(op)) => return Err(ExclusiveOpError::Busy(op)),
+            Err(s) => return Err(ExclusiveOpError::Unrecognized(s)),
         }
     }
     if !found_fsid_dir {
@@ -600,42 +603,55 @@ mod tests {
     // --- ExclusiveOp::parse tests ---
 
     #[test]
-    // Intent: ExclusiveOp::parse recognizes all sysfs strings from exclop_def[].
-    // Why: Ensures the parser covers every value the kernel can write.
+    // Intent: ExclusiveOp::parse maps every sysfs string from exclop_def[]
+    //   to the right outcome -- `"none"` -> Ok(None) (idle), each busy
+    //   string -> Ok(Some(variant)).
+    // Why: Pins the type-level split between idle and busy. If a kernel
+    //   string is added or renamed, this catches it before the busy paths
+    //   silently misclassify.
     // Scenario: Kernel writes each possible exclusive_operation value.
     fn exclusive_op_parse_all_variants() {
-        assert_eq!(ExclusiveOp::parse("none"), Some(ExclusiveOp::None));
-        assert_eq!(ExclusiveOp::parse("balance"), Some(ExclusiveOp::Balance));
+        assert_eq!(ExclusiveOp::parse("none"), Ok(None));
+        assert_eq!(
+            ExclusiveOp::parse("balance"),
+            Ok(Some(ExclusiveOp::Balance))
+        );
         assert_eq!(
             ExclusiveOp::parse("balance paused"),
-            Some(ExclusiveOp::BalancePaused)
+            Ok(Some(ExclusiveOp::BalancePaused))
         );
         assert_eq!(
             ExclusiveOp::parse("device add"),
-            Some(ExclusiveOp::DeviceAdd)
+            Ok(Some(ExclusiveOp::DeviceAdd))
         );
         assert_eq!(
             ExclusiveOp::parse("device remove"),
-            Some(ExclusiveOp::DeviceRemove)
+            Ok(Some(ExclusiveOp::DeviceRemove))
         );
         assert_eq!(
             ExclusiveOp::parse("device replace"),
-            Some(ExclusiveOp::DeviceReplace)
+            Ok(Some(ExclusiveOp::DeviceReplace))
         );
-        assert_eq!(ExclusiveOp::parse("resize"), Some(ExclusiveOp::Resize));
+        assert_eq!(ExclusiveOp::parse("resize"), Ok(Some(ExclusiveOp::Resize)));
         assert_eq!(
             ExclusiveOp::parse("swap activate"),
-            Some(ExclusiveOp::SwapActivate)
+            Ok(Some(ExclusiveOp::SwapActivate))
         );
     }
 
     #[test]
-    // Intent: ExclusiveOp::parse returns None for unrecognized values.
-    // Why: Future kernel versions may add new op types; fail-closed is safer.
+    // Intent: ExclusiveOp::parse returns Err(s) carrying the unrecognized
+    //   input for any value outside exclop_def[].
+    // Why: Future kernel versions may add new op types; fail-closed is
+    //   safer. Carrying the offending string lets callers surface it via
+    //   `ExclusiveOpError::Unrecognized`.
     // Scenario: Kernel writes a value not in exclop_def[].
     fn exclusive_op_parse_unrecognized() {
-        assert_eq!(ExclusiveOp::parse("something new"), Option::None);
-        assert_eq!(ExclusiveOp::parse(""), Option::None);
+        assert_eq!(
+            ExclusiveOp::parse("something new"),
+            Err("something new".to_string())
+        );
+        assert_eq!(ExclusiveOp::parse(""), Err(String::new()));
     }
 
     #[test]
