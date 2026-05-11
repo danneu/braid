@@ -144,206 +144,12 @@ fn is_btrfs_mounted<F: Filesystem + ?Sized>(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::cmd::{MockRunner, RawCommandOutput};
-    use std::collections::HashMap;
+    use crate::cmd::MockRunner;
+    use crate::test_fixtures::{
+        IDLE_FSID, IDLE_FSID_OTHER, IdleMockFs, assert_idle_busy_unknown, idle_mp,
+        idle_ready_for_sysfs_check, idle_runner_with_scrub_finished, idle_scrub_running,
+    };
     use std::io::ErrorKind;
-
-    const FSID: &str = "12345678-1234-1234-1234-123456789abc";
-    const FSID_OTHER: &str = "deadbeef-dead-beef-dead-beefdeadbeef";
-
-    fn mp() -> MountPoint {
-        MountPoint("/mnt/storage".into())
-    }
-
-    const MOUNTINFO_WITH_BTRFS_TARGET: &str =
-        "36 35 0:32 / /mnt/storage rw,noatime shared:1 - btrfs /dev/mapper/braid-disk1 rw\n";
-    const MOUNTINFO_WITHOUT_TARGET: &str =
-        "26 25 0:23 / / rw,noatime shared:1 - ext4 /dev/sda1 rw\n";
-
-    /// HashMap-backed MockFs. `read_to_string` and `list_dir` look up the
-    /// requested path in their respective maps; an unseeded path yields a
-    /// NotFound error so a test fails loudly if `cmd_idle` reaches for an
-    /// unexpected file -- the strict-defense behavior the previous mock
-    /// had for its single `expected_path`.
-    struct MockFs {
-        reads: HashMap<String, Result<String, ErrorKind>>,
-        list_dirs: HashMap<String, Result<Vec<String>, ErrorKind>>,
-    }
-
-    impl MockFs {
-        fn empty() -> Self {
-            Self {
-                reads: HashMap::new(),
-                list_dirs: HashMap::new(),
-            }
-        }
-
-        fn seed_mountinfo(mut self, content: &str) -> Self {
-            self.reads
-                .insert("/proc/self/mountinfo".into(), Ok(content.to_string()));
-            self
-        }
-
-        fn seed_btrfs_listing(mut self, entries: &[&str]) -> Self {
-            self.list_dirs.insert(
-                "/sys/fs/btrfs".into(),
-                Ok(entries.iter().map(|s| (*s).to_string()).collect()),
-            );
-            self
-        }
-
-        fn seed_btrfs_listing_error(mut self, kind: ErrorKind) -> Self {
-            self.list_dirs.insert("/sys/fs/btrfs".into(), Err(kind));
-            self
-        }
-
-        fn seed_exclop(mut self, fsid: &str, body: &str) -> Self {
-            self.reads.insert(
-                format!("/sys/fs/btrfs/{fsid}/exclusive_operation"),
-                Ok(format!("{body}\n")),
-            );
-            self
-        }
-
-        fn seed_exclop_error(mut self, fsid: &str, kind: ErrorKind) -> Self {
-            self.reads.insert(
-                format!("/sys/fs/btrfs/{fsid}/exclusive_operation"),
-                Err(kind),
-            );
-            self
-        }
-
-        /// Typical case: mountinfo says btrfs is mounted at /mnt/storage,
-        /// /sys/fs/btrfs/ contains exactly one fsid dir, and that dir's
-        /// `exclusive_operation` reads `body`.
-        fn with_exclop(body: &str) -> Self {
-            Self::empty()
-                .seed_mountinfo(MOUNTINFO_WITH_BTRFS_TARGET)
-                .seed_btrfs_listing(&[FSID])
-                .seed_exclop(FSID, body)
-        }
-
-        /// Sysfs read fails on the fsid's `exclusive_operation`.
-        /// Uses `PermissionDenied` to keep this constructor focused on
-        /// non-`NotFound` read errors. `NotFound` on a non-allowlisted
-        /// entry is covered by `idle_unknown_entry_notfound_is_fail_closed`.
-        fn with_read_error() -> Self {
-            Self::empty()
-                .seed_mountinfo(MOUNTINFO_WITH_BTRFS_TARGET)
-                .seed_btrfs_listing(&[FSID])
-                .seed_exclop_error(FSID, ErrorKind::PermissionDenied)
-        }
-
-        /// Mountinfo body lacks the configured target -- pool reads as
-        /// offline before the scrub or sysfs branches run.
-        fn with_offline_mountinfo() -> Self {
-            Self::empty().seed_mountinfo(MOUNTINFO_WITHOUT_TARGET)
-        }
-
-        /// `/proc/self/mountinfo` read fails -- exercises the IO path of
-        /// MountInfoError.
-        fn with_no_mountinfo() -> Self {
-            Self::empty()
-        }
-
-        /// Custom mountinfo content -- exercises the parser path of
-        /// MountInfoError.
-        fn with_mountinfo(content: &str) -> Self {
-            Self::empty().seed_mountinfo(content)
-        }
-    }
-
-    impl Filesystem for MockFs {
-        fn exists(&self, _path: &str) -> bool {
-            false
-        }
-
-        fn is_block_device(&self, _path: &str) -> bool {
-            false
-        }
-
-        fn read_to_string(&self, path: &str) -> Result<String, std::io::Error> {
-            match self.reads.get(path) {
-                Some(Ok(s)) => Ok(s.clone()),
-                Some(Err(kind)) => Err(std::io::Error::new(
-                    *kind,
-                    format!("MockFs: seeded read error for {path}"),
-                )),
-                None => Err(std::io::Error::new(
-                    ErrorKind::NotFound,
-                    format!("MockFs: unexpected path {path}"),
-                )),
-            }
-        }
-
-        fn list_dir(&self, path: &str) -> Result<Vec<String>, std::io::Error> {
-            match self.list_dirs.get(path) {
-                Some(Ok(v)) => Ok(v.clone()),
-                Some(Err(kind)) => Err(std::io::Error::new(
-                    *kind,
-                    format!("MockFs: seeded list_dir error for {path}"),
-                )),
-                None => Err(std::io::Error::new(
-                    ErrorKind::NotFound,
-                    format!("MockFs: unexpected list_dir {path}"),
-                )),
-            }
-        }
-    }
-
-    fn scrub_finished() -> (CmdRequest, RawCommandOutput) {
-        (
-            CmdRequest::BtrfsScrubStatus { mount_point: mp() },
-            RawCommandOutput {
-                cmd: "btrfs scrub status --raw /mnt/storage".into(),
-                stdout: "UUID:             12345678-1234-1234-1234-123456789abc\n\
-                         Scrub started:    Mon Jan  1 00:00:00 2024\n\
-                         Status:           finished\n\
-                         Duration:         0:00:01\n\
-                         Total to scrub:   1073741824\n\
-                         Rate:             1073741824/s\n\
-                         Error summary:    no errors found\n"
-                    .into(),
-                stderr: String::new(),
-                exit_status: 0,
-            },
-        )
-    }
-
-    fn scrub_running(pct: u8) -> (CmdRequest, RawCommandOutput) {
-        let total: u64 = 30408704000;
-        let scrubbed = total * u64::from(pct) / 100;
-        (
-            CmdRequest::BtrfsScrubStatus { mount_point: mp() },
-            RawCommandOutput {
-                cmd: "btrfs scrub status --raw /mnt/storage".into(),
-                stdout: format!(
-                    "UUID:             12345678-1234-1234-1234-123456789abc\n\
-                     Scrub started:    Mon Jan  1 00:00:00 2024\n\
-                     Status:           running\n\
-                     Duration:         0:00:05\n\
-                     Total to scrub:   {total}\n\
-                     Bytes scrubbed:   {scrubbed}  ({pct}.00%)\n\
-                     Rate:             2952790016/s\n\
-                     Error summary:    no errors found\n"
-                ),
-                stderr: String::new(),
-                exit_status: 0,
-            },
-        )
-    }
-
-    fn runner_with_scrub_finished() -> MockRunner {
-        let (req, out) = scrub_finished();
-        MockRunner::default().with_output(req, out)
-    }
-
-    fn assert_busy_unknown(result: IdleResult) {
-        assert!(
-            matches!(result, IdleResult::Busy(BusyReason::Unknown(_))),
-            "got {result:?}"
-        );
-    }
 
     // Intent: Pool not mounted -> PoolOffline (idle).
     // Why: If the pool is offline, there's nothing to protect -- allow suspend.
@@ -351,8 +157,8 @@ mod tests {
     #[test]
     fn idle_when_pool_offline() {
         let runner = MockRunner::default();
-        let fs = MockFs::with_offline_mountinfo();
-        let result = cmd_idle(&runner, &fs, &mp());
+        let fs = IdleMockFs::offline_mountinfo();
+        let result = cmd_idle(&runner, &fs, &idle_mp());
         assert_eq!(result, IdleResult::PoolOffline);
     }
 
@@ -361,10 +167,10 @@ mod tests {
     // Scenario: NAS pool is online but no user activity or maintenance in progress.
     #[test]
     fn idle_when_all_ops_quiet() {
-        let runner = runner_with_scrub_finished();
-        let fs = MockFs::with_exclop("none");
+        let runner = idle_runner_with_scrub_finished();
+        let fs = IdleMockFs::with_exclop("none");
 
-        let result = cmd_idle(&runner, &fs, &mp());
+        let result = cmd_idle(&runner, &fs, &idle_mp());
         assert_eq!(result, IdleResult::Idle);
     }
 
@@ -374,24 +180,18 @@ mod tests {
     // Scenario: Monthly auto-scrub is in progress when autosuspend checks.
     #[test]
     fn busy_when_scrub_running() {
-        let (scrub_req, scrub_out) = scrub_running(45);
+        let (scrub_req, scrub_out) = idle_scrub_running(45);
         let runner = MockRunner::default().with_output(scrub_req, scrub_out);
         // Deliberately seed mountinfo only (no /sys/fs/btrfs listing) --
         // a passing test proves we short-circuit on the scrub probe
         // before the sysfs scan would error on unseeded list_dir.
-        let fs = MockFs::empty().seed_mountinfo(MOUNTINFO_WITH_BTRFS_TARGET);
+        let fs = IdleMockFs::mounted_btrfs_only();
 
-        let result = cmd_idle(&runner, &fs, &mp());
+        let result = cmd_idle(&runner, &fs, &idle_mp());
         assert_eq!(
             result,
             IdleResult::Busy(BusyReason::ScrubRunning { pct: Some(45) })
         );
-    }
-
-    /// Build a runner+fs ready to drive cmd_idle to the sysfs scan step
-    /// (mount + scrub-clean already seeded; one fsid dir with `exclop`).
-    fn ready_for_sysfs_check(exclop: &str) -> (MockRunner, MockFs) {
-        (runner_with_scrub_finished(), MockFs::with_exclop(exclop))
     }
 
     // Intent: Each kernel exclop string maps to the matching BusyReason.
@@ -403,50 +203,50 @@ mod tests {
     //   `braid idle` must report busy so autosuspend does not suspend.
     #[test]
     fn busy_when_balance() {
-        let (runner, fs) = ready_for_sysfs_check("balance");
-        let result = cmd_idle(&runner, &fs, &mp());
+        let (runner, fs) = idle_ready_for_sysfs_check("balance");
+        let result = cmd_idle(&runner, &fs, &idle_mp());
         assert_eq!(result, IdleResult::Busy(BusyReason::Balance));
     }
 
     #[test]
     fn busy_when_balance_paused() {
-        let (runner, fs) = ready_for_sysfs_check("balance paused");
-        let result = cmd_idle(&runner, &fs, &mp());
+        let (runner, fs) = idle_ready_for_sysfs_check("balance paused");
+        let result = cmd_idle(&runner, &fs, &idle_mp());
         assert_eq!(result, IdleResult::Busy(BusyReason::BalancePaused));
     }
 
     #[test]
     fn busy_when_device_add() {
-        let (runner, fs) = ready_for_sysfs_check("device add");
-        let result = cmd_idle(&runner, &fs, &mp());
+        let (runner, fs) = idle_ready_for_sysfs_check("device add");
+        let result = cmd_idle(&runner, &fs, &idle_mp());
         assert_eq!(result, IdleResult::Busy(BusyReason::DeviceAdd));
     }
 
     #[test]
     fn busy_when_device_remove() {
-        let (runner, fs) = ready_for_sysfs_check("device remove");
-        let result = cmd_idle(&runner, &fs, &mp());
+        let (runner, fs) = idle_ready_for_sysfs_check("device remove");
+        let result = cmd_idle(&runner, &fs, &idle_mp());
         assert_eq!(result, IdleResult::Busy(BusyReason::DeviceRemove));
     }
 
     #[test]
     fn busy_when_device_replace() {
-        let (runner, fs) = ready_for_sysfs_check("device replace");
-        let result = cmd_idle(&runner, &fs, &mp());
+        let (runner, fs) = idle_ready_for_sysfs_check("device replace");
+        let result = cmd_idle(&runner, &fs, &idle_mp());
         assert_eq!(result, IdleResult::Busy(BusyReason::DeviceReplace));
     }
 
     #[test]
     fn busy_when_resize() {
-        let (runner, fs) = ready_for_sysfs_check("resize");
-        let result = cmd_idle(&runner, &fs, &mp());
+        let (runner, fs) = idle_ready_for_sysfs_check("resize");
+        let result = cmd_idle(&runner, &fs, &idle_mp());
         assert_eq!(result, IdleResult::Busy(BusyReason::Resize));
     }
 
     #[test]
     fn busy_when_swap_activate() {
-        let (runner, fs) = ready_for_sysfs_check("swap activate");
-        let result = cmd_idle(&runner, &fs, &mp());
+        let (runner, fs) = idle_ready_for_sysfs_check("swap activate");
+        let result = cmd_idle(&runner, &fs, &idle_mp());
         assert_eq!(result, IdleResult::Busy(BusyReason::SwapActivate));
     }
 
@@ -457,9 +257,9 @@ mod tests {
     // Scenario: New btrfs version writes a new state we do not yet handle.
     #[test]
     fn busy_unknown_on_unrecognized_exclop() {
-        let (runner, fs) = ready_for_sysfs_check("brand new op");
-        let result = cmd_idle(&runner, &fs, &mp());
-        assert_busy_unknown(result);
+        let (runner, fs) = idle_ready_for_sysfs_check("brand new op");
+        let result = cmd_idle(&runner, &fs, &idle_mp());
+        assert_idle_busy_unknown(result);
     }
 
     // Intent: Sysfs read error on a real fsid dir -> Busy::Unknown
@@ -473,11 +273,11 @@ mod tests {
     //   the fsid dir present but inaccessible.
     #[test]
     fn busy_unknown_on_sysfs_read_failure() {
-        let runner = runner_with_scrub_finished();
-        let fs = MockFs::with_read_error();
+        let runner = idle_runner_with_scrub_finished();
+        let fs = IdleMockFs::with_exclop_read_error(ErrorKind::PermissionDenied);
 
-        let result = cmd_idle(&runner, &fs, &mp());
-        assert_busy_unknown(result);
+        let result = cmd_idle(&runner, &fs, &idle_mp());
+        assert_idle_busy_unknown(result);
     }
 
     // Intent: `cmd_idle` must NOT call `BtrfsBalanceStatus`,
@@ -492,8 +292,8 @@ mod tests {
     //   probe; this test catches it before merge.
     #[test]
     fn no_balance_or_replace_subprocess_calls() {
-        let (runner, fs) = ready_for_sysfs_check("none");
-        let result = cmd_idle(&runner, &fs, &mp());
+        let (runner, fs) = idle_ready_for_sysfs_check("none");
+        let result = cmd_idle(&runner, &fs, &idle_mp());
         assert_eq!(result, IdleResult::Idle);
     }
 
@@ -507,10 +307,10 @@ mod tests {
     fn busy_unknown_on_scrub_probe_failure() {
         // No scrub mock -> MissingMock when scrub is queried.
         let runner = MockRunner::default();
-        let fs = MockFs::with_exclop("none");
+        let fs = IdleMockFs::with_exclop("none");
 
-        let result = cmd_idle(&runner, &fs, &mp());
-        assert_busy_unknown(result);
+        let result = cmd_idle(&runner, &fs, &idle_mp());
+        assert_idle_busy_unknown(result);
     }
 
     /* Intent: a `/proc/self/mountinfo` IO failure must propagate as
@@ -522,15 +322,15 @@ mod tests {
      *   abstraction; the equivalent failure mode is the file being
      *   unreadable and must surface as Busy::Unknown for the
      *   fail-closed contract to hold.
-     * Scenario: MockFs.read_to_string("/proc/self/mountinfo") returns
+     * Scenario: IdleMockFs.read_to_string("/proc/self/mountinfo") returns
      *   NotFound.
      */
     #[test]
     fn mountinfo_read_failure_is_busy_unknown() {
         let runner = MockRunner::default();
-        let fs = MockFs::with_no_mountinfo();
-        let result = cmd_idle(&runner, &fs, &mp());
-        assert_busy_unknown(result);
+        let fs = IdleMockFs::empty();
+        let result = cmd_idle(&runner, &fs, &idle_mp());
+        assert_idle_busy_unknown(result);
     }
 
     /* Intent: malformed mountinfo content for the target line must
@@ -545,11 +345,11 @@ mod tests {
     #[test]
     fn mountinfo_malformed_target_line_is_busy_unknown() {
         let runner = MockRunner::default();
-        let fs = MockFs::with_mountinfo(
+        let fs = IdleMockFs::with_mountinfo(
             "36 35 0:32 / /mnt/storage rw,noatime shared:1 garbage_no_dash_separator\n",
         );
-        let result = cmd_idle(&runner, &fs, &mp());
-        assert_busy_unknown(result);
+        let result = cmd_idle(&runner, &fs, &idle_mp());
+        assert_idle_busy_unknown(result);
     }
 
     /* Intent: `/sys/fs/btrfs/` entries named `features` or `debug` are
@@ -565,19 +365,18 @@ mod tests {
      */
     #[test]
     fn idle_skips_features_and_debug_pseudo_dirs() {
-        let runner = runner_with_scrub_finished();
+        let runner = idle_runner_with_scrub_finished();
         // Deliberately do NOT seed `features` or `debug` exclop reads.
-        // If the helper ever stopped skipping them by name, MockFs's
+        // If the helper ever stopped skipping them by name, IdleMockFs's
         // unseeded-path fallback would return NotFound, which under the
         // current allowlist-only skip would now produce Busy::Unknown.
         // So either direction of regression in the skip rule is
         // observable here.
-        let fs = MockFs::empty()
-            .seed_mountinfo(MOUNTINFO_WITH_BTRFS_TARGET)
-            .seed_btrfs_listing(&["features", "debug", FSID])
-            .seed_exclop(FSID, "none");
+        let fs = IdleMockFs::mounted_btrfs_only()
+            .seed_btrfs_listing(&["features", "debug", IDLE_FSID])
+            .seed_exclop(IDLE_FSID, "none");
 
-        let result = cmd_idle(&runner, &fs, &mp());
+        let result = cmd_idle(&runner, &fs, &idle_mp());
         assert_eq!(result, IdleResult::Idle);
     }
 
@@ -590,21 +389,21 @@ mod tests {
      *   NotFound as a skip, a busy state on that fs would never be
      *   observed and autosuspend would proceed despite incomplete
      *   coverage of the listed btrfs filesystems.
-     * Scenario: list returns [FSID, FSID_OTHER]; the FSID dir reports
-     *   `none`; FSID_OTHER's exclop file is gone (unmount race). Must
-     *   return Busy::Unknown rather than concluding Idle from FSID alone.
+     * Scenario: list returns [IDLE_FSID, IDLE_FSID_OTHER]; the IDLE_FSID dir
+     *   reports `none`; IDLE_FSID_OTHER's exclop file is gone (unmount race).
+     *   Must return Busy::Unknown rather than concluding Idle from IDLE_FSID
+     *   alone.
      */
     #[test]
     fn idle_unknown_entry_notfound_is_fail_closed() {
-        let runner = runner_with_scrub_finished();
-        let fs = MockFs::empty()
-            .seed_mountinfo(MOUNTINFO_WITH_BTRFS_TARGET)
-            .seed_btrfs_listing(&[FSID, FSID_OTHER])
-            .seed_exclop(FSID, "none");
-        // FSID_OTHER intentionally has no exclop seeded -> NotFound.
+        let runner = idle_runner_with_scrub_finished();
+        let fs = IdleMockFs::mounted_btrfs_only()
+            .seed_btrfs_listing(&[IDLE_FSID, IDLE_FSID_OTHER])
+            .seed_exclop(IDLE_FSID, "none");
+        // IDLE_FSID_OTHER intentionally has no exclop seeded -> NotFound.
 
-        let result = cmd_idle(&runner, &fs, &mp());
-        assert_busy_unknown(result);
+        let result = cmd_idle(&runner, &fs, &idle_mp());
+        assert_idle_busy_unknown(result);
     }
 
     /* Intent: when the host has multiple btrfs filesystems, ANY busy
@@ -618,17 +417,16 @@ mod tests {
      */
     #[test]
     fn idle_any_busy_blocks_suspend_multi_btrfs() {
-        let runner = runner_with_scrub_finished();
+        let runner = idle_runner_with_scrub_finished();
         // First entry is `none`, second is `balance`. The helper iterates
         // entries in returned order, so the loop must continue past the
         // first and report Busy on the second.
-        let fs = MockFs::empty()
-            .seed_mountinfo(MOUNTINFO_WITH_BTRFS_TARGET)
-            .seed_btrfs_listing(&[FSID_OTHER, FSID])
-            .seed_exclop(FSID_OTHER, "none")
-            .seed_exclop(FSID, "balance");
+        let fs = IdleMockFs::mounted_btrfs_only()
+            .seed_btrfs_listing(&[IDLE_FSID_OTHER, IDLE_FSID])
+            .seed_exclop(IDLE_FSID_OTHER, "none")
+            .seed_exclop(IDLE_FSID, "balance");
 
-        let result = cmd_idle(&runner, &fs, &mp());
+        let result = cmd_idle(&runner, &fs, &idle_mp());
         assert_eq!(result, IdleResult::Busy(BusyReason::Balance));
     }
 
@@ -643,13 +441,11 @@ mod tests {
      */
     #[test]
     fn idle_zero_fsid_dirs_after_mount_check_is_busy_unknown() {
-        let runner = runner_with_scrub_finished();
-        let fs = MockFs::empty()
-            .seed_mountinfo(MOUNTINFO_WITH_BTRFS_TARGET)
-            .seed_btrfs_listing(&[]);
+        let runner = idle_runner_with_scrub_finished();
+        let fs = IdleMockFs::mounted_btrfs_only().seed_btrfs_listing(&[]);
 
-        let result = cmd_idle(&runner, &fs, &mp());
-        assert_busy_unknown(result);
+        let result = cmd_idle(&runner, &fs, &idle_mp());
+        assert_idle_busy_unknown(result);
     }
 
     /* Intent: a `list_dir("/sys/fs/btrfs")` IO failure (e.g.
@@ -666,12 +462,11 @@ mod tests {
      */
     #[test]
     fn idle_list_dir_io_error_is_fail_closed() {
-        let runner = runner_with_scrub_finished();
-        let fs = MockFs::empty()
-            .seed_mountinfo(MOUNTINFO_WITH_BTRFS_TARGET)
-            .seed_btrfs_listing_error(ErrorKind::PermissionDenied);
+        let runner = idle_runner_with_scrub_finished();
+        let fs =
+            IdleMockFs::mounted_btrfs_only().seed_btrfs_listing_error(ErrorKind::PermissionDenied);
 
-        let result = cmd_idle(&runner, &fs, &mp());
-        assert_busy_unknown(result);
+        let result = cmd_idle(&runner, &fs, &idle_mp());
+        assert_idle_busy_unknown(result);
     }
 }

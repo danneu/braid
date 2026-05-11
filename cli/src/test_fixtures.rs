@@ -1,6 +1,6 @@
 //! Test-only shared fixtures for `replace`, `add`, `remove`,
 //! `remove_missing`, `recover`, `doctor`, `mount`, `enroll_key_file`,
-//! `unlock`, `status`, `lock`, `ack`, and `monitor`.
+//! `unlock`, `status`, `lock`, `ack`, `monitor`, and `idle`.
 //!
 //! These fixtures consolidate the per-test scaffolding that previously
 //! lived as one-off `*Runner` structs and inline `tempdir + config + pass +
@@ -75,6 +75,9 @@
 //!   * `monitor` -- flat collection of monitor-shaped helpers with strict
 //!     probe runners and mountinfo-only filesystem fixtures so fail-closed
 //!     branches and state-file side effects remain visible in the tests.
+//!   * `idle` -- flat idle helpers with a strict mountinfo/sysfs filesystem
+//!     mock and scrub output factories. It deliberately avoids a broad runner
+//!     because missing mocks and missing sysfs seeds are load-bearing.
 //!   * `PoolFixture` -- bundled tempdirs + `StatePaths` + config +
 //!     passphrase + `RecordingInhibitor`.
 //!   * `ReplaceParamsBuilder` / `AddParamsBuilder` / `RemoveParamsBuilder`
@@ -83,13 +86,14 @@
 //!
 //! Layout: this file is a facade. `shared` holds cross-scope items;
 //! `replace`, `add`, `remove`, `remove_missing`, `recover`, `doctor`,
-//! `mount`, `enroll_key_file`, `unlock`, `status`, `lock`, `ack`, and
-//! `monitor` hold their per-scope topologies, builders, and helpers.
+//! `mount`, `enroll_key_file`, `unlock`, `status`, `lock`, `ack`, `monitor`,
+//! and `idle` hold their per-scope topologies, builders, and helpers.
 
 mod ack;
 mod add;
 mod doctor;
 mod enroll_key_file;
+mod idle;
 mod lock;
 mod monitor;
 mod mount;
@@ -122,6 +126,12 @@ pub(crate) use enroll_key_file::{
     enroll_luks_uuid_ok, enroll_make_existing_keyfile, enroll_make_membership, enroll_passphrase,
     enroll_test_keyfile_fail, enroll_test_keyfile_ok, enroll_test_passphrase_fail,
     enroll_test_passphrase_ok, enroll_with_mountpoint_fail, enroll_with_mountpoint_ok,
+};
+#[allow(unused_imports)]
+pub(crate) use idle::{
+    IDLE_FSID, IDLE_FSID_OTHER, IdleMockFs, assert_idle_busy_unknown, idle_mp,
+    idle_ready_for_sysfs_check, idle_runner_with_scrub_finished, idle_scrub_finished,
+    idle_scrub_running,
 };
 pub(crate) use lock::{
     LockNoopSleeper, RecordingRunner as LockRecordingRunner, lock_count_forget_steps, lock_err_raw,
