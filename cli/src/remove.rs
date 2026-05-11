@@ -293,6 +293,12 @@ impl RemovePlan {
         if !pre_membership.disks.contains_key(&work_plan.name) {
             return Err(absent_from_membership_error(&work_plan.name));
         }
+        // Pin the target's live btrfs devid into the journal so recovery can
+        // drop the matching acked-stats entry after a committed eviction.
+        let mut pre_membership = pre_membership;
+        if let Some(member) = pre_membership.disks.get_mut(&work_plan.name) {
+            member.devid = Some(work_plan.target_devid);
+        }
         let mut target_membership = pre_membership.clone();
         target_membership.disks.remove(&work_plan.name);
         let journal = journal::build_journal(
@@ -884,6 +890,50 @@ mod tests {
         assert!(
             !reloaded.0.contains_key("2"),
             "removed target devid must be pruned"
+        );
+    }
+
+    // Intent
+    // `cmd_remove` writes the target's live btrfs devid into the journal's
+    // pre_membership before mutating the pool.
+    //
+    // Why it exists
+    // Recovery uses the journaled devid for acked-stats hygiene; pool.json
+    // entries written from by-id discovery may not carry devids yet.
+    //
+    // Scenario
+    // Starting from a healthy two-disk pool.json with no devids, device remove
+    // fails after journal write, leaving the journal inspectable.
+    #[test]
+    fn remove_journal_pre_membership_carries_target_devid() {
+        let f = PoolFixture::two_disk_healthy();
+        let runner = RemovalPool::two_disk()
+            .install(MockRunner::default())
+            .with_handler(|req| match req {
+                CmdRequest::BtrfsDeviceRemove { .. } => Some(Ok(RawCommandOutput {
+                    cmd: "btrfs device remove".into(),
+                    stdout: String::new(),
+                    stderr: "ERROR: error removing device".into(),
+                    exit_status: 1,
+                })),
+                _ => None,
+            });
+        let fs = MockFs::storage(vec![]);
+
+        let result = cmd_remove(&runner, &fs, &f.remove_params().build());
+
+        assert!(result.is_err(), "remove should fail after journal write");
+        let journal = journal::load_journal(&f.paths)
+            .unwrap()
+            .expect("failed device remove should preserve pending journal");
+        assert_eq!(
+            journal.pre_membership.disks["disk2"].devid,
+            Some(2),
+            "journaled pre_membership must pin disk2's live devid"
+        );
+        assert!(
+            !journal.target_membership.disks.contains_key("disk2"),
+            "target membership should still remove disk2"
         );
     }
 

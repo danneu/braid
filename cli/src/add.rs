@@ -636,7 +636,11 @@ fn format_add_done(names: &[String]) -> String {
     )
 }
 
-fn devid_for_mapper_path(pool: &PoolState, mapper_path: &str) -> Option<u64> {
+/// Mapper-path to devid lookup shared by `cmd_add` and `cmd_recover`.
+///
+/// Both call sites need the canonical post-btrfs-add devid mapping to drop
+/// stale acked-stats baselines for newly assigned devids.
+pub(crate) fn devid_for_mapper_path(pool: &PoolState, mapper_path: &str) -> Option<u64> {
     let mapper = mapper_path
         .strip_prefix("/dev/mapper/")
         .unwrap_or(mapper_path);

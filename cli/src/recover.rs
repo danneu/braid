@@ -1,3 +1,5 @@
+use crate::add::devid_for_mapper_path;
+use crate::alert;
 use crate::cmd::{CmdRequest, CommandRunner, Step};
 use crate::config::{self, Config};
 use crate::credential::{self, OpenCredential};
@@ -41,6 +43,12 @@ pub enum RecoverError {
     Luks(#[from] crate::luks::LuksError),
     #[error("{0}")]
     Failed(String),
+    #[error(
+        "pool was modified by recovery, but acked-stats cleanup failed at {stage}: {detail}\n\
+         pending-op.json is preserved; rm /var/lib/braid/acked-stats.json before \
+         trusting `braid monitor`, then re-run `braid recover`."
+    )]
+    AckCleanupFailed { stage: &'static str, detail: String },
 }
 
 /// Recovery-local passphrase holder that preserves zeroizing ownership.
@@ -1022,6 +1030,15 @@ fn execute_generic_live_pool_recovery<R: CommandRunner + Sync>(
     membership::save_membership(&recovered, params.paths)?;
     eprintln!("pool.json written from live pool state.");
 
+    if matches!(&plan.journal.op, journal::OpKind::Add { .. })
+        && plan.journal.pre_membership.disks.is_empty()
+    {
+        alert::remove_acked_stats(params.paths).map_err(|e| RecoverError::AckCleanupFailed {
+            stage: "bootstrap-recovery",
+            detail: e.to_string(),
+        })?;
+    }
+
     replay_post_mutation(
         runner,
         &plan.mount_point,
@@ -1029,6 +1046,22 @@ fn execute_generic_live_pool_recovery<R: CommandRunner + Sync>(
         &pool,
         params.progress,
     )?;
+
+    if let journal::OpKind::Remove { name } = &plan.journal.op {
+        if !recovered.disks.contains_key(name) {
+            if let Some(devid) = plan
+                .journal
+                .pre_membership
+                .disks
+                .get(name)
+                .and_then(|m| m.devid)
+            {
+                if let Err(e) = alert::drop_ghost_acked_for_devids(params.paths, &[devid]) {
+                    eprintln!("Warning: failed to update acked stats: {e}");
+                }
+            }
+        }
+    }
 
     journal::clear_journal(params.paths).map_err(|e| RecoverError::Journal(e.to_string()))?;
     eprintln!("pending-op.json cleared. Recovery complete.");
@@ -2277,6 +2310,18 @@ fn execute_add_pool_mutation_recovery<R: CommandRunner + Sync, F: Filesystem + ?
                 }
             }
             pool = probe::probe_pool(runner, fs, mount_point)?;
+            let devid = devid_for_mapper_path(&pool, &mapper_path).ok_or_else(|| {
+                RecoverError::AckCleanupFailed {
+                    stage: "live-pool add recovery",
+                    detail: format!("{name}: not found in pool after replayed add"),
+                }
+            })?;
+            alert::drop_ghost_acked_for_devids(params.paths, &[devid]).map_err(|e| {
+                RecoverError::AckCleanupFailed {
+                    stage: "live-pool add recovery",
+                    detail: format!("devid {devid}: {e}"),
+                }
+            })?;
             validate_live_members_allowed(&pool, union)?;
         }
 
@@ -2289,6 +2334,7 @@ fn execute_add_pool_mutation_recovery<R: CommandRunner + Sync, F: Filesystem + ?
         let prior = membership::load_membership(params.paths).ok();
         let recovered =
             build_membership_from_live_pool(&pool, union, prior.as_ref(), by_id_resolver)?;
+        sweep_recovered_add_acked_stats(params.paths, &pool, targets)?;
         membership::save_membership(&recovered, params.paths)?;
         eprintln!("pool.json written from completed add membership.");
         let journal = write_add_phase(
@@ -2309,6 +2355,7 @@ fn execute_add_pool_mutation_recovery<R: CommandRunner + Sync, F: Filesystem + ?
 
     let prior = membership::load_membership(params.paths).ok();
     let recovered = build_membership_from_live_pool(&pool, union, prior.as_ref(), by_id_resolver)?;
+    sweep_recovered_add_acked_stats(params.paths, &pool, targets)?;
     membership::save_membership(&recovered, params.paths)?;
     eprintln!("pool.json written from completed add membership.");
     let journal = write_add_phase(
@@ -2317,6 +2364,36 @@ fn execute_add_pool_mutation_recovery<R: CommandRunner + Sync, F: Filesystem + ?
         journal::AddPhase::PostAddBalanceRaid1,
     )?;
     execute_add_post_balance_recovery(runner, by_id_resolver, params, &journal, union, pool, false)
+}
+
+/// Drop acked-stats ghosts for every journaled add target before phase handoff.
+///
+/// Recovery can enter with targets already live, or skip individual live
+/// targets during replay; the sweep makes those committed-but-closed windows
+/// obey the same reused-devid boundary as the replayed add arm.
+fn sweep_recovered_add_acked_stats(
+    paths: &StatePaths,
+    pool: &PoolState,
+    targets: &std::collections::BTreeMap<String, journal::AddJournalTarget>,
+) -> Result<(), RecoverError> {
+    let mut sweep_devids: Vec<u64> = Vec::with_capacity(targets.len());
+    for (name, target) in targets {
+        let mapper_path = format!("/dev/mapper/{}", target.mapper_name);
+        let devid = devid_for_mapper_path(pool, &mapper_path).ok_or_else(|| {
+            RecoverError::AckCleanupFailed {
+                stage: "live-pool add recovery (target sweep)",
+                detail: format!("{name}: not found in live pool"),
+            }
+        })?;
+        sweep_devids.push(devid);
+    }
+    alert::drop_ghost_acked_for_devids(paths, &sweep_devids).map_err(|e| {
+        RecoverError::AckCleanupFailed {
+            stage: "live-pool add recovery (target sweep)",
+            detail: e.to_string(),
+        }
+    })?;
+    Ok(())
 }
 
 fn execute_remove_missing_pool_mutation_recovery<R: CommandRunner + Sync>(
@@ -2445,6 +2522,9 @@ fn execute_remove_missing_post_maintenance_recovery<R: CommandRunner + Sync>(
         )?;
     }
     journal::clear_journal(params.paths).map_err(|e| RecoverError::Journal(e.to_string()))?;
+    if let Err(e) = alert::drop_ghost_acked_for_devids(params.paths, &[devid]) {
+        eprintln!("Warning: failed to update acked stats: {e}");
+    }
     eprintln!("pending-op.json cleared. Recovery complete.");
     Ok(())
 }
@@ -3253,7 +3333,9 @@ mod tests {
     use crate::preview::NoteLevel;
     use crate::probe::Filesystem;
     use crate::test_fixtures::{PoolFixture, RemountHarness, TEST_PASSPHRASE_BYTES};
-    use crate::types::{ByIdPath, LuksUuid, MapperName, MountPoint, PoolDevice};
+    use crate::types::{
+        ByIdPath, LuksUuid, MapperName, MountPoint, NullUnderlyingDevice, PoolDevice,
+    };
     use std::collections::{BTreeMap, VecDeque};
     use std::sync::atomic::{AtomicU32, Ordering};
     use std::sync::{Arc, Mutex};
@@ -3967,6 +4049,27 @@ mod tests {
         )
     }
 
+    fn btrfs_show_disk1_and_disk2_devid4() -> RawCommandOutput {
+        ok_raw(
+            "btrfs filesystem show /mnt/storage",
+            "Label: none  uuid: aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee\n\
+             \tTotal devices 2 FS bytes used 1.00GiB\n\
+             \tdevid    1 size 10.00GiB used 2.00GiB path /dev/mapper/braid-disk1\n\
+             \tdevid    4 size 10.00GiB used 2.00GiB path /dev/mapper/braid-disk2\n",
+        )
+    }
+
+    fn btrfs_show_disk1_disk2_devid4_disk3_devid5() -> RawCommandOutput {
+        ok_raw(
+            "btrfs filesystem show /mnt/storage",
+            "Label: none  uuid: aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee\n\
+             \tTotal devices 3 FS bytes used 1.00GiB\n\
+             \tdevid    1 size 10.00GiB used 2.00GiB path /dev/mapper/braid-disk1\n\
+             \tdevid    4 size 10.00GiB used 2.00GiB path /dev/mapper/braid-disk2\n\
+             \tdevid    5 size 10.00GiB used 2.00GiB path /dev/mapper/braid-disk3\n",
+        )
+    }
+
     fn btrfs_show_one_disk() -> RawCommandOutput {
         ok_raw(
             "btrfs filesystem show /mnt/storage",
@@ -4023,6 +4126,76 @@ mod tests {
             luks_uuid: None,
             devid: Some(devid),
             added_at: None,
+        }
+    }
+
+    fn acked_disk(missing_acked: bool, read_io_errs: u64) -> alert::AckedDisk {
+        alert::AckedDisk {
+            missing_acked,
+            device_stats: alert::AckedDeviceCounters {
+                read_io_errs,
+                ..Default::default()
+            },
+        }
+    }
+
+    fn seed_acked_stats(paths: &StatePaths, entries: &[(u64, alert::AckedDisk)]) {
+        let map = entries
+            .iter()
+            .map(|(devid, disk)| (devid.to_string(), disk.clone()))
+            .collect();
+        alert::save_acked_stats(&alert::AckedStats(map), paths).unwrap();
+    }
+
+    fn bootstrap_pool_mutation_add_journal() -> journal::Journal {
+        let pre = PoolMembership::empty();
+        let mut target_disks = BTreeMap::new();
+        for name in ["disk1", "disk2"] {
+            target_disks.insert(
+                name.to_owned(),
+                DiskMember::from_by_id(ByIdPath(format!("/dev/disk/by-id/virtio-{name}"))),
+            );
+        }
+        let mut targets = BTreeMap::new();
+        for name in ["disk1", "disk2"] {
+            targets.insert(
+                name.to_owned(),
+                journal::AddJournalTarget {
+                    by_id: ByIdPath(format!("/dev/disk/by-id/virtio-{name}")),
+                    mapper_name: format!("braid-{name}"),
+                    mode: journal::AddJournalMode::FreshLuks {
+                        luks_label: format!("braid-{name}"),
+                        luks_format_extra_opts: vec!["--label".into(), format!("braid-{name}")],
+                        enroll_key_file: None,
+                    },
+                },
+            );
+        }
+        journal::Journal {
+            started_at: "2026-01-01T00:00:00Z".into(),
+            op: OpKind::Add {
+                phase: journal::AddPhase::PoolMutation,
+                targets,
+            },
+            pre_membership: pre,
+            target_membership: PoolMembership {
+                disks: target_disks,
+            },
+        }
+    }
+
+    fn recover_work_plan_for_journal(journal: journal::Journal) -> RecoverWorkPlan {
+        let union = union_memberships(&journal);
+        RecoverWorkPlan {
+            open_plan: None,
+            pre_resolved_credential: None,
+            journal,
+            union,
+            mount_point: MountPoint("/mnt/storage".into()),
+            pool_json_path: std::path::PathBuf::from("/var/lib/braid/pool.json"),
+            pending_op_path: std::path::PathBuf::from("/var/lib/braid/pending-op.json"),
+            luks_headers_dir: std::path::PathBuf::from("/var/lib/braid/luks-headers"),
+            actions: Vec::new(),
         }
     }
 
@@ -4551,6 +4724,41 @@ mod tests {
         }
     }
 
+    fn pool_state_disk1_and_disk2_devid4() -> PoolState {
+        PoolState {
+            mounted: true,
+            devices: vec![
+                PoolDevice {
+                    mapper: MapperName("braid-disk1".into()),
+                    luks_uuid: LuksUuid("11111111-1111-1111-1111-111111111111".into()),
+                    devid: 1,
+                    underlying: "/dev/vda".into(),
+                },
+                PoolDevice {
+                    mapper: MapperName("braid-disk2".into()),
+                    luks_uuid: LuksUuid("22222222-2222-2222-2222-222222222222".into()),
+                    devid: 4,
+                    underlying: "/dev/vdb".into(),
+                },
+            ],
+            missing_count: 0,
+            total_devices: 2,
+            fsid: Some("aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee".into()),
+            missing_devids: vec![],
+            null_underlying: vec![],
+        }
+    }
+
+    fn pool_state_disk1_with_null_underlying_disk2() -> PoolState {
+        let mut pool = pool_state_one_disk();
+        pool.total_devices = 2;
+        pool.null_underlying.push(NullUnderlyingDevice {
+            mapper: MapperName("braid-disk2".into()),
+            devid: 2,
+        });
+        pool
+    }
+
     fn pool_state_disk1_and_old() -> PoolState {
         PoolState {
             mounted: true,
@@ -4756,6 +4964,86 @@ mod tests {
             )
     }
 
+    fn with_disk1_disk2_devid4_pool_probe(runner: MockRunner) -> MockRunner {
+        runner
+            .with_output(
+                CmdRequest::BtrfsFilesystemShow {
+                    mount_point: MountPoint("/mnt/storage".into()),
+                },
+                btrfs_show_disk1_and_disk2_devid4(),
+            )
+            .with_output(
+                CmdRequest::CryptsetupStatus {
+                    mapper: "braid-disk1".into(),
+                },
+                cryptsetup_status_active("braid-disk1", "/dev/vda"),
+            )
+            .with_output(
+                CmdRequest::CryptsetupLuksUuid {
+                    device: "/dev/vda".into(),
+                },
+                cryptsetup_uuid_ok("/dev/vda", "11111111-1111-1111-1111-111111111111"),
+            )
+            .with_output(
+                CmdRequest::CryptsetupStatus {
+                    mapper: "braid-disk2".into(),
+                },
+                cryptsetup_status_active("braid-disk2", "/dev/vdb"),
+            )
+            .with_output(
+                CmdRequest::CryptsetupLuksUuid {
+                    device: "/dev/vdb".into(),
+                },
+                cryptsetup_uuid_ok("/dev/vdb", "22222222-2222-2222-2222-222222222222"),
+            )
+    }
+
+    fn with_disk1_disk2_devid4_disk3_devid5_pool_probe(runner: MockRunner) -> MockRunner {
+        runner
+            .with_output(
+                CmdRequest::BtrfsFilesystemShow {
+                    mount_point: MountPoint("/mnt/storage".into()),
+                },
+                btrfs_show_disk1_disk2_devid4_disk3_devid5(),
+            )
+            .with_output(
+                CmdRequest::CryptsetupStatus {
+                    mapper: "braid-disk1".into(),
+                },
+                cryptsetup_status_active("braid-disk1", "/dev/vda"),
+            )
+            .with_output(
+                CmdRequest::CryptsetupLuksUuid {
+                    device: "/dev/vda".into(),
+                },
+                cryptsetup_uuid_ok("/dev/vda", "11111111-1111-1111-1111-111111111111"),
+            )
+            .with_output(
+                CmdRequest::CryptsetupStatus {
+                    mapper: "braid-disk2".into(),
+                },
+                cryptsetup_status_active("braid-disk2", "/dev/vdb"),
+            )
+            .with_output(
+                CmdRequest::CryptsetupLuksUuid {
+                    device: "/dev/vdb".into(),
+                },
+                cryptsetup_uuid_ok("/dev/vdb", "22222222-2222-2222-2222-222222222222"),
+            )
+            .with_output(
+                CmdRequest::CryptsetupStatus {
+                    mapper: "braid-disk3".into(),
+                },
+                cryptsetup_status_active("braid-disk3", "/dev/vdc"),
+            )
+            .with_output(
+                CmdRequest::CryptsetupLuksUuid {
+                    device: "/dev/vdc".into(),
+                },
+                cryptsetup_uuid_ok("/dev/vdc", "33333333-3333-3333-3333-333333333333"),
+            )
+    }
+
     fn with_three_disk_pool_probe(runner: MockRunner) -> MockRunner {
         runner
             .with_output(
@@ -4819,6 +5107,689 @@ mod tests {
                 },
                 ok_raw_empty("btrfs balance start"),
             )
+    }
+
+    // Intent
+    // Bootstrap add recovery deletes every pre-existing acked-stats entry.
+    //
+    // Why it exists
+    // A recovered bootstrap creates a new pool identity; old-pool devid
+    // baselines must not attach to the new disks.
+    //
+    // Scenario
+    // A pool bootstrap crashes after btrfs creates the filesystem but before
+    // `cmd_add` clears acked-stats. Recovery completes the bootstrap.
+    #[test]
+    fn bootstrap_recovery_clears_acked_stats() {
+        let f = PoolFixture::empty();
+        let journal = bootstrap_pool_mutation_add_journal();
+        journal::write_journal(&f.paths, &journal).unwrap();
+        seed_acked_stats(
+            &f.paths,
+            &[
+                (1, acked_disk(false, 11)),
+                (2, acked_disk(true, 22)),
+                (7, acked_disk(false, 77)),
+            ],
+        );
+        let runner = with_balance_replay(MockRunner::default());
+        let resolver = resolver_for(&[("/dev/vda", "virtio-disk1"), ("/dev/vdb", "virtio-disk2")]);
+        let params = f.recover_params().passphrase_file(None).build();
+        let plan = recover_work_plan_for_journal(journal);
+
+        execute_generic_live_pool_recovery(
+            &runner,
+            &resolver,
+            &params,
+            &plan,
+            pool_state_two_disks(),
+        )
+        .expect("bootstrap recovery should clear acked-stats and finish");
+
+        assert!(
+            !f.paths.acked_stats_json().exists(),
+            "bootstrap recovery must delete stale acked-stats.json"
+        );
+    }
+
+    fn replay_returned_disk2_runner_for_devid4() -> MockRunner {
+        with_balance_replay(with_disk1_disk2_devid4_pool_probe(
+            MockRunner::default()
+                .with_output(
+                    CmdRequest::CryptsetupLuksUuid {
+                        device: "/dev/disk/by-id/virtio-disk2".into(),
+                    },
+                    cryptsetup_uuid_ok(
+                        "/dev/disk/by-id/virtio-disk2",
+                        "22222222-2222-2222-2222-222222222222",
+                    ),
+                )
+                .with_luks_dump_text_luks2("/dev/disk/by-id/virtio-disk2")
+                .with_mapper_open(
+                    "braid-disk2",
+                    "/dev/vdb",
+                    "22222222-2222-2222-2222-222222222222",
+                )
+                .with_output_stdin(
+                    CmdRequest::CryptsetupTestPassphrase {
+                        device: "/dev/vda".into(),
+                    },
+                    TEST_PASSPHRASE_BYTES.to_vec(),
+                    ok_raw_empty("cryptsetup open --test-passphrase"),
+                )
+                .with_output_stdin(
+                    CmdRequest::CryptsetupTestPassphrase {
+                        device: "/dev/disk/by-id/virtio-disk2".into(),
+                    },
+                    TEST_PASSPHRASE_BYTES.to_vec(),
+                    ok_raw_empty("cryptsetup open --test-passphrase"),
+                )
+                .with_output(
+                    CmdRequest::BtrfsFilesystemShowTarget {
+                        target: "/dev/mapper/braid-disk2".into(),
+                    },
+                    btrfs_show_target_no_btrfs("/dev/mapper/braid-disk2"),
+                )
+                .with_output(
+                    CmdRequest::BtrfsDeviceScanForget {
+                        devices: vec!["/dev/mapper/braid-disk2".into()],
+                    },
+                    ok_raw_empty("btrfs device scan --forget"),
+                )
+                .with_output(
+                    CmdRequest::WipefsBtrfs {
+                        device: "/dev/mapper/braid-disk2".into(),
+                    },
+                    ok_raw_empty("wipefs"),
+                )
+                .with_output(
+                    CmdRequest::BtrfsDeviceAdd {
+                        device: "/dev/mapper/braid-disk2".into(),
+                        mount_point: MountPoint("/mnt/storage".into()),
+                        force: true,
+                    },
+                    ok_raw_empty("btrfs device add"),
+                ),
+        ))
+    }
+
+    // Intent
+    // Live-add recovery drops the replayed target's assigned devid inside
+    // the replay loop.
+    //
+    // Why it exists
+    // If btrfs reuses a removed max devid, the fresh holder must not inherit
+    // the old disk's acked baseline during partial add recovery.
+    //
+    // Scenario
+    // Recovery replays `pool_add_device` for disk2 and btrfs assigns reused
+    // devid 4 while unrelated devid 1 ack state already exists.
+    #[test]
+    fn live_add_recovery_drops_ghost_for_reused_devid_via_replay() {
+        let f = PoolFixture::empty();
+        let journal = recoverable_pool_mutation_add_journal();
+        journal::write_journal(&f.paths, &journal).unwrap();
+        let union = union_memberships(&journal);
+        let targets = match &journal.op {
+            OpKind::Add { targets, .. } => targets,
+            _ => unreachable!("test journal is Add"),
+        };
+        let control = acked_disk(false, 11);
+        seed_acked_stats(
+            &f.paths,
+            &[(1, control.clone()), (4, acked_disk(false, 44))],
+        );
+        let runner = replay_returned_disk2_runner_for_devid4();
+        let resolver = resolver_for(&[("/dev/vda", "virtio-disk1"), ("/dev/vdb", "virtio-disk2")]);
+        let params = f.recover_params().build();
+
+        execute_add_pool_mutation_recovery(
+            &runner,
+            &MockFs::new(&["/dev/disk/by-id/virtio-disk2", "/dev/mapper/braid-disk2"]),
+            &resolver,
+            &params,
+            AddPoolReplayCtx {
+                credential: None,
+                journal: &journal,
+                union: &union,
+                targets,
+                pool: pool_state_one_disk(),
+            },
+        )
+        .expect("live-add replay should finish");
+
+        assert!(
+            runner
+                .requests()
+                .iter()
+                .any(|r| matches!(r, CmdRequest::BtrfsDeviceAdd { device, .. } if device == "/dev/mapper/braid-disk2")),
+            "recovery should replay the target add"
+        );
+        let reloaded = alert::load_acked_stats(&f.paths);
+        assert_eq!(reloaded.0.get("1"), Some(&control));
+        assert!(
+            !reloaded.0.contains_key("4"),
+            "replayed target's reused devid must be dropped"
+        );
+    }
+
+    // Intent
+    // Live-add recovery sweeps ghosts for targets already live at recovery
+    // entry when the replay loop is skipped entirely.
+    //
+    // Why it exists
+    // Per-arm cleanup only runs inside replay; committed-but-closed targets
+    // need a pre-save sweep to close the crash window.
+    //
+    // Scenario
+    // Disk2 was added to btrfs at reused devid 4 before the crash, so
+    // recovery sees all targets live and does not call `btrfs device add`.
+    #[test]
+    fn live_add_recovery_drops_ghost_for_committed_but_closed_target() {
+        let f = PoolFixture::empty();
+        let journal = recoverable_pool_mutation_add_journal();
+        journal::write_journal(&f.paths, &journal).unwrap();
+        let union = union_memberships(&journal);
+        let targets = match &journal.op {
+            OpKind::Add { targets, .. } => targets,
+            _ => unreachable!("test journal is Add"),
+        };
+        let control = acked_disk(false, 11);
+        seed_acked_stats(
+            &f.paths,
+            &[(1, control.clone()), (4, acked_disk(false, 44))],
+        );
+        let runner = with_balance_replay(MockRunner::default());
+        let resolver = resolver_for(&[("/dev/vda", "virtio-disk1"), ("/dev/vdb", "virtio-disk2")]);
+        let params = f.recover_params().passphrase_file(None).build();
+
+        execute_add_pool_mutation_recovery(
+            &runner,
+            &MockFs::new(&[]),
+            &resolver,
+            &params,
+            AddPoolReplayCtx {
+                credential: None,
+                journal: &journal,
+                union: &union,
+                targets,
+                pool: pool_state_disk1_and_disk2_devid4(),
+            },
+        )
+        .expect("all-live add recovery should finish");
+
+        assert!(
+            !runner
+                .requests()
+                .iter()
+                .any(|r| matches!(r, CmdRequest::BtrfsDeviceAdd { .. })),
+            "all-live recovery must not replay btrfs device add"
+        );
+        let reloaded = alert::load_acked_stats(&f.paths);
+        assert_eq!(reloaded.0.get("1"), Some(&control));
+        assert!(
+            !reloaded.0.contains_key("4"),
+            "sweep must drop the committed target's reused devid"
+        );
+    }
+
+    // Intent
+    // Live-add recovery sweeps ghosts for targets skipped by the per-target
+    // live-member `continue` while other targets replay.
+    //
+    // Why it exists
+    // Mixed batches can have one target already live and another still
+    // missing; per-arm cleanup covers only the replayed target.
+    //
+    // Scenario
+    // Disk2 is already live at reused devid 4, disk3 replays and gets devid
+    // 5, and both stale ack entries must be removed.
+    #[test]
+    fn live_add_recovery_drops_ghosts_for_mixed_batch() {
+        let f = PoolFixture::empty();
+        let journal = two_target_recoverable_pool_mutation_add_journal();
+        journal::write_journal(&f.paths, &journal).unwrap();
+        let union = union_memberships(&journal);
+        let targets = match &journal.op {
+            OpKind::Add { targets, .. } => targets,
+            _ => unreachable!("test journal is Add"),
+        };
+        let control = acked_disk(false, 11);
+        seed_acked_stats(
+            &f.paths,
+            &[
+                (1, control.clone()),
+                (4, acked_disk(false, 44)),
+                (5, acked_disk(false, 55)),
+            ],
+        );
+        let runner = with_balance_replay(with_disk1_disk2_devid4_disk3_devid5_pool_probe(
+            MockRunner::default()
+                .with_output(
+                    CmdRequest::CryptsetupLuksUuid {
+                        device: "/dev/disk/by-id/virtio-disk3".into(),
+                    },
+                    cryptsetup_uuid_ok(
+                        "/dev/disk/by-id/virtio-disk3",
+                        "33333333-3333-3333-3333-333333333333",
+                    ),
+                )
+                .with_luks_dump_text_luks2("/dev/disk/by-id/virtio-disk3")
+                .with_mapper_open(
+                    "braid-disk3",
+                    "/dev/vdc",
+                    "33333333-3333-3333-3333-333333333333",
+                )
+                .with_output_stdin(
+                    CmdRequest::CryptsetupTestPassphrase {
+                        device: "/dev/vda".into(),
+                    },
+                    TEST_PASSPHRASE_BYTES.to_vec(),
+                    ok_raw_empty("cryptsetup open --test-passphrase"),
+                )
+                .with_output_stdin(
+                    CmdRequest::CryptsetupTestPassphrase {
+                        device: "/dev/vdb".into(),
+                    },
+                    TEST_PASSPHRASE_BYTES.to_vec(),
+                    ok_raw_empty("cryptsetup open --test-passphrase"),
+                )
+                .with_output_stdin(
+                    CmdRequest::CryptsetupTestPassphrase {
+                        device: "/dev/disk/by-id/virtio-disk3".into(),
+                    },
+                    TEST_PASSPHRASE_BYTES.to_vec(),
+                    ok_raw_empty("cryptsetup open --test-passphrase"),
+                )
+                .with_output(
+                    CmdRequest::BtrfsFilesystemShowTarget {
+                        target: "/dev/mapper/braid-disk3".into(),
+                    },
+                    btrfs_show_target_no_btrfs("/dev/mapper/braid-disk3"),
+                )
+                .with_output(
+                    CmdRequest::BtrfsDeviceScanForget {
+                        devices: vec!["/dev/mapper/braid-disk3".into()],
+                    },
+                    ok_raw_empty("btrfs device scan --forget"),
+                )
+                .with_output(
+                    CmdRequest::WipefsBtrfs {
+                        device: "/dev/mapper/braid-disk3".into(),
+                    },
+                    ok_raw_empty("wipefs"),
+                )
+                .with_output(
+                    CmdRequest::BtrfsDeviceAdd {
+                        device: "/dev/mapper/braid-disk3".into(),
+                        mount_point: MountPoint("/mnt/storage".into()),
+                        force: true,
+                    },
+                    ok_raw_empty("btrfs device add"),
+                ),
+        ));
+        let resolver = resolver_for(&[
+            ("/dev/vda", "virtio-disk1"),
+            ("/dev/vdb", "virtio-disk2"),
+            ("/dev/vdc", "virtio-disk3"),
+        ]);
+        let params = f.recover_params().build();
+
+        execute_add_pool_mutation_recovery(
+            &runner,
+            &MockFs::new(&["/dev/disk/by-id/virtio-disk3", "/dev/mapper/braid-disk3"]),
+            &resolver,
+            &params,
+            AddPoolReplayCtx {
+                credential: None,
+                journal: &journal,
+                union: &union,
+                targets,
+                pool: pool_state_disk1_and_disk2_devid4(),
+            },
+        )
+        .expect("mixed add recovery should finish");
+
+        assert!(
+            runner
+                .requests()
+                .iter()
+                .any(|r| matches!(r, CmdRequest::BtrfsDeviceAdd { device, .. } if device == "/dev/mapper/braid-disk3")),
+            "recovery should replay only the missing disk3 target"
+        );
+        let reloaded = alert::load_acked_stats(&f.paths);
+        assert_eq!(reloaded.0.get("1"), Some(&control));
+        assert!(!reloaded.0.contains_key("4"));
+        assert!(!reloaded.0.contains_key("5"));
+    }
+
+    // Intent
+    // Committed Remove recovery drops the removed target's acked devid.
+    //
+    // Why it exists
+    // Recovery must mirror the live `cmd_remove` hygiene path after btrfs
+    // eviction has committed.
+    //
+    // Scenario
+    // Disk2 was removed from a disk1+disk2 pool but recovery is finishing the
+    // bookkeeping after a crash.
+    #[test]
+    fn remove_recovery_drops_target_devid_when_eviction_committed() {
+        let f = PoolFixture::empty();
+        let journal = remove_2to1_journal_with_target_devid();
+        journal::write_journal(&f.paths, &journal).unwrap();
+        let plan = recover_work_plan_for_journal(journal);
+        let control = acked_disk(false, 11);
+        seed_acked_stats(
+            &f.paths,
+            &[(1, control.clone()), (2, acked_disk(false, 22))],
+        );
+        let resolver = resolver_for(&[("/dev/vda", "virtio-disk1")]);
+        let params = f.recover_params().passphrase_file(None).build();
+
+        execute_generic_live_pool_recovery(
+            &MockRunner::default(),
+            &resolver,
+            &params,
+            &plan,
+            pool_state_one_disk(),
+        )
+        .expect("committed remove recovery should finish");
+
+        let recovered = membership::load_membership(&f.paths).unwrap();
+        assert!(!recovered.disks.contains_key("disk2"));
+        let reloaded = alert::load_acked_stats(&f.paths);
+        assert_eq!(reloaded.0.get("1"), Some(&control));
+        assert!(!reloaded.0.contains_key("2"));
+    }
+
+    // Intent
+    // Uncommitted Remove recovery preserves the target's acked-stats entry.
+    //
+    // Why it exists
+    // Recovery restores targets still owned by btrfs; dropping their acked
+    // state would erase a legitimate live-disk baseline.
+    //
+    // Scenario
+    // Disk2's remove did not commit and the mapper is now null-underlying, so
+    // recovery keeps disk2 in pool.json.
+    #[test]
+    fn remove_recovery_preserves_target_devid_when_eviction_uncommitted() {
+        let f = PoolFixture::empty();
+        let journal = remove_2to1_journal_with_target_devid();
+        journal::write_journal(&f.paths, &journal).unwrap();
+        let plan = recover_work_plan_for_journal(journal);
+        let target = acked_disk(false, 22);
+        seed_acked_stats(&f.paths, &[(2, target.clone())]);
+        let resolver = resolver_for(&[("/dev/vda", "virtio-disk1")]);
+        let params = f.recover_params().passphrase_file(None).build();
+
+        execute_generic_live_pool_recovery(
+            &MockRunner::default(),
+            &resolver,
+            &params,
+            &plan,
+            pool_state_disk1_with_null_underlying_disk2(),
+        )
+        .expect("uncommitted remove recovery should finish");
+
+        let recovered = membership::load_membership(&f.paths).unwrap();
+        assert!(recovered.disks.contains_key("disk2"));
+        let reloaded = alert::load_acked_stats(&f.paths);
+        assert_eq!(reloaded.0.get("2"), Some(&target));
+    }
+
+    // Intent
+    // Remove recovery with no target devid in the journal skips cleanup.
+    //
+    // Why it exists
+    // Recovery should tolerate older or externally written journals that lack
+    // the enrichment added to `cmd_remove`.
+    //
+    // Scenario
+    // The committed remove state is clear, but `pre_membership.disk2.devid`
+    // is absent, so there is no safe acked-stats key to drop.
+    #[test]
+    fn remove_recovery_with_no_devid_journal_skips_cleanup_with_warning() {
+        let f = PoolFixture::empty();
+        let journal = remove_2to1_journal();
+        journal::write_journal(&f.paths, &journal).unwrap();
+        let plan = recover_work_plan_for_journal(journal);
+        let target = acked_disk(false, 22);
+        seed_acked_stats(&f.paths, &[(2, target.clone())]);
+        let resolver = resolver_for(&[("/dev/vda", "virtio-disk1")]);
+        let params = f.recover_params().passphrase_file(None).build();
+
+        execute_generic_live_pool_recovery(
+            &MockRunner::default(),
+            &resolver,
+            &params,
+            &plan,
+            pool_state_one_disk(),
+        )
+        .expect("remove recovery should tolerate missing target devid");
+
+        let reloaded = alert::load_acked_stats(&f.paths);
+        assert_eq!(reloaded.0.get("2"), Some(&target));
+    }
+
+    // Intent
+    // Remove recovery treats corrupt acked-stats cleanup as warning-only.
+    //
+    // Why it exists
+    // Remove cleanup is hygiene; a corrupt ack file must not strand recovery
+    // with a completed btrfs eviction and a preserved journal.
+    //
+    // Scenario
+    // Committed Remove recovery finds non-JSON acked-stats bytes while
+    // clearing the journal.
+    #[test]
+    fn remove_recovery_warning_only_on_corrupt_acked_stats() {
+        let f = PoolFixture::empty();
+        let journal = remove_2to1_journal_with_target_devid();
+        journal::write_journal(&f.paths, &journal).unwrap();
+        let plan = recover_work_plan_for_journal(journal);
+        std::fs::write(f.paths.acked_stats_json(), b"corrupt").unwrap();
+        let resolver = resolver_for(&[("/dev/vda", "virtio-disk1")]);
+        let params = f.recover_params().passphrase_file(None).build();
+
+        execute_generic_live_pool_recovery(
+            &MockRunner::default(),
+            &resolver,
+            &params,
+            &plan,
+            pool_state_one_disk(),
+        )
+        .expect("corrupt acked-stats should warn, not fail remove recovery");
+
+        assert!(!f.paths.pending_op_json().exists());
+        assert_eq!(
+            std::fs::read(f.paths.acked_stats_json()).unwrap(),
+            b"corrupt"
+        );
+    }
+
+    // Intent
+    // RemoveMissing PostMaintenance recovery drops the removed devid's acked
+    // entry.
+    //
+    // Why it exists
+    // Recovery must mirror the live `cmd_remove_missing` hygiene path after
+    // the remove-missing operation has committed.
+    //
+    // Scenario
+    // `braid remove-missing` crashed after mutation and recovery resumes at
+    // PostRemoveMissingMaintenance for devid 2.
+    #[test]
+    fn remove_missing_post_maintenance_recovery_drops_devid() {
+        let f = PoolFixture::empty();
+        let mut journal = remove_missing_journal();
+        journal.op = OpKind::RemoveMissing {
+            phase: journal::RemoveMissingPhase::PostRemoveMissingMaintenance,
+            devid: 2,
+            restore_raid1_after_commit: false,
+        };
+        journal::write_journal(&f.paths, &journal).unwrap();
+        let control = acked_disk(false, 11);
+        seed_acked_stats(
+            &f.paths,
+            &[(1, control.clone()), (2, acked_disk(false, 22))],
+        );
+        let resolver = resolver_for(&[("/dev/vda", "virtio-disk1")]);
+        let params = f.recover_params().passphrase_file(None).build();
+
+        execute_remove_missing_post_maintenance_recovery(
+            &MockRunner::default(),
+            &resolver,
+            &params,
+            RemoveMissingPostCtx {
+                journal: &journal,
+                pool: pool_state_one_disk(),
+                devid: 2,
+                restore_raid1_after_commit: false,
+                inhibitor_already_held: false,
+            },
+        )
+        .expect("post-maintenance remove-missing recovery should finish");
+
+        let reloaded = alert::load_acked_stats(&f.paths);
+        assert_eq!(reloaded.0.get("1"), Some(&control));
+        assert!(!reloaded.0.contains_key("2"));
+    }
+
+    // Intent
+    // RemoveMissing PostMaintenance recovery treats corrupt acked-stats
+    // cleanup as warning-only.
+    //
+    // Why it exists
+    // The remove-missing hygiene path should not turn corrupt alert state into
+    // a stuck recovery journal.
+    //
+    // Scenario
+    // The post-maintenance journal is ready to clear, but acked-stats.json is
+    // non-JSON bytes.
+    #[test]
+    fn remove_missing_post_maintenance_recovery_warning_only_on_corrupt_acked_stats() {
+        let f = PoolFixture::empty();
+        let mut journal = remove_missing_journal();
+        journal.op = OpKind::RemoveMissing {
+            phase: journal::RemoveMissingPhase::PostRemoveMissingMaintenance,
+            devid: 2,
+            restore_raid1_after_commit: false,
+        };
+        journal::write_journal(&f.paths, &journal).unwrap();
+        std::fs::write(f.paths.acked_stats_json(), b"corrupt").unwrap();
+        let resolver = resolver_for(&[("/dev/vda", "virtio-disk1")]);
+        let params = f.recover_params().passphrase_file(None).build();
+
+        execute_remove_missing_post_maintenance_recovery(
+            &MockRunner::default(),
+            &resolver,
+            &params,
+            RemoveMissingPostCtx {
+                journal: &journal,
+                pool: pool_state_one_disk(),
+                devid: 2,
+                restore_raid1_after_commit: false,
+                inhibitor_already_held: false,
+            },
+        )
+        .expect("corrupt acked-stats should warn, not fail remove-missing recovery");
+
+        assert!(!f.paths.pending_op_json().exists());
+        assert_eq!(
+            std::fs::read(f.paths.acked_stats_json()).unwrap(),
+            b"corrupt"
+        );
+    }
+
+    // Intent
+    // Bootstrap recovery returns a typed ack cleanup error and preserves the
+    // journal when `remove_acked_stats` fails.
+    //
+    // Why it exists
+    // The bootstrap add boundary must fail closed so a future recover can
+    // retry cleanup instead of silently trusting stale alert baselines.
+    //
+    // Scenario
+    // `acked-stats.json` is a directory, causing the cleanup removal to fail.
+    #[test]
+    fn bootstrap_recovery_ack_cleanup_failure_returns_typed_error_and_preserves_journal() {
+        let f = PoolFixture::empty();
+        let journal = bootstrap_pool_mutation_add_journal();
+        journal::write_journal(&f.paths, &journal).unwrap();
+        std::fs::create_dir_all(f.paths.acked_stats_json()).unwrap();
+        let plan = recover_work_plan_for_journal(journal);
+        let resolver = resolver_for(&[("/dev/vda", "virtio-disk1"), ("/dev/vdb", "virtio-disk2")]);
+        let params = f.recover_params().passphrase_file(None).build();
+
+        let err = execute_generic_live_pool_recovery(
+            &MockRunner::default(),
+            &resolver,
+            &params,
+            &plan,
+            pool_state_two_disks(),
+        )
+        .unwrap_err();
+
+        assert!(matches!(
+            err,
+            RecoverError::AckCleanupFailed {
+                stage: "bootstrap-recovery",
+                ..
+            }
+        ));
+        assert!(f.paths.pending_op_json().exists());
+    }
+
+    // Intent
+    // Live-add recovery returns a typed ack cleanup error and preserves the
+    // journal when `drop_ghost_acked_for_devids` fails.
+    //
+    // Why it exists
+    // Reused-devid cleanup is the add correctness boundary; corrupt
+    // acked-stats must abort before the recovery phase handoff.
+    //
+    // Scenario
+    // Recovery replays disk2's add, then the fallible acked-stats loader sees
+    // non-JSON bytes.
+    #[test]
+    fn live_add_recovery_ack_cleanup_failure_returns_typed_error_and_preserves_journal() {
+        let f = PoolFixture::empty();
+        let journal = recoverable_pool_mutation_add_journal();
+        journal::write_journal(&f.paths, &journal).unwrap();
+        let union = union_memberships(&journal);
+        let targets = match &journal.op {
+            OpKind::Add { targets, .. } => targets,
+            _ => unreachable!("test journal is Add"),
+        };
+        std::fs::write(f.paths.acked_stats_json(), b"corrupt").unwrap();
+        let runner = replay_returned_disk2_runner_for_devid4();
+        let resolver = resolver_for(&[("/dev/vda", "virtio-disk1"), ("/dev/vdb", "virtio-disk2")]);
+        let params = f.recover_params().build();
+
+        let err = execute_add_pool_mutation_recovery(
+            &runner,
+            &MockFs::new(&["/dev/disk/by-id/virtio-disk2", "/dev/mapper/braid-disk2"]),
+            &resolver,
+            &params,
+            AddPoolReplayCtx {
+                credential: None,
+                journal: &journal,
+                union: &union,
+                targets,
+                pool: pool_state_one_disk(),
+            },
+        )
+        .unwrap_err();
+
+        match err {
+            RecoverError::AckCleanupFailed { stage, .. } => {
+                assert!(stage.starts_with("live-pool add recovery"));
+            }
+            other => panic!("expected AckCleanupFailed, got {other:?}"),
+        }
+        assert!(f.paths.pending_op_json().exists());
     }
 
     #[test]
