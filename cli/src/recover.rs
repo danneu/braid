@@ -540,6 +540,26 @@ impl RecoverCompletion {
         params: &RecoverParams<'_>,
     ) -> Result<(), RecoverError> {
         let pool = probe::probe_pool(runner, fs, &plan.mount_point)?;
+        // Completion runs only after recovery either opened the pool or
+        // observed it already mounted. If this fresh post-mount probe no
+        // longer sees a mounted pool with members, preserve pool.json and
+        // the pending journal so the operator can fix the mount state and
+        // retry.
+        if !pool.mounted || (pool.devices.is_empty() && !plan.union.disks.is_empty()) {
+            let probe_state = if !pool.mounted {
+                "no btrfs mount"
+            } else {
+                "zero btrfs devices"
+            };
+            return Err(RecoverError::Failed(format!(
+                "recovery aborted: post-mount probe at {} reports {} -- \
+                 expected a mounted pool with members. pool.json was not \
+                 written and the pending-op journal is preserved. Investigate \
+                 (external umount? btrfs auto-remount-ro? mount_point \
+                 mismatch?) and re-run braid recover.",
+                plan.mount_point, probe_state
+            )));
+        }
         match self {
             RecoverCompletion::AddPoolMutation { targets, .. } => {
                 execute_add_pool_mutation_recovery(
@@ -3250,12 +3270,23 @@ mod tests {
 
     struct MockFs {
         paths: Vec<String>,
+        mountinfo: String,
     }
 
     impl MockFs {
         fn new(paths: &[&str]) -> Self {
             Self {
                 paths: paths.iter().map(|s| s.to_string()).collect(),
+                mountinfo:
+                    "36 35 0:32 / /mnt/storage rw shared:1 - btrfs /dev/mapper/braid-disk1 rw\n"
+                        .to_owned(),
+            }
+        }
+
+        fn without_mounted_pool(paths: &[&str]) -> Self {
+            Self {
+                paths: paths.iter().map(|s| s.to_string()).collect(),
+                mountinfo: "26 25 0:23 / / rw shared:1 - ext4 /dev/sda1 rw\n".to_owned(),
             }
         }
     }
@@ -3271,10 +3302,7 @@ mod tests {
 
         fn read_to_string(&self, path: &str) -> Result<String, std::io::Error> {
             if path == "/proc/self/mountinfo" {
-                return Ok(
-                    "36 35 0:32 / /mnt/storage rw shared:1 - btrfs /dev/mapper/braid-disk1 rw\n"
-                        .to_owned(),
-                );
+                return Ok(self.mountinfo.clone());
             }
             Err(std::io::Error::new(std::io::ErrorKind::NotFound, "mock"))
         }
@@ -3945,6 +3973,14 @@ mod tests {
             "Label: none  uuid: aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee\n\
              \tTotal devices 1 FS bytes used 1.00GiB\n\
              \tdevid    1 size 10.00GiB used 2.00GiB path /dev/mapper/braid-disk1\n",
+        )
+    }
+
+    fn btrfs_show_zero_devices() -> RawCommandOutput {
+        ok_raw(
+            "btrfs filesystem show /mnt/storage",
+            "Label: none  uuid: aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee\n\
+             \tTotal devices 2 FS bytes used 1.00GiB\n",
         )
     }
 
@@ -12322,6 +12358,92 @@ mod tests {
              \tdevid    1 size 10.00GiB used 2.00GiB path /dev/mapper/braid-disk1\n\
              \tdevid    2 size 0 used 0 path MISSING\n",
         )
+    }
+
+    // Intent: post-cycle recover aborts when its completion probe finds the
+    //   configured pool mount absent.
+    // Why it exists: probe_pool reports mounted=false with no devices when
+    //   mountinfo has no entry; the GenericLivePool path must not turn that
+    //   empty probe into an empty pool.json and clear the journal.
+    // Scenario: a remove journal is pending, planning sees the pool as already
+    //   mounted, and an external unmount removes it before completion probes.
+    #[test]
+    fn cmd_recover_aborts_when_post_cycle_probe_reports_unmounted() {
+        let f = PoolFixture::empty();
+        let fs = MockFs::without_mounted_pool(&[]);
+
+        let journal = remove_2to1_journal_with_target_devid();
+        journal::write_journal(&f.paths, &journal).unwrap();
+
+        let (mp_req, mp_out) = mountpoint_ok();
+        let runner = MockRunner::default().with_output(mp_req, mp_out);
+
+        let resolver = resolver_for(&[("/dev/vda", "virtio-disk1")]);
+        let params = f.recover_params().passphrase_file(None).build();
+        let err = cmd_recover(&runner, &fs, &resolver, &params)
+            .expect_err("recover must fail when the completion probe sees no mount");
+
+        let msg = format!("{err}");
+        assert!(
+            msg.contains("post-mount probe"),
+            "error must name the probe state: {msg}"
+        );
+        assert!(
+            msg.contains("no btrfs mount"),
+            "error must name the unmounted state: {msg}"
+        );
+        assert!(
+            !f.paths.pool_json().exists(),
+            "pool.json must not be written when the completion probe sees no mount"
+        );
+        assert!(
+            f.paths.pending_op_json().exists(),
+            "journal must be preserved when the completion probe sees no mount"
+        );
+    }
+
+    // Intent: post-cycle recover aborts when its completion probe finds a
+    //   mounted btrfs filesystem with zero device rows.
+    // Why it exists: the empty-device branch protects pathological btrfs show
+    //   output from silently erasing membership through GenericLivePool.
+    // Scenario: a remove journal is pending, the pool remains mounted, but
+    //   btrfs filesystem show returns an FSID and no device rows.
+    #[test]
+    fn cmd_recover_aborts_when_post_cycle_probe_reports_zero_devices() {
+        let f = PoolFixture::empty();
+        let fs = MockFs::new(&[]);
+
+        let journal = remove_2to1_journal_with_target_devid();
+        journal::write_journal(&f.paths, &journal).unwrap();
+
+        let (mp_req, mp_out) = mountpoint_ok();
+        let runner = MockRunner::default()
+            .with_output(mp_req, mp_out)
+            .with_output(
+                CmdRequest::BtrfsFilesystemShow {
+                    mount_point: MountPoint("/mnt/storage".into()),
+                },
+                btrfs_show_zero_devices(),
+            );
+
+        let resolver = resolver_for(&[("/dev/vda", "virtio-disk1")]);
+        let params = f.recover_params().passphrase_file(None).build();
+        let err = cmd_recover(&runner, &fs, &resolver, &params)
+            .expect_err("recover must fail when the completion probe sees zero devices");
+
+        let msg = format!("{err}");
+        assert!(
+            msg.contains("zero btrfs devices"),
+            "error must name the zero-device state: {msg}"
+        );
+        assert!(
+            !f.paths.pool_json().exists(),
+            "pool.json must not be written when the completion probe sees zero devices"
+        );
+        assert!(
+            f.paths.pending_op_json().exists(),
+            "journal must be preserved when the completion probe sees zero devices"
+        );
     }
 
     /* Intent: cmd_recover for an interrupted OpKind::Remove preserves the

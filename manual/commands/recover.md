@@ -86,6 +86,7 @@ sudo braid recover --dry-run
 - Refuses to adopt live pool members that aren't in either the pre-operation or target journal snapshot (guards against devices added outside braid).
 - Hard-fails if a live pool device has no `/dev/disk/by-id/` symlink (recovery can't guess a stable identifier).
 - Detects interrupted bootstrap add (first disk, no filesystem yet) and gives specific wipe-and-retry instructions instead of a confusing mount error.
+- Refuses to overwrite `pool.json` or clear `pending-op.json` if the post-mount probe at the configured mount point sees the pool unmounted or with zero btrfs devices. The mount may have been removed externally between recover's mount step and membership probe; `pool.json` and `pending-op.json` are both preserved -- investigate the mount, then re-run `braid recover`.
 - For existing-pool add recovery, refuses to clear the journal while any journaled add target is missing from the live pool.
 - Returned-disk replay may need a pool passphrase even when the pool is already mounted, because the mapper for the journaled target may still be closed.
 - Once an add journal reaches `PostAddBalanceRaid1`, refuses to replay disk preparation or btrfs membership mutation.
