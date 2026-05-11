@@ -187,6 +187,19 @@ pub fn mount_entry_at_via_fs<F: Filesystem + ?Sized>(
     mount_entry_at(&content, target)
 }
 
+/// True if either mountinfo option field marks the mount read-only.
+/// Field 6 (vfs_options) carries VFS-level per-mount flags; field 11
+/// (fs_options) carries superblock/filesystem options. Both can independently
+/// carry `ro`, so the field that carries it is state evidence, not source
+/// attribution.
+pub(crate) fn entry_is_read_only(entry: &MountEntry) -> bool {
+    has_ro(&entry.vfs_options) || has_ro(&entry.fs_options)
+}
+
+fn has_ro(opts: &str) -> bool {
+    opts.split(',').any(|opt| opt.trim() == "ro")
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

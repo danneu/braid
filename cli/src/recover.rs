@@ -11,6 +11,7 @@ use crate::luks::{self, VerifyOutcome};
 use crate::mapper_close::close_mapper_best_effort;
 use crate::membership::{self, DiskMember, PoolMembership};
 use crate::mount::{self, MountError, OpenPlan};
+use crate::mount_check;
 use crate::parse::btrfs_filesystem_show::{DeviceBtrfsProbe, classify_btrfs_probe};
 use crate::parse::{ReplaceState, parse_btrfs_replace_status};
 use crate::preview::{self, PerDiskStyle, PlanFailure, Preview, PreviewCompleteness, PreviewNote};
@@ -548,6 +549,25 @@ impl RecoverCompletion {
         params: &RecoverParams<'_>,
     ) -> Result<(), RecoverError> {
         let pool = probe::probe_pool(runner, fs, &plan.mount_point)?;
+        match mount_check::mount_entry_at_via_fs(fs, plan.mount_point.as_str()) {
+            Ok(Some(entry)) if mount_check::entry_is_read_only(&entry) => {
+                return Err(RecoverError::Failed(format!(
+                    "recovery aborted: pool at {mp} is mounted read-only \
+                     (vfs_options={:?}, fs_options={:?}) -- btrfs may have \
+                     auto-remounted the superblock after an I/O error, or \
+                     an operator may have remounted it. pool.json was not \
+                     written and the pending-op journal is preserved. \
+                     Investigate with `btrfs check` and remount read-write \
+                     with `mount -o remount,rw {mp}`, then re-run braid \
+                     recover.",
+                    entry.vfs_options,
+                    entry.fs_options,
+                    mp = plan.mount_point
+                )));
+            }
+            Ok(Some(_)) | Ok(None) => {}
+            Err(e) => return Err(RecoverError::Probe(ProbeError::MountInfo(e))),
+        }
         // Completion runs only after recovery either opened the pool or
         // observed it already mounted. If this fresh post-mount probe no
         // longer sees a mounted pool with members, preserve pool.json and
@@ -1256,6 +1276,31 @@ pub fn plan_recover<R: CommandRunner + Sync, F: Filesystem + ?Sized>(
                 return Err(PlanFailure::with_notes(notes, e.into()));
             }
         };
+        match mount_check::mount_entry_at_via_fs(fs, mount_point.as_str()) {
+            Ok(Some(entry)) if mount_check::entry_is_read_only(&entry) => {
+                return Err(PlanFailure::with_notes(
+                    notes,
+                    RecoverError::Failed(format!(
+                        "recover dry-run: pool at {mp} is mounted read-only \
+                         (vfs_options={:?}, fs_options={:?}) -- execute \
+                         would refuse. Investigate with `btrfs check` and \
+                         remount read-write with `mount -o remount,rw {mp}` \
+                         before re-running braid recover. pool.json and the \
+                         pending-op journal are unchanged.",
+                        entry.vfs_options,
+                        entry.fs_options,
+                        mp = mount_point
+                    )),
+                ));
+            }
+            Ok(Some(_)) | Ok(None) => {}
+            Err(e) => {
+                return Err(PlanFailure::with_notes(
+                    notes,
+                    RecoverError::Probe(ProbeError::MountInfo(e)),
+                ));
+            }
+        }
         if let Err(e) = validate_live_members_allowed(&pool, &union) {
             return Err(PlanFailure::with_notes(notes, e));
         }
@@ -3369,6 +3414,24 @@ mod tests {
             Self {
                 paths: paths.iter().map(|s| s.to_string()).collect(),
                 mountinfo: "26 25 0:23 / / rw shared:1 - ext4 /dev/sda1 rw\n".to_owned(),
+            }
+        }
+
+        fn with_mounted_pool_ro_vfs(paths: &[&str]) -> Self {
+            Self {
+                paths: paths.iter().map(|s| s.to_string()).collect(),
+                mountinfo:
+                    "36 35 0:32 / /mnt/storage ro shared:1 - btrfs /dev/mapper/braid-disk1 rw\n"
+                        .to_owned(),
+            }
+        }
+
+        fn with_mounted_pool_ro_fs(paths: &[&str]) -> Self {
+            Self {
+                paths: paths.iter().map(|s| s.to_string()).collect(),
+                mountinfo:
+                    "36 35 0:32 / /mnt/storage rw shared:1 - btrfs /dev/mapper/braid-disk1 ro,space_cache=v2\n"
+                        .to_owned(),
             }
         }
     }
@@ -13417,6 +13480,102 @@ mod tests {
         );
     }
 
+    // Intent: post-cycle recover aborts before writing pool.json when the VFS
+    //   mount options report the mounted pool as read-only.
+    // Why it exists: operator-issued remount-ro must not let recover rewrite
+    //   membership and then fail later with an opaque btrfs balance error.
+    // Scenario: a remove journal is pending and the pool remains mounted, but
+    //   the mount is read-only at the VFS layer.
+    #[test]
+    fn cmd_recover_aborts_when_post_mount_probe_reports_vfs_read_only() {
+        let f = PoolFixture::empty();
+        let fs = MockFs::with_mounted_pool_ro_vfs(&[]);
+
+        let journal = remove_2to1_journal_with_target_devid();
+        journal::write_journal(&f.paths, &journal).unwrap();
+
+        let (mp_req, mp_out) = mountpoint_ok();
+        let runner = MockRunner::default()
+            .with_output(mp_req, mp_out)
+            .with_output(
+                CmdRequest::BtrfsFilesystemShow {
+                    mount_point: MountPoint("/mnt/storage".into()),
+                },
+                btrfs_show_zero_devices(),
+            );
+
+        let resolver = resolver_for(&[("/dev/vda", "virtio-disk1")]);
+        let params = f.recover_params().passphrase_file(None).build();
+        let err = cmd_recover(&runner, &fs, &resolver, &params)
+            .expect_err("recover must fail when the completion probe sees read-only VFS state");
+
+        let msg = format!("{err}");
+        assert!(
+            msg.contains("mounted read-only"),
+            "error must name the read-only state: {msg}"
+        );
+        assert!(
+            msg.contains("remount,rw"),
+            "error must include remount guidance: {msg}"
+        );
+        assert!(
+            !f.paths.pool_json().exists(),
+            "pool.json must not be written when the pool is read-only"
+        );
+        assert!(
+            f.paths.pending_op_json().exists(),
+            "journal must be preserved when the pool is read-only"
+        );
+    }
+
+    // Intent: post-cycle recover aborts before writing pool.json when the
+    //   filesystem options report the mounted pool as read-only.
+    // Why it exists: btrfs can auto-remount the superblock read-only after
+    //   I/O errors without relying on the VFS option field.
+    // Scenario: a remove journal is pending and the pool remains mounted, but
+    //   mountinfo field 11 carries `ro,space_cache=v2`.
+    #[test]
+    fn cmd_recover_aborts_when_post_mount_probe_reports_fs_read_only() {
+        let f = PoolFixture::empty();
+        let fs = MockFs::with_mounted_pool_ro_fs(&[]);
+
+        let journal = remove_2to1_journal_with_target_devid();
+        journal::write_journal(&f.paths, &journal).unwrap();
+
+        let (mp_req, mp_out) = mountpoint_ok();
+        let runner = MockRunner::default()
+            .with_output(mp_req, mp_out)
+            .with_output(
+                CmdRequest::BtrfsFilesystemShow {
+                    mount_point: MountPoint("/mnt/storage".into()),
+                },
+                btrfs_show_zero_devices(),
+            );
+
+        let resolver = resolver_for(&[("/dev/vda", "virtio-disk1")]);
+        let params = f.recover_params().passphrase_file(None).build();
+        let err = cmd_recover(&runner, &fs, &resolver, &params)
+            .expect_err("recover must fail when the completion probe sees read-only fs state");
+
+        let msg = format!("{err}");
+        assert!(
+            msg.contains("mounted read-only"),
+            "error must name the read-only state: {msg}"
+        );
+        assert!(
+            msg.contains("remount,rw"),
+            "error must include remount guidance: {msg}"
+        );
+        assert!(
+            !f.paths.pool_json().exists(),
+            "pool.json must not be written when the pool is read-only"
+        );
+        assert!(
+            f.paths.pending_op_json().exists(),
+            "journal must be preserved when the pool is read-only"
+        );
+    }
+
     /* Intent: cmd_recover for an interrupted OpKind::Remove preserves the
      * target in pool.json when the live pool reports the target's mapper
      * as null-underlying, even though it is absent from `pool.devices`.
@@ -14197,6 +14356,79 @@ mod tests {
                     panic!("dry_run={dry_run}: notes[1] must be PreviewNote::Info, got: {other:?}")
                 }
             }
+        }
+    }
+
+    /* Intent: dry-run recover refuses an already-mounted read-only pool with
+     * the same PlanFailure note preservation shape used by other preview
+     * refusals.
+     * Why it exists: preview must agree with execute before recover would
+     * write pool.json or clear the pending-operation journal.
+     * Scenario: a remove journal is pending, the pool is already mounted, and
+     * mountinfo reports filesystem-level read-only state.
+     */
+    #[test]
+    fn plan_recover_dry_run_refuses_already_mounted_read_only_fs_options() {
+        let f = PoolFixture::empty();
+        let fs = MockFs::with_mounted_pool_ro_fs(&[]);
+
+        let journal = remove_2to1_journal_with_target_devid();
+        journal::write_journal(&f.paths, &journal).unwrap();
+
+        let (mp_req, mp_out) = mountpoint_ok();
+        let runner = MockRunner::default()
+            .with_output(mp_req, mp_out)
+            .with_output(
+                CmdRequest::BtrfsFilesystemShow {
+                    mount_point: MountPoint("/mnt/storage".into()),
+                },
+                btrfs_show_zero_devices(),
+            );
+
+        let params = f
+            .recover_params()
+            .passphrase_file(None)
+            .dry_run(true)
+            .build();
+
+        let failure = match plan_recover(&runner, &fs, &params) {
+            Err(failure) => failure,
+            other => panic!("expected RecoverError::Failed for read-only dry-run, got: {other:?}"),
+        };
+        let err = match &failure.error {
+            RecoverError::Failed(msg) => msg,
+            other => panic!("expected RecoverError::Failed for read-only dry-run, got: {other:?}"),
+        };
+        assert!(
+            err.contains("mounted read-only"),
+            "error must name the read-only state, got: {err:?}",
+        );
+        assert!(
+            err.contains("recover dry-run"),
+            "error must identify the dry-run refusal, got: {err:?}",
+        );
+        assert!(
+            err.contains("remount,rw"),
+            "error must include remount guidance, got: {err:?}",
+        );
+
+        assert_eq!(
+            failure.notes.len(),
+            2,
+            "PlanFailure::notes must hold entry banner + AlreadyMounted, got: {:?}",
+            failure.notes,
+        );
+        let entry_banner = format_recover_entry(&journal);
+        match &failure.notes[0] {
+            PreviewNote::Info(msg) => assert_eq!(msg, &entry_banner),
+            other => panic!("notes[0] must be PreviewNote::Info, got: {other:?}"),
+        }
+        match &failure.notes[1] {
+            PreviewNote::Info(msg) => assert!(
+                msg.contains("pool already mounted at /mnt/storage"),
+                "notes[1] must be the AlreadyMounted info, got: {msg:?}",
+            ),
+            other => panic!("notes[1] must be PreviewNote::Info, got: {other:?}"),
         }
     }
 

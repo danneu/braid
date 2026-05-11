@@ -3,7 +3,7 @@ use std::fmt;
 use crate::cmd::{CmdRequest, CommandRunner};
 use crate::journal;
 use crate::membership::PoolMembership;
-use crate::mount_check::mount_entry_at_via_fs;
+use crate::mount_check::{self, mount_entry_at_via_fs};
 use crate::parse::parse_btrfs_device_usage;
 use crate::parse::types::{BtrfsBgType, BtrfsDeviceUsageEntry, BtrfsDfOutput};
 use crate::preview::PreviewNote;
@@ -270,17 +270,13 @@ fn check_not_read_only<F: Filesystem + ?Sized>(
         Err(e) => return Ok(Some(format!("read /proc/self/mountinfo: {e}"))),
     };
 
-    if has_ro(&entry.vfs_options) || has_ro(&entry.fs_options) {
+    if mount_check::entry_is_read_only(&entry) {
         return Err(format!(
             "pool is mounted read-only. Remount read-write first:\n  \
                  mount -o remount,rw {mount_point}"
         ));
     }
     Ok(None)
-}
-
-fn has_ro(opts: &str) -> bool {
-    opts.split(',').any(|opt| opt.trim() == "ro")
 }
 
 /// Refuse if the pool has missing devices.
