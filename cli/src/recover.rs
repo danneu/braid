@@ -1569,7 +1569,6 @@ fn write_replace_phase(
     let journal::OpKind::Replace {
         old_name,
         new_name,
-        new_by_id,
         new_target,
         source,
         restore_raid1_after_commit,
@@ -1587,7 +1586,6 @@ fn write_replace_phase(
             phase,
             old_name: old_name.clone(),
             new_name: new_name.clone(),
-            new_by_id: new_by_id.clone(),
             new_target: new_target.clone(),
             source: source.clone(),
             restore_raid1_after_commit: *restore_raid1_after_commit,
@@ -12424,7 +12422,6 @@ mod tests {
             phase: journal::ReplacePhase::PoolMutation,
             old_name: "old".to_owned(),
             new_name: "new".to_owned(),
-            new_by_id: ByIdPath("/dev/disk/by-id/x".into()),
             new_target: journal::ReplaceJournalTarget {
                 by_id: ByIdPath("/dev/disk/by-id/x".into()),
                 mapper_name: "braid-new".into(),
@@ -12455,7 +12452,6 @@ mod tests {
             phase: journal::ReplacePhase::PoolMutation,
             old_name: "old".to_owned(),
             new_name: "new".to_owned(),
-            new_by_id: ByIdPath("/dev/disk/by-id/x".into()),
             new_target: journal::ReplaceJournalTarget {
                 by_id: ByIdPath("/dev/disk/by-id/x".into()),
                 mapper_name: "braid-new".into(),
@@ -12530,7 +12526,6 @@ mod tests {
                 phase: journal::ReplacePhase::PoolMutation,
                 old_name: "old".to_owned(),
                 new_name: "new".to_owned(),
-                new_by_id: ByIdPath("/dev/disk/by-id/virtio-new".into()),
                 new_target: journal::ReplaceJournalTarget {
                     by_id: ByIdPath("/dev/disk/by-id/virtio-new".into()),
                     mapper_name: "braid-new".into(),

@@ -99,7 +99,6 @@ with subtest("Lock pool and inject ExistingLuks + enroll journal (mismatched UUI
             "phase": "PoolMutation",
             "old_name": "disk2",
             "new_name": "disk4",
-            "new_by_id": "/dev/disk/by-id/virtio-disk4",
             "new_target": {
                 "by_id": "/dev/disk/by-id/virtio-disk4",
                 "mapper_name": "braid-disk4",

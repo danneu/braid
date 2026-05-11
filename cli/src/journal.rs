@@ -124,7 +124,6 @@ pub enum OpKind {
         phase: ReplacePhase,
         old_name: String,
         new_name: String,
-        new_by_id: ByIdPath,
         new_target: ReplaceJournalTarget,
         source: ReplaceJournalSource,
         restore_raid1_after_commit: bool,
@@ -347,7 +346,6 @@ mod tests {
                 phase: ReplacePhase::PoolMutation,
                 old_name: "disk1".into(),
                 new_name: "disk2".into(),
-                new_by_id: ByIdPath("/dev/disk/by-id/ata-NEW".into()),
                 new_target: ReplaceJournalTarget {
                     by_id: ByIdPath("/dev/disk/by-id/ata-NEW".into()),
                     mapper_name: "braid-disk2".into(),
@@ -364,6 +362,19 @@ mod tests {
             },
         );
         write_journal(&paths, &journal).unwrap();
+        let serialized: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(paths.pending_op_json()).unwrap())
+                .unwrap();
+        let op = serialized.get("op").unwrap();
+        assert!(
+            op.get("new_by_id").is_none(),
+            "replace journal must not duplicate new target by-id at op root"
+        );
+        assert_eq!(
+            op.pointer("/new_target/by_id")
+                .and_then(|value| value.as_str()),
+            Some("/dev/disk/by-id/ata-NEW")
+        );
         let loaded = load_journal(&paths).unwrap().unwrap();
         assert_eq!(loaded.op, journal.op);
     }
@@ -385,7 +396,6 @@ mod tests {
                 phase: ReplacePhase::PoolMutation,
                 old_name: "disk1".into(),
                 new_name: "disk2".into(),
-                new_by_id: ByIdPath("/dev/disk/by-id/ata-NEW".into()),
                 new_target: ReplaceJournalTarget {
                     by_id: ByIdPath("/dev/disk/by-id/ata-NEW".into()),
                     mapper_name: "braid-disk2".into(),
@@ -534,7 +544,6 @@ mod tests {
                 phase: ReplacePhase::PoolMutation,
                 old_name: "disk1".into(),
                 new_name: "disk2".into(),
-                new_by_id: ByIdPath("/dev/disk/by-id/ata-Y".into()),
                 new_target: ReplaceJournalTarget {
                     by_id: ByIdPath("/dev/disk/by-id/ata-Y".into()),
                     mapper_name: "braid-disk2".into(),
@@ -565,7 +574,6 @@ mod tests {
                 phase: ReplacePhase::PostReplaceMaintenance,
                 old_name: "disk1".into(),
                 new_name: "disk2".into(),
-                new_by_id: ByIdPath("/dev/disk/by-id/ata-Y".into()),
                 new_target: ReplaceJournalTarget {
                     by_id: ByIdPath("/dev/disk/by-id/ata-Y".into()),
                     mapper_name: "braid-disk2".into(),
