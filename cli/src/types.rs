@@ -10,7 +10,7 @@ pub struct ByIdPath(pub String);
 #[serde(transparent)]
 pub struct LuksUuid(pub String);
 
-#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 #[serde(transparent)]
 pub struct MapperName(pub String);
 

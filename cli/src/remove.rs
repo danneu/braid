@@ -6,13 +6,14 @@ use crate::inhibit::AcquireSleepInhibitor;
 use crate::journal;
 use crate::membership;
 use crate::parse::{ParseError, parse_btrfs_device_usage, parse_btrfs_df_json};
-use crate::pool::evict_present_device;
+use crate::pool::{DeviceIdentity, evict_present_device, validate_pool_topology};
 use crate::preflight;
 use crate::preview::{self, PerDiskStyle, Preview, PreviewCompleteness, PreviewNote};
 use crate::probe::{Filesystem, ProbeError, probe_pool};
 use crate::progress::ProgressOutput;
 use crate::state_paths::StatePaths;
 use crate::types::*;
+use std::collections::BTreeMap;
 use std::path::Path;
 
 #[derive(Debug, thiserror::Error)]
@@ -99,21 +100,41 @@ struct RemoveWorkPlan {
     remaining: usize,
     total: usize,
     mount_point: MountPoint,
+    /// Identity snapshot of every present pool device at planning time,
+    /// consumed by `validate_pool_topology` at execute time (pre- and
+    /// post-journal). Full identity (mapper, devid, luks_uuid) -- not just
+    /// cardinality or mapper name -- so a same-count survivor swap or a
+    /// same-mapper replacement both fail the validation rather than
+    /// slipping through with stale capacity-preflight assumptions.
+    expected_present_identities: BTreeMap<MapperName, DeviceIdentity>,
 }
 
 impl RemoveWorkPlan {
     fn new(
         name: String,
         target: &PoolDevice,
-        total: usize,
+        devices: &[PoolDevice],
         mount_point: MountPoint,
     ) -> Result<Self, RemoveError> {
+        let total = devices.len();
         let remaining = total - 1;
         if remaining == 0 {
             return Err(RemoveError::Validation(
                 "cannot remove the last disk from the pool".into(),
             ));
         }
+        let expected_present_identities: BTreeMap<MapperName, DeviceIdentity> = devices
+            .iter()
+            .map(|d| {
+                (
+                    d.mapper.clone(),
+                    DeviceIdentity {
+                        devid: d.devid,
+                        luks_uuid: d.luks_uuid.clone(),
+                    },
+                )
+            })
+            .collect();
         Ok(Self {
             name,
             target_devid: target.devid,
@@ -122,6 +143,7 @@ impl RemoveWorkPlan {
             remaining,
             total,
             mount_point,
+            expected_present_identities,
         })
     }
 
@@ -234,6 +256,34 @@ impl RemovePlan {
                 ))
             })?;
 
+        // (Pre-journal) topology drift validation -- clean failure if the
+        // world changed between plan_remove and here. Above journal::write_journal
+        // so failure does NOT strand pending-op.json (principle 3,
+        // docs/principles.md:23). Hot-unplug variant surfaces a journal-free
+        // recovery sequence (re-plug, OR close + reopen the stale mapper via
+        // lock/unlock or reboot, then re-run); `braid recover` is intentionally
+        // NOT mentioned here because it would fail with no pending journal.
+        validate_pool_topology(
+            runner,
+            fs,
+            &work_plan.mount_point,
+            &work_plan.target_mapper.0,
+            &work_plan.expected_present_identities,
+        )
+        .map_err(|drift| {
+            let detail = drift.detail();
+            let suffix = if drift.is_target_hot_unplug() {
+                "cryptsetup reports `device: (null)` (hot-unplug). \
+                 The remove did not start. Resolve the hot-unplug by re-plugging \
+                 the disk, OR by closing + reopening the stale mapper \
+                 (`braid lock` then `braid unlock`, or reboot then `braid unlock`), \
+                 then re-run `braid remove`."
+            } else {
+                "Resolve the drift and re-run `braid remove`."
+            };
+            RemoveError::Validation(format!("{detail}. {suffix}"))
+        })?;
+
         // Build target membership and write journal before irreversible disk op.
         let pre_membership = membership::load_membership(params.paths)
             .map_err(|e| RemoveError::Validation(format!("failed to load pool membership: {e}")))?;
@@ -249,12 +299,43 @@ impl RemovePlan {
         journal::write_journal(params.paths, &journal)
             .map_err(|e| RemoveError::Validation(e.to_string()))?;
 
+        // (Post-journal) last-moment safety gate: catch drift in the small
+        // window between the pre-journal probe and pool_balance_single.
+        // BtrfsBalanceSingle ships -f, which skips btrfs-progs' missing-device
+        // safety timeout (reference/btrfs-progs/cmds/balance.c:558-561).
+        // Without this gate, a disk going MISSING here could subject the pool
+        // to a dangerous profile conversion. Failure here keeps the journal
+        // in place because we are below journal::write_journal and above
+        // journal::clear_journal -- standard "preserved for recover" semantics.
+        validate_pool_topology(
+            runner,
+            fs,
+            &work_plan.mount_point,
+            &work_plan.target_mapper.0,
+            &work_plan.expected_present_identities,
+        )
+        .map_err(|drift| {
+            let detail = drift.detail();
+            let suffix = if drift.is_target_hot_unplug() {
+                "cryptsetup reports `device: (null)` (hot-unplug). \
+                 Run `braid recover` to reconcile pool.json. \
+                 The broken mapper does not self-heal on replug; if \
+                 `cryptsetup status` still reports `device: (null)` after \
+                 recover, close + reopen the mappers (`braid lock` then \
+                 `braid unlock`, or reboot then `braid unlock`) before \
+                 retrying the remove."
+            } else {
+                "Run `braid recover` to reconcile."
+            };
+            RemoveError::Validation(format!("{detail}. {suffix}"))
+        })?;
+
         // Execute
         evict_present_device(
             runner,
-            fs,
             &work_plan.target_mapper.0,
             &work_plan.mount_point,
+            work_plan.remaining == 1,
             params.progress,
         )?;
 
@@ -374,7 +455,7 @@ pub fn plan_remove<R: CommandRunner + Sync, F: Filesystem + ?Sized>(
     let work_plan = match RemoveWorkPlan::new(
         params.name.to_owned(),
         target,
-        pool.devices.len(),
+        &pool.devices,
         config.mount_point().clone(),
     ) {
         Ok(plan) => plan,
@@ -638,7 +719,7 @@ fn remove_present_work_plan_for_test(
             .unwrap_or(mn.0.as_str())
             .to_owned(),
         &target,
-        pool.devices.len(),
+        &pool.devices,
         mount_point.clone(),
     )
 }
@@ -1771,6 +1852,441 @@ mod tests {
             ),
             "notes[0]={:?}",
             report.notes[0],
+        );
+    }
+
+    // ---------------------------------------------------------------------
+    // Drift-detection regression tests for validate_pool_topology, wired
+    // pre-journal and post-journal in RemovePlan::execute.
+    // ---------------------------------------------------------------------
+
+    /// Three-disk `btrfs filesystem show` baseline; matches the planning
+    /// probe so the planner captures the canonical identity snapshot.
+    const THREE_DISK_SHOW_BASE: &str = "Label: none  uuid: cc86845b-aec3-408e-bef5-553affc1f2b1\n\
+        \tTotal devices 3 FS bytes used 16.17MiB\n\
+        \tdevid    1 size 496.00MiB used 121.56MiB path /dev/mapper/braid-disk1\n\
+        \tdevid    2 size 496.00MiB used 121.56MiB path /dev/mapper/braid-disk2\n\
+        \tdevid    3 size 496.00MiB used 121.56MiB path /dev/mapper/braid-disk3\n";
+
+    /// Build a `with_handler` override that swaps `BtrfsFilesystemShow`
+    /// output per call, given a sequence of stdouts. Calls past the end of
+    /// the sequence repeat the last entry. Per-test handlers are registered
+    /// AFTER `RemovalPool::install`; `MockRunner::with_handler` runs them
+    /// in LIFO order, so this override shadows the constant-show handler.
+    fn show_sequence_handler(
+        outputs: Vec<&'static str>,
+    ) -> impl Fn(&CmdRequest) -> Option<Result<RawCommandOutput, CmdError>> + Send + Sync + 'static
+    {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        let counter = std::sync::Arc::new(AtomicUsize::new(0));
+        move |req| match req {
+            CmdRequest::BtrfsFilesystemShow { .. } => {
+                let idx = counter.fetch_add(1, Ordering::SeqCst);
+                let pick = outputs
+                    .get(idx)
+                    .copied()
+                    .unwrap_or_else(|| *outputs.last().expect("at least one show output required"));
+                Some(Ok(mock_ok("btrfs filesystem show", pick)))
+            }
+            _ => None,
+        }
+    }
+
+    /// Add cryptsetup status / luksUUID overrides so probe_pool can
+    /// process every mapper that might appear in `show` outputs --
+    /// including a synthetic "braid-disk4" used in same-count-swap and
+    /// device-count-grew drift scenarios. The base `RemovalPool::install`
+    /// already covers disk1/disk2/disk3.
+    fn extra_disk_handler()
+    -> impl Fn(&CmdRequest) -> Option<Result<RawCommandOutput, CmdError>> + Send + Sync + 'static
+    {
+        |req| match req {
+            CmdRequest::CryptsetupStatus { mapper } if mapper == "braid-disk4" => {
+                Some(Ok(mock_ok(
+                    "cryptsetup status braid-disk4",
+                    "braid-disk4 is active and is in use.\n  type:    LUKS2\n  device:  /dev/vde\n  mode:    read/write\n",
+                )))
+            }
+            CmdRequest::CryptsetupLuksUuid { device } if device == "/dev/vde" => Some(Ok(mock_ok(
+                "cryptsetup luksUUID /dev/vde",
+                "44444444-4444-4444-4444-444444444444\n",
+            ))),
+            _ => None,
+        }
+    }
+
+    /* Intent: pre-journal validate_pool_topology rejects topology drift
+     * detected before journal::write_journal -- the command exits cleanly,
+     * no mutation runs, no pending-op.json is written, and the error tells
+     * the user to re-run `braid remove`.
+     *
+     * Why it exists: pins (a) ADR 022 -- if the helper re-introduces its
+     * own probe, the no-mutation assertion flips; (b) principle 3 -- if
+     * validation moves below journal::write_journal, the pending-op.json
+     * assertion flips; (c) drift detection -- if the topology-match check
+     * is dropped, is_err() flips.
+     *
+     * Scenario: while the user paused at the `yes` prompt, a third disk
+     * went MISSING (here: shrank from 3-disk show to 2-disk show between
+     * planning and execute). The planner would have rejected this case at
+     * check_no_missing_devices; the execute-time gate enforces it.
+     */
+    #[test]
+    fn pre_journal_drift_fails_clean_without_journal() {
+        const TWO_DISK_DRIFT: &str = "Label: none  uuid: cc86845b-aec3-408e-bef5-553affc1f2b1\n\
+             \tTotal devices 3 FS bytes used 16.17MiB\n\
+             \tdevid    1 size 496.00MiB used 121.56MiB path /dev/mapper/braid-disk1\n\
+             \tdevid    2 size 496.00MiB used 121.56MiB path /dev/mapper/braid-disk2\n\
+             \t*** Some devices missing\n";
+        let f = PoolFixture::three_disk_healthy();
+        let runner = RemovalPool::three_disk()
+            .install(MockRunner::default())
+            // Planning probe sees the healthy 3-disk pool; the next probe
+            // (pre-journal validation) sees disk3 MISSING.
+            .with_handler(show_sequence_handler(vec![
+                THREE_DISK_SHOW_BASE,
+                TWO_DISK_DRIFT,
+            ]));
+        let fs = MockFs::storage(vec![]);
+
+        let result = cmd_remove(&runner, &fs, &f.remove_params().build());
+        let err = result.expect_err("pre-journal drift must fail the command");
+        let msg = err.to_string();
+
+        let calls = runner.requests();
+        assert!(
+            !calls.iter().any(|c| matches!(
+                c,
+                CmdRequest::BtrfsBalanceSingle { .. }
+                    | CmdRequest::BtrfsDeviceRemove { .. }
+                    | CmdRequest::CryptsetupClose { .. }
+            )),
+            "validation must reject drift before any mutation; calls: {calls:?}",
+        );
+        assert!(
+            journal::load_journal(&f.paths).unwrap().is_none(),
+            "pre-journal validation failure must NOT leave a pending-op.json",
+        );
+        assert!(
+            msg.contains("re-run `braid remove`"),
+            "pre-journal drift error must direct user to re-run remove; got: {msg}",
+        );
+    }
+
+    /* Intent: post-journal validate_pool_topology rejects topology drift
+     * detected after journal::write_journal but before any mutation --
+     * the command fails, zero mutation commands run (critically, no
+     * `btrfs balance ... -f`), the journal survives for `braid recover`,
+     * and the error points to recover (not to re-run remove, which would
+     * be blocked by check_no_pending_operation).
+     *
+     * Why: pins the post-journal safety gate. BtrfsBalanceSingle ships -f
+     * (cli/src/cmd.rs), which skips btrfs-progs' missing-device timeout
+     * (balance.c:558-561). Without this gate, a disk going MISSING here
+     * could subject the pool to a dangerous profile conversion.
+     *
+     * Scenario: pre-journal validation passed; between then and the
+     * balance command, a previously flapping disk went MISSING. The
+     * post-journal gate aborts the balance and preserves the journal.
+     */
+    #[test]
+    fn post_journal_drift_preserves_journal_and_blocks_mutation() {
+        const POST_JOURNAL_DRIFT: &str = "Label: none  uuid: cc86845b-aec3-408e-bef5-553affc1f2b1\n\
+             \tTotal devices 3 FS bytes used 16.17MiB\n\
+             \tdevid    1 size 496.00MiB used 121.56MiB path /dev/mapper/braid-disk1\n\
+             \tdevid    2 size 496.00MiB used 121.56MiB path /dev/mapper/braid-disk2\n\
+             \t*** Some devices missing\n";
+        let f = PoolFixture::three_disk_healthy();
+        // Probe 1 = planning probe (3 disks). Probe 2 = pre-journal
+        // validation probe (3 disks, passes). Probe 3 = post-journal
+        // validation probe (disk3 went MISSING).
+        let runner = RemovalPool::three_disk()
+            .install(MockRunner::default())
+            .with_handler(show_sequence_handler(vec![
+                THREE_DISK_SHOW_BASE,
+                THREE_DISK_SHOW_BASE,
+                POST_JOURNAL_DRIFT,
+            ]));
+        let fs = MockFs::storage(vec![]);
+
+        let result = cmd_remove(&runner, &fs, &f.remove_params().build());
+        let err = result.expect_err("post-journal drift must fail the command");
+        let msg = err.to_string();
+
+        let calls = runner.requests();
+        assert!(
+            !calls.iter().any(|c| matches!(
+                c,
+                CmdRequest::BtrfsBalanceSingle { .. }
+                    | CmdRequest::BtrfsDeviceRemove { .. }
+                    | CmdRequest::CryptsetupClose { .. }
+            )),
+            "post-journal validation must reject drift before any mutation; calls: {calls:?}",
+        );
+        assert!(
+            journal::load_journal(&f.paths).unwrap().is_some(),
+            "post-journal validation failure must preserve pending-op.json so braid recover can reconcile",
+        );
+        assert!(
+            msg.contains("`braid recover`"),
+            "post-journal drift error must direct user to recover; got: {msg}",
+        );
+        assert!(
+            !msg.contains("re-run `braid remove`"),
+            "post-journal drift error must NOT direct user to re-run remove; got: {msg}",
+        );
+    }
+
+    /* Intent: same-count survivor swap (one mapper added, one removed
+     * between plan and execute) is rejected by pre-journal validation.
+     *
+     * Why: pins the mapper-set-drift case that a cardinality-only check
+     * would have missed. The plan's identity snapshot includes
+     * braid-disk3; the validation probe sees braid-disk4 instead.
+     *
+     * Scenario: between plan and execute, disk3 was unplugged and a new
+     * disk4 was plugged in and auto-unlocked. Same count, different set.
+     */
+    #[test]
+    fn pre_journal_same_count_swap_rejected() {
+        const SWAP_SHOW: &str = "Label: none  uuid: cc86845b-aec3-408e-bef5-553affc1f2b1\n\
+            \tTotal devices 3 FS bytes used 16.17MiB\n\
+            \tdevid    1 size 496.00MiB used 121.56MiB path /dev/mapper/braid-disk1\n\
+            \tdevid    2 size 496.00MiB used 121.56MiB path /dev/mapper/braid-disk2\n\
+            \tdevid    4 size 496.00MiB used 121.56MiB path /dev/mapper/braid-disk4\n";
+        let f = PoolFixture::three_disk_healthy();
+        let runner = RemovalPool::three_disk()
+            .install(MockRunner::default())
+            .with_handler(show_sequence_handler(vec![THREE_DISK_SHOW_BASE, SWAP_SHOW]))
+            .with_handler(extra_disk_handler());
+        let fs = MockFs::storage(vec![]);
+
+        let err = cmd_remove(&runner, &fs, &f.remove_params().build())
+            .expect_err("same-count swap must be rejected");
+        let msg = err.to_string();
+        assert!(
+            msg.contains("braid-disk3"),
+            "expected disk3 in error: {msg}"
+        );
+        assert!(
+            msg.contains("braid-disk4"),
+            "expected disk4 in error: {msg}"
+        );
+        assert!(
+            journal::load_journal(&f.paths).unwrap().is_none(),
+            "pre-journal swap failure must NOT leave a pending-op.json",
+        );
+        let calls = runner.requests();
+        assert!(
+            !calls.iter().any(|c| matches!(
+                c,
+                CmdRequest::BtrfsBalanceSingle { .. }
+                    | CmdRequest::BtrfsDeviceRemove { .. }
+                    | CmdRequest::CryptsetupClose { .. }
+            )),
+            "no mutation on swap drift; calls: {calls:?}",
+        );
+    }
+
+    /* Intent: same-mapper replacement (mapper name unchanged, devid or
+     * luks_uuid differs) is rejected by pre-journal validation.
+     *
+     * Why: pins the identity-drift case that a `BTreeSet<MapperName>`
+     * comparison would have missed; `BTreeMap<MapperName, DeviceIdentity>`
+     * catches it on the value-equality flip.
+     *
+     * Scenario: operator ran `cryptsetup close` + `cryptsetup open` on a
+     * different LUKS device under the same `braid-disk3` mapper between
+     * plan and execute, flipping devid and luks_uuid for that mapper.
+     */
+    #[test]
+    fn pre_journal_same_mapper_replacement_rejected() {
+        // The validation probe sees braid-disk3 mapped to devid 99 with
+        // a different underlying / luks_uuid.
+        const REPLACED_SHOW: &str = "Label: none  uuid: cc86845b-aec3-408e-bef5-553affc1f2b1\n\
+            \tTotal devices 3 FS bytes used 16.17MiB\n\
+            \tdevid    1 size 496.00MiB used 121.56MiB path /dev/mapper/braid-disk1\n\
+            \tdevid    2 size 496.00MiB used 121.56MiB path /dev/mapper/braid-disk2\n\
+            \tdevid    99 size 496.00MiB used 121.56MiB path /dev/mapper/braid-disk3\n";
+        let f = PoolFixture::three_disk_healthy();
+        // Override CryptsetupStatus + LuksUuid for braid-disk3 on the
+        // second pass so the LUKS identity differs from the planner snapshot.
+        let runner = RemovalPool::three_disk()
+            .install(MockRunner::default())
+            .with_handler(show_sequence_handler(vec![
+                THREE_DISK_SHOW_BASE,
+                REPLACED_SHOW,
+            ]));
+        let fs = MockFs::storage(vec![]);
+
+        let err = cmd_remove(&runner, &fs, &f.remove_params().build())
+            .expect_err("same-mapper replacement must be rejected");
+        let msg = err.to_string();
+        assert!(
+            msg.contains("braid-disk3"),
+            "expected disk3 in error: {msg}"
+        );
+        assert!(
+            msg.contains("identity changed") || msg.contains("devid"),
+            "error must signal identity drift: {msg}"
+        );
+        assert!(
+            journal::load_journal(&f.paths).unwrap().is_none(),
+            "pre-journal replacement failure must NOT leave a pending-op.json",
+        );
+        let calls = runner.requests();
+        assert!(
+            !calls.iter().any(|c| matches!(
+                c,
+                CmdRequest::BtrfsBalanceSingle { .. }
+                    | CmdRequest::BtrfsDeviceRemove { .. }
+                    | CmdRequest::CryptsetupClose { .. }
+            )),
+            "no mutation on identity drift; calls: {calls:?}",
+        );
+    }
+
+    /* Intent: pre-journal target hot-unplug surfaces the journal-free
+     * remediation, NOT a `braid recover` hint. The detect-recover
+     * message would mislead the user because no journal exists -- recover
+     * would fail with "no pending operation journal found".
+     *
+     * Why: replaces the old helper-level
+     * `evict_present_device_target_null_underlying_classifies_hot_unplug`
+     * at the seam where the rich UX is now actually emitted.
+     *
+     * Scenario: between plan_remove and the pre-journal probe, the target
+     * disk was hot-unplugged -- cryptsetup reports `device: (null)`.
+     */
+    #[test]
+    fn pre_journal_target_hot_unplug_message() {
+        let f = PoolFixture::three_disk_healthy();
+        // Two show calls: planning, pre-journal validation. Flip the
+        // target's cryptsetup status to (null) for the second probe only.
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        let show_counter = std::sync::Arc::new(AtomicUsize::new(0));
+        let show_counter_for_status = std::sync::Arc::clone(&show_counter);
+        let runner = RemovalPool::three_disk()
+            .install(MockRunner::default())
+            .with_handler(move |req| match req {
+                CmdRequest::BtrfsFilesystemShow { .. } => {
+                    show_counter.fetch_add(1, Ordering::SeqCst);
+                    Some(Ok(mock_ok("btrfs filesystem show", THREE_DISK_SHOW_BASE)))
+                }
+                _ => None,
+            })
+            .with_handler(move |req| match req {
+                CmdRequest::CryptsetupStatus { mapper } if mapper == "braid-disk2" => {
+                    let phase = show_counter_for_status.load(Ordering::SeqCst);
+                    let device = if phase >= 2 { "(null)" } else { "/dev/vdc" };
+                    Some(Ok(mock_ok(
+                        "cryptsetup status braid-disk2",
+                        &format!(
+                            "braid-disk2 is active and is in use.\n  type:    LUKS2\n  device:  {device}\n  mode:    read/write\n"
+                        ),
+                    )))
+                }
+                _ => None,
+            });
+        let fs = MockFs::storage(vec![]);
+
+        let err = cmd_remove(&runner, &fs, &f.remove_params().build())
+            .expect_err("pre-journal hot-unplug must fail");
+        let msg = err.to_string();
+
+        assert!(msg.contains("braid-disk2"), "expected target mapper: {msg}");
+        assert!(
+            msg.contains("device: (null)"),
+            "expected null marker: {msg}"
+        );
+        assert!(msg.contains("hot-unplug"), "expected hot-unplug: {msg}");
+        assert!(msg.contains("braid lock"), "expected braid lock: {msg}");
+        assert!(msg.contains("braid unlock"), "expected braid unlock: {msg}");
+        assert!(msg.contains("reboot"), "expected reboot alt: {msg}");
+        assert!(
+            msg.contains("re-run `braid remove`"),
+            "pre-journal hot-unplug must point at re-run remove: {msg}"
+        );
+        assert!(
+            !msg.contains("braid recover"),
+            "pre-journal hot-unplug must NOT mention braid recover (would fail with no journal): {msg}",
+        );
+        assert!(
+            journal::load_journal(&f.paths).unwrap().is_none(),
+            "pre-journal hot-unplug must NOT leave a pending-op.json",
+        );
+    }
+
+    /* Intent: post-journal target hot-unplug surfaces the journal-bearing
+     * remediation -- mentions `braid recover` and preserves the journal
+     * for it. Mirrors the legacy in-helper wording (pool.rs:373-388)
+     * which is what the existing operator muscle-memory expects.
+     *
+     * Why: complements the pre-journal hot-unplug regression so callers
+     * see the same rich UX but routed by call position.
+     *
+     * Scenario: pre-journal validation passed; between then and the
+     * post-journal validation, the target's underlying was hot-unplugged.
+     */
+    #[test]
+    fn post_journal_target_hot_unplug_message() {
+        let f = PoolFixture::three_disk_healthy();
+        // Three show calls: planning, pre-journal validation, post-journal
+        // validation. We flip cryptsetup status to (null) for braid-disk2
+        // ONLY after the second probe has finished.
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        let show_counter = std::sync::Arc::new(AtomicUsize::new(0));
+        let show_counter_for_status = std::sync::Arc::clone(&show_counter);
+        let runner = RemovalPool::three_disk()
+            .install(MockRunner::default())
+            .with_handler(move |req| match req {
+                CmdRequest::BtrfsFilesystemShow { .. } => {
+                    show_counter.fetch_add(1, Ordering::SeqCst);
+                    Some(Ok(mock_ok("btrfs filesystem show", THREE_DISK_SHOW_BASE)))
+                }
+                _ => None,
+            })
+            .with_handler(move |req| match req {
+                CmdRequest::CryptsetupStatus { mapper } if mapper == "braid-disk2" => {
+                    // First two probes (planning + pre-journal): healthy.
+                    // Probe #3 (post-journal): hot-unplugged.
+                    let phase = show_counter_for_status.load(Ordering::SeqCst);
+                    let device = if phase >= 3 { "(null)" } else { "/dev/vdc" };
+                    Some(Ok(mock_ok(
+                        "cryptsetup status braid-disk2",
+                        &format!(
+                            "braid-disk2 is active and is in use.\n  type:    LUKS2\n  device:  {device}\n  mode:    read/write\n"
+                        ),
+                    )))
+                }
+                _ => None,
+            });
+        let fs = MockFs::storage(vec![]);
+
+        let err = cmd_remove(&runner, &fs, &f.remove_params().build())
+            .expect_err("post-journal hot-unplug must fail");
+        let msg = err.to_string();
+
+        assert!(msg.contains("braid-disk2"), "expected target mapper: {msg}");
+        assert!(
+            msg.contains("device: (null)"),
+            "expected null marker: {msg}"
+        );
+        assert!(msg.contains("hot-unplug"), "expected hot-unplug: {msg}");
+        assert!(
+            msg.contains("braid recover"),
+            "expected braid recover: {msg}"
+        );
+        assert!(msg.contains("braid lock"), "expected braid lock: {msg}");
+        assert!(msg.contains("braid unlock"), "expected braid unlock: {msg}");
+        assert!(msg.contains("reboot"), "expected reboot alt: {msg}");
+        assert!(
+            !msg.contains("re-run `braid remove`"),
+            "post-journal hot-unplug must NOT direct at re-run remove (blocked by pending-op): {msg}",
+        );
+        assert!(
+            journal::load_journal(&f.paths).unwrap().is_some(),
+            "post-journal hot-unplug must preserve pending-op.json for recover",
         );
     }
 }

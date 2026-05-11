@@ -959,24 +959,29 @@ fn execute_generic_live_pool_recovery<R: CommandRunner + Sync>(
     let mut recovered =
         build_membership_from_live_pool(&pool, &plan.union, prior.as_ref(), by_id_resolver)?;
 
-    // OpKind::Remove guard: an absent target may indicate an in-progress race
-    // (mapper went null-underlying or btrfs-MISSING between plan_remove and
-    // helper / between helper and recovery), not a completed eviction.
-    // build_membership_from_live_pool walks pool.devices only; restore the
-    // target from pre_membership when probe_pool's null_underlying or
-    // missing_devids signal that btrfs still owns it.
-    if let journal::OpKind::Remove { name } = &plan.journal.op
-        && !recovered.disks.contains_key(name)
-        && let Some(target_member) = plan.journal.pre_membership.disks.get(name)
-    {
-        let mapper = config::mapper_name(name);
-        let in_null_underlying = pool.null_underlying.iter().any(|n| n.mapper == mapper);
-        let in_missing = target_member
-            .devid
-            .map(|d| pool.missing_devids.contains(&d))
-            .unwrap_or(false);
-        if in_null_underlying || in_missing {
-            recovered.disks.insert(name.clone(), target_member.clone());
+    // OpKind::Remove guard: restore any pre_membership disk that btrfs still
+    // owns. build_membership_from_live_pool walks pool.devices only, so any
+    // disk that has gone null-underlying or btrfs-MISSING between
+    // plan_remove and recovery would be pruned even though no eviction
+    // committed. This loop is the broadened form of the original
+    // target-only restore: the target is in pre_membership, so it gets the
+    // same treatment as any other disk; non-target disks now also survive
+    // (closes the gap where a post-journal validation failure preserved
+    // the journal but recover then lost a flapping non-target disk).
+    if matches!(&plan.journal.op, journal::OpKind::Remove { .. }) {
+        for (name, member) in &plan.journal.pre_membership.disks {
+            if recovered.disks.contains_key(name) {
+                continue;
+            }
+            let mapper = config::mapper_name(name);
+            let in_null_underlying = pool.null_underlying.iter().any(|n| n.mapper == mapper);
+            let in_missing = member
+                .devid
+                .map(|d| pool.missing_devids.contains(&d))
+                .unwrap_or(false);
+            if in_null_underlying || in_missing {
+                recovered.disks.insert(name.clone(), member.clone());
+            }
         }
     }
 
@@ -12433,6 +12438,298 @@ mod tests {
      * live pool now reports only disk1. Recover must drop disk2 from
      * pool.json and clear the journal.
      */
+    /// 3-disk Remove journal with disk2 as the eviction target and devids
+    /// pinned on every pre_membership entry. Used by recover-side tests
+    /// for the broadened OpKind::Remove guard which must preserve any
+    /// pre_membership disk that btrfs still owns -- not just the target.
+    fn remove_3to2_journal_with_devids() -> journal::Journal {
+        let mut pre_disks = BTreeMap::new();
+        pre_disks.insert(
+            "disk1".to_owned(),
+            disk_member_with_devid("/dev/disk/by-id/virtio-disk1", 1),
+        );
+        pre_disks.insert(
+            "disk2".to_owned(),
+            disk_member_with_devid("/dev/disk/by-id/virtio-disk2", 2),
+        );
+        pre_disks.insert(
+            "disk3".to_owned(),
+            disk_member_with_devid("/dev/disk/by-id/virtio-disk3", 3),
+        );
+        let pre = PoolMembership { disks: pre_disks };
+
+        let mut target_disks = BTreeMap::new();
+        target_disks.insert(
+            "disk1".to_owned(),
+            disk_member_with_devid("/dev/disk/by-id/virtio-disk1", 1),
+        );
+        target_disks.insert(
+            "disk3".to_owned(),
+            disk_member_with_devid("/dev/disk/by-id/virtio-disk3", 3),
+        );
+
+        journal::Journal {
+            started_at: "2026-01-01T00:00:00Z".into(),
+            op: OpKind::Remove {
+                name: "disk2".to_owned(),
+            },
+            pre_membership: pre,
+            target_membership: PoolMembership {
+                disks: target_disks,
+            },
+        }
+    }
+
+    /* Intent: cmd_recover for an interrupted OpKind::Remove preserves a
+     * NON-target disk in pool.json when btrfs reports its devid in
+     * `missing_devids`.
+     * Why it exists: the broadened OpKind::Remove guard restores any
+     * pre_membership disk that btrfs still owns, not just the target.
+     * Without this, a post-journal validation failure that preserved the
+     * journal would be undermined by recover silently dropping non-target
+     * MISSING disks from pool.json.
+     * Scenario: a 3-disk pool started `braid remove disk2`; between
+     * journal::write_journal and the post-journal validation, disk3 went
+     * MISSING (flapping disk). Recover must keep disk2 AND disk3 in
+     * pool.json so a follow-up remove or remove-missing can act on them.
+     */
+    #[test]
+    fn cmd_recover_remove_preserves_non_target_missing_disk() {
+        let f = PoolFixture::empty();
+        let fs = MockFs::new(&[]);
+
+        let journal = remove_3to2_journal_with_devids();
+        journal::write_journal(&f.paths, &journal).unwrap();
+
+        // Live pool: disk1 and disk2 present; disk3 is MISSING (btrfs-
+        // authoritative path MISSING sentinel for devid 3).
+        let show = ok_raw(
+            "btrfs filesystem show /mnt/storage",
+            "Label: none  uuid: aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee\n\
+             \tTotal devices 3 FS bytes used 1.00GiB\n\
+             \tdevid    1 size 10.00GiB used 2.00GiB path /dev/mapper/braid-disk1\n\
+             \tdevid    2 size 10.00GiB used 2.00GiB path /dev/mapper/braid-disk2\n\
+             \tdevid    3 size 0 used 0 path MISSING\n",
+        );
+        let (mp_req, mp_out) = mountpoint_ok();
+        let runner = MockRunner::default()
+            .with_output(mp_req, mp_out)
+            .with_output(
+                CmdRequest::BtrfsFilesystemShow {
+                    mount_point: MountPoint("/mnt/storage".into()),
+                },
+                show,
+            )
+            .with_output(
+                CmdRequest::CryptsetupStatus {
+                    mapper: "braid-disk1".into(),
+                },
+                cryptsetup_status_active("braid-disk1", "/dev/vda"),
+            )
+            .with_output(
+                CmdRequest::CryptsetupLuksUuid {
+                    device: "/dev/vda".into(),
+                },
+                cryptsetup_uuid_ok("/dev/vda", "11111111-1111-1111-1111-111111111111"),
+            )
+            .with_output(
+                CmdRequest::CryptsetupStatus {
+                    mapper: "braid-disk2".into(),
+                },
+                cryptsetup_status_active("braid-disk2", "/dev/vdb"),
+            )
+            .with_output(
+                CmdRequest::CryptsetupLuksUuid {
+                    device: "/dev/vdb".into(),
+                },
+                cryptsetup_uuid_ok("/dev/vdb", "22222222-2222-2222-2222-222222222222"),
+            );
+
+        let resolver = resolver_for(&[
+            ("/dev/vda", "virtio-disk1"),
+            ("/dev/vdb", "virtio-disk2"),
+            ("/dev/vdc", "virtio-disk3"),
+        ]);
+        let params = f.recover_params().passphrase_file(None).build();
+        let result = cmd_recover(&runner, &fs, &resolver, &params);
+        result.expect("recover should succeed and preserve non-target MISSING");
+
+        let recovered = membership::load_membership(&f.paths).unwrap();
+        assert!(recovered.disks.contains_key("disk1"));
+        assert!(
+            recovered.disks.contains_key("disk2"),
+            "target disk2 must be preserved (still in pool.devices)"
+        );
+        assert!(
+            recovered.disks.contains_key("disk3"),
+            "non-target MISSING disk3 must be preserved by the broadened guard"
+        );
+        assert!(!f.paths.pending_op_json().exists());
+    }
+
+    /* Intent: cmd_recover for an interrupted OpKind::Remove preserves a
+     * NON-target disk in pool.json when its mapper is in
+     * `pool.null_underlying` (cryptsetup reports `device: (null)`).
+     * Why it exists: the broadened guard checks both null_underlying and
+     * missing_devids; this test pins the null_underlying branch for the
+     * non-target case.
+     * Scenario: a 3-disk pool started `braid remove disk2`; between
+     * journal write and post-journal validation, disk3's underlying
+     * block device was hot-unplugged.
+     */
+    #[test]
+    fn cmd_recover_remove_preserves_non_target_null_underlying_disk() {
+        let f = PoolFixture::empty();
+        let fs = MockFs::new(&[]);
+
+        let journal = remove_3to2_journal_with_devids();
+        journal::write_journal(&f.paths, &journal).unwrap();
+
+        // Live pool reports all three mappers; disk3 has cryptsetup
+        // status `device: (null)` so probe_pool sorts it into
+        // null_underlying.
+        let show = ok_raw(
+            "btrfs filesystem show /mnt/storage",
+            "Label: none  uuid: aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee\n\
+             \tTotal devices 3 FS bytes used 1.00GiB\n\
+             \tdevid    1 size 10.00GiB used 2.00GiB path /dev/mapper/braid-disk1\n\
+             \tdevid    2 size 10.00GiB used 2.00GiB path /dev/mapper/braid-disk2\n\
+             \tdevid    3 size 10.00GiB used 2.00GiB path /dev/mapper/braid-disk3\n",
+        );
+        let (mp_req, mp_out) = mountpoint_ok();
+        let runner = MockRunner::default()
+            .with_output(mp_req, mp_out)
+            .with_output(
+                CmdRequest::BtrfsFilesystemShow {
+                    mount_point: MountPoint("/mnt/storage".into()),
+                },
+                show,
+            )
+            .with_output(
+                CmdRequest::CryptsetupStatus {
+                    mapper: "braid-disk1".into(),
+                },
+                cryptsetup_status_active("braid-disk1", "/dev/vda"),
+            )
+            .with_output(
+                CmdRequest::CryptsetupLuksUuid {
+                    device: "/dev/vda".into(),
+                },
+                cryptsetup_uuid_ok("/dev/vda", "11111111-1111-1111-1111-111111111111"),
+            )
+            .with_output(
+                CmdRequest::CryptsetupStatus {
+                    mapper: "braid-disk2".into(),
+                },
+                cryptsetup_status_active("braid-disk2", "/dev/vdb"),
+            )
+            .with_output(
+                CmdRequest::CryptsetupLuksUuid {
+                    device: "/dev/vdb".into(),
+                },
+                cryptsetup_uuid_ok("/dev/vdb", "22222222-2222-2222-2222-222222222222"),
+            )
+            .with_output(
+                CmdRequest::CryptsetupStatus {
+                    mapper: "braid-disk3".into(),
+                },
+                cryptsetup_status_active("braid-disk3", "(null)"),
+            );
+
+        let resolver = resolver_for(&[
+            ("/dev/vda", "virtio-disk1"),
+            ("/dev/vdb", "virtio-disk2"),
+            ("/dev/vdc", "virtio-disk3"),
+        ]);
+        let params = f.recover_params().passphrase_file(None).build();
+        let result = cmd_recover(&runner, &fs, &resolver, &params);
+        result.expect("recover should succeed and preserve non-target null-underlying");
+
+        let recovered = membership::load_membership(&f.paths).unwrap();
+        assert!(recovered.disks.contains_key("disk1"));
+        assert!(recovered.disks.contains_key("disk2"));
+        assert!(
+            recovered.disks.contains_key("disk3"),
+            "non-target null-underlying disk3 must be preserved by the broadened guard"
+        );
+        assert!(!f.paths.pending_op_json().exists());
+    }
+
+    /* Intent: cmd_recover for an interrupted OpKind::Remove must NOT
+     * resurrect a NON-target disk that is genuinely gone from the live
+     * pool (not in devices, not null-underlying, not MISSING).
+     * Why: the broadened guard must not over-correct. A non-target disk
+     * may have been removed by an earlier, fully-completed operation
+     * before the interrupted Remove; recover must drop it from pool.json
+     * to match the live pool.
+     * Scenario: a 3-disk pool started `braid remove disk2`. The btrfs
+     * device-remove on disk2 was interrupted -- BUT disk3 had separately
+     * been fully evicted in a prior, completed operation. The live pool
+     * now reports only disk1 and disk2. Recover must drop disk3.
+     */
+    #[test]
+    fn cmd_recover_remove_does_not_resurrect_genuinely_gone_non_target() {
+        let f = PoolFixture::empty();
+        let fs = MockFs::new(&[]);
+
+        let journal = remove_3to2_journal_with_devids();
+        journal::write_journal(&f.paths, &journal).unwrap();
+
+        // Live pool: only disk1 and disk2 present; disk3 is genuinely
+        // gone -- not in pool.devices, not in null_underlying, not in
+        // missing_devids.
+        let (mp_req, mp_out) = mountpoint_ok();
+        let runner = MockRunner::default()
+            .with_output(mp_req, mp_out)
+            .with_output(
+                CmdRequest::BtrfsFilesystemShow {
+                    mount_point: MountPoint("/mnt/storage".into()),
+                },
+                btrfs_show_two_disks(),
+            )
+            .with_output(
+                CmdRequest::CryptsetupStatus {
+                    mapper: "braid-disk1".into(),
+                },
+                cryptsetup_status_active("braid-disk1", "/dev/vda"),
+            )
+            .with_output(
+                CmdRequest::CryptsetupLuksUuid {
+                    device: "/dev/vda".into(),
+                },
+                cryptsetup_uuid_ok("/dev/vda", "11111111-1111-1111-1111-111111111111"),
+            )
+            .with_output(
+                CmdRequest::CryptsetupStatus {
+                    mapper: "braid-disk2".into(),
+                },
+                cryptsetup_status_active("braid-disk2", "/dev/vdb"),
+            )
+            .with_output(
+                CmdRequest::CryptsetupLuksUuid {
+                    device: "/dev/vdb".into(),
+                },
+                cryptsetup_uuid_ok("/dev/vdb", "22222222-2222-2222-2222-222222222222"),
+            );
+
+        let resolver = resolver_for(&[("/dev/vda", "virtio-disk1"), ("/dev/vdb", "virtio-disk2")]);
+        let params = f.recover_params().passphrase_file(None).build();
+        let result = cmd_recover(&runner, &fs, &resolver, &params);
+        result.expect("recover should succeed when non-target is genuinely gone");
+
+        let recovered = membership::load_membership(&f.paths).unwrap();
+        assert!(recovered.disks.contains_key("disk1"));
+        assert!(
+            recovered.disks.contains_key("disk2"),
+            "target disk2 must be preserved (still in pool.devices)"
+        );
+        assert!(
+            !recovered.disks.contains_key("disk3"),
+            "genuinely gone non-target disk3 must NOT be resurrected"
+        );
+        assert!(!f.paths.pending_op_json().exists());
+    }
+
     #[test]
     fn cmd_recover_remove_with_genuinely_evicted_target_drops_membership() {
         let f = PoolFixture::empty();

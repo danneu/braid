@@ -5,7 +5,8 @@ use crate::progress::{
     run_with_progress,
 };
 use crate::status_tag::{StatusTag, color_enabled_for_stderr, emit_status, status_line};
-use crate::types::MountPoint;
+use crate::types::{LuksUuid, MapperName, MountPoint};
+use std::collections::BTreeMap;
 
 #[derive(Debug, thiserror::Error)]
 pub enum PoolError {
@@ -13,6 +14,186 @@ pub enum PoolError {
     Cmd(#[from] CmdError),
     #[error("{0}")]
     Failed(String),
+}
+
+/// Identity record per present pool device captured at planning time and
+/// again at execution-time validation. Equality fails on any field change,
+/// catching same-mapper replacement (cryptsetup close + open on a different
+/// LUKS device under the same `braid-<name>` mapper between plan and
+/// execute), which a mapper-name-only comparison would miss.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DeviceIdentity {
+    pub devid: u64,
+    pub luks_uuid: LuksUuid,
+}
+
+/// Structured drift summary returned by `validate_pool_topology` on
+/// mismatch. Position-neutral: the caller chooses where to invoke the
+/// validation (pre-journal clean-failure vs. post-journal recovery
+/// handoff) and wraps the returned drift with the appropriate
+/// remediation. The struct exposes the derived `target_present` and
+/// `target_null_underlying` flags so callers can route the hot-unplug
+/// case without re-probing.
+#[derive(Debug)]
+pub struct TopologyDrift {
+    /// `None` when the probe succeeded; `Some(message)` when probing
+    /// itself failed.
+    pub probe_error: Option<String>,
+    pub target_present: bool,
+    pub target_null_underlying: bool,
+    pub expected_present_identities: BTreeMap<MapperName, DeviceIdentity>,
+    pub observed_present_identities: BTreeMap<MapperName, DeviceIdentity>,
+    pub observed_missing_count: u64,
+}
+
+impl TopologyDrift {
+    /// True when the target mapper is gone from the live pool AND its
+    /// dm-crypt node still resolves but cryptsetup reports `device: (null)`.
+    /// Distinct recovery flow: re-plug does NOT self-heal the mapper.
+    pub fn is_target_hot_unplug(&self) -> bool {
+        !self.target_present && self.target_null_underlying
+    }
+
+    /// Brief drift summary for embedding in error messages. Names the
+    /// observed deltas (missing, added, identity-changed) so an operator
+    /// can tell whether a disk was added/removed vs. replaced under the
+    /// same mapper. Callers append the remediation suffix; this helper
+    /// is position-neutral on purpose.
+    pub fn detail(&self) -> String {
+        if let Some(err) = &self.probe_error {
+            return format!("topology validation probe failed: {err}");
+        }
+        let expected_keys: std::collections::BTreeSet<&MapperName> =
+            self.expected_present_identities.keys().collect();
+        let observed_keys: std::collections::BTreeSet<&MapperName> =
+            self.observed_present_identities.keys().collect();
+
+        let mut parts = Vec::<String>::new();
+        let missing: Vec<&MapperName> = expected_keys.difference(&observed_keys).copied().collect();
+        let added: Vec<&MapperName> = observed_keys.difference(&expected_keys).copied().collect();
+        let mut identity_changed: Vec<String> = Vec::new();
+        for key in expected_keys.intersection(&observed_keys) {
+            let expected_id = &self.expected_present_identities[*key];
+            let observed_id = &self.observed_present_identities[*key];
+            if expected_id != observed_id {
+                identity_changed.push(format!(
+                    "{} (expected devid={} luks_uuid={}, observed devid={} luks_uuid={})",
+                    key.0,
+                    expected_id.devid,
+                    expected_id.luks_uuid,
+                    observed_id.devid,
+                    observed_id.luks_uuid,
+                ));
+            }
+        }
+
+        if !missing.is_empty() {
+            let names: Vec<String> = missing.iter().map(|m| m.0.clone()).collect();
+            parts.push(format!("expected but absent: {}", names.join(", ")));
+        }
+        if !added.is_empty() {
+            let names: Vec<String> = added.iter().map(|m| m.0.clone()).collect();
+            parts.push(format!("observed but unexpected: {}", names.join(", ")));
+        }
+        if !identity_changed.is_empty() {
+            parts.push(format!("identity changed: {}", identity_changed.join("; ")));
+        }
+        if self.observed_missing_count > 0 {
+            parts.push(format!(
+                "{} btrfs-MISSING device(s)",
+                self.observed_missing_count
+            ));
+        }
+        if self.is_target_hot_unplug() {
+            parts.push(
+                "target mapper present in pool table but cryptsetup reports \
+                 `device: (null)` (null-underlying / hot-unplug)"
+                    .to_owned(),
+            );
+        }
+
+        if parts.is_empty() {
+            "topology changed between plan and execute".to_owned()
+        } else {
+            format!(
+                "topology changed between plan and execute: {}",
+                parts.join("; ")
+            )
+        }
+    }
+}
+
+/// Execution-time validation that the live pool topology matches the
+/// planner's exact identity snapshot. Returns `Err(TopologyDrift)` on
+/// probe failure, target absence, missing-device drift, mapper-set
+/// mismatch, or per-mapper identity drift (devid or luks_uuid changed
+/// for the same mapper name).
+///
+/// **Position-dependent failure semantics.** The helper itself is
+/// position-neutral: the caller chooses where to call it and wraps the
+/// returned drift with the appropriate remediation:
+/// - Pre-`journal::write_journal` (clean failure path): caller wraps
+///   with "re-run `braid remove`". Failure here is a "command never
+///   started" exit and must NOT strand `pending-op.json`
+///   (principle 3, `docs/principles.md:23`).
+/// - Post-`journal::write_journal` (recovery-handoff path): caller
+///   wraps with "run `braid recover` to reconcile". Failure here
+///   intentionally preserves `pending-op.json` so the recovery flow
+///   can replay/reconcile.
+pub fn validate_pool_topology<R: CommandRunner + Sync, F: Filesystem + ?Sized>(
+    runner: &R,
+    fs: &F,
+    mount_point: &MountPoint,
+    target_mapper: &str,
+    expected_present_identities: &BTreeMap<MapperName, DeviceIdentity>,
+) -> Result<(), TopologyDrift> {
+    let pool = match probe_pool(runner, fs, mount_point) {
+        Ok(p) => p,
+        Err(e) => {
+            return Err(TopologyDrift {
+                probe_error: Some(e.to_string()),
+                target_present: false,
+                target_null_underlying: false,
+                expected_present_identities: expected_present_identities.clone(),
+                observed_present_identities: BTreeMap::new(),
+                observed_missing_count: 0,
+            });
+        }
+    };
+    let observed_present_identities: BTreeMap<MapperName, DeviceIdentity> = pool
+        .devices
+        .iter()
+        .map(|d| {
+            (
+                d.mapper.clone(),
+                DeviceIdentity {
+                    devid: d.devid,
+                    luks_uuid: d.luks_uuid.clone(),
+                },
+            )
+        })
+        .collect();
+    let target_present = observed_present_identities
+        .keys()
+        .any(|m| m.0 == target_mapper);
+    let target_null_underlying = pool
+        .null_underlying
+        .iter()
+        .any(|n| n.mapper.0 == target_mapper);
+
+    let identities_match = observed_present_identities == *expected_present_identities;
+    let no_missing = pool.missing_count == 0;
+    if identities_match && no_missing && target_present {
+        return Ok(());
+    }
+    Err(TopologyDrift {
+        probe_error: None,
+        target_present,
+        target_null_underlying,
+        expected_present_identities: expected_present_identities.clone(),
+        observed_present_identities,
+        observed_missing_count: pool.missing_count,
+    })
 }
 
 /// Add a device to an existing btrfs pool.
@@ -389,54 +570,31 @@ pub fn pool_resize_device<R: CommandRunner + Sync>(
 
 /// Shared helper: evict a live (present) device from the pool.
 ///
-/// 1. Probes the current pool to decide if RAID1→single conversion is needed.
-/// 2. If only one device would remain, balances to single first.
-///    Note: if a device is faulty, we do not want it to participate in the balance.
-///          Rather, it should just be removed. But we don't have that info.
-/// 3. Removes the target device from the pool.
-/// 4. Closes the LUKS mapper (best-effort; warns on failure).
+/// 1. If `needs_balance` is true, balances RAID1 -> single first
+///    (only safe when the planner promised a 2->1 transition).
+/// 2. Removes the target device from the pool.
+/// 3. Closes the LUKS mapper (best-effort; warns on failure).
 ///
-/// Fail-closed: returns `PoolError::Failed` if the in-helper re-probe finds the
-/// target mapper absent from `pool.devices` (hot-unplug or btrfs-MISSING
-/// transition between `plan_remove` and here). The caller relies on this to
-/// keep the journal on disk and `pool.json` un-rewritten so the next
-/// `braid recover` reconciles from live state. Layer-2 recovery
-/// (`execute_generic_live_pool_recovery` for `OpKind::Remove`) honors the
-/// same null-underlying / MISSING detection to avoid dropping the target
-/// from `pool.json`.
+/// Caller is responsible for upstream topology validation (see
+/// `validate_pool_topology`, which the caller invokes pre-journal AND
+/// post-journal). This helper assumes the typed work plan is consistent
+/// with the live pool and executes it. Drift in the residual microsecond
+/// window between the post-journal validation and the actual btrfs
+/// command surfaces as a btrfs command failure (e.g.
+/// `pool_balance_single` or `pool_remove_device` returning
+/// `PoolError::Failed`) and preserves the journal for `braid recover`
+/// to reconcile.
 #[allow(clippy::doc_overindented_list_items)]
-pub fn evict_present_device<R: CommandRunner + Sync, F: Filesystem + ?Sized>(
+pub fn evict_present_device<R: CommandRunner + Sync>(
     runner: &R,
-    fs: &F,
     mapper: &str,
     mount_point: &MountPoint,
+    needs_balance: bool,
     progress: ProgressOutput,
 ) -> Result<(), PoolError> {
-    let pool = probe_pool(runner, fs, mount_point).map_err(|e| PoolError::Failed(e.to_string()))?;
-
     let device_path = format!("/dev/mapper/{mapper}");
-    let in_pool = pool.devices.iter().any(|d| d.mapper.0 == mapper);
-
-    if !in_pool {
-        let null_underlying = pool.null_underlying.iter().any(|n| n.mapper.0 == mapper);
-        let detail = if null_underlying {
-            "cryptsetup reports `device: (null)` (hot-unplug). \
-             Run `braid recover` to reconcile pool.json. \
-             The broken mapper does not self-heal on replug; if `cryptsetup status` \
-             still reports `device: (null)` after recover, close + reopen the mappers \
-             (`braid lock` then `braid unlock`, or reboot then `braid unlock`) before \
-             retrying the remove."
-        } else {
-            "remove did not commit. Run `braid recover` to reconcile pool.json."
-        };
-        return Err(PoolError::Failed(format!(
-            "target {mapper} is no longer present in pool: {detail}"
-        )));
-    }
-
     let color_enabled = color_enabled_for_stderr();
-    let remaining = pool.devices.len() - 1;
-    if remaining == 1 {
+    if needs_balance {
         eprint!(
             "{}",
             status_line(
@@ -1582,19 +1740,13 @@ mod tests {
         );
     }
 
-    /// Custom runner for evict_present_device tests. Mocks probe_pool against
-    /// a 3-disk pool layout, the BtrfsDeviceRemove call, and the trailing
-    /// CryptsetupClose with a configurable exit status. The target-mapper
-    /// presence and underlying-device shape are configurable so the
-    /// fail-closed paths (target absent, target null-underlying) are
-    /// reachable from tests; mutating commands are recorded so tests can
-    /// assert they did not leak through the fail-closed branches.
+    /// Custom runner for the trimmed `evict_present_device` test. The
+    /// helper no longer probes the pool, so we only need to mock the
+    /// mutating commands -- BtrfsDeviceRemove and CryptsetupClose.
+    /// Mutating commands are recorded so the test can assert sequencing.
     #[derive(Clone)]
     struct EvictRunner {
         close_exit: i32,
-        target_mapper: &'static str,
-        target_present: bool,
-        null_underlying_target: bool,
         invocations: Arc<Mutex<Vec<&'static str>>>,
     }
 
@@ -1602,19 +1754,12 @@ mod tests {
         fn default() -> Self {
             Self {
                 close_exit: 0,
-                target_mapper: "braid-disk2",
-                target_present: true,
-                null_underlying_target: false,
                 invocations: Arc::new(Mutex::new(Vec::new())),
             }
         }
     }
 
     impl EvictRunner {
-        fn invocations(&self) -> Vec<&'static str> {
-            self.invocations.lock().unwrap().clone()
-        }
-
         fn record(&self, tag: &'static str) {
             self.invocations.lock().unwrap().push(tag);
         }
@@ -1623,47 +1768,6 @@ mod tests {
     impl CommandRunner for EvictRunner {
         fn run(&self, request: &CmdRequest) -> Result<RawCommandOutput, CmdError> {
             match request {
-                CmdRequest::BtrfsFilesystemShow { .. } => {
-                    let mut lines =
-                        String::from("Label: none  uuid: cc86845b-aec3-408e-bef5-553affc1f2b1\n");
-                    lines.push_str("\tTotal devices 3 FS bytes used 16.17MiB\n");
-                    for i in 1..=3 {
-                        let mapper = format!("braid-disk{i}");
-                        if !self.target_present && mapper == self.target_mapper {
-                            continue;
-                        }
-                        lines.push_str(&format!(
-                            "\tdevid    {i} size 496.00MiB used 121.56MiB path /dev/mapper/{mapper}\n"
-                        ));
-                    }
-                    Ok(RawCommandOutput {
-                        cmd: String::new(),
-                        stdout: lines,
-                        stderr: String::new(),
-                        exit_status: 0,
-                    })
-                }
-                CmdRequest::CryptsetupStatus { mapper } => {
-                    let device = if self.null_underlying_target && mapper == self.target_mapper {
-                        "(null)".to_owned()
-                    } else {
-                        format!("/dev/sd{mapper}")
-                    };
-                    Ok(RawCommandOutput {
-                        cmd: String::new(),
-                        stdout: format!(
-                            "{mapper} is active and is in use.\n  type:    LUKS2\n  device:  {device}\n  mode:    read/write\n"
-                        ),
-                        stderr: String::new(),
-                        exit_status: 0,
-                    })
-                }
-                CmdRequest::CryptsetupLuksUuid { .. } => Ok(RawCommandOutput {
-                    cmd: String::new(),
-                    stdout: "11111111-1111-1111-1111-111111111111\n".to_owned(),
-                    stderr: String::new(),
-                    exit_status: 0,
-                }),
                 CmdRequest::BtrfsDeviceRemove { .. } => {
                     self.record("BtrfsDeviceRemove");
                     Ok(ok_raw())
@@ -1709,13 +1813,9 @@ mod tests {
             ..EvictRunner::default()
         };
         let captured = crate::status_tag::testing::capture_with_color(false, || {
-            let result = evict_present_device(
-                &runner,
-                &RestoreFs,
-                "braid-disk2",
-                &mp(),
-                ProgressOutput::Off,
-            );
+            // 3-disk fixture -> remaining == 2 -> no balance needed.
+            let result =
+                evict_present_device(&runner, "braid-disk2", &mp(), false, ProgressOutput::Off);
             assert!(result.is_ok(), "evict should still return Ok: {result:?}");
         });
         let wait = "[wait] disk disk2: locking...";
@@ -1728,122 +1828,305 @@ mod tests {
         );
     }
 
-    /* Intent: pool::evict_present_device fails closed when the in-helper
-     * re-probe finds the target absent from the live pool, leaving the
-     * journal and pool.json untouched.
-     * Why it exists: prior to the fix, an early `Ok(())` on absent target
-     * let cmd_remove::execute write pool.json and clear the journal,
-     * producing a phantom-success while btrfs still owned the device --
-     * see the layered race documented at evict_present_device's doc.
-     * Scenario: a target mapper transitions to btrfs-MISSING / outright
-     * absence (its row drops from `btrfs filesystem show`) between
-     * plan_remove and the helper's own probe. The helper must surface an
-     * error pointing at `braid recover` and never invoke BtrfsDeviceRemove
-     * or CryptsetupClose against the missing target.
+    // ----- validate_pool_topology helper-level tests --------------------
+
+    /// Build a planner identity snapshot for a healthy 3-disk pool
+    /// {braid-disk1, braid-disk2, braid-disk3}.
+    fn three_disk_expected_identities() -> BTreeMap<MapperName, DeviceIdentity> {
+        let mut m = BTreeMap::new();
+        for i in 1..=3u64 {
+            m.insert(
+                MapperName(format!("braid-disk{i}")),
+                DeviceIdentity {
+                    devid: i,
+                    luks_uuid: LuksUuid(format!(
+                        "{:08x}-{:04x}-{:04x}-{:04x}-{:012x}",
+                        i as u32, i as u16, i as u16, i as u16, i
+                    )),
+                },
+            );
+        }
+        m
+    }
+
+    /// Custom runner that emits a configurable `btrfs filesystem show`
+    /// output and the matching `cryptsetup status` / `cryptsetup luksUUID`
+    /// answers so probe_pool returns the topology under test.
+    #[derive(Clone)]
+    struct ValidateProbeRunner {
+        show_stdout: String,
+        // mapper -> underlying device path (or "(null)" for null-underlying)
+        statuses: std::collections::HashMap<String, String>,
+        // device path -> luks_uuid
+        luks_uuids: std::collections::HashMap<String, String>,
+    }
+
+    impl CommandRunner for ValidateProbeRunner {
+        fn run(&self, request: &CmdRequest) -> Result<RawCommandOutput, CmdError> {
+            match request {
+                CmdRequest::BtrfsFilesystemShow { .. } => Ok(RawCommandOutput {
+                    cmd: String::new(),
+                    stdout: self.show_stdout.clone(),
+                    stderr: String::new(),
+                    exit_status: 0,
+                }),
+                CmdRequest::CryptsetupStatus { mapper } => {
+                    let device = self
+                        .statuses
+                        .get(mapper)
+                        .cloned()
+                        .unwrap_or_else(|| format!("/dev/sd{mapper}"));
+                    Ok(RawCommandOutput {
+                        cmd: String::new(),
+                        stdout: format!(
+                            "{mapper} is active and is in use.\n  type:    LUKS2\n  device:  {device}\n  mode:    read/write\n"
+                        ),
+                        stderr: String::new(),
+                        exit_status: 0,
+                    })
+                }
+                CmdRequest::CryptsetupLuksUuid { device } => {
+                    let uuid = self
+                        .luks_uuids
+                        .get(device)
+                        .cloned()
+                        .unwrap_or_else(|| "00000000-0000-0000-0000-000000000000".into());
+                    Ok(RawCommandOutput {
+                        cmd: String::new(),
+                        stdout: format!("{uuid}\n"),
+                        stderr: String::new(),
+                        exit_status: 0,
+                    })
+                }
+                _ => Err(CmdError::MissingMock),
+            }
+        }
+
+        fn run_with_stdin(
+            &self,
+            request: &CmdRequest,
+            _stdin: &[u8],
+        ) -> Result<RawCommandOutput, CmdError> {
+            self.run(request)
+        }
+    }
+
+    fn make_show(rows: &[(u64, &str)]) -> String {
+        let mut s = String::from("Label: none  uuid: cc86845b-aec3-408e-bef5-553affc1f2b1\n");
+        s.push_str(&format!(
+            "\tTotal devices {} FS bytes used 16.17MiB\n",
+            rows.len()
+        ));
+        for (devid, mapper) in rows {
+            s.push_str(&format!(
+                "\tdevid    {devid} size 496.00MiB used 121.56MiB path /dev/mapper/{mapper}\n"
+            ));
+        }
+        s
+    }
+
+    fn three_disk_runner() -> ValidateProbeRunner {
+        let show = make_show(&[(1, "braid-disk1"), (2, "braid-disk2"), (3, "braid-disk3")]);
+        let mut statuses = std::collections::HashMap::new();
+        let mut luks_uuids = std::collections::HashMap::new();
+        for i in 1..=3u64 {
+            let mapper = format!("braid-disk{i}");
+            let underlying = format!("/dev/sd{i}");
+            statuses.insert(mapper.clone(), underlying.clone());
+            luks_uuids.insert(
+                underlying,
+                format!(
+                    "{:08x}-{:04x}-{:04x}-{:04x}-{:012x}",
+                    i as u32, i as u16, i as u16, i as u16, i
+                ),
+            );
+        }
+        ValidateProbeRunner {
+            show_stdout: show,
+            statuses,
+            luks_uuids,
+        }
+    }
+
+    /* Intent: validate_pool_topology returns Ok when the live pool exactly
+     * matches the planner's identity snapshot.
+     * Why: regression guard for the happy path; a defect that flips the
+     * equality direction or skips the missing-count check breaks here.
+     * Scenario: a stable 3-disk pool between plan and execute.
      */
     #[test]
-    fn evict_present_device_target_missing_returns_error_without_mutating() {
-        let runner = EvictRunner {
-            target_present: false,
-            ..EvictRunner::default()
-        };
-        let result = evict_present_device(
-            &runner,
-            &RestoreFs,
-            "braid-disk2",
-            &mp(),
-            ProgressOutput::Off,
-        );
-        let err = result
-            .expect_err("missing target must fail closed")
-            .to_string();
+    fn validate_pool_topology_ok_on_exact_match() {
+        let runner = three_disk_runner();
+        let expected = three_disk_expected_identities();
+        let result = validate_pool_topology(&runner, &RestoreFs, &mp(), "braid-disk2", &expected);
+        assert!(result.is_ok(), "exact match must return Ok: {result:?}");
+    }
+
+    /* Intent: validate_pool_topology flags target-absent drift (plain).
+     * Why: pre-fix, an absent target was caught by the in-helper guard;
+     * the new helper must continue catching it before any mutation.
+     * Scenario: between plan and execute, the target's row dropped out
+     * of `btrfs filesystem show` (not null-underlying, just gone).
+     */
+    #[test]
+    fn validate_pool_topology_target_absent_plain() {
+        let show = make_show(&[(1, "braid-disk1"), (3, "braid-disk3")]);
+        let mut runner = three_disk_runner();
+        runner.show_stdout = show;
+        let expected = three_disk_expected_identities();
+        let drift = validate_pool_topology(&runner, &RestoreFs, &mp(), "braid-disk2", &expected)
+            .expect_err("target absence must surface drift");
+        assert!(!drift.target_present);
+        assert!(!drift.target_null_underlying);
+        assert!(!drift.is_target_hot_unplug());
+        assert!(drift.detail().contains("braid-disk2"));
+    }
+
+    /* Intent: validate_pool_topology classifies target hot-unplug.
+     * Why: replaces the old in-helper classifier so callers can route
+     * to the richer remediation without re-probing.
+     * Scenario: the target's underlying SCSI device hot-unplugged,
+     * leaving cryptsetup reporting `device: (null)`.
+     */
+    #[test]
+    fn validate_pool_topology_target_hot_unplug() {
+        // The mapper still appears in `btrfs filesystem show` (the dm-crypt
+        // node is open) but cryptsetup reports `device: (null)`. probe_pool
+        // sorts it into null_underlying and excludes it from devices.
+        let mut runner = three_disk_runner();
+        runner
+            .statuses
+            .insert("braid-disk2".into(), "(null)".into());
+        let expected = three_disk_expected_identities();
+        let drift = validate_pool_topology(&runner, &RestoreFs, &mp(), "braid-disk2", &expected)
+            .expect_err("null-underlying must surface drift");
+        assert!(drift.is_target_hot_unplug(), "must classify as hot-unplug");
+        let detail = drift.detail();
         assert!(
-            err.contains("braid-disk2"),
-            "error should name the target mapper: {err}"
-        );
-        assert!(
-            err.contains("no longer present in pool"),
-            "error should explain absence: {err}"
-        );
-        assert!(
-            err.contains("remove did not commit"),
-            "error should report remove did not commit: {err}"
-        );
-        assert!(
-            err.contains("braid recover"),
-            "error should point at braid recover: {err}"
-        );
-        let invocations = runner.invocations();
-        assert!(
-            !invocations.contains(&"BtrfsDeviceRemove"),
-            "BtrfsDeviceRemove must not run on absent target: {invocations:?}"
-        );
-        assert!(
-            !invocations.contains(&"CryptsetupClose"),
-            "CryptsetupClose must not run on absent target: {invocations:?}"
+            detail.contains("null-underlying") || detail.contains("device: (null)"),
+            "detail must mention null-underlying / hot-unplug: {detail}"
         );
     }
 
-    /* Intent: pool::evict_present_device fails closed and classifies the
-     * cause as hot-unplug when the target's underlying block device is
-     * gone (cryptsetup reports `device: (null)`).
-     * Why it exists: hot-unplug needs a different recovery story than the
-     * generic "remove did not commit" branch -- the dm-crypt target was
-     * bound to the original SCSI node and does not self-heal on replug,
-     * so the operator must run `braid recover` first (the only mutating
-     * command allowed under pending-op.json) and only then close + reopen
-     * the mapper if it is still null.
-     * Scenario: between plan_remove and the helper's probe, the target's
-     * underlying device is hot-unplugged. The mapper still appears in
-     * `btrfs filesystem show`, but cryptsetup reports `device: (null)`,
-     * so probe_pool sorts it into `null_underlying`. The helper must
-     * raise the hot-unplug message and sequence recover before lock +
-     * unlock.
+    /* Intent: validate_pool_topology flags non-target MISSING drift.
+     * Why: a non-target disk going MISSING would otherwise pass the old
+     * cardinality-only check; the new helper rejects it before mutation.
+     * Scenario: a third disk goes MISSING while the target is still
+     * present, between plan and execute.
      */
     #[test]
-    fn evict_present_device_target_null_underlying_classifies_hot_unplug() {
-        let runner = EvictRunner {
-            null_underlying_target: true,
-            ..EvictRunner::default()
-        };
-        let result = evict_present_device(
-            &runner,
-            &RestoreFs,
-            "braid-disk2",
-            &mp(),
-            ProgressOutput::Off,
+    fn validate_pool_topology_non_target_missing() {
+        // Drop disk3 from `btrfs filesystem show` and replace it with a
+        // MISSING sentinel row. probe_pool reports it as missing_count > 0.
+        let mut s = String::from("Label: none  uuid: cc86845b-aec3-408e-bef5-553affc1f2b1\n");
+        s.push_str("\tTotal devices 3 FS bytes used 16.17MiB\n");
+        s.push_str("\tdevid    1 size 496.00MiB used 121.56MiB path /dev/mapper/braid-disk1\n");
+        s.push_str("\tdevid    2 size 496.00MiB used 121.56MiB path /dev/mapper/braid-disk2\n");
+        s.push_str("\t*** Some devices missing\n");
+        let mut runner = three_disk_runner();
+        runner.show_stdout = s;
+        let expected = three_disk_expected_identities();
+        let drift = validate_pool_topology(&runner, &RestoreFs, &mp(), "braid-disk2", &expected)
+            .expect_err("non-target MISSING must surface drift");
+        assert!(drift.target_present, "target must still be present");
+        assert!(drift.observed_missing_count >= 1);
+        let detail = drift.detail();
+        assert!(detail.contains("MISSING") || detail.contains("missing"));
+    }
+
+    /* Intent: validate_pool_topology flags an extra mapper (4th disk
+     * auto-unlocked between plan and execute).
+     * Why: BTreeMap equality flips on the extra key; the helper must
+     * surface that the observed set is larger than expected.
+     * Scenario: a fourth disk auto-unlocked between plan and execute,
+     * flipping a 3->2 plan into an unwanted balance against a 4-disk pool.
+     */
+    #[test]
+    fn validate_pool_topology_device_count_grew() {
+        let show = make_show(&[
+            (1, "braid-disk1"),
+            (2, "braid-disk2"),
+            (3, "braid-disk3"),
+            (4, "braid-disk4"),
+        ]);
+        let mut runner = three_disk_runner();
+        runner.show_stdout = show;
+        runner
+            .statuses
+            .insert("braid-disk4".into(), "/dev/sd4".into());
+        runner.luks_uuids.insert(
+            "/dev/sd4".into(),
+            "44444444-4444-4444-4444-444444444444".into(),
         );
-        let err = result
-            .expect_err("null-underlying target must fail closed")
-            .to_string();
+        let expected = three_disk_expected_identities();
+        let drift = validate_pool_topology(&runner, &RestoreFs, &mp(), "braid-disk2", &expected)
+            .expect_err("extra disk must surface drift");
+        assert!(drift.target_present);
+        assert_eq!(drift.observed_missing_count, 0);
+        assert!(drift.detail().contains("braid-disk4"));
+    }
+
+    /* Intent: validate_pool_topology flags same-mapper identity drift
+     * (devid or luks_uuid differs for the same mapper name).
+     * Why: a BTreeSet<MapperName> comparison would have missed this;
+     * BTreeMap<MapperName, DeviceIdentity> catches it on value equality.
+     * Scenario: operator ran `cryptsetup close` + `cryptsetup open` on a
+     * different LUKS device under the same braid- mapper name between
+     * plan and execute, flipping devid and luks_uuid for that mapper.
+     */
+    #[test]
+    fn validate_pool_topology_same_mapper_replacement() {
+        // disk3's devid is now 99 with a different luks_uuid.
+        let show = make_show(&[(1, "braid-disk1"), (2, "braid-disk2"), (99, "braid-disk3")]);
+        let mut runner = three_disk_runner();
+        runner.show_stdout = show;
+        runner.luks_uuids.insert(
+            "/dev/sd3".into(),
+            "deadbeef-dead-beef-dead-beefdeadbeef".into(),
+        );
+        let expected = three_disk_expected_identities();
+        let drift = validate_pool_topology(&runner, &RestoreFs, &mp(), "braid-disk2", &expected)
+            .expect_err("same-mapper replacement must surface drift");
+        assert!(drift.target_present);
+        let detail = drift.detail();
+        assert!(detail.contains("braid-disk3"), "detail: {detail}");
         assert!(
-            err.contains("braid-disk2"),
-            "error should name the target mapper: {err}"
+            detail.contains("identity changed") || detail.contains("devid"),
+            "detail must signal identity drift: {detail}"
+        );
+    }
+
+    /* Intent: validate_pool_topology flags same-count survivor swap
+     * (one mapper added, one removed between plan and execute).
+     * Why: a cardinality-only check would have missed this; the helper
+     * must detect mapper-set drift even when count stays the same.
+     * Scenario: disk3 was unplugged AND disk4 plugged in (and auto-
+     * unlocked) between plan and execute -- 3 mappers, both not the
+     * target, but the planner's identity map is now wrong.
+     */
+    #[test]
+    fn validate_pool_topology_same_count_swap() {
+        let show = make_show(&[(1, "braid-disk1"), (2, "braid-disk2"), (4, "braid-disk4")]);
+        let mut runner = three_disk_runner();
+        runner.show_stdout = show;
+        runner
+            .statuses
+            .insert("braid-disk4".into(), "/dev/sd4".into());
+        runner.luks_uuids.insert(
+            "/dev/sd4".into(),
+            "44444444-4444-4444-4444-444444444444".into(),
+        );
+        let expected = three_disk_expected_identities();
+        let drift = validate_pool_topology(&runner, &RestoreFs, &mp(), "braid-disk2", &expected)
+            .expect_err("same-count swap must surface drift");
+        let detail = drift.detail();
+        assert!(
+            detail.contains("braid-disk3"),
+            "missing key in detail: {detail}"
         );
         assert!(
-            err.contains("device: (null)") && err.contains("hot-unplug"),
-            "error should classify as hot-unplug: {err}"
-        );
-        assert!(
-            err.contains("braid recover"),
-            "error should sequence braid recover first: {err}"
-        );
-        assert!(
-            err.contains("braid lock") && err.contains("braid unlock"),
-            "error should mention lock + unlock follow-up: {err}"
-        );
-        assert!(
-            err.contains("reboot"),
-            "error should mention reboot alternative: {err}"
-        );
-        let invocations = runner.invocations();
-        assert!(
-            !invocations.contains(&"BtrfsDeviceRemove"),
-            "BtrfsDeviceRemove must not run on null-underlying target: {invocations:?}"
-        );
-        assert!(
-            !invocations.contains(&"CryptsetupClose"),
-            "CryptsetupClose must not run on null-underlying target: {invocations:?}"
+            detail.contains("braid-disk4"),
+            "added key in detail: {detail}"
         );
     }
 }
