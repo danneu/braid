@@ -148,25 +148,12 @@ impl SubTab {
             SubTab::SubvolList => CmdRequest::BtrfsSubvolumeList {
                 mount_point: mount_point.clone(),
             },
-            SubTab::ScrubStatus => CmdRequest::BtrfsScrubStatus {
+            SubTab::ScrubStatus => CmdRequest::BtrfsScrubStatusHuman {
                 mount_point: mount_point.clone(),
             },
             SubTab::BalanceStatus => CmdRequest::BtrfsBalanceStatus {
                 mount_point: mount_point.clone(),
             },
-        }
-    }
-
-    pub fn command_display(self, mount_point: &str) -> String {
-        match self {
-            SubTab::FsUsage => format!("btrfs filesystem usage {mount_point}"),
-            SubTab::FsShow => format!("btrfs filesystem show {mount_point}"),
-            SubTab::FsDf => format!("btrfs filesystem df {mount_point}"),
-            SubTab::DevUsage => format!("btrfs device usage {mount_point}"),
-            SubTab::DevStats => format!("btrfs device stats {mount_point}"),
-            SubTab::SubvolList => format!("btrfs subvolume list {mount_point}"),
-            SubTab::ScrubStatus => format!("btrfs scrub status {mount_point}"),
-            SubTab::BalanceStatus => format!("btrfs balance status {mount_point}"),
         }
     }
 }
@@ -232,7 +219,9 @@ impl Model {
 
     pub fn current_command_display(&self) -> String {
         self.current_subtab()
-            .command_display(self.mount_point.as_str())
+            .request(&self.mount_point)
+            .to_argv()
+            .to_shell_string()
     }
 
     #[cfg(test)]

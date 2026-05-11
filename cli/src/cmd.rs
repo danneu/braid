@@ -211,6 +211,11 @@ pub enum CmdRequest {
     BtrfsDeviceUsage {
         mount_point: MountPoint,
     },
+    /// Browse-only scrub status request so copied footer commands match the
+    /// human-readable stdout while parser callers keep raw byte output.
+    BtrfsScrubStatusHuman {
+        mount_point: MountPoint,
+    },
     BtrfsSubvolumeList {
         mount_point: MountPoint,
     },
@@ -784,6 +789,10 @@ impl CmdRequest {
                 program: "btrfs".to_owned(),
                 args: vec!["device".into(), "usage".into(), mount_point.0.clone()],
             },
+            CmdRequest::BtrfsScrubStatusHuman { mount_point } => CmdArgs {
+                program: "btrfs".to_owned(),
+                args: vec!["scrub".into(), "status".into(), mount_point.0.clone()],
+            },
             CmdRequest::BtrfsSubvolumeList { mount_point } => CmdArgs {
                 program: "btrfs".to_owned(),
                 args: vec!["subvolume".into(), "list".into(), mount_point.0.clone()],
@@ -1218,6 +1227,28 @@ mod tests {
 
         let out = mock.run(&req).expect("mock should have output");
         assert_eq!(out.exit_status, 0);
+    }
+
+    #[test]
+    fn btrfs_scrub_status_argv_uses_raw_for_parser_path() {
+        let argv = CmdRequest::BtrfsScrubStatus {
+            mount_point: MountPoint("/mnt/storage".into()),
+        }
+        .to_argv()
+        .to_shell_string();
+
+        assert_eq!(argv, "btrfs scrub status --raw /mnt/storage");
+    }
+
+    #[test]
+    fn btrfs_scrub_status_human_argv_omits_raw_for_browse_path() {
+        let argv = CmdRequest::BtrfsScrubStatusHuman {
+            mount_point: MountPoint("/mnt/storage".into()),
+        }
+        .to_argv()
+        .to_shell_string();
+
+        assert_eq!(argv, "btrfs scrub status /mnt/storage");
     }
 
     #[test]

@@ -4,6 +4,8 @@ use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Borders, Clear, Padding, Paragraph, Row, Table};
 
+use crate::cmd::CmdRequest;
+
 use super::model::{Model, Tab, ViewMode};
 
 const SPINNER: &[char] = &['⠋', '⠙', '⠹', '⠸', '⠼', '⠴', '⠦', '⠧', '⠇', '⠏'];
@@ -161,11 +163,11 @@ pub fn view(model: &mut Model, frame: &mut Frame) {
     let cmd_display = if model.mode == ViewMode::SubvolDetail {
         if !model.subvolumes.is_empty() {
             let sv = &model.subvolumes[model.subvol_selected];
-            format!(
-                "btrfs subvolume show {}/{}",
-                model.mount_point.as_str(),
-                sv.path
-            )
+            CmdRequest::BtrfsSubvolumeShow {
+                path: format!("{}/{}", model.mount_point.as_str(), sv.path),
+            }
+            .to_argv()
+            .to_shell_string()
         } else {
             model.current_command_display()
         }
@@ -433,6 +435,40 @@ mod tests {
         }];
         let terminal = render(&mut model, 60, 12);
         snap!(buffer_to_string(&terminal));
+    }
+
+    /*
+     * Intent: SubvolDetail command footer quotes paths that contain spaces.
+     *
+     * Why it exists: the footer is a copy-paste contract for the argv browse
+     * executes; token-split paths would send the wrong command to the shell.
+     *
+     * Scenario: user opens detail for a subvolume named `my data`.
+     */
+    #[test]
+    fn snapshot_subvol_detail_space_path_quotes_command() {
+        let mut model = Model::new_demo(
+            "/mnt/storage",
+            Tab::Subvolumes,
+            vec![
+                "my data".into(),
+                "  Name:     my data".into(),
+                "  UUID:     abc-123".into(),
+            ],
+        );
+        model.mode = ViewMode::SubvolDetail;
+        model.subvolumes = vec![BtrfsSubvolume {
+            id: 256,
+            generation: 10,
+            top_level: 5,
+            path: "my data".into(),
+        }];
+        let terminal = render(&mut model, 60, 12);
+        let rendered = buffer_to_string(&terminal);
+
+        assert!(rendered.contains("$ btrfs subvolume show '/mnt/storage/my data'"));
+        assert!(!rendered.contains("$ btrfs subvolume show /mnt/storage/my data"));
+        snap!(rendered);
     }
 
     /*

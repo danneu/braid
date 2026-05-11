@@ -1,0 +1,10 @@
+---
+source: cli/src/browse/view.rs
+expression: rendered
+---
+Filesystem  Devices  Subvolumes  Scrub  Balance
+my data
+  Name:     my data
+  UUID:     abc-123
+$ btrfs subvolume show '/mnt/storage/my data'
+q:quit | ?:help | r:reload | j/k:scroll | esc:back
