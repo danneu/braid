@@ -39,7 +39,7 @@ esac
 # post-ack baseline and re-latch a stale alert.
 #
 # Contention behavior is per command:
-# - unlock/add/recover/remove/remove-missing: non-blocking fail-fast for
+# - unlock/add/recover/remove/remove-missing/replace: non-blocking fail-fast for
 #   interactive pool mutation; the user retries once the active operation
 #   finishes.
 # - ack: wait briefly for a monitor cycle, but bound the wait so a stuck
@@ -49,7 +49,7 @@ esac
 # This enforces mutual exclusion at the critical section itself, not via
 # systemd unit topology. See Principle 12.
 case "$subcmd" in
-  unlock|add|recover|remove|remove-missing)
+  unlock|add|recover|remove|remove-missing|replace)
     if ! $skip_fixup; then
       exec 9>/run/braid-pool.lock
       if ! @flockBin@ -n 9; then

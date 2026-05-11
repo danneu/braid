@@ -601,6 +601,11 @@
               braid = linuxCrane.braid-cli-unwrapped;
             }
           );
+          pool-lock-replace-contention = pkgs.testers.nixosTest (
+            import ./tests/module/pool-lock-replace-contention.nix {
+              braid = linuxCrane.braid-cli-unwrapped;
+            }
+          );
           alert-state-lock = pkgs.testers.nixosTest (
             import ./tests/module/alert-state-lock.nix {
               braid = linuxCrane.braid-cli-unwrapped;
