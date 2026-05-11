@@ -101,6 +101,53 @@ fn replace_error(mount_point: &MountPoint, result: &RawCommandOutput) -> PoolErr
     }
 }
 
+/// Recovery context for a failed `btrfs device remove`, because present-disk
+/// removal and missing-device cleanup require different operator followups.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum RemoveContext {
+    Live,
+    Missing,
+}
+
+/// Build a `PoolError::Failed` for `btrfs device remove`, decoding the
+/// kernel's min-devices rejection and appending a recovery hint that accounts
+/// for braid's already-written pending operation journal.
+fn device_remove_error(
+    ctx: RemoveContext,
+    mount_point: &MountPoint,
+    result: &RawCommandOutput,
+) -> PoolError {
+    let stderr = result.stderr.to_lowercase();
+    if stderr.contains("unable to go below") {
+        let hint = match ctx {
+            RemoveContext::Live => format!(
+                "a non-RAID1 chunk likely requires more devices than will remain. \
+                 Inspect with `btrfs filesystem usage {mount_point}`, then \
+                 `btrfs balance start -dconvert=raid1 -mconvert=raid1 -f {mount_point}` \
+                 to convert it back to RAID1, then `braid recover` to clear the \
+                 pending operation, then retry `braid remove`."
+            ),
+            RemoveContext::Missing => "a non-RAID1 chunk requires more devices than will remain. \
+                 While a device is missing, do not lower redundancy -- \
+                 repair the missing device instead. Run `braid recover` to \
+                 clear the pending operation, then `braid replace --missing-id <devid>` \
+                 to rebuild data onto a replacement disk."
+                .to_owned(),
+        };
+        PoolError::Failed(format!(
+            "btrfs device remove failed (exit {}): {}\nhint: {hint}",
+            result.exit_status,
+            result.stderr.trim(),
+        ))
+    } else {
+        PoolError::Failed(format!(
+            "btrfs device remove failed (exit {}): {}",
+            result.exit_status,
+            result.stderr.trim(),
+        ))
+    }
+}
+
 /// Balance pool to RAID1 with progress display.
 pub fn pool_balance_raid1<R: CommandRunner + Sync>(
     runner: &R,
@@ -256,7 +303,7 @@ pub fn pool_remove_device<R: CommandRunner + Sync>(
         },
         progress,
     )?;
-    device_remove_result(result)
+    device_remove_result(RemoveContext::Live, mount_point, &result)
 }
 
 pub(crate) fn pool_remove_device_using<R, S, W>(
@@ -282,16 +329,16 @@ where
         sleeper,
         sink,
     )?;
-    device_remove_result(result)
+    device_remove_result(RemoveContext::Missing, mount_point, &result)
 }
 
-fn device_remove_result(result: RawCommandOutput) -> Result<(), PoolError> {
+fn device_remove_result(
+    ctx: RemoveContext,
+    mount_point: &MountPoint,
+    result: &RawCommandOutput,
+) -> Result<(), PoolError> {
     if result.exit_status != 0 {
-        return Err(PoolError::Failed(format!(
-            "btrfs device remove failed (exit {}): {}",
-            result.exit_status,
-            result.stderr.trim()
-        )));
+        return Err(device_remove_error(ctx, mount_point, result));
     }
     Ok(())
 }
@@ -1127,6 +1174,256 @@ mod tests {
         assert!(
             !msg.contains("hint:"),
             "should NOT contain recovery hint for non-ENOSPC: {msg}"
+        );
+    }
+
+    #[test]
+    // Intent: device_remove_result appends the live-removal recovery hint for
+    // the RAID1 min-devices rejection.
+    // Why it exists: present-disk remove can hit a kernel fallback that
+    // preflight did not predict, and the operator needs the concrete balance
+    // and recover sequence rather than raw btrfs stderr.
+    // Scenario: `braid remove` asks btrfs to remove a mapper, but the kernel
+    // refuses to go below two devices on RAID1.
+    fn device_remove_result_live_raid1_min_includes_balance_hint() {
+        let result = RawCommandOutput {
+            cmd: String::new(),
+            stdout: String::new(),
+            stderr: "ERROR: error removing device '/dev/mapper/braid-disk2': unable to go below two devices on raid1".to_owned(),
+            exit_status: 1,
+        };
+
+        let err = device_remove_result(RemoveContext::Live, &mp(), &result)
+            .expect_err("min-devices rejection should return an error")
+            .to_string();
+        assert!(err.contains("hint:"), "error should include hint: {err}");
+        assert!(
+            err.contains("dconvert=raid1"),
+            "hint should suggest converting data chunks to RAID1: {err}"
+        );
+        assert!(
+            err.contains("braid recover"),
+            "hint should clear pending operation first: {err}"
+        );
+        assert!(
+            err.contains("braid remove"),
+            "hint should tell operator to retry remove: {err}"
+        );
+        assert!(
+            err.contains("/mnt/storage"),
+            "hint should include mount point: {err}"
+        );
+    }
+
+    #[test]
+    // Intent: device_remove_result appends the same live-removal recovery hint
+    // for non-RAID1 min-devices variants.
+    // Why it exists: the kernel has several BTRFS_ERROR_DEV_RAID*_MIN_NOT_MET
+    // messages, and braid should classify the whole family with one stable
+    // substring instead of matching only RAID1.
+    // Scenario: `braid remove` encounters a stray RAID1C3 chunk that requires
+    // more devices than would remain.
+    fn device_remove_result_live_raid1c3_min_includes_balance_hint() {
+        let result = RawCommandOutput {
+            cmd: String::new(),
+            stdout: String::new(),
+            stderr: "ERROR: error removing device '/dev/mapper/braid-disk2': unable to go below three devices on raid1c3".to_owned(),
+            exit_status: 1,
+        };
+
+        let err = device_remove_result(RemoveContext::Live, &mp(), &result)
+            .expect_err("min-devices rejection should return an error")
+            .to_string();
+        assert!(err.contains("hint:"), "error should include hint: {err}");
+        assert!(
+            err.contains("dconvert=raid1"),
+            "hint should suggest converting data chunks to RAID1: {err}"
+        );
+        assert!(
+            err.contains("braid recover"),
+            "hint should clear pending operation first: {err}"
+        );
+        assert!(
+            err.contains("braid remove"),
+            "hint should tell operator to retry remove: {err}"
+        );
+    }
+
+    #[test]
+    // Intent: device_remove_result appends the missing-device recovery hint
+    // for the CLI-reachable non-RAID1 min-devices rejection.
+    // Why it exists: a degraded pool cannot lower redundancy while a device is
+    // missing, so the missing path must steer toward recovery and replace, not
+    // raw btrfs balance.
+    // Scenario: `braid remove-missing` hits a leftover RAID1C3 chunk while
+    // clearing a missing device slot from a larger pool.
+    fn device_remove_result_missing_raid1c3_min_includes_replace_hint() {
+        let result = RawCommandOutput {
+            cmd: String::new(),
+            stdout: String::new(),
+            stderr: "ERROR: error removing device '2': unable to go below three devices on raid1c3"
+                .to_owned(),
+            exit_status: 1,
+        };
+
+        let err = device_remove_result(RemoveContext::Missing, &mp(), &result)
+            .expect_err("min-devices rejection should return an error")
+            .to_string();
+        assert!(err.contains("hint:"), "error should include hint: {err}");
+        assert!(
+            err.contains("braid replace --missing-id"),
+            "hint should point at missing-device replacement: {err}"
+        );
+        assert!(
+            err.contains("braid recover"),
+            "hint should clear pending operation first: {err}"
+        );
+        assert!(
+            !err.contains("dconvert=raid1"),
+            "missing hint must not suggest RAID1 conversion: {err}"
+        );
+        assert!(
+            !err.contains("btrfs balance"),
+            "missing hint must not suggest balance while degraded: {err}"
+        );
+    }
+
+    #[test]
+    // Intent: device_remove_result returns a plain error for unrelated btrfs
+    // device remove failures.
+    // Why it exists: the min-devices recovery hint should not be attached to
+    // every remove failure, because unrelated failures need different
+    // operator action.
+    // Scenario: btrfs refuses device removal because the device is busy.
+    fn device_remove_result_no_hint_for_unrelated_failure() {
+        let result = RawCommandOutput {
+            cmd: String::new(),
+            stdout: String::new(),
+            stderr: "ERROR: device is busy".to_owned(),
+            exit_status: 1,
+        };
+
+        let err = device_remove_result(RemoveContext::Live, &mp(), &result)
+            .expect_err("non-zero exit status should return an error")
+            .to_string();
+        assert!(
+            !err.contains("hint:"),
+            "unrelated failure must not include min-devices hint: {err}"
+        );
+    }
+
+    #[test]
+    // Intent: device_remove_result leaves successful btrfs device remove output
+    // as a no-op.
+    // Why it exists: the result router should only classify failures; success
+    // must pass through without consulting stderr or context.
+    // Scenario: btrfs removes the device successfully after braid's preflight
+    // and progress handling have already completed.
+    fn device_remove_result_ok_passes_through() {
+        let result = RawCommandOutput {
+            cmd: String::new(),
+            stdout: String::new(),
+            stderr: String::new(),
+            exit_status: 0,
+        };
+
+        let outcome = device_remove_result(RemoveContext::Missing, &mp(), &result);
+        assert!(outcome.is_ok(), "success should pass through: {outcome:?}");
+    }
+
+    #[test]
+    // Intent: pool_remove_device wires present-disk removal to the live
+    // recovery hint context.
+    // Why it exists: the compiler enforces that a context is passed, but only
+    // this wrapper-level test catches a swapped Live/Missing value at the
+    // public remove boundary.
+    // Scenario: `braid remove` fails with the RAID1 min-devices rejection and
+    // should point at balance, recover, then retry remove.
+    fn pool_remove_device_failure_emits_live_balance_hint() {
+        let runner = MockRunner::default().with_output(
+            CmdRequest::BtrfsDeviceRemove {
+                device: "/dev/mapper/braid-disk2".to_owned(),
+                mount_point: mp(),
+            },
+            RawCommandOutput {
+                cmd: String::new(),
+                stdout: String::new(),
+                stderr: "ERROR: error removing device '/dev/mapper/braid-disk2': unable to go below two devices on raid1".to_owned(),
+                exit_status: 1,
+            },
+        );
+
+        let err = pool_remove_device(
+            &runner,
+            "/dev/mapper/braid-disk2",
+            &mp(),
+            ProgressOutput::Off,
+        )
+        .expect_err("min-devices rejection should return an error")
+        .to_string();
+        assert!(
+            err.contains("dconvert=raid1"),
+            "live hint should suggest RAID1 conversion: {err}"
+        );
+        assert!(
+            err.contains("braid recover"),
+            "live hint should clear pending operation first: {err}"
+        );
+        assert!(
+            err.contains("braid remove"),
+            "live hint should tell operator to retry remove: {err}"
+        );
+        assert!(
+            !err.contains("braid replace --missing-id"),
+            "live hint must not point at missing-device replacement: {err}"
+        );
+    }
+
+    #[test]
+    // Intent: pool_remove_device_using wires missing-device cleanup to the
+    // missing recovery hint context.
+    // Why it exists: the compiler enforces that a context is passed, but only
+    // this wrapper-level test catches a swapped Live/Missing value at the
+    // remove-missing boundary.
+    // Scenario: `braid remove-missing` fails on a stray RAID1C3 chunk and
+    // should point at recover, then replace the missing device.
+    fn pool_remove_device_using_failure_emits_missing_replace_hint() {
+        let runner = MockRunner::default().with_output(
+            CmdRequest::BtrfsDeviceRemove {
+                device: "2".to_owned(),
+                mount_point: mp(),
+            },
+            RawCommandOutput {
+                cmd: String::new(),
+                stdout: String::new(),
+                stderr:
+                    "ERROR: error removing device '2': unable to go below three devices on raid1c3"
+                        .to_owned(),
+                exit_status: 1,
+            },
+        );
+        let sleeper = FakeSleeper::default();
+        let sink = RecordingSink::default();
+
+        let err =
+            pool_remove_device_using(&runner, "2", &mp(), ProgressOutput::Off, &sleeper, &sink)
+                .expect_err("min-devices rejection should return an error")
+                .to_string();
+        assert!(
+            err.contains("braid replace --missing-id"),
+            "missing hint should point at replacement: {err}"
+        );
+        assert!(
+            err.contains("braid recover"),
+            "missing hint should clear pending operation first: {err}"
+        );
+        assert!(
+            !err.contains("dconvert=raid1"),
+            "missing hint must not suggest RAID1 conversion: {err}"
+        );
+        assert!(
+            !err.contains("btrfs balance"),
+            "missing hint must not suggest balance while degraded: {err}"
         );
     }
 
