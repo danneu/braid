@@ -71,47 +71,9 @@ pub fn cmd_scrub_cancel<R: CommandRunner>(
 mod tests {
     use super::*;
     use crate::cmd::{MockRunner, RawCommandOutput};
-
-    fn mp() -> MountPoint {
-        MountPoint("/mnt/storage".into())
-    }
-
-    fn scrub_cancel_ok() -> (CmdRequest, RawCommandOutput) {
-        (
-            CmdRequest::BtrfsScrubCancel { mount_point: mp() },
-            RawCommandOutput {
-                cmd: "btrfs scrub cancel /mnt/storage".into(),
-                stdout: "scrub cancelled\n".into(),
-                stderr: String::new(),
-                exit_status: 0,
-            },
-        )
-    }
-
-    fn scrub_cancel_not_running() -> (CmdRequest, RawCommandOutput) {
-        // btrfs-progs maps ENOTCONN to exit code 2 (scrub.c:1799-1800), not 1.
-        (
-            CmdRequest::BtrfsScrubCancel { mount_point: mp() },
-            RawCommandOutput {
-                cmd: "btrfs scrub cancel /mnt/storage".into(),
-                stdout: String::new(),
-                stderr: "ERROR: scrub cancel failed on /mnt/storage: not running\n".into(),
-                exit_status: 2,
-            },
-        )
-    }
-
-    fn scrub_cancel_real_failure() -> (CmdRequest, RawCommandOutput) {
-        (
-            CmdRequest::BtrfsScrubCancel { mount_point: mp() },
-            RawCommandOutput {
-                cmd: "btrfs scrub cancel /mnt/storage".into(),
-                stdout: String::new(),
-                stderr: "ERROR: scrub cancel failed on /mnt/storage: Permission denied\n".into(),
-                exit_status: 1,
-            },
-        )
-    }
+    use crate::test_fixtures::{
+        scrub_cancel_not_running, scrub_cancel_ok, scrub_cancel_real_failure, scrub_mp,
+    };
 
     #[test]
     // Intent: cancel ioctl exit 0 -> Cancelled.
@@ -124,7 +86,7 @@ mod tests {
         let (req, out) = scrub_cancel_ok();
         let runner = MockRunner::default().with_output(req, out);
 
-        let result = cmd_scrub_cancel(&runner, &mp()).unwrap();
+        let result = cmd_scrub_cancel(&runner, &scrub_mp()).unwrap();
         assert_eq!(result, ScrubCancelResult::Cancelled);
     }
 
@@ -143,7 +105,7 @@ mod tests {
         let (req, out) = scrub_cancel_not_running();
         let runner = MockRunner::default().with_output(req, out);
 
-        let result = cmd_scrub_cancel(&runner, &mp()).unwrap();
+        let result = cmd_scrub_cancel(&runner, &scrub_mp()).unwrap();
         assert_eq!(result, ScrubCancelResult::NotRunning);
     }
 
@@ -160,7 +122,7 @@ mod tests {
         let (req, out) = scrub_cancel_real_failure();
         let runner = MockRunner::default().with_output(req, out);
 
-        let result = cmd_scrub_cancel(&runner, &mp());
+        let result = cmd_scrub_cancel(&runner, &scrub_mp());
         assert!(
             matches!(result, Err(ScrubCancelError::CancelFailed { .. })),
             "expected Err(CancelFailed), got {result:?}"
@@ -178,7 +140,9 @@ mod tests {
     //   continues to classify correctly.
     fn cancel_exit_two_with_empty_stderr_is_not_running() {
         let runner = MockRunner::default().with_output(
-            CmdRequest::BtrfsScrubCancel { mount_point: mp() },
+            CmdRequest::BtrfsScrubCancel {
+                mount_point: scrub_mp(),
+            },
             RawCommandOutput {
                 cmd: "btrfs scrub cancel /mnt/storage".into(),
                 stdout: String::new(),
@@ -187,7 +151,7 @@ mod tests {
             },
         );
 
-        let result = cmd_scrub_cancel(&runner, &mp()).unwrap();
+        let result = cmd_scrub_cancel(&runner, &scrub_mp()).unwrap();
         assert_eq!(result, ScrubCancelResult::NotRunning);
     }
 
@@ -203,7 +167,9 @@ mod tests {
     //   errno -- braid does not silence it as a benign idle.
     fn cancel_not_running_stderr_with_exit_one_is_failure() {
         let runner = MockRunner::default().with_output(
-            CmdRequest::BtrfsScrubCancel { mount_point: mp() },
+            CmdRequest::BtrfsScrubCancel {
+                mount_point: scrub_mp(),
+            },
             RawCommandOutput {
                 cmd: "btrfs scrub cancel /mnt/storage".into(),
                 stdout: String::new(),
@@ -212,7 +178,7 @@ mod tests {
             },
         );
 
-        let result = cmd_scrub_cancel(&runner, &mp());
+        let result = cmd_scrub_cancel(&runner, &scrub_mp());
         assert!(
             matches!(result, Err(ScrubCancelError::CancelFailed { .. })),
             "expected Err(CancelFailed), got {result:?}"
@@ -254,7 +220,7 @@ mod tests {
     #[test]
     fn cancel_command_failure_propagates() {
         let runner = FailingCancelRunner;
-        let result = cmd_scrub_cancel(&runner, &mp());
+        let result = cmd_scrub_cancel(&runner, &scrub_mp());
         let err = result.unwrap_err();
 
         assert!(

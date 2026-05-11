@@ -67,53 +67,18 @@ fn start_scrub<R: CommandRunner>(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::cmd::{MockRunner, RawCommandOutput};
-
-    fn mp() -> MountPoint {
-        MountPoint("/mnt/storage".into())
-    }
-
-    fn resume_output(exit_status: i32) -> (CmdRequest, RawCommandOutput) {
-        (
-            CmdRequest::BtrfsScrubResume { mount_point: mp() },
-            RawCommandOutput {
-                cmd: "btrfs scrub resume -B /mnt/storage".into(),
-                stdout: String::new(),
-                stderr: if exit_status == 1 {
-                    "ERROR: resume failed\n".into()
-                } else {
-                    String::new()
-                },
-                exit_status,
-            },
-        )
-    }
-
-    fn start_output(exit_status: i32) -> (CmdRequest, RawCommandOutput) {
-        (
-            CmdRequest::BtrfsScrubStart { mount_point: mp() },
-            RawCommandOutput {
-                cmd: "btrfs scrub start -B /mnt/storage".into(),
-                stdout: String::new(),
-                stderr: if exit_status == 1 {
-                    "ERROR: start failed\n".into()
-                } else {
-                    String::new()
-                },
-                exit_status,
-            },
-        )
-    }
+    use crate::cmd::MockRunner;
+    use crate::test_fixtures::{scrub_mp, scrub_resume_output, scrub_start_output};
 
     #[test]
     // Intent: resume exit 0 returns Resumed without falling back to start.
     // Why it exists: scheduled scrub should continue saved work before starting fresh.
     // Scenario: monthly timer fires while cancelled scrub progress exists.
     fn resume_succeeds_returns_resumed() {
-        let (resume_req, resume_out) = resume_output(0);
+        let (resume_req, resume_out) = scrub_resume_output(0);
         let runner = MockRunner::default().with_output(resume_req, resume_out);
 
-        let result = cmd_scrub_resume_or_start(&runner, &mp()).unwrap();
+        let result = cmd_scrub_resume_or_start(&runner, &scrub_mp()).unwrap();
         assert_eq!(
             result,
             ScrubResumeOrStartResult::Resumed {
@@ -127,10 +92,10 @@ mod tests {
     // Why it exists: preserves btrfs scrub's exit-3 semantics.
     // Scenario: resumed scrub finishes but finds uncorrectable errors.
     fn resume_uncorrectable_propagates() {
-        let (resume_req, resume_out) = resume_output(3);
+        let (resume_req, resume_out) = scrub_resume_output(3);
         let runner = MockRunner::default().with_output(resume_req, resume_out);
 
-        let result = cmd_scrub_resume_or_start(&runner, &mp()).unwrap();
+        let result = cmd_scrub_resume_or_start(&runner, &scrub_mp()).unwrap();
         assert_eq!(
             result,
             ScrubResumeOrStartResult::Resumed {
@@ -145,13 +110,13 @@ mod tests {
     // saved progress exists.
     // Scenario: monthly timer fires after all prior scrubs finished cleanly.
     fn resume_nothing_to_resume_falls_back_to_start() {
-        let (resume_req, resume_out) = resume_output(2);
-        let (start_req, start_out) = start_output(0);
+        let (resume_req, resume_out) = scrub_resume_output(2);
+        let (start_req, start_out) = scrub_start_output(0);
         let runner = MockRunner::default()
             .with_output(resume_req, resume_out)
             .with_output(start_req, start_out);
 
-        let result = cmd_scrub_resume_or_start(&runner, &mp()).unwrap();
+        let result = cmd_scrub_resume_or_start(&runner, &scrub_mp()).unwrap();
         assert_eq!(
             result,
             ScrubResumeOrStartResult::Started {
@@ -165,13 +130,13 @@ mod tests {
     // Why it exists: a fresh scrub's uncorrectable errors must propagate too.
     // Scenario: scheduled scrub starts fresh and finds uncorrectable errors.
     fn start_uncorrectable_after_fallback() {
-        let (resume_req, resume_out) = resume_output(2);
-        let (start_req, start_out) = start_output(3);
+        let (resume_req, resume_out) = scrub_resume_output(2);
+        let (start_req, start_out) = scrub_start_output(3);
         let runner = MockRunner::default()
             .with_output(resume_req, resume_out)
             .with_output(start_req, start_out);
 
-        let result = cmd_scrub_resume_or_start(&runner, &mp()).unwrap();
+        let result = cmd_scrub_resume_or_start(&runner, &scrub_mp()).unwrap();
         assert_eq!(
             result,
             ScrubResumeOrStartResult::Started {
@@ -185,10 +150,10 @@ mod tests {
     // Why it exists: only "nothing to resume" is a fallback condition.
     // Scenario: btrfs cannot read the saved scrub state file.
     fn resume_real_failure_propagates() {
-        let (resume_req, resume_out) = resume_output(1);
+        let (resume_req, resume_out) = scrub_resume_output(1);
         let runner = MockRunner::default().with_output(resume_req, resume_out);
 
-        let result = cmd_scrub_resume_or_start(&runner, &mp());
+        let result = cmd_scrub_resume_or_start(&runner, &scrub_mp());
         assert!(
             matches!(result, Err(ScrubResumeOrStartError::ResumeFailed { .. })),
             "expected ResumeFailed, got {result:?}"
@@ -200,13 +165,13 @@ mod tests {
     // Why it exists: real fresh-start failures must fail the scrub service.
     // Scenario: timer fires but btrfs cannot start a fresh scrub.
     fn start_real_failure_propagates() {
-        let (resume_req, resume_out) = resume_output(2);
-        let (start_req, start_out) = start_output(1);
+        let (resume_req, resume_out) = scrub_resume_output(2);
+        let (start_req, start_out) = scrub_start_output(1);
         let runner = MockRunner::default()
             .with_output(resume_req, resume_out)
             .with_output(start_req, start_out);
 
-        let result = cmd_scrub_resume_or_start(&runner, &mp());
+        let result = cmd_scrub_resume_or_start(&runner, &scrub_mp());
         assert!(
             matches!(result, Err(ScrubResumeOrStartError::StartFailed { .. })),
             "expected StartFailed, got {result:?}"

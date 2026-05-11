@@ -1,6 +1,6 @@
 //! Test-only shared fixtures for `replace`, `add`, `remove`,
 //! `remove_missing`, `recover`, `doctor`, `mount`, `enroll_key_file`,
-//! `unlock`, `status`, `lock`, `ack`, `monitor`, and `idle`.
+//! `unlock`, `status`, `lock`, `ack`, `monitor`, `idle`, and `scrub`.
 //!
 //! These fixtures consolidate the per-test scaffolding that previously
 //! lived as one-off `*Runner` structs and inline `tempdir + config + pass +
@@ -78,6 +78,13 @@
 //!   * `idle` -- flat idle helpers with a strict mountinfo/sysfs filesystem
 //!     mock and scrub output factories. It deliberately avoids a broad runner
 //!     because missing mocks and missing sysfs seeds are load-bearing.
+//!   * `scrub` -- flat scrub-shaped helpers for `cmd_scrub_cancel`,
+//!     `cmd_scrub_needs_resume`, and `cmd_scrub_resume_or_start`. Ships
+//!     exit-code-shaped factories for cancel and resume/start, plus
+//!     per-state scrub-status factories. Names document kernel state, not
+//!     stderr text, so the numeric-exit-code dispatch contract for
+//!     `scrub cancel` stays visible. No broad scrub runner: cross-command
+//!     probes still surface as `MissingMock`.
 //!   * `PoolFixture` -- bundled tempdirs + `StatePaths` + config +
 //!     passphrase + `RecordingInhibitor`.
 //!   * `ReplaceParamsBuilder` / `AddParamsBuilder` / `RemoveParamsBuilder`
@@ -87,7 +94,7 @@
 //! Layout: this file is a facade. `shared` holds cross-scope items;
 //! `replace`, `add`, `remove`, `remove_missing`, `recover`, `doctor`,
 //! `mount`, `enroll_key_file`, `unlock`, `status`, `lock`, `ack`, `monitor`,
-//! and `idle` hold their per-scope topologies, builders, and helpers.
+//! `idle`, and `scrub` hold their per-scope topologies, builders, and helpers.
 
 mod ack;
 mod add;
@@ -101,6 +108,7 @@ mod recover;
 mod remove;
 mod remove_missing;
 mod replace;
+mod scrub;
 mod shared;
 mod status;
 mod unlock;
@@ -161,6 +169,12 @@ pub(crate) use remove::{
 #[allow(unused_imports)]
 pub(crate) use remove_missing::{RemoveMissingParamsBuilder, RemoveMissingPool};
 pub(crate) use replace::ReplacementPool;
+#[allow(unused_imports)]
+pub(crate) use scrub::{
+    scrub_cancel_not_running, scrub_cancel_ok, scrub_cancel_real_failure, scrub_mp,
+    scrub_resume_output, scrub_start_output, scrub_status_aborted, scrub_status_finished,
+    scrub_status_interrupted, scrub_status_never, scrub_status_running, scrub_status_unknown,
+};
 #[allow(unused_imports)]
 pub(crate) use shared::{MockFs, PoolFixture, TEST_PASSPHRASE_BYTES, mock_ok};
 #[allow(unused_imports)]

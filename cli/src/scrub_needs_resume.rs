@@ -44,113 +44,10 @@ pub fn cmd_scrub_needs_resume<R: CommandRunner>(
 mod tests {
     use super::*;
     use crate::cmd::{MockRunner, RawCommandOutput};
-
-    fn mp() -> MountPoint {
-        MountPoint("/mnt/storage".into())
-    }
-
-    fn scrub_status_running() -> (CmdRequest, RawCommandOutput) {
-        (
-            CmdRequest::BtrfsScrubStatus { mount_point: mp() },
-            RawCommandOutput {
-                cmd: "btrfs scrub status --raw /mnt/storage".into(),
-                stdout: "UUID:             12345678-1234-1234-1234-123456789abc\n\
-                         Scrub started:    Mon Jan  1 00:00:00 2024\n\
-                         Status:           running\n\
-                         Duration:         0:00:05\n\
-                         Total to scrub:   30408704000\n\
-                         Rate:             2952790016/s\n\
-                         10.00% done\n\
-                         Error summary:    no errors found\n"
-                    .into(),
-                stderr: String::new(),
-                exit_status: 0,
-            },
-        )
-    }
-
-    fn scrub_status_never() -> (CmdRequest, RawCommandOutput) {
-        (
-            CmdRequest::BtrfsScrubStatus { mount_point: mp() },
-            RawCommandOutput {
-                cmd: "btrfs scrub status --raw /mnt/storage".into(),
-                stdout: "UUID:             12345678-1234-1234-1234-123456789abc\n\
-                         no stats available\n"
-                    .into(),
-                stderr: String::new(),
-                exit_status: 0,
-            },
-        )
-    }
-
-    fn scrub_status_finished() -> (CmdRequest, RawCommandOutput) {
-        (
-            CmdRequest::BtrfsScrubStatus { mount_point: mp() },
-            RawCommandOutput {
-                cmd: "btrfs scrub status --raw /mnt/storage".into(),
-                stdout: "UUID:             12345678-1234-1234-1234-123456789abc\n\
-                         Scrub started:    Mon Jan  1 00:00:00 2024\n\
-                         Status:           finished\n\
-                         Duration:         0:00:01\n\
-                         Total to scrub:   1073741824\n\
-                         Rate:             1073741824/s\n\
-                         Error summary:    no errors found\n"
-                    .into(),
-                stderr: String::new(),
-                exit_status: 0,
-            },
-        )
-    }
-
-    fn scrub_status_aborted() -> (CmdRequest, RawCommandOutput) {
-        (
-            CmdRequest::BtrfsScrubStatus { mount_point: mp() },
-            RawCommandOutput {
-                cmd: "btrfs scrub status --raw /mnt/storage".into(),
-                stdout: "UUID:             12345678-1234-1234-1234-123456789abc\n\
-                         Scrub started:    Mon Jan  1 00:00:00 2024\n\
-                         Status:           aborted\n\
-                         Duration:         0:00:01\n\
-                         Total to scrub:   1073741824\n\
-                         Rate:             1073741824/s\n\
-                         Error summary:    no errors found\n"
-                    .into(),
-                stderr: String::new(),
-                exit_status: 0,
-            },
-        )
-    }
-
-    fn scrub_status_interrupted() -> (CmdRequest, RawCommandOutput) {
-        (
-            CmdRequest::BtrfsScrubStatus { mount_point: mp() },
-            RawCommandOutput {
-                cmd: "btrfs scrub status --raw /mnt/storage".into(),
-                stdout: "UUID:             12345678-1234-1234-1234-123456789abc\n\
-                         Scrub started:    Mon Jan  1 00:00:00 2024\n\
-                         Status:           interrupted\n\
-                         Duration:         0:00:01\n\
-                         Total to scrub:   1073741824\n\
-                         Rate:             1073741824/s\n\
-                         Error summary:    no errors found\n"
-                    .into(),
-                stderr: String::new(),
-                exit_status: 0,
-            },
-        )
-    }
-
-    fn scrub_status_unknown() -> (CmdRequest, RawCommandOutput) {
-        (
-            CmdRequest::BtrfsScrubStatus { mount_point: mp() },
-            RawCommandOutput {
-                cmd: "btrfs scrub status --raw /mnt/storage".into(),
-                stdout: String::new(),
-                stderr: String::new(),
-                exit_status: 0,
-            },
-        )
-    }
+    use crate::test_fixtures::{
+        scrub_mp, scrub_status_aborted, scrub_status_finished, scrub_status_interrupted,
+        scrub_status_never, scrub_status_running, scrub_status_unknown,
+    };
 
     #[test]
     // Intent: status==Aborted means the pool-online trigger should start the scrub service.
@@ -160,7 +57,7 @@ mod tests {
         let (status_req, status_out) = scrub_status_aborted();
         let runner = MockRunner::default().with_output(status_req, status_out);
 
-        let result = cmd_scrub_needs_resume(&runner, &mp()).unwrap();
+        let result = cmd_scrub_needs_resume(&runner, &scrub_mp()).unwrap();
         assert_eq!(result, ScrubNeedsResumeResult::Yes);
     }
 
@@ -172,7 +69,7 @@ mod tests {
         let (status_req, status_out) = scrub_status_interrupted();
         let runner = MockRunner::default().with_output(status_req, status_out);
 
-        let result = cmd_scrub_needs_resume(&runner, &mp()).unwrap();
+        let result = cmd_scrub_needs_resume(&runner, &scrub_mp()).unwrap();
         assert_eq!(result, ScrubNeedsResumeResult::Yes);
     }
 
@@ -184,7 +81,7 @@ mod tests {
         let (status_req, status_out) = scrub_status_never();
         let runner = MockRunner::default().with_output(status_req, status_out);
 
-        let result = cmd_scrub_needs_resume(&runner, &mp()).unwrap();
+        let result = cmd_scrub_needs_resume(&runner, &scrub_mp()).unwrap();
         assert_eq!(result, ScrubNeedsResumeResult::No);
     }
 
@@ -196,7 +93,7 @@ mod tests {
         let (status_req, status_out) = scrub_status_finished();
         let runner = MockRunner::default().with_output(status_req, status_out);
 
-        let result = cmd_scrub_needs_resume(&runner, &mp()).unwrap();
+        let result = cmd_scrub_needs_resume(&runner, &scrub_mp()).unwrap();
         assert_eq!(result, ScrubNeedsResumeResult::No);
     }
 
@@ -208,7 +105,7 @@ mod tests {
         let (status_req, status_out) = scrub_status_running();
         let runner = MockRunner::default().with_output(status_req, status_out);
 
-        let result = cmd_scrub_needs_resume(&runner, &mp()).unwrap();
+        let result = cmd_scrub_needs_resume(&runner, &scrub_mp()).unwrap();
         assert_eq!(result, ScrubNeedsResumeResult::No);
     }
 
@@ -220,7 +117,7 @@ mod tests {
         let (status_req, status_out) = scrub_status_unknown();
         let runner = MockRunner::default().with_output(status_req, status_out);
 
-        let result = cmd_scrub_needs_resume(&runner, &mp());
+        let result = cmd_scrub_needs_resume(&runner, &scrub_mp());
         assert!(
             matches!(result, Err(ScrubNeedsResumeError::StatusUnknown)),
             "expected Err(StatusUnknown), got {result:?}"
@@ -233,7 +130,9 @@ mod tests {
     // Scenario: typo in mount path or filesystem error causes scrub status to exit non-zero.
     fn status_command_failure_propagates() {
         let runner = MockRunner::default().with_output(
-            CmdRequest::BtrfsScrubStatus { mount_point: mp() },
+            CmdRequest::BtrfsScrubStatus {
+                mount_point: scrub_mp(),
+            },
             RawCommandOutput {
                 cmd: "btrfs scrub status --raw /mnt/storage".into(),
                 stdout: String::new(),
@@ -242,7 +141,7 @@ mod tests {
             },
         );
 
-        let result = cmd_scrub_needs_resume(&runner, &mp());
+        let result = cmd_scrub_needs_resume(&runner, &scrub_mp());
         let err = result.unwrap_err();
         assert!(
             matches!(
