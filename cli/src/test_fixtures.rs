@@ -1,6 +1,7 @@
 //! Test-only shared fixtures for `replace`, `add`, `remove`,
 //! `remove_missing`, `recover`, `doctor`, `mount`, `enroll_key_file`,
-//! `unlock`, `status`, `lock`, `ack`, `monitor`, `idle`, and `scrub`.
+//! `unlock`, `status`, `lock`, `ack`, `monitor`, `idle`, `scrub`,
+//! and `discover`.
 //!
 //! These fixtures consolidate the per-test scaffolding that previously
 //! lived as one-off `*Runner` structs and inline `tempdir + config + pass +
@@ -85,6 +86,12 @@
 //!     stderr text, so the numeric-exit-code dispatch contract for
 //!     `scrub cancel` stays visible. No broad scrub runner: cross-command
 //!     probes still surface as `MissingMock`.
+//!   * `discover` -- flat discover-shaped helpers: `DiscoverLabelMap`
+//!     preserves cryptsetup-like `Ok(exit=1)` fall-through for unknown
+//!     devices and records calls for the non-LUKS gate test, while
+//!     `discover_create_target` and `discover_create_by_id_symlink` keep
+//!     real tempdir and Unix-symlink coverage at each call site. The prefix
+//!     avoids facade collisions with other fixture families.
 //!   * `PoolFixture` -- bundled tempdirs + `StatePaths` + config +
 //!     passphrase + `RecordingInhibitor`.
 //!   * `ReplaceParamsBuilder` / `AddParamsBuilder` / `RemoveParamsBuilder`
@@ -94,10 +101,12 @@
 //! Layout: this file is a facade. `shared` holds cross-scope items;
 //! `replace`, `add`, `remove`, `remove_missing`, `recover`, `doctor`,
 //! `mount`, `enroll_key_file`, `unlock`, `status`, `lock`, `ack`, `monitor`,
-//! `idle`, and `scrub` hold their per-scope topologies, builders, and helpers.
+//! `idle`, `scrub`, and `discover` hold their per-scope topologies, builders,
+//! and helpers.
 
 mod ack;
 mod add;
+mod discover;
 mod doctor;
 mod enroll_key_file;
 mod idle;
@@ -119,6 +128,10 @@ pub(crate) use ack::{
     ack_mounted_fs_that_touches_smartd, ack_mounted_probe_runner,
     ack_mounted_probe_runner_with_device_stats, ack_mp, ack_offline_fs_that_touches_smartd,
     ack_write_latch,
+};
+#[allow(unused_imports)]
+pub(crate) use discover::{
+    DiscoverLabelMap, discover_create_by_id_symlink, discover_create_target,
 };
 #[allow(unused_imports)]
 pub(crate) use doctor::{

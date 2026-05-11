@@ -305,129 +305,9 @@ pub(crate) fn is_partition_entry(name: &str) -> bool {
 mod tests {
     use super::*;
     use crate::cmd::{CmdError, CmdRequest, CommandRunner, RawCommandOutput};
-    use std::collections::HashMap;
-    use std::sync::Mutex;
-
-    fn mock_output(cmd: &str, stdout: &str, exit_status: i32) -> RawCommandOutput {
-        RawCommandOutput {
-            cmd: cmd.to_owned(),
-            stdout: stdout.to_owned(),
-            stderr: String::new(),
-            exit_status,
-        }
-    }
-
-    /// Test runner that maps full by-id paths to LUKS labels and versions.
-    /// Returns realistic Ok(RawCommandOutput) for all commands — uses non-zero
-    /// exit status for unknown devices, never Err (matching RealRunner behavior).
-    /// Tracks which (command, device) pairs were called. Default version
-    /// for known devices is LUKS2 (matching what braid actually formats).
-    struct LabelMap {
-        labels: HashMap<String, String>,
-        versions: HashMap<String, u32>,
-        dump_responses: HashMap<String, RawCommandOutput>,
-        calls: Mutex<Vec<(String, String)>>,
-    }
-
-    impl LabelMap {
-        fn new(entries: &[(&str, &str)]) -> Self {
-            LabelMap {
-                labels: entries
-                    .iter()
-                    .map(|(path, label)| (path.to_string(), label.to_string()))
-                    .collect(),
-                versions: HashMap::new(),
-                dump_responses: HashMap::new(),
-                calls: Mutex::new(Vec::new()),
-            }
-        }
-
-        /// Override the LUKS version reported for a specific path. Defaults
-        /// to 2 (LUKS2) for any path not explicitly set.
-        fn with_version(mut self, path: &str, version: u32) -> Self {
-            self.versions.insert(path.to_string(), version);
-            self
-        }
-
-        /// Override the entire luksDump response for a path. Used to inject
-        /// realistic failure modes (non-zero exit + stderr) or unparseable
-        /// stdout. Takes precedence over the synthesized default.
-        fn with_dump_response(mut self, path: &str, response: RawCommandOutput) -> Self {
-            self.dump_responses.insert(path.to_string(), response);
-            self
-        }
-
-        fn calls(&self) -> Vec<(String, String)> {
-            self.calls.lock().unwrap().clone()
-        }
-    }
-
-    impl CommandRunner for LabelMap {
-        fn run(&self, request: &CmdRequest) -> Result<RawCommandOutput, CmdError> {
-            match request {
-                CmdRequest::CryptsetupIsLuks { device } => {
-                    self.calls
-                        .lock()
-                        .unwrap()
-                        .push(("isLuks".into(), device.clone()));
-                    if self.labels.contains_key(device.as_str()) {
-                        Ok(mock_output("cryptsetup", "", 0))
-                    } else {
-                        Ok(mock_output("cryptsetup", "", 1))
-                    }
-                }
-                CmdRequest::CryptsetupLuksDumpText { device } => {
-                    self.calls
-                        .lock()
-                        .unwrap()
-                        .push(("luksDump".into(), device.clone()));
-                    if let Some(response) = self.dump_responses.get(device.as_str()) {
-                        Ok(response.clone())
-                    } else if let Some(label) = self.labels.get(device.as_str()) {
-                        let version = self.versions.get(device.as_str()).copied().unwrap_or(2);
-                        Ok(mock_output(
-                            "cryptsetup",
-                            &format!(
-                                "LUKS header information\nVersion:\t{version}\nLabel:\t{label}\n"
-                            ),
-                            0,
-                        ))
-                    } else {
-                        Ok(mock_output(
-                            "cryptsetup",
-                            "Device /dev/foo is not a valid LUKS device.\n",
-                            1,
-                        ))
-                    }
-                }
-                _ => Err(CmdError::MissingMock),
-            }
-        }
-
-        fn run_with_stdin(
-            &self,
-            request: &CmdRequest,
-            _stdin: &[u8],
-        ) -> Result<RawCommandOutput, CmdError> {
-            self.run(request)
-        }
-    }
-
-    /// Create a real placeholder file in `dir` representing a physical
-    /// device. Symlinks pointing at this file canonicalize to its path.
-    fn create_target(dir: &Path, name: &str) -> String {
-        let path = dir.join(name);
-        std::fs::write(&path, b"").unwrap();
-        path.to_string_lossy().into_owned()
-    }
-
-    /// Create a by-id symlink in `dir` pointing at `target`. Returns the
-    /// symlink's full path, which is what discover_from_dir sees at runtime.
-    fn create_by_id_symlink(dir: &Path, name: &str, target: &str) -> String {
-        let path = dir.join(name);
-        std::os::unix::fs::symlink(target, &path).unwrap();
-        path.to_string_lossy().into_owned()
-    }
+    use crate::test_fixtures::{
+        DiscoverLabelMap, discover_create_by_id_symlink, discover_create_target,
+    };
 
     #[test]
     fn discover_propagates_runner_error_at_isluks() {
@@ -461,8 +341,8 @@ mod tests {
 
         let by_id_dir = tempfile::tempdir().unwrap();
         let target_dir = tempfile::tempdir().unwrap();
-        let target = create_target(target_dir.path(), "fake-disk");
-        create_by_id_symlink(by_id_dir.path(), "ata-SOMEDISK", &target);
+        let target = discover_create_target(target_dir.path(), "fake-disk");
+        discover_create_by_id_symlink(by_id_dir.path(), "ata-SOMEDISK", &target);
 
         let err = discover_from_dir(
             &IsLuksFailRunner,
@@ -517,8 +397,8 @@ mod tests {
 
         let by_id_dir = tempfile::tempdir().unwrap();
         let target_dir = tempfile::tempdir().unwrap();
-        let target = create_target(target_dir.path(), "fake-disk");
-        create_by_id_symlink(by_id_dir.path(), "ata-SOMEDISK", &target);
+        let target = discover_create_target(target_dir.path(), "fake-disk");
+        discover_create_by_id_symlink(by_id_dir.path(), "ata-SOMEDISK", &target);
 
         let err = discover_from_dir(
             &LuksDumpFailRunner,
@@ -545,13 +425,14 @@ mod tests {
          *   luksDump on the non-LUKS device.
          */
         let dir = tempfile::tempdir().unwrap();
-        let luks_target = create_target(dir.path(), "fake-sda");
-        let usb_target = create_target(dir.path(), "fake-usb");
-        let luks_path = create_by_id_symlink(dir.path(), "ata-TOSHIBA_BRAID", &luks_target);
-        create_by_id_symlink(dir.path(), "ata-USB_STICK", &usb_target);
+        let luks_target = discover_create_target(dir.path(), "fake-sda");
+        let usb_target = discover_create_target(dir.path(), "fake-usb");
+        let luks_path =
+            discover_create_by_id_symlink(dir.path(), "ata-TOSHIBA_BRAID", &luks_target);
+        discover_create_by_id_symlink(dir.path(), "ata-USB_STICK", &usb_target);
 
         // Only the LUKS device is in the label map; the USB stick is unknown.
-        let runner = LabelMap::new(&[(&luks_path, "braid-sda")]);
+        let runner = DiscoverLabelMap::new(&[(&luks_path, "braid-sda")]);
         let outcome =
             discover_from_dir(&runner, &crate::recover::RealByIdResolver, dir.path()).unwrap();
         assert!(
@@ -585,11 +466,13 @@ mod tests {
          *   visible under /dev/disk/by-id during pool recovery.
          */
         let dir = tempfile::tempdir().unwrap();
-        let modern_target = create_target(dir.path(), "fake-sda");
-        let broken_target = create_target(dir.path(), "fake-sdb");
-        let modern_path = create_by_id_symlink(dir.path(), "ata-MODERN_DISK", &modern_target);
-        let broken_path = create_by_id_symlink(dir.path(), "ata-BROKEN_DISK", &broken_target);
-        let runner = LabelMap::new(&[
+        let modern_target = discover_create_target(dir.path(), "fake-sda");
+        let broken_target = discover_create_target(dir.path(), "fake-sdb");
+        let modern_path =
+            discover_create_by_id_symlink(dir.path(), "ata-MODERN_DISK", &modern_target);
+        let broken_path =
+            discover_create_by_id_symlink(dir.path(), "ata-BROKEN_DISK", &broken_target);
+        let runner = DiscoverLabelMap::new(&[
             (&modern_path, "braid-modern"),
             (&broken_path, "braid-broken"),
         ])
@@ -641,9 +524,9 @@ mod tests {
          *   that discover requires to enforce the LUKS2-only invariant.
          */
         let dir = tempfile::tempdir().unwrap();
-        let target = create_target(dir.path(), "fake-sda");
-        let path = create_by_id_symlink(dir.path(), "ata-ODD_DISK", &target);
-        let runner = LabelMap::new(&[(&path, "braid-odd")]).with_dump_response(
+        let target = discover_create_target(dir.path(), "fake-sda");
+        let path = discover_create_by_id_symlink(dir.path(), "ata-ODD_DISK", &target);
+        let runner = DiscoverLabelMap::new(&[(&path, "braid-odd")]).with_dump_response(
             &path,
             RawCommandOutput {
                 cmd: "cryptsetup".into(),
@@ -705,10 +588,10 @@ mod tests {
          *   not whichever the filesystem happened to return last.
          */
         let dir = tempfile::tempdir().unwrap();
-        let target = create_target(dir.path(), "fake-sda");
-        let ata_path = create_by_id_symlink(dir.path(), "ata-SEAGATE_ST500", &target);
-        let wwn_path = create_by_id_symlink(dir.path(), "wwn-0x50014ee606704442", &target);
-        let runner = LabelMap::new(&[(&ata_path, "braid-sda"), (&wwn_path, "braid-sda")]);
+        let target = discover_create_target(dir.path(), "fake-sda");
+        let ata_path = discover_create_by_id_symlink(dir.path(), "ata-SEAGATE_ST500", &target);
+        let wwn_path = discover_create_by_id_symlink(dir.path(), "wwn-0x50014ee606704442", &target);
+        let runner = DiscoverLabelMap::new(&[(&ata_path, "braid-sda"), (&wwn_path, "braid-sda")]);
         let outcome =
             discover_from_dir(&runner, &crate::recover::RealByIdResolver, dir.path()).unwrap();
         assert!(
@@ -738,10 +621,10 @@ mod tests {
          *   alphabetically earlier one.
          */
         let dir = tempfile::tempdir().unwrap();
-        let target = create_target(dir.path(), "fake-sda");
-        let ata_z = create_by_id_symlink(dir.path(), "ata-ZZZZZ_DISK", &target);
-        let ata_a = create_by_id_symlink(dir.path(), "ata-AAAAA_DISK", &target);
-        let runner = LabelMap::new(&[(&ata_z, "braid-sda"), (&ata_a, "braid-sda")]);
+        let target = discover_create_target(dir.path(), "fake-sda");
+        let ata_z = discover_create_by_id_symlink(dir.path(), "ata-ZZZZZ_DISK", &target);
+        let ata_a = discover_create_by_id_symlink(dir.path(), "ata-AAAAA_DISK", &target);
+        let runner = DiscoverLabelMap::new(&[(&ata_z, "braid-sda"), (&ata_a, "braid-sda")]);
         let outcome =
             discover_from_dir(&runner, &crate::recover::RealByIdResolver, dir.path()).unwrap();
         assert!(
@@ -776,12 +659,15 @@ mod tests {
          *   LUKS2 braid disk; only the LUKS2 disk should be discovered.
          */
         let dir = tempfile::tempdir().unwrap();
-        let luks1_target = create_target(dir.path(), "fake-sda");
-        let luks2_target = create_target(dir.path(), "fake-sdb");
-        let luks1_path = create_by_id_symlink(dir.path(), "ata-LEGACY_DISK", &luks1_target);
-        let luks2_path = create_by_id_symlink(dir.path(), "ata-MODERN_DISK", &luks2_target);
-        let runner = LabelMap::new(&[(&luks1_path, "braid-legacy"), (&luks2_path, "braid-modern")])
-            .with_version(&luks1_path, 1);
+        let luks1_target = discover_create_target(dir.path(), "fake-sda");
+        let luks2_target = discover_create_target(dir.path(), "fake-sdb");
+        let luks1_path =
+            discover_create_by_id_symlink(dir.path(), "ata-LEGACY_DISK", &luks1_target);
+        let luks2_path =
+            discover_create_by_id_symlink(dir.path(), "ata-MODERN_DISK", &luks2_target);
+        let runner =
+            DiscoverLabelMap::new(&[(&luks1_path, "braid-legacy"), (&luks2_path, "braid-modern")])
+                .with_version(&luks1_path, 1);
         let outcome =
             discover_from_dir(&runner, &crate::recover::RealByIdResolver, dir.path()).unwrap();
         let members = &outcome.members;
@@ -831,11 +717,11 @@ mod tests {
          *   form escapes the non-ASCII byte.
          */
         let dir = tempfile::tempdir().unwrap();
-        let bad_target = create_target(dir.path(), "fake-bad");
-        let good_target = create_target(dir.path(), "fake-good");
-        let bad_path = create_by_id_symlink(dir.path(), "ata-BAD_LABEL", &bad_target);
-        let good_path = create_by_id_symlink(dir.path(), "ata-GOOD_LABEL", &good_target);
-        let runner = LabelMap::new(&[(&bad_path, "braid-é"), (&good_path, "braid-good")]);
+        let bad_target = discover_create_target(dir.path(), "fake-bad");
+        let good_target = discover_create_target(dir.path(), "fake-good");
+        let bad_path = discover_create_by_id_symlink(dir.path(), "ata-BAD_LABEL", &bad_target);
+        let good_path = discover_create_by_id_symlink(dir.path(), "ata-GOOD_LABEL", &good_target);
+        let runner = DiscoverLabelMap::new(&[(&bad_path, "braid-é"), (&good_path, "braid-good")]);
 
         let outcome =
             discover_from_dir(&runner, &crate::recover::RealByIdResolver, dir.path()).unwrap();
@@ -888,13 +774,13 @@ mod tests {
          *   braid discover should return wwn- for every disk, not a mix.
          */
         let dir = tempfile::tempdir().unwrap();
-        let alpha_target = create_target(dir.path(), "fake-disk1");
-        let beta_target = create_target(dir.path(), "fake-disk2");
-        let ata_alpha = create_by_id_symlink(dir.path(), "ata-DISK1_ALPHA", &alpha_target);
-        let wwn_alpha = create_by_id_symlink(dir.path(), "wwn-0x0001", &alpha_target);
-        let ata_beta = create_by_id_symlink(dir.path(), "ata-DISK2_BETA", &beta_target);
-        let wwn_beta = create_by_id_symlink(dir.path(), "wwn-0x0002", &beta_target);
-        let runner = LabelMap::new(&[
+        let alpha_target = discover_create_target(dir.path(), "fake-disk1");
+        let beta_target = discover_create_target(dir.path(), "fake-disk2");
+        let ata_alpha = discover_create_by_id_symlink(dir.path(), "ata-DISK1_ALPHA", &alpha_target);
+        let wwn_alpha = discover_create_by_id_symlink(dir.path(), "wwn-0x0001", &alpha_target);
+        let ata_beta = discover_create_by_id_symlink(dir.path(), "ata-DISK2_BETA", &beta_target);
+        let wwn_beta = discover_create_by_id_symlink(dir.path(), "wwn-0x0002", &beta_target);
+        let runner = DiscoverLabelMap::new(&[
             (&ata_alpha, "braid-alpha"),
             (&wwn_alpha, "braid-alpha"),
             (&ata_beta, "braid-beta"),
@@ -933,11 +819,11 @@ mod tests {
          *   to relabel it before the next `braid discover` run.
          */
         let dir = tempfile::tempdir().unwrap();
-        let target_a = create_target(dir.path(), "fake-sda");
-        let target_b = create_target(dir.path(), "fake-sdb");
-        let alias_a = create_by_id_symlink(dir.path(), "ata-CLONE_A", &target_a);
-        let alias_b = create_by_id_symlink(dir.path(), "ata-CLONE_B", &target_b);
-        let runner = LabelMap::new(&[(&alias_a, "braid-foo"), (&alias_b, "braid-foo")]);
+        let target_a = discover_create_target(dir.path(), "fake-sda");
+        let target_b = discover_create_target(dir.path(), "fake-sdb");
+        let alias_a = discover_create_by_id_symlink(dir.path(), "ata-CLONE_A", &target_a);
+        let alias_b = discover_create_by_id_symlink(dir.path(), "ata-CLONE_B", &target_b);
+        let runner = DiscoverLabelMap::new(&[(&alias_a, "braid-foo"), (&alias_b, "braid-foo")]);
 
         let err =
             discover_from_dir(&runner, &crate::recover::RealByIdResolver, dir.path()).unwrap_err();
@@ -972,11 +858,14 @@ mod tests {
          *   detach; discover still records the remaining valid member.
          */
         let dir = tempfile::tempdir().unwrap();
-        let target = create_target(dir.path(), "fake-sda");
-        let dangling =
-            create_by_id_symlink(dir.path(), "ata-DANGLING", "/nonexistent/dangling/target");
-        let valid = create_by_id_symlink(dir.path(), "wwn-VALID", &target);
-        let runner = LabelMap::new(&[(&dangling, "braid-foo"), (&valid, "braid-foo")]);
+        let target = discover_create_target(dir.path(), "fake-sda");
+        let dangling = discover_create_by_id_symlink(
+            dir.path(),
+            "ata-DANGLING",
+            "/nonexistent/dangling/target",
+        );
+        let valid = discover_create_by_id_symlink(dir.path(), "wwn-VALID", &target);
+        let runner = DiscoverLabelMap::new(&[(&dangling, "braid-foo"), (&valid, "braid-foo")]);
 
         let outcome =
             discover_from_dir(&runner, &crate::recover::RealByIdResolver, dir.path()).unwrap();
