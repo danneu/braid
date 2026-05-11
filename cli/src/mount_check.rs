@@ -48,6 +48,16 @@ fn find_unique_target_entry(
     content: &str,
     target: &str,
 ) -> Result<Option<ParsedLine>, MountInfoError> {
+    // mountinfo emits canonical paths with no trailing slash for non-root
+    // mounts. Normalize only the caller-supplied target so configs like
+    // "/mnt/storage/" still match the kernel's "/mnt/storage"; preserve root
+    // because mountinfo emits "/" for it. Without this, the idle mount probe
+    // can miss a mounted pool and let autosuspend proceed.
+    let target = if target == "/" {
+        target
+    } else {
+        target.trim_end_matches('/')
+    };
     let mut hit: Option<ParsedLine> = None;
     for line in content.lines() {
         if line.is_empty() {
@@ -224,6 +234,36 @@ mod tests {
         assert_eq!(
             fstype_at_mount(&body, TARGET).unwrap(),
             Some("btrfs".to_string())
+        );
+    }
+
+    /* Intent: a configured target with a trailing slash matches the
+     *   canonical non-root mount point emitted by mountinfo.
+     * Why: all safety-critical callers share this helper, so normalization
+     *   must happen before the exact mount-point comparison.
+     * Scenario: autosuspend fail-open seam: `! braid idle` runs against a
+     *   mounted pool whose config says "/mnt/storage/"; without this match,
+     *   idle reports PoolOffline and allows suspend on a mounted pool.
+     */
+    #[test]
+    fn fstype_at_mount_matches_trailing_slash_target() {
+        let body = format!("{ROOT_LINE}{}", target_btrfs_line());
+        assert_eq!(
+            fstype_at_mount(&body, "/mnt/storage/").unwrap(),
+            Some("btrfs".to_string())
+        );
+    }
+
+    /* Intent: the root target remains "/" instead of being normalized to an
+     *   empty string.
+     * Why: a blanket trim_end_matches('/') would break root mount lookups.
+     * Scenario: a caller probes the root filesystem entry in mountinfo.
+     */
+    #[test]
+    fn fstype_at_mount_root_target_still_matches_root_entry() {
+        assert_eq!(
+            fstype_at_mount(ROOT_LINE, "/").unwrap(),
+            Some("ext4".to_string())
         );
     }
 
@@ -469,6 +509,28 @@ mod tests {
                 fstype: "btrfs".to_string(),
                 vfs_options: "rw,relatime".to_string(),
                 fs_options: "rw,space_cache=v2".to_string(),
+            })
+        );
+    }
+
+    /* Intent: mount_entry_at also matches a trailing-slash target against the
+     *   canonical non-root mount point emitted by mountinfo.
+     * Why: read-only preflight depends on this helper to inspect both
+     *   mountinfo option fields, so the normalization must apply here too.
+     * Scenario: a mutating command runs with braid.mountPoint =
+     *   "/mnt/storage/" while /mnt/storage is mounted read-only.
+     */
+    #[test]
+    fn mount_entry_at_matches_trailing_slash_target() {
+        let body = format!(
+            "36 35 0:32 / {TARGET} ro,relatime shared:1 - btrfs /dev/mapper/braid-vdb ro,space_cache=v2\n"
+        );
+        assert_eq!(
+            mount_entry_at(&body, "/mnt/storage/").unwrap(),
+            Some(MountEntry {
+                fstype: "btrfs".to_string(),
+                vfs_options: "ro,relatime".to_string(),
+                fs_options: "ro,space_cache=v2".to_string(),
             })
         );
     }
