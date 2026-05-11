@@ -157,6 +157,44 @@ with subtest("Corrupt latch (mounted): monitor surfaces and quarantines"):
     machine.fail("test -f /var/lib/braid/alert-latch.json")
     machine.fail("test -f /var/lib/braid/alert-latch.json.corrupt")
 
+# Intent: When the alert latch becomes corrupt a second time before ack, the
+#   first .corrupt sidecar must be preserved -- ADR 014 guarantees the bad
+#   bytes survive for forensics until ack, and the first corruption event is
+#   the most valuable snapshot.
+# Why it exists: Pre-fix, std::fs::rename atomically replaced the .corrupt
+#   sidecar on every quarantine, silently destroying the original failure
+#   event's bytes whenever a second corruption occurred before braid ack.
+# Scenario: Operator misses the first ALERT; meanwhile the latch corrupts
+#   again (FS damage, manual edit, slow tampering). The second monitor cycle
+#   must keep the first sidecar and surface the lost-evidence condition in
+#   braid status's JSON output.
+with subtest("Repeated corrupt latch preserves first sidecar"):
+    machine.succeed("printf 'first corruption' > /var/lib/braid/alert-latch.json")
+    rc = machine.succeed("set +e; braid monitor; echo $?").strip().splitlines()[-1]
+    assert rc == "1", f"Expected monitor exit 1 on first corrupt latch, got {rc}"
+    first_sidecar = machine.succeed("cat /var/lib/braid/alert-latch.json.corrupt")
+    assert first_sidecar == "first corruption"
+
+    # Second corruption: overwrite the freshly written valid latch.
+    machine.succeed("printf 'second corruption' > /var/lib/braid/alert-latch.json")
+    rc2 = machine.succeed("set +e; braid monitor; echo $?").strip().splitlines()[-1]
+    assert rc2 == "1", f"Expected monitor exit 1 on second corrupt latch, got {rc2}"
+
+    # Sidecar still holds the FIRST event's bytes.
+    preserved = machine.succeed("cat /var/lib/braid/alert-latch.json.corrupt")
+    assert preserved == "first corruption", (
+        f"first sidecar must survive second quarantine, got {preserved!r}"
+    )
+
+    # braid status surfaces the lost-evidence condition.
+    status_json = machine.succeed("braid status --json")
+    assert "prior alert-latch.json.corrupt sidecar exists" in status_json
+
+    # ack clears both files as before.
+    machine.succeed("braid ack")
+    machine.fail("test -f /var/lib/braid/alert-latch.json")
+    machine.fail("test -f /var/lib/braid/alert-latch.json.corrupt")
+
 # Intent: An offline `braid ack` of a latched MissingDevice cause persists
 #   missing_acked=true into acked-stats.json so the alert does not re-fire
 #   on the next monitor cycle after the pool is remounted.

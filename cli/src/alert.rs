@@ -324,11 +324,36 @@ pub fn load_alert_latch_or_quarantine(paths: &StatePaths) -> (Option<AlertState>
     match load_alert_latch(paths) {
         Ok(opt) => (opt, None),
         Err(e) => {
-            let detail = e.to_string();
-            eprintln!("warning: alert latch unreadable -- quarantining: {detail}");
-            let _ = std::fs::rename(paths.alert_latch_json(), paths.alert_latch_corrupt());
+            let parse_detail = e.to_string();
+            eprintln!("warning: alert latch unreadable -- quarantining: {parse_detail}");
+            let detail = match quarantine_corrupt_latch(paths) {
+                Some(quarantine_detail) => format!("{parse_detail}; {quarantine_detail}"),
+                None => parse_detail,
+            };
             (None, Some(detail))
         }
+    }
+}
+
+/// Preserve the first unreadable latch sidecar without clobbering prior bytes.
+///
+/// The hard-link step is the atomic no-clobber primitive: it fails with
+/// AlreadyExists if the sidecar path is already occupied, avoiding an
+/// exists-then-rename race that could replace the original forensic bytes.
+fn quarantine_corrupt_latch(paths: &StatePaths) -> Option<String> {
+    let src = paths.alert_latch_json();
+    let dst = paths.alert_latch_corrupt();
+    match std::fs::hard_link(&src, &dst) {
+        Ok(()) => match std::fs::remove_file(&src) {
+            Ok(()) => None,
+            Err(e) => Some(format!(
+                "quarantined corrupt latch but failed to remove source: {e}"
+            )),
+        },
+        Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => Some(
+            "prior alert-latch.json.corrupt sidecar exists -- new corrupt bytes were not separately preserved".to_string(),
+        ),
+        Err(e) => Some(format!("failed to quarantine corrupt latch: {e}")),
     }
 }
 
@@ -639,6 +664,112 @@ mod tests {
         let preserved = std::fs::read(paths.alert_latch_corrupt())
             .expect("corrupt sidecar must exist after quarantine");
         assert_eq!(preserved, garbage, "sidecar must contain original bytes");
+    }
+
+    // Intent: When the latch corrupts again before ack, quarantine preserves
+    // the first alert-latch.json.corrupt sidecar and reports that later bytes
+    // were not separately captured.
+    // Why it exists: Unix rename replaces an existing destination, so the old
+    // quarantine path could destroy the original and most useful corruption
+    // snapshot on a second monitor cycle.
+    // Scenario: The latch is quarantined once, braid later writes a valid
+    // latch, and external damage corrupts that latch again before the
+    // operator runs braid ack.
+    #[test]
+    fn quarantine_preserves_first_corrupt_sidecar() {
+        let dir = tempfile::tempdir().unwrap();
+        let paths = StatePaths::custom(dir.path().to_path_buf());
+        let first = b"first garbage".to_vec();
+        std::fs::write(paths.alert_latch_json(), &first).unwrap();
+
+        let (state, detail) = load_alert_latch_or_quarantine(&paths);
+
+        assert!(state.is_none());
+        let detail = detail.expect("first quarantine reports parse detail");
+        assert!(
+            detail.contains("parse alert latch"),
+            "first detail should name parse failure, got {detail:?}"
+        );
+        assert!(
+            !detail.contains("; "),
+            "first detail should not include quarantine suffix, got {detail:?}"
+        );
+        assert!(
+            !paths.alert_latch_json().exists(),
+            "live latch path must be removed after first quarantine"
+        );
+        let preserved = std::fs::read(paths.alert_latch_corrupt())
+            .expect("corrupt sidecar must exist after first quarantine");
+        assert_eq!(preserved, first, "sidecar must hold first bytes");
+
+        let second = b"second garbage".to_vec();
+        std::fs::write(paths.alert_latch_json(), &second).unwrap();
+
+        let (state, detail) = load_alert_latch_or_quarantine(&paths);
+
+        assert!(state.is_none());
+        let detail = detail.expect("second quarantine reports parse and sidecar detail");
+        assert!(
+            detail.contains("parse alert latch"),
+            "second detail should name parse failure, got {detail:?}"
+        );
+        assert!(
+            detail.contains("prior alert-latch.json.corrupt sidecar exists"),
+            "second detail should name prior sidecar preservation, got {detail:?}"
+        );
+        let preserved = std::fs::read(paths.alert_latch_corrupt())
+            .expect("first corrupt sidecar must remain present");
+        assert_eq!(
+            preserved, first,
+            "second quarantine must not replace first sidecar"
+        );
+        let live = std::fs::read(paths.alert_latch_json())
+            .expect("second corrupt latch remains for caller overwrite");
+        assert_eq!(live, second, "second bytes should remain at live path");
+    }
+
+    // Intent: A hard_link I/O failure during quarantine is folded into the
+    // returned detail instead of being silently dropped.
+    // Why it exists: If quarantine cannot create the sidecar, the caller's
+    // next save_alert_latch overwrites the bad bytes at alert-latch.json, so
+    // the operator needs a visible lost-evidence signal.
+    // Scenario: The state directory is readable but not writable when monitor
+    // encounters an unreadable latch.
+    #[cfg(unix)]
+    #[test]
+    fn quarantine_link_failure_surfaces_in_detail() {
+        use std::os::unix::fs::PermissionsExt;
+
+        struct RestorePerms {
+            dir: std::path::PathBuf,
+        }
+
+        impl Drop for RestorePerms {
+            fn drop(&mut self) {
+                let _ = std::fs::set_permissions(&self.dir, std::fs::Permissions::from_mode(0o700));
+            }
+        }
+
+        let dir = tempfile::tempdir().unwrap();
+        let paths = StatePaths::custom(dir.path().to_path_buf());
+        let garbage = b"not json".to_vec();
+        std::fs::write(paths.alert_latch_json(), &garbage).unwrap();
+        let _restore = RestorePerms {
+            dir: dir.path().to_path_buf(),
+        };
+        std::fs::set_permissions(dir.path(), std::fs::Permissions::from_mode(0o500)).unwrap();
+
+        let (state, detail) = load_alert_latch_or_quarantine(&paths);
+
+        assert!(state.is_none());
+        let detail = detail.expect("failed quarantine reports detail");
+        assert!(
+            detail.contains("failed to quarantine corrupt latch"),
+            "detail should name quarantine failure, got {detail:?}"
+        );
+        let live = std::fs::read(paths.alert_latch_json())
+            .expect("hard_link failure must leave corrupt latch in place");
+        assert_eq!(live, garbage, "corrupt latch must remain at live path");
     }
 
     #[test]
