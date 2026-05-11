@@ -20,7 +20,7 @@ use crate::pool::{
     pool_add_device, pool_balance_raid1, pool_bootstrap_mount, pool_bootstrap_mount_raid1,
 };
 use crate::preflight;
-use crate::preview::{self, PerDiskStyle, Preview, PreviewCompleteness, PreviewNote};
+use crate::preview::{self, PerDiskStyle, PlanFailure, Preview, PreviewCompleteness, PreviewNote};
 use crate::probe::{Filesystem, ProbeError, probe_config_disk, probe_pool};
 use crate::progress::ProgressOutput;
 use crate::progress::RealSleeper;
@@ -664,22 +664,11 @@ pub struct AddPlan {
     pub pool_membership: PoolMembership,
 }
 
-/// Report returned by `plan_add`. Shape A: when planning fails after
-/// notes have been accumulated (e.g. a later step rejects after the
-/// missing-devices warning is already in-hand), the notes survive on
-/// `report.notes` so the caller can render them to stderr before the
-/// error. On the `Ok` branch, all accumulated notes have been moved into
-/// `plan.notes` and `report.notes` is empty.
-pub struct AddPlanReport {
-    pub notes: Vec<PreviewNote>,
-    pub result: Result<AddPlan, AddError>,
-}
-
 impl AddPlan {
     /// Real-run and failure-path stderr for `add` use `Bracketed` per-disk
-    /// style to match other Shape A commands; note that `add` does not
+    /// style to match other note-carrying commands; note that `add` does not
     /// produce `PerDisk` notes in PR 7, so this constant exists only to
-    /// satisfy the uniform Shape A contract.
+    /// satisfy the uniform stderr-note contract.
     pub const STDERR_STYLE: PerDiskStyle = PerDiskStyle::Bracketed;
 
     pub fn preview(&self) -> Preview {
@@ -701,7 +690,7 @@ impl AddPlan {
         // the shared renderer. Warn notes emit as the canonical
         // `[warn] <body>` (same as dry-run stdout); the no-op Info
         // note (when steps are empty) emits as the bare noop line.
-        // `cmd_add`'s preserved-context Err branch pipes `report.notes`
+        // `cmd_add`'s preserved-context Err branch pipes `PlanFailure::notes`
         // through the same helper, so success, failure, and dry-run
         // stdout share one render contract for these notes.
         preview::emit_notes_to_stderr(&self.notes, Self::STDERR_STYLE);
@@ -1161,30 +1150,24 @@ impl AddPlan {
 /// preflight, the missing-devices warning, the keyfile-asymmetry warning,
 /// and the semantic add work planner. On success, every accumulated note lives
 /// on `plan.notes`; on failure after note accumulation, notes survive on
-/// `report.notes` so `cmd_add` can render them to stderr before the error.
+/// `PlanFailure::notes` so `cmd_add` can render them to stderr before the error.
 pub fn plan_add<R: CommandRunner + Sync, F: Filesystem + ?Sized>(
     runner: &R,
     fs: &F,
     params: &AddParams<'_>,
-) -> AddPlanReport {
+) -> Result<AddPlan, PlanFailure<AddError>> {
     // Accumulator for preview-context notes that must survive a later
-    // planner error (Shape A "notes-carrying report" contract). Notes
-    // added here travel to `report.notes` on the Err branch and move
-    // into `plan.notes` on the Ok branch.
+    // planner error. Notes added here travel to `PlanFailure::notes` on
+    // the Err branch and move into `plan.notes` on the Ok branch.
     let mut notes: Vec<PreviewNote> = Vec::new();
 
-    let err_empty = |e: AddError| AddPlanReport {
-        notes: Vec::new(),
-        result: Err(e),
-    };
-
     if let Err(msg) = preflight::check_no_pending_operation(params.paths) {
-        return err_empty(AddError::Validation(msg));
+        return Err(PlanFailure::empty(AddError::Validation(msg)));
     }
 
     let config = match config_read(params.config_path) {
         Ok(c) => c,
-        Err(e) => return err_empty(e.into()),
+        Err(e) => return Err(PlanFailure::empty(e.into())),
     };
 
     // Parse disk specs: name=by_id
@@ -1195,7 +1178,7 @@ pub fn plan_add<R: CommandRunner + Sync, F: Filesystem + ?Sized>(
         .collect::<Result<Vec<_>, _>>()
     {
         Ok(v) => v,
-        Err(e) => return err_empty(e.into()),
+        Err(e) => return Err(PlanFailure::empty(e.into())),
     };
 
     let names: Vec<String> = parsed.iter().map(|(n, _)| n.clone()).collect();
@@ -1206,9 +1189,9 @@ pub fn plan_add<R: CommandRunner + Sync, F: Filesystem + ?Sized>(
         let mut seen = std::collections::HashSet::new();
         for name in &names {
             if !seen.insert(name.as_str()) {
-                return err_empty(AddError::Validation(format!(
+                return Err(PlanFailure::empty(AddError::Validation(format!(
                     "duplicate disk name: '{name}'"
-                )));
+                ))));
             }
         }
     }
@@ -1222,10 +1205,10 @@ pub fn plan_add<R: CommandRunner + Sync, F: Filesystem + ?Sized>(
         let mut seen = std::collections::HashSet::new();
         for by_id in &by_ids {
             if !seen.insert(by_id.0.as_str()) {
-                return err_empty(AddError::Validation(format!(
+                return Err(PlanFailure::empty(AddError::Validation(format!(
                     "duplicate by_id: '{}'",
                     by_id.0
-                )));
+                ))));
             }
         }
     }
@@ -1233,20 +1216,20 @@ pub fn plan_add<R: CommandRunner + Sync, F: Filesystem + ?Sized>(
     if let Some(kf) = params.enroll_key_file
         && let Err(e) = crate::enroll_key_file::validate_key_file_path(kf, false)
     {
-        return err_empty(AddError::Validation(e.to_string()));
+        return Err(PlanFailure::empty(AddError::Validation(e.to_string())));
     }
 
     // Load existing membership (or empty if first add)
     let pool_membership = match membership::load_membership(params.paths) {
         Ok(m) => m,
         Err(membership::MembershipError::NotFound(_)) => PoolMembership::empty(),
-        Err(e) => return err_empty(e.into()),
+        Err(e) => return Err(PlanFailure::empty(e.into())),
     };
 
     // Validate no conflicts
     for (name, by_id) in &parsed {
         if let Err(e) = membership::validate_no_conflicts(&pool_membership, name, &by_id.0) {
-            return err_empty(e.into());
+            return Err(PlanFailure::empty(e.into()));
         }
     }
 
@@ -1258,15 +1241,15 @@ pub fn plan_add<R: CommandRunner + Sync, F: Filesystem + ?Sized>(
         .collect::<Result<Vec<_>, _>>()
     {
         Ok(v) => v,
-        Err(e) => return err_empty(e.into()),
+        Err(e) => return Err(PlanFailure::empty(e.into())),
     };
 
     for (i, p) in probed.iter().enumerate() {
         if matches!(p.state, ConfigDiskState::Absent) {
-            return err_empty(AddError::Validation(format!(
+            return Err(PlanFailure::empty(AddError::Validation(format!(
                 "disk '{}' ({}) is not present. Is it plugged in?",
                 names[i], by_ids[i]
-            )));
+            ))));
         }
     }
 
@@ -1274,35 +1257,32 @@ pub fn plan_add<R: CommandRunner + Sync, F: Filesystem + ?Sized>(
     let pool = match probe_pool(runner, fs, config.mount_point()) {
         Ok(p) => p,
         Err(ProbeError::NotBtrfs { fstype, .. }) => {
-            return err_empty(AddError::Validation(format!(
+            return Err(PlanFailure::empty(AddError::Validation(format!(
                 "{} is already mounted with {fstype}, not btrfs. Unmount it first.",
                 config.mount_point()
-            )));
+            ))));
         }
-        Err(e) => return err_empty(AddError::Probe(e)),
+        Err(e) => return Err(PlanFailure::empty(AddError::Probe(e))),
     };
 
     // Refuse if pool.json lists members but pool isn't unlocked. Catches the
     // silent-bootstrap case where a fresh disk + locked pool would otherwise
     // overwrite pool.json and orphan the existing locked members.
     if let Err(msg) = preflight::check_pool_unlocked_if_membership_exists(&pool_membership, &pool) {
-        return err_empty(AddError::Validation(msg));
+        return Err(PlanFailure::empty(AddError::Validation(msg)));
     }
 
     if pool.mounted {
         let fsid = pool.fsid.as_deref().expect("mounted pool must have FSID");
         match preflight::require_mutation_preflight(runner, fs, fsid, config.mount_point()) {
             Ok(preflight_notes) => notes.extend(preflight_notes),
-            Err(msg) => return err_empty(AddError::Validation(msg)),
+            Err(msg) => return Err(PlanFailure::empty(AddError::Validation(msg))),
         }
     }
     if let Err(msg) =
         preflight::check_ups_not_on_battery(runner, config.ups().map(|u| u.name.as_str()), "add")
     {
-        return AddPlanReport {
-            notes,
-            result: Err(AddError::Validation(msg)),
-        };
+        return Err(PlanFailure::with_notes(notes, AddError::Validation(msg)));
     }
 
     // Missing-devices warning: body-only, no legacy `warning:` prefix.
@@ -1335,7 +1315,7 @@ pub fn plan_add<R: CommandRunner + Sync, F: Filesystem + ?Sized>(
 
     // Build the semantic work plan. This can fail on PresentLuks identity / foreign-pool
     // guards -- any accumulated notes up to here (missing-devices,
-    // keyfile-asymmetry) must survive on `report.notes` so the caller can
+    // keyfile-asymmetry) must survive on `PlanFailure::notes` so the caller can
     // render them to stderr before the error.
     let names_refs: Vec<&str> = names.iter().map(String::as_str).collect();
     let by_ids_refs: Vec<&ByIdPath> = by_ids.iter().collect();
@@ -1354,10 +1334,7 @@ pub fn plan_add<R: CommandRunner + Sync, F: Filesystem + ?Sized>(
     ) {
         Ok(s) => s,
         Err(e) => {
-            return AddPlanReport {
-                notes,
-                result: Err(e),
-            };
+            return Err(PlanFailure::with_notes(notes, e));
         }
     };
     // No-op preview: zero steps + Info note naming the already-in-pool
@@ -1382,10 +1359,7 @@ pub fn plan_add<R: CommandRunner + Sync, F: Filesystem + ?Sized>(
         pool_membership,
     };
 
-    AddPlanReport {
-        notes: Vec::new(),
-        result: Ok(plan),
-    }
+    Ok(plan)
 }
 
 pub fn cmd_add<R: CommandRunner + Sync, F: Filesystem + ?Sized>(
@@ -1393,18 +1367,17 @@ pub fn cmd_add<R: CommandRunner + Sync, F: Filesystem + ?Sized>(
     fs: &F,
     params: &AddParams<'_>,
 ) -> Result<(), AddError> {
-    let report = plan_add(runner, fs, params);
-    let plan = match report.result {
+    let plan = match plan_add(runner, fs, params) {
         Ok(p) => p,
-        Err(e) => {
+        Err(PlanFailure { notes, error }) => {
             // Preserved-context failure: accumulated notes render to
             // stderr before the error via the SAME helper as the Ok
             // path (`AddPlan::execute`), so a `PreviewNote::Warn`
             // emitted on the refusal path is byte-identical to the
             // same note emitted on dry-run stdout and real-run
             // success stderr.
-            preview::emit_notes_to_stderr(&report.notes, AddPlan::STDERR_STYLE);
-            return Err(e);
+            preview::emit_notes_to_stderr(&notes, AddPlan::STDERR_STYLE);
+            return Err(error);
         }
     };
 
@@ -5236,7 +5209,7 @@ mod tests {
         let kf_path = tmp.path().join("does-not-exist").join("braid.key");
         let inhibitor = crate::inhibit::RecordingInhibitor::new();
 
-        let report = plan_add(
+        let failure = match plan_add(
             &PanicRunner,
             &PanicFilesystem,
             &AddParams {
@@ -5253,20 +5226,22 @@ mod tests {
                 sleep_inhibitor: &inhibitor,
                 passphrase_reader: &crate::luks::RealTty,
             },
-        );
+        ) {
+            Ok(_) => panic!("expected Err(Validation), got Ok(_)"),
+            Err(failure) => failure,
+        };
 
-        match report.result {
-            Err(AddError::Validation(msg)) => assert!(
+        match failure.error {
+            AddError::Validation(msg) => assert!(
                 msg.contains("keyfile not found"),
                 "expected missing keyfile validation, got: {msg}"
             ),
-            Err(other) => panic!("expected Validation, got: {other:?}"),
-            Ok(_) => panic!("expected Err(Validation), got Ok(_)"),
+            other => panic!("expected Validation, got: {other:?}"),
         }
         assert!(
-            report.notes.is_empty(),
+            failure.notes.is_empty(),
             "expected no notes: {:?}",
-            report.notes
+            failure.notes
         );
         assert_eq!(inhibitor.acquire_count(), 0);
     }
@@ -5284,7 +5259,7 @@ mod tests {
         std::fs::create_dir(&kf_path).unwrap();
         let inhibitor = crate::inhibit::RecordingInhibitor::new();
 
-        let report = plan_add(
+        let failure = match plan_add(
             &PanicRunner,
             &PanicFilesystem,
             &AddParams {
@@ -5301,20 +5276,22 @@ mod tests {
                 sleep_inhibitor: &inhibitor,
                 passphrase_reader: &crate::luks::RealTty,
             },
-        );
+        ) {
+            Ok(_) => panic!("expected Err(Validation), got Ok(_)"),
+            Err(failure) => failure,
+        };
 
-        match report.result {
-            Err(AddError::Validation(msg)) => assert!(
+        match failure.error {
+            AddError::Validation(msg) => assert!(
                 msg.contains("is not a regular file"),
                 "expected directory keyfile validation, got: {msg}"
             ),
-            Err(other) => panic!("expected Validation, got: {other:?}"),
-            Ok(_) => panic!("expected Err(Validation), got Ok(_)"),
+            other => panic!("expected Validation, got: {other:?}"),
         }
         assert!(
-            report.notes.is_empty(),
+            failure.notes.is_empty(),
             "expected no notes: {:?}",
-            report.notes
+            failure.notes
         );
         assert_eq!(inhibitor.acquire_count(), 0);
     }
@@ -5711,7 +5688,7 @@ mod tests {
     //   - already-in-pool is a note-only success (Info + zero steps)
     //   - dry-run render passes through plan.preview().render()
     //   - preserved-context failure carries accumulated notes on
-    //     report.notes when planning bails later
+    //     PlanFailure::notes when planning bails later
     //
     // Fixtures reuse add_test_setup/AddMockFs and a bespoke runner that
     // can toggle `missing_count` on the pool probe.
@@ -5954,9 +5931,7 @@ mod tests {
 
         let disk_specs = ["disk2=/dev/disk/by-id/virtio-disk2".to_string()];
         let report = plan_add(&runner, &fs, &fixture.params(&disk_specs, true));
-        let plan = report
-            .result
-            .expect("plan_add must succeed even with a missing device present");
+        let plan = report.expect("plan_add must succeed even with a missing device present");
 
         let warns: Vec<&String> = plan
             .notes
@@ -5995,7 +5970,7 @@ mod tests {
 
         let disk_specs = ["disk2=/dev/disk/by-id/virtio-disk2".to_string()];
         let report = plan_add(&runner, &fs, &fixture.params(&disk_specs, true));
-        let plan = report.result.expect("plan_add should succeed");
+        let plan = report.expect("plan_add should succeed");
 
         let warns: Vec<&String> = plan
             .notes
@@ -6033,7 +6008,7 @@ mod tests {
 
         let disk_specs = ["disk2=/dev/disk/by-id/virtio-disk2".to_string()];
         let report = plan_add(&runner, &fs, &fixture.params(&disk_specs, true));
-        let plan = report.result.expect("plan_add should succeed");
+        let plan = report.expect("plan_add should succeed");
 
         let warns: Vec<&String> = plan
             .notes
@@ -6073,7 +6048,7 @@ mod tests {
 
         let disk_specs = ["disk2=/dev/disk/by-id/virtio-disk2".to_string()];
         let report = plan_add(&runner, &fs, &fixture.params(&disk_specs, true));
-        let plan = report.result.expect("plan_add should succeed");
+        let plan = report.expect("plan_add should succeed");
 
         let warns: Vec<&String> = plan
             .notes
@@ -6113,7 +6088,7 @@ mod tests {
 
         let disk_specs = ["disk2=/dev/disk/by-id/virtio-disk2".to_string()];
         let report = plan_add(&runner, &fs, &fixture.params(&disk_specs, true));
-        let plan = report.result.expect("plan_add should succeed");
+        let plan = report.expect("plan_add should succeed");
 
         let warns: Vec<&String> = plan
             .notes
@@ -6155,7 +6130,7 @@ mod tests {
 
         let disk_specs = ["disk3=/dev/disk/by-id/virtio-disk3".to_string()];
         let report = plan_add(&runner, &fs, &fixture.params(&disk_specs, true));
-        let plan = report.result.expect("plan_add should succeed");
+        let plan = report.expect("plan_add should succeed");
 
         let warns: Vec<&String> = plan
             .notes
@@ -6249,7 +6224,7 @@ mod tests {
                 passphrase_reader: &RealTty,
             },
         );
-        let plan = report.result.expect("plan_add should succeed for noop");
+        let plan = report.expect("plan_add should succeed for noop");
         let preview = plan.preview();
         assert!(
             preview.steps.is_empty(),
@@ -6316,9 +6291,7 @@ mod tests {
                 passphrase_reader: &RealTty,
             },
         );
-        let plan = report
-            .result
-            .expect("plan_add should succeed for fresh bootstrap");
+        let plan = report.expect("plan_add should succeed for fresh bootstrap");
         assert!(
             plan.notes.is_empty(),
             "fresh bootstrap must emit no warning/info notes, got: {:?}",
@@ -6356,7 +6329,7 @@ mod tests {
 
         let disk_specs = ["disk2=/dev/disk/by-id/virtio-disk2".to_string()];
         let report = plan_add(&runner, &fs, &fixture.params(&disk_specs, true));
-        let plan = report.result.expect("plan_add should succeed");
+        let plan = report.expect("plan_add should succeed");
 
         let rendered = plan.preview().render();
         let warn_pos = rendered
@@ -6433,12 +6406,11 @@ mod tests {
     /* Intent: when plan_add accumulates a Warn note (e.g.
      * missing-devices) and then fails later inside
      * add work-plan rendering (e.g. BraidLabeledNoBtrfs identity), the
-     * accumulated notes survive on `report.notes` and the result is
+     * accumulated notes survive on `PlanFailure::notes` and the result is
      * Err(...).
-     * Why it exists: Shape A "notes-carrying report" promises preserved
-     * context. Without this, a refused add on a degraded pool would lose
-     * the missing-devices context the user needs to understand the
-     * refusal.
+     * Why it exists: `PlanFailure::notes` promises preserved context.
+     * Without this, a refused add on a degraded pool would lose the
+     * missing-devices context the user needs to understand the refusal.
      * Scenario: 2-disk pool with 1 MISSING placeholder, operator tries
      * to add disk2 which is a braid-labeled LUKS with no btrfs
      * superblock (ambiguous identity). plan_add accumulates the
@@ -6491,13 +6463,11 @@ mod tests {
         };
 
         let disk_specs = ["disk2=/dev/disk/by-id/virtio-disk2".to_string()];
-        let report = plan_add(&runner, &fs, &fixture.params(&disk_specs, true));
-
-        assert!(
-            report.result.is_err(),
-            "plan_add must fail on BraidLabeledNoBtrfs identity"
-        );
-        let warns: Vec<&String> = report
+        let failure = match plan_add(&runner, &fs, &fixture.params(&disk_specs, true)) {
+            Ok(_) => panic!("plan_add must fail on BraidLabeledNoBtrfs identity"),
+            Err(failure) => failure,
+        };
+        let warns: Vec<&String> = failure
             .notes
             .iter()
             .filter_map(|n| match n {
@@ -6508,7 +6478,7 @@ mod tests {
         assert_eq!(
             warns.len(),
             1,
-            "missing-devices warn must survive the Err branch on report.notes, got: {warns:?}"
+            "missing-devices warn must survive the Err branch on PlanFailure::notes, got: {warns:?}"
         );
         assert_eq!(warns[0], &format_add_missing_devices_warning(1));
     }
@@ -6570,9 +6540,7 @@ mod tests {
 
         let disk_specs = ["disk2=/dev/disk/by-id/virtio-disk2".to_string()];
         let report = plan_add(&runner, &fs, &fixture.params(&disk_specs, true));
-        let plan = report
-            .result
-            .expect("plan_add should succeed on clean fixture + busy op");
+        let plan = report.expect("plan_add should succeed on clean fixture + busy op");
 
         assert_eq!(
             plan.notes.len(),
@@ -6598,11 +6566,11 @@ mod tests {
 
     /* Intent: when plan_add accumulates a preflight Info note and then
      * fails on a later hard gate (UPS on battery), the accumulated notes
-     * survive on `report.notes` with `report.result = Err(...)`.
-     * Why it exists: Shape A "notes-carrying report" promises preserved
-     * context. Without this, a UPS refusal on an enqueued-busy pool
-     * would lose the busy-op context the operator needs to understand
-     * what else is happening.
+     * survive on `PlanFailure::notes` with `Err(...)`.
+     * Why it exists: `PlanFailure::notes` promises preserved context.
+     * Without this, a UPS refusal on an enqueued-busy pool would lose
+     * the busy-op context the operator needs to understand what else is
+     * happening.
      * Scenario: sysfs reports "device add" (enqueueable busy), UPS
      * reports OB (on battery), operator runs `braid add disk2`.
      */
@@ -6653,31 +6621,33 @@ mod tests {
         .unwrap();
 
         let disk_specs = ["disk2=/dev/disk/by-id/virtio-disk2".to_string()];
-        let report = plan_add(&runner, &fs, &fixture.params(&disk_specs, true));
+        let failure = match plan_add(&runner, &fs, &fixture.params(&disk_specs, true)) {
+            Ok(_) => panic!("expected Err(Validation), got Ok(_)"),
+            Err(failure) => failure,
+        };
 
-        match &report.result {
-            Err(AddError::Validation(msg)) => {
+        match &failure.error {
+            AddError::Validation(msg) => {
                 assert!(
                     msg.contains("utility power"),
                     "expected UPS refusal wording, got: {msg}"
                 );
             }
-            Err(other) => panic!("expected Validation, got: {other:?}"),
-            Ok(_) => panic!("expected Err(Validation), got Ok(_)"),
+            other => panic!("expected Validation, got: {other:?}"),
         }
         assert_eq!(
-            report.notes.len(),
+            failure.notes.len(),
             1,
-            "busy-op Info note must survive the UPS failure on report.notes, got: {:?}",
-            report.notes,
+            "busy-op Info note must survive the UPS failure on PlanFailure::notes, got: {:?}",
+            failure.notes,
         );
         assert!(
             matches!(
-                &report.notes[0],
+                &failure.notes[0],
                 PreviewNote::Info(b) if b.contains("waiting for in-flight") && b.contains("device add")
             ),
             "notes[0]={:?}",
-            report.notes[0],
+            failure.notes[0],
         );
     }
 
@@ -6717,11 +6687,11 @@ mod tests {
         let fs = AddMockFs(vec!["/dev/disk/by-id/virtio-disk2".into()]);
 
         let disk_specs = ["disk2=/dev/disk/by-id/virtio-disk2".to_string()];
-        let report = plan_add(&runner, &fs, &fixture.params(&disk_specs, true));
-        let err = match report.result {
+        let failure = match plan_add(&runner, &fs, &fixture.params(&disk_specs, true)) {
             Ok(_) => panic!("plan_add must fail when pending-op.json is present"),
-            Err(e) => e.to_string(),
+            Err(failure) => failure,
         };
+        let err = failure.error.to_string();
         assert!(
             err.contains("interrupted operation detected"),
             "pending-op error must win over locked-pool refusal, got: {err}"

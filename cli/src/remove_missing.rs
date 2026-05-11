@@ -8,7 +8,7 @@ use crate::membership;
 use crate::parse::parse_btrfs_device_usage;
 use crate::pool::pool_remove_device_using;
 use crate::preflight;
-use crate::preview::{self, PerDiskStyle, Preview, PreviewCompleteness, PreviewNote};
+use crate::preview::{self, PerDiskStyle, PlanFailure, Preview, PreviewCompleteness, PreviewNote};
 use crate::probe::{Filesystem, ProbeError, probe_pool};
 use crate::progress::{self, ProgressOutput};
 use crate::state_paths::StatePaths;
@@ -81,16 +81,6 @@ pub struct RemoveMissingPlan {
     work_plan: RemoveMissingWorkPlan,
 }
 
-/// Report returned by `plan_remove_missing`. On the `Ok` branch,
-/// accumulated notes have moved into `plan.notes` and `report.notes`
-/// is empty. Post-preflight failures preserve accumulated notes on
-/// `report.notes` so `cmd_remove_missing` can render them before
-/// returning the error.
-pub struct RemoveMissingPlanReport {
-    pub notes: Vec<PreviewNote>,
-    pub result: Result<RemoveMissingPlan, RemoveMissingError>,
-}
-
 #[derive(Debug, Clone)]
 struct RemoveMissingWorkPlan {
     missing_id: u64,
@@ -137,7 +127,7 @@ impl RemoveMissingPlan {
     /// Real-run and failure-path stderr for `remove-missing` use
     /// `Bracketed` per-disk style to match the canonical dry-run render.
     /// `remove-missing` does not emit `PerDisk` notes today, but the
-    /// constant keeps the Shape A contract uniform with the other
+    /// constant keeps the stderr-note contract uniform with the other
     /// migrated commands.
     pub const STDERR_STYLE: PerDiskStyle = PerDiskStyle::Bracketed;
 
@@ -304,98 +294,90 @@ impl RemoveMissingPlan {
 /// `--dry-run` gate: pending-op preflight, config read, pool probe /
 /// mounted validation, mutation preflight, UPS preflight,
 /// missing-device validations, the relocation-space preflight, and
-/// work-plan construction. Returns a
-/// `RemoveMissingPlanReport`: on success, accumulated notes move into
+/// work-plan construction. On success, accumulated notes move into
 /// `plan.notes`; on post-preflight failure, accumulated notes stay on
-/// `report.notes` so `cmd_remove_missing` can render them before
+/// `PlanFailure::notes` so `cmd_remove_missing` can render them before
 /// returning the error.
 pub fn plan_remove_missing<R: CommandRunner + Sync, F: Filesystem + ?Sized>(
     runner: &R,
     fs: &F,
     params: &RemoveMissingParams<'_>,
-) -> RemoveMissingPlanReport {
-    // Notes accumulator. `err_empty` is correct for pre-preflight exits
-    // (no notes can have accumulated yet). Post-preflight exits return
-    // a notes-preserving report so preflight diagnostics (busy-op Info,
-    // readonly-probe-fail Warn) reach `cmd_remove_missing`'s stderr
-    // render.
+) -> Result<RemoveMissingPlan, PlanFailure<RemoveMissingError>> {
+    // Notes accumulator. Pre-preflight exits have no notes; later exits
+    // preserve preflight diagnostics on `PlanFailure::notes`.
     let mut notes: Vec<PreviewNote> = Vec::new();
-    let err_empty = |e: RemoveMissingError| RemoveMissingPlanReport {
-        notes: Vec::new(),
-        result: Err(e),
-    };
 
     if let Err(msg) = preflight::check_no_pending_operation(params.paths) {
-        return err_empty(RemoveMissingError::Validation(msg));
+        return Err(PlanFailure::empty(RemoveMissingError::Validation(msg)));
     }
 
     let config = match config_read(params.config_path) {
         Ok(c) => c,
-        Err(e) => return err_empty(e.into()),
+        Err(e) => return Err(PlanFailure::empty(e.into())),
     };
 
     let pool = match probe_pool(runner, fs, config.mount_point()) {
         Ok(p) => p,
         Err(ProbeError::NotBtrfs { .. }) => {
-            return err_empty(RemoveMissingError::Validation(
+            return Err(PlanFailure::empty(RemoveMissingError::Validation(
                 "pool is not mounted. Nothing to remove.".into(),
-            ));
+            )));
         }
-        Err(e) => return err_empty(RemoveMissingError::Probe(e)),
+        Err(e) => return Err(PlanFailure::empty(RemoveMissingError::Probe(e))),
     };
 
     if !pool.mounted {
-        return err_empty(RemoveMissingError::Validation(
+        return Err(PlanFailure::empty(RemoveMissingError::Validation(
             "pool is not mounted. Nothing to remove.".into(),
-        ));
+        )));
     }
 
     // Preflight
     let fsid = pool.fsid.as_deref().expect("mounted pool must have FSID");
     match preflight::require_mutation_preflight(runner, fs, fsid, config.mount_point()) {
         Ok(preflight_notes) => notes.extend(preflight_notes),
-        Err(msg) => return err_empty(RemoveMissingError::Validation(msg)),
+        Err(msg) => return Err(PlanFailure::empty(RemoveMissingError::Validation(msg))),
     }
     if let Err(msg) = preflight::check_ups_not_on_battery(
         runner,
         config.ups().map(|u| u.name.as_str()),
         "remove-missing",
     ) {
-        return RemoveMissingPlanReport {
-            notes: std::mem::take(&mut notes),
-            result: Err(RemoveMissingError::Validation(msg)),
-        };
+        return Err(PlanFailure::with_notes(
+            notes,
+            RemoveMissingError::Validation(msg),
+        ));
     }
 
     if pool.missing_count == 0 {
-        return RemoveMissingPlanReport {
-            notes: std::mem::take(&mut notes),
-            result: Err(RemoveMissingError::Validation(format!(
+        return Err(PlanFailure::with_notes(
+            notes,
+            RemoveMissingError::Validation(format!(
                 "no missing devices detected in pool (devid {} was not found among them).",
                 params.missing_id
-            ))),
-        };
+            )),
+        ));
     }
 
     if pool.devices.iter().any(|d| d.devid == params.missing_id) {
-        return RemoveMissingPlanReport {
-            notes: std::mem::take(&mut notes),
-            result: Err(RemoveMissingError::Validation(format!(
+        return Err(PlanFailure::with_notes(
+            notes,
+            RemoveMissingError::Validation(format!(
                 "devid {} is a live device, not a missing one. \
                  Use 'braid remove' to remove live devices.",
                 params.missing_id
-            ))),
-        };
+            )),
+        ));
     }
     if !pool.missing_devids.contains(&params.missing_id) {
-        return RemoveMissingPlanReport {
-            notes: std::mem::take(&mut notes),
-            result: Err(RemoveMissingError::Validation(format!(
+        return Err(PlanFailure::with_notes(
+            notes,
+            RemoveMissingError::Validation(format!(
                 "devid {} is not a device in this pool. \
                  Use 'braid status' to see device IDs.",
                 params.missing_id
-            ))),
-        };
+            )),
+        ));
     }
 
     // Pre-flight: reject the exact 2-device RAID1 + 1 missing case. The
@@ -411,9 +393,9 @@ pub fn plan_remove_missing<R: CommandRunner + Sync, F: Filesystem + ?Sized>(
     // (where the survivor is not guaranteed to mirror every chunk under
     // btrfs RAID1's ncopies=2 layout) is left to existing/future logic.
     if pool.total_devices == 2 && pool.devices.len() == 1 && pool.missing_count == 1 {
-        return RemoveMissingPlanReport {
-            notes: std::mem::take(&mut notes),
-            result: Err(RemoveMissingError::Validation(format!(
+        return Err(PlanFailure::with_notes(
+            notes,
+            RemoveMissingError::Validation(format!(
                 "cannot remove missing devid {devid} -- this is a 2-disk \
                  RAID1 pool with one disk missing, and the kernel refuses \
                  to drop a RAID1 pool below two devices. Repair the dead \
@@ -423,8 +405,8 @@ pub fn plan_remove_missing<R: CommandRunner + Sync, F: Filesystem + ?Sized>(
                  first and then re-run `braid remove-missing`. \
                  Use `braid status` to see device names and IDs.",
                 devid = params.missing_id,
-            ))),
-        };
+            )),
+        ));
     }
 
     // Pre-flight: reject if survivors lack space to absorb the missing
@@ -441,10 +423,7 @@ pub fn plan_remove_missing<R: CommandRunner + Sync, F: Filesystem + ?Sized>(
                 notes.push(PreviewNote::Warn(body));
             }
             Err(e) => {
-                return RemoveMissingPlanReport {
-                    notes: std::mem::take(&mut notes),
-                    result: Err(e),
-                };
+                return Err(PlanFailure::with_notes(notes, e));
             }
         }
     }
@@ -458,10 +437,7 @@ pub fn plan_remove_missing<R: CommandRunner + Sync, F: Filesystem + ?Sized>(
         missing_count: pool.missing_count,
         mount_point: config.mount_point().clone(),
     };
-    RemoveMissingPlanReport {
-        notes: Vec::new(),
-        result: Ok(RemoveMissingPlan { notes, work_plan }),
-    }
+    Ok(RemoveMissingPlan { notes, work_plan })
 }
 
 pub fn cmd_remove_missing<R: CommandRunner + Sync, F: Filesystem + ?Sized>(
@@ -469,17 +445,16 @@ pub fn cmd_remove_missing<R: CommandRunner + Sync, F: Filesystem + ?Sized>(
     fs: &F,
     params: &RemoveMissingParams<'_>,
 ) -> Result<(), RemoveMissingError> {
-    let report = plan_remove_missing(runner, fs, params);
-    let plan = match report.result {
+    let plan = match plan_remove_missing(runner, fs, params) {
         Ok(p) => p,
-        Err(e) => {
+        Err(PlanFailure { notes, error }) => {
             // Preserved-context failure: accumulated notes render to
             // stderr before the error via the SAME helper as the Ok
             // path (`RemoveMissingPlan::execute`), so preflight
             // diagnostics surface identically across success, failure,
             // and dry-run stdout.
-            preview::emit_notes_to_stderr(&report.notes, RemoveMissingPlan::STDERR_STYLE);
-            return Err(e);
+            preview::emit_notes_to_stderr(&notes, RemoveMissingPlan::STDERR_STYLE);
+            return Err(error);
         }
     };
 
@@ -1206,22 +1181,24 @@ mod tests {
         let runner = WrongMissingIdRunner {
             log: Arc::clone(&log),
         };
-        let report = plan_remove_missing(
+        let failure = match plan_remove_missing(
             &runner,
             &MockFs::storage(vec![]),
             &f.remove_missing_params()
                 .missing_id(99)
                 .dry_run(true)
                 .build(),
-        );
+        ) {
+            Ok(_) => panic!("expected Err(Validation), got Ok(_)"),
+            Err(failure) => failure,
+        };
 
-        match &report.result {
-            Err(RemoveMissingError::Validation(msg)) => assert_eq!(
+        match &failure.error {
+            RemoveMissingError::Validation(msg) => assert_eq!(
                 msg,
                 "devid 99 is not a device in this pool. Use 'braid status' to see device IDs.",
             ),
-            Err(other) => panic!("expected Validation, got: {other:?}"),
-            Ok(_) => panic!("expected Err(Validation), got Ok(_)"),
+            other => panic!("expected Validation, got: {other:?}"),
         }
         assert!(
             !log.lock()
@@ -1723,16 +1700,12 @@ mod tests {
             CmdRequest::BtrfsDeviceUsageRaw { .. } => Some(Err(CmdError::MissingMock)),
             _ => None,
         });
-        let report = plan_remove_missing(
+        let plan = plan_remove_missing(
             &runner,
             &MockFs::storage(vec![]),
             &f.remove_missing_params().dry_run(true).build(),
-        );
-        assert!(
-            report.notes.is_empty(),
-            "report.notes must stay empty on success -- notes land on plan.notes"
-        );
-        let plan = report.result.expect("planning should succeed");
+        )
+        .expect("planning should succeed");
         assert_eq!(plan.notes.len(), 1, "expected exactly one soft-warn note");
         match &plan.notes[0] {
             PreviewNote::Warn(body) => {
@@ -1807,7 +1780,7 @@ mod tests {
             &MockFs::storage(vec![]),
             &f.remove_missing_params().dry_run(true).build(),
         );
-        let plan = report.result.expect("planning should succeed");
+        let plan = report.expect("planning should succeed");
         assert_eq!(plan.notes.len(), 1, "expected exactly one soft-warn note");
         match &plan.notes[0] {
             PreviewNote::Warn(body) => {
@@ -1927,9 +1900,7 @@ mod tests {
             &MockFs::storage(vec![]).with_excl_op("device add\n"),
             &f.remove_missing_params().dry_run(true).build(),
         );
-        let plan = report
-            .result
-            .expect("plan_remove_missing should succeed with 1 missing + busy op");
+        let plan = report.expect("plan_remove_missing should succeed with 1 missing + busy op");
         let info_notes: Vec<&String> = plan
             .notes
             .iter()
@@ -1964,11 +1935,10 @@ mod tests {
     /* Intent: when plan_remove_missing accumulates a preflight Info
      * note and then fails on the "no missing devices" validation
      * (missing_count == 0), the accumulated notes survive on
-     * `report.notes`.
-     * Why it exists: Shape A "notes-carrying report" promises
-     * preserved context; a spurious remove-missing invocation during
-     * an in-flight balance must not hide the busy-op context from the
-     * operator.
+     * `PlanFailure::notes`.
+     * Why it exists: `PlanFailure::notes` promises preserved context; a
+     * spurious remove-missing invocation during an in-flight balance
+     * must not hide the busy-op context from the operator.
      * Scenario: 2-device healthy pool (zero missing), sysfs reports
      * "device add". Operator runs `braid remove-missing --missing-id
      * 999 --dry-run`.
@@ -1977,16 +1947,19 @@ mod tests {
     fn plan_remove_missing_preserves_preflight_notes_on_no_missing_devices() {
         let f = PoolFixture::two_disk_devids_pinned();
         let runner = HealthyPoolRunner;
-        let report = plan_remove_missing(
+        let failure = match plan_remove_missing(
             &runner,
             &MockFs::storage(vec![]).with_excl_op("device add\n"),
             &f.remove_missing_params()
                 .missing_id(999)
                 .dry_run(true)
                 .build(),
-        );
-        match &report.result {
-            Err(RemoveMissingError::Validation(msg)) => {
+        ) {
+            Ok(_) => panic!("expected Err(Validation), got Ok(_)"),
+            Err(failure) => failure,
+        };
+        match &failure.error {
+            RemoveMissingError::Validation(msg) => {
                 assert!(
                     msg.contains("no missing devices detected"),
                     "expected 'no missing devices detected' in: {msg}"
@@ -1996,22 +1969,21 @@ mod tests {
                     "expected requested devid in no-missing validation: {msg}"
                 );
             }
-            Err(other) => panic!("expected Validation, got: {other:?}"),
-            Ok(_) => panic!("expected Err(Validation), got Ok(_)"),
+            other => panic!("expected Validation, got: {other:?}"),
         }
         assert_eq!(
-            report.notes.len(),
+            failure.notes.len(),
             1,
             "busy-op Info note must survive the no-missing failure, got: {:?}",
-            report.notes,
+            failure.notes,
         );
         assert!(
             matches!(
-                &report.notes[0],
+                &failure.notes[0],
                 PreviewNote::Info(b) if b.contains("waiting for in-flight") && b.contains("device add")
             ),
             "notes[0]={:?}",
-            report.notes[0],
+            failure.notes[0],
         );
     }
 
@@ -2027,17 +1999,20 @@ mod tests {
     #[test]
     fn plan_remove_missing_zero_missing_precedes_live_device_validation() {
         let f = PoolFixture::two_disk_devids_pinned();
-        let report = plan_remove_missing(
+        let failure = match plan_remove_missing(
             &HealthyPoolRunner,
             &MockFs::storage(vec![]),
             &f.remove_missing_params()
                 .missing_id(1)
                 .dry_run(true)
                 .build(),
-        );
+        ) {
+            Ok(_) => panic!("expected Err(Validation), got Ok(_)"),
+            Err(failure) => failure,
+        };
 
-        match &report.result {
-            Err(RemoveMissingError::Validation(msg)) => {
+        match &failure.error {
+            RemoveMissingError::Validation(msg) => {
                 assert!(
                     msg.contains("no missing devices detected"),
                     "expected no-missing validation, got: {msg}"
@@ -2051,8 +2026,7 @@ mod tests {
                     "expected requested devid in no-missing validation: {msg}"
                 );
             }
-            Err(other) => panic!("expected Validation, got: {other:?}"),
-            Ok(_) => panic!("expected Err(Validation), got Ok(_)"),
+            other => panic!("expected Validation, got: {other:?}"),
         }
     }
 
@@ -2069,17 +2043,20 @@ mod tests {
     #[test]
     fn plan_remove_missing_null_underlying_empty_missing_devids_not_no_missing() {
         let f = PoolFixture::two_disk_devids_pinned();
-        let report = plan_remove_missing(
+        let failure = match plan_remove_missing(
             &NullUnderlyingPoolRunner,
             &MockFs::storage(vec![]),
             &f.remove_missing_params()
                 .missing_id(2)
                 .dry_run(true)
                 .build(),
-        );
+        ) {
+            Ok(_) => panic!("expected Err(Validation), got Ok(_)"),
+            Err(failure) => failure,
+        };
 
-        match &report.result {
-            Err(RemoveMissingError::Validation(msg)) => {
+        match &failure.error {
+            RemoveMissingError::Validation(msg) => {
                 assert!(
                     !msg.contains("no missing devices detected"),
                     "null-underlying pool must not use no-missing wording: {msg}"
@@ -2089,8 +2066,7 @@ mod tests {
                     "devid 2 is not a device in this pool. Use 'braid status' to see device IDs.",
                 );
             }
-            Err(other) => panic!("expected Validation, got: {other:?}"),
-            Ok(_) => panic!("expected Err(Validation), got Ok(_)"),
+            other => panic!("expected Validation, got: {other:?}"),
         }
     }
 }

@@ -54,6 +54,33 @@ pub enum PreviewNote {
     },
 }
 
+/// Failure-side payload for planners that accumulate preview notes before
+/// rejecting a command. The success branch carries notes on the returned plan,
+/// so `PlanFailure` makes "notes on Err only" a type-level boundary.
+#[derive(Debug)]
+pub struct PlanFailure<E> {
+    /// Notes accumulated before the planner rejected the command.
+    /// Callers render these before propagating `error`.
+    pub notes: Vec<PreviewNote>,
+    /// Command-specific planning error that remains owned by the caller.
+    pub error: E,
+}
+
+impl<E> PlanFailure<E> {
+    /// Build a failure before any preview notes have been accumulated.
+    pub fn empty(error: E) -> Self {
+        Self {
+            notes: Vec::new(),
+            error,
+        }
+    }
+
+    /// Build a failure after preview notes have been accumulated.
+    pub fn with_notes(notes: Vec<PreviewNote>, error: E) -> Self {
+        Self { notes, error }
+    }
+}
+
 #[derive(Debug, Clone, Copy, Serialize)]
 #[serde(rename_all = "kebab-case")]
 pub enum NoteLevel {
@@ -188,10 +215,9 @@ pub fn render_notes_for_stderr_with(
 
 /// Render `notes` and emit the result to stderr with the per-command
 /// `style`. Wraps `render_notes_for_stderr_with` plus the standard
-/// `color_enabled_for_stderr()` resolution so Shape A commands
-/// (`XxxPlan::execute` and `cmd_xxx` Err arms) collapse to a single
-/// call. `replace` does not use this helper -- its capture-aware
-/// wrapper owns the write side.
+/// `color_enabled_for_stderr()` resolution so plan execution and
+/// `PlanFailure` Err arms collapse to a single call. `replace` does
+/// not use this helper -- its capture-aware wrapper owns the write side.
 pub fn emit_notes_to_stderr(notes: &[PreviewNote], style: PerDiskStyle) {
     let color_enabled = crate::status_tag::color_enabled_for_stderr();
     eprint!(
@@ -507,9 +533,8 @@ mod tests {
      * insertion order: Info unadorned, Warn as `[warn] <body>`,
      * PerDisk via the chosen style.
      * Why it exists: this helper is the failure-path / real-run
-     * prelude renderer for Shape A commands. Wording or ordering
+     * prelude renderer for note-carrying planners. Wording or ordering
      * drift here changes user-visible stderr for unlock/recover/etc.
-     * once those commands migrate.
      * Scenario: one note of each kind in a fixed order, rendered in
      * Bracketed style.
      */

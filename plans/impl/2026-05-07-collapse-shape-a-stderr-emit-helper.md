@@ -32,6 +32,13 @@ Outcome: ~60 lines of repeated scaffolding collapse into one-line
 helper calls. Zero behavioral change. The contract that motivated the
 const stays visible at the same locations.
 
+Follow-up: `plans/impl/2026-05-11-replace-plan-reports-with-plan-failure.md`
+keeps the helper boundary from this plan, but replaces the seven
+command-local preserved-context `XxxPlanReport` wrappers with the
+shared `PlanFailure<E>` error payload. The `cmd_xxx` Err arms still
+emit notes through `preview::emit_notes_to_stderr`; `replace.rs` still
+uses its capture-aware wrapper.
+
 ## Change
 
 ### 1. Add the helper

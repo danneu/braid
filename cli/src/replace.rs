@@ -16,7 +16,7 @@ use crate::membership::{self, PoolMembership};
 use crate::parse::parse_btrfs_device_stats;
 use crate::pool::{pool_replace_device, pool_resize_device};
 use crate::preflight;
-use crate::preview::{self, PerDiskStyle, Preview, PreviewCompleteness, PreviewNote};
+use crate::preview::{self, PerDiskStyle, PlanFailure, Preview, PreviewCompleteness, PreviewNote};
 use crate::probe::{Filesystem, ProbeError, probe_config_disk, probe_pool};
 use crate::progress::{self, ProgressOutput};
 use crate::state_paths::StatePaths;
@@ -73,16 +73,6 @@ pub struct ReplaceParams<'a> {
 pub struct ReplacePlan {
     pub notes: Vec<PreviewNote>,
     work_plan: ReplaceWorkPlan,
-}
-
-/// Report returned by `plan_replace`. Shape A: when planning fails after
-/// notes have been accumulated (e.g. a post-preflight validation rejects),
-/// the notes survive on `report.notes` so `cmd_replace` can render them
-/// to stderr before the error. On the `Ok` branch, accumulated notes have
-/// moved into `plan.notes` and `report.notes` is empty.
-pub struct ReplacePlanReport {
-    pub notes: Vec<PreviewNote>,
-    pub result: Result<ReplacePlan, ReplaceError>,
 }
 
 #[derive(Debug, Clone)]
@@ -280,7 +270,7 @@ impl ReplacePlan {
     /// Real-run and failure-path stderr for `replace` use `Bracketed`
     /// per-disk style to match the canonical dry-run render. `replace`
     /// does not emit `PerDisk` notes today, but the constant keeps the
-    /// Shape A contract uniform with the other migrated commands.
+    /// stderr-note contract uniform with the other migrated commands.
     pub const STDERR_STYLE: PerDiskStyle = PerDiskStyle::Bracketed;
 
     /// Build a `Preview` carrying any plan-derived notes. The 1-disk
@@ -320,7 +310,7 @@ impl ReplacePlan {
         } = work_plan;
 
         // Render accumulated notes to stderr via the shared helper
-        // BEFORE any mutation. Matches the other Shape A commands so
+        // BEFORE any mutation. Matches the other note-carrying commands so
         // preflight diagnostics surface identically across success,
         // failure, and dry-run stdout.
         emit_replace_notes_to_stderr(&notes);
@@ -826,10 +816,9 @@ mod replace_stderr_capture {
 /// `--old == --new` guard, keyfile path validation, `probe_pool` + mounted
 /// validation, mutation/UPS preflight, replace-source resolution,
 /// membership load + `build_replacement_membership`, new-disk probe, and
-/// step compilation. Returns a `ReplacePlanReport`: on success, accumulated
-/// notes move into `plan.notes`; on post-preflight failure, accumulated
-/// notes stay on `report.notes` so `cmd_replace` can render them before
-/// returning the error.
+/// step compilation. On success, accumulated notes move into `plan.notes`;
+/// on post-preflight failure, accumulated notes stay on `PlanFailure::notes`
+/// so `cmd_replace` can render them before returning the error.
 ///
 /// Does not read or verify the passphrase, acquire the sleep inhibitor,
 /// or run `check_new_not_in_pool` -- those happen inside
@@ -839,77 +828,71 @@ pub fn plan_replace<R: CommandRunner + Sync, F: Filesystem + ?Sized>(
     runner: &R,
     fs: &F,
     params: &ReplaceParams<'_>,
-) -> ReplacePlanReport {
-    // Notes accumulator. `err_empty` is correct for pre-preflight exits
-    // (no notes can have accumulated yet). Post-preflight exits return
-    // a notes-preserving report so preflight diagnostics (busy-op Info,
-    // readonly-probe-fail Warn) reach `cmd_replace`'s stderr render.
+) -> Result<ReplacePlan, PlanFailure<ReplaceError>> {
+    // Notes accumulator. Pre-preflight exits have no notes; later exits
+    // preserve preflight diagnostics on `PlanFailure::notes`.
     let mut notes: Vec<PreviewNote> = Vec::new();
-    let err_empty = |e: ReplaceError| ReplacePlanReport {
-        notes: Vec::new(),
-        result: Err(e),
-    };
 
     if let Err(msg) = preflight::check_no_pending_operation(params.paths) {
-        return err_empty(ReplaceError::Validation(msg));
+        return Err(PlanFailure::empty(ReplaceError::Validation(msg)));
     }
 
     let config = match config_read(params.config_path) {
         Ok(c) => c,
-        Err(e) => return err_empty(e.into()),
+        Err(e) => return Err(PlanFailure::empty(e.into())),
     };
 
     // Parse new_name as name=by_id spec
     let (new_name_parsed, new_by_id) = match membership::parse_disk_spec(params.new_name) {
         Ok(v) => v,
-        Err(e) => return err_empty(ReplaceError::Validation(e.to_string())),
+        Err(e) => return Err(PlanFailure::empty(ReplaceError::Validation(e.to_string()))),
     };
     let new_name = new_name_parsed.as_str();
 
     // --old == --new: reject before any pool or disk probes.
     if params.old_name == new_name {
-        return err_empty(ReplaceError::Validation(
+        return Err(PlanFailure::empty(ReplaceError::Validation(
             "--old and --new must be different disks".into(),
-        ));
+        )));
     }
 
     if let Some(kf) = params.enroll_key_file
         && let Err(e) = crate::enroll_key_file::validate_key_file_path(kf, false)
     {
-        return err_empty(ReplaceError::Validation(e.to_string()));
+        return Err(PlanFailure::empty(ReplaceError::Validation(e.to_string())));
     }
 
     let pool = match probe_pool(runner, fs, config.mount_point()) {
         Ok(p) => p,
         Err(ProbeError::NotBtrfs { .. }) => {
-            return err_empty(ReplaceError::Validation(
+            return Err(PlanFailure::empty(ReplaceError::Validation(
                 "pool is not mounted. Cannot replace.".into(),
-            ));
+            )));
         }
-        Err(e) => return err_empty(ReplaceError::Probe(e)),
+        Err(e) => return Err(PlanFailure::empty(ReplaceError::Probe(e))),
     };
 
     if !pool.mounted {
-        return err_empty(ReplaceError::Validation(
+        return Err(PlanFailure::empty(ReplaceError::Validation(
             "pool is not mounted. Cannot replace.".into(),
-        ));
+        )));
     }
 
     // Preflight
     let fsid = pool.fsid.as_deref().expect("mounted pool must have FSID");
     match preflight::require_mutation_preflight(runner, fs, fsid, config.mount_point()) {
         Ok(preflight_notes) => notes.extend(preflight_notes),
-        Err(msg) => return err_empty(ReplaceError::Validation(msg)),
+        Err(msg) => return Err(PlanFailure::empty(ReplaceError::Validation(msg))),
     }
     if let Err(msg) = preflight::check_ups_not_on_battery(
         runner,
         config.ups().map(|u| u.name.as_str()),
         "replace",
     ) {
-        return ReplacePlanReport {
-            notes: std::mem::take(&mut notes),
-            result: Err(ReplaceError::Validation(msg)),
-        };
+        return Err(PlanFailure::with_notes(
+            notes,
+            ReplaceError::Validation(msg),
+        ));
     }
 
     // Resolve --old: live or missing (by devid).
@@ -924,10 +907,7 @@ pub fn plan_replace<R: CommandRunner + Sync, F: Filesystem + ?Sized>(
     ) {
         Ok(v) => v,
         Err(e) => {
-            return ReplacePlanReport {
-                notes: std::mem::take(&mut notes),
-                result: Err(e),
-            };
+            return Err(PlanFailure::with_notes(notes, e));
         }
     };
 
@@ -939,12 +919,10 @@ pub fn plan_replace<R: CommandRunner + Sync, F: Filesystem + ?Sized>(
     let pre_membership = match membership::load_membership(params.paths) {
         Ok(m) => m,
         Err(e) => {
-            return ReplacePlanReport {
-                notes: std::mem::take(&mut notes),
-                result: Err(ReplaceError::Validation(format!(
-                    "failed to load pool membership: {e}"
-                ))),
-            };
+            return Err(PlanFailure::with_notes(
+                notes,
+                ReplaceError::Validation(format!("failed to load pool membership: {e}")),
+            ));
         }
     };
     let target_membership = match build_replacement_membership(
@@ -956,10 +934,7 @@ pub fn plan_replace<R: CommandRunner + Sync, F: Filesystem + ?Sized>(
     ) {
         Ok(m) => m,
         Err(e) => {
-            return ReplacePlanReport {
-                notes: std::mem::take(&mut notes),
-                result: Err(e),
-            };
+            return Err(PlanFailure::with_notes(notes, e));
         }
     };
 
@@ -967,10 +942,7 @@ pub fn plan_replace<R: CommandRunner + Sync, F: Filesystem + ?Sized>(
     let new_probed = match probe_config_disk(runner, fs, new_name, &new_by_id) {
         Ok(p) => p,
         Err(e) => {
-            return ReplacePlanReport {
-                notes: std::mem::take(&mut notes),
-                result: Err(e.into()),
-            };
+            return Err(PlanFailure::with_notes(notes, e.into()));
         }
     };
 
@@ -1014,10 +986,10 @@ pub fn plan_replace<R: CommandRunner + Sync, F: Filesystem + ?Sized>(
                         Some(kf.to_path_buf())
                     }
                     Err(e) => {
-                        return ReplacePlanReport {
-                            notes: std::mem::take(&mut notes),
-                            result: Err(ReplaceError::Validation(e.to_string())),
-                        };
+                        return Err(PlanFailure::with_notes(
+                            notes,
+                            ReplaceError::Validation(e.to_string()),
+                        ));
                     }
                 }
             }
@@ -1040,17 +1012,11 @@ pub fn plan_replace<R: CommandRunner + Sync, F: Filesystem + ?Sized>(
     }) {
         Ok(plan) => plan,
         Err(e) => {
-            return ReplacePlanReport {
-                notes: std::mem::take(&mut notes),
-                result: Err(e),
-            };
+            return Err(PlanFailure::with_notes(notes, e));
         }
     };
 
-    ReplacePlanReport {
-        notes: Vec::new(),
-        result: Ok(ReplacePlan { notes, work_plan }),
-    }
+    Ok(ReplacePlan { notes, work_plan })
 }
 
 pub fn cmd_replace<R: CommandRunner + Sync, F: Filesystem + ?Sized>(
@@ -1058,17 +1024,16 @@ pub fn cmd_replace<R: CommandRunner + Sync, F: Filesystem + ?Sized>(
     fs: &F,
     params: &ReplaceParams<'_>,
 ) -> Result<(), ReplaceError> {
-    let report = plan_replace(runner, fs, params);
-    let plan = match report.result {
+    let plan = match plan_replace(runner, fs, params) {
         Ok(p) => p,
-        Err(e) => {
+        Err(PlanFailure { notes, error }) => {
             // Preserved-context failure: accumulated notes render to
             // stderr before the error via the SAME helper as the Ok
             // path (`ReplacePlan::execute`), so preflight diagnostics
             // surface identically across success, failure, and dry-run
             // stdout.
-            emit_replace_notes_to_stderr(&report.notes);
-            return Err(e);
+            emit_replace_notes_to_stderr(&notes);
+            return Err(error);
         }
     };
     if params.dry_run {
@@ -3823,14 +3788,7 @@ mod tests {
         let replace_done = Arc::new(AtomicBool::new(false));
         let runner =
             ReplacementPool::two_disk_healthy().install(MockRunner::default(), replace_done);
-        let report = plan_replace(&runner, &fs, &f.replace_params().dry_run(true).build());
-        assert!(
-            report.notes.is_empty(),
-            "replace preview fixture must not accumulate preflight notes on the Ok path: {:?}",
-            report.notes,
-        );
-        let plan = report
-            .result
+        let plan = plan_replace(&runner, &fs, &f.replace_params().dry_run(true).build())
             .expect("plan_replace should succeed on live-path fixture");
 
         let preview = plan.preview();
@@ -3888,7 +3846,7 @@ mod tests {
         let replace_done = Arc::new(AtomicBool::new(false));
         let runner = ReplacementPool::one_live_one_missing()
             .install(MockRunner::default(), replace_done.clone());
-        let report = plan_replace(
+        let plan = plan_replace(
             &runner,
             &fs,
             &f.replace_params()
@@ -3897,15 +3855,8 @@ mod tests {
                 .missing_id(Some(2))
                 .dry_run(true)
                 .build(),
-        );
-        assert!(
-            report.notes.is_empty(),
-            "replace preview fixture must not accumulate preflight notes on the Ok path: {:?}",
-            report.notes,
-        );
-        let plan = report
-            .result
-            .expect("plan_replace should succeed on missing-path fixture");
+        )
+        .expect("plan_replace should succeed on missing-path fixture");
 
         let preview = plan.preview();
         let rendered = preview.render();
@@ -3953,7 +3904,7 @@ mod tests {
      * PreviewNote::Info on `plan.notes`, and the rendered preview
      * contains the "waiting for in-flight <op>" line. Confirmation-only
      * 1-disk `WARNING:` output still does not leak into the preview.
-     * Why it exists: Shape A migration moves the busy-op diagnostic
+     * Why it exists: PlanFailure migration moves the busy-op diagnostic
      * from stderr into plan.notes; a regression leaking it back to
      * stderr breaks the dry-run stdout-only contract.
      * Scenario: 2-disk pool, sysfs reports "device add", operator
@@ -3972,9 +3923,7 @@ mod tests {
         let runner =
             ReplacementPool::two_disk_healthy().install(MockRunner::default(), replace_done);
         let report = plan_replace(&runner, &fs, &f.replace_params().dry_run(true).build());
-        let plan = report
-            .result
-            .expect("plan_replace should succeed on live-path fixture + busy op");
+        let plan = report.expect("plan_replace should succeed on live-path fixture + busy op");
         assert_eq!(
             plan.notes.len(),
             1,
@@ -4019,7 +3968,7 @@ mod tests {
         )
         .unwrap();
         let inhibitor = crate::inhibit::RecordingInhibitor::new();
-        let report = plan_replace(
+        let failure = match plan_replace(
             &PanicRunner,
             &PanicFilesystem,
             &ReplaceParams {
@@ -4038,22 +3987,24 @@ mod tests {
                 sleep_inhibitor: &inhibitor,
                 sleeper: &crate::progress::NoopSleeper,
             },
-        );
-        match &report.result {
-            Err(ReplaceError::Validation(msg)) => {
+        ) {
+            Ok(_) => panic!("expected Err(Validation), got Ok(_)"),
+            Err(failure) => failure,
+        };
+        match &failure.error {
+            ReplaceError::Validation(msg) => {
                 assert!(
                     msg.contains("--old and --new must be different"),
                     "expected same-name refusal wording, got: {msg}"
                 );
             }
-            Err(other) => panic!("expected Validation, got: {other:?}"),
-            Ok(_) => panic!("expected Err(Validation), got Ok(_)"),
+            other => panic!("expected Validation, got: {other:?}"),
         }
         assert_eq!(
-            report.notes.len(),
+            failure.notes.len(),
             0,
             "same-name input validation must not preserve preflight notes, got: {:?}",
-            report.notes,
+            failure.notes,
         );
         assert_eq!(inhibitor.acquire_count(), 0);
     }
@@ -4099,18 +4050,21 @@ mod tests {
             },
         );
 
-        match report.result {
-            Err(ReplaceError::Validation(msg)) => assert!(
+        let failure = match report {
+            Ok(_) => panic!("expected Err(Validation), got Ok(_)"),
+            Err(failure) => failure,
+        };
+        match failure.error {
+            ReplaceError::Validation(msg) => assert!(
                 msg.contains("keyfile not found"),
                 "expected missing keyfile validation, got: {msg}"
             ),
-            Err(other) => panic!("expected Validation, got: {other:?}"),
-            Ok(_) => panic!("expected Err(Validation), got Ok(_)"),
+            other => panic!("expected Validation, got: {other:?}"),
         }
         assert!(
-            report.notes.is_empty(),
+            failure.notes.is_empty(),
             "expected no notes: {:?}",
-            report.notes
+            failure.notes
         );
         assert_eq!(inhibitor.acquire_count(), 0);
     }
@@ -4157,18 +4111,21 @@ mod tests {
             },
         );
 
-        match report.result {
-            Err(ReplaceError::Validation(msg)) => assert!(
+        let failure = match report {
+            Ok(_) => panic!("expected Err(Validation), got Ok(_)"),
+            Err(failure) => failure,
+        };
+        match failure.error {
+            ReplaceError::Validation(msg) => assert!(
                 msg.contains("is not a regular file"),
                 "expected directory keyfile validation, got: {msg}"
             ),
-            Err(other) => panic!("expected Validation, got: {other:?}"),
-            Ok(_) => panic!("expected Err(Validation), got Ok(_)"),
+            other => panic!("expected Validation, got: {other:?}"),
         }
         assert!(
-            report.notes.is_empty(),
+            failure.notes.is_empty(),
             "expected no notes: {:?}",
-            report.notes
+            failure.notes
         );
         assert_eq!(inhibitor.acquire_count(), 0);
     }
@@ -4224,7 +4181,7 @@ mod tests {
             &fs,
             &f.replace_params().dry_run(true).yes(false).build(),
         );
-        let plan = report.result.expect("plan_replace should succeed");
+        let plan = report.expect("plan_replace should succeed");
         let rendered = plan.preview().render();
 
         assert!(
@@ -4297,7 +4254,7 @@ mod tests {
             &fs,
             &f.replace_params().dry_run(true).yes(false).build(),
         );
-        let plan = report.result.expect("plan_replace should succeed");
+        let plan = report.expect("plan_replace should succeed");
         let rendered = plan.preview().render();
 
         assert_eq!(

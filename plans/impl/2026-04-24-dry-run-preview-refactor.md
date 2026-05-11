@@ -151,6 +151,13 @@ plan.execute(...)
 
 **Failure-path stderr contract:** any accumulated notes render to stderr before the error message. This mirrors today's `mount::print_probe_events(&report.events); let plan = report.result?;` pattern (`unlock.rs:47-48`, `recover.rs:177-178`) and keeps `mount.rs:1868`'s byte-level contract intact -- the notes rendering on the Err path uses the same `preview::render_notes_*` helper as on the Ok path.
 
+**Follow-up:** `plans/impl/2026-05-11-replace-plan-reports-with-plan-failure.md`
+collapses the seven command-local `XxxPlanReport` wrappers into
+`Result<XxxPlan, PlanFailure<E>>`. The failure-path stderr contract
+above is unchanged; only the type-level representation of
+failure-path notes changes. `mount.rs::PlanReport` remains separate
+because it carries probe events, not preview notes.
+
 **No shared `CommandPlan` trait.** Each command's `execute` has a unique signature (errors, credentials, progress, inhibitor). A one-method trait `fn preview(&self)` adds crate-level indirection for zero polymorphism and is a YAGNI today. Revisit only if `--format json` wants a generic entry point.
 
 ## Per-command migration recipes

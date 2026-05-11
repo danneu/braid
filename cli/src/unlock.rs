@@ -3,7 +3,7 @@ use crate::config::Config;
 use crate::membership::{self, PoolMembership};
 use crate::mount::{self, MountError, OpenPlan, ProbeEvent};
 use crate::preflight;
-use crate::preview::{self, PerDiskStyle, Preview, PreviewCompleteness, PreviewNote};
+use crate::preview::{self, PerDiskStyle, PlanFailure, Preview, PreviewCompleteness, PreviewNote};
 use crate::probe::{self, Filesystem};
 use crate::progress::RealSleeper;
 use crate::state_paths::StatePaths;
@@ -45,17 +45,6 @@ pub struct UnlockPlan {
     pub notes: Vec<PreviewNote>,
     pub steps: Vec<Step>,
     pub open_plan: Option<OpenPlan>,
-}
-
-/// Report returned by `plan_unlock`. On the `Ok` branch, all
-/// accumulated probe notes have been moved into `plan.notes` and
-/// `notes` here is empty. On the `Err` branch, `notes` carries the
-/// per-disk context accumulated before `plan_open_pool` bailed (e.g.
-/// `DegradedRefused`) so the caller can render it to stderr before the
-/// error.
-pub struct UnlockPlanReport {
-    pub notes: Vec<PreviewNote>,
-    pub result: Result<UnlockPlan, UnlockError>,
 }
 
 impl UnlockPlan {
@@ -153,21 +142,18 @@ impl UnlockPlan {
 /// every `ProbeEvent` to a `PreviewNote`, and `compile_open_steps` when
 /// an `OpenPlan` is produced. On success, accumulated probe notes live
 /// on `plan.notes` (the single render source for both preview and
-/// execute). On failure, notes move to `report.notes` so the caller can
-/// render them to stderr before the error.
+/// execute). On failure, notes move to `PlanFailure::notes` so the caller
+/// can render them to stderr before the error.
 pub fn plan_unlock<R: CommandRunner, F: Filesystem + ?Sized>(
     runner: &R,
     fs: &F,
     params: &UnlockParams<'_>,
-) -> UnlockPlanReport {
+) -> Result<UnlockPlan, PlanFailure<UnlockError>> {
     // `plan_add` also runs `check_pool_unlocked_if_membership_exists`
     // here; unlock skips it because unlock never writes pool.json
     // membership -- see the "Contract:" block in `UnlockPlan::execute`.
     if let Err(msg) = preflight::check_no_pending_operation(params.paths) {
-        return UnlockPlanReport {
-            notes: Vec::new(),
-            result: Err(UnlockError::Failed(msg)),
-        };
+        return Err(PlanFailure::empty(UnlockError::Failed(msg)));
     }
 
     let report = mount::plan_open_pool(
@@ -192,19 +178,13 @@ pub fn plan_unlock<R: CommandRunner, F: Filesystem + ?Sized>(
                 }
                 None => Vec::new(),
             };
-            UnlockPlanReport {
-                notes: Vec::new(),
-                result: Ok(UnlockPlan {
-                    notes,
-                    steps,
-                    open_plan,
-                }),
-            }
+            Ok(UnlockPlan {
+                notes,
+                steps,
+                open_plan,
+            })
         }
-        Err(e) => UnlockPlanReport {
-            notes,
-            result: Err(UnlockError::Mount(e)),
-        },
+        Err(e) => Err(PlanFailure::with_notes(notes, UnlockError::Mount(e))),
     }
 }
 
@@ -213,15 +193,14 @@ pub fn cmd_unlock<R: CommandRunner, F: Filesystem + ?Sized>(
     fs: &F,
     params: &UnlockParams<'_>,
 ) -> Result<(), UnlockError> {
-    let report = plan_unlock(runner, fs, params);
-    let plan = match report.result {
+    let plan = match plan_unlock(runner, fs, params) {
         Ok(p) => p,
-        Err(e) => {
+        Err(PlanFailure { notes, error }) => {
             // Preserved-context failure: accumulated probe notes render
             // to stderr before the error, mirroring today's
             // `print_probe_events` + `?` sequence.
-            preview::emit_notes_to_stderr(&report.notes, UnlockPlan::STDERR_STYLE);
-            return Err(e);
+            preview::emit_notes_to_stderr(&notes, UnlockPlan::STDERR_STYLE);
+            return Err(error);
         }
     };
 
@@ -719,7 +698,6 @@ mod tests {
         };
 
         let rendered = plan_unlock(&runner, &fs, &params)
-            .result
             .expect("plan_unlock should succeed on 2-disk closed pool")
             .preview()
             .render();
@@ -786,7 +764,6 @@ mod tests {
         };
 
         let rendered = plan_unlock(&runner, &fs, &params)
-            .result
             .expect("plan_unlock should succeed on 2-disk closed pool")
             .preview()
             .render();
@@ -845,7 +822,6 @@ mod tests {
         };
 
         let plan = plan_unlock(&runner, &fs, &params)
-            .result
             .expect("plan_unlock should succeed on already-mounted pool");
 
         assert!(
@@ -866,7 +842,7 @@ mod tests {
     }
 
     // Intent: a degraded refusal at the planner boundary preserves per-disk
-    //   probe notes on `UnlockPlanReport.notes` in probe order and routes the
+    //   probe notes on `PlanFailure::notes` in probe order and routes the
     //   error as `UnlockError::Mount(MountError::DegradedRefused(_))`.
     // Why it exists: accumulated notes must survive the Err path so cmd_unlock
     //   can render context before the refusal message.
@@ -917,9 +893,12 @@ mod tests {
             dry_run: true,
         };
 
-        let report = plan_unlock(&runner, &fs, &params);
+        let failure = match plan_unlock(&runner, &fs, &params) {
+            Ok(_) => panic!("degraded refusal must surface as Err"),
+            Err(failure) => failure,
+        };
 
-        let per_disk: Vec<&PreviewNote> = report
+        let per_disk: Vec<&PreviewNote> = failure
             .notes
             .iter()
             .filter(|n| matches!(n, PreviewNote::PerDisk { .. }))
@@ -927,8 +906,8 @@ mod tests {
         assert_eq!(
             per_disk.len(),
             3,
-            "report.notes must carry one per-disk note per membership disk, got: {:?}",
-            report.notes,
+            "PlanFailure::notes must carry one per-disk note per membership disk, got: {:?}",
+            failure.notes,
         );
         assert!(
             matches!(
@@ -955,9 +934,7 @@ mod tests {
             per_disk[2],
         );
 
-        let err = report
-            .result
-            .expect_err("degraded refusal must surface as Err");
+        let err = failure.error;
         assert!(
             matches!(&err, UnlockError::Mount(MountError::DegradedRefused(_))),
             "expected DegradedRefused, got: {err:?}",

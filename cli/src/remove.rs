@@ -8,7 +8,7 @@ use crate::membership;
 use crate::parse::{ParseError, parse_btrfs_device_usage, parse_btrfs_df_json};
 use crate::pool::{DeviceIdentity, evict_present_device, validate_pool_topology};
 use crate::preflight;
-use crate::preview::{self, PerDiskStyle, Preview, PreviewCompleteness, PreviewNote};
+use crate::preview::{self, PerDiskStyle, PlanFailure, Preview, PreviewCompleteness, PreviewNote};
 use crate::probe::{Filesystem, ProbeError, probe_pool};
 use crate::progress::{self, ProgressOutput};
 use crate::state_paths::StatePaths;
@@ -92,15 +92,6 @@ pub struct RemoveParams<'a> {
 pub struct RemovePlan {
     pub notes: Vec<PreviewNote>,
     work_plan: RemoveWorkPlan,
-}
-
-/// Report returned by `plan_remove`. On the `Ok` branch, accumulated
-/// notes have moved into `plan.notes` and `report.notes` is empty.
-/// Post-preflight failures preserve accumulated notes on `report.notes`
-/// so `cmd_remove` can render them before returning the error.
-pub struct RemovePlanReport {
-    pub notes: Vec<PreviewNote>,
-    pub result: Result<RemovePlan, RemoveError>,
 }
 
 #[derive(Debug, Clone)]
@@ -198,7 +189,7 @@ impl RemovePlan {
     /// Real-run and failure-path stderr for `remove` use `Bracketed`
     /// per-disk style to match the canonical dry-run render. `remove`
     /// does not emit `PerDisk` notes today, but the constant keeps the
-    /// Shape A contract uniform with the other migrated commands.
+    /// stderr-note contract uniform with the other migrated commands.
     pub const STDERR_STYLE: PerDiskStyle = PerDiskStyle::Bracketed;
 
     pub fn preview(&self) -> Preview {
@@ -376,63 +367,54 @@ impl RemovePlan {
 /// gate: pending-op preflight, config read, pool probe / mounted
 /// validation, mutation preflight, UPS preflight, target device lookup,
 /// missing-device guard, work-plan construction, and the
-/// eviction-space preflight. Returns a `RemovePlanReport`: on success,
-/// accumulated notes move into `plan.notes`; on post-preflight failure,
-/// accumulated notes stay on `report.notes` so `cmd_remove` can render
-/// them before returning the error.
+/// eviction-space preflight. On success, accumulated notes move into
+/// `plan.notes`; on post-preflight failure, accumulated notes stay on
+/// `PlanFailure::notes` so `cmd_remove` can render them before returning
+/// the error.
 pub fn plan_remove<R: CommandRunner + Sync, F: Filesystem + ?Sized>(
     runner: &R,
     fs: &F,
     params: &RemoveParams<'_>,
-) -> RemovePlanReport {
-    // Notes accumulator. `err_empty` is correct for pre-preflight exits
-    // (no notes can have accumulated yet). Post-preflight exits return
-    // a notes-preserving report so preflight diagnostics (busy-op Info,
-    // readonly-probe-fail Warn) reach `cmd_remove`'s stderr render.
+) -> Result<RemovePlan, PlanFailure<RemoveError>> {
+    // Notes accumulator. Pre-preflight exits have no notes; later exits
+    // preserve preflight diagnostics on `PlanFailure::notes`.
     let mut notes: Vec<PreviewNote> = Vec::new();
-    let err_empty = |e: RemoveError| RemovePlanReport {
-        notes: Vec::new(),
-        result: Err(e),
-    };
 
     if let Err(msg) = preflight::check_no_pending_operation(params.paths) {
-        return err_empty(RemoveError::Validation(msg));
+        return Err(PlanFailure::empty(RemoveError::Validation(msg)));
     }
 
     let config = match config_read(params.config_path) {
         Ok(c) => c,
-        Err(e) => return err_empty(e.into()),
+        Err(e) => return Err(PlanFailure::empty(e.into())),
     };
 
     let pool = match probe_pool(runner, fs, config.mount_point()) {
         Ok(p) => p,
         Err(ProbeError::NotBtrfs { .. }) => {
-            return err_empty(RemoveError::Validation(
+            return Err(PlanFailure::empty(RemoveError::Validation(
                 "pool is not mounted. Nothing to remove.".into(),
-            ));
+            )));
         }
-        Err(e) => return err_empty(RemoveError::Probe(e)),
+        Err(e) => return Err(PlanFailure::empty(RemoveError::Probe(e))),
     };
 
     if !pool.mounted {
-        return err_empty(RemoveError::Validation(
+        return Err(PlanFailure::empty(RemoveError::Validation(
             "pool is not mounted. Nothing to remove.".into(),
-        ));
+        )));
     }
 
     // Preflight
     let fsid = pool.fsid.as_deref().expect("mounted pool must have FSID");
     match preflight::require_mutation_preflight(runner, fs, fsid, config.mount_point()) {
         Ok(preflight_notes) => notes.extend(preflight_notes),
-        Err(msg) => return err_empty(RemoveError::Validation(msg)),
+        Err(msg) => return Err(PlanFailure::empty(RemoveError::Validation(msg))),
     }
     if let Err(msg) =
         preflight::check_ups_not_on_battery(runner, config.ups().map(|u| u.name.as_str()), "remove")
     {
-        return RemovePlanReport {
-            notes: std::mem::take(&mut notes),
-            result: Err(RemoveError::Validation(msg)),
-        };
+        return Err(PlanFailure::with_notes(notes, RemoveError::Validation(msg)));
     }
 
     let mn = mapper_name(params.name);
@@ -451,20 +433,14 @@ pub fn plan_remove<R: CommandRunner + Sync, F: Filesystem + ?Sized>(
                     if pool.missing_count == 1 { "" } else { "s" }
                 ));
             }
-            return RemovePlanReport {
-                notes: std::mem::take(&mut notes),
-                result: Err(RemoveError::Validation(msg)),
-            };
+            return Err(PlanFailure::with_notes(notes, RemoveError::Validation(msg)));
         }
     };
 
     if let Err(msg) =
         preflight::check_no_missing_devices(pool.missing_count, "remove a live disk from the pool")
     {
-        return RemovePlanReport {
-            notes: std::mem::take(&mut notes),
-            result: Err(RemoveError::Validation(msg)),
-        };
+        return Err(PlanFailure::with_notes(notes, RemoveError::Validation(msg)));
     }
 
     // The live pool probe above proves btrfs still sees the target mapper.
@@ -474,19 +450,17 @@ pub fn plan_remove<R: CommandRunner + Sync, F: Filesystem + ?Sized>(
     let pre_membership = match membership::load_membership(params.paths) {
         Ok(m) => m,
         Err(e) => {
-            return RemovePlanReport {
-                notes: std::mem::take(&mut notes),
-                result: Err(RemoveError::Validation(format!(
-                    "failed to load pool membership: {e}"
-                ))),
-            };
+            return Err(PlanFailure::with_notes(
+                notes,
+                RemoveError::Validation(format!("failed to load pool membership: {e}")),
+            ));
         }
     };
     if !pre_membership.disks.contains_key(params.name) {
-        return RemovePlanReport {
-            notes: std::mem::take(&mut notes),
-            result: Err(absent_from_membership_error(params.name)),
-        };
+        return Err(PlanFailure::with_notes(
+            notes,
+            absent_from_membership_error(params.name),
+        ));
     }
 
     // RemoveWorkPlan::new owns the remaining == 0 rejection (last-disk
@@ -501,10 +475,7 @@ pub fn plan_remove<R: CommandRunner + Sync, F: Filesystem + ?Sized>(
     ) {
         Ok(plan) => plan,
         Err(e) => {
-            return RemovePlanReport {
-                notes: std::mem::take(&mut notes),
-                result: Err(e),
-            };
+            return Err(PlanFailure::with_notes(notes, e));
         }
     };
 
@@ -522,19 +493,13 @@ pub fn plan_remove<R: CommandRunner + Sync, F: Filesystem + ?Sized>(
             notes.push(PreviewNote::Warn(body));
         }
         Err(e) => {
-            return RemovePlanReport {
-                notes: std::mem::take(&mut notes),
-                result: Err(e),
-            };
+            return Err(PlanFailure::with_notes(notes, e));
         }
     }
 
     let plan = RemovePlan { notes, work_plan };
 
-    RemovePlanReport {
-        notes: Vec::new(),
-        result: Ok(plan),
-    }
+    Ok(plan)
 }
 
 pub fn cmd_remove<R: CommandRunner + Sync, F: Filesystem + ?Sized>(
@@ -542,17 +507,16 @@ pub fn cmd_remove<R: CommandRunner + Sync, F: Filesystem + ?Sized>(
     fs: &F,
     params: &RemoveParams<'_>,
 ) -> Result<(), RemoveError> {
-    let report = plan_remove(runner, fs, params);
-    let plan = match report.result {
+    let plan = match plan_remove(runner, fs, params) {
         Ok(p) => p,
-        Err(e) => {
+        Err(PlanFailure { notes, error }) => {
             // Preserved-context failure: accumulated notes render to
             // stderr before the error via the SAME helper as the Ok
             // path (`RemovePlan::execute`), so preflight diagnostics
             // surface identically across success, failure, and dry-run
             // stdout.
-            preview::emit_notes_to_stderr(&report.notes, RemovePlan::STDERR_STYLE);
-            return Err(e);
+            preview::emit_notes_to_stderr(&notes, RemovePlan::STDERR_STYLE);
+            return Err(error);
         }
     };
 
@@ -998,7 +962,6 @@ mod tests {
         let params = f.remove_params().name("disk1").yes(true).build();
 
         let plan = plan_remove(&runner, &fs, &params)
-            .result
             .expect("initial plan must succeed before pool.json drift");
         let drifted = disk2_disk3_membership();
         membership::save_membership(&drifted, &f.paths).unwrap();
@@ -1768,14 +1731,8 @@ mod tests {
         let fs = MockFs::storage(vec![]);
         let params = f.remove_params().name("disk3").dry_run(true).build();
 
-        let report = plan_remove(&runner, &fs, &params);
-        assert!(
-            report.notes.is_empty(),
-            "report.notes must be empty (no pre-validation probing)",
-        );
-        let plan = report
-            .result
-            .expect("soft-warn case must produce an Ok plan");
+        let plan =
+            plan_remove(&runner, &fs, &params).expect("soft-warn case must produce an Ok plan");
         assert_eq!(
             plan.notes.len(),
             1,
@@ -1834,9 +1791,7 @@ mod tests {
         let params = f.remove_params().name("disk3").dry_run(true).build();
 
         let report = plan_remove(&runner, &fs, &params);
-        let plan = report
-            .result
-            .expect("soft-warn case must produce an Ok plan");
+        let plan = report.expect("soft-warn case must produce an Ok plan");
         assert_eq!(
             plan.notes.len(),
             1,
@@ -1885,9 +1840,8 @@ mod tests {
         let fs = MockFs::storage(vec![]);
         let params = f.remove_params().name("disk3").dry_run(true).build();
 
-        let plan = plan_remove(&runner, &fs, &params)
-            .result
-            .expect("soft-warn case must produce an Ok plan");
+        let plan =
+            plan_remove(&runner, &fs, &params).expect("soft-warn case must produce an Ok plan");
         let rendered = plan.preview().render();
         let lines: Vec<&str> = rendered.lines().collect();
         assert!(
@@ -1954,9 +1908,7 @@ mod tests {
         let fs = MockFs::storage(vec![]).with_excl_op("device add\n");
         let params = f.remove_params().dry_run(true).build();
         let report = plan_remove(&runner, &fs, &params);
-        let plan = report
-            .result
-            .expect("plan_remove should succeed on healthy pool + busy op");
+        let plan = report.expect("plan_remove should succeed on healthy pool + busy op");
         assert_eq!(
             plan.notes.len(),
             1,
@@ -1980,10 +1932,9 @@ mod tests {
 
     /* Intent: when plan_remove accumulates a preflight Info note and
      * then fails on the "disk not found in pool" validation, the
-     * accumulated notes survive on `report.notes`.
-     * Why it exists: Shape A "notes-carrying report" promises
-     * preserved context; a misspelled disk name during an in-flight
-     * balance must not hide the busy-op context from the operator.
+     * accumulated notes survive on `PlanFailure::notes`.
+     * Why it exists: a misspelled disk name during an in-flight balance
+     * must not hide the busy-op context from the operator.
      * Scenario: sysfs reports "device add" (enqueueable busy), operator
      * runs `braid remove typo-name` against a healthy 3-disk pool
      * whose members are disk1/disk2/disk3.
@@ -1994,27 +1945,29 @@ mod tests {
         let runner = RemovalPool::three_disk().install(MockRunner::default());
         let fs = MockFs::storage(vec![]).with_excl_op("device add\n");
         let params = f.remove_params().name("typo-name").dry_run(true).build();
-        let report = plan_remove(&runner, &fs, &params);
-        match &report.result {
-            Err(RemoveError::Validation(msg)) => {
+        let failure = match plan_remove(&runner, &fs, &params) {
+            Ok(_) => panic!("expected Err(Validation), got Ok(_)"),
+            Err(failure) => failure,
+        };
+        match &failure.error {
+            RemoveError::Validation(msg) => {
                 assert!(msg.contains("not found"), "expected 'not found' in: {msg}");
             }
-            Err(other) => panic!("expected Validation, got: {other:?}"),
-            Ok(_) => panic!("expected Err(Validation), got Ok(_)"),
+            other => panic!("expected Validation, got: {other:?}"),
         }
         assert_eq!(
-            report.notes.len(),
+            failure.notes.len(),
             1,
             "busy-op Info note must survive the disk-not-found failure, got: {:?}",
-            report.notes,
+            failure.notes,
         );
         assert!(
             matches!(
-                &report.notes[0],
+                &failure.notes[0],
                 PreviewNote::Info(b) if b.contains("waiting for in-flight") && b.contains("device add")
             ),
             "notes[0]={:?}",
-            report.notes[0],
+            failure.notes[0],
         );
     }
 

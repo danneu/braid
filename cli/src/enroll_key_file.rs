@@ -7,7 +7,9 @@ use crate::credential_verify::{
 use crate::luks::{self, KEYFILE_SIZE, KeySlotState, LUKS_SLOT_KEYFILE, LuksError, VerifyOutcome};
 use crate::membership::PoolMembership;
 use crate::preflight;
-use crate::preview::{self, NoteLevel, PerDiskStyle, Preview, PreviewCompleteness, PreviewNote};
+use crate::preview::{
+    self, NoteLevel, PerDiskStyle, PlanFailure, Preview, PreviewCompleteness, PreviewNote,
+};
 use crate::probe::{self, Filesystem};
 use crate::secret::Passphrase;
 use crate::state_paths::StatePaths;
@@ -390,20 +392,6 @@ pub struct EnrollKeyFileParams<'a> {
     pub paths: &'a StatePaths,
 }
 
-/// Report returned by `plan_enroll`. On the `Ok` branch, `notes` is
-/// always empty and all accumulated per-disk skip notes live on
-/// `EnrollPlan.notes` (the single source of truth for successful
-/// preview + real-run stderr prelude). On the `Err` branch, `notes`
-/// carries the discovery notes accumulated before the failure so the
-/// caller can render them to stderr before the error -- preserving
-/// today's "skip: <name> not present" lines that printed before the
-/// "no present LUKS disks" error.
-#[derive(Debug)]
-pub struct EnrollPlanReport {
-    pub notes: Vec<PreviewNote>,
-    pub result: Result<EnrollPlan, EnrollKeyFileError>,
-}
-
 /// Dry-run preview source of truth for `braid enroll` plus the
 /// execute inputs pre-computed during planning. `notes` + `steps` are
 /// both rendered by `preview()`; `execute()` renders `notes` to stderr
@@ -546,7 +534,7 @@ fn validate_generated_keyfile_target<R: CommandRunner>(
 /// Plan a `braid enroll` run. Owns the pending-op preflight,
 /// keyfile-path validation, and pre-passphrase discovery. Per-disk
 /// skip notes land on `EnrollPlan.notes` when discovery produces at
-/// least one candidate, or on `EnrollPlanReport.notes` when the
+/// least one candidate, or on `PlanFailure::notes` when the
 /// planner bails (e.g. no candidates, mid-loop probe error).
 ///
 /// Dry-run keyfile probe: when `dry_run && !generate`, after discovery
@@ -568,12 +556,9 @@ pub fn plan_enroll<R: CommandRunner, F: Filesystem + ?Sized>(
     generate: bool,
     dry_run: bool,
     paths: &StatePaths,
-) -> EnrollPlanReport {
+) -> Result<EnrollPlan, PlanFailure<EnrollKeyFileError>> {
     if let Err(msg) = preflight::check_no_pending_operation(paths) {
-        return EnrollPlanReport {
-            notes: Vec::new(),
-            result: Err(EnrollKeyFileError::Validation(msg)),
-        };
+        return Err(PlanFailure::empty(EnrollKeyFileError::Validation(msg)));
     }
 
     let key_file_validation = if generate {
@@ -582,20 +567,14 @@ pub fn plan_enroll<R: CommandRunner, F: Filesystem + ?Sized>(
         validate_key_file_path(key_file_path, false)
     };
     if let Err(e) = key_file_validation {
-        return EnrollPlanReport {
-            notes: Vec::new(),
-            result: Err(e),
-        };
+        return Err(PlanFailure::empty(e));
     }
 
     let (mut notes, discovery) = discover_enrollment_candidates(runner, fs, membership);
     let candidates = match discovery {
         Ok(c) => c,
         Err(e) => {
-            return EnrollPlanReport {
-                notes,
-                result: Err(e),
-            };
+            return Err(PlanFailure::with_notes(notes, e));
         }
     };
 
@@ -625,10 +604,7 @@ pub fn plan_enroll<R: CommandRunner, F: Filesystem + ?Sized>(
                     needs_enroll.push((name.clone(), by_id.clone()));
                 }
                 Err(e) => {
-                    return EnrollPlanReport {
-                        notes,
-                        result: Err(e.into()),
-                    };
+                    return Err(PlanFailure::with_notes(notes, e.into()));
                 }
             }
         }
@@ -637,15 +613,12 @@ pub fn plan_enroll<R: CommandRunner, F: Filesystem + ?Sized>(
         compile_enroll_steps(&candidates, key_file_path, generate, paths)
     };
 
-    EnrollPlanReport {
-        notes: Vec::new(),
-        result: Ok(EnrollPlan {
-            notes,
-            steps,
-            candidates,
-            generate,
-        }),
-    }
+    Ok(EnrollPlan {
+        notes,
+        steps,
+        candidates,
+        generate,
+    })
 }
 
 pub fn cmd_enroll_key_file<R: CommandRunner, F: Filesystem + ?Sized>(
@@ -653,7 +626,7 @@ pub fn cmd_enroll_key_file<R: CommandRunner, F: Filesystem + ?Sized>(
     fs: &F,
     params: &EnrollKeyFileParams<'_>,
 ) -> Result<(), EnrollKeyFileError> {
-    let report = plan_enroll(
+    let plan = match plan_enroll(
         runner,
         fs,
         params.membership,
@@ -661,16 +634,15 @@ pub fn cmd_enroll_key_file<R: CommandRunner, F: Filesystem + ?Sized>(
         params.generate,
         params.dry_run,
         params.paths,
-    );
-    let plan = match report.result {
+    ) {
         Ok(p) => p,
-        Err(e) => {
+        Err(PlanFailure { notes, error }) => {
             // Preserved-context failure: accumulated skip notes render
             // to stderr before the error message, mirroring today's
             // `eprintln!("skip: ...")` + validation-error sequence on
             // the no-candidates path.
-            preview::emit_notes_to_stderr(&report.notes, EnrollPlan::STDERR_STYLE);
-            return Err(e);
+            preview::emit_notes_to_stderr(&notes, EnrollPlan::STDERR_STYLE);
+            return Err(error);
         }
     };
 
@@ -731,12 +703,8 @@ mod tests {
         let kf = tmp.path().join("braid.key");
         let runner = enroll_with_mountpoint_ok(runner, tmp.path());
 
-        let report = plan_enroll(&runner, &fs, &membership, &kf, true, false, &paths);
-        assert!(
-            report.notes.is_empty(),
-            "report.notes should be empty on success"
-        );
-        let plan = report.result.expect("plan_enroll should succeed");
+        let plan = plan_enroll(&runner, &fs, &membership, &kf, true, false, &paths)
+            .expect("plan_enroll should succeed");
         assert_eq!(plan.candidates.len(), 2);
         assert_eq!(plan.candidates[0].0, "disk1");
         assert_eq!(plan.candidates[1].0, "disk2");
@@ -771,13 +739,7 @@ mod tests {
         let kf = tmp.path().join("braid.key");
         let runner = enroll_with_mountpoint_ok(runner, tmp.path());
 
-        let report = plan_enroll(&runner, &fs, &membership, &kf, true, false, &paths);
-        assert!(
-            report.notes.is_empty(),
-            "report.notes should be empty on success"
-        );
-        let plan = report
-            .result
+        let plan = plan_enroll(&runner, &fs, &membership, &kf, true, false, &paths)
             .expect("plan_enroll should succeed with one candidate");
         assert_eq!(plan.candidates.len(), 1);
         assert_eq!(plan.candidates[0].0, "disk2");
@@ -821,9 +783,8 @@ mod tests {
         let kf = tmp.path().join("braid.key");
         let runner = enroll_with_mountpoint_ok(runner, tmp.path());
 
-        let report = plan_enroll(&runner, &fs, &membership, &kf, true, false, &paths);
-        assert!(report.notes.is_empty());
-        let plan = report.result.expect("plan_enroll should succeed");
+        let plan = plan_enroll(&runner, &fs, &membership, &kf, true, false, &paths)
+            .expect("plan_enroll should succeed");
         assert_eq!(plan.candidates.len(), 1);
         assert_eq!(plan.candidates[0].0, "disk2");
         assert_eq!(plan.notes.len(), 1);
@@ -844,7 +805,7 @@ mod tests {
     /*
      * Intent: when every membership disk is absent, `plan_enroll`
      *   returns `Err(no present LUKS disks...)` with *all* accumulated
-     *   skip notes preserved on `report.notes` -- the preserved-context
+     *   skip notes preserved on `PlanFailure::notes` -- the preserved-context
      *   failure contract.
      * Why: this pins the shape A failure path for `enroll`. Today's
      *   behavior prints each `skip:` line before the validation error;
@@ -864,19 +825,22 @@ mod tests {
         let kf = tmp.path().join("braid.key");
         let runner = enroll_with_mountpoint_ok(runner, tmp.path());
 
-        let report = plan_enroll(&runner, &fs, &membership, &kf, true, false, &paths);
-        let err = report.result.expect_err("expected no-candidates error");
+        let failure = match plan_enroll(&runner, &fs, &membership, &kf, true, false, &paths) {
+            Ok(_) => panic!("expected no-candidates error"),
+            Err(failure) => failure,
+        };
+        let err = &failure.error;
         assert!(
             err.to_string().contains("no present LUKS disks found"),
             "unexpected error: {err}"
         );
         assert_eq!(
-            report.notes.len(),
+            failure.notes.len(),
             2,
             "both skip notes must survive the Err branch"
         );
         for (i, name) in ["disk1", "disk2"].iter().enumerate() {
-            match &report.notes[i] {
+            match &failure.notes[i] {
                 PreviewNote::PerDisk {
                     name: actual_name,
                     level,
@@ -909,14 +873,17 @@ mod tests {
         let kf = tmp.path().join("braid.key");
         let runner = enroll_with_mountpoint_ok(runner, tmp.path());
 
-        let report = plan_enroll(&runner, &fs, &membership, &kf, true, false, &paths);
-        let err = report.result.expect_err("expected no-candidates error");
+        let failure = match plan_enroll(&runner, &fs, &membership, &kf, true, false, &paths) {
+            Ok(_) => panic!("expected no-candidates error"),
+            Err(failure) => failure,
+        };
+        let err = &failure.error;
         assert!(
             err.to_string().contains("no present LUKS disks found"),
             "unexpected error: {err}"
         );
-        assert_eq!(report.notes.len(), 1);
-        match &report.notes[0] {
+        assert_eq!(failure.notes.len(), 1);
+        match &failure.notes[0] {
             PreviewNote::PerDisk {
                 name,
                 level,
@@ -959,7 +926,6 @@ mod tests {
         let runner = enroll_with_mountpoint_ok(runner, tmp.path());
 
         let plan = plan_enroll(&runner, &fs, &membership, &kf, true, false, &paths)
-            .result
             .expect("plan_enroll should succeed");
 
         let rendered_stdout = plan.preview().render();
@@ -993,10 +959,11 @@ mod tests {
         let fs = enroll_fs(&["/dev/disk/by-id/d1"]);
         let membership = enroll_make_membership(&[("disk1", "/dev/disk/by-id/d1")]);
 
-        let report = plan_enroll(&runner, &fs, &membership, &kf, true, false, &paths);
-        let err = report
-            .result
-            .expect_err("missing target directory must fail");
+        let failure = match plan_enroll(&runner, &fs, &membership, &kf, true, false, &paths) {
+            Ok(_) => panic!("missing target directory must fail"),
+            Err(failure) => failure,
+        };
+        let err = failure.error;
 
         assert!(
             err.to_string().contains("keyfile directory does not exist"),
@@ -1027,8 +994,11 @@ mod tests {
         let fs = enroll_fs(&["/dev/disk/by-id/d1"]);
         let membership = enroll_make_membership(&[("disk1", "/dev/disk/by-id/d1")]);
 
-        let report = plan_enroll(&runner, &fs, &membership, &kf, true, false, &paths);
-        let err = report.result.expect_err("non-directory target must fail");
+        let failure = match plan_enroll(&runner, &fs, &membership, &kf, true, false, &paths) {
+            Ok(_) => panic!("non-directory target must fail"),
+            Err(failure) => failure,
+        };
+        let err = failure.error;
 
         assert!(
             err.to_string()
@@ -1062,8 +1032,11 @@ mod tests {
         let fs = enroll_fs(&["/dev/disk/by-id/d1"]);
         let membership = enroll_make_membership(&[("disk1", "/dev/disk/by-id/d1")]);
 
-        let report = plan_enroll(&runner, &fs, &membership, &kf, true, false, &paths);
-        let err = report.result.expect_err("plain directory must fail");
+        let failure = match plan_enroll(&runner, &fs, &membership, &kf, true, false, &paths) {
+            Ok(_) => panic!("plain directory must fail"),
+            Err(failure) => failure,
+        };
+        let err = failure.error;
 
         assert_eq!(
             err.to_string(),
@@ -1149,10 +1122,11 @@ mod tests {
         let fs = enroll_fs(&["/dev/disk/by-id/d1"]);
         let membership = enroll_make_membership(&[("disk1", "/dev/disk/by-id/d1")]);
 
-        let report = plan_enroll(&runner, &fs, &membership, &kf, true, false, &paths);
-        let err = report
-            .result
-            .expect_err("existing generated keyfile must fail");
+        let failure = match plan_enroll(&runner, &fs, &membership, &kf, true, false, &paths) {
+            Ok(_) => panic!("existing generated keyfile must fail"),
+            Err(failure) => failure,
+        };
+        let err = failure.error;
 
         assert!(
             err.to_string().contains("braid.key already exists"),
@@ -1186,7 +1160,6 @@ mod tests {
         let membership = enroll_make_membership(&[("disk1", d1), ("disk2", d2)]);
 
         let plan = plan_enroll(&runner, &fs, &membership, &kf, false, false, &paths)
-            .result
             .expect("existing keyfile in ordinary directory should plan");
 
         assert_eq!(plan.candidates.len(), 2);
@@ -1264,7 +1237,6 @@ mod tests {
         let membership = enroll_make_membership(&[("disk1", d1), ("disk2", d2)]);
 
         let plan = plan_enroll(&runner, &fs, &membership, &kf, false, true, &paths)
-            .result
             .expect("plan_enroll should succeed");
 
         assert!(
@@ -1334,7 +1306,6 @@ mod tests {
 
         let captured = crate::status_tag::testing::capture_with_color(false, || {
             plan_enroll(&runner, &fs, &membership, &kf, false, true, &paths)
-                .result
                 .expect("plan_enroll should succeed");
         });
 
@@ -1388,7 +1359,6 @@ mod tests {
         let membership = enroll_make_membership(&[("disk1", d1), ("disk2", d2)]);
 
         let plan = plan_enroll(&runner, &fs, &membership, &kf, false, true, &paths)
-            .result
             .expect("plan_enroll should succeed");
 
         assert!(
@@ -1435,7 +1405,6 @@ mod tests {
         let runner = enroll_with_mountpoint_ok(runner, tmp.path());
 
         let _plan = plan_enroll(&runner, &fs, &membership, &kf, true, true, &paths)
-            .result
             .expect("plan_enroll should succeed in --generate dry-run mode");
 
         let probe_count = runner
@@ -1459,8 +1428,8 @@ mod tests {
      *   already-pushed Skip notes from earlier iterations, giving
      *   users a confusing error context that hides the fact that
      *   disk1 was already enrolled. Without an explicit assertion on
-     *   `report.notes`, an implementation that returns
-     *   `EnrollPlanReport { notes: Vec::new(), result: Err(_) }` on
+     *   `PlanFailure::notes`, an implementation that returns
+     *   `Err(PlanFailure { notes: Vec::new(), .. })` on
      *   probe error would silently pass.
      * Scenario: 2-disk pool, disk1 has the keyfile already, disk2's
      *   backing device is busy (stale dm-crypt mapper holding it
@@ -1490,10 +1459,11 @@ mod tests {
         let fs = enroll_fs(&[d1, d2]);
         let membership = enroll_make_membership(&[("disk1", d1), ("disk2", d2)]);
 
-        let report = plan_enroll(&runner, &fs, &membership, &kf, false, true, &paths);
-        let err = report
-            .result
-            .expect_err("probe error must propagate as Err");
+        let failure = match plan_enroll(&runner, &fs, &membership, &kf, false, true, &paths) {
+            Ok(_) => panic!("probe error must propagate as Err"),
+            Err(failure) => failure,
+        };
+        let err = failure.error;
 
         match err {
             EnrollKeyFileError::Luks(LuksError::OpenFailed { exit_code, .. }) => {
@@ -1505,7 +1475,7 @@ mod tests {
         }
 
         assert!(
-            report.notes.iter().any(|n| matches!(
+            failure.notes.iter().any(|n| matches!(
                 n,
                 PreviewNote::PerDisk { name, level, message }
                     if name == "disk1"
@@ -1513,7 +1483,7 @@ mod tests {
                         && message == "keyfile already enrolled"
             )),
             "disk1's accumulated Skip note must survive probe error on disk2; got: {:?}",
-            report.notes
+            failure.notes
         );
     }
 

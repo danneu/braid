@@ -11,7 +11,7 @@ use crate::membership::{self, DiskMember, PoolMembership};
 use crate::mount::{self, MountError, OpenPlan};
 use crate::parse::btrfs_filesystem_show::{DeviceBtrfsProbe, classify_btrfs_probe};
 use crate::parse::{ReplaceState, parse_btrfs_replace_status};
-use crate::preview::{self, PerDiskStyle, Preview, PreviewCompleteness, PreviewNote};
+use crate::preview::{self, PerDiskStyle, PlanFailure, Preview, PreviewCompleteness, PreviewNote};
 use crate::probe::{self, Filesystem, ProbeError};
 use crate::progress::{self, ProgressOutput, RealSleeper, Sleeper};
 use crate::secret::Passphrase;
@@ -193,17 +193,6 @@ pub struct RecoverParams<'a> {
 pub struct RecoverPlan {
     pub notes: Vec<PreviewNote>,
     work_plan: RecoverWorkPlan,
-}
-
-/// Report returned by `plan_recover`. On the `Ok` branch, all
-/// accumulated notes (entry banner + probe events) have been moved
-/// into `plan.notes` and `notes` here is empty. On the `Err` branch,
-/// `notes` carries the banner + per-disk context accumulated before
-/// planning bailed (e.g. `DegradedRefused`) so the caller can render
-/// it to stderr before the error.
-pub struct RecoverPlanReport {
-    pub notes: Vec<PreviewNote>,
-    pub result: Result<RecoverPlan, RecoverError>,
 }
 
 #[derive(Debug)]
@@ -1083,31 +1072,25 @@ impl RecoverPlan {
 /// On success, accumulated notes (entry banner + probe events) live
 /// on `plan.notes` (the single render source for both preview and
 /// execute). On failure after accumulating notes, those notes move
-/// to `report.notes` so the caller can render them to stderr before
-/// the error.
+/// to `PlanFailure::notes` so the caller can render them to stderr
+/// before the error.
 pub fn plan_recover<R: CommandRunner + Sync, F: Filesystem + ?Sized>(
     runner: &R,
     fs: &F,
     params: &RecoverParams<'_>,
-) -> RecoverPlanReport {
+) -> Result<RecoverPlan, PlanFailure<RecoverError>> {
     // 1. Load journal (required -- nothing to recover if absent). The
     // no-journal failure is a no-context failure by design: nothing has
-    // been probed or accumulated yet, so `report.notes` stays empty.
+    // been probed or accumulated yet, so `PlanFailure::notes` stays empty.
     let journal = match journal::load_journal(params.paths) {
         Ok(Some(j)) => j,
         Ok(None) => {
-            return RecoverPlanReport {
-                notes: Vec::new(),
-                result: Err(RecoverError::Failed(
-                    "no pending operation journal found -- nothing to recover".into(),
-                )),
-            };
+            return Err(PlanFailure::empty(RecoverError::Failed(
+                "no pending operation journal found -- nothing to recover".into(),
+            )));
         }
         Err(e) => {
-            return RecoverPlanReport {
-                notes: Vec::new(),
-                result: Err(RecoverError::Journal(e.to_string())),
-            };
+            return Err(PlanFailure::empty(RecoverError::Journal(e.to_string())));
         }
     };
 
@@ -1129,10 +1112,7 @@ pub fn plan_recover<R: CommandRunner + Sync, F: Filesystem + ?Sized>(
         match discover_add_targets_before_mount(runner, fs, params, &journal, targets) {
             Ok(credential) => pre_resolved_credential = credential,
             Err(e) => {
-                return RecoverPlanReport {
-                    notes,
-                    result: Err(e),
-                };
+                return Err(PlanFailure::with_notes(notes, e));
             }
         }
     }
@@ -1174,10 +1154,7 @@ pub fn plan_recover<R: CommandRunner + Sync, F: Filesystem + ?Sized>(
     let open_plan = match report.result {
         Ok(op) => op,
         Err(e) => {
-            return RecoverPlanReport {
-                notes,
-                result: Err(RecoverError::Mount(e)),
-            };
+            return Err(PlanFailure::with_notes(notes, RecoverError::Mount(e)));
         }
     };
 
@@ -1194,9 +1171,9 @@ pub fn plan_recover<R: CommandRunner + Sync, F: Filesystem + ?Sized>(
     // -- no pending-op preflight in lock.rs) then `braid recover`, which
     // opens its own mount and takes the just_mounted == true cycle path.
     if open_plan.is_none() && is_replace_pool_mutation(&journal.op) {
-        return RecoverPlanReport {
+        return Err(PlanFailure::with_notes(
             notes,
-            result: Err(RecoverError::Failed(
+            RecoverError::Failed(
                 "recover refuses to probe an already-mounted pool when the journal \
                  records a replace -- the kernel may have resumed an interrupted \
                  dev_replace on this mount session, leaving stale in-memory device \
@@ -1207,8 +1184,8 @@ pub fn plan_recover<R: CommandRunner + Sync, F: Filesystem + ?Sized>(
                  closes LUKS, after which braid recover opens a fresh mount session \
                  and clears the staleness via the relock cycle."
                     .to_owned(),
-            )),
-        };
+            ),
+        ));
     }
 
     let probed_live_pool = if open_plan.is_none() && params.dry_run {
@@ -1223,17 +1200,11 @@ pub fn plan_recover<R: CommandRunner + Sync, F: Filesystem + ?Sized>(
         let pool = match probe::probe_pool(runner, fs, mount_point) {
             Ok(p) => p,
             Err(e) => {
-                return RecoverPlanReport {
-                    notes,
-                    result: Err(e.into()),
-                };
+                return Err(PlanFailure::with_notes(notes, e.into()));
             }
         };
         if let Err(e) = validate_live_members_allowed(&pool, &union) {
-            return RecoverPlanReport {
-                notes,
-                result: Err(e),
-            };
+            return Err(PlanFailure::with_notes(notes, e));
         }
         Some(pool)
     } else {
@@ -1254,21 +1225,21 @@ pub fn plan_recover<R: CommandRunner + Sync, F: Filesystem + ?Sized>(
     {
         for name in &cycle_reopen_names {
             if !union.disks.contains_key(name) {
-                return RecoverPlanReport {
+                return Err(PlanFailure::with_notes(
                     notes,
-                    result: Err(RecoverError::Failed(format!(
+                    RecoverError::Failed(format!(
                         "recover remount cycle preview: disk '{name}' missing from membership union"
-                    ))),
-                };
+                    )),
+                ));
             }
         }
         if cycle_reopen_names.is_empty() {
-            return RecoverPlanReport {
+            return Err(PlanFailure::with_notes(
                 notes,
-                result: Err(RecoverError::Failed(
+                RecoverError::Failed(
                     "recover remount cycle preview: no disks available to reopen".into(),
-                )),
-            };
+                ),
+            ));
         }
         actions.push(RecoverWorkAction::RemountCycle {
             close_names: cycle_close_names,
@@ -1358,10 +1329,7 @@ pub fn plan_recover<R: CommandRunner + Sync, F: Filesystem + ?Sized>(
         luks_headers_dir: params.paths.luks_headers_dir(),
         actions,
     };
-    RecoverPlanReport {
-        notes: Vec::new(),
-        result: Ok(RecoverPlan { notes, work_plan }),
-    }
+    Ok(RecoverPlan { notes, work_plan })
 }
 
 pub fn cmd_recover<R: CommandRunner + Sync, F: Filesystem + ?Sized>(
@@ -1370,16 +1338,15 @@ pub fn cmd_recover<R: CommandRunner + Sync, F: Filesystem + ?Sized>(
     by_id_resolver: &dyn ByIdResolver,
     params: &RecoverParams<'_>,
 ) -> Result<(), RecoverError> {
-    let report = plan_recover(runner, fs, params);
-    let plan = match report.result {
+    let plan = match plan_recover(runner, fs, params) {
         Ok(p) => p,
-        Err(e) => {
+        Err(PlanFailure { notes, error }) => {
             // Preserved-context failure: any accumulated notes (entry
             // banner + per-disk probe events) render to stderr before
             // the error, mirroring today's `eprintln!(entry)` +
             // `mount::print_probe_events` + `?` sequence.
-            preview::emit_notes_to_stderr(&report.notes, RecoverPlan::STDERR_STYLE);
-            return Err(e);
+            preview::emit_notes_to_stderr(&notes, RecoverPlan::STDERR_STYLE);
+            return Err(error);
         }
     };
 
@@ -4881,7 +4848,6 @@ mod tests {
         let params = f.recover_params().build();
 
         let plan = plan_recover(&harness.runner, &harness.fs, &params)
-            .result
             .expect("planner should discover add target, then plan from pre-membership");
         assert!(
             plan.work_plan.pre_resolved_credential.is_some(),
@@ -5002,7 +4968,6 @@ mod tests {
 
         let params = f.recover_params().build();
         let plan = plan_recover(&harness.runner, &harness.fs, &params)
-            .result
             .expect("planner should discover fresh add target, then plan from pre-membership");
         let open_plan = plan
             .work_plan
@@ -5120,7 +5085,6 @@ mod tests {
 
         let params = f.recover_params().passphrase_file(None).build();
         let plan = plan_recover(&runner, &fs, &params)
-            .result
             .expect("planner should skip mismatched add target and mount from pre-membership");
         assert!(
             plan.work_plan.pre_resolved_credential.is_none(),
@@ -5223,7 +5187,6 @@ mod tests {
 
         let params = f.recover_params().passphrase_file(None).build();
         let plan = plan_recover(&runner, &fs, &params)
-            .result
             .expect("planner should skip mislabeled fresh target and mount from pre-membership");
         assert!(
             plan.work_plan.pre_resolved_credential.is_none(),
@@ -5357,7 +5320,6 @@ mod tests {
 
         let params = f.recover_params().build();
         let plan = plan_recover(&runner, &fs, &params)
-            .result
             .expect("planner should skip disk2 and continue discovering disk3");
         assert!(
             plan.work_plan.pre_resolved_credential.is_some(),
@@ -5916,7 +5878,6 @@ mod tests {
         let params = f.recover_params().passphrase_file(None).build();
 
         let plan = plan_recover(&runner, &fs, &params)
-            .result
             .expect("planner should mount existing-pool add from pre-membership");
         let open_plan = plan
             .work_plan
@@ -8985,9 +8946,7 @@ mod tests {
             .dry_run(true)
             .sleep_inhibitor(&f.inhibitor)
             .build();
-        plan_recover(&runner, &fs, &params)
-            .result
-            .expect("dry-run planning should not acquire inhibitor");
+        plan_recover(&runner, &fs, &params).expect("dry-run planning should not acquire inhibitor");
         assert_eq!(f.inhibitor.acquire_count(), 0);
     }
 
@@ -11731,7 +11690,7 @@ mod tests {
         let params = f.recover_params().build();
 
         let report = plan_recover(&harness.runner, &harness.fs, &params);
-        let plan = report.result.expect("recover planning should succeed");
+        let plan = report.expect("recover planning should succeed");
         let result = plan.execute(&harness.runner, &harness.fs, &resolver, &params);
 
         let err = result.expect_err("suspended replace should abort recover");
@@ -12908,7 +12867,6 @@ mod tests {
             .build();
 
         let rendered = plan_recover(&runner, &fs, &params)
-            .result
             .expect("plan_recover should succeed with allow_degraded=true")
             .preview()
             .render();
@@ -13027,7 +12985,6 @@ mod tests {
             .build();
 
         let rendered = plan_recover(&runner, &fs, &params)
-            .result
             .expect("plan_recover should succeed on already-mounted pool")
             .preview()
             .render();
@@ -13058,7 +13015,7 @@ mod tests {
     /* Intent: when the journal records OpKind::Replace and the pool is already
      * mounted at planner entry, plan_recover MUST return RecoverError::Failed
      * with safe-recovery instructions, preserving the entry banner and
-     * AlreadyMounted info note on report.notes. The refusal must fire for
+     * AlreadyMounted info note on PlanFailure::notes. The refusal must fire for
      * both dry_run = false (real run) and dry_run = true (preview); the gate
      * sits upstream of that branch, so a regression that affects only one of
      * the two would still be a real regression.
@@ -13097,9 +13054,14 @@ mod tests {
                 .dry_run(dry_run)
                 .build();
 
-            let report = plan_recover(&runner, &fs, &params);
-            let err = match report.result {
-                Err(RecoverError::Failed(msg)) => msg,
+            let failure = match plan_recover(&runner, &fs, &params) {
+                Err(failure) => failure,
+                other => {
+                    panic!("expected RecoverError::Failed for dry_run={dry_run}, got: {other:?}")
+                }
+            };
+            let err = match failure.error {
+                RecoverError::Failed(msg) => msg,
                 other => {
                     panic!("expected RecoverError::Failed for dry_run={dry_run}, got: {other:?}")
                 }
@@ -13118,13 +13080,13 @@ mod tests {
             );
 
             assert_eq!(
-                report.notes.len(),
+                failure.notes.len(),
                 2,
-                "dry_run={dry_run}: report.notes must hold entry banner + AlreadyMounted, got: {:?}",
-                report.notes,
+                "dry_run={dry_run}: PlanFailure::notes must hold entry banner + AlreadyMounted, got: {:?}",
+                failure.notes,
             );
             let entry_banner = format_recover_entry(&journal);
-            match &report.notes[0] {
+            match &failure.notes[0] {
                 PreviewNote::Info(msg) => assert_eq!(
                     msg, &entry_banner,
                     "dry_run={dry_run}: notes[0] must be the entry banner",
@@ -13133,7 +13095,7 @@ mod tests {
                     panic!("dry_run={dry_run}: notes[0] must be PreviewNote::Info, got: {other:?}")
                 }
             }
-            match &report.notes[1] {
+            match &failure.notes[1] {
                 PreviewNote::Info(msg) => assert!(
                     msg.contains("pool already mounted at /mnt/storage"),
                     "dry_run={dry_run}: notes[1] must be the AlreadyMounted info, got: {msg:?}",
@@ -13163,7 +13125,6 @@ mod tests {
             .build();
 
         plan_recover(&runner, &fs, &params)
-            .result
             .expect("plan_recover should render a dry-run preview")
             .preview()
             .render()
@@ -13975,14 +13936,14 @@ mod tests {
     }
 
     /* Intent: a degraded-refusal at the planner boundary preserves the
-     * entry banner + per-disk probe notes on `RecoverPlanReport.notes`
+     * entry banner + per-disk probe notes on `PlanFailure::notes`
      * in order, and routes the error as
      * `RecoverError::Mount(MountError::DegradedRefused(_))`.
      *
-     * Why it exists: Shape A's preserved-context contract for recover
-     * says the entry banner and accumulated probe context survive the
-     * `Err` path so `cmd_recover` can render them to stderr before the
-     * refusal message -- mirroring today's
+     * Why it exists: recover's preserved-context contract says the
+     * entry banner and accumulated probe context survive on
+     * `PlanFailure::notes` so `cmd_recover` can render them to stderr
+     * before the refusal message -- mirroring today's
      * `eprintln!(entry) + print_probe_events + ?` sequence. Without
      * this boundary test, a regression that dropped the banner from the
      * failure path or reordered the notes could still pass the
@@ -14039,16 +14000,19 @@ mod tests {
             .dry_run(true)
             .build();
 
-        let report = plan_recover(&runner, &fs, &params);
+        let failure = match plan_recover(&runner, &fs, &params) {
+            Ok(_) => panic!("degraded refusal must surface as Err"),
+            Err(failure) => failure,
+        };
 
         let entry_banner = format_recover_entry(&journal);
         assert!(
-            matches!(&report.notes[0], PreviewNote::Info(msg) if msg == &entry_banner),
+            matches!(&failure.notes[0], PreviewNote::Info(msg) if msg == &entry_banner),
             "first note must be the entry banner, got: {:?}",
-            report.notes,
+            failure.notes,
         );
 
-        let per_disk: Vec<&PreviewNote> = report
+        let per_disk: Vec<&PreviewNote> = failure
             .notes
             .iter()
             .filter(|n| matches!(n, PreviewNote::PerDisk { .. }))
@@ -14056,8 +14020,8 @@ mod tests {
         assert_eq!(
             per_disk.len(),
             3,
-            "report.notes must carry one per-disk note per union disk, got: {:?}",
-            report.notes,
+            "PlanFailure::notes must carry one per-disk note per union disk, got: {:?}",
+            failure.notes,
         );
         assert!(
             matches!(
@@ -14084,9 +14048,7 @@ mod tests {
             per_disk[2],
         );
 
-        let err = report
-            .result
-            .expect_err("degraded refusal must surface as Err");
+        let err = failure.error;
         assert!(
             matches!(&err, RecoverError::Mount(MountError::DegradedRefused(_))),
             "expected DegradedRefused, got: {err:?}",
