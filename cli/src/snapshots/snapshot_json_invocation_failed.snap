@@ -1,0 +1,8 @@
+---
+source: cli/src/ups.rs
+expression: "&payload"
+---
+{
+  "error": "invocation_failed",
+  "detail": "invocation failed: upsc: No such file or directory"
+}

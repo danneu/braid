@@ -7,6 +7,7 @@
 # config.json emission changes, etc.).
 
 import json
+import re
 
 start_all()
 machine.wait_for_unit("multi-user.target")
@@ -70,6 +71,40 @@ assert isinstance(detail, str) and "Connection failure" in detail, (
 )
 assert err == "", (
     f"expected empty stderr in --json query-failed, got: {err!r}"
+)
+
+# --- Invocation-failed branch ---
+# Force upsc to fail to spawn by running the unwrapped braid with a PATH
+# that does not include nut. This pins the invocation_failed sentinel
+# that distinguishes "your braid wrapper / nut package is broken" from
+# "your upsd is down" (the query_failed block above). Also pins the
+# stdout-only contract: --json must not print a redundant human error to
+# stderr.
+braid_wrapped_path = machine.succeed("readlink -f $(command -v braid)").strip()
+wrapper_source = machine.succeed(f"cat {braid_wrapped_path}")
+m = re.search(r'(/nix/store/[^"\s]+/bin/braid)(?!\-)', wrapper_source)
+assert m, f"could not locate unwrapped braid in wrapper:\n{wrapper_source}"
+unwrapped_braid = m.group(1)
+
+exit_code = machine.execute(
+    f"PATH=/nonexistent {unwrapped_braid} ups status --json "
+    ">/tmp/ups_if.out 2>/tmp/ups_if.err"
+)[0]
+assert exit_code != 0, (
+    "braid ups status --json must exit non-zero on invocation failure; got 0"
+)
+out_if = machine.succeed("cat /tmp/ups_if.out")
+err_if = machine.succeed("cat /tmp/ups_if.err")
+parsed_if = json.loads(out_if)
+assert parsed_if.get("error") == "invocation_failed", (
+    f"expected error=invocation_failed, got {parsed_if}"
+)
+detail_if = parsed_if.get("detail", "")
+assert isinstance(detail_if, str) and "invocation failed" in detail_if, (
+    f"expected detail to contain 'invocation failed', got {parsed_if}"
+)
+assert err_if == "", (
+    f"expected empty stderr in --json invocation-failed, got: {err_if!r}"
 )
 
 # --- Not-enabled branch ---

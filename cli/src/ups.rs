@@ -5,8 +5,9 @@
 //! (non-zero `upsc` exit) is a hard error with `upsc`'s own stderr surfaced.
 //!
 //! `--json` emits a stable serialized `UpscOutput` (plus distinct error
-//! shapes for the query-failed and not-enabled cases) so scripts can key
-//! off the parsed model without re-parsing `upsc` output themselves.
+//! shapes for query-failed, invocation-failed, and not-enabled cases) so
+//! scripts can key off the parsed model without re-parsing `upsc` output
+//! themselves.
 
 use crate::cmd::{CmdError, CmdRequest, CommandRunner};
 use crate::config::{ConfigError, config_read};
@@ -68,6 +69,8 @@ enum ErrorReport<'a> {
     NotEnabled,
     #[serde(rename = "query_failed")]
     QueryFailed { detail: &'a str },
+    #[serde(rename = "invocation_failed")]
+    InvocationFailed { detail: &'a str },
 }
 
 pub fn cmd_ups_status<R: CommandRunner>(
@@ -85,7 +88,7 @@ pub fn cmd_ups_status<R: CommandRunner>(
     let parsed = match query_ups(runner, &ups_cfg.name) {
         Ok(p) => p,
         Err(UpsQueryError::InvocationFailed(e)) => {
-            return emit_query_failed(json, format!("invocation failed: {e}"));
+            return emit_invocation_failed(json, format!("invocation failed: {e}"));
         }
         Err(UpsQueryError::QueryFailed { exit_code, stderr }) => {
             return emit_query_failed(json, format!("exit {exit_code}: {stderr}"));
@@ -116,6 +119,18 @@ fn print_not_enabled(json: bool) -> Result<(), UpsError> {
 fn emit_query_failed(json: bool, detail: String) -> Result<(), UpsError> {
     if json {
         emit_json(&JsonReport::Error(ErrorReport::QueryFailed {
+            detail: &detail,
+        }))?;
+        return Err(UpsError::QueryFailedJsonReported);
+    }
+    Err(UpsError::QueryFailed { detail })
+}
+
+/// Keep invocation failures distinct in `--json` while preserving the
+/// existing human error shape and shared exit-code wiring.
+fn emit_invocation_failed(json: bool, detail: String) -> Result<(), UpsError> {
+    if json {
+        emit_json(&JsonReport::Error(ErrorReport::InvocationFailed {
             detail: &detail,
         }))?;
         return Err(UpsError::QueryFailedJsonReported);
@@ -409,6 +424,23 @@ mod tests {
         assert!(text.contains("Connection failure"));
     }
 
+    // Intent: the `invocation_failed` JSON payload carries both the
+    // sentinel and the captured detail.
+    // Why it exists: cheap structural guard against a future refactor
+    // that drops the `detail` field or renames the sentinel without
+    // updating the doc.
+    // Scenario: unit-level mirror of the snapshot test, so a `detail`
+    // shape regression fails loudly without an insta accept.
+    #[test]
+    fn json_invocation_failed_has_sentinel_error_and_detail() {
+        let payload = JsonReport::Error(ErrorReport::InvocationFailed {
+            detail: "invocation failed: upsc: No such file or directory",
+        });
+        let text = serde_json::to_string_pretty(&payload).unwrap();
+        assert!(text.contains("\"invocation_failed\""));
+        assert!(text.contains("No such file or directory"));
+    }
+
     /*
      * Intent: query_ups returns QueryFailed when upsc exits non-zero.
      * Why it exists: non-zero exit is runner-integration state, not parser
@@ -493,6 +525,25 @@ mod tests {
             err.to_string()
                 .starts_with("upsc query failed: invocation failed: "),
             "unexpected display: {err}"
+        );
+    }
+
+    // Intent: cmd_ups_status under --json routes invocation failure
+    // through QueryFailedJsonReported.
+    // Why it exists: pins the contract main.rs depends on -- the
+    // JSON-reported sentinel tells the CLI shell to exit 1 without
+    // printing a duplicate human stderr line.
+    // Scenario: MockRunner with no UpscQuery mock seeded simulates a
+    // spawn failure (CmdError::MissingMock) under --json.
+    #[test]
+    fn cmd_ups_status_invocation_failure_json_returns_already_reported() {
+        let runner = MockRunner::default();
+        let dir = tempfile::tempdir().unwrap();
+        let cfg = ups_write_config(&dir, "ups");
+        let err = cmd_ups_status(&runner, &cfg, true).expect_err("query failure expected");
+        assert!(
+            matches!(err, UpsError::QueryFailedJsonReported),
+            "got {err:?}"
         );
     }
 
@@ -711,6 +762,22 @@ mod tests {
     fn snapshot_json_query_failed() {
         let payload = JsonReport::Error(ErrorReport::QueryFailed {
             detail: "exit 1: Error: Connection failure: Connection refused",
+        });
+        snap_json!(&payload);
+    }
+
+    // Intent: invocation-failed --json serializes to the
+    // `invocation_failed` sentinel with detail.
+    // Why it exists: scripts key off `.error == "invocation_failed"` to
+    // distinguish a broken braid wrapper / missing nut package from
+    // `query_failed` (live NUT state); a snapshot pins the exact JSON
+    // shape against accidental sentinel renames.
+    // Scenario: `braid ups status --json` when `upsc` cannot be spawned
+    // (e.g. wrapper PATH bug or nut packaging error).
+    #[test]
+    fn snapshot_json_invocation_failed() {
+        let payload = JsonReport::Error(ErrorReport::InvocationFailed {
+            detail: "invocation failed: upsc: No such file or directory",
         });
         snap_json!(&payload);
     }

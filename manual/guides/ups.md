@@ -80,9 +80,10 @@ sentinels are emitted for the common non-OK cases:
 
 | Condition | JSON shape | Exit code |
 | --- | --- | --- |
-| UPS query failed | `{"error": "query_failed", "detail": "exit 1: Error: Connection failure: ..."}` | 1 |
-| UPS not enabled | `{"error": "ups_not_enabled"}` | 0 |
 | UPS reachable | serialized `UpscOutput` | 0 |
+| UPS query failed | `{"error": "query_failed", "detail": "exit 1: Error: Connection failure: ..."}` | 1 |
+| UPS invocation failed (upsc could not run -- missing on PATH, killed by signal, or other runner-level failure) | `{"error": "invocation_failed", "detail": "invocation failed: ..."}` | 1 |
+| UPS not enabled | `{"error": "ups_not_enabled"}` | 0 |
 
 ## TUI UPS panel
 
