@@ -60,10 +60,17 @@ pub struct AckedDeviceCounters {
 // Load / save
 // ---------------------------------------------------------------------------
 
+/// Lossy loader: swallows both `NotFound` and parse errors into
+/// `AckedStats::default()`. Use only for test reload assertions or
+/// strictly read-only inspection. Production mutation paths must use
+/// `load_acked_stats_fallible` so corruption surfaces as
+/// `ComputationError` per ADR 014 (`docs/decisions/014-alerts.md:74`).
 pub fn load_acked_stats(paths: &StatePaths) -> AckedStats {
     load_acked_stats_at(&paths.acked_stats_json())
 }
 
+/// Path-based form of the lossy loader; keep production mutation paths on
+/// `load_acked_stats_fallible` so corrupt state cannot be treated as empty.
 pub fn load_acked_stats_at(path: &Path) -> AckedStats {
     let contents = match std::fs::read_to_string(path) {
         Ok(c) => c,

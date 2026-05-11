@@ -2,9 +2,7 @@
 use std::collections::BTreeMap;
 use std::collections::BTreeSet;
 
-use crate::alert::{
-    self, AlertCause, compute_alert_state, load_acked_stats, merge_into_latch, save_acked_stats,
-};
+use crate::alert::{self, AlertCause, compute_alert_state, merge_into_latch, save_acked_stats};
 use crate::cmd::{CmdRequest, CommandRunner};
 use crate::parse::parse_btrfs_device_stats;
 use crate::probe::{Filesystem, ProbeError, probe_pool};
@@ -92,8 +90,16 @@ pub fn cmd_monitor<R: CommandRunner, F: Filesystem + ?Sized>(
         Err(e) => return latch_computation_error(e.to_string(), paths),
     };
 
-    // 3. Load acked stats
-    let mut acked = load_acked_stats(paths);
+    // 3. Load acked stats. Fail closed if the file is unreadable or
+    // unparseable: an empty fallback would silently re-fire every acked
+    // cause as a BtrfsDeviceErrors / MissingDevice cause against a zero
+    // baseline.
+    let mut acked = match alert::load_acked_stats_fallible(paths) {
+        Ok(a) => a,
+        Err(e) => {
+            return latch_computation_error(format!("acked-stats unreadable -- {e}"), paths);
+        }
+    };
 
     // 4. Compute alert-local missing devids: btrfs MISSING ∪ null-underlying
     let alert_missing_devids = pool.alert_missing_devids();
@@ -264,6 +270,48 @@ mod tests {
         assert!(
             !paths.alert_latch_json().exists(),
             "no alert latch must be written for a benign stale row"
+        );
+    }
+
+    // Intent: cmd_monitor returns MonitorResult::Alert with exactly one
+    //   ComputationError cause whose detail names "acked-stats" when
+    //   acked-stats.json is unreadable / unparseable, and the corrupt
+    //   bytes on disk are preserved byte-identical.
+    // Why it exists: pins use of load_acked_stats_fallible (not the
+    //   lossy load_acked_stats) on monitor's mutation path. Without it,
+    //   cmd_monitor would treat a corrupt acked-stats.json as an empty
+    //   baseline and silently return MonitorResult::Ok against an
+    //   otherwise-healthy pool -- a fail-open hole in the indeterminate-
+    //   state contract pinned by ADR 014:74. The byte-identity assertion
+    //   also pins that monitor must not silently rewrite corrupt files
+    //   (mirrors ack.rs:1018-1022).
+    // Scenario: acked-stats.json was hand-edited to invalid JSON; the
+    //   pool is mounted and healthy, btrfs device stats reports zero
+    //   counters on both members. cmd_monitor must surface the
+    //   corruption as a single ComputationError cause and leave the
+    //   corrupt file on disk.
+    #[test]
+    fn cmd_monitor_corrupt_acked_stats_latches_computation_error() {
+        let (_dir, paths) = isolated_paths();
+        std::fs::write(paths.acked_stats_json(), b"not json").unwrap();
+        let original_bytes = std::fs::read(paths.acked_stats_json()).unwrap();
+        let runner = MonitorTestRunner::with_stale_mapper_stats();
+
+        let result = cmd_monitor(&runner, &monitor_fs_btrfs(), &monitor_mp(), &paths);
+        let detail = assert_monitor_single_computation_error(&result);
+        assert!(
+            detail.contains("acked-stats"),
+            "detail should name acked-stats failure, got {detail}"
+        );
+
+        assert!(
+            paths.alert_latch_json().exists(),
+            "alert latch must be written on acked-stats corruption"
+        );
+        let after_bytes = std::fs::read(paths.acked_stats_json()).unwrap();
+        assert_eq!(
+            after_bytes, original_bytes,
+            "corrupt acked-stats must not be silently overwritten"
         );
     }
 
