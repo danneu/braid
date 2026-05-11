@@ -474,7 +474,7 @@ pub fn cmd_remove_missing<R: CommandRunner + Sync, F: Filesystem + ?Sized>(
 /// valid operation. A hard "survivors lack space" outcome is a
 /// `RemoveMissingError::Validation` instead.
 #[derive(Debug)]
-pub(crate) enum RelocationCheck {
+enum RelocationCheck {
     Proceed,
     ProceedWithWarning(String),
 }
@@ -492,7 +492,7 @@ pub(crate) enum RelocationCheck {
 /// If the check itself fails (parse error, command error), the caller receives
 /// `ProceedWithWarning(body)` so it can surface the warning through the
 /// preview + execute paths without this helper printing directly.
-pub(crate) fn check_relocation_space<R: CommandRunner>(
+fn check_relocation_space<R: CommandRunner>(
     runner: &R,
     mount_point: &MountPoint,
     missing_id: Option<u64>,
