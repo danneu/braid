@@ -369,6 +369,62 @@ mod tests {
         assert!(deadline <= after + Duration::from_millis(500));
     }
 
+    // Intent: The full manual-refresh sequence
+    // (Mounted -> RefreshPool -> Refreshing -> PoolProbeFinished(Err)) must
+    // land on ErrorStale, preserving the error string and the pool snapshot
+    // that was visible before the user pressed 'r'.
+    // Why it exists: The stale banner renders only for ErrorStale, so the pool
+    // state must survive both RefreshPool's stale snapshot read and
+    // PoolProbeFinished's stale fallback.
+    // Scenario: User has a mounted pool on screen, presses 'r', and the
+    // subsequent btrfs spawn fails.
+    #[test]
+    fn refresh_then_probe_err_yields_error_stale_preserving_pool() {
+        const SENTINEL: u64 = 0xDEAD_BEEF_DEAD_BEEF;
+        let mut prev_pool = sample_pool();
+        prev_pool.capacity_used_bytes = SENTINEL;
+
+        let mut model =
+            Model::new_demo(sample_disk_names(), PoolStatus::Mounted(prev_pool.clone()));
+        let tmp = tempfile::tempdir().unwrap();
+        model.paths = Some(crate::state_paths::StatePaths::custom(tmp.path().into()));
+
+        update(&mut model, Message::RefreshPool);
+        match &model.pool {
+            PoolStatus::Refreshing(p) => assert_eq!(
+                p.capacity_used_bytes, SENTINEL,
+                "RefreshPool dropped the stale pool (Mounted -> Refreshing)"
+            ),
+            other => panic!(
+                "after RefreshPool: expected Refreshing(_), got discriminant {:?}",
+                std::mem::discriminant(other)
+            ),
+        }
+
+        update(
+            &mut model,
+            Message::PoolProbeFinished(
+                Err("btrfs spawn failed: ENOENT".to_owned()),
+                Duration::from_millis(50),
+            ),
+        );
+        match &model.pool {
+            PoolStatus::ErrorStale(msg, kept) => {
+                assert_eq!(msg, "btrfs spawn failed: ENOENT");
+                assert_eq!(
+                    kept.capacity_used_bytes, SENTINEL,
+                    "PoolProbeFinished(Err) dropped the stale pool",
+                );
+            }
+            other => panic!(
+                "after PoolProbeFinished(Err): expected ErrorStale, got discriminant {:?}",
+                std::mem::discriminant(other)
+            ),
+        }
+
+        drop(tmp);
+    }
+
     // Intent: in demo mode (paths None), Message::RefreshPool must be a true
     // no-op -- no probe effects of any kind, no spinner_deadline, no pool
     // state flip -- even when fan_control and ups_config are both set.

@@ -226,6 +226,14 @@ impl PoolStatus {
         }
     }
 
+    /// Error message from a failed refresh when stale pool data remains visible.
+    pub fn stale_error(&self) -> Option<&str> {
+        match self {
+            PoolStatus::ErrorStale(msg, _) => Some(msg.as_str()),
+            _ => None,
+        }
+    }
+
     pub fn is_inflight(&self) -> bool {
         matches!(self, PoolStatus::Loading | PoolStatus::Refreshing(_))
     }

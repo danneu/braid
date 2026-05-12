@@ -1308,6 +1308,8 @@ pub fn view(model: &Model, frame: &mut Frame, now: PrimitiveDateTime) {
         .map(|p| p.alert_state.active())
         .unwrap_or(false);
     let alert_height: u16 = if alert_active { 1 } else { 0 };
+    let stale_msg = model.pool.stale_error();
+    let stale_height: u16 = if stale_msg.is_some() { 1 } else { 0 };
 
     let mut constraints = Vec::new();
     if alert_height > 0 {
@@ -1315,6 +1317,9 @@ pub fn view(model: &Model, frame: &mut Frame, now: PrimitiveDateTime) {
     }
     if advisory_height > 0 {
         constraints.push(Constraint::Length(advisory_height));
+    }
+    if stale_height > 0 {
+        constraints.push(Constraint::Length(stale_height));
     }
     constraints.push(Constraint::Length(1)); // tab bar
     constraints.push(Constraint::Length(1)); // spacer
@@ -1348,6 +1353,18 @@ pub fn view(model: &Model, frame: &mut Frame, now: PrimitiveDateTime) {
             })
             .collect();
         frame.render_widget(Paragraph::new(lines), outer[off]);
+        off += 1;
+    }
+
+    if let Some(msg) = stale_msg {
+        let line = Line::from(Span::styled(
+            format!(" pool data stale -- last pool refresh failed: {msg} "),
+            Style::default()
+                .bg(Color::Yellow)
+                .fg(Color::Black)
+                .add_modifier(Modifier::BOLD),
+        ));
+        frame.render_widget(Paragraph::new(line), outer[off]);
         off += 1;
     }
 
@@ -1593,6 +1610,49 @@ pub(crate) mod tests {
         );
         let terminal = render(&model, 60, 22);
         snap!(buffer_to_string(&terminal));
+    }
+
+    // Intent: A failed pool re-probe renders a stale-data banner above the
+    // tab bar, keeps the stale pool body visible, and styles the banner as a
+    // bold yellow warning.
+    // Why it exists: ErrorStale preserves the last good pool snapshot through
+    // a transient probe failure. Dropping the error message would make stale
+    // data look fresh, and a text-only snapshot cannot pin the visual style.
+    // Scenario: User pressed 'r'; btrfs spawn failed transiently; the model is
+    // now ErrorStale("btrfs spawn failed: ENOENT", prev_pool).
+    #[test]
+    fn snapshot_stale_banner() {
+        let model = Model::new_demo(
+            sample_disk_names(),
+            PoolStatus::ErrorStale("btrfs spawn failed: ENOENT".to_owned(), sample_pool()),
+        );
+        let terminal = render(&model, 80, 24);
+        let out = buffer_to_string(&terminal);
+
+        assert!(
+            out.contains("pool data stale -- last pool refresh failed: btrfs spawn failed: ENOENT"),
+            "stale banner text missing from rendered output:\n{out}"
+        );
+
+        let buf = terminal.backend().buffer();
+        let banner_y: u16 = 0;
+        let mut checked = 0;
+        for x in 0..buf.area.width {
+            let cell = buf.cell((x, banner_y)).expect("cell in bounds");
+            if cell.symbol() == " " {
+                continue;
+            }
+            assert_eq!(cell.bg, Color::Yellow, "banner bg at x={x}");
+            assert_eq!(cell.fg, Color::Black, "banner fg at x={x}");
+            assert!(
+                cell.modifier.contains(Modifier::BOLD),
+                "banner BOLD modifier at x={x}"
+            );
+            checked += 1;
+        }
+        assert!(checked > 0, "banner row had no non-space cells");
+
+        snap!(out);
     }
 
     /*
