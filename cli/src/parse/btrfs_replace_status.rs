@@ -1,7 +1,110 @@
+use nom::{
+    IResult, Parser,
+    branch::alt,
+    bytes::complete::{tag, take_until, take_while_m_n, take_while1},
+    character::complete::u64 as parse_u64,
+    combinator::{all_consuming, recognize},
+    error::{Error, ErrorKind},
+};
+
 use crate::cmd::RawCommandOutput;
 
 use super::ParseError;
 use super::types::ReplaceState;
+
+fn parse_percent(input: &str) -> IResult<&str, f64> {
+    let (input, token) = recognize((
+        take_while1(|c: char| c.is_ascii_digit()),
+        tag("."),
+        take_while_m_n(1, 1, |c: char| c.is_ascii_digit()),
+        tag("%"),
+    ))
+    .parse(input)?;
+
+    let value = token
+        .strip_suffix('%')
+        .expect("percent parser includes trailing %")
+        .parse::<f64>()
+        .map_err(|_| nom::Err::Error(Error::new(token, ErrorKind::Float)))?;
+
+    if value.is_finite() && (0.0..=100.0).contains(&value) {
+        Ok((input, value))
+    } else {
+        Err(nom::Err::Error(Error::new(token, ErrorKind::Verify)))
+    }
+}
+
+fn parse_nonempty_until<'a>(input: &'a str, delimiter: &str) -> IResult<&'a str, &'a str> {
+    let original = input;
+    let (input, value) = take_until(delimiter)(input)?;
+    if value.is_empty() {
+        return Err(nom::Err::Error(Error::new(original, ErrorKind::Verify)));
+    }
+    Ok((input, value))
+}
+
+fn parse_error_counters(input: &str) -> IResult<&str, ()> {
+    let (input, _) = tag(", ")(input)?;
+    let (input, _) = parse_u64(input)?;
+    let (input, _) = tag(" write errs, ")(input)?;
+    let (input, _) = parse_u64(input)?;
+    let (input, _) = tag(" uncorr. read errs")(input)?;
+    Ok((input, ()))
+}
+
+fn parse_running(input: &str) -> IResult<&str, ReplaceState> {
+    let (input, pct) = parse_percent(input)?;
+    let (input, _) = tag(" done")(input)?;
+    let (input, _) = parse_error_counters(input)?;
+    Ok((input, ReplaceState::Running { pct }))
+}
+
+fn parse_finished(input: &str) -> IResult<&str, ReplaceState> {
+    let (input, _) = tag("Started on ")(input)?;
+    let (input, _) = parse_nonempty_until(input, ", finished on ")?;
+    let (input, _) = tag(", finished on ")(input)?;
+    let (input, _) = parse_nonempty_until(input, ", ")?;
+    let (input, _) = parse_error_counters(input)?;
+    Ok((input, ReplaceState::Finished))
+}
+
+fn parse_cancelled(input: &str) -> IResult<&str, ReplaceState> {
+    let (input, _) = tag("Started on ")(input)?;
+    let (input, _) = parse_nonempty_until(input, ", canceled on ")?;
+    let (input, _) = tag(", canceled on ")(input)?;
+    let (input, _) = parse_nonempty_until(input, " at ")?;
+    let (input, _) = tag(" at ")(input)?;
+    let (input, _) = parse_percent(input)?;
+    let (input, _) = parse_error_counters(input)?;
+    Ok((input, ReplaceState::Cancelled))
+}
+
+fn parse_suspended(input: &str) -> IResult<&str, ReplaceState> {
+    let (input, _) = tag("Started on ")(input)?;
+    let (input, _) = parse_nonempty_until(input, ", suspended on ")?;
+    let (input, _) = tag(", suspended on ")(input)?;
+    let (input, _) = parse_nonempty_until(input, " at ")?;
+    let (input, _) = tag(" at ")(input)?;
+    let (input, pct) = parse_percent(input)?;
+    let (input, _) = parse_error_counters(input)?;
+    Ok((input, ReplaceState::Suspended { pct }))
+}
+
+fn parse_never_started(input: &str) -> IResult<&str, ReplaceState> {
+    let (input, _) = tag("Never started")(input)?;
+    Ok((input, ReplaceState::NotStarted))
+}
+
+fn parse_replace_status_line(input: &str) -> IResult<&str, ReplaceState> {
+    all_consuming(alt((
+        parse_running,
+        parse_finished,
+        parse_cancelled,
+        parse_suspended,
+        parse_never_started,
+    )))
+    .parse(input)
+}
 
 /// Parse the output of `btrfs replace status -1 <mount_point>`.
 ///
@@ -12,10 +115,9 @@ use super::types::ReplaceState;
 /// - Suspended: "Started on <t1>, suspended on <t2> at 12.5%, ..."
 /// - Never started: "Never started"
 ///
-/// Any other zero-exit stdout returns `Err(ParseError::InvalidText)` --
-/// upstream `btrfs-progs` emits one of the strings above for every
-/// success-exit case, so unrecognised output means the contract drifted and
-/// callers must not silently bucket it as `NotStarted`.
+/// The zero-exit stdout must trim to exactly one recognised status line. Any
+/// other text returns `Err(ParseError::InvalidText)` because upstream
+/// `btrfs-progs` emits one of the strings above for every success-exit case.
 pub fn parse_btrfs_replace_status(raw: &RawCommandOutput) -> Result<ReplaceState, ParseError> {
     if raw.exit_status != 0 {
         return Err(ParseError::CommandFailed {
@@ -27,55 +129,12 @@ pub fn parse_btrfs_replace_status(raw: &RawCommandOutput) -> Result<ReplaceState
 
     let stdout = &raw.stdout;
 
-    // "finished on" indicates completion
-    if stdout.contains("finished on") {
-        return Ok(ReplaceState::Finished);
-    }
-
-    if stdout.contains("canceled on") {
-        return Ok(ReplaceState::Cancelled);
-    }
-
-    if stdout.contains("suspended on") {
-        return Ok(ReplaceState::Suspended {
-            pct: extract_percent(stdout).unwrap_or(0.0),
-        });
-    }
-
-    if stdout.contains("Never started") {
-        return Ok(ReplaceState::NotStarted);
-    }
-
-    // Look for percentage: "45.3% done" or "100.0% done".
-    if stdout.contains("% done")
-        && let Some(pct) = extract_percent(stdout)
-    {
-        return Ok(ReplaceState::Running { pct });
-    }
-
-    Err(ParseError::InvalidText {
-        cmd: raw.cmd.clone(),
-        detail: format!("unrecognised btrfs replace status output: {stdout:?}"),
-    })
-}
-
-fn extract_percent(text: &str) -> Option<f64> {
-    // Match an "NN.N%" token anywhere in the output.
-    for line in text.lines() {
-        let trimmed = line.trim();
-        if let Some(pos) = trimmed.find('%') {
-            // Walk backwards from the '%' to find the start of the number
-            let before = &trimmed[..pos];
-            let num_start = before
-                .rfind(|c: char| !c.is_ascii_digit() && c != '.')
-                .map(|i| i + 1)
-                .unwrap_or(0);
-            if let Ok(pct) = before[num_start..].parse::<f64>() {
-                return Some(pct);
-            }
-        }
-    }
-    None
+    parse_replace_status_line(stdout.trim())
+        .map(|(_, state)| state)
+        .map_err(|_| ParseError::InvalidText {
+            cmd: raw.cmd.clone(),
+            detail: format!("unrecognised btrfs replace status output: {stdout:?}"),
+        })
 }
 
 #[cfg(test)]
@@ -89,6 +148,14 @@ mod tests {
             stderr: String::new(),
             exit_status: 0,
         }
+    }
+
+    fn assert_invalid_text(stdout: &str) {
+        let err = parse_btrfs_replace_status(&raw(stdout)).unwrap_err();
+        assert!(
+            matches!(err, ParseError::InvalidText { .. }),
+            "expected InvalidText for {stdout:?}, got {err:?}"
+        );
     }
 
     #[test]
@@ -158,7 +225,8 @@ mod tests {
     }
 
     #[test]
-    // Intent: "Never started" output maps to the lenient NotStarted bucket.
+    // Intent: "Never started" output maps to the exact idle state emitted by
+    // btrfs-progs.
     // Why it exists: btrfs-progs replace.c:486-490 emits this exact output
     // with skip_stats = 1, so no percentage or error counters follow it.
     // Scenario: a fixture capture checks replace status before any replace
@@ -169,19 +237,15 @@ mod tests {
     }
 
     #[test]
-    // Intent: suspended output without a percent token still maps to
-    // Suspended with a defensive zero progress value.
-    // Why it exists: the prefix is more important than the rendering detail;
-    // future btrfs-progs formatting drift should not collapse a suspended
-    // kernel operation into NotStarted.
-    // Scenario: status text keeps the suspended state word but omits the
+    // Intent: suspended output without a percentage is rejected.
+    // Why it exists: upstream includes progress2string for every suspended
+    // status, so missing progress means the rendered grammar drifted.
+    // Scenario: btrfs-progs keeps the suspended state word but omits the
     // "at NN.N%" fragment.
-    fn suspended_no_percent_token_falls_back_to_zero() {
-        let out = parse_btrfs_replace_status(&raw(
+    fn suspended_no_percent_token_returns_err() {
+        assert_invalid_text(
             "Started on 27.Feb 10:30:00, suspended on 27.Feb 10:35:00, 0 write errs, 0 uncorr. read errs\n",
-        ))
-        .unwrap();
-        assert_eq!(out, ReplaceState::Suspended { pct: 0.0 });
+        );
     }
 
     #[test]
@@ -240,6 +304,62 @@ mod tests {
                 );
             }
             other => panic!("expected InvalidText, got {other:?}"),
+        }
+    }
+
+    #[test]
+    // Intent: a zero-exit "no operation running" line is rejected.
+    // Why it exists: current btrfs-progs emits "Never started" for the idle
+    // state; accepting stale wording would hide output-contract drift.
+    // Scenario: an older or fictional btrfs-progs build returns an idle phrase
+    // that braid no longer treats as authoritative.
+    fn no_operation_running_returns_err() {
+        assert_invalid_text("no operation running\n");
+    }
+
+    #[test]
+    // Intent: the running percentage accepts only progress2string syntax.
+    // Why it exists: Rust float parsing accepts signs, exponent notation, and
+    // special values that upstream cannot produce.
+    // Scenario: malformed status text includes a percent-like token and must
+    // fail closed instead of being normalized into progress.
+    fn invalid_percent_forms_return_err() {
+        let cases = [
+            "-1.0% done, 0 write errs, 0 uncorr. read errs\n",
+            "+1.0% done, 0 write errs, 0 uncorr. read errs\n",
+            "1% done, 0 write errs, 0 uncorr. read errs\n",
+            "1.23% done, 0 write errs, 0 uncorr. read errs\n",
+            "1.% done, 0 write errs, 0 uncorr. read errs\n",
+            "1.0e1% done, 0 write errs, 0 uncorr. read errs\n",
+            "NaN% done, 0 write errs, 0 uncorr. read errs\n",
+            "inf% done, 0 write errs, 0 uncorr. read errs\n",
+            "100.1% done, 0 write errs, 0 uncorr. read errs\n",
+        ];
+
+        for case in cases {
+            assert_invalid_text(case);
+        }
+    }
+
+    #[test]
+    // Intent: status lines must be complete, single-line, and fully anchored.
+    // Why it exists: substring parsing previously accepted prefixes, embedded
+    // extra lines, and counterless output that upstream does not produce.
+    // Scenario: a future output change preserves a familiar fragment but drops
+    // required context that callers need for fail-closed classification.
+    fn rejects_partial_multiline_and_counterless_output() {
+        let cases = [
+            "prefix Never started\n",
+            "Never started\njunk\n",
+            "45.3% done\n",
+            "45.3% done, 0 write errs\n",
+            "45.3% done, 0 write errs, 0 uncorr. read errs extra\n",
+            "Started on 27.Feb 10:30:00, finished on 27.Feb 10:35:00\n",
+            "Started on 27.Feb 10:30:00, canceled on 27.Feb 10:35:00 at 0.0%\n",
+        ];
+
+        for case in cases {
+            assert_invalid_text(case);
         }
     }
 

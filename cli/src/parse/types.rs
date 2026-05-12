@@ -393,8 +393,7 @@ pub struct SmartProbe {
 /// btrfs replace status
 #[derive(Debug, Clone, PartialEq)]
 pub enum ReplaceState {
-    /// Filesystem has never had a replace issued, or status output was empty
-    /// / idle. Distinguishing those cases is not actionable for callers.
+    /// Filesystem has never had a replace issued.
     NotStarted,
     /// Replace in progress with percentage.
     Running { pct: f64 },

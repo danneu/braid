@@ -137,6 +137,7 @@ machine.succeed(
 # 14. btrfs balance status (paused after skip_balance remount)
 # Captures the exact output btrfs-progs produces when counters are reset to 0/0.
 # This is the canary for formatting drift (e.g. nan vs -nan).
+import base64
 import re
 import time
 
@@ -261,6 +262,11 @@ assert not saw_finished_too_early, (
 assert saw_in_flight, (
     "Never observed btrfs replace in-flight -- canceled fixture cannot "
     "be captured deterministically. Last status:\n" + last_status
+)
+last_status_b64 = base64.b64encode(last_status.encode()).decode()
+machine.succeed(
+    f"printf %s {last_status_b64} | base64 -d"
+    f" > {FIXTURE_DIR}/btrfs-replace-status-running.txt"
 )
 
 # `btrfs replace cancel` returns once scrub cancel is requested, but the

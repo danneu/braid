@@ -241,6 +241,23 @@ golden_test!(
 );
 
 golden_test!(
+    golden_btrfs_replace_status_running,
+    "btrfs-replace-status-running.txt",
+    "btrfs replace status",
+    parse::btrfs_replace_status::parse_btrfs_replace_status,
+    |out: parse::types::ReplaceState| match out {
+        parse::types::ReplaceState::Running { pct } => {
+            assert!(pct.is_finite(), "running percent must be finite");
+            assert!(
+                (0.0..=100.0).contains(&pct),
+                "running percent must be in range, got {pct}"
+            );
+        }
+        other => panic!("expected Running, got {other:?}"),
+    }
+);
+
+golden_test!(
     golden_btrfs_replace_status_finished,
     "btrfs-replace-status-finished.txt",
     "btrfs replace status",
