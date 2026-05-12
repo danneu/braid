@@ -6,7 +6,7 @@ use crate::parse::{
 };
 use crate::secret::Passphrase;
 use crate::state_paths::StatePaths;
-use crate::types::{ByIdPath, LuksUuid, MapperName, PoolDevice};
+use crate::types::{ByIdPath, LuksFormatExtraOpts, LuksUuid, MapperName, PoolDevice};
 use std::io::{Read, Write};
 use std::os::unix::fs::PermissionsExt;
 use std::os::unix::io::{AsRawFd, RawFd};
@@ -417,17 +417,28 @@ fn check_passphrase_match(first: Passphrase, second: Passphrase) -> Result<Passp
     }
 }
 
-/// LUKS format a device with the given passphrase.
+/// LUKS format a device with the given passphrase, journaled `uuid`, and
+/// braid-derived `label`. The caller produces `uuid` (typically via
+/// `LuksUuid::new_v4()` at the planning site for fresh-format paths, or the
+/// preserved journaled value on a recovery replay) so a mid-format crash
+/// and replay reformat under the same identity, and so the same UUID is
+/// recorded in `OpKind::Add`/`OpKind::Replace` from t=0. `extra_opts`
+/// carries already-validated user argv extras (managed flags `--uuid`
+/// and `--label` are rejected by `LuksFormatExtraOpts::parse`).
 pub fn luks_format<R: CommandRunner>(
     runner: &R,
     device: &str,
     passphrase: &Passphrase,
-    extra_opts: &[String],
+    uuid: &LuksUuid,
+    label: &str,
+    extra_opts: &LuksFormatExtraOpts,
 ) -> Result<(), LuksError> {
     let result = runner.run_with_stdin(
         &CmdRequest::CryptsetupLuksFormat {
             device: device.to_owned(),
-            extra_opts: extra_opts.to_vec(),
+            uuid: uuid.clone(),
+            label: label.to_owned(),
+            extra_opts: extra_opts.clone(),
         },
         passphrase.expose_secret().as_bytes(),
     )?;
@@ -2195,10 +2206,16 @@ mod tests {
      */
     #[test]
     fn luks_format_exit_2_mentions_permission() {
+        // Test-module seed allocation: cli/src/luks.rs uses 200 (deterministic
+        // fixed UUID is enough; these tests do not assert on the UUID value).
+        let uuid = LuksUuid::parse("00000000-0000-0000-0000-000000000200").unwrap();
+        let extras = LuksFormatExtraOpts::default();
         let runner = MockRunner::default().with_output_stdin(
             CmdRequest::CryptsetupLuksFormat {
                 device: "/dev/sda".into(),
-                extra_opts: vec![],
+                uuid: uuid.clone(),
+                label: "braid-test".into(),
+                extra_opts: extras.clone(),
             },
             b"pass".to_vec(),
             RawCommandOutput {
@@ -2208,7 +2225,15 @@ mod tests {
                 exit_status: 2,
             },
         );
-        let err = luks_format(&runner, "/dev/sda", &zpass("pass"), &[]).unwrap_err();
+        let err = luks_format(
+            &runner,
+            "/dev/sda",
+            &zpass("pass"),
+            &uuid,
+            "braid-test",
+            &extras,
+        )
+        .unwrap_err();
         let msg = err.to_string();
         assert!(
             msg.contains("exit 2"),
@@ -2231,10 +2256,14 @@ mod tests {
      */
     #[test]
     fn luks_format_exit_4_mentions_device_not_found() {
+        let uuid = LuksUuid::parse("00000000-0000-0000-0000-000000000200").unwrap();
+        let extras = LuksFormatExtraOpts::default();
         let runner = MockRunner::default().with_output_stdin(
             CmdRequest::CryptsetupLuksFormat {
                 device: "/dev/sdz".into(),
-                extra_opts: vec![],
+                uuid: uuid.clone(),
+                label: "braid-test".into(),
+                extra_opts: extras.clone(),
             },
             b"pass".to_vec(),
             RawCommandOutput {
@@ -2244,7 +2273,15 @@ mod tests {
                 exit_status: 4,
             },
         );
-        let err = luks_format(&runner, "/dev/sdz", &zpass("pass"), &[]).unwrap_err();
+        let err = luks_format(
+            &runner,
+            "/dev/sdz",
+            &zpass("pass"),
+            &uuid,
+            "braid-test",
+            &extras,
+        )
+        .unwrap_err();
         let msg = err.to_string();
         assert!(
             msg.contains("exit 4"),

@@ -217,7 +217,7 @@ fn discover_from_dir<R: CommandRunner>(
         let Some(disk_name) = crate::config::name_from_mapper(&label) else {
             continue;
         };
-        if !crate::membership::is_valid_disk_name(disk_name) {
+        if crate::types::DiskName::parse(disk_name).is_err() {
             warnings.push(DiscoverWarning::InvalidDiskName {
                 path: path_str.clone(),
                 label: label.clone(),

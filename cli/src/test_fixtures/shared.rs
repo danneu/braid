@@ -7,9 +7,57 @@ use crate::inhibit::RecordingInhibitor;
 use crate::membership::{self, DiskMember, PoolMembership};
 use crate::probe::Filesystem;
 use crate::state_paths::StatePaths;
-use crate::types::{ByIdPath, MountPoint};
+use crate::types::{ByIdPath, DiskName, LuksUuid, MountPoint};
 use std::path::PathBuf;
 use tempfile::TempDir;
+
+// ---------------------------------------------------------------------------
+// UUID-keyed fixture helpers (introduced ahead of the recover.rs / per-command
+// fixture rekey so subsequent fixture rekeys are mechanical).
+// ---------------------------------------------------------------------------
+
+/// Deterministic fixture-only `LuksUuid` generator. The first 20 hex
+/// digits are zero so `seed` is the only varying bits, which makes
+/// UUID-lex order identical to seed order. Production code never calls
+/// this helper -- it is the single source of truth for test UUIDs so
+/// per-module seed allocation (see plan) yields stable on-disk diffs.
+pub(crate) fn test_uuid(seed: u64) -> LuksUuid {
+    LuksUuid::parse(&format!("00000000-0000-0000-0000-{:012x}", seed))
+        .expect("hand-padded UUID is canonical")
+}
+
+/// Build a `(LuksUuid, DiskMember)` pair for use as the value half of a
+/// `PoolMembership::insert(uuid, member)` call. Devid and added_at
+/// default to `None`; tests that need them populated use
+/// `disk_member_with`.
+pub(crate) fn disk_member(seed: u64, name: &str, by_id: &str) -> (LuksUuid, DiskMember) {
+    (
+        test_uuid(seed),
+        DiskMember {
+            name: DiskName::parse(name).expect("valid disk name in fixture"),
+            by_id: ByIdPath::parse(by_id).expect("valid by-id path in fixture"),
+            devid: None,
+            added_at: None,
+        },
+    )
+}
+
+/// Build a `(LuksUuid, DiskMember)` pair with an explicit `devid` and/or
+/// `added_at`. Same shape as `disk_member` so fixture call sites stay
+/// one-line for the common case.
+#[allow(dead_code)]
+pub(crate) fn disk_member_with(
+    seed: u64,
+    name: &str,
+    by_id: &str,
+    devid: Option<u64>,
+    added_at: Option<&str>,
+) -> (LuksUuid, DiskMember) {
+    let (uuid, mut m) = disk_member(seed, name, by_id);
+    m.devid = devid;
+    m.added_at = added_at.map(|s| s.to_owned());
+    (uuid, m)
+}
 
 /// Single source of truth for the passphrase bytes the fixture writes to
 /// `pass_path` and that scope-local stdin expectations match against.

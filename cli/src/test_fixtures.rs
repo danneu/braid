@@ -202,7 +202,9 @@ pub(crate) use scrub::{
     scrub_status_interrupted, scrub_status_never, scrub_status_running, scrub_status_unknown,
 };
 #[allow(unused_imports)]
-pub(crate) use shared::{MockFs, PoolFixture, TEST_PASSPHRASE_BYTES, mock_ok};
+pub(crate) use shared::{
+    MockFs, PoolFixture, TEST_PASSPHRASE_BYTES, disk_member, disk_member_with, mock_ok, test_uuid,
+};
 #[allow(unused_imports)]
 pub(crate) use status::{
     status_btrfs_device_stats_3disk, status_btrfs_device_usage_raw_1disk,
