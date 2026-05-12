@@ -165,10 +165,13 @@ fn decode_octal_escapes(s: &str) -> String {
     String::from_utf8(out).expect("UTF-8 preserved by construction")
 }
 
-/// IO wrapper that goes through the existing `Filesystem` trait so tests
-/// can mock `/proc/self/mountinfo` content via the same MockFs they use for
-/// sysfs reads. Production paths get `RealFilesystem`, which delegates to
-/// `std::fs::read_to_string`.
+/// Checks whether `target` is a mounted btrfs filesystem.
+///
+/// Reads `/proc/self/mountinfo` through the existing `Filesystem` trait. An
+/// `Ok(false)` result only means a well-formed mountinfo body has no btrfs
+/// mount at `target`. IO errors, malformed lines, and duplicate target entries
+/// return `MountInfoError`; safety-critical callers should treat those errors
+/// as indeterminate and fail closed.
 pub fn is_btrfs_mounted<F: Filesystem + ?Sized>(
     fs: &F,
     target: &str,

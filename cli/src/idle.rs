@@ -1,5 +1,4 @@
 use crate::cmd::{CmdRequest, CommandRunner};
-use crate::mount_check::MountInfoError;
 use crate::parse::{ScrubState, parse_btrfs_scrub_status};
 use crate::preflight::{ExclusiveOp, ExclusiveOpError, check_any_btrfs_exclusive_op};
 use crate::probe::Filesystem;
@@ -59,7 +58,7 @@ pub fn cmd_idle<R: CommandRunner, F: Filesystem + ?Sized>(
     mount_point: &MountPoint,
 ) -> IdleResult {
     // 1. Pool offline -- nothing to protect.
-    let mounted = match is_btrfs_mounted(fs, mount_point) {
+    let mounted = match crate::mount_check::is_btrfs_mounted(fs, mount_point.as_str()) {
         Ok(mounted) => mounted,
         Err(e) => return busy_unknown(e),
     };
@@ -119,23 +118,6 @@ fn busy_from_exclop(op: ExclusiveOp) -> BusyReason {
         ExclusiveOp::Resize => BusyReason::Resize,
         ExclusiveOp::SwapActivate => BusyReason::SwapActivate,
     }
-}
-
-/// Check whether `mount_point` is a mounted btrfs filesystem.
-///
-/// Reads `/proc/self/mountinfo` directly via the `Filesystem` abstraction
-/// rather than shelling out to `findmnt`. The mount probe is a fail-closed
-/// safety gate (autosuspend uses the exit code to decide whether to suspend);
-/// any subprocess fallback path that maps "non-zero exit + empty stderr" to
-/// "no mount" reintroduces a fail-open seam. IO errors, malformed mountinfo
-/// lines, and ambiguous duplicate target entries all surface as
-/// `BusyReason::Unknown`, which `main.rs` maps to exit 1 and autosuspend
-/// then treats as activity. See docs/decisions/016-auto-suspend.md.
-fn is_btrfs_mounted<F: Filesystem + ?Sized>(
-    fs: &F,
-    mount_point: &MountPoint,
-) -> Result<bool, MountInfoError> {
-    crate::mount_check::is_btrfs_mounted(fs, mount_point.as_str())
 }
 
 #[cfg(test)]
