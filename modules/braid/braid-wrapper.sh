@@ -33,15 +33,16 @@ case "${BRAID_SYSTEMD_EXECSTOP:-}" in
   1|true|yes) in_systemd_execstop=true ;;
 esac
 
-# Pool and alert-state mutators acquire /run/braid-pool.lock before the
-# CLI runs. The lock intentionally spans subprocess I/O as well as JSON
-# file writes, so monitor cannot compare pre-ack btrfs stats against a
-# post-ack baseline and re-latch a stale alert.
+# Pool mutators, alert-state mutators, and discover acquire
+# /run/braid-pool.lock before the CLI runs. The lock intentionally spans
+# subprocess I/O as well as JSON file writes, so monitor cannot compare
+# pre-ack btrfs stats against a post-ack baseline and re-latch a stale
+# alert.
 #
 # Contention behavior is per command:
-# - unlock/add/recover/remove/remove-missing/replace: non-blocking fail-fast for
-#   interactive pool mutation; the user retries once the active operation
-#   finishes.
+# - unlock/add/recover/remove/remove-missing/replace/discover: non-blocking
+#   fail-fast for interactive pool-state work; the user retries once the active
+#   operation finishes.
 # - ack: wait briefly for a monitor cycle, but bound the wait so a stuck
 #   pool operation still returns a clear retry message.
 # - monitor: non-blocking silent exit 0; a missed timer cycle is harmless,
@@ -49,7 +50,7 @@ esac
 # This enforces mutual exclusion at the critical section itself, not via
 # systemd unit topology. See Principle 12.
 case "$subcmd" in
-  unlock|add|recover|remove|remove-missing|replace)
+  unlock|add|recover|remove|remove-missing|replace|discover)
     if ! $skip_fixup; then
       exec 9>/run/braid-pool.lock
       if ! @flockBin@ -n 9; then
