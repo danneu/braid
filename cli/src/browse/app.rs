@@ -334,6 +334,57 @@ mod tests {
         assert!(effects.is_empty());
     }
 
+    // Intent: PageDown in SubvolDetail advances by one viewport and clamps at
+    // the last full viewport start.
+    //
+    // Why it exists: detail-mode Ctrl-D depends on this existing app-level
+    // message behavior; keymap tests alone would not catch a broken scroll
+    // contract.
+    //
+    // Scenario: user pages down through long subvolume detail output near the
+    // end of the visible content.
+    #[test]
+    fn page_down_in_subvol_detail_advances_by_viewport_and_clamps() {
+        let output = (0..10).map(|i| format!("line{i}")).collect();
+        let mut model = Model::new_demo("/mnt/storage", Tab::Subvolumes, output);
+        model.mode = ViewMode::SubvolDetail;
+        model.viewport_height = 4;
+
+        let effects = update(&mut model, Message::PageDown);
+        assert!(effects.is_empty());
+        assert_eq!(model.scroll_offset, 4);
+
+        let effects = update(&mut model, Message::PageDown);
+        assert!(effects.is_empty());
+        assert_eq!(model.scroll_offset, 6);
+    }
+
+    // Intent: PageUp in SubvolDetail moves up by one viewport and saturates at
+    // zero.
+    //
+    // Why it exists: detail-mode Ctrl-U depends on this existing app-level
+    // message behavior; keymap tests alone would not catch a broken scroll
+    // contract.
+    //
+    // Scenario: user pages upward from near the end of long subvolume detail
+    // output, then pages up again past the beginning.
+    #[test]
+    fn page_up_in_subvol_detail_subtracts_by_viewport_and_saturates() {
+        let output = (0..10).map(|i| format!("line{i}")).collect();
+        let mut model = Model::new_demo("/mnt/storage", Tab::Subvolumes, output);
+        model.mode = ViewMode::SubvolDetail;
+        model.viewport_height = 4;
+        model.scroll_offset = 6;
+
+        let effects = update(&mut model, Message::PageUp);
+        assert!(effects.is_empty());
+        assert_eq!(model.scroll_offset, 2);
+
+        let effects = update(&mut model, Message::PageUp);
+        assert!(effects.is_empty());
+        assert_eq!(model.scroll_offset, 0);
+    }
+
     // Intent: a `btrfs subvolume show` response that arrives after Back is
     // dropped instead of clobbering the restored list view.
     //

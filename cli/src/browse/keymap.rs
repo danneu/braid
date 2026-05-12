@@ -16,14 +16,18 @@ pub fn handle_key(key: KeyEvent, mode: &ViewMode) -> Option<Message> {
     }
 
     if matches!(mode, ViewMode::SubvolDetail) {
-        return match key.code {
-            KeyCode::Esc | KeyCode::Backspace => Some(Message::Back),
-            KeyCode::Char('q') => Some(Message::Quit),
-            KeyCode::Char('r') => Some(Message::Reload),
-            KeyCode::Char('j') | KeyCode::Down => Some(Message::ScrollDown),
-            KeyCode::Char('k') | KeyCode::Up => Some(Message::ScrollUp),
-            KeyCode::Char('?') => Some(Message::ToggleHelp),
-            _ => None,
+        return match (key.code, key.modifiers) {
+            (KeyCode::Char('d'), KeyModifiers::CONTROL) => Some(Message::PageDown),
+            (KeyCode::Char('u'), KeyModifiers::CONTROL) => Some(Message::PageUp),
+            _ => match key.code {
+                KeyCode::Esc | KeyCode::Backspace => Some(Message::Back),
+                KeyCode::Char('q') => Some(Message::Quit),
+                KeyCode::Char('r') => Some(Message::Reload),
+                KeyCode::Char('j') | KeyCode::Down => Some(Message::ScrollDown),
+                KeyCode::Char('k') | KeyCode::Up => Some(Message::ScrollUp),
+                KeyCode::Char('?') => Some(Message::ToggleHelp),
+                _ => None,
+            },
         };
     }
 
@@ -80,6 +84,38 @@ mod tests {
         assert!(matches!(
             handle_key(key, &ViewMode::SubvolDetail),
             Some(Message::Back)
+        ));
+    }
+
+    // Intent: Ctrl-D in SubvolDetail emits PageDown.
+    //
+    // Why it exists: the detail footer advertises page scrolling, and the
+    // detail-mode allow-list must route that key to the existing update path.
+    //
+    // Scenario: user is reading long subvolume detail output and presses
+    // Ctrl-D to move down by one page.
+    #[test]
+    fn ctrl_d_pages_down_in_detail() {
+        let key = KeyEvent::new(KeyCode::Char('d'), KeyModifiers::CONTROL);
+        assert!(matches!(
+            handle_key(key, &ViewMode::SubvolDetail),
+            Some(Message::PageDown)
+        ));
+    }
+
+    // Intent: Ctrl-U in SubvolDetail emits PageUp.
+    //
+    // Why it exists: the detail footer advertises page scrolling, and the
+    // detail-mode allow-list must route that key to the existing update path.
+    //
+    // Scenario: user is reading long subvolume detail output and presses
+    // Ctrl-U to move up by one page.
+    #[test]
+    fn ctrl_u_pages_up_in_detail() {
+        let key = KeyEvent::new(KeyCode::Char('u'), KeyModifiers::CONTROL);
+        assert!(matches!(
+            handle_key(key, &ViewMode::SubvolDetail),
+            Some(Message::PageUp)
         ));
     }
 
