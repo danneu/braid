@@ -11,7 +11,7 @@ use crate::probe::Filesystem;
 use crate::state_paths::StatePaths;
 use crate::status::format_bytes;
 use crate::types::{MountPoint, PoolState};
-use crate::ups::{UpsQueryError, query_ups};
+use crate::ups::{query_ups, UpsQueryError};
 
 /// Refuse if pool.json lists members but the pool is not mounted (locked).
 /// Catches the silent-bootstrap case where `braid add` against a locked pool
@@ -67,7 +67,7 @@ pub fn check_no_pending_operation(paths: &StatePaths) -> Result<(), String> {
 /// String values follow `exclop_def[]` in btrfs-progs
 /// `common/utils.c:1186-1194` (vendored in `reference/btrfs-progs/`).
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) enum ExclusiveOp {
+pub enum ExclusiveOp {
     Balance,
     BalancePaused,
     DeviceAdd,

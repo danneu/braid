@@ -87,7 +87,7 @@ Each piece of the block is load-bearing:
 2. If not mounted: returns idle (exit 0)
 3. Reads `/sys/fs/btrfs/*/exclusive_operation` for any active exclusive operation on any btrfs filesystem: `balance`, `balance paused`, `device add`, `device remove`, `device replace`, `resize`, `swap activate`
 4. If sysfs reports a busy operation or the sysfs probe fails, returns immediately before probing scrub
-5. Checks scrub status via `btrfs scrub status` (scrub is not in the kernel exclusive-operation set, so sysfs cannot detect it)
+5. Probes scrub status via `btrfs scrub status` only after the sysfs scan is clean (scrub is not in the kernel exclusive-operation set, so sysfs cannot detect it)
 
 ## Related commands
 

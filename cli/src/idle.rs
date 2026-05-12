@@ -1,6 +1,6 @@
 use crate::cmd::{CmdRequest, CommandRunner};
-use crate::parse::{ScrubState, parse_btrfs_scrub_status};
-use crate::preflight::{ExclusiveOp, ExclusiveOpError, check_any_btrfs_exclusive_op};
+use crate::parse::{parse_btrfs_scrub_status, ScrubState};
+use crate::preflight::{check_any_btrfs_exclusive_op, ExclusiveOp, ExclusiveOpError};
 use crate::probe::Filesystem;
 use crate::progress::pct_from_bytes;
 use crate::types::MountPoint;
@@ -23,16 +23,10 @@ pub enum BusyReason {
     /// not in the kernel exclusive-operation set (see
     /// `reference/btrfs-progs/common/utils.c:1188-1197`), so sysfs cannot
     /// detect or quantify it.
-    ScrubRunning {
-        pct: Option<u8>,
-    },
-    Balance,
-    BalancePaused,
-    DeviceAdd,
-    DeviceRemove,
-    DeviceReplace,
-    Resize,
-    SwapActivate,
+    ScrubRunning { pct: Option<u8> },
+    /// Shared sysfs exclusive-op identity so idle and mutating-command
+    /// preflight cannot drift on the set of operations that block suspend.
+    Exclop(ExclusiveOp),
 }
 
 impl std::fmt::Display for BusyReason {
@@ -41,13 +35,9 @@ impl std::fmt::Display for BusyReason {
             BusyReason::Unknown(msg) => write!(f, "unknown ({msg})"),
             BusyReason::ScrubRunning { pct: Some(p) } => write!(f, "scrub running ({p}%)"),
             BusyReason::ScrubRunning { pct: None } => write!(f, "scrub running"),
-            BusyReason::Balance => write!(f, "balance running"),
-            BusyReason::BalancePaused => write!(f, "balance paused"),
-            BusyReason::DeviceAdd => write!(f, "device add in progress"),
-            BusyReason::DeviceRemove => write!(f, "device remove in progress"),
-            BusyReason::DeviceReplace => write!(f, "device replace in progress"),
-            BusyReason::Resize => write!(f, "resize in progress"),
-            BusyReason::SwapActivate => write!(f, "swap activate in progress"),
+            BusyReason::Exclop(ExclusiveOp::Balance) => write!(f, "balance running"),
+            BusyReason::Exclop(ExclusiveOp::BalancePaused) => write!(f, "balance paused"),
+            BusyReason::Exclop(op) => write!(f, "{op} in progress"),
         }
     }
 }
@@ -73,7 +63,7 @@ pub fn cmd_idle<R: CommandRunner, F: Filesystem + ?Sized>(
     //    docs/decisions/016-auto-suspend.md for the any-busy semantic.
     match check_any_btrfs_exclusive_op(fs) {
         Ok(()) => {}
-        Err(ExclusiveOpError::Busy(op)) => return IdleResult::Busy(busy_from_exclop(op)),
+        Err(ExclusiveOpError::Busy(op)) => return IdleResult::Busy(BusyReason::Exclop(op)),
         Err(e @ (ExclusiveOpError::Read(_) | ExclusiveOpError::Unrecognized(_))) => {
             return busy_unknown("sysfs", e);
         }
@@ -111,25 +101,14 @@ fn busy_unknown(layer: &str, e: impl std::fmt::Display) -> IdleResult {
     IdleResult::Busy(BusyReason::Unknown(format!("{layer}: {e}")))
 }
 
-fn busy_from_exclop(op: ExclusiveOp) -> BusyReason {
-    match op {
-        ExclusiveOp::Balance => BusyReason::Balance,
-        ExclusiveOp::BalancePaused => BusyReason::BalancePaused,
-        ExclusiveOp::DeviceAdd => BusyReason::DeviceAdd,
-        ExclusiveOp::DeviceRemove => BusyReason::DeviceRemove,
-        ExclusiveOp::DeviceReplace => BusyReason::DeviceReplace,
-        ExclusiveOp::Resize => BusyReason::Resize,
-        ExclusiveOp::SwapActivate => BusyReason::SwapActivate,
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::cmd::{MockRunner, RawCommandOutput};
     use crate::test_fixtures::{
-        IDLE_FSID, IDLE_FSID_OTHER, IdleMockFs, assert_idle_busy_unknown_prefix, idle_mp,
-        idle_ready_for_sysfs_check, idle_runner_with_scrub_finished, idle_scrub_running,
+        assert_idle_busy_unknown_prefix, idle_mp, idle_ready_for_sysfs_check,
+        idle_runner_with_scrub_finished, idle_scrub_running, IdleMockFs, IDLE_FSID,
+        IDLE_FSID_OTHER,
     };
     use std::io::ErrorKind;
 
@@ -173,6 +152,55 @@ mod tests {
         );
     }
 
+    // Intent: BusyReason Display pins the exact stdout suffixes for `braid idle`.
+    // Why: The refactor shares exclop identity with preflight, but idle has
+    //   its own human-facing text for balance and paused balance.
+    // Scenario: Autosuspend logs and shell scripts continue seeing the same
+    //   `busy: ...` lines while the internal BusyReason representation changes.
+    #[test]
+    fn busy_reason_display_pins_cli_strings() {
+        let cases = [
+            (
+                BusyReason::ScrubRunning { pct: Some(45) },
+                "scrub running (45%)",
+            ),
+            (BusyReason::ScrubRunning { pct: None }, "scrub running"),
+            (BusyReason::Exclop(ExclusiveOp::Balance), "balance running"),
+            (
+                BusyReason::Exclop(ExclusiveOp::BalancePaused),
+                "balance paused",
+            ),
+            (
+                BusyReason::Exclop(ExclusiveOp::DeviceAdd),
+                "device add in progress",
+            ),
+            (
+                BusyReason::Exclop(ExclusiveOp::DeviceRemove),
+                "device remove in progress",
+            ),
+            (
+                BusyReason::Exclop(ExclusiveOp::DeviceReplace),
+                "device replace in progress",
+            ),
+            (
+                BusyReason::Exclop(ExclusiveOp::Resize),
+                "resize in progress",
+            ),
+            (
+                BusyReason::Exclop(ExclusiveOp::SwapActivate),
+                "swap activate in progress",
+            ),
+            (
+                BusyReason::Unknown("sysfs: simulated failure".into()),
+                "unknown (sysfs: simulated failure)",
+            ),
+        ];
+
+        for (reason, expected) in cases {
+            assert_eq!(reason.to_string(), expected);
+        }
+    }
+
     // Intent: A kernel exclop wins over an overlapping running scrub.
     // Why: Sysfs is checked first because it is cheap and blocks suspend
     //   for operations `btrfs scrub status` cannot represent.
@@ -185,7 +213,10 @@ mod tests {
         let fs = IdleMockFs::with_exclop("balance");
 
         let result = cmd_idle(&runner, &fs, &idle_mp());
-        assert_eq!(result, IdleResult::Busy(BusyReason::Balance));
+        assert_eq!(
+            result,
+            IdleResult::Busy(BusyReason::Exclop(ExclusiveOp::Balance))
+        );
         assert!(runner.requests().is_empty(), "{:?}", runner.requests());
     }
 
@@ -200,49 +231,70 @@ mod tests {
     fn busy_when_balance() {
         let (runner, fs) = idle_ready_for_sysfs_check("balance");
         let result = cmd_idle(&runner, &fs, &idle_mp());
-        assert_eq!(result, IdleResult::Busy(BusyReason::Balance));
+        assert_eq!(
+            result,
+            IdleResult::Busy(BusyReason::Exclop(ExclusiveOp::Balance))
+        );
     }
 
     #[test]
     fn busy_when_balance_paused() {
         let (runner, fs) = idle_ready_for_sysfs_check("balance paused");
         let result = cmd_idle(&runner, &fs, &idle_mp());
-        assert_eq!(result, IdleResult::Busy(BusyReason::BalancePaused));
+        assert_eq!(
+            result,
+            IdleResult::Busy(BusyReason::Exclop(ExclusiveOp::BalancePaused))
+        );
     }
 
     #[test]
     fn busy_when_device_add() {
         let (runner, fs) = idle_ready_for_sysfs_check("device add");
         let result = cmd_idle(&runner, &fs, &idle_mp());
-        assert_eq!(result, IdleResult::Busy(BusyReason::DeviceAdd));
+        assert_eq!(
+            result,
+            IdleResult::Busy(BusyReason::Exclop(ExclusiveOp::DeviceAdd))
+        );
     }
 
     #[test]
     fn busy_when_device_remove() {
         let (runner, fs) = idle_ready_for_sysfs_check("device remove");
         let result = cmd_idle(&runner, &fs, &idle_mp());
-        assert_eq!(result, IdleResult::Busy(BusyReason::DeviceRemove));
+        assert_eq!(
+            result,
+            IdleResult::Busy(BusyReason::Exclop(ExclusiveOp::DeviceRemove))
+        );
     }
 
     #[test]
     fn busy_when_device_replace() {
         let (runner, fs) = idle_ready_for_sysfs_check("device replace");
         let result = cmd_idle(&runner, &fs, &idle_mp());
-        assert_eq!(result, IdleResult::Busy(BusyReason::DeviceReplace));
+        assert_eq!(
+            result,
+            IdleResult::Busy(BusyReason::Exclop(ExclusiveOp::DeviceReplace))
+        );
     }
 
     #[test]
     fn busy_when_resize() {
         let (runner, fs) = idle_ready_for_sysfs_check("resize");
         let result = cmd_idle(&runner, &fs, &idle_mp());
-        assert_eq!(result, IdleResult::Busy(BusyReason::Resize));
+        assert_eq!(
+            result,
+            IdleResult::Busy(BusyReason::Exclop(ExclusiveOp::Resize))
+        );
     }
 
     #[test]
     fn busy_when_swap_activate() {
         let (runner, fs) = idle_ready_for_sysfs_check("swap activate");
         let result = cmd_idle(&runner, &fs, &idle_mp());
-        assert_eq!(result, IdleResult::Busy(BusyReason::SwapActivate));
+        assert_eq!(
+            result,
+            IdleResult::Busy(BusyReason::Exclop(ExclusiveOp::SwapActivate))
+        );
     }
 
     // Intent: Unrecognized exclop value -> Busy::Unknown (fail-closed).
@@ -460,7 +512,10 @@ mod tests {
             .seed_exclop(IDLE_FSID, "balance");
 
         let result = cmd_idle(&runner, &fs, &idle_mp());
-        assert_eq!(result, IdleResult::Busy(BusyReason::Balance));
+        assert_eq!(
+            result,
+            IdleResult::Busy(BusyReason::Exclop(ExclusiveOp::Balance))
+        );
     }
 
     /* Intent: `is_btrfs_mounted` returned true but `/sys/fs/btrfs/` is
