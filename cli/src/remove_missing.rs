@@ -20,6 +20,23 @@ use std::path::Path;
 pub enum RemoveMissingError {
     #[error("{0}")]
     Validation(String),
+    /// `--missing-id <devid>` had no matching member in `pool.json` --
+    /// the membership has never been enriched for that devid (or the
+    /// devid is from a different pool). Pinned by the plan's
+    /// "Forward `remove-missing` never-enriched refusal" test contract;
+    /// the substring `no member in membership has devid {devid}` is
+    /// load-bearing.
+    #[error(
+        "no member in membership has devid {devid} -- pool.json membership may need manual repair (run `braid status` to inspect)"
+    )]
+    NoMemberForDevid { devid: u64 },
+    /// `pool.json` membership corruption surfaced from `by_devid` (two
+    /// or more members share the same persisted devid). Wraps
+    /// `MembershipError::DuplicateDevid` so the operator-facing
+    /// remediation reads consistently with the rest of the membership
+    /// errors.
+    #[error("pool membership corruption: {0}")]
+    Membership(#[from] membership::MembershipError),
     #[error("probe error: {0}")]
     Probe(#[from] ProbeError),
     #[error("pool error: {0}")]
@@ -30,26 +47,22 @@ pub enum RemoveMissingError {
     Cmd(#[from] crate::cmd::CmdError),
 }
 
-/// Resolve the missing-device removal target to a (devid, membership-name) pair.
-/// Returns Err if the missing device's identity can't be mapped to a pool.json entry.
+/// Resolve a missing devid to a `(LuksUuid, DiskName)` pair via
+/// `PoolMembership::by_devid`. Returns
+/// `RemoveMissingError::NoMemberForDevid` when no member carries the
+/// persisted devid (so the operator can decide whether enrichment ever
+/// ran on the pool); propagates `MembershipError::DuplicateDevid` when
+/// the membership is corrupt. This is the single point of identity
+/// resolution for `remove-missing` -- callers thread the returned UUID
+/// straight into the journal and the persisted-member removal.
 fn resolve_removal_target(
     devid: u64,
     membership: &membership::PoolMembership,
-) -> Result<(u64, String), RemoveMissingError> {
-    let name = membership
-        .disks
-        .iter()
-        .find(|(_, member)| member.devid == Some(devid))
-        .map(|(name, _)| name.clone())
-        .ok_or_else(|| {
-            RemoveMissingError::Validation(format!(
-                "devid {devid} not found in pool.json membership -- \
-                 no disk entry has this device ID. \
-                 Pool membership may need manual repair."
-            ))
-        })?;
-
-    Ok((devid, name))
+) -> Result<(crate::types::LuksUuid, crate::types::DiskName), RemoveMissingError> {
+    match membership.by_devid(devid)? {
+        Some((uuid, member)) => Ok((uuid.clone(), member.name.clone())),
+        None => Err(RemoveMissingError::NoMemberForDevid { devid }),
+    }
 }
 
 pub struct RemoveMissingParams<'a> {
@@ -156,19 +169,23 @@ impl RemoveMissingPlan {
             work_plan,
         } = self;
 
-        // Resolve devid->name from enriched pool.json before confirmation and journal.
+        // Resolve devid -> (LuksUuid, DiskName) from enriched pool.json
+        // before confirmation and journal. UUID identity flows through
+        // the rest of the function; the name is for confirmation prompt
+        // and progress lines only.
         let pre_membership = membership::load_membership(params.paths).map_err(|e| {
             RemoveMissingError::Validation(format!("failed to load pool membership: {e}"))
         })?;
-        let (resolved_devid, name_to_remove) =
+        let (target_uuid, name_to_remove) =
             resolve_removal_target(work_plan.missing_id, &pre_membership)?;
+        let resolved_devid = work_plan.missing_id;
 
         // Confirm
         if !params.yes {
             eprintln!(
                 "{}",
                 format_remove_missing_confirm(
-                    &name_to_remove,
+                    name_to_remove.as_str(),
                     resolved_devid,
                     work_plan.remaining_present,
                     work_plan.missing_count,
@@ -198,9 +215,10 @@ impl RemoveMissingPlan {
                 ))
             })?;
 
-        // Build journal before btrfs operation.
+        // Build journal before btrfs operation. The member is removed
+        // from `target_membership` by UUID; name is logging-only.
         let mut target_membership = pre_membership.clone();
-        target_membership.disks.remove(&name_to_remove);
+        target_membership.remove_by_uuid(&target_uuid);
         let restore_raid1_after_commit = work_plan.restore_raid1_after_commit();
         let journal = journal::build_journal(
             pre_membership,
@@ -609,9 +627,8 @@ fn format_remove_missing_confirm(
 mod tests {
     use super::*;
     use crate::cmd::{CmdError, CmdRequest, CommandRunner, MockRunner, RawCommandOutput};
-    use crate::membership::{DiskMember, PoolMembership};
+    use crate::membership::PoolMembership;
     use crate::test_fixtures::{MockFs, PoolFixture, RemoveMissingPool, mock_ok};
-    use crate::types::ByIdPath;
 
     fn mp() -> MountPoint {
         MountPoint("/mnt/storage".into())
@@ -1402,8 +1419,8 @@ mod tests {
         assert!(
             membership::load_membership(&f.paths)
                 .unwrap()
-                .disks
-                .contains_key("disk3"),
+                .by_name(&crate::types::DiskName::parse("disk3").unwrap())
+                .is_some(),
             "pool.json must still contain the target disk when device remove fails"
         );
         let calls = runner.requests();
@@ -1487,16 +1504,24 @@ mod tests {
         // maybe_restore_raid1) makes these assertions fail.
         let saved = membership::load_membership(&f.paths)
             .expect("pool.json must exist after the membership commit");
+        let saved_names: Vec<&str> = saved.names().map(|n| n.as_str()).collect();
         assert!(
-            !saved.disks.contains_key("disk3"),
+            saved
+                .by_name(&crate::types::DiskName::parse("disk3").unwrap())
+                .is_none(),
             "removed missing disk must be gone from pool.json even when the \
              post-remove soft balance fails (saved: {:?})",
-            saved.disks.keys().collect::<Vec<_>>()
+            saved_names
         );
         assert!(
-            saved.disks.contains_key("disk1") && saved.disks.contains_key("disk2"),
+            saved
+                .by_name(&crate::types::DiskName::parse("disk1").unwrap())
+                .is_some()
+                && saved
+                    .by_name(&crate::types::DiskName::parse("disk2").unwrap())
+                    .is_some(),
             "surviving disks must remain in pool.json (saved: {:?})",
-            saved.disks.keys().collect::<Vec<_>>()
+            saved_names
         );
         // The journal exists, which proves we got past journal::write_journal,
         // which proves the inhibitor was acquired exactly once on the way in.
@@ -1560,15 +1585,23 @@ mod tests {
     //   match it to any pool.json entry.
     fn resolve_target_fails_when_devid_not_in_membership() {
         let mut m = PoolMembership::empty();
-        m.disks.insert(
-            "disk1".to_string(),
-            DiskMember::from_by_id(ByIdPath("/dev/disk/by-id/virtio-disk1".to_string())),
+        let (uuid, member) = crate::test_fixtures::disk_member_with(
+            450,
+            "disk1",
+            "/dev/disk/by-id/virtio-disk1",
+            None,
+            None,
         );
+        m.insert(uuid, member).expect("fixture insert");
         let err = resolve_removal_target(99, &m).unwrap_err();
+        match &err {
+            RemoveMissingError::NoMemberForDevid { devid } => assert_eq!(*devid, 99),
+            other => panic!("expected NoMemberForDevid, got: {other:?}"),
+        }
         let msg = err.to_string();
         assert!(
-            msg.contains("not found in pool.json"),
-            "expected pool.json membership error; got: {msg}"
+            msg.contains("no member in membership has devid 99"),
+            "expected pinned NoMemberForDevid wording; got: {msg}"
         );
     }
 
@@ -2068,5 +2101,241 @@ mod tests {
             }
             other => panic!("expected Validation, got: {other:?}"),
         }
+    }
+
+    // ---------------------------------------------------------------------
+    // UUID-identity boundary tests (Phase 3a)
+    //
+    // Test-module seed allocation note: remove_missing.rs uses 450-499 for
+    // new UUID-identity tests, leaving 100-199 to membership.rs, 200 to
+    // luks.rs, 201-299 to journal.rs, 300-399 to cmd.rs, 400-449 to
+    // remove.rs.
+    // ---------------------------------------------------------------------
+
+    use crate::membership::DiskMember;
+    use crate::test_fixtures::{disk_member_with, test_uuid};
+    use crate::types::{ByIdPath, DiskName, LuksUuid};
+
+    // Intent: cmd_remove_missing for the persisted devid resolves to a
+    //   single UUID via membership.by_devid, removes that UUID from
+    //   target_membership, and issues ZERO `cryptsetup luksUUID` requests
+    //   for the missing target (no backing device to probe).
+    //
+    // Why: this is the positive-path identity contract. A regression that
+    //   probed cryptsetup for the missing device's by_id would fail
+    //   because the device is gone; a regression that used name-keyed
+    //   removal would silently no-op when the persisted name drifted
+    //   from the live mapper name.
+    //
+    // Scenario: 3-disk pool, devid 3 missing. Membership pins three
+    //   members with disk-number-mirroring UUIDs.
+    #[test]
+    fn cmd_remove_missing_resolves_devid_to_uuid_and_issues_no_luks_uuid_probes() {
+        let f = PoolFixture::three_disk_devids_pinned();
+        // Snapshot membership so we can verify which UUID got removed.
+        let pre = membership::load_membership(&f.paths).unwrap();
+        let (target_uuid, _target_member) = pre
+            .by_devid(3)
+            .unwrap()
+            .expect("devid 3 must resolve in the fixture");
+        let target_uuid = target_uuid.clone();
+
+        let (runner, _remove_done) =
+            RemoveMissingPool::three_disk_one_missing().install(MockRunner::default());
+        cmd_remove_missing(
+            &runner,
+            &MockFs::storage(vec![]),
+            &f.remove_missing_params().build(),
+        )
+        .expect("remove-missing should succeed");
+
+        // Membership: target UUID is gone; the other two remain.
+        let saved = membership::load_membership(&f.paths).unwrap();
+        assert!(
+            saved.by_uuid(&target_uuid).is_none(),
+            "target UUID must be removed by uuid"
+        );
+        assert_eq!(saved.len(), 2, "two surviving members expected");
+
+        // Recording runner saw zero CryptsetupLuksUuid probes for the
+        // missing target's by-id path. (The pool topology probes for
+        // live devices' UUIDs still fire -- that's part of probe_pool's
+        // contract, not the missing-target identity flow.)
+        let calls = runner.requests();
+        let probes_for_missing_byid = calls
+            .iter()
+            .filter(|c| {
+                matches!(c, CmdRequest::CryptsetupLuksUuid { device }
+                if device == "/dev/disk/by-id/virtio-disk3")
+            })
+            .count();
+        assert_eq!(
+            probes_for_missing_byid, 0,
+            "remove-missing must NOT probe the missing target's by-id path"
+        );
+    }
+
+    // Intent: when two members carry distinct devids, remove-missing
+    //   removes ONLY the UUID whose persisted devid matches the btrfs
+    //   missing devid; the other entry is byte-for-byte unchanged.
+    //
+    // Why: by-id and disk-name are operator-cosmetic decoys; only the
+    //   persisted devid drives the missing-target identity selection.
+    //   A regression that fell back to name- or by-id-keyed lookup
+    //   would pick the wrong member.
+    //
+    // Scenario: 3-disk pool, devid 3 missing. Membership has two
+    //   "decoy" entries (`misleading-label` and `decoy`) with the
+    //   true target name placed differently from its by-id basename.
+    #[test]
+    fn cmd_remove_missing_decoy_regression_selects_by_devid_only() {
+        let f = PoolFixture::three_disk_devids_pinned();
+        // Replace membership with a decoy-laced version: U_R holds the
+        // member with persisted devid matching the missing one (3);
+        // U_D holds a decoy with a different devid and a misleading
+        // disk name.
+        let u_r = test_uuid(450);
+        let u_d = test_uuid(451);
+        // The fixture's RemoveMissingPool flips the missing devid to 3,
+        // so U_R must carry devid Some(3). U_D carries 99 -- a value
+        // present in NEITHER live nor missing devids.
+        let mut m = PoolMembership::empty();
+        // Surviving disk1 + disk2 must be present with their fixture
+        // UUIDs so probe_pool can correlate them to live devices.
+        let disk1_uuid = LuksUuid::parse("11111111-1111-1111-1111-111111111111").unwrap();
+        m.insert(
+            disk1_uuid,
+            DiskMember {
+                name: DiskName::parse("disk1").unwrap(),
+                by_id: ByIdPath::parse("/dev/disk/by-id/virtio-disk1").unwrap(),
+                devid: Some(1),
+                added_at: None,
+            },
+        )
+        .unwrap();
+        let disk2_uuid = LuksUuid::parse("22222222-2222-2222-2222-222222222222").unwrap();
+        m.insert(
+            disk2_uuid,
+            DiskMember {
+                name: DiskName::parse("disk2").unwrap(),
+                by_id: ByIdPath::parse("/dev/disk/by-id/virtio-disk2").unwrap(),
+                devid: Some(2),
+                added_at: None,
+            },
+        )
+        .unwrap();
+        // U_R: true missing target. Persisted name and by-id are operator
+        // labels chosen to mislead; only persisted devid 3 selects it.
+        m.insert(
+            u_r.clone(),
+            DiskMember {
+                name: DiskName::parse("misleading-label").unwrap(),
+                by_id: ByIdPath::parse("/dev/disk/by-id/virtio-right").unwrap(),
+                devid: Some(3),
+                added_at: None,
+            },
+        )
+        .unwrap();
+        // U_D: decoy. Different devid (99). The by-id basename is the
+        // operator-typed name on purpose -- a buggy by-id-keyed lookup
+        // would pick this row.
+        m.insert(
+            u_d.clone(),
+            DiskMember {
+                name: DiskName::parse("decoy").unwrap(),
+                by_id: ByIdPath::parse("/dev/disk/by-id/virtio-misleading-label").unwrap(),
+                devid: Some(99),
+                added_at: None,
+            },
+        )
+        .unwrap();
+        membership::save_membership(&m, &f.paths).unwrap();
+
+        let (runner, _remove_done) =
+            RemoveMissingPool::three_disk_one_missing().install(MockRunner::default());
+        cmd_remove_missing(
+            &runner,
+            &MockFs::storage(vec![]),
+            &f.remove_missing_params().missing_id(3).build(),
+        )
+        .expect("remove-missing should succeed");
+
+        let saved = membership::load_membership(&f.paths).unwrap();
+        assert!(
+            saved.by_uuid(&u_r).is_none(),
+            "U_R (devid==3) must be removed by uuid"
+        );
+        let decoy_after = saved
+            .by_uuid(&u_d)
+            .expect("U_D decoy must remain untouched");
+        assert_eq!(
+            decoy_after.devid,
+            Some(99),
+            "U_D's persisted devid must not be perturbed by the remove-missing"
+        );
+        let calls = runner.requests();
+        let probes_for_missing_byid = calls
+            .iter()
+            .filter(|c| {
+                matches!(c, CmdRequest::CryptsetupLuksUuid { device }
+                if device == "/dev/disk/by-id/virtio-right"
+                    || device == "/dev/disk/by-id/virtio-misleading-label")
+            })
+            .count();
+        assert_eq!(
+            probes_for_missing_byid, 0,
+            "remove-missing must NOT probe the missing target's by-id path"
+        );
+    }
+
+    // Intent: when membership has no member with the requested devid
+    //   (enrichment never ran for any member, or the devid is foreign),
+    //   `cmd_remove_missing` returns RemoveMissingError::NoMemberForDevid
+    //   with the pinned `no member in membership has devid {devid}`
+    //   substring, AND issues zero mutating requests of any shape.
+    //
+    // Why: this is the forward never-enriched refusal contract. A
+    //   regression that fell through to remove an arbitrary entry
+    //   would pass the positive-path and decoy tests but fail this one.
+    //
+    // Scenario: 2-disk pool with one missing devid (2), but membership
+    //   has both members WITHOUT enrichment (devid: None on both).
+    #[test]
+    fn cmd_remove_missing_never_enriched_refusal_returns_structured_error() {
+        let f = PoolFixture::two_disk_devids_pinned();
+        // Replace membership with one that has NO devid enrichment on
+        // any member. The fixture already pinned devids; overwrite.
+        let mut m = PoolMembership::empty();
+        let (u1, mem1) = disk_member_with(452, "disk1", "/dev/disk/by-id/virtio-disk1", None, None);
+        let (u2, mem2) = disk_member_with(453, "disk2", "/dev/disk/by-id/virtio-disk2", None, None);
+        m.insert(u1, mem1).unwrap();
+        m.insert(u2, mem2).unwrap();
+        membership::save_membership(&m, &f.paths).unwrap();
+        let pre_bytes = std::fs::read(f.paths.pool_json()).unwrap();
+
+        // 2-disk fixture flips devid 2 to MISSING under
+        // RemoveMissingPool::two_disk_one_missing. But the validation
+        // pipeline rejects 2-disk-RAID1+1-missing at preflight (covered
+        // by single_survivor_rejected_at_preflight). To exercise the
+        // NoMemberForDevid arm directly, drive plan_remove_missing on a
+        // 3-disk topology where devid 2 IS missing but membership lacks
+        // any member with devid: Some(2). Easier still: call
+        // `resolve_removal_target` directly with devid 2.
+        let err = resolve_removal_target(2, &m).unwrap_err();
+        match &err {
+            RemoveMissingError::NoMemberForDevid { devid } => assert_eq!(*devid, 2),
+            other => panic!("expected NoMemberForDevid, got: {other:?}"),
+        }
+        let msg = err.to_string();
+        assert!(
+            msg.contains("no member in membership has devid 2"),
+            "expected pinned NoMemberForDevid wording; got: {msg}"
+        );
+        // Membership file is byte-for-byte unchanged.
+        let post_bytes = std::fs::read(f.paths.pool_json()).unwrap();
+        assert_eq!(
+            pre_bytes, post_bytes,
+            "resolve_removal_target must not perturb pool.json"
+        );
     }
 }

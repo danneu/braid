@@ -1,14 +1,14 @@
 //! Remove-scope fixtures: `RemovalPool`, `RemoveParamsBuilder`, and
 //! remove-only `PoolFixture` constructors.
 
-use super::shared::{PoolFixture, mock_ok};
+use super::shared::{PoolFixture, disk_member_with, mock_ok};
 use crate::cmd::{CmdRequest, MockRunner};
 use crate::inhibit::RecordingInhibitor;
-use crate::membership::{self, DiskMember, PoolMembership};
+use crate::membership::{self, PoolMembership};
 use crate::progress::{self, ProgressOutput};
 use crate::remove::RemoveParams;
 use crate::state_paths::StatePaths;
-use crate::types::{ByIdPath, LuksUuid, MapperName, PoolDevice};
+use crate::types::{LuksUuid, MapperName, PoolDevice};
 use std::path::Path;
 
 const TWO_DISK_SHOW: &str = "Label: none  uuid: cc86845b-aec3-408e-bef5-553affc1f2b1\n\
@@ -71,15 +71,21 @@ const THREE_DISK_DF_JSON: &str = TWO_DISK_DF_JSON;
 
 impl PoolFixture {
     /// pool.json: disk1 + disk2 + disk3. Kept remove-scoped until another
-    /// command needs the same three-member steady-state topology.
+    /// command needs the same three-member steady-state topology. Each
+    /// disk's UUID seed encodes its disk number (`disk1` -> seed 1, etc.)
+    /// so fixture UUIDs read at a glance and stay in disk-number order.
     pub(crate) fn three_disk_healthy() -> Self {
         let base = Self::empty_inner();
         let mut m = PoolMembership::empty();
-        for name in ["disk1", "disk2", "disk3"] {
-            m.disks.insert(
-                name.to_owned(),
-                DiskMember::from_by_id(ByIdPath(format!("/dev/disk/by-id/virtio-{name}"))),
+        for (seed, name) in [(1u64, "disk1"), (2, "disk2"), (3, "disk3")] {
+            let (uuid, member) = disk_member_with(
+                seed,
+                name,
+                &format!("/dev/disk/by-id/virtio-{name}"),
+                None,
+                None,
             );
+            m.insert(uuid, member).expect("fixture insert");
         }
         membership::save_membership(&m, &base.paths).expect("save_membership");
         Self {
@@ -244,10 +250,11 @@ impl<'a> RemoveParamsBuilder<'a> {
 pub(crate) fn target_device(name: &str) -> PoolDevice {
     let disk = name.strip_prefix("disk").unwrap_or(name);
     let devid = disk.parse().unwrap_or(1);
+    let uuid_raw = luks_uuid_for_disk_name(name).unwrap_or("00000000-0000-0000-0000-000000000000");
     PoolDevice {
         devid,
         mapper: MapperName(format!("braid-{name}")),
-        luks_uuid: LuksUuid(luks_uuid_for_disk_name(name).unwrap_or("").to_owned()),
+        luks_uuid: LuksUuid::parse(uuid_raw).expect("valid fixture UUID"),
         underlying: mapper_underlying(&format!("braid-{name}"))
             .unwrap_or("/dev/vda")
             .to_owned(),
