@@ -24,8 +24,8 @@ const MOUNTINFO_WITHOUT_TARGET: &str = "26 25 0:23 / / rw,noatime shared:1 - ext
 
 /// Strict idle filesystem mock whose unseeded reads and directory listings fail.
 ///
-/// That strictness is load-bearing for tests that prove `cmd_idle` does not
-/// touch sysfs before scrub short-circuits, and does not skip real fsid paths.
+/// That strictness is load-bearing for tests that prove `cmd_idle` reaches
+/// each intended probe boundary and does not skip real fsid paths.
 pub(crate) struct IdleMockFs {
     reads: HashMap<String, Result<String, ErrorKind>>,
     list_dirs: HashMap<String, Result<Vec<String>, ErrorKind>>,
@@ -41,8 +41,8 @@ impl IdleMockFs {
         }
     }
 
-    /// Mounted-btrfs surface with no sysfs listing, used to keep scrub
-    /// short-circuit tests sensitive to unexpected sysfs access.
+    /// Mounted-btrfs surface with no sysfs listing, used for tests that should
+    /// stop before the exclusive-operation scan.
     pub(crate) fn mounted_btrfs_only() -> Self {
         Self::empty().seed_mountinfo(MOUNTINFO_WITH_BTRFS_TARGET)
     }

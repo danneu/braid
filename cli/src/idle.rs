@@ -66,9 +66,21 @@ pub fn cmd_idle<R: CommandRunner, F: Filesystem + ?Sized>(
         return IdleResult::PoolOffline;
     }
 
-    // 2. Scrub via subprocess (scrub is not in the kernel exclop set, so
-    //    sysfs cannot see it). Done before fsid lookup so the common
-    //    "scrub in progress" case short-circuits the extra probes.
+    // 2. Kernel exclusive operations via sysfs. This is cheap and uses
+    //    the same parser preflight.rs uses for mutating commands
+    //    (ExclusiveOp::parse), so the two code paths cannot disagree
+    //    about what counts as "busy." See
+    //    docs/decisions/016-auto-suspend.md for the any-busy semantic.
+    match check_any_btrfs_exclusive_op(fs) {
+        Ok(()) => {}
+        Err(ExclusiveOpError::Busy(op)) => return IdleResult::Busy(busy_from_exclop(op)),
+        Err(e @ (ExclusiveOpError::Read(_) | ExclusiveOpError::Unrecognized(_))) => {
+            return busy_unknown(e);
+        }
+    }
+
+    // 3. Scrub via subprocess. Scrub is outside the kernel exclop set, so
+    //    sysfs cannot see or quantify it.
     let scrub_raw = match runner.run(&CmdRequest::BtrfsScrubStatus {
         mount_point: mount_point.clone(),
     }) {
@@ -92,16 +104,7 @@ pub fn cmd_idle<R: CommandRunner, F: Filesystem + ?Sized>(
         return IdleResult::Busy(BusyReason::ScrubRunning { pct });
     }
 
-    // 3. Every other exclusive operation comes from a single sysfs scan
-    //    of /sys/fs/btrfs/*. Same parser preflight.rs uses for mutating
-    //    commands (ExclusiveOp::parse), so the two code paths cannot
-    //    disagree about what counts as "busy." See
-    //    docs/decisions/016-auto-suspend.md for the any-busy semantic.
-    match check_any_btrfs_exclusive_op(fs) {
-        Ok(()) => IdleResult::Idle,
-        Err(ExclusiveOpError::Busy(op)) => IdleResult::Busy(busy_from_exclop(op)),
-        Err(e @ (ExclusiveOpError::Read(_) | ExclusiveOpError::Unrecognized(_))) => busy_unknown(e),
-    }
+    IdleResult::Idle
 }
 
 fn busy_unknown(e: impl std::fmt::Display) -> IdleResult {
@@ -161,16 +164,29 @@ mod tests {
     fn busy_when_scrub_running() {
         let (scrub_req, scrub_out) = idle_scrub_running(45);
         let runner = MockRunner::default().with_output(scrub_req, scrub_out);
-        // Deliberately seed mountinfo only (no /sys/fs/btrfs listing) --
-        // a passing test proves we short-circuit on the scrub probe
-        // before the sysfs scan would error on unseeded list_dir.
-        let fs = IdleMockFs::mounted_btrfs_only();
+        let fs = IdleMockFs::with_exclop("none");
 
         let result = cmd_idle(&runner, &fs, &idle_mp());
         assert_eq!(
             result,
             IdleResult::Busy(BusyReason::ScrubRunning { pct: Some(45) })
         );
+    }
+
+    // Intent: A kernel exclop wins over an overlapping running scrub.
+    // Why: Sysfs is checked first because it is cheap and blocks suspend
+    //   for operations `btrfs scrub status` cannot represent.
+    // Scenario: Autosuspend probes while a balance and scrub overlap; the
+    //   balance result should short-circuit without spawning scrub status.
+    #[test]
+    fn busy_exclop_short_circuits_scrub_probe() {
+        let (scrub_req, scrub_out) = idle_scrub_running(45);
+        let runner = MockRunner::default().with_output(scrub_req, scrub_out);
+        let fs = IdleMockFs::with_exclop("balance");
+
+        let result = cmd_idle(&runner, &fs, &idle_mp());
+        assert_eq!(result, IdleResult::Busy(BusyReason::Balance));
+        assert!(runner.requests().is_empty(), "{:?}", runner.requests());
     }
 
     // Intent: Each kernel exclop string maps to the matching BusyReason.
@@ -239,6 +255,7 @@ mod tests {
         let (runner, fs) = idle_ready_for_sysfs_check("brand new op");
         let result = cmd_idle(&runner, &fs, &idle_mp());
         assert_idle_busy_unknown(result);
+        assert!(runner.requests().is_empty(), "{:?}", runner.requests());
     }
 
     // Intent: Sysfs read error on a real fsid dir -> Busy::Unknown
@@ -257,6 +274,7 @@ mod tests {
 
         let result = cmd_idle(&runner, &fs, &idle_mp());
         assert_idle_busy_unknown(result);
+        assert!(runner.requests().is_empty(), "{:?}", runner.requests());
     }
 
     // Intent: `cmd_idle` must NOT call `BtrfsBalanceStatus`,
@@ -290,6 +308,12 @@ mod tests {
 
         let result = cmd_idle(&runner, &fs, &idle_mp());
         assert_idle_busy_unknown(result);
+        assert_eq!(
+            runner.requests(),
+            vec![CmdRequest::BtrfsScrubStatus {
+                mount_point: idle_mp()
+            }]
+        );
     }
 
     /* Intent: a `/proc/self/mountinfo` IO failure must propagate as
@@ -310,6 +334,7 @@ mod tests {
         let fs = IdleMockFs::empty();
         let result = cmd_idle(&runner, &fs, &idle_mp());
         assert_idle_busy_unknown(result);
+        assert!(runner.requests().is_empty(), "{:?}", runner.requests());
     }
 
     /* Intent: malformed mountinfo content for the target line must
@@ -329,6 +354,7 @@ mod tests {
         );
         let result = cmd_idle(&runner, &fs, &idle_mp());
         assert_idle_busy_unknown(result);
+        assert!(runner.requests().is_empty(), "{:?}", runner.requests());
     }
 
     /* Intent: `/sys/fs/btrfs/` entries named `features` or `debug` are
@@ -383,6 +409,7 @@ mod tests {
 
         let result = cmd_idle(&runner, &fs, &idle_mp());
         assert_idle_busy_unknown(result);
+        assert!(runner.requests().is_empty(), "{:?}", runner.requests());
     }
 
     /* Intent: when the host has multiple btrfs filesystems, ANY busy
@@ -425,6 +452,7 @@ mod tests {
 
         let result = cmd_idle(&runner, &fs, &idle_mp());
         assert_idle_busy_unknown(result);
+        assert!(runner.requests().is_empty(), "{:?}", runner.requests());
     }
 
     /* Intent: a `list_dir("/sys/fs/btrfs")` IO failure (e.g.
@@ -447,5 +475,6 @@ mod tests {
 
         let result = cmd_idle(&runner, &fs, &idle_mp());
         assert_idle_busy_unknown(result);
+        assert!(runner.requests().is_empty(), "{:?}", runner.requests());
     }
 }
