@@ -18,6 +18,7 @@ use crate::pool::{pool_replace_device, pool_resize_device};
 use crate::preflight;
 use crate::preview::{self, PerDiskStyle, PlanFailure, Preview, PreviewCompleteness, PreviewNote};
 use crate::probe::{Filesystem, ProbeError, probe_config_disk, probe_pool};
+use crate::probe_mapper_uuid::probe_observed_mapper_uuid;
 use crate::progress::{self, ProgressOutput};
 use crate::state_paths::StatePaths;
 use crate::status_tag::{StatusTag, color_enabled_for_stderr, status_line};
@@ -884,59 +885,6 @@ impl ReplacePlan {
 
         eprintln!("Done. Replaced {} with {}.", old_name, new_name);
         Ok(())
-    }
-}
-
-/// Probe the live LUKS UUID at the observed `old_mapper` and require it
-/// to equal the journaled `old_uuid`. Returns true if the probe matched
-/// (caller should proceed to close); returns false on mismatch or any
-/// probe failure (caller should skip the close). Failure path emits a
-/// `Warning: ...` to stderr naming the mapper, expected UUID, and the
-/// observed UUID or probe error so a future operator can reason about
-/// why the close was skipped. Mirrors `remove.rs::probe_observed_mapper_uuid`
-/// at the same defense-in-depth seam (post-commit close for Replace's
-/// in-process site at `replace.rs:707`; recovery replay at
-/// `recover.rs:2935` is Phase 4 scope).
-fn probe_observed_mapper_uuid<R: CommandRunner>(
-    runner: &R,
-    old_mapper: &MapperName,
-    old_uuid: &LuksUuid,
-) -> bool {
-    let device = format!("/dev/mapper/{}", old_mapper.0);
-    let probe = match runner.run(&CmdRequest::CryptsetupLuksUuid {
-        device: device.clone(),
-    }) {
-        Ok(out) => out,
-        Err(e) => {
-            eprintln!(
-                "Warning: post-commit close skipped for mapper {mapper}: probe failed ({err}); expected LUKS UUID {expected}",
-                mapper = old_mapper,
-                err = e,
-                expected = old_uuid,
-            );
-            return false;
-        }
-    };
-    match parse_cryptsetup_luks_uuid(&probe) {
-        Ok(parsed) if parsed.uuid == *old_uuid => true,
-        Ok(parsed) => {
-            eprintln!(
-                "Warning: post-commit close skipped for mapper {mapper}: expected LUKS UUID {expected} but observed {observed}",
-                mapper = old_mapper,
-                expected = old_uuid,
-                observed = parsed.uuid,
-            );
-            false
-        }
-        Err(e) => {
-            eprintln!(
-                "Warning: post-commit close skipped for mapper {mapper}: probe failed ({err}); expected LUKS UUID {expected}",
-                mapper = old_mapper,
-                err = e,
-                expected = old_uuid,
-            );
-            false
-        }
     }
 }
 

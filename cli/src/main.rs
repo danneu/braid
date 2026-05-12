@@ -290,6 +290,14 @@ struct DiscoverArgs {
     /// Write discovered membership to pool.json
     #[arg(long)]
     write: bool,
+    /// Fail closed if discovery produces fewer than N members.
+    /// Used by the LUKS-UUID-as-identity cutover runbook (see
+    /// docs/luks-unlock.md): pre-record the expected count from the
+    /// existing pool.json, then pass it here so a momentarily detached
+    /// disk (loose cable, USB power glitch, udev race) cannot silently
+    /// produce a smaller pool.json. Only honored alongside --write.
+    #[arg(long = "expect-count", value_name = "N")]
+    expect_count: Option<usize>,
 }
 
 #[derive(Debug, Args)]
@@ -705,12 +713,15 @@ fn main() {
             }
         }
         Commands::Discover(args) => {
-            if let Err(e) = braid_cli::preflight::check_no_pending_operation(&paths) {
-                print_cli_error(&e);
-                std::process::exit(1);
-            }
+            // Note: the pre-save fail-closed gates for `--write`
+            // (pending-op presence + name-keyed pool.json sniff) live
+            // inside `discover::write_discovered_membership` so the
+            // CLI arm stays narrow. The bare-`discover` (read-only)
+            // path still surfaces a friendlier "pool.json already
+            // exists" hint when the file is present and the operator
+            // didn't pass `--write`.
             let pool_json = paths.pool_json();
-            if pool_json.exists() {
+            if !args.write && pool_json.exists() {
                 print_cli_error(&format!(
                     "pool.json already exists at {} -- use 'braid add' to add disks",
                     pool_json.display()
@@ -727,24 +738,23 @@ fn main() {
                         eprintln!("no braid-labeled LUKS devices found");
                         std::process::exit(1);
                     }
-                    for (name, by_id) in &outcome.members {
-                        eprintln!("  {} = {}", name, by_id);
+                    for (_uuid, m) in outcome.members.iter() {
+                        eprintln!("  {} = {}", m.name, m.by_id);
                     }
                     if args.write {
-                        let m = braid_cli::membership::PoolMembership {
-                            disks: outcome
-                                .members
-                                .into_iter()
-                                .map(|(name, by_id)| {
-                                    (name, braid_cli::membership::DiskMember::from_by_id(by_id))
-                                })
-                                .collect(),
-                        };
-                        if let Err(e) = braid_cli::membership::save_membership(&m, &paths) {
-                            print_cli_error(&format!("failed to write pool membership: {e}"));
-                            std::process::exit(1);
+                        match braid_cli::discover::write_discovered_membership(
+                            outcome,
+                            &paths,
+                            args.expect_count,
+                        ) {
+                            Ok(_) => {
+                                eprintln!("pool membership written to {}", pool_json.display());
+                            }
+                            Err(e) => {
+                                print_cli_error(&e.to_string());
+                                std::process::exit(1);
+                            }
                         }
-                        eprintln!("pool membership written to {}", pool_json.display());
                     } else {
                         eprintln!("pass --write to save to {}", pool_json.display());
                     }

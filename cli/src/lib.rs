@@ -31,6 +31,7 @@ pub mod pool;
 pub mod preflight;
 pub mod preview;
 pub mod probe;
+pub(crate) mod probe_mapper_uuid;
 pub mod progress;
 pub mod recover;
 pub mod remove;

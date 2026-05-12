@@ -11,7 +11,7 @@ use crate::probe::Filesystem;
 use crate::state_paths::StatePaths;
 use crate::status::format_bytes;
 use crate::types::{MountPoint, PoolState};
-use crate::ups::{query_ups, UpsQueryError};
+use crate::ups::{UpsQueryError, query_ups};
 
 /// Refuse if pool.json lists members but the pool is not mounted (locked).
 /// Catches the silent-bootstrap case where `braid add` against a locked pool

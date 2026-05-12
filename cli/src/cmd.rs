@@ -74,6 +74,8 @@ pub enum CmdRequest {
     CryptsetupIsLuks {
         device: String,
     },
+    // TODO(post-migration): retype mapper: String to MapperName once
+    // this migration lands.
     CryptsetupClose {
         mapper: String,
     },

@@ -1,6 +1,6 @@
 use crate::cmd::{CmdRequest, CommandRunner};
-use crate::parse::{parse_btrfs_scrub_status, ScrubState};
-use crate::preflight::{check_any_btrfs_exclusive_op, ExclusiveOp, ExclusiveOpError};
+use crate::parse::{ScrubState, parse_btrfs_scrub_status};
+use crate::preflight::{ExclusiveOp, ExclusiveOpError, check_any_btrfs_exclusive_op};
 use crate::probe::Filesystem;
 use crate::progress::pct_from_bytes;
 use crate::types::MountPoint;
@@ -106,9 +106,8 @@ mod tests {
     use super::*;
     use crate::cmd::{MockRunner, RawCommandOutput};
     use crate::test_fixtures::{
-        assert_idle_busy_unknown_prefix, idle_mp, idle_ready_for_sysfs_check,
-        idle_runner_with_scrub_finished, idle_scrub_running, IdleMockFs, IDLE_FSID,
-        IDLE_FSID_OTHER,
+        IDLE_FSID, IDLE_FSID_OTHER, IdleMockFs, assert_idle_busy_unknown_prefix, idle_mp,
+        idle_ready_for_sysfs_check, idle_runner_with_scrub_finished, idle_scrub_running,
     };
     use std::io::ErrorKind;
 
