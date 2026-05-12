@@ -60,7 +60,7 @@ pub fn cmd_idle<R: CommandRunner, F: Filesystem + ?Sized>(
     // 1. Pool offline -- nothing to protect.
     let mounted = match crate::mount_check::is_btrfs_mounted(fs, mount_point.as_str()) {
         Ok(mounted) => mounted,
-        Err(e) => return busy_unknown(e),
+        Err(e) => return busy_unknown("mountinfo", e),
     };
     if !mounted {
         return IdleResult::PoolOffline;
@@ -75,7 +75,7 @@ pub fn cmd_idle<R: CommandRunner, F: Filesystem + ?Sized>(
         Ok(()) => {}
         Err(ExclusiveOpError::Busy(op)) => return IdleResult::Busy(busy_from_exclop(op)),
         Err(e @ (ExclusiveOpError::Read(_) | ExclusiveOpError::Unrecognized(_))) => {
-            return busy_unknown(e);
+            return busy_unknown("sysfs", e);
         }
     }
 
@@ -85,11 +85,11 @@ pub fn cmd_idle<R: CommandRunner, F: Filesystem + ?Sized>(
         mount_point: mount_point.clone(),
     }) {
         Ok(raw) => raw,
-        Err(e) => return busy_unknown(e),
+        Err(e) => return busy_unknown("scrub", e),
     };
     let scrub = match parse_btrfs_scrub_status(&scrub_raw) {
         Ok(scrub) => scrub,
-        Err(e) => return busy_unknown(e),
+        Err(e) => return busy_unknown("scrub", e),
     };
     if let ScrubState::Running {
         bytes_scrubbed,
@@ -107,8 +107,8 @@ pub fn cmd_idle<R: CommandRunner, F: Filesystem + ?Sized>(
     IdleResult::Idle
 }
 
-fn busy_unknown(e: impl std::fmt::Display) -> IdleResult {
-    IdleResult::Busy(BusyReason::Unknown(e.to_string()))
+fn busy_unknown(layer: &str, e: impl std::fmt::Display) -> IdleResult {
+    IdleResult::Busy(BusyReason::Unknown(format!("{layer}: {e}")))
 }
 
 fn busy_from_exclop(op: ExclusiveOp) -> BusyReason {
@@ -126,9 +126,9 @@ fn busy_from_exclop(op: ExclusiveOp) -> BusyReason {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::cmd::MockRunner;
+    use crate::cmd::{MockRunner, RawCommandOutput};
     use crate::test_fixtures::{
-        IDLE_FSID, IDLE_FSID_OTHER, IdleMockFs, assert_idle_busy_unknown, idle_mp,
+        IDLE_FSID, IDLE_FSID_OTHER, IdleMockFs, assert_idle_busy_unknown_prefix, idle_mp,
         idle_ready_for_sysfs_check, idle_runner_with_scrub_finished, idle_scrub_running,
     };
     use std::io::ErrorKind;
@@ -254,7 +254,7 @@ mod tests {
     fn busy_unknown_on_unrecognized_exclop() {
         let (runner, fs) = idle_ready_for_sysfs_check("brand new op");
         let result = cmd_idle(&runner, &fs, &idle_mp());
-        assert_idle_busy_unknown(result);
+        assert_idle_busy_unknown_prefix(result, "sysfs:");
         assert!(runner.requests().is_empty(), "{:?}", runner.requests());
     }
 
@@ -273,7 +273,7 @@ mod tests {
         let fs = IdleMockFs::with_exclop_read_error(ErrorKind::PermissionDenied);
 
         let result = cmd_idle(&runner, &fs, &idle_mp());
-        assert_idle_busy_unknown(result);
+        assert_idle_busy_unknown_prefix(result, "sysfs:");
         assert!(runner.requests().is_empty(), "{:?}", runner.requests());
     }
 
@@ -307,13 +307,40 @@ mod tests {
         let fs = IdleMockFs::with_exclop("none");
 
         let result = cmd_idle(&runner, &fs, &idle_mp());
-        assert_idle_busy_unknown(result);
+        assert_idle_busy_unknown_prefix(result, "scrub:");
         assert_eq!(
             runner.requests(),
             vec![CmdRequest::BtrfsScrubStatus {
                 mount_point: idle_mp()
             }]
         );
+    }
+
+    // Intent: A non-zero `btrfs scrub status` result returned by the runner
+    //   is attributed to the scrub parser layer after a clean sysfs scan.
+    // Why: Command invocation failures and parse-time command failures share
+    //   the same fail-closed user-facing source label.
+    // Scenario: `btrfs scrub status` exits non-zero and preserves stderr for
+    //   the operator while `braid idle` blocks autosuspend.
+    #[test]
+    fn busy_unknown_on_scrub_parse_failure() {
+        let request = CmdRequest::BtrfsScrubStatus {
+            mount_point: idle_mp(),
+        };
+        let runner = MockRunner::default().with_output(
+            request.clone(),
+            RawCommandOutput {
+                cmd: "btrfs scrub status --raw /mnt/storage".into(),
+                stdout: String::new(),
+                stderr: "simulated scrub status failure\n".into(),
+                exit_status: 1,
+            },
+        );
+        let fs = IdleMockFs::with_exclop("none");
+
+        let result = cmd_idle(&runner, &fs, &idle_mp());
+        assert_idle_busy_unknown_prefix(result, "scrub:");
+        assert_eq!(runner.requests(), vec![request]);
     }
 
     /* Intent: a `/proc/self/mountinfo` IO failure must propagate as
@@ -333,7 +360,7 @@ mod tests {
         let runner = MockRunner::default();
         let fs = IdleMockFs::empty();
         let result = cmd_idle(&runner, &fs, &idle_mp());
-        assert_idle_busy_unknown(result);
+        assert_idle_busy_unknown_prefix(result, "mountinfo:");
         assert!(runner.requests().is_empty(), "{:?}", runner.requests());
     }
 
@@ -353,7 +380,7 @@ mod tests {
             "36 35 0:32 / /mnt/storage rw,noatime shared:1 garbage_no_dash_separator\n",
         );
         let result = cmd_idle(&runner, &fs, &idle_mp());
-        assert_idle_busy_unknown(result);
+        assert_idle_busy_unknown_prefix(result, "mountinfo:");
         assert!(runner.requests().is_empty(), "{:?}", runner.requests());
     }
 
@@ -408,7 +435,7 @@ mod tests {
         // IDLE_FSID_OTHER intentionally has no exclop seeded -> NotFound.
 
         let result = cmd_idle(&runner, &fs, &idle_mp());
-        assert_idle_busy_unknown(result);
+        assert_idle_busy_unknown_prefix(result, "sysfs:");
         assert!(runner.requests().is_empty(), "{:?}", runner.requests());
     }
 
@@ -451,7 +478,7 @@ mod tests {
         let fs = IdleMockFs::mounted_btrfs_only().seed_btrfs_listing(&[]);
 
         let result = cmd_idle(&runner, &fs, &idle_mp());
-        assert_idle_busy_unknown(result);
+        assert_idle_busy_unknown_prefix(result, "sysfs:");
         assert!(runner.requests().is_empty(), "{:?}", runner.requests());
     }
 
@@ -474,7 +501,7 @@ mod tests {
             IdleMockFs::mounted_btrfs_only().seed_btrfs_listing_error(ErrorKind::PermissionDenied);
 
         let result = cmd_idle(&runner, &fs, &idle_mp());
-        assert_idle_busy_unknown(result);
+        assert_idle_busy_unknown_prefix(result, "sysfs:");
         assert!(runner.requests().is_empty(), "{:?}", runner.requests());
     }
 }

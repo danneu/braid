@@ -163,7 +163,7 @@ pub(crate) use enroll_key_file::{
 };
 #[allow(unused_imports)]
 pub(crate) use idle::{
-    IDLE_FSID, IDLE_FSID_OTHER, IdleMockFs, assert_idle_busy_unknown, idle_mp,
+    IDLE_FSID, IDLE_FSID_OTHER, IdleMockFs, assert_idle_busy_unknown_prefix, idle_mp,
     idle_ready_for_sysfs_check, idle_runner_with_scrub_finished, idle_scrub_finished,
     idle_scrub_running,
 };

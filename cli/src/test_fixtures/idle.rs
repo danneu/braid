@@ -217,11 +217,13 @@ pub(crate) fn idle_ready_for_sysfs_check(exclop: &str) -> (MockRunner, IdleMockF
     )
 }
 
-/// Idle-specific assertion for fail-closed branches where the message text is
-/// intentionally less important than the `Unknown` classification.
-pub(crate) fn assert_idle_busy_unknown(result: IdleResult) {
-    assert!(
-        matches!(result, IdleResult::Busy(BusyReason::Unknown(_))),
-        "got {result:?}"
-    );
+/// Idle-specific assertion for fail-closed branches where the probe source is
+/// part of the user-facing diagnostic contract.
+pub(crate) fn assert_idle_busy_unknown_prefix(result: IdleResult, prefix: &str) {
+    match result {
+        IdleResult::Busy(BusyReason::Unknown(msg)) => {
+            assert!(msg.starts_with(prefix), "expected {prefix:?}, got {msg:?}");
+        }
+        other => panic!("got {other:?}"),
+    }
 }

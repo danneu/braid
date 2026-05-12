@@ -46,16 +46,17 @@ busy: device remove in progress
 busy: device replace in progress
 busy: resize in progress
 busy: swap activate in progress
-busy: unknown (<error>)
+busy: unknown (<probe>: <error>)
 ```
 
 Only the scrub line carries a percentage. The named btrfs operation states
 come from scanning `/sys/fs/btrfs/*/exclusive_operation`, which reports the
 active operation but not its progress.
 
-`busy: unknown (<error>)` is printed when a probe failed (mountinfo,
-scrub command/parser, sysfs scan, etc). The parenthesized message is the
-underlying error.
+`busy: unknown (<probe>: <error>)` is printed when a probe failed. The
+probe label is `mountinfo` for `/proc/self/mountinfo`, `sysfs` for
+`/sys/fs/btrfs/*/exclusive_operation`, or `scrub` for `btrfs scrub status`
+command/parser failures. The error text preserves the underlying diagnostic.
 
 When the pool is offline (not mounted), exit code is 0 -- there is nothing to protect, so suspend is safe.
 
@@ -84,9 +85,9 @@ Each piece of the block is load-bearing:
 
 1. Checks if the pool is mounted (via `/proc/self/mountinfo`)
 2. If not mounted: returns idle (exit 0)
-3. Checks scrub status via `btrfs scrub status` (scrub is not in the kernel exclusive-operation set, so sysfs cannot detect it)
-4. Reads `/sys/fs/btrfs/*/exclusive_operation` for any active exclusive operation on any btrfs filesystem: `balance`, `balance paused`, `device add`, `device remove`, `device replace`, `resize`, `swap activate`
-5. Returns busy on the first active operation found (short-circuits -- the scrub probe runs first so the common scrub-in-progress case skips the sysfs read)
+3. Reads `/sys/fs/btrfs/*/exclusive_operation` for any active exclusive operation on any btrfs filesystem: `balance`, `balance paused`, `device add`, `device remove`, `device replace`, `resize`, `swap activate`
+4. If sysfs reports a busy operation or the sysfs probe fails, returns immediately before probing scrub
+5. Checks scrub status via `btrfs scrub status` (scrub is not in the kernel exclusive-operation set, so sysfs cannot detect it)
 
 ## Related commands
 

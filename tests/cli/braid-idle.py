@@ -76,7 +76,7 @@ exec __REAL_BTRFS__ "$@"
     output = output.strip()
     assert status == 1, f"Expected exit 1 for probe failure, got {status}: {output}"
     assert output.startswith(
-        "busy: unknown ("
+        "busy: unknown (scrub:"
     ), f"Expected busy unknown diagnostic, got: {output}"
     assert "simulated scrub status failure" in output, (
         f"Expected underlying probe diagnostic to be preserved, got: {output}"
