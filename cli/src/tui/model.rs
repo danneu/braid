@@ -293,10 +293,8 @@ impl Model {
         // Kick off the UPS probe immediately so the first render shows
         // live state rather than a placeholder that disappears on the
         // next poll tick.
-        let ups_probe_inflight = ups_config.as_ref().is_some_and(|u| u.enable);
-        if let Some(u) = ups_config.as_ref()
-            && u.enable
-        {
+        let ups_probe_inflight = ups_config.is_some();
+        if let Some(u) = ups_config.as_ref() {
             effects.push(Effect::ProbeUps {
                 name: u.name.clone(),
             });

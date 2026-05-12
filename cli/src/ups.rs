@@ -1,6 +1,6 @@
 //! `braid ups status` -- operator inspection of live NUT state.
 //!
-//! Missing or disabled config prints a helpful enable-hint and exits 0 --
+//! Missing `ups` block in config.json prints a helpful enable-hint and exits 0.
 //! `braid ups status` on a pool without UPS is not an error. Query failure
 //! (non-zero `upsc` exit) is a hard error with `upsc`'s own stderr surfaced.
 //!
@@ -118,9 +118,6 @@ pub fn cmd_ups_status<R: CommandRunner>(
     let Some(ups_cfg) = config.ups() else {
         return print_not_enabled(json);
     };
-    if !ups_cfg.enable {
-        return print_not_enabled(json);
-    }
     let parsed = match query_ups(runner, &ups_cfg.name) {
         Ok(p) => p,
         Err(UpsQueryError::InvocationFailed(e)) => {
@@ -477,8 +474,8 @@ mod tests {
     // Intent: not-enabled --json surfaces the stable error sentinel.
     // Why: scripts wrapping `braid ups status --json` key off
     // `.error == "ups_not_enabled"` without needing stderr parsing.
-    // Scenario: unit test of the branch triggered when `braid.ups.enable`
-    // is false or the config block is absent.
+    // Scenario: unit test of the branch triggered when the `ups` block is
+    // absent from config.json.
     #[test]
     fn json_not_enabled_has_sentinel_error() {
         let payload = JsonReport::Error(ErrorReport::NotEnabled);
@@ -862,8 +859,8 @@ mod tests {
     // Intent: not-enabled --json serializes to the not-enabled sentinel.
     // Why: distinguishes "UPS unreachable" from "UPS intentionally
     // disabled" so scripts can stay quiet in the latter case.
-    // Scenario: host without `braid.ups.enable = true` -- `braid ups
-    // status --json` still exits 0 with the ups_not_enabled sentinel.
+    // Scenario: host with no `ups` block in config.json -- `braid ups status
+    // --json` still exits 0 with the ups_not_enabled sentinel.
     #[test]
     fn snapshot_json_not_enabled() {
         let payload = JsonReport::Error(ErrorReport::NotEnabled);

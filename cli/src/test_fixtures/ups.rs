@@ -15,7 +15,7 @@ pub(crate) fn ups_write_config(dir: &TempDir, name: &str) -> PathBuf {
     let path = dir.path().join("config.json");
     std::fs::write(
         &path,
-        format!(r#"{{"mount_point":"/mnt/storage","ups":{{"enable":true,"name":"{name}"}}}}"#),
+        format!(r#"{{"mount_point":"/mnt/storage","ups":{{"name":"{name}"}}}}"#),
     )
     .unwrap();
     path

@@ -43,13 +43,10 @@ fn fan_probe_effect(model: &Model) -> Option<Effect> {
     })
 }
 
-/// Emit an `Effect::ProbeUps` when the UPS block is present AND enabled.
+/// Emit an `Effect::ProbeUps` when the UPS block is present.
 /// Mirrors `fan_probe_effect` for the fan subsystem.
 fn ups_probe_effect(model: &Model) -> Option<Effect> {
     let u = model.ups_config.as_ref()?;
-    if !u.enable {
-        return None;
-    }
     Some(Effect::ProbeUps {
         name: u.name.clone(),
     })
@@ -221,10 +218,9 @@ pub fn update(model: &mut Model, msg: Message) -> Vec<Effect> {
         }
         Message::RefreshUps => {
             model.ups_scheduler_pending = false;
-            // Disabled / absent UPS config -> tear the loop down, no
-            // further effects. Mirror of the fan loop.
-            let enabled = model.ups_config.as_ref().is_some_and(|u| u.enable);
-            if !enabled {
+            // Absent UPS config -> tear the loop down, no further effects.
+            // Mirror of the fan loop.
+            if model.ups_config.is_none() {
                 return vec![];
             }
             if model.ups_probe_inflight {
@@ -272,11 +268,8 @@ mod tests {
         effects.iter().filter(|effect| pred(effect)).count()
     }
 
-    fn sample_ups_config(enable: bool) -> crate::config::Ups {
-        crate::config::Ups {
-            enable,
-            name: "ups".into(),
-        }
+    fn sample_ups_config() -> crate::config::Ups {
+        crate::config::Ups { name: "ups".into() }
     }
 
     fn sample_ups_snapshot() -> UpsSnapshot {
@@ -318,7 +311,7 @@ mod tests {
     // arming either scheduler until the first probe finishes.
     // Why it exists: initializing scheduler-pending state to true would
     // suppress the first re-arm and leave startup telemetry stale forever.
-    // Scenario: TUI starts with fan control and an enabled UPS configured.
+    // Scenario: TUI starts with fan control and a UPS configured.
     #[test]
     fn startup_probes_without_scheduler_pending_then_first_finish_arms_loop() {
         let (mut model, init_effects) = Model::new(
@@ -326,7 +319,7 @@ mod tests {
             std::collections::HashMap::new(),
             "/mnt/storage".to_owned(),
             Some(sample_fan_control()),
-            Some(sample_ups_config(true)),
+            Some(sample_ups_config()),
             vec![],
             crate::state_paths::StatePaths::production(),
         );
@@ -434,13 +427,13 @@ mod tests {
     // is conditional" and let fan/UPS probes leak through, or leave the pool
     // stuck in Loading.
     // Scenario: user runs `braid tui --demo` as a non-root user and presses
-    // 'r' on a hypothetical demo build that has fan and UPS enabled.
+    // 'r' on a hypothetical demo build that has fan and UPS configured.
     #[test]
     fn refresh_pool_in_demo_is_noop() {
         let mut model = Model::new_demo(sample_disk_names(), PoolStatus::Mounted(sample_pool()));
         model.fan_control = Some(sample_fan_control());
         model.fan_probe_inflight = false;
-        model.ups_config = Some(sample_ups_config(true));
+        model.ups_config = Some(sample_ups_config());
         model.ups_probe_inflight = false;
 
         let effects = update(&mut model, Message::RefreshPool);
@@ -871,7 +864,7 @@ mod tests {
     #[test]
     fn ups_probe_finished_schedules_only_ups_refresh() {
         let mut model = Model::new_demo(sample_disk_names(), PoolStatus::Mounted(sample_pool()));
-        model.ups_config = Some(sample_ups_config(true));
+        model.ups_config = Some(sample_ups_config());
         model.ups_probe_inflight = true;
         model.ups_scheduler_pending = false;
         let effects = update(&mut model, Message::UpsProbeFinished(sample_ups_snapshot()));
@@ -894,7 +887,7 @@ mod tests {
         let mut model = Model::new_demo(sample_disk_names(), PoolStatus::Mounted(sample_pool()));
         let _tmp = tempfile::tempdir().unwrap();
         model.paths = Some(crate::state_paths::StatePaths::custom(_tmp.path().into()));
-        model.ups_config = Some(sample_ups_config(true));
+        model.ups_config = Some(sample_ups_config());
         model.ups_probe_inflight = false;
         model.ups_scheduler_pending = true;
 
@@ -917,7 +910,7 @@ mod tests {
     #[test]
     fn refresh_ups_idle_tick_rearms_once_after_probe_finished() {
         let mut model = Model::new_demo(sample_disk_names(), PoolStatus::Loading);
-        model.ups_config = Some(sample_ups_config(true));
+        model.ups_config = Some(sample_ups_config());
         model.ups_probe_inflight = false;
         model.ups_scheduler_pending = true;
 
@@ -940,7 +933,7 @@ mod tests {
     #[test]
     fn refresh_ups_inflight_tick_rearms_once_total() {
         let mut model = Model::new_demo(sample_disk_names(), PoolStatus::Loading);
-        model.ups_config = Some(sample_ups_config(true));
+        model.ups_config = Some(sample_ups_config());
         model.ups_probe_inflight = true;
         model.ups_scheduler_pending = true;
 
@@ -966,7 +959,7 @@ mod tests {
     #[test]
     fn refresh_ups_skips_when_inflight() {
         let mut model = Model::new_demo(sample_disk_names(), PoolStatus::Loading);
-        model.ups_config = Some(sample_ups_config(true));
+        model.ups_config = Some(sample_ups_config());
         model.ups_probe_inflight = true;
         model.ups_scheduler_pending = false;
         let effects = update(&mut model, Message::RefreshUps);
@@ -991,50 +984,34 @@ mod tests {
         assert!(!model.ups_scheduler_pending);
     }
 
-    // Intent: RefreshUps with config present but enable=false also
-    // tears the loop down.
-    // Why: the Nix-emitted config can carry an ups block whose
-    // `enable = false` (e.g. during a partial rollout); the loop
-    // must honour that.
-    // Scenario: operator sets braid.ups.enable = false temporarily.
-    #[test]
-    fn refresh_ups_skips_when_not_enabled() {
-        let mut model = Model::new_demo(sample_disk_names(), PoolStatus::Loading);
-        model.ups_config = Some(sample_ups_config(false));
-        model.ups_scheduler_pending = true;
-        let effects = update(&mut model, Message::RefreshUps);
-        assert!(effects.is_empty());
-        assert!(!model.ups_scheduler_pending);
-    }
-
-    // Intent: RefreshUps with config enabled and no probe in flight
+    // Intent: RefreshUps with config present and no probe in flight
     // emits exactly one ProbeUps AND flips inflight to true.
     // Why: the inflight flag is the guard for the manual-refresh +
     // auto-poll duplicate-probe case; flipping it here, at the point
     // of decision, is the single source of truth.
-    // Scenario: first scheduler tick on a UPS-enabled system.
+    // Scenario: first scheduler tick on a UPS-configured system.
     #[test]
     fn refresh_ups_emits_probe_when_idle() {
         let mut model = Model::new_demo(sample_disk_names(), PoolStatus::Loading);
-        model.ups_config = Some(sample_ups_config(true));
+        model.ups_config = Some(sample_ups_config());
         model.ups_probe_inflight = false;
         let effects = update(&mut model, Message::RefreshUps);
         assert!(effects.iter().any(is_probe_ups));
         assert!(model.ups_probe_inflight);
     }
 
-    // Intent: manual `r` with UPS enabled + idle fires BOTH pool and
+    // Intent: manual `r` with UPS configured + idle fires BOTH pool and
     // UPS probes.
     // Why: the user's mental model of `r` is "refresh everything";
     // stopping short of the UPS would create asymmetry with the fan
     // path.
-    // Scenario: user presses `r` on a UPS-enabled system.
+    // Scenario: user presses `r` on a UPS-configured system.
     #[test]
     fn refresh_pool_with_ups_idle_emits_both() {
         let mut model = Model::new_demo(sample_disk_names(), PoolStatus::Mounted(sample_pool()));
         let _tmp = tempfile::tempdir().unwrap();
         model.paths = Some(crate::state_paths::StatePaths::custom(_tmp.path().into()));
-        model.ups_config = Some(sample_ups_config(true));
+        model.ups_config = Some(sample_ups_config());
         model.ups_probe_inflight = false;
         let effects = update(&mut model, Message::RefreshPool);
         assert!(effects.iter().any(is_probe_pool), "missing ProbePool");
@@ -1051,7 +1028,7 @@ mod tests {
         let mut model = Model::new_demo(sample_disk_names(), PoolStatus::Mounted(sample_pool()));
         let _tmp = tempfile::tempdir().unwrap();
         model.paths = Some(crate::state_paths::StatePaths::custom(_tmp.path().into()));
-        model.ups_config = Some(sample_ups_config(true));
+        model.ups_config = Some(sample_ups_config());
         model.ups_probe_inflight = true;
         let effects = update(&mut model, Message::RefreshPool);
         assert!(effects.iter().any(is_probe_pool));

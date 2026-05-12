@@ -29,7 +29,6 @@ let
     }
     // lib.optionalAttrs cfg.ups.enable {
       ups = {
-        enable = cfg.ups.enable;
         name = cfg.ups.name;
       };
     }

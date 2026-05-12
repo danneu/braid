@@ -6613,10 +6613,10 @@ mod tests {
             inner: AddPlanTestRunner::new(),
         };
 
-        // Build a config.json that enables a UPS named "ups".
+        // Build a config.json with a UPS named "ups".
         let config_json = serde_json::json!({
             "mount_point": "/mnt/storage",
-            "ups": { "enable": true, "name": "ups" },
+            "ups": { "name": "ups" },
         });
         std::fs::write(
             &fixture.config_path,

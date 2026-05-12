@@ -29,8 +29,8 @@ pub struct FanControl {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct Ups {
-    pub enable: bool,
     pub name: String,
 }
 
@@ -208,21 +208,38 @@ mod tests {
     }
 
     // Intent: Config deserializes the ups block emitted by modules/braid/cli.nix.
-    // Why: cli.nix writes `ups = { enable, name }` when braid.ups.enable = true;
-    // a schema mismatch silently leaves Config::ups as None, which would turn
-    // the preflight on-battery refusal into a no-op (the check is a no-op when
-    // `ups_name` is None).
+    // Why: cli.nix writes `ups = { name }` when braid.ups.enable = true;
+    // a schema mismatch would stop UPS-aware commands from seeing the NUT
+    // daemon name they need to query.
     // Scenario: NixOS generation with braid.ups.enable = true and name = "ups".
     #[test]
     fn parses_config_with_ups() {
         let raw = r#"{
             "mount_point": "/mnt/storage",
-            "ups": { "enable": true, "name": "ups" }
+            "ups": { "name": "ups" }
         }"#;
         let cfg: Config = serde_json::from_str(raw).expect("config should parse");
         let u = cfg.ups().expect("ups should be Some");
-        assert!(u.enable);
         assert_eq!(u.name, "ups");
+    }
+
+    // Intent: Config rejects the legacy UPS shape with an `enable` field.
+    // Why: accepting stale JSON would turn a hand-edited
+    // `{"enable":false}` block into a live UPS config.
+    // Scenario: operator keeps an old config.json after the JSON schema
+    // switches to presence-only UPS enablement.
+    #[test]
+    fn rejects_config_with_legacy_ups_enable_field() {
+        let raw = r#"{
+            "mount_point": "/mnt/storage",
+            "ups": { "enable": true, "name": "ups" }
+        }"#;
+        let err = serde_json::from_str::<Config>(raw).expect_err("legacy ups shape must fail");
+        let message = err.to_string();
+        assert!(
+            message.contains("enable") || message.contains("unknown field"),
+            "expected legacy-field error, got: {message}"
+        );
     }
 
     // Intent: Config parses when ups key is absent (braid.ups.enable = false).

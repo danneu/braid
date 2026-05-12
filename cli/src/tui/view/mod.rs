@@ -270,7 +270,7 @@ fn format_ups_load(snapshot: &UpsSnapshot) -> String {
 /// Render the single-row UPS table. Sensor cells render dim when the
 /// UPS daemon is Failed or Inactive (mirror of the Fans section).
 ///
-/// Precondition: `model.ups_config` is Some AND enable=true.
+/// Precondition: `model.ups_config` is Some.
 fn ups_section(model: &Model) -> Table<'_> {
     let header = Row::new(["Status", "Battery", "Runtime", "Load"])
         .style(Style::default().fg(Color::DarkGray));
@@ -940,7 +940,7 @@ fn view_data(model: &Model, frame: &mut Frame, area: Rect, _now: PrimitiveDateTi
     };
     let disk_height: u16 = model.disk_names.len() as u16 + 2; // +1 border, +1 header
     let fan_enabled = model.fan_control.is_some();
-    let ups_enabled = model.ups_config.as_ref().is_some_and(|u| u.enable);
+    let ups_enabled = model.ups_config.is_some();
     // border + header + single data row
     let fan_height: u16 = 3;
     let ups_height: u16 = 3;
