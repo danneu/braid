@@ -195,12 +195,14 @@ Global invariants:
 
 Commit strategy:
 
-- Do not commit after every worker phase by default.
-- Do not create normal project commits for intentionally broken intermediate states.
-- Use the task list as the phase checkpoint mechanism.
-- Only commit at coherent boundaries where the tree compiles or where the user explicitly asks for a WIP checkpoint.
-- If a WIP checkpoint is explicitly requested while the tree is broken, the commit subject must make that clear with `wip:`.
-- Final history should be clean: preferably one implementation commit, with docs/fixtures split only if that separation is genuinely useful.
+- Worker subagents must not create commits.
+- After accepting each worker phase, the orchestrator should create a checkpoint commit for that phase.
+- Checkpoint commits may be compile-broken only when the selected plan or accepted phase notes say the breakage is expected until a later phase.
+- Broken checkpoint commit subjects must start with `wip:`.
+- Each checkpoint commit body must record the accepted phase, known expected failures, and checks run.
+- The task list remains the authoritative phase tracking mechanism; checkpoint commits are for git-level traceability and rollback.
+- Before final delivery, the orchestrator should decide whether to keep checkpoint history or squash/rework it into clean implementation commits.
+- Final history should be clean if it will be merged directly: preferably one implementation commit, with docs/fixtures split only if that separation is genuinely useful.
 - If committing, stage touched paths by name. Never use `git add -A`, `git add .`, or directory-wide staging.
 - Commit messages must be Conventional Commits style and the first line must start lowercase.
 
