@@ -16,29 +16,22 @@ pub enum MonitorResult {
     Alert(alert::AlertState),
 }
 
-// Fail closed: any indeterminate-state failure inside cmd_monitor latches a
-// ComputationError cause and surfaces as MonitorResult::Alert so the systemd
-// wrapper starts the beeper. See docs/decisions/014-alerts.md.
-fn latch_computation_error(detail: String, paths: &StatePaths) -> MonitorResult {
-    eprintln!("error: {detail}");
-    let (existing, latch_corrupt_detail) = alert::load_alert_latch_or_quarantine(paths);
-    // merge_into_latch's same_cause_key collapses every ComputationError into
-    // one slot, so two distinct ComputationError entries would lose one. Fold
-    // the latch-corruption detail into the same cause string instead.
-    let combined_detail = match latch_corrupt_detail {
-        Some(latch_detail) => format!(
-            "{detail}; additionally, previous alert latch was unreadable -- quarantined; {latch_detail}"
-        ),
-        None => detail,
-    };
-    let causes = vec![AlertCause::ComputationError {
-        detail: combined_detail,
-    }];
-    let merged = merge_into_latch(existing.as_ref(), &causes);
-    if let Err(e) = alert::save_alert_latch(&merged, paths) {
-        eprintln!("Warning: failed to write alert latch: {e}");
+/// Centralizes monitor's fail-closed detail folding so each pass contributes
+/// at most one `ComputationError` latch slot.
+fn folded_computation_error_detail(
+    failure_detail: Option<String>,
+    latch_corrupt_detail: Option<String>,
+) -> Option<String> {
+    match (failure_detail, latch_corrupt_detail) {
+        (Some(failure), Some(latch_detail)) => Some(format!(
+            "{failure}; additionally, previous alert latch was unreadable -- quarantined; {latch_detail}"
+        )),
+        (Some(failure), None) => Some(failure),
+        (None, Some(latch_detail)) => Some(format!(
+            "previous alert latch was unreadable -- quarantined; {latch_detail}"
+        )),
+        (None, None) => None,
     }
-    MonitorResult::Alert(merged)
 }
 
 pub fn cmd_monitor<R: CommandRunner, F: Filesystem + ?Sized>(
@@ -47,99 +40,99 @@ pub fn cmd_monitor<R: CommandRunner, F: Filesystem + ?Sized>(
     mount_point: &MountPoint,
     paths: &StatePaths,
 ) -> MonitorResult {
-    // 1. Check if pool is mounted.
-    //
-    // Exhaustive over every ProbeError variant on purpose: a future variant
-    // must produce a "non-exhaustive patterns" compile error here so the
-    // reviewer is forced to classify it as either offline or fail-closed
-    // alert. monitor is the headless surface, so the wrong default would
-    // propagate silently into operator-visible behavior.
-    let pool = match probe_pool(runner, fs, mount_point) {
-        Ok(p) => p,
-        // Mount target holds a non-btrfs filesystem -- our pool is not here.
-        // Treat as offline; no fail-closed beep needed.
-        Err(ProbeError::NotBtrfs { .. }) => return MonitorResult::PoolOffline,
-        // All remaining variants describe indeterminate pool state -- tooling
-        // breakage (Cmd/Parse), pool show internally inconsistent (PoolDevice),
-        // or LUKS-side mismatch (UnsupportedLuksVersion / MapperConflict, both
-        // unreachable from probe_pool today but listed for the gate). Fail
-        // closed per ADR 014: latch ComputationError so the wrapper beeps.
-        Err(
-            e @ (ProbeError::Cmd(_)
-            | ProbeError::Parse(_)
-            | ProbeError::PoolDevice { .. }
-            | ProbeError::UnsupportedLuksVersion { .. }
-            | ProbeError::MapperConflict { .. }
-            | ProbeError::MountInfo(_)),
-        ) => return latch_computation_error(e.to_string(), paths),
-    };
+    let classified = (|| -> Result<Option<Vec<AlertCause>>, String> {
+        // 1. Check if pool is mounted.
+        //
+        // Exhaustive over every ProbeError variant on purpose: a future variant
+        // must produce a "non-exhaustive patterns" compile error here so the
+        // reviewer is forced to classify it as either offline or fail-closed
+        // alert. monitor is the headless surface, so the wrong default would
+        // propagate silently into operator-visible behavior.
+        let pool = match probe_pool(runner, fs, mount_point) {
+            Ok(p) => p,
+            // Mount target holds a non-btrfs filesystem -- our pool is not here.
+            // Treat as offline; no fail-closed beep needed.
+            Err(ProbeError::NotBtrfs { .. }) => return Ok(None),
+            // All remaining variants describe indeterminate pool state --
+            // tooling breakage (Cmd/Parse), pool show internally inconsistent
+            // (PoolDevice), or LUKS-side mismatch (UnsupportedLuksVersion /
+            // MapperConflict, both unreachable from probe_pool today but listed
+            // for the gate). Fail closed per ADR 014: latch ComputationError so
+            // the wrapper beeps.
+            Err(
+                e @ (ProbeError::Cmd(_)
+                | ProbeError::Parse(_)
+                | ProbeError::PoolDevice { .. }
+                | ProbeError::UnsupportedLuksVersion { .. }
+                | ProbeError::MapperConflict { .. }
+                | ProbeError::MountInfo(_)),
+            ) => return Err(e.to_string()),
+        };
 
-    if !pool.mounted {
-        return MonitorResult::PoolOffline;
-    }
+        if !pool.mounted {
+            return Ok(None);
+        }
 
-    // 2. Run btrfs device stats
-    let stats_raw = match runner.run(&CmdRequest::BtrfsDeviceStatsJson {
-        mount_point: mount_point.clone(),
-    }) {
-        Ok(r) => r,
-        Err(e) => return latch_computation_error(e.to_string(), paths),
-    };
-    let device_stats = match parse_btrfs_device_stats(&stats_raw) {
-        Ok(s) => s,
-        Err(e) => return latch_computation_error(e.to_string(), paths),
-    };
+        // 2. Run btrfs device stats
+        let stats_raw = runner
+            .run(&CmdRequest::BtrfsDeviceStatsJson {
+                mount_point: mount_point.clone(),
+            })
+            .map_err(|e| e.to_string())?;
+        let device_stats = parse_btrfs_device_stats(&stats_raw).map_err(|e| e.to_string())?;
 
-    // 3. Load acked stats. Fail closed if the file is unreadable or
-    // unparseable: an empty fallback would silently re-fire every acked
-    // cause as a BtrfsDeviceErrors / MissingDevice cause against a zero
-    // baseline.
-    let mut acked = match alert::load_acked_stats_fallible(paths) {
-        Ok(a) => a,
-        Err(e) => {
-            return latch_computation_error(format!("acked-stats unreadable -- {e}"), paths);
+        // 3. Load acked stats. Fail closed if the file is unreadable or
+        // unparseable: an empty fallback would silently re-fire every acked
+        // cause as a BtrfsDeviceErrors / MissingDevice cause against a zero
+        // baseline.
+        let mut acked = alert::load_acked_stats_fallible(paths)
+            .map_err(|e| format!("acked-stats unreadable -- {e}"))?;
+
+        // 4. Compute alert-local missing devids: btrfs MISSING ∪ null-underlying
+        let alert_missing_devids = pool.alert_missing_devids();
+
+        // 5. Check smartd alert flag
+        let smartd_active = alert::smartd_alert_active(paths);
+
+        // 6. Reconcile stale ack state: prune orphan devids and self-heal
+        //    missing_acked for devices that are present again.
+        let present_devids: BTreeSet<u64> = pool.devices.iter().map(|d| d.devid).collect();
+        let still_relevant_devids: BTreeSet<u64> = present_devids
+            .iter()
+            .copied()
+            .chain(pool.null_underlying.iter().map(|d| d.devid))
+            .chain(pool.missing_devids.iter().copied())
+            .collect();
+        let ack_changed =
+            alert::reconcile_acked_stats(&mut acked, &still_relevant_devids, &present_devids);
+        if ack_changed && let Err(e) = save_acked_stats(&acked, paths) {
+            eprintln!("Warning: failed to update acked stats: {e}");
+        }
+
+        // 7. Compute live alert state. Identity is the devid carried on each
+        //    stats row by btrfs -- no path-to-devid map needed.
+        let live_causes =
+            compute_alert_state(&device_stats, &acked, &alert_missing_devids, smartd_active).causes;
+
+        Ok(Some(live_causes))
+    })();
+
+    let (mut live_causes, failure_detail) = match classified {
+        Ok(None) => return MonitorResult::PoolOffline,
+        Ok(Some(causes)) => (causes, None),
+        Err(detail) => {
+            eprintln!("error: {detail}");
+            (Vec::new(), Some(detail))
         }
     };
 
-    // 4. Compute alert-local missing devids: btrfs MISSING ∪ null-underlying
-    let alert_missing_devids = pool.alert_missing_devids();
-
-    // 5. Check smartd alert flag
-    let smartd_active = alert::smartd_alert_active(paths);
-
-    // 6. Reconcile stale ack state: prune orphan devids and self-heal
-    //    missing_acked for devices that are present again.
-    let present_devids: BTreeSet<u64> = pool.devices.iter().map(|d| d.devid).collect();
-    let still_relevant_devids: BTreeSet<u64> = present_devids
-        .iter()
-        .copied()
-        .chain(pool.null_underlying.iter().map(|d| d.devid))
-        .chain(pool.missing_devids.iter().copied())
-        .collect();
-    let ack_changed =
-        alert::reconcile_acked_stats(&mut acked, &still_relevant_devids, &present_devids);
-    if ack_changed && let Err(e) = save_acked_stats(&acked, paths) {
-        eprintln!("Warning: failed to update acked stats: {e}");
-    }
-
-    // 7. Compute live alert state. Identity is the devid carried on each
-    //    stats row by btrfs -- no path-to-devid map needed.
-    let live_causes =
-        compute_alert_state(&device_stats, &acked, &alert_missing_devids, smartd_active).causes;
-
-    // 9. Load existing latch (quarantine corrupt file if needed)
+    // 8. Load existing latch (quarantine corrupt file if needed)
     let (existing_latch, latch_corrupt_detail) = alert::load_alert_latch_or_quarantine(paths);
 
-    // 9b. If the prior latch was unreadable, surface that as a loud
+    // 9. Surface computation failures and latch corruption as at most one
     // ComputationError cause so status sees it instead of silently rebuilding.
-    let mut live_causes = live_causes;
-    if let Some(detail) = latch_corrupt_detail {
-        live_causes.insert(
-            0,
-            AlertCause::ComputationError {
-                detail: format!("previous alert latch was unreadable -- quarantined; {detail}"),
-            },
-        );
+    if let Some(detail) = folded_computation_error_detail(failure_detail, latch_corrupt_detail) {
+        live_causes.insert(0, AlertCause::ComputationError { detail });
     }
 
     // 10. Merge: existing latch + live causes
@@ -178,6 +171,24 @@ mod tests {
                 ..Default::default()
             },
         }
+    }
+
+    fn alert_state(result: &MonitorResult) -> &alert::AlertState {
+        match result {
+            MonitorResult::Alert(state) => state,
+            other => panic!("expected MonitorResult::Alert, got {other:?}"),
+        }
+    }
+
+    fn computation_error_details(state: &alert::AlertState) -> Vec<&str> {
+        state
+            .causes
+            .iter()
+            .filter_map(|cause| match cause {
+                AlertCause::ComputationError { detail } => Some(detail.as_str()),
+                _ => None,
+            })
+            .collect()
     }
 
     /*
@@ -433,6 +444,90 @@ mod tests {
                 "{label}: alert latch must be written"
             );
         }
+    }
+
+    // Intent: A btrfs stats failure and corrupt alert latch fold into exactly
+    //   one ComputationError cause.
+    // Why it exists: merge_into_latch keys every ComputationError into one
+    //   slot, so emitting separate failure and quarantine causes would lose
+    //   one detail and hide part of the incident from status.
+    // Scenario: the pool is mounted, btrfs device stats fails, and the prior
+    //   alert-latch.json is corrupt. Monitor must preserve the corrupt bytes
+    //   while returning one combined ComputationError detail.
+    #[test]
+    fn stats_failure_with_corrupt_alert_latch_folds_one_computation_error() {
+        let (_dir, paths) = isolated_paths();
+        std::fs::write(paths.alert_latch_json(), b"not json").unwrap();
+        let runner = MonitorTestRunner::with_override(MonitorOverride::StatsResult(Err(
+            CmdError::Failed("btrfs device stats: spawn failed".into()),
+        )));
+
+        let result = cmd_monitor(&runner, &monitor_fs_btrfs(), &monitor_mp(), &paths);
+        let detail = assert_monitor_single_computation_error(&result);
+        assert!(
+            detail.contains("btrfs device stats: spawn failed"),
+            "detail should include stats failure, got {detail}"
+        );
+        assert!(
+            detail.contains("previous alert latch was unreadable -- quarantined"),
+            "detail should include alert latch quarantine, got {detail}"
+        );
+
+        let sidecar = std::fs::read(paths.alert_latch_corrupt()).unwrap();
+        assert_eq!(
+            sidecar,
+            b"not json".to_vec(),
+            "corrupt alert latch bytes must be preserved"
+        );
+    }
+
+    // Intent: A stats failure preserves an already-latched non-ComputationError
+    //   cause and adds exactly one ComputationError cause.
+    // Why it exists: the refactor must keep the latch merge path shared while
+    //   preserving latched operator-visible alerts until ack clears them.
+    // Scenario: a prior monitor pass latched MissingDevice, then the next pass
+    //   cannot compute fresh btrfs stats. The returned state and saved latch
+    //   must both contain MissingDevice plus one fail-closed computation error.
+    #[test]
+    fn stats_failure_merges_existing_non_computation_latch_once() {
+        let (_dir, paths) = isolated_paths();
+        let existing = alert::AlertState {
+            causes: vec![AlertCause::MissingDevice { devid: 7 }],
+        };
+        alert::save_alert_latch(&existing, &paths).unwrap();
+        let runner = MonitorTestRunner::with_override(MonitorOverride::StatsResult(Err(
+            CmdError::Failed("btrfs device stats: spawn failed".into()),
+        )));
+
+        let result = cmd_monitor(&runner, &monitor_fs_btrfs(), &monitor_mp(), &paths);
+        let state = alert_state(&result);
+        assert_eq!(
+            state
+                .causes
+                .iter()
+                .filter(|cause| matches!(cause, AlertCause::MissingDevice { devid: 7 }))
+                .count(),
+            1,
+            "original MissingDevice cause must remain latched"
+        );
+        let computation_details = computation_error_details(state);
+        assert_eq!(
+            computation_details.len(),
+            1,
+            "expected exactly one ComputationError, got {:?}",
+            state.causes
+        );
+        assert!(
+            computation_details[0].contains("btrfs device stats: spawn failed"),
+            "detail should include stats failure, got {}",
+            computation_details[0]
+        );
+
+        let saved = alert::load_alert_latch(&paths).unwrap().unwrap();
+        assert_eq!(
+            &saved, state,
+            "saved latch must match returned monitor alert"
+        );
     }
 
     /*
