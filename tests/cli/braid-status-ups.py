@@ -44,6 +44,28 @@ assert parsed["load_pct"] == 17, parsed
 assert parsed["realpower_nominal_watts"] == 330, parsed
 assert parsed["device"]["model"] == "Back-UPS ES 550G", parsed
 assert parsed["device"]["mfr"] == "APC", parsed
+assert "warning" not in parsed, parsed
+
+# --- Empty-status warning branch ---
+# The secondary dummy UPS has useful telemetry but an empty ups.status.
+# Point braid's config at it and confirm --json preserves the parsed
+# body while adding the warning sentinel.
+machine.wait_until_succeeds("upsc emptyups@localhost battery.charge", timeout=60)
+machine.succeed("jq '.ups.name = \"emptyups\"' /etc/braid/config.json > /tmp/empty-ups.json")
+raw_empty = machine.succeed("braid --config /tmp/empty-ups.json ups status --json")
+parsed_empty = json.loads(raw_empty)
+assert parsed_empty.get("warning") == "ups_status_empty", (
+    f"expected warning=ups_status_empty, got {parsed_empty}"
+)
+assert parsed_empty.get("status_flags") == [], (
+    f"expected empty status_flags, got {parsed_empty}"
+)
+assert parsed_empty["battery"]["charge_pct"] == 55, parsed_empty
+assert parsed_empty["battery"]["runtime_secs"] == 900, parsed_empty
+assert parsed_empty["load_pct"] == 12, parsed_empty
+assert parsed_empty["device"]["model"] == "Back-UPS ES 550G", parsed_empty
+assert parsed_empty["device"]["mfr"] == "APC", parsed_empty
+assert "error" not in parsed_empty, parsed_empty
 
 # --- Query-failed branch ---
 # Stop upsd and confirm the query-failed JSON shape has the sentinel

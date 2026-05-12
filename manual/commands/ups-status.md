@@ -34,7 +34,9 @@ Last test: Done and passed
 sudo braid ups status --json | jq .
 ```
 
-Emits the serialized `UpscOutput` model. Shape:
+Emits the serialized `UpscOutput` model. A trusted healthy success is a
+reachable UPS with a populated `status_flags` array and no top-level
+`error` or `warning` field. Shape:
 
 ```json
 {
@@ -66,20 +68,22 @@ Emits the serialized `UpscOutput` model. Shape:
 }
 ```
 
-Distinct error sentinels cover the common non-OK cases:
+Distinct sentinels cover the common non-OK cases:
 
 | Condition | JSON | Exit code |
 | --- | --- | --- |
-| UPS reachable | serialized `UpscOutput` | 0 |
+| UPS reachable with populated `ups.status` | serialized `UpscOutput` | 0 |
+| UPS reachable but `ups.status` empty | serialized `UpscOutput` plus `"warning": "ups_status_empty"` | 0 |
 | UPS query failed | `{"error": "query_failed", "detail": "exit 1: Error: Connection failure: ..."}` | 1 |
 | UPS invocation failed (upsc could not run -- missing on PATH, killed by signal, or other runner-level failure) | `{"error": "invocation_failed", "detail": "invocation failed: ..."}` | 1 |
 | UPS not enabled | `{"error": "ups_not_enabled"}` | 0 |
 
-For these cases, `--json` writes only to stdout -- stderr
-stays silent so the JSON sentinel can be piped into a single sink
-(`jq`, `tee`, CI logs) without a redundant human error line. Other
-failure modes, such as malformed config, still print a human error to
-stderr.
+If `error` or `warning` is present, do not treat the typed body as
+healthy UPS state. For these cases, `--json` writes only to stdout --
+stderr stays silent so the JSON sentinel can be piped into a single
+sink (`jq`, `tee`, CI logs) without a redundant human error line.
+Other failure modes, such as malformed config, still print a human
+error to stderr.
 
 ## Flags
 

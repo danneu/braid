@@ -59,7 +59,43 @@ pub fn query_ups<R: CommandRunner>(runner: &R, name: &str) -> Result<UpscOutput,
 #[serde(untagged)]
 enum JsonReport<'a> {
     Error(ErrorReport<'a>),
-    Ok(&'a UpscOutput),
+    Ok(JsonSuccessReport<'a>),
+}
+
+impl<'a> JsonReport<'a> {
+    fn success(parsed: &'a UpscOutput) -> Self {
+        Self::Ok(JsonSuccessReport::new(parsed))
+    }
+}
+
+/// Flattened success shape so scripts keep reading the typed UPS model
+/// at top level while braid can add warning sentinels for suspect data.
+#[derive(Debug, serde::Serialize)]
+struct JsonSuccessReport<'a> {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    warning: Option<JsonWarning>,
+    #[serde(flatten)]
+    parsed: &'a UpscOutput,
+}
+
+impl<'a> JsonSuccessReport<'a> {
+    fn new(parsed: &'a UpscOutput) -> Self {
+        Self {
+            warning: parsed
+                .status_flags
+                .is_empty()
+                .then_some(JsonWarning::UpsStatusEmpty),
+            parsed,
+        }
+    }
+}
+
+/// JSON warning sentinels for success-status output whose typed body is
+/// still useful but must not be treated as trusted healthy UPS state.
+#[derive(Debug, serde::Serialize)]
+#[serde(rename_all = "snake_case")]
+enum JsonWarning {
+    UpsStatusEmpty,
 }
 
 #[derive(Debug, serde::Serialize)]
@@ -95,7 +131,7 @@ pub fn cmd_ups_status<R: CommandRunner>(
         }
     };
     if json {
-        emit_json(&JsonReport::Ok(&parsed))?;
+        emit_json(&JsonReport::success(&parsed))?;
     } else {
         print!("{}", format_human(&ups_cfg.name, &parsed));
     }
@@ -304,9 +340,10 @@ mod tests {
     }
 
     // Intent: JSON output of a healthy parse round-trips to a stable shape.
-    // Why: the --json contract is "serde_json::to_string_pretty(UpscOutput)".
-    // Snapshot-style coverage lives in golden tests; here we lock in the
-    // minimum invariants (status_flags present, battery.charge_pct surfaced).
+    // Why it exists: the --json contract is the top-level typed UPS body,
+    // optionally decorated with sentinel fields. Snapshot-style coverage
+    // lives in golden tests; here we lock in the minimum invariants
+    // (status_flags present, battery.charge_pct surfaced, no warning).
     // Scenario: unit coverage for the JSON branch without spinning up a VM.
     #[test]
     fn json_output_has_status_and_battery_keys() {
@@ -328,8 +365,9 @@ mod tests {
             device: DeviceFields::default(),
             extra: std::collections::BTreeMap::new(),
         };
-        let text =
-            serde_json::to_string_pretty(&JsonReport::Ok(&parsed)).expect("serialize succeeds");
+        let text = serde_json::to_string_pretty(&JsonReport::success(&parsed))
+            .expect("serialize succeeds");
+        let value: serde_json::Value = serde_json::from_str(&text).unwrap();
         assert!(text.contains("\"status_flags\""), "got: {text}");
         assert!(text.contains("\"battery\""), "got: {text}");
         assert!(
@@ -340,6 +378,45 @@ mod tests {
             text.contains("\"NEWFLAG\""),
             "unknown flag token appears verbatim: {text}"
         );
+        assert!(
+            value.get("warning").is_none(),
+            "healthy output must omit warning: {text}"
+        );
+    }
+
+    // Intent: JSON output marks empty status_flags with a warning sentinel.
+    // Why it exists: scripts need a machine-readable signal that the
+    // flattened typed body is telemetry, not trusted healthy UPS state.
+    // Scenario: upsc exits 0 and reports battery data before the driver
+    // has populated ups.status.
+    #[test]
+    fn json_output_with_empty_status_has_warning_and_body() {
+        let parsed = UpscOutput {
+            status_flags: std::collections::HashSet::new(),
+            battery: BatteryFields {
+                charge_pct: Some(55),
+                ..Default::default()
+            },
+            load_pct: Some(12),
+            realpower_nominal_watts: None,
+            input: InputFields::default(),
+            test_result: None,
+            device: DeviceFields {
+                model: Some("Back-UPS ES 550G".into()),
+                ..Default::default()
+            },
+            extra: std::collections::BTreeMap::new(),
+        };
+        let value: serde_json::Value =
+            serde_json::from_str(&serde_json::to_string(&JsonReport::success(&parsed)).unwrap())
+                .unwrap();
+
+        assert_eq!(value["warning"], "ups_status_empty");
+        assert!(value["status_flags"].as_array().unwrap().is_empty());
+        assert_eq!(value["battery"]["charge_pct"], 55);
+        assert_eq!(value["load_pct"], 12);
+        assert_eq!(value["device"]["model"], "Back-UPS ES 550G");
+        assert!(value.get("error").is_none(), "got: {value}");
     }
 
     // Intent: format_human emits exactly `Battery: --`, `Runtime: --`,
@@ -652,7 +729,7 @@ mod tests {
         let parsed = parse_fixture(include_str!(
             "../tests/fixtures/nixos-25.11/upsc/upsc-online.txt"
         ));
-        let text = serde_json::to_string_pretty(&JsonReport::Ok(&parsed)).unwrap();
+        let text = serde_json::to_string_pretty(&JsonReport::success(&parsed)).unwrap();
         let value: serde_json::Value = serde_json::from_str(&text).unwrap();
         let flags = value["status_flags"].as_array().unwrap();
         assert!(flags.iter().any(|v| v == "OL"), "OL in status_flags");
@@ -686,7 +763,7 @@ mod tests {
             "../tests/fixtures/nixos-25.11/upsc/upsc-onbattery.txt"
         ));
         let value: serde_json::Value =
-            serde_json::from_str(&serde_json::to_string(&JsonReport::Ok(&parsed)).unwrap())
+            serde_json::from_str(&serde_json::to_string(&JsonReport::success(&parsed)).unwrap())
                 .unwrap();
         let flags = value["status_flags"].as_array().unwrap();
         assert!(flags.iter().any(|v| v == "OB"), "OB in status_flags");
@@ -717,7 +794,7 @@ mod tests {
             "../tests/fixtures/nixos-25.11/upsc/upsc-lowbattery.txt"
         ));
         let value: serde_json::Value =
-            serde_json::from_str(&serde_json::to_string(&JsonReport::Ok(&parsed)).unwrap())
+            serde_json::from_str(&serde_json::to_string(&JsonReport::success(&parsed)).unwrap())
                 .unwrap();
         let flags = value["status_flags"].as_array().unwrap();
         assert!(flags.iter().any(|v| v == "OB"), "OB in status_flags");
@@ -746,7 +823,7 @@ mod tests {
             "../tests/fixtures/nixos-25.11/upsc/upsc-replace-battery.txt"
         ));
         let value: serde_json::Value =
-            serde_json::from_str(&serde_json::to_string(&JsonReport::Ok(&parsed)).unwrap())
+            serde_json::from_str(&serde_json::to_string(&JsonReport::success(&parsed)).unwrap())
                 .unwrap();
         let flags = value["status_flags"].as_array().unwrap();
         assert!(flags.iter().any(|v| v == "OL"));

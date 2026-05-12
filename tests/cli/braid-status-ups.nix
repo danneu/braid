@@ -74,6 +74,26 @@
         ups.test.result: Done and passed
       '';
 
+      # Secondary dummy UPS for the empty-status JSON warning path. The
+      # dummy-ups driver initializes a missing ups.status to OL, so this
+      # fixture must explicitly set an empty status line.
+      power.ups.ups.emptyups = {
+        driver = "dummy-ups";
+        port = "emptyups.dev";
+        description = "empty-status UPS";
+      };
+
+      environment.etc."nut/emptyups.dev".text = ''
+        battery.charge: 55
+        battery.runtime: 900
+        input.voltage: 120.0
+        ups.load: 12
+        ups.mfr: APC
+        ups.model: Back-UPS ES 550G
+        ups.realpower.nominal: 330
+        ups.status:
+      '';
+
       environment.systemPackages = [ pkgs.jq ];
 
       virtualisation.memorySize = 1024;

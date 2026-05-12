@@ -2448,6 +2448,35 @@ mod tests {
         assert!(r.message.contains("reachable"));
     }
 
+    // Intent: check_ups_daemon_up warns when upsc exits 0 but omits
+    // ups.status.
+    // Why it exists: reachable telemetry without UPS status is not a
+    // query failure, but doctor must still flag that preflight cannot
+    // trust the UPS state.
+    // Scenario: dummy-ups has published battery data before the driver
+    // has populated the status line.
+    #[test]
+    fn ups_daemon_check_warns_when_status_is_empty() {
+        let runner = MockRunner::default().with_output(
+            CmdRequest::UpscQuery { name: "ups".into() },
+            RawCommandOutput {
+                cmd: "upsc ups".into(),
+                stdout: "battery.charge: 44\nups.load: 12\n".into(),
+                stderr: String::new(),
+                exit_status: 0,
+            },
+        );
+        let (_dir, paths) = isolated_paths();
+        let mut ctx = ups_ctx(&runner, &paths, config_with_ups_enabled());
+        let r = check_ups_daemon_up(&mut ctx);
+        assert_eq!(r.status, CheckStatus::Warn, "got: {r:?}");
+        assert!(
+            r.message.contains("ups.status is empty"),
+            "got: {}",
+            r.message
+        );
+    }
+
     // Intent: check_ups_daemon_up warns when `upsc` exits non-zero.
     // Why: query failure deserves a visible but non-fatal nudge -- the
     // operator fixes NUT state, braid does not intervene. Regression here

@@ -58,6 +58,8 @@ Pinning is load-bearing. A new `braid.packages.networkupstools` option is added 
 
 `braid ups status` defaults to a curated human-readable summary and supports `--json` for the typed parsed model. Raw `upsc` passthrough is not exposed; users who want that can still run `upsc` directly.
 
+The `--json` success shape preserves the typed parsed model at top level. If `upsc` exits 0 but `ups.status` is empty or missing, the JSON output stays exit 0 and adds top-level `"warning": "ups_status_empty"` beside the parsed body. Scripts must treat either `.error` or `.warning` as a sentinel that the body is not trusted healthy UPS state.
+
 ### Shutdown-on-LB = `systemctl poweroff`
 
 When NUT fires the low-battery (LB) event, upsmon runs `systemctl poweroff`. systemd's standard shutdown sequence then unwinds `braid-online.service` (decision 018), which closes the btrfs mount and LUKS mappers. The host powers off via normal means before the UPS exhausts its battery.
