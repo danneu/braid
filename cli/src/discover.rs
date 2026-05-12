@@ -147,6 +147,19 @@ fn discover_from_dir<R: CommandRunner>(
         let path = entry.path();
         let path_str = path.to_string_lossy().to_string();
 
+        // Catch stale udev by-id symlinks before the LUKS probe. A dangling
+        // symlink is a structural by-id problem independent of LUKS state.
+        let canonical = match resolver.canonicalize(&path_str) {
+            Ok(c) => c,
+            Err(e) => {
+                warnings.push(DiscoverWarning::CannotCanonicalize {
+                    path: path_str.clone(),
+                    detail: e.to_string(),
+                });
+                continue;
+            }
+        };
+
         // Check if LUKS
         let raw = runner.run(&CmdRequest::CryptsetupIsLuks {
             device: path_str.clone(),
@@ -211,17 +224,6 @@ fn discover_from_dir<R: CommandRunner>(
             });
             continue;
         }
-
-        let canonical = match resolver.canonicalize(&path_str) {
-            Ok(c) => c,
-            Err(e) => {
-                warnings.push(DiscoverWarning::CannotCanonicalize {
-                    path: path_str.clone(),
-                    detail: e.to_string(),
-                });
-                continue;
-            }
-        };
 
         let priority = by_id_priority(&name_str);
         let filename = name_str.into_owned();
@@ -847,13 +849,47 @@ mod tests {
     }
 
     #[test]
+    fn discover_warns_on_dangling_symlink_with_no_luks_device() {
+        /*
+         * Intent: a dangling by-id symlink with no underlying LUKS device
+         *   produces a single CannotCanonicalize warning and no member.
+         * Why it exists: the LUKS probe used to fail silently on dangling
+         *   symlinks, so operators saw no diagnostic when udev left a stale
+         *   alias behind. Pinning canonicalize ahead of the probe makes the
+         *   warning fire on structural by-id problems regardless of LUKS
+         *   state.
+         * Scenario: after a disk swap, udev failed to clean up the prior
+         *   drive's /dev/disk/by-id/ata-OLD_DRIVE symlink; the operator runs
+         *   `braid discover` and expects to see why the entry is being skipped.
+         */
+        let dir = tempfile::tempdir().unwrap();
+        discover_create_by_id_symlink(
+            dir.path(),
+            "ata-DANGLING_OLD",
+            "/nonexistent/dangling/target",
+        );
+        let runner = DiscoverLabelMap::new(&[]);
+
+        let outcome =
+            discover_from_dir(&runner, &crate::recover::RealByIdResolver, dir.path()).unwrap();
+
+        assert!(outcome.members.is_empty());
+        assert_eq!(outcome.warnings.len(), 1);
+        assert!(matches!(
+            &outcome.warnings[0],
+            DiscoverWarning::CannotCanonicalize { path, .. }
+                if path.ends_with("ata-DANGLING_OLD")
+        ));
+    }
+
+    #[test]
     fn discover_skips_entry_when_canonicalize_fails() {
         /*
          * Intent: a by-id symlink whose canonicalize fails is skipped with a
          *   warning instead of aborting discovery.
-         * Why it exists: collision detection only applies after both entries
-         *   resolve to canonical targets. A broken symlink should not become
-         *   either a hard collision or an accepted pool member.
+         * Why it exists: the by-id structural gate must reject a broken
+         *   symlink before any LUKS probing or alias collision detection can
+         *   treat it as a usable pool candidate.
          * Scenario: udev leaves a stale by-id symlink after a transient disk
          *   detach; discover still records the remaining valid member.
          */
