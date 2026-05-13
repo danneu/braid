@@ -12,6 +12,7 @@
 # while the balance is still running and pending-op.json still exists.
 
 import json
+import uuid
 
 
 def member_names(pool):
@@ -110,6 +111,12 @@ with subtest("pool.json already contains the new disk during balance"):
     )
     disk2 = member(membership, "disk2")
     assert disk2_uuid, f"disk2 UUID key missing:\n{pool_json}"
+    assert str(uuid.UUID(disk2_uuid)) == disk2_uuid, (
+        f"disk2 pool.json key is not canonical LUKS UUID form:\n{pool_json}"
+    )
+    assert "luks_uuid" not in disk2, (
+        f"disk2 must not carry duplicate value-side luks_uuid:\n{pool_json}"
+    )
     assert disk2.get("devid") is not None, f"disk2 devid missing:\n{pool_json}"
     assert disk2.get("added_at"), f"disk2 added_at missing:\n{pool_json}"
 

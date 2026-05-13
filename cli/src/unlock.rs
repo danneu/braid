@@ -84,8 +84,9 @@ impl UnlockPlan {
         // - Membership comes from pool.json; unlock never creates, repairs, or rewrites it.
         // - Probe only configured members, open what is available, and mount the pool.
         // - Refuse degraded mounts unless --allow-degraded is explicit.
-        // - After a successful mount, pool.json enriched fields (luks_uuid, devid) are
-        //   refreshed best-effort, but correctness never depends on that write.
+        // - After a successful mount, pool.json enrichment fields (devid,
+        //   added_at) are refreshed best-effort, but correctness never
+        //   depends on that write.
 
         // Unlock-specific gate: only resolve a credential if there is
         // something to unlock. Preserves the "no prompt when every
@@ -118,7 +119,7 @@ impl UnlockPlan {
 
         let mount_point = params.config.mount_point();
 
-        // Enrich pool.json with live metadata (luks_uuid, devid) -- best-effort.
+        // Enrich pool.json with live metadata (devid, added_at) -- best-effort.
         // A rare race where probe_pool sees mounted=false after a successful
         // mount leaves `pool_after.devices` empty, so refresh_pool_metadata
         // no-ops. That is acceptable: correctness never depends on this write

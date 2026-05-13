@@ -330,11 +330,15 @@ impl RemovePlan {
         if pre_membership.by_uuid(&work_plan.target_uuid).is_none() {
             return Err(absent_from_membership_error(work_plan.name.as_str()));
         }
-        // Pin the target's live btrfs devid into the journal so recovery can
-        // drop the matching acked-stats entry after a committed eviction.
+        // Pin every live member's btrfs devid into the journal. Recovery is
+        // allowed to use persisted devid as the fallback identity for
+        // null-underlying or MISSING btrfs devices, but must not fall back to
+        // mapper-name correlation when the LUKS UUID is no longer observable.
         let mut pre_membership = pre_membership;
-        if let Some(member) = pre_membership.by_uuid_mut(&work_plan.target_uuid) {
-            member.devid = Some(work_plan.target_devid);
+        for identity in work_plan.expected_present_identities.values() {
+            if let Some(member) = pre_membership.by_uuid_mut(&identity.luks_uuid) {
+                member.devid = Some(identity.devid);
+            }
         }
         let mut target_membership = pre_membership.clone();
         target_membership.remove_by_uuid(&work_plan.target_uuid);
@@ -1002,18 +1006,20 @@ mod tests {
     }
 
     // Intent
-    // `cmd_remove` writes the target's live btrfs devid into the journal's
+    // `cmd_remove` writes every live member's btrfs devid into the journal's
     // pre_membership before mutating the pool.
     //
     // Why it exists
-    // Recovery uses the journaled devid for acked-stats hygiene; pool.json
-    // entries written from by-id discovery may not carry devids yet.
+    // Recovery uses the journaled devid as its only fallback identity when
+    // btrfs later reports a null-underlying or MISSING device without an
+    // observable LUKS UUID. pool.json entries written from by-id discovery may
+    // not carry devids yet.
     //
     // Scenario
     // Starting from a healthy two-disk pool.json with no devids, device remove
     // fails after journal write, leaving the journal inspectable.
     #[test]
-    fn remove_journal_pre_membership_carries_target_devid() {
+    fn remove_journal_pre_membership_carries_live_member_devids() {
         let f = PoolFixture::two_disk_healthy();
         let runner = RemovalPool::two_disk()
             .install(MockRunner::default())
@@ -1034,6 +1040,17 @@ mod tests {
         let journal = journal::load_journal(&f.paths)
             .unwrap()
             .expect("failed device remove should preserve pending journal");
+        let disk1_uuid = LuksUuid::parse("11111111-1111-1111-1111-111111111111").unwrap();
+        let disk1 = journal
+            .pre_membership
+            .by_uuid(&disk1_uuid)
+            .expect("pre_membership must still carry disk1's UUID");
+        assert_eq!(
+            disk1.devid,
+            Some(1),
+            "journaled pre_membership must pin disk1's live devid"
+        );
+
         let disk2_uuid = LuksUuid::parse("22222222-2222-2222-2222-222222222222").unwrap();
         let disk2 = journal
             .pre_membership

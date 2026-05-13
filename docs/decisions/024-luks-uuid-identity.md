@@ -96,14 +96,23 @@ one.
 5. Code may construct `mapper_name(&member.name)` when opening or addressing
    braid's expected mapper.
 6. Code must not parse mapper names or LUKS labels to decide membership, target
-   a member, or correlate live pool state. Two narrow exceptions are allowed:
-   `discover` bootstrapping from cold disks, and returning-disk adoption safety
-   in `add`, where the `PresentLuks` path may gate adoption on label match but
-   identity correlation still uses `LuksUuid`/`devid`/FSID.
+   a member, or correlate live pool state. Narrow exceptions are allowed for
+   bootstrapping and sanity checks only: `discover` bootstraps from cold
+   braid-labeled disks; returning-disk adoption in `add` may gate on label match
+   after identity correlation still uses `LuksUuid`/`devid`/FSID; fresh add and
+   replace recovery may require the expected label before treating an
+   already-formatted target as the crash-created LUKS container, but still
+   requires the journaled UUID to match. `lock` may use its explicit FSID-only
+   fallback only after per-device probing fails and the mounted filesystem FSID
+   proves braid owns the mount; that path must warn that mapper drift detection
+   is disabled and must not write membership.
 7. `lock` is the special cleanup case: classify live mappers by UUID/devid
    first, then close the observed mapper name, not a reconstructed
    `mapper_name(&member.name)`, so drifted-but-member-owned mappers are closed
    correctly.
+8. Recovery must fail closed when a live btrfs device lacks an observable LUKS
+   UUID and the journal has no persisted devid binding. It must not recover by
+   inferring identity from `braid-<DiskName>`.
 
 ## Limits And Non-Goals
 
@@ -118,6 +127,9 @@ one.
 - `devid` remains btrfs state. It is allowed only as a prior binding for
   missing/null-underlying cases where btrfs can still identify a member but
   braid cannot currently observe the LUKS UUID.
+- A member with neither observable LUKS UUID nor journaled/persisted devid is
+  not recoverable by mapper-name inference. The right behavior is to preserve
+  recovery state and require manual reconciliation.
 - UUIDs are not a user-facing naming scheme. They may appear in diagnostics,
   `pool.json`, `pending-op.json`, and machine-readable output, but command
   selection and normal summaries should continue to use `DiskName`.
@@ -132,6 +144,15 @@ one.
   `cryptsetup luksFormat --uuid <uuid> --label <label>` argv order.
 - `cli/src/status.rs` unit tests pin compact status names by resolving live
   pool UUIDs back to `DiskName`, including a drifted mapper case.
+- `cli/src/lock.rs` unit tests pin the normal UUID/devid-classified close set,
+  observed-mapper closing, and the degraded FSID-only fallback warning when
+  per-device probing fails.
+- `cli/src/remove.rs` unit tests pin all live member devids into the
+  pre-operation journal snapshot before mutation, so recovery has a legitimate
+  fallback identity when LUKS UUID is not observable.
+- `cli/src/recover.rs` unit tests verify recovery refuses a null-underlying
+  member when the journal lacks both observable UUID and persisted devid,
+  instead of falling back to mapper-name inference.
 - `tests/cli/luks-mapper-drift.py` verifies `braid lock` closes the observed
   drifted mapper owned by a member UUID.
 - `tests/cli/unlock-uuid-mismatch.py` and
@@ -140,7 +161,8 @@ one.
 - `tests/cli/replace-new-in-pool-guard.py` verifies duplicate LUKS UUIDs are
   rejected before braid writes membership or calls into btrfs mutation.
 - `tests/cli/braid-add-persists-before-balance.py` verifies fresh add writes
-  UUID-keyed membership before post-add maintenance continues.
+  canonical UUID-keyed membership, without a duplicate value-side `luks_uuid`,
+  before post-add maintenance continues.
 
 ## Consequences
 

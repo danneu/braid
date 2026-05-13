@@ -1082,33 +1082,28 @@ fn execute_generic_live_pool_recovery<R: CommandRunner + Sync>(
             if recovered.by_uuid(uuid).is_some() {
                 continue;
             }
-            let mapper = config::mapper_name(member.name.as_str());
-            // Pattern 2 carve-out (Remove-recovery never-enriched fallback):
-            // when member.devid is None, additionally accept a positive match on
-            // pool.null_underlying.mapper == config::mapper_name(&member.name).
-            // This is the only place in the codebase where a mapper-name compare
-            // participates in an identity decision; scope is bounded to
-            // Remove-recovery's null_underlying restoration of an operator-attested
-            // pre_membership entry. See plans/impl/2026-05-12-luks-uuid-as-identity/plan.md, section
-            // "Remove-recovery null_underlying guard: never-enriched carve-out".
-            let null_underlying_match = pool.null_underlying.iter().find(|n| {
-                member
-                    .devid
-                    .map(|d| n.devid == d)
-                    .unwrap_or_else(|| n.mapper == mapper)
-            });
+            let null_underlying_match = member
+                .devid
+                .and_then(|devid| pool.null_underlying.iter().find(|n| n.devid == devid));
             let in_missing = member
                 .devid
                 .map(|d| pool.missing_devids.contains(&d))
                 .unwrap_or(false);
-            if let Some(null_underlying) = null_underlying_match {
-                let mut restored = member.clone();
-                if restored.devid.is_none() {
-                    restored.devid = Some(null_underlying.devid);
-                }
-                recovered.insert(uuid.clone(), restored)?;
+            if null_underlying_match.is_some() {
+                recovered.insert(uuid.clone(), member.clone())?;
             } else if in_missing {
                 recovered.insert(uuid.clone(), member.clone())?;
+            } else if member.devid.is_none()
+                && (!pool.null_underlying.is_empty() || !pool.missing_devids.is_empty())
+            {
+                return Err(RecoverError::Failed(format!(
+                    "remove recovery cannot safely correlate journaled member '{}' because \
+                     pre_membership has no persisted btrfs devid and live btrfs reports \
+                     devices without observable LUKS UUIDs. Current braid remove journals \
+                     pin live devids before mutation; preserve pending-op.json and rebuild \
+                     membership with braid discover --write only after manual reconciliation.",
+                    member.name
+                )));
             }
         }
     }
@@ -14105,24 +14100,21 @@ mod tests {
         );
     }
 
-    /* Intent: cmd_recover for an interrupted OpKind::Remove stamps the live
-     * btrfs devid onto a restored null-underlying member that was never
-     * enriched before the crash.
+    /* Intent: cmd_recover for an interrupted OpKind::Remove fails closed when
+     * a null-underlying member cannot be correlated by journaled btrfs devid.
      *
-     * Why it exists: null-underlying recovery can only correlate this
-     * operator-attested pre_membership entry by the narrow mapper-name
-     * carve-out. Without copying the observed devid, the restored member
-     * remains `devid: None` forever and cannot later be removed with
-     * `remove-missing`.
+     * Why it exists: LUKS UUID is the primary identity and persisted btrfs
+     * devid is the only allowed fallback for null-underlying devices. A
+     * journal missing both must not recover by comparing mapper names.
      *
-     * Scenario: a 2-disk pool started `braid remove disk2` before any
-     * enrichment wrote disk2's btrfs devid into pool.json. Disk2's
-     * underlying device hot-unplugged during the remove, so btrfs still
-     * reports mapper braid-disk2 as devid 2 while cryptsetup reports
-     * `device: (null)`.
+     * Scenario: a hand-built or obsolete pending-op.json lacks disk2's
+     * pre-operation devid. Disk2's underlying device hot-unplugged during
+     * remove, so btrfs still reports mapper braid-disk2 as devid 2 while
+     * cryptsetup reports `device: (null)`. Recovery must preserve the journal
+     * for manual reconciliation rather than infer identity from braid-disk2.
      */
     #[test]
-    fn cmd_recover_remove_with_never_enriched_null_underlying_stamps_devid() {
+    fn cmd_recover_remove_without_devid_refuses_null_underlying_mapper_name_fallback() {
         let f = PoolFixture::empty();
         let fs = MockFs::new(&[]);
 
@@ -14159,21 +14151,16 @@ mod tests {
 
         let resolver = resolver_for(&[("/dev/vda", "virtio-disk1"), ("/dev/vdb", "virtio-disk2")]);
         let params = f.recover_params().passphrase_file(None).build();
-        cmd_recover(&runner, &fs, &resolver, &params)
-            .expect("recover should preserve and stamp null-underlying target");
+        let err = cmd_recover(&runner, &fs, &resolver, &params)
+            .expect_err("recover must fail closed without a UUID/devid identity binding");
 
-        let recovered = membership::load_membership(&f.paths).unwrap();
-        let (_, restored) = recovered
-            .by_name(&disk_name("disk2"))
-            .expect("recovered membership must keep disk2");
-        assert_eq!(
-            restored.devid,
-            Some(2),
-            "null-underlying restoration must stamp the observed btrfs devid"
+        assert!(
+            err.to_string().contains("no persisted btrfs devid"),
+            "error should explain the missing fallback identity, got: {err}"
         );
         assert!(
-            recovered.by_devid(2).unwrap().is_some(),
-            "stamped devid must be resolvable by remove-missing"
+            f.paths.pending_op_json().exists(),
+            "fail-closed recovery must preserve pending-op.json"
         );
     }
 
