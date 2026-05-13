@@ -74,9 +74,20 @@ not part of the structured preview.
 The typed work-plan preview model is the precedent for `add`, `replace`,
 `remove`, `remove-missing`, and `recover`.
 
-Older dry-run seams in `lock`, `unlock`, and `enroll` may remain until those
-commands are intentionally migrated. Do not use their older helpers or cached
-step fields as precedent for commands already on the typed work-plan model.
+The LUKS-UUID-identity migration also gave `lock` a typed close set
+(`LockCloseSets` carrying `member_owned: Vec<MemberOwnedClose>` and
+`orphan_mappers: Vec<OrphanMapper>` in `cli/src/lock.rs`). Both the
+dry-run step compilation (`compile_lock_steps`) and `LockPlan::execute`
+read from those typed sets so the preview and the real run share one
+identity classification. `LockPlan` still caches the rendered
+`Vec<Step>` alongside the close sets rather than rendering on demand
+from them, which is the remaining "do not use as precedent" caveat for
+this command.
+
+Older dry-run seams in `unlock` and `enroll` may remain until those
+commands are intentionally migrated. Do not use their older helpers or
+cached step fields as precedent for commands already on the typed
+work-plan model.
 
 ## Consequences
 
