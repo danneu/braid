@@ -387,6 +387,22 @@ impl PoolMembership {
     }
 }
 
+#[cfg(test)]
+impl PoolMembership {
+    /// Test-only constructor that bypasses the production four-axis
+    /// uniqueness check so downstream tests can cover corrupt
+    /// membership states that load-time validation normally rejects.
+    pub(crate) fn for_corruption_tests(entries: Vec<(LuksUuid, DiskMember)>) -> Self {
+        let mut disks: BTreeMap<LuksUuid, DiskMember> = BTreeMap::new();
+        for (uuid, member) in entries {
+            disks.insert(uuid, member);
+        }
+        PoolMembership {
+            disks: LuksUuidMap(disks),
+        }
+    }
+}
+
 impl DiskMember {
     /// Minimal member -- used by discover and initial-add paths that have
     /// just the name and by-id, with enrichment to follow.
