@@ -226,6 +226,8 @@ fn build_compact_drives(pool: &PoolState, membership: &PoolMembership) -> Vec<Co
         let name = membership
             .by_uuid(&pd.luks_uuid)
             .map(|member| member.name.as_str())
+            // Display-only fallback for foreign live devices; UUID-keyed
+            // membership remains the identity boundary.
             .or_else(|| config::name_from_mapper(&pd.mapper.0))
             .unwrap_or(&pd.mapper.0)
             .to_owned();
@@ -743,7 +745,8 @@ fn build_disk_reports<R: CommandRunner>(
         });
 
         let disk_name = matched_config.map(|cd| cd.name.clone()).unwrap_or_else(|| {
-            // Derive name from mapper (strip braid- prefix)
+            // Display-only fallback for foreign live devices; UUID-keyed
+            // config matching remains the identity boundary.
             config::name_from_mapper(&pd.mapper.0)
                 .unwrap_or(&pd.mapper.0)
                 .to_owned()

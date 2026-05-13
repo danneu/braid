@@ -14,9 +14,7 @@ use crate::mount::{self, MountError, OpenPlan};
 use crate::mount_check;
 use crate::parse::btrfs_filesystem_show::{DeviceBtrfsProbe, classify_btrfs_probe};
 use crate::parse::{ReplaceState, parse_btrfs_replace_status};
-use crate::preview::{
-    self, NoteLevel, PerDiskStyle, PlanFailure, Preview, PreviewCompleteness, PreviewNote,
-};
+use crate::preview::{self, PerDiskStyle, PlanFailure, Preview, PreviewCompleteness, PreviewNote};
 use crate::probe::{self, Filesystem, ProbeError};
 use crate::progress::{self, ProgressOutput, RealSleeper, Sleeper};
 use crate::secret::Passphrase;
@@ -1371,7 +1369,6 @@ pub fn plan_recover<R: CommandRunner + Sync, F: Filesystem + ?Sized>(
                 return Err(PlanFailure::with_notes(notes, e.into()));
             }
         };
-        notes.extend(non_braid_mapper_skip_notes(&pool));
         match mount_check::mount_entry_at_via_fs(fs, mount_point.as_str()) {
             Ok(Some(entry)) if mount_check::entry_is_read_only(&entry) => {
                 return Err(PlanFailure::with_notes(
@@ -1584,26 +1581,6 @@ fn is_replace_pool_mutation(op: &journal::OpKind) -> bool {
     )
 }
 
-/// Shared recover skip classifier for live pool mappers outside braid's name
-/// ownership boundary.
-fn non_braid_mapper_skip_note(mapper: &crate::types::MapperName) -> PreviewNote {
-    PreviewNote::PerDisk {
-        name: mapper.0.clone(),
-        level: NoteLevel::Skip,
-        message: "no braid- prefix".into(),
-    }
-}
-
-/// Collect live-pool mapper skip notes without changing membership validation
-/// or topology matching semantics.
-fn non_braid_mapper_skip_notes(pool: &PoolState) -> Vec<PreviewNote> {
-    pool.devices
-        .iter()
-        .filter(|dev| config::name_from_mapper(&dev.mapper.0).is_none())
-        .map(|dev| non_braid_mapper_skip_note(&dev.mapper))
-        .collect()
-}
-
 fn live_pool_matches_membership(
     pool: &PoolState,
     membership: &PoolMembership,
@@ -1648,13 +1625,6 @@ fn recover_membership_matching_expected(
 ) -> Result<PoolMembership, RecoverError> {
     let mut recovered = PoolMembership::empty();
     for dev in &pool.devices {
-        if config::name_from_mapper(&dev.mapper.0).is_none() {
-            crate::status_tag::emit_status(&preview::render_per_disk_notes(
-                &[non_braid_mapper_skip_note(&dev.mapper)],
-                RecoverPlan::STDERR_STYLE,
-            ));
-            continue;
-        }
         let Some(expected_member) = expected.by_uuid(&dev.luks_uuid) else {
             return Err(RecoverError::Failed(format!(
                 "device {} (LUKS UUID {}) is in the live pool but is not part of the expected \
@@ -1932,9 +1902,6 @@ fn validate_live_members_allowed(
     allowed: &PoolMembership,
 ) -> Result<(), RecoverError> {
     for dev in &pool.devices {
-        if config::name_from_mapper(&dev.mapper.0).is_none() {
-            continue;
-        }
         if allowed.by_uuid(&dev.luks_uuid).is_none() {
             return Err(RecoverError::Failed(format!(
                 "device {} (LUKS UUID {}) is in the live pool but has no by-id path in either \
@@ -1964,13 +1931,6 @@ fn build_membership_from_live_pool(
 ) -> Result<PoolMembership, RecoverError> {
     let mut recovered = PoolMembership::empty();
     for dev in &pool.devices {
-        if config::name_from_mapper(&dev.mapper.0).is_none() {
-            crate::status_tag::emit_status(&preview::render_per_disk_notes(
-                &[non_braid_mapper_skip_note(&dev.mapper)],
-                RecoverPlan::STDERR_STYLE,
-            ));
-            continue;
-        }
         let Some(union_member) = union.by_uuid(&dev.luks_uuid) else {
             return Err(RecoverError::Failed(format!(
                 "device {} (LUKS UUID {}) is in the live pool but has no by-id path in either \
@@ -2139,6 +2099,8 @@ fn verify_recover_passphrase_for_add_replay<R: CommandRunner, F: Filesystem + ?S
         .devices
         .iter()
         .map(|device| CredentialVerifyTarget {
+            // Display-only fallback for credential error messages; replay
+            // identity decisions above use live LUKS UUID membership.
             name: config::name_from_mapper(&device.mapper.0)
                 .unwrap_or(device.mapper.0.as_str())
                 .to_owned(),
@@ -2849,6 +2811,8 @@ fn verify_replace_fresh_prep_passphrase<R: CommandRunner>(
         .devices
         .iter()
         .map(|device| CredentialVerifyTarget {
+            // Display-only fallback for credential error messages; replay
+            // identity decisions above use live LUKS UUID membership.
             name: config::name_from_mapper(&device.mapper.0)
                 .unwrap_or(device.mapper.0.as_str())
                 .to_owned(),
@@ -10409,62 +10373,58 @@ mod tests {
         assert!(f.paths.pending_op_json().exists());
     }
 
-    // Intent: build_membership_from_live_pool renders foreign mapper skips
-    // through the shared recover preview note.
-    // Why it exists: execute output and dry-run preview must not diverge for
-    // the same non-braid live-pool mapper classification.
-    // Scenario: a mounted pool contains braid-disk1 plus an externally named
-    // LUKS mapper; recovery rebuilds pool.json from only braid-owned devices.
+    // Intent: build_membership_from_live_pool rejects a live pool device whose
+    // LUKS UUID is absent from the expected union, even if its mapper is not
+    // braid-prefixed.
+    // Why it exists: recovery must not treat mapper naming as an identity
+    // gate; live-pool membership is correlated by UUID.
+    // Scenario: a mounted pool contains disk1 plus an externally named LUKS
+    // mapper with a foreign UUID. Recovery refuses to rebuild pool.json.
     #[test]
-    fn build_membership_from_live_pool_emits_shared_foreign_mapper_skip() {
+    fn build_membership_from_live_pool_rejects_foreign_live_uuid() {
         let pool = pool_state_disk1_and_foreign();
         let union = one_disk_membership();
         let resolver = resolver_for(&[("/dev/vda", "virtio-disk1")]);
-        let mut recovered = None;
 
-        let captured = crate::status_tag::testing::capture_with_color(false, || {
-            recovered = Some(
-                build_membership_from_live_pool(&pool, &union, None, &resolver)
-                    .expect("foreign mapper should be skipped, not adopted"),
-            );
-        });
-
+        let err = build_membership_from_live_pool(&pool, &union, None, &resolver)
+            .expect_err("foreign live UUID must be rejected");
+        let msg = err.to_string();
         assert!(
-            captured.contains("[skip] disk luks-foreign: no braid- prefix"),
-            "missing shared skip note: {captured:?}"
+            msg.contains("device luks-foreign (LUKS UUID 99999999-9999-9999-9999-999999999999)"),
+            "error must name the foreign live UUID: {msg}"
         );
-        let recovered = recovered.expect("builder should return membership");
-        assert!(recovered.by_name(&disk_name("disk1")).is_some());
-        assert!(!recovered.by_name(&disk_name("luks-foreign")).is_some());
+        assert!(
+            msg.contains("has no by-id path in either"),
+            "error must describe the snapshot mismatch: {msg}"
+        );
     }
 
-    // Intent: recover_membership_matching_expected renders foreign mapper
-    // skips through the shared recover preview note.
-    // Why it exists: phased recovery builders must share the same skip wording
-    // and capture path as generic live-pool recovery.
+    // Intent: recover_membership_matching_expected rejects a live pool device
+    // whose LUKS UUID is absent from the expected committed membership, even if
+    // its mapper is not braid-prefixed.
+    // Why it exists: phased recovery builders must preserve UUID identity when
+    // comparing live topology against expected membership.
     // Scenario: committed remove-missing or replace recovery compares a live
     // pool against expected membership while an external mapper is also live.
     #[test]
-    fn recover_membership_matching_expected_emits_shared_foreign_mapper_skip() {
+    fn recover_membership_matching_expected_rejects_foreign_live_uuid() {
         let pool = pool_state_disk1_and_foreign();
         let expected = one_disk_membership();
         let resolver = resolver_for(&[("/dev/vda", "virtio-disk1")]);
-        let mut recovered = None;
 
-        let captured = crate::status_tag::testing::capture_with_color(false, || {
-            recovered = Some(
-                recover_membership_matching_expected(&pool, &expected, None, &resolver)
-                    .expect("foreign mapper should be skipped, not adopted"),
-            );
-        });
-
+        let err = recover_membership_matching_expected(&pool, &expected, None, &resolver)
+            .expect_err("foreign live UUID must be rejected");
+        let msg = err.to_string();
         assert!(
-            captured.contains("[skip] disk luks-foreign: no braid- prefix"),
-            "missing shared skip note: {captured:?}"
+            msg.contains("device luks-foreign (LUKS UUID 99999999-9999-9999-9999-999999999999)"),
+            "error must name the foreign live UUID: {msg}"
         );
-        let recovered = recovered.expect("builder should return membership");
-        assert!(recovered.by_name(&disk_name("disk1")).is_some());
-        assert!(!recovered.by_name(&disk_name("luks-foreign")).is_some());
+        assert!(
+            msg.contains(
+                "is in the live pool but is not part of the expected committed membership"
+            ),
+            "error must describe the expected-membership mismatch: {msg}"
+        );
     }
 
     #[test]
@@ -14714,14 +14674,15 @@ mod tests {
         );
     }
 
-    // Intent: already-mounted recover dry-run renders non-braid live-pool
-    // mapper skips through the shared preview notes list.
-    // Why it exists: preview must show the same non-braid mapper decision as
-    // execute while still rendering the normal recovery steps.
-    // Scenario: a mounted btrfs pool contains braid-disk1, braid-disk2, and
-    // an externally named LUKS mapper that recovery must skip.
+    // Intent: already-mounted recover dry-run rejects a live pool device whose
+    // LUKS UUID is absent from the journal snapshots, even when its mapper is
+    // not braid-prefixed.
+    // Why it exists: dry-run must not claim recovery is ready when live
+    // topology contains a UUID not in the expected membership union.
+    // Scenario: a mounted btrfs pool contains disk1, disk2, and an externally
+    // named LUKS mapper with a foreign UUID.
     #[test]
-    fn plan_recover_dry_run_already_mounted_renders_foreign_mapper_skip() {
+    fn plan_recover_dry_run_already_mounted_rejects_foreign_live_uuid() {
         let f = PoolFixture::empty();
         let fs = MockFs::new(&[]);
 
@@ -14735,22 +14696,63 @@ mod tests {
             .dry_run(true)
             .build();
 
-        let rendered = plan_recover(&runner, &fs, &params)
-            .expect("plan_recover should succeed with a foreign mapper skip")
-            .preview()
-            .render();
+        let failure = match plan_recover(&runner, &fs, &params) {
+            Err(failure) => failure,
+            other => panic!("expected foreign-live-UUID PlanFailure, got: {other:?}"),
+        };
+        let err = match &failure.error {
+            RecoverError::Failed(msg) => msg,
+            other => panic!("expected RecoverError::Failed for foreign live UUID, got: {other:?}"),
+        };
+        assert!(
+            err.contains("device luks-foreign (LUKS UUID 99999999-9999-9999-9999-999999999999)"),
+            "error must name the foreign live UUID, got: {err:?}",
+        );
+        assert!(
+            err.contains("has no by-id path in either"),
+            "error must describe the snapshot mismatch, got: {err:?}",
+        );
+    }
 
+    // Intent: already-mounted recover dry-run keeps mapper-prefix checks out
+    // of the read-only failure path.
+    // Why it exists: read-only refusal should preserve entry context without
+    // making identity decisions from mapper names.
+    // Scenario: dry-run probes a mounted pool with a foreign mapper, then sees
+    // filesystem-level read-only mount options and aborts before UUID
+    // validation can run.
+    #[test]
+    fn plan_recover_dry_run_read_only_failure_has_no_foreign_mapper_skip() {
+        let f = PoolFixture::empty();
+        let fs = MockFs::with_mounted_pool_ro_fs(&[]);
+
+        let journal = two_disk_journal();
+        journal::write_journal(&f.paths, &journal).unwrap();
+
+        let runner = already_mounted_two_disks_and_foreign_runner();
+        let params = f
+            .recover_params()
+            .passphrase_file(None)
+            .dry_run(true)
+            .build();
+
+        let failure = match plan_recover(&runner, &fs, &params) {
+            Err(failure) => failure,
+            other => panic!("expected read-only PlanFailure, got: {other:?}"),
+        };
+        let err = match &failure.error {
+            RecoverError::Failed(msg) => msg,
+            other => panic!("expected RecoverError::Failed for read-only dry-run, got: {other:?}"),
+        };
         assert!(
-            rendered.contains("[skip] disk luks-foreign: no braid- prefix"),
-            "rendered preview must contain the foreign mapper skip, got: {rendered:?}",
+            err.contains("mounted read-only"),
+            "error must name the read-only state, got: {err:?}",
         );
+        let rendered =
+            preview::render_notes_for_stderr_with(&failure.notes, RecoverPlan::STDERR_STYLE, false);
         assert!(
-            rendered.contains("write recovered pool.json"),
-            "rendered preview must still contain the write-pool.json step, got: {rendered:?}",
-        );
-        assert!(
-            rendered.contains("clear pending-op.json"),
-            "rendered preview must still contain the clear-pending-op.json step, got: {rendered:?}",
+            !rendered.contains("luks-foreign"),
+            "failure notes must not add mapper-name identity skips, got: {rendered:?}",
         );
     }
 
@@ -14920,48 +14922,6 @@ mod tests {
             ),
             other => panic!("notes[1] must be PreviewNote::Info, got: {other:?}"),
         }
-    }
-
-    // Intent: already-mounted recover dry-run preserves non-braid mapper skip
-    // notes when a later read-only mountinfo check refuses planning.
-    // Why it exists: PlanFailure notes must keep all preview context gathered
-    // before the refusal, including live-pool mapper classification.
-    // Scenario: dry-run probes a mounted pool with a foreign mapper, then sees
-    // filesystem-level read-only mount options and aborts before validation.
-    #[test]
-    fn plan_recover_dry_run_read_only_failure_preserves_foreign_mapper_skip() {
-        let f = PoolFixture::empty();
-        let fs = MockFs::with_mounted_pool_ro_fs(&[]);
-
-        let journal = two_disk_journal();
-        journal::write_journal(&f.paths, &journal).unwrap();
-
-        let runner = already_mounted_two_disks_and_foreign_runner();
-        let params = f
-            .recover_params()
-            .passphrase_file(None)
-            .dry_run(true)
-            .build();
-
-        let failure = match plan_recover(&runner, &fs, &params) {
-            Err(failure) => failure,
-            other => panic!("expected read-only PlanFailure, got: {other:?}"),
-        };
-        let err = match &failure.error {
-            RecoverError::Failed(msg) => msg,
-            other => panic!("expected RecoverError::Failed for read-only dry-run, got: {other:?}"),
-        };
-        assert!(
-            err.contains("mounted read-only"),
-            "error must name the read-only state, got: {err:?}",
-        );
-
-        let rendered =
-            preview::render_notes_for_stderr_with(&failure.notes, RecoverPlan::STDERR_STYLE, false);
-        assert!(
-            rendered.contains("[skip] disk luks-foreign: no braid- prefix"),
-            "failure notes must preserve the foreign mapper skip, got: {rendered:?}",
-        );
     }
 
     fn render_recover_dry_run(

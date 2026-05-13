@@ -486,6 +486,8 @@ impl ReplacePlan {
         let mut credential_targets: Vec<CredentialVerifyTarget> = anchor_members
             .into_iter()
             .map(|device| CredentialVerifyTarget {
+                // Display-only fallback for credential error messages; replace
+                // source identity is resolved by LUKS UUID before this point.
                 name: name_from_mapper(&device.mapper.0)
                     .unwrap_or(device.mapper.0.as_str())
                     .to_owned(),
