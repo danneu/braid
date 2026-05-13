@@ -21,13 +21,13 @@ use crate::cmd::{CmdRequest, CommandRunner, RealRunner};
 use crate::config::{Config, DEFAULT_CONFIG_PATH};
 use crate::luks;
 use crate::membership;
-use crate::parse::parse_btrfs_df_json;
 use crate::parse::types::{BtrfsBgType, BtrfsDfOutput, BtrfsProfile};
+use crate::parse::{parse_btrfs_df_json, parse_cryptsetup_luks_uuid};
 use crate::preflight;
 use crate::state_paths::StatePaths;
 use crate::status::format_bytes;
 use crate::status_tag::{StatusTag, color_enabled_for_stdout, status_line};
-use crate::types::MountPoint;
+use crate::types::{LuksUuid, MountPoint};
 
 // ---------------------------------------------------------------------------
 // Types
@@ -238,12 +238,18 @@ fn check_config_permissions_for_path(path: &Path) -> CheckResult {
 
 /// Classification of a single declared disk after the doctor's LUKS probe.
 /// `summarize_declared_disks` translates a slice of these into a `CheckResult`;
-/// the variants pin the four reachable outcomes (header Ok, header unreadable,
-/// header damaged, missing/non-block/probe-failed).
+/// the variants pin the six reachable outcomes (header Ok, UUID mismatch,
+/// header unreadable, header damaged, missing/non-block/probe-failed).
 #[derive(Debug, Clone)]
 pub(crate) enum DiskState {
-    /// Both `cryptsetup isLuks` and `cryptsetup luksDump` succeeded.
+    /// Header probes succeeded and the live LUKS UUID matched the pool.json key.
     LuksHeaderOk,
+    /// `cryptsetup isLuks`, `cryptsetup luksDump`, and `cryptsetup luksUUID`
+    /// succeeded, but the live LUKS UUID does not match the pool.json key.
+    LuksUuidMismatch {
+        expected: LuksUuid,
+        observed: LuksUuid,
+    },
     /// `std::fs::metadata` returned `Err` — the by-id symlink target is gone.
     Missing,
     /// Path exists but is not a block device.
@@ -272,7 +278,11 @@ pub(crate) enum DiskState {
 /// The LUKS-specific probe sequence is delegated to `luks::probe_luks_header`
 /// so that `doctor` and `unlock` share the same classification (and the same
 /// remediation message strings downstream).
-fn classify_disk_state<R: CommandRunner>(runner: &R, path: &Path) -> DiskState {
+fn classify_disk_state<R: CommandRunner>(
+    runner: &R,
+    path: &Path,
+    expected_uuid: &LuksUuid,
+) -> DiskState {
     match std::fs::metadata(path) {
         Err(_) => return DiskState::Missing,
         Ok(meta) if !meta.file_type().is_block_device() => return DiskState::NotBlock,
@@ -280,11 +290,41 @@ fn classify_disk_state<R: CommandRunner>(runner: &R, path: &Path) -> DiskState {
     }
 
     let device = path.to_string_lossy().into_owned();
-    match luks::probe_luks_header(runner, &device) {
-        luks::LuksHeaderState::Ok => DiskState::LuksHeaderOk,
-        luks::LuksHeaderState::Unreadable => DiskState::LuksHeaderUnreadable,
-        luks::LuksHeaderState::Damaged => DiskState::LuksHeaderDamaged,
-        luks::LuksHeaderState::ProbeFailed(err) => DiskState::ProbeFailed(err),
+    classify_luks_identity(runner, &device, expected_uuid)
+}
+
+/// Runner-only LUKS identity classifier so unit tests can cover the UUID
+/// comparison without depending on host block-device state.
+fn classify_luks_identity<R: CommandRunner>(
+    runner: &R,
+    device: &str,
+    expected_uuid: &LuksUuid,
+) -> DiskState {
+    match luks::probe_luks_header(runner, device) {
+        luks::LuksHeaderState::Unreadable => return DiskState::LuksHeaderUnreadable,
+        luks::LuksHeaderState::Damaged => return DiskState::LuksHeaderDamaged,
+        luks::LuksHeaderState::ProbeFailed(err) => return DiskState::ProbeFailed(err),
+        luks::LuksHeaderState::Ok => {}
+    }
+
+    let raw = match runner.run(&CmdRequest::CryptsetupLuksUuid {
+        device: device.to_owned(),
+    }) {
+        Ok(raw) => raw,
+        Err(e) => return DiskState::ProbeFailed(e.to_string()),
+    };
+    let observed = match parse_cryptsetup_luks_uuid(&raw) {
+        Ok(out) => out.uuid,
+        Err(e) => return DiskState::ProbeFailed(e.to_string()),
+    };
+
+    if observed == *expected_uuid {
+        DiskState::LuksHeaderOk
+    } else {
+        DiskState::LuksUuidMismatch {
+            expected: expected_uuid.clone(),
+            observed,
+        }
     }
 }
 
@@ -305,10 +345,19 @@ fn summarize_declared_disks(classifications: &[(String, String, DiskState)]) -> 
     let mut probe_failed: Vec<String> = Vec::new();
     let mut header_unreadable: Vec<String> = Vec::new();
     let mut header_damaged: Vec<String> = Vec::new();
+    let mut uuid_mismatch: Vec<String> = Vec::new();
 
     for (name, by_id, state) in classifications {
         match state {
             DiskState::LuksHeaderOk => {}
+            DiskState::LuksUuidMismatch { expected, observed } => {
+                uuid_mismatch.push(format!(
+                    "{name} ({by_id}): expected {expected}, observed {observed} -- \
+                     disk was swapped, cloned, or reformatted; detach the foreign \
+                     disk and reattach the original, or run 'braid replace' if the \
+                     swap was intentional"
+                ));
+            }
             DiskState::Missing => missing.push(format!("{name} ({by_id})")),
             DiskState::NotBlock => not_block.push(format!("{name} ({by_id})")),
             DiskState::ProbeFailed(err) => {
@@ -333,7 +382,8 @@ fn summarize_declared_disks(classifications: &[(String, String, DiskState)]) -> 
         + not_block.len()
         + probe_failed.len()
         + header_unreadable.len()
-        + header_damaged.len();
+        + header_damaged.len()
+        + uuid_mismatch.len();
 
     if problem_count == 0 {
         return CheckResult::ok(
@@ -371,6 +421,13 @@ fn summarize_declared_disks(classifications: &[(String, String, DiskState)]) -> 
             header_damaged.join("; ")
         ));
     }
+    if !uuid_mismatch.is_empty() {
+        parts.push(format!(
+            "{} with LUKS UUID mismatch: {}",
+            uuid_mismatch.len(),
+            uuid_mismatch.join("; ")
+        ));
+    }
     if !probe_failed.is_empty() {
         parts.push(format!(
             "{} with LUKS header probe failures: {}",
@@ -379,15 +436,17 @@ fn summarize_declared_disks(classifications: &[(String, String, DiskState)]) -> 
         ));
     }
 
-    CheckResult::warn(
-        "declared_disks",
-        format!(
-            "{}/{} disk(s) have problems: {}",
-            problem_count,
-            total,
-            parts.join("; ")
-        ),
-    )
+    let message = format!(
+        "{}/{} disk(s) have problems: {}",
+        problem_count,
+        total,
+        parts.join("; ")
+    );
+    if uuid_mismatch.is_empty() {
+        CheckResult::warn("declared_disks", message)
+    } else {
+        CheckResult::fail("declared_disks", message)
+    }
 }
 
 fn check_declared_disks<R: CommandRunner>(ctx: &mut DoctorContext<'_, R>) -> CheckResult {
@@ -406,16 +465,12 @@ fn check_declared_disks<R: CommandRunner>(ctx: &mut DoctorContext<'_, R>) -> Che
         }
     };
 
-    let members: Vec<_> = pool_membership
-        .iter_by_name()
-        .into_iter()
-        .map(|(_, member)| member)
-        .collect();
+    let members = pool_membership.iter_by_name();
     let classifications: Vec<(String, String, DiskState)> = members
         .into_iter()
-        .map(|member| {
+        .map(|(uuid, member)| {
             let by_id = member.by_id.as_str().to_owned();
-            let state = classify_disk_state(ctx.runner, Path::new(&by_id));
+            let state = classify_disk_state(ctx.runner, Path::new(&by_id), uuid);
             (member.name.as_str().to_owned(), by_id, state)
         })
         .collect();
@@ -1038,9 +1093,10 @@ mod tests {
         DF_MIXED, DF_MIXED_METADATA, DF_RAID1_CLEAN, DfQueryFailureRunner,
         PoolMissingDevicesRunner, UpscSpawnFailureRunner, beep_check_options, beep_ctx, cls,
         config_with_ups_enabled, config_without_ups, device_usage_healthy,
-        device_usage_with_missing, df_json, df_json_fail, human_options, isolated_paths,
-        mountpoint_fail, mountpoint_ok, parsed_doctor_ctx, systemctl_is_active_output, ups_ctx,
-        valid_config_json, write_temp,
+        device_usage_with_missing, df_json, df_json_fail, human_options, is_luks_ok,
+        isolated_paths, luks_dump_text_ok, luks_uuid_ok, mountpoint_fail, mountpoint_ok,
+        parsed_doctor_ctx, systemctl_is_active_output, test_uuid, ups_ctx, valid_config_json,
+        write_temp,
     };
     use crate::types::MountPoint;
 
@@ -1644,6 +1700,106 @@ mod tests {
         assert!(
             !msg.contains("luksHeaderRestore"),
             "execution failure must not suggest restore: {msg}"
+        );
+    }
+
+    // Intent: a valid LUKS header whose live UUID differs from pool.json is
+    //   classified as an identity mismatch, not as healthy.
+    // Why it exists: doctor is the read-only early-warning surface for swapped,
+    //   cloned, or reformatted disks.
+    // Scenario: a by-id slot still points to a LUKS2 volume, but it is no
+    //   longer the UUID-keyed member recorded in pool membership.
+    #[test]
+    fn classify_luks_identity_returns_luks_uuid_mismatch_when_observed_diverges() {
+        let device = "/dev/disk/by-id/wwn-0x1";
+        let expected = test_uuid(1);
+        let observed = test_uuid(2);
+        let (is_luks_req, is_luks_out) = is_luks_ok(device);
+        let (dump_req, dump_out) = luks_dump_text_ok(device);
+        let (uuid_req, uuid_out) = luks_uuid_ok(device, observed.as_str());
+        let runner = MockRunner::default()
+            .with_output(is_luks_req, is_luks_out)
+            .with_output(dump_req, dump_out)
+            .with_output(uuid_req, uuid_out);
+
+        let state = classify_luks_identity(&runner, device, &expected);
+
+        match state {
+            DiskState::LuksUuidMismatch {
+                expected: got_expected,
+                observed: got_observed,
+            } => {
+                assert_eq!(got_expected.as_str(), expected.as_str());
+                assert_eq!(got_observed.as_str(), observed.as_str());
+            }
+            other => panic!("expected LuksUuidMismatch, got {other:?}"),
+        }
+    }
+
+    // Intent: a valid LUKS header whose live UUID matches pool.json keeps the
+    //   existing healthy classification.
+    // Why it exists: adding the UUID probe must not turn healthy declared disks
+    //   into warnings or failures.
+    // Scenario: a normal offline member disk is attached at its expected by-id
+    //   path and still carries the journaled UUID.
+    #[test]
+    fn classify_luks_identity_returns_luks_header_ok_when_uuid_matches() {
+        let device = "/dev/disk/by-id/wwn-0x1";
+        let expected = test_uuid(1);
+        let (is_luks_req, is_luks_out) = is_luks_ok(device);
+        let (dump_req, dump_out) = luks_dump_text_ok(device);
+        let (uuid_req, uuid_out) = luks_uuid_ok(device, expected.as_str());
+        let runner = MockRunner::default()
+            .with_output(is_luks_req, is_luks_out)
+            .with_output(dump_req, dump_out)
+            .with_output(uuid_req, uuid_out);
+
+        let state = classify_luks_identity(&runner, device, &expected);
+
+        match state {
+            DiskState::LuksHeaderOk => {}
+            other => panic!("expected LuksHeaderOk, got {other:?}"),
+        }
+    }
+
+    // Intent: a LUKS UUID mismatch makes the declared_disks check fail and
+    //   renders both sides of the identity comparison.
+    // Why it exists: a swapped disk will be rejected by later mutating commands,
+    //   so read-only doctor must fail closed first.
+    // Scenario: disk1 was reformatted in place while disk2 remains the expected
+    //   pool member.
+    #[test]
+    fn summarize_declared_disks_promotes_to_fail_on_uuid_mismatch() {
+        let expected = test_uuid(1);
+        let observed = test_uuid(2);
+        let inputs = [
+            cls(
+                "disk1",
+                "/dev/disk/by-id/wwn-0x1",
+                DiskState::LuksUuidMismatch {
+                    expected: expected.clone(),
+                    observed: observed.clone(),
+                },
+            ),
+            cls("disk2", "/dev/disk/by-id/wwn-0x2", DiskState::LuksHeaderOk),
+        ];
+
+        let result = summarize_declared_disks(&inputs);
+
+        assert_eq!(result.status, CheckStatus::Fail);
+        let msg = &result.message;
+        assert!(msg.contains("disk1"), "missing disk name: {msg}");
+        assert!(
+            msg.contains(&format!("expected {expected}")),
+            "missing expected UUID: {msg}"
+        );
+        assert!(
+            msg.contains(&format!("observed {observed}")),
+            "missing observed UUID: {msg}"
+        );
+        assert!(
+            msg.contains("detach the foreign disk"),
+            "missing foreign-disk guidance: {msg}"
         );
     }
 

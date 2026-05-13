@@ -253,6 +253,11 @@
               braid = linuxCrane.braid;
             }
           );
+          braid-doctor-uuid-swap = pkgs.testers.nixosTest (
+            import ./tests/cli/braid-doctor-uuid-swap.nix {
+              braid = linuxCrane.braid;
+            }
+          );
           braid-doctor-beep = pkgs.testers.nixosTest (
             import ./tests/cli/braid-doctor-beep.nix {
               braid = linuxCrane.braid;

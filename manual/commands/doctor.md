@@ -52,7 +52,7 @@ Note: `--json` mode skips the alert beep test even when combined with `--beep` (
 | `config_file` | Config exists and is valid JSON |
 | `config_schema` | Required fields present and deserializable |
 | `config_permissions` | Canonical `/etc/braid/config.json` is not world-writable and is owned by root; custom `--config` paths skip this check |
-| `declared_disks` | Every UUID-keyed pool.json member is present and has a readable LUKS header |
+| `declared_disks` | Every UUID-keyed pool.json member is present, has a readable LUKS header, and its live LUKS UUID matches the pool.json key |
 | `pool_missing_devices` | No btrfs missing devices in the live pool |
 | `data_profile_mismatch` | Data block groups all use the same RAID profile |
 | `metadata_profile_mismatch` | Metadata block groups all use the same RAID profile |
@@ -75,7 +75,7 @@ Note: `--json` mode skips the alert beep test even when combined with `--beep` (
 ## What happens under the hood
 
 1. Reads and validates `/etc/braid/config.json`.
-2. Loads UUID-keyed `pool.json` and probes each declared disk via `cryptsetup isLuks` and `cryptsetup luksDump`.
+2. Loads UUID-keyed `pool.json` and probes each declared disk via `cryptsetup isLuks`, `cryptsetup luksDump`, and `cryptsetup luksUUID`.
 3. If the pool is mounted, queries `btrfs filesystem df` to check RAID profile consistency and probes for missing devices.
 4. If the braid monitor NixOS module is configured, reports the alert beep check as skipped by default.
 5. With `--beep` and without `--json`, plays a short test beep through the canonical beep wrapper.

@@ -166,6 +166,9 @@ one.
 - `tests/cli/braid-add-persists-before-balance.py` verifies fresh add writes
   canonical UUID-keyed membership, without a duplicate value-side `luks_uuid`,
   before post-add maintenance continues.
+- `tests/cli/braid-doctor-uuid-swap.py` verifies `braid doctor` fails closed
+  when a member's live LUKS UUID diverges from its pool.json key, surfacing
+  the swap before any mutating command runs.
 
 ## Consequences
 
