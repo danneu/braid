@@ -481,6 +481,44 @@ mod tests {
         );
     }
 
+    // Intent: A corrupt alert latch alone -- with healthy probe and stats
+    //   paths -- latches a ComputationError and returns MonitorResult::Alert,
+    //   quarantining the corrupt bytes to the sidecar.
+    // Why it exists: pins the (None, Some(latch_detail)) branch of
+    //   folded_computation_error_detail. The combined corrupt-latch test only
+    //   exercises the (Some, Some) branch, so a regression in the latch-alone
+    //   path could silently pass while the manual still promises a
+    //   beeper-triggering alert for alert-latch failure alone.
+    // Scenario: pool is mounted, probe and btrfs device stats succeed cleanly,
+    //   but alert-latch.json is corrupt after a partial write or hand edit.
+    //   cmd_monitor must quarantine the corrupt bytes, return
+    //   MonitorResult::Alert with one ComputationError whose detail names the
+    //   latch quarantine, and write a fresh latch.
+    #[test]
+    fn cmd_monitor_corrupt_alert_latch_latches_computation_error() {
+        let (_dir, paths) = isolated_paths();
+        std::fs::write(paths.alert_latch_json(), b"not json").unwrap();
+        let runner = MonitorTestRunner::with_stale_mapper_stats();
+
+        let result = cmd_monitor(&runner, &monitor_fs_btrfs(), &monitor_mp(), &paths);
+        let detail = assert_monitor_single_computation_error(&result);
+        assert!(
+            detail.contains("previous alert latch was unreadable -- quarantined"),
+            "detail should name alert latch quarantine, got {detail}"
+        );
+
+        let sidecar = std::fs::read(paths.alert_latch_corrupt()).unwrap();
+        assert_eq!(
+            sidecar,
+            b"not json".to_vec(),
+            "corrupt alert latch bytes must be preserved"
+        );
+        assert!(
+            paths.alert_latch_json().exists(),
+            "fresh alert latch must be written with ComputationError cause"
+        );
+    }
+
     // Intent: A stats failure preserves an already-latched non-ComputationError
     //   cause and adds exactly one ComputationError cause.
     // Why it exists: the refactor must keep the latch merge path shared while

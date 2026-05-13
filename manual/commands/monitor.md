@@ -26,13 +26,14 @@ sudo braid monitor; echo $?
 | --- | --- |
 | **0** | Healthy, or pool is offline (nothing to check) |
 | **1** | Alert active -- one or more problems detected |
-| **2** | Monitor error (config unreadable, probe failure) |
+| **2** | Pre-monitor setup error -- config unreadable |
 
 ## What triggers an alert (exit 1)
 
 - **btrfs device errors** -- any device in the pool has read, write, flush, corruption, or generation errors above the acknowledged baseline.
 - **Missing device** -- btrfs reports a device as missing or a pool device has a null underlying path.
 - **SMART alert** -- smartd has written a SMART alert flag (via the braid smartd notifier).
+- **Computation error** -- a probe, parse, btrfs device stats call, mountinfo read, acked-stats baseline read, or alert latch read failed. Monitor fails closed: it latches a `ComputationError` cause so the beeper fires and `braid status` shows the detail.
 
 ## Flags
 
