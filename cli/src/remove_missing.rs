@@ -2113,7 +2113,7 @@ mod tests {
     // ---------------------------------------------------------------------
 
     use crate::membership::DiskMember;
-    use crate::test_fixtures::{disk_member_with, test_uuid};
+    use crate::test_fixtures::test_uuid;
     use crate::types::{ByIdPath, DiskName, LuksUuid};
 
     // Intent: cmd_remove_missing for the persisted devid resolves to a
@@ -2298,44 +2298,76 @@ mod tests {
     //   regression that fell through to remove an arbitrary entry
     //   would pass the positive-path and decoy tests but fail this one.
     //
-    // Scenario: 2-disk pool with one missing devid (2), but membership
-    //   has both members WITHOUT enrichment (devid: None on both).
+    // Scenario: 3-disk pool with missing devid 3, but membership has
+    //   every member WITHOUT enrichment (devid: None on all entries).
     #[test]
     fn cmd_remove_missing_never_enriched_refusal_returns_structured_error() {
-        let f = PoolFixture::two_disk_devids_pinned();
+        let f = PoolFixture::three_disk_devids_pinned();
         // Replace membership with one that has NO devid enrichment on
-        // any member. The fixture already pinned devids; overwrite.
+        // any member. Keep UUIDs aligned with the live fixture so the
+        // only failure is the missing persisted-devid binding.
         let mut m = PoolMembership::empty();
-        let (u1, mem1) = disk_member_with(452, "disk1", "/dev/disk/by-id/virtio-disk1", None, None);
-        let (u2, mem2) = disk_member_with(453, "disk2", "/dev/disk/by-id/virtio-disk2", None, None);
-        m.insert(u1, mem1).unwrap();
-        m.insert(u2, mem2).unwrap();
+        for (uuid, name) in [
+            ("11111111-1111-1111-1111-111111111111", "disk1"),
+            ("22222222-2222-2222-2222-222222222222", "disk2"),
+            ("33333333-3333-3333-3333-333333333333", "disk3"),
+        ] {
+            m.insert(
+                LuksUuid::parse(uuid).unwrap(),
+                DiskMember {
+                    name: DiskName::parse(name).unwrap(),
+                    by_id: ByIdPath::parse(&format!("/dev/disk/by-id/virtio-{name}")).unwrap(),
+                    devid: None,
+                    added_at: None,
+                },
+            )
+            .unwrap();
+        }
         membership::save_membership(&m, &f.paths).unwrap();
         let pre_bytes = std::fs::read(f.paths.pool_json()).unwrap();
 
-        // 2-disk fixture flips devid 2 to MISSING under
-        // RemoveMissingPool::two_disk_one_missing. But the validation
-        // pipeline rejects 2-disk-RAID1+1-missing at preflight (covered
-        // by single_survivor_rejected_at_preflight). To exercise the
-        // NoMemberForDevid arm directly, drive plan_remove_missing on a
-        // 3-disk topology where devid 2 IS missing but membership lacks
-        // any member with devid: Some(2). Easier still: call
-        // `resolve_removal_target` directly with devid 2.
-        let err = resolve_removal_target(2, &m).unwrap_err();
+        let (runner, _remove_done) =
+            RemoveMissingPool::three_disk_one_missing().install(MockRunner::default());
+        let err = cmd_remove_missing(
+            &runner,
+            &MockFs::storage(vec![]),
+            &f.remove_missing_params().missing_id(3).build(),
+        )
+        .unwrap_err();
         match &err {
-            RemoveMissingError::NoMemberForDevid { devid } => assert_eq!(*devid, 2),
+            RemoveMissingError::NoMemberForDevid { devid } => assert_eq!(*devid, 3),
             other => panic!("expected NoMemberForDevid, got: {other:?}"),
         }
         let msg = err.to_string();
         assert!(
-            msg.contains("no member in membership has devid 2"),
+            msg.contains("no member in membership has devid 3"),
             "expected pinned NoMemberForDevid wording; got: {msg}"
         );
         // Membership file is byte-for-byte unchanged.
         let post_bytes = std::fs::read(f.paths.pool_json()).unwrap();
         assert_eq!(
             pre_bytes, post_bytes,
-            "resolve_removal_target must not perturb pool.json"
+            "cmd_remove_missing must not perturb pool.json on never-enriched refusal"
+        );
+        assert_eq!(
+            f.inhibitor.acquire_count(),
+            0,
+            "never-enriched refusal must happen before acquiring the sleep inhibitor"
+        );
+        assert!(
+            journal::load_journal(&f.paths).unwrap().is_none(),
+            "never-enriched refusal must happen before pending-op.json is written"
+        );
+        let calls = runner.requests();
+        assert!(
+            calls.iter().all(|c| !matches!(
+                c,
+                CmdRequest::BtrfsDeviceRemove { .. }
+                    | CmdRequest::BtrfsBalanceRaid1Soft { .. }
+                    | CmdRequest::CryptsetupClose { .. }
+                    | CmdRequest::BtrfsDeviceScanForget { .. }
+            )),
+            "never-enriched refusal must issue zero mutating requests; calls: {calls:?}"
         );
     }
 }
