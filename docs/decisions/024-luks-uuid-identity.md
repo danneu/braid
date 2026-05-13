@@ -28,6 +28,27 @@ write, store that UUID in the journal before mutation, and pass it through the
 structured `CryptsetupLuksFormat` request. User-supplied `--luks-format-arg`
 values may not override `--uuid` or `--label`.
 
+## Benefits
+
+- **Single source of truth.** `pool.json` has one persistent member identity:
+  the LUKS UUID map key. Disk name, by-id path, and btrfs devid no longer
+  duplicate or compete with a value-side `luks_uuid` field.
+- **Drift-tolerant member correlation.** Commands resolve membership by UUID
+  instead of reconstructing identity from `braid-<name>`. A member opened under
+  a drifted mapper can still be recognized as the same disk, and cleanup paths
+  close the observed mapper rather than the expected one.
+- **Safer recovery replay.** Journals carry UUID-keyed pre-operation and target
+  membership snapshots. Recovery can compare the live pool against the
+  journaled member set by UUID/devid and re-check live UUIDs before replaying
+  format, add, replace, resize, or close steps.
+- **Earlier clone and swap detection.** Duplicate LUKS UUIDs are rejected before
+  membership writes or destructive operations, and UUID mismatches catch disks
+  that were swapped, cloned, or reformatted after the original plan was made.
+- **Human-facing names stay human-facing.** Operators still type and read disk
+  names such as `toshiba1`; mapper names and labels remain `braid-<DiskName>`.
+  UUIDs appear where they help diagnostics or machine-readable state, not as the
+  normal command vocabulary.
+
 ## Runtime Handles And Labels
 
 1. Mapper names remain `braid-<DiskName>`.

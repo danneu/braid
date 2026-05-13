@@ -295,10 +295,15 @@ fn is_managed_format_flag(token: &str) -> bool {
 // MapperName / MountPoint
 // ---------------------------------------------------------------------------
 
+/// Wraps a `/dev/mapper/<name>` basename so callers can pass mapper identity
+/// without re-parsing strings; LUKS UUID stays the persistent identity, this
+/// type is for presentation and command argv construction only.
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 #[serde(transparent)]
 pub struct MapperName(pub String);
 
+/// Wraps the absolute mount path braid hands to `mount(8)` so it cannot be
+/// confused with arbitrary user paths at call sites that mix the two.
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(transparent)]
 pub struct MountPoint(pub String);
