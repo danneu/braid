@@ -81,20 +81,24 @@ pub fn cmd_idle<R: CommandRunner, F: Filesystem + ?Sized>(
         Ok(scrub) => scrub,
         Err(e) => return busy_unknown("scrub", e),
     };
-    if let ScrubState::Running {
-        bytes_scrubbed,
-        total_bytes,
-        ..
-    } = scrub.state
-    {
-        let pct = match (bytes_scrubbed, total_bytes) {
-            (Some(scrubbed), Some(total)) => pct_from_bytes(scrubbed, total),
-            _ => None,
-        };
-        return IdleResult::Busy(BusyReason::ScrubRunning { pct });
+    match scrub.state {
+        ScrubState::Running {
+            bytes_scrubbed,
+            total_bytes,
+            ..
+        } => {
+            let pct = match (bytes_scrubbed, total_bytes) {
+                (Some(scrubbed), Some(total)) => pct_from_bytes(scrubbed, total),
+                _ => None,
+            };
+            IdleResult::Busy(BusyReason::ScrubRunning { pct })
+        }
+        ScrubState::Never
+        | ScrubState::Finished { .. }
+        | ScrubState::Aborted { .. }
+        | ScrubState::Interrupted { .. } => IdleResult::Idle,
+        ScrubState::Unknown => busy_unknown("scrub", "unrecognized scrub state"),
     }
-
-    IdleResult::Idle
 }
 
 fn busy_unknown(layer: &str, e: impl std::fmt::Display) -> IdleResult {
@@ -108,6 +112,7 @@ mod tests {
     use crate::test_fixtures::{
         IDLE_FSID, IDLE_FSID_OTHER, IdleMockFs, assert_idle_busy_unknown_prefix, idle_mp,
         idle_ready_for_sysfs_check, idle_runner_with_scrub_finished, idle_scrub_running,
+        scrub_status_unknown,
     };
     use std::io::ErrorKind;
 
@@ -392,6 +397,29 @@ mod tests {
         let result = cmd_idle(&runner, &fs, &idle_mp());
         assert_idle_busy_unknown_prefix(result, "scrub:");
         assert_eq!(runner.requests(), vec![request]);
+    }
+
+    // Intent: a parser result of `Ok(state: ScrubState::Unknown)` after a
+    //   clean (zero-exit) scrub-status invocation must surface as
+    //   Busy::Unknown, not Idle.
+    // Why it exists: closes the last fail-open branch in the autosuspend
+    //   gate. The parser-Err path is covered by
+    //   busy_unknown_on_scrub_parse_failure; this test pins the
+    //   parser-Ok-but-Unknown path that the previous non-exhaustive scrub
+    //   state check silently treated as idle. Same fail-closed contract the
+    //   sysfs branch and scrub_needs_resume.rs already obey.
+    // Scenario: btrfs-progs upgrade reshapes the `Status:` line (or
+    //   stdout is empty); parse_btrfs_scrub_status returns
+    //   Ok(BtrfsScrubStatusOutput { state: ScrubState::Unknown }).
+    #[test]
+    fn busy_unknown_on_scrub_state_unknown() {
+        let (scrub_req, scrub_out) = scrub_status_unknown();
+        let runner = MockRunner::default().with_output(scrub_req.clone(), scrub_out);
+        let fs = IdleMockFs::with_exclop("none");
+
+        let result = cmd_idle(&runner, &fs, &idle_mp());
+        assert_idle_busy_unknown_prefix(result, "scrub:");
+        assert_eq!(runner.requests(), vec![scrub_req]);
     }
 
     /* Intent: a `/proc/self/mountinfo` IO failure must propagate as

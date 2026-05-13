@@ -58,6 +58,8 @@ Pseudo-dir skip is by name allowlist (`features`, `debug`), not by "absorb any N
 
 Fail-closed branches: `list_dir("/sys/fs/btrfs")` IO errors, any read error on a non-allowlisted entry's `exclusive_operation` (including `NotFound`), unrecognized parser values, and an empty `/sys/fs/btrfs/` after the mount check passed all surface as `Busy(BusyReason::Unknown)` and exit 1.
 
+The scrub probe is held to the same contract: a `parse_btrfs_scrub_status` result of `ScrubState::Unknown` (empty stdout or an unrecognized `Status:` word) surfaces as `Busy(BusyReason::Unknown)` and exits 1. Parser drift must not silently allow suspend.
+
 `probe::probe_fsid` is no longer reached from `cmd_idle`. It remains in use by non-idle callers (`lock.rs` and the preflight pipelines that need a UUID for other purposes), and is out of scope for this gate.
 
 ### SSH always on, SMB/NFS auto-detected
