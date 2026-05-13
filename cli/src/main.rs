@@ -736,9 +736,16 @@ fn main() {
                             );
                         }
                     }
-                    braid_cli::discover::PoolJsonShape::Other => {
+                    braid_cli::discover::PoolJsonShape::ValidUuidKeyed => {
                         print_cli_error(&format!(
                             "pool.json already exists at {} -- use 'braid add' to add disks",
+                            pool_json.display()
+                        ));
+                        std::process::exit(1);
+                    }
+                    braid_cli::discover::PoolJsonShape::Corrupt => {
+                        print_cli_error(&format!(
+                            "pool.json at {} is corrupt or unreadable -- run 'braid discover --write' to rebuild from existing disks (with all intended pool members attached; see docs/luks-unlock.md)",
                             pool_json.display()
                         ));
                         std::process::exit(1);

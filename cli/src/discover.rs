@@ -190,40 +190,54 @@ pub fn discover_pool_members<R: CommandRunner>(
 }
 
 /// Classifies an existing pool.json by shape for discover's gating.
-/// Keeps the write-path legacy refusal and read-only migration preview
-/// on one JSON-shape classifier.
+/// A valid UUID-keyed file is only recognized by a successful
+/// `PoolMembership` load; everything else that is neither missing nor
+/// legacy name-keyed is treated as corrupt.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum PoolJsonShape {
     Missing,
     LegacyNameKeyed,
-    Other,
+    ValidUuidKeyed,
+    Corrupt,
 }
 
-/// Positively identifies the pre-LUKS-UUID name-keyed pool.json shape.
-/// Unreadable, unparseable, UUID-keyed, and unrecognized payloads all
-/// return `Other` so callers can fail closed unless explicitly allowed.
+/// Classifies pool.json through the canonical loader before falling
+/// back to the legacy-shape sniff required by read-only migration
+/// previews.
 pub fn classify_pool_json(path: &Path) -> PoolJsonShape {
-    let raw = match std::fs::read_to_string(path) {
-        Ok(raw) => raw,
-        Err(err) if err.kind() == std::io::ErrorKind::NotFound => {
-            return PoolJsonShape::Missing;
+    match crate::membership::load_membership_from(path) {
+        Ok(_) => PoolJsonShape::ValidUuidKeyed,
+        Err(crate::membership::MembershipError::Io { source, .. })
+            if source.kind() == std::io::ErrorKind::NotFound =>
+        {
+            PoolJsonShape::Missing
         }
-        Err(_) => return PoolJsonShape::Other,
-    };
+        Err(_) => {
+            if is_legacy_name_keyed_shape(path) {
+                PoolJsonShape::LegacyNameKeyed
+            } else {
+                PoolJsonShape::Corrupt
+            }
+        }
+    }
+}
 
+/// Last-resort sniff for the pre-LUKS-UUID name-keyed shape. The
+/// canonical loader intentionally fails closed on legacy keys, but
+/// discover preview needs this narrow positive identification.
+fn is_legacy_name_keyed_shape(path: &Path) -> bool {
+    let Ok(raw) = std::fs::read_to_string(path) else {
+        return false;
+    };
     let Ok(value) = serde_json::from_str::<serde_json::Value>(&raw) else {
-        return PoolJsonShape::Other;
+        return false;
     };
 
     let Some(disks) = value.get("disks").and_then(|v| v.as_object()) else {
-        return PoolJsonShape::Other;
+        return false;
     };
 
-    if disks.keys().any(|key| LuksUuid::parse(key).is_err()) {
-        PoolJsonShape::LegacyNameKeyed
-    } else {
-        PoolJsonShape::Other
-    }
+    disks.keys().any(|key| LuksUuid::parse(key).is_err())
 }
 
 /// Build a `LabelCollision` error from two colliding by-id paths.
@@ -1523,6 +1537,138 @@ mod tests {
         assert_eq!(
             pool_json_post, stale,
             "name-keyed pool.json must be byte-for-byte unchanged after refusal"
+        );
+    }
+
+    // Intent: absent pool.json classifies as Missing.
+    // Why it exists: read-only discover must keep scanning when no prior
+    //   membership file exists.
+    // Scenario: first boot before any discover --write run.
+    #[test]
+    fn classify_pool_json_returns_missing_when_absent() {
+        let root = tempfile::tempdir().unwrap();
+        let paths = StatePaths::custom(root.path().to_path_buf());
+
+        assert_eq!(
+            classify_pool_json(&paths.pool_json()),
+            PoolJsonShape::Missing
+        );
+    }
+
+    // Intent: pre-LUKS-UUID name-keyed pool.json classifies as legacy.
+    // Why it exists: read-only discover must preserve the migration
+    //   preview and hint for old state files.
+    // Scenario: an operator previews discover before moving the legacy
+    //   pool.json aside.
+    #[test]
+    fn classify_pool_json_returns_legacy_name_keyed_for_name_keyed_shape() {
+        let root = tempfile::tempdir().unwrap();
+        let paths = StatePaths::custom(root.path().to_path_buf());
+        let stale = r#"{"disks":{"toshiba1":{"by_id":"/dev/disk/by-id/ata-X"}}}"#;
+        std::fs::write(paths.pool_json(), stale).unwrap();
+
+        assert_eq!(
+            classify_pool_json(&paths.pool_json()),
+            PoolJsonShape::LegacyNameKeyed
+        );
+    }
+
+    // Intent: loadable UUID-keyed pool.json classifies as ValidUuidKeyed.
+    // Why it exists: the "use braid add" refusal is correct only when
+    //   the canonical membership loader accepts the file.
+    // Scenario: a pool has already been discovered and persisted in the
+    //   current UUID-keyed format.
+    #[test]
+    fn classify_pool_json_returns_valid_uuid_keyed_for_loadable_pool_json() {
+        let root = tempfile::tempdir().unwrap();
+        let paths = StatePaths::custom(root.path().to_path_buf());
+        let mut members = PoolMembership::empty();
+        members
+            .insert(
+                LuksUuid::parse("aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee").unwrap(),
+                DiskMember::new(
+                    DiskName::parse("disk1").unwrap(),
+                    ByIdPath::parse("/dev/disk/by-id/ata-X").unwrap(),
+                ),
+            )
+            .unwrap();
+        save_membership(&members, &paths).unwrap();
+
+        assert_eq!(
+            classify_pool_json(&paths.pool_json()),
+            PoolJsonShape::ValidUuidKeyed
+        );
+    }
+
+    // Intent: unparseable pool.json classifies as Corrupt.
+    // Why it exists: bare discover must point operators at the rebuild
+    //   remediation instead of suggesting braid add.
+    // Scenario: a power loss truncates pool.json into non-JSON bytes.
+    #[test]
+    fn classify_pool_json_returns_corrupt_for_unparseable() {
+        let root = tempfile::tempdir().unwrap();
+        let paths = StatePaths::custom(root.path().to_path_buf());
+        std::fs::write(paths.pool_json(), "not-json").unwrap();
+
+        assert_eq!(
+            classify_pool_json(&paths.pool_json()),
+            PoolJsonShape::Corrupt
+        );
+    }
+
+    // Intent: parseable but off-schema pool.json classifies as Corrupt.
+    // Why it exists: JSON that lacks the membership schema still cannot
+    //   be repaired by braid add.
+    // Scenario: an operator or old experiment writes unrelated JSON to
+    //   /var/lib/braid/pool.json.
+    #[test]
+    fn classify_pool_json_returns_corrupt_for_off_schema() {
+        let root = tempfile::tempdir().unwrap();
+        let paths = StatePaths::custom(root.path().to_path_buf());
+        std::fs::write(paths.pool_json(), r#"{"unexpected":true}"#).unwrap();
+
+        assert_eq!(
+            classify_pool_json(&paths.pool_json()),
+            PoolJsonShape::Corrupt
+        );
+    }
+
+    // Intent: non-NotFound I/O from pool.json classifies as Corrupt.
+    // Why it exists: only an absent file should allow the Missing path;
+    //   unreadable present state must fail closed with rebuild guidance.
+    // Scenario: the pool.json path exists as a directory, exercising the
+    //   same classifier arm as EACCES/EIO without needing root tricks.
+    #[test]
+    fn classify_pool_json_returns_corrupt_for_non_not_found_io() {
+        let root = tempfile::tempdir().unwrap();
+        let paths = StatePaths::custom(root.path().to_path_buf());
+        std::fs::create_dir(paths.pool_json()).unwrap();
+
+        assert_eq!(
+            classify_pool_json(&paths.pool_json()),
+            PoolJsonShape::Corrupt
+        );
+    }
+
+    // Intent: value-side uniqueness conflicts classify as Corrupt.
+    // Why it exists: the classifier must treat any canonical loader
+    //   failure as not valid, including MembershipError::Conflict.
+    // Scenario: a UUID-keyed pool.json repeats the same disk name under
+    //   two members and cannot be loaded safely.
+    #[test]
+    fn classify_pool_json_returns_corrupt_for_value_side_conflict() {
+        let root = tempfile::tempdir().unwrap();
+        let paths = StatePaths::custom(root.path().to_path_buf());
+        let u1 = "aaaaaaaa-0000-0000-0000-000000000001";
+        let u2 = "aaaaaaaa-0000-0000-0000-000000000002";
+        let body = format!(
+            "{{\"disks\":{{\"{u1}\":{{\"name\":\"dup\",\"by_id\":\"/dev/disk/by-id/ata-A\"}},\"{u2}\":{{\"name\":\"dup\",\"by_id\":\"/dev/disk/by-id/ata-B\"}}}}}}"
+        );
+        std::fs::write(paths.pool_json(), body).unwrap();
+
+        assert_eq!(
+            classify_pool_json(&paths.pool_json()),
+            PoolJsonShape::Corrupt
         );
     }
 

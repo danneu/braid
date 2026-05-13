@@ -38,14 +38,17 @@ def assert_pool_json_absent():
     machine.fail(f"test -e {POOL_JSON}")
 
 
-def assert_existing_pool_json_refuses_preview(contents, label):
-    """Assert unrecognized existing pool.json shapes keep the old refusal."""
+def assert_corrupt_pool_json_refuses_preview(contents, label):
+    """Assert corrupt/off-schema pool.json gets the rebuild remediation."""
     with subtest(label):
         write_pool_json(contents)
         before = read_pool_json()
         out = machine.fail("braid discover 2>&1")
-        assert "pool.json already exists at /var/lib/braid/pool.json" in out, (
-            "expected existing pool.json refusal; got:\n" + out
+        assert (
+            "is corrupt or unreadable -- run 'braid discover --write' "
+            "to rebuild from existing disks"
+        ) in out, (
+            "expected corrupt pool.json rebuild remediation; got:\n" + out
         )
         assert read_pool_json() == before, "pool.json must be byte-for-byte unchanged"
 
@@ -132,14 +135,14 @@ with subtest("bare discover refuses new UUID-keyed pool.json"):
         "expected existing pool.json refusal; got:\n" + out
     )
 
-assert_existing_pool_json_refuses_preview(
+assert_corrupt_pool_json_refuses_preview(
     '{"unexpected":true}',
-    "bare discover refuses parseable unrecognized pool.json",
+    "bare discover gives rebuild remediation for parseable unrecognized pool.json",
 )
 
-assert_existing_pool_json_refuses_preview(
+assert_corrupt_pool_json_refuses_preview(
     "not-json-at-all",
-    "bare discover refuses unparseable pool.json",
+    "bare discover gives rebuild remediation for unparseable pool.json",
 )
 
 machine.shutdown()
