@@ -12,6 +12,7 @@
 {
   passphrase, # LUKS passphrase
   diskNames, # [ "disk1" "disk2" ... ]
+  diskUuidMap ? null, # optional attrset: disk name -> deterministic LUKS UUID
   extraWaitDevices ? [ ], # extra block devices to wait for (e.g., USB)
   extraStorePaths ? [ ], # extra packages in initrd store
   extraPath ? [ ], # extra packages on service PATH
@@ -37,6 +38,24 @@ let
     else
       "mkfs.btrfs -f -d raid1 -m raid1 "
       + lib.concatMapStringsSep " " (d: "/dev/mapper/braid-${d}-fmt") diskNames;
+
+  uuidCase =
+    if diskUuidMap == null then
+      ''
+        disk1) luks_uuid="11111111-1111-1111-1111-111111111111" ;;
+        disk2) luks_uuid="22222222-2222-2222-2222-222222222222" ;;
+        disk3) luks_uuid="33333333-3333-3333-3333-333333333333" ;;
+        disk4) luks_uuid="44444444-4444-4444-4444-444444444444" ;;
+        disk5) luks_uuid="55555555-5555-5555-5555-555555555555" ;;
+        *) echo "no deterministic test LUKS UUID for $disk" >&2; exit 1 ;;
+      ''
+    else
+      lib.concatMapStrings (disk: ''
+        ${disk}) luks_uuid="${diskUuidMap.${disk}}" ;;
+      '') diskNames
+      + ''
+        *) echo "no deterministic test LUKS UUID for $disk" >&2; exit 1 ;;
+      '';
 in
 {
   boot.initrd = {
@@ -97,12 +116,7 @@ in
             dev="/dev/disk/by-id/virtio-$disk"
             if ! cryptsetup isLuks "$dev" 2>/dev/null; then
               case "$disk" in
-                disk1) luks_uuid="11111111-1111-1111-1111-111111111111" ;;
-                disk2) luks_uuid="22222222-2222-2222-2222-222222222222" ;;
-                disk3) luks_uuid="33333333-3333-3333-3333-333333333333" ;;
-                disk4) luks_uuid="44444444-4444-4444-4444-444444444444" ;;
-                disk5) luks_uuid="55555555-5555-5555-5555-555555555555" ;;
-                *) echo "no deterministic test LUKS UUID for $disk" >&2; exit 1 ;;
+          ${uuidCase}
               esac
               echo -n '${passphrase}' | cryptsetup luksFormat --batch-mode \
                 --uuid "$luks_uuid" \

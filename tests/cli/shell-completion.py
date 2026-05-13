@@ -9,6 +9,8 @@
 #
 # Dependencies: Rust braid binary with clap_complete CompleteEnv support.
 
+import json
+
 # --- Registration scripts are generated for each shell ---
 
 with subtest("bash registration"):
@@ -43,6 +45,29 @@ printf '%s\\n' "${COMPREPLY[@]}"
 SCRIPT
 chmod +x /tmp/get-completions.sh
 """)
+
+with subtest("disk name completion is in DiskName order"):
+    pool = {
+        "disks": {
+            "11111111-1111-1111-1111-111111111111": {
+                "name": "zeta",
+                "by_id": "/dev/disk/by-id/ata-Z",
+            },
+            "99999999-9999-9999-9999-999999999999": {
+                "name": "alpha",
+                "by_id": "/dev/disk/by-id/ata-A",
+            },
+        }
+    }
+    machine.succeed("mkdir -p /var/lib/braid")
+    machine.succeed(
+        "cat > /var/lib/braid/pool.json << 'EOF'\n" + json.dumps(pool) + "\nEOF"
+    )
+    output = machine.succeed("bash /tmp/get-completions.sh braid add ''")
+    candidates = [c for c in output.splitlines() if c in ("alpha", "zeta")]
+    assert candidates == ["alpha", "zeta"], (
+        "completion candidates must be in DiskName order, got: " + str(candidates)
+    )
 
 with subtest("subcommand completion"):
     output = machine.succeed("bash /tmp/get-completions.sh braid ''")

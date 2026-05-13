@@ -226,12 +226,7 @@ fn plan_open_pool_inner<R: CommandRunner, F: Filesystem + ?Sized>(
     let mut first_open_mapper: Option<String> = None;
     let mut missing: Vec<(String, MissingReason)> = Vec::new();
 
-    let mut members: Vec<_> = membership.iter().collect();
-    // Membership is UUID-keyed for persistence, but this probe emits
-    // operator-visible rows. Keep the visible unlock order by disk name.
-    members.sort_by(|(_, left), (_, right)| left.name.cmp(&right.name));
-
-    for (expected_uuid, member) in members {
+    for (expected_uuid, member) in membership.iter_by_name() {
         let name = member.name.as_str();
         let probed = probe::probe_config_disk(runner, fs, &member.name, &member.by_id)?;
         match &probed.state {

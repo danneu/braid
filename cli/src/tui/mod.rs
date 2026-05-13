@@ -30,8 +30,7 @@ pub fn run(config_path: &Path, paths: &StatePaths) -> io::Result<()> {
     let membership =
         membership::load_membership(paths).map_err(|e| io::Error::other(e.to_string()))?;
     let advisories = luks::header_backup_advisories(paths);
-    let mut members: Vec<_> = membership.iter().collect();
-    members.sort_by(|(_, a), (_, b)| a.name.cmp(&b.name));
+    let members = membership.iter_by_name();
     let disk_names: Vec<String> = members
         .iter()
         .map(|(_, member)| member.name.as_str().to_owned())

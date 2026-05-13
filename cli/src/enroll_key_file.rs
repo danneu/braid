@@ -82,7 +82,7 @@ fn discover_enrollment_candidates<R: CommandRunner, F: Filesystem + ?Sized>(
     let mut notes: Vec<PreviewNote> = Vec::new();
     let mut candidates: Vec<EnrollmentCandidate> = Vec::new();
 
-    for (expected_uuid, member) in membership.iter() {
+    for (expected_uuid, member) in membership.iter_by_name() {
         let name = member.name.as_str();
         let probed = match probe::probe_config_disk(runner, fs, &member.name, &member.by_id) {
             Ok(p) => p,
@@ -119,26 +119,6 @@ fn discover_enrollment_candidates<R: CommandRunner, F: Filesystem + ?Sized>(
             }
         }
     }
-
-    // Pool membership iterates by LUKS UUID for persistence stability.
-    // Enroll is operator-facing, so discovery results must be presented
-    // by disk name instead.
-    candidates.sort_by(|(left, _), (right, _)| left.cmp(right));
-    notes.sort_by(|left, right| {
-        if let (
-            PreviewNote::PerDisk {
-                name: left_name, ..
-            },
-            PreviewNote::PerDisk {
-                name: right_name, ..
-            },
-        ) = (left, right)
-        {
-            left_name.cmp(right_name)
-        } else {
-            std::cmp::Ordering::Equal
-        }
-    });
 
     if candidates.is_empty() {
         return (
@@ -817,6 +797,54 @@ mod tests {
                 .iter()
                 .any(|r| matches!(r, CmdRequest::CryptsetupLuksAddKeyFile { .. })),
             "enrollment mutation must not run after UUID mismatch: {requests:?}"
+        );
+    }
+
+    // Intent: preserved-context discovery failures return accumulated
+    //   notes in DiskName order, not UUID order.
+    // Why it exists: this function used to iterate membership.iter() and
+    //   only sort notes after the loop completed, so early returns leaked
+    //   UUID order to stderr.
+    // Scenario: alpha is absent and zeta has a mismatched LUKS UUID.
+    //   UUID order is zeta then alpha, but the one preserved note must
+    //   be for alpha.
+    #[test]
+    fn preserved_context_failure_returns_notes_in_name_order() {
+        let alpha_path = "/dev/disk/by-id/ata-A";
+        let zeta_path = "/dev/disk/by-id/ata-Z";
+        let mut membership = PoolMembership::empty();
+        let (zeta_uuid, zeta) = disk_member(700, "zeta", zeta_path);
+        let (alpha_uuid, alpha) = disk_member(701, "alpha", alpha_path);
+        membership.insert(zeta_uuid, zeta).unwrap();
+        membership.insert(alpha_uuid, alpha).unwrap();
+
+        let observed = "ffffffff-ffff-ffff-ffff-ffffffffffff";
+        let (req, out) = enroll_luks_uuid_ok(zeta_path, observed);
+        let runner = MockRunner::default()
+            .with_output(req, out)
+            .with_luks_dump_text_luks2(zeta_path)
+            .with_mapper_closed("braid-zeta");
+        let fs = enroll_fs(&[zeta_path]);
+
+        let (notes, result) = discover_enrollment_candidates(&runner, &fs, &membership);
+
+        let err = result.expect_err("UUID mismatch must reject discovery");
+        let msg = match err {
+            EnrollKeyFileError::Validation(msg) => msg,
+            other => panic!("expected validation error, got {other:?}"),
+        };
+        assert!(msg.contains("zeta"), "error should name zeta: {msg}");
+        assert_eq!(notes.len(), 1, "expected one preserved note: {notes:?}");
+        assert!(
+            matches!(
+                &notes[0],
+                PreviewNote::PerDisk {
+                    name,
+                    level: NoteLevel::Skip,
+                    message,
+                } if name == "alpha" && message == "not present"
+            ),
+            "expected alpha skip note before UUID mismatch, got: {notes:?}"
         );
     }
 

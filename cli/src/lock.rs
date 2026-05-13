@@ -413,6 +413,27 @@ fn compile_lock_steps(
     steps
 }
 
+/// Member names that should render as already closed, in DiskName
+/// order, before the planned close loop emits its own status lines.
+fn already_closed_names<'a>(
+    membership: &'a PoolMembership,
+    planned_members: &HashSet<&DiskName>,
+    planned_mappers: &HashSet<&str>,
+    skipped_mappers: &HashSet<&str>,
+) -> Vec<&'a DiskName> {
+    membership
+        .iter_by_name()
+        .into_iter()
+        .filter_map(|(_, member)| {
+            let mn = mapper_name(member.name.as_str());
+            (!planned_members.contains(&member.name)
+                && !planned_mappers.contains(mn.as_str())
+                && !skipped_mappers.contains(mn.as_str()))
+            .then_some(&member.name)
+        })
+        .collect()
+}
+
 /// The dry-run preview source of truth for `braid lock` and the
 /// close set pre-computed during planning. `fs.exists` during execute
 /// is only a disappearance guard before mutating an already-planned
@@ -581,20 +602,16 @@ impl LockPlan {
             // line. The expected mapper is reconstructed from name
             // purely for display here; identity decisions for the
             // close itself were made at plan time.
-            for (_uuid, member) in membership.iter() {
-                let mn = mapper_name(member.name.as_str());
-                if !planned_members.contains(&member.name)
-                    && !planned_mappers.contains(mn.as_str())
-                    && !skipped_mappers.contains(mn.as_str())
-                {
-                    eprint!(
-                        "{}",
-                        line(
-                            StatusTag::Ok,
-                            &format!("disk {}: already closed", member.name)
-                        )
-                    );
-                }
+            for name in already_closed_names(
+                membership,
+                &planned_members,
+                &planned_mappers,
+                &skipped_mappers,
+            ) {
+                eprint!(
+                    "{}",
+                    line(StatusTag::Ok, &format!("disk {name}: already closed"))
+                );
             }
             // Planned closes, observed-mapper-first.
             for entry in self.close_set.entries() {
@@ -936,9 +953,9 @@ mod tests {
     use crate::cmd::{MockRunner, RawCommandOutput};
     use crate::mapper_close::{CLOSE_RETRY_ATTEMPTS, CLOSE_RETRY_DELAY};
     use crate::test_fixtures::{
-        LockNoopSleeper, LockRecordingRunner, lock_count_forget_steps, lock_err_raw,
+        LockNoopSleeper, LockRecordingRunner, disk_member, lock_count_forget_steps, lock_err_raw,
         lock_forget_step_devices, lock_fs, lock_mounted_runner, lock_ok_raw, lock_test_config,
-        lock_test_membership, lock_umount_failed_runner, lock_with_fsid_probe_mocks,
+        lock_test_membership, lock_umount_failed_runner, lock_with_fsid_probe_mocks, test_uuid,
     };
     use std::sync::Mutex;
     use std::time::Duration;
@@ -961,6 +978,36 @@ mod tests {
     fn with_orphan_mapper(runner: MockRunner, mapper: &str) -> MockRunner {
         let device = format!("/dev/disk/by-id/{mapper}");
         runner.with_mapper_open(mapper, &device, ORPHAN_UUID)
+    }
+
+    // Intent: the "already closed" prelude lists members in DiskName
+    //   order regardless of underlying UUID order.
+    // Why it exists: the LUKS-UUID migration left this loop iterating in
+    //   UUID order; this pins name order at the call-site helper.
+    // Scenario: a two-disk pool where UUID order is opposite name order;
+    //   no member is in the planned close set, so both appear.
+    #[test]
+    fn already_closed_names_returned_in_name_order_independent_of_uuid_order() {
+        let mut membership = PoolMembership::empty();
+        let (_, zeta) = disk_member(700, "zeta", "/dev/disk/by-id/ata-Z");
+        let (_, alpha) = disk_member(701, "alpha", "/dev/disk/by-id/ata-A");
+        membership.insert(test_uuid(700), zeta).unwrap();
+        membership.insert(test_uuid(701), alpha).unwrap();
+        let planned_members: HashSet<&DiskName> = HashSet::new();
+        let planned_mappers: HashSet<&str> = HashSet::new();
+        let skipped_mappers: HashSet<&str> = HashSet::new();
+
+        let names: Vec<&str> = already_closed_names(
+            &membership,
+            &planned_members,
+            &planned_mappers,
+            &skipped_mappers,
+        )
+        .into_iter()
+        .map(DiskName::as_str)
+        .collect();
+
+        assert_eq!(names, vec!["alpha", "zeta"]);
     }
 
     #[test]

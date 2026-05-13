@@ -301,9 +301,19 @@ impl PoolMembership {
         }
     }
 
-    /// Iterate `(UUID, &DiskMember)` pairs in UUID-sorted order.
+    /// Iterate `(UUID, &DiskMember)` pairs in UUID-sorted order. Use
+    /// for internal data processing; for operator-visible output, prefer
+    /// `iter_by_name()` (see decision 024).
     pub fn iter(&self) -> btree_map::Iter<'_, LuksUuid, DiskMember> {
         self.disks.iter()
+    }
+
+    /// Iterate `(UUID, &DiskMember)` pairs sorted by `DiskName` -- the
+    /// operator-facing display order required by decision 024.
+    pub fn iter_by_name(&self) -> Vec<(&LuksUuid, &DiskMember)> {
+        let mut members: Vec<_> = self.disks.iter().collect();
+        members.sort_by(|(_, left), (_, right)| left.name.cmp(&right.name));
+        members
     }
 
     /// Iterate disk names in UUID-sorted order (callers that need name
@@ -1147,6 +1157,40 @@ mod tests {
         let observed: Vec<&LuksUuid> = loaded.iter().map(|(u, _)| u).collect();
         let expected: Vec<&LuksUuid> = uuids.iter().collect();
         assert_eq!(observed, expected);
+    }
+
+    // Intent: iter_by_name() returns operator-visible name order even when
+    //   UUID order is the opposite, and iter() stays in UUID order.
+    // Why it exists: decision 024 requires display surfaces to sort by
+    //   DiskName. This pins both orderings against regressions of the
+    //   kind that produced the discover and lock bugs.
+    // Scenario: a two-disk pool whose LUKS UUIDs happen to sort opposite
+    //   to their disk names; operator output should still be alphabetical.
+    #[test]
+    fn iter_by_name_returns_name_sorted_order_independent_of_uuid_order() {
+        let mut uuids = [test_uuid(160), test_uuid(161)];
+        uuids.sort();
+        let [u_lo, u_hi] = [uuids[0].clone(), uuids[1].clone()];
+        let mut membership = PoolMembership::empty();
+        membership
+            .insert(u_lo, member("zeta", "/dev/disk/by-id/ata-Z"))
+            .unwrap();
+        membership
+            .insert(u_hi, member("alpha", "/dev/disk/by-id/ata-A"))
+            .unwrap();
+
+        let uuid_order: Vec<&str> = membership
+            .iter()
+            .map(|(_, member)| member.name.as_str())
+            .collect();
+        assert_eq!(uuid_order, vec!["zeta", "alpha"]);
+
+        let name_order: Vec<&str> = membership
+            .iter_by_name()
+            .iter()
+            .map(|(_, member)| member.name.as_str())
+            .collect();
+        assert_eq!(name_order, vec!["alpha", "zeta"]);
     }
 
     // ----- enrich_from_pool_state ------------------------------------------

@@ -136,6 +136,17 @@ pub struct DiscoverOutcome {
     pub warnings: Vec<DiscoverWarning>,
 }
 
+/// Format operator-visible discover preview rows in DiskName order.
+/// Returned as lines so the binary entry point stays easy to test.
+pub fn render_preview_lines(outcome: &DiscoverOutcome) -> Vec<String> {
+    outcome
+        .members
+        .iter_by_name()
+        .into_iter()
+        .map(|(_, member)| format!("  {} = {}", member.name, member.by_id))
+        .collect()
+}
+
 /// Discover-side fail-closed errors that fire from the `--write` path
 /// before any `save_membership` call. Separate from `DiscoverError`
 /// (which collects pre-write failures from the scan itself) because
@@ -630,6 +641,48 @@ mod tests {
             Err(_) => return false,
         };
         members.by_name(&disk_name).is_some()
+    }
+
+    fn member(name: &str, by_id: &str) -> DiskMember {
+        DiskMember::new(
+            DiskName::parse(name).expect("valid test disk name"),
+            ByIdPath::parse(by_id).expect("valid test by-id path"),
+        )
+    }
+
+    // Intent: discover preview lines are returned in DiskName order
+    //   regardless of underlying UUID order.
+    // Why it exists: a previous regression printed the preview in UUID
+    //   order, contradicting decision 024. This pins the call-site helper.
+    // Scenario: two discovered members whose UUID order is opposite name
+    //   order; operator expects alphabetical preview rows.
+    #[test]
+    fn render_preview_lines_returns_name_sorted_independent_of_uuid_order() {
+        let mut members = PoolMembership::empty();
+        members
+            .insert(
+                LuksUuid::parse("11111111-1111-1111-1111-111111111111").unwrap(),
+                member("zeta", "/dev/disk/by-id/ata-Z"),
+            )
+            .unwrap();
+        members
+            .insert(
+                LuksUuid::parse("99999999-9999-9999-9999-999999999999").unwrap(),
+                member("alpha", "/dev/disk/by-id/ata-A"),
+            )
+            .unwrap();
+        let outcome = DiscoverOutcome {
+            members,
+            warnings: Vec::new(),
+        };
+
+        assert_eq!(
+            render_preview_lines(&outcome),
+            vec![
+                "  alpha = /dev/disk/by-id/ata-A",
+                "  zeta = /dev/disk/by-id/ata-Z"
+            ]
+        );
     }
 
     #[test]

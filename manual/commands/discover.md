@@ -23,8 +23,8 @@ sudo braid discover
 Output:
 
 ```
-  toshiba = /dev/disk/by-id/ata-TOSHIBA_MN08ACA16T_XXXXXXXX
   ironwolf = /dev/disk/by-id/ata-ST12000VN0008_XXXXXXXX
+  toshiba = /dev/disk/by-id/ata-TOSHIBA_MN08ACA16T_XXXXXXXX
 pass --write to save to /var/lib/braid/pool.json
 ```
 

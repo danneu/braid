@@ -241,9 +241,7 @@ fn build_compact_drives(pool: &PoolState, membership: &PoolMembership) -> Vec<Co
     }
 
     // Unpooled membership disks
-    let mut members: Vec<_> = membership.iter().collect();
-    members.sort_by(|(_, a), (_, b)| a.name.cmp(&b.name));
-    for (uuid, member) in members {
+    for (uuid, member) in membership.iter_by_name() {
         if pool_luks_uuids.contains(uuid) {
             continue;
         }
@@ -385,8 +383,11 @@ fn build_status<R: CommandRunner, F: Filesystem>(
 
     let compact_drives = build_compact_drives(&pool, &membership);
 
-    let mut members: Vec<_> = membership.iter().map(|(_, member)| member).collect();
-    members.sort_by(|a, b| a.name.cmp(&b.name));
+    let members: Vec<_> = membership
+        .iter_by_name()
+        .into_iter()
+        .map(|(_, member)| member)
+        .collect();
     let config_disks: Vec<ConfigDisk> = members
         .into_iter()
         .map(|member| probe_config_disk(runner, fs, &member.name, &member.by_id))

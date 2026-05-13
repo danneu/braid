@@ -406,8 +406,11 @@ fn check_declared_disks<R: CommandRunner>(ctx: &mut DoctorContext<'_, R>) -> Che
         }
     };
 
-    let mut members: Vec<_> = pool_membership.iter().map(|(_, member)| member).collect();
-    members.sort_by(|a, b| a.name.cmp(&b.name));
+    let members: Vec<_> = pool_membership
+        .iter_by_name()
+        .into_iter()
+        .map(|(_, member)| member)
+        .collect();
     let classifications: Vec<(String, String, DiskState)> = members
         .into_iter()
         .map(|member| {

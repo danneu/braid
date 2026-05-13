@@ -148,6 +148,11 @@
               braid = linuxCrane.braid;
             }
           );
+          braid-discover-name-order = pkgs.testers.nixosTest (
+            import ./tests/cli/braid-discover-name-order.nix {
+              braid = linuxCrane.braid;
+            }
+          );
           braid-discover-migration = pkgs.testers.nixosTest (
             import ./tests/cli/braid-discover-migration.nix {
               braid = linuxCrane.braid;
@@ -404,6 +409,11 @@
           );
           braid-lock = pkgs.testers.nixosTest (
             import ./tests/cli/braid-lock.nix {
+              braid = linuxCrane.braid;
+            }
+          );
+          braid-lock-name-order = pkgs.testers.nixosTest (
+            import ./tests/cli/braid-lock-name-order.nix {
               braid = linuxCrane.braid;
             }
           );

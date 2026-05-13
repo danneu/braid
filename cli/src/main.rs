@@ -762,8 +762,8 @@ fn main() {
                         eprintln!("no braid-labeled LUKS devices found");
                         std::process::exit(1);
                     }
-                    for (_uuid, m) in outcome.members.iter() {
-                        eprintln!("  {} = {}", m.name, m.by_id);
+                    for line in braid_cli::discover::render_preview_lines(&outcome) {
+                        eprintln!("{line}");
                     }
                     if args.write {
                         match braid_cli::discover::write_discovered_membership(
@@ -888,15 +888,16 @@ fn print_cli_error(message: &str) {
     }
 }
 
-/// Tab completion returns disk names from membership.
+/// Tab completion returns disk names from membership in operator-visible order.
 fn disk_name_candidates() -> Vec<CompletionCandidate> {
     let paths = StatePaths::production();
     let Ok(membership) = braid_cli::membership::load_membership(&paths) else {
         return Vec::new();
     };
     membership
-        .names()
-        .map(|name| CompletionCandidate::new(name.as_str().to_owned()))
+        .iter_by_name()
+        .into_iter()
+        .map(|(_, member)| CompletionCandidate::new(member.name.as_str().to_owned()))
         .collect()
 }
 
