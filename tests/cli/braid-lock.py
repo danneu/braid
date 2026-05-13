@@ -174,4 +174,64 @@ with subtest("Test 5: dry-run preview goes to stdout"):
     assert "\x1b[" not in stdout, f"dry-run stdout must be plain without a TTY: {stdout!r}"
     assert stderr == "", f"expected empty stderr, got: {stderr!r}"
 
+# --- Test 6: Dry-run unverified mapper warning stream routing ---
+# Intent: `braid lock --dry-run` routes unverified cleanup-candidate warnings
+# to stdout and keeps stderr empty.
+# Why it exists: successful dry-run owns a single rendered Preview stream; a
+# skipped `braid-*` candidate must not leak a planner warning to stderr or
+# render a false clean no-op.
+# Scenario: the pool is already locked, but a stale `braid-disk1` path exists
+# in `/dev/mapper` without a verifiable cryptsetup backing UUID.
+
+with subtest("Test 6: dry-run unverified mapper warning goes to stdout"):
+    machine.succeed("touch /dev/mapper/braid-disk1")
+    machine.succeed(
+        "braid lock --dry-run >/tmp/lock-skip-stdout 2>/tmp/lock-skip-stderr"
+    )
+    skip_stdout = machine.succeed("cat /tmp/lock-skip-stdout")
+    skip_stderr = machine.succeed("cat /tmp/lock-skip-stderr")
+    machine.succeed("rm -f /dev/mapper/braid-disk1")
+
+    assert "[warn] skipping mapper braid-disk1: cannot verify backing LUKS UUID" in skip_stdout, (
+        f"expected skip warning on stdout, got: {skip_stdout!r}"
+    )
+    assert "cleanup incomplete: some braid mappers could not be verified" in skip_stdout, (
+        f"expected cleanup-incomplete info on stdout, got: {skip_stdout!r}"
+    )
+    assert "nothing to do." not in skip_stdout, (
+        f"uncertain cleanup must not render a clean no-op, got: {skip_stdout!r}"
+    )
+    assert "close LUKS mapper braid-disk1" not in skip_stdout, (
+        f"skipped mapper must not appear as a close step, got: {skip_stdout!r}"
+    )
+    assert skip_stderr == "", f"dry-run stderr must be empty, got: {skip_stderr!r}"
+
+# --- Test 7: Real-run unverified mapper is not a clean no-op ---
+# Intent: `braid lock` suppresses `pool already locked` when cleanup is
+# uncertain because a `braid-*` candidate could not be verified.
+# Why it exists: warning-only real execution must not claim a clean locked
+# state while leaving a braid-prefixed candidate open.
+# Scenario: same stale `/dev/mapper/braid-disk1` path as the dry-run stream
+# test, but through real execution.
+
+with subtest("Test 7: real-run unverified mapper suppresses already-locked"):
+    machine.succeed("touch /dev/mapper/braid-disk1")
+    machine.succeed(
+        "braid lock >/tmp/lock-skip-real-stdout 2>/tmp/lock-skip-real-stderr"
+    )
+    real_stdout = machine.succeed("cat /tmp/lock-skip-real-stdout")
+    real_stderr = machine.succeed("cat /tmp/lock-skip-real-stderr")
+    machine.succeed("rm -f /dev/mapper/braid-disk1")
+
+    assert real_stdout == "", f"real lock should not write stdout, got: {real_stdout!r}"
+    assert "[warn] skipping mapper braid-disk1: cannot verify backing LUKS UUID" in real_stderr, (
+        f"expected skip warning on stderr, got: {real_stderr!r}"
+    )
+    assert "disk disk1: already closed" not in real_stderr, (
+        f"skipped mapper must suppress matching already-closed row, got: {real_stderr!r}"
+    )
+    assert "pool already locked" not in real_stderr, (
+        f"uncertain cleanup must not print already-locked, got: {real_stderr!r}"
+    )
+
 machine.shutdown()

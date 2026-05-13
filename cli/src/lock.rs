@@ -32,12 +32,10 @@ impl From<CloseMapperError> for LockError {
 }
 
 /// Snapshot of the pool's live state at lock-planning time. `Full`
-/// carries the UUID-classified `PoolState` from `probe_pool`;
-/// `FsidOnly` is the per-device-probe-failed fallback that keeps
-/// `require_lock_preflight` running while drift detection is
-/// disabled. The two arms produce identical close orders on identical
-/// inputs by construction (see plan 3215-3226).
-#[allow(dead_code)] // fsid/probe_error are reserved for the FsidOnly arm warning.
+/// carries the UUID-classified `PoolState` from `probe_pool`; `FsidOnly`
+/// is the per-device-probe-failed fallback that keeps FSID preflight
+/// evidence separate from the later UUID-scanned mapper cleanup.
+#[allow(dead_code)] // fsid/probe_error are reserved for the mounted fallback warning.
 pub enum LockSnapshot {
     /// Full per-device probe result with live LUKS UUIDs available.
     Full(PoolState),
@@ -143,16 +141,14 @@ impl LockCloseSet {
     }
 }
 
-/// Issue exactly two `CmdRequest` calls per stranded mapper -- a
+/// Issue exactly two `CmdRequest` calls per braid-prefixed candidate -- a
 /// `CryptsetupStatus` to confirm the mapper is a cryptsetup-managed
 /// dm slot and extract its backing device, then a `CryptsetupLuksUuid`
 /// against that backing device to read the live LUKS UUID. The parsed
 /// UUID is matched against membership keys to decide MemberOwned vs
-/// Orphan. Failure on either call ends the helper with
-/// `Err(CmdError::...)`; the caller's per-mapper degrade path turns
-/// it into a logged-warning Orphan and continues scanning so one
-/// cryptsetup hiccup cannot tank the whole lock.
-fn classify_stranded_mapper<R: CommandRunner>(
+/// Orphan. Failure on either call ends the helper with `Err(...)`; the
+/// caller skips that mapper so name-only evidence never proves ownership.
+fn classify_candidate_mapper<R: CommandRunner>(
     runner: &R,
     mapper: &MapperName,
     membership: &PoolMembership,
@@ -162,6 +158,12 @@ fn classify_stranded_mapper<R: CommandRunner>(
     })?;
     let status = parse_cryptsetup_status(&status_raw)
         .map_err(|e| CmdError::Failed(format!("cryptsetup status {mapper}: {e}")))?;
+    if !status.is_active {
+        return Err(CmdError::Failed(format!(
+            "cryptsetup status {}: mapper is inactive",
+            mapper
+        )));
+    }
     let backing_device = match status.device.as_deref() {
         Some(device) if !device.is_empty() && device != "(null)" => device,
         Some(device) => {
@@ -194,48 +196,35 @@ fn classify_stranded_mapper<R: CommandRunner>(
     }
 }
 
-/// Enumerate `/dev/mapper/braid-*` entries that are NOT in pool
-/// membership by name (the FsidOnly-arm fallback). Drift-blind by
-/// design -- per-device drift detection requires the per-device
-/// probe data that only `LockSnapshot::Full` provides.
-fn scan_orphan_mappers_by_name<F: Filesystem + ?Sized>(
+/// Enumerate existing `/dev/mapper/braid-*` basenames that are not
+/// already proven by full-pool probing. The prefix is only a cleanup
+/// namespace; ownership is decided later by backing LUKS UUID.
+fn scan_braid_mapper_candidates<F: Filesystem + ?Sized>(
     fs: &F,
-    membership: &PoolMembership,
-) -> Result<Vec<LockMapperClose>, std::io::Error> {
+    already_observed: &HashSet<&str>,
+) -> Result<Vec<MapperName>, std::io::Error> {
     let entries = fs.list_dir("/dev/mapper")?;
-    let mut orphans = Vec::new();
+    let mut candidates = Vec::new();
     for entry in entries {
-        let Some(disk_name_raw) = name_from_mapper(&entry) else {
+        if name_from_mapper(&entry).is_none() {
             continue;
-        };
-        // Malformed `braid-<not-a-valid-disk-name>` falls through to
-        // orphan classification rather than skipping silently. The
-        // raw basename carries the warning body, including text that
-        // DiskName::parse rejects.
-        let parsed = DiskName::parse(disk_name_raw);
-        if let Ok(name) = &parsed
-            && membership.by_name(name).is_some()
-        {
+        }
+        if already_observed.contains(entry.as_str()) {
             continue;
         }
         if !fs.exists(&format!("/dev/mapper/{entry}")) {
             continue;
         }
-        orphans.push(LockMapperClose {
-            mapper: MapperName(entry.clone()),
-            kind: LockMapperCloseKind::Orphan {
-                disk_name: disk_name_raw.to_owned(),
-            },
-        });
+        candidates.push(MapperName(entry));
     }
-    Ok(orphans)
+    Ok(candidates)
 }
 
 /// Message body (no `[warn]` prefix) for a failed /dev/mapper scan.
 /// Shared between the dry-run preview and the real-run stderr warn so
 /// both branches use identical wording.
-fn orphan_scan_warn_body(e: &std::io::Error) -> String {
-    format!("could not scan /dev/mapper for orphans: {e} (skipping)")
+fn mapper_scan_warn_body(e: &std::io::Error) -> String {
+    format!("could not scan /dev/mapper for braid mappers: {e} (skipping)")
 }
 
 /// Message body (no `[warn]` prefix) for a per-orphan mapper note.
@@ -248,18 +237,52 @@ fn orphan_mapper_warn_body(entry: &MapperName) -> String {
     format!("orphaned mapper {entry} (not in pool.json -- likely a prior crash)")
 }
 
-/// Message body (no `[warn]` prefix) for the FsidOnly-arm warning.
-/// Pinned by plan 3228-3239. Two operator-relevant substrings are
-/// pinned independently by the lock test suite:
-/// `Mapper drift detection is disabled for this run.` AND
-/// `an unrelated disk opened under that name will be torn down.`
-fn fsid_only_warn_body(probe_error: &ProbeError) -> String {
+/// Message body for a braid-prefixed mapper that could not be proven by
+/// backing LUKS UUID. The mapper is left open because name evidence is
+/// insufficient for either member or orphan cleanup.
+fn skipped_mapper_warn_body(entry: &MapperName, detail: &CmdError) -> String {
+    format!("skipping mapper {entry}: cannot verify backing LUKS UUID ({detail})")
+}
+
+/// Message body (no `[warn]` prefix) for the mounted fallback warning.
+/// The FSID preflight still proves braid owns the mount, but mapper
+/// cleanup remains UUID-gated and unverified candidates are skipped.
+fn uuid_scanned_fallback_warn_body(probe_error: &ProbeError) -> String {
     format!(
-        "warning: per-device probe failed ({probe_error}); falling back to FSID-only lock preflight. \
-         Mapper drift detection is disabled for this run. \
-         In this mode, mappers under the names braid-<member-name> are closed without verifying their LUKS UUID; \
-         an unrelated disk opened under that name will be torn down."
+        "per-device probe failed ({probe_error}); falling back to UUID-scanned mapper cleanup. \
+         Only braid-* mappers with a verified backing LUKS UUID will be closed; unverified candidates are skipped."
     )
+}
+
+/// Classify one scanned candidate into the ordered close vectors or the
+/// skipped set. Keeping this shared between full and fallback planning
+/// prevents stranded mapper handling from drifting back to name inference.
+fn push_uuid_classified_candidate<R: CommandRunner>(
+    runner: &R,
+    mapper: MapperName,
+    membership: &PoolMembership,
+    notes: &mut Vec<PreviewNote>,
+    member_owned: &mut Vec<LockMapperClose>,
+    orphan_mappers: &mut Vec<LockMapperClose>,
+    skipped_mappers: &mut Vec<MapperName>,
+    cleanup_uncertain: &mut bool,
+) {
+    match classify_candidate_mapper(runner, &mapper, membership) {
+        Ok(kind @ LockMapperCloseKind::MemberOwned { .. }) => {
+            member_owned.push(LockMapperClose { mapper, kind });
+        }
+        Ok(kind @ LockMapperCloseKind::Orphan { .. }) => {
+            notes.push(PreviewNote::Warn(orphan_mapper_warn_body(&mapper)));
+            orphan_mappers.push(LockMapperClose { mapper, kind });
+        }
+        Err(cmd_err) => {
+            notes.push(PreviewNote::Warn(skipped_mapper_warn_body(
+                &mapper, &cmd_err,
+            )));
+            skipped_mappers.push(mapper);
+            *cleanup_uncertain = true;
+        }
+    }
 }
 
 /// Classify umount EBUSY from libmount's diagnostic segment.
@@ -399,14 +422,25 @@ pub struct LockPlan {
     pub pool_was_mounted: bool,
     /// Ordered mapper closes consumed by preview, forget, and execute.
     pub close_set: LockCloseSet,
+    /// Braid-prefixed mapper candidates left open because their backing
+    /// LUKS UUID could not be verified during planning.
+    pub skipped_mappers: Vec<MapperName>,
+    /// True when cleanup may be incomplete even if no close step exists.
+    pub cleanup_uncertain: bool,
     pub mount_point: MountPoint,
 }
 
 impl LockPlan {
     pub fn preview(&self) -> Preview {
+        let mut notes = self.notes.clone();
+        if self.cleanup_uncertain {
+            notes.push(PreviewNote::Info(
+                "cleanup incomplete: some braid mappers could not be verified".into(),
+            ));
+        }
         Preview {
             completeness: PreviewCompleteness::Complete,
-            notes: self.notes.clone(),
+            notes,
             steps: compile_lock_steps(self.pool_was_mounted, &self.close_set, &self.mount_point),
         }
     }
@@ -427,9 +461,9 @@ impl LockPlan {
         let line = |t, body: &str| status_line(t, color_enabled, body);
 
         // Emit accumulated Warn notes to stderr before any mutation.
-        // The plan carries the orphan-scan-failure warn and one warn
-        // per detected orphan mapper as PreviewNote::Warn; this loop
-        // is the single emit point for both.
+        // The plan carries scan-failure, orphan, fallback, and skip
+        // warnings as PreviewNote::Warn; this loop is the single emit
+        // point for all of them.
         for note in &self.notes {
             if let PreviewNote::Warn(body) = note {
                 eprint!("{}", line(StatusTag::Warn, body));
@@ -526,6 +560,11 @@ impl LockPlan {
         // output when a member-owned mapper is observed under a
         // non-default mapper name.
         let planned_mappers = self.close_set.mapper_names();
+        let skipped_mappers: HashSet<&str> = self
+            .skipped_mappers
+            .iter()
+            .map(|mapper| mapper.as_str())
+            .collect();
         let planned_members = self.close_set.member_names();
         let mut all_already_closed = true;
         {
@@ -544,7 +583,9 @@ impl LockPlan {
             // close itself were made at plan time.
             for (_uuid, member) in membership.iter() {
                 let mn = mapper_name(member.name.as_str());
-                if !planned_members.contains(&member.name) && !planned_mappers.contains(mn.as_str())
+                if !planned_members.contains(&member.name)
+                    && !planned_mappers.contains(mn.as_str())
+                    && !skipped_mappers.contains(mn.as_str())
                 {
                     eprint!(
                         "{}",
@@ -589,7 +630,7 @@ impl LockPlan {
         }
 
         // 5. If nothing was done → short message
-        if !self.pool_was_mounted && all_already_closed {
+        if !self.pool_was_mounted && all_already_closed && !self.cleanup_uncertain {
             eprintln!("pool already locked");
         }
 
@@ -600,10 +641,10 @@ impl LockPlan {
 /// Plan a `braid lock` run. Owns the mountpoint probe, preflight,
 /// per-device probe (for UUID classification), close-set assembly,
 /// step compilation, and any `PreviewNote::Warn` notes: one per
-/// detected orphan mapper, the FsidOnly fallback warning when
-/// per-device probe failed, or a single warn from a failed orphan
-/// scan. The returned `LockPlan` is the single source of truth for
-/// both `--dry-run` preview and real execution.
+/// detected orphan mapper, per skipped candidate, the mounted fallback
+/// warning when per-device probe failed, or a single warn from a failed
+/// candidate scan. The returned `LockPlan` is the single source of
+/// truth for both `--dry-run` preview and real execution.
 pub fn plan_lock<R, F>(
     runner: &R,
     fs: &F,
@@ -624,13 +665,14 @@ where
 
     // 2. Try per-device probe; on success take the Full path so
     // close-set classification routes through observed UUIDs.
-    // Per-device failures fall back to FSID-only preflight; NotBtrfs
-    // aborts to preserve today's mounted-non-btrfs refusal.
+    // Per-device failures fall back to FSID preflight plus UUID-scanned
+    // mapper cleanup; NotBtrfs aborts to preserve today's
+    // mounted-non-btrfs refusal.
     let snapshot = if pool_was_mounted {
         match probe_pool(runner, fs, &mount_point) {
             Ok(pool) => LockSnapshot::Full(pool),
             // Explicit per-variant routing. NotBtrfs aborts; every
-            // other variant falls back to probe_fsid + FsidOnly.
+            // other variant falls back to probe_fsid + UUID-scanned cleanup.
             // No catch-all -- if a future ProbeError variant lands,
             // it must opt in explicitly here so a real configuration
             // error cannot be silently masked by the FsidOnly path.
@@ -657,9 +699,9 @@ where
         }
     } else {
         // Pool unmounted: skip per-device probing entirely and use
-        // the FsidOnly-shape branch -- preflight does not run when
-        // the pool is unmounted (preflight is the mounted-pool gate
-        // for exclusive operations).
+        // the fallback-shape branch -- preflight does not run when the
+        // pool is unmounted (preflight is the mounted-pool gate for
+        // exclusive operations).
         LockSnapshot::FsidOnly {
             fsid: String::new(),
             probe_error: ProbeError::PoolDevice {
@@ -670,26 +712,47 @@ where
     };
 
     let mut notes: Vec<PreviewNote> = Vec::new();
-    let close_sets = match &snapshot {
+    let mut skipped_mappers: Vec<MapperName> = Vec::new();
+    let mut cleanup_uncertain = false;
+    let close_set = match &snapshot {
         LockSnapshot::Full(pool) => {
             if pool_was_mounted && let Some(fsid) = &pool.fsid {
                 preflight::require_lock_preflight(fs, fsid).map_err(LockError::Failed)?;
             }
-            build_close_sets_full(runner, fs, pool, membership, &mut notes)
+            build_close_sets_full(
+                runner,
+                fs,
+                pool,
+                membership,
+                &mut notes,
+                &mut skipped_mappers,
+                &mut cleanup_uncertain,
+            )
         }
         LockSnapshot::FsidOnly { fsid, probe_error } => {
             if pool_was_mounted {
-                notes.push(PreviewNote::Warn(fsid_only_warn_body(probe_error)));
+                notes.push(PreviewNote::Warn(uuid_scanned_fallback_warn_body(
+                    probe_error,
+                )));
                 preflight::require_lock_preflight(fs, fsid).map_err(LockError::Failed)?;
             }
-            build_close_sets_fsid_only(fs, membership, &mut notes)
+            build_close_sets_uuid_scanned_fallback(
+                runner,
+                fs,
+                membership,
+                &mut notes,
+                &mut skipped_mappers,
+                &mut cleanup_uncertain,
+            )
         }
     };
 
     Ok(LockPlan {
         notes,
         pool_was_mounted,
-        close_set: close_sets,
+        close_set,
+        skipped_mappers,
+        cleanup_uncertain,
         mount_point,
     })
 }
@@ -698,15 +761,17 @@ where
 /// member-owned classification through observed `PoolDevice.mapper`
 /// strings so the close + forget + dry-run preview all share one
 /// observed-mapper source-of-truth. Stranded `/dev/mapper/braid-*`
-/// slots that did not appear in pool.devices are re-classified via
-/// `classify_stranded_mapper`; per-mapper failures degrade to logged
-/// Orphan rather than failing the whole lock.
+/// slots that did not appear in pool.devices are re-classified by
+/// backing LUKS UUID; per-mapper failures warn and skip rather than
+/// falling back to name-only ownership.
 fn build_close_sets_full<R: CommandRunner, F: Filesystem + ?Sized>(
     runner: &R,
     fs: &F,
     pool: &PoolState,
     membership: &PoolMembership,
     notes: &mut Vec<PreviewNote>,
+    skipped_mappers: &mut Vec<MapperName>,
+    cleanup_uncertain: &mut bool,
 ) -> LockCloseSet {
     let mut member_owned: Vec<LockMapperClose> = Vec::new();
     let mut orphan_mappers: Vec<LockMapperClose> = Vec::new();
@@ -758,103 +823,78 @@ fn build_close_sets_full<R: CommandRunner, F: Filesystem + ?Sized>(
 
     // Pass 3: stranded `braid-*` slots in /dev/mapper that did NOT
     // appear in pool.devices or pool.null_underlying. Each one is
-    // probed via classify_stranded_mapper to decide MemberOwned vs
-    // Orphan. Per-mapper failures degrade to a logged warning + Orphan.
-    let already_observed: HashSet<&str> = member_owned
-        .iter()
-        .map(|m| m.mapper.as_str())
-        .chain(orphan_mappers.iter().map(|o| o.mapper.as_str()))
-        .collect();
+    // probed via backing LUKS UUID. Per-mapper failures warn and skip.
+    let stranded = {
+        let already_observed: HashSet<&str> = member_owned
+            .iter()
+            .map(|m| m.mapper.as_str())
+            .chain(orphan_mappers.iter().map(|o| o.mapper.as_str()))
+            .collect();
 
-    let dev_mapper_entries = match fs.list_dir("/dev/mapper") {
-        Ok(entries) => entries,
-        Err(e) => {
-            notes.push(PreviewNote::Warn(orphan_scan_warn_body(&e)));
-            // Preserve best-effort semantics: with no /dev/mapper
-            // listing, return what we have. Pass-1/2 member_owned
-            // is still valid.
-            return LockCloseSet::from_classified(member_owned, orphan_mappers);
+        match scan_braid_mapper_candidates(fs, &already_observed) {
+            Ok(entries) => entries,
+            Err(e) => {
+                notes.push(PreviewNote::Warn(mapper_scan_warn_body(&e)));
+                // Preserve best-effort semantics: with no /dev/mapper
+                // listing, return what we have. Pass-1/2 member_owned
+                // is still valid.
+                return LockCloseSet::from_classified(member_owned, orphan_mappers);
+            }
         }
     };
 
-    let mut stranded: Vec<MapperName> = Vec::new();
-    for entry in dev_mapper_entries {
-        if name_from_mapper(&entry).is_none() {
-            continue;
-        }
-        if already_observed.contains(entry.as_str()) {
-            continue;
-        }
-        if !fs.exists(&format!("/dev/mapper/{entry}")) {
-            continue;
-        }
-        stranded.push(MapperName(entry));
-    }
-
     for mapper in stranded {
-        match classify_stranded_mapper(runner, &mapper, membership) {
-            Ok(kind @ LockMapperCloseKind::MemberOwned { .. }) => {
-                member_owned.push(LockMapperClose { mapper, kind });
-            }
-            Ok(kind @ LockMapperCloseKind::Orphan { .. }) => {
-                notes.push(PreviewNote::Warn(orphan_mapper_warn_body(&mapper)));
-                orphan_mappers.push(LockMapperClose { mapper, kind });
-            }
-            Err(cmd_err) => {
-                eprintln!(
-                    "Warning: failed to classify stranded mapper {mapper}: {cmd_err}; treating as orphan",
-                );
-                let disk_name = name_from_mapper(mapper.as_str())
-                    .unwrap_or(mapper.as_str())
-                    .to_owned();
-                notes.push(PreviewNote::Warn(orphan_mapper_warn_body(&mapper)));
-                orphan_mappers.push(LockMapperClose {
-                    mapper,
-                    kind: LockMapperCloseKind::Orphan { disk_name },
-                });
-            }
-        }
+        push_uuid_classified_candidate(
+            runner,
+            mapper,
+            membership,
+            notes,
+            &mut member_owned,
+            &mut orphan_mappers,
+            skipped_mappers,
+            cleanup_uncertain,
+        );
     }
 
     LockCloseSet::from_classified(member_owned, orphan_mappers)
 }
 
-/// Close-set construction for the `LockSnapshot::FsidOnly` arm.
-/// Drift-blind by design -- per-device drift detection requires
-/// per-device probe data that only `LockSnapshot::Full` provides.
-/// Mirrors today's `scan_orphan_mappers` flow: reconstruct
-/// member-owned mappers from membership names, scan /dev/mapper for
-/// stranded slots, classify by name alone.
-fn build_close_sets_fsid_only<F: Filesystem + ?Sized>(
+/// Close-set construction for fallback cleanup. The mounted variant has
+/// only FSID proof for the filesystem, and the unmounted variant has no
+/// btrfs probe at all, so every candidate must prove ownership or orphan
+/// status by backing LUKS UUID before it enters the close set.
+fn build_close_sets_uuid_scanned_fallback<R: CommandRunner, F: Filesystem + ?Sized>(
+    runner: &R,
     fs: &F,
     membership: &PoolMembership,
     notes: &mut Vec<PreviewNote>,
+    skipped_mappers: &mut Vec<MapperName>,
+    cleanup_uncertain: &mut bool,
 ) -> LockCloseSet {
     let mut member_owned: Vec<LockMapperClose> = Vec::new();
-    for (_uuid, member) in membership.iter() {
-        let mn = mapper_name(member.name.as_str());
-        if fs.exists(&format!("/dev/mapper/{mn}")) {
-            member_owned.push(LockMapperClose {
-                mapper: mn,
-                kind: LockMapperCloseKind::MemberOwned {
-                    display_name: member.name.clone(),
-                },
-            });
-        }
-    }
-
-    let orphan_mappers = match scan_orphan_mappers_by_name(fs, membership) {
-        Ok(v) => {
-            for om in &v {
-                notes.push(PreviewNote::Warn(orphan_mapper_warn_body(&om.mapper)));
-            }
-            v
-        }
+    let mut orphan_mappers: Vec<LockMapperClose> = Vec::new();
+    let already_observed: HashSet<&str> = HashSet::new();
+    let candidates = match scan_braid_mapper_candidates(fs, &already_observed) {
+        Ok(entries) => entries,
         Err(e) => {
-            notes.push(PreviewNote::Warn(orphan_scan_warn_body(&e)));
-            Vec::new()
+            notes.push(PreviewNote::Warn(mapper_scan_warn_body(&e)));
+            *cleanup_uncertain = true;
+            return LockCloseSet::from_classified(member_owned, orphan_mappers);
         }
     };
+
+    for mapper in candidates {
+        push_uuid_classified_candidate(
+            runner,
+            mapper,
+            membership,
+            notes,
+            &mut member_owned,
+            &mut orphan_mappers,
+            skipped_mappers,
+            cleanup_uncertain,
+        );
+    }
 
     LockCloseSet::from_classified(member_owned, orphan_mappers)
 }
@@ -912,6 +952,15 @@ mod tests {
             stderr: String::new(),
             exit_status: 0,
         }
+    }
+
+    const AAA_UUID: &str = "00000000-0000-0000-0000-0000000002bc";
+    const BBB_UUID: &str = "00000000-0000-0000-0000-0000000002bd";
+    const ORPHAN_UUID: &str = "00000000-0000-0000-0000-0000000002ff";
+
+    fn with_orphan_mapper(runner: MockRunner, mapper: &str) -> MockRunner {
+        let device = format!("/dev/disk/by-id/{mapper}");
+        runner.with_mapper_open(mapper, &device, ORPHAN_UUID)
     }
 
     #[test]
@@ -1009,6 +1058,7 @@ mod tests {
                 },
                 lock_err_raw("mountpoint -q /mnt/storage", 1, ""),
             )
+            .with_mapper_open("braid-aaa", "/dev/disk/by-id/a", AAA_UUID)
             .with_output(
                 CmdRequest::CryptsetupClose {
                     mapper: MapperName("braid-aaa".into()),
@@ -1307,7 +1357,7 @@ mod tests {
     //   pool.json write; next `braid lock` must still close the orphan.
     #[test]
     fn lock_closes_orphaned_mapper() {
-        let runner = lock_mounted_runner()
+        let runner = with_orphan_mapper(lock_mounted_runner(), "braid-ccc")
             // Override forget mock: with an orphan present, the forget
             // set must include it (close-set-scoped).
             .with_output(
@@ -1410,17 +1460,21 @@ mod tests {
 
         assert!(
             output.starts_with(
-                "[warn] could not scan /dev/mapper for orphans: permission denied (skipping)\n"
+                "[warn] could not scan /dev/mapper for braid mappers: permission denied (skipping)\n"
             ),
             "preview must start with the exact [warn] line, got:\n{output}"
         );
         assert!(
-            output.contains("close LUKS mapper braid-aaa"),
-            "preview must still render membership close steps, got:\n{output}"
+            output.contains("cleanup incomplete: some braid mappers could not be verified"),
+            "preview must carry cleanup-uncertain info, got:\n{output}"
         );
         assert!(
-            output.contains("close LUKS mapper braid-bbb"),
-            "preview must still render membership close steps, got:\n{output}"
+            !output.contains("close LUKS mapper"),
+            "fallback scan failure must not render name-derived close steps, got:\n{output}"
+        );
+        assert!(
+            !output.contains("nothing to do."),
+            "warning-only uncertain cleanup must not render a clean no-op, got:\n{output}"
         );
     }
 
@@ -1436,12 +1490,15 @@ mod tests {
      */
     #[test]
     fn dry_run_preview_warns_per_orphan_mapper() {
-        let runner = lock_with_fsid_probe_mocks(MockRunner::default().with_output(
-            CmdRequest::MountpointCheck {
-                path: MountPoint("/mnt/storage".to_owned()),
-            },
-            lock_ok_raw("mountpoint -q /mnt/storage"),
-        ));
+        let runner = with_orphan_mapper(
+            lock_with_fsid_probe_mocks(MockRunner::default().with_output(
+                CmdRequest::MountpointCheck {
+                    path: MountPoint("/mnt/storage".to_owned()),
+                },
+                lock_ok_raw("mountpoint -q /mnt/storage"),
+            )),
+            "braid-ccc",
+        );
         let fs = lock_fs(&[
             "/dev/mapper/braid-aaa",
             "/dev/mapper/braid-bbb",
@@ -1480,12 +1537,15 @@ mod tests {
     fn dry_run_preview_mounted_happy_path() {
         // Mounted pool needs MountpointCheck ok + probe_fsid mocks for
         // preflight. Plan-only path -- no umount/forget/close mocks.
-        let runner = lock_with_fsid_probe_mocks(MockRunner::default().with_output(
-            CmdRequest::MountpointCheck {
-                path: MountPoint("/mnt/storage".to_owned()),
-            },
-            lock_ok_raw("mountpoint -q /mnt/storage"),
-        ));
+        let runner = with_orphan_mapper(
+            lock_with_fsid_probe_mocks(MockRunner::default().with_output(
+                CmdRequest::MountpointCheck {
+                    path: MountPoint("/mnt/storage".to_owned()),
+                },
+                lock_ok_raw("mountpoint -q /mnt/storage"),
+            )),
+            "braid-ccc",
+        );
         let fs = lock_fs(&[
             "/dev/mapper/braid-aaa",
             "/dev/mapper/braid-bbb",
@@ -1559,6 +1619,161 @@ mod tests {
         let output = plan.preview().render();
 
         assert_eq!(output, "nothing to do.\n", "unexpected preview: {output:?}");
+    }
+
+    // Intent: mounted `probe_pool` failure still plans useful cleanup
+    // for a mapper whose backing LUKS UUID matches membership.
+    // Why it exists: the fallback must remain best-effort without
+    // returning to name-derived member ownership.
+    // Scenario: per-device probing fails before close-set construction,
+    // but the mounted FSID preflight succeeds and `/dev/mapper/braid-aaa`
+    // can be reclassified by `cryptsetup status` + `luksUUID`.
+    #[test]
+    fn mounted_probe_failure_fallback_closes_uuid_verified_member() {
+        let runner = lock_with_fsid_probe_mocks(MockRunner::default().with_output(
+            CmdRequest::MountpointCheck {
+                path: MountPoint("/mnt/storage".to_owned()),
+            },
+            lock_ok_raw("mountpoint -q /mnt/storage"),
+        ))
+        .with_output_sequence(
+            CmdRequest::CryptsetupStatus {
+                mapper: MapperName("braid-aaa".into()),
+            },
+            vec![
+                lock_err_raw("cryptsetup status braid-aaa", 5, "transient status failure"),
+                cryptsetup_status_active("braid-aaa", "/dev/disk/by-id/a"),
+            ],
+        );
+        let fs = lock_fs(&["/dev/mapper/braid-aaa"]);
+        let config = lock_test_config();
+        let membership = lock_test_membership();
+
+        let plan = plan_lock(&runner, &fs, &config, &membership).expect("fallback should plan");
+
+        assert!(
+            plan.notes.iter().any(|note| matches!(
+                note,
+                PreviewNote::Warn(body)
+                    if body.contains("falling back to UUID-scanned mapper cleanup")
+            )),
+            "fallback warning expected, got: {:?}",
+            plan.notes,
+        );
+        assert_eq!(
+            member_summaries(&plan.close_set),
+            vec![("braid-aaa".to_owned(), "aaa".to_owned())],
+        );
+        assert!(plan.skipped_mappers.is_empty());
+        assert!(!plan.cleanup_uncertain);
+    }
+
+    // Intent: a mapper named like a member but backed by a different
+    // readable UUID is not classified as that member.
+    // Why it exists: `braid-<DiskName>` is a cleanup namespace, not
+    // identity proof; a swapped mapper must not receive member status.
+    // Scenario: pool is unmounted and `/dev/mapper/braid-aaa` points to
+    // a readable LUKS header whose UUID is absent from pool.json.
+    #[test]
+    fn fallback_member_named_mapper_with_different_uuid_is_orphan() {
+        let runner = with_orphan_mapper(
+            MockRunner::default().with_output(
+                CmdRequest::MountpointCheck {
+                    path: MountPoint("/mnt/storage".to_owned()),
+                },
+                lock_err_raw("mountpoint -q /mnt/storage", 1, ""),
+            ),
+            "braid-aaa",
+        );
+        let fs = lock_fs(&["/dev/mapper/braid-aaa"]);
+        let config = lock_test_config();
+        let membership = lock_test_membership();
+
+        let plan = plan_lock(&runner, &fs, &config, &membership).expect("fallback should plan");
+
+        assert!(member_summaries(&plan.close_set).is_empty());
+        assert_eq!(
+            orphan_summaries(&plan.close_set),
+            vec![("braid-aaa".to_owned(), "aaa".to_owned())],
+        );
+        assert!(plan.skipped_mappers.is_empty());
+        assert!(!plan.cleanup_uncertain);
+    }
+
+    // Intent: unmounted lock closes a UUID-verified member mapper even
+    // when the observed mapper name has drifted.
+    // Why it exists: the unmounted fallback has no btrfs pool.devices
+    // evidence, so backing UUID scan is the only safe way to preserve
+    // observed-mapper cleanup.
+    // Scenario: `/dev/mapper/braid-WRONG` is open for member `aaa` while
+    // the pool is not mounted.
+    #[test]
+    fn unmounted_fallback_closes_uuid_verified_drifted_member() {
+        let runner = MockRunner::default()
+            .with_output(
+                CmdRequest::MountpointCheck {
+                    path: MountPoint("/mnt/storage".to_owned()),
+                },
+                lock_err_raw("mountpoint -q /mnt/storage", 1, ""),
+            )
+            .with_mapper_open("braid-WRONG", "/dev/disk/by-id/a", AAA_UUID);
+        let fs = lock_fs(&["/dev/mapper/braid-WRONG"]);
+        let config = lock_test_config();
+        let membership = lock_test_membership();
+
+        let plan = plan_lock(&runner, &fs, &config, &membership).expect("fallback should plan");
+
+        assert_eq!(
+            member_summaries(&plan.close_set),
+            vec![("braid-WRONG".to_owned(), "aaa".to_owned())],
+        );
+        assert!(
+            plan.preview()
+                .render()
+                .contains("close LUKS mapper braid-WRONG")
+        );
+    }
+
+    // Intent: unverified braid-prefixed candidates are warned and skipped,
+    // never closed as orphan by name.
+    // Why it exists: a mapper-name match with no readable backing UUID is
+    // insufficient proof for either member-owned or orphan cleanup.
+    // Scenario: pool is unmounted and `/dev/mapper/braid-aaa` exists, but
+    // `cryptsetup status braid-aaa` cannot be verified.
+    #[test]
+    fn unverified_fallback_candidate_is_warned_and_skipped() {
+        let runner = MockRunner::default().with_output(
+            CmdRequest::MountpointCheck {
+                path: MountPoint("/mnt/storage".to_owned()),
+            },
+            lock_err_raw("mountpoint -q /mnt/storage", 1, ""),
+        );
+        let fs = lock_fs(&["/dev/mapper/braid-aaa"]);
+        let config = lock_test_config();
+        let membership = lock_test_membership();
+
+        let plan = plan_lock(&runner, &fs, &config, &membership).expect("fallback should plan");
+        let output = plan.preview().render();
+
+        assert!(plan.close_set.is_empty());
+        assert_eq!(plan.skipped_mappers, vec![MapperName("braid-aaa".into())]);
+        assert!(plan.cleanup_uncertain);
+        assert!(
+            output.starts_with("[warn] skipping mapper braid-aaa: cannot verify backing LUKS UUID"),
+            "skip warning must render first, got:\n{output}"
+        );
+        assert!(
+            output.contains("cleanup incomplete: some braid mappers could not be verified"),
+            "cleanup info expected, got:\n{output}"
+        );
+        assert!(
+            !output.contains("close LUKS mapper") && !output.contains("btrfs device scan --forget"),
+            "skipped mapper must not enter close/forget steps, got:\n{output}"
+        );
+        assert!(
+            !output.contains("nothing to do."),
+            "uncertain warning-only preview must not render clean no-op, got:\n{output}"
+        );
     }
 
     // Intent: when umount fails, lock still attempts to close LUKS mappers
@@ -1720,7 +1935,7 @@ mod tests {
     //   umount error.
     #[test]
     fn lock_umount_fails_orphan_busy_is_warning() {
-        let runner = lock_umount_failed_runner()
+        let runner = with_orphan_mapper(lock_umount_failed_runner(), "braid-ccc")
             .with_output(
                 CmdRequest::CryptsetupClose {
                     mapper: MapperName("braid-aaa".into()),
@@ -1770,7 +1985,7 @@ mod tests {
     //   over the umount error).
     #[test]
     fn lock_umount_fails_orphan_unexpected_error_is_fatal() {
-        let runner = lock_umount_failed_runner()
+        let runner = with_orphan_mapper(lock_umount_failed_runner(), "braid-ccc")
             .with_output(
                 CmdRequest::CryptsetupClose {
                     mapper: MapperName("braid-aaa".into()),
@@ -1814,7 +2029,7 @@ mod tests {
     //   surface the failure.
     #[test]
     fn lock_orphan_close_failure_is_fatal() {
-        let runner = lock_mounted_runner()
+        let runner = with_orphan_mapper(lock_mounted_runner(), "braid-orphan")
             .with_output(
                 CmdRequest::BtrfsDeviceScanForget {
                     devices: vec![
@@ -2446,7 +2661,7 @@ mod tests {
     // call carries all three mapper paths.
     #[test]
     fn lock_forget_includes_orphan_mappers() {
-        let inner = lock_mounted_runner()
+        let inner = with_orphan_mapper(lock_mounted_runner(), "braid-ccc")
             .with_output(
                 CmdRequest::BtrfsDeviceScanForget {
                     devices: vec![
@@ -2696,7 +2911,17 @@ mod tests {
         let mut notes = Vec::new();
         let pool = synthetic_pool_state("braid-WRONG", "braid-bbb");
         let runner = MockRunner::default();
-        let close_set = super::build_close_sets_full(&runner, &fs, &pool, &membership, &mut notes);
+        let mut skipped = Vec::new();
+        let mut cleanup_uncertain = false;
+        let close_set = super::build_close_sets_full(
+            &runner,
+            &fs,
+            &pool,
+            &membership,
+            &mut notes,
+            &mut skipped,
+            &mut cleanup_uncertain,
+        );
         // Both members are classified by UUID despite the drift.
         let observed: Vec<String> = member_summaries(&close_set)
             .into_iter()
@@ -2729,7 +2954,17 @@ mod tests {
         let mut notes = Vec::new();
         let pool = synthetic_pool_state("braid-WRONG", "braid-bbb");
         let runner = MockRunner::default();
-        let close_set = super::build_close_sets_full(&runner, &fs, &pool, &membership, &mut notes);
+        let mut skipped = Vec::new();
+        let mut cleanup_uncertain = false;
+        let close_set = super::build_close_sets_full(
+            &runner,
+            &fs,
+            &pool,
+            &membership,
+            &mut notes,
+            &mut skipped,
+            &mut cleanup_uncertain,
+        );
         let mp = MountPoint("/mnt/storage".into());
         let steps = super::compile_lock_steps(true, &close_set, &mp);
         assert_eq!(
@@ -2742,13 +2977,14 @@ mod tests {
         );
     }
 
-    /// Intent: LockSnapshot::FsidOnly preserves today's close order
-    /// (member-owned before orphan) so the two arms produce
-    /// identical orders on identical inputs.
-    /// Why: plan 3215-3226.
+    /// Intent: the UUID-scanned fallback preserves the close order
+    /// (member-owned before orphan) while deriving both classes from
+    /// backing LUKS UUIDs, not mapper names.
+    /// Why: fallback cleanup must stay useful without regressing to
+    /// name-derived identity.
     /// Scenario: seed 702.
     #[test]
-    fn fsid_only_arm_preserves_member_then_orphan_close_order() {
+    fn uuid_scanned_fallback_preserves_member_then_orphan_close_order() {
         let fs = lock_fs(&[
             "/dev/mapper/braid-aaa",
             "/dev/mapper/braid-bbb",
@@ -2756,7 +2992,22 @@ mod tests {
         ]);
         let membership = lock_test_membership();
         let mut notes = Vec::new();
-        let close_set = super::build_close_sets_fsid_only(&fs, &membership, &mut notes);
+        let runner = with_orphan_mapper(
+            MockRunner::default()
+                .with_mapper_open("braid-aaa", "/dev/disk/by-id/a", AAA_UUID)
+                .with_mapper_open("braid-bbb", "/dev/disk/by-id/b", BBB_UUID),
+            "braid-ccc",
+        );
+        let mut skipped = Vec::new();
+        let mut cleanup_uncertain = false;
+        let close_set = super::build_close_sets_uuid_scanned_fallback(
+            &runner,
+            &fs,
+            &membership,
+            &mut notes,
+            &mut skipped,
+            &mut cleanup_uncertain,
+        );
         let mp = MountPoint("/mnt/storage".into());
         let steps = super::compile_lock_steps(true, &close_set, &mp);
         let forget = lock_forget_step_devices(&steps);
@@ -2769,65 +3020,78 @@ mod tests {
                 "/dev/mapper/braid-ccc".to_string(),
             ]
         );
+        assert!(skipped.is_empty(), "all candidates should verify");
+        assert!(
+            !cleanup_uncertain,
+            "verified candidates are complete cleanup"
+        );
     }
 
-    /// Intent: the FsidOnly warning carries the two pinned operator-
+    /// Intent: the mounted fallback warning carries the two pinned operator-
     /// relevant substrings independently.
-    /// Why: plan 3228-3239. The full text is pinned with two
-    /// `assert!.contains(...)` calls so a future edit that drops
-    /// either signal surfaces in CI.
+    /// Why: the warning must tell operators both that fallback cleanup is
+    /// UUID-scanned and that unverified candidates are skipped.
     /// Scenario: seed 703.
     #[test]
-    fn fsid_only_warn_body_contains_pinned_substrings() {
+    fn uuid_scanned_fallback_warn_body_contains_pinned_substrings() {
         // Synthesize a ProbeError::Cmd to feed into the warn body.
         let pe = ProbeError::PoolDevice {
             mapper: "/mnt/storage".into(),
             detail: "synthetic".into(),
         };
-        let body = super::fsid_only_warn_body(&pe);
+        let body = super::uuid_scanned_fallback_warn_body(&pe);
         assert!(
-            body.contains("Mapper drift detection is disabled for this run."),
+            body.contains("falling back to UUID-scanned mapper cleanup."),
             "missing first pinned substring; body was: {body}"
         );
         assert!(
-            body.contains("an unrelated disk opened under that name will be torn down."),
+            body.contains("unverified candidates are skipped."),
             "missing second pinned substring; body was: {body}"
         );
     }
 
-    /// Intent: scan_orphan_mappers_by_name falls through a malformed
-    /// `braid-<not-a-valid-name>` mapper as an orphan rather than
-    /// silently skipping. The orphan disk_name carries the raw
-    /// text for the warning body.
-    /// Why: plan 3257-3286.
+    /// Intent: a malformed `braid-<not-a-valid-name>` mapper with a
+    /// readable non-member UUID is still closable as an orphan. The
+    /// orphan disk_name carries the raw suffix for the warning body.
+    /// Why: `braid-*` is the cleanup namespace even when the suffix is
+    /// not a valid DiskName, but identity still comes from LUKS UUID.
     /// Scenario: seed 704.
     #[test]
-    fn fsid_only_malformed_mapper_falls_through_to_orphan() {
+    fn uuid_scanned_fallback_malformed_mapper_with_uuid_is_orphan() {
         // A mapper named "braid-..foo" -- DiskName::parse rejects it.
-        let fs = lock_fs(&["/dev/mapper/braid-aaa", "/dev/mapper/braid-..foo"]);
+        let fs = lock_fs(&["/dev/mapper/braid-..foo"]);
         let membership = lock_test_membership();
-        let orphans = super::scan_orphan_mappers_by_name(&fs, &membership).unwrap();
-        let names: Vec<String> = orphans
-            .iter()
-            .filter_map(|entry| match &entry.kind {
-                LockMapperCloseKind::MemberOwned { .. } => None,
-                LockMapperCloseKind::Orphan { disk_name } => Some(disk_name.clone()),
-            })
+        let runner = with_orphan_mapper(MockRunner::default(), "braid-..foo");
+        let mut notes = Vec::new();
+        let mut skipped = Vec::new();
+        let mut cleanup_uncertain = false;
+        let close_set = super::build_close_sets_uuid_scanned_fallback(
+            &runner,
+            &fs,
+            &membership,
+            &mut notes,
+            &mut skipped,
+            &mut cleanup_uncertain,
+        );
+        let names: Vec<String> = orphan_summaries(&close_set)
+            .into_iter()
+            .map(|(_mapper, disk_name)| disk_name)
             .collect();
         assert!(
             names.contains(&"..foo".to_owned()),
             "malformed mapper basename must be carried as orphan disk_name, got: {names:?}",
         );
+        assert!(skipped.is_empty(), "readable UUID should not be skipped");
     }
 
-    /// Intent: classify_stranded_mapper demotes per-mapper failures
-    /// to a logged-warning Orphan rather than aborting the lock.
-    /// Why: plan 3134-3196. Per-mapper degrade keeps one cryptsetup
-    /// hiccup from tanking the whole lock.
+    /// Intent: classify_candidate_mapper skips per-mapper failures
+    /// instead of demoting them to orphan by name.
+    /// Why: a cryptsetup hiccup cannot prove either member ownership or
+    /// orphan status; closing by the `braid-*` name would be unsafe.
     /// Scenario: seed 705 -- a stranded mapper whose cryptsetup
     /// status call returns a CmdError (not Ok).
     #[test]
-    fn full_arm_stranded_mapper_classify_failure_demotes_to_orphan() {
+    fn full_arm_stranded_mapper_classify_failure_skips_candidate() {
         let fs = lock_fs(&[
             "/dev/mapper/braid-aaa",
             "/dev/mapper/braid-bbb",
@@ -2835,22 +3099,37 @@ mod tests {
         ]);
         let membership = lock_test_membership();
         // braid-stranded is NOT in pool.devices, so it gets routed
-        // through classify_stranded_mapper. The MockRunner has no
+        // through classify_candidate_mapper. The MockRunner has no
         // CryptsetupStatus mock for that mapper -- it returns
-        // MissingMock (a CmdError), and the helper demotes to
-        // Orphan + emits the pinned warning.
+        // MissingMock (a CmdError), and the helper skips it with the
+        // pinned warning instead of closing by name.
         let pool = synthetic_pool_state("braid-aaa", "braid-bbb");
         let runner = MockRunner::default();
         let mut notes = Vec::new();
-        let close_set = super::build_close_sets_full(&runner, &fs, &pool, &membership, &mut notes);
+        let mut skipped = Vec::new();
+        let mut cleanup_uncertain = false;
+        let close_set = super::build_close_sets_full(
+            &runner,
+            &fs,
+            &pool,
+            &membership,
+            &mut notes,
+            &mut skipped,
+            &mut cleanup_uncertain,
+        );
         // Member-owned still has the two pool.devices entries.
         assert_eq!(member_summaries(&close_set).len(), 2);
-        // Stranded mapper became an orphan.
-        let orphan_mappers: Vec<String> = orphan_summaries(&close_set)
-            .into_iter()
-            .map(|(mapper, _disk_name)| mapper)
-            .collect();
-        assert_eq!(orphan_mappers, vec!["braid-stranded".to_owned()]);
+        assert!(orphan_summaries(&close_set).is_empty());
+        assert_eq!(skipped, vec![MapperName("braid-stranded".to_owned())]);
+        assert!(cleanup_uncertain);
+        assert!(
+            notes.iter().any(|note| matches!(
+                note,
+                PreviewNote::Warn(body)
+                    if body.contains("skipping mapper braid-stranded")
+            )),
+            "skip warning expected, got: {notes:?}",
+        );
     }
 
     /// Intent: a stranded mapper whose backing LUKS UUID matches
@@ -2891,7 +3170,17 @@ mod tests {
             );
 
         let mut notes = Vec::new();
-        let close_set = super::build_close_sets_full(&runner, &fs, &pool, &membership, &mut notes);
+        let mut skipped = Vec::new();
+        let mut cleanup_uncertain = false;
+        let close_set = super::build_close_sets_full(
+            &runner,
+            &fs,
+            &pool,
+            &membership,
+            &mut notes,
+            &mut skipped,
+            &mut cleanup_uncertain,
+        );
 
         let member_owned = member_summaries(&close_set);
         assert!(
@@ -2908,10 +3197,10 @@ mod tests {
     }
 
     /// Intent: probe_pool's NotBtrfs error variant is NOT routed
-    /// through the FsidOnly fallback -- it aborts the lock with the
+    /// through fallback cleanup -- it aborts the lock with the
     /// preserved mounted-non-btrfs message.
     /// Why: plan 3320 -- only per-device variants are catchable by
-    /// the FsidOnly fallback so a real configuration error
+    /// fallback cleanup so a real configuration error
     /// (NotBtrfs) cannot be silently masked.
     /// Scenario: seed 706. NB: an existing test
     /// `lock_rejects_mounted_but_not_btrfs` proves this same
@@ -2934,7 +3223,7 @@ mod tests {
         let result = plan_lock(&runner, &fs, &config, &membership);
         let err = match result {
             Err(e) => e,
-            Ok(_) => panic!("NotBtrfs must surface as an abort, not FsidOnly fallback"),
+            Ok(_) => panic!("NotBtrfs must surface as an abort, not fallback cleanup"),
         };
         let msg = err.to_string();
         assert!(

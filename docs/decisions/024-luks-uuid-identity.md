@@ -102,14 +102,17 @@ one.
    after identity correlation still uses `LuksUuid`/`devid`/FSID; fresh add and
    replace recovery may require the expected label before treating an
    already-formatted target as the crash-created LUKS container, but still
-   requires the journaled UUID to match. `lock` may use its explicit FSID-only
-   fallback only after per-device probing fails and the mounted filesystem FSID
-   proves braid owns the mount; that path must warn that mapper drift detection
-   is disabled and must not write membership.
+   requires the journaled UUID to match. `lock` may use the `braid-*` prefix
+   only to discover cleanup candidates; member identity still requires
+   UUID/devid evidence, and candidates whose backing LUKS UUID cannot be
+   verified are warned and skipped.
 7. `lock` is the special cleanup case: classify live mappers by UUID/devid
    first, then close the observed mapper name, not a reconstructed
    `mapper_name(&member.name)`, so drifted-but-member-owned mappers are closed
-   correctly.
+   correctly. If mounted per-device probing fails, `lock` first requires the
+   mounted filesystem FSID to prove braid owns the mount, then scans
+   `/dev/mapper/braid-*` candidates and closes only those with verified backing
+   LUKS UUIDs.
 8. Recovery must fail closed when a live btrfs device lacks an observable LUKS
    UUID and the journal has no persisted devid binding. It must not recover by
    inferring identity from `braid-<DiskName>`.
@@ -145,8 +148,8 @@ one.
 - `cli/src/status.rs` unit tests pin compact status names by resolving live
   pool UUIDs back to `DiskName`, including a drifted mapper case.
 - `cli/src/lock.rs` unit tests pin the normal UUID/devid-classified close set,
-  observed-mapper closing, and the degraded FSID-only fallback warning when
-  per-device probing fails.
+  observed-mapper closing, UUID-scanned fallback cleanup, orphan classification
+  for readable non-members, and skip warnings for unverified candidates.
 - `cli/src/remove.rs` unit tests pin all live member devids into the
   pre-operation journal snapshot before mutation, so recovery has a legitimate
   fallback identity when LUKS UUID is not observable.
