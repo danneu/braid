@@ -331,7 +331,7 @@ impl RemovePlan {
             return Err(absent_from_membership_error(work_plan.name.as_str()));
         }
         // Pin every live member's btrfs devid into the journal. Recovery is
-        // allowed to use persisted devid as the fallback identity for
+        // allowed to use persisted devid as the fallback binding for
         // null-underlying or MISSING btrfs devices, but must not fall back to
         // mapper-name correlation when the LUKS UUID is no longer observable.
         let mut pre_membership = pre_membership;
@@ -1010,7 +1010,7 @@ mod tests {
     // pre_membership before mutating the pool.
     //
     // Why it exists
-    // Recovery uses the journaled devid as its only fallback identity when
+    // Recovery uses the journaled devid as its only fallback binding when
     // btrfs later reports a null-underlying or MISSING device without an
     // observable LUKS UUID. pool.json entries written from by-id discovery may
     // not carry devids yet.
@@ -2157,7 +2157,7 @@ mod tests {
     // ---------------------------------------------------------------------
 
     /// Three-disk `btrfs filesystem show` baseline; matches the planning
-    /// probe so the planner captures the canonical identity snapshot.
+    /// probe so the planner captures the expected live topology snapshot.
     const THREE_DISK_SHOW_BASE: &str = "Label: none  uuid: cc86845b-aec3-408e-bef5-553affc1f2b1\n\
         \tTotal devices 3 FS bytes used 16.17MiB\n\
         \tdevid    1 size 496.00MiB used 121.56MiB path /dev/mapper/braid-disk1\n\

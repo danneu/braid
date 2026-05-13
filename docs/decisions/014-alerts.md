@@ -52,7 +52,7 @@ A flag that exists at cleanup time when the snapshot saw neither active smartd s
 
 ### Ack state keyed by btrfs devid
 
-devid is btrfs-native — no cross-referencing config or disk-map needed. The parser captures missing device devids from MISSING sentinel lines.
+devid is btrfs-native -- no membership cross-reference is needed for alert counter baselines. The parser captures missing device devids from MISSING sentinel lines.
 
 ### Ack state separate from pool.json
 

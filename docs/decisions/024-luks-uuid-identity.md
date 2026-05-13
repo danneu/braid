@@ -152,7 +152,7 @@ one.
   for readable non-members, and skip warnings for unverified candidates.
 - `cli/src/remove.rs` unit tests pin all live member devids into the
   pre-operation journal snapshot before mutation, so recovery has a legitimate
-  fallback identity when LUKS UUID is not observable.
+  fallback binding when LUKS UUID is not observable.
 - `cli/src/recover.rs` unit tests verify recovery refuses a null-underlying
   member when the journal lacks both observable UUID and persisted devid,
   instead of falling back to mapper-name inference.

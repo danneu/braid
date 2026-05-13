@@ -27,7 +27,7 @@ Move disk membership to a CLI-owned runtime state file. The NixOS module provide
   }
 }
 ```
-The map key is the member's persistent identity. The `name` field is the operator-facing disk name used in commands, mapper names, and labels; it is not the identity. `by_id` is the hardware address used to find the disk before it is opened. `devid` is live btrfs state captured after membership commits and is only a fallback identity when btrfs reports a missing or null-underlying device by devid alone. `added_at` is historical state -- once set on a member, it is preserved across all subsequent writes (`unlock`, `recover`, `replace`, `add`, etc.). These fields replace the former `disk-map.json` advisory file.
+The map key is the member's persistent identity. The `name` field is the operator-facing disk name used in commands, mapper names, and labels; it is not the identity. `by_id` is the hardware address used to find the disk before it is opened. `devid` is live btrfs state captured after membership commits and is only a fallback binding key when btrfs reports a missing or null-underlying device by devid alone. `added_at` is historical state -- once set on a member, it is preserved across all subsequent writes (`unlock`, `recover`, `replace`, `add`, etc.). These fields replace the former `disk-map.json` advisory file.
 
 **`/etc/braid/config.json`** — machine config (no disk information):
 ```json

@@ -76,7 +76,7 @@ sudo braid recover --dry-run
 9. For add `PostAddBalanceRaid1`, does not format, enroll, back up headers as target prep, wipe, or add disks. It only validates the committed live pool and finishes the owed RAID1 balance.
 10. For replace and remove-missing `PoolMutation`, detects whether the primary btrfs membership mutation committed. If it did not commit, recover restores/keeps the pre-operation `pool.json`, clears the journal, and tells you to rerun the original command. It does not rerun `btrfs replace start` or `btrfs device remove`.
 11. For replace and remove-missing post-maintenance phases, validates committed live membership, repairs `pool.json` if needed, and finishes only owed maintenance such as resize, paused-balance resume, or soft RAID1 balance.
-12. Resolves `/dev/disk/by-id/` paths from live LUKS UUID/devid identity (not from the journal's by-id path, which may be stale).
+12. Resolves `/dev/disk/by-id/` paths from live LUKS UUIDs, using btrfs devid only for missing or null-underlying bindings (not from the journal's by-id path, which may be stale).
 13. Writes or repairs `pool.json` only after the journal phase allows it and live membership is complete.
 14. Clears `pending-op.json` only after membership is complete and any owed balance work is done.
 

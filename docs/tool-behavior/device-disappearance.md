@@ -74,5 +74,5 @@ The transition from Null-underlying to MISSING with path is the least understood
 
 - `probe_pool`: `cli/src/probe.rs` -- builds `pool.devices`, `pool.null_underlying`, `pool.missing_devids`
 - `btrfs filesystem show` parser: `cli/src/parse/btrfs_filesystem_show.rs` -- filters MISSING devices from `devices` list
-- `btrfs device stats` parser: `cli/src/parse/btrfs_device_stats.rs` -- propagates `devid` (canonical identity) and converts `<missing disk>` / `devid:<n>` to the `MissingDisk` sentinel for `target`
+- `btrfs device stats` parser: `cli/src/parse/btrfs_device_stats.rs` -- propagates `devid` as the btrfs-native stats row key and converts `<missing disk>` / `devid:<n>` to the `MissingDisk` sentinel for `target`
 - alert computation: `cli/src/alert.rs` -- `compute_alert_state` and `snapshot_current` key by `dev.devid` from the parsed stats row; no path-to-devid map

@@ -940,9 +940,9 @@ fn probe_existing_luks_new_target_uuid<R: CommandRunner>(
 }
 
 /// True iff the stats row identified by `devid` has any non-zero error
-/// counter. Pairing is by devid (canonical identity from btrfs), not by
-/// mapper path -- the row's path string can differ from the canonical
-/// /dev/mapper/braid-X without changing which physical device it describes.
+/// counter. Pairing is by the btrfs-native devid row key, not by mapper
+/// path -- the row's path string can differ from the expected mapper path
+/// without changing which live btrfs device it describes.
 fn source_has_io_errors(stats: &crate::parse::types::BtrfsDeviceStatsOutput, devid: u64) -> bool {
     stats.devices.iter().any(|d| {
         d.devid == devid
@@ -1866,7 +1866,7 @@ mod tests {
      * Why it exists: the live-replace warning previously matched on
      * `target.as_path() == /dev/mapper/<mapper>`, which silently dropped
      * the warning whenever btrfs reported the row by an alternate path
-     * (e.g. /dev/dm-N). Pairing by devid removes that identity weakness.
+     * (e.g. /dev/dm-N). Pairing by devid removes that path-match blind spot.
      * This test pins the new behavior so a future revert to path
      * matching cannot land silently.
      *

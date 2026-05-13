@@ -6,7 +6,7 @@
 # Why: disk names are presentation/adoption metadata, not identity. A by-id path
 # already owned by pool.json must not be silently adopted under a new name.
 #
-# Dependencies: braid add (to build initial pool and disk-map entries).
+# Dependencies: braid add (to build initial pool membership entries).
 { braid }:
 {
   name = "config-name-immutability";

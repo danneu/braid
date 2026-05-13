@@ -4,7 +4,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::alert::{self, AlertCause, AlertState};
 use crate::cmd::{CmdError, CmdRequest, CommandRunner, LsblkFieldKind};
-use crate::config::{self, Config, mapper_name};
+use crate::config::{Config, mapper_name};
 use crate::confirm::get_lsblk_field;
 use crate::luks;
 use crate::membership::{self, PoolMembership};
@@ -220,15 +220,11 @@ fn build_compact_drives(pool: &PoolState, membership: &PoolMembership) -> Vec<Co
     let mut drives = Vec::new();
 
     // Present pool devices
-    let pool_mappers: HashSet<&str> = pool.devices.iter().map(|d| d.mapper.0.as_str()).collect();
     let pool_luks_uuids: HashSet<&LuksUuid> = pool.devices.iter().map(|d| &d.luks_uuid).collect();
     for pd in &pool.devices {
         let name = membership
             .by_uuid(&pd.luks_uuid)
             .map(|member| member.name.as_str())
-            // Display-only fallback for foreign live devices; UUID-keyed
-            // membership remains the identity boundary.
-            .or_else(|| config::name_from_mapper(&pd.mapper.0))
             .unwrap_or(&pd.mapper.0)
             .to_owned();
         let device_short = pd
@@ -252,15 +248,12 @@ fn build_compact_drives(pool: &PoolState, membership: &PoolMembership) -> Vec<Co
             continue;
         }
         let name = member.name.as_str();
-        let expected_mapper = format!("braid-{name}");
-        if !pool_mappers.contains(expected_mapper.as_str()) {
-            drives.push(CompactDrive {
-                name: name.to_owned(),
-                device_short: "-".to_owned(),
-                devid: None,
-                status: DiskStatus::Missing,
-            });
-        }
+        drives.push(CompactDrive {
+            name: name.to_owned(),
+            device_short: "-".to_owned(),
+            devid: None,
+            status: DiskStatus::Missing,
+        });
     }
 
     drives
@@ -399,7 +392,7 @@ fn build_status<R: CommandRunner, F: Filesystem>(
         .map(|member| probe_config_disk(runner, fs, &member.name, &member.by_id))
         .collect::<Result<Vec<_>, _>>()?;
     let device_stats = get_device_stats(runner, config.mount_point())?;
-    let verbose_ctx = build_disk_reports(runner, &config_disks, &pool, &device_stats);
+    let verbose_ctx = build_disk_reports(runner, &membership, &config_disks, &pool, &device_stats);
 
     let alert_state = resolve_alert_state(paths);
 
@@ -727,35 +720,38 @@ pub fn emit_paused_balance_warning<R: CommandRunner>(
 
 fn build_disk_reports<R: CommandRunner>(
     runner: &R,
+    membership: &PoolMembership,
     config_disks: &[ConfigDisk],
     pool: &PoolState,
     device_stats: &BtrfsDeviceStatsOutput,
 ) -> VerboseContext {
     let pool_uuid_set: HashSet<&LuksUuid> = pool.devices.iter().map(|d| &d.luks_uuid).collect();
-    let pool_mapper_set: HashSet<&str> = pool.devices.iter().map(|d| d.mapper.0.as_str()).collect();
 
     let mut disk_reports = Vec::new();
     let mut human_details = Vec::new();
 
     // Present pool devices
     for pd in &pool.devices {
-        // Find matching config disk by LUKS UUID
-        let matched_config = config_disks.iter().find(|cd| {
-            matches!(&cd.state, ConfigDiskState::PresentLuks { uuid, .. } if uuid == &pd.luks_uuid)
-        });
+        let matched_member = membership.by_uuid(&pd.luks_uuid);
+        let matched_config =
+            matched_member.and_then(|member| config_disks.iter().find(|cd| cd.name == member.name));
 
+        // `build_status` derives `config_disks` from membership today, but
+        // keep the member-name fallback so this helper stays correct for
+        // partial probes or future callers.
         let disk_name = matched_config
             .map(|cd| cd.name.as_str().to_owned())
+            .or_else(|| matched_member.map(|member| member.name.as_str().to_owned()))
             .unwrap_or_else(|| {
-                // Display-only fallback for foreign live devices; UUID-keyed
-                // config matching remains the identity boundary.
-                config::name_from_mapper(&pd.mapper.0)
-                    .unwrap_or(&pd.mapper.0)
-                    .to_owned()
+                // Display-only fallback for foreign live devices. Keep the
+                // raw mapper basename instead of deriving a member name from
+                // `braid-*`; UUID-keyed membership remains the identity join.
+                pd.mapper.0.clone()
             });
 
         let by_id = matched_config
             .map(|cd| cd.by_id_path.as_str().to_owned())
+            .or_else(|| matched_member.map(|member| member.by_id.as_str().to_owned()))
             .unwrap_or_else(|| format!("/dev/mapper/{}", pd.mapper.0));
 
         let mapper = pd.mapper.0.clone();
@@ -764,9 +760,9 @@ fn build_disk_reports<R: CommandRunner>(
         let model = get_lsblk_field(runner, &by_id, LsblkFieldKind::Model);
         let serial = get_lsblk_field(runner, &by_id, LsblkFieldKind::Serial);
 
-        // Error stats. Pair by devid (canonical identity) -- the stats row's
-        // path can differ from the canonical mapper path without changing
-        // which physical device it describes.
+        // Error stats. Pair by the btrfs-native devid row key -- the stats
+        // row's path can differ from the mapper path without changing which
+        // live btrfs device it describes.
         let errors = device_stats
             .devices
             .iter()
@@ -804,15 +800,10 @@ fn build_disk_reports<R: CommandRunner>(
 
     // Unpooled config disks (not matched to pool)
     for cd in config_disks {
-        let is_unpooled = match &cd.state {
-            ConfigDiskState::Absent => true,
-            ConfigDiskState::PresentLuks { uuid, .. } => !pool_uuid_set.contains(uuid),
-            ConfigDiskState::PresentNotLuks => {
-                !pool_mapper_set.contains(mapper_name(cd.name.as_str()).0.as_str())
-            }
-        };
-
-        if !is_unpooled {
+        let membership_uuid_live = membership
+            .by_name(&cd.name)
+            .is_some_and(|(uuid, _)| pool_uuid_set.contains(uuid));
+        if membership_uuid_live {
             continue;
         }
 
@@ -2989,7 +2980,13 @@ mod tests {
         let runner = MockRunner::default();
         let stats = BtrfsDeviceStatsOutput { devices: vec![] };
 
-        let ctx = build_disk_reports(&runner, &config_disks, &status_pool_empty(), &stats);
+        let ctx = build_disk_reports(
+            &runner,
+            &PoolMembership::empty(),
+            &config_disks,
+            &status_pool_empty(),
+            &stats,
+        );
         assert_eq!(ctx.disks.len(), 1);
         assert_eq!(ctx.disks[0].status, DiskStatus::Unknown);
     }
@@ -3019,7 +3016,13 @@ mod tests {
         );
         let stats = BtrfsDeviceStatsOutput { devices: vec![] };
 
-        let ctx = build_disk_reports(&runner, &config_disks, &status_pool_empty(), &stats);
+        let ctx = build_disk_reports(
+            &runner,
+            &PoolMembership::empty(),
+            &config_disks,
+            &status_pool_empty(),
+            &stats,
+        );
         assert_eq!(ctx.disks.len(), 1);
         assert_eq!(ctx.disks[0].status, DiskStatus::LuksHeaderUnreadable);
     }
@@ -3056,7 +3059,13 @@ mod tests {
             );
         let stats = BtrfsDeviceStatsOutput { devices: vec![] };
 
-        let ctx = build_disk_reports(&runner, &config_disks, &status_pool_empty(), &stats);
+        let ctx = build_disk_reports(
+            &runner,
+            &PoolMembership::empty(),
+            &config_disks,
+            &status_pool_empty(),
+            &stats,
+        );
         assert_eq!(ctx.disks.len(), 1);
         assert_eq!(ctx.disks[0].status, DiskStatus::LuksHeaderDamaged);
     }
@@ -3099,29 +3108,35 @@ mod tests {
             );
         let stats = BtrfsDeviceStatsOutput { devices: vec![] };
 
-        let ctx = build_disk_reports(&runner, &config_disks, &status_pool_empty(), &stats);
+        let ctx = build_disk_reports(
+            &runner,
+            &PoolMembership::empty(),
+            &config_disks,
+            &status_pool_empty(),
+            &stats,
+        );
         assert_eq!(ctx.disks.len(), 1);
         assert_eq!(ctx.disks[0].status, DiskStatus::Unknown);
     }
 
     /*
      * Intent: when a config disk's by_id LUKS header probe failed
-     * (PresentNotLuks) but the mapper is already open and in the pool,
+     * (PresentNotLuks) but its membership UUID is already live in the pool,
      * build_disk_reports must emit exactly one Present row for that disk in
      * both the JSON disks array and the verbose human output, not a duplicate
      * Unknown/LuksHeader* row from the unpooled fall-through.
      *
-     * Why it exists: the unpooled loop keys on LUKS UUID, but a
-     * PresentNotLuks config disk has no UUID to match, so the dedup misses
-     * without an explicit mapper-name guard. Pinning both JSON and human
-     * output prevents drift between disks and human_details.
+     * Why it exists: the unpooled loop must join through UUID-keyed
+     * membership rather than the expected mapper name. A live mapper named
+     * `braid-disk1` is not proof that it is the disk1 member; the live LUKS
+     * UUID is.
      *
      * Scenario: pool device "braid-disk1" / uuid U1 / devid 1; config disk
      * "disk1" with state PresentNotLuks. No CryptsetupIsLuks/LuksDumpText
      * mocks exist, so probe_luks_header would return ProbeFailed if it ran.
      */
     #[test]
-    fn build_disk_reports_skips_unpooled_row_when_mapper_in_pool_for_present_not_luks() {
+    fn build_disk_reports_skips_unpooled_row_when_membership_uuid_live_for_present_not_luks() {
         let pool = PoolState {
             mounted: true,
             devices: vec![PoolDevice {
@@ -3137,10 +3152,11 @@ mod tests {
             null_underlying: vec![],
         };
         let config_disks = status_cfg_present_not_luks("disk1", "/dev/disk/by-id/disk1");
+        let membership = status_membership_1disk();
         let runner = MockRunner::default();
         let stats = BtrfsDeviceStatsOutput { devices: vec![] };
 
-        let ctx = build_disk_reports(&runner, &config_disks, &pool, &stats);
+        let ctx = build_disk_reports(&runner, &membership, &config_disks, &pool, &stats);
 
         assert_eq!(ctx.disks.len(), 1, "disks: {:?}", ctx.disks);
         assert_eq!(ctx.disks[0].status, DiskStatus::Present);
@@ -3178,6 +3194,108 @@ mod tests {
         );
         assert!(!human.contains("LUKS HEADER UNREADABLE"), "got:\n{human}");
         assert!(!human.contains("LUKS HEADER DAMAGED"), "got:\n{human}");
+    }
+
+    /*
+     * Intent: a foreign live mapper whose name looks like a member's mapper
+     * does not suppress the UUID-keyed member's unpooled row in verbose
+     * status.
+     *
+     * Why it exists: mapper names are runtime handles, not membership
+     * identity. A stale implementation can parse `braid-disk1` as proof that
+     * disk1 is present and hide the fact that UUID U1 is missing.
+     *
+     * Scenario: membership expects disk1 at UUID U1. The mounted pool reports
+     * mapper `braid-disk1` with UUID U9, and the configured by-id path cannot
+     * currently report a LUKS UUID. Status must show the foreign runtime
+     * handle and a separate disk1 diagnostic row.
+     */
+    #[test]
+    fn build_disk_reports_foreign_mapper_name_does_not_hide_missing_member() {
+        let pool = PoolState {
+            mounted: true,
+            devices: vec![PoolDevice {
+                mapper: MapperName("braid-disk1".to_owned()),
+                luks_uuid: LuksUuid::parse("99999999-9999-9999-9999-999999999999").unwrap(),
+                devid: 1,
+                underlying: "/dev/vdz".to_owned(),
+            }],
+            missing_count: 0,
+            missing_devids: vec![],
+            total_devices: 1,
+            fsid: None,
+            null_underlying: vec![],
+        };
+        let config_disks = status_cfg_present_not_luks("disk1", "/dev/disk/by-id/disk1");
+        let membership = status_membership_1disk();
+        let runner = MockRunner::default();
+        let stats = BtrfsDeviceStatsOutput { devices: vec![] };
+
+        let ctx = build_disk_reports(&runner, &membership, &config_disks, &pool, &stats);
+
+        assert_eq!(ctx.disks.len(), 2, "disks: {:?}", ctx.disks);
+        assert_eq!(ctx.disks[0].name, "braid-disk1");
+        assert_eq!(ctx.disks[0].status, DiskStatus::Present);
+        assert_eq!(
+            ctx.disks[0].luks_uuid,
+            "99999999-9999-9999-9999-999999999999"
+        );
+        assert_eq!(ctx.disks[1].name, "disk1");
+        assert_eq!(ctx.disks[1].status, DiskStatus::Unknown);
+    }
+
+    /*
+     * Intent: a config disk whose current by-id target reports the foreign
+     * live UUID still does not satisfy the UUID-keyed member.
+     *
+     * Why it exists: a swapped/reformatted disk can make the member's by-id
+     * path point at the live foreign UUID. Verbose status must not attach the
+     * member's name to that live UUID or suppress the member diagnostic row.
+     *
+     * Scenario: membership expects disk1 at UUID U1, but disk1's by-id path
+     * probes as PresentLuks UUID U9 and the mounted pool also reports U9.
+     */
+    #[test]
+    fn build_disk_reports_foreign_config_uuid_does_not_hide_missing_member() {
+        let foreign_uuid = LuksUuid::parse("99999999-9999-9999-9999-999999999999").unwrap();
+        let pool = PoolState {
+            mounted: true,
+            devices: vec![PoolDevice {
+                mapper: MapperName("braid-disk1".to_owned()),
+                luks_uuid: foreign_uuid.clone(),
+                devid: 1,
+                underlying: "/dev/vdz".to_owned(),
+            }],
+            missing_count: 0,
+            missing_devids: vec![],
+            total_devices: 1,
+            fsid: None,
+            null_underlying: vec![],
+        };
+        let config_disks = vec![ConfigDisk {
+            name: DiskName::parse("disk1").unwrap(),
+            by_id_path: ByIdPath::parse("/dev/disk/by-id/disk1").unwrap(),
+            state: ConfigDiskState::PresentLuks {
+                uuid: foreign_uuid,
+                label: Some("braid-disk1".to_owned()),
+                mapper_open: true,
+            },
+        }];
+        let membership = status_membership_1disk();
+        let runner = MockRunner::default();
+        let stats = BtrfsDeviceStatsOutput { devices: vec![] };
+
+        let ctx = build_disk_reports(&runner, &membership, &config_disks, &pool, &stats);
+
+        assert_eq!(ctx.disks.len(), 2, "disks: {:?}", ctx.disks);
+        assert_eq!(ctx.disks[0].name, "braid-disk1");
+        assert_eq!(ctx.disks[0].status, DiskStatus::Present);
+        assert_eq!(
+            ctx.disks[0].luks_uuid,
+            "99999999-9999-9999-9999-999999999999"
+        );
+        assert_eq!(ctx.disks[1].name, "disk1");
+        assert_eq!(ctx.disks[1].status, DiskStatus::Unknown);
     }
 
     // =======================================================================
@@ -3224,6 +3342,47 @@ mod tests {
         assert_eq!(drives.len(), 1);
         assert_eq!(drives[0].name, "disk1");
         assert_eq!(drives[0].status, DiskStatus::Present);
+    }
+
+    /*
+     * Intent: a live pool device with a foreign LUKS UUID does not satisfy a
+     * missing member just because its mapper name has the expected
+     * `braid-<name>` shape.
+     *
+     * Why it exists: LUKS UUID is the membership join. The status compact
+     * summary must not parse mapper names to decide that a UUID-keyed member
+     * is present, or it can hide a swapped/reformatted disk behind the old
+     * human name.
+     *
+     * Scenario: membership expects disk1 at UUID U1, but the mounted pool has
+     * a live mapper `braid-disk1` with UUID U9. The compact list shows the
+     * foreign runtime handle as present and disk1 as missing.
+     */
+    #[test]
+    fn status_compact_foreign_mapper_name_does_not_hide_missing_member() {
+        let pool = PoolState {
+            mounted: true,
+            devices: vec![PoolDevice {
+                mapper: MapperName("braid-disk1".to_owned()),
+                luks_uuid: LuksUuid::parse("99999999-9999-9999-9999-999999999999").unwrap(),
+                devid: 1,
+                underlying: "/dev/vdz".to_owned(),
+            }],
+            missing_count: 0,
+            missing_devids: vec![],
+            total_devices: 1,
+            fsid: None,
+            null_underlying: vec![],
+        };
+        let membership = status_membership_1disk();
+
+        let drives = build_compact_drives(&pool, &membership);
+
+        assert_eq!(drives.len(), 2);
+        assert_eq!(drives[0].name, "braid-disk1");
+        assert_eq!(drives[0].status, DiskStatus::Present);
+        assert_eq!(drives[1].name, "disk1");
+        assert_eq!(drives[1].status, DiskStatus::Missing);
     }
 
     // =======================================================================
@@ -3599,13 +3758,13 @@ mod tests {
     /*
      * Intent: build_disk_reports pairs btrfs device-stats rows to DiskReport
      * by devid, not by mapper-path string. A stats row whose path differs
-     * from the canonical /dev/mapper/braid-X but whose devid matches a pool
+     * from the expected /dev/mapper/braid-X but whose devid matches a pool
      * member must still populate DiskReport.errors.
      *
      * Why it exists: the previous `target.as_path() == Some(dev_path)`
      * comparison silently dropped error stats whenever btrfs reported a
      * row by an alternate path spelling (e.g. /dev/dm-N) -- the same
-     * identity weakness that the alert pipeline used to suffer via
+     * path-match blind spot that the alert pipeline used to suffer via
      * UnmappedDeviceError. This test pins the devid-based pairing so a
      * future revert to path matching cannot land silently.
      *
@@ -3656,8 +3815,9 @@ mod tests {
             }],
         };
         let runner = MockRunner::default();
+        let membership = status_membership_1disk();
 
-        let ctx = build_disk_reports(&runner, &config_disks, &pool, &stats);
+        let ctx = build_disk_reports(&runner, &membership, &config_disks, &pool, &stats);
 
         assert_eq!(ctx.disks.len(), 1);
         let errors = ctx.disks[0]

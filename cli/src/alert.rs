@@ -962,8 +962,8 @@ mod tests {
      * are zero. This is the positive replacement for the deleted
      * `unmapped_device_is_error_in_alert` test.
      *
-     * Why it exists: with devid as canonical identity, an "orphan" path is
-     * no longer a fail-closed condition. The row simply has no acked
+     * Why it exists: with devid as the btrfs stats row key, an "orphan" path
+     * is no longer a fail-closed condition. The row simply has no acked
      * baseline (acked.0.get("99") is None) and zero counters, so
      * has_new_errors returns false. The alert pipeline must not treat
      * unknown-devid rows as a structural error.

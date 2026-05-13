@@ -108,7 +108,7 @@ impl RecoverPassphrase<'_> {
     }
 }
 
-/// Resolve `/dev/disk/by-id/` symlinks against live device identity during recovery.
+/// Resolve `/dev/disk/by-id/` symlinks for a live LUKS UUID during recovery.
 ///
 /// Narrow recovery-local abstraction so the production code path can read symlinks
 /// without widening the shared `probe::Filesystem` trait (which has 14 mock impls).
@@ -14152,11 +14152,11 @@ mod tests {
         let resolver = resolver_for(&[("/dev/vda", "virtio-disk1"), ("/dev/vdb", "virtio-disk2")]);
         let params = f.recover_params().passphrase_file(None).build();
         let err = cmd_recover(&runner, &fs, &resolver, &params)
-            .expect_err("recover must fail closed without a UUID/devid identity binding");
+            .expect_err("recover must fail closed without a UUID or devid binding");
 
         assert!(
             err.to_string().contains("no persisted btrfs devid"),
-            "error should explain the missing fallback identity, got: {err}"
+            "error should explain the missing fallback binding, got: {err}"
         );
         assert!(
             f.paths.pending_op_json().exists(),

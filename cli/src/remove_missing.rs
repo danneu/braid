@@ -2123,7 +2123,7 @@ mod tests {
     //   target_membership, and issues ZERO `cryptsetup luksUUID` requests
     //   for the missing target (no backing device to probe).
     //
-    // Why: this is the positive-path identity contract. A regression that
+    // Why: this is the positive-path UUID ownership contract. A regression that
     //   probed cryptsetup for the missing device's by_id would fail
     //   because the device is gone; a regression that used name-keyed
     //   removal would silently no-op when the persisted name drifted
@@ -2182,7 +2182,7 @@ mod tests {
     //   missing devid; the other entry is byte-for-byte unchanged.
     //
     // Why: by-id and disk-name are operator-cosmetic decoys; only the
-    //   persisted devid drives the missing-target identity selection.
+    //   persisted devid drives the missing-target member selection.
     //   A regression that fell back to name- or by-id-keyed lookup
     //   would pick the wrong member.
     //

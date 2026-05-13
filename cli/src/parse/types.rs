@@ -327,10 +327,11 @@ impl std::fmt::Display for DeviceStatsTarget {
 
 /// btrfs device stats
 ///
-/// `devid` is the canonical identity for a stats row -- always present in the
-/// btrfs JSON schema and stable across mapper-path changes. All identity
-/// logic (alert pairing, snapshot keys, status/replace/TUI lookups) keys
-/// off `devid`. `target` is retained for direct display strings only.
+/// `devid` is the btrfs-native key for a stats row -- always present in the
+/// btrfs JSON schema and stable across mapper-path changes. Alert pairing,
+/// snapshot keys, and status/replace/TUI row lookups use `devid` for this
+/// parser output; LUKS UUID remains braid's persistent member identity.
+/// `target` is retained for direct display strings only.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct DeviceErrorStats {
     pub devid: u64,

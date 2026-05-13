@@ -257,7 +257,7 @@ mod tests {
      * Why it exists: previously, btrfs reporting a mapper path that wasn't
      * in monitor's path-to-devid map produced an UnmappedDeviceError, which
      * cmd_monitor latched as a ComputationError and surfaced as
-     * MonitorResult::Alert. With dev.devid as the canonical identity, an
+     * MonitorResult::Alert. With dev.devid as the btrfs stats row key, an
      * unknown-path row is just a row with no acked baseline -- benign when
      * counters are zero. This test pins the regression: a stale row in
      * stats output must not fire a fail-closed beep.

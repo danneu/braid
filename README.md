@@ -10,9 +10,9 @@ braid is a NixOS CLI tool for managing an encrypted, redundant NAS. It wraps two
 ```sh
 # Create a pool from three disks
 sudo braid add \
-  toshiba1=/dev/by-id/aaa \
-  toshiba2=/dev/by-id/bbb \
-  toshiba3=/dev/by-id/ccc
+  toshiba1=/dev/disk/by-id/aaa \
+  toshiba2=/dev/disk/by-id/bbb \
+  toshiba3=/dev/disk/by-id/ccc
 
 # Unlock and mount at /mnt/storage
 sudo braid unlock

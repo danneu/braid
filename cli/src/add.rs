@@ -723,7 +723,7 @@ fn format_add_done(names: &[DiskName]) -> String {
 
 /// Mapper-path to devid lookup shared by `cmd_add` and `cmd_recover`.
 ///
-/// Both call sites need the canonical post-btrfs-add devid mapping to drop
+/// Both call sites need the post-btrfs-add devid-to-mapper mapping to drop
 /// stale acked-stats baselines for newly assigned devids.
 pub(crate) fn devid_for_mapper_path(pool: &PoolState, mapper_path: &str) -> Option<u64> {
     let mapper = mapper_path

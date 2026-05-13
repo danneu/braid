@@ -2981,7 +2981,7 @@ mod tests {
     /// (member-owned before orphan) while deriving both classes from
     /// backing LUKS UUIDs, not mapper names.
     /// Why: fallback cleanup must stay useful without regressing to
-    /// name-derived identity.
+    /// mapper-name ownership.
     /// Scenario: seed 702.
     #[test]
     fn uuid_scanned_fallback_preserves_member_then_orphan_close_order() {

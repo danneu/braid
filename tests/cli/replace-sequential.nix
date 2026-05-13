@@ -3,7 +3,7 @@
 # What: Two sequential replacements in a 2-disk pool — the full migration
 # workflow (replace disk1, then replace disk2).
 #
-# Why: The first replace may leave state (disk map, pool topology, LUKS
+# Why: The first replace may leave state (pool membership, pool topology, LUKS
 # mappers) that breaks the second. This is the real migration workflow
 # users follow when upgrading all drives.
 #

@@ -53,21 +53,30 @@ pub fn probe_pool_for_tui<R: CommandRunner, F: Filesystem + ?Sized>(
     // Map devid -> disk name from UUID-keyed membership. btrfs device usage may
     // report raw /dev/dm-N paths that do not match braid mapper names.
     //
-    // Include null_underlying devices through persisted prior devid, the
-    // authorized fallback identity when the backing LUKS UUID is not observable.
+    // null_underlying and missing_devids are exactly the cases where btrfs
+    // still reports a device but no live LUKS UUID is observable; bind those
+    // through the persisted prior devid.
     let uuid_to_name: HashMap<&LuksUuid, &str> = disk_luks_uuid
         .iter()
         .map(|(name, uuid)| (uuid, name.as_str()))
+        .collect();
+    let persisted_devid_to_name: HashMap<u64, &str> = disk_devid
+        .iter()
+        .map(|(name, devid)| (*devid, name.as_str()))
         .collect();
     let devid_to_name: HashMap<u64, &str> = domain
         .devices
         .iter()
         .filter_map(|d| uuid_to_name.get(&d.luks_uuid).map(|name| (d.devid, *name)))
         .chain(domain.null_underlying.iter().filter_map(|d| {
-            disk_devid
-                .iter()
-                .find(|(_, devid)| **devid == d.devid)
-                .map(|(name, _)| (d.devid, name.as_str()))
+            persisted_devid_to_name
+                .get(&d.devid)
+                .map(|name| (d.devid, *name))
+        }))
+        .chain(domain.missing_devids.iter().filter_map(|devid| {
+            persisted_devid_to_name
+                .get(devid)
+                .map(|name| (*devid, *name))
         }))
         .collect();
 
@@ -169,8 +178,8 @@ pub fn probe_pool_for_tui<R: CommandRunner, F: Filesystem + ?Sized>(
         .and_then(|raw| parse_btrfs_device_stats(raw).ok());
     if let Some(ref stats) = device_stats {
         for dev in &stats.devices {
-            // Pair by devid (canonical identity from btrfs). Unknown devids
-            // are silently skipped, same pattern as the disk_usage loop above.
+            // Pair by the btrfs-native devid row key. Unknown devids are
+            // silently skipped, same pattern as the disk_usage loop above.
             let Some(name) = devid_to_name.get(&dev.devid) else {
                 continue;
             };
@@ -906,7 +915,7 @@ mod tests {
     /// Why it exists: the previous code stripped "/dev/mapper/braid-" off
     /// the row's target path to derive the disk name, which silently
     /// dropped any row whose path didn't match that prefix -- the same
-    /// path-identity weakness the alert pipeline used to suffer. This
+    /// path-based lookup bug the alert pipeline used to suffer. This
     /// test pins the devid-keyed lookup so a future revert to
     /// strip-prefix cannot land silently.
     ///
@@ -1011,6 +1020,119 @@ mod tests {
             errors.read, 7,
             "stats row paired by devid must surface its read_io_errs"
         );
+    }
+
+    /*
+     * Intent: TUI device_errors can attach a btrfs stats row for a fully
+     * missing device to the UUID-keyed member through the persisted prior
+     * devid.
+     *
+     * Why it exists: after the LUKS UUID identity migration, persisted devid
+     * is still the authorized fallback when btrfs reports a device by devid
+     * but no live LUKS UUID is observable. The TUI must not require a mapper
+     * name for `<missing disk>` stats rows.
+     *
+     * Scenario: btrfs reports disk1 live and devid 2 as MISSING. Device stats
+     * reports `<missing disk>` for devid 2 with a read error. The TUI surfaces
+     * that counter on the member whose persisted prior devid is 2.
+     */
+    #[test]
+    fn device_errors_for_missing_devid_use_persisted_prior_binding() {
+        let mp = MountPoint("/mnt/storage".to_owned());
+
+        let runner = MockRunner::default()
+            .with_output(
+                CmdRequest::BtrfsFilesystemShow {
+                    mount_point: mp.clone(),
+                },
+                ok_raw(
+                    "btrfs filesystem show",
+                    "Label: none  uuid: aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee\n\
+                     \tTotal devices 2 FS bytes used 1.00GiB\n\
+                     \tdevid    1 size 10.00GiB used 2.00GiB path /dev/mapper/braid-toshiba\n\
+                     \tdevid    2 size 10.00GiB used 2.00GiB path MISSING\n",
+                ),
+            )
+            .with_output(
+                CmdRequest::CryptsetupStatus {
+                    mapper: MapperName("braid-toshiba".into()),
+                },
+                ok_raw(
+                    "cryptsetup status",
+                    "/dev/mapper/braid-toshiba is active.\n\tdevice:  /dev/vda\n",
+                ),
+            )
+            .with_output(
+                CmdRequest::CryptsetupLuksUuid {
+                    device: "/dev/vda".into(),
+                },
+                ok_raw(
+                    "cryptsetup luksUUID",
+                    "11111111-1111-1111-1111-111111111111\n",
+                ),
+            )
+            .with_output(
+                CmdRequest::BtrfsFilesystemDfJson {
+                    mount_point: mp.clone(),
+                },
+                ok_raw(
+                    "btrfs filesystem df",
+                    r#"{"filesystem-df": [
+                        {"bg-type": "Data", "bg-profile": "single", "total": 67108864, "used": 16777216}
+                    ]}"#,
+                ),
+            )
+            .with_output(
+                CmdRequest::BtrfsDeviceUsageRaw {
+                    mount_point: mp.clone(),
+                },
+                ok_raw(
+                    "btrfs device usage",
+                    "/dev/dm-0, ID: 1\n\
+                     \x20  Device size:          1073741824\n\
+                     \x20  Device slack:              0\n\
+                     \x20  Data,single:          67108864\n\
+                     \x20  Unallocated:          1006632960\n",
+                ),
+            )
+            .with_output(
+                CmdRequest::BtrfsBalanceStatus {
+                    mount_point: mp.clone(),
+                },
+                ok_raw(
+                    "btrfs balance status",
+                    "No balance found on '/mnt/storage'\n",
+                ),
+            )
+            .with_output(
+                CmdRequest::BtrfsDeviceStatsJson {
+                    mount_point: mp.clone(),
+                },
+                ok_raw(
+                    "btrfs device stats",
+                    r#"{"device-stats": [
+                        {"device": "<missing disk>", "devid": 2, "write_io_errs": 0, "read_io_errs": 9, "flush_io_errs": 0, "corruption_errs": 0, "generation_errs": 0}
+                    ]}"#,
+                ),
+            );
+
+        let pool = probe_pool_for_tui(
+            &runner,
+            &StubFs::empty(),
+            &MountPoint("/mnt/storage".into()),
+            &HashMap::new(),
+            &tui_disk_luks_uuid(),
+            &tui_disk_devid(),
+            &test_paths().1,
+        )
+        .unwrap()
+        .expect("pool should be Some");
+
+        let errors = pool
+            .device_errors
+            .get("ironwolf")
+            .expect("missing devid 2 must resolve to ironwolf by persisted binding");
+        assert_eq!(errors.read, 9);
     }
 
     /// Intent: capacity_used_bytes and capacity_total_bytes must be

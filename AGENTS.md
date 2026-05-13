@@ -256,9 +256,9 @@ Decision rule:
 
 Example (single finding):
 
-- High: Plan makes `braid status` mutate disk-map state.
+- High: Plan makes `braid status` mutate `pool.json` membership.
   Impact: A read command causes side effects, which breaks safety expectations and complicates debugging.
-  Recommended fix: Keep `braid status` read-only; perform disk-map reconciliation only in explicit mutating commands (`add`, `remove`, `remove-missing`, `replace`).
+  Recommended fix: Keep `braid status` read-only; perform `pool.json` membership reconciliation only in explicit mutating commands (`add`, `remove`, `remove-missing`, `replace`).
 
 ## Git commits
 
