@@ -1090,7 +1090,7 @@ fn execute_generic_live_pool_recovery<R: CommandRunner + Sync>(
             // Remove-recovery's null_underlying restoration of an operator-attested
             // pre_membership entry. See plans/impl/2026-05-12-luks-uuid-as-identity/plan.md, section
             // "Remove-recovery null_underlying guard: never-enriched carve-out".
-            let in_null_underlying = pool.null_underlying.iter().any(|n| {
+            let null_underlying_match = pool.null_underlying.iter().find(|n| {
                 member
                     .devid
                     .map(|d| n.devid == d)
@@ -1100,7 +1100,13 @@ fn execute_generic_live_pool_recovery<R: CommandRunner + Sync>(
                 .devid
                 .map(|d| pool.missing_devids.contains(&d))
                 .unwrap_or(false);
-            if in_null_underlying || in_missing {
+            if let Some(null_underlying) = null_underlying_match {
+                let mut restored = member.clone();
+                if restored.devid.is_none() {
+                    restored.devid = Some(null_underlying.devid);
+                }
+                recovered.insert(uuid.clone(), restored)?;
+            } else if in_missing {
                 recovered.insert(uuid.clone(), member.clone())?;
             }
         }
@@ -13807,6 +13813,32 @@ mod tests {
         }
     }
 
+    /// Two-disk Remove journal where disk2 was never enriched with a prior
+    /// btrfs devid. Used by the null-underlying recovery carve-out test
+    /// because live LUKS UUID is unobservable in that state.
+    fn remove_2to1_journal_without_target_devid() -> journal::Journal {
+        let pre = membership_from(vec![
+            membership_entry("disk1", "/dev/disk/by-id/virtio-disk1", None, Some(1)),
+            membership_entry("disk2", "/dev/disk/by-id/virtio-disk2", None, None),
+        ]);
+        let target = membership_from(vec![membership_entry(
+            "disk1",
+            "/dev/disk/by-id/virtio-disk1",
+            None,
+            Some(1),
+        )]);
+
+        journal::Journal {
+            started_at: "2026-01-01T00:00:00Z".into(),
+            op: OpKind::Remove {
+                luks_uuid: uuid_for_name("disk2"),
+                name: disk_name("disk2"),
+            },
+            pre_membership: pre,
+            target_membership: target,
+        }
+    }
+
     /// btrfs filesystem show output for a 2-disk pool where disk2 is reported
     /// as MISSING (path MISSING sentinel). probe_pool routes the row into
     /// `missing_devids` and only iterates disk1 for cryptsetup probes.
@@ -14072,6 +14104,78 @@ mod tests {
         assert!(
             !f.paths.pending_op_json().exists(),
             "journal must be cleared after live-pool recovery"
+        );
+    }
+
+    /* Intent: cmd_recover for an interrupted OpKind::Remove stamps the live
+     * btrfs devid onto a restored null-underlying member that was never
+     * enriched before the crash.
+     *
+     * Why it exists: null-underlying recovery can only correlate this
+     * operator-attested pre_membership entry by the narrow mapper-name
+     * carve-out. Without copying the observed devid, the restored member
+     * remains `devid: None` forever and cannot later be removed with
+     * `remove-missing`.
+     *
+     * Scenario: a 2-disk pool started `braid remove disk2` before any
+     * enrichment wrote disk2's btrfs devid into pool.json. Disk2's
+     * underlying device hot-unplugged during the remove, so btrfs still
+     * reports mapper braid-disk2 as devid 2 while cryptsetup reports
+     * `device: (null)`.
+     */
+    #[test]
+    fn cmd_recover_remove_with_never_enriched_null_underlying_stamps_devid() {
+        let f = PoolFixture::empty();
+        let fs = MockFs::new(&[]);
+
+        let journal = remove_2to1_journal_without_target_devid();
+        journal::write_journal(&f.paths, &journal).unwrap();
+
+        let (mp_req, mp_out) = mountpoint_ok();
+        let runner = MockRunner::default()
+            .with_output(mp_req, mp_out)
+            .with_output(
+                CmdRequest::BtrfsFilesystemShow {
+                    mount_point: MountPoint("/mnt/storage".into()),
+                },
+                btrfs_show_two_disks(),
+            )
+            .with_output(
+                CmdRequest::CryptsetupStatus {
+                    mapper: "braid-disk1".into(),
+                },
+                cryptsetup_status_active("braid-disk1", "/dev/vda"),
+            )
+            .with_output(
+                CmdRequest::CryptsetupLuksUuid {
+                    device: "/dev/vda".into(),
+                },
+                cryptsetup_uuid_ok("/dev/vda", "11111111-1111-1111-1111-111111111111"),
+            )
+            .with_output(
+                CmdRequest::CryptsetupStatus {
+                    mapper: "braid-disk2".into(),
+                },
+                cryptsetup_status_active("braid-disk2", "(null)"),
+            );
+
+        let resolver = resolver_for(&[("/dev/vda", "virtio-disk1"), ("/dev/vdb", "virtio-disk2")]);
+        let params = f.recover_params().passphrase_file(None).build();
+        cmd_recover(&runner, &fs, &resolver, &params)
+            .expect("recover should preserve and stamp null-underlying target");
+
+        let recovered = membership::load_membership(&f.paths).unwrap();
+        let (_, restored) = recovered
+            .by_name(&disk_name("disk2"))
+            .expect("recovered membership must keep disk2");
+        assert_eq!(
+            restored.devid,
+            Some(2),
+            "null-underlying restoration must stamp the observed btrfs devid"
+        );
+        assert!(
+            recovered.by_devid(2).unwrap().is_some(),
+            "stamped devid must be resolvable by remove-missing"
         );
     }
 
