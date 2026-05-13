@@ -336,17 +336,23 @@ mod tests {
     // Intent: `cmd_idle` must NOT call `BtrfsBalanceStatus`,
     //   `BtrfsReplaceStatus`, or `BtrfsFilesystemShow`.
     //   Those subprocess probes were removed in favor of the sysfs scan.
-    // Why: Pins the contract that the refactor preserves -- a
-    //   `MockRunner` with only `BtrfsScrubStatus` seeded must still let
-    //   `cmd_idle` return successfully. Adding a new caller of any of
-    //   those CmdRequests inside `cmd_idle` would surface as MissingMock
-    //   here.
+    // Why: Pins the contract that the refactor preserves by asserting the
+    //   exact recorded request log -- the only `CmdRequest` `cmd_idle` may
+    //   issue is `BtrfsScrubStatus`. Re-introducing any other subprocess
+    //   probe fails this assertion directly, naming the offending request,
+    //   independent of how the runner happens to handle unmocked calls.
     // Scenario: Future change accidentally re-introduces a subprocess
     //   probe; this test catches it before merge.
     #[test]
     fn no_balance_or_replace_subprocess_calls() {
         let (runner, fs) = idle_ready_for_sysfs_check("none");
         let result = cmd_idle(&runner, &fs, &idle_mp());
+        assert_eq!(
+            runner.requests(),
+            vec![CmdRequest::BtrfsScrubStatus {
+                mount_point: idle_mp()
+            }]
+        );
         assert_eq!(result, IdleResult::Idle);
     }
 
