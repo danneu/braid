@@ -375,7 +375,7 @@ pub fn compile_open_steps(
         if let Some(kf) = key_file {
             steps.push(Step {
                 risk: "safe",
-                description: format!("LUKS open {} → {}", by_id, mn),
+                description: format!("LUKS open {} -> {}", by_id, mn),
                 commands: vec![CmdRequest::CryptsetupLuksOpenKeyFile {
                     device: by_id.as_str().to_owned(),
                     mapper: mn.0.clone(),
@@ -385,7 +385,7 @@ pub fn compile_open_steps(
         } else {
             steps.push(Step {
                 risk: "safe",
-                description: format!("LUKS open {} → {}", by_id, mn),
+                description: format!("LUKS open {} -> {}", by_id, mn),
                 commands: vec![CmdRequest::CryptsetupLuksOpen {
                     device: by_id.as_str().to_owned(),
                     mapper: mn.0.clone(),
@@ -403,7 +403,7 @@ pub fn compile_open_steps(
     if plan.any_missing_member {
         steps.push(Step {
             risk: "safe",
-            description: format!("mount → {} (degraded)", mount_point),
+            description: format!("mount -> {} (degraded)", mount_point),
             commands: vec![CmdRequest::MountWithOptions {
                 device: plan.mount_device.clone(),
                 mount_point: mount_point.clone(),
@@ -413,7 +413,7 @@ pub fn compile_open_steps(
     } else {
         steps.push(Step {
             risk: "safe",
-            description: format!("mount → {}", mount_point),
+            description: format!("mount -> {}", mount_point),
             commands: vec![CmdRequest::Mount {
                 device: plan.mount_device.clone(),
                 mount_point: mount_point.clone(),

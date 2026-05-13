@@ -23,7 +23,7 @@ Recovering from interrupted Add operation (started 2026-03-15T14:30:00Z)...
   pre-operation membership:  {"ironwolf", "toshiba"}
   target membership:         {"ironwolf", "toshiba", "wdc"}
   recovered (live pool):     {"ironwolf", "toshiba", "wdc"}
-note: target membership achieved — the interrupted operation completed before the crash.
+note: target membership achieved -- the interrupted operation completed before the crash.
 pool.json written from live pool state.
 pending-op.json cleared. Recovery complete.
 ```

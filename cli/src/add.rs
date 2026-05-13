@@ -440,7 +440,7 @@ impl AddWorkPlan {
                         steps.push(Step {
                             risk: "safe",
                             description: format!(
-                                "enroll keyfile → LUKS slot 1 on {}",
+                                "enroll keyfile -> LUKS slot 1 on {}",
                                 target.by_id
                             ),
                             commands: vec![CmdRequest::CryptsetupLuksAddKeyFile {
@@ -452,7 +452,7 @@ impl AddWorkPlan {
                     steps.push(Step {
                         risk: "safe",
                         description: format!(
-                            "LUKS header backup → {}",
+                            "LUKS header backup -> {}",
                             target.header_backup_path.display()
                         ),
                         commands: vec![CmdRequest::CryptsetupLuksHeaderBackup {
@@ -462,7 +462,7 @@ impl AddWorkPlan {
                     });
                     steps.push(Step {
                         risk: "safe",
-                        description: format!("LUKS open → {}", target.mapper_name),
+                        description: format!("LUKS open -> {}", target.mapper_name),
                         commands: vec![CmdRequest::CryptsetupLuksOpen {
                             device: target.by_id.as_str().to_owned(),
                             mapper: target.mapper_name.0.clone(),
@@ -488,7 +488,7 @@ impl AddWorkPlan {
                     steps.push(Step {
                         risk: "safe",
                         description: format!(
-                            "LUKS open + identity verification at execution time → {}",
+                            "LUKS open + identity verification at execution time -> {}",
                             target.mapper_name
                         ),
                         commands: vec![CmdRequest::CryptsetupLuksOpen {
@@ -529,7 +529,7 @@ impl AddWorkPlan {
                 });
                 steps.push(Step {
                     risk: "safe",
-                    description: format!("mount → {}", self.mount_point),
+                    description: format!("mount -> {}", self.mount_point),
                     commands: vec![CmdRequest::Mount {
                         device: mapper_paths[0].clone(),
                         mount_point: self.mount_point.clone(),
@@ -549,7 +549,7 @@ impl AddWorkPlan {
                 });
                 steps.push(Step {
                     risk: "safe",
-                    description: format!("mount → {}", self.mount_point),
+                    description: format!("mount -> {}", self.mount_point),
                     commands: vec![CmdRequest::Mount {
                         device: mapper_path,
                         mount_point: self.mount_point.clone(),
@@ -603,7 +603,7 @@ fn push_returned_disk_enrollment_steps(
 ) {
     steps.push(Step {
         risk: "safe",
-        description: format!("enroll keyfile → LUKS slot 1 on {}", by_id),
+        description: format!("enroll keyfile -> LUKS slot 1 on {}", by_id),
         commands: vec![CmdRequest::CryptsetupLuksAddKeyFile {
             device: by_id.as_str().to_owned(),
             key_file_path: key_file.display().to_string(),
@@ -611,7 +611,7 @@ fn push_returned_disk_enrollment_steps(
     });
     steps.push(Step {
         risk: "safe",
-        description: format!("LUKS header backup → {}", header_backup_path.display()),
+        description: format!("LUKS header backup -> {}", header_backup_path.display()),
         commands: vec![CmdRequest::CryptsetupLuksHeaderBackup {
             device: by_id.as_str().to_owned(),
             backup_path: header_backup_path.display().to_string(),

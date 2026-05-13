@@ -434,7 +434,7 @@ impl RecoverWorkAction {
                     steps.push(Step {
                         risk: "safe",
                         description: format!(
-                            "mount → {} (recover remount cycle, degraded)",
+                            "mount -> {} (recover remount cycle, degraded)",
                             plan.mount_point
                         ),
                         commands: vec![CmdRequest::MountWithOptions {
@@ -447,7 +447,7 @@ impl RecoverWorkAction {
                     steps.push(Step {
                         risk: "safe",
                         description: format!(
-                            "mount → {} (recover remount cycle)",
+                            "mount -> {} (recover remount cycle)",
                             plan.mount_point
                         ),
                         commands: vec![CmdRequest::Mount {
@@ -894,7 +894,7 @@ fn render_recovery_tail(
     steps.push(Step {
         risk: "safe",
         description: format!(
-            "write recovered pool.json → {}",
+            "write recovered pool.json -> {}",
             plan.pool_json_path.display()
         ),
         commands: vec![],
@@ -941,7 +941,10 @@ fn render_recovery_tail(
 
     steps.push(Step {
         risk: "safe",
-        description: format!("clear pending-op.json → {}", plan.pending_op_path.display()),
+        description: format!(
+            "clear pending-op.json -> {}",
+            plan.pending_op_path.display()
+        ),
         commands: vec![],
     });
 }
@@ -15364,7 +15367,7 @@ mod tests {
             "missing cycle reopen steps: {rendered:?}",
         );
         assert!(
-            rendered.contains("mount → /mnt/storage (recover remount cycle, degraded)"),
+            rendered.contains("mount -> /mnt/storage (recover remount cycle, degraded)"),
             "missing degraded cycle mount step: {rendered:?}",
         );
     }
@@ -15600,7 +15603,7 @@ mod tests {
         );
         assert!(
             !rendered.contains(
-                "LUKS open /dev/disk/by-id/virtio-old → braid-old (recover remount cycle)"
+                "LUKS open /dev/disk/by-id/virtio-old -> braid-old (recover remount cycle)"
             ),
             "reopen set should not include damaged old disk: {rendered:?}",
         );

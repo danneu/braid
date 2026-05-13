@@ -2216,7 +2216,7 @@ mod tests {
             },
             Step {
                 risk: "safe",
-                description: "LUKS open → braid-aaa".into(),
+                description: "LUKS open -> braid-aaa".into(),
                 commands: vec![CmdRequest::CryptsetupLuksOpen {
                     device: "/dev/disk/by-id/disk1".to_owned(),
                     mapper: "braid-aaa".to_owned(),
@@ -2228,8 +2228,12 @@ mod tests {
         assert_eq!(lines.len(), 4);
         assert_eq!(lines[0], "[destructive] LUKS format /dev/disk/by-id/disk1");
         assert!(lines[1].contains("$ cryptsetup luksFormat"));
-        assert_eq!(lines[2], "[safe       ] LUKS open → braid-aaa");
+        assert_eq!(lines[2], "[safe       ] LUKS open -> braid-aaa");
         assert!(lines[3].contains("$ cryptsetup open --type luks"));
+        assert!(
+            output.is_ascii(),
+            "dry-run renderer output must stay ASCII: {output:?}"
+        );
     }
 
     #[test]

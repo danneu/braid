@@ -372,7 +372,7 @@ pub fn compile_enroll_steps(
     if generate {
         steps.push(Step {
             risk: "safe",
-            description: format!("generate keyfile → {}", key_file_path.display()),
+            description: format!("generate keyfile -> {}", key_file_path.display()),
             commands: vec![],
         });
     }
@@ -381,7 +381,7 @@ pub fn compile_enroll_steps(
         let mn = mapper_name(name);
         steps.push(Step {
             risk: "safe",
-            description: format!("enroll keyfile → LUKS slot 1 on {}", by_id),
+            description: format!("enroll keyfile -> LUKS slot 1 on {}", by_id),
             commands: vec![CmdRequest::CryptsetupLuksAddKeyFile {
                 device: by_id.as_str().to_owned(),
                 key_file_path: key_file_path.display().to_string(),
@@ -392,7 +392,7 @@ pub fn compile_enroll_steps(
             .join(format!("{}.luksheader", mn.0));
         steps.push(Step {
             risk: "safe",
-            description: format!("LUKS header backup → {}", backup_path.display()),
+            description: format!("LUKS header backup -> {}", backup_path.display()),
             commands: vec![CmdRequest::CryptsetupLuksHeaderBackup {
                 device: by_id.as_str().to_owned(),
                 backup_path: backup_path.display().to_string(),
@@ -1285,11 +1285,11 @@ mod tests {
             "preview must not list an enroll step for disk1 (already enrolled). Render: {rendered}"
         );
         assert!(
-            rendered.contains("enroll keyfile → LUKS slot 1 on /dev/disk/by-id/d2"),
+            rendered.contains("enroll keyfile -> LUKS slot 1 on /dev/disk/by-id/d2"),
             "preview must include enroll step for disk2. Render: {rendered}"
         );
         assert!(
-            rendered.contains("LUKS header backup → "),
+            rendered.contains("LUKS header backup -> "),
             "preview must include header-backup step for disk2. Render: {rendered}"
         );
         assert!(
