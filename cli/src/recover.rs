@@ -5912,7 +5912,7 @@ mod tests {
         .expect("committed remove recovery should finish");
 
         let recovered = membership::load_membership(&f.paths).unwrap();
-        assert!(!recovered.by_name(&disk_name("disk2")).is_some());
+        assert!(recovered.by_name(&disk_name("disk2")).is_none());
         let reloaded = alert::load_acked_stats(&f.paths);
         assert_eq!(reloaded.0.get("1"), Some(&control));
         assert!(!reloaded.0.contains_key("2"));
@@ -9099,7 +9099,7 @@ mod tests {
         assert!(!f.paths.pending_op_json().exists());
         let recovered = membership::load_membership(&f.paths).unwrap();
         assert!(recovered.by_name(&disk_name("new")).is_some());
-        assert!(!recovered.by_name(&disk_name("old")).is_some());
+        assert!(recovered.by_name(&disk_name("old")).is_none());
     }
 
     // Intent: Replace::PoolMutation recovery restores pre state when replace
@@ -9182,7 +9182,7 @@ mod tests {
         assert!(!f.paths.pending_op_json().exists());
         let recovered = membership::load_membership(&f.paths).unwrap();
         assert!(recovered.by_name(&disk_name("old")).is_some());
-        assert!(!recovered.by_name(&disk_name("new")).is_some());
+        assert!(recovered.by_name(&disk_name("new")).is_none());
     }
 
     // Intent: Replace::PoolMutation recovery rejects mixed pre/post topology.
@@ -9385,7 +9385,7 @@ mod tests {
         assert!(!f.paths.pending_op_json().exists());
         let recovered = membership::load_membership(&f.paths).unwrap();
         assert!(recovered.by_name(&disk_name("old")).is_some());
-        assert!(!recovered.by_name(&disk_name("new")).is_some());
+        assert!(recovered.by_name(&disk_name("new")).is_none());
     }
 
     // Intent: Replace::PoolMutation FreshLuks recovery refuses a prepared
@@ -10097,7 +10097,7 @@ mod tests {
         // Replay re-establishes pre-replace topology (the op didn't
         // commit, so we roll back to {disk1, old}).
         assert!(recovered.by_name(&disk_name("old")).is_some());
-        assert!(!recovered.by_name(&disk_name("new")).is_some());
+        assert!(recovered.by_name(&disk_name("new")).is_none());
     }
 
     // Intent: Replace::PostReplaceMaintenance skips unowed balance work.
@@ -13516,7 +13516,7 @@ mod tests {
             "recovered membership should match the post-replace target"
         );
         assert!(
-            !recovered.by_name(&disk_name("old")).is_some(),
+            recovered.by_name(&disk_name("old")).is_none(),
             "old disk must not appear in the post-replace membership"
         );
 
@@ -14426,7 +14426,7 @@ mod tests {
             "target disk2 must be preserved (still in pool.devices)"
         );
         assert!(
-            !recovered.by_name(&disk_name("disk3")).is_some(),
+            recovered.by_name(&disk_name("disk3")).is_none(),
             "genuinely gone non-target disk3 must NOT be resurrected"
         );
         assert!(!f.paths.pending_op_json().exists());
@@ -14454,7 +14454,7 @@ mod tests {
             membership_name_list(&recovered)
         );
         assert!(
-            !recovered.by_name(&disk_name("disk2")).is_some(),
+            recovered.by_name(&disk_name("disk2")).is_none(),
             "recovered membership must drop genuinely evicted disk2: {:?}",
             membership_name_list(&recovered)
         );

@@ -2738,13 +2738,12 @@ mod tests {
         membership::save_membership(&m, &f.paths).unwrap();
 
         // Live pool: U_R observed under MAPPER "braid-WRONG", not "braid-right".
-        let show = format!(
-            "Label: none  uuid: cc86845b-aec3-408e-bef5-553affc1f2b1\n\
+        let show = "Label: none  uuid: cc86845b-aec3-408e-bef5-553affc1f2b1\n\
              \tTotal devices 3 FS bytes used 16.17MiB\n\
              \tdevid    1 size 496.00MiB used 121.56MiB path /dev/mapper/braid-disk1\n\
              \tdevid    2 size 496.00MiB used 121.56MiB path /dev/mapper/braid-WRONG\n\
              \tdevid    3 size 496.00MiB used 121.56MiB path /dev/mapper/braid-disk3\n"
-        );
+            .to_string();
         let u_r_for_probe = u_r.clone();
         let runner = MockRunner::default().with_handler({
             move |req| match req {

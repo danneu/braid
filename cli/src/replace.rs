@@ -2868,7 +2868,7 @@ mod tests {
             &fs,
             &f.replace_params()
                 .old("disk1")
-                .new("disk1=/dev/disk/by-id/virtio-disk3")
+                .new_disk("disk1=/dev/disk/by-id/virtio-disk3")
                 .build(),
         );
 
@@ -3206,7 +3206,7 @@ mod tests {
             &fs,
             &f.replace_params()
                 .old("disk2")
-                .new("disk3=/dev/disk/by-id/virtio-disk3")
+                .new_disk("disk3=/dev/disk/by-id/virtio-disk3")
                 .missing_id(Some(2))
                 .build(),
         );
@@ -3686,7 +3686,7 @@ mod tests {
             &fs,
             &f.replace_params()
                 .old("disk2")
-                .new("disk3=/dev/disk/by-id/virtio-disk3")
+                .new_disk("disk3=/dev/disk/by-id/virtio-disk3")
                 .missing_id(Some(2))
                 .build(),
         );
@@ -3826,7 +3826,7 @@ mod tests {
             &fs,
             &f.replace_params()
                 .old("disk2")
-                .new("disk3=/dev/disk/by-id/virtio-disk3")
+                .new_disk("disk3=/dev/disk/by-id/virtio-disk3")
                 .missing_id(Some(2))
                 .enroll_key_file(Some(kf_path.as_path()))
                 .luks_format_extra_opts(&luks_format_extra_opts)
@@ -3939,7 +3939,7 @@ mod tests {
             &fs,
             &f.replace_params()
                 .old("disk2")
-                .new("disk3=/dev/disk/by-id/virtio-disk3")
+                .new_disk("disk3=/dev/disk/by-id/virtio-disk3")
                 .missing_id(Some(2))
                 .build(),
         )
@@ -4016,7 +4016,7 @@ mod tests {
             &fs,
             &f.replace_params()
                 .old("disk2")
-                .new("disk3=/dev/disk/by-id/virtio-disk3")
+                .new_disk("disk3=/dev/disk/by-id/virtio-disk3")
                 .missing_id(Some(2))
                 .build(),
         );
@@ -4156,7 +4156,7 @@ mod tests {
             &fs,
             &f.replace_params()
                 .old("disk2")
-                .new("disk3=/dev/disk/by-id/virtio-disk3")
+                .new_disk("disk3=/dev/disk/by-id/virtio-disk3")
                 .missing_id(Some(2))
                 .dry_run(true)
                 .build(),
@@ -4611,7 +4611,7 @@ mod tests {
                 &PanicRunner,
                 &PanicFilesystem,
                 &f.replace_params()
-                    .new("disk2=/dev/disk/by-id/virtio-disk2")
+                    .new_disk("disk2=/dev/disk/by-id/virtio-disk2")
                     .passphrase_file(None)
                     .build(),
             )
@@ -4659,6 +4659,7 @@ mod tests {
     /// confusing presentation:
     ///   - U_R -> { name: "misleading-label", by_id: "/dev/disk/by-id/right", devid: Some(2) }
     ///   - U_D -> { name: "decoy", by_id: "/dev/disk/by-id/misleading-label", devid: Some(99) }
+    ///
     /// btrfs reports `missing_devids = [2]`. A buggy by-id-keyed lookup
     /// would chase the basename "misleading-label" inside U_D's by-id;
     /// the UUID-keyed model must select U_R via `by_name(&"misleading-label")`

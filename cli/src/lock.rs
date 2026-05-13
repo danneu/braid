@@ -38,9 +38,14 @@ impl From<CloseMapperError> for LockError {
 /// inputs by construction (see plan 3215-3226).
 #[allow(dead_code)] // fsid/probe_error are reserved for the FsidOnly arm warning.
 pub enum LockSnapshot {
+    /// Full per-device probe result with live LUKS UUIDs available.
     Full(PoolState),
+    /// Fallback when mounted btrfs state is known but per-device UUID probing
+    /// failed before close-set construction.
     FsidOnly {
+        /// Filesystem UUID that proved the mounted filesystem is braid's pool.
         fsid: String,
+        /// Original probe failure surfaced in the fallback warning.
         probe_error: ProbeError,
     },
 }
@@ -55,7 +60,9 @@ pub enum LockSnapshot {
 // lands -- see plans/impl/2026-05-12-luks-uuid-as-identity/plan.md.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct MemberOwnedClose {
+    /// Observed mapper to close; may differ from `mapper_name(display_name)`.
     pub mapper: MapperName,
+    /// Canonical membership name used only for status output.
     pub display_name: DiskName,
 }
 
@@ -67,7 +74,9 @@ pub struct MemberOwnedClose {
 // lands -- see plans/impl/2026-05-12-luks-uuid-as-identity/plan.md.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct LockCloseSets {
+    /// Mappers proven to belong to UUID/devid-correlated members.
     pub member_owned: Vec<MemberOwnedClose>,
+    /// Braid-prefixed mapper slots not proven to belong to membership.
     pub orphan_mappers: Vec<OrphanMapper>,
 }
 
@@ -82,7 +91,9 @@ pub struct LockCloseSets {
 /// (malformed-mapper fall-through to orphan classification).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct OrphanMapper {
+    /// Observed mapper to warn about and close after member-owned mappers.
     pub mapper: MapperName,
+    /// Raw display basename for the warning body; may not parse as DiskName.
     pub disk_name: String,
 }
 

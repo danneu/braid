@@ -314,7 +314,7 @@ impl<'a> ReplaceParamsBuilder<'a> {
         self.old_name = name;
         self
     }
-    pub(crate) fn new(mut self, spec: &'a str) -> Self {
+    pub(crate) fn new_disk(mut self, spec: &'a str) -> Self {
         self.new_name = spec;
         self
     }

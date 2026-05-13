@@ -20,7 +20,11 @@ pub struct LuksUuid(String);
 #[derive(Debug, Error)]
 #[error("invalid LUKS UUID '{raw}': {detail}")]
 pub struct LuksUuidParseError {
+    /// Original text supplied by the user, parser, or fixture before
+    /// canonicalization failed.
     pub raw: String,
+    /// Parser-specific reason from `uuid::Uuid`, kept so CLI errors do not
+    /// collapse all malformed UUIDs into the same opaque message.
     pub detail: String,
 }
 
@@ -108,6 +112,7 @@ pub struct DiskName(String);
     "invalid disk name '{raw}': must start with a letter, contain only letters, digits, hyphens, or underscores, and be at most 32 characters"
 )]
 pub struct DiskNameParseError {
+    /// Original text supplied at a disk-name boundary.
     pub raw: String,
 }
 
@@ -185,6 +190,7 @@ pub struct ByIdPath(String);
 #[derive(Debug, Error)]
 #[error("invalid by_id path '{raw}': must start with /dev/disk/by-id/")]
 pub struct ByIdPathParseError {
+    /// Original path supplied at a by-id boundary.
     pub raw: String,
 }
 
@@ -309,6 +315,8 @@ pub struct MapperName(pub String);
 pub struct MountPoint(pub String);
 
 impl MountPoint {
+    /// Borrow the configured mount path for command argv and mountinfo
+    /// comparisons without exposing a mutable string.
     pub fn as_str(&self) -> &str {
         &self.0
     }
@@ -376,11 +384,18 @@ impl PoolState {
     }
 }
 
+/// Live btrfs member observed through `probe_pool`; identity comes from
+/// the LUKS UUID probed from the mapper's backing device.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PoolDevice {
+    /// Observed mapper basename from btrfs/probe output; used for command
+    /// argv and diagnostics, not persistent identity.
     pub mapper: MapperName,
+    /// Persistent LUKS UUID for this live device.
     pub luks_uuid: LuksUuid,
+    /// Live btrfs devid for topology and missing-device correlation.
     pub devid: u64,
+    /// Backing block device path reported by `cryptsetup status`.
     pub underlying: String,
 }
 
@@ -389,7 +404,9 @@ pub struct PoolDevice {
 /// not yet confirmed by btrfs as MISSING.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct NullUnderlyingDevice {
+    /// Observed mapper basename whose backing device is currently `(null)`.
     pub mapper: MapperName,
+    /// Btrfs devid still associated with the open mapper.
     pub devid: u64,
 }
 

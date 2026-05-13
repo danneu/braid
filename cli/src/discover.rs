@@ -130,7 +130,9 @@ impl fmt::Display for DiscoverWarning {
 /// `--write` path.
 #[derive(Debug, PartialEq, Eq)]
 pub struct DiscoverOutcome {
+    /// UUID-keyed membership reconstructed from attached braid-labeled disks.
     pub members: PoolMembership,
+    /// Non-fatal scan findings for disks skipped before membership write.
     pub warnings: Vec<DiscoverWarning>,
 }
 

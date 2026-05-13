@@ -161,6 +161,7 @@ impl<'a, V> IntoIterator for &'a LuksUuidMap<V> {
 #[derive(Debug, Error)]
 #[error("duplicate LUKS UUID: {uuid} already in LuksUuidMap")]
 pub struct LuksUuidMapConflict {
+    /// Canonical UUID key that was already present.
     pub uuid: LuksUuid,
 }
 
@@ -232,10 +233,16 @@ pub struct PoolMembership {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct DiskMember {
+    /// Operator-facing disk name used for mapper/label construction and
+    /// command display.
     pub name: DiskName,
+    /// Stable hardware path used to open the LUKS header.
     pub by_id: ByIdPath,
+    /// Last observed btrfs devid, when the member has been seen in a mounted
+    /// pool.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub devid: Option<u64>,
+    /// First-add timestamp carried forward by membership rewrites.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub added_at: Option<String>,
 }
@@ -521,6 +528,8 @@ pub enum DiskSpecParseError {
 /// directly at the dm slot the operator can inspect.
 #[derive(Debug, Default, Clone, PartialEq, Eq)]
 pub struct EnrichmentReport {
+    /// Live pool UUIDs that were not admitted into membership, keyed by UUID
+    /// with the observed mapper for diagnostics.
     pub foreign: BTreeMap<LuksUuid, MapperName>,
 }
 
@@ -1123,7 +1132,7 @@ mod tests {
         let paths = StatePaths::custom(tmp.path().into());
         let mut m = PoolMembership::empty();
         // Insert in REVERSE UUID order.
-        let mut uuids = vec![test_uuid(140), test_uuid(141), test_uuid(142)];
+        let mut uuids = [test_uuid(140), test_uuid(141), test_uuid(142)];
         uuids.sort();
         for (i, u) in uuids.iter().rev().enumerate() {
             m.insert(
