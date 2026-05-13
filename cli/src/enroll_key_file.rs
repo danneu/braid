@@ -82,7 +82,7 @@ fn discover_enrollment_candidates<R: CommandRunner, F: Filesystem + ?Sized>(
     let mut notes: Vec<PreviewNote> = Vec::new();
     let mut candidates: Vec<EnrollmentCandidate> = Vec::new();
 
-    for (_, member) in membership.iter() {
+    for (expected_uuid, member) in membership.iter() {
         let name = member.name.as_str();
         let probed = match probe::probe_config_disk(runner, fs, &member.name, &member.by_id) {
             Ok(p) => p,
@@ -103,7 +103,18 @@ fn discover_enrollment_candidates<R: CommandRunner, F: Filesystem + ?Sized>(
                     message: "not LUKS-formatted".into(),
                 });
             }
-            ConfigDiskState::PresentLuks { .. } => {
+            ConfigDiskState::PresentLuks { uuid, .. } => {
+                if expected_uuid != uuid {
+                    return (
+                        notes,
+                        Err(EnrollKeyFileError::Validation(format!(
+                            "disk '{}' LUKS UUID mismatch at {}:\n  \
+                             expected  {}\n  \
+                             found     {}",
+                            name, member.by_id, expected_uuid, uuid
+                        ))),
+                    );
+                }
                 candidates.push((name.to_owned(), member.by_id.clone()));
             }
         }
@@ -686,7 +697,7 @@ mod tests {
         enroll_luks_uuid_ok, enroll_make_existing_keyfile, enroll_make_membership,
         enroll_passphrase, enroll_test_keyfile_fail, enroll_test_keyfile_ok,
         enroll_test_passphrase_fail, enroll_test_passphrase_ok, enroll_with_mountpoint_fail,
-        enroll_with_mountpoint_ok, isolated_paths, mock_ok,
+        enroll_with_mountpoint_ok, isolated_paths, mock_ok, test_uuid,
     };
 
     // ---- plan_enroll discovery tests ----
@@ -707,8 +718,8 @@ mod tests {
      */
     #[test]
     fn plan_discover_two_present_luks_disks() {
-        let (req1, out1) = enroll_luks_uuid_ok("/dev/disk/by-id/d1");
-        let (req2, out2) = enroll_luks_uuid_ok("/dev/disk/by-id/d2");
+        let (req1, out1) = enroll_luks_uuid_ok("/dev/disk/by-id/d1", test_uuid(500).as_str());
+        let (req2, out2) = enroll_luks_uuid_ok("/dev/disk/by-id/d2", test_uuid(501).as_str());
         let runner = MockRunner::default()
             .with_output(req1, out1)
             .with_output(req2, out2)
@@ -735,6 +746,80 @@ mod tests {
         );
     }
 
+    // Intent: discovery rejects a member whose live LUKS UUID at the
+    //   by-id path no longer matches the membership UUID key, before
+    //   any slot mutation or slot inventory probe runs.
+    // Why it exists: decision-024 mandates UUID re-checks at every
+    //   mutation boundary; mount/replace/recover enforce this and enroll
+    //   must too. Without it, a swapped or reformatted disk silently
+    //   takes the operator's keyfile into slot 1 of a foreign LUKS
+    //   container while the intended member's slot 1 stays empty,
+    //   defeating auto-unlock at boot.
+    // Scenario: operator's by-id stable path now points at a different
+    //   LUKS volume than the one captured in pool.json (swap, reformat,
+    //   or cloned disk). braid enroll fails before mutation, with the
+    //   same wording shape as braid unlock.
+    #[test]
+    fn discover_rejects_luks_uuid_mismatch_before_slot_inventory() {
+        let d1 = "/dev/disk/by-id/d1";
+        let d2 = "/dev/disk/by-id/d2";
+        let expected = test_uuid(500);
+        let observed = "ffffffff-ffff-ffff-ffff-ffffffffffff";
+
+        let (req1, out1) = enroll_luks_uuid_ok(d1, observed);
+        let (req2, out2) = enroll_luks_uuid_ok(d2, test_uuid(501).as_str());
+        let runner = MockRunner::default()
+            .with_output(req1, out1)
+            .with_output(req2, out2)
+            .with_luks_dump_text_luks2(d1)
+            .with_luks_dump_text_luks2(d2)
+            .with_mappers_closed(&["braid-disk1", "braid-disk2"]);
+        let fs = enroll_fs(&[d1, d2]);
+        let membership = enroll_make_membership(&[("disk1", d1), ("disk2", d2)]);
+
+        let (notes, result) = discover_enrollment_candidates(&runner, &fs, &membership);
+
+        assert!(notes.is_empty(), "unexpected notes: {notes:?}");
+        let err = result.expect_err("UUID mismatch must reject discovery");
+        let msg = match err {
+            EnrollKeyFileError::Validation(msg) => msg,
+            other => panic!("expected validation error, got {other:?}"),
+        };
+        assert!(msg.contains("disk1"), "error should name disk1: {msg}");
+        assert!(
+            msg.contains("LUKS UUID mismatch"),
+            "error should describe mismatch: {msg}"
+        );
+        assert!(
+            msg.contains(expected.as_str()),
+            "error should include expected UUID {expected}: {msg}"
+        );
+        assert!(
+            msg.contains(observed),
+            "error should include observed UUID {observed}: {msg}"
+        );
+
+        let requests = runner.requests();
+        assert!(
+            requests.iter().any(
+                |r| matches!(r, CmdRequest::CryptsetupLuksDumpText { device } if device == d1)
+            ),
+            "gateway luksDump text probe for mismatched disk should run: {requests:?}"
+        );
+        assert!(
+            !requests
+                .iter()
+                .any(|r| matches!(r, CmdRequest::CryptsetupLuksDump { .. })),
+            "slot inventory must not run after UUID mismatch: {requests:?}"
+        );
+        assert!(
+            !requests
+                .iter()
+                .any(|r| matches!(r, CmdRequest::CryptsetupLuksAddKeyFile { .. })),
+            "enrollment mutation must not run after UUID mismatch: {requests:?}"
+        );
+    }
+
     /*
      * Intent: an absent disk becomes a `PreviewNote::PerDisk { Skip }`
      *   on the successful plan, alongside the surviving LUKS candidate.
@@ -746,7 +831,7 @@ mod tests {
      */
     #[test]
     fn plan_discover_absent_disk_accumulates_skip_note() {
-        let (req, out) = enroll_luks_uuid_ok("/dev/disk/by-id/d2");
+        let (req, out) = enroll_luks_uuid_ok("/dev/disk/by-id/d2", test_uuid(501).as_str());
         let runner = MockRunner::default()
             .with_output(req, out)
             .with_luks_dump_text_luks2("/dev/disk/by-id/d2")
@@ -789,7 +874,7 @@ mod tests {
     #[test]
     fn plan_discover_non_luks_disk_accumulates_skip_note() {
         let (req1, out1) = enroll_luks_uuid_not_luks("/dev/disk/by-id/d1");
-        let (req2, out2) = enroll_luks_uuid_ok("/dev/disk/by-id/d2");
+        let (req2, out2) = enroll_luks_uuid_ok("/dev/disk/by-id/d2", test_uuid(501).as_str());
         let runner = MockRunner::default()
             .with_output(req1, out1)
             .with_output(req2, out2)
@@ -932,7 +1017,7 @@ mod tests {
      */
     #[test]
     fn plan_skip_note_renders_bracketed_in_preview_and_plain_in_stderr() {
-        let (req, out) = enroll_luks_uuid_ok("/dev/disk/by-id/d2");
+        let (req, out) = enroll_luks_uuid_ok("/dev/disk/by-id/d2", test_uuid(501).as_str());
         let runner = MockRunner::default()
             .with_output(req, out)
             .with_luks_dump_text_luks2("/dev/disk/by-id/d2")
@@ -1320,7 +1405,13 @@ mod tests {
 
         let (tkf1_req, tkf1_out) = enroll_test_keyfile_ok(d1, &kf_str);
         let (tkf2_req, tkf2_out) = enroll_test_keyfile_fail(d2, &kf_str);
-        let runner = enroll_discovery_two_disks(d1, d2)
+        let (uuid1_req, uuid1_out) = enroll_luks_uuid_ok(d1, test_uuid(501).as_str());
+        let (uuid2_req, uuid2_out) = enroll_luks_uuid_ok(d2, test_uuid(500).as_str());
+        let runner = MockRunner::default()
+            .with_output(uuid1_req, uuid1_out)
+            .with_output(uuid2_req, uuid2_out)
+            .with_luks_dump_text_luks2_for(&[d1, d2])
+            .with_mappers_closed(&["braid-disk1", "braid-disk2"])
             .with_output(tkf1_req, tkf1_out)
             .with_output(tkf2_req, tkf2_out);
         let fs = enroll_fs(&[d1, d2]);
@@ -2737,7 +2828,7 @@ mod tests {
         std::fs::write(&pass_path, "wrongpass\n").unwrap();
 
         let d1 = "/dev/disk/by-id/d1";
-        let (uuid_req, uuid_out) = enroll_luks_uuid_ok(d1);
+        let (uuid_req, uuid_out) = enroll_luks_uuid_ok(d1, test_uuid(500).as_str());
         let (tp_req, tp_stdin, tp_out) = enroll_test_passphrase_fail(d1, "wrongpass");
 
         let runner = MockRunner::default()
@@ -2794,7 +2885,7 @@ mod tests {
         let kf = tmp.path().join("braid.key");
 
         let d1 = "/dev/disk/by-id/d1";
-        let (uuid_req, uuid_out) = enroll_luks_uuid_ok(d1);
+        let (uuid_req, uuid_out) = enroll_luks_uuid_ok(d1, test_uuid(500).as_str());
 
         // No passphrase mock, no TestKeyFile mock, no slot dump. If
         // dry-run regresses past the short-circuit, MockRunner returns

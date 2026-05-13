@@ -106,19 +106,17 @@ pub(crate) fn enroll_passphrase(s: &str) -> Passphrase {
 // (different signatures, or different request variants), so the facade
 // keeps both sets reachable via the `enroll_` prefix.
 
-/// Returns the canonical `aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee` UUID for
-/// every device. Distinct from `mount::luks_uuid_ok` which takes a uuid
-/// arg -- enroll tests never assert on the UUID value, only that the
-/// probe succeeds. Even if the signatures matched, the prefix is still
-/// required to keep both helpers reachable through the same facade.
-pub(crate) fn enroll_luks_uuid_ok(device: &str) -> (CmdRequest, RawCommandOutput) {
+/// Returns the supplied canonical UUID for a device. Distinct from
+/// `mount::luks_uuid_ok` by prefix so both helpers stay reachable
+/// through the same facade.
+pub(crate) fn enroll_luks_uuid_ok(device: &str, uuid: &str) -> (CmdRequest, RawCommandOutput) {
     (
         CmdRequest::CryptsetupLuksUuid {
             device: device.to_owned(),
         },
         shared::mock_ok(
             &format!("cryptsetup luksUUID {device}"),
-            "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee\n",
+            &format!("{uuid}\n"),
         ),
     )
 }
@@ -350,8 +348,8 @@ pub(crate) fn enroll_make_existing_keyfile(tmp: &TempDir) -> (PathBuf, String) {
 ///     test layers its own per-disk verify outcome with the correct
 ///     passphrase or keyfile path.
 pub(crate) fn enroll_discovery_two_disks(d1: &str, d2: &str) -> MockRunner {
-    let (req1, out1) = enroll_luks_uuid_ok(d1);
-    let (req2, out2) = enroll_luks_uuid_ok(d2);
+    let (req1, out1) = enroll_luks_uuid_ok(d1, shared::test_uuid(500).as_str());
+    let (req2, out2) = enroll_luks_uuid_ok(d2, shared::test_uuid(501).as_str());
     MockRunner::default()
         .with_output(req1, out1)
         .with_output(req2, out2)

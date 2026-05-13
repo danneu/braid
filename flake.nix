@@ -432,6 +432,11 @@
               braid = linuxCrane.braid;
             }
           );
+          enroll-uuid-mismatch = pkgs.testers.nixosTest (
+            import ./tests/cli/enroll-uuid-mismatch.nix {
+              braid = linuxCrane.braid;
+            }
+          );
           braid-recover = pkgs.testers.nixosTest (
             import ./tests/cli/braid-recover.nix {
               braid = linuxCrane.braid;
