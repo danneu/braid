@@ -221,8 +221,12 @@ fn build_compact_drives(pool: &PoolState, membership: &PoolMembership) -> Vec<Co
 
     // Present pool devices
     let pool_mappers: HashSet<&str> = pool.devices.iter().map(|d| d.mapper.0.as_str()).collect();
+    let pool_luks_uuids: HashSet<&LuksUuid> = pool.devices.iter().map(|d| &d.luks_uuid).collect();
     for pd in &pool.devices {
-        let name = config::name_from_mapper(&pd.mapper.0)
+        let name = membership
+            .by_uuid(&pd.luks_uuid)
+            .map(|member| member.name.as_str())
+            .or_else(|| config::name_from_mapper(&pd.mapper.0))
             .unwrap_or(&pd.mapper.0)
             .to_owned();
         let device_short = pd
@@ -239,9 +243,12 @@ fn build_compact_drives(pool: &PoolState, membership: &PoolMembership) -> Vec<Co
     }
 
     // Unpooled membership disks
-    let mut members: Vec<_> = membership.iter().map(|(_, member)| member).collect();
-    members.sort_by(|a, b| a.name.cmp(&b.name));
-    for member in members {
+    let mut members: Vec<_> = membership.iter().collect();
+    members.sort_by(|(_, a), (_, b)| a.name.cmp(&b.name));
+    for (uuid, member) in members {
+        if pool_luks_uuids.contains(uuid) {
+            continue;
+        }
         let name = member.name.as_str();
         let expected_mapper = format!("braid-{name}");
         if !pool_mappers.contains(expected_mapper.as_str()) {
@@ -3187,6 +3194,31 @@ mod tests {
         let drives = build_compact_drives(&pool, &membership);
         assert_eq!(drives.len(), 1);
         assert_eq!(drives[0].status, DiskStatus::Missing);
+    }
+
+    #[test]
+    fn status_compact_names_present_disk_from_membership_uuid() {
+        let pool = PoolState {
+            mounted: true,
+            devices: vec![PoolDevice {
+                mapper: MapperName("braid-drifted".to_owned()),
+                luks_uuid: LuksUuid::parse("11111111-1111-1111-1111-111111111111").unwrap(),
+                devid: 1,
+                underlying: "/dev/vda".to_owned(),
+            }],
+            missing_count: 0,
+            missing_devids: vec![],
+            total_devices: 1,
+            fsid: None,
+            null_underlying: vec![],
+        };
+        let membership = status_membership_1disk();
+
+        let drives = build_compact_drives(&pool, &membership);
+
+        assert_eq!(drives.len(), 1);
+        assert_eq!(drives[0].name, "disk1");
+        assert_eq!(drives[0].status, DiskStatus::Present);
     }
 
     // =======================================================================
