@@ -15,7 +15,7 @@ use crate::luks::{
 use crate::mapper_close::close_mapper_with_retry;
 use crate::membership::{self, DiskMember, LuksUuidMap, PoolMembership};
 use crate::parse::btrfs_filesystem_show::{DeviceBtrfsProbe, classify_btrfs_probe};
-use crate::parse::parse_btrfs_filesystem_show;
+use crate::parse::{parse_btrfs_filesystem_show, parse_cryptsetup_luks_uuid};
 use crate::pool::{
     pool_add_device, pool_balance_raid1, pool_bootstrap_mount, pool_bootstrap_mount_raid1,
 };
@@ -64,6 +64,19 @@ pub enum AddError {
         by_id1: ByIdPath,
         name2: DiskName,
         by_id2: ByIdPath,
+    },
+    /// Closed-PresentLuks target identity drift between planning-time
+    /// probe and the live disk immediately before Pass 1
+    /// `ensure_luks_open`. Mirrors
+    /// `ReplaceError::NewTargetUuidMismatchAtOpen` so operator
+    /// remediation reads identically across add and replace.
+    #[error(
+        "add target '{by_id}' LUKS UUID mismatch: expected {expected}, found {observed} -- detach the foreign disk and retry"
+    )]
+    TargetUuidMismatchAtOpen {
+        by_id: ByIdPath,
+        expected: LuksUuid,
+        observed: String,
     },
     /// Operator passed `--luks-format-arg` containing a braid-managed
     /// cryptsetup option (`--uuid`, `--label`). Surfaced through
@@ -207,6 +220,38 @@ fn identity_to_error(identity: &AddLuksIdentity, name: &str) -> Option<AddError>
             name,
         ))),
         _ => None,
+    }
+}
+
+/// Open-boundary re-probe for ClosedPresentLuks before mapper open.
+/// Mirrors replace's ExistingLuks gate so a by-id swap is rejected
+/// before braid opens a foreign LUKS volume.
+fn probe_closed_present_luks_target_uuid<R: CommandRunner>(
+    runner: &R,
+    by_id: &ByIdPath,
+    expected: &LuksUuid,
+) -> Result<(), AddError> {
+    let probe = runner
+        .run(&CmdRequest::CryptsetupLuksUuid {
+            device: by_id.as_str().to_owned(),
+        })
+        .map_err(|e| AddError::TargetUuidMismatchAtOpen {
+            by_id: by_id.clone(),
+            expected: expected.clone(),
+            observed: format!("probe failed: {e}"),
+        })?;
+    match parse_cryptsetup_luks_uuid(&probe) {
+        Ok(parsed) if parsed.uuid == *expected => Ok(()),
+        Ok(parsed) => Err(AddError::TargetUuidMismatchAtOpen {
+            by_id: by_id.clone(),
+            expected: expected.clone(),
+            observed: parsed.uuid.as_str().to_owned(),
+        }),
+        Err(e) => Err(AddError::TargetUuidMismatchAtOpen {
+            by_id: by_id.clone(),
+            expected: expected.clone(),
+            observed: format!("probe parse failed: {e}"),
+        }),
     }
 }
 
@@ -892,6 +937,7 @@ impl AddPlan {
             let AddTargetWork::ClosedPresentLuks(target) = target else {
                 continue;
             };
+            probe_closed_present_luks_target_uuid(runner, &target.by_id, &target.luks_uuid)?;
             emit_status(&status_line(
                 StatusTag::Wait,
                 color_enabled,
@@ -1831,12 +1877,15 @@ fn build_add_work_plan<R: CommandRunner>(
                         _ => unreachable!("error variants handled by identity_to_error above"),
                     }
                 } else {
-                    // Mapper closed — FSID verification deferred to execution time.
-                    // The deferred path stores the probed UUID; the
-                    // pre-write uniqueness assert covers
-                    // ClosedPresentLuks via the same gate that runs
-                    // when the target promotes to a
-                    // RecoverableBraidTarget at execute time.
+                    // Mapper closed -- FSID verification deferred to execution time.
+                    // Two-tier defense for the cached `uuid`:
+                    //   (a) plan-time `assert_target_uuid_unique` below rejects UUID
+                    //       collisions against in-flight targets, pool membership, and
+                    //       the live pool.
+                    //   (b) execute-time live-UUID re-probe before `ensure_luks_open`
+                    //       (see Pass-1 loop) rejects plan-to-execute disk swaps so a
+                    //       foreign disk at this by-id cannot pass through to
+                    //       `btrfs device add`.
                     assert_target_uuid_unique(
                         uuid,
                         input.pool_membership,

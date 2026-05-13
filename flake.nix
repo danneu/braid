@@ -123,6 +123,11 @@
               braid = linuxCrane.braid;
             }
           );
+          braid-add-uuid-swap-rejected = pkgs.testers.nixosTest (
+            import ./tests/cli/braid-add-uuid-swap-rejected.nix {
+              braid = linuxCrane.braid;
+            }
+          );
           braid-add-persists-before-balance = pkgs.testers.nixosTest (
             import ./tests/cli/braid-add-persists-before-balance.nix {
               braid = linuxCrane.braid;
