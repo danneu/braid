@@ -244,20 +244,30 @@ fn skipped_mapper_warn_body(entry: &MapperName, detail: &CmdError) -> String {
     format!("skipping mapper {entry}: cannot verify backing LUKS UUID ({detail})")
 }
 
-/// Warn body for a null-underlying mapper whose persisted devid collides
-/// across membership UUIDs; lock cannot prove ownership, so the mapper
-/// is left open and the corrupt identity evidence is surfaced.
+/// Operator-facing body for the Pass 2 skip when persisted devid
+/// resolution surfaces corrupt membership. Centralizing the format keeps
+/// the mapper name, colliding devid, and offending UUID set together.
 fn duplicate_devid_warn_body(entry: &MapperName, devid: u64, members: &[LuksUuid]) -> String {
     format!(
-        "skipping mapper {entry}: pool.json has duplicate devid {devid} across UUIDs {} -- leaving open; repair pool.json before next lock",
+        "skipping mapper {entry}: pool.json corrupt -- devid {devid} \
+         claimed by multiple members [{}] (resolve before locking)",
         format_uuid_list(members),
     )
 }
 
-/// Warn body for future membership lookup errors from `by_devid`; this
-/// keeps lock fail-closed if new error variants become reachable.
-fn membership_error_warn_body(entry: &MapperName, err: &MembershipError) -> String {
-    format!("skipping mapper {entry}: {err} -- leaving open; repair pool.json before next lock")
+/// Shared orphan emission so Pass 1, Pass 2, and the Pass 3 stranded path
+/// produce byte-identical warn rendering and route through one append site.
+fn push_orphan_close(
+    notes: &mut Vec<PreviewNote>,
+    orphan_mappers: &mut Vec<LockMapperClose>,
+    mapper: MapperName,
+    disk_name: String,
+) {
+    notes.push(PreviewNote::Warn(orphan_mapper_warn_body(&mapper)));
+    orphan_mappers.push(LockMapperClose {
+        mapper,
+        kind: LockMapperCloseKind::Orphan { disk_name },
+    });
 }
 
 /// Message body (no `[warn]` prefix) for the mounted fallback warning.
@@ -287,9 +297,8 @@ fn push_uuid_classified_candidate<R: CommandRunner>(
         Ok(kind @ LockMapperCloseKind::MemberOwned { .. }) => {
             member_owned.push(LockMapperClose { mapper, kind });
         }
-        Ok(kind @ LockMapperCloseKind::Orphan { .. }) => {
-            notes.push(PreviewNote::Warn(orphan_mapper_warn_body(&mapper)));
-            orphan_mappers.push(LockMapperClose { mapper, kind });
+        Ok(LockMapperCloseKind::Orphan { disk_name }) => {
+            push_orphan_close(notes, orphan_mappers, mapper, disk_name);
         }
         Err(cmd_err) => {
             notes.push(PreviewNote::Warn(skipped_mapper_warn_body(
@@ -793,10 +802,10 @@ where
 /// Close-set construction for the `LockSnapshot::Full` arm. Drives the
 /// member-owned classification through observed `PoolDevice.mapper`
 /// strings so the close + forget + dry-run preview all share one
-/// observed-mapper source-of-truth. Stranded `/dev/mapper/braid-*`
-/// slots that did not appear in pool.devices are re-classified by
-/// backing LUKS UUID; per-mapper failures warn and skip rather than
-/// falling back to name-only ownership.
+/// observed-mapper source-of-truth. All three passes emit the same
+/// orphan warning when they classify a mapper as orphan, and Pass 2
+/// surfaces duplicate-devid membership corruption as a typed skip that
+/// leaves cleanup uncertain until the operator reconciles pool.json.
 fn build_close_sets_full<R: CommandRunner, F: Filesystem + ?Sized>(
     runner: &R,
     fs: &F,
@@ -819,17 +828,10 @@ fn build_close_sets_full<R: CommandRunner, F: Filesystem + ?Sized>(
                 },
             });
         } else {
-            // Live mapper carries a UUID not in membership -- treat
-            // as orphan (the close-observed-not-reconstructed
-            // doctrine). disk_name carries the basename for the
-            // warning body.
             let disk_name = name_from_mapper(dev.mapper.as_str())
                 .unwrap_or(dev.mapper.as_str())
                 .to_owned();
-            orphan_mappers.push(LockMapperClose {
-                mapper: dev.mapper.clone(),
-                kind: LockMapperCloseKind::Orphan { disk_name },
-            });
+            push_orphan_close(notes, &mut orphan_mappers, dev.mapper.clone(), disk_name);
         }
     }
 
@@ -846,25 +848,23 @@ fn build_close_sets_full<R: CommandRunner, F: Filesystem + ?Sized>(
                 let disk_name = name_from_mapper(nu.mapper.as_str())
                     .unwrap_or(nu.mapper.as_str())
                     .to_owned();
-                orphan_mappers.push(LockMapperClose {
-                    mapper: nu.mapper.clone(),
-                    kind: LockMapperCloseKind::Orphan { disk_name },
-                });
+                push_orphan_close(notes, &mut orphan_mappers, nu.mapper.clone(), disk_name);
             }
-            Err(MembershipError::DuplicateDevid { devid, members }) => {
-                notes.push(PreviewNote::Warn(duplicate_devid_warn_body(
-                    &nu.mapper, devid, &members,
-                )));
-                skipped_mappers.push(nu.mapper.clone());
-                *cleanup_uncertain = true;
-            }
-            Err(err) => {
-                notes.push(PreviewNote::Warn(membership_error_warn_body(
-                    &nu.mapper, &err,
-                )));
-                skipped_mappers.push(nu.mapper.clone());
-                *cleanup_uncertain = true;
-            }
+            Err(err) => match err {
+                MembershipError::DuplicateDevid { devid, members } => {
+                    notes.push(PreviewNote::Warn(duplicate_devid_warn_body(
+                        &nu.mapper, devid, &members,
+                    )));
+                    skipped_mappers.push(nu.mapper.clone());
+                    *cleanup_uncertain = true;
+                }
+                other @ (MembershipError::Corrupt { .. }
+                | MembershipError::Conflict(_)
+                | MembershipError::Io { .. }
+                | MembershipError::Save { .. }) => {
+                    unreachable!("by_devid cannot return this MembershipError variant: {other:?}");
+                }
+            },
         }
     }
 
@@ -2971,6 +2971,31 @@ mod tests {
         }
     }
 
+    fn synthetic_pool_state_with_null_underlying(
+        mapper_aaa: &str,
+        null_mapper: &str,
+        null_devid: u64,
+    ) -> crate::types::PoolState {
+        use crate::types::{LuksUuid, MapperName, NullUnderlyingDevice, PoolDevice, PoolState};
+        PoolState {
+            mounted: true,
+            devices: vec![PoolDevice {
+                mapper: MapperName(mapper_aaa.into()),
+                luks_uuid: LuksUuid::parse("00000000-0000-0000-0000-0000000002bc").unwrap(),
+                devid: 1,
+                underlying: "/dev/disk/by-id/a".into(),
+            }],
+            missing_count: 1,
+            total_devices: 2,
+            fsid: Some("aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee".into()),
+            missing_devids: vec![null_devid],
+            null_underlying: vec![NullUnderlyingDevice {
+                mapper: MapperName(null_mapper.into()),
+                devid: null_devid,
+            }],
+        }
+    }
+
     /// Intent: in LockSnapshot::Full, a drifted member mapper
     /// (`PoolDevice.mapper = "braid-WRONG"`, luks_uuid matches
     /// member) appears in member_owned via UUID classification,
@@ -3052,6 +3077,209 @@ mod tests {
                 "/dev/mapper/braid-bbb".to_string(),
             ],
             "forget set must use observed mapper, not reconstructed",
+        );
+    }
+
+    // Intent: a PoolDevice whose LUKS UUID is absent from membership is
+    //   classified as orphan and emits the orphan warn.
+    // Why it exists: pins the Pass 1 orphan path so it cannot regress
+    //   back to a silent demotion while Pass 3 still warns.
+    // Scenario: a post-migration lock sees a live mapper whose backing
+    //   UUID does not match any pool.json member after an interrupted
+    //   replace left a stale mapper behind.
+    #[test]
+    fn full_arm_pass1_unknown_uuid_classifies_as_orphan_and_warns() {
+        use crate::types::{LuksUuid, MapperName, PoolDevice, PoolState};
+
+        let fs = lock_fs(&["/dev/mapper/braid-leftover"]);
+        let membership = lock_test_membership();
+        let pool = PoolState {
+            mounted: true,
+            devices: vec![PoolDevice {
+                mapper: MapperName("braid-leftover".into()),
+                luks_uuid: LuksUuid::parse(ORPHAN_UUID).unwrap(),
+                devid: 99,
+                underlying: "/dev/disk/by-id/leftover".into(),
+            }],
+            missing_count: 0,
+            total_devices: 1,
+            fsid: Some("aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee".into()),
+            missing_devids: vec![],
+            null_underlying: vec![],
+        };
+        let runner = MockRunner::default();
+        let mut notes = Vec::new();
+        let mut skipped = Vec::new();
+        let mut cleanup_uncertain = false;
+
+        let close_set = super::build_close_sets_full(
+            &runner,
+            &fs,
+            &pool,
+            &membership,
+            &mut notes,
+            &mut skipped,
+            &mut cleanup_uncertain,
+        );
+
+        assert!(member_summaries(&close_set).is_empty());
+        assert_eq!(
+            orphan_summaries(&close_set),
+            vec![("braid-leftover".to_owned(), "leftover".to_owned())]
+        );
+        assert!(
+            notes.iter().any(|note| matches!(
+                note,
+                PreviewNote::Warn(body) if body.contains("orphaned mapper braid-leftover")
+            )),
+            "orphan warning expected, got: {notes:?}"
+        );
+        assert!(skipped.is_empty());
+        assert!(!cleanup_uncertain);
+    }
+
+    // Intent: a null_underlying entry whose devid is absent from
+    //   membership is classified as orphan and emits the orphan warn.
+    // Why it exists: pins the Pass 2 Ok(None) branch, which was
+    //   previously a silent orphan demotion.
+    // Scenario: a hot-unplugged device leaves an open mapper whose devid
+    //   never landed in pool.json because `braid add` was interrupted
+    //   before membership was committed.
+    #[test]
+    fn full_arm_pass2_null_underlying_unknown_devid_classifies_as_orphan_and_warns() {
+        let fs = lock_fs(&["/dev/mapper/braid-aaa", "/dev/mapper/braid-ghost"]);
+        let membership = lock_test_membership();
+        let pool = synthetic_pool_state_with_null_underlying("braid-aaa", "braid-ghost", 99);
+        let runner = MockRunner::default();
+        let mut notes = Vec::new();
+        let mut skipped = Vec::new();
+        let mut cleanup_uncertain = false;
+
+        let close_set = super::build_close_sets_full(
+            &runner,
+            &fs,
+            &pool,
+            &membership,
+            &mut notes,
+            &mut skipped,
+            &mut cleanup_uncertain,
+        );
+
+        assert!(
+            orphan_summaries(&close_set).contains(&("braid-ghost".to_owned(), "ghost".to_owned())),
+            "braid-ghost must be an orphan: {:?}",
+            orphan_summaries(&close_set)
+        );
+        assert!(
+            notes.iter().any(|note| matches!(
+                note,
+                PreviewNote::Warn(body) if body.contains("orphaned mapper braid-ghost")
+            )),
+            "orphan warning expected, got: {notes:?}"
+        );
+        assert!(skipped.is_empty());
+        assert!(!cleanup_uncertain);
+    }
+
+    // Intent: a null_underlying entry whose devid is claimed by two
+    //   members surfaces a typed DuplicateDevid warn, lands exactly once
+    //   in skipped_mappers, and sets cleanup_uncertain. Pass 3 must not
+    //   rescan the skipped mapper.
+    // Why it exists: pins the corruption path so duplicate devids cannot
+    //   silently demote to orphan cleanup, and so the Pass 3 exclusion set
+    //   includes every pool.devices and pool.null_underlying mapper.
+    // Scenario: in-memory membership bypasses load-time validation and
+    //   contains two members with devid 7 while btrfs reports braid-dup
+    //   as the matching null-underlying mapper.
+    #[test]
+    fn full_arm_pass2_duplicate_devid_skips_and_warns_with_cleanup_uncertain() {
+        use crate::membership::DiskMember;
+        use crate::types::{ByIdPath, DiskName, LuksUuid};
+
+        let aaa_uuid = LuksUuid::parse(AAA_UUID).unwrap();
+        let bbb_uuid = LuksUuid::parse(BBB_UUID).unwrap();
+        let mut aaa = DiskMember::new(
+            DiskName::parse("aaa").unwrap(),
+            ByIdPath::parse("/dev/disk/by-id/a").unwrap(),
+        );
+        let mut bbb = DiskMember::new(
+            DiskName::parse("bbb").unwrap(),
+            ByIdPath::parse("/dev/disk/by-id/b").unwrap(),
+        );
+        aaa.devid = Some(7);
+        bbb.devid = Some(7);
+        let membership = PoolMembership::for_corruption_tests(vec![
+            (aaa_uuid.clone(), aaa),
+            (bbb_uuid.clone(), bbb),
+        ]);
+        let pool = synthetic_pool_state_with_null_underlying("braid-aaa", "braid-dup", 7);
+        let fs = lock_fs(&["/dev/mapper/braid-aaa", "/dev/mapper/braid-dup"]);
+        let runner = MockRunner::default();
+        let mut notes = Vec::new();
+        let mut skipped = Vec::new();
+        let mut cleanup_uncertain = false;
+
+        let close_set = super::build_close_sets_full(
+            &runner,
+            &fs,
+            &pool,
+            &membership,
+            &mut notes,
+            &mut skipped,
+            &mut cleanup_uncertain,
+        );
+
+        assert!(
+            !member_summaries(&close_set)
+                .iter()
+                .any(|(mapper, _display)| mapper == "braid-dup"),
+            "braid-dup must not be member-owned: {:?}",
+            member_summaries(&close_set)
+        );
+        assert!(
+            !orphan_summaries(&close_set)
+                .iter()
+                .any(|(mapper, _disk_name)| mapper == "braid-dup"),
+            "braid-dup must not be an orphan: {:?}",
+            orphan_summaries(&close_set)
+        );
+        assert_eq!(skipped, vec![MapperName("braid-dup".into())]);
+        assert!(cleanup_uncertain);
+
+        let warns: Vec<&str> = notes
+            .iter()
+            .filter_map(|note| match note {
+                PreviewNote::Warn(body) => Some(body.as_str()),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(warns.len(), 1, "expected one warn, got: {notes:?}");
+        let warn = warns[0];
+        for expected in ["braid-dup", "devid 7", AAA_UUID, BBB_UUID] {
+            assert!(
+                warn.contains(expected),
+                "warn must contain {expected:?}, got: {warn}"
+            );
+        }
+        assert!(
+            !warn.contains("cannot verify backing LUKS UUID"),
+            "Pass 3 rescan warning must not appear, got: {warn}"
+        );
+
+        let status_probe_count = runner
+            .requests()
+            .into_iter()
+            .filter(|request| {
+                matches!(
+                    request,
+                    CmdRequest::CryptsetupStatus { mapper }
+                        if mapper.as_str() == "braid-dup"
+                )
+            })
+            .count();
+        assert_eq!(
+            status_probe_count, 0,
+            "Pass 3 must not re-probe skipped null-underlying braid-dup"
         );
     }
 
@@ -3160,101 +3388,6 @@ mod tests {
             "malformed mapper basename must be carried as orphan disk_name, got: {names:?}",
         );
         assert!(skipped.is_empty(), "readable UUID should not be skipped");
-    }
-
-    // Intent: when a null-underlying mapper's persisted devid collides
-    //   across two membership UUIDs, lock skips the mapper exactly once,
-    //   warns with both UUIDs, and marks cleanup uncertain.
-    // Why it exists: the previous Pass 2 catch-all silently demoted
-    //   DuplicateDevid corruption to an orphan close; this also pins that
-    //   Pass 3 excludes pool.null_underlying inputs from the stranded scan.
-    // Scenario: corrupt in-memory pool.json has two members at devid 7,
-    //   btrfs reports braid-X as null-underlying at devid 7, and
-    //   /dev/mapper/braid-X exists but must not be re-probed as stranded.
-    #[test]
-    fn full_arm_duplicate_devid_null_underlying_skips_once() {
-        use crate::types::NullUnderlyingDevice;
-
-        let (u1, mut m1) = disk_member(720, "dup-a", "/dev/disk/by-id/ata-DUP-A");
-        let (u2, mut m2) = disk_member(721, "dup-b", "/dev/disk/by-id/ata-DUP-B");
-        m1.devid = Some(7);
-        m2.devid = Some(7);
-        let membership =
-            PoolMembership::for_corruption_tests(vec![(u1.clone(), m1), (u2.clone(), m2)]);
-        let pool = PoolState {
-            mounted: true,
-            devices: vec![],
-            missing_count: 0,
-            total_devices: 1,
-            fsid: Some("aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee".into()),
-            missing_devids: vec![],
-            null_underlying: vec![NullUnderlyingDevice {
-                mapper: MapperName("braid-X".into()),
-                devid: 7,
-            }],
-        };
-        let fs = lock_fs(&["/dev/mapper/braid-X"]);
-        let runner = MockRunner::default();
-        let mut notes = Vec::new();
-        let mut skipped = Vec::new();
-        let mut cleanup_uncertain = false;
-
-        let close_set = super::build_close_sets_full(
-            &runner,
-            &fs,
-            &pool,
-            &membership,
-            &mut notes,
-            &mut skipped,
-            &mut cleanup_uncertain,
-        );
-
-        assert!(member_summaries(&close_set).is_empty());
-        assert!(orphan_summaries(&close_set).is_empty());
-        assert_eq!(
-            skipped
-                .iter()
-                .filter(|mapper| mapper.as_str() == "braid-X")
-                .count(),
-            1,
-            "braid-X must be skipped exactly once: {skipped:?}",
-        );
-        assert!(cleanup_uncertain);
-
-        let warns: Vec<&str> = notes
-            .iter()
-            .filter_map(|note| match note {
-                PreviewNote::Warn(body) => Some(body.as_str()),
-                _ => None,
-            })
-            .collect();
-        assert_eq!(warns.len(), 1, "expected one warn, got: {notes:?}");
-        let warn = warns[0];
-        assert!(
-            warn.contains("duplicate devid 7"),
-            "warn must name duplicate devid, got: {warn}"
-        );
-        let expected_uuids = format_uuid_list(&[u1.clone(), u2.clone()]);
-        assert!(
-            warn.contains(&expected_uuids),
-            "warn must name colliding UUIDs {expected_uuids}, got: {warn}"
-        );
-
-        let status_probe_count = runner
-            .requests()
-            .into_iter()
-            .filter(|request| {
-                matches!(
-                    request,
-                    CmdRequest::CryptsetupStatus { mapper }
-                        if mapper.as_str() == "braid-X"
-                )
-            })
-            .count();
-        assert_eq!(
-            status_probe_count, 0,
-            "Pass 3 must not re-probe null-underlying braid-X"
-        );
     }
 
     /// Intent: classify_candidate_mapper skips per-mapper failures
