@@ -1,4 +1,4 @@
-use crate::add::devid_for_mapper_path;
+use crate::add::find_added_device_by_uuid;
 use crate::alert;
 use crate::cmd::{CmdRequest, CommandRunner, Step};
 use crate::config::{self, Config};
@@ -2536,16 +2536,16 @@ fn execute_add_pool_mutation_recovery<R: CommandRunner + Sync, F: Filesystem + ?
                 }
             }
             pool = probe::probe_pool(runner, fs, mount_point)?;
-            let devid = devid_for_mapper_path(&pool, &mapper_path).ok_or_else(|| {
+            let dev = find_added_device_by_uuid(&pool, target_uuid).ok_or_else(|| {
                 RecoverError::AckCleanupFailed {
                     stage: "live-pool add recovery",
                     detail: format!("{}: not found in pool after replayed add", target.name),
                 }
             })?;
-            alert::drop_ghost_acked_for_devids(params.paths, &[devid]).map_err(|e| {
+            alert::drop_ghost_acked_for_devids(params.paths, &[dev.devid]).map_err(|e| {
                 RecoverError::AckCleanupFailed {
                     stage: "live-pool add recovery",
-                    detail: format!("devid {devid}: {e}"),
+                    detail: format!("devid {}: {e}", dev.devid),
                 }
             })?;
             validate_live_members_allowed(&pool, union)?;
@@ -2603,16 +2603,14 @@ fn sweep_recovered_add_acked_stats(
     targets: &LuksUuidMap<journal::AddJournalTarget>,
 ) -> Result<(), RecoverError> {
     let mut sweep_devids: Vec<u64> = Vec::with_capacity(targets.len());
-    for (_, target) in targets {
-        let mapper = config::mapper_name(target.name.as_str());
-        let mapper_path = format!("/dev/mapper/{}", mapper.0);
-        let devid = devid_for_mapper_path(pool, &mapper_path).ok_or_else(|| {
+    for (uuid, target) in targets {
+        let dev = find_added_device_by_uuid(pool, uuid).ok_or_else(|| {
             RecoverError::AckCleanupFailed {
                 stage: "live-pool add recovery (target sweep)",
                 detail: format!("{}: not found in live pool", target.name),
             }
         })?;
-        sweep_devids.push(devid);
+        sweep_devids.push(dev.devid);
     }
     alert::drop_ghost_acked_for_devids(paths, &sweep_devids).map_err(|e| {
         RecoverError::AckCleanupFailed {
@@ -4386,6 +4384,16 @@ mod tests {
         )
     }
 
+    fn btrfs_show_disk1_and_drifted_disk2_devid4() -> RawCommandOutput {
+        ok_raw(
+            "btrfs filesystem show /mnt/storage",
+            "Label: none  uuid: aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee\n\
+             \tTotal devices 2 FS bytes used 1.00GiB\n\
+             \tdevid    1 size 10.00GiB used 2.00GiB path /dev/mapper/braid-disk1\n\
+             \tdevid    4 size 10.00GiB used 2.00GiB path /dev/mapper/braid-WRONG\n",
+        )
+    }
+
     fn btrfs_show_disk1_disk2_devid4_disk3_devid5() -> RawCommandOutput {
         ok_raw(
             "btrfs filesystem show /mnt/storage",
@@ -5163,6 +5171,12 @@ mod tests {
         }
     }
 
+    fn pool_state_disk1_and_drifted_disk2_devid4() -> PoolState {
+        let mut pool = pool_state_disk1_and_disk2_devid4();
+        pool.devices[1].mapper = MapperName("braid-WRONG".into());
+        pool
+    }
+
     fn pool_state_disk1_with_null_underlying_disk2() -> PoolState {
         let mut pool = pool_state_one_disk();
         pool.total_devices = 2;
@@ -5412,6 +5426,40 @@ mod tests {
             )
     }
 
+    fn with_disk1_drifted_disk2_devid4_pool_probe(runner: MockRunner) -> MockRunner {
+        runner
+            .with_output(
+                CmdRequest::BtrfsFilesystemShow {
+                    mount_point: MountPoint("/mnt/storage".into()),
+                },
+                btrfs_show_disk1_and_drifted_disk2_devid4(),
+            )
+            .with_output(
+                CmdRequest::CryptsetupStatus {
+                    mapper: MapperName("braid-disk1".into()),
+                },
+                cryptsetup_status_active("braid-disk1", "/dev/vda"),
+            )
+            .with_output(
+                CmdRequest::CryptsetupLuksUuid {
+                    device: "/dev/vda".into(),
+                },
+                cryptsetup_uuid_ok("/dev/vda", "11111111-1111-1111-1111-111111111111"),
+            )
+            .with_output(
+                CmdRequest::CryptsetupStatus {
+                    mapper: MapperName("braid-WRONG".into()),
+                },
+                cryptsetup_status_active("braid-WRONG", "/dev/vdb"),
+            )
+            .with_output(
+                CmdRequest::CryptsetupLuksUuid {
+                    device: "/dev/vdb".into(),
+                },
+                cryptsetup_uuid_ok("/dev/vdb", "22222222-2222-2222-2222-222222222222"),
+            )
+    }
+
     fn with_disk1_disk2_devid4_disk3_devid5_pool_probe(runner: MockRunner) -> MockRunner {
         runner
             .with_output(
@@ -5566,64 +5614,74 @@ mod tests {
         );
     }
 
+    fn replay_returned_disk2_runner_base() -> MockRunner {
+        MockRunner::default()
+            .with_output(
+                CmdRequest::CryptsetupLuksUuid {
+                    device: "/dev/disk/by-id/virtio-disk2".into(),
+                },
+                cryptsetup_uuid_ok(
+                    "/dev/disk/by-id/virtio-disk2",
+                    "22222222-2222-2222-2222-222222222222",
+                ),
+            )
+            .with_luks_dump_text_luks2("/dev/disk/by-id/virtio-disk2")
+            .with_mapper_open(
+                "braid-disk2",
+                "/dev/vdb",
+                "22222222-2222-2222-2222-222222222222",
+            )
+            .with_output_stdin(
+                CmdRequest::CryptsetupTestPassphrase {
+                    device: "/dev/vda".into(),
+                },
+                TEST_PASSPHRASE_BYTES.to_vec(),
+                ok_raw_empty("cryptsetup open --test-passphrase"),
+            )
+            .with_output_stdin(
+                CmdRequest::CryptsetupTestPassphrase {
+                    device: "/dev/disk/by-id/virtio-disk2".into(),
+                },
+                TEST_PASSPHRASE_BYTES.to_vec(),
+                ok_raw_empty("cryptsetup open --test-passphrase"),
+            )
+            .with_output(
+                CmdRequest::BtrfsFilesystemShowTarget {
+                    target: "/dev/mapper/braid-disk2".into(),
+                },
+                btrfs_show_target_no_btrfs("/dev/mapper/braid-disk2"),
+            )
+            .with_output(
+                CmdRequest::BtrfsDeviceScanForget {
+                    devices: vec!["/dev/mapper/braid-disk2".into()],
+                },
+                ok_raw_empty("btrfs device scan --forget"),
+            )
+            .with_output(
+                CmdRequest::WipefsBtrfs {
+                    device: "/dev/mapper/braid-disk2".into(),
+                },
+                ok_raw_empty("wipefs"),
+            )
+            .with_output(
+                CmdRequest::BtrfsDeviceAdd {
+                    device: "/dev/mapper/braid-disk2".into(),
+                    mount_point: MountPoint("/mnt/storage".into()),
+                    force: true,
+                },
+                ok_raw_empty("btrfs device add"),
+            )
+    }
+
     fn replay_returned_disk2_runner_for_devid4() -> MockRunner {
         with_balance_replay(with_disk1_disk2_devid4_pool_probe(
-            MockRunner::default()
-                .with_output(
-                    CmdRequest::CryptsetupLuksUuid {
-                        device: "/dev/disk/by-id/virtio-disk2".into(),
-                    },
-                    cryptsetup_uuid_ok(
-                        "/dev/disk/by-id/virtio-disk2",
-                        "22222222-2222-2222-2222-222222222222",
-                    ),
-                )
-                .with_luks_dump_text_luks2("/dev/disk/by-id/virtio-disk2")
-                .with_mapper_open(
-                    "braid-disk2",
-                    "/dev/vdb",
-                    "22222222-2222-2222-2222-222222222222",
-                )
-                .with_output_stdin(
-                    CmdRequest::CryptsetupTestPassphrase {
-                        device: "/dev/vda".into(),
-                    },
-                    TEST_PASSPHRASE_BYTES.to_vec(),
-                    ok_raw_empty("cryptsetup open --test-passphrase"),
-                )
-                .with_output_stdin(
-                    CmdRequest::CryptsetupTestPassphrase {
-                        device: "/dev/disk/by-id/virtio-disk2".into(),
-                    },
-                    TEST_PASSPHRASE_BYTES.to_vec(),
-                    ok_raw_empty("cryptsetup open --test-passphrase"),
-                )
-                .with_output(
-                    CmdRequest::BtrfsFilesystemShowTarget {
-                        target: "/dev/mapper/braid-disk2".into(),
-                    },
-                    btrfs_show_target_no_btrfs("/dev/mapper/braid-disk2"),
-                )
-                .with_output(
-                    CmdRequest::BtrfsDeviceScanForget {
-                        devices: vec!["/dev/mapper/braid-disk2".into()],
-                    },
-                    ok_raw_empty("btrfs device scan --forget"),
-                )
-                .with_output(
-                    CmdRequest::WipefsBtrfs {
-                        device: "/dev/mapper/braid-disk2".into(),
-                    },
-                    ok_raw_empty("wipefs"),
-                )
-                .with_output(
-                    CmdRequest::BtrfsDeviceAdd {
-                        device: "/dev/mapper/braid-disk2".into(),
-                        mount_point: MountPoint("/mnt/storage".into()),
-                        force: true,
-                    },
-                    ok_raw_empty("btrfs device add"),
-                ),
+            replay_returned_disk2_runner_base(),
+        ))
+    }
+
+    fn replay_returned_disk2_runner_for_drifted_devid4() -> MockRunner {
+        with_balance_replay(with_disk1_drifted_disk2_devid4_pool_probe(
+            replay_returned_disk2_runner_base(),
         ))
     }
 
@@ -5687,6 +5745,66 @@ mod tests {
         );
     }
 
+    // Intent: live-add recovery's replay loop succeeds when the post-replay
+    // probe reports the replayed target under a drifted mapper but the
+    // journaled LUKS UUID is present in the live pool.
+    //
+    // Why it exists: recovery's ack-cleanup devid lookup must be UUID-keyed
+    // per decision 024. A reverted-to-mapper-keyed replay loop would crash
+    // recovery exactly when drift-tolerance matters most.
+    //
+    // Scenario: recovery replays `pool_add_device` for disk2; the post-replay
+    // probe reports it as `braid-WRONG` carrying the journaled UUID. The
+    // reused-devid ghost is still dropped.
+    #[test]
+    fn live_add_recovery_drops_ghost_under_drifted_mapper_via_replay() {
+        let f = PoolFixture::empty();
+        let journal = recoverable_pool_mutation_add_journal();
+        journal::write_journal(&f.paths, &journal).unwrap();
+        let union = union_memberships(&journal);
+        let targets = match &journal.op {
+            OpKind::Add { targets, .. } => targets,
+            _ => unreachable!("test journal is Add"),
+        };
+        let control = acked_disk(false, 11);
+        seed_acked_stats(
+            &f.paths,
+            &[(1, control.clone()), (4, acked_disk(false, 44))],
+        );
+        let runner = replay_returned_disk2_runner_for_drifted_devid4();
+        let resolver = resolver_for(&[("/dev/vda", "virtio-disk1"), ("/dev/vdb", "virtio-disk2")]);
+        let params = f.recover_params().build();
+
+        execute_add_pool_mutation_recovery(
+            &runner,
+            &MockFs::new(&["/dev/disk/by-id/virtio-disk2", "/dev/mapper/braid-disk2"]),
+            &resolver,
+            &params,
+            AddPoolReplayCtx {
+                credential: None,
+                journal: &journal,
+                union: &union,
+                targets,
+                pool: pool_state_one_disk(),
+            },
+        )
+        .expect("live-add replay should tolerate mapper drift");
+
+        assert!(
+            runner
+                .requests()
+                .iter()
+                .any(|r| matches!(r, CmdRequest::BtrfsDeviceAdd { device, .. } if device == "/dev/mapper/braid-disk2")),
+            "recovery should replay the target add"
+        );
+        let reloaded = alert::load_acked_stats(&f.paths);
+        assert_eq!(reloaded.0.get("1"), Some(&control));
+        assert!(
+            !reloaded.0.contains_key("4"),
+            "replayed target's reused devid must be dropped under mapper drift"
+        );
+    }
+
     // Intent
     // Live-add recovery sweeps ghosts for targets already live at recovery
     // entry when the replay loop is skipped entirely.
@@ -5744,6 +5862,64 @@ mod tests {
         assert!(
             !reloaded.0.contains_key("4"),
             "sweep must drop the committed target's reused devid"
+        );
+    }
+
+    // Intent: live-add recovery's all-live sweep succeeds when the live pool
+    // reports a journaled target under a drifted mapper but its UUID is present.
+    //
+    // Why it exists: `sweep_recovered_add_acked_stats` must resolve every
+    // journaled target by UUID, not by reconstructed `braid-<name>` mapper.
+    //
+    // Scenario: disk2 was added to btrfs at reused devid 4 before the crash,
+    // so recovery sees all targets live and skips replay. The live pool reports
+    // disk2 under `braid-WRONG`; the sweep still drops the reused-devid ghost.
+    #[test]
+    fn live_add_recovery_drops_ghost_under_drifted_mapper_committed_but_closed() {
+        let f = PoolFixture::empty();
+        let journal = recoverable_pool_mutation_add_journal();
+        journal::write_journal(&f.paths, &journal).unwrap();
+        let union = union_memberships(&journal);
+        let targets = match &journal.op {
+            OpKind::Add { targets, .. } => targets,
+            _ => unreachable!("test journal is Add"),
+        };
+        let control = acked_disk(false, 11);
+        seed_acked_stats(
+            &f.paths,
+            &[(1, control.clone()), (4, acked_disk(false, 44))],
+        );
+        let runner = with_balance_replay(MockRunner::default());
+        let resolver = resolver_for(&[("/dev/vda", "virtio-disk1"), ("/dev/vdb", "virtio-disk2")]);
+        let params = f.recover_params().passphrase_file(None).build();
+
+        execute_add_pool_mutation_recovery(
+            &runner,
+            &MockFs::new(&[]),
+            &resolver,
+            &params,
+            AddPoolReplayCtx {
+                credential: None,
+                journal: &journal,
+                union: &union,
+                targets,
+                pool: pool_state_disk1_and_drifted_disk2_devid4(),
+            },
+        )
+        .expect("all-live add recovery should tolerate mapper drift");
+
+        assert!(
+            !runner
+                .requests()
+                .iter()
+                .any(|r| matches!(r, CmdRequest::BtrfsDeviceAdd { .. })),
+            "all-live recovery must not replay btrfs device add"
+        );
+        let reloaded = alert::load_acked_stats(&f.paths);
+        assert_eq!(reloaded.0.get("1"), Some(&control));
+        assert!(
+            !reloaded.0.contains_key("4"),
+            "sweep must drop the committed target's reused devid under mapper drift"
         );
     }
 

@@ -277,6 +277,8 @@ impl<R: CommandRunner> Drop for LuksCleanupGuard<'_, R> {
 struct PoolAddExecutionTarget {
     mapper_path: String,
     force: bool,
+    luks_uuid: LuksUuid,
+    name: DiskName,
 }
 
 #[derive(Debug, Clone)]
@@ -721,18 +723,13 @@ fn format_add_done(names: &[DiskName]) -> String {
     )
 }
 
-/// Mapper-path to devid lookup shared by `cmd_add` and `cmd_recover`.
-///
-/// Both call sites need the post-btrfs-add devid-to-mapper mapping to drop
-/// stale acked-stats baselines for newly assigned devids.
-pub(crate) fn devid_for_mapper_path(pool: &PoolState, mapper_path: &str) -> Option<u64> {
-    let mapper = mapper_path
-        .strip_prefix("/dev/mapper/")
-        .unwrap_or(mapper_path);
-    pool.devices
-        .iter()
-        .find(|device| device.mapper.0 == mapper)
-        .map(|device| device.devid)
+/// Shared post-add resolver so `cmd_add` and `cmd_recover` prove live
+/// btrfs membership with the journaled LUKS UUID instead of mapper labels.
+pub(crate) fn find_added_device_by_uuid<'a>(
+    pool: &'a PoolState,
+    uuid: &LuksUuid,
+) -> Option<&'a PoolDevice> {
+    pool.devices.iter().find(|device| device.luks_uuid == *uuid)
 }
 
 /// Dry-run preview source of truth for `braid add` plus the execute
@@ -883,6 +880,8 @@ impl AddPlan {
                 needs_pool_add.push(PoolAddExecutionTarget {
                     mapper_path: target.mapper_path.clone(),
                     force: true,
+                    luks_uuid: target.luks_uuid.clone(),
+                    name: target.name.clone(),
                 });
             }
         }
@@ -949,6 +948,8 @@ impl AddPlan {
                     needs_pool_add.push(PoolAddExecutionTarget {
                         mapper_path: verified.mapper_path,
                         force: true,
+                        luks_uuid: verified.luks_uuid,
+                        name: verified.name,
                     });
                 }
                 _ => unreachable!("error variants handled by identity_to_error above"),
@@ -1107,6 +1108,8 @@ impl AddPlan {
             needs_pool_add.push(PoolAddExecutionTarget {
                 mapper_path: target.mapper_path.clone(),
                 force: false,
+                luks_uuid: target.luks_uuid.clone(),
+                name: target.name.clone(),
             });
         }
 
@@ -1208,20 +1211,20 @@ impl AddPlan {
                 let pool_after = probe_pool(runner, fs, mount_point).map_err(|e| {
                     AddError::AckCleanupFailed {
                         stage: "post-add probe",
-                        detail: format!("{}: {e}", target.mapper_path),
+                        detail: format!("{}: {e}", target.name),
                     }
                 })?;
-                let devid =
-                    devid_for_mapper_path(&pool_after, &target.mapper_path).ok_or_else(|| {
+                let dev =
+                    find_added_device_by_uuid(&pool_after, &target.luks_uuid).ok_or_else(|| {
                         AddError::AckCleanupFailed {
                             stage: "post-add probe",
-                            detail: format!("{}: not found in pool after add", target.mapper_path),
+                            detail: format!("{}: not found in pool after add", target.name),
                         }
                     })?;
-                alert::drop_ghost_acked_for_devids(params.paths, &[devid]).map_err(|e| {
+                alert::drop_ghost_acked_for_devids(params.paths, &[dev.devid]).map_err(|e| {
                     AddError::AckCleanupFailed {
                         stage: "live-pool add",
-                        detail: format!("devid {devid}: {e}"),
+                        detail: format!("devid {}: {e}", dev.devid),
                     }
                 })?;
             }
@@ -1230,16 +1233,14 @@ impl AddPlan {
             // the long post-add balance while leaving the journal in place so
             // recovery still knows the balance is owed if interrupted.
             let pool_after = probe_pool(runner, fs, mount_point)?;
-            // Internal iteration: the per-target presence check runs
-            // for every UUID-keyed target; the operator-visible error
-            // body names the missing target by its derived mapper
-            // (`braid-<name>`).
-            for target in journal_targets.iter().map(|(_, t)| t) {
-                let mapper = mapper_name(target.name.as_str());
-                if !pool_after.devices.iter().any(|d| d.mapper == mapper) {
+            // Distinct from the per-target probe above: membership is about
+            // to be persisted, so re-check every journaled target in the
+            // current live pool by UUID before saving pool.json.
+            for (uuid, target) in journal_targets.iter() {
+                if find_added_device_by_uuid(&pool_after, uuid).is_none() {
                     return Err(AddError::Validation(format!(
                         "disk '{}' was not found in the live pool after add",
-                        mapper
+                        target.name
                     )));
                 }
             }
@@ -2351,23 +2352,21 @@ mod tests {
         );
     }
 
-    /*
-     * Intent: devid_for_mapper_path resolves the btrfs devid assigned to a
-     * mapper path returned from the add loop.
-     *
-     * Why it exists: live-pool add cleanup must delete the acked-stats entry
-     * for the freshly assigned devid, not for the disk's config name or
-     * by-id path. This helper is the narrow translation boundary.
-     *
-     * Scenario: `braid add` has just added /dev/mapper/braid-disk2, then
-     * probes the pool and must find devid 4 for the cleanup call.
-     */
+    // Intent: find_added_device_by_uuid resolves the live PoolDevice by LUKS
+    // UUID, tolerating mapper drift.
+    //
+    // Why it exists: post-add ack-cleanup and presence verification must key
+    // on the persistent LUKS UUID per decision 024, not on a reconstructed
+    // `braid-<name>` mapper.
+    //
+    // Scenario: post-add probe reports the new device under a drifted mapper
+    // with the journaled UUID; the resolver still matches and exposes devid 4.
     #[test]
-    fn devid_for_mapper_path_matches_mapper_name() {
+    fn find_added_device_by_uuid_tolerates_drifted_mapper() {
         let pool = PoolState {
             mounted: true,
             devices: vec![PoolDevice {
-                mapper: MapperName("braid-disk2".into()),
+                mapper: MapperName("braid-WRONG".into()),
                 luks_uuid: LuksUuid::parse("22222222-2222-2222-2222-222222222222").unwrap(),
                 devid: 4,
                 underlying: "/dev/vdc".into(),
@@ -2378,12 +2377,13 @@ mod tests {
             missing_devids: vec![],
             null_underlying: vec![],
         };
+        let uuid = LuksUuid::parse("22222222-2222-2222-2222-222222222222").unwrap();
+        let missing = LuksUuid::parse("99999999-9999-9999-9999-999999999999").unwrap();
 
-        assert_eq!(
-            devid_for_mapper_path(&pool, "/dev/mapper/braid-disk2"),
-            Some(4)
-        );
-        assert_eq!(devid_for_mapper_path(&pool, "/dev/mapper/missing"), None);
+        let dev = find_added_device_by_uuid(&pool, &uuid).expect("uuid should match");
+        assert_eq!(dev.devid, 4);
+        assert_eq!(dev.mapper, MapperName("braid-WRONG".into()));
+        assert!(find_added_device_by_uuid(&pool, &missing).is_none());
     }
 
     // --- add work-plan identity tests ---
@@ -2593,7 +2593,7 @@ mod tests {
 
         let pool_fsid = POOL_FSID;
         let by_id = ByIdPath::parse("/dev/disk/by-id/virtio-disk2").unwrap();
-        let luks_uuid = LuksUuid::parse("a1b2c3d4-e5f6-7890-abcd-ef1234567890").unwrap();
+        let luks_uuid = LuksUuid::parse("22222222-2222-2222-2222-222222222222").unwrap();
         let probed = vec![ConfigDisk {
             name: DiskName::parse("disk2").expect("valid disk name in test fixture"),
             by_id_path: by_id.clone(),
@@ -3647,11 +3647,13 @@ mod tests {
         mounted: Arc<AtomicBool>,
         added: Mutex<Vec<String>>,
         opened: Mutex<Vec<String>>,
+        formatted_uuids: Mutex<std::collections::BTreeMap<String, String>>,
         fail_bootstrap_post_mount_probe: bool,
         fail_second_add: bool,
         fail_post_add_probe: bool,
         fail_luks_format: bool,
         omit_new_mapper_from_probe: bool,
+        added_mapper_drift: Option<String>,
         disk2_devid: u64,
     }
 
@@ -3661,11 +3663,13 @@ mod tests {
                 mounted: Arc::new(AtomicBool::new(true)),
                 added: Mutex::new(Vec::new()),
                 opened: Mutex::new(vec!["braid-disk1".to_owned()]),
+                formatted_uuids: Mutex::new(std::collections::BTreeMap::new()),
                 fail_bootstrap_post_mount_probe: false,
                 fail_second_add: false,
                 fail_post_add_probe: false,
                 fail_luks_format: false,
                 omit_new_mapper_from_probe: false,
+                added_mapper_drift: None,
                 disk2_devid: 2,
             }
         }
@@ -3702,6 +3706,11 @@ mod tests {
             self
         }
 
+        fn with_added_mapper_drifted(mut self, rename: &str) -> Self {
+            self.added_mapper_drift = Some(rename.to_owned());
+            self
+        }
+
         fn with_disk2_devid(mut self, devid: u64) -> Self {
             self.disk2_devid = devid;
             self
@@ -3718,8 +3727,40 @@ mod tests {
             self.added.lock().unwrap().clone()
         }
 
+        fn canonical_mapper(&self, mapper: &str) -> String {
+            if self
+                .added_mapper_drift
+                .as_ref()
+                .is_some_and(|drifted| drifted == mapper)
+            {
+                "braid-disk2".to_owned()
+            } else {
+                mapper.to_owned()
+            }
+        }
+
+        fn probe_mapper_name(&self, mapper: &str) -> String {
+            if mapper == "braid-disk2" {
+                self.added_mapper_drift
+                    .clone()
+                    .unwrap_or_else(|| mapper.to_owned())
+            } else {
+                mapper.to_owned()
+            }
+        }
+
+        fn mapper_is_open(&self, mapper: &str) -> bool {
+            let canonical = self.canonical_mapper(mapper);
+            self.opened
+                .lock()
+                .unwrap()
+                .iter()
+                .any(|opened| opened == mapper || opened == &canonical)
+        }
+
         fn mapper_devid(&self, mapper: &str) -> u64 {
-            match mapper {
+            let canonical = self.canonical_mapper(mapper);
+            match canonical.as_str() {
                 "braid-disk1" => 1,
                 "braid-disk2" => self.disk2_devid,
                 "braid-disk3" => 3,
@@ -3727,8 +3768,9 @@ mod tests {
             }
         }
 
-        fn mapper_underlying(mapper: &str) -> &'static str {
-            match mapper {
+        fn mapper_underlying(&self, mapper: &str) -> &'static str {
+            let canonical = self.canonical_mapper(mapper);
+            match canonical.as_str() {
                 "braid-disk1" => "/dev/vdb",
                 "braid-disk2" => "/dev/vdc",
                 "braid-disk3" => "/dev/vdd",
@@ -3736,11 +3778,28 @@ mod tests {
             }
         }
 
-        fn luks_uuid_for_underlying(device: &str) -> Option<&'static str> {
+        fn formatted_uuid_for_device(&self, device: &str) -> Option<String> {
+            let formatted = self.formatted_uuids.lock().unwrap();
+            if let Some(uuid) = formatted.get(device) {
+                return Some(uuid.clone());
+            }
+            let by_id = match device {
+                "/dev/vdb" => Some("/dev/disk/by-id/virtio-disk1"),
+                "/dev/vdc" => Some("/dev/disk/by-id/virtio-disk2"),
+                "/dev/vdd" => Some("/dev/disk/by-id/virtio-disk3"),
+                _ => None,
+            }?;
+            formatted.get(by_id).cloned()
+        }
+
+        fn luks_uuid_for_device(&self, device: &str) -> Option<String> {
+            if let Some(uuid) = self.formatted_uuid_for_device(device) {
+                return Some(uuid);
+            }
             match device {
-                "/dev/vdb" => Some("11111111-1111-1111-1111-111111111111"),
-                "/dev/vdc" => Some("22222222-2222-2222-2222-222222222222"),
-                "/dev/vdd" => Some("33333333-3333-3333-3333-333333333333"),
+                "/dev/vdb" => Some("11111111-1111-1111-1111-111111111111".to_owned()),
+                "/dev/vdc" => Some("22222222-2222-2222-2222-222222222222".to_owned()),
+                "/dev/vdd" => Some("33333333-3333-3333-3333-333333333333".to_owned()),
                 _ => None,
             }
         }
@@ -3756,9 +3815,10 @@ mod tests {
                 mappers.len()
             );
             for mapper in mappers {
-                let devid = self.mapper_devid(&mapper);
+                let probe_mapper = self.probe_mapper_name(&mapper);
+                let devid = self.mapper_devid(&probe_mapper);
                 out.push_str(&format!(
-                    "\tdevid    {devid} size 496.00MiB used 121.56MiB path /dev/mapper/{mapper}\n"
+                    "\tdevid    {devid} size 496.00MiB used 121.56MiB path /dev/mapper/{probe_mapper}\n"
                 ));
             }
             out
@@ -3816,18 +3876,12 @@ mod tests {
                     ))
                 }
                 CmdRequest::CryptsetupStatus { mapper } => {
-                    if self
-                        .opened
-                        .lock()
-                        .unwrap()
-                        .iter()
-                        .any(|m| m == mapper.as_str())
-                    {
+                    if self.mapper_is_open(mapper.as_str()) {
                         Ok(mock_ok(
                             &format!("cryptsetup status {mapper}"),
                             &format!(
                                 "{mapper} is active and is in use.\n  type:    LUKS2\n  device:  {}\n  mode:    read/write\n",
-                                Self::mapper_underlying(mapper.as_str())
+                                self.mapper_underlying(mapper.as_str())
                             ),
                         ))
                     } else {
@@ -3840,7 +3894,7 @@ mod tests {
                     }
                 }
                 CmdRequest::CryptsetupLuksUuid { device } => {
-                    if let Some(uuid) = Self::luks_uuid_for_underlying(device) {
+                    if let Some(uuid) = self.luks_uuid_for_device(device) {
                         Ok(mock_ok(
                             &format!("cryptsetup luksUUID {device}"),
                             &format!("{uuid}\n"),
@@ -3866,7 +3920,11 @@ mod tests {
                         exit_status: 1,
                     })
                 }
-                CmdRequest::CryptsetupLuksFormat { device, .. } => {
+                CmdRequest::CryptsetupLuksFormat { device, uuid, .. } => {
+                    self.formatted_uuids
+                        .lock()
+                        .unwrap()
+                        .insert(device.clone(), uuid.as_str().to_owned());
                     Ok(mock_ok(&format!("cryptsetup luksFormat {device}"), ""))
                 }
                 CmdRequest::CryptsetupLuksHeaderBackup {
@@ -3992,6 +4050,65 @@ mod tests {
         assert!(
             !reloaded.0.contains_key("7"),
             "newly assigned devid must not inherit a ghost ack"
+        );
+    }
+
+    // Intent: existing-pool add succeeds when the post-add probe reports the
+    // new device under a drifted mapper but the journaled LUKS UUID is present
+    // in the live pool.
+    //
+    // Why it exists: post-add membership correlation must be UUID-keyed per
+    // decision 024. A reverted-to-mapper-keyed implementation must fail this
+    // test even if helper-level unit tests still pass.
+    //
+    // Scenario: `braid add disk2=...` completes `btrfs device add`; the
+    // post-add probe reports disk2 as `braid-WRONG` with the correct LUKS UUID.
+    // Add still persists membership, clears the journal, and drops the ghost.
+    #[test]
+    fn cmd_add_succeeds_when_post_add_mapper_drifted() {
+        let (_state_tmp, paths, _tmp, config_path, pass_path) = add_test_setup();
+        save_test_acked(&paths, &[("2", test_acked_disk(true, 22))]);
+        let fs = AddMockFs(vec!["/dev/disk/by-id/virtio-disk2".into()]);
+        let runner = AddFullPathRunner::live().with_added_mapper_drifted("braid-WRONG");
+        let inhibitor = crate::inhibit::RecordingInhibitor::new();
+
+        let result = cmd_add(
+            &runner,
+            &fs,
+            &AddParams {
+                config_path: &config_path,
+                disk_specs: &["disk2=/dev/disk/by-id/virtio-disk2".into()],
+                dry_run: false,
+                yes: true,
+                passphrase_stdin: false,
+                passphrase_file: Some(pass_path.as_path()),
+                enroll_key_file: None,
+                luks_format_extra_opts: &[],
+                progress: ProgressOutput::Off,
+                paths: &paths,
+                sleep_inhibitor: &inhibitor,
+                passphrase_reader: &RealTty,
+            },
+        );
+
+        assert!(
+            result.is_ok(),
+            "expected add to tolerate mapper drift, got {result:?}"
+        );
+        assert_eq!(runner.added_mappers(), vec!["braid-disk2"]);
+        let membership = membership::load_membership(&paths).expect("membership should persist");
+        let disk2_name = DiskName::parse("disk2").unwrap();
+        let (_, disk2) = membership
+            .by_name(&disk2_name)
+            .expect("disk2 membership should be saved");
+        assert_eq!(disk2.devid, Some(2));
+        assert!(
+            journal::load_journal(&paths).unwrap().is_none(),
+            "pending-op.json should be cleared after successful add"
+        );
+        assert!(
+            !alert::load_acked_stats(&paths).0.contains_key("2"),
+            "drifted mapper must still resolve the assigned devid for cleanup"
         );
     }
 
