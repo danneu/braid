@@ -98,12 +98,13 @@ enum StrandedClass {
 
 /// Issue exactly two `CmdRequest` calls per stranded mapper -- a
 /// `CryptsetupStatus` to confirm the mapper is a cryptsetup-managed
-/// dm slot, then a `CryptsetupLuksUuid` against the dm path to read
-/// the live LUKS UUID. The parsed UUID is matched against membership
-/// keys to decide MemberOwned vs Orphan. Failure on either call ends
-/// the helper with `Err(CmdError::...)`; the caller's per-mapper
-/// degrade path turns it into a logged-warning Orphan and continues
-/// scanning so one cryptsetup hiccup cannot tank the whole lock.
+/// dm slot and extract its backing device, then a `CryptsetupLuksUuid`
+/// against that backing device to read the live LUKS UUID. The parsed
+/// UUID is matched against membership keys to decide MemberOwned vs
+/// Orphan. Failure on either call ends the helper with
+/// `Err(CmdError::...)`; the caller's per-mapper degrade path turns
+/// it into a logged-warning Orphan and continues scanning so one
+/// cryptsetup hiccup cannot tank the whole lock.
 fn classify_stranded_mapper<R: CommandRunner>(
     runner: &R,
     mapper: &MapperName,
@@ -112,13 +113,28 @@ fn classify_stranded_mapper<R: CommandRunner>(
     let status_raw = runner.run(&CmdRequest::CryptsetupStatus {
         mapper: mapper.0.clone(),
     })?;
-    parse_cryptsetup_status(&status_raw)
+    let status = parse_cryptsetup_status(&status_raw)
         .map_err(|e| CmdError::Failed(format!("cryptsetup status {}: {e}", mapper.0)))?;
+    let backing_device = match status.device.as_deref() {
+        Some(device) if !device.is_empty() && device != "(null)" => device,
+        Some(device) => {
+            return Err(CmdError::Failed(format!(
+                "cryptsetup status {}: mapper backing device is {device}",
+                mapper.0
+            )));
+        }
+        None => {
+            return Err(CmdError::Failed(format!(
+                "cryptsetup status {}: mapper is inactive",
+                mapper.0
+            )));
+        }
+    };
     let uuid_raw = runner.run(&CmdRequest::CryptsetupLuksUuid {
-        device: format!("/dev/mapper/{}", mapper.0),
+        device: backing_device.to_owned(),
     })?;
     let parsed = parse_cryptsetup_luks_uuid(&uuid_raw)
-        .map_err(|e| CmdError::Failed(format!("cryptsetup luksUUID {}: {e}", mapper.0)))?;
+        .map_err(|e| CmdError::Failed(format!("cryptsetup luksUUID {backing_device}: {e}")))?;
     match membership.by_uuid(&parsed.uuid) {
         Some(member) => Ok(StrandedClass::MemberOwned {
             display_name: member.name.clone(),
@@ -912,7 +928,7 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::cmd::MockRunner;
+    use crate::cmd::{MockRunner, RawCommandOutput};
     use crate::mapper_close::{CLOSE_RETRY_ATTEMPTS, CLOSE_RETRY_DELAY};
     use crate::test_fixtures::{
         LockNoopSleeper, LockRecordingRunner, lock_count_forget_steps, lock_err_raw,
@@ -921,6 +937,17 @@ mod tests {
     };
     use std::sync::Mutex;
     use std::time::Duration;
+
+    fn cryptsetup_status_active(mapper: &str, device: &str) -> RawCommandOutput {
+        RawCommandOutput {
+            cmd: format!("cryptsetup status {mapper}"),
+            stdout: format!(
+                "{mapper} is active and is in use.\n  type:    LUKS2\n  device:  {device}\n  mode:    read/write\n"
+            ),
+            stderr: String::new(),
+            exit_status: 0,
+        }
+    }
 
     #[test]
     fn lock_happy_path_unmounts_and_closes() {
@@ -2807,6 +2834,65 @@ mod tests {
             .map(|o| o.mapper.0.as_str())
             .collect();
         assert_eq!(orphan_mappers, vec!["braid-stranded"]);
+    }
+
+    /// Intent: a stranded mapper whose backing LUKS UUID matches
+    /// membership is classified as member-owned using the status-reported
+    /// backing device, not the decrypted `/dev/mapper/<name>` payload.
+    /// Why: `cryptsetup luksUUID /dev/mapper/<name>` probes the opened
+    /// plaintext mapping, not the LUKS header, so it cannot decide identity
+    /// for stranded mapper cleanup.
+    /// Scenario: seed 705b -- pool.devices reports the normal members,
+    /// and a third stranded mapper is open against `/dev/vdc` with UUID
+    /// matching membership's `aaa` entry.
+    #[test]
+    fn full_arm_stranded_mapper_classifies_member_by_backing_device_uuid() {
+        let fs = lock_fs(&[
+            "/dev/mapper/braid-aaa",
+            "/dev/mapper/braid-bbb",
+            "/dev/mapper/braid-stranded",
+        ]);
+        let membership = lock_test_membership();
+        let pool = synthetic_pool_state("braid-aaa", "braid-bbb");
+        let runner = MockRunner::default()
+            .with_output(
+                CmdRequest::CryptsetupStatus {
+                    mapper: "braid-stranded".to_owned(),
+                },
+                cryptsetup_status_active("braid-stranded", "/dev/vdc"),
+            )
+            .with_output(
+                CmdRequest::CryptsetupLuksUuid {
+                    device: "/dev/vdc".to_owned(),
+                },
+                RawCommandOutput {
+                    cmd: "cryptsetup luksUUID /dev/vdc".to_owned(),
+                    stdout: "00000000-0000-0000-0000-0000000002bc\n".to_owned(),
+                    stderr: String::new(),
+                    exit_status: 0,
+                },
+            );
+
+        let mut notes = Vec::new();
+        let close_sets = super::build_close_sets_full(&runner, &fs, &pool, &membership, &mut notes);
+
+        let member_owned: Vec<(&str, &str)> = close_sets
+            .member_owned
+            .iter()
+            .map(|m| (m.mapper.0.as_str(), m.display_name.as_str()))
+            .collect();
+        assert!(
+            member_owned.contains(&("braid-stranded", "aaa")),
+            "stranded mapper should be member-owned via backing UUID, got: {member_owned:?}",
+        );
+        assert!(
+            close_sets
+                .orphan_mappers
+                .iter()
+                .all(|o| o.mapper.0 != "braid-stranded"),
+            "stranded member must not be demoted to orphan: {:?}",
+            close_sets.orphan_mappers,
+        );
     }
 
     /// Intent: probe_pool's NotBtrfs error variant is NOT routed
