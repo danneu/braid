@@ -261,7 +261,7 @@ impl ReplaceWorkPlan {
                     description: format!("LUKS open -> {}", self.new_mapper),
                     commands: vec![CmdRequest::CryptsetupLuksOpen {
                         device: self.new_by_id.as_str().to_owned(),
-                        mapper: self.new_mapper.0.clone(),
+                        mapper: self.new_mapper.clone(),
                     }],
                 });
             }
@@ -297,7 +297,7 @@ impl ReplaceWorkPlan {
                         description: format!("LUKS open -> {}", self.new_mapper),
                         commands: vec![CmdRequest::CryptsetupLuksOpen {
                             device: self.new_by_id.as_str().to_owned(),
-                            mapper: self.new_mapper.0.clone(),
+                            mapper: self.new_mapper.clone(),
                         }],
                     });
                 }
@@ -328,7 +328,7 @@ impl ReplaceWorkPlan {
                 risk: "safe",
                 description: format!("cryptsetup close {}", mapper),
                 commands: vec![CmdRequest::CryptsetupClose {
-                    mapper: mapper.0.clone(),
+                    mapper: mapper.clone(),
                 }],
             });
         }
@@ -488,8 +488,8 @@ impl ReplacePlan {
             .map(|device| CredentialVerifyTarget {
                 // Display-only fallback for credential error messages; replace
                 // source identity is resolved by LUKS UUID before this point.
-                name: name_from_mapper(&device.mapper.0)
-                    .unwrap_or(device.mapper.0.as_str())
+                name: name_from_mapper(device.mapper.as_str())
+                    .unwrap_or(device.mapper.as_str())
                     .to_owned(),
                 device: device.underlying.clone(),
             })
@@ -635,7 +635,7 @@ impl ReplacePlan {
                 let backup_path = backup_luks_header_post_mutation(
                     runner,
                     new_by_id.as_str(),
-                    &new_mn.0,
+                    new_mn.as_str(),
                     params.paths,
                 )?;
                 eprintln!("LUKS header backed up: {}", backup_path.display());
@@ -697,7 +697,7 @@ impl ReplacePlan {
                     let backup_path = backup_luks_header_post_mutation(
                         runner,
                         new_by_id.as_str(),
-                        &new_mn.0,
+                        new_mn.as_str(),
                         params.paths,
                     )?;
                     eprintln!("LUKS header backed up: {}", backup_path.display());
@@ -856,12 +856,15 @@ impl ReplacePlan {
             ..
         } = &journal.op
         {
-            let old_label = mapper.0.strip_prefix("braid-").unwrap_or(&mapper.0);
+            let old_label = mapper
+                .as_str()
+                .strip_prefix("braid-")
+                .unwrap_or(mapper.as_str());
             if probe_observed_mapper_uuid(runner, mapper, journaled_old_uuid)
                 && close_mapper_best_effort(
                     runner,
                     params.sleeper,
-                    &mapper.0,
+                    mapper,
                     old_label,
                     color_enabled,
                 )
@@ -1383,7 +1386,7 @@ fn build_replace_work_plan(
     input: ReplaceWorkPlanInput<'_>,
 ) -> Result<ReplaceWorkPlan, ReplaceError> {
     let new_mapper = mapper_name(input.new_name.as_str());
-    let new_mapper_path = format!("/dev/mapper/{}", new_mapper.0);
+    let new_mapper_path = format!("/dev/mapper/{new_mapper}");
     let journal_target = build_replace_journal_target(
         &input.new_by_id,
         &input.new_probed,
@@ -1407,7 +1410,7 @@ fn build_replace_work_plan(
             header_backup_path: input
                 .paths
                 .luks_headers_dir()
-                .join(format!("{}.luksheader", new_mapper.0)),
+                .join(format!("{new_mapper}.luksheader")),
         },
         ConfigDiskState::PresentLuks { mapper_open, .. } => ReplaceTargetPrep::ExistingLuks {
             mapper_open,
@@ -1415,7 +1418,7 @@ fn build_replace_work_plan(
             header_backup_path: input
                 .paths
                 .luks_headers_dir()
-                .join(format!("{}.luksheader", new_mapper.0)),
+                .join(format!("{new_mapper}.luksheader")),
         },
     };
 
@@ -2381,7 +2384,7 @@ mod tests {
     fn dead_old_resolution_single_missing() {
         let mut pool = two_device_pool();
         // Simulate disk2 missing
-        pool.devices.retain(|d| d.mapper.0 != "braid-disk2");
+        pool.devices.retain(|d| d.mapper.as_str() != "braid-disk2");
         pool.missing_count = 1;
         pool.total_devices = 2;
         let runner = mock_with_missing_devids(&[2]);
@@ -2409,7 +2412,7 @@ mod tests {
     // entry records devid 2.
     fn dead_old_resolution_with_devid() {
         let mut pool = two_device_pool();
-        pool.devices.retain(|d| d.mapper.0 != "braid-disk2");
+        pool.devices.retain(|d| d.mapper.as_str() != "braid-disk2");
         pool.missing_count = 1;
         pool.total_devices = 2;
         let runner = mock_with_missing_devids(&[2]);
@@ -2437,7 +2440,7 @@ mod tests {
     //   disk while pool.json records devid 1 for `--old`.
     fn missing_id_pointing_to_live_device_rejected() {
         let mut pool = two_device_pool();
-        pool.devices.retain(|d| d.mapper.0 != "braid-disk2");
+        pool.devices.retain(|d| d.mapper.as_str() != "braid-disk2");
         pool.missing_count = 1;
         pool.total_devices = 2;
         let runner = mock_with_missing_devids(&[2]);
@@ -2477,7 +2480,7 @@ mod tests {
     //   member records devid 2.
     fn missing_id_disagrees_with_persisted_devid() {
         let mut pool = two_device_pool();
-        pool.devices.retain(|d| d.mapper.0 != "braid-disk2");
+        pool.devices.retain(|d| d.mapper.as_str() != "braid-disk2");
         pool.missing_count = 1;
         pool.total_devices = 2;
         let runner = mock_with_missing_devids(&[2]);
@@ -2516,7 +2519,7 @@ mod tests {
     //   devid 3 missing instead.
     fn persisted_devid_not_in_missing_set_rejected() {
         let mut pool = two_device_pool();
-        pool.devices.retain(|d| d.mapper.0 != "braid-disk2");
+        pool.devices.retain(|d| d.mapper.as_str() != "braid-disk2");
         pool.missing_count = 1;
         pool.total_devices = 2;
         let runner = mock_with_missing_devids(&[3]);
@@ -2547,7 +2550,7 @@ mod tests {
     //   bootstrap had not enriched it yet).
     fn missing_path_without_persisted_devid_rejected() {
         let mut pool = two_device_pool();
-        pool.devices.retain(|d| d.mapper.0 != "braid-disk2");
+        pool.devices.retain(|d| d.mapper.as_str() != "braid-disk2");
         pool.missing_count = 1;
         pool.total_devices = 2;
         let runner = mock_with_missing_devids(&[2]);
@@ -2988,7 +2991,7 @@ mod tests {
             .position(|r| {
                 matches!(
                     r,
-                    CmdRequest::CryptsetupClose { mapper } if mapper == "braid-disk2"
+                    CmdRequest::CryptsetupClose { mapper } if mapper.as_str() == "braid-disk2"
                 )
             })
             .expect("cryptsetup close on braid-disk2 must be issued even when resize fails");
@@ -3071,7 +3074,7 @@ mod tests {
                         replace_done.store(true, std::sync::atomic::Ordering::Relaxed);
                         Some(Ok(mock_ok("btrfs replace start", "")))
                     }
-                    CmdRequest::CryptsetupClose { mapper } if mapper == "braid-disk2" => {
+                    CmdRequest::CryptsetupClose { mapper } if mapper.as_str() == "braid-disk2" => {
                         Some(Ok(RawCommandOutput {
                             cmd: "cryptsetup close".into(),
                             stdout: String::new(),
@@ -3130,7 +3133,7 @@ mod tests {
                         replace_done.store(true, Ordering::Relaxed);
                         Some(Ok(mock_ok("btrfs replace start", "")))
                     }
-                    CmdRequest::CryptsetupClose { mapper } if mapper == "braid-disk2" => {
+                    CmdRequest::CryptsetupClose { mapper } if mapper.as_str() == "braid-disk2" => {
                         let attempt = close_attempts.fetch_add(1, Ordering::SeqCst) + 1;
                         if attempt == 1 {
                             Some(Ok(RawCommandOutput {
@@ -3163,7 +3166,7 @@ mod tests {
             .requests()
             .iter()
             .filter(|request| {
-                matches!(request, CmdRequest::CryptsetupClose { mapper } if mapper == "braid-disk2")
+                matches!(request, CmdRequest::CryptsetupClose { mapper } if mapper.as_str() == "braid-disk2")
             })
             .count();
         assert_eq!(close_count, 2);
@@ -4836,7 +4839,8 @@ mod tests {
         match source.clone() {
             ReplaceSource::Live { mapper, devid } => {
                 assert_eq!(
-                    mapper.0, "braid-WRONG",
+                    mapper.as_str(),
+                    "braid-WRONG",
                     "observed mapper must be cloned, not reconstructed"
                 );
                 assert_eq!(devid, 7);
@@ -4876,7 +4880,7 @@ mod tests {
         MockRunner::default()
             .with_output(
                 CmdRequest::CryptsetupStatus {
-                    mapper: mapper.to_owned(),
+                    mapper: MapperName(mapper.to_owned()),
                 },
                 mock_ok(
                     &format!("cryptsetup status {mapper}"),

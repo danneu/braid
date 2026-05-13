@@ -266,7 +266,7 @@ pub fn probe_pool<R: CommandRunner, F: Filesystem + ?Sized>(
             .to_owned();
 
         let status_raw = runner.run(&CmdRequest::CryptsetupStatus {
-            mapper: name.clone(),
+            mapper: MapperName(name.clone()),
         })?;
         let status = parse_cryptsetup_status(&status_raw)?;
 
@@ -595,7 +595,7 @@ mod tests {
             )
             .with_output(
                 CmdRequest::CryptsetupStatus {
-                    mapper: "braid-toshiba".into(),
+                    mapper: MapperName("braid-toshiba".into()),
                 },
                 cryptsetup_status_inactive("braid-toshiba"),
             );
@@ -645,7 +645,7 @@ mod tests {
             )
             .with_output(
                 CmdRequest::CryptsetupStatus {
-                    mapper: "braid-toshiba".into(),
+                    mapper: MapperName("braid-toshiba".into()),
                 },
                 cryptsetup_status_active("braid-toshiba", "/dev/vda"),
             )
@@ -707,7 +707,7 @@ mod tests {
             )
             .with_output(
                 CmdRequest::CryptsetupStatus {
-                    mapper: "braid-toshiba".into(),
+                    mapper: MapperName("braid-toshiba".into()),
                 },
                 cryptsetup_status_active("braid-toshiba", "/dev/vdz"),
             )
@@ -785,7 +785,7 @@ mod tests {
             )
             .with_output(
                 CmdRequest::CryptsetupStatus {
-                    mapper: "braid-toshiba".into(),
+                    mapper: MapperName("braid-toshiba".into()),
                 },
                 cryptsetup_status_active("braid-toshiba", "/dev/vdz"),
             )
@@ -854,7 +854,7 @@ mod tests {
             )
             .with_output(
                 CmdRequest::CryptsetupStatus {
-                    mapper: "braid-toshiba".into(),
+                    mapper: MapperName("braid-toshiba".into()),
                 },
                 cryptsetup_status_inactive("braid-toshiba"),
             );
@@ -906,7 +906,7 @@ mod tests {
             )
             .with_output(
                 CmdRequest::CryptsetupStatus {
-                    mapper: "braid-toshiba".into(),
+                    mapper: MapperName("braid-toshiba".into()),
                 },
                 cryptsetup_status_active_null("braid-toshiba"),
             );
@@ -1161,7 +1161,7 @@ mod tests {
             )
             .with_output(
                 CmdRequest::CryptsetupStatus {
-                    mapper: "braid-toshiba".into(),
+                    mapper: MapperName("braid-toshiba".into()),
                 },
                 cryptsetup_status_active("braid-toshiba", "/dev/vda"),
             )
@@ -1173,7 +1173,7 @@ mod tests {
             )
             .with_output(
                 CmdRequest::CryptsetupStatus {
-                    mapper: "braid-ironwolf".into(),
+                    mapper: MapperName("braid-ironwolf".into()),
                 },
                 cryptsetup_status_active("braid-ironwolf", "/dev/vdb"),
             )
@@ -1218,7 +1218,7 @@ mod tests {
             )
             .with_output(
                 CmdRequest::CryptsetupStatus {
-                    mapper: "braid-toshiba".into(),
+                    mapper: MapperName("braid-toshiba".into()),
                 },
                 cryptsetup_status_active("braid-toshiba", "/dev/vda"),
             )
@@ -1230,7 +1230,7 @@ mod tests {
             )
             .with_output(
                 CmdRequest::CryptsetupStatus {
-                    mapper: "braid-ironwolf".into(),
+                    mapper: MapperName("braid-ironwolf".into()),
                 },
                 cryptsetup_status_active("braid-ironwolf", "/dev/vdb"),
             )
@@ -1267,7 +1267,7 @@ mod tests {
             )
             .with_output(
                 CmdRequest::CryptsetupStatus {
-                    mapper: "braid-toshiba".into(),
+                    mapper: MapperName("braid-toshiba".into()),
                 },
                 cryptsetup_status_active("braid-toshiba", "/dev/vda"),
             )
@@ -1303,7 +1303,7 @@ mod tests {
             )
             .with_output(
                 CmdRequest::CryptsetupStatus {
-                    mapper: "braid-toshiba".into(),
+                    mapper: MapperName("braid-toshiba".into()),
                 },
                 err_raw(
                     "cryptsetup status braid-toshiba",
@@ -1368,7 +1368,7 @@ mod tests {
             )
             .with_output(
                 CmdRequest::CryptsetupStatus {
-                    mapper: "braid-toshiba".into(),
+                    mapper: MapperName("braid-toshiba".into()),
                 },
                 cryptsetup_status_active("braid-toshiba", "/dev/vda"),
             )
@@ -1380,7 +1380,7 @@ mod tests {
             )
             .with_output(
                 CmdRequest::CryptsetupStatus {
-                    mapper: "braid-ironwolf".into(),
+                    mapper: MapperName("braid-ironwolf".into()),
                 },
                 // cryptsetup reports device: (null) when backing device vanishes
                 ok_raw(
@@ -1434,7 +1434,7 @@ mod tests {
             )
             .with_output(
                 CmdRequest::CryptsetupStatus {
-                    mapper: "braid-toshiba".into(),
+                    mapper: MapperName("braid-toshiba".into()),
                 },
                 cryptsetup_status_active("braid-toshiba", "/dev/vda"),
             )

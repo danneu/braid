@@ -419,7 +419,7 @@ pub(crate) fn status_runner_healthy_3disk_base() -> MockRunner {
         )
         .with_output(
             CmdRequest::CryptsetupStatus {
-                mapper: "disk1".into(),
+                mapper: MapperName("disk1".into()),
             },
             status_cryptsetup_status_active("disk1", "/dev/vda"),
         )
@@ -431,7 +431,7 @@ pub(crate) fn status_runner_healthy_3disk_base() -> MockRunner {
         )
         .with_output(
             CmdRequest::CryptsetupStatus {
-                mapper: "disk2".into(),
+                mapper: MapperName("disk2".into()),
             },
             status_cryptsetup_status_active("disk2", "/dev/vdb"),
         )
@@ -443,7 +443,7 @@ pub(crate) fn status_runner_healthy_3disk_base() -> MockRunner {
         )
         .with_output(
             CmdRequest::CryptsetupStatus {
-                mapper: "disk3".into(),
+                mapper: MapperName("disk3".into()),
             },
             status_cryptsetup_status_active("disk3", "/dev/vdc"),
         )

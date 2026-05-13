@@ -68,6 +68,7 @@ with subtest("Manually mount disk1 under a drifted mapper"):
 with subtest("Lock closes the observed drifted mapper"):
     status, output = machine.execute("braid lock 2>&1")
     assert status == 0, f"braid lock failed: {output}"
+    assert "disk disk1: already closed" not in output, output
     assert "disk disk1: locking" in output, output
     assert "disk disk1: locked" in output, output
     machine.fail("mountpoint -q /mnt/storage")

@@ -72,9 +72,12 @@ impl RecordingRunner {
 impl CommandRunner for RecordingRunner {
     fn run(&self, request: &CmdRequest) -> Result<RawCommandOutput, CmdError> {
         if let CmdRequest::CryptsetupClose { mapper } = request {
-            self.close_calls.lock().unwrap().push(mapper.clone());
+            self.close_calls
+                .lock()
+                .unwrap()
+                .push(mapper.as_str().to_owned());
             let mut seqs = self.close_sequences.lock().unwrap();
-            if let Some(queue) = seqs.get_mut(mapper)
+            if let Some(queue) = seqs.get_mut(mapper.as_str())
                 && let Some(out) = queue.pop_front()
             {
                 return Ok(out);

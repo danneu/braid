@@ -159,7 +159,7 @@ impl RemovalPool {
                 Some(Ok(mock_ok(&format!("btrfs filesystem show {mount_point}"), show)))
             }
             CmdRequest::CryptsetupStatus { mapper } => {
-                let dev = mapper_underlying(mapper)?;
+                let dev = mapper_underlying(mapper.as_str())?;
                 Some(Ok(mock_ok(
                     &format!("cryptsetup status {mapper}"),
                     &format!(

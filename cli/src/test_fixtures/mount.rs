@@ -31,7 +31,7 @@ use crate::mount::{
 use crate::probe::Filesystem;
 use crate::progress::Sleeper;
 use crate::secret::Passphrase;
-use crate::types::{ByIdPath, LuksUuid, MountPoint};
+use crate::types::{ByIdPath, LuksUuid, MapperName, MountPoint};
 use zeroize::Zeroizing;
 
 // ---------------------------------------------------------------------------
@@ -371,7 +371,7 @@ pub(crate) fn direct_two_disk_open_runner() -> MockRunner {
         .with_output_stdin(
             CmdRequest::CryptsetupLuksOpen {
                 device: "/dev/disk/by-id/virtio-disk1".into(),
-                mapper: "braid-disk1".into(),
+                mapper: MapperName("braid-disk1".into()),
             },
             MOUNT_TEST_PASSPHRASE_BYTES.to_vec(),
             ok_raw("cryptsetup open"),
@@ -379,7 +379,7 @@ pub(crate) fn direct_two_disk_open_runner() -> MockRunner {
         .with_output_stdin(
             CmdRequest::CryptsetupLuksOpen {
                 device: "/dev/disk/by-id/virtio-disk2".into(),
-                mapper: "braid-disk2".into(),
+                mapper: MapperName("braid-disk2".into()),
             },
             MOUNT_TEST_PASSPHRASE_BYTES.to_vec(),
             ok_raw("cryptsetup open"),

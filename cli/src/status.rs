@@ -2752,7 +2752,7 @@ mod tests {
             )
             .with_output(
                 CmdRequest::CryptsetupStatus {
-                    mapper: "disk1".into(),
+                    mapper: MapperName("disk1".into()),
                 },
                 status_cryptsetup_status_active("disk1", "/dev/vda"),
             )
@@ -2764,7 +2764,7 @@ mod tests {
             )
             .with_output(
                 CmdRequest::CryptsetupStatus {
-                    mapper: "disk2".into(),
+                    mapper: MapperName("disk2".into()),
                 },
                 status_cryptsetup_status_active("disk2", "/dev/vdb"),
             )
@@ -2875,7 +2875,7 @@ mod tests {
             )
             .with_output(
                 CmdRequest::CryptsetupStatus {
-                    mapper: "disk2".into(),
+                    mapper: MapperName("disk2".into()),
                 },
                 status_cryptsetup_status_active("disk2", "(null)"),
             );
@@ -2906,7 +2906,7 @@ mod tests {
             )
             .with_output(
                 CmdRequest::CryptsetupStatus {
-                    mapper: "disk1".into(),
+                    mapper: MapperName("disk1".into()),
                 },
                 status_cryptsetup_status_active("disk1", "/dev/vda"),
             )
@@ -3491,7 +3491,7 @@ mod tests {
             )
             .with_output(
                 CmdRequest::CryptsetupStatus {
-                    mapper: "disk1".into(),
+                    mapper: MapperName("disk1".into()),
                 },
                 status_cryptsetup_status_active("disk1", "/dev/vda"),
             )
@@ -3558,7 +3558,7 @@ mod tests {
             )
             .with_output(
                 CmdRequest::CryptsetupStatus {
-                    mapper: "braid-disk1".into(),
+                    mapper: MapperName("braid-disk1".into()),
                 },
                 status_cryptsetup_status_active("braid-disk1", "/dev/vdz"),
             )

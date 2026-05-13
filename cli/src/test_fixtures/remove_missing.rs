@@ -119,7 +119,7 @@ impl RemoveMissingPool {
                 )))
             }
             CmdRequest::CryptsetupStatus { mapper } => {
-                let dev = mapper_underlying(mapper)?;
+                let dev = mapper_underlying(mapper.as_str())?;
                 Some(Ok(mock_ok(
                     &format!("cryptsetup status {mapper}"),
                     &format!(

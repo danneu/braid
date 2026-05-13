@@ -9,6 +9,7 @@ use crate::probe::{Filesystem, ProbeError, probe_fsid, probe_pool};
 use crate::progress::{RealSleeper, Sleeper};
 use crate::status_tag::{StatusTag, color_enabled_for_stderr, status_line};
 use crate::types::{DiskName, MapperName, MountPoint, PoolState};
+use std::collections::HashSet;
 
 #[derive(Debug, thiserror::Error)]
 pub enum LockError {
@@ -50,61 +51,96 @@ pub enum LockSnapshot {
     },
 }
 
-/// A member-owned mapper to close at lock execution. `mapper` is the
-/// observed `MapperName` from `PoolDevice.mapper` (or the
-/// classification helper for stranded mappers); `display_name` is the
-/// canonical disk name for status output. Classified once at plan
-/// time so `execute` never has to redo the identity decision.
-// TODO(post-migration): consider unifying MemberOwnedClose and
-// OrphanMapper into LockMapperClose { kind } once this migration
-// lands -- see plans/impl/2026-05-12-luks-uuid-as-identity/plan.md.
+/// A mapper to close at lock execution. `mapper` is the observed name,
+/// while `kind` carries the member/orphan status behavior decided at
+/// plan time.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct MemberOwnedClose {
+pub struct LockMapperClose {
     /// Observed mapper to close; may differ from `mapper_name(display_name)`.
     pub mapper: MapperName,
-    /// Canonical membership name used only for status output.
-    pub display_name: DiskName,
+    /// Status-output and error-behavior class for this planned close.
+    pub kind: LockMapperCloseKind,
 }
 
-/// Combined close set produced by lock planning. Two parallel
-/// vectors so the close path can iterate member-owned then orphan in
-/// the order today's `close_set_paths` already uses.
-// TODO(post-migration): consider unifying MemberOwnedClose and
-// OrphanMapper into LockMapperClose { kind } once this migration
-// lands -- see plans/impl/2026-05-12-luks-uuid-as-identity/plan.md.
+/// Identity class for a planned lock close.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct LockCloseSets {
-    /// Mappers proven to belong to UUID/devid-correlated members.
-    pub member_owned: Vec<MemberOwnedClose>,
-    /// Braid-prefixed mapper slots not proven to belong to membership.
-    pub orphan_mappers: Vec<OrphanMapper>,
-}
-
-/// Internal scanned-orphan representation. Constructed by
-/// `scan_orphan_mappers_by_name` (FsidOnly fallback) or by the
-/// stranded-mapper classification helper (Full path): a
-/// `/dev/mapper/braid-*` entry observed at plan time that is not part
-/// of pool membership. The `mapper` field is typed `MapperName`
-/// post-migration so every observed-mapper field shares one type;
-/// `disk_name` stays `String` to carry the raw basename text from
-/// `name_from_mapper` -- including text `DiskName::parse` rejects
-/// (malformed-mapper fall-through to orphan classification).
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct OrphanMapper {
-    /// Observed mapper to warn about and close after member-owned mappers.
-    pub mapper: MapperName,
-    /// Raw display basename for the warning body; may not parse as DiskName.
-    pub disk_name: String,
-}
-
-/// Classification result for a stranded `/dev/mapper/braid-*` slot
-/// that did not appear in the planning-time `pool.devices` scan.
-/// `MemberOwned` carries the canonical disk name so the close set's
-/// status line can render `disk <name>: locking...`; `Orphan` rolls
-/// straight into the orphan-warn path.
-enum StrandedClass {
+pub enum LockMapperCloseKind {
+    /// Mapper proven to belong to a pool member; carries the validated
+    /// membership disk name used in status output.
     MemberOwned { display_name: DiskName },
-    Orphan,
+    /// Braid-prefixed mapper not proven to be a member; carries the raw
+    /// basename so malformed names remain closable and reportable.
+    Orphan { disk_name: String },
+}
+
+impl LockMapperClose {
+    fn is_orphan(&self) -> bool {
+        matches!(self.kind, LockMapperCloseKind::Orphan { .. })
+    }
+
+    fn disk_label(&self) -> &str {
+        match &self.kind {
+            LockMapperCloseKind::MemberOwned { display_name } => display_name.as_str(),
+            LockMapperCloseKind::Orphan { disk_name } => disk_name.as_str(),
+        }
+    }
+}
+
+/// Ordered close set produced by lock planning and consumed by dry-run
+/// preview, btrfs forget, and real mapper close execution.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct LockCloseSet {
+    entries: Vec<LockMapperClose>,
+}
+
+impl LockCloseSet {
+    /// Combine already-classified member-owned and orphan closes into the
+    /// lock ordering contract: all members first, then all orphans.
+    pub fn from_classified(members: Vec<LockMapperClose>, orphans: Vec<LockMapperClose>) -> Self {
+        let entries = members.into_iter().chain(orphans).collect();
+        Self { entries }
+    }
+
+    /// Borrow the ordered entries so dry-run and execute loops cannot
+    /// re-sort or rebuild the planned close set.
+    pub fn entries(&self) -> &[LockMapperClose] {
+        &self.entries
+    }
+
+    /// Report whether lock has any mapper close work to do.
+    pub fn is_empty(&self) -> bool {
+        self.entries.is_empty()
+    }
+
+    /// Return all observed mapper names planned for close, including
+    /// orphan mappers, for membership prelude filtering.
+    pub fn mapper_names(&self) -> HashSet<&str> {
+        self.entries
+            .iter()
+            .map(|entry| entry.mapper.as_str())
+            .collect()
+    }
+
+    /// Return only member-owned display names so drifted member mappers
+    /// do not also print an already-closed line for the same disk.
+    pub fn member_names(&self) -> HashSet<&DiskName> {
+        self.entries
+            .iter()
+            .filter_map(|entry| match &entry.kind {
+                LockMapperCloseKind::MemberOwned { display_name } => Some(display_name),
+                LockMapperCloseKind::Orphan { .. } => None,
+            })
+            .collect()
+    }
+
+    /// Render the exact ordered `/dev/mapper/...` paths handed to
+    /// `btrfs device scan --forget`.
+    pub fn forget_paths(&self) -> Vec<String> {
+        self.entries
+            .iter()
+            .map(|entry| format!("/dev/mapper/{}", entry.mapper))
+            .collect()
+    }
 }
 
 /// Issue exactly two `CmdRequest` calls per stranded mapper -- a
@@ -120,24 +156,24 @@ fn classify_stranded_mapper<R: CommandRunner>(
     runner: &R,
     mapper: &MapperName,
     membership: &PoolMembership,
-) -> Result<StrandedClass, CmdError> {
+) -> Result<LockMapperCloseKind, CmdError> {
     let status_raw = runner.run(&CmdRequest::CryptsetupStatus {
-        mapper: mapper.0.clone(),
+        mapper: mapper.clone(),
     })?;
     let status = parse_cryptsetup_status(&status_raw)
-        .map_err(|e| CmdError::Failed(format!("cryptsetup status {}: {e}", mapper.0)))?;
+        .map_err(|e| CmdError::Failed(format!("cryptsetup status {mapper}: {e}")))?;
     let backing_device = match status.device.as_deref() {
         Some(device) if !device.is_empty() && device != "(null)" => device,
         Some(device) => {
             return Err(CmdError::Failed(format!(
                 "cryptsetup status {}: mapper backing device is {device}",
-                mapper.0
+                mapper
             )));
         }
         None => {
             return Err(CmdError::Failed(format!(
                 "cryptsetup status {}: mapper is inactive",
-                mapper.0
+                mapper
             )));
         }
     };
@@ -147,24 +183,25 @@ fn classify_stranded_mapper<R: CommandRunner>(
     let parsed = parse_cryptsetup_luks_uuid(&uuid_raw)
         .map_err(|e| CmdError::Failed(format!("cryptsetup luksUUID {backing_device}: {e}")))?;
     match membership.by_uuid(&parsed.uuid) {
-        Some(member) => Ok(StrandedClass::MemberOwned {
+        Some(member) => Ok(LockMapperCloseKind::MemberOwned {
             display_name: member.name.clone(),
         }),
-        None => Ok(StrandedClass::Orphan),
+        None => Ok(LockMapperCloseKind::Orphan {
+            disk_name: name_from_mapper(mapper.as_str())
+                .unwrap_or(mapper.as_str())
+                .to_owned(),
+        }),
     }
 }
 
 /// Enumerate `/dev/mapper/braid-*` entries that are NOT in pool
 /// membership by name (the FsidOnly-arm fallback). Drift-blind by
 /// design -- per-device drift detection requires the per-device
-/// probe data that only `LockSnapshot::Full` provides. Renamed from
-/// `scan_orphan_mappers` to flag the legacy classifier explicitly:
-/// in the Full arm the close-set builder routes through
-/// `classify_stranded_mapper` instead.
+/// probe data that only `LockSnapshot::Full` provides.
 fn scan_orphan_mappers_by_name<F: Filesystem + ?Sized>(
     fs: &F,
     membership: &PoolMembership,
-) -> Result<Vec<OrphanMapper>, std::io::Error> {
+) -> Result<Vec<LockMapperClose>, std::io::Error> {
     let entries = fs.list_dir("/dev/mapper")?;
     let mut orphans = Vec::new();
     for entry in entries {
@@ -173,8 +210,7 @@ fn scan_orphan_mappers_by_name<F: Filesystem + ?Sized>(
         };
         // Malformed `braid-<not-a-valid-disk-name>` falls through to
         // orphan classification rather than skipping silently. The
-        // OrphanMapper.disk_name carries the raw basename for the
-        // warning body, which by construction admits text
+        // raw basename carries the warning body, including text that
         // DiskName::parse rejects.
         let parsed = DiskName::parse(disk_name_raw);
         if let Ok(name) = &parsed
@@ -185,9 +221,11 @@ fn scan_orphan_mappers_by_name<F: Filesystem + ?Sized>(
         if !fs.exists(&format!("/dev/mapper/{entry}")) {
             continue;
         }
-        orphans.push(OrphanMapper {
+        orphans.push(LockMapperClose {
             mapper: MapperName(entry.clone()),
-            disk_name: disk_name_raw.to_owned(),
+            kind: LockMapperCloseKind::Orphan {
+                disk_name: disk_name_raw.to_owned(),
+            },
         });
     }
     Ok(orphans)
@@ -235,33 +273,11 @@ fn umount_stderr_is_busy(stderr: &str) -> bool {
     s == "target is busy" || s.ends_with(": target is busy")
 }
 
-/// Compose the lock close set as fully qualified `/dev/mapper/...`
-/// paths: every member-owned mapper observed open at plan time,
-/// followed by orphaned braid-* mappers, in that order. Caller is
-/// responsible for any TOCTOU re-filter -- this helper does not
-/// touch the filesystem. Both slices render through
-/// `MapperName::Display` so the wire format stays byte-identical to
-/// the pre-migration `String` path.
-fn close_set_paths(
-    member_owned: &[MemberOwnedClose],
-    orphan_mappers: &[OrphanMapper],
-) -> Vec<String> {
-    member_owned
-        .iter()
-        .map(|m| format!("/dev/mapper/{}", m.mapper))
-        .chain(
-            orphan_mappers
-                .iter()
-                .map(|o| format!("/dev/mapper/{}", o.mapper)),
-        )
-        .collect()
-}
-
 /// Shared close-and-aggregate state for the membership and orphan
-/// loops in `LockPlan::execute`. Bundles the loop-invariant inputs
+/// loop in `LockPlan::execute`. Bundles the loop-invariant inputs
 /// (runner, sleeper, color, umount-busy suppression flag) with the
 /// `&mut first_mapper_error` accumulator so status formatting and
-/// error-aggregation cannot drift between the two callers.
+/// error-aggregation cannot drift by close kind.
 struct CloseMapperCtx<'a, R, S>
 where
     R: CommandRunner,
@@ -279,7 +295,7 @@ where
     R: CommandRunner,
     S: Sleeper,
 {
-    fn close_one(&mut self, mapper: &str, disk_label: &str, is_orphan: bool) {
+    fn close_one(&mut self, mapper: &MapperName, disk_label: &str, is_orphan: bool) {
         let color_enabled = self.color_enabled;
         let line = |t, body: &str| status_line(t, color_enabled, body);
         let paren = if is_orphan { " (orphan)" } else { "" };
@@ -330,14 +346,12 @@ where
     }
 }
 
-/// Compile dry-run steps for lock. The close-set's two slices are
-/// driven by the same observed mapper strings as `execute` (see
-/// `LockPlan::execute`); this keeps the forget set, dry-run steps, and
-/// real-run close calls byte-identical on identical inputs.
+/// Compile dry-run steps for lock from the same ordered close set that
+/// `execute` consumes, keeping forget paths, dry-run steps, and real
+/// close calls byte-identical on identical inputs.
 fn compile_lock_steps(
     pool_was_mounted: bool,
-    member_owned: &[MemberOwnedClose],
-    orphan_mappers: &[OrphanMapper],
+    close_set: &LockCloseSet,
     mount_point: &MountPoint,
 ) -> Vec<Step> {
     let mut steps = Vec::new();
@@ -350,7 +364,7 @@ fn compile_lock_steps(
                 mount_point: mount_point.clone(),
             }],
         });
-        let forget_devs = close_set_paths(member_owned, orphan_mappers);
+        let forget_devs = close_set.forget_paths();
         if !forget_devs.is_empty() {
             steps.push(Step {
                 risk: "safe",
@@ -362,26 +376,13 @@ fn compile_lock_steps(
         }
     }
 
-    for entry in member_owned {
+    for entry in close_set.entries() {
+        let orphan_suffix = if entry.is_orphan() { " (orphan)" } else { "" };
         steps.push(Step {
             risk: "safe",
-            description: format!("close LUKS mapper {}", entry.mapper),
+            description: format!("close LUKS mapper {}{orphan_suffix}", entry.mapper),
             commands: vec![CmdRequest::CryptsetupClose {
-                // TODO(post-migration): retype mapper: String to
-                // MapperName once this migration lands.
-                mapper: entry.mapper.0.clone(),
-            }],
-        });
-    }
-
-    for orphan in orphan_mappers {
-        steps.push(Step {
-            risk: "safe",
-            description: format!("close LUKS mapper {} (orphan)", orphan.mapper),
-            commands: vec![CmdRequest::CryptsetupClose {
-                // TODO(post-migration): retype mapper: String to
-                // MapperName once this migration lands.
-                mapper: orphan.mapper.0.clone(),
+                mapper: entry.mapper.clone(),
             }],
         });
     }
@@ -389,23 +390,15 @@ fn compile_lock_steps(
     steps
 }
 
-/// The dry-run preview source of truth for `braid lock` and the sets
-/// pre-computed during planning. The membership close decision and
-/// forget set are driven by `member_owned`; `fs.exists` during execute
+/// The dry-run preview source of truth for `braid lock` and the
+/// close set pre-computed during planning. `fs.exists` during execute
 /// is only a disappearance guard before mutating an already-planned
 /// mapper.
 pub struct LockPlan {
     pub notes: Vec<PreviewNote>,
-    pub steps: Vec<Step>,
     pub pool_was_mounted: bool,
-    /// Member-owned mappers observed open during planning (the
-    /// successor to `open_mappers`). For `LockSnapshot::Full` each
-    /// entry's `mapper` is cloned from the live `PoolDevice.mapper`
-    /// (or the stranded-mapper classifier); for `LockSnapshot::FsidOnly`
-    /// it is reconstructed via `mapper_name(member.name)` because no
-    /// per-device live data is available.
-    pub member_owned: Vec<MemberOwnedClose>,
-    orphan_mappers: Vec<OrphanMapper>,
+    /// Ordered mapper closes consumed by preview, forget, and execute.
+    pub close_set: LockCloseSet,
     pub mount_point: MountPoint,
 }
 
@@ -414,7 +407,7 @@ impl LockPlan {
         Preview {
             completeness: PreviewCompleteness::Complete,
             notes: self.notes.clone(),
-            steps: self.steps.clone(),
+            steps: compile_lock_steps(self.pool_was_mounted, &self.close_set, &self.mount_point),
         }
     }
 
@@ -444,7 +437,6 @@ impl LockPlan {
         }
 
         let mount_point = &self.mount_point;
-        let orphan_mappers = &self.orphan_mappers;
 
         // 2. If mounted → unmount
         let mut umount_error: Option<LockError> = None;
@@ -493,7 +485,7 @@ impl LockPlan {
                 // pools. Scope to the close set (membership + orphan mappers)
                 // -- the no-arg form is kernel-global and would invalidate
                 // scan entries for unrelated btrfs filesystems on the host.
-                let mut forget_devs = close_set_paths(&self.member_owned, orphan_mappers);
+                let mut forget_devs = self.close_set.forget_paths();
                 forget_devs.retain(|p| fs.exists(p));
                 if !forget_devs.is_empty() {
                     let forget_result = runner.run(&CmdRequest::BtrfsDeviceScanForget {
@@ -528,17 +520,13 @@ impl LockPlan {
             }
         }
 
-        // 3. Close each member-owned mapper. For every membership
-        // entry NOT in member_owned (`planned`-set), surface
-        // "already closed". The planned set comes from observed
-        // mappers in the Full arm, and from reconstructed names in
-        // the FsidOnly arm; either way the close path treats
-        // anything outside that set as already-closed.
-        let planned_mappers: std::collections::HashSet<&str> = self
-            .member_owned
-            .iter()
-            .map(|e| e.mapper.0.as_str())
-            .collect();
+        // 3. Close each planned mapper. For every membership entry
+        // outside the planned member-owned names and observed mapper
+        // names, surface "already closed". This avoids contradictory
+        // output when a member-owned mapper is observed under a
+        // non-default mapper name.
+        let planned_mappers = self.close_set.mapper_names();
+        let planned_members = self.close_set.member_names();
         let mut all_already_closed = true;
         {
             let mut close_ctx = CloseMapperCtx {
@@ -549,14 +537,15 @@ impl LockPlan {
                 first_mapper_error: &mut first_mapper_error,
             };
             // Membership-side "already closed" prelude: for every
-            // member whose expected mapper is not in the planned
-            // close set, emit the already-closed status line. The
-            // expected mapper is reconstructed from name purely for
-            // display here; identity decisions for the close itself
-            // were made at plan time.
+            // member whose name and expected mapper are both outside
+            // the planned close set, emit the already-closed status
+            // line. The expected mapper is reconstructed from name
+            // purely for display here; identity decisions for the
+            // close itself were made at plan time.
             for (_uuid, member) in membership.iter() {
                 let mn = mapper_name(member.name.as_str());
-                if !planned_mappers.contains(mn.0.as_str()) {
+                if !planned_members.contains(&member.name) && !planned_mappers.contains(mn.as_str())
+                {
                     eprint!(
                         "{}",
                         line(
@@ -566,16 +555,18 @@ impl LockPlan {
                     );
                 }
             }
-            // Member-owned closes, observed-mapper-first
-            // (matches today's close_set_paths ordering).
-            for entry in &self.member_owned {
+            // Planned closes, observed-mapper-first.
+            for entry in self.close_set.entries() {
                 let mapper_path = format!("/dev/mapper/{}", entry.mapper);
                 if !fs.exists(&mapper_path) {
+                    if entry.is_orphan() {
+                        continue;
+                    }
                     eprint!(
                         "{}",
                         line(
                             StatusTag::Ok,
-                            &format!("disk {}: already closed", entry.display_name)
+                            &format!("disk {}: already closed", entry.disk_label())
                         )
                     );
                     continue;
@@ -584,29 +575,7 @@ impl LockPlan {
                 // double-drift -- see plan section "Accepted risk:
                 // in-process member-owned close double-drift" for
                 // rationale.
-                close_ctx.close_one(&entry.mapper.0, entry.display_name.as_str(), false);
-                all_already_closed = false;
-            }
-        }
-
-        // 3b. Close orphaned braid-* mappers (precomputed during
-        // planning so the forget call shared the same close-set). An
-        // orphan is detected iff fs.exists was true at plan time;
-        // re-check to cover the narrow window where it disappeared on
-        // its own.
-        {
-            let mut close_ctx = CloseMapperCtx {
-                runner,
-                sleeper,
-                color_enabled,
-                umount_error: &umount_error,
-                first_mapper_error: &mut first_mapper_error,
-            };
-            for orphan in orphan_mappers {
-                if !fs.exists(&format!("/dev/mapper/{}", orphan.mapper)) {
-                    continue;
-                }
-                close_ctx.close_one(&orphan.mapper.0, &orphan.disk_name, true);
+                close_ctx.close_one(&entry.mapper, entry.disk_label(), entry.is_orphan());
                 all_already_closed = false;
             }
         }
@@ -717,19 +686,10 @@ where
         }
     };
 
-    let steps = compile_lock_steps(
-        pool_was_mounted,
-        &close_sets.member_owned,
-        &close_sets.orphan_mappers,
-        &mount_point,
-    );
-
     Ok(LockPlan {
         notes,
-        steps,
         pool_was_mounted,
-        member_owned: close_sets.member_owned,
-        orphan_mappers: close_sets.orphan_mappers,
+        close_set: close_sets,
         mount_point,
     })
 }
@@ -747,28 +707,30 @@ fn build_close_sets_full<R: CommandRunner, F: Filesystem + ?Sized>(
     pool: &PoolState,
     membership: &PoolMembership,
     notes: &mut Vec<PreviewNote>,
-) -> LockCloseSets {
-    let mut member_owned: Vec<MemberOwnedClose> = Vec::new();
-    let mut orphan_mappers: Vec<OrphanMapper> = Vec::new();
+) -> LockCloseSet {
+    let mut member_owned: Vec<LockMapperClose> = Vec::new();
+    let mut orphan_mappers: Vec<LockMapperClose> = Vec::new();
 
     // Pass 1: pool.devices, classified by observed LUKS UUID.
     for dev in &pool.devices {
         if let Some(member) = membership.by_uuid(&dev.luks_uuid) {
-            member_owned.push(MemberOwnedClose {
+            member_owned.push(LockMapperClose {
                 mapper: dev.mapper.clone(),
-                display_name: member.name.clone(),
+                kind: LockMapperCloseKind::MemberOwned {
+                    display_name: member.name.clone(),
+                },
             });
         } else {
             // Live mapper carries a UUID not in membership -- treat
             // as orphan (the close-observed-not-reconstructed
             // doctrine). disk_name carries the basename for the
             // warning body.
-            let disk_name = name_from_mapper(&dev.mapper.0)
-                .unwrap_or(dev.mapper.0.as_str())
+            let disk_name = name_from_mapper(dev.mapper.as_str())
+                .unwrap_or(dev.mapper.as_str())
                 .to_owned();
-            orphan_mappers.push(OrphanMapper {
+            orphan_mappers.push(LockMapperClose {
                 mapper: dev.mapper.clone(),
-                disk_name,
+                kind: LockMapperCloseKind::Orphan { disk_name },
             });
         }
     }
@@ -776,17 +738,19 @@ fn build_close_sets_full<R: CommandRunner, F: Filesystem + ?Sized>(
     // Pass 2: pool.null_underlying, classified by persisted devid.
     for nu in &pool.null_underlying {
         match membership.by_devid(nu.devid) {
-            Ok(Some((_uuid, member))) => member_owned.push(MemberOwnedClose {
+            Ok(Some((_uuid, member))) => member_owned.push(LockMapperClose {
                 mapper: nu.mapper.clone(),
-                display_name: member.name.clone(),
+                kind: LockMapperCloseKind::MemberOwned {
+                    display_name: member.name.clone(),
+                },
             }),
             _ => {
-                let disk_name = name_from_mapper(&nu.mapper.0)
-                    .unwrap_or(nu.mapper.0.as_str())
+                let disk_name = name_from_mapper(nu.mapper.as_str())
+                    .unwrap_or(nu.mapper.as_str())
                     .to_owned();
-                orphan_mappers.push(OrphanMapper {
+                orphan_mappers.push(LockMapperClose {
                     mapper: nu.mapper.clone(),
-                    disk_name,
+                    kind: LockMapperCloseKind::Orphan { disk_name },
                 });
             }
         }
@@ -796,10 +760,10 @@ fn build_close_sets_full<R: CommandRunner, F: Filesystem + ?Sized>(
     // appear in pool.devices or pool.null_underlying. Each one is
     // probed via classify_stranded_mapper to decide MemberOwned vs
     // Orphan. Per-mapper failures degrade to a logged warning + Orphan.
-    let already_observed: std::collections::HashSet<&str> = member_owned
+    let already_observed: HashSet<&str> = member_owned
         .iter()
-        .map(|m| m.mapper.0.as_str())
-        .chain(orphan_mappers.iter().map(|o| o.mapper.0.as_str()))
+        .map(|m| m.mapper.as_str())
+        .chain(orphan_mappers.iter().map(|o| o.mapper.as_str()))
         .collect();
 
     let dev_mapper_entries = match fs.list_dir("/dev/mapper") {
@@ -809,10 +773,7 @@ fn build_close_sets_full<R: CommandRunner, F: Filesystem + ?Sized>(
             // Preserve best-effort semantics: with no /dev/mapper
             // listing, return what we have. Pass-1/2 member_owned
             // is still valid.
-            return LockCloseSets {
-                member_owned,
-                orphan_mappers,
-            };
+            return LockCloseSet::from_classified(member_owned, orphan_mappers);
         }
     };
 
@@ -832,36 +793,30 @@ fn build_close_sets_full<R: CommandRunner, F: Filesystem + ?Sized>(
 
     for mapper in stranded {
         match classify_stranded_mapper(runner, &mapper, membership) {
-            Ok(StrandedClass::MemberOwned { display_name }) => {
-                member_owned.push(MemberOwnedClose {
-                    mapper,
-                    display_name,
-                });
+            Ok(kind @ LockMapperCloseKind::MemberOwned { .. }) => {
+                member_owned.push(LockMapperClose { mapper, kind });
             }
-            Ok(StrandedClass::Orphan) => {
-                let disk_name = name_from_mapper(&mapper.0)
-                    .unwrap_or(mapper.0.as_str())
-                    .to_owned();
+            Ok(kind @ LockMapperCloseKind::Orphan { .. }) => {
                 notes.push(PreviewNote::Warn(orphan_mapper_warn_body(&mapper)));
-                orphan_mappers.push(OrphanMapper { mapper, disk_name });
+                orphan_mappers.push(LockMapperClose { mapper, kind });
             }
             Err(cmd_err) => {
                 eprintln!(
                     "Warning: failed to classify stranded mapper {mapper}: {cmd_err}; treating as orphan",
                 );
-                let disk_name = name_from_mapper(&mapper.0)
-                    .unwrap_or(mapper.0.as_str())
+                let disk_name = name_from_mapper(mapper.as_str())
+                    .unwrap_or(mapper.as_str())
                     .to_owned();
                 notes.push(PreviewNote::Warn(orphan_mapper_warn_body(&mapper)));
-                orphan_mappers.push(OrphanMapper { mapper, disk_name });
+                orphan_mappers.push(LockMapperClose {
+                    mapper,
+                    kind: LockMapperCloseKind::Orphan { disk_name },
+                });
             }
         }
     }
 
-    LockCloseSets {
-        member_owned,
-        orphan_mappers,
-    }
+    LockCloseSet::from_classified(member_owned, orphan_mappers)
 }
 
 /// Close-set construction for the `LockSnapshot::FsidOnly` arm.
@@ -874,14 +829,16 @@ fn build_close_sets_fsid_only<F: Filesystem + ?Sized>(
     fs: &F,
     membership: &PoolMembership,
     notes: &mut Vec<PreviewNote>,
-) -> LockCloseSets {
-    let mut member_owned: Vec<MemberOwnedClose> = Vec::new();
+) -> LockCloseSet {
+    let mut member_owned: Vec<LockMapperClose> = Vec::new();
     for (_uuid, member) in membership.iter() {
         let mn = mapper_name(member.name.as_str());
-        if fs.exists(&format!("/dev/mapper/{}", mn.0)) {
-            member_owned.push(MemberOwnedClose {
+        if fs.exists(&format!("/dev/mapper/{mn}")) {
+            member_owned.push(LockMapperClose {
                 mapper: mn,
-                display_name: member.name.clone(),
+                kind: LockMapperCloseKind::MemberOwned {
+                    display_name: member.name.clone(),
+                },
             });
         }
     }
@@ -899,10 +856,7 @@ fn build_close_sets_fsid_only<F: Filesystem + ?Sized>(
         }
     };
 
-    LockCloseSets {
-        member_owned,
-        orphan_mappers,
-    }
+    LockCloseSet::from_classified(member_owned, orphan_mappers)
 }
 
 pub fn cmd_lock<R: CommandRunner, F: Filesystem + ?Sized>(
@@ -965,13 +919,13 @@ mod tests {
         let runner = lock_mounted_runner()
             .with_output(
                 CmdRequest::CryptsetupClose {
-                    mapper: "braid-aaa".into(),
+                    mapper: MapperName("braid-aaa".into()),
                 },
                 lock_ok_raw("cryptsetup close braid-aaa"),
             )
             .with_output(
                 CmdRequest::CryptsetupClose {
-                    mapper: "braid-bbb".into(),
+                    mapper: MapperName("braid-bbb".into()),
                 },
                 lock_ok_raw("cryptsetup close braid-bbb"),
             );
@@ -1008,7 +962,7 @@ mod tests {
         let plan =
             plan_lock(&runner, &plan_fs, &config, &membership).expect("plan_lock should succeed");
         assert!(
-            plan.member_owned.is_empty(),
+            plan.close_set.is_empty(),
             "precondition: plan should record no membership opens"
         );
 
@@ -1057,7 +1011,7 @@ mod tests {
             )
             .with_output(
                 CmdRequest::CryptsetupClose {
-                    mapper: "braid-aaa".into(),
+                    mapper: MapperName("braid-aaa".into()),
                 },
                 lock_ok_raw("cryptsetup close braid-aaa"),
             );
@@ -1091,7 +1045,7 @@ mod tests {
         )
         .with_output(
             CmdRequest::CryptsetupClose {
-                mapper: "braid-aaa".into(),
+                mapper: MapperName("braid-aaa".into()),
             },
             lock_err_raw(
                 "cryptsetup close braid-aaa",
@@ -1101,7 +1055,7 @@ mod tests {
         )
         .with_output(
             CmdRequest::CryptsetupClose {
-                mapper: "braid-bbb".into(),
+                mapper: MapperName("braid-bbb".into()),
             },
             lock_err_raw(
                 "cryptsetup close braid-bbb",
@@ -1139,7 +1093,7 @@ mod tests {
         )
         .with_output(
             CmdRequest::CryptsetupClose {
-                mapper: "braid-aaa".into(),
+                mapper: MapperName("braid-aaa".into()),
             },
             lock_err_raw(
                 "cryptsetup close braid-aaa",
@@ -1149,7 +1103,7 @@ mod tests {
         )
         .with_output(
             CmdRequest::CryptsetupClose {
-                mapper: "braid-bbb".into(),
+                mapper: MapperName("braid-bbb".into()),
             },
             lock_err_raw(
                 "cryptsetup close braid-bbb",
@@ -1198,13 +1152,13 @@ mod tests {
         )
         .with_output(
             CmdRequest::CryptsetupClose {
-                mapper: "braid-aaa".into(),
+                mapper: MapperName("braid-aaa".into()),
             },
             lock_ok_raw("cryptsetup close braid-aaa"),
         )
         .with_output(
             CmdRequest::CryptsetupClose {
-                mapper: "braid-bbb".into(),
+                mapper: MapperName("braid-bbb".into()),
             },
             lock_ok_raw("cryptsetup close braid-bbb"),
         );
@@ -1253,13 +1207,13 @@ mod tests {
         )
         .with_output(
             CmdRequest::CryptsetupClose {
-                mapper: "braid-aaa".into(),
+                mapper: MapperName("braid-aaa".into()),
             },
             lock_ok_raw("cryptsetup close braid-aaa"),
         )
         .with_output(
             CmdRequest::CryptsetupClose {
-                mapper: "braid-bbb".into(),
+                mapper: MapperName("braid-bbb".into()),
             },
             lock_ok_raw("cryptsetup close braid-bbb"),
         );
@@ -1281,13 +1235,13 @@ mod tests {
         let runner = lock_mounted_runner()
             .with_output(
                 CmdRequest::CryptsetupClose {
-                    mapper: "braid-aaa".into(),
+                    mapper: MapperName("braid-aaa".into()),
                 },
                 lock_ok_raw("cryptsetup close braid-aaa"),
             )
             .with_output(
                 CmdRequest::CryptsetupClose {
-                    mapper: "braid-bbb".into(),
+                    mapper: MapperName("braid-bbb".into()),
                 },
                 lock_ok_raw("cryptsetup close braid-bbb"),
             );
@@ -1326,13 +1280,13 @@ mod tests {
         )
         .with_output(
             CmdRequest::CryptsetupClose {
-                mapper: "braid-aaa".into(),
+                mapper: MapperName("braid-aaa".into()),
             },
             lock_ok_raw("cryptsetup close braid-aaa"),
         )
         .with_output(
             CmdRequest::CryptsetupClose {
-                mapper: "braid-bbb".into(),
+                mapper: MapperName("braid-bbb".into()),
             },
             lock_ok_raw("cryptsetup close braid-bbb"),
         );
@@ -1368,19 +1322,19 @@ mod tests {
             )
             .with_output(
                 CmdRequest::CryptsetupClose {
-                    mapper: "braid-aaa".into(),
+                    mapper: MapperName("braid-aaa".into()),
                 },
                 lock_ok_raw("cryptsetup close braid-aaa"),
             )
             .with_output(
                 CmdRequest::CryptsetupClose {
-                    mapper: "braid-bbb".into(),
+                    mapper: MapperName("braid-bbb".into()),
                 },
                 lock_ok_raw("cryptsetup close braid-bbb"),
             )
             .with_output(
                 CmdRequest::CryptsetupClose {
-                    mapper: "braid-ccc".into(),
+                    mapper: MapperName("braid-ccc".into()),
                 },
                 lock_ok_raw("cryptsetup close braid-ccc"),
             );
@@ -1408,13 +1362,13 @@ mod tests {
         let runner = lock_mounted_runner()
             .with_output(
                 CmdRequest::CryptsetupClose {
-                    mapper: "braid-aaa".into(),
+                    mapper: MapperName("braid-aaa".into()),
                 },
                 lock_ok_raw("cryptsetup close braid-aaa"),
             )
             .with_output(
                 CmdRequest::CryptsetupClose {
-                    mapper: "braid-bbb".into(),
+                    mapper: MapperName("braid-bbb".into()),
                 },
                 lock_ok_raw("cryptsetup close braid-bbb"),
             );
@@ -1620,13 +1574,13 @@ mod tests {
         let runner = lock_umount_failed_runner()
             .with_output(
                 CmdRequest::CryptsetupClose {
-                    mapper: "braid-aaa".into(),
+                    mapper: MapperName("braid-aaa".into()),
                 },
                 lock_ok_raw("cryptsetup close braid-aaa"),
             )
             .with_output(
                 CmdRequest::CryptsetupClose {
-                    mapper: "braid-bbb".into(),
+                    mapper: MapperName("braid-bbb".into()),
                 },
                 lock_ok_raw("cryptsetup close braid-bbb"),
             );
@@ -1655,7 +1609,7 @@ mod tests {
         let runner = lock_umount_failed_runner()
             .with_output(
                 CmdRequest::CryptsetupClose {
-                    mapper: "braid-aaa".into(),
+                    mapper: MapperName("braid-aaa".into()),
                 },
                 lock_err_raw(
                     "cryptsetup close braid-aaa",
@@ -1665,7 +1619,7 @@ mod tests {
             )
             .with_output(
                 CmdRequest::CryptsetupClose {
-                    mapper: "braid-bbb".into(),
+                    mapper: MapperName("braid-bbb".into()),
                 },
                 lock_err_raw(
                     "cryptsetup close braid-bbb",
@@ -1700,13 +1654,13 @@ mod tests {
         let runner = lock_umount_failed_runner()
             .with_output(
                 CmdRequest::CryptsetupClose {
-                    mapper: "braid-aaa".into(),
+                    mapper: MapperName("braid-aaa".into()),
                 },
                 lock_err_raw("cryptsetup close braid-aaa", 4, "Device is not active."),
             )
             .with_output(
                 CmdRequest::CryptsetupClose {
-                    mapper: "braid-bbb".into(),
+                    mapper: MapperName("braid-bbb".into()),
                 },
                 lock_ok_raw("cryptsetup close braid-bbb"),
             );
@@ -1733,13 +1687,13 @@ mod tests {
         let runner = lock_mounted_runner()
             .with_output(
                 CmdRequest::CryptsetupClose {
-                    mapper: "braid-aaa".into(),
+                    mapper: MapperName("braid-aaa".into()),
                 },
                 lock_err_raw("cryptsetup close braid-aaa", 4, "Device is not active."),
             )
             .with_output(
                 CmdRequest::CryptsetupClose {
-                    mapper: "braid-bbb".into(),
+                    mapper: MapperName("braid-bbb".into()),
                 },
                 lock_ok_raw("cryptsetup close braid-bbb"),
             );
@@ -1769,19 +1723,19 @@ mod tests {
         let runner = lock_umount_failed_runner()
             .with_output(
                 CmdRequest::CryptsetupClose {
-                    mapper: "braid-aaa".into(),
+                    mapper: MapperName("braid-aaa".into()),
                 },
                 lock_ok_raw("cryptsetup close braid-aaa"),
             )
             .with_output(
                 CmdRequest::CryptsetupClose {
-                    mapper: "braid-bbb".into(),
+                    mapper: MapperName("braid-bbb".into()),
                 },
                 lock_ok_raw("cryptsetup close braid-bbb"),
             )
             .with_output(
                 CmdRequest::CryptsetupClose {
-                    mapper: "braid-ccc".into(),
+                    mapper: MapperName("braid-ccc".into()),
                 },
                 lock_err_raw(
                     "cryptsetup close braid-ccc",
@@ -1819,19 +1773,19 @@ mod tests {
         let runner = lock_umount_failed_runner()
             .with_output(
                 CmdRequest::CryptsetupClose {
-                    mapper: "braid-aaa".into(),
+                    mapper: MapperName("braid-aaa".into()),
                 },
                 lock_ok_raw("cryptsetup close braid-aaa"),
             )
             .with_output(
                 CmdRequest::CryptsetupClose {
-                    mapper: "braid-bbb".into(),
+                    mapper: MapperName("braid-bbb".into()),
                 },
                 lock_ok_raw("cryptsetup close braid-bbb"),
             )
             .with_output(
                 CmdRequest::CryptsetupClose {
-                    mapper: "braid-ccc".into(),
+                    mapper: MapperName("braid-ccc".into()),
                 },
                 lock_err_raw("cryptsetup close braid-ccc", 4, "Device is not active."),
             );
@@ -1873,19 +1827,19 @@ mod tests {
             )
             .with_output(
                 CmdRequest::CryptsetupClose {
-                    mapper: "braid-aaa".into(),
+                    mapper: MapperName("braid-aaa".into()),
                 },
                 lock_ok_raw("cryptsetup close braid-aaa"),
             )
             .with_output(
                 CmdRequest::CryptsetupClose {
-                    mapper: "braid-bbb".into(),
+                    mapper: MapperName("braid-bbb".into()),
                 },
                 lock_ok_raw("cryptsetup close braid-bbb"),
             )
             .with_output(
                 CmdRequest::CryptsetupClose {
-                    mapper: "braid-orphan".into(),
+                    mapper: MapperName("braid-orphan".into()),
                 },
                 lock_err_raw("cryptsetup close braid-orphan", 4, "Device is not active."),
             );
@@ -1917,13 +1871,13 @@ mod tests {
         let inner = lock_mounted_runner()
             .with_output(
                 CmdRequest::CryptsetupClose {
-                    mapper: "braid-aaa".into(),
+                    mapper: MapperName("braid-aaa".into()),
                 },
                 lock_err_raw("cryptsetup close braid-aaa", 4, "Device is not active."),
             )
             .with_output(
                 CmdRequest::CryptsetupClose {
-                    mapper: "braid-bbb".into(),
+                    mapper: MapperName("braid-bbb".into()),
                 },
                 lock_ok_raw("cryptsetup close braid-bbb"),
             );
@@ -1956,13 +1910,13 @@ mod tests {
         let inner = lock_mounted_runner()
             .with_output(
                 CmdRequest::CryptsetupClose {
-                    mapper: "braid-aaa".into(),
+                    mapper: MapperName("braid-aaa".into()),
                 },
                 lock_err_raw("cryptsetup close braid-aaa", 4, "Device is not active."),
             )
             .with_output(
                 CmdRequest::CryptsetupClose {
-                    mapper: "braid-bbb".into(),
+                    mapper: MapperName("braid-bbb".into()),
                 },
                 lock_err_raw("cryptsetup close braid-bbb", 1, "permission denied"),
             );
@@ -2008,7 +1962,7 @@ mod tests {
     fn lock_retries_busy_close_then_succeeds() {
         let inner = lock_mounted_runner().with_output(
             CmdRequest::CryptsetupClose {
-                mapper: "braid-bbb".into(),
+                mapper: MapperName("braid-bbb".into()),
             },
             lock_ok_raw("cryptsetup close braid-bbb"),
         );
@@ -2062,7 +2016,7 @@ mod tests {
         let inner = lock_mounted_runner()
             .with_output(
                 CmdRequest::CryptsetupClose {
-                    mapper: "braid-aaa".into(),
+                    mapper: MapperName("braid-aaa".into()),
                 },
                 lock_err_raw(
                     "cryptsetup close braid-aaa",
@@ -2072,7 +2026,7 @@ mod tests {
             )
             .with_output(
                 CmdRequest::CryptsetupClose {
-                    mapper: "braid-bbb".into(),
+                    mapper: MapperName("braid-bbb".into()),
                 },
                 lock_ok_raw("cryptsetup close braid-bbb"),
             );
@@ -2118,13 +2072,13 @@ mod tests {
         let runner = lock_mounted_runner()
             .with_output(
                 CmdRequest::CryptsetupClose {
-                    mapper: "braid-aaa".into(),
+                    mapper: MapperName("braid-aaa".into()),
                 },
                 lock_err_raw("cryptsetup close braid-aaa", 5, busy_stderr),
             )
             .with_output(
                 CmdRequest::CryptsetupClose {
-                    mapper: "braid-bbb".into(),
+                    mapper: MapperName("braid-bbb".into()),
                 },
                 lock_ok_raw("cryptsetup close braid-bbb"),
             );
@@ -2238,13 +2192,58 @@ mod tests {
         );
     }
 
-    /// Test-local helper: build a MemberOwnedClose entry from a bare
+    /// Test-local helper: build a member-owned close entry from a bare
     /// mapper basename and disk name for compile_lock_steps tests.
-    fn mo(mapper: &str, disk_name: &str) -> MemberOwnedClose {
-        MemberOwnedClose {
+    fn member_close(mapper: &str, disk_name: &str) -> LockMapperClose {
+        LockMapperClose {
             mapper: MapperName(mapper.into()),
-            display_name: DiskName::parse(disk_name).expect("valid test disk name"),
+            kind: LockMapperCloseKind::MemberOwned {
+                display_name: DiskName::parse(disk_name).expect("valid test disk name"),
+            },
         }
+    }
+
+    fn orphan_close(mapper: &str, disk_name: &str) -> LockMapperClose {
+        LockMapperClose {
+            mapper: MapperName(mapper.into()),
+            kind: LockMapperCloseKind::Orphan {
+                disk_name: disk_name.into(),
+            },
+        }
+    }
+
+    fn test_close_set(
+        members: Vec<LockMapperClose>,
+        orphans: Vec<LockMapperClose>,
+    ) -> LockCloseSet {
+        LockCloseSet::from_classified(members, orphans)
+    }
+
+    fn member_summaries(close_set: &LockCloseSet) -> Vec<(String, String)> {
+        close_set
+            .entries()
+            .iter()
+            .filter_map(|entry| match &entry.kind {
+                LockMapperCloseKind::MemberOwned { display_name } => Some((
+                    entry.mapper.as_str().to_owned(),
+                    display_name.as_str().to_owned(),
+                )),
+                LockMapperCloseKind::Orphan { .. } => None,
+            })
+            .collect()
+    }
+
+    fn orphan_summaries(close_set: &LockCloseSet) -> Vec<(String, String)> {
+        close_set
+            .entries()
+            .iter()
+            .filter_map(|entry| match &entry.kind {
+                LockMapperCloseKind::MemberOwned { .. } => None,
+                LockMapperCloseKind::Orphan { disk_name } => {
+                    Some((entry.mapper.as_str().to_owned(), disk_name.clone()))
+                }
+            })
+            .collect()
     }
 
     // Intent: dry-run for lock shows umount + scan forget + close per open mapper.
@@ -2256,12 +2255,18 @@ mod tests {
     fn dry_run_render_lock_mounted_2_disks() {
         use crate::types::MountPoint;
         let mount_point = MountPoint("/mnt/storage".into());
-        let member_owned = vec![mo("braid-disk1", "disk1"), mo("braid-disk2", "disk2")];
-        let steps = compile_lock_steps(true, &member_owned, &[], &mount_point);
+        let close_set = test_close_set(
+            vec![
+                member_close("braid-disk1", "disk1"),
+                member_close("braid-disk2", "disk2"),
+            ],
+            vec![],
+        );
+        let steps = compile_lock_steps(true, &close_set, &mount_point);
         let output = Step::render_dry_run(&steps);
         let lines: Vec<&str> = output.lines().collect();
 
-        // 4 steps (umount + scan forget + 2× close), each with 1 command = 8 lines
+        // 4 steps (umount + scan forget + 2x close), each with 1 command = 8 lines
         assert_eq!(lines.len(), 8, "expected 8 lines, got:\n{output}");
         assert!(lines[0].contains("unmount"));
         assert!(lines[1].contains("$ umount"));
@@ -2282,8 +2287,8 @@ mod tests {
     fn dry_run_lock_not_mounted_1_open() {
         use crate::types::MountPoint;
         let mount_point = MountPoint("/mnt/storage".into());
-        let member_owned = vec![mo("braid-disk1", "disk1")];
-        let steps = compile_lock_steps(false, &member_owned, &[], &mount_point);
+        let close_set = test_close_set(vec![member_close("braid-disk1", "disk1")], vec![]);
+        let steps = compile_lock_steps(false, &close_set, &mount_point);
         let output = Step::render_dry_run(&steps);
         let lines: Vec<&str> = output.lines().collect();
 
@@ -2300,7 +2305,8 @@ mod tests {
     fn dry_run_lock_nothing_to_do() {
         use crate::types::MountPoint;
         let mount_point = MountPoint("/mnt/storage".into());
-        let steps = compile_lock_steps(false, &[], &[], &mount_point);
+        let close_set = test_close_set(vec![], vec![]);
+        let steps = compile_lock_steps(false, &close_set, &mount_point);
         assert!(steps.is_empty());
     }
 
@@ -2316,8 +2322,14 @@ mod tests {
     fn dry_run_lock_forget_step_lists_scoped_devices() {
         use crate::types::MountPoint;
         let mount_point = MountPoint("/mnt/storage".into());
-        let member_owned = vec![mo("braid-aaa", "aaa"), mo("braid-bbb", "bbb")];
-        let steps = compile_lock_steps(true, &member_owned, &[], &mount_point);
+        let close_set = test_close_set(
+            vec![
+                member_close("braid-aaa", "aaa"),
+                member_close("braid-bbb", "bbb"),
+            ],
+            vec![],
+        );
+        let steps = compile_lock_steps(true, &close_set, &mount_point);
         assert_eq!(
             lock_forget_step_devices(&steps),
             vec![
@@ -2340,12 +2352,11 @@ mod tests {
     fn dry_run_lock_forget_step_includes_orphans() {
         use crate::types::MountPoint;
         let mount_point = MountPoint("/mnt/storage".into());
-        let member_owned = vec![mo("braid-aaa", "aaa")];
-        let orphan_mappers = vec![OrphanMapper {
-            mapper: MapperName("braid-orphan".into()),
-            disk_name: "orphan".into(),
-        }];
-        let steps = compile_lock_steps(true, &member_owned, &orphan_mappers, &mount_point);
+        let close_set = test_close_set(
+            vec![member_close("braid-aaa", "aaa")],
+            vec![orphan_close("braid-orphan", "orphan")],
+        );
+        let steps = compile_lock_steps(true, &close_set, &mount_point);
         assert_eq!(
             lock_forget_step_devices(&steps),
             vec![
@@ -2366,7 +2377,8 @@ mod tests {
     fn dry_run_lock_forget_step_omitted_when_no_mappers() {
         use crate::types::MountPoint;
         let mount_point = MountPoint("/mnt/storage".into());
-        let steps = compile_lock_steps(true, &[], &[], &mount_point);
+        let close_set = test_close_set(vec![], vec![]);
+        let steps = compile_lock_steps(true, &close_set, &mount_point);
         assert_eq!(
             lock_count_forget_steps(&steps),
             0,
@@ -2394,13 +2406,13 @@ mod tests {
         let inner = lock_mounted_runner()
             .with_output(
                 CmdRequest::CryptsetupClose {
-                    mapper: "braid-aaa".into(),
+                    mapper: MapperName("braid-aaa".into()),
                 },
                 lock_ok_raw("cryptsetup close braid-aaa"),
             )
             .with_output(
                 CmdRequest::CryptsetupClose {
-                    mapper: "braid-bbb".into(),
+                    mapper: MapperName("braid-bbb".into()),
                 },
                 lock_ok_raw("cryptsetup close braid-bbb"),
             );
@@ -2447,19 +2459,19 @@ mod tests {
             )
             .with_output(
                 CmdRequest::CryptsetupClose {
-                    mapper: "braid-aaa".into(),
+                    mapper: MapperName("braid-aaa".into()),
                 },
                 lock_ok_raw("cryptsetup close braid-aaa"),
             )
             .with_output(
                 CmdRequest::CryptsetupClose {
-                    mapper: "braid-bbb".into(),
+                    mapper: MapperName("braid-bbb".into()),
                 },
                 lock_ok_raw("cryptsetup close braid-bbb"),
             )
             .with_output(
                 CmdRequest::CryptsetupClose {
-                    mapper: "braid-ccc".into(),
+                    mapper: MapperName("braid-ccc".into()),
                 },
                 lock_ok_raw("cryptsetup close braid-ccc"),
             );
@@ -2517,7 +2529,7 @@ mod tests {
         let sleeper = RecordingSleeper(Mutex::new(Vec::new()));
         let runner = MockRunner::default().with_output(
             CmdRequest::CryptsetupClose {
-                mapper: "braid-aaa".into(),
+                mapper: MapperName("braid-aaa".into()),
             },
             lock_err_raw(
                 "cryptsetup close braid-aaa",
@@ -2526,8 +2538,9 @@ mod tests {
             ),
         );
 
-        let err = close_mapper_with_retry(&runner, &sleeper, "braid-aaa", false)
-            .expect_err("should exhaust retries and return DeviceBusy");
+        let err =
+            close_mapper_with_retry(&runner, &sleeper, &MapperName("braid-aaa".into()), false)
+                .expect_err("should exhaust retries and return DeviceBusy");
         assert!(
             matches!(err, CloseMapperError::DeviceBusy(_)),
             "expected DeviceBusy after retry exhaustion, got: {err:?}"
@@ -2585,7 +2598,7 @@ mod tests {
         let runner = lock_mounted_runner()
             .with_output(
                 CmdRequest::CryptsetupClose {
-                    mapper: "braid-aaa".into(),
+                    mapper: MapperName("braid-aaa".into()),
                 },
                 lock_err_raw(
                     "cryptsetup close braid-aaa",
@@ -2595,7 +2608,7 @@ mod tests {
             )
             .with_output(
                 CmdRequest::CryptsetupClose {
-                    mapper: "braid-bbb".into(),
+                    mapper: MapperName("braid-bbb".into()),
                 },
                 lock_err_raw(
                     "cryptsetup close braid-bbb",
@@ -2638,7 +2651,7 @@ mod tests {
     /// Build a synthetic 2-disk PoolState whose mappers are the given
     /// observed names and whose LUKS UUIDs match
     /// `lock_test_membership` so the Full-arm classifier yields two
-    /// MemberOwnedClose entries.
+    /// member-owned close entries.
     fn synthetic_pool_state(mapper_aaa: &str, mapper_bbb: &str) -> crate::types::PoolState {
         use crate::types::{LuksUuid, MapperName, PoolDevice, PoolState};
         PoolState {
@@ -2683,24 +2696,22 @@ mod tests {
         let mut notes = Vec::new();
         let pool = synthetic_pool_state("braid-WRONG", "braid-bbb");
         let runner = MockRunner::default();
-        let close_sets = super::build_close_sets_full(&runner, &fs, &pool, &membership, &mut notes);
+        let close_set = super::build_close_sets_full(&runner, &fs, &pool, &membership, &mut notes);
         // Both members are classified by UUID despite the drift.
-        let observed: Vec<String> = close_sets
-            .member_owned
-            .iter()
-            .map(|m| m.mapper.0.clone())
+        let observed: Vec<String> = member_summaries(&close_set)
+            .into_iter()
+            .map(|(mapper, _display)| mapper)
             .collect();
         assert_eq!(
             observed,
             vec!["braid-WRONG".to_owned(), "braid-bbb".to_owned()]
         );
-        let display: Vec<String> = close_sets
-            .member_owned
-            .iter()
-            .map(|m| m.display_name.as_str().to_owned())
+        let display: Vec<String> = member_summaries(&close_set)
+            .into_iter()
+            .map(|(_mapper, display)| display)
             .collect();
         assert_eq!(display, vec!["aaa".to_owned(), "bbb".to_owned()]);
-        assert!(close_sets.orphan_mappers.is_empty());
+        assert!(orphan_summaries(&close_set).is_empty());
     }
 
     /// Intent: in LockSnapshot::Full, the forget_devs set passed to
@@ -2718,14 +2729,9 @@ mod tests {
         let mut notes = Vec::new();
         let pool = synthetic_pool_state("braid-WRONG", "braid-bbb");
         let runner = MockRunner::default();
-        let close_sets = super::build_close_sets_full(&runner, &fs, &pool, &membership, &mut notes);
+        let close_set = super::build_close_sets_full(&runner, &fs, &pool, &membership, &mut notes);
         let mp = MountPoint("/mnt/storage".into());
-        let steps = super::compile_lock_steps(
-            true,
-            &close_sets.member_owned,
-            &close_sets.orphan_mappers,
-            &mp,
-        );
+        let steps = super::compile_lock_steps(true, &close_set, &mp);
         assert_eq!(
             lock_forget_step_devices(&steps),
             vec![
@@ -2750,16 +2756,11 @@ mod tests {
         ]);
         let membership = lock_test_membership();
         let mut notes = Vec::new();
-        let close_sets = super::build_close_sets_fsid_only(&fs, &membership, &mut notes);
+        let close_set = super::build_close_sets_fsid_only(&fs, &membership, &mut notes);
         let mp = MountPoint("/mnt/storage".into());
-        let steps = super::compile_lock_steps(
-            true,
-            &close_sets.member_owned,
-            &close_sets.orphan_mappers,
-            &mp,
-        );
+        let steps = super::compile_lock_steps(true, &close_set, &mp);
         let forget = lock_forget_step_devices(&steps);
-        // Members first, orphan last -- mirroring close_set_paths order.
+        // Members first, orphan last -- mirroring LockCloseSet order.
         assert_eq!(
             forget,
             vec![
@@ -2796,7 +2797,7 @@ mod tests {
 
     /// Intent: scan_orphan_mappers_by_name falls through a malformed
     /// `braid-<not-a-valid-name>` mapper as an orphan rather than
-    /// silently skipping. The OrphanMapper.disk_name carries the raw
+    /// silently skipping. The orphan disk_name carries the raw
     /// text for the warning body.
     /// Why: plan 3257-3286.
     /// Scenario: seed 704.
@@ -2806,9 +2807,15 @@ mod tests {
         let fs = lock_fs(&["/dev/mapper/braid-aaa", "/dev/mapper/braid-..foo"]);
         let membership = lock_test_membership();
         let orphans = super::scan_orphan_mappers_by_name(&fs, &membership).unwrap();
-        let names: Vec<&str> = orphans.iter().map(|o| o.disk_name.as_str()).collect();
+        let names: Vec<String> = orphans
+            .iter()
+            .filter_map(|entry| match &entry.kind {
+                LockMapperCloseKind::MemberOwned { .. } => None,
+                LockMapperCloseKind::Orphan { disk_name } => Some(disk_name.clone()),
+            })
+            .collect();
         assert!(
-            names.contains(&"..foo"),
+            names.contains(&"..foo".to_owned()),
             "malformed mapper basename must be carried as orphan disk_name, got: {names:?}",
         );
     }
@@ -2835,16 +2842,15 @@ mod tests {
         let pool = synthetic_pool_state("braid-aaa", "braid-bbb");
         let runner = MockRunner::default();
         let mut notes = Vec::new();
-        let close_sets = super::build_close_sets_full(&runner, &fs, &pool, &membership, &mut notes);
+        let close_set = super::build_close_sets_full(&runner, &fs, &pool, &membership, &mut notes);
         // Member-owned still has the two pool.devices entries.
-        assert_eq!(close_sets.member_owned.len(), 2);
+        assert_eq!(member_summaries(&close_set).len(), 2);
         // Stranded mapper became an orphan.
-        let orphan_mappers: Vec<&str> = close_sets
-            .orphan_mappers
-            .iter()
-            .map(|o| o.mapper.0.as_str())
+        let orphan_mappers: Vec<String> = orphan_summaries(&close_set)
+            .into_iter()
+            .map(|(mapper, _disk_name)| mapper)
             .collect();
-        assert_eq!(orphan_mappers, vec!["braid-stranded"]);
+        assert_eq!(orphan_mappers, vec!["braid-stranded".to_owned()]);
     }
 
     /// Intent: a stranded mapper whose backing LUKS UUID matches
@@ -2868,7 +2874,7 @@ mod tests {
         let runner = MockRunner::default()
             .with_output(
                 CmdRequest::CryptsetupStatus {
-                    mapper: "braid-stranded".to_owned(),
+                    mapper: MapperName("braid-stranded".into()),
                 },
                 cryptsetup_status_active("braid-stranded", "/dev/vdc"),
             )
@@ -2885,24 +2891,19 @@ mod tests {
             );
 
         let mut notes = Vec::new();
-        let close_sets = super::build_close_sets_full(&runner, &fs, &pool, &membership, &mut notes);
+        let close_set = super::build_close_sets_full(&runner, &fs, &pool, &membership, &mut notes);
 
-        let member_owned: Vec<(&str, &str)> = close_sets
-            .member_owned
-            .iter()
-            .map(|m| (m.mapper.0.as_str(), m.display_name.as_str()))
-            .collect();
+        let member_owned = member_summaries(&close_set);
         assert!(
-            member_owned.contains(&("braid-stranded", "aaa")),
+            member_owned.contains(&("braid-stranded".to_owned(), "aaa".to_owned())),
             "stranded mapper should be member-owned via backing UUID, got: {member_owned:?}",
         );
         assert!(
-            close_sets
-                .orphan_mappers
+            orphan_summaries(&close_set)
                 .iter()
-                .all(|o| o.mapper.0 != "braid-stranded"),
+                .all(|(mapper, _disk_name)| mapper != "braid-stranded"),
             "stranded member must not be demoted to orphan: {:?}",
-            close_sets.orphan_mappers,
+            orphan_summaries(&close_set),
         );
     }
 

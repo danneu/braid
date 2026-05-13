@@ -644,6 +644,7 @@ mod tests {
     use super::*;
     use crate::cmd::{MockRunner, RawCommandOutput};
     use crate::parse::types::DeviceAllocation;
+    use crate::types::MapperName;
 
     fn test_paths() -> (tempfile::TempDir, StatePaths) {
         let tmp = tempfile::TempDir::new().unwrap();
@@ -750,7 +751,7 @@ mod tests {
             )
             // probe_pool: cryptsetup status for each device
             .with_output(
-                CmdRequest::CryptsetupStatus { mapper: "braid-toshiba".into() },
+                CmdRequest::CryptsetupStatus { mapper: MapperName("braid-toshiba".into()) },
                 ok_raw(
                     "cryptsetup status",
                     "/dev/mapper/braid-toshiba is active.\n\tdevice:  /dev/vda\n",
@@ -761,7 +762,7 @@ mod tests {
                 ok_raw("cryptsetup luksUUID", "11111111-1111-1111-1111-111111111111\n"),
             )
             .with_output(
-                CmdRequest::CryptsetupStatus { mapper: "braid-ironwolf".into() },
+                CmdRequest::CryptsetupStatus { mapper: MapperName("braid-ironwolf".into()) },
                 ok_raw(
                     "cryptsetup status",
                     "/dev/mapper/braid-ironwolf is active.\n\tdevice:  /dev/vdb\n",
@@ -927,7 +928,7 @@ mod tests {
                 ),
             )
             .with_output(
-                CmdRequest::CryptsetupStatus { mapper: "braid-toshiba".into() },
+                CmdRequest::CryptsetupStatus { mapper: MapperName("braid-toshiba".into()) },
                 ok_raw(
                     "cryptsetup status",
                     "/dev/mapper/braid-toshiba is active.\n\tdevice:  /dev/vda\n",
@@ -1045,7 +1046,7 @@ mod tests {
                 ),
             )
             .with_output(
-                CmdRequest::CryptsetupStatus { mapper: "braid-toshiba".into() },
+                CmdRequest::CryptsetupStatus { mapper: MapperName("braid-toshiba".into()) },
                 ok_raw(
                     "cryptsetup status",
                     "/dev/mapper/braid-toshiba is active.\n\tdevice:  /dev/vda\n",
@@ -1056,7 +1057,7 @@ mod tests {
                 ok_raw("cryptsetup luksUUID", "11111111-1111-1111-1111-111111111111\n"),
             )
             .with_output(
-                CmdRequest::CryptsetupStatus { mapper: "braid-ironwolf".into() },
+                CmdRequest::CryptsetupStatus { mapper: MapperName("braid-ironwolf".into()) },
                 ok_raw(
                     "cryptsetup status",
                     "/dev/mapper/braid-ironwolf is active.\n\tdevice:  /dev/vdb\n",
@@ -1174,7 +1175,7 @@ mod tests {
             )
             .with_output(
                 CmdRequest::CryptsetupStatus {
-                    mapper: "braid-toshiba".into(),
+                    mapper: MapperName("braid-toshiba".into()),
                 },
                 ok_raw(
                     "cryptsetup status",
@@ -1319,7 +1320,7 @@ mod tests {
             )
             .with_output(
                 CmdRequest::CryptsetupStatus {
-                    mapper: "braid-ironwolf".into(),
+                    mapper: MapperName("braid-ironwolf".into()),
                 },
                 RawCommandOutput {
                     cmd: "cryptsetup status braid-ironwolf".into(),

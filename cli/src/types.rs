@@ -308,6 +308,14 @@ fn is_managed_format_flag(token: &str) -> bool {
 #[serde(transparent)]
 pub struct MapperName(pub String);
 
+impl MapperName {
+    /// Borrow the mapper basename at command argv and filesystem-path
+    /// boundaries without exposing mutable access to the identity text.
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+
 /// Wraps the absolute mount path braid hands to `mount(8)` so it cannot be
 /// confused with arbitrary user paths at call sites that mix the two.
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]

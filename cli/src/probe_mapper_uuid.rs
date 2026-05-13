@@ -33,7 +33,7 @@ pub(crate) fn probe_observed_mapper_uuid<R: CommandRunner>(
     expected_uuid: &LuksUuid,
 ) -> bool {
     let status = match runner.run(&CmdRequest::CryptsetupStatus {
-        mapper: mapper.0.clone(),
+        mapper: mapper.clone(),
     }) {
         Ok(out) => out,
         Err(e) => {

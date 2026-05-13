@@ -718,12 +718,14 @@ mod tests {
                     &format!("btrfs filesystem show {mount_point}"),
                     "Label: none  uuid: cc86845b-aec3-408e-bef5-553affc1f2b1\n\tTotal devices 2 FS bytes used 16.17MiB\n\tdevid    1 size 496.00MiB used 121.56MiB path /dev/mapper/braid-disk1\n\tdevid    2 size 496.00MiB used 121.56MiB path /dev/mapper/braid-disk2\n",
                 )),
-                CmdRequest::CryptsetupStatus { mapper } if mapper == "braid-disk2" => Ok(mock_ok(
-                    &format!("cryptsetup status {mapper}"),
-                    &format!(
-                        "{mapper} is active and is in use.\n  type:    LUKS2\n  device:  (null)\n  mode:    read/write\n"
-                    ),
-                )),
+                CmdRequest::CryptsetupStatus { mapper } if mapper.as_str() == "braid-disk2" => {
+                    Ok(mock_ok(
+                        &format!("cryptsetup status {mapper}"),
+                        &format!(
+                            "{mapper} is active and is in use.\n  type:    LUKS2\n  device:  (null)\n  mode:    read/write\n"
+                        ),
+                    ))
+                }
                 CmdRequest::CryptsetupStatus { mapper } => Ok(mock_ok(
                     &format!("cryptsetup status {mapper}"),
                     &format!(

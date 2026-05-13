@@ -391,9 +391,7 @@ impl RecoverWorkAction {
                     steps.push(Step {
                         risk: "safe",
                         description: format!("close LUKS mapper {} (recover remount cycle)", mn),
-                        commands: vec![CmdRequest::CryptsetupClose {
-                            mapper: mn.0.clone(),
-                        }],
+                        commands: vec![CmdRequest::CryptsetupClose { mapper: mn.clone() }],
                     });
                 }
 
@@ -412,7 +410,7 @@ impl RecoverWorkAction {
                         ),
                         commands: vec![CmdRequest::CryptsetupLuksOpen {
                             device: member.by_id.as_str().to_owned(),
-                            mapper: mn.0.clone(),
+                            mapper: mn.clone(),
                         }],
                     });
                 }
@@ -865,7 +863,7 @@ fn render_add_pool_mutation_recovery_steps(
                 });
                 commands.push(CmdRequest::CryptsetupLuksOpen {
                     device: target.by_id.as_str().to_owned(),
-                    mapper: mapper.0.clone(),
+                    mapper: mapper.clone(),
                 });
                 commands.push(CmdRequest::BtrfsDeviceAdd {
                     device: mapper_path,
@@ -2420,8 +2418,7 @@ fn execute_add_pool_mutation_recovery<R: CommandRunner + Sync, F: Filesystem + ?
                     verified_pool_fsid,
                     enroll_key_file,
                 } => {
-                    let probed =
-                        probe::probe_config_disk(runner, fs, &target.name, &target.by_id)?;
+                    let probed = probe::probe_config_disk(runner, fs, &target.name, &target.by_id)?;
                     let ConfigDiskState::PresentLuks {
                         uuid, mapper_open, ..
                     } = probed.state
@@ -2480,8 +2477,7 @@ fn execute_add_pool_mutation_recovery<R: CommandRunner + Sync, F: Filesystem + ?
                     extra_opts,
                     enroll_key_file,
                 } => {
-                    let probed =
-                        probe::probe_config_disk(runner, fs, &target.name, &target.by_id)?;
+                    let probed = probe::probe_config_disk(runner, fs, &target.name, &target.by_id)?;
                     let expected_label = format!("braid-{}", target.name);
                     match probed.state {
                         ConfigDiskState::PresentNotLuks => {
@@ -2889,8 +2885,7 @@ fn finish_uncommitted_replace_recovery<R: CommandRunner + Sync, F: Filesystem + 
             // FreshLuks `luks_label` guard at finish-time. We use LUKS
             // UUID (not a braid label) because ExistingLuks targets
             // carry no braid label by definition.
-            let probed =
-                probe::probe_config_disk(runner, fs, new_name, &new_target.by_id)?;
+            let probed = probe::probe_config_disk(runner, fs, new_name, &new_target.by_id)?;
             match &probed.state {
                 ConfigDiskState::PresentLuks { uuid, .. } if uuid == new_uuid => {}
                 ConfigDiskState::PresentLuks { uuid, .. } => {
@@ -2959,8 +2954,7 @@ fn finish_uncommitted_replace_recovery<R: CommandRunner + Sync, F: Filesystem + 
         journal::ReplaceJournalMode::FreshLuks {
             enroll_key_file, ..
         } => {
-            let probed =
-                probe::probe_config_disk(runner, fs, new_name, &new_target.by_id)?;
+            let probed = probe::probe_config_disk(runner, fs, new_name, &new_target.by_id)?;
             let expected_label = format!("braid-{new_name}");
             match probed.state {
                 ConfigDiskState::PresentNotLuks => {
@@ -3146,8 +3140,11 @@ fn close_old_mapper_best_effort<R, S, F>(
         return;
     }
     let color_enabled = color_enabled_for_stderr();
-    let old_label = mapper.0.strip_prefix("braid-").unwrap_or(&mapper.0);
-    if close_mapper_best_effort(runner, sleeper, &mapper.0, old_label, color_enabled) {
+    let old_label = mapper
+        .as_str()
+        .strip_prefix("braid-")
+        .unwrap_or(mapper.as_str());
+    if close_mapper_best_effort(runner, sleeper, mapper, old_label, color_enabled) {
         eprintln!("Old device closed. If repurposing the physical disk, wipe it separately.");
     }
 }
@@ -3454,9 +3451,7 @@ fn relock_and_remount<R: CommandRunner, F: Filesystem + ?Sized>(
             )
         );
         let close = runner
-            .run(&CmdRequest::CryptsetupClose {
-                mapper: mn.0.clone(),
-            })
+            .run(&CmdRequest::CryptsetupClose { mapper: mn.clone() })
             .map_err(|e| {
                 RecoverError::Failed(format!(
                     "recover remount cycle: cryptsetup close {}: {e}",
@@ -4456,7 +4451,7 @@ mod tests {
             )
             .with_output(
                 CmdRequest::CryptsetupStatus {
-                    mapper: "braid-disk1".into(),
+                    mapper: MapperName("braid-disk1".into()),
                 },
                 cryptsetup_status_active("braid-disk1", "/dev/vda"),
             )
@@ -4468,7 +4463,7 @@ mod tests {
             )
             .with_output(
                 CmdRequest::CryptsetupStatus {
-                    mapper: "braid-disk2".into(),
+                    mapper: MapperName("braid-disk2".into()),
                 },
                 cryptsetup_status_active("braid-disk2", "/dev/vdb"),
             )
@@ -4480,7 +4475,7 @@ mod tests {
             )
             .with_output(
                 CmdRequest::CryptsetupStatus {
-                    mapper: "luks-foreign".into(),
+                    mapper: MapperName("luks-foreign".into()),
                 },
                 cryptsetup_status_active("luks-foreign", "/dev/vdc"),
             )
@@ -4730,7 +4725,7 @@ mod tests {
             )
             .with_output(
                 CmdRequest::CryptsetupStatus {
-                    mapper: "braid-disk1".into(),
+                    mapper: MapperName("braid-disk1".into()),
                 },
                 cryptsetup_status_active("braid-disk1", "/dev/vda"),
             )
@@ -5342,7 +5337,7 @@ mod tests {
             )
             .with_output(
                 CmdRequest::CryptsetupStatus {
-                    mapper: "braid-disk1".into(),
+                    mapper: MapperName("braid-disk1".into()),
                 },
                 cryptsetup_status_active("braid-disk1", "/dev/vda"),
             )
@@ -5364,7 +5359,7 @@ mod tests {
             )
             .with_output(
                 CmdRequest::CryptsetupStatus {
-                    mapper: "braid-disk1".into(),
+                    mapper: MapperName("braid-disk1".into()),
                 },
                 cryptsetup_status_active("braid-disk1", "/dev/vda"),
             )
@@ -5376,7 +5371,7 @@ mod tests {
             )
             .with_output(
                 CmdRequest::CryptsetupStatus {
-                    mapper: "braid-disk2".into(),
+                    mapper: MapperName("braid-disk2".into()),
                 },
                 cryptsetup_status_active("braid-disk2", "/dev/vdb"),
             )
@@ -5398,7 +5393,7 @@ mod tests {
             )
             .with_output(
                 CmdRequest::CryptsetupStatus {
-                    mapper: "braid-disk1".into(),
+                    mapper: MapperName("braid-disk1".into()),
                 },
                 cryptsetup_status_active("braid-disk1", "/dev/vda"),
             )
@@ -5410,7 +5405,7 @@ mod tests {
             )
             .with_output(
                 CmdRequest::CryptsetupStatus {
-                    mapper: "braid-disk2".into(),
+                    mapper: MapperName("braid-disk2".into()),
                 },
                 cryptsetup_status_active("braid-disk2", "/dev/vdb"),
             )
@@ -5432,7 +5427,7 @@ mod tests {
             )
             .with_output(
                 CmdRequest::CryptsetupStatus {
-                    mapper: "braid-disk1".into(),
+                    mapper: MapperName("braid-disk1".into()),
                 },
                 cryptsetup_status_active("braid-disk1", "/dev/vda"),
             )
@@ -5444,7 +5439,7 @@ mod tests {
             )
             .with_output(
                 CmdRequest::CryptsetupStatus {
-                    mapper: "braid-disk2".into(),
+                    mapper: MapperName("braid-disk2".into()),
                 },
                 cryptsetup_status_active("braid-disk2", "/dev/vdb"),
             )
@@ -5456,7 +5451,7 @@ mod tests {
             )
             .with_output(
                 CmdRequest::CryptsetupStatus {
-                    mapper: "braid-disk3".into(),
+                    mapper: MapperName("braid-disk3".into()),
                 },
                 cryptsetup_status_active("braid-disk3", "/dev/vdc"),
             )
@@ -5478,7 +5473,7 @@ mod tests {
             )
             .with_output(
                 CmdRequest::CryptsetupStatus {
-                    mapper: "braid-disk1".into(),
+                    mapper: MapperName("braid-disk1".into()),
                 },
                 cryptsetup_status_active("braid-disk1", "/dev/vda"),
             )
@@ -5490,7 +5485,7 @@ mod tests {
             )
             .with_output(
                 CmdRequest::CryptsetupStatus {
-                    mapper: "braid-disk2".into(),
+                    mapper: MapperName("braid-disk2".into()),
                 },
                 cryptsetup_status_active("braid-disk2", "/dev/vdb"),
             )
@@ -5502,7 +5497,7 @@ mod tests {
             )
             .with_output(
                 CmdRequest::CryptsetupStatus {
-                    mapper: "braid-disk3".into(),
+                    mapper: MapperName("braid-disk3".into()),
                 },
                 cryptsetup_status_active("braid-disk3", "/dev/vdc"),
             )
@@ -6250,7 +6245,7 @@ mod tests {
             .with_output_stdin(
                 CmdRequest::CryptsetupLuksOpen {
                     device: "/dev/disk/by-id/virtio-disk2".into(),
-                    mapper: "braid-disk2".into(),
+                    mapper: MapperName("braid-disk2".into()),
                 },
                 TEST_PASSPHRASE_BYTES.to_vec(),
                 ok_raw_empty("cryptsetup open"),
@@ -6308,7 +6303,7 @@ mod tests {
                 matches!(
                     r,
                     CmdRequest::CryptsetupLuksOpen { device, mapper }
-                        if device == "/dev/disk/by-id/virtio-disk2" && mapper == "braid-disk2"
+                        if device == "/dev/disk/by-id/virtio-disk2" && mapper.as_str() == "braid-disk2"
                 )
             })
             .expect("pre-mount discovery should open the committed add target");
@@ -6377,7 +6372,7 @@ mod tests {
             .with_output_stdin(
                 CmdRequest::CryptsetupLuksOpen {
                     device: "/dev/disk/by-id/virtio-disk2".into(),
-                    mapper: "braid-disk2".into(),
+                    mapper: MapperName("braid-disk2".into()),
                 },
                 TEST_PASSPHRASE_BYTES.to_vec(),
                 ok_raw_empty("cryptsetup open"),
@@ -6419,7 +6414,7 @@ mod tests {
                 matches!(
                     r,
                     CmdRequest::CryptsetupLuksOpen { device, mapper }
-                        if device == "/dev/disk/by-id/virtio-disk2" && mapper == "braid-disk2"
+                        if device == "/dev/disk/by-id/virtio-disk2" && mapper.as_str() == "braid-disk2"
                 )
             })
             .expect("pre-mount discovery should open the committed fresh target");
@@ -6492,7 +6487,7 @@ mod tests {
             .with_luks_dump_text_luks2("/dev/disk/by-id/virtio-disk2")
             .with_output(
                 CmdRequest::CryptsetupStatus {
-                    mapper: "braid-disk2".into(),
+                    mapper: MapperName("braid-disk2".into()),
                 },
                 inactive_mapper_status("braid-disk2"),
             )
@@ -6508,7 +6503,7 @@ mod tests {
             .with_luks_dump_text_luks2("/dev/disk/by-id/virtio-disk1")
             .with_output(
                 CmdRequest::CryptsetupStatus {
-                    mapper: "braid-disk1".into(),
+                    mapper: MapperName("braid-disk1".into()),
                 },
                 inactive_mapper_status("braid-disk1"),
             );
@@ -6539,7 +6534,7 @@ mod tests {
                 matches!(
                     r,
                     CmdRequest::CryptsetupLuksOpen { mapper, .. }
-                        if mapper == "braid-disk2"
+                        if mapper.as_str() == "braid-disk2"
                 )
             }),
             "mismatched add target must not be opened during pre-mount discovery"
@@ -6594,7 +6589,7 @@ mod tests {
             )
             .with_output(
                 CmdRequest::CryptsetupStatus {
-                    mapper: "braid-disk2".into(),
+                    mapper: MapperName("braid-disk2".into()),
                 },
                 inactive_mapper_status("braid-disk2"),
             )
@@ -6610,7 +6605,7 @@ mod tests {
             .with_luks_dump_text_luks2("/dev/disk/by-id/virtio-disk1")
             .with_output(
                 CmdRequest::CryptsetupStatus {
-                    mapper: "braid-disk1".into(),
+                    mapper: MapperName("braid-disk1".into()),
                 },
                 inactive_mapper_status("braid-disk1"),
             );
@@ -6641,7 +6636,7 @@ mod tests {
                 matches!(
                     r,
                     CmdRequest::CryptsetupLuksOpen { mapper, .. }
-                        if mapper == "braid-disk2"
+                        if mapper.as_str() == "braid-disk2"
                 )
             }),
             "mislabeled fresh target must not be opened during pre-mount discovery"
@@ -6691,7 +6686,7 @@ mod tests {
             .with_luks_dump_text_luks2("/dev/disk/by-id/virtio-disk2")
             .with_output(
                 CmdRequest::CryptsetupStatus {
-                    mapper: "braid-disk2".into(),
+                    mapper: MapperName("braid-disk2".into()),
                 },
                 inactive_mapper_status("braid-disk2"),
             )
@@ -6707,14 +6702,14 @@ mod tests {
             .with_luks_dump_text_luks2("/dev/disk/by-id/virtio-disk3")
             .with_output(
                 CmdRequest::CryptsetupStatus {
-                    mapper: "braid-disk3".into(),
+                    mapper: MapperName("braid-disk3".into()),
                 },
                 inactive_mapper_status("braid-disk3"),
             )
             .with_output_stdin(
                 CmdRequest::CryptsetupLuksOpen {
                     device: "/dev/disk/by-id/virtio-disk3".into(),
-                    mapper: "braid-disk3".into(),
+                    mapper: MapperName("braid-disk3".into()),
                 },
                 TEST_PASSPHRASE_BYTES.to_vec(),
                 ok_raw_empty("cryptsetup open"),
@@ -6743,7 +6738,7 @@ mod tests {
             .with_luks_dump_text_luks2("/dev/disk/by-id/virtio-disk1")
             .with_output(
                 CmdRequest::CryptsetupStatus {
-                    mapper: "braid-disk1".into(),
+                    mapper: MapperName("braid-disk1".into()),
                 },
                 inactive_mapper_status("braid-disk1"),
             );
@@ -6763,7 +6758,7 @@ mod tests {
                 matches!(
                     r,
                     CmdRequest::CryptsetupLuksOpen { mapper, .. }
-                        if mapper == "braid-disk2"
+                        if mapper.as_str() == "braid-disk2"
                 )
             }),
             "mismatched first target must not be opened"
@@ -6773,7 +6768,7 @@ mod tests {
                 matches!(
                     r,
                     CmdRequest::CryptsetupLuksOpen { device, mapper }
-                        if device == "/dev/disk/by-id/virtio-disk3" && mapper == "braid-disk3"
+                        if device == "/dev/disk/by-id/virtio-disk3" && mapper.as_str() == "braid-disk3"
                 )
             }),
             "matching later target must be opened"
@@ -6838,7 +6833,7 @@ mod tests {
             )
             .with_output(
                 CmdRequest::CryptsetupStatus {
-                    mapper: "braid-disk1".into(),
+                    mapper: MapperName("braid-disk1".into()),
                 },
                 cryptsetup_status_active("braid-disk1", "/dev/vda"),
             )
@@ -6967,7 +6962,7 @@ mod tests {
         assert!(
             !requests.iter().any(|r| matches!(
                 r,
-                CmdRequest::CryptsetupLuksOpen { mapper, .. } if mapper == "braid-disk3"
+                CmdRequest::CryptsetupLuksOpen { mapper, .. } if mapper.as_str() == "braid-disk3"
             )),
             "unknown live member must abort before opening the journaled target"
         );
@@ -7070,7 +7065,7 @@ mod tests {
                 .with_output_stdin(
                     CmdRequest::CryptsetupLuksOpen {
                         device: "/dev/disk/by-id/virtio-disk2".into(),
-                        mapper: "braid-disk2".into(),
+                        mapper: MapperName("braid-disk2".into()),
                     },
                     TEST_PASSPHRASE_BYTES.to_vec(),
                     ok_raw_empty("cryptsetup open"),
@@ -7107,7 +7102,7 @@ mod tests {
                 .with_output_stdin(
                     CmdRequest::CryptsetupLuksOpen {
                         device: "/dev/disk/by-id/virtio-disk1".into(),
-                        mapper: "braid-disk1".into(),
+                        mapper: MapperName("braid-disk1".into()),
                     },
                     TEST_PASSPHRASE_BYTES.to_vec(),
                     ok_raw_empty("cryptsetup open"),
@@ -7205,7 +7200,7 @@ mod tests {
                 .with_output_stdin(
                     CmdRequest::CryptsetupLuksOpen {
                         device: "/dev/disk/by-id/virtio-disk2".into(),
-                        mapper: "braid-disk2".into(),
+                        mapper: MapperName("braid-disk2".into()),
                     },
                     TEST_PASSPHRASE_BYTES.to_vec(),
                     ok_raw_empty("cryptsetup open"),
@@ -7248,7 +7243,7 @@ mod tests {
             requests.iter().any(|r| matches!(
                 r,
                 CmdRequest::CryptsetupLuksOpen { device, mapper }
-                    if device == "/dev/disk/by-id/virtio-disk2" && mapper == "braid-disk2"
+                    if device == "/dev/disk/by-id/virtio-disk2" && mapper.as_str() == "braid-disk2"
             )),
             "reconciliation should open the closed fresh target"
         );
@@ -8038,7 +8033,7 @@ mod tests {
             .with_luks_dump_text_luks2("/dev/disk/by-id/virtio-disk2")
             .with_output(
                 CmdRequest::CryptsetupStatus {
-                    mapper: "braid-disk2".into(),
+                    mapper: MapperName("braid-disk2".into()),
                 },
                 inactive_mapper_status("braid-disk2"),
             )
@@ -8054,7 +8049,7 @@ mod tests {
             .with_luks_dump_text_luks2("/dev/disk/by-id/virtio-disk1")
             .with_output_sequence(
                 CmdRequest::CryptsetupStatus {
-                    mapper: "braid-disk1".into(),
+                    mapper: MapperName("braid-disk1".into()),
                 },
                 // Status probes for disk1, in order:
                 // 1. initial mount planning sees disk1 closed;
@@ -8082,7 +8077,7 @@ mod tests {
             .with_output_stdin(
                 CmdRequest::CryptsetupLuksOpen {
                     device: "/dev/disk/by-id/virtio-disk1".into(),
-                    mapper: "braid-disk1".into(),
+                    mapper: MapperName("braid-disk1".into()),
                 },
                 TEST_PASSPHRASE_BYTES.to_vec(),
                 ok_raw_empty("cryptsetup open"),
@@ -8198,7 +8193,7 @@ mod tests {
                 .with_output_stdin(
                     CmdRequest::CryptsetupLuksOpen {
                         device: "/dev/disk/by-id/virtio-disk2".into(),
-                        mapper: "braid-disk2".into(),
+                        mapper: MapperName("braid-disk2".into()),
                     },
                     TEST_PASSPHRASE_BYTES.to_vec(),
                     ok_raw_empty("cryptsetup open"),
@@ -8301,7 +8296,7 @@ mod tests {
                 .with_output_stdin(
                     CmdRequest::CryptsetupLuksOpen {
                         device: "/dev/disk/by-id/virtio-disk2".into(),
-                        mapper: "braid-disk2".into(),
+                        mapper: MapperName("braid-disk2".into()),
                     },
                     TEST_PASSPHRASE_BYTES.to_vec(),
                     ok_raw_empty("cryptsetup open"),
@@ -9049,7 +9044,7 @@ mod tests {
         let runner = MockRunner::default()
             .with_output(
                 CmdRequest::CryptsetupClose {
-                    mapper: "braid-old".into(),
+                    mapper: MapperName("braid-old".into()),
                 },
                 ok_raw_empty("cryptsetup close braid-old"),
             )
@@ -10201,7 +10196,7 @@ mod tests {
             .with_handler({
                 let close_attempts = close_attempts.clone();
                 move |req| match req {
-                    CmdRequest::CryptsetupClose { mapper } if mapper == "braid-old" => {
+                    CmdRequest::CryptsetupClose { mapper } if mapper.as_str() == "braid-old" => {
                         let attempt = close_attempts.fetch_add(1, Ordering::SeqCst) + 1;
                         if attempt == 1 {
                             Some(Ok(err_raw(
@@ -10255,7 +10250,7 @@ mod tests {
             .requests()
             .iter()
             .filter(|request| {
-                matches!(request, CmdRequest::CryptsetupClose { mapper } if mapper == "braid-old")
+                matches!(request, CmdRequest::CryptsetupClose { mapper } if mapper.as_str() == "braid-old")
             })
             .count();
         assert_eq!(close_count, 2);
@@ -10523,7 +10518,7 @@ mod tests {
             )
             .with_output(
                 CmdRequest::CryptsetupStatus {
-                    mapper: "braid-toshiba".into(),
+                    mapper: MapperName("braid-toshiba".into()),
                 },
                 cryptsetup_status_active("braid-toshiba", "/dev/vda"),
             )
@@ -10535,7 +10530,7 @@ mod tests {
             )
             .with_output(
                 CmdRequest::CryptsetupStatus {
-                    mapper: "braid-mystery".into(),
+                    mapper: MapperName("braid-mystery".into()),
                 },
                 cryptsetup_status_active("braid-mystery", "/dev/vdb"),
             )
@@ -10641,7 +10636,7 @@ mod tests {
             .with_output_stdin(
                 CmdRequest::CryptsetupLuksOpen {
                     device: "/dev/disk/by-id/virtio-disk1".into(),
-                    mapper: "braid-disk1".into(),
+                    mapper: MapperName("braid-disk1".into()),
                 },
                 TEST_PASSPHRASE_BYTES.to_vec(),
                 ok_raw_empty("cryptsetup open"),
@@ -10650,7 +10645,7 @@ mod tests {
             .with_output_stdin(
                 CmdRequest::CryptsetupLuksOpen {
                     device: "/dev/disk/by-id/virtio-disk2".into(),
-                    mapper: "braid-disk2".into(),
+                    mapper: MapperName("braid-disk2".into()),
                 },
                 TEST_PASSPHRASE_BYTES.to_vec(),
                 ok_raw_empty("cryptsetup open"),
@@ -10700,13 +10695,13 @@ mod tests {
             // flips status queries to inactive so the re-probe opens them).
             .with_output(
                 CmdRequest::CryptsetupClose {
-                    mapper: "braid-disk1".into(),
+                    mapper: MapperName("braid-disk1".into()),
                 },
                 ok_raw_empty("cryptsetup close braid-disk1"),
             )
             .with_output(
                 CmdRequest::CryptsetupClose {
-                    mapper: "braid-disk2".into(),
+                    mapper: MapperName("braid-disk2".into()),
                 },
                 ok_raw_empty("cryptsetup close braid-disk2"),
             )
@@ -10722,7 +10717,7 @@ mod tests {
             // probe_pool: cryptsetup status for each device
             .with_output(
                 CmdRequest::CryptsetupStatus {
-                    mapper: "braid-disk1".into(),
+                    mapper: MapperName("braid-disk1".into()),
                 },
                 cryptsetup_status_active("braid-disk1", "/dev/vda"),
             )
@@ -10734,7 +10729,7 @@ mod tests {
             )
             .with_output(
                 CmdRequest::CryptsetupStatus {
-                    mapper: "braid-disk2".into(),
+                    mapper: MapperName("braid-disk2".into()),
                 },
                 cryptsetup_status_active("braid-disk2", "/dev/vdb"),
             )
@@ -10872,7 +10867,7 @@ mod tests {
             )
             .with_output(
                 CmdRequest::CryptsetupStatus {
-                    mapper: "braid-disk1".into(),
+                    mapper: MapperName("braid-disk1".into()),
                 },
                 cryptsetup_status_active("braid-disk1", "/dev/vda"),
             )
@@ -10884,7 +10879,7 @@ mod tests {
             )
             .with_output(
                 CmdRequest::CryptsetupStatus {
-                    mapper: "braid-disk2".into(),
+                    mapper: MapperName("braid-disk2".into()),
                 },
                 cryptsetup_status_active("braid-disk2", "/dev/vdb"),
             )
@@ -11040,7 +11035,7 @@ mod tests {
             .with_output_stdin(
                 CmdRequest::CryptsetupLuksOpen {
                     device: "/dev/disk/by-id/virtio-disk1".into(),
-                    mapper: "braid-disk1".into(),
+                    mapper: MapperName("braid-disk1".into()),
                 },
                 TEST_PASSPHRASE_BYTES.to_vec(),
                 ok_raw_empty("cryptsetup open"),
@@ -11048,7 +11043,7 @@ mod tests {
             .with_output_stdin(
                 CmdRequest::CryptsetupLuksOpen {
                     device: "/dev/disk/by-id/virtio-new".into(),
-                    mapper: "braid-new".into(),
+                    mapper: MapperName("braid-new".into()),
                 },
                 TEST_PASSPHRASE_BYTES.to_vec(),
                 ok_raw_empty("cryptsetup open"),
@@ -11056,7 +11051,7 @@ mod tests {
             .with_output_stdin(
                 CmdRequest::CryptsetupLuksOpen {
                     device: "/dev/disk/by-id/virtio-old".into(),
-                    mapper: "braid-old".into(),
+                    mapper: MapperName("braid-old".into()),
                 },
                 TEST_PASSPHRASE_BYTES.to_vec(),
                 ok_raw_empty("cryptsetup open"),
@@ -11178,13 +11173,13 @@ mod tests {
             )
             .with_output(
                 CmdRequest::CryptsetupClose {
-                    mapper: "braid-disk1".into(),
+                    mapper: MapperName("braid-disk1".into()),
                 },
                 ok_raw_empty("cryptsetup close"),
             )
             .with_output(
                 CmdRequest::CryptsetupClose {
-                    mapper: "braid-disk2".into(),
+                    mapper: MapperName("braid-disk2".into()),
                 },
                 ok_raw_empty("cryptsetup close"),
             )
@@ -11244,7 +11239,7 @@ mod tests {
             .with_output_stdin(
                 CmdRequest::CryptsetupLuksOpen {
                     device: "/dev/disk/by-id/virtio-disk1".into(),
-                    mapper: "braid-disk1".into(),
+                    mapper: MapperName("braid-disk1".into()),
                 },
                 b"testpass".to_vec(),
                 ok_raw_empty("cryptsetup open"),
@@ -11252,7 +11247,7 @@ mod tests {
             .with_output_stdin(
                 CmdRequest::CryptsetupLuksOpen {
                     device: "/dev/disk/by-id/virtio-disk2".into(),
-                    mapper: "braid-disk2".into(),
+                    mapper: MapperName("braid-disk2".into()),
                 },
                 b"testpass".to_vec(),
                 ok_raw_empty("cryptsetup open"),
@@ -11353,7 +11348,7 @@ mod tests {
             )
             .with_output(
                 CmdRequest::CryptsetupClose {
-                    mapper: "braid-disk1".into(),
+                    mapper: MapperName("braid-disk1".into()),
                 },
                 ok_raw_empty("cryptsetup close"),
             )
@@ -11398,7 +11393,7 @@ mod tests {
             .with_output_stdin(
                 CmdRequest::CryptsetupLuksOpen {
                     device: "/dev/disk/by-id/virtio-disk1".into(),
-                    mapper: "braid-disk1".into(),
+                    mapper: MapperName("braid-disk1".into()),
                 },
                 b"testpass".to_vec(),
                 ok_raw_empty("cryptsetup open"),
@@ -11406,7 +11401,7 @@ mod tests {
             .with_output_stdin(
                 CmdRequest::CryptsetupLuksOpen {
                     device: "/dev/disk/by-id/virtio-disk2".into(),
-                    mapper: "braid-disk2".into(),
+                    mapper: MapperName("braid-disk2".into()),
                 },
                 b"testpass".to_vec(),
                 ok_raw_empty("cryptsetup open"),
@@ -11500,13 +11495,13 @@ mod tests {
             )
             .with_output(
                 CmdRequest::CryptsetupClose {
-                    mapper: "braid-disk1".into(),
+                    mapper: MapperName("braid-disk1".into()),
                 },
                 ok_raw_empty("cryptsetup close"),
             )
             .with_output(
                 CmdRequest::CryptsetupClose {
-                    mapper: "braid-disk2".into(),
+                    mapper: MapperName("braid-disk2".into()),
                 },
                 ok_raw_empty("cryptsetup close"),
             )
@@ -11551,7 +11546,7 @@ mod tests {
             .with_output_stdin(
                 CmdRequest::CryptsetupLuksOpen {
                     device: "/dev/disk/by-id/virtio-disk1".into(),
-                    mapper: "braid-disk1".into(),
+                    mapper: MapperName("braid-disk1".into()),
                 },
                 b"testpass".to_vec(),
                 ok_raw_empty("cryptsetup open"),
@@ -11559,7 +11554,7 @@ mod tests {
             .with_output_stdin(
                 CmdRequest::CryptsetupLuksOpen {
                     device: "/dev/disk/by-id/virtio-disk2".into(),
-                    mapper: "braid-disk2".into(),
+                    mapper: MapperName("braid-disk2".into()),
                 },
                 b"testpass".to_vec(),
                 ok_raw_empty("cryptsetup open"),
@@ -11662,7 +11657,7 @@ mod tests {
             .with_output_stdin(
                 CmdRequest::CryptsetupLuksOpen {
                     device: "/dev/disk/by-id/virtio-disk1".into(),
-                    mapper: "braid-disk1".into(),
+                    mapper: MapperName("braid-disk1".into()),
                 },
                 TEST_PASSPHRASE_BYTES.to_vec(),
                 ok_raw_empty("cryptsetup open"),
@@ -11670,7 +11665,7 @@ mod tests {
             .with_output_stdin(
                 CmdRequest::CryptsetupLuksOpen {
                     device: "/dev/disk/by-id/virtio-disk2".into(),
-                    mapper: "braid-disk2".into(),
+                    mapper: MapperName("braid-disk2".into()),
                 },
                 TEST_PASSPHRASE_BYTES.to_vec(),
                 ok_raw_empty("cryptsetup open"),
@@ -11740,7 +11735,7 @@ mod tests {
             // probe_pool: cryptsetup status for each device
             .with_output(
                 CmdRequest::CryptsetupStatus {
-                    mapper: "braid-disk1".into(),
+                    mapper: MapperName("braid-disk1".into()),
                 },
                 cryptsetup_status_active("braid-disk1", "/dev/vda"),
             )
@@ -11752,7 +11747,7 @@ mod tests {
             )
             .with_output(
                 CmdRequest::CryptsetupStatus {
-                    mapper: "braid-disk2".into(),
+                    mapper: MapperName("braid-disk2".into()),
                 },
                 cryptsetup_status_active("braid-disk2", "/dev/vdb"),
             )
@@ -12022,7 +12017,7 @@ mod tests {
             )
             .with_output(
                 CmdRequest::CryptsetupStatus {
-                    mapper: "braid-disk1".into(),
+                    mapper: MapperName("braid-disk1".into()),
                 },
                 cryptsetup_status_active("braid-disk1", "/dev/vda"),
             )
@@ -12034,7 +12029,7 @@ mod tests {
             )
             .with_output(
                 CmdRequest::CryptsetupStatus {
-                    mapper: "braid-disk2".into(),
+                    mapper: MapperName("braid-disk2".into()),
                 },
                 cryptsetup_status_active("braid-disk2", "/dev/vdb"),
             )
@@ -12149,7 +12144,7 @@ mod tests {
             .with_output_stdin(
                 CmdRequest::CryptsetupLuksOpen {
                     device: "/dev/disk/by-id/virtio-disk1".into(),
-                    mapper: "braid-disk1".into(),
+                    mapper: MapperName("braid-disk1".into()),
                 },
                 TEST_PASSPHRASE_BYTES.to_vec(),
                 ok_raw_empty("cryptsetup open"),
@@ -12190,7 +12185,7 @@ mod tests {
             )
             .with_output(
                 CmdRequest::CryptsetupClose {
-                    mapper: "braid-disk1".into(),
+                    mapper: MapperName("braid-disk1".into()),
                 },
                 ok_raw_empty("cryptsetup close"),
             )
@@ -12433,7 +12428,7 @@ mod tests {
             .with_output_stdin(
                 CmdRequest::CryptsetupLuksOpen {
                     device: "/dev/disk/by-id/virtio-disk1".into(),
-                    mapper: "braid-disk1".into(),
+                    mapper: MapperName("braid-disk1".into()),
                 },
                 TEST_PASSPHRASE_BYTES.to_vec(),
                 ok_raw_empty("cryptsetup open"),
@@ -12475,7 +12470,7 @@ mod tests {
             )
             .with_output(
                 CmdRequest::CryptsetupClose {
-                    mapper: "braid-disk1".into(),
+                    mapper: MapperName("braid-disk1".into()),
                 },
                 ok_raw_empty("cryptsetup close"),
             )
@@ -12507,7 +12502,7 @@ mod tests {
         );
         assert!(
             runner.requests().iter().any(
-                |r| matches!(r, CmdRequest::CryptsetupClose { mapper } if mapper == "braid-disk1")
+                |r| matches!(r, CmdRequest::CryptsetupClose { mapper } if mapper.as_str() == "braid-disk1")
             ),
             "bootstrap mount failure with btrfs superblock should still cleanup opened mapper"
         );
@@ -12546,7 +12541,7 @@ mod tests {
             )
             .with_output(
                 CmdRequest::CryptsetupStatus {
-                    mapper: "braid-disk1".into(),
+                    mapper: MapperName("braid-disk1".into()),
                 },
                 cryptsetup_status_active("braid-disk1", "/dev/vda"),
             )
@@ -12558,7 +12553,7 @@ mod tests {
             )
             .with_output(
                 CmdRequest::CryptsetupStatus {
-                    mapper: "braid-disk2".into(),
+                    mapper: MapperName("braid-disk2".into()),
                 },
                 cryptsetup_status_active("braid-disk2", "/dev/vdb"),
             )
@@ -12660,7 +12655,7 @@ mod tests {
             )
             .with_output(
                 CmdRequest::CryptsetupStatus {
-                    mapper: "braid-disk1".into(),
+                    mapper: MapperName("braid-disk1".into()),
                 },
                 cryptsetup_status_active("braid-disk1", "/dev/vda"),
             )
@@ -12672,7 +12667,7 @@ mod tests {
             )
             .with_output(
                 CmdRequest::CryptsetupStatus {
-                    mapper: "braid-disk2".into(),
+                    mapper: MapperName("braid-disk2".into()),
                 },
                 cryptsetup_status_active("braid-disk2", "/dev/vdb"),
             )
@@ -13146,7 +13141,7 @@ mod tests {
             .with_output_stdin(
                 CmdRequest::CryptsetupLuksOpen {
                     device: "/dev/disk/by-id/virtio-disk1".into(),
-                    mapper: "braid-disk1".into(),
+                    mapper: MapperName("braid-disk1".into()),
                 },
                 TEST_PASSPHRASE_BYTES.to_vec(),
                 ok_raw_empty("cryptsetup open"),
@@ -13154,7 +13149,7 @@ mod tests {
             .with_output_stdin(
                 CmdRequest::CryptsetupLuksOpen {
                     device: "/dev/disk/by-id/virtio-new".into(),
-                    mapper: "braid-new".into(),
+                    mapper: MapperName("braid-new".into()),
                 },
                 TEST_PASSPHRASE_BYTES.to_vec(),
                 ok_raw_empty("cryptsetup open"),
@@ -13162,7 +13157,7 @@ mod tests {
             .with_output_stdin(
                 CmdRequest::CryptsetupLuksOpen {
                     device: "/dev/disk/by-id/virtio-old".into(),
-                    mapper: "braid-old".into(),
+                    mapper: MapperName("braid-old".into()),
                 },
                 TEST_PASSPHRASE_BYTES.to_vec(),
                 ok_raw_empty("cryptsetup open"),
@@ -13336,7 +13331,7 @@ mod tests {
             .with_output_stdin(
                 CmdRequest::CryptsetupLuksOpen {
                     device: "/dev/disk/by-id/virtio-disk1".into(),
-                    mapper: "braid-disk1".into(),
+                    mapper: MapperName("braid-disk1".into()),
                 },
                 TEST_PASSPHRASE_BYTES.to_vec(),
                 ok_raw_empty("cryptsetup open"),
@@ -13344,7 +13339,7 @@ mod tests {
             .with_output_stdin(
                 CmdRequest::CryptsetupLuksOpen {
                     device: "/dev/disk/by-id/virtio-new".into(),
-                    mapper: "braid-new".into(),
+                    mapper: MapperName("braid-new".into()),
                 },
                 TEST_PASSPHRASE_BYTES.to_vec(),
                 ok_raw_empty("cryptsetup open"),
@@ -13352,7 +13347,7 @@ mod tests {
             .with_output_stdin(
                 CmdRequest::CryptsetupLuksOpen {
                     device: "/dev/disk/by-id/virtio-old".into(),
-                    mapper: "braid-old".into(),
+                    mapper: MapperName("braid-old".into()),
                 },
                 TEST_PASSPHRASE_BYTES.to_vec(),
                 ok_raw_empty("cryptsetup open"),
@@ -13409,19 +13404,19 @@ mod tests {
             //    `closed` set after each successful close.
             .with_output(
                 CmdRequest::CryptsetupClose {
-                    mapper: "braid-disk1".into(),
+                    mapper: MapperName("braid-disk1".into()),
                 },
                 ok_raw_empty("cryptsetup close braid-disk1"),
             )
             .with_output(
                 CmdRequest::CryptsetupClose {
-                    mapper: "braid-new".into(),
+                    mapper: MapperName("braid-new".into()),
                 },
                 ok_raw_empty("cryptsetup close braid-new"),
             )
             .with_output(
                 CmdRequest::CryptsetupClose {
-                    mapper: "braid-old".into(),
+                    mapper: MapperName("braid-old".into()),
                 },
                 ok_raw_empty("cryptsetup close braid-old"),
             )
@@ -13441,7 +13436,7 @@ mod tests {
             )
             .with_output(
                 CmdRequest::CryptsetupStatus {
-                    mapper: "braid-disk1".into(),
+                    mapper: MapperName("braid-disk1".into()),
                 },
                 cryptsetup_status_active("braid-disk1", "/dev/vda"),
             )
@@ -13453,7 +13448,7 @@ mod tests {
             )
             .with_output(
                 CmdRequest::CryptsetupStatus {
-                    mapper: "braid-new".into(),
+                    mapper: MapperName("braid-new".into()),
                 },
                 cryptsetup_status_active("braid-new", "/dev/vdc"),
             )
@@ -13586,7 +13581,7 @@ mod tests {
             )
             .with_output(
                 CmdRequest::CryptsetupStatus {
-                    mapper: "braid-disk1".into(),
+                    mapper: MapperName("braid-disk1".into()),
                 },
                 cryptsetup_status_active("braid-disk1", "/dev/vda"),
             )
@@ -13598,7 +13593,7 @@ mod tests {
             )
             .with_output(
                 CmdRequest::CryptsetupStatus {
-                    mapper: "braid-disk2".into(),
+                    mapper: MapperName("braid-disk2".into()),
                 },
                 cryptsetup_status_active("braid-disk2", "/dev/vdb"),
             )
@@ -13737,7 +13732,7 @@ mod tests {
             )
             .with_output(
                 CmdRequest::CryptsetupStatus {
-                    mapper: "braid-disk1".into(),
+                    mapper: MapperName("braid-disk1".into()),
                 },
                 cryptsetup_status_active("braid-disk1", "/dev/vda"),
             )
@@ -13749,7 +13744,7 @@ mod tests {
             )
             .with_output(
                 CmdRequest::CryptsetupStatus {
-                    mapper: "braid-disk2".into(),
+                    mapper: MapperName("braid-disk2".into()),
                 },
                 cryptsetup_status_active("braid-disk2", "/dev/vdb"),
             )
@@ -14071,7 +14066,7 @@ mod tests {
             )
             .with_output(
                 CmdRequest::CryptsetupStatus {
-                    mapper: "braid-disk1".into(),
+                    mapper: MapperName("braid-disk1".into()),
                 },
                 cryptsetup_status_active("braid-disk1", "/dev/vda"),
             )
@@ -14083,7 +14078,7 @@ mod tests {
             )
             .with_output(
                 CmdRequest::CryptsetupStatus {
-                    mapper: "braid-disk2".into(),
+                    mapper: MapperName("braid-disk2".into()),
                 },
                 cryptsetup_status_active("braid-disk2", "(null)"),
             );
@@ -14145,7 +14140,7 @@ mod tests {
             )
             .with_output(
                 CmdRequest::CryptsetupStatus {
-                    mapper: "braid-disk1".into(),
+                    mapper: MapperName("braid-disk1".into()),
                 },
                 cryptsetup_status_active("braid-disk1", "/dev/vda"),
             )
@@ -14157,7 +14152,7 @@ mod tests {
             )
             .with_output(
                 CmdRequest::CryptsetupStatus {
-                    mapper: "braid-disk2".into(),
+                    mapper: MapperName("braid-disk2".into()),
                 },
                 cryptsetup_status_active("braid-disk2", "(null)"),
             );
@@ -14217,7 +14212,7 @@ mod tests {
             )
             .with_output(
                 CmdRequest::CryptsetupStatus {
-                    mapper: "braid-disk1".into(),
+                    mapper: MapperName("braid-disk1".into()),
                 },
                 cryptsetup_status_active("braid-disk1", "/dev/vda"),
             )
@@ -14331,7 +14326,7 @@ mod tests {
             )
             .with_output(
                 CmdRequest::CryptsetupStatus {
-                    mapper: "braid-disk1".into(),
+                    mapper: MapperName("braid-disk1".into()),
                 },
                 cryptsetup_status_active("braid-disk1", "/dev/vda"),
             )
@@ -14343,7 +14338,7 @@ mod tests {
             )
             .with_output(
                 CmdRequest::CryptsetupStatus {
-                    mapper: "braid-disk2".into(),
+                    mapper: MapperName("braid-disk2".into()),
                 },
                 cryptsetup_status_active("braid-disk2", "/dev/vdb"),
             )
@@ -14416,7 +14411,7 @@ mod tests {
             )
             .with_output(
                 CmdRequest::CryptsetupStatus {
-                    mapper: "braid-disk1".into(),
+                    mapper: MapperName("braid-disk1".into()),
                 },
                 cryptsetup_status_active("braid-disk1", "/dev/vda"),
             )
@@ -14428,7 +14423,7 @@ mod tests {
             )
             .with_output(
                 CmdRequest::CryptsetupStatus {
-                    mapper: "braid-disk2".into(),
+                    mapper: MapperName("braid-disk2".into()),
                 },
                 cryptsetup_status_active("braid-disk2", "/dev/vdb"),
             )
@@ -14440,7 +14435,7 @@ mod tests {
             )
             .with_output(
                 CmdRequest::CryptsetupStatus {
-                    mapper: "braid-disk3".into(),
+                    mapper: MapperName("braid-disk3".into()),
                 },
                 cryptsetup_status_active("braid-disk3", "(null)"),
             );
@@ -14498,7 +14493,7 @@ mod tests {
             )
             .with_output(
                 CmdRequest::CryptsetupStatus {
-                    mapper: "braid-disk1".into(),
+                    mapper: MapperName("braid-disk1".into()),
                 },
                 cryptsetup_status_active("braid-disk1", "/dev/vda"),
             )
@@ -14510,7 +14505,7 @@ mod tests {
             )
             .with_output(
                 CmdRequest::CryptsetupStatus {
-                    mapper: "braid-disk2".into(),
+                    mapper: MapperName("braid-disk2".into()),
                 },
                 cryptsetup_status_active("braid-disk2", "/dev/vdb"),
             )
@@ -14724,7 +14719,7 @@ mod tests {
             )
             .with_output(
                 CmdRequest::CryptsetupStatus {
-                    mapper: "braid-disk1".into(),
+                    mapper: MapperName("braid-disk1".into()),
                 },
                 cryptsetup_status_active("braid-disk1", "/dev/vda"),
             )
@@ -14736,7 +14731,7 @@ mod tests {
             )
             .with_output(
                 CmdRequest::CryptsetupStatus {
-                    mapper: "braid-disk2".into(),
+                    mapper: MapperName("braid-disk2".into()),
                 },
                 cryptsetup_status_active("braid-disk2", "/dev/vdb"),
             )
@@ -15399,7 +15394,7 @@ mod tests {
             )
             .with_output(
                 CmdRequest::CryptsetupStatus {
-                    mapper: "braid-disk1".into(),
+                    mapper: MapperName("braid-disk1".into()),
                 },
                 cryptsetup_status_active("braid-disk1", "/dev/vda"),
             )
@@ -15411,7 +15406,7 @@ mod tests {
             )
             .with_output(
                 CmdRequest::CryptsetupStatus {
-                    mapper: "braid-disk2".into(),
+                    mapper: MapperName("braid-disk2".into()),
                 },
                 cryptsetup_status_active("braid-disk2", "/dev/vdb"),
             )

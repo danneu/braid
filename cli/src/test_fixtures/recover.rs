@@ -176,9 +176,9 @@ impl RemountRunner {
 impl CommandRunner for RemountRunner {
     fn run(&self, request: &CmdRequest) -> Result<RawCommandOutput, crate::cmd::CmdError> {
         if let CmdRequest::CryptsetupStatus { mapper } = request
-            && self.closed.lock().unwrap().contains(mapper)
+            && self.closed.lock().unwrap().contains(mapper.as_str())
         {
-            return Ok(Self::inactive_status(mapper));
+            return Ok(Self::inactive_status(mapper.as_str()));
         }
         let result = self.inner.run(request)?;
         match request {
@@ -187,7 +187,10 @@ impl CommandRunner for RemountRunner {
                     .lock()
                     .unwrap()
                     .remove(&format!("/dev/mapper/{}", mapper));
-                self.closed.lock().unwrap().insert(mapper.clone());
+                self.closed
+                    .lock()
+                    .unwrap()
+                    .insert(mapper.as_str().to_owned());
             }
             CmdRequest::CryptsetupLuksOpen { mapper, .. }
             | CmdRequest::CryptsetupLuksOpenKeyFile { mapper, .. }
@@ -197,7 +200,7 @@ impl CommandRunner for RemountRunner {
                     .lock()
                     .unwrap()
                     .insert(format!("/dev/mapper/{}", mapper));
-                self.closed.lock().unwrap().remove(mapper);
+                self.closed.lock().unwrap().remove(mapper.as_str());
             }
             _ => {}
         }
@@ -219,7 +222,7 @@ impl CommandRunner for RemountRunner {
                     .lock()
                     .unwrap()
                     .insert(format!("/dev/mapper/{}", mapper));
-                self.closed.lock().unwrap().remove(mapper);
+                self.closed.lock().unwrap().remove(mapper.as_str());
             }
             _ => {}
         }

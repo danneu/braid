@@ -1,6 +1,7 @@
 use crate::cmd::{CmdError, CmdRequest, CommandRunner};
 use crate::progress::Sleeper;
 use crate::status_tag::{StatusTag, emit_status, status_line};
+use crate::types::MapperName;
 use std::time::Duration;
 
 pub(crate) const CLOSE_RETRY_ATTEMPTS: u32 = 3;
@@ -21,12 +22,12 @@ pub(crate) enum CloseMapperError {
 pub(crate) fn close_mapper_with_retry<R: CommandRunner, S: Sleeper + ?Sized>(
     runner: &R,
     sleeper: &S,
-    mapper: &str,
+    mapper: &MapperName,
     color_enabled: bool,
 ) -> Result<(), CloseMapperError> {
     for attempt in 1..=CLOSE_RETRY_ATTEMPTS {
         let result = runner.run(&CmdRequest::CryptsetupClose {
-            mapper: mapper.to_owned(),
+            mapper: mapper.clone(),
         })?;
         if result.exit_status == 0 {
             return Ok(());
@@ -69,7 +70,7 @@ pub(crate) fn close_mapper_with_retry<R: CommandRunner, S: Sleeper + ?Sized>(
 pub(crate) fn close_mapper_best_effort<R, S>(
     runner: &R,
     sleeper: &S,
-    mapper: &str,
+    mapper: &MapperName,
     disk_label: &str,
     color_enabled: bool,
 ) -> bool
@@ -119,7 +120,7 @@ mod tests {
 
     fn close_request() -> CmdRequest {
         CmdRequest::CryptsetupClose {
-            mapper: "braid-disk2".into(),
+            mapper: MapperName("braid-disk2".into()),
         }
     }
 
@@ -134,7 +135,13 @@ mod tests {
     fn run_best_effort(runner: &MockRunner) -> bool {
         let mut closed = false;
         crate::status_tag::testing::capture_with_color(false, || {
-            closed = close_mapper_best_effort(runner, &NoopSleeper, "braid-disk2", "disk2", false);
+            closed = close_mapper_best_effort(
+                runner,
+                &NoopSleeper,
+                &MapperName("braid-disk2".into()),
+                "disk2",
+                false,
+            );
         });
         closed
     }

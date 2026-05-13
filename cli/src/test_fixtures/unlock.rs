@@ -15,7 +15,7 @@
 use super::mount::{MOUNT_TEST_PASSPHRASE_BYTES, err_raw, ok_raw};
 use super::shared;
 use crate::cmd::{CmdRequest, MockRunner, RawCommandOutput};
-use crate::types::MountPoint;
+use crate::types::{MapperName, MountPoint};
 use std::io::Write;
 
 /// Unlock tests mostly model a mounted `/mnt/storage` post-mount probe;
@@ -107,7 +107,7 @@ pub(crate) fn unlock_with_open_mapper_ok(
     runner.with_output_stdin(
         CmdRequest::CryptsetupLuksOpen {
             device: device.to_owned(),
-            mapper: mapper.to_owned(),
+            mapper: MapperName(mapper.to_owned()),
         },
         MOUNT_TEST_PASSPHRASE_BYTES.to_vec(),
         ok_raw("cryptsetup open"),

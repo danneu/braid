@@ -215,7 +215,7 @@ impl RemoveWorkPlan {
             risk: "safe",
             description: format!("cryptsetup close {}", self.target_mapper),
             commands: vec![CmdRequest::CryptsetupClose {
-                mapper: self.target_mapper.0.clone(),
+                mapper: self.target_mapper.clone(),
             }],
         });
         steps
@@ -307,7 +307,7 @@ impl RemovePlan {
             runner,
             fs,
             &work_plan.mount_point,
-            &work_plan.target_mapper.0,
+            work_plan.target_mapper.as_str(),
             &work_plan.expected_present_identities,
         )
         .map_err(|drift| {
@@ -361,7 +361,7 @@ impl RemovePlan {
             runner,
             fs,
             &work_plan.mount_point,
-            &work_plan.target_mapper.0,
+            work_plan.target_mapper.as_str(),
             &work_plan.expected_present_identities,
         )
         .map_err(|drift| {
@@ -387,7 +387,7 @@ impl RemovePlan {
         // call; we keep balance + remove inline and gate the close on a
         // probe of the journaled identity.
         let color_enabled = color_enabled_for_stderr();
-        let mapper_str = work_plan.target_mapper.0.as_str();
+        let mapper_str = work_plan.target_mapper.as_str();
         if work_plan.remaining == 1 {
             eprint!(
                 "{}",
@@ -441,7 +441,7 @@ impl RemovePlan {
             close_mapper_best_effort(
                 runner,
                 params.sleeper,
-                mapper_str,
+                &work_plan.target_mapper,
                 close_label,
                 color_enabled,
             );
@@ -826,7 +826,7 @@ fn remove_present_work_plan_for_test(
             luks_uuid: placeholder_uuid.clone(),
             underlying: String::new(),
         });
-    let name_raw = mn.0.strip_prefix("braid-").unwrap_or(mn.0.as_str());
+    let name_raw = mn.as_str().strip_prefix("braid-").unwrap_or(mn.as_str());
     let name = DiskName::parse(name_raw).expect("test fixture disk name");
     RemoveWorkPlan::new(
         name,
@@ -2180,7 +2180,7 @@ mod tests {
     -> impl Fn(&CmdRequest) -> Option<Result<RawCommandOutput, CmdError>> + Send + Sync + 'static
     {
         |req| match req {
-            CmdRequest::CryptsetupStatus { mapper } if mapper == "braid-disk4" => {
+            CmdRequest::CryptsetupStatus { mapper } if mapper.as_str() == "braid-disk4" => {
                 Some(Ok(mock_ok(
                     "cryptsetup status braid-disk4",
                     "braid-disk4 is active and is in use.\n  type:    LUKS2\n  device:  /dev/vde\n  mode:    read/write\n",
@@ -2455,7 +2455,7 @@ mod tests {
                 _ => None,
             })
             .with_handler(move |req| match req {
-                CmdRequest::CryptsetupStatus { mapper } if mapper == "braid-disk2" => {
+                CmdRequest::CryptsetupStatus { mapper } if mapper.as_str() == "braid-disk2" => {
                     let phase = show_counter_for_status.load(Ordering::SeqCst);
                     let device = if phase >= 2 { "(null)" } else { "/dev/vdc" };
                     Some(Ok(mock_ok(
@@ -2526,7 +2526,7 @@ mod tests {
                 _ => None,
             })
             .with_handler(move |req| match req {
-                CmdRequest::CryptsetupStatus { mapper } if mapper == "braid-disk2" => {
+                CmdRequest::CryptsetupStatus { mapper } if mapper.as_str() == "braid-disk2" => {
                     // First two probes (planning + pre-journal): healthy.
                     // Probe #3 (post-journal): hot-unplugged.
                     let phase = show_counter_for_status.load(Ordering::SeqCst);
@@ -2803,7 +2803,8 @@ mod tests {
         // Plan first to assert target_mapper preservation directly.
         let plan = plan_remove(&runner, &fs, &params).expect("plan succeeds");
         assert_eq!(
-            plan.work_plan.target_mapper.0, "braid-WRONG",
+            plan.work_plan.target_mapper.as_str(),
+            "braid-WRONG",
             "target_mapper must be the observed PoolDevice.mapper, not mapper_name(&name)"
         );
 
@@ -2823,7 +2824,8 @@ mod tests {
         match close_calls[0] {
             CmdRequest::CryptsetupClose { mapper } => {
                 assert_eq!(
-                    mapper, "braid-WRONG",
+                    mapper.as_str(),
+                    "braid-WRONG",
                     "close must target the observed mapper, not the reconstructed one"
                 );
             }
@@ -2963,7 +2965,7 @@ mod tests {
         let closes_for_wrong = calls
             .iter()
             .filter(
-                |c| matches!(c, CmdRequest::CryptsetupClose { mapper } if mapper == "braid-WRONG"),
+                |c| matches!(c, CmdRequest::CryptsetupClose { mapper } if mapper.as_str() == "braid-WRONG"),
             )
             .count();
         assert_eq!(

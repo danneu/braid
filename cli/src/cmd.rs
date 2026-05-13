@@ -1,4 +1,4 @@
-use crate::types::{LuksFormatExtraOpts, LuksUuid, MountPoint};
+use crate::types::{LuksFormatExtraOpts, LuksUuid, MapperName, MountPoint};
 use std::os::unix::process::ExitStatusExt;
 use thiserror::Error;
 
@@ -33,7 +33,7 @@ pub enum CmdRequest {
         target: String,
     },
     CryptsetupStatus {
-        mapper: String,
+        mapper: MapperName,
     },
     CryptsetupLuksUuid {
         device: String,
@@ -69,15 +69,13 @@ pub enum CmdRequest {
     // Mutation commands for apply
     CryptsetupLuksOpen {
         device: String,
-        mapper: String,
+        mapper: MapperName,
     },
     CryptsetupIsLuks {
         device: String,
     },
-    // TODO(post-migration): retype mapper: String to MapperName once
-    // this migration lands.
     CryptsetupClose {
-        mapper: String,
+        mapper: MapperName,
     },
     BtrfsDeviceAdd {
         device: String,
@@ -200,7 +198,7 @@ pub enum CmdRequest {
     // Keyfile commands (auto-unlock)
     CryptsetupLuksOpenKeyFile {
         device: String,
-        mapper: String,
+        mapper: MapperName,
         key_file_path: String,
     },
     CryptsetupTestKeyFile {
@@ -346,7 +344,7 @@ impl CmdRequest {
             },
             CmdRequest::CryptsetupStatus { mapper } => CmdArgs {
                 program: "cryptsetup".to_owned(),
-                args: vec!["status".into(), mapper.clone()],
+                args: vec!["status".into(), mapper.as_str().to_owned()],
             },
             CmdRequest::CryptsetupLuksUuid { device } => CmdArgs {
                 program: "cryptsetup".to_owned(),
@@ -469,7 +467,7 @@ impl CmdRequest {
                     "--perf-no_read_workqueue".into(),
                     "--perf-no_write_workqueue".into(),
                     device.clone(),
-                    mapper.clone(),
+                    mapper.as_str().to_owned(),
                 ],
             },
             CmdRequest::CryptsetupIsLuks { device } => CmdArgs {
@@ -478,7 +476,7 @@ impl CmdRequest {
             },
             CmdRequest::CryptsetupClose { mapper } => CmdArgs {
                 program: "cryptsetup".to_owned(),
-                args: vec!["close".into(), mapper.clone()],
+                args: vec!["close".into(), mapper.as_str().to_owned()],
             },
             CmdRequest::BtrfsDeviceAdd {
                 device,
@@ -767,7 +765,7 @@ impl CmdRequest {
                     "--perf-no_read_workqueue".into(),
                     "--perf-no_write_workqueue".into(),
                     device.clone(),
-                    mapper.clone(),
+                    mapper.as_str().to_owned(),
                 ],
             },
             CmdRequest::CryptsetupTestKeyFile {
@@ -1143,7 +1141,7 @@ impl MockRunner {
     pub fn with_mapper_closed(self, mapper: &str) -> Self {
         self.with_output(
             CmdRequest::CryptsetupStatus {
-                mapper: mapper.into(),
+                mapper: MapperName(mapper.into()),
             },
             RawCommandOutput {
                 cmd: format!("cryptsetup status {mapper}"),
@@ -1170,7 +1168,7 @@ impl MockRunner {
     pub fn with_mapper_open(self, mapper: &str, underlying: &str, uuid: &str) -> Self {
         self.with_output(
             CmdRequest::CryptsetupStatus {
-                mapper: mapper.into(),
+                mapper: MapperName(mapper.into()),
             },
             RawCommandOutput {
                 cmd: format!("cryptsetup status {mapper}"),
@@ -1712,7 +1710,7 @@ mod tests {
     fn luks_open_key_file_run_dispatches_directly() {
         let req = CmdRequest::CryptsetupLuksOpenKeyFile {
             device: "/dev/vda".to_owned(),
-            mapper: "braid-test".to_owned(),
+            mapper: MapperName("braid-test".into()),
             key_file_path: "/run/braid-key/braid.key".to_owned(),
         };
         let mock = MockRunner::default().with_output(
@@ -2219,7 +2217,7 @@ mod tests {
                 description: "LUKS open -> braid-aaa".into(),
                 commands: vec![CmdRequest::CryptsetupLuksOpen {
                     device: "/dev/disk/by-id/disk1".to_owned(),
-                    mapper: "braid-aaa".to_owned(),
+                    mapper: MapperName("braid-aaa".into()),
                 }],
             },
         ];
@@ -2343,7 +2341,7 @@ mod tests {
     fn cryptsetup_luks_open_omits_keyfile_size() {
         let cmd = CmdRequest::CryptsetupLuksOpen {
             device: "/dev/disk/by-id/disk1".to_owned(),
-            mapper: "braid-disk1".to_owned(),
+            mapper: MapperName("braid-disk1".into()),
         }
         .to_argv();
         assert_eq!(cmd.program, "cryptsetup");
@@ -2451,7 +2449,7 @@ mod tests {
     fn cryptsetup_luks_open_key_file_sets_keyfile_size_4096() {
         let cmd = CmdRequest::CryptsetupLuksOpenKeyFile {
             device: "/dev/disk/by-id/disk1".to_owned(),
-            mapper: "braid-disk1".to_owned(),
+            mapper: MapperName("braid-disk1".into()),
             key_file_path: "/var/lib/braid/keyfiles/braid-disk1.key".to_owned(),
         }
         .to_argv();

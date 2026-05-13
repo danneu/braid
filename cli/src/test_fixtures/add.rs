@@ -442,8 +442,13 @@ impl AddStatefulPool {
                 )))
             }
             CmdRequest::CryptsetupStatus { mapper } => {
-                if h_opened.lock().unwrap().iter().any(|m| m == mapper) {
-                    let underlying = mapper_underlying(mapper);
+                if h_opened
+                    .lock()
+                    .unwrap()
+                    .iter()
+                    .any(|m| m == mapper.as_str())
+                {
+                    let underlying = mapper_underlying(mapper.as_str());
                     Some(Ok(mock_ok(
                         &format!("cryptsetup status {mapper}"),
                         &format!(
@@ -492,7 +497,7 @@ impl AddStatefulPool {
                 "",
             ))),
             CmdRequest::CryptsetupLuksOpen { device, mapper } => {
-                h_opened.lock().unwrap().push(mapper.clone());
+                h_opened.lock().unwrap().push(mapper.as_str().to_owned());
                 Some(Ok(mock_ok(
                     &format!("cryptsetup open --type luks {device} {mapper}"),
                     "",
@@ -735,7 +740,7 @@ impl AddPlanTopology {
                 )))
             }
             CmdRequest::CryptsetupStatus { mapper } => {
-                let suffix = mapper.strip_prefix("braid-disk")?;
+                let suffix = mapper.as_str().strip_prefix("braid-disk")?;
                 let index = suffix.parse::<usize>().ok()?.checked_sub(1)?;
                 if index >= keyfile_probes.len() {
                     return None;

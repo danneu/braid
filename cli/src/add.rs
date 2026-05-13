@@ -215,7 +215,7 @@ fn identity_to_error(identity: &AddLuksIdentity, name: &str) -> Option<AddError>
 /// Call `disarm()` on the success path to skip cleanup.
 struct LuksCleanupGuard<'a, R: CommandRunner> {
     runner: &'a R,
-    mappers: Vec<String>,
+    mappers: Vec<MapperName>,
     armed: bool,
 }
 
@@ -228,7 +228,7 @@ impl<'a, R: CommandRunner> LuksCleanupGuard<'a, R> {
         }
     }
 
-    fn track(&mut self, mapper: String) {
+    fn track(&mut self, mapper: MapperName) {
         self.mappers.push(mapper);
     }
 
@@ -245,7 +245,10 @@ impl<R: CommandRunner> Drop for LuksCleanupGuard<'_, R> {
         let color_enabled = color_enabled_for_stderr();
         let sleeper = RealSleeper;
         for mapper in self.mappers.iter().rev() {
-            let label = mapper.strip_prefix("braid-").unwrap_or(mapper);
+            let label = mapper
+                .as_str()
+                .strip_prefix("braid-")
+                .unwrap_or(mapper.as_str());
             emit_status(&status_line(
                 StatusTag::Wait,
                 color_enabled,
@@ -465,7 +468,7 @@ impl AddWorkPlan {
                         description: format!("LUKS open -> {}", target.mapper_name),
                         commands: vec![CmdRequest::CryptsetupLuksOpen {
                             device: target.by_id.as_str().to_owned(),
-                            mapper: target.mapper_name.0.clone(),
+                            mapper: target.mapper_name.clone(),
                         }],
                     });
                 }
@@ -493,7 +496,7 @@ impl AddWorkPlan {
                         ),
                         commands: vec![CmdRequest::CryptsetupLuksOpen {
                             device: target.by_id.as_str().to_owned(),
-                            mapper: target.mapper_name.0.clone(),
+                            mapper: target.mapper_name.clone(),
                         }],
                     });
                     if let Some(kf) = &target.enroll_key_file {
@@ -898,7 +901,7 @@ impl AddPlan {
             if ensure_luks_open(runner, target.name.as_str(), &target.by_id, &passphrase)?
                 == OpenOutcome::Opened
             {
-                luks_guard.track(target.mapper_name.0.clone());
+                luks_guard.track(target.mapper_name.clone());
             }
             emit_status(&status_line(
                 StatusTag::Ok,
@@ -1090,7 +1093,7 @@ impl AddPlan {
             if ensure_luks_open(runner, name.as_str(), &target.by_id, &passphrase)?
                 == OpenOutcome::Opened
             {
-                luks_guard.track(target.mapper_name.0.clone());
+                luks_guard.track(target.mapper_name.clone());
             }
             eprint!(
                 "{}",
@@ -2876,7 +2879,7 @@ mod tests {
     impl CommandRunner for SpyRunner {
         fn run(&self, request: &CmdRequest) -> Result<RawCommandOutput, CmdError> {
             if let CmdRequest::CryptsetupClose { mapper } = request {
-                self.closed.lock().unwrap().push(mapper.clone());
+                self.closed.lock().unwrap().push(mapper.as_str().to_owned());
                 let mut output = self.close_output.clone();
                 output.cmd = format!("cryptsetup close {mapper}");
                 return Ok(output);
@@ -2902,8 +2905,8 @@ mod tests {
         let runner = SpyRunner::new(MockRunner::default());
         let captured = crate::status_tag::testing::capture_with_color(false, || {
             let mut guard = LuksCleanupGuard::new(&runner);
-            guard.track("braid-aaa".into());
-            guard.track("braid-bbb".into());
+            guard.track(MapperName("braid-aaa".into()));
+            guard.track(MapperName("braid-bbb".into()));
             // guard drops here while still armed
         });
         let closed = runner.closed.lock().unwrap();
@@ -2943,7 +2946,7 @@ mod tests {
         });
         let captured = crate::status_tag::testing::capture_with_color(false, || {
             let mut guard = LuksCleanupGuard::new(&runner);
-            guard.track("braid-aaa".into());
+            guard.track(MapperName("braid-aaa".into()));
             // guard drops here while still armed
         });
         let wait = "[wait] disk aaa: locking (cleanup)...";
@@ -2964,7 +2967,7 @@ mod tests {
         // Scenario: cleanup close for a mapper is busy once, then succeeds.
         let runner = MockRunner::default().with_output_sequence(
             CmdRequest::CryptsetupClose {
-                mapper: "braid-aaa".into(),
+                mapper: MapperName("braid-aaa".into()),
             },
             vec![
                 RawCommandOutput {
@@ -2983,7 +2986,7 @@ mod tests {
         );
         let captured = crate::status_tag::testing::capture_with_color(false, || {
             let mut guard = LuksCleanupGuard::new(&runner);
-            guard.track("braid-aaa".into());
+            guard.track(MapperName("braid-aaa".into()));
             // guard drops here while still armed
         });
 
@@ -3016,7 +3019,7 @@ mod tests {
         let runner = SpyRunner::new(MockRunner::default());
         {
             let mut guard = LuksCleanupGuard::new(&runner);
-            guard.track("braid-aaa".into());
+            guard.track(MapperName("braid-aaa".into()));
             guard.disarm();
             // guard drops here, disarmed
         }
@@ -3039,7 +3042,7 @@ mod tests {
             let mut guard = LuksCleanupGuard::new(&runner);
             // Only track mappers we opened ourselves.
             // Pre-existing mapper "braid-existing" is NOT tracked.
-            guard.track("braid-new".into());
+            guard.track(MapperName("braid-new".into()));
             // guard drops here while armed — simulates error path
         }
         let closed = runner.closed.lock().unwrap();
@@ -3080,7 +3083,7 @@ mod tests {
             if ensure_luks_open(&runner, "existing", &by_id, &passphrase("testpass")).unwrap()
                 == OpenOutcome::Opened
             {
-                guard.track("braid-existing".into());
+                guard.track(MapperName("braid-existing".into()));
             }
             // guard drops here while still armed
         }
@@ -3089,7 +3092,7 @@ mod tests {
             !runner
                 .requests()
                 .iter()
-                .any(|r| matches!(r, CmdRequest::CryptsetupClose { mapper } if mapper == "braid-existing")),
+                .any(|r| matches!(r, CmdRequest::CryptsetupClose { mapper } if mapper.as_str() == "braid-existing")),
             "already-owned mapper must not be closed by add cleanup guard"
         );
     }
@@ -3192,8 +3195,8 @@ mod tests {
     impl CommandRunner for ClosedNoBtrfsRunner {
         fn run(&self, request: &CmdRequest) -> Result<RawCommandOutput, CmdError> {
             match request {
-                CmdRequest::CryptsetupStatus { mapper } if mapper == "braid-disk2" => {
-                    Ok(mock_status_inactive(mapper))
+                CmdRequest::CryptsetupStatus { mapper } if mapper.as_str() == "braid-disk2" => {
+                    Ok(mock_status_inactive(mapper.as_str()))
                 }
                 CmdRequest::CryptsetupLuksOpen { .. } => Ok(mock_ok("cryptsetup luksOpen", "")),
                 _ => self.inner.run(request),
@@ -3813,12 +3816,18 @@ mod tests {
                     ))
                 }
                 CmdRequest::CryptsetupStatus { mapper } => {
-                    if self.opened.lock().unwrap().iter().any(|m| m == mapper) {
+                    if self
+                        .opened
+                        .lock()
+                        .unwrap()
+                        .iter()
+                        .any(|m| m == mapper.as_str())
+                    {
                         Ok(mock_ok(
                             &format!("cryptsetup status {mapper}"),
                             &format!(
                                 "{mapper} is active and is in use.\n  type:    LUKS2\n  device:  {}\n  mode:    read/write\n",
-                                Self::mapper_underlying(mapper)
+                                Self::mapper_underlying(mapper.as_str())
                             ),
                         ))
                     } else {
@@ -3871,7 +3880,7 @@ mod tests {
                     ))
                 }
                 CmdRequest::CryptsetupLuksOpen { device, mapper } => {
-                    self.opened.lock().unwrap().push(mapper.clone());
+                    self.opened.lock().unwrap().push(mapper.as_str().to_owned());
                     Ok(mock_ok(
                         &format!("cryptsetup open --type luks {device} {mapper}"),
                         "",
@@ -4824,7 +4833,7 @@ mod tests {
             )
             .with_output(
                 CmdRequest::CryptsetupStatus {
-                    mapper: "braid-disk1".into(),
+                    mapper: MapperName("braid-disk1".into()),
                 },
                 mock_status_active("braid-disk1", "/dev/vdz"),
             )
@@ -4910,7 +4919,7 @@ mod tests {
             )
             .with_output(
                 CmdRequest::CryptsetupStatus {
-                    mapper: "braid-disk2".into(),
+                    mapper: MapperName("braid-disk2".into()),
                 },
                 mock_status_inactive("braid-disk2"),
             )
@@ -5425,7 +5434,13 @@ mod tests {
                     exit_status: 0,
                 }),
                 CmdRequest::CryptsetupStatus { mapper } => {
-                    if self.opened.lock().unwrap().iter().any(|m| m == mapper) {
+                    if self
+                        .opened
+                        .lock()
+                        .unwrap()
+                        .iter()
+                        .any(|m| m == mapper.as_str())
+                    {
                         let underlying = match mapper.as_str() {
                             "braid-disk1" => "/dev/vdb",
                             "braid-disk2" => "/dev/vdc",
@@ -6181,7 +6196,7 @@ mod tests {
                     ))
                 }
                 CmdRequest::CryptsetupStatus { mapper } => {
-                    let Some(suffix) = mapper.strip_prefix("braid-disk") else {
+                    let Some(suffix) = mapper.as_str().strip_prefix("braid-disk") else {
                         return Err(CmdError::MissingMock);
                     };
                     let index = suffix

@@ -227,6 +227,7 @@ mod tests {
         unlock_storage_fs, unlock_with_mount_degraded_ok, unlock_with_mount_ok,
         unlock_with_open_mapper_ok, unlock_with_test_passphrase_ok, unlock_with_three_mappers_open,
     };
+    use crate::types::MapperName;
     use crate::types::MountPoint;
 
     // Intent: a bricked LUKS header (PresentNotLuks) on a known pool member
@@ -419,7 +420,7 @@ mod tests {
                 .with_output_stdin(
                     CmdRequest::CryptsetupLuksOpen {
                         device: "/dev/disk/by-id/virtio-disk2".into(),
-                        mapper: "braid-disk2".into(),
+                        mapper: MapperName("braid-disk2".into()),
                     },
                     MOUNT_TEST_PASSPHRASE_BYTES.to_vec(),
                     unlock_err_raw(
@@ -505,13 +506,13 @@ mod tests {
                 )
                 .with_output(
                     CmdRequest::CryptsetupClose {
-                        mapper: "braid-disk1".into(),
+                        mapper: MapperName("braid-disk1".into()),
                     },
                     unlock_err_raw("cryptsetup close", 5, "busy"),
                 )
                 .with_output(
                     CmdRequest::CryptsetupClose {
-                        mapper: "braid-disk2".into(),
+                        mapper: MapperName("braid-disk2".into()),
                     },
                     unlock_ok_raw("cryptsetup close"),
                 );
@@ -556,7 +557,7 @@ mod tests {
                 r,
                 CmdRequest::CryptsetupClose {
                     mapper
-                } if mapper == "braid-disk2"
+                } if mapper.as_str() == "braid-disk2"
             )),
             "cleanup should keep closing later mappers after the busy close"
         );
