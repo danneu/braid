@@ -290,12 +290,13 @@ struct DiscoverArgs {
     /// Write discovered membership to pool.json
     #[arg(long)]
     write: bool,
-    /// Fail closed if discovery produces fewer than N members.
+    /// Fail closed unless discovery produces exactly N members.
     /// Used by the LUKS-UUID-as-identity cutover runbook (see
     /// docs/luks-unlock.md): pre-record the expected count from the
     /// existing pool.json, then pass it here so a momentarily detached
-    /// disk (loose cable, USB power glitch, udev race) cannot silently
-    /// produce a smaller pool.json. Only honored alongside --write.
+    /// disk (loose cable, USB power glitch, udev race) or extra
+    /// braid-labeled disk cannot silently produce the wrong pool.json.
+    /// Only honored alongside --write.
     #[arg(long = "expect-count", value_name = "N")]
     expect_count: Option<usize>,
 }
@@ -715,18 +716,34 @@ fn main() {
         Commands::Discover(args) => {
             // Note: the pre-save fail-closed gates for `--write`
             // (pending-op presence + name-keyed pool.json sniff) live
-            // inside `discover::write_discovered_membership` so the
-            // CLI arm stays narrow. The bare-`discover` (read-only)
-            // path still surfaces a friendlier "pool.json already
-            // exists" hint when the file is present and the operator
-            // didn't pass `--write`.
+            // inside `discover::write_discovered_membership`. The
+            // bare read-only path reuses the shape classifier so
+            // operators can preview legacy cutovers before moving the
+            // old state file aside.
             let pool_json = paths.pool_json();
-            if !args.write && pool_json.exists() {
-                print_cli_error(&format!(
-                    "pool.json already exists at {} -- use 'braid add' to add disks",
-                    pool_json.display()
-                ));
-                std::process::exit(1);
+            let shape = braid_cli::discover::classify_pool_json(&pool_json);
+            if !args.write {
+                match shape {
+                    braid_cli::discover::PoolJsonShape::Missing
+                    | braid_cli::discover::PoolJsonShape::LegacyNameKeyed => {
+                        if matches!(shape, braid_cli::discover::PoolJsonShape::LegacyNameKeyed) {
+                            eprintln!(
+                                "note: legacy name-keyed pool.json detected at {} -- \
+                                 this is the pre-migration shape. Run 'braid discover \
+                                 --write --expect-count N' after moving it aside (see \
+                                 docs/luks-unlock.md).",
+                                pool_json.display()
+                            );
+                        }
+                    }
+                    braid_cli::discover::PoolJsonShape::Other => {
+                        print_cli_error(&format!(
+                            "pool.json already exists at {} -- use 'braid add' to add disks",
+                            pool_json.display()
+                        ));
+                        std::process::exit(1);
+                    }
+                }
             }
             let runner = RealRunner;
             match braid_cli::discover::discover_pool_members(&runner) {

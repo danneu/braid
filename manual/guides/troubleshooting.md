@@ -34,7 +34,7 @@ sudo braid unlock
 
 `discover` scans `/dev/disk/by-id/` for LUKS devices with `braid-*` labels and reconstructs the membership file. See [Recovery scenarios](recovery-scenarios.md) for details.
 
-**Note:** `discover` refuses to run if pool.json already exists. If pool.json exists but is wrong, remove it first:
+**Note:** Bare `discover` previews when the existing pool.json is the legacy name-keyed shape. If pool.json exists in the new UUID-keyed shape, or any shape discover cannot identify, remove it first:
 
 ```sh
 sudo rm /var/lib/braid/pool.json

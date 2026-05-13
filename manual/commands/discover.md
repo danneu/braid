@@ -36,8 +36,8 @@ Write the discovered membership to pool.json:
 sudo braid discover --write
 ```
 
-During a cutover from an old state file, fail closed if fewer than the expected
-member count is discovered:
+During a cutover from an old state file, fail closed if the discovered member
+count is not exactly the expected count:
 
 ```
 sudo braid discover --write --expect-count 3
@@ -48,12 +48,12 @@ sudo braid discover --write --expect-count 3
 | Flag | Effect |
 | --- | --- |
 | `--write` | Persist the discovered membership to `pool.json` |
-| `--expect-count <N>` | With `--write`, refuse to write if fewer than `N` members are discovered |
+| `--expect-count <N>` | With `--write`, refuse to write if the discovered member count is not exactly `N` |
 
 ## What happens under the hood
 
 1. Checks for a pending operation journal (refuses if one exists).
-2. Refuses if `pool.json` already exists (use `braid add` instead).
+2. Refuses if `pool.json` already exists in the new UUID-keyed shape or an unrecognized shape. If the existing file is the legacy name-keyed shape, bare read-only `discover` prints a migration hint and continues as a preview.
 3. Reads all entries in `/dev/disk/by-id/`, skipping partition entries (e.g., `ata-TOSHIBA-part1`).
 4. Resolves each by-id symlink to its canonical kernel device. Skips with a `cannot canonicalize` warning when the symlink is dangling (e.g., udev didn't clean up after a disk removal).
 5. For each entry, runs `cryptsetup isLuks` to check if it's a LUKS device.
@@ -67,9 +67,9 @@ sudo braid discover --write --expect-count 3
 
 ## Safety checks
 
-- Refuses if `pool.json` already exists.
+- Refuses if `pool.json` already exists in the new UUID-keyed shape or an unrecognized shape; legacy name-keyed files are allowed only for read-only preview.
 - Refuses if a pending operation journal exists.
-- With `--expect-count`, refuses to write if discovery produces fewer members than requested.
+- With `--expect-count`, refuses to write if the discovered member count is not exactly the requested count.
 - Refuses if another braid operation is in progress (`/run/braid-pool.lock` is held by another wrapper).
 - Without `--write`, makes no changes at all -- read-only scan.
 - Dangling `/dev/disk/by-id/` symlinks are skipped with a warning -- a diagnostic operators need when udev leaves a stale alias behind after a disk swap.

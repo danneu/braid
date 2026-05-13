@@ -149,7 +149,7 @@ Move the old `pool.json` aside only after confirming the attached disks are the
 intended pool members. Then rebuild with `braid discover --write`; during a
 single-user cutover, pass `--expect-count` with the member count from the old
 file so a temporarily detached disk cannot silently produce a smaller
-membership.
+membership and an unrelated braid-labeled disk cannot be silently admitted.
 
 For an unparseable pending-operation journal, the remediation phrase is:
 

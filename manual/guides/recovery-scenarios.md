@@ -70,7 +70,7 @@ sudo braid unlock
 
 ### Notes
 
-- `discover` refuses to run if pool.json already exists. Remove it first if it exists but is wrong.
+- Bare `discover` previews when the existing pool.json is the legacy name-keyed shape. For a new UUID-keyed or otherwise unrecognized existing file, remove it first if it is wrong.
 - `discover` refuses to run if pending-op.json exists. Use `braid recover` instead.
 - `discover` only finds LUKS2 devices. LUKS1 devices with braid labels are skipped with a warning.
 - The rebuilt `pool.json` is keyed by LUKS UUID. Disk names are stored in each member value for command input and display.

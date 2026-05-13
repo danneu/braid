@@ -158,11 +158,11 @@ pub enum DiscoverWriteError {
         "discover refusing to write pool.json: existing file at {path} is not in UUID-keyed format -- back it up and move it aside before retrying (see docs/luks-unlock.md)"
     )]
     NameKeyedPoolJson { path: String },
-    /// `--expect-count <N>` was set and discovery produced fewer than
-    /// `N` members. Catches the partial-attach hazard during the
-    /// cutover runbook.
+    /// `--expect-count <N>` was set and discovery produced a member
+    /// count other than `N`. Catches partial-attach and unintended
+    /// extra-disk hazards during the cutover runbook.
     #[error(
-        "discover refusing to write pool.json: expected at least {expected} members, found {actual} -- check that all intended pool members are attached and readable, then retry"
+        "discover refusing to write pool.json: expected exactly {expected} members, found {actual} -- check that all intended pool members are attached and readable, and that no unrelated braid-labeled disks are attached, then retry"
     )]
     ExpectCountUnmet { expected: usize, actual: usize },
     /// `save_membership` failed at the I/O / serialization layer.
@@ -187,6 +187,43 @@ pub fn discover_pool_members<R: CommandRunner>(
         &crate::recover::RealByIdResolver,
         Path::new("/dev/disk/by-id"),
     )
+}
+
+/// Classifies an existing pool.json by shape for discover's gating.
+/// Keeps the write-path legacy refusal and read-only migration preview
+/// on one JSON-shape classifier.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PoolJsonShape {
+    Missing,
+    LegacyNameKeyed,
+    Other,
+}
+
+/// Positively identifies the pre-LUKS-UUID name-keyed pool.json shape.
+/// Unreadable, unparseable, UUID-keyed, and unrecognized payloads all
+/// return `Other` so callers can fail closed unless explicitly allowed.
+pub fn classify_pool_json(path: &Path) -> PoolJsonShape {
+    let raw = match std::fs::read_to_string(path) {
+        Ok(raw) => raw,
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => {
+            return PoolJsonShape::Missing;
+        }
+        Err(_) => return PoolJsonShape::Other,
+    };
+
+    let Ok(value) = serde_json::from_str::<serde_json::Value>(&raw) else {
+        return PoolJsonShape::Other;
+    };
+
+    let Some(disks) = value.get("disks").and_then(|v| v.as_object()) else {
+        return PoolJsonShape::Other;
+    };
+
+    if disks.keys().any(|key| LuksUuid::parse(key).is_err()) {
+        PoolJsonShape::LegacyNameKeyed
+    } else {
+        PoolJsonShape::Other
+    }
 }
 
 /// Build a `LabelCollision` error from two colliding by-id paths.
@@ -477,8 +514,8 @@ fn discover_from_dir<R: CommandRunner>(
 ///    (covered by `NameKeyedPoolJson`).
 ///
 /// When `expected_count` is set, the gate refuses if the produced
-/// membership has fewer than `expected_count` members (cutover
-/// partial-attach guard).
+/// membership count is not exactly `expected_count` (cutover
+/// partial-attach and unintended-extra-disk guard).
 ///
 /// On success returns the saved `PoolMembership`. The accepting CLI
 /// arm at `main.rs:707` consumes both `warnings` (printed before this
@@ -496,12 +533,7 @@ pub fn write_discovered_membership(
     }
 
     let pool_json_path = paths.pool_json();
-    if pool_json_path.exists()
-        && let Ok(raw) = std::fs::read_to_string(&pool_json_path)
-        && let Ok(value) = serde_json::from_str::<serde_json::Value>(&raw)
-        && let Some(disks) = value.get("disks").and_then(|v| v.as_object())
-        && disks.keys().any(|k| LuksUuid::parse(k).is_err())
-    {
+    if classify_pool_json(&pool_json_path) == PoolJsonShape::LegacyNameKeyed {
         return Err(DiscoverWriteError::NameKeyedPoolJson {
             path: pool_json_path.display().to_string(),
         });
@@ -509,7 +541,7 @@ pub fn write_discovered_membership(
 
     if let Some(expected) = expected_count {
         let actual = outcome.members.len();
-        if actual < expected {
+        if actual != expected {
             return Err(DiscoverWriteError::ExpectCountUnmet { expected, actual });
         }
     }
@@ -1532,11 +1564,10 @@ mod tests {
     /// Intent: write_discovered_membership refuses when
     /// --expect-count exceeds the produced membership size and does
     /// not call save_membership.
-    /// Why: the cutover partial-attach guard from plan 3859-3864.
-    /// Scenario: seed 807 -- runbook step 5 with a momentarily
-    /// detached disk.
+    /// Why: the cutover exact-count guard must catch partial attach.
+    /// Scenario: runbook step with a momentarily detached disk.
     #[test]
-    fn discover_write_refuses_when_below_expected_count() {
+    fn discover_write_refuses_when_count_mismatches_below() {
         let root = tempfile::tempdir().unwrap();
         let paths = StatePaths::custom(root.path().to_path_buf());
 
@@ -1563,7 +1594,51 @@ mod tests {
         let msg = err.to_string();
         assert!(
             msg.contains(
-                "discover refusing to write pool.json: expected at least 3 members, found 2"
+                "discover refusing to write pool.json: expected exactly 3 members, found 2"
+            ),
+            "got: {msg}"
+        );
+        assert!(
+            !paths.pool_json().exists(),
+            "pool.json must not have been written"
+        );
+    }
+
+    /// Intent: write_discovered_membership refuses when
+    /// --expect-count is lower than the produced membership size and
+    /// does not call save_membership.
+    /// Why: the cutover exact-count guard must catch unrelated
+    /// braid-labeled disks that would otherwise be admitted.
+    /// Scenario: runbook step with an extra recovery disk attached.
+    #[test]
+    fn discover_write_refuses_when_count_mismatches_above() {
+        let root = tempfile::tempdir().unwrap();
+        let paths = StatePaths::custom(root.path().to_path_buf());
+
+        let mut members = PoolMembership::empty();
+        for (i, name) in ["disk1", "disk2"].iter().enumerate() {
+            members
+                .insert(
+                    LuksUuid::parse(&format!("00000000-0000-0000-0000-{:012x}", 900 + i as u64))
+                        .unwrap(),
+                    DiskMember::new(
+                        DiskName::parse(name).unwrap(),
+                        ByIdPath::parse(&format!("/dev/disk/by-id/ata-{name}")).unwrap(),
+                    ),
+                )
+                .unwrap();
+        }
+        let outcome = DiscoverOutcome {
+            members,
+            warnings: Vec::new(),
+        };
+
+        let err = write_discovered_membership(outcome, &paths, Some(1))
+            .expect_err("must refuse with ExpectCountUnmet");
+        let msg = err.to_string();
+        assert!(
+            msg.contains(
+                "discover refusing to write pool.json: expected exactly 1 members, found 2"
             ),
             "got: {msg}"
         );
