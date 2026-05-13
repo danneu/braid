@@ -2040,7 +2040,7 @@ fn discover_add_targets_before_mount<R: CommandRunner, F: Filesystem + ?Sized>(
             continue;
         }
 
-        let probed = probe::probe_config_disk(runner, fs, target.name.as_str(), &target.by_id)?;
+        let probed = probe::probe_config_disk(runner, fs, &target.name, &target.by_id)?;
         let ConfigDiskState::PresentLuks {
             uuid,
             label,
@@ -2127,7 +2127,7 @@ fn verify_recover_passphrase_for_add_replay<R: CommandRunner, F: Filesystem + ?S
         if live.contains(target_uuid) {
             continue;
         }
-        let probed = probe::probe_config_disk(runner, fs, target.name.as_str(), &target.by_id)?;
+        let probed = probe::probe_config_disk(runner, fs, &target.name, &target.by_id)?;
         let ConfigDiskState::PresentLuks { uuid, label, .. } = probed.state else {
             continue;
         };
@@ -2339,7 +2339,7 @@ fn execute_add_pool_mutation_recovery<R: CommandRunner + Sync, F: Filesystem + ?
             if live_member_uuids(&pool).contains(target_uuid) {
                 continue;
             }
-            let probed = probe::probe_config_disk(runner, fs, target.name.as_str(), &target.by_id)?;
+            let probed = probe::probe_config_disk(runner, fs, &target.name, &target.by_id)?;
             let ConfigDiskState::PresentLuks {
                 uuid,
                 label,
@@ -2421,7 +2421,7 @@ fn execute_add_pool_mutation_recovery<R: CommandRunner + Sync, F: Filesystem + ?
                     enroll_key_file,
                 } => {
                     let probed =
-                        probe::probe_config_disk(runner, fs, target.name.as_str(), &target.by_id)?;
+                        probe::probe_config_disk(runner, fs, &target.name, &target.by_id)?;
                     let ConfigDiskState::PresentLuks {
                         uuid, mapper_open, ..
                     } = probed.state
@@ -2481,7 +2481,7 @@ fn execute_add_pool_mutation_recovery<R: CommandRunner + Sync, F: Filesystem + ?
                     enroll_key_file,
                 } => {
                     let probed =
-                        probe::probe_config_disk(runner, fs, target.name.as_str(), &target.by_id)?;
+                        probe::probe_config_disk(runner, fs, &target.name, &target.by_id)?;
                     let expected_label = format!("braid-{}", target.name);
                     match probed.state {
                         ConfigDiskState::PresentNotLuks => {
@@ -2890,7 +2890,7 @@ fn finish_uncommitted_replace_recovery<R: CommandRunner + Sync, F: Filesystem + 
             // UUID (not a braid label) because ExistingLuks targets
             // carry no braid label by definition.
             let probed =
-                probe::probe_config_disk(runner, fs, new_name.as_str(), &new_target.by_id)?;
+                probe::probe_config_disk(runner, fs, new_name, &new_target.by_id)?;
             match &probed.state {
                 ConfigDiskState::PresentLuks { uuid, .. } if uuid == new_uuid => {}
                 ConfigDiskState::PresentLuks { uuid, .. } => {
@@ -2960,7 +2960,7 @@ fn finish_uncommitted_replace_recovery<R: CommandRunner + Sync, F: Filesystem + 
             enroll_key_file, ..
         } => {
             let probed =
-                probe::probe_config_disk(runner, fs, new_name.as_str(), &new_target.by_id)?;
+                probe::probe_config_disk(runner, fs, new_name, &new_target.by_id)?;
             let expected_label = format!("braid-{new_name}");
             match probed.state {
                 ConfigDiskState::PresentNotLuks => {

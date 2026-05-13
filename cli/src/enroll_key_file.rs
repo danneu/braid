@@ -84,7 +84,7 @@ fn discover_enrollment_candidates<R: CommandRunner, F: Filesystem + ?Sized>(
 
     for (_, member) in membership.iter() {
         let name = member.name.as_str();
-        let probed = match probe::probe_config_disk(runner, fs, name, &member.by_id) {
+        let probed = match probe::probe_config_disk(runner, fs, &member.name, &member.by_id) {
             Ok(p) => p,
             Err(e) => return (notes, Err(e.into())),
         };

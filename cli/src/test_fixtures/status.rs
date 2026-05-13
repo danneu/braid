@@ -585,7 +585,7 @@ pub(crate) fn status_pool_empty() -> PoolState {
 /// One-element config-disk set in the `PresentNotLuks` state under test.
 pub(crate) fn status_cfg_present_not_luks(name: &str, by_id: &str) -> Vec<ConfigDisk> {
     vec![ConfigDisk {
-        name: name.to_owned(),
+        name: DiskName::parse(name).expect("valid disk name in test fixture"),
         by_id_path: ByIdPath::parse(by_id).unwrap(),
         state: ConfigDiskState::PresentNotLuks,
     }]

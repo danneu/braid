@@ -233,7 +233,7 @@ fn plan_open_pool_inner<R: CommandRunner, F: Filesystem + ?Sized>(
 
     for (expected_uuid, member) in members {
         let name = member.name.as_str();
-        let probed = probe::probe_config_disk(runner, fs, name, &member.by_id)?;
+        let probed = probe::probe_config_disk(runner, fs, &member.name, &member.by_id)?;
         match &probed.state {
             ConfigDiskState::Absent => {
                 events.push(ProbeEvent::DiskAbsent {

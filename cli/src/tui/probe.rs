@@ -210,7 +210,9 @@ pub fn probe_pool_for_tui<R: CommandRunner, F: Filesystem + ?Sized>(
             continue;
         }
         let by_id = ByIdPath::parse(by_id_path).expect("membership by-id paths are validated");
-        let probed = match probe_config_disk(runner, fs, disk_name, &by_id) {
+        let parsed_name =
+            crate::types::DiskName::parse(disk_name).expect("membership disk names are validated");
+        let probed = match probe_config_disk(runner, fs, &parsed_name, &by_id) {
             Ok(p) => p,
             Err(ProbeError::UnsupportedLuksVersion { version, .. }) => {
                 // Surface the wrong-version disk explicitly instead of

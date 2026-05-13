@@ -119,12 +119,12 @@ impl From<OwnershipError> for ProbeError {
 pub fn probe_config_disk<R: CommandRunner, F: Filesystem + ?Sized>(
     runner: &R,
     fs: &F,
-    name: &str,
+    name: &DiskName,
     by_id: &ByIdPath,
 ) -> Result<ConfigDisk, ProbeError> {
     if !fs.exists(by_id.as_str()) {
         return Ok(ConfigDisk {
-            name: name.to_owned(),
+            name: name.clone(),
             by_id_path: by_id.clone(),
             state: ConfigDiskState::Absent,
         });
@@ -138,7 +138,7 @@ pub fn probe_config_disk<R: CommandRunner, F: Filesystem + ?Sized>(
         Ok(out) => out.uuid,
         Err(ParseError::CommandFailed { .. }) => {
             return Ok(ConfigDisk {
-                name: name.to_owned(),
+                name: name.clone(),
                 by_id_path: by_id.clone(),
                 state: ConfigDiskState::PresentNotLuks,
             });
@@ -163,17 +163,17 @@ pub fn probe_config_disk<R: CommandRunner, F: Filesystem + ?Sized>(
     let version = parse_cryptsetup_luks_version(&dump_raw)?.version;
     if version != 2 {
         return Err(ProbeError::UnsupportedLuksVersion {
-            name: name.to_owned(),
+            name: name.as_str().to_owned(),
             version,
         });
     }
     let label = parse_cryptsetup_luks_label(&dump_raw)?.label;
 
-    let mn = mapper_name(name);
-    let mapper_open = probe_mapper_open(runner, name, &mn, &uuid)?;
+    let mn = mapper_name(name.as_str());
+    let mapper_open = probe_mapper_open(runner, name.as_str(), &mn, &uuid)?;
 
     Ok(ConfigDisk {
-        name: name.to_owned(),
+        name: name.clone(),
         by_id_path: by_id.clone(),
         state: ConfigDiskState::PresentLuks {
             uuid,
@@ -460,6 +460,10 @@ mod tests {
         ByIdPath::parse(path).unwrap()
     }
 
+    fn dn(name: &str) -> DiskName {
+        DiskName::parse(name).expect("valid disk name in test fixture")
+    }
+
     fn mp() -> MountPoint {
         MountPoint("/mnt/storage".into())
     }
@@ -472,8 +476,8 @@ mod tests {
         let fs = MockFs::new(&[]);
         let d = by_id("/dev/disk/by-id/disk-1");
 
-        let result = probe_config_disk(&runner, &fs, "toshiba", &d).unwrap();
-        assert_eq!(result.name, "toshiba");
+        let result = probe_config_disk(&runner, &fs, &dn("toshiba"), &d).unwrap();
+        assert_eq!(result.name.as_str(), "toshiba");
         assert_eq!(result.state, ConfigDiskState::Absent);
     }
 
@@ -492,7 +496,7 @@ mod tests {
         let fs = MockFs::new(&["/dev/disk/by-id/disk-1"]);
         let d = by_id("/dev/disk/by-id/disk-1");
 
-        let result = probe_config_disk(&runner, &fs, "toshiba", &d).unwrap();
+        let result = probe_config_disk(&runner, &fs, &dn("toshiba"), &d).unwrap();
         assert_eq!(result.state, ConfigDiskState::PresentNotLuks);
     }
 
@@ -502,7 +506,7 @@ mod tests {
         let fs = MockFs::new(&["/dev/disk/by-id/disk-1"]);
         let d = by_id("/dev/disk/by-id/disk-1");
 
-        let result = probe_config_disk(&runner, &fs, "toshiba", &d);
+        let result = probe_config_disk(&runner, &fs, &dn("toshiba"), &d);
         assert!(result.is_err());
         let err = result.unwrap_err();
         assert!(
@@ -522,7 +526,7 @@ mod tests {
         let fs = MockFs::new(&["/dev/disk/by-id/disk-1"]);
         let d = by_id("/dev/disk/by-id/disk-1");
 
-        let result = probe_config_disk(&runner, &fs, "toshiba", &d);
+        let result = probe_config_disk(&runner, &fs, &dn("toshiba"), &d);
         assert!(result.is_err());
         let err = result.unwrap_err();
         assert!(
@@ -598,8 +602,8 @@ mod tests {
         let fs = MockFs::new(&["/dev/disk/by-id/disk-1"]);
         let d = by_id("/dev/disk/by-id/disk-1");
 
-        let result = probe_config_disk(&runner, &fs, "toshiba", &d).unwrap();
-        assert_eq!(result.name, "toshiba");
+        let result = probe_config_disk(&runner, &fs, &dn("toshiba"), &d).unwrap();
+        assert_eq!(result.name.as_str(), "toshiba");
         assert_eq!(
             result.state,
             ConfigDiskState::PresentLuks {
@@ -657,7 +661,7 @@ mod tests {
         let fs = MockFs::new(&["/dev/disk/by-id/disk-1"]);
         let d = by_id("/dev/disk/by-id/disk-1");
 
-        let result = probe_config_disk(&runner, &fs, "toshiba", &d).unwrap();
+        let result = probe_config_disk(&runner, &fs, &dn("toshiba"), &d).unwrap();
         assert_eq!(
             result.state,
             ConfigDiskState::PresentLuks {
@@ -719,7 +723,7 @@ mod tests {
         let fs = MockFs::new(&["/dev/disk/by-id/disk-1"]);
         let d = by_id("/dev/disk/by-id/disk-1");
 
-        let err = probe_config_disk(&runner, &fs, "toshiba", &d).unwrap_err();
+        let err = probe_config_disk(&runner, &fs, &dn("toshiba"), &d).unwrap_err();
         match err {
             ProbeError::MapperConflict {
                 name,
@@ -798,7 +802,7 @@ mod tests {
         let fs = MockFs::new(&["/dev/disk/by-id/disk-1"]);
         let d = by_id("/dev/disk/by-id/disk-1");
 
-        let err = probe_config_disk(&runner, &fs, "toshiba", &d).unwrap_err();
+        let err = probe_config_disk(&runner, &fs, &dn("toshiba"), &d).unwrap_err();
 
         match err {
             ProbeError::MapperConflict {
@@ -857,7 +861,7 @@ mod tests {
         let fs = MockFs::new(&["/dev/disk/by-id/disk-1"]);
         let d = by_id("/dev/disk/by-id/disk-1");
 
-        let result = probe_config_disk(&runner, &fs, "toshiba", &d).unwrap();
+        let result = probe_config_disk(&runner, &fs, &dn("toshiba"), &d).unwrap();
         assert_eq!(
             result.state,
             ConfigDiskState::PresentLuks {
@@ -909,7 +913,7 @@ mod tests {
         let fs = MockFs::new(&["/dev/disk/by-id/disk-1"]);
         let d = by_id("/dev/disk/by-id/disk-1");
 
-        let err = probe_config_disk(&runner, &fs, "toshiba", &d).unwrap_err();
+        let err = probe_config_disk(&runner, &fs, &dn("toshiba"), &d).unwrap_err();
         match err {
             ProbeError::MapperConflict {
                 name,
@@ -961,7 +965,7 @@ mod tests {
         let fs = MockFs::new(&["/dev/disk/by-id/disk-1"]);
         let d = by_id("/dev/disk/by-id/disk-1");
 
-        let err = probe_config_disk(&runner, &fs, "toshiba", &d).unwrap_err();
+        let err = probe_config_disk(&runner, &fs, &dn("toshiba"), &d).unwrap_err();
         match err {
             ProbeError::UnsupportedLuksVersion { name, version } => {
                 assert_eq!(name, "toshiba");
@@ -995,7 +999,7 @@ mod tests {
         let fs = MockFs::new(&["/dev/disk/by-id/disk-1"]);
         let d = by_id("/dev/disk/by-id/disk-1");
 
-        let err = probe_config_disk(&runner, &fs, "toshiba", &d).unwrap_err();
+        let err = probe_config_disk(&runner, &fs, &dn("toshiba"), &d).unwrap_err();
         assert!(
             matches!(err, ProbeError::Cmd(_)),
             "expected ProbeError::Cmd, got: {err:?}"
@@ -1034,7 +1038,7 @@ mod tests {
         let fs = MockFs::new(&["/dev/disk/by-id/disk-1"]);
         let d = by_id("/dev/disk/by-id/disk-1");
 
-        let err = probe_config_disk(&runner, &fs, "toshiba", &d).unwrap_err();
+        let err = probe_config_disk(&runner, &fs, &dn("toshiba"), &d).unwrap_err();
         assert!(
             matches!(err, ProbeError::Parse(_)),
             "expected ProbeError::Parse, got: {err:?}"

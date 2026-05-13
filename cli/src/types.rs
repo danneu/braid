@@ -411,9 +411,11 @@ pub struct NullUnderlyingDevice {
 }
 
 /// Pre-probed state of each config disk (produced by probe, consumed by commands).
+/// `name` is the validated `DiskName` resolved at the probe boundary so
+/// downstream command code never re-checks the disk-name contract.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ConfigDisk {
-    pub name: String,
+    pub name: DiskName,
     pub by_id_path: ByIdPath,
     pub state: ConfigDiskState,
 }

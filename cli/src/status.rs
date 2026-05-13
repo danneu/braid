@@ -396,7 +396,7 @@ fn build_status<R: CommandRunner, F: Filesystem>(
     members.sort_by(|a, b| a.name.cmp(&b.name));
     let config_disks: Vec<ConfigDisk> = members
         .into_iter()
-        .map(|member| probe_config_disk(runner, fs, member.name.as_str(), &member.by_id))
+        .map(|member| probe_config_disk(runner, fs, &member.name, &member.by_id))
         .collect::<Result<Vec<_>, _>>()?;
     let device_stats = get_device_stats(runner, config.mount_point())?;
     let verbose_ctx = build_disk_reports(runner, &config_disks, &pool, &device_stats);
@@ -744,13 +744,15 @@ fn build_disk_reports<R: CommandRunner>(
             matches!(&cd.state, ConfigDiskState::PresentLuks { uuid, .. } if uuid == &pd.luks_uuid)
         });
 
-        let disk_name = matched_config.map(|cd| cd.name.clone()).unwrap_or_else(|| {
-            // Display-only fallback for foreign live devices; UUID-keyed
-            // config matching remains the identity boundary.
-            config::name_from_mapper(&pd.mapper.0)
-                .unwrap_or(&pd.mapper.0)
-                .to_owned()
-        });
+        let disk_name = matched_config
+            .map(|cd| cd.name.as_str().to_owned())
+            .unwrap_or_else(|| {
+                // Display-only fallback for foreign live devices; UUID-keyed
+                // config matching remains the identity boundary.
+                config::name_from_mapper(&pd.mapper.0)
+                    .unwrap_or(&pd.mapper.0)
+                    .to_owned()
+            });
 
         let by_id = matched_config
             .map(|cd| cd.by_id_path.as_str().to_owned())
@@ -806,7 +808,7 @@ fn build_disk_reports<R: CommandRunner>(
             ConfigDiskState::Absent => true,
             ConfigDiskState::PresentLuks { uuid, .. } => !pool_uuid_set.contains(uuid),
             ConfigDiskState::PresentNotLuks => {
-                !pool_mapper_set.contains(mapper_name(&cd.name).0.as_str())
+                !pool_mapper_set.contains(mapper_name(cd.name.as_str()).0.as_str())
             }
         };
 
@@ -841,10 +843,10 @@ fn build_disk_reports<R: CommandRunner>(
                 }
             }
         };
-        let mapper = mapper_name(&cd.name).0;
+        let mapper = mapper_name(cd.name.as_str()).0;
 
         disk_reports.push(DiskReport {
-            name: cd.name.clone(),
+            name: cd.name.as_str().to_owned(),
             mapper: mapper.clone(),
             by_id: cd.by_id_path.as_str().to_owned(),
             luks_uuid: String::new(),
@@ -855,7 +857,7 @@ fn build_disk_reports<R: CommandRunner>(
         });
 
         human_details.push(HumanDisk {
-            name: cd.name.clone(),
+            name: cd.name.as_str().to_owned(),
             by_id: cd.by_id_path.as_str().to_owned(),
             luks_uuid: String::new(),
             devid: None,
@@ -3615,7 +3617,7 @@ mod tests {
     #[test]
     fn disk_report_pairs_stats_by_devid_when_path_differs() {
         use crate::parse::types::{BtrfsDeviceStatsOutput, DeviceErrorStats, DeviceStatsTarget};
-        use crate::types::{LuksUuid, MapperName, PoolDevice};
+        use crate::types::{DiskName, LuksUuid, MapperName, PoolDevice};
 
         let pool = PoolState {
             mounted: true,
@@ -3632,7 +3634,7 @@ mod tests {
             null_underlying: vec![],
         };
         let config_disks = vec![ConfigDisk {
-            name: "disk1".to_owned(),
+            name: DiskName::parse("disk1").unwrap(),
             by_id_path: ByIdPath::parse("/dev/disk/by-id/disk1").unwrap(),
             state: ConfigDiskState::PresentLuks {
                 uuid: LuksUuid::parse("11111111-1111-1111-1111-111111111111").unwrap(),

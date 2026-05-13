@@ -1165,7 +1165,7 @@ pub fn plan_replace<R: CommandRunner + Sync, F: Filesystem + ?Sized>(
     };
 
     // Probe --new disk state
-    let new_probed = match probe_config_disk(runner, fs, new_name_str, &new_by_id) {
+    let new_probed = match probe_config_disk(runner, fs, &new_name_parsed, &new_by_id) {
         Ok(p) => p,
         Err(e) => {
             return Err(PlanFailure::with_notes(notes, e.into()));
@@ -2186,7 +2186,7 @@ mod tests {
         let _config: crate::config::Config =
             serde_json::from_value(config_json).expect("valid config");
         let new_probed = ConfigDisk {
-            name: "disk3".into(),
+            name: DiskName::parse("disk3").expect("valid disk name in test fixture"),
             by_id_path: ByIdPath::parse("/dev/disk/by-id/virtio-disk3").unwrap(),
             state: ConfigDiskState::PresentNotLuks,
         };
@@ -2251,7 +2251,7 @@ mod tests {
         let _config: crate::config::Config =
             serde_json::from_value(config_json).expect("valid config");
         let new_probed = ConfigDisk {
-            name: "disk3".into(),
+            name: DiskName::parse("disk3").expect("valid disk name in test fixture"),
             by_id_path: ByIdPath::parse("/dev/disk/by-id/virtio-disk3").unwrap(),
             state: ConfigDiskState::PresentNotLuks,
         };
@@ -2583,7 +2583,7 @@ mod tests {
 
     fn new_probed_not_luks() -> ConfigDisk {
         ConfigDisk {
-            name: "disk3".into(),
+            name: DiskName::parse("disk3").expect("valid disk name in test fixture"),
             by_id_path: ByIdPath::parse("/dev/disk/by-id/virtio-disk3").unwrap(),
             state: ConfigDiskState::PresentNotLuks,
         }
@@ -2602,7 +2602,7 @@ mod tests {
         let extra_opts = LuksFormatExtraOpts::parse(&["--pbkdf".to_owned(), "pbkdf2".to_owned()])
             .expect("valid extras");
         let new_probed = ConfigDisk {
-            name: "disk3".into(),
+            name: DiskName::parse("disk3").expect("valid disk name in test fixture"),
             by_id_path: new_by_id.clone(),
             state: ConfigDiskState::PresentNotLuks,
         };
@@ -2639,7 +2639,7 @@ mod tests {
         let new_by_id = ByIdPath::parse("/dev/disk/by-id/virtio-disk3").unwrap();
         let luks_uuid = LuksUuid::parse("33333333-3333-3333-3333-333333333333").unwrap();
         let new_probed = ConfigDisk {
-            name: "disk3".into(),
+            name: DiskName::parse("disk3").expect("valid disk name in test fixture"),
             by_id_path: new_by_id.clone(),
             state: ConfigDiskState::PresentLuks {
                 uuid: luks_uuid.clone(),
@@ -3353,7 +3353,7 @@ mod tests {
     fn dry_run_render_existing_luks_replace_with_enroll_renders_addkey_and_backup() {
         let luks_uuid = LuksUuid::parse("33333333-3333-3333-3333-333333333333").unwrap();
         let new_probed = ConfigDisk {
-            name: "disk3".into(),
+            name: DiskName::parse("disk3").expect("valid disk name in test fixture"),
             by_id_path: ByIdPath::parse("/dev/disk/by-id/virtio-disk3").unwrap(),
             state: ConfigDiskState::PresentLuks {
                 uuid: luks_uuid.clone(),

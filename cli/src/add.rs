@@ -1427,7 +1427,7 @@ pub fn plan_add<R: CommandRunner + Sync, F: Filesystem + ?Sized>(
     let probed: Vec<ConfigDisk> = match names
         .iter()
         .zip(by_ids.iter())
-        .map(|(name, by_id)| probe_config_disk(runner, fs, name.as_str(), by_id))
+        .map(|(name, by_id)| probe_config_disk(runner, fs, name, by_id))
         .collect::<Result<Vec<_>, _>>()
     {
         Ok(v) => v,
@@ -2387,7 +2387,7 @@ mod tests {
 
     fn probed_present_luks(name: &str, mapper_open: bool, label: Option<String>) -> ConfigDisk {
         ConfigDisk {
-            name: name.to_owned(),
+            name: DiskName::parse(name).expect("valid disk name in test fixture"),
             by_id_path: ByIdPath::parse("/dev/disk/by-id/disk1").unwrap(),
             state: ConfigDiskState::PresentLuks {
                 uuid: LuksUuid::parse("a1b2c3d4-e5f6-7890-abcd-ef1234567890").unwrap(),
@@ -2537,7 +2537,7 @@ mod tests {
     fn dry_run_raw_disk_still_shows_destructive_format() {
         let runner = MockRunner::default();
         let probed = vec![ConfigDisk {
-            name: "disk1".to_owned(),
+            name: DiskName::parse("disk1").expect("valid disk name in test fixture"),
             by_id_path: ByIdPath::parse("/dev/disk/by-id/disk1").unwrap(),
             state: ConfigDiskState::PresentNotLuks,
         }];
@@ -2592,7 +2592,7 @@ mod tests {
         let by_id = ByIdPath::parse("/dev/disk/by-id/virtio-disk2").unwrap();
         let luks_uuid = LuksUuid::parse("a1b2c3d4-e5f6-7890-abcd-ef1234567890").unwrap();
         let probed = vec![ConfigDisk {
-            name: "disk2".into(),
+            name: DiskName::parse("disk2").expect("valid disk name in test fixture"),
             by_id_path: by_id.clone(),
             state: ConfigDiskState::PresentLuks {
                 uuid: luks_uuid.clone(),
@@ -3272,7 +3272,7 @@ mod tests {
             null_underlying: vec![],
         };
         let probed = vec![ConfigDisk {
-            name: "disk2".into(),
+            name: DiskName::parse("disk2").expect("valid disk name in test fixture"),
             by_id_path: by_id_disk2.clone(),
             state: ConfigDiskState::PresentLuks {
                 uuid: LuksUuid::parse("22222222-2222-2222-2222-222222222222").unwrap(),
@@ -4976,7 +4976,7 @@ mod tests {
     fn dry_run_render_fresh_single_disk_bootstrap() {
         let runner = MockRunner::default();
         let probed = vec![ConfigDisk {
-            name: "disk1".to_owned(),
+            name: DiskName::parse("disk1").expect("valid disk name in test fixture"),
             by_id_path: ByIdPath::parse("/dev/disk/by-id/disk1").unwrap(),
             state: ConfigDiskState::PresentNotLuks,
         }];
@@ -5055,7 +5055,7 @@ mod tests {
     fn dry_run_render_fresh_disk_with_keyfile_orders_backup_after_addkey() {
         let runner = MockRunner::default();
         let probed = vec![ConfigDisk {
-            name: "disk1".to_owned(),
+            name: DiskName::parse("disk1").expect("valid disk name in test fixture"),
             by_id_path: ByIdPath::parse("/dev/disk/by-id/disk1").unwrap(),
             state: ConfigDiskState::PresentNotLuks,
         }];
@@ -5272,7 +5272,7 @@ mod tests {
     fn dry_run_render_add_to_existing_pool_with_balance() {
         let runner = MockRunner::default();
         let probed = vec![ConfigDisk {
-            name: "disk2".to_owned(),
+            name: DiskName::parse("disk2").expect("valid disk name in test fixture"),
             by_id_path: ByIdPath::parse("/dev/disk/by-id/disk2").unwrap(),
             state: ConfigDiskState::PresentNotLuks,
         }];
@@ -7147,7 +7147,7 @@ mod tests {
     /// label is `braid-<name>` so the precondition gate accepts it.
     fn cloned_disk_probed(name: &str, by_id: &str, uuid: &str) -> ConfigDisk {
         ConfigDisk {
-            name: name.to_owned(),
+            name: DiskName::parse(name).expect("valid disk name in test fixture"),
             by_id_path: ByIdPath::parse(by_id).unwrap(),
             state: ConfigDiskState::PresentLuks {
                 uuid: LuksUuid::parse(uuid).unwrap(),
@@ -7296,17 +7296,17 @@ mod tests {
         let runner = MockRunner::default();
         let probed = vec![
             ConfigDisk {
-                name: "a-disk".into(),
+                name: DiskName::parse("a-disk").expect("valid disk name in test fixture"),
                 by_id_path: ByIdPath::parse("/dev/disk/by-id/usb-A").unwrap(),
                 state: ConfigDiskState::PresentNotLuks,
             },
             ConfigDisk {
-                name: "m-disk".into(),
+                name: DiskName::parse("m-disk").expect("valid disk name in test fixture"),
                 by_id_path: ByIdPath::parse("/dev/disk/by-id/usb-M").unwrap(),
                 state: ConfigDiskState::PresentNotLuks,
             },
             ConfigDisk {
-                name: "z-disk".into(),
+                name: DiskName::parse("z-disk").expect("valid disk name in test fixture"),
                 by_id_path: ByIdPath::parse("/dev/disk/by-id/usb-Z").unwrap(),
                 state: ConfigDiskState::PresentNotLuks,
             },
