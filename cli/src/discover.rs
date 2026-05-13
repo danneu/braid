@@ -27,12 +27,12 @@ pub enum DiscoverError {
     },
     /// Two physically distinct disks share one LUKS UUID -- typically the
     /// dd-cloned-disk case. Discover names both by-id paths and both
-    /// labels so the operator can pick which one to relabel or detach.
+    /// labels so the operator can pick which one to detach.
     /// Raised explicitly in the discover code path before delegating to
     /// `PoolMembership::insert` so the friendly wording reaches the
     /// operator instead of the generic `MembershipError::Conflict`.
     #[error(
-        "duplicate LUKS UUID: braid-{name1} ({path1}) and braid-{name2} ({path2}) share UUID {uuid} -- relabel or detach one before retrying (this typically indicates a dd-cloned disk)"
+        "duplicate LUKS UUID: braid-{name1} ({path1}) and braid-{name2} ({path2}) share UUID {uuid} -- detach the cloned or unintended disk before retrying (this typically indicates a dd-cloned disk)"
     )]
     DuplicateUuid {
         uuid: LuksUuid,
@@ -1437,6 +1437,10 @@ mod tests {
         assert!(msg.contains(shared_uuid), "missing uuid: {msg}");
         assert!(msg.contains("braid-disk1"), "missing disk1 label: {msg}");
         assert!(msg.contains("braid-disk2"), "missing disk2 label: {msg}");
+        assert!(
+            msg.contains("detach the cloned or unintended disk before retrying"),
+            "missing detach remediation clause: {msg}"
+        );
         assert!(
             msg.contains("dd-cloned disk"),
             "missing remediation suffix: {msg}"

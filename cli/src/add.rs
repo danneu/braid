@@ -48,15 +48,16 @@ pub enum AddError {
          before trusting `braid monitor`."
     )]
     AckCleanupFailed { stage: &'static str, detail: String },
-    /// Two adoption targets in a single `braid add` invocation point at
-    /// distinct by-id paths but share a LUKS UUID -- the dd-cloned-disk
-    /// case. Raised before journal write, before any
+    /// Pre-journal-write refusal: a target's LUKS UUID collides with
+    /// another in-flight add target, an existing pool member, or a UUID
+    /// observed in the live `pool.devices` set. Raised by
+    /// `assert_target_uuid_unique` before journal write, before any
     /// `CryptsetupLuksFormat`, and before any `PoolMembership::insert`,
-    /// so the operator-facing message names both by-id paths and
-    /// suggests cloning as the typical cause. Mirrors
+    /// so the operator-facing message names both `(name, by_id)` pairs
+    /// and suggests cloning as the typical cause. Mirrors
     /// `DiscoverError::DuplicateUuid`.
     #[error(
-        "duplicate LUKS UUID across add targets: braid-{name1} ({by_id1}) and braid-{name2} ({by_id2}) share UUID {uuid} -- relabel or detach one before retrying (this typically indicates a dd-cloned disk)"
+        "duplicate LUKS UUID: braid-{name1} ({by_id1}) and braid-{name2} ({by_id2}) share UUID {uuid} -- detach the cloned or unintended disk before retrying (this typically indicates a dd-cloned disk)"
     )]
     DuplicateUuid {
         uuid: LuksUuid,
@@ -7433,9 +7434,13 @@ mod tests {
                 .to_string();
                 assert!(
                     body.contains(
-                        "duplicate LUKS UUID across add targets: braid-diska (/dev/disk/by-id/usb-CLONE-AAAA) and braid-diskb (/dev/disk/by-id/usb-CLONE-BBBB) share UUID 55555555-5555-5555-5555-555555555555"
+                        "duplicate LUKS UUID: braid-diska (/dev/disk/by-id/usb-CLONE-AAAA) and braid-diskb (/dev/disk/by-id/usb-CLONE-BBBB) share UUID 55555555-5555-5555-5555-555555555555"
                     ),
                     "Display must match the pinned wording: {body}"
+                );
+                assert!(
+                    body.contains("detach the cloned or unintended disk before retrying"),
+                    "missing detach remediation clause: {body}"
                 );
             }
             other => panic!("expected AddError::DuplicateUuid, got: {other:?}"),
