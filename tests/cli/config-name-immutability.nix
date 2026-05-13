@@ -1,10 +1,10 @@
 # Test: config disk-name immutability
 #
-# What: Verifies mutating braid commands fail fast when a disk name is renamed
-# in config while reusing the same by-id identity.
+# What: Verifies mutating braid commands fail fast when an existing by-id path
+# is reintroduced under a different disk name.
 #
-# Why: v1.0 treats disk names as immutable identity anchors. A name rename must
-# not be silently reconciled by mutating commands.
+# Why: disk names are presentation/adoption metadata, not identity. A by-id path
+# already owned by pool.json must not be silently adopted under a new name.
 #
 # Dependencies: braid add (to build initial pool and disk-map entries).
 { braid }:
