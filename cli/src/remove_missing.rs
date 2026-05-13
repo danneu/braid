@@ -13,7 +13,7 @@ use crate::probe::{Filesystem, ProbeError, probe_pool};
 use crate::progress::{self, ProgressOutput};
 use crate::state_paths::StatePaths;
 use crate::status_tag::{StatusTag, color_enabled_for_stderr, status_line};
-use crate::types::MountPoint;
+use crate::types::{DiskName, LuksUuid, MountPoint};
 use std::path::Path;
 
 #[derive(Debug, thiserror::Error)]
@@ -97,6 +97,8 @@ pub struct RemoveMissingPlan {
 #[derive(Debug, Clone)]
 struct RemoveMissingWorkPlan {
     missing_id: u64,
+    target_uuid: LuksUuid,
+    target_name: DiskName,
     will_clear_last_missing: bool,
     remaining_present: usize,
     missing_count: u64,
@@ -169,15 +171,8 @@ impl RemoveMissingPlan {
             work_plan,
         } = self;
 
-        // Resolve devid -> (LuksUuid, DiskName) from enriched pool.json
-        // before confirmation and journal. UUID identity flows through
-        // the rest of the function; the name is for confirmation prompt
-        // and progress lines only.
-        let pre_membership = membership::load_membership(params.paths).map_err(|e| {
-            RemoveMissingError::Validation(format!("failed to load pool membership: {e}"))
-        })?;
-        let (target_uuid, name_to_remove) =
-            resolve_removal_target(work_plan.missing_id, &pre_membership)?;
+        let target_uuid = work_plan.target_uuid.clone();
+        let name_to_remove = work_plan.target_name.clone();
         let resolved_devid = work_plan.missing_id;
 
         // Confirm
@@ -214,6 +209,22 @@ impl RemoveMissingPlan {
                     "could not acquire sleep inhibitor (is logind running?): {e}"
                 ))
             })?;
+
+        let pre_membership = membership::load_membership(params.paths).map_err(|e| {
+            RemoveMissingError::Validation(format!("failed to load pool membership: {e}"))
+        })?;
+        // Re-resolve the requested devid against the fresh membership so
+        // execution refuses pool.json drift that dry-run cannot see.
+        let (fresh_uuid, _fresh_name) =
+            resolve_removal_target(work_plan.missing_id, &pre_membership)?;
+        if fresh_uuid != target_uuid {
+            return Err(RemoveMissingError::Validation(format!(
+                "membership drift between planning and execution: devid {} \
+                 now resolves to a different member -- aborting to avoid \
+                 removing the wrong entry",
+                work_plan.missing_id,
+            )));
+        }
 
         // Build journal before btrfs operation. The member is removed
         // from `target_membership` by UUID; name is logging-only.
@@ -427,6 +438,23 @@ pub fn plan_remove_missing<R: CommandRunner + Sync, F: Filesystem + ?Sized>(
         ));
     }
 
+    // Resolve pool.json membership while planning so dry-run refuses the
+    // same missing-devid identity failures as real execution.
+    let pre_membership = match membership::load_membership(params.paths) {
+        Ok(m) => m,
+        Err(e) => {
+            return Err(PlanFailure::with_notes(
+                notes,
+                RemoveMissingError::Validation(format!("failed to load pool membership: {e}")),
+            ));
+        }
+    };
+    let (target_uuid, target_name) =
+        match resolve_removal_target(params.missing_id, &pre_membership) {
+            Ok(p) => p,
+            Err(e) => return Err(PlanFailure::with_notes(notes, e)),
+        };
+
     // Pre-flight: reject if survivors lack space to absorb the missing
     // device's data. Without this check, btrfs will either ENOSPC or
     // crash the filesystem to read-only mid-relocation (see tests/repro/).
@@ -450,6 +478,8 @@ pub fn plan_remove_missing<R: CommandRunner + Sync, F: Filesystem + ?Sized>(
     let remaining_present = pool.devices.len();
     let work_plan = RemoveMissingWorkPlan {
         missing_id: params.missing_id,
+        target_uuid,
+        target_name,
         will_clear_last_missing,
         remaining_present,
         missing_count: pool.missing_count,
@@ -561,6 +591,8 @@ fn remove_missing_work_plan_for_test(
 ) -> RemoveMissingWorkPlan {
     RemoveMissingWorkPlan {
         missing_id,
+        target_uuid: LuksUuid::parse("00000000-0000-0000-0000-000000000001").unwrap(),
+        target_name: DiskName::parse("disk-test").unwrap(),
         will_clear_last_missing,
         remaining_present,
         missing_count: if will_clear_last_missing { 1 } else { 2 },
@@ -1852,13 +1884,8 @@ mod tests {
      */
     #[test]
     fn plan_preview_renders_warn_above_steps() {
-        let work_plan = RemoveMissingWorkPlan {
-            missing_id: 3,
-            will_clear_last_missing: true,
-            remaining_present: 2,
-            missing_count: 1,
-            mount_point: MountPoint("/mnt/storage".into()),
-        };
+        let work_plan =
+            remove_missing_work_plan_for_test(3, true, 2, &MountPoint("/mnt/storage".into()));
         let plan = RemoveMissingPlan {
             notes: vec![PreviewNote::Warn(
                 "ENOSPC pre-flight check failed: boom; proceeding anyway".into(),
@@ -2370,6 +2397,163 @@ mod tests {
                     | CmdRequest::BtrfsDeviceScanForget { .. }
             )),
             "never-enriched refusal must issue zero mutating requests; calls: {calls:?}"
+        );
+    }
+
+    // Intent: when membership has no member with the requested devid,
+    //   dry-run remove-missing must surface the pinned
+    //   RemoveMissingError::NoMemberForDevid refusal.
+    //
+    // Why it exists: pins the doc 022 dry-run contract for the exact
+    //   UUID-identity migration bug where identity was resolved only
+    //   in execute(), letting dry-run render a successful preview for
+    //   inputs a real run refused.
+    //
+    // Scenario: 3-disk pool with missing devid 3; membership has every
+    //   member but with `devid: None`. Dry-run must refuse with the
+    //   pinned wording and emit zero mutating requests.
+    #[test]
+    fn cmd_remove_missing_never_enriched_refusal_in_dry_run() {
+        let f = PoolFixture::three_disk_devids_pinned();
+        let mut m = PoolMembership::empty();
+        for (uuid, name) in [
+            ("11111111-1111-1111-1111-111111111111", "disk1"),
+            ("22222222-2222-2222-2222-222222222222", "disk2"),
+            ("33333333-3333-3333-3333-333333333333", "disk3"),
+        ] {
+            m.insert(
+                LuksUuid::parse(uuid).unwrap(),
+                DiskMember {
+                    name: DiskName::parse(name).unwrap(),
+                    by_id: ByIdPath::parse(&format!("/dev/disk/by-id/virtio-{name}")).unwrap(),
+                    devid: None,
+                    added_at: None,
+                },
+            )
+            .unwrap();
+        }
+        membership::save_membership(&m, &f.paths).unwrap();
+        let pre_bytes = std::fs::read(f.paths.pool_json()).unwrap();
+
+        let (runner, _remove_done) =
+            RemoveMissingPool::three_disk_one_missing().install(MockRunner::default());
+        let err = cmd_remove_missing(
+            &runner,
+            &MockFs::storage(vec![]),
+            &f.remove_missing_params()
+                .missing_id(3)
+                .dry_run(true)
+                .build(),
+        )
+        .unwrap_err();
+        match &err {
+            RemoveMissingError::NoMemberForDevid { devid } => assert_eq!(*devid, 3),
+            other => panic!("expected NoMemberForDevid, got: {other:?}"),
+        }
+        let msg = err.to_string();
+        assert!(
+            msg.contains("no member in membership has devid 3"),
+            "expected pinned NoMemberForDevid wording; got: {msg}"
+        );
+        let post_bytes = std::fs::read(f.paths.pool_json()).unwrap();
+        assert_eq!(
+            pre_bytes, post_bytes,
+            "cmd_remove_missing --dry-run must not perturb pool.json on never-enriched refusal"
+        );
+        assert_eq!(
+            f.inhibitor.acquire_count(),
+            0,
+            "dry-run never-enriched refusal must not acquire the sleep inhibitor"
+        );
+        assert!(
+            journal::load_journal(&f.paths).unwrap().is_none(),
+            "dry-run never-enriched refusal must not write pending-op.json"
+        );
+        let calls = runner.requests();
+        assert!(
+            calls.iter().all(|c| !matches!(
+                c,
+                CmdRequest::BtrfsDeviceRemove { .. }
+                    | CmdRequest::BtrfsBalanceRaid1Soft { .. }
+                    | CmdRequest::CryptsetupClose { .. }
+                    | CmdRequest::BtrfsDeviceScanForget { .. }
+            )),
+            "dry-run never-enriched refusal must issue zero mutating requests; calls: {calls:?}"
+        );
+    }
+
+    // Intent: when pool.json is mutated between planning and execution
+    //   such that the target devid now resolves to a different UUID,
+    //   execute() must abort before btrfs mutation, journal write, or
+    //   membership save.
+    //
+    // Why it exists: the persisted devid is the authorized identity
+    //   binding for missing devices. A UUID-existence-only recheck
+    //   would let a stale plan remove the wrong member from pool.json.
+    //
+    // Scenario: 3-disk pool with missing devid 3 bound to disk3's UUID.
+    //   Plan resolves disk3, then pool.json is rewritten so devid 3
+    //   belongs to disk2. Execute must report membership drift and
+    //   leave recovery state untouched.
+    #[test]
+    fn execute_aborts_when_devid_rebinds_between_plan_and_execute() {
+        let f = PoolFixture::three_disk_devids_pinned();
+        let (runner, _remove_done) =
+            RemoveMissingPool::three_disk_one_missing().install(MockRunner::default());
+        let plan = plan_remove_missing(
+            &runner,
+            &MockFs::storage(vec![]),
+            &f.remove_missing_params().missing_id(3).build(),
+        )
+        .expect("planning should succeed for valid devid 3 -> disk3");
+
+        let mut m = membership::load_membership(&f.paths).unwrap();
+        let disk2_uuid = m
+            .by_name(&DiskName::parse("disk2").unwrap())
+            .expect("disk2 must exist")
+            .0
+            .clone();
+        let disk3_uuid = m
+            .by_name(&DiskName::parse("disk3").unwrap())
+            .expect("disk3 must exist")
+            .0
+            .clone();
+        m.by_uuid_mut(&disk2_uuid).unwrap().devid = Some(3);
+        m.by_uuid_mut(&disk3_uuid).unwrap().devid = None;
+        membership::save_membership(&m, &f.paths).unwrap();
+        let drifted_bytes = std::fs::read(f.paths.pool_json()).unwrap();
+
+        let err = plan
+            .execute(
+                &runner,
+                &MockFs::storage(vec![]),
+                &f.remove_missing_params().missing_id(3).build(),
+            )
+            .unwrap_err();
+        match &err {
+            RemoveMissingError::Validation(msg) => assert!(
+                msg.contains("membership drift"),
+                "expected drift wording; got: {msg}"
+            ),
+            other => panic!("expected Validation(drift), got: {other:?}"),
+        }
+        let calls = runner.requests();
+        assert!(
+            calls.iter().all(|c| !matches!(
+                c,
+                CmdRequest::BtrfsDeviceRemove { .. } | CmdRequest::BtrfsBalanceRaid1Soft { .. }
+            )),
+            "drift recheck must fire before any btrfs mutation; calls: {calls:?}"
+        );
+        assert!(
+            journal::load_journal(&f.paths).unwrap().is_none(),
+            "drift recheck must fire before pending-op.json is written"
+        );
+        let post_bytes = std::fs::read(f.paths.pool_json()).unwrap();
+        assert_eq!(
+            drifted_bytes, post_bytes,
+            "drift recheck must fire before save_membership; pool.json \
+             must remain byte-for-byte the drifted state"
         );
     }
 }
