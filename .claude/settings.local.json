@@ -31,7 +31,9 @@
       "Bash(cargo clippy:*)",
       "Bash(python3 scripts/fetch-references.py)",
       "Bash(just --list)",
-      "Bash(cargo fmt *)"
+      "Bash(cargo fmt *)",
+      "Edit(/command-findings/**)",
+      "Bash(mkdir *)"
     ]
   },
   "plansDirectory": "./plans/wip",
