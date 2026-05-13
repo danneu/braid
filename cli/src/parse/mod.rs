@@ -63,6 +63,17 @@ pub enum ParseError {
         field: String,
         value: String,
     },
+
+    /// Value at `field` was rejected by a typed sub-parser. `raw` is the
+    /// offending input verbatim; `detail` is the sub-parser's reason.
+    /// Kept separate so consumers never recover structure by splitting text.
+    #[error("invalid value `{raw}` for field `{field}` in output of `{cmd}`: {detail}")]
+    InvalidValue {
+        cmd: String,
+        field: String,
+        raw: String,
+        detail: String,
+    },
 }
 
 // Re-export all types for convenient access

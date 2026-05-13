@@ -404,17 +404,7 @@ fn discover_from_dir<R: CommandRunner>(
                 });
                 continue;
             }
-            Err(ParseError::UnexpectedValue { value, .. }) => {
-                // value is "<raw> (<detail>)" per the dump parser;
-                // split the formatted prefix back out into the raw +
-                // detail surface the warning needs.
-                let (raw, detail) = match value.find(" (") {
-                    Some(idx) => (
-                        value[..idx].to_owned(),
-                        value[idx + 2..].trim_end_matches(')').to_owned(),
-                    ),
-                    None => (value.clone(), String::new()),
-                };
+            Err(ParseError::InvalidValue { raw, detail, .. }) => {
                 warnings.push(DiscoverWarning::InvalidLuksUuid {
                     path: path_str.clone(),
                     raw,
@@ -1437,6 +1427,61 @@ mod tests {
                 "skipping {warn_path}: invalid LUKS UUID \"{raw}\" --"
             )),
             "rendered: {rendered}",
+        );
+    }
+
+    // Intent: discover surfaces an invalid UUID value containing the
+    //   literal " (" substring with raw and detail intact in
+    //   DiscoverWarning::InvalidLuksUuid.
+    // Why it exists: an earlier implementation reverse-split a formatted
+    //   "<raw> (<detail>)" string on " (" inside discover; if raw itself
+    //   contained " (", the warning showed a truncated raw (for example,
+    //   "not" for input "not (a uuid)") and a malformed detail.
+    // Scenario: a corrupted LUKS2 header where the UUID: line reads
+    //   "not (a uuid)" -- the " (" between "not" and "(a uuid)" is the
+    //   exact delimiter the old split matched first.
+    #[test]
+    fn discover_warns_when_uuid_value_contains_split_delimiter() {
+        let dir = tempfile::tempdir().unwrap();
+        let target = discover_create_target(dir.path(), "fake-bad");
+        let path = discover_create_by_id_symlink(dir.path(), "ata-INVALID_UUID_PAREN", &target);
+        let runner = DiscoverLabelMap::new(&[(&path, "braid-baddisk")]).with_dump_response(
+            &path,
+            RawCommandOutput {
+                cmd: "cryptsetup".into(),
+                stdout: luksdump_body("braid-baddisk", Some("UUID:\tnot (a uuid)")),
+                stderr: String::new(),
+                exit_status: 0,
+            },
+        );
+
+        let outcome =
+            discover_from_dir(&runner, &crate::recover::RealByIdResolver, dir.path()).unwrap();
+
+        assert!(!contains_name(&outcome.members, "baddisk"));
+        let warning = outcome
+            .warnings
+            .iter()
+            .find(|w| matches!(w, DiscoverWarning::InvalidLuksUuid { .. }))
+            .expect("InvalidLuksUuid warning expected");
+        let DiscoverWarning::InvalidLuksUuid {
+            path: warn_path,
+            raw,
+            detail,
+        } = warning
+        else {
+            unreachable!();
+        };
+        assert!(warn_path.ends_with("ata-INVALID_UUID_PAREN"));
+        assert_eq!(raw, "not (a uuid)");
+        assert_ne!(raw, "not");
+        assert!(!detail.is_empty(), "detail must carry uuid-crate reason");
+
+        let rendered = warning.to_string();
+        assert_eq!(
+            rendered.matches("not (a uuid)").count(),
+            1,
+            "rendered: {rendered}"
         );
     }
 

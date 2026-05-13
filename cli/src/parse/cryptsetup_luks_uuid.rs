@@ -66,10 +66,11 @@ pub fn parse_cryptsetup_luks_uuid_from_dump(
         field: "UUID".into(),
     })?;
 
-    LuksUuid::parse(&raw_value).map_err(|e| ParseError::UnexpectedValue {
+    LuksUuid::parse(&raw_value).map_err(|e| ParseError::InvalidValue {
         cmd: raw.cmd.clone(),
         field: "UUID".into(),
-        value: format!("{} ({})", e.raw, e.detail),
+        raw: e.raw,
+        detail: e.detail,
     })
 }
 
@@ -208,7 +209,7 @@ mod tests {
     }
 
     // Intent: a luksDump body whose `UUID:` value fails LuksUuid::parse
-    //   surfaces as ParseError::UnexpectedValue naming the UUID field.
+    //   surfaces as ParseError::InvalidValue naming the UUID field.
     // Why: discover maps the invalid-value outcome to
     //   DiscoverWarning::InvalidLuksUuid carrying the offending raw text.
     #[test]
@@ -222,11 +223,47 @@ mod tests {
         };
         let err = parse_cryptsetup_luks_uuid_from_dump(&raw).unwrap_err();
         match err {
-            ParseError::UnexpectedValue { field, value, .. } => {
+            ParseError::InvalidValue {
+                field, raw, detail, ..
+            } => {
                 assert_eq!(field, "UUID");
-                assert!(value.starts_with("not-a-uuid"), "value was {value:?}");
+                assert_eq!(raw, "not-a-uuid");
+                assert!(!detail.is_empty(), "detail must carry uuid-crate reason");
             }
-            other => panic!("expected UnexpectedValue UUID, got {other:?}"),
+            other => panic!("expected InvalidValue UUID, got {other:?}"),
+        }
+    }
+
+    // Intent: a UUID: line whose value contains the literal " ("
+    //   substring yields structured raw/detail fields with no
+    //   string-round-trip corruption.
+    // Why it exists: an earlier implementation packed raw+detail into a
+    //   single formatted string ("<raw> (<detail>)") and discover
+    //   reverse-split it on " ("; any raw containing " (" silently
+    //   truncated at the first match.
+    // Scenario: a corrupted or hand-edited LUKS2 header dump line of the
+    //   form "UUID:          \tnot (a uuid)\n" -- the " (" between
+    //   "not" and "(a uuid)" is exactly the delimiter the old split
+    //   matched first.
+    #[test]
+    fn luks_uuid_from_dump_preserves_delimiter_bearing_raw() {
+        let raw = RawCommandOutput {
+            cmd: "cryptsetup luksDump".into(),
+            stdout: "LUKS header information\nVersion:       \t2\nUUID:          \tnot (a uuid)\n"
+                .into(),
+            stderr: String::new(),
+            exit_status: 0,
+        };
+        let err = parse_cryptsetup_luks_uuid_from_dump(&raw).unwrap_err();
+        match err {
+            ParseError::InvalidValue {
+                field, raw, detail, ..
+            } => {
+                assert_eq!(field, "UUID");
+                assert_eq!(raw, "not (a uuid)");
+                assert!(!detail.is_empty(), "detail must carry uuid-crate reason");
+            }
+            other => panic!("expected InvalidValue UUID, got {other:?}"),
         }
     }
 
