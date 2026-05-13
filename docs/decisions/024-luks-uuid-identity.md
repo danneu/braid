@@ -28,6 +28,23 @@ write, store that UUID in the journal before mutation, and pass it through the
 structured `CryptsetupLuksFormat` request. User-supplied `--luks-format-arg`
 values may not override `--uuid` or `--label`.
 
+## Identity Boundaries
+
+| Identifier | Role | Persistent identity? | Normal user vocabulary? |
+| --- | --- | --- | --- |
+| `LuksUuid` | Encrypted-volume identity used for membership correlation, journals, duplicate detection, and live probe checks. | Yes | No |
+| `DiskName` | Operator-facing name used in commands, status summaries, mapper suffixes, and labels. | No | Yes |
+| `ByIdPath` | Hardware address used to find, open, or format a disk before it is mapped. | No | Setup and repair only |
+| `DiskMember.devid` | Prior btrfs binding used when btrfs can report a device by devid but no live LUKS UUID is observable. | Fallback binding only | Repair diagnostics only |
+| `braid-<DiskName>` mapper name | Runtime handle passed to cryptsetup, btrfs, mount, and close operations. | No | Mostly hidden |
+| `braid-<DiskName>` LUKS label | Human/debug label for LUKS headers and discovery bootstrapping. | No | Mostly hidden |
+
+This means UUID identity does not move normal command vocabulary from names to
+UUIDs. Operators still add, replace, remove, and read disks by names such as
+`toshiba1`. UUIDs belong in `pool.json`, journals, machine-readable status, and
+diagnostics where braid must prove that the encrypted member is the expected
+one.
+
 ## Benefits
 
 - **Single source of truth.** `pool.json` has one persistent member identity:
@@ -49,6 +66,27 @@ values may not override `--uuid` or `--label`.
   UUIDs appear where they help diagnostics or machine-readable state, not as the
   normal command vocabulary.
 
+## Concrete Improvements
+
+- **Membership shape is simpler.** The old model had a name-keyed map plus
+  value-side fields that could be mistaken for identity. The new model has one
+  identity axis: UUID keys map to name/by-id/devid metadata.
+- **Formatting is crash-replayable.** Fresh `add` and `replace` paths generate
+  the UUID before mutation, journal it, and pass it to cryptsetup. Recovery can
+  tell whether it is seeing the exact LUKS container that the interrupted plan
+  intended to create.
+- **Cleanup follows observed ownership.** `lock` classifies live mappers by
+  UUID/devid and closes the mapper it actually observed. A mapper opened as
+  `braid-WRONG` but owned by `disk1` is closed as `braid-WRONG`; braid does not
+  merely try `braid-disk1` and leave the real mapper open.
+- **Recovery compares member sets by identity.** Pending operations carry
+  UUID-keyed pre-operation and target membership snapshots, so recovery can
+  compare live topology with the journaled member set instead of re-discovering
+  by label or assuming names still line up.
+- **Display code has an explicit join rule.** User-facing summaries resolve a
+  live pool device's UUID back to `DiskName` for presentation. UUIDs remain
+  available to verbose/machine-readable paths where they are useful evidence.
+
 ## Runtime Handles And Labels
 
 1. Mapper names remain `braid-<DiskName>`.
@@ -66,6 +104,43 @@ values may not override `--uuid` or `--label`.
    first, then close the observed mapper name, not a reconstructed
    `mapper_name(&member.name)`, so drifted-but-member-owned mappers are closed
    correctly.
+
+## Limits And Non-Goals
+
+- A LUKS UUID identifies an encrypted LUKS container, not a physical drive,
+  enclosure slot, SATA port, or by-id path.
+- A cloned LUKS header intentionally has the same UUID as its source. Braid
+  treats that as a duplicate identity and rejects it; it does not invent a new
+  member identity for the clone.
+- Mapper and label drift are tolerated for correlation and cleanup, but braid
+  does not silently rewrite drifted mapper names or labels back into the
+  expected `braid-<DiskName>` form.
+- `devid` remains btrfs state. It is allowed only as a prior binding for
+  missing/null-underlying cases where btrfs can still identify a member but
+  braid cannot currently observe the LUKS UUID.
+- UUIDs are not a user-facing naming scheme. They may appear in diagnostics,
+  `pool.json`, `pending-op.json`, and machine-readable output, but command
+  selection and normal summaries should continue to use `DiskName`.
+
+## Tests That Enforce This
+
+- `cli/src/membership.rs` unit tests pin UUID-keyed `pool.json`, reject old
+  name-keyed maps, reject stale value-side `luks_uuid`, and enforce duplicate
+  checks across UUID, name, by-id, and devid axes.
+- `cli/src/types.rs` and `cli/src/cmd.rs` unit tests reject user-supplied
+  `--uuid`/`--label` extras and pin the structured
+  `cryptsetup luksFormat --uuid <uuid> --label <label>` argv order.
+- `cli/src/status.rs` unit tests pin compact status names by resolving live
+  pool UUIDs back to `DiskName`, including a drifted mapper case.
+- `tests/cli/luks-mapper-drift.py` verifies `braid lock` closes the observed
+  drifted mapper owned by a member UUID.
+- `tests/cli/unlock-uuid-mismatch.py` and
+  `tests/cli/recover-replace-existing-luks-uuid-mismatch.py` verify swapped or
+  reformatted disks fail UUID re-checks before unsafe replay or mount.
+- `tests/cli/replace-new-in-pool-guard.py` verifies duplicate LUKS UUIDs are
+  rejected before braid writes membership or calls into btrfs mutation.
+- `tests/cli/braid-add-persists-before-balance.py` verifies fresh add writes
+  UUID-keyed membership before post-add maintenance continues.
 
 ## Consequences
 
