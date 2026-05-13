@@ -77,15 +77,15 @@ Each disk is specified as `NAME=PATH`, where:
 - **NAME** is a short label you choose (e.g. `toshiba1`)
 - **PATH** is the `/dev/disk/by-id/` stable device path
 
-The name is used in pool.json, LUKS mapper names (`braid-toshiba1`), and all future commands.
+The name is stored in pool.json and used in LUKS mapper names (`braid-toshiba1`), LUKS labels, and all future commands. The persistent member identity is the LUKS UUID, not the name.
 
 ## What happens under the hood
 
 1. Probes each disk to determine its state (fresh, braid-labeled, or foreign)
 2. Shows a confirmation prompt with disk model, serial, and size
-3. For fresh disks: LUKS-formats the disk with the pool passphrase, creates a LUKS header backup, and opens the LUKS mapper
+3. For fresh disks: pre-generates a LUKS UUID, LUKS-formats the disk with the pool passphrase and `braid-<name>` label, creates a LUKS header backup, and opens the LUKS mapper
 4. If no pool exists: creates a btrfs filesystem (RAID1 if 2+ disks, single if 1 disk)
-5. If a pool exists: writes a phased journal, adds the device to the existing btrfs filesystem, records the new membership in pool.json, then advances the journal to the balance phase
+5. If a pool exists: writes a phased UUID-keyed journal, adds the device to the existing btrfs filesystem, records the new membership in pool.json, then advances the journal to the balance phase
 6. If the pool now has 2+ disks: balances data to RAID1, then clears the journal
 
 A sleep inhibitor is held during all irreversible operations to prevent the system from suspending mid-operation.
@@ -104,7 +104,7 @@ braid classifies each disk before acting:
 ## Safety checks / refusal cases
 
 - Rejects duplicate disk names in the same command
-- Rejects disks that conflict with existing pool membership (same name or same by-id path)
+- Rejects disks that conflict with existing pool membership (same LUKS UUID, same name, or same by-id path)
 - Rejects absent disks (not plugged in)
 - Verifies the passphrase against an existing pool member before formatting new disks
 - Warns if the pool has missing devices (suggests `braid replace` first)

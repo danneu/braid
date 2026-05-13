@@ -397,6 +397,11 @@
               braid = linuxCrane.braid;
             }
           );
+          luks-mapper-drift = pkgs.testers.nixosTest (
+            import ./tests/cli/luks-mapper-drift.nix {
+              braid = linuxCrane.braid;
+            }
+          );
           braid-lock-orphan = pkgs.testers.nixosTest (
             import ./tests/cli/braid-lock-orphan.nix {
               braid = linuxCrane.braid;

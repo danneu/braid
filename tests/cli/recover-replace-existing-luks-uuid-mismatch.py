@@ -36,6 +36,22 @@ def add_cmd(name):
     )
 
 
+def member_entry(pool, name):
+    for uuid, member in pool["disks"].items():
+        if member["name"] == name:
+            return uuid, member
+    raise AssertionError(f"{name} missing from pool.json: {pool}")
+
+
+def members_except(pool, *names):
+    skip = set(names)
+    return {
+        uuid: member
+        for uuid, member in pool["disks"].items()
+        if member["name"] not in skip
+    }
+
+
 # --- Phase 0: build pool ---
 
 with subtest("Setup: build 3-disk pool"):
@@ -85,11 +101,12 @@ with subtest("Re-format disk4 -> new LUKS UUID (different from journal)"):
 with subtest("Lock pool and inject ExistingLuks + enroll journal (mismatched UUID)"):
     machine.succeed("braid lock")
 
-    target_disks = {}
-    for name, member in pool_json["disks"].items():
-        if name != "disk2":
-            target_disks[name] = member
-    target_disks["disk4"] = {"by_id": "/dev/disk/by-id/virtio-disk4"}
+    old_uuid, old_member = member_entry(pool_json, "disk2")
+    target_disks = members_except(pool_json, "disk2")
+    target_disks[journaled_uuid] = {
+        "name": "disk4",
+        "by_id": "/dev/disk/by-id/virtio-disk4",
+    }
     target_json = {"disks": target_disks}
 
     journal = {
@@ -97,21 +114,21 @@ with subtest("Lock pool and inject ExistingLuks + enroll journal (mismatched UUI
         "op": {
             "op": "Replace",
             "phase": "PoolMutation",
+            "old_uuid": old_uuid,
             "old_name": "disk2",
+            "new_uuid": journaled_uuid,
             "new_name": "disk4",
             "new_target": {
                 "by_id": "/dev/disk/by-id/virtio-disk4",
-                "mapper_name": "braid-disk4",
                 "mode": {
                     "ExistingLuks": {
-                        "luks_uuid": journaled_uuid,
                         "enroll_key_file": "/tmp/braid.key",
                     }
                 },
             },
             "source": {
                 "Live": {
-                    "old_devid": pool_json["disks"]["disk2"]["devid"],
+                    "old_devid": old_member["devid"],
                     "old_mapper": "braid-disk2",
                 }
             },

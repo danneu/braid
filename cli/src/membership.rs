@@ -9,7 +9,7 @@
 
 use crate::state_io;
 use crate::state_paths::StatePaths;
-use crate::types::{ByIdPath, DiskName, LuksUuid, MapperName, PoolState};
+use crate::types::{ByIdPath, DiskName, LuksUuid, MapperName, PoolState, format_uuid_list};
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 use std::collections::btree_map;
@@ -63,16 +63,6 @@ pub enum MembershipError {
         #[source]
         source: std::io::Error,
     },
-}
-
-fn format_uuid_list(uuids: &[LuksUuid]) -> String {
-    let mut sorted: Vec<&LuksUuid> = uuids.iter().collect();
-    sorted.sort();
-    sorted
-        .into_iter()
-        .map(|u| u.to_string())
-        .collect::<Vec<_>>()
-        .join(", ")
 }
 
 // ---------------------------------------------------------------------------
@@ -573,10 +563,14 @@ pub fn enrich_from_pool_state(
     let mut foreign: BTreeMap<LuksUuid, MapperName> = BTreeMap::new();
     for dev in &pool.devices {
         if let Some(member) = membership.by_uuid_mut(&dev.luks_uuid) {
-            // Known UUID: refresh the live devid. The other fields
-            // (name, by_id, added_at) are operator-attested at insert
-            // time and do not update from live state.
+            // Known UUID: refresh the live devid and stamp the first
+            // observed live-pool time when the journal/member did not
+            // already carry one. Name and by_id remain operator-attested
+            // at insert time and do not update from live state.
             member.devid = Some(dev.devid);
+            if member.added_at.is_none() {
+                member.added_at = Some(crate::util::now_iso());
+            }
         } else {
             // Foreign UUID: surface via eprintln (transient) and
             // accumulate into the structured report (persistent).
@@ -926,7 +920,7 @@ mod tests {
     fn by_devid_returns_duplicate_devid_on_corruption() {
         // Intent: by_devid against a manually-corrupted membership returns
         //   DuplicateDevid with all colliding UUIDs in canonical lex order.
-        let mut disks: BTreeMap<LuksUuid, DiskMember> = BTreeMap::new();
+        let mut raw_members: BTreeMap<LuksUuid, DiskMember> = BTreeMap::new();
         let u1 = test_uuid(120);
         let u2 = test_uuid(121);
         let u3 = test_uuid(122);
@@ -937,10 +931,10 @@ mod tests {
         ] {
             let mut dm = member(name, by_id_s);
             dm.devid = Some(7);
-            disks.insert(u.clone(), dm);
+            raw_members.insert(u.clone(), dm);
         }
         let m = PoolMembership {
-            disks: LuksUuidMap(disks),
+            disks: LuksUuidMap(raw_members),
         };
         let err = m.by_devid(7).unwrap_err();
         match &err {
@@ -1201,6 +1195,44 @@ mod tests {
             updated.added_at, original.added_at,
             "added_at must be preserved"
         );
+    }
+
+    #[test]
+    fn enrich_from_pool_state_known_uuid_stamps_missing_added_at() {
+        // Intent: a live PoolDevice whose luks_uuid is in membership stamps
+        //   `added_at` when the persisted entry does not have one.
+        // Why: add/recover journals intentionally carry `added_at: None`
+        //   until btrfs commits the member; the pre-balance pool.json write
+        //   must still preserve a historical insertion timestamp.
+        let mut m = PoolMembership::empty();
+        let u_k = test_uuid(153);
+        let original = member("disk1", "/dev/disk/by-id/ata-K");
+        m.insert(u_k.clone(), original.clone()).unwrap();
+        let pool = pool_state_with(vec![PoolDevice {
+            mapper: MapperName("braid-disk1".into()),
+            luks_uuid: u_k.clone(),
+            devid: 2,
+            underlying: "/dev/vdb".into(),
+        }]);
+        let report = enrich_from_pool_state(&mut m, &pool).expect("enrichment succeeds");
+        assert!(
+            report.foreign.is_empty(),
+            "known UUID must not surface as foreign; got: {:?}",
+            report.foreign
+        );
+        let updated = m.by_uuid(&u_k).expect("known UUID still present");
+        assert_eq!(updated.devid, Some(2), "live devid must be recorded");
+        assert_eq!(updated.name, original.name, "name must be preserved");
+        assert_eq!(updated.by_id, original.by_id, "by_id must be preserved");
+        let added_at = updated
+            .added_at
+            .as_ref()
+            .expect("missing added_at should be stamped");
+        time::OffsetDateTime::parse(
+            added_at,
+            &time::format_description::well_known::Iso8601::DEFAULT,
+        )
+        .expect("fresh added_at should parse as ISO-8601");
     }
 
     #[test]

@@ -24,14 +24,14 @@ Replace plan/apply with five intent commands:
 
 ### Disk keys
 
-Disk membership is CLI-owned runtime state in `/var/lib/braid/pool.json` (see [017-runtime-disk-membership.md](017-runtime-disk-membership.md)). Disks are added with `name=by_id` syntax:
+Disk membership is CLI-owned runtime state in `/var/lib/braid/pool.json` (see [017-runtime-disk-membership.md](017-runtime-disk-membership.md)). `pool.json` is keyed by LUKS UUID; the disk name is stored as presentation metadata. Disks are added with `name=by_id` syntax:
 
 ```sh
 braid add toshiba=/dev/disk/by-id/ata-Toshiba_MN07_XXXX \
           ironwolf=/dev/disk/by-id/ata-Ironwolf_ST12_YYYY
 ```
 
-Mapper names are `braid-<name>` (e.g., `braid-toshiba`) — human-friendly, debuggable in lsblk/systemd logs, deterministic.
+Mapper names are `braid-<name>` (e.g., `braid-toshiba`) — human-friendly, debuggable in lsblk/systemd logs, deterministic. They are runtime handles, not persistent identity.
 
 ### Safety model
 
@@ -39,11 +39,11 @@ The old architecture used a structural code boundary — `luksFormat` was litera
 
 1. **Explicit operator intent**: user specifies a disk key and confirms
 2. **Layered identity check** for existing LUKS devices:
-   a. LUKS label must be `braid-<key>` — non-braid LUKS is refused outright.
+   a. LUKS UUID is the persistent identity. LUKS label `braid-<key>` is an adoption-safety gate for returning disks; non-braid LUKS is refused outright.
    b. Pool must be mounted — bootstrap refuses existing LUKS (no pool to verify against).
    c. Opened mapper's btrfs FSID must match the current pool — foreign-pool disks are refused.
    d. Braid-labeled LUKS with no btrfs superblock is refused -- this state is ambiguous (clean eviction, partial init, manual wipe, stale data) and cannot be distinguished without tombstones.
-   e. A braid-labeled LUKS disk with a btrfs superblock whose FSID matches the mounted pool may be accepted as a returned-disk add target. The add journal records that identity before mutation. If the stale btrfs signature would block `btrfs device add`, braid runs only `wipefs --all --types btrfs` on the verified mapper and uses `btrfs device add -f`.
+   e. A braid-labeled LUKS disk with a btrfs superblock whose FSID matches the mounted pool may be accepted as a returned-disk add target. The add journal records the LUKS UUID before mutation. If the stale btrfs signature would block `btrfs device add`, braid runs only `wipefs --all --types btrfs` on the verified mapper and uses `btrfs device add -f`.
    f. Superblock guard is defense-in-depth on the FSID-matching path for existing-LUKS adds. The bootstrap path accepts only disks classified as fresh non-LUKS during add planning, and the LUKS open helpers verify that any pre-existing `braid-<key>` mapper is backed by the requested by-id disk before pool creation proceeds. `mkfs.btrfs` itself is invoked without `-f`, so its own signature check is the final fail-closed guard.
 3. **Unified confirmation with device context**: all mutating commands (`add`, `remove`, `remove-missing`, `replace`) show a rich device-info block (model, size, serial via lsblk) and confirm with `Type 'yes' to continue:`. Degraded-path warnings are informational text, not special confirmation phrases. `--yes` skips the prompt for scripting.
 4. **Disk name immutability**: mutating commands validate names against recorded disk identity and reject name rename/reassignment. Operators must use explicit `replace` or `remove`+`add` workflows instead of renaming.

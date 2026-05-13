@@ -61,8 +61,7 @@ use crate::cmd::{CmdRequest, MockRunner, RawCommandOutput};
 use crate::luks::KEYFILE_SIZE;
 use crate::membership::{DiskMember, PoolMembership};
 use crate::secret::Passphrase;
-use crate::types::{ByIdPath, MountPoint};
-use std::collections::BTreeMap;
+use crate::types::{ByIdPath, DiskName, MountPoint};
 use std::path::{Path, PathBuf};
 use tempfile::TempDir;
 
@@ -91,7 +90,7 @@ pub(crate) fn enroll_fs(paths: &[&str]) -> shared::MockFs {
 // ---------------------------------------------------------------------------
 
 pub(crate) fn enroll_by_id(path: &str) -> ByIdPath {
-    ByIdPath(path.to_owned())
+    ByIdPath::parse(path).unwrap()
 }
 
 pub(crate) fn enroll_passphrase(s: &str) -> Passphrase {
@@ -302,14 +301,19 @@ pub(crate) fn enroll_with_mountpoint_fail(runner: MockRunner, dir: &Path) -> Moc
 /// `d2`) and arbitrary disk names so a parameterised builder is the
 /// right shape.
 pub(crate) fn enroll_make_membership(disks: &[(&str, &str)]) -> PoolMembership {
-    let mut map = BTreeMap::new();
-    for (key, path) in disks {
-        map.insert(
-            (*key).to_owned(),
-            DiskMember::from_by_id(enroll_by_id(path)),
-        );
+    let mut membership = PoolMembership::empty();
+    for (idx, (key, path)) in disks.iter().enumerate() {
+        let member = DiskMember {
+            name: DiskName::parse(key).expect("valid enroll fixture disk name"),
+            by_id: enroll_by_id(path),
+            devid: None,
+            added_at: None,
+        };
+        membership
+            .insert(shared::test_uuid(500 + idx as u64), member)
+            .expect("insert enroll fixture member");
     }
-    PoolMembership { disks: map }
+    membership
 }
 
 /// Writes `KEYFILE_SIZE` zero bytes to `<tmp>/braid.key`. Returns

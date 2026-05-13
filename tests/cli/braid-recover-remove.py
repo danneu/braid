@@ -38,14 +38,35 @@ def add_cmd(key):
     )
 
 
+def member_entry(pool, name):
+    for uuid, member in pool["disks"].items():
+        if member["name"] == name:
+            return uuid, member
+    raise AssertionError(f"{name} missing from pool.json: {pool}")
+
+
+def members_except(pool, *names):
+    skip = set(names)
+    return {
+        uuid: member
+        for uuid, member in pool["disks"].items()
+        if member["name"] not in skip
+    }
+
+
+def has_member(pool, name):
+    return any(member["name"] == name for member in pool["disks"].values())
+
+
 def build_remove_journal(pool_json):
     """Build a pending-op.json for an interrupted remove of disk3."""
-    target = json.loads(json.dumps(pool_json))
-    del target["disks"]["disk3"]
+    target_uuid, _ = member_entry(pool_json, "disk3")
+    target = {"disks": members_except(pool_json, "disk3")}
     return {
         "started_at": "2026-01-01T00:00:00Z",
         "op": {
             "op": "Remove",
+            "luks_uuid": target_uuid,
             "name": "disk3",
         },
         "pre_membership": pool_json,
@@ -116,7 +137,7 @@ with subtest("A: braid recover rebuilds pool.json with all 3 disks"):
 
     recovered = json.loads(machine.succeed("cat /var/lib/braid/pool.json"))
     for name in ["disk1", "disk2", "disk3"]:
-        assert name in recovered["disks"], (
+        assert has_member(recovered, name), (
             f"{name} missing from recovered pool.json: {recovered}"
         )
 
@@ -193,13 +214,13 @@ with subtest("B: braid recover rebuilds pool.json with disk1+disk2 only"):
     machine.succeed("mountpoint -q /mnt/storage")
 
     recovered = json.loads(machine.succeed("cat /var/lib/braid/pool.json"))
-    assert "disk1" in recovered["disks"], (
+    assert has_member(recovered, "disk1"), (
         f"disk1 missing from recovered pool.json: {recovered}"
     )
-    assert "disk2" in recovered["disks"], (
+    assert has_member(recovered, "disk2"), (
         f"disk2 missing from recovered pool.json: {recovered}"
     )
-    assert "disk3" not in recovered["disks"], (
+    assert not has_member(recovered, "disk3"), (
         f"disk3 should NOT be in recovered pool.json: {recovered}"
     )
 

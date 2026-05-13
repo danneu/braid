@@ -22,7 +22,7 @@ The `-dusage=0` pass relocates only completely empty block groups (zero cost). `
 
 **Symptom:** `braid unlock` fails because pool.json is missing or corrupted.
 
-**Fix:** Rebuild pool.json from disk labels:
+**Fix:** Rebuild UUID-keyed pool.json from disk labels and LUKS UUIDs:
 
 ```sh
 sudo braid discover

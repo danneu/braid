@@ -9,7 +9,7 @@ use crate::inhibit::AcquireSleepInhibitor;
 use crate::journal::{self, Journal};
 use crate::luks::{self, VerifyOutcome};
 use crate::mapper_close::close_mapper_best_effort;
-use crate::membership::{self, DiskMember, PoolMembership};
+use crate::membership::{self, DiskMember, LuksUuidMap, PoolMembership};
 use crate::mount::{self, MountError, OpenPlan};
 use crate::mount_check;
 use crate::parse::btrfs_filesystem_show::{DeviceBtrfsProbe, classify_btrfs_probe};
@@ -23,7 +23,9 @@ use crate::secret::Passphrase;
 use crate::state_paths::StatePaths;
 use crate::status::{BalanceReport, get_balance_report};
 use crate::status_tag::{StatusTag, color_enabled_for_stderr, emit_status, status_line};
-use crate::types::{ByIdPath, ConfigDiskState, MountPoint, PoolState};
+use crate::types::{
+    ByIdPath, ConfigDiskState, DiskName, LuksUuid, MountPoint, PoolState, format_uuid_list,
+};
 use std::path::PathBuf;
 use std::time::Duration;
 use thiserror::Error;
@@ -52,6 +54,40 @@ pub enum RecoverError {
          trusting `braid monitor`, then re-run `braid recover`."
     )]
     AckCleanupFailed { stage: &'static str, detail: String },
+    /// RemoveMissing replay observed a journaled `null_underlying` mapper
+    /// whose authoritative `LuksUuid` cannot be resolved because the
+    /// member entry was never enriched (devid: None). The journal alone
+    /// cannot complete the identity decision; the operator must reconcile.
+    #[error(
+        "journaled LUKS UUID {luks_uuid} has no persisted devid; cannot resolve null-underlying mapper"
+    )]
+    JournalUuidDevidGap { luks_uuid: LuksUuid },
+    /// Journaled-snapshot corruption: the same `devid` resolves to two or
+    /// more UUIDs inside `journal.pre_membership` / `journal.target_membership`.
+    /// Surfaces in canonical lexicographic UUID order.
+    #[error(
+        "duplicate devid {devid} in journaled membership across UUIDs {}",
+        format_uuid_list(.members)
+    )]
+    DuplicateDevidDuringReplay { devid: u64, members: Vec<LuksUuid> },
+    /// Journaled-snapshot corruption: a devid that the live pool reports
+    /// has no matching member in the relevant journal snapshot, so the
+    /// pre-crash identity binding is unrecoverable from the journal alone.
+    #[error(
+        "no member in journaled membership has devid {devid}; the journal entry was written against a never-enriched member -- see docs/luks-unlock.md and manual/guides/recovery-scenarios.md before removing /var/lib/braid/pending-op.json"
+    )]
+    NoMemberForJournaledDevid { devid: u64 },
+}
+
+/// Recover-local snapshot-walk errors raised by `live_pool_matches_membership`
+/// when `journal.pre_membership` / `journal.target_membership` corruption
+/// prevents the gate from evaluating its predicate. Bridged into the
+/// matching `RecoverError::*` variant at each call site so the per-site
+/// topology-mismatch wording stays distinct from corruption wording.
+#[derive(Debug)]
+enum JournaledSnapshotError {
+    DuplicateDevid { devid: u64, members: Vec<LuksUuid> },
+    NoMemberForDevid { devid: u64 },
 }
 
 /// Recovery-local passphrase holder that preserves zeroizing ownership.
@@ -164,7 +200,8 @@ fn resolve_by_id_for_underlying(
 
     // Stable highest-priority pick: lowest by_id_priority wins, ties broken by filename.
     matches.sort_by(|a, b| (a.0, &a.1).cmp(&(b.0, &b.1)));
-    Ok(ByIdPath(matches.into_iter().next().unwrap().2))
+    let selected = matches.into_iter().next().unwrap().2;
+    ByIdPath::parse(&selected).map_err(|e| RecoverError::Failed(e.to_string()))
 }
 
 /// Rebuild pool.json from the live mounted pool and clear the pending-operation journal.
@@ -224,8 +261,8 @@ enum RecoverWorkAction {
     InitialOpenPool,
     WaitForKernelReplace,
     RemountCycle {
-        close_names: Vec<String>,
-        reopen_names: Vec<String>,
+        close_names: Vec<DiskName>,
+        reopen_names: Vec<DiskName>,
         any_missing_member: bool,
     },
     Complete(RecoverCompletion),
@@ -234,9 +271,9 @@ enum RecoverWorkAction {
 #[derive(Debug)]
 enum RecoverCompletion {
     AddPoolMutation {
-        targets: std::collections::BTreeMap<String, journal::AddJournalTarget>,
+        targets: LuksUuidMap<journal::AddJournalTarget>,
         all_targets_already_live: bool,
-        live_names: Option<std::collections::BTreeSet<String>>,
+        live_uuids: Option<std::collections::BTreeSet<LuksUuid>>,
     },
     AddPostBalance,
     RemoveMissingPoolMutation {
@@ -248,14 +285,17 @@ enum RecoverCompletion {
         restore_raid1_after_commit: bool,
     },
     ReplacePoolMutation {
-        old_name: String,
-        new_name: String,
+        old_uuid: LuksUuid,
+        new_uuid: LuksUuid,
+        old_name: DiskName,
+        new_name: DiskName,
         new_target: journal::ReplaceJournalTarget,
         source: journal::ReplaceJournalSource,
         restore_raid1_after_commit: bool,
     },
     ReplacePostMaintenance {
-        new_name: String,
+        new_uuid: LuksUuid,
+        new_name: DiskName,
         source: journal::ReplaceJournalSource,
         restore_raid1_after_commit: bool,
     },
@@ -336,7 +376,7 @@ impl RecoverWorkAction {
 
                 let forget_devs: Vec<String> = close_names
                     .iter()
-                    .map(|name| format!("/dev/mapper/{}", config::mapper_name(name).0))
+                    .map(|name| format!("/dev/mapper/{}", config::mapper_name(name.as_str()).0))
                     .collect();
                 if !forget_devs.is_empty() {
                     steps.push(Step {
@@ -349,7 +389,7 @@ impl RecoverWorkAction {
                 }
 
                 for name in close_names {
-                    let mn = config::mapper_name(name);
+                    let mn = config::mapper_name(name.as_str());
                     steps.push(Step {
                         risk: "safe",
                         description: format!("close LUKS mapper {} (recover remount cycle)", mn),
@@ -362,18 +402,18 @@ impl RecoverWorkAction {
                 for name in reopen_names {
                     let member = plan
                         .union
-                        .disks
-                        .get(name)
+                        .by_name(name)
+                        .map(|(_, m)| m)
                         .expect("remount-cycle reopen target validated during planning");
-                    let mn = config::mapper_name(name);
+                    let mn = config::mapper_name(name.as_str());
                     steps.push(Step {
                         risk: "safe",
                         description: format!(
-                            "LUKS open {} → {} (recover remount cycle)",
+                            "LUKS open {} -> {} (recover remount cycle)",
                             member.by_id, mn,
                         ),
                         commands: vec![CmdRequest::CryptsetupLuksOpen {
-                            device: member.by_id.0.clone(),
+                            device: member.by_id.as_str().to_owned(),
                             mapper: mn.0.clone(),
                         }],
                     });
@@ -388,8 +428,10 @@ impl RecoverWorkAction {
                 let first_reopen_name = reopen_names
                     .first()
                     .expect("remount-cycle mount target validated during planning");
-                let mount_device =
-                    format!("/dev/mapper/{}", config::mapper_name(first_reopen_name).0);
+                let mount_device = format!(
+                    "/dev/mapper/{}",
+                    config::mapper_name(first_reopen_name.as_str()).0
+                );
                 if *any_missing_member {
                     steps.push(Step {
                         risk: "safe",
@@ -479,14 +521,14 @@ impl RecoverCompletion {
             RecoverCompletion::AddPoolMutation {
                 targets,
                 all_targets_already_live,
-                live_names,
+                live_uuids,
             } => {
                 render_add_pool_mutation_recovery_steps(
                     plan,
                     steps,
                     targets,
                     *all_targets_already_live,
-                    live_names.as_ref(),
+                    live_uuids.as_ref(),
                 );
                 render_recovery_tail(plan, steps, None, true);
             }
@@ -575,7 +617,7 @@ impl RecoverCompletion {
         // longer sees a mounted pool with members, preserve pool.json and
         // the pending journal so the operator can fix the mount state and
         // retry.
-        if !pool.mounted || (pool.devices.is_empty() && !plan.union.disks.is_empty()) {
+        if !pool.mounted || (pool.devices.is_empty() && !plan.union.is_empty()) {
             let probe_state = if !pool.mounted {
                 "no btrfs mount"
             } else {
@@ -643,6 +685,8 @@ impl RecoverCompletion {
                 },
             ),
             RecoverCompletion::ReplacePoolMutation {
+                old_uuid,
+                new_uuid,
                 old_name,
                 new_name,
                 new_target,
@@ -657,6 +701,8 @@ impl RecoverCompletion {
                 &plan.journal,
                 &plan.union,
                 pool,
+                old_uuid,
+                new_uuid,
                 old_name,
                 new_name,
                 new_target,
@@ -664,6 +710,7 @@ impl RecoverCompletion {
                 *restore_raid1_after_commit,
             ),
             RecoverCompletion::ReplacePostMaintenance {
+                new_uuid,
                 new_name,
                 source,
                 restore_raid1_after_commit,
@@ -674,6 +721,7 @@ impl RecoverCompletion {
                 params,
                 &plan.journal,
                 pool,
+                new_uuid,
                 new_name,
                 source,
                 fs,
@@ -688,16 +736,23 @@ impl RecoverCompletion {
 }
 
 struct ReplaceResizePreview<'a> {
-    new_name: &'a str,
+    new_name: &'a DiskName,
     skipped_if_replacement_not_committed: bool,
 }
 
+/// Render add-recovery replay steps in DiskName-sorted order.
+///
+/// The journal's `targets` map is UUID-keyed (random per-disk under v4),
+/// so iterating it in map order would surface "replay fresh add target ..."
+/// rows in a different order every recover. Sort by `target.name` first so
+/// operator-visible preview output stays alphabetical-by-name -- the same
+/// order the live `add` command renders.
 fn render_add_pool_mutation_recovery_steps(
     plan: &RecoverWorkPlan,
     steps: &mut Vec<Step>,
-    targets: &std::collections::BTreeMap<String, journal::AddJournalTarget>,
+    targets: &LuksUuidMap<journal::AddJournalTarget>,
     all_targets_already_live: bool,
-    live_names: Option<&std::collections::BTreeSet<String>>,
+    live_uuids: Option<&std::collections::BTreeSet<LuksUuid>>,
 ) {
     steps.push(Step {
         risk: "safe",
@@ -711,15 +766,22 @@ fn render_add_pool_mutation_recovery_steps(
     });
     let conditional_suffix =
         " (skipped at runtime if open/scan reconciliation makes target live before replay)";
-    for (name, target) in targets {
-        let mapper_path = format!("/dev/mapper/{}", target.mapper_name);
-        if live_names.is_some_and(|live| live.contains(name)) {
+
+    // Sort by DiskName so operator-visible iteration order is stable
+    // across recover runs, matching the live add command.
+    let mut sorted: Vec<(&LuksUuid, &journal::AddJournalTarget)> = targets.iter().collect();
+    sorted.sort_by(|a, b| a.1.name.cmp(&b.1.name));
+
+    for (uuid, target) in sorted {
+        let mapper = config::mapper_name(target.name.as_str());
+        let mapper_path = format!("/dev/mapper/{}", mapper.0);
+        if live_uuids.is_some_and(|live| live.contains(uuid)) {
             let (kind, label) = match &target.mode {
                 journal::AddJournalMode::RecoverableBraidLabeled { .. } => {
                     ("verified returned-disk add", mapper_path.clone())
                 }
                 journal::AddJournalMode::FreshLuks { .. } => {
-                    ("fresh add target", target.by_id.0.clone())
+                    ("fresh add target", target.by_id.as_str().to_owned())
                 }
             };
             steps.push(Step {
@@ -746,14 +808,14 @@ fn render_add_pool_mutation_recovery_steps(
                 let mut commands = Vec::new();
                 if let Some(key_file) = enroll_key_file {
                     commands.push(CmdRequest::CryptsetupLuksAddKeyFile {
-                        device: target.by_id.0.clone(),
+                        device: target.by_id.as_str().to_owned(),
                         key_file_path: key_file.display().to_string(),
                     });
                     commands.push(CmdRequest::CryptsetupLuksHeaderBackup {
-                        device: target.by_id.0.clone(),
+                        device: target.by_id.as_str().to_owned(),
                         backup_path: plan
                             .luks_headers_dir
-                            .join(format!("{}.luksheader", target.mapper_name))
+                            .join(format!("{}.luksheader", mapper.0))
                             .display()
                             .to_string(),
                     });
@@ -769,7 +831,7 @@ fn render_add_pool_mutation_recovery_steps(
                     mount_point: plan.mount_point.clone(),
                     force: true,
                 });
-                let mapper_path_for_description = format!("/dev/mapper/{}", target.mapper_name);
+                let mapper_path_for_description = format!("/dev/mapper/{}", mapper.0);
                 steps.push(Step {
                     risk: "safe",
                     description: format!(
@@ -779,31 +841,33 @@ fn render_add_pool_mutation_recovery_steps(
                 });
             }
             journal::AddJournalMode::FreshLuks {
-                luks_format_extra_opts,
+                extra_opts,
                 enroll_key_file,
-                ..
             } => {
+                let label = format!("braid-{}", target.name);
                 let mut commands = vec![CmdRequest::CryptsetupLuksFormat {
-                    device: target.by_id.0.clone(),
-                    extra_opts: luks_format_extra_opts.clone(),
+                    device: target.by_id.as_str().to_owned(),
+                    uuid: uuid.clone(),
+                    label: label.clone(),
+                    extra_opts: extra_opts.clone(),
                 }];
                 if let Some(key_file) = enroll_key_file {
                     commands.push(CmdRequest::CryptsetupLuksAddKeyFile {
-                        device: target.by_id.0.clone(),
+                        device: target.by_id.as_str().to_owned(),
                         key_file_path: key_file.display().to_string(),
                     });
                 }
                 commands.push(CmdRequest::CryptsetupLuksHeaderBackup {
-                    device: target.by_id.0.clone(),
+                    device: target.by_id.as_str().to_owned(),
                     backup_path: plan
                         .luks_headers_dir
-                        .join(format!("{}.luksheader", target.mapper_name))
+                        .join(format!("{}.luksheader", mapper.0))
                         .display()
                         .to_string(),
                 });
                 commands.push(CmdRequest::CryptsetupLuksOpen {
-                    device: target.by_id.0.clone(),
-                    mapper: target.mapper_name.clone(),
+                    device: target.by_id.as_str().to_owned(),
+                    mapper: mapper.0.clone(),
                 });
                 commands.push(CmdRequest::BtrfsDeviceAdd {
                     device: mapper_path,
@@ -937,12 +1001,15 @@ fn execute_recover_initial_open<R: CommandRunner + Sync, F: Filesystem + ?Sized>
             // Bootstrap mount failure: probe the target devices to confirm
             // no btrfs superblock exists -- only then is it safe to advise
             // wiping.
-            if plan.journal.pre_membership.disks.is_empty()
+            if plan.journal.pre_membership.is_empty()
                 && let mount::MountError::MountFailed(_) = &failure.error
                 && let journal::OpKind::Add { targets, .. } = &plan.journal.op
             {
-                let all_no_btrfs = targets.values().all(|target| {
-                    let mapper = format!("/dev/mapper/{}", target.mapper_name);
+                let all_no_btrfs = targets.iter().all(|(_, target)| {
+                    let mapper = format!(
+                        "/dev/mapper/{}",
+                        config::mapper_name(target.name.as_str()).0
+                    );
                     match runner.run(&CmdRequest::BtrfsFilesystemShowTarget { target: mapper }) {
                         Ok(raw) => matches!(classify_btrfs_probe(&raw), DeviceBtrfsProbe::NoBtrfs),
                         Err(_) => false,
@@ -958,9 +1025,8 @@ fn execute_recover_initial_open<R: CommandRunner + Sync, F: Filesystem + ?Sized>
                 if all_no_btrfs {
                     let disk_list: Vec<_> = plan
                         .union
-                        .disks
                         .iter()
-                        .map(|(name, m)| format!("  {} ({})", name, m.by_id))
+                        .map(|(_, m)| format!("  {} ({})", m.name, m.by_id))
                         .collect();
                     return Err(RecoverError::Failed(format!(
                         "bootstrap add was interrupted before the filesystem was \
@@ -1013,27 +1079,49 @@ fn execute_generic_live_pool_recovery<R: CommandRunner + Sync>(
     // (closes the gap where a post-journal validation failure preserved
     // the journal but recover then lost a flapping non-target disk).
     if matches!(&plan.journal.op, journal::OpKind::Remove { .. }) {
-        for (name, member) in &plan.journal.pre_membership.disks {
-            if recovered.disks.contains_key(name) {
+        for (uuid, member) in plan.journal.pre_membership.iter() {
+            if recovered.by_uuid(uuid).is_some() {
                 continue;
             }
-            let mapper = config::mapper_name(name);
-            let in_null_underlying = pool.null_underlying.iter().any(|n| n.mapper == mapper);
+            let mapper = config::mapper_name(member.name.as_str());
+            // Pattern 2 carve-out (Remove-recovery never-enriched fallback):
+            // when member.devid is None, additionally accept a positive match on
+            // pool.null_underlying.mapper == config::mapper_name(&member.name).
+            // This is the only place in the codebase where a mapper-name compare
+            // participates in an identity decision; scope is bounded to
+            // Remove-recovery's null_underlying restoration of an operator-attested
+            // pre_membership entry. See plans/impl/2026-05-12-luks-uuid-as-identity/plan.md, section
+            // "Remove-recovery null_underlying guard: never-enriched carve-out".
+            let in_null_underlying = pool.null_underlying.iter().any(|n| {
+                member
+                    .devid
+                    .map(|d| n.devid == d)
+                    .unwrap_or_else(|| n.mapper == mapper)
+            });
             let in_missing = member
                 .devid
                 .map(|d| pool.missing_devids.contains(&d))
                 .unwrap_or(false);
             if in_null_underlying || in_missing {
-                recovered.disks.insert(name.clone(), member.clone());
+                recovered.insert(uuid.clone(), member.clone())?;
             }
         }
     }
 
-    let pre_names: std::collections::BTreeSet<_> =
-        plan.journal.pre_membership.disks.keys().collect();
-    let target_names: std::collections::BTreeSet<_> =
-        plan.journal.target_membership.disks.keys().collect();
-    let recovered_names: std::collections::BTreeSet<_> = recovered.disks.keys().collect();
+    let pre_names: std::collections::BTreeSet<_> = plan
+        .journal
+        .pre_membership
+        .names()
+        .map(|n| n.as_str().to_owned())
+        .collect();
+    let target_names: std::collections::BTreeSet<_> = plan
+        .journal
+        .target_membership
+        .names()
+        .map(|n| n.as_str().to_owned())
+        .collect();
+    let recovered_names: std::collections::BTreeSet<_> =
+        recovered.names().map(|n| n.as_str().to_owned()).collect();
 
     eprintln!("  pre-operation membership:  {:?}", pre_names);
     eprintln!("  target membership:         {:?}", target_names);
@@ -1053,7 +1141,7 @@ fn execute_generic_live_pool_recovery<R: CommandRunner + Sync>(
     eprintln!("pool.json written from live pool state.");
 
     if matches!(&plan.journal.op, journal::OpKind::Add { .. })
-        && plan.journal.pre_membership.disks.is_empty()
+        && plan.journal.pre_membership.is_empty()
     {
         alert::remove_acked_stats(params.paths).map_err(|e| RecoverError::AckCleanupFailed {
             stage: "bootstrap-recovery",
@@ -1069,20 +1157,16 @@ fn execute_generic_live_pool_recovery<R: CommandRunner + Sync>(
         params.progress,
     )?;
 
-    if let journal::OpKind::Remove { name } = &plan.journal.op {
-        if !recovered.disks.contains_key(name) {
-            if let Some(devid) = plan
-                .journal
-                .pre_membership
-                .disks
-                .get(name)
-                .and_then(|m| m.devid)
-            {
-                if let Err(e) = alert::drop_ghost_acked_for_devids(params.paths, &[devid]) {
-                    eprintln!("Warning: failed to update acked stats: {e}");
-                }
-            }
-        }
+    if let journal::OpKind::Remove { luks_uuid, .. } = &plan.journal.op
+        && recovered.by_uuid(luks_uuid).is_none()
+        && let Some(devid) = plan
+            .journal
+            .pre_membership
+            .by_uuid(luks_uuid)
+            .and_then(|m| m.devid)
+        && let Err(e) = alert::drop_ghost_acked_for_devids(params.paths, &[devid])
+    {
+        eprintln!("Warning: failed to update acked stats: {e}");
     }
 
     journal::clear_journal(params.paths).map_err(|e| RecoverError::Journal(e.to_string()))?;
@@ -1181,7 +1265,7 @@ pub fn plan_recover<R: CommandRunner + Sync, F: Filesystem + ?Sized>(
         phase: journal::AddPhase::PoolMutation,
         targets,
     } = &journal.op
-        && !journal.pre_membership.disks.is_empty()
+        && !journal.pre_membership.is_empty()
         && !params.dry_run
     {
         match discover_add_targets_before_mount(runner, fs, params, &journal, targets) {
@@ -1204,32 +1288,41 @@ pub fn plan_recover<R: CommandRunner + Sync, F: Filesystem + ?Sized>(
         notes.push(event.to_preview_note());
     }
 
-    let cycle_reopen_names: Vec<String> = report
-        .events
-        .iter()
-        .filter_map(|e| match e {
+    let mut cycle_reopen_names: Vec<DiskName> = Vec::new();
+    for event in &report.events {
+        let Some(name) = (match event {
             mount::ProbeEvent::DiskAvailable { name }
-            | mount::ProbeEvent::DiskAlreadyOpen { name } => Some(name.clone()),
+            | mount::ProbeEvent::DiskAlreadyOpen { name } => Some(name),
             _ => None,
-        })
-        .collect();
-    let cycle_close_names: Vec<String> = union
-        .disks
-        .keys()
-        .filter(|name| {
+        }) else {
+            continue;
+        };
+        let parsed = DiskName::parse(name).map_err(|e| {
+            PlanFailure::with_notes(
+                notes.clone(),
+                RecoverError::Failed(format!(
+                    "recover remount cycle preview: invalid disk name from mount planner '{name}': {e}"
+                )),
+            )
+        })?;
+        cycle_reopen_names.push(parsed);
+    }
+    let cycle_close_names: Vec<DiskName> = union
+        .iter()
+        .filter_map(|(_, member)| {
+            let name = &member.name;
             if cycle_reopen_names.contains(name) {
-                return true;
+                return Some(name.clone());
             }
-            let mapper_path = format!("/dev/mapper/{}", config::mapper_name(name).0);
-            fs.exists(&mapper_path)
+            let mapper_path = format!("/dev/mapper/{}", config::mapper_name(name.as_str()).0);
+            fs.exists(&mapper_path).then(|| name.clone())
         })
-        .cloned()
         .collect();
 
     let open_plan = match report.result {
         Ok(op) => op,
         Err(e) => {
-            return Err(PlanFailure::with_notes(notes, RecoverError::Mount(e)));
+            return Err(PlanFailure::with_notes(notes, recover_mount_error(e)));
         }
     };
 
@@ -1325,7 +1418,7 @@ pub fn plan_recover<R: CommandRunner + Sync, F: Filesystem + ?Sized>(
         && is_replace_pool_mutation(&journal.op)
     {
         for name in &cycle_reopen_names {
-            if !union.disks.contains_key(name) {
+            if union.by_name(name).is_none() {
                 return Err(PlanFailure::with_notes(
                     notes,
                     RecoverError::Failed(format!(
@@ -1353,15 +1446,15 @@ pub fn plan_recover<R: CommandRunner + Sync, F: Filesystem + ?Sized>(
         journal::OpKind::Add {
             phase: journal::AddPhase::PoolMutation,
             targets,
-        } if !journal.pre_membership.disks.is_empty() => {
+        } if !journal.pre_membership.is_empty() => {
             let all_targets_already_live = probed_live_pool
                 .as_ref()
                 .is_some_and(|pool| add_targets_all_live(pool, targets));
-            let live_names = probed_live_pool.as_ref().map(live_member_names);
+            let live_uuids = probed_live_pool.as_ref().map(live_member_uuids);
             RecoverCompletion::AddPoolMutation {
                 targets: targets.clone(),
                 all_targets_already_live,
-                live_names,
+                live_uuids,
             }
         }
         journal::OpKind::Add {
@@ -1386,13 +1479,17 @@ pub fn plan_recover<R: CommandRunner + Sync, F: Filesystem + ?Sized>(
         },
         journal::OpKind::Replace {
             phase: journal::ReplacePhase::PoolMutation,
+            old_uuid,
             new_name,
             old_name,
+            new_uuid,
             new_target,
             source,
             restore_raid1_after_commit,
             ..
         } => RecoverCompletion::ReplacePoolMutation {
+            old_uuid: old_uuid.clone(),
+            new_uuid: new_uuid.clone(),
             old_name: old_name.clone(),
             new_name: new_name.clone(),
             new_target: new_target.clone(),
@@ -1401,11 +1498,13 @@ pub fn plan_recover<R: CommandRunner + Sync, F: Filesystem + ?Sized>(
         },
         journal::OpKind::Replace {
             phase: journal::ReplacePhase::PostReplaceMaintenance,
+            new_uuid,
             new_name,
             source,
             restore_raid1_after_commit,
             ..
         } => RecoverCompletion::ReplacePostMaintenance {
+            new_uuid: new_uuid.clone(),
             new_name: new_name.clone(),
             source: source.clone(),
             restore_raid1_after_commit: *restore_raid1_after_commit,
@@ -1459,6 +1558,22 @@ pub fn cmd_recover<R: CommandRunner + Sync, F: Filesystem + ?Sized>(
     plan.execute(runner, fs, by_id_resolver, params)
 }
 
+/// Preserve recovery context in mount-time identity failures without changing
+/// the shared mount planner's messages for normal unlock/status callers.
+fn recover_mount_error(error: MountError) -> RecoverError {
+    match error {
+        MountError::Failed(message)
+            if message.contains("LUKS UUID mismatch")
+                && !message.contains("preserving pending-op.json") =>
+        {
+            RecoverError::Failed(format!(
+                "{message}\nrecover aborted -- preserving pending-op.json"
+            ))
+        }
+        other => RecoverError::Mount(other),
+    }
+}
+
 fn is_replace_pool_mutation(op: &journal::OpKind) -> bool {
     matches!(
         op,
@@ -1489,43 +1604,40 @@ fn non_braid_mapper_skip_notes(pool: &PoolState) -> Vec<PreviewNote> {
         .collect()
 }
 
-/// Emit the shared skip note through recover's preview renderer while keeping
-/// real-run tests on the capture-aware status writer.
-fn emit_non_braid_mapper_skip_note(mapper: &crate::types::MapperName) {
-    let notes = [non_braid_mapper_skip_note(mapper)];
-    let rendered = preview::render_notes_for_stderr_with(
-        &notes,
-        RecoverPlan::STDERR_STYLE,
-        color_enabled_for_stderr(),
-    );
-    emit_status(&rendered);
-}
-
-fn live_pool_matches_membership(pool: &PoolState, membership: &PoolMembership) -> bool {
-    let live = live_member_names(pool);
-    let missing_devids: std::collections::BTreeSet<u64> =
-        pool.missing_devids.iter().copied().collect();
-    let membership_missing_devids: std::collections::BTreeSet<u64> = membership
-        .disks
-        .values()
-        .filter_map(|member| member.devid)
-        .filter(|devid| missing_devids.contains(devid))
-        .collect();
-    if membership_missing_devids != missing_devids {
-        return false;
+fn live_pool_matches_membership(
+    pool: &PoolState,
+    membership: &PoolMembership,
+) -> Result<bool, JournaledSnapshotError> {
+    let live_uuids = live_member_uuids(pool);
+    let mut missing_uuids = std::collections::BTreeSet::new();
+    for devid in pool.missing_devids.iter().copied() {
+        match membership.by_devid(devid) {
+            Ok(Some((uuid, _))) => {
+                missing_uuids.insert(uuid.clone());
+            }
+            Ok(None) => {
+                return Err(JournaledSnapshotError::NoMemberForDevid { devid });
+            }
+            Err(membership::MembershipError::DuplicateDevid { devid, members }) => {
+                return Err(JournaledSnapshotError::DuplicateDevid { devid, members });
+            }
+            Err(e) => {
+                return Err(JournaledSnapshotError::NoMemberForDevid {
+                    devid: match e {
+                        membership::MembershipError::DuplicateDevid { devid, .. } => devid,
+                        _ => devid,
+                    },
+                });
+            }
+        }
     }
 
-    let expected_live: std::collections::BTreeSet<String> = membership
-        .disks
-        .iter()
-        .filter(|(_, member)| {
-            member
-                .devid
-                .is_none_or(|devid| !missing_devids.contains(&devid))
-        })
-        .map(|(name, _)| name.clone())
-        .collect();
-    live == expected_live
+    let expected: std::collections::BTreeSet<LuksUuid> =
+        membership.iter().map(|(uuid, _)| uuid.clone()).collect();
+    let union: std::collections::BTreeSet<LuksUuid> =
+        live_uuids.union(&missing_uuids).cloned().collect();
+    let disjoint = live_uuids.is_disjoint(&missing_uuids);
+    Ok(union == expected && disjoint)
 }
 
 fn recover_membership_matching_expected(
@@ -1534,35 +1646,38 @@ fn recover_membership_matching_expected(
     prior: Option<&PoolMembership>,
     by_id_resolver: &dyn ByIdResolver,
 ) -> Result<PoolMembership, RecoverError> {
-    let mut recovered = expected.clone();
+    let mut recovered = PoolMembership::empty();
     for dev in &pool.devices {
-        let Some(name) = config::name_from_mapper(&dev.mapper.0) else {
-            emit_non_braid_mapper_skip_note(&dev.mapper);
+        if config::name_from_mapper(&dev.mapper.0).is_none() {
+            crate::status_tag::emit_status(&preview::render_per_disk_notes(
+                &[non_braid_mapper_skip_note(&dev.mapper)],
+                RecoverPlan::STDERR_STYLE,
+            ));
             continue;
-        };
-        if !expected.disks.contains_key(name) {
-            return Err(RecoverError::Failed(format!(
-                "device {} is in the live pool but is not part of the expected \
-                 committed membership.",
-                dev.mapper.0
-            )));
         }
+        let Some(expected_member) = expected.by_uuid(&dev.luks_uuid) else {
+            return Err(RecoverError::Failed(format!(
+                "device {} (LUKS UUID {}) is in the live pool but is not part of the expected \
+                 committed membership.",
+                dev.mapper.0, dev.luks_uuid
+            )));
+        };
         let by_id = resolve_by_id_for_underlying(by_id_resolver, &dev.underlying)?;
         let added_at = prior
-            .and_then(|p| p.disks.get(name))
+            .and_then(|p| p.by_uuid(&dev.luks_uuid))
             .and_then(|m| m.added_at.clone())
-            .or_else(|| expected.disks.get(name).and_then(|m| m.added_at.clone()));
-        recovered.disks.insert(
-            name.to_owned(),
+            .or_else(|| expected_member.added_at.clone())
+            .or_else(|| Some(crate::util::now_iso()));
+        recovered.insert(
+            dev.luks_uuid.clone(),
             DiskMember {
+                name: expected_member.name.clone(),
                 by_id,
-                luks_uuid: None,
-                devid: None,
+                devid: Some(dev.devid),
                 added_at,
             },
-        );
+        )?;
     }
-    membership::enrich_from_pool_state(pool, &mut recovered);
     Ok(recovered)
 }
 
@@ -1602,7 +1717,9 @@ fn write_replace_phase(
     target_membership: Option<PoolMembership>,
 ) -> Result<Journal, RecoverError> {
     let journal::OpKind::Replace {
+        old_uuid,
         old_name,
+        new_uuid,
         new_name,
         new_target,
         source,
@@ -1619,7 +1736,9 @@ fn write_replace_phase(
         journal,
         journal::OpKind::Replace {
             phase,
+            old_uuid: old_uuid.clone(),
             old_name: old_name.clone(),
+            new_uuid: new_uuid.clone(),
             new_name: new_name.clone(),
             new_target: new_target.clone(),
             source: source.clone(),
@@ -1801,10 +1920,10 @@ fn journal_op_label(op: &journal::OpKind) -> &'static str {
     }
 }
 
-fn live_member_names(pool: &PoolState) -> std::collections::BTreeSet<String> {
+fn live_member_uuids(pool: &PoolState) -> std::collections::BTreeSet<LuksUuid> {
     pool.devices
         .iter()
-        .filter_map(|dev| config::name_from_mapper(&dev.mapper.0).map(str::to_owned))
+        .map(|dev| dev.luks_uuid.clone())
         .collect()
 }
 
@@ -1813,16 +1932,16 @@ fn validate_live_members_allowed(
     allowed: &PoolMembership,
 ) -> Result<(), RecoverError> {
     for dev in &pool.devices {
-        let Some(name) = config::name_from_mapper(&dev.mapper.0) else {
+        if config::name_from_mapper(&dev.mapper.0).is_none() {
             continue;
-        };
-        if !allowed.disks.contains_key(name) {
+        }
+        if allowed.by_uuid(&dev.luks_uuid).is_none() {
             return Err(RecoverError::Failed(format!(
-                "device {} is in the live pool but has no by-id path in either \
+                "device {} (LUKS UUID {}) is in the live pool but has no by-id path in either \
                  the pre-operation or target membership snapshot.\n\
                  This must be resolved manually -- provide the correct \
                  /dev/disk/by-id/ path and re-run recovery.",
-                dev.mapper.0
+                dev.mapper.0, dev.luks_uuid
             )));
         }
     }
@@ -1831,10 +1950,10 @@ fn validate_live_members_allowed(
 
 fn add_targets_all_live(
     pool: &PoolState,
-    targets: &std::collections::BTreeMap<String, journal::AddJournalTarget>,
+    targets: &LuksUuidMap<journal::AddJournalTarget>,
 ) -> bool {
-    let live = live_member_names(pool);
-    targets.keys().all(|name| live.contains(name))
+    let live = live_member_uuids(pool);
+    targets.keys().all(|uuid| live.contains(uuid))
 }
 
 fn build_membership_from_live_pool(
@@ -1845,35 +1964,38 @@ fn build_membership_from_live_pool(
 ) -> Result<PoolMembership, RecoverError> {
     let mut recovered = PoolMembership::empty();
     for dev in &pool.devices {
-        let Some(name) = config::name_from_mapper(&dev.mapper.0) else {
-            emit_non_braid_mapper_skip_note(&dev.mapper);
+        if config::name_from_mapper(&dev.mapper.0).is_none() {
+            crate::status_tag::emit_status(&preview::render_per_disk_notes(
+                &[non_braid_mapper_skip_note(&dev.mapper)],
+                RecoverPlan::STDERR_STYLE,
+            ));
             continue;
-        };
-        if !union.disks.contains_key(name) {
+        }
+        let Some(union_member) = union.by_uuid(&dev.luks_uuid) else {
             return Err(RecoverError::Failed(format!(
-                "device {} is in the live pool but has no by-id path in either \
+                "device {} (LUKS UUID {}) is in the live pool but has no by-id path in either \
                  the pre-operation or target membership snapshot.\n\
                  This must be resolved manually -- provide the correct \
                  /dev/disk/by-id/ path and re-run recovery.",
-                dev.mapper.0
+                dev.mapper.0, dev.luks_uuid
             )));
-        }
+        };
         let by_id = resolve_by_id_for_underlying(by_id_resolver, &dev.underlying)?;
         let added_at = prior
-            .and_then(|p| p.disks.get(name))
+            .and_then(|p| p.by_uuid(&dev.luks_uuid))
             .and_then(|m| m.added_at.clone())
-            .or_else(|| union.disks.get(name).and_then(|m| m.added_at.clone()));
-        recovered.disks.insert(
-            name.to_owned(),
+            .or_else(|| union_member.added_at.clone())
+            .or_else(|| Some(crate::util::now_iso()));
+        recovered.insert(
+            dev.luks_uuid.clone(),
             DiskMember {
+                name: union_member.name.clone(),
                 by_id,
-                luks_uuid: None,
-                devid: None,
+                devid: Some(dev.devid),
                 added_at,
             },
-        );
+        )?;
     }
-    membership::enrich_from_pool_state(pool, &mut recovered);
     Ok(recovered)
 }
 
@@ -1918,12 +2040,23 @@ fn open_credential_passphrase<'a>(
     }
 }
 
+fn add_recovery_uuid_mismatch_message(
+    by_id: &ByIdPath,
+    expected_uuid: &LuksUuid,
+    observed_uuid: &LuksUuid,
+    target_state: &str,
+) -> String {
+    format!(
+        "add recovery aborted: target {by_id} LUKS UUID mismatch -- journaled {expected_uuid}, observed {observed_uuid} ({target_state}); the disk at this by-id was reformatted out-of-band between crash and recovery (see manual/guides/recovery-scenarios.md)"
+    )
+}
+
 fn discover_add_targets_before_mount<R: CommandRunner, F: Filesystem + ?Sized>(
     runner: &R,
     fs: &F,
     params: &RecoverParams<'_>,
     journal: &Journal,
-    targets: &std::collections::BTreeMap<String, journal::AddJournalTarget>,
+    targets: &LuksUuidMap<journal::AddJournalTarget>,
 ) -> Result<Option<OpenCredential>, RecoverError> {
     let mount_result = runner.run(&CmdRequest::MountpointCheck {
         path: params.config.mount_point().clone(),
@@ -1933,12 +2066,12 @@ fn discover_add_targets_before_mount<R: CommandRunner, F: Filesystem + ?Sized>(
     }
 
     let mut credential: Option<OpenCredential> = None;
-    for (name, target) in targets {
-        if journal.pre_membership.disks.contains_key(name) {
+    for (target_uuid, target) in targets {
+        if journal.pre_membership.by_uuid(target_uuid).is_some() {
             continue;
         }
 
-        let probed = probe::probe_config_disk(runner, fs, name, &target.by_id)?;
+        let probed = probe::probe_config_disk(runner, fs, target.name.as_str(), &target.by_id)?;
         let ConfigDiskState::PresentLuks {
             uuid,
             label,
@@ -1949,14 +2082,23 @@ fn discover_add_targets_before_mount<R: CommandRunner, F: Filesystem + ?Sized>(
         };
 
         match &target.mode {
-            journal::AddJournalMode::RecoverableBraidLabeled { luks_uuid, .. } => {
-                if &uuid != luks_uuid {
+            journal::AddJournalMode::RecoverableBraidLabeled { .. } => {
+                if &uuid != target_uuid {
                     continue;
                 }
             }
-            journal::AddJournalMode::FreshLuks { luks_label, .. } => {
-                if label.as_deref() != Some(luks_label.as_str()) {
+            journal::AddJournalMode::FreshLuks { .. } => {
+                let expected_label = format!("braid-{}", target.name);
+                if label.as_deref() != Some(expected_label.as_str()) {
                     continue;
+                }
+                if &uuid != target_uuid {
+                    return Err(RecoverError::Failed(add_recovery_uuid_mismatch_message(
+                        &target.by_id,
+                        target_uuid,
+                        &uuid,
+                        "fresh-luks",
+                    )));
                 }
             }
         }
@@ -1976,10 +2118,11 @@ fn discover_add_targets_before_mount<R: CommandRunner, F: Filesystem + ?Sized>(
                 credential.as_ref().expect("credential was resolved above"),
                 "add recovery pre-mount discovery",
             )?;
-            luks::ensure_luks_open(runner, name, &target.by_id, passphrase)?;
+            luks::ensure_luks_open(runner, target.name.as_str(), &target.by_id, passphrase)?;
         }
 
-        scan_mapper_if_btrfs_visible(runner, &format!("/dev/mapper/{}", target.mapper_name))?;
+        let mapper = config::mapper_name(target.name.as_str());
+        scan_mapper_if_btrfs_visible(runner, &format!("/dev/mapper/{}", mapper.0))?;
     }
 
     Ok(credential)
@@ -1989,7 +2132,7 @@ fn verify_recover_passphrase_for_add_replay<R: CommandRunner, F: Filesystem + ?S
     runner: &R,
     fs: &F,
     pool: &PoolState,
-    targets: &std::collections::BTreeMap<String, journal::AddJournalTarget>,
+    targets: &LuksUuidMap<journal::AddJournalTarget>,
     passphrase: &Passphrase,
 ) -> Result<(), RecoverError> {
     let mut verify_targets: Vec<_> = pool
@@ -2008,36 +2151,45 @@ fn verify_recover_passphrase_for_add_replay<R: CommandRunner, F: Filesystem + ?S
         ));
     }
 
-    let live = live_member_names(pool);
-    for (name, target) in targets {
-        if live.contains(name) {
+    let live = live_member_uuids(pool);
+    for (target_uuid, target) in targets {
+        if live.contains(target_uuid) {
             continue;
         }
-        let probed = probe::probe_config_disk(runner, fs, name, &target.by_id)?;
+        let probed = probe::probe_config_disk(runner, fs, target.name.as_str(), &target.by_id)?;
         let ConfigDiskState::PresentLuks { uuid, label, .. } = probed.state else {
             continue;
         };
         match &target.mode {
-            journal::AddJournalMode::RecoverableBraidLabeled { luks_uuid, .. } => {
-                if &uuid != luks_uuid {
+            journal::AddJournalMode::RecoverableBraidLabeled { .. } => {
+                if &uuid != target_uuid {
                     return Err(RecoverError::Failed(format!(
                         "recover add target '{}' LUKS UUID mismatch: expected {}, found {}",
-                        name, luks_uuid, uuid
+                        target.name, target_uuid, uuid
                     )));
                 }
             }
-            journal::AddJournalMode::FreshLuks { luks_label, .. } => {
-                if label.as_deref() != Some(luks_label.as_str()) {
+            journal::AddJournalMode::FreshLuks { .. } => {
+                let expected_label = format!("braid-{}", target.name);
+                if label.as_deref() != Some(expected_label.as_str()) {
                     return Err(RecoverError::Failed(format!(
                         "recover add target '{}' has unexpected LUKS label",
-                        name
+                        target.name
+                    )));
+                }
+                if &uuid != target_uuid {
+                    return Err(RecoverError::Failed(add_recovery_uuid_mismatch_message(
+                        &target.by_id,
+                        target_uuid,
+                        &uuid,
+                        "fresh-luks",
                     )));
                 }
             }
         }
         verify_targets.push(CredentialVerifyTarget {
-            name: name.clone(),
-            device: target.by_id.0.clone(),
+            name: target.name.as_str().to_owned(),
+            device: target.by_id.as_str().to_owned(),
         });
     }
 
@@ -2132,13 +2284,22 @@ fn execute_add_post_balance_recovery<R: CommandRunner + Sync>(
     pool: PoolState,
     inhibitor_already_held: bool,
 ) -> Result<(), RecoverError> {
-    let live = live_member_names(&pool);
-    let target: std::collections::BTreeSet<_> =
-        journal.target_membership.disks.keys().cloned().collect();
+    let live = live_member_uuids(&pool);
+    let target: std::collections::BTreeSet<_> = journal
+        .target_membership
+        .iter()
+        .map(|(uuid, _)| uuid.clone())
+        .collect();
     if live != target {
+        let live_devices = pool
+            .devices
+            .iter()
+            .map(|dev| format!("{} ({})", dev.mapper.0, dev.luks_uuid))
+            .collect::<Vec<_>>()
+            .join(", ");
         return Err(RecoverError::Failed(format!(
-            "post-add recovery expected live pool membership {:?}, found {:?}",
-            target, live
+            "post-add recovery expected live pool membership {:?}, found {:?}; live devices: {}",
+            target, live, live_devices
         )));
     }
 
@@ -2179,7 +2340,7 @@ struct AddPoolReplayCtx<'a> {
     credential: Option<&'a OpenCredential>,
     journal: &'a Journal,
     union: &'a PoolMembership,
-    targets: &'a std::collections::BTreeMap<String, journal::AddJournalTarget>,
+    targets: &'a LuksUuidMap<journal::AddJournalTarget>,
     pool: PoolState,
 }
 
@@ -2203,11 +2364,11 @@ fn execute_add_pool_mutation_recovery<R: CommandRunner + Sync, F: Filesystem + ?
     if !add_targets_all_live(&pool, targets) {
         let mut opened_or_scanned = false;
         let mut passphrase: Option<RecoverPassphrase<'_>> = None;
-        for (name, target) in targets {
-            if live_member_names(&pool).contains(name) {
+        for (target_uuid, target) in targets {
+            if live_member_uuids(&pool).contains(target_uuid) {
                 continue;
             }
-            let probed = probe::probe_config_disk(runner, fs, name, &target.by_id)?;
+            let probed = probe::probe_config_disk(runner, fs, target.name.as_str(), &target.by_id)?;
             let ConfigDiskState::PresentLuks {
                 uuid,
                 label,
@@ -2218,14 +2379,25 @@ fn execute_add_pool_mutation_recovery<R: CommandRunner + Sync, F: Filesystem + ?
             };
 
             match &target.mode {
-                journal::AddJournalMode::RecoverableBraidLabeled { luks_uuid, .. } => {
-                    if &uuid != luks_uuid {
+                journal::AddJournalMode::RecoverableBraidLabeled { .. } if &uuid != target_uuid => {
+                    return Err(RecoverError::Failed(format!(
+                        "recover add target '{}' LUKS UUID mismatch: expected {}, found {}",
+                        target.name, target_uuid, uuid
+                    )));
+                }
+                journal::AddJournalMode::RecoverableBraidLabeled { .. } => {}
+                journal::AddJournalMode::FreshLuks { .. } => {
+                    let expected_label = format!("braid-{}", target.name);
+                    if label.as_deref() != Some(expected_label.as_str()) {
                         continue;
                     }
-                }
-                journal::AddJournalMode::FreshLuks { luks_label, .. } => {
-                    if label.as_deref() != Some(luks_label.as_str()) {
-                        continue;
+                    if &uuid != target_uuid {
+                        return Err(RecoverError::Failed(add_recovery_uuid_mismatch_message(
+                            &target.by_id,
+                            target_uuid,
+                            &uuid,
+                            "fresh-luks",
+                        )));
                     }
                 }
             }
@@ -2238,10 +2410,10 @@ fn execute_add_pool_mutation_recovery<R: CommandRunner + Sync, F: Filesystem + ?
                     .as_ref()
                     .map(|p| p.expose_secret())
                     .expect("passphrase was resolved above");
-                luks::ensure_luks_open(runner, name, &target.by_id, passphrase)?;
+                luks::ensure_luks_open(runner, target.name.as_str(), &target.by_id, passphrase)?;
             }
-            if scan_mapper_if_btrfs_visible(runner, &format!("/dev/mapper/{}", target.mapper_name))?
-            {
+            let mapper = config::mapper_name(target.name.as_str());
+            if scan_mapper_if_btrfs_visible(runner, &format!("/dev/mapper/{}", mapper.0))? {
                 opened_or_scanned = true;
             }
         }
@@ -2266,37 +2438,38 @@ fn execute_add_pool_mutation_recovery<R: CommandRunner + Sync, F: Filesystem + ?
             .acquire("replaying interrupted add")
             .map_err(|e| RecoverError::Failed(format!("could not acquire sleep inhibitor: {e}")))?;
 
-        for (name, target) in targets {
-            if live_member_names(&pool).contains(name) {
+        for (target_uuid, target) in targets {
+            if live_member_uuids(&pool).contains(target_uuid) {
                 continue;
             }
-            let mapper_path = format!("/dev/mapper/{}", target.mapper_name);
+            let mapper = config::mapper_name(target.name.as_str());
+            let mapper_path = format!("/dev/mapper/{}", mapper.0);
             match &target.mode {
                 journal::AddJournalMode::RecoverableBraidLabeled {
                     verified_pool_fsid,
-                    luks_uuid,
                     enroll_key_file,
                 } => {
-                    let probed = probe::probe_config_disk(runner, fs, name, &target.by_id)?;
+                    let probed =
+                        probe::probe_config_disk(runner, fs, target.name.as_str(), &target.by_id)?;
                     let ConfigDiskState::PresentLuks {
                         uuid, mapper_open, ..
                     } = probed.state
                     else {
                         return Err(RecoverError::Failed(format!(
                             "recover add target '{}' is not a LUKS device",
-                            name
+                            target.name
                         )));
                     };
-                    if &uuid != luks_uuid {
+                    if &uuid != target_uuid {
                         return Err(RecoverError::Failed(format!(
                             "recover add target '{}' LUKS UUID mismatch: expected {}, found {}",
-                            name, luks_uuid, uuid
+                            target.name, target_uuid, uuid
                         )));
                     }
                     if !mapper_open {
                         luks::ensure_luks_open(
                             runner,
-                            name,
+                            target.name.as_str(),
                             &target.by_id,
                             passphrase.expose_secret(),
                         )?;
@@ -2306,7 +2479,7 @@ fn execute_add_pool_mutation_recovery<R: CommandRunner + Sync, F: Filesystem + ?
                     {
                         return Err(RecoverError::Failed(format!(
                             "recover add target '{}' btrfs FSID mismatch: expected {}, found {}",
-                            name, verified_pool_fsid, fsid
+                            target.name, verified_pool_fsid, fsid
                         )));
                     }
                     // Crashed mid-add: if the journaled plan called for keyfile
@@ -2318,14 +2491,14 @@ fn execute_add_pool_mutation_recovery<R: CommandRunner + Sync, F: Filesystem + ?
                     if let Some(key_file) = enroll_key_file {
                         ensure_keyfile_enrolled(
                             runner,
-                            &target.by_id.0,
+                            target.by_id.as_str(),
                             passphrase.expose_secret(),
                             key_file,
                         )?;
                         luks::backup_luks_header(
                             runner,
-                            &target.by_id.0,
-                            &target.mapper_name,
+                            target.by_id.as_str(),
+                            &mapper.0,
                             params.paths,
                         )?;
                     }
@@ -2333,32 +2506,45 @@ fn execute_add_pool_mutation_recovery<R: CommandRunner + Sync, F: Filesystem + ?
                         .map_err(|e| RecoverError::Failed(format!("recover add replay: {e}")))?;
                 }
                 journal::AddJournalMode::FreshLuks {
-                    luks_label,
-                    luks_format_extra_opts,
+                    extra_opts,
                     enroll_key_file,
                 } => {
-                    let probed = probe::probe_config_disk(runner, fs, name, &target.by_id)?;
+                    let probed =
+                        probe::probe_config_disk(runner, fs, target.name.as_str(), &target.by_id)?;
+                    let expected_label = format!("braid-{}", target.name);
                     match probed.state {
                         ConfigDiskState::PresentNotLuks => {
                             luks::luks_format(
                                 runner,
-                                &target.by_id.0,
+                                target.by_id.as_str(),
                                 passphrase.expose_secret(),
-                                luks_format_extra_opts,
+                                target_uuid,
+                                &expected_label,
+                                extra_opts,
                             )?;
                         }
-                        ConfigDiskState::PresentLuks { label, .. } => {
-                            if label.as_deref() != Some(luks_label.as_str()) {
+                        ConfigDiskState::PresentLuks { uuid, label, .. } => {
+                            if label.as_deref() != Some(expected_label.as_str()) {
                                 return Err(RecoverError::Failed(format!(
                                     "recover add target '{}' has unexpected LUKS label",
-                                    name
+                                    target.name
                                 )));
+                            }
+                            if &uuid != target_uuid {
+                                return Err(RecoverError::Failed(
+                                    add_recovery_uuid_mismatch_message(
+                                        &target.by_id,
+                                        target_uuid,
+                                        &uuid,
+                                        "fresh-luks",
+                                    ),
+                                ));
                             }
                         }
                         ConfigDiskState::Absent => {
                             return Err(RecoverError::Failed(format!(
                                 "recover add target '{}' ({}) is not present",
-                                name, target.by_id
+                                target.name, target.by_id
                             )));
                         }
                     }
@@ -2366,20 +2552,20 @@ fn execute_add_pool_mutation_recovery<R: CommandRunner + Sync, F: Filesystem + ?
                     if let Some(key_file) = enroll_key_file {
                         ensure_keyfile_enrolled(
                             runner,
-                            &target.by_id.0,
+                            target.by_id.as_str(),
                             passphrase.expose_secret(),
                             key_file,
                         )?;
                     }
                     luks::backup_luks_header(
                         runner,
-                        &target.by_id.0,
-                        &target.mapper_name,
+                        target.by_id.as_str(),
+                        &mapper.0,
                         params.paths,
                     )?;
                     luks::ensure_luks_open(
                         runner,
-                        name,
+                        target.name.as_str(),
                         &target.by_id,
                         passphrase.expose_secret(),
                     )?;
@@ -2391,7 +2577,7 @@ fn execute_add_pool_mutation_recovery<R: CommandRunner + Sync, F: Filesystem + ?
             let devid = devid_for_mapper_path(&pool, &mapper_path).ok_or_else(|| {
                 RecoverError::AckCleanupFailed {
                     stage: "live-pool add recovery",
-                    detail: format!("{name}: not found in pool after replayed add"),
+                    detail: format!("{}: not found in pool after replayed add", target.name),
                 }
             })?;
             alert::drop_ghost_acked_for_devids(params.paths, &[devid]).map_err(|e| {
@@ -2452,15 +2638,16 @@ fn execute_add_pool_mutation_recovery<R: CommandRunner + Sync, F: Filesystem + ?
 fn sweep_recovered_add_acked_stats(
     paths: &StatePaths,
     pool: &PoolState,
-    targets: &std::collections::BTreeMap<String, journal::AddJournalTarget>,
+    targets: &LuksUuidMap<journal::AddJournalTarget>,
 ) -> Result<(), RecoverError> {
     let mut sweep_devids: Vec<u64> = Vec::with_capacity(targets.len());
-    for (name, target) in targets {
-        let mapper_path = format!("/dev/mapper/{}", target.mapper_name);
+    for (_, target) in targets {
+        let mapper = config::mapper_name(target.name.as_str());
+        let mapper_path = format!("/dev/mapper/{}", mapper.0);
         let devid = devid_for_mapper_path(pool, &mapper_path).ok_or_else(|| {
             RecoverError::AckCleanupFailed {
                 stage: "live-pool add recovery (target sweep)",
-                detail: format!("{name}: not found in live pool"),
+                detail: format!("{}: not found in live pool", target.name),
             }
         })?;
         sweep_devids.push(devid);
@@ -2484,11 +2671,20 @@ fn execute_remove_missing_pool_mutation_recovery<R: CommandRunner + Sync>(
     restore_raid1_after_commit: bool,
 ) -> Result<(), RecoverError> {
     if pool.missing_devids.contains(&devid) {
-        if !live_pool_matches_membership(&pool, &journal.pre_membership) {
-            return Err(RecoverError::Failed(format!(
-                "remove-missing recovery found devid {devid} still missing, but live pool \
+        match live_pool_matches_membership(&pool, &journal.pre_membership) {
+            Ok(true) => {}
+            Ok(false) => {
+                return Err(RecoverError::Failed(format!(
+                    "remove-missing recovery found devid {devid} still missing, but live pool \
                  topology does not match the pre-operation membership"
-            )));
+                )));
+            }
+            Err(JournaledSnapshotError::DuplicateDevid { devid, members }) => {
+                return Err(RecoverError::DuplicateDevidDuringReplay { devid, members });
+            }
+            Err(JournaledSnapshotError::NoMemberForDevid { devid }) => {
+                return Err(RecoverError::NoMemberForJournaledDevid { devid });
+            }
         }
         membership::save_membership(&journal.pre_membership, params.paths)?;
         journal::clear_journal(params.paths).map_err(|e| RecoverError::Journal(e.to_string()))?;
@@ -2499,11 +2695,20 @@ fn execute_remove_missing_pool_mutation_recovery<R: CommandRunner + Sync>(
         return Ok(());
     }
 
-    if !live_pool_matches_membership(&pool, &journal.target_membership) {
-        return Err(RecoverError::Failed(format!(
-            "remove-missing recovery found devid {devid} gone, but live pool topology \
+    match live_pool_matches_membership(&pool, &journal.target_membership) {
+        Ok(true) => {}
+        Ok(false) => {
+            return Err(RecoverError::Failed(format!(
+                "remove-missing recovery found devid {devid} gone, but live pool topology \
              does not match the target membership"
-        )));
+            )));
+        }
+        Err(JournaledSnapshotError::DuplicateDevid { devid, members }) => {
+            return Err(RecoverError::DuplicateDevidDuringReplay { devid, members });
+        }
+        Err(JournaledSnapshotError::NoMemberForDevid { devid }) => {
+            return Err(RecoverError::NoMemberForJournaledDevid { devid });
+        }
     }
 
     let recovered = recover_membership_matching_expected(
@@ -2562,10 +2767,19 @@ fn execute_remove_missing_post_maintenance_recovery<R: CommandRunner + Sync>(
              but btrfs still reports it missing"
         )));
     }
-    if !live_pool_matches_membership(&pool, &journal.target_membership) {
-        return Err(RecoverError::Failed(
-            "post-remove-missing recovery live pool does not match target membership".into(),
-        ));
+    match live_pool_matches_membership(&pool, &journal.target_membership) {
+        Ok(true) => {}
+        Ok(false) => {
+            return Err(RecoverError::Failed(
+                "post-remove-missing recovery live pool does not match target membership".into(),
+            ));
+        }
+        Err(JournaledSnapshotError::DuplicateDevid { devid, members }) => {
+            return Err(RecoverError::DuplicateDevidDuringReplay { devid, members });
+        }
+        Err(JournaledSnapshotError::NoMemberForDevid { devid }) => {
+            return Err(RecoverError::NoMemberForJournaledDevid { devid });
+        }
     }
 
     let prior = membership::load_membership(params.paths).ok();
@@ -2627,7 +2841,7 @@ fn recover_passphrase_for_context<'a>(
 fn verify_replace_fresh_prep_passphrase<R: CommandRunner>(
     runner: &R,
     pool: &PoolState,
-    new_name: &str,
+    new_name: &DiskName,
     new_by_id: &ByIdPath,
     passphrase: &Passphrase,
 ) -> Result<(), RecoverError> {
@@ -2642,8 +2856,8 @@ fn verify_replace_fresh_prep_passphrase<R: CommandRunner>(
         })
         .collect();
     targets.push(CredentialVerifyTarget {
-        name: new_name.to_owned(),
-        device: new_by_id.0.clone(),
+        name: new_name.as_str().to_owned(),
+        device: new_by_id.as_str().to_owned(),
     });
     verify_credential_for_targets(
         runner,
@@ -2676,7 +2890,8 @@ struct ReplaceFinishCtx<'a> {
     credential: Option<&'a OpenCredential>,
     journal: &'a Journal,
     pool: &'a PoolState,
-    new_name: &'a str,
+    new_uuid: &'a LuksUuid,
+    new_name: &'a DiskName,
     new_target: &'a journal::ReplaceJournalTarget,
 }
 
@@ -2690,27 +2905,26 @@ fn finish_uncommitted_replace_recovery<R: CommandRunner + Sync, F: Filesystem + 
         credential,
         journal,
         pool,
+        new_uuid,
         new_name,
         new_target,
     } = ctx;
     match &new_target.mode {
-        journal::ReplaceJournalMode::ExistingLuks {
-            luks_uuid,
-            enroll_key_file,
-        } => {
+        journal::ReplaceJournalMode::ExistingLuks { enroll_key_file } => {
             // Identity probe before any mutation. Wrong disk replugged
             // or header zeroed -> preserve the journal; matches the
             // FreshLuks `luks_label` guard at finish-time. We use LUKS
             // UUID (not a braid label) because ExistingLuks targets
             // carry no braid label by definition.
-            let probed = probe::probe_config_disk(runner, fs, new_name, &new_target.by_id)?;
+            let probed =
+                probe::probe_config_disk(runner, fs, new_name.as_str(), &new_target.by_id)?;
             match &probed.state {
-                ConfigDiskState::PresentLuks { uuid, .. } if uuid == luks_uuid => {}
+                ConfigDiskState::PresentLuks { uuid, .. } if uuid == new_uuid => {}
                 ConfigDiskState::PresentLuks { uuid, .. } => {
                     return Err(RecoverError::Failed(format!(
                         "recover replace target '{}' LUKS UUID mismatch: \
                          expected {}, found {} -- preserving pending-op.json",
-                        new_name, luks_uuid, uuid,
+                        new_name, new_uuid, uuid,
                     )));
                 }
                 ConfigDiskState::PresentNotLuks => {
@@ -2752,14 +2966,15 @@ fn finish_uncommitted_replace_recovery<R: CommandRunner + Sync, F: Filesystem + 
                     })?;
                 ensure_keyfile_enrolled(
                     runner,
-                    &new_target.by_id.0,
+                    new_target.by_id.as_str(),
                     passphrase.expose_secret(),
                     key_file,
                 )?;
+                let mapper = config::mapper_name(new_name.as_str());
                 luks::backup_luks_header(
                     runner,
-                    &new_target.by_id.0,
-                    &new_target.mapper_name,
+                    new_target.by_id.as_str(),
+                    &mapper.0,
                     params.paths,
                 )?;
             }
@@ -2769,22 +2984,28 @@ fn finish_uncommitted_replace_recovery<R: CommandRunner + Sync, F: Filesystem + 
                 .map_err(|e| RecoverError::Journal(e.to_string()))?;
         }
         journal::ReplaceJournalMode::FreshLuks {
-            luks_label,
-            enroll_key_file,
-            ..
+            enroll_key_file, ..
         } => {
-            let probed = probe::probe_config_disk(runner, fs, new_name, &new_target.by_id)?;
+            let probed =
+                probe::probe_config_disk(runner, fs, new_name.as_str(), &new_target.by_id)?;
+            let expected_label = format!("braid-{new_name}");
             match probed.state {
                 ConfigDiskState::PresentNotLuks => {
                     membership::save_membership(&journal.pre_membership, params.paths)?;
                     journal::clear_journal(params.paths)
                         .map_err(|e| RecoverError::Journal(e.to_string()))?;
                 }
-                ConfigDiskState::PresentLuks { label, .. } => {
-                    if label.as_deref() != Some(luks_label.as_str()) {
+                ConfigDiskState::PresentLuks { uuid, label, .. } => {
+                    if label.as_deref() != Some(expected_label.as_str()) {
                         return Err(RecoverError::Failed(format!(
                             "recover replace target '{}' has unexpected LUKS label",
                             new_name
+                        )));
+                    }
+                    if &uuid != new_uuid {
+                        return Err(RecoverError::Failed(format!(
+                            "recover replace target '{}' LUKS UUID mismatch: expected {}, found {}",
+                            new_target.by_id, new_uuid, uuid
                         )));
                     }
 
@@ -2806,15 +3027,16 @@ fn finish_uncommitted_replace_recovery<R: CommandRunner + Sync, F: Filesystem + 
                     if let Some(key_file) = enroll_key_file {
                         ensure_keyfile_enrolled(
                             runner,
-                            &new_target.by_id.0,
+                            new_target.by_id.as_str(),
                             passphrase.expose_secret(),
                             key_file,
                         )?;
                     }
+                    let mapper = config::mapper_name(new_name.as_str());
                     luks::backup_luks_header(
                         runner,
-                        &new_target.by_id.0,
-                        &new_target.mapper_name,
+                        new_target.by_id.as_str(),
+                        &mapper.0,
                         params.paths,
                     )?;
                     membership::save_membership(&journal.pre_membership, params.paths)?;
@@ -2848,25 +3070,43 @@ fn execute_replace_pool_mutation_recovery<R: CommandRunner + Sync, F: Filesystem
     journal: &Journal,
     union: &PoolMembership,
     pool: PoolState,
-    old_name: &str,
-    new_name: &str,
+    old_uuid: &LuksUuid,
+    new_uuid: &LuksUuid,
+    _old_name: &DiskName,
+    new_name: &DiskName,
     new_target: &journal::ReplaceJournalTarget,
     source: &journal::ReplaceJournalSource,
     restore_raid1_after_commit: bool,
 ) -> Result<(), RecoverError> {
     validate_live_members_allowed(&pool, union)?;
-    let live = live_member_names(&pool);
-    let committed = live.contains(new_name) && !live.contains(old_name);
-    let pre_topology =
-        live_pool_matches_membership(&pool, &journal.pre_membership) && !live.contains(new_name);
+    let live = live_member_uuids(&pool);
+    let committed = live.contains(new_uuid) && !live.contains(old_uuid);
+    let pre_topology = match live_pool_matches_membership(&pool, &journal.pre_membership) {
+        Ok(matches) => matches && !live.contains(new_uuid),
+        Err(JournaledSnapshotError::DuplicateDevid { devid, members }) => {
+            return Err(RecoverError::DuplicateDevidDuringReplay { devid, members });
+        }
+        Err(JournaledSnapshotError::NoMemberForDevid { devid }) => {
+            return Err(RecoverError::NoMemberForJournaledDevid { devid });
+        }
+    };
 
     if committed {
-        if !live_pool_matches_membership(&pool, &journal.target_membership) {
-            return Err(RecoverError::Failed(
-                "replace recovery found the new disk live, but live pool topology \
+        match live_pool_matches_membership(&pool, &journal.target_membership) {
+            Ok(true) => {}
+            Ok(false) => {
+                return Err(RecoverError::Failed(
+                    "replace recovery found the new disk live, but live pool topology \
                  does not match the target membership"
-                    .into(),
-            ));
+                        .into(),
+                ));
+            }
+            Err(JournaledSnapshotError::DuplicateDevid { devid, members }) => {
+                return Err(RecoverError::DuplicateDevidDuringReplay { devid, members });
+            }
+            Err(JournaledSnapshotError::NoMemberForDevid { devid }) => {
+                return Err(RecoverError::NoMemberForJournaledDevid { devid });
+            }
         }
         let recovered = recover_membership_matching_expected(
             &pool,
@@ -2887,6 +3127,7 @@ fn execute_replace_pool_mutation_recovery<R: CommandRunner + Sync, F: Filesystem
             params,
             &journal,
             pool,
+            new_uuid,
             new_name,
             source,
             fs,
@@ -2904,6 +3145,7 @@ fn execute_replace_pool_mutation_recovery<R: CommandRunner + Sync, F: Filesystem
                 credential,
                 journal,
                 pool: &pool,
+                new_uuid,
                 new_name,
                 new_target,
             },
@@ -2945,7 +3187,8 @@ fn execute_replace_post_maintenance_recovery<R, S, F>(
     params: &RecoverParams<'_>,
     journal: &Journal,
     pool: PoolState,
-    new_name: &str,
+    new_uuid: &LuksUuid,
+    new_name: &DiskName,
     source: &journal::ReplaceJournalSource,
     fs: &F,
     restore_raid1_after_commit: bool,
@@ -2956,10 +3199,19 @@ where
     S: Sleeper + ?Sized,
     F: Filesystem + ?Sized,
 {
-    if !live_pool_matches_membership(&pool, &journal.target_membership) {
-        return Err(RecoverError::Failed(
-            "post-replace recovery live pool does not match target membership".into(),
-        ));
+    match live_pool_matches_membership(&pool, &journal.target_membership) {
+        Ok(true) => {}
+        Ok(false) => {
+            return Err(RecoverError::Failed(
+                "post-replace recovery live pool does not match target membership".into(),
+            ));
+        }
+        Err(JournaledSnapshotError::DuplicateDevid { devid, members }) => {
+            return Err(RecoverError::DuplicateDevidDuringReplay { devid, members });
+        }
+        Err(JournaledSnapshotError::NoMemberForDevid { devid }) => {
+            return Err(RecoverError::NoMemberForJournaledDevid { devid });
+        }
     }
     let prior = membership::load_membership(params.paths).ok();
     let recovered = recover_membership_matching_expected(
@@ -2988,8 +3240,7 @@ where
         close_old_mapper_best_effort(runner, sleeper, fs, old_mapper);
     }
 
-    let new_mn = config::mapper_name(new_name);
-    let Some(dev) = pool.devices.iter().find(|d| d.mapper == new_mn) else {
+    let Some(dev) = pool.devices.iter().find(|d| &d.luks_uuid == new_uuid) else {
         return Err(RecoverError::Failed(format!(
             "post-replace recovery could not find new disk '{}' in the live pool",
             new_name
@@ -3145,7 +3396,7 @@ fn relock_and_remount<R: CommandRunner, F: Filesystem + ?Sized>(
     membership: &PoolMembership,
     allow_degraded: bool,
     credential: &OpenCredential,
-    close_names: &[String],
+    close_names: &[DiskName],
 ) -> Result<(), RecoverError> {
     let color_enabled = color_enabled_for_stderr();
     let mount_point = config.mount_point();
@@ -3192,7 +3443,7 @@ fn relock_and_remount<R: CommandRunner, F: Filesystem + ?Sized>(
     //    needs to cover the mappers this cycle will close.
     let forget_devs: Vec<String> = close_names
         .iter()
-        .map(|name| format!("/dev/mapper/{}", config::mapper_name(name).0))
+        .map(|name| format!("/dev/mapper/{}", config::mapper_name(name.as_str()).0))
         .filter(|p| fs.exists(p))
         .collect();
     if !forget_devs.is_empty() {
@@ -3216,7 +3467,7 @@ fn relock_and_remount<R: CommandRunner, F: Filesystem + ?Sized>(
     //    (not just unmounted) for the next mount to bypass the kernel's
     //    stale fs_devices cache.
     for name in close_names {
-        let mn = config::mapper_name(name);
+        let mn = config::mapper_name(name.as_str());
         let mapper_path = format!("/dev/mapper/{}", mn.0);
         if !fs.exists(&mapper_path) {
             continue;
@@ -3297,17 +3548,19 @@ fn relock_and_remount<R: CommandRunner, F: Filesystem + ?Sized>(
 /// Compare recovered membership against pre/target to produce a one-sentence guidance message.
 fn recovery_guidance(
     op: &journal::OpKind,
-    pre_names: &std::collections::BTreeSet<&String>,
-    target_names: &std::collections::BTreeSet<&String>,
-    recovered_names: &std::collections::BTreeSet<&String>,
+    pre_names: &std::collections::BTreeSet<String>,
+    target_names: &std::collections::BTreeSet<String>,
+    recovered_names: &std::collections::BTreeSet<String>,
 ) -> String {
     if recovered_names == target_names {
         match op {
             journal::OpKind::Add { targets, .. } => {
-                let names: Vec<_> = targets.keys().map(|n| format!("'{n}'")).collect();
+                let mut names: Vec<_> = targets.iter().map(|(_, t)| &t.name).collect();
+                names.sort();
+                let names: Vec<_> = names.into_iter().map(|n| format!("'{n}'")).collect();
                 format!("add completed -- {} now in the pool.", names.join(", "))
             }
-            journal::OpKind::Remove { name } => {
+            journal::OpKind::Remove { name, .. } => {
                 format!("remove completed -- '{name}' is no longer in the pool.")
             }
             journal::OpKind::RemoveMissing { .. } => {
@@ -3322,13 +3575,15 @@ fn recovery_guidance(
     } else if recovered_names == pre_names {
         match op {
             journal::OpKind::Add { targets, .. } => {
-                let names: Vec<_> = targets.keys().map(|n| format!("'{n}'")).collect();
+                let mut names: Vec<_> = targets.iter().map(|(_, t)| &t.name).collect();
+                names.sort();
+                let names: Vec<_> = names.into_iter().map(|n| format!("'{n}'")).collect();
                 format!(
                     "add did not complete -- {} not in the pool. Re-run braid add to retry.",
                     names.join(", ")
                 )
             }
-            journal::OpKind::Remove { name } => {
+            journal::OpKind::Remove { name, .. } => {
                 format!(
                     "remove did not complete -- '{name}' is still in the pool. \
                      Re-run braid remove to retry."
@@ -3356,11 +3611,12 @@ fn recovery_guidance(
 /// Merge pre_membership and target_membership into a single set of all known devices.
 fn union_memberships(journal: &Journal) -> PoolMembership {
     let mut union = journal.pre_membership.clone();
-    for (name, member) in &journal.target_membership.disks {
-        union
-            .disks
-            .entry(name.clone())
-            .or_insert_with(|| member.clone());
+    for (uuid, member) in journal.target_membership.iter() {
+        if union.by_uuid(uuid).is_none() {
+            union
+                .insert(uuid.clone(), member.clone())
+                .expect("journal snapshots should not violate membership uniqueness");
+        }
     }
     union
 }
@@ -3373,7 +3629,7 @@ fn mount_membership_for_recover<'a>(
         journal::OpKind::Add {
             phase: journal::AddPhase::PoolMutation,
             ..
-        } if !journal.pre_membership.disks.is_empty() => &journal.pre_membership,
+        } if !journal.pre_membership.is_empty() => &journal.pre_membership,
         journal::OpKind::Add {
             phase: journal::AddPhase::PostAddBalanceRaid1,
             ..
@@ -3412,7 +3668,8 @@ mod tests {
     use crate::probe::Filesystem;
     use crate::test_fixtures::{PoolFixture, RemountHarness, TEST_PASSPHRASE_BYTES};
     use crate::types::{
-        ByIdPath, LuksUuid, MapperName, MountPoint, NullUnderlyingDevice, PoolDevice,
+        ByIdPath, DiskName, LuksFormatExtraOpts, LuksUuid, MapperName, MountPoint,
+        NullUnderlyingDevice, PoolDevice,
     };
     use std::collections::{BTreeMap, VecDeque};
     use std::sync::atomic::{AtomicU32, Ordering};
@@ -4266,31 +4523,137 @@ mod tests {
     const JOURNAL_ADDED_AT: &str = "2023-08-30T10:00:00Z";
     const LEGACY_JOURNAL_ADDED_AT: &str = "2023-01-01T00:00:00Z";
 
-    fn disk_member(by_id: &str, added_at: Option<&str>) -> DiskMember {
+    fn disk_name(name: &str) -> DiskName {
+        DiskName::parse(name).expect("valid fixture disk name")
+    }
+
+    fn by_id_path(path: &str) -> ByIdPath {
+        ByIdPath::parse(path).expect("valid fixture by-id path")
+    }
+
+    fn uuid_raw(raw: &str) -> LuksUuid {
+        LuksUuid::parse(raw).expect("valid fixture UUID")
+    }
+
+    fn uuid_for_name(name: &str) -> LuksUuid {
+        match name {
+            "disk1" | "toshiba" => uuid_raw("11111111-1111-1111-1111-111111111111"),
+            "disk2" | "old" => uuid_raw("22222222-2222-2222-2222-222222222222"),
+            "disk3" => uuid_raw("33333333-3333-3333-3333-333333333333"),
+            "new" => uuid_raw("33333333-3333-3333-3333-333333333333"),
+            "luks-foreign" => uuid_raw("99999999-9999-9999-9999-999999999999"),
+            other => {
+                let seed = other
+                    .bytes()
+                    .fold(0u64, |acc, b| acc.wrapping_mul(131).wrapping_add(b as u64));
+                let seed = (seed & 0xffff_ffff_ffff).max(1);
+                LuksUuid::parse(&format!("00000000-0000-0000-0000-{seed:012x}"))
+                    .expect("derived fixture UUID")
+            }
+        }
+    }
+
+    fn disk_member_named(
+        name: &str,
+        by_id: &str,
+        added_at: Option<&str>,
+        devid: Option<u64>,
+    ) -> DiskMember {
         DiskMember {
-            by_id: ByIdPath(by_id.to_owned()),
-            luks_uuid: None,
-            devid: None,
+            name: disk_name(name),
+            by_id: by_id_path(by_id),
+            devid,
             added_at: added_at.map(str::to_owned),
         }
     }
 
-    fn disk_member_with_devid(by_id: &str, devid: u64) -> DiskMember {
-        DiskMember {
-            by_id: ByIdPath(by_id.to_owned()),
-            luks_uuid: None,
-            devid: Some(devid),
-            added_at: None,
+    fn membership_from(entries: Vec<(LuksUuid, DiskMember)>) -> PoolMembership {
+        let mut membership = PoolMembership::empty();
+        for (uuid, member) in entries {
+            membership
+                .insert(uuid, member)
+                .expect("insert fixture member");
+        }
+        membership
+    }
+
+    fn membership_entry(
+        name: &str,
+        by_id: &str,
+        added_at: Option<&str>,
+        devid: Option<u64>,
+    ) -> (LuksUuid, DiskMember) {
+        (
+            uuid_for_name(name),
+            disk_member_named(name, by_id, added_at, devid),
+        )
+    }
+
+    fn membership_name_list(membership: &PoolMembership) -> Vec<String> {
+        let mut names: Vec<String> = membership
+            .names()
+            .map(|name| name.as_str().to_owned())
+            .collect();
+        names.sort();
+        names
+    }
+
+    fn add_target(
+        name: &str,
+        by_id: &str,
+        mode: journal::AddJournalMode,
+    ) -> journal::AddJournalTarget {
+        journal::AddJournalTarget {
+            name: disk_name(name),
+            by_id: by_id_path(by_id),
+            mode,
         }
     }
 
+    fn add_targets(
+        entries: Vec<(LuksUuid, journal::AddJournalTarget)>,
+    ) -> crate::membership::LuksUuidMap<journal::AddJournalTarget> {
+        let mut targets = crate::membership::LuksUuidMap::new();
+        for (uuid, target) in entries {
+            targets.insert(uuid, target).expect("insert add target");
+        }
+        targets
+    }
+
+    fn fresh_mode(
+        extras: Vec<String>,
+        enroll_key_file: Option<std::path::PathBuf>,
+    ) -> journal::AddJournalMode {
+        let extras = strip_legacy_managed_format_opts(extras);
+        journal::AddJournalMode::FreshLuks {
+            extra_opts: LuksFormatExtraOpts::parse(&extras).expect("valid fixture extra opts"),
+            enroll_key_file,
+        }
+    }
+
+    fn strip_legacy_managed_format_opts(extras: Vec<String>) -> Vec<String> {
+        let mut out = Vec::new();
+        let mut iter = extras.into_iter();
+        while let Some(token) = iter.next() {
+            if token == "--label" || token == "--uuid" {
+                let _ = iter.next();
+                continue;
+            }
+            if token.starts_with("--label=") || token.starts_with("--uuid=") {
+                continue;
+            }
+            out.push(token);
+        }
+        out
+    }
+
     fn one_disk_membership() -> PoolMembership {
-        let mut disks = BTreeMap::new();
-        disks.insert(
-            "disk1".to_owned(),
-            DiskMember::from_by_id(ByIdPath("/dev/disk/by-id/virtio-disk1".into())),
-        );
-        PoolMembership { disks }
+        membership_from(vec![membership_entry(
+            "disk1",
+            "/dev/disk/by-id/virtio-disk1",
+            None,
+            None,
+        )])
     }
 
     fn acked_disk(missing_acked: bool, read_io_errs: u64) -> alert::AckedDisk {
@@ -4313,28 +4676,29 @@ mod tests {
 
     fn bootstrap_pool_mutation_add_journal() -> journal::Journal {
         let pre = PoolMembership::empty();
-        let mut target_disks = BTreeMap::new();
-        for name in ["disk1", "disk2"] {
-            target_disks.insert(
-                name.to_owned(),
-                DiskMember::from_by_id(ByIdPath(format!("/dev/disk/by-id/virtio-{name}"))),
-            );
-        }
-        let mut targets = BTreeMap::new();
-        for name in ["disk1", "disk2"] {
-            targets.insert(
-                name.to_owned(),
-                journal::AddJournalTarget {
-                    by_id: ByIdPath(format!("/dev/disk/by-id/virtio-{name}")),
-                    mapper_name: format!("braid-{name}"),
-                    mode: journal::AddJournalMode::FreshLuks {
-                        luks_label: format!("braid-{name}"),
-                        luks_format_extra_opts: vec!["--label".into(), format!("braid-{name}")],
-                        enroll_key_file: None,
-                    },
-                },
-            );
-        }
+        let target = membership_from(
+            ["disk1", "disk2"]
+                .into_iter()
+                .map(|name| {
+                    membership_entry(name, &format!("/dev/disk/by-id/virtio-{name}"), None, None)
+                })
+                .collect(),
+        );
+        let targets = add_targets(
+            ["disk1", "disk2"]
+                .into_iter()
+                .map(|name| {
+                    (
+                        uuid_for_name(name),
+                        add_target(
+                            name,
+                            &format!("/dev/disk/by-id/virtio-{name}"),
+                            fresh_mode(Vec::new(), None),
+                        ),
+                    )
+                })
+                .collect(),
+        );
         journal::Journal {
             started_at: "2026-01-01T00:00:00Z".into(),
             op: OpKind::Add {
@@ -4342,9 +4706,7 @@ mod tests {
                 targets,
             },
             pre_membership: pre,
-            target_membership: PoolMembership {
-                disks: target_disks,
-            },
+            target_membership: target,
         }
     }
 
@@ -4364,28 +4726,22 @@ mod tests {
     }
 
     fn add_op_from_disks(disks: BTreeMap<String, ByIdPath>) -> OpKind {
+        let mut targets = crate::membership::LuksUuidMap::new();
+        for (name, by_id) in disks {
+            targets
+                .insert(
+                    uuid_for_name(&name),
+                    journal::AddJournalTarget {
+                        name: disk_name(&name),
+                        by_id,
+                        mode: fresh_mode(Vec::new(), None),
+                    },
+                )
+                .expect("insert add op target");
+        }
         OpKind::Add {
             phase: journal::AddPhase::PostAddBalanceRaid1,
-            targets: disks
-                .into_iter()
-                .map(|(name, by_id)| {
-                    (
-                        name.clone(),
-                        journal::AddJournalTarget {
-                            by_id,
-                            mapper_name: config::mapper_name(&name).0,
-                            mode: journal::AddJournalMode::FreshLuks {
-                                luks_label: format!("braid-{name}"),
-                                luks_format_extra_opts: vec![
-                                    "--label".into(),
-                                    format!("braid-{name}"),
-                                ],
-                                enroll_key_file: None,
-                            },
-                        },
-                    )
-                })
-                .collect(),
+            targets,
         }
     }
 
@@ -4414,51 +4770,44 @@ mod tests {
     }
 
     fn interrupted_remove_journal(disk1_added_at: Option<&str>) -> journal::Journal {
-        let mut pre_disks = BTreeMap::new();
-        pre_disks.insert(
-            "disk1".to_owned(),
-            disk_member("/dev/disk/by-id/virtio-disk1", disk1_added_at),
-        );
-        pre_disks.insert(
-            "disk2".to_owned(),
-            DiskMember::from_by_id(ByIdPath("/dev/disk/by-id/virtio-disk2".into())),
-        );
-        let pre = PoolMembership { disks: pre_disks };
-
-        let mut target_disks = BTreeMap::new();
-        target_disks.insert(
-            "disk1".to_owned(),
-            disk_member("/dev/disk/by-id/virtio-disk1", disk1_added_at),
-        );
+        let pre = membership_from(vec![
+            membership_entry(
+                "disk1",
+                "/dev/disk/by-id/virtio-disk1",
+                disk1_added_at,
+                None,
+            ),
+            membership_entry("disk2", "/dev/disk/by-id/virtio-disk2", None, None),
+        ]);
+        let target = membership_from(vec![membership_entry(
+            "disk1",
+            "/dev/disk/by-id/virtio-disk1",
+            disk1_added_at,
+            None,
+        )]);
 
         journal::Journal {
             started_at: "2026-01-01T00:00:00Z".into(),
             op: OpKind::Remove {
-                name: "disk2".to_owned(),
+                luks_uuid: uuid_for_name("disk2"),
+                name: disk_name("disk2"),
             },
             pre_membership: pre,
-            target_membership: PoolMembership {
-                disks: target_disks,
-            },
+            target_membership: target,
         }
     }
 
     fn remove_missing_journal() -> journal::Journal {
-        let mut pre_disks = BTreeMap::new();
-        pre_disks.insert(
-            "disk1".to_owned(),
-            disk_member_with_devid("/dev/disk/by-id/virtio-disk1", 1),
-        );
-        pre_disks.insert(
-            "disk2".to_owned(),
-            disk_member_with_devid("/dev/disk/by-id/virtio-disk2", 2),
-        );
-
-        let mut target_disks = BTreeMap::new();
-        target_disks.insert(
-            "disk1".to_owned(),
-            disk_member_with_devid("/dev/disk/by-id/virtio-disk1", 1),
-        );
+        let pre = membership_from(vec![
+            membership_entry("disk1", "/dev/disk/by-id/virtio-disk1", None, Some(1)),
+            membership_entry("disk2", "/dev/disk/by-id/virtio-disk2", None, Some(2)),
+        ]);
+        let target = membership_from(vec![membership_entry(
+            "disk1",
+            "/dev/disk/by-id/virtio-disk1",
+            None,
+            Some(1),
+        )]);
 
         journal::Journal {
             started_at: "2026-01-01T00:00:00Z".into(),
@@ -4467,37 +4816,21 @@ mod tests {
                 devid: 2,
                 restore_raid1_after_commit: true,
             },
-            pre_membership: PoolMembership { disks: pre_disks },
-            target_membership: PoolMembership {
-                disks: target_disks,
-            },
+            pre_membership: pre,
+            target_membership: target,
         }
     }
 
     fn remove_missing_journal_two_survivors() -> journal::Journal {
-        let mut pre_disks = BTreeMap::new();
-        pre_disks.insert(
-            "disk1".to_owned(),
-            disk_member_with_devid("/dev/disk/by-id/virtio-disk1", 1),
-        );
-        pre_disks.insert(
-            "disk2".to_owned(),
-            disk_member_with_devid("/dev/disk/by-id/virtio-disk2", 2),
-        );
-        pre_disks.insert(
-            "disk3".to_owned(),
-            disk_member_with_devid("/dev/disk/by-id/virtio-disk3", 3),
-        );
-
-        let mut target_disks = BTreeMap::new();
-        target_disks.insert(
-            "disk1".to_owned(),
-            disk_member_with_devid("/dev/disk/by-id/virtio-disk1", 1),
-        );
-        target_disks.insert(
-            "disk2".to_owned(),
-            disk_member_with_devid("/dev/disk/by-id/virtio-disk2", 2),
-        );
+        let pre = membership_from(vec![
+            membership_entry("disk1", "/dev/disk/by-id/virtio-disk1", None, Some(1)),
+            membership_entry("disk2", "/dev/disk/by-id/virtio-disk2", None, Some(2)),
+            membership_entry("disk3", "/dev/disk/by-id/virtio-disk3", None, Some(3)),
+        ]);
+        let target = membership_from(vec![
+            membership_entry("disk1", "/dev/disk/by-id/virtio-disk1", None, Some(1)),
+            membership_entry("disk2", "/dev/disk/by-id/virtio-disk2", None, Some(2)),
+        ]);
 
         journal::Journal {
             started_at: "2026-01-01T00:00:00Z".into(),
@@ -4506,44 +4839,32 @@ mod tests {
                 devid: 3,
                 restore_raid1_after_commit: true,
             },
-            pre_membership: PoolMembership { disks: pre_disks },
-            target_membership: PoolMembership {
-                disks: target_disks,
-            },
+            pre_membership: pre,
+            target_membership: target,
         }
     }
 
     /// Two-disk journal for interrupted add: pre has disk1+disk2, target has disk1+disk2+disk3.
     fn two_disk_journal() -> journal::Journal {
-        let mut pre_disks = BTreeMap::new();
-        pre_disks.insert(
-            "disk1".to_owned(),
-            DiskMember::from_by_id(ByIdPath("/dev/disk/by-id/virtio-disk1".into())),
-        );
-        pre_disks.insert(
-            "disk2".to_owned(),
-            DiskMember::from_by_id(ByIdPath("/dev/disk/by-id/virtio-disk2".into())),
-        );
-        let pre = PoolMembership { disks: pre_disks };
+        let pre = membership_from(vec![
+            membership_entry("disk1", "/dev/disk/by-id/virtio-disk1", None, None),
+            membership_entry("disk2", "/dev/disk/by-id/virtio-disk2", None, None),
+        ]);
+        let target = membership_from(vec![
+            membership_entry("disk1", "/dev/disk/by-id/virtio-disk1", None, None),
+            membership_entry("disk2", "/dev/disk/by-id/virtio-disk2", None, None),
+            membership_entry("disk3", "/dev/disk/by-id/virtio-disk3", None, None),
+        ]);
 
-        let mut target_disks = pre.disks.clone();
-        target_disks.insert(
+        let mut add_targets_by_name = BTreeMap::new();
+        add_targets_by_name.insert(
             "disk3".to_owned(),
-            DiskMember::from_by_id(ByIdPath("/dev/disk/by-id/virtio-disk3".into())),
-        );
-        let target = PoolMembership {
-            disks: target_disks,
-        };
-
-        let mut add_disks = BTreeMap::new();
-        add_disks.insert(
-            "disk3".to_owned(),
-            ByIdPath("/dev/disk/by-id/virtio-disk3".into()),
+            ByIdPath::parse("/dev/disk/by-id/virtio-disk3").unwrap(),
         );
 
         journal::Journal {
             started_at: "2026-01-01T00:00:00Z".into(),
-            op: add_op_from_disks(add_disks),
+            op: add_op_from_disks(add_targets_by_name),
             pre_membership: pre,
             target_membership: target,
         }
@@ -4552,31 +4873,26 @@ mod tests {
     /// Add journal for the committed post-add phase: pre has disk1,
     /// target/live pool has disk1+disk2, and recovery only owes balance.
     fn committed_two_disk_add_journal() -> journal::Journal {
-        let mut pre_disks = BTreeMap::new();
-        pre_disks.insert(
-            "disk1".to_owned(),
-            DiskMember::from_by_id(ByIdPath("/dev/disk/by-id/virtio-disk1".into())),
-        );
-        let pre = PoolMembership { disks: pre_disks };
+        let pre = membership_from(vec![membership_entry(
+            "disk1",
+            "/dev/disk/by-id/virtio-disk1",
+            None,
+            None,
+        )]);
+        let target = membership_from(vec![
+            membership_entry("disk1", "/dev/disk/by-id/virtio-disk1", None, None),
+            membership_entry("disk2", "/dev/disk/by-id/virtio-disk2", None, None),
+        ]);
 
-        let mut target_disks = pre.disks.clone();
-        target_disks.insert(
+        let mut add_targets_by_name = BTreeMap::new();
+        add_targets_by_name.insert(
             "disk2".to_owned(),
-            DiskMember::from_by_id(ByIdPath("/dev/disk/by-id/virtio-disk2".into())),
-        );
-        let target = PoolMembership {
-            disks: target_disks,
-        };
-
-        let mut add_disks = BTreeMap::new();
-        add_disks.insert(
-            "disk2".to_owned(),
-            ByIdPath("/dev/disk/by-id/virtio-disk2".into()),
+            ByIdPath::parse("/dev/disk/by-id/virtio-disk2").unwrap(),
         );
 
         journal::Journal {
             started_at: "2026-01-01T00:00:00Z".into(),
-            op: add_op_from_disks(add_disks),
+            op: add_op_from_disks(add_targets_by_name),
             pre_membership: pre,
             target_membership: target,
         }
@@ -4591,7 +4907,9 @@ mod tests {
     ) -> journal::Journal {
         let mut journal = recoverable_pool_mutation_add_journal();
         if let OpKind::Add { targets, .. } = &mut journal.op {
-            for target in targets.values_mut() {
+            let uuids: Vec<LuksUuid> = targets.keys().cloned().collect();
+            for uuid in uuids {
+                let target = targets.get_mut(&uuid).expect("target still present");
                 if let journal::AddJournalMode::RecoverableBraidLabeled {
                     enroll_key_file: stored,
                     ..
@@ -4607,35 +4925,28 @@ mod tests {
     }
 
     fn recoverable_pool_mutation_add_journal() -> journal::Journal {
-        let mut pre_disks = BTreeMap::new();
-        pre_disks.insert(
-            "disk1".to_owned(),
-            DiskMember::from_by_id(ByIdPath("/dev/disk/by-id/virtio-disk1".into())),
-        );
-        let pre = PoolMembership { disks: pre_disks };
+        let pre = membership_from(vec![membership_entry(
+            "disk1",
+            "/dev/disk/by-id/virtio-disk1",
+            None,
+            None,
+        )]);
+        let target = membership_from(vec![
+            membership_entry("disk1", "/dev/disk/by-id/virtio-disk1", None, None),
+            membership_entry("disk2", "/dev/disk/by-id/virtio-disk2", None, None),
+        ]);
 
-        let mut target_disks = pre.disks.clone();
-        target_disks.insert(
-            "disk2".to_owned(),
-            DiskMember::from_by_id(ByIdPath("/dev/disk/by-id/virtio-disk2".into())),
-        );
-        let target = PoolMembership {
-            disks: target_disks,
-        };
-
-        let mut targets = BTreeMap::new();
-        targets.insert(
-            "disk2".to_owned(),
-            journal::AddJournalTarget {
-                by_id: ByIdPath("/dev/disk/by-id/virtio-disk2".into()),
-                mapper_name: "braid-disk2".into(),
-                mode: journal::AddJournalMode::RecoverableBraidLabeled {
+        let targets = add_targets(vec![(
+            uuid_for_name("disk2"),
+            add_target(
+                "disk2",
+                "/dev/disk/by-id/virtio-disk2",
+                journal::AddJournalMode::RecoverableBraidLabeled {
                     verified_pool_fsid: "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee".into(),
-                    luks_uuid: LuksUuid("22222222-2222-2222-2222-222222222222".into()),
                     enroll_key_file: None,
                 },
-            },
-        );
+            ),
+        )]);
 
         journal::Journal {
             started_at: "2026-01-01T00:00:00Z".into(),
@@ -4649,39 +4960,27 @@ mod tests {
     }
 
     fn two_pre_recoverable_add_disk3_journal() -> journal::Journal {
-        let mut pre_disks = BTreeMap::new();
-        pre_disks.insert(
-            "disk1".to_owned(),
-            DiskMember::from_by_id(ByIdPath("/dev/disk/by-id/virtio-disk1".into())),
-        );
-        pre_disks.insert(
-            "disk2".to_owned(),
-            DiskMember::from_by_id(ByIdPath("/dev/disk/by-id/virtio-disk2".into())),
-        );
-        let pre = PoolMembership { disks: pre_disks };
+        let pre = membership_from(vec![
+            membership_entry("disk1", "/dev/disk/by-id/virtio-disk1", None, None),
+            membership_entry("disk2", "/dev/disk/by-id/virtio-disk2", None, None),
+        ]);
+        let target = membership_from(vec![
+            membership_entry("disk1", "/dev/disk/by-id/virtio-disk1", None, None),
+            membership_entry("disk2", "/dev/disk/by-id/virtio-disk2", None, None),
+            membership_entry("disk3", "/dev/disk/by-id/virtio-disk3", None, None),
+        ]);
 
-        let mut target_disks = pre.disks.clone();
-        target_disks.insert(
-            "disk3".to_owned(),
-            DiskMember::from_by_id(ByIdPath("/dev/disk/by-id/virtio-disk3".into())),
-        );
-        let target = PoolMembership {
-            disks: target_disks,
-        };
-
-        let mut targets = BTreeMap::new();
-        targets.insert(
-            "disk3".to_owned(),
-            journal::AddJournalTarget {
-                by_id: ByIdPath("/dev/disk/by-id/virtio-disk3".into()),
-                mapper_name: "braid-disk3".into(),
-                mode: journal::AddJournalMode::RecoverableBraidLabeled {
+        let targets = add_targets(vec![(
+            uuid_for_name("disk3"),
+            add_target(
+                "disk3",
+                "/dev/disk/by-id/virtio-disk3",
+                journal::AddJournalMode::RecoverableBraidLabeled {
                     verified_pool_fsid: "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee".into(),
-                    luks_uuid: LuksUuid("33333333-3333-3333-3333-333333333333".into()),
                     enroll_key_file: None,
                 },
-            },
-        );
+            ),
+        )]);
 
         journal::Journal {
             started_at: "2026-01-01T00:00:00Z".into(),
@@ -4695,42 +4994,36 @@ mod tests {
     }
 
     fn two_target_recoverable_pool_mutation_add_journal() -> journal::Journal {
-        let mut pre_disks = BTreeMap::new();
-        pre_disks.insert(
-            "disk1".to_owned(),
-            DiskMember::from_by_id(ByIdPath("/dev/disk/by-id/virtio-disk1".into())),
+        let pre = membership_from(vec![membership_entry(
+            "disk1",
+            "/dev/disk/by-id/virtio-disk1",
+            None,
+            None,
+        )]);
+        let target = membership_from(vec![
+            membership_entry("disk1", "/dev/disk/by-id/virtio-disk1", None, None),
+            membership_entry("disk2", "/dev/disk/by-id/virtio-disk2", None, None),
+            membership_entry("disk3", "/dev/disk/by-id/virtio-disk3", None, None),
+        ]);
+
+        let targets = add_targets(
+            ["disk2", "disk3"]
+                .into_iter()
+                .map(|name| {
+                    (
+                        uuid_for_name(name),
+                        add_target(
+                            name,
+                            &format!("/dev/disk/by-id/virtio-{name}"),
+                            journal::AddJournalMode::RecoverableBraidLabeled {
+                                verified_pool_fsid: "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee".into(),
+                                enroll_key_file: None,
+                            },
+                        ),
+                    )
+                })
+                .collect(),
         );
-        let pre = PoolMembership { disks: pre_disks };
-
-        let mut target_disks = pre.disks.clone();
-        for name in ["disk2", "disk3"] {
-            target_disks.insert(
-                name.to_owned(),
-                DiskMember::from_by_id(ByIdPath(format!("/dev/disk/by-id/virtio-{name}"))),
-            );
-        }
-        let target = PoolMembership {
-            disks: target_disks,
-        };
-
-        let mut targets = BTreeMap::new();
-        for (name, uuid) in [
-            ("disk2", "22222222-2222-2222-2222-222222222222"),
-            ("disk3", "33333333-3333-3333-3333-333333333333"),
-        ] {
-            targets.insert(
-                name.to_owned(),
-                journal::AddJournalTarget {
-                    by_id: ByIdPath(format!("/dev/disk/by-id/virtio-{name}")),
-                    mapper_name: format!("braid-{name}"),
-                    mode: journal::AddJournalMode::RecoverableBraidLabeled {
-                        verified_pool_fsid: "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee".into(),
-                        luks_uuid: LuksUuid(uuid.into()),
-                        enroll_key_file: None,
-                    },
-                },
-            );
-        }
 
         journal::Journal {
             started_at: "2026-01-01T00:00:00Z".into(),
@@ -4744,51 +5037,44 @@ mod tests {
     }
 
     fn mixed_pool_mutation_add_journal() -> journal::Journal {
-        let mut pre_disks = BTreeMap::new();
-        pre_disks.insert(
-            "disk1".to_owned(),
-            DiskMember::from_by_id(ByIdPath("/dev/disk/by-id/virtio-disk1".into())),
-        );
-        let pre = PoolMembership { disks: pre_disks };
+        let pre = membership_from(vec![membership_entry(
+            "disk1",
+            "/dev/disk/by-id/virtio-disk1",
+            None,
+            None,
+        )]);
+        let target = membership_from(vec![
+            membership_entry("disk1", "/dev/disk/by-id/virtio-disk1", None, None),
+            membership_entry("disk2", "/dev/disk/by-id/virtio-disk2", None, None),
+            membership_entry("disk3", "/dev/disk/by-id/virtio-disk3", None, None),
+        ]);
 
-        let mut target_disks = pre.disks.clone();
-        for name in ["disk2", "disk3"] {
-            target_disks.insert(
-                name.to_owned(),
-                DiskMember::from_by_id(ByIdPath(format!("/dev/disk/by-id/virtio-{name}"))),
-            );
-        }
-        let target = PoolMembership {
-            disks: target_disks,
-        };
-
-        let mut targets = BTreeMap::new();
-        targets.insert(
-            "disk2".to_owned(),
-            journal::AddJournalTarget {
-                by_id: ByIdPath("/dev/disk/by-id/virtio-disk2".into()),
-                mapper_name: "braid-disk2".into(),
-                mode: journal::AddJournalMode::RecoverableBraidLabeled {
-                    verified_pool_fsid: "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee".into(),
-                    luks_uuid: LuksUuid("22222222-2222-2222-2222-222222222222".into()),
-                    enroll_key_file: None,
-                },
-            },
-        );
-        targets.insert(
-            "disk3".to_owned(),
-            journal::AddJournalTarget {
-                by_id: ByIdPath("/dev/disk/by-id/virtio-disk3".into()),
-                mapper_name: "braid-disk3".into(),
-                mode: journal::AddJournalMode::FreshLuks {
-                    luks_label: "braid-disk3".into(),
-                    luks_format_extra_opts: vec!["--label".into(), "braid-disk3".into()],
-                    enroll_key_file: Some(std::path::PathBuf::from(
-                        "/var/lib/braid/keyfiles/braid-disk3.key",
-                    )),
-                },
-            },
-        );
+        let targets = add_targets(vec![
+            (
+                uuid_for_name("disk2"),
+                add_target(
+                    "disk2",
+                    "/dev/disk/by-id/virtio-disk2",
+                    journal::AddJournalMode::RecoverableBraidLabeled {
+                        verified_pool_fsid: "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee".into(),
+                        enroll_key_file: None,
+                    },
+                ),
+            ),
+            (
+                uuid_for_name("disk3"),
+                add_target(
+                    "disk3",
+                    "/dev/disk/by-id/virtio-disk3",
+                    fresh_mode(
+                        Vec::new(),
+                        Some(std::path::PathBuf::from(
+                            "/var/lib/braid/keyfiles/braid-disk3.key",
+                        )),
+                    ),
+                ),
+            ),
+        ]);
 
         journal::Journal {
             started_at: "2026-01-01T00:00:00Z".into(),
@@ -4805,35 +5091,24 @@ mod tests {
         luks_format_extra_opts: Vec<String>,
         enroll_key_file: Option<std::path::PathBuf>,
     ) -> journal::Journal {
-        let mut pre_disks = BTreeMap::new();
-        pre_disks.insert(
-            "disk1".to_owned(),
-            DiskMember::from_by_id(ByIdPath("/dev/disk/by-id/virtio-disk1".into())),
-        );
-        let pre = PoolMembership { disks: pre_disks };
-
-        let mut target_disks = pre.disks.clone();
-        target_disks.insert(
-            "disk2".to_owned(),
-            DiskMember::from_by_id(ByIdPath("/dev/disk/by-id/virtio-disk2".into())),
-        );
-        let target = PoolMembership {
-            disks: target_disks,
-        };
-
-        let mut targets = BTreeMap::new();
-        targets.insert(
-            "disk2".to_owned(),
-            journal::AddJournalTarget {
-                by_id: ByIdPath("/dev/disk/by-id/virtio-disk2".into()),
-                mapper_name: "braid-disk2".into(),
-                mode: journal::AddJournalMode::FreshLuks {
-                    luks_label: "braid-disk2".into(),
-                    luks_format_extra_opts,
-                    enroll_key_file,
-                },
-            },
-        );
+        let pre = membership_from(vec![membership_entry(
+            "disk1",
+            "/dev/disk/by-id/virtio-disk1",
+            None,
+            None,
+        )]);
+        let target = membership_from(vec![
+            membership_entry("disk1", "/dev/disk/by-id/virtio-disk1", None, None),
+            membership_entry("disk2", "/dev/disk/by-id/virtio-disk2", None, None),
+        ]);
+        let targets = add_targets(vec![(
+            uuid_for_name("disk2"),
+            add_target(
+                "disk2",
+                "/dev/disk/by-id/virtio-disk2",
+                fresh_mode(luks_format_extra_opts, enroll_key_file),
+            ),
+        )]);
 
         journal::Journal {
             started_at: "2026-01-01T00:00:00Z".into(),
@@ -4851,7 +5126,7 @@ mod tests {
             mounted: true,
             devices: vec![PoolDevice {
                 mapper: MapperName("braid-disk1".into()),
-                luks_uuid: LuksUuid("11111111-1111-1111-1111-111111111111".into()),
+                luks_uuid: LuksUuid::parse("11111111-1111-1111-1111-111111111111").unwrap(),
                 devid: 1,
                 underlying: "/dev/vda".into(),
             }],
@@ -4867,7 +5142,7 @@ mod tests {
         let mut pool = pool_state_one_disk();
         pool.devices.push(PoolDevice {
             mapper: MapperName("luks-foreign".into()),
-            luks_uuid: LuksUuid("99999999-9999-9999-9999-999999999999".into()),
+            luks_uuid: LuksUuid::parse("99999999-9999-9999-9999-999999999999").unwrap(),
             devid: 9,
             underlying: "/dev/vdz".into(),
         });
@@ -4881,13 +5156,13 @@ mod tests {
             devices: vec![
                 PoolDevice {
                     mapper: MapperName("braid-disk1".into()),
-                    luks_uuid: LuksUuid("11111111-1111-1111-1111-111111111111".into()),
+                    luks_uuid: LuksUuid::parse("11111111-1111-1111-1111-111111111111").unwrap(),
                     devid: 1,
                     underlying: "/dev/vda".into(),
                 },
                 PoolDevice {
                     mapper: MapperName("braid-disk2".into()),
-                    luks_uuid: LuksUuid("22222222-2222-2222-2222-222222222222".into()),
+                    luks_uuid: LuksUuid::parse("22222222-2222-2222-2222-222222222222").unwrap(),
                     devid: 2,
                     underlying: "/dev/vdb".into(),
                 },
@@ -4906,13 +5181,13 @@ mod tests {
             devices: vec![
                 PoolDevice {
                     mapper: MapperName("braid-disk1".into()),
-                    luks_uuid: LuksUuid("11111111-1111-1111-1111-111111111111".into()),
+                    luks_uuid: LuksUuid::parse("11111111-1111-1111-1111-111111111111").unwrap(),
                     devid: 1,
                     underlying: "/dev/vda".into(),
                 },
                 PoolDevice {
                     mapper: MapperName("braid-disk2".into()),
-                    luks_uuid: LuksUuid("22222222-2222-2222-2222-222222222222".into()),
+                    luks_uuid: LuksUuid::parse("22222222-2222-2222-2222-222222222222").unwrap(),
                     devid: 4,
                     underlying: "/dev/vdb".into(),
                 },
@@ -4941,13 +5216,13 @@ mod tests {
             devices: vec![
                 PoolDevice {
                     mapper: MapperName("braid-disk1".into()),
-                    luks_uuid: LuksUuid("11111111-1111-1111-1111-111111111111".into()),
+                    luks_uuid: LuksUuid::parse("11111111-1111-1111-1111-111111111111").unwrap(),
                     devid: 1,
                     underlying: "/dev/vda".into(),
                 },
                 PoolDevice {
                     mapper: MapperName("braid-old".into()),
-                    luks_uuid: LuksUuid("22222222-2222-2222-2222-222222222222".into()),
+                    luks_uuid: LuksUuid::parse("22222222-2222-2222-2222-222222222222").unwrap(),
                     devid: 2,
                     underlying: "/dev/vdb".into(),
                 },
@@ -4966,13 +5241,13 @@ mod tests {
             devices: vec![
                 PoolDevice {
                     mapper: MapperName("braid-disk1".into()),
-                    luks_uuid: LuksUuid("11111111-1111-1111-1111-111111111111".into()),
+                    luks_uuid: LuksUuid::parse("11111111-1111-1111-1111-111111111111").unwrap(),
                     devid: 1,
                     underlying: "/dev/vda".into(),
                 },
                 PoolDevice {
                     mapper: MapperName("braid-new".into()),
-                    luks_uuid: LuksUuid("33333333-3333-3333-3333-333333333333".into()),
+                    luks_uuid: LuksUuid::parse("33333333-3333-3333-3333-333333333333").unwrap(),
                     devid: 2,
                     underlying: "/dev/vdc".into(),
                 },
@@ -4989,7 +5264,7 @@ mod tests {
         let mut pool = pool_state_disk1_and_old();
         pool.devices.push(PoolDevice {
             mapper: MapperName("braid-new".into()),
-            luks_uuid: LuksUuid("33333333-3333-3333-3333-333333333333".into()),
+            luks_uuid: LuksUuid::parse("33333333-3333-3333-3333-333333333333").unwrap(),
             devid: 3,
             underlying: "/dev/vdc".into(),
         });
@@ -5002,7 +5277,7 @@ mod tests {
             mounted: true,
             devices: vec![PoolDevice {
                 mapper: MapperName("braid-disk1".into()),
-                luks_uuid: LuksUuid("11111111-1111-1111-1111-111111111111".into()),
+                luks_uuid: LuksUuid::parse("11111111-1111-1111-1111-111111111111").unwrap(),
                 devid: 1,
                 underlying: "/dev/vda".into(),
             }],
@@ -5020,19 +5295,19 @@ mod tests {
             devices: vec![
                 PoolDevice {
                     mapper: MapperName("braid-disk1".into()),
-                    luks_uuid: LuksUuid("11111111-1111-1111-1111-111111111111".into()),
+                    luks_uuid: LuksUuid::parse("11111111-1111-1111-1111-111111111111").unwrap(),
                     devid: 1,
                     underlying: "/dev/vda".into(),
                 },
                 PoolDevice {
                     mapper: MapperName("braid-disk2".into()),
-                    luks_uuid: LuksUuid("22222222-2222-2222-2222-222222222222".into()),
+                    luks_uuid: LuksUuid::parse("22222222-2222-2222-2222-222222222222").unwrap(),
                     devid: 2,
                     underlying: "/dev/vdb".into(),
                 },
                 PoolDevice {
                     mapper: MapperName("braid-disk3".into()),
-                    luks_uuid: LuksUuid("33333333-3333-3333-3333-333333333333".into()),
+                    luks_uuid: LuksUuid::parse("33333333-3333-3333-3333-333333333333").unwrap(),
                     devid: 3,
                     underlying: "/dev/vdc".into(),
                 },
@@ -5673,7 +5948,7 @@ mod tests {
         .expect("committed remove recovery should finish");
 
         let recovered = membership::load_membership(&f.paths).unwrap();
-        assert!(!recovered.disks.contains_key("disk2"));
+        assert!(!recovered.by_name(&disk_name("disk2")).is_some());
         let reloaded = alert::load_acked_stats(&f.paths);
         assert_eq!(reloaded.0.get("1"), Some(&control));
         assert!(!reloaded.0.contains_key("2"));
@@ -5710,7 +5985,7 @@ mod tests {
         .expect("uncommitted remove recovery should finish");
 
         let recovered = membership::load_membership(&f.paths).unwrap();
-        assert!(recovered.disks.contains_key("disk2"));
+        assert!(recovered.by_name(&disk_name("disk2")).is_some());
         let reloaded = alert::load_acked_stats(&f.paths);
         assert_eq!(reloaded.0.get("2"), Some(&target));
     }
@@ -6044,7 +6319,7 @@ mod tests {
             open_plan.to_unlock,
             vec![(
                 "disk1".to_owned(),
-                ByIdPath("/dev/disk/by-id/virtio-disk1".into())
+                ByIdPath::parse("/dev/disk/by-id/virtio-disk1").unwrap()
             )]
         );
 
@@ -6160,7 +6435,7 @@ mod tests {
             open_plan.to_unlock,
             vec![(
                 "disk1".to_owned(),
-                ByIdPath("/dev/disk/by-id/virtio-disk1".into())
+                ByIdPath::parse("/dev/disk/by-id/virtio-disk1").unwrap()
             )]
         );
 
@@ -6281,7 +6556,7 @@ mod tests {
             open_plan.to_unlock,
             vec![(
                 "disk1".to_owned(),
-                ByIdPath("/dev/disk/by-id/virtio-disk1".into())
+                ByIdPath::parse("/dev/disk/by-id/virtio-disk1").unwrap()
             )]
         );
 
@@ -6383,7 +6658,7 @@ mod tests {
             open_plan.to_unlock,
             vec![(
                 "disk1".to_owned(),
-                ByIdPath("/dev/disk/by-id/virtio-disk1".into())
+                ByIdPath::parse("/dev/disk/by-id/virtio-disk1").unwrap()
             )]
         );
 
@@ -6681,7 +6956,7 @@ mod tests {
         let mut pool = pool_state_two_disks();
         pool.devices.push(PoolDevice {
             mapper: MapperName("braid-mystery".into()),
-            luks_uuid: LuksUuid("99999999-9999-9999-9999-999999999999".into()),
+            luks_uuid: LuksUuid::parse("99999999-9999-9999-9999-999999999999").unwrap(),
             devid: 3,
             underlying: "/dev/vdz".into(),
         });
@@ -6910,8 +7185,8 @@ mod tests {
         );
         assert!(!f.paths.pending_op_json().exists());
         let recovered = membership::load_membership(&f.paths).unwrap();
-        assert!(recovered.disks.contains_key("disk1"));
-        assert!(recovered.disks.contains_key("disk2"));
+        assert!(recovered.by_name(&disk_name("disk1")).is_some());
+        assert!(recovered.by_name(&disk_name("disk2")).is_some());
     }
 
     // Intent
@@ -7022,8 +7297,8 @@ mod tests {
         );
         assert!(!f.paths.pending_op_json().exists());
         let recovered = membership::load_membership(&f.paths).unwrap();
-        assert!(recovered.disks.contains_key("disk1"));
-        assert!(recovered.disks.contains_key("disk2"));
+        assert!(recovered.by_name(&disk_name("disk1")).is_some());
+        assert!(recovered.by_name(&disk_name("disk2")).is_some());
     }
 
     // Intent
@@ -7203,7 +7478,7 @@ mod tests {
         );
         assert!(!f.paths.pending_op_json().exists());
         let recovered = membership::load_membership(&f.paths).unwrap();
-        assert!(recovered.disks.contains_key("disk2"));
+        assert!(recovered.by_name(&disk_name("disk2")).is_some());
     }
 
     // Intent: ExistingLuks add recovery with `enroll_key_file:
@@ -7387,19 +7662,17 @@ mod tests {
     //   is `RecoverableBraidLabeled` with the keyfile path set.
     #[test]
     fn render_add_recovery_existing_luks_with_enroll_renders_addkey_before_scanforget() {
-        let mut targets = BTreeMap::new();
-        targets.insert(
-            "disk2".to_owned(),
-            journal::AddJournalTarget {
-                by_id: ByIdPath("/dev/disk/by-id/virtio-disk2".into()),
-                mapper_name: "braid-disk2".into(),
-                mode: journal::AddJournalMode::RecoverableBraidLabeled {
+        let targets = add_targets(vec![(
+            uuid_for_name("disk2"),
+            add_target(
+                "disk2",
+                "/dev/disk/by-id/virtio-disk2",
+                journal::AddJournalMode::RecoverableBraidLabeled {
                     verified_pool_fsid: "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee".into(),
-                    luks_uuid: LuksUuid("22222222-2222-2222-2222-222222222222".into()),
                     enroll_key_file: Some(std::path::PathBuf::from("/run/keys/braid.key")),
                 },
-            },
-        );
+            ),
+        )]);
 
         let plan = RecoverWorkPlan {
             open_plan: None,
@@ -7444,19 +7717,17 @@ mod tests {
     // Scenario: pre-`--enroll`-fix journal, recovery dry-run.
     #[test]
     fn render_add_recovery_existing_luks_without_enroll_emits_no_keyfile_steps() {
-        let mut targets = BTreeMap::new();
-        targets.insert(
-            "disk2".to_owned(),
-            journal::AddJournalTarget {
-                by_id: ByIdPath("/dev/disk/by-id/virtio-disk2".into()),
-                mapper_name: "braid-disk2".into(),
-                mode: journal::AddJournalMode::RecoverableBraidLabeled {
+        let targets = add_targets(vec![(
+            uuid_for_name("disk2"),
+            add_target(
+                "disk2",
+                "/dev/disk/by-id/virtio-disk2",
+                journal::AddJournalMode::RecoverableBraidLabeled {
                     verified_pool_fsid: "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee".into(),
-                    luks_uuid: LuksUuid("22222222-2222-2222-2222-222222222222".into()),
                     enroll_key_file: None,
                 },
-            },
-        );
+            ),
+        )]);
 
         let plan = RecoverWorkPlan {
             open_plan: None,
@@ -7652,9 +7923,9 @@ mod tests {
 
         assert!(f.paths.pool_json().exists(), "pool.json should be written");
         let recovered = membership::load_membership(&f.paths).unwrap();
-        assert!(recovered.disks.contains_key("disk1"));
-        assert!(recovered.disks.contains_key("disk2"));
-        assert!(recovered.disks.contains_key("disk3"));
+        assert!(recovered.by_name(&disk_name("disk1")).is_some());
+        assert!(recovered.by_name(&disk_name("disk2")).is_some());
+        assert!(recovered.by_name(&disk_name("disk3")).is_some());
         assert!(
             f.paths.pending_op_json().exists(),
             "failing inhibitor should preserve the journal"
@@ -7929,7 +8200,12 @@ mod tests {
                 .with_output_stdin(
                     CmdRequest::CryptsetupLuksFormat {
                         device: "/dev/disk/by-id/virtio-disk2".into(),
-                        extra_opts: stored_opts.clone(),
+                        uuid: uuid_for_name("disk2"),
+                        label: "braid-disk2".into(),
+                        extra_opts: LuksFormatExtraOpts::parse(&strip_legacy_managed_format_opts(
+                            stored_opts.clone(),
+                        ))
+                        .unwrap(),
                     },
                     TEST_PASSPHRASE_BYTES.to_vec(),
                     ok_raw_empty("cryptsetup luksFormat"),
@@ -8616,10 +8892,12 @@ mod tests {
         );
         assert!(!f.paths.pending_op_json().exists());
         let recovered = membership::load_membership(&f.paths).unwrap();
-        assert_eq!(
-            recovered.disks.keys().cloned().collect::<Vec<_>>(),
-            vec!["disk1".to_owned(), "disk2".to_owned()]
-        );
+        let mut names: Vec<String> = recovered
+            .names()
+            .map(|name| name.as_str().to_owned())
+            .collect();
+        names.sort();
+        assert_eq!(names, vec!["disk1".to_owned(), "disk2".to_owned()]);
     }
 
     // Intent: RemoveMissing::PoolMutation recovery exits recovery mode when
@@ -8655,7 +8933,7 @@ mod tests {
         assert!(runner.requests().is_empty());
         assert!(!f.paths.pending_op_json().exists());
         let recovered = membership::load_membership(&f.paths).unwrap();
-        assert!(recovered.disks.contains_key("disk2"));
+        assert!(recovered.by_name(&disk_name("disk2")).is_some());
     }
 
     // Intent: RemoveMissing::PoolMutation recovery rejects mixed live state.
@@ -8831,8 +9109,10 @@ mod tests {
             &journal,
             &union,
             pool_state_disk1_and_new(),
-            "old",
-            "new",
+            &uuid_for_name("old"),
+            &uuid_for_name("new"),
+            &disk_name("old"),
+            &disk_name("new"),
             new_target,
             source,
             false,
@@ -8854,8 +9134,8 @@ mod tests {
         );
         assert!(!f.paths.pending_op_json().exists());
         let recovered = membership::load_membership(&f.paths).unwrap();
-        assert!(recovered.disks.contains_key("new"));
-        assert!(!recovered.disks.contains_key("old"));
+        assert!(recovered.by_name(&disk_name("new")).is_some());
+        assert!(!recovered.by_name(&disk_name("old")).is_some());
     }
 
     // Intent: Replace::PoolMutation recovery restores pre state when replace
@@ -8881,7 +9161,7 @@ mod tests {
                 },
                 cryptsetup_uuid_ok(
                     "/dev/disk/by-id/virtio-new",
-                    "44444444-4444-4444-4444-444444444444",
+                    "33333333-3333-3333-3333-333333333333",
                 ),
             )
             .with_output(
@@ -8912,8 +9192,10 @@ mod tests {
             &journal,
             &union,
             pool_state_disk1_and_old(),
-            "old",
-            "new",
+            &uuid_for_name("old"),
+            &uuid_for_name("new"),
+            &disk_name("old"),
+            &disk_name("new"),
             new_target,
             source,
             false,
@@ -8935,8 +9217,8 @@ mod tests {
         );
         assert!(!f.paths.pending_op_json().exists());
         let recovered = membership::load_membership(&f.paths).unwrap();
-        assert!(recovered.disks.contains_key("old"));
-        assert!(!recovered.disks.contains_key("new"));
+        assert!(recovered.by_name(&disk_name("old")).is_some());
+        assert!(!recovered.by_name(&disk_name("new")).is_some());
     }
 
     // Intent: Replace::PoolMutation recovery rejects mixed pre/post topology.
@@ -8969,8 +9251,10 @@ mod tests {
             &journal,
             &union,
             pool_state_disk1_old_and_new(),
-            "old",
-            "new",
+            &uuid_for_name("old"),
+            &uuid_for_name("new"),
+            &disk_name("old"),
+            &disk_name("new"),
             new_target,
             source,
             false,
@@ -9085,8 +9369,10 @@ mod tests {
             &journal,
             &union,
             pool_state_disk1_and_old(),
-            "old",
-            "new",
+            &uuid_for_name("old"),
+            &uuid_for_name("new"),
+            &disk_name("old"),
+            &disk_name("new"),
             new_target,
             source,
             false,
@@ -9134,8 +9420,8 @@ mod tests {
         );
         assert!(!f.paths.pending_op_json().exists());
         let recovered = membership::load_membership(&f.paths).unwrap();
-        assert!(recovered.disks.contains_key("old"));
-        assert!(!recovered.disks.contains_key("new"));
+        assert!(recovered.by_name(&disk_name("old")).is_some());
+        assert!(!recovered.by_name(&disk_name("new")).is_some());
     }
 
     // Intent: Replace::PoolMutation FreshLuks recovery refuses a prepared
@@ -9189,8 +9475,10 @@ mod tests {
             &journal,
             &union,
             pool_state_disk1_and_old(),
-            "old",
-            "new",
+            &uuid_for_name("old"),
+            &uuid_for_name("new"),
+            &disk_name("old"),
+            &disk_name("new"),
             new_target,
             source,
             false,
@@ -9250,8 +9538,10 @@ mod tests {
             &journal,
             &union,
             pool_state_disk1_and_old(),
-            "old",
-            "new",
+            &uuid_for_name("old"),
+            &uuid_for_name("new"),
+            &disk_name("old"),
+            &disk_name("new"),
             new_target,
             source,
             false,
@@ -9347,8 +9637,10 @@ mod tests {
             &journal,
             &union,
             pool_state_disk1_and_old(),
-            "old",
-            "new",
+            &uuid_for_name("old"),
+            &uuid_for_name("new"),
+            &disk_name("old"),
+            &disk_name("new"),
             new_target,
             source,
             false,
@@ -9466,8 +9758,10 @@ mod tests {
             &journal,
             &union,
             pool_state_disk1_and_old(),
-            "old",
-            "new",
+            &uuid_for_name("old"),
+            &uuid_for_name("new"),
+            &disk_name("old"),
+            &disk_name("new"),
             new_target,
             source,
             false,
@@ -9550,8 +9844,10 @@ mod tests {
             &journal,
             &union,
             pool_state_disk1_and_old(),
-            "old",
-            "new",
+            &uuid_for_name("old"),
+            &uuid_for_name("new"),
+            &disk_name("old"),
+            &disk_name("new"),
             new_target,
             source,
             false,
@@ -9609,7 +9905,7 @@ mod tests {
                 },
                 cryptsetup_uuid_ok(
                     "/dev/disk/by-id/virtio-new",
-                    "44444444-4444-4444-4444-444444444444",
+                    "33333333-3333-3333-3333-333333333333",
                 ),
             )
             .with_output(
@@ -9669,8 +9965,10 @@ mod tests {
             &journal,
             &union,
             pool_state_disk1_and_old(),
-            "old",
-            "new",
+            &uuid_for_name("old"),
+            &uuid_for_name("new"),
+            &disk_name("old"),
+            &disk_name("new"),
             new_target,
             source,
             false,
@@ -9726,7 +10024,7 @@ mod tests {
                 },
                 cryptsetup_uuid_ok(
                     "/dev/disk/by-id/virtio-new",
-                    "44444444-4444-4444-4444-444444444444",
+                    "33333333-3333-3333-3333-333333333333",
                 ),
             )
             .with_output(
@@ -9804,8 +10102,10 @@ mod tests {
             &journal,
             &union,
             pool_state_disk1_and_old(),
-            "old",
-            "new",
+            &uuid_for_name("old"),
+            &uuid_for_name("new"),
+            &disk_name("old"),
+            &disk_name("new"),
             new_target,
             source,
             false,
@@ -9832,8 +10132,8 @@ mod tests {
         let recovered = membership::load_membership(&f.paths).unwrap();
         // Replay re-establishes pre-replace topology (the op didn't
         // commit, so we roll back to {disk1, old}).
-        assert!(recovered.disks.contains_key("old"));
-        assert!(!recovered.disks.contains_key("new"));
+        assert!(recovered.by_name(&disk_name("old")).is_some());
+        assert!(!recovered.by_name(&disk_name("new")).is_some());
     }
 
     // Intent: Replace::PostReplaceMaintenance skips unowed balance work.
@@ -9874,7 +10174,8 @@ mod tests {
             &params,
             &journal,
             pool_state_disk1_and_new(),
-            "new",
+            &uuid_for_name("new"),
+            &disk_name("new"),
             source,
             &fs,
             false,
@@ -9967,7 +10268,8 @@ mod tests {
                 &params,
                 &journal,
                 pool_state_disk1_and_new(),
-                "new",
+                &uuid_for_name("new"),
+                &disk_name("new"),
                 source,
                 &fs,
                 false,
@@ -10032,7 +10334,8 @@ mod tests {
             &params,
             &journal,
             pool_state_disk1_and_new(),
-            "new",
+            &uuid_for_name("new"),
+            &disk_name("new"),
             source,
             &fs,
             true,
@@ -10088,7 +10391,8 @@ mod tests {
             &params,
             &journal,
             pool_state_disk1_and_new(),
-            "new",
+            &uuid_for_name("new"),
+            &disk_name("new"),
             source,
             &fs,
             true,
@@ -10130,8 +10434,8 @@ mod tests {
             "missing shared skip note: {captured:?}"
         );
         let recovered = recovered.expect("builder should return membership");
-        assert!(recovered.disks.contains_key("disk1"));
-        assert!(!recovered.disks.contains_key("luks-foreign"));
+        assert!(recovered.by_name(&disk_name("disk1")).is_some());
+        assert!(!recovered.by_name(&disk_name("luks-foreign")).is_some());
     }
 
     // Intent: recover_membership_matching_expected renders foreign mapper
@@ -10159,8 +10463,8 @@ mod tests {
             "missing shared skip note: {captured:?}"
         );
         let recovered = recovered.expect("builder should return membership");
-        assert!(recovered.disks.contains_key("disk1"));
-        assert!(!recovered.disks.contains_key("luks-foreign"));
+        assert!(recovered.by_name(&disk_name("disk1")).is_some());
+        assert!(!recovered.by_name(&disk_name("luks-foreign")).is_some());
     }
 
     #[test]
@@ -10216,23 +10520,23 @@ mod tests {
         let fs = MockFs::new(&[]);
 
         // pre and target both only know about "toshiba"
-        let mut pre_disks = BTreeMap::new();
-        pre_disks.insert(
-            "toshiba".to_owned(),
-            DiskMember::from_by_id(ByIdPath("/dev/disk/by-id/ata-TOSHIBA".into())),
-        );
-        let pre = PoolMembership { disks: pre_disks };
+        let pre = membership_from(vec![membership_entry(
+            "toshiba",
+            "/dev/disk/by-id/ata-TOSHIBA",
+            None,
+            None,
+        )]);
         let target = pre.clone();
 
         // Op is adding "mystery" -- but neither snapshot contains it
-        let mut add_disks = BTreeMap::new();
-        add_disks.insert(
+        let mut add_targets_by_name = BTreeMap::new();
+        add_targets_by_name.insert(
             "mystery".to_owned(),
-            ByIdPath("/dev/disk/by-id/ata-MYSTERY".into()),
+            ByIdPath::parse("/dev/disk/by-id/ata-MYSTERY").unwrap(),
         );
         let journal = journal::Journal {
             started_at: "2026-01-01T00:00:00Z".into(),
-            op: add_op_from_disks(add_disks),
+            op: add_op_from_disks(add_targets_by_name),
             pre_membership: pre,
             target_membership: target,
         };
@@ -10511,11 +10815,11 @@ mod tests {
         assert!(f.paths.pool_json().exists(), "pool.json should exist");
         let recovered = membership::load_membership(&f.paths).unwrap();
         assert!(
-            recovered.disks.contains_key("disk1"),
+            recovered.by_name(&disk_name("disk1")).is_some(),
             "recovered membership should contain disk1"
         );
         assert!(
-            recovered.disks.contains_key("disk2"),
+            recovered.by_name(&disk_name("disk2")).is_some(),
             "recovered membership should contain disk2"
         );
 
@@ -10673,11 +10977,11 @@ mod tests {
         assert!(f.paths.pool_json().exists(), "pool.json should exist");
         let recovered = membership::load_membership(&f.paths).unwrap();
         assert!(
-            recovered.disks.contains_key("disk1"),
+            recovered.by_name(&disk_name("disk1")).is_some(),
             "recovered membership should contain disk1"
         );
         assert!(
-            recovered.disks.contains_key("disk2"),
+            recovered.by_name(&disk_name("disk2")).is_some(),
             "recovered membership should contain disk2"
         );
 
@@ -10878,22 +11182,14 @@ mod tests {
             "/dev/mapper/braid-disk2",
             "/dev/mapper/braid-extra",
         ]);
-        let membership = PoolMembership {
-            disks: BTreeMap::from([
-                (
-                    "disk1".to_owned(),
-                    DiskMember::from_by_id(ByIdPath("/dev/disk/by-id/virtio-disk1".into())),
-                ),
-                (
-                    "disk2".to_owned(),
-                    DiskMember::from_by_id(ByIdPath("/dev/disk/by-id/virtio-disk2".into())),
-                ),
-                (
-                    "extra".to_owned(),
-                    DiskMember::from_by_id(ByIdPath("/dev/disk/by-id/virtio-extra".into())),
-                ),
-            ]),
-        };
+        let membership = membership_from(vec![
+            membership_entry("disk1", "/dev/disk/by-id/virtio-disk1", None, None),
+            membership_entry("disk2", "/dev/disk/by-id/virtio-disk2", None, None),
+            (
+                uuid_raw("33333333-3333-3333-3333-333333333333"),
+                disk_member_named("extra", "/dev/disk/by-id/virtio-extra", None, None),
+            ),
+        ]);
         let (mp_req, mp_out) = mountpoint_fail();
         let runner = MockRunner::default()
             .with_output(
@@ -11003,7 +11299,7 @@ mod tests {
                 },
                 ok_raw_empty("mount"),
             );
-        let close_names = vec!["disk1".to_owned(), "disk2".to_owned()];
+        let close_names = vec![disk_name("disk1"), disk_name("disk2")];
 
         relock_and_remount(
             &runner,
@@ -11068,18 +11364,10 @@ mod tests {
             "/dev/disk/by-id/virtio-disk2",
             "/dev/mapper/braid-disk1",
         ]);
-        let membership = PoolMembership {
-            disks: BTreeMap::from([
-                (
-                    "disk1".to_owned(),
-                    DiskMember::from_by_id(ByIdPath("/dev/disk/by-id/virtio-disk1".into())),
-                ),
-                (
-                    "disk2".to_owned(),
-                    DiskMember::from_by_id(ByIdPath("/dev/disk/by-id/virtio-disk2".into())),
-                ),
-            ]),
-        };
+        let membership = membership_from(vec![
+            membership_entry("disk1", "/dev/disk/by-id/virtio-disk1", None, None),
+            membership_entry("disk2", "/dev/disk/by-id/virtio-disk2", None, None),
+        ]);
         let (mp_req, mp_out) = mountpoint_fail();
         let runner = MockRunner::default()
             .with_output(
@@ -11165,7 +11453,7 @@ mod tests {
                 },
                 ok_raw_empty("mount"),
             );
-        let close_names = vec!["disk1".to_owned(), "disk2".to_owned()];
+        let close_names = vec![disk_name("disk1"), disk_name("disk2")];
 
         relock_and_remount(
             &runner,
@@ -11220,18 +11508,10 @@ mod tests {
             "/dev/mapper/braid-disk1",
             "/dev/mapper/braid-disk2",
         ]);
-        let membership = PoolMembership {
-            disks: BTreeMap::from([
-                (
-                    "disk1".to_owned(),
-                    DiskMember::from_by_id(ByIdPath("/dev/disk/by-id/virtio-disk1".into())),
-                ),
-                (
-                    "disk2".to_owned(),
-                    DiskMember::from_by_id(ByIdPath("/dev/disk/by-id/virtio-disk2".into())),
-                ),
-            ]),
-        };
+        let membership = membership_from(vec![
+            membership_entry("disk1", "/dev/disk/by-id/virtio-disk1", None, None),
+            membership_entry("disk2", "/dev/disk/by-id/virtio-disk2", None, None),
+        ]);
         let (mp_req, mp_out) = mountpoint_fail();
         let runner = MockRunner::default()
             .with_output(
@@ -11326,7 +11606,7 @@ mod tests {
                 },
                 err_raw("mount", 32, "mount failed"),
             );
-        let close_names = vec!["disk1".to_owned(), "disk2".to_owned()];
+        let close_names = vec![disk_name("disk1"), disk_name("disk2")];
 
         let err = relock_and_remount(
             &runner,
@@ -11535,8 +11815,8 @@ mod tests {
 
         assert!(f.paths.pool_json().exists(), "pool.json should exist");
         let recovered = membership::load_membership(&f.paths).unwrap();
-        assert!(recovered.disks.contains_key("disk1"));
-        assert!(recovered.disks.contains_key("disk2"));
+        assert!(recovered.by_name(&disk_name("disk1")).is_some());
+        assert!(recovered.by_name(&disk_name("disk2")).is_some());
         assert!(
             !f.paths.pending_op_json().exists(),
             "journal should be cleared"
@@ -11558,10 +11838,17 @@ mod tests {
         let fs = MockFs::new(&[]);
 
         let mut current = PoolMembership::empty();
-        current.disks.insert(
-            "disk1".to_owned(),
-            disk_member("/dev/disk/by-id/old-disk1", Some(POOL_JSON_ADDED_AT)),
-        );
+        current
+            .insert(
+                uuid_for_name("disk1"),
+                disk_member_named(
+                    "disk1",
+                    "/dev/disk/by-id/old-disk1",
+                    Some(POOL_JSON_ADDED_AT),
+                    None,
+                ),
+            )
+            .expect("insert current disk1");
         membership::save_membership(&current, &f.paths).unwrap();
 
         let journal = interrupted_remove_journal(Some(LEGACY_JOURNAL_ADDED_AT));
@@ -11580,7 +11867,12 @@ mod tests {
 
         let recovered = membership::load_membership(&f.paths).unwrap();
         assert_eq!(
-            recovered.disks["disk1"].added_at.as_deref(),
+            recovered
+                .by_name(&disk_name("disk1"))
+                .expect("disk1 recovered")
+                .1
+                .added_at
+                .as_deref(),
             Some(POOL_JSON_ADDED_AT)
         );
     }
@@ -11599,35 +11891,29 @@ mod tests {
         let f = PoolFixture::empty();
         let fs = MockFs::new(&[]);
 
-        let mut pre_disks = BTreeMap::new();
-        pre_disks.insert(
-            "disk1".to_owned(),
-            DiskMember {
-                by_id: ByIdPath("/dev/disk/by-id/virtio-disk1".into()),
-                luks_uuid: None,
-                devid: None,
-                added_at: Some(JOURNAL_ADDED_AT.into()),
-            },
-        );
-        pre_disks.insert(
-            "disk2".to_owned(),
-            DiskMember::from_by_id(ByIdPath("/dev/disk/by-id/virtio-disk2".into())),
-        );
-        let pre = PoolMembership { disks: pre_disks };
-        let mut target_disks = BTreeMap::new();
-        target_disks.insert(
-            "disk1".to_owned(),
-            DiskMember::from_by_id(ByIdPath("/dev/disk/by-id/virtio-disk1".into())),
-        );
+        let pre = membership_from(vec![
+            membership_entry(
+                "disk1",
+                "/dev/disk/by-id/virtio-disk1",
+                Some(JOURNAL_ADDED_AT),
+                None,
+            ),
+            membership_entry("disk2", "/dev/disk/by-id/virtio-disk2", None, None),
+        ]);
+        let target = membership_from(vec![membership_entry(
+            "disk1",
+            "/dev/disk/by-id/virtio-disk1",
+            None,
+            None,
+        )]);
         let journal = journal::Journal {
             started_at: "2026-01-01T00:00:00Z".into(),
             op: OpKind::Remove {
-                name: "disk2".to_owned(),
+                luks_uuid: uuid_for_name("disk2"),
+                name: disk_name("disk2"),
             },
             pre_membership: pre,
-            target_membership: PoolMembership {
-                disks: target_disks,
-            },
+            target_membership: target,
         };
         journal::write_journal(&f.paths, &journal).unwrap();
 
@@ -11644,7 +11930,12 @@ mod tests {
 
         let recovered = membership::load_membership(&f.paths).unwrap();
         assert_eq!(
-            recovered.disks["disk1"].added_at.as_deref(),
+            recovered
+                .by_name(&disk_name("disk1"))
+                .expect("disk1 recovered")
+                .1
+                .added_at
+                .as_deref(),
             Some(JOURNAL_ADDED_AT)
         );
     }
@@ -11678,7 +11969,10 @@ mod tests {
         result.expect("recover should succeed");
 
         let recovered = membership::load_membership(&f.paths).unwrap();
-        let added_at = recovered.disks["disk1"]
+        let added_at = recovered
+            .by_name(&disk_name("disk1"))
+            .expect("disk1 recovered")
+            .1
             .added_at
             .as_deref()
             .expect("recover should stamp added_at");
@@ -11706,36 +12000,43 @@ mod tests {
         let fs = MockFs::new(&[]);
 
         let mut current = PoolMembership::empty();
-        current.disks.insert(
-            "disk1".to_owned(),
-            disk_member("/dev/disk/by-id/virtio-disk1", Some(POOL_JSON_ADDED_AT)),
-        );
+        current
+            .insert(
+                uuid_for_name("disk1"),
+                disk_member_named(
+                    "disk1",
+                    "/dev/disk/by-id/virtio-disk1",
+                    Some(POOL_JSON_ADDED_AT),
+                    None,
+                ),
+            )
+            .expect("insert current disk1");
         membership::save_membership(&current, &f.paths).unwrap();
 
-        let mut pre_disks = BTreeMap::new();
-        pre_disks.insert(
-            "disk1".to_owned(),
-            disk_member("/dev/disk/by-id/virtio-disk1", Some(POOL_JSON_ADDED_AT)),
-        );
-        let pre = PoolMembership { disks: pre_disks };
+        let pre = membership_from(vec![membership_entry(
+            "disk1",
+            "/dev/disk/by-id/virtio-disk1",
+            Some(POOL_JSON_ADDED_AT),
+            None,
+        )]);
+        let target = membership_from(vec![
+            membership_entry(
+                "disk1",
+                "/dev/disk/by-id/virtio-disk1",
+                Some(POOL_JSON_ADDED_AT),
+                None,
+            ),
+            membership_entry("disk2", "/dev/disk/by-id/virtio-disk2", None, None),
+        ]);
 
-        let mut target_disks = pre.disks.clone();
-        target_disks.insert(
+        let mut add_targets_by_name = BTreeMap::new();
+        add_targets_by_name.insert(
             "disk2".to_owned(),
-            DiskMember::from_by_id(ByIdPath("/dev/disk/by-id/virtio-disk2".into())),
-        );
-        let target = PoolMembership {
-            disks: target_disks,
-        };
-
-        let mut add_disks = BTreeMap::new();
-        add_disks.insert(
-            "disk2".to_owned(),
-            ByIdPath("/dev/disk/by-id/virtio-disk2".into()),
+            ByIdPath::parse("/dev/disk/by-id/virtio-disk2").unwrap(),
         );
         let journal = journal::Journal {
             started_at: "2026-01-01T00:00:00Z".into(),
-            op: add_op_from_disks(add_disks),
+            op: add_op_from_disks(add_targets_by_name),
             pre_membership: pre,
             target_membership: target,
         };
@@ -11793,10 +12094,18 @@ mod tests {
 
         let recovered = membership::load_membership(&f.paths).unwrap();
         assert_eq!(
-            recovered.disks["disk1"].added_at.as_deref(),
+            recovered
+                .by_name(&disk_name("disk1"))
+                .expect("disk1 recovered")
+                .1
+                .added_at
+                .as_deref(),
             Some(POOL_JSON_ADDED_AT)
         );
-        let disk2_added_at = recovered.disks["disk2"]
+        let disk2_added_at = recovered
+            .by_name(&disk_name("disk2"))
+            .expect("disk2 recovered")
+            .1
             .added_at
             .as_deref()
             .expect("new disk should be stamped");
@@ -11805,24 +12114,22 @@ mod tests {
 
     /// Bootstrap journal: pre_membership is empty, target has one disk.
     fn bootstrap_journal() -> journal::Journal {
-        let mut target_disks = BTreeMap::new();
-        target_disks.insert(
-            "disk1".to_owned(),
-            DiskMember::from_by_id(ByIdPath("/dev/disk/by-id/virtio-disk1".into())),
-        );
-        let target = PoolMembership {
-            disks: target_disks,
-        };
+        let target = membership_from(vec![membership_entry(
+            "disk1",
+            "/dev/disk/by-id/virtio-disk1",
+            None,
+            None,
+        )]);
 
-        let mut add_disks = BTreeMap::new();
-        add_disks.insert(
+        let mut add_targets_by_name = BTreeMap::new();
+        add_targets_by_name.insert(
             "disk1".to_owned(),
-            ByIdPath("/dev/disk/by-id/virtio-disk1".into()),
+            ByIdPath::parse("/dev/disk/by-id/virtio-disk1").unwrap(),
         );
 
         journal::Journal {
             started_at: "2026-01-01T00:00:00Z".into(),
-            op: add_op_from_disks(add_disks),
+            op: add_op_from_disks(add_targets_by_name),
             pre_membership: PoolMembership::empty(),
             target_membership: target,
         }
@@ -12334,11 +12641,23 @@ mod tests {
 
         let recovered = membership::load_membership(&f.paths).unwrap();
         assert_eq!(
-            recovered.disks["disk1"].by_id.0, "/dev/disk/by-id/wwn-0xAAAA",
+            recovered
+                .by_name(&disk_name("disk1"))
+                .unwrap()
+                .1
+                .by_id
+                .as_str(),
+            "/dev/disk/by-id/wwn-0xAAAA",
             "disk1 should resolve to highest-priority wwn-, not stale journal value"
         );
         assert_eq!(
-            recovered.disks["disk2"].by_id.0, "/dev/disk/by-id/wwn-0xBBBB",
+            recovered
+                .by_name(&disk_name("disk2"))
+                .unwrap()
+                .1
+                .by_id
+                .as_str(),
+            "/dev/disk/by-id/wwn-0xBBBB",
             "disk2 should resolve to highest-priority wwn-, not stale journal value"
         );
     }
@@ -12455,7 +12774,8 @@ mod tests {
         let resolved =
             resolve_by_id_for_underlying(&resolver, "/dev/sda").expect("resolution should succeed");
         assert_eq!(
-            resolved.0, "/dev/disk/by-id/wwn-X",
+            resolved.as_str(),
+            "/dev/disk/by-id/wwn-X",
             "wwn- has highest priority and must win"
         );
     }
@@ -12477,7 +12797,8 @@ mod tests {
         let resolved =
             resolve_by_id_for_underlying(&resolver, "/dev/sda").expect("resolution should succeed");
         assert_eq!(
-            resolved.0, "/dev/disk/by-id/ata-FOO",
+            resolved.as_str(),
+            "/dev/disk/by-id/ata-FOO",
             "partition entries must be filtered, leaving only the whole-disk by-id"
         );
     }
@@ -12488,21 +12809,20 @@ mod tests {
         names.iter().map(|s| s.to_string()).collect()
     }
 
-    fn ref_set(s: &std::collections::BTreeSet<String>) -> std::collections::BTreeSet<&String> {
-        s.iter().collect()
-    }
-
     #[test]
     fn guidance_add_completed() {
         let pre = set_of(&["disk1", "disk2"]);
         let target = set_of(&["disk1", "disk2", "disk3"]);
         let recovered = set_of(&["disk1", "disk2", "disk3"]);
-        let mut add_disks = BTreeMap::new();
-        add_disks.insert("disk3".to_owned(), ByIdPath("/dev/disk/by-id/x".into()));
-        let op = add_op_from_disks(add_disks);
+        let mut add_targets_by_name = BTreeMap::new();
+        add_targets_by_name.insert(
+            "disk3".to_owned(),
+            ByIdPath::parse("/dev/disk/by-id/x").unwrap(),
+        );
+        let op = add_op_from_disks(add_targets_by_name);
 
         assert_eq!(
-            recovery_guidance(&op, &ref_set(&pre), &ref_set(&target), &ref_set(&recovered)),
+            recovery_guidance(&op, &pre, &target, &recovered),
             "add completed -- 'disk3' now in the pool."
         );
     }
@@ -12512,12 +12832,15 @@ mod tests {
         let pre = set_of(&["disk1", "disk2"]);
         let target = set_of(&["disk1", "disk2", "disk3"]);
         let recovered = set_of(&["disk1", "disk2"]);
-        let mut add_disks = BTreeMap::new();
-        add_disks.insert("disk3".to_owned(), ByIdPath("/dev/disk/by-id/x".into()));
-        let op = add_op_from_disks(add_disks);
+        let mut add_targets_by_name = BTreeMap::new();
+        add_targets_by_name.insert(
+            "disk3".to_owned(),
+            ByIdPath::parse("/dev/disk/by-id/x").unwrap(),
+        );
+        let op = add_op_from_disks(add_targets_by_name);
 
         assert_eq!(
-            recovery_guidance(&op, &ref_set(&pre), &ref_set(&target), &ref_set(&recovered)),
+            recovery_guidance(&op, &pre, &target, &recovered),
             "add did not complete -- 'disk3' not in the pool. Re-run braid add to retry."
         );
     }
@@ -12528,11 +12851,12 @@ mod tests {
         let target = set_of(&["disk1"]);
         let recovered = set_of(&["disk1"]);
         let op = OpKind::Remove {
-            name: "toshiba".to_owned(),
+            luks_uuid: uuid_for_name("toshiba"),
+            name: disk_name("toshiba"),
         };
 
         assert_eq!(
-            recovery_guidance(&op, &ref_set(&pre), &ref_set(&target), &ref_set(&recovered)),
+            recovery_guidance(&op, &pre, &target, &recovered),
             "remove completed -- 'toshiba' is no longer in the pool."
         );
     }
@@ -12543,11 +12867,12 @@ mod tests {
         let target = set_of(&["disk1"]);
         let recovered = set_of(&["disk1", "toshiba"]);
         let op = OpKind::Remove {
-            name: "toshiba".to_owned(),
+            luks_uuid: uuid_for_name("toshiba"),
+            name: disk_name("toshiba"),
         };
 
         assert_eq!(
-            recovery_guidance(&op, &ref_set(&pre), &ref_set(&target), &ref_set(&recovered)),
+            recovery_guidance(&op, &pre, &target, &recovered),
             "remove did not complete -- 'toshiba' is still in the pool. Re-run braid remove to retry."
         );
     }
@@ -12564,7 +12889,7 @@ mod tests {
         };
 
         assert_eq!(
-            recovery_guidance(&op, &ref_set(&pre), &ref_set(&target), &ref_set(&recovered)),
+            recovery_guidance(&op, &pre, &target, &recovered),
             "remove-missing completed -- missing device removed from the pool."
         );
     }
@@ -12581,7 +12906,7 @@ mod tests {
         };
 
         assert_eq!(
-            recovery_guidance(&op, &ref_set(&pre), &ref_set(&target), &ref_set(&recovered)),
+            recovery_guidance(&op, &pre, &target, &recovered),
             "remove-missing did not complete -- device still in the pool. Re-run braid remove-missing to retry."
         );
     }
@@ -12593,13 +12918,13 @@ mod tests {
         let recovered = set_of(&["disk1", "new"]);
         let op = OpKind::Replace {
             phase: journal::ReplacePhase::PoolMutation,
-            old_name: "old".to_owned(),
-            new_name: "new".to_owned(),
+            old_uuid: uuid_for_name("old"),
+            old_name: disk_name("old"),
+            new_uuid: uuid_for_name("new"),
+            new_name: disk_name("new"),
             new_target: journal::ReplaceJournalTarget {
-                by_id: ByIdPath("/dev/disk/by-id/x".into()),
-                mapper_name: "braid-new".into(),
+                by_id: ByIdPath::parse("/dev/disk/by-id/x").unwrap(),
                 mode: journal::ReplaceJournalMode::ExistingLuks {
-                    luks_uuid: LuksUuid("44444444-4444-4444-4444-444444444444".into()),
                     enroll_key_file: None,
                 },
             },
@@ -12611,7 +12936,7 @@ mod tests {
         };
 
         assert_eq!(
-            recovery_guidance(&op, &ref_set(&pre), &ref_set(&target), &ref_set(&recovered)),
+            recovery_guidance(&op, &pre, &target, &recovered),
             "replace completed -- 'old' replaced by 'new'."
         );
     }
@@ -12623,13 +12948,13 @@ mod tests {
         let recovered = set_of(&["disk1", "old"]);
         let op = OpKind::Replace {
             phase: journal::ReplacePhase::PoolMutation,
-            old_name: "old".to_owned(),
-            new_name: "new".to_owned(),
+            old_uuid: uuid_for_name("old"),
+            old_name: disk_name("old"),
+            new_uuid: uuid_for_name("new"),
+            new_name: disk_name("new"),
             new_target: journal::ReplaceJournalTarget {
-                by_id: ByIdPath("/dev/disk/by-id/x".into()),
-                mapper_name: "braid-new".into(),
+                by_id: ByIdPath::parse("/dev/disk/by-id/x").unwrap(),
                 mode: journal::ReplaceJournalMode::ExistingLuks {
-                    luks_uuid: LuksUuid("44444444-4444-4444-4444-444444444444".into()),
                     enroll_key_file: None,
                 },
             },
@@ -12641,7 +12966,7 @@ mod tests {
         };
 
         assert_eq!(
-            recovery_guidance(&op, &ref_set(&pre), &ref_set(&target), &ref_set(&recovered)),
+            recovery_guidance(&op, &pre, &target, &recovered),
             "replace did not complete -- pool still has 'old'. Re-run braid replace to retry."
         );
     }
@@ -12651,12 +12976,15 @@ mod tests {
         let pre = set_of(&["disk1", "disk2"]);
         let target = set_of(&["disk1", "disk2", "disk3"]);
         let recovered = set_of(&["disk1", "disk3"]);
-        let mut add_disks = BTreeMap::new();
-        add_disks.insert("disk3".to_owned(), ByIdPath("/dev/disk/by-id/x".into()));
-        let op = add_op_from_disks(add_disks);
+        let mut add_targets_by_name = BTreeMap::new();
+        add_targets_by_name.insert(
+            "disk3".to_owned(),
+            ByIdPath::parse("/dev/disk/by-id/x").unwrap(),
+        );
+        let op = add_op_from_disks(add_targets_by_name);
 
         assert_eq!(
-            recovery_guidance(&op, &ref_set(&pre), &ref_set(&target), &ref_set(&recovered)),
+            recovery_guidance(&op, &pre, &target, &recovered),
             "pool membership does not match the pre-operation or target state. \
              Run braid status and decide whether to re-run the operation."
         );
@@ -12669,41 +12997,26 @@ mod tests {
     /// (the live pool reports {disk1, new} on the new mapper) but shutdown hit
     /// before braid could re-issue `pool_resize_device`.
     fn replace_journal() -> journal::Journal {
-        let mut pre_disks = BTreeMap::new();
-        pre_disks.insert(
-            "disk1".to_owned(),
-            DiskMember::from_by_id(ByIdPath("/dev/disk/by-id/virtio-disk1".into())),
-        );
-        pre_disks.insert(
-            "old".to_owned(),
-            DiskMember::from_by_id(ByIdPath("/dev/disk/by-id/virtio-old".into())),
-        );
-        let pre = PoolMembership { disks: pre_disks };
-
-        let mut target_disks = BTreeMap::new();
-        target_disks.insert(
-            "disk1".to_owned(),
-            DiskMember::from_by_id(ByIdPath("/dev/disk/by-id/virtio-disk1".into())),
-        );
-        target_disks.insert(
-            "new".to_owned(),
-            DiskMember::from_by_id(ByIdPath("/dev/disk/by-id/virtio-new".into())),
-        );
-        let target = PoolMembership {
-            disks: target_disks,
-        };
+        let pre = membership_from(vec![
+            membership_entry("disk1", "/dev/disk/by-id/virtio-disk1", None, None),
+            membership_entry("old", "/dev/disk/by-id/virtio-old", None, None),
+        ]);
+        let target = membership_from(vec![
+            membership_entry("disk1", "/dev/disk/by-id/virtio-disk1", None, None),
+            membership_entry("new", "/dev/disk/by-id/virtio-new", None, None),
+        ]);
 
         journal::Journal {
             started_at: "2026-01-01T00:00:00Z".into(),
             op: OpKind::Replace {
                 phase: journal::ReplacePhase::PoolMutation,
-                old_name: "old".to_owned(),
-                new_name: "new".to_owned(),
+                old_uuid: uuid_for_name("old"),
+                old_name: disk_name("old"),
+                new_uuid: uuid_for_name("new"),
+                new_name: disk_name("new"),
                 new_target: journal::ReplaceJournalTarget {
-                    by_id: ByIdPath("/dev/disk/by-id/virtio-new".into()),
-                    mapper_name: "braid-new".into(),
+                    by_id: ByIdPath::parse("/dev/disk/by-id/virtio-new").unwrap(),
                     mode: journal::ReplaceJournalMode::ExistingLuks {
-                        luks_uuid: LuksUuid("44444444-4444-4444-4444-444444444444".into()),
                         enroll_key_file: None,
                     },
                 },
@@ -12750,11 +13063,9 @@ mod tests {
             unreachable!("replace_journal returns Replace");
         };
         *new_target = journal::ReplaceJournalTarget {
-            by_id: ByIdPath("/dev/disk/by-id/virtio-new".into()),
-            mapper_name: "braid-new".into(),
+            by_id: ByIdPath::parse("/dev/disk/by-id/virtio-new").unwrap(),
             mode: journal::ReplaceJournalMode::FreshLuks {
-                luks_label: "braid-new".into(),
-                luks_format_extra_opts: vec!["--label".into(), "braid-new".into()],
+                extra_opts: LuksFormatExtraOpts::default(),
                 enroll_key_file: Some(enroll_key_file),
             },
         };
@@ -13118,8 +13429,8 @@ mod tests {
                 CmdRequest::BtrfsDeviceScanForget {
                     devices: vec![
                         "/dev/mapper/braid-disk1".into(),
-                        "/dev/mapper/braid-new".into(),
                         "/dev/mapper/braid-old".into(),
+                        "/dev/mapper/braid-new".into(),
                     ],
                 },
                 ok_raw_empty("btrfs device scan --forget"),
@@ -13240,11 +13551,12 @@ mod tests {
 
         let recovered = membership::load_membership(&f.paths).unwrap();
         assert!(
-            recovered.disks.contains_key("disk1") && recovered.disks.contains_key("new"),
+            recovered.by_name(&disk_name("disk1")).is_some()
+                && recovered.by_name(&disk_name("new")).is_some(),
             "recovered membership should match the post-replace target"
         );
         assert!(
-            !recovered.disks.contains_key("old"),
+            !recovered.by_name(&disk_name("old")).is_some(),
             "old disk must not appear in the post-replace membership"
         );
 
@@ -13375,8 +13687,8 @@ mod tests {
         result.expect("recover should succeed and resume the paused balance");
 
         let recovered = membership::load_membership(&f.paths).unwrap();
-        assert!(recovered.disks.contains_key("disk1"));
-        assert!(recovered.disks.contains_key("disk2"));
+        assert!(recovered.by_name(&disk_name("disk1")).is_some());
+        assert!(recovered.by_name(&disk_name("disk2")).is_some());
 
         assert!(
             !f.paths.pending_op_json().exists(),
@@ -13389,30 +13701,22 @@ mod tests {
     /// pre-remove `pool_balance_single`, so the live pool still has both
     /// disks but the kernel has a paused convert-to-single balance.
     fn remove_2to1_journal() -> journal::Journal {
-        let mut pre_disks = BTreeMap::new();
-        pre_disks.insert(
-            "disk1".to_owned(),
-            DiskMember::from_by_id(ByIdPath("/dev/disk/by-id/virtio-disk1".into())),
-        );
-        pre_disks.insert(
-            "disk2".to_owned(),
-            DiskMember::from_by_id(ByIdPath("/dev/disk/by-id/virtio-disk2".into())),
-        );
-        let pre = PoolMembership { disks: pre_disks };
-
-        let mut target_disks = BTreeMap::new();
-        target_disks.insert(
-            "disk1".to_owned(),
-            DiskMember::from_by_id(ByIdPath("/dev/disk/by-id/virtio-disk1".into())),
-        );
-        let target = PoolMembership {
-            disks: target_disks,
-        };
+        let pre = membership_from(vec![
+            membership_entry("disk1", "/dev/disk/by-id/virtio-disk1", None, None),
+            membership_entry("disk2", "/dev/disk/by-id/virtio-disk2", None, None),
+        ]);
+        let target = membership_from(vec![membership_entry(
+            "disk1",
+            "/dev/disk/by-id/virtio-disk1",
+            None,
+            None,
+        )]);
 
         journal::Journal {
             started_at: "2026-01-01T00:00:00Z".into(),
             op: OpKind::Remove {
-                name: "disk2".to_owned(),
+                luks_uuid: uuid_for_name("disk2"),
+                name: disk_name("disk2"),
             },
             pre_membership: pre,
             target_membership: target,
@@ -13505,7 +13809,8 @@ mod tests {
 
         let recovered = membership::load_membership(&f.paths).unwrap();
         assert!(
-            recovered.disks.contains_key("disk1") && recovered.disks.contains_key("disk2"),
+            recovered.by_name(&disk_name("disk1")).is_some()
+                && recovered.by_name(&disk_name("disk2")).is_some(),
             "recovered membership must reflect the live pool (both disks still present)"
         );
 
@@ -13520,32 +13825,25 @@ mod tests {
     /// recover-guard tests so the missing_devids check (which keys off
     /// `pre_membership.disks[name].devid`) has the value it needs.
     fn remove_2to1_journal_with_target_devid() -> journal::Journal {
-        let mut pre_disks = BTreeMap::new();
-        pre_disks.insert(
-            "disk1".to_owned(),
-            disk_member_with_devid("/dev/disk/by-id/virtio-disk1", 1),
-        );
-        pre_disks.insert(
-            "disk2".to_owned(),
-            disk_member_with_devid("/dev/disk/by-id/virtio-disk2", 2),
-        );
-        let pre = PoolMembership { disks: pre_disks };
-
-        let mut target_disks = BTreeMap::new();
-        target_disks.insert(
-            "disk1".to_owned(),
-            disk_member_with_devid("/dev/disk/by-id/virtio-disk1", 1),
-        );
+        let pre = membership_from(vec![
+            membership_entry("disk1", "/dev/disk/by-id/virtio-disk1", None, Some(1)),
+            membership_entry("disk2", "/dev/disk/by-id/virtio-disk2", None, Some(2)),
+        ]);
+        let target = membership_from(vec![membership_entry(
+            "disk1",
+            "/dev/disk/by-id/virtio-disk1",
+            None,
+            Some(1),
+        )]);
 
         journal::Journal {
             started_at: "2026-01-01T00:00:00Z".into(),
             op: OpKind::Remove {
-                name: "disk2".to_owned(),
+                luks_uuid: uuid_for_name("disk2"),
+                name: disk_name("disk2"),
             },
             pre_membership: pre,
-            target_membership: PoolMembership {
-                disks: target_disks,
-            },
+            target_membership: target,
         }
     }
 
@@ -13802,14 +14100,14 @@ mod tests {
 
         let recovered = membership::load_membership(&f.paths).unwrap();
         assert!(
-            recovered.disks.contains_key("disk1"),
+            recovered.by_name(&disk_name("disk1")).is_some(),
             "recovered membership must keep disk1: {:?}",
-            recovered.disks.keys().collect::<Vec<_>>()
+            membership_name_list(&recovered)
         );
         assert!(
-            recovered.disks.contains_key("disk2"),
+            recovered.by_name(&disk_name("disk2")).is_some(),
             "recovered membership must keep disk2 (null-underlying): {:?}",
-            recovered.disks.keys().collect::<Vec<_>>()
+            membership_name_list(&recovered)
         );
         assert!(
             !f.paths.pending_op_json().exists(),
@@ -13870,14 +14168,14 @@ mod tests {
 
         let recovered = membership::load_membership(&f.paths).unwrap();
         assert!(
-            recovered.disks.contains_key("disk1"),
+            recovered.by_name(&disk_name("disk1")).is_some(),
             "recovered membership must keep disk1: {:?}",
-            recovered.disks.keys().collect::<Vec<_>>()
+            membership_name_list(&recovered)
         );
         assert!(
-            recovered.disks.contains_key("disk2"),
+            recovered.by_name(&disk_name("disk2")).is_some(),
             "recovered membership must keep disk2 (btrfs MISSING): {:?}",
-            recovered.disks.keys().collect::<Vec<_>>()
+            membership_name_list(&recovered)
         );
         assert!(
             !f.paths.pending_op_json().exists(),
@@ -13903,40 +14201,24 @@ mod tests {
     /// for the broadened OpKind::Remove guard which must preserve any
     /// pre_membership disk that btrfs still owns -- not just the target.
     fn remove_3to2_journal_with_devids() -> journal::Journal {
-        let mut pre_disks = BTreeMap::new();
-        pre_disks.insert(
-            "disk1".to_owned(),
-            disk_member_with_devid("/dev/disk/by-id/virtio-disk1", 1),
-        );
-        pre_disks.insert(
-            "disk2".to_owned(),
-            disk_member_with_devid("/dev/disk/by-id/virtio-disk2", 2),
-        );
-        pre_disks.insert(
-            "disk3".to_owned(),
-            disk_member_with_devid("/dev/disk/by-id/virtio-disk3", 3),
-        );
-        let pre = PoolMembership { disks: pre_disks };
-
-        let mut target_disks = BTreeMap::new();
-        target_disks.insert(
-            "disk1".to_owned(),
-            disk_member_with_devid("/dev/disk/by-id/virtio-disk1", 1),
-        );
-        target_disks.insert(
-            "disk3".to_owned(),
-            disk_member_with_devid("/dev/disk/by-id/virtio-disk3", 3),
-        );
+        let pre = membership_from(vec![
+            membership_entry("disk1", "/dev/disk/by-id/virtio-disk1", None, Some(1)),
+            membership_entry("disk2", "/dev/disk/by-id/virtio-disk2", None, Some(2)),
+            membership_entry("disk3", "/dev/disk/by-id/virtio-disk3", None, Some(3)),
+        ]);
+        let target = membership_from(vec![
+            membership_entry("disk1", "/dev/disk/by-id/virtio-disk1", None, Some(1)),
+            membership_entry("disk3", "/dev/disk/by-id/virtio-disk3", None, Some(3)),
+        ]);
 
         journal::Journal {
             started_at: "2026-01-01T00:00:00Z".into(),
             op: OpKind::Remove {
-                name: "disk2".to_owned(),
+                luks_uuid: uuid_for_name("disk2"),
+                name: disk_name("disk2"),
             },
             pre_membership: pre,
-            target_membership: PoolMembership {
-                disks: target_disks,
-            },
+            target_membership: target,
         }
     }
 
@@ -14015,13 +14297,13 @@ mod tests {
         result.expect("recover should succeed and preserve non-target MISSING");
 
         let recovered = membership::load_membership(&f.paths).unwrap();
-        assert!(recovered.disks.contains_key("disk1"));
+        assert!(recovered.by_name(&disk_name("disk1")).is_some());
         assert!(
-            recovered.disks.contains_key("disk2"),
+            recovered.by_name(&disk_name("disk2")).is_some(),
             "target disk2 must be preserved (still in pool.devices)"
         );
         assert!(
-            recovered.disks.contains_key("disk3"),
+            recovered.by_name(&disk_name("disk3")).is_some(),
             "non-target MISSING disk3 must be preserved by the broadened guard"
         );
         assert!(!f.paths.pending_op_json().exists());
@@ -14106,10 +14388,10 @@ mod tests {
         result.expect("recover should succeed and preserve non-target null-underlying");
 
         let recovered = membership::load_membership(&f.paths).unwrap();
-        assert!(recovered.disks.contains_key("disk1"));
-        assert!(recovered.disks.contains_key("disk2"));
+        assert!(recovered.by_name(&disk_name("disk1")).is_some());
+        assert!(recovered.by_name(&disk_name("disk2")).is_some());
         assert!(
-            recovered.disks.contains_key("disk3"),
+            recovered.by_name(&disk_name("disk3")).is_some(),
             "non-target null-underlying disk3 must be preserved by the broadened guard"
         );
         assert!(!f.paths.pending_op_json().exists());
@@ -14178,13 +14460,13 @@ mod tests {
         result.expect("recover should succeed when non-target is genuinely gone");
 
         let recovered = membership::load_membership(&f.paths).unwrap();
-        assert!(recovered.disks.contains_key("disk1"));
+        assert!(recovered.by_name(&disk_name("disk1")).is_some());
         assert!(
-            recovered.disks.contains_key("disk2"),
+            recovered.by_name(&disk_name("disk2")).is_some(),
             "target disk2 must be preserved (still in pool.devices)"
         );
         assert!(
-            !recovered.disks.contains_key("disk3"),
+            !recovered.by_name(&disk_name("disk3")).is_some(),
             "genuinely gone non-target disk3 must NOT be resurrected"
         );
         assert!(!f.paths.pending_op_json().exists());
@@ -14207,14 +14489,14 @@ mod tests {
 
         let recovered = membership::load_membership(&f.paths).unwrap();
         assert!(
-            recovered.disks.contains_key("disk1"),
+            recovered.by_name(&disk_name("disk1")).is_some(),
             "recovered membership must keep disk1: {:?}",
-            recovered.disks.keys().collect::<Vec<_>>()
+            membership_name_list(&recovered)
         );
         assert!(
-            !recovered.disks.contains_key("disk2"),
+            !recovered.by_name(&disk_name("disk2")).is_some(),
             "recovered membership must drop genuinely evicted disk2: {:?}",
-            recovered.disks.keys().collect::<Vec<_>>()
+            membership_name_list(&recovered)
         );
         assert!(
             !f.paths.pending_op_json().exists(),
@@ -14957,7 +15239,7 @@ mod tests {
         );
         assert!(
             disk2_block.contains(
-                "$ cryptsetup luksFormat --type luks2 --batch-mode '--key-file=-' --label braid-disk2 /dev/disk/by-id/virtio-disk2"
+                "$ cryptsetup luksFormat --type luks2 --batch-mode '--key-file=-' --uuid 22222222-2222-2222-2222-222222222222 --label braid-disk2 /dev/disk/by-id/virtio-disk2"
             ) && disk2_block.contains("$ cryptsetup luksHeaderBackup --header-backup-file")
                 && disk2_block.contains("braid-disk2.luksheader /dev/disk/by-id/virtio-disk2")
                 && disk2_block.contains(
@@ -15011,9 +15293,9 @@ mod tests {
         );
         assert!(
             rendered.contains(
-                "LUKS open /dev/disk/by-id/virtio-disk1 → braid-disk1 (recover remount cycle)"
+                "LUKS open /dev/disk/by-id/virtio-disk1 -> braid-disk1 (recover remount cycle)"
             ) && rendered.contains(
-                "LUKS open /dev/disk/by-id/virtio-new → braid-new (recover remount cycle)"
+                "LUKS open /dev/disk/by-id/virtio-new -> braid-new (recover remount cycle)"
             ),
             "missing cycle reopen steps: {rendered:?}",
         );
@@ -15171,7 +15453,7 @@ mod tests {
 
         assert!(
             rendered.contains(
-                "$ btrfs device scan --forget /dev/mapper/braid-disk1 /dev/mapper/braid-new /dev/mapper/braid-old"
+                "$ btrfs device scan --forget /dev/mapper/braid-disk1 /dev/mapper/braid-old /dev/mapper/braid-new"
             ),
             "scan --forget should include absent-but-open old mapper: {rendered:?}",
         );

@@ -18,6 +18,17 @@
 
 import json
 
+
+def member_names(pool):
+    return {member["name"] for member in pool["disks"].values()}
+
+
+def member(pool, name):
+    for entry in pool["disks"].values():
+        if entry["name"] == name:
+            return entry
+    raise AssertionError(f"{name} missing from pool.json: {pool}")
+
 start_all()
 machine.wait_for_unit("multi-user.target")
 
@@ -108,8 +119,8 @@ with subtest("Data intact after replace"):
 
 with subtest("Pool membership updated after replace"):
     pm = read_pool()
-    assert "disk1" not in pm["disks"], f"disk1 still in pool: {pm}"
-    assert "disk3" in pm["disks"], f"disk3 missing from pool: {pm}"
-    assert "disk2" in pm["disks"], f"disk2 missing from pool: {pm}"
+    assert "disk1" not in member_names(pm), f"disk1 still in pool: {pm}"
+    assert "disk3" in member_names(pm), f"disk3 missing from pool: {pm}"
+    assert "disk2" in member_names(pm), f"disk2 missing from pool: {pm}"
 
 machine.shutdown()

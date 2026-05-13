@@ -14,6 +14,26 @@
 # uninitialized disk.
 
 import json
+
+
+def member_names(pool):
+    return {member["name"] for member in pool["disks"].values()}
+
+
+def member(pool, name):
+    for entry in pool["disks"].values():
+        if entry["name"] == name:
+            return entry
+    raise AssertionError(f"{name} missing from pool.json: {pool}")
+
+
+def member_uuid(pool, name):
+    for uuid, entry in pool["disks"].items():
+        if entry["name"] == name:
+            return uuid
+    raise AssertionError(f"{name} missing from pool.json: {pool}")
+
+
 import shlex
 
 start_all()
@@ -287,18 +307,17 @@ with subtest("Test 2b: unlock enriches pool.json with runtime metadata"):
     machine.succeed(unlock_cmd(passphrase))
     machine.succeed("mountpoint -q /mnt/storage")
 
-    # Verify pool.json has enriched fields for all 3 disks
+    # Verify pool.json has UUID-keyed entries and runtime metadata for all 3 disks
     pool_raw = machine.succeed("cat /var/lib/braid/pool.json")
     pool_m = json.loads(pool_raw)
 
-    assert set(pool_m["disks"].keys()) == {"disk1", "disk2", "disk3"}, \
-        f"Expected 3 disks in pool.json, got: {set(pool_m['disks'].keys())}"
+    assert member_names(pool_m) == {"disk1", "disk2", "disk3"}, \
+        f"Expected 3 disks in pool.json, got: {member_names(pool_m)}"
 
-    # Enriched fields must be present and non-null
     for name in ["disk1", "disk2", "disk3"]:
-        entry = pool_m["disks"][name]
-        assert entry.get("luks_uuid") is not None, \
-            f"{name}.luks_uuid should not be None after unlock: {entry}"
+        entry = member(pool_m, name)
+        assert member_uuid(pool_m, name), \
+            f"{name} UUID key should not be empty after unlock: {pool_m}"
         assert entry.get("devid") is not None, \
             f"{name}.devid should not be None after unlock: {entry}"
 
@@ -471,10 +490,18 @@ with subtest("Test 7: uninitialized disk detected — degraded-refused enumerate
 
     # Two-disk pool: disk1 is real (already LUKS-formatted), 'raw' is
     # virtio-disk4 which has never been braid add'd.
+    original = json.loads(original_pool)
+    disk1_uuid = member_uuid(original, "disk1")
     mixed_pool = json.dumps({
         "disks": {
-            "disk1": {"by_id": "/dev/disk/by-id/virtio-disk1"},
-            "raw":   {"by_id": "/dev/disk/by-id/virtio-disk4"},
+            disk1_uuid: {
+                "name": "disk1",
+                "by_id": "/dev/disk/by-id/virtio-disk1",
+            },
+            "44444444-4444-4444-4444-444444444444": {
+                "name": "raw",
+                "by_id": "/dev/disk/by-id/virtio-disk4",
+            },
         },
     })
     machine.succeed(f"echo '{mixed_pool}' > /var/lib/braid/pool.json")

@@ -393,7 +393,9 @@ fn summarize_declared_disks(classifications: &[(String, String, DiskState)]) -> 
 fn check_declared_disks<R: CommandRunner>(ctx: &mut DoctorContext<'_, R>) -> CheckResult {
     let pool_membership = match membership::load_membership(ctx.paths) {
         Ok(m) => m,
-        Err(membership::MembershipError::NotFound(_)) => {
+        Err(membership::MembershipError::Io { source, .. })
+            if source.kind() == std::io::ErrorKind::NotFound =>
+        {
             return CheckResult::skip("declared_disks", "skipped (no pool membership file)");
         }
         Err(e) => {
@@ -404,13 +406,14 @@ fn check_declared_disks<R: CommandRunner>(ctx: &mut DoctorContext<'_, R>) -> Che
         }
     };
 
-    let classifications: Vec<(String, String, DiskState)> = pool_membership
-        .disks
-        .iter()
-        .map(|(name, member)| {
-            let by_id = member.by_id.0.clone();
+    let mut members: Vec<_> = pool_membership.iter().map(|(_, member)| member).collect();
+    members.sort_by(|a, b| a.name.cmp(&b.name));
+    let classifications: Vec<(String, String, DiskState)> = members
+        .into_iter()
+        .map(|member| {
+            let by_id = member.by_id.as_str().to_owned();
             let state = classify_disk_state(ctx.runner, Path::new(&by_id));
-            (name.clone(), by_id, state)
+            (member.name.as_str().to_owned(), by_id, state)
         })
         .collect();
 

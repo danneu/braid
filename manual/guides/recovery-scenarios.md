@@ -13,7 +13,7 @@ braid has two recovery commands that solve different problems:
 | `braid discover --write` | pool.json is missing or corrupted | Scans disk labels to rebuild pool.json |
 | `braid recover` | pending-op.json exists (interrupted mutation) | Opens pool, probes live topology, rebuilds pool.json, clears journal |
 
-**discover** solves metadata loss -- the CLI's record of which disks belong to the pool is gone, but the disks themselves are fine. It reads LUKS labels (`braid-<name>`) from `/dev/disk/by-id/` devices to reconstruct membership.
+**discover** solves metadata loss -- the CLI's record of which disks belong to the pool is gone, but the disks themselves are fine. It reads LUKS labels (`braid-<name>`) and LUKS UUIDs from `/dev/disk/by-id/` devices to reconstruct UUID-keyed membership.
 
 **recover** solves interrupted operations -- an `add`, `remove`, `remove-missing`, or `replace` was killed mid-flight (power loss, crash, OOM). The pending-operation journal (`/var/lib/braid/pending-op.json`) records what was in progress. Recover opens the pool, inspects what actually happened on disk, and rebuilds pool.json to match reality.
 
@@ -54,6 +54,14 @@ sudo braid discover --write
 
 This creates `/var/lib/braid/pool.json`.
 
+During a single-user cutover from an old state file, record the old member
+count first and pass it as a fail-closed guard:
+
+```sh
+EXPECTED=$(jq '.disks | length' /var/lib/braid/pool.json.old)
+sudo braid discover --write --expect-count="$EXPECTED"
+```
+
 4. Unlock normally:
 
 ```sh
@@ -65,6 +73,7 @@ sudo braid unlock
 - `discover` refuses to run if pool.json already exists. Remove it first if it exists but is wrong.
 - `discover` refuses to run if pending-op.json exists. Use `braid recover` instead.
 - `discover` only finds LUKS2 devices. LUKS1 devices with braid labels are skipped with a warning.
+- The rebuilt `pool.json` is keyed by LUKS UUID. Disk names are stored in each member value for command input and display.
 - When multiple `/dev/disk/by-id/` symlinks point to the same device, discover picks the most stable one (wwn > nvme > scsi > ata > usb).
 
 ## Interrupted add/remove/replace
@@ -120,6 +129,47 @@ Recover replays the add from the journaled returned-disk target. Do not wipe the
 For an interrupted fresh-disk add, recover replays the format, optional keyfile enrollment, LUKS header backup, mapper open, and `btrfs device add` from the journaled options when the disk is present.
 
 If the disk is absent or has a different LUKS label than the journal records, recover fails and leaves `pending-op.json` in place. Reconnect the original disk or replace the target, then rerun `sudo braid recover`.
+
+## Pending-op file corruption
+
+**Symptom:** braid reports that `/var/lib/braid/pending-op.json` could not be parsed.
+
+The remediation phrase is:
+
+`Remove /var/lib/braid/pending-op.json after manual reconciliation (see docs/luks-unlock.md) and re-run.`
+
+It is safe to remove `pending-op.json` only when one of these is true:
+
+| Situation | Safe? |
+| --- | --- |
+| No disk-level mutation committed: no LUKS format, no `btrfs device add`, no cryptsetup open of a fresh-format target | Yes |
+| `braid status` confirms the live pool already reflects the intended state and the journal is stale | Yes |
+| A mutation is partially complete, such as `mkfs.btrfs` run but `btrfs device add` did not, or `replace` is paused mid-rebuild | No |
+
+When it is not safe, keep the journal in place and investigate the interrupted operation before editing state.
+
+## Out-of-band reformat during recovery
+
+Recover refuses if a target disk's live LUKS UUID no longer matches the journal. This catches a disk that was reformatted, swapped, or cloned after the original operation started.
+
+Messages to search for:
+
+- `add recovery aborted: target ... LUKS UUID mismatch`
+- `recover replace target '...' LUKS UUID mismatch: expected ..., found ...`
+
+Do not force the journal forward. Investigate the foreign reformat or swapped disk, restore the intended disk if possible, and rerun recovery.
+
+## Never-enriched member with null-underlying mapper
+
+A member can be known to btrfs by devid while its LUKS backing device is gone (`cryptsetup status` reports `device: (null)`). If the member was never enriched with a persisted devid, recovery cannot bind that null-underlying mapper back to a UUID-keyed membership entry.
+
+Let `braid recover` complete when it can preserve the member. The next read-side command observes the live devid and `braid remove-missing` becomes available again if the device is truly gone.
+
+## Duplicate or missing devid in journal snapshot
+
+Recovery may refuse with internal errors equivalent to duplicate journaled devids or no member for a journaled devid. This means the journal snapshot cannot safely resolve a btrfs devid to a UUID-keyed member.
+
+Do not edit `pool.json`; that resolution did not consult it. Re-run recovery only after manual reconciliation of `pending-op.json`.
 
 ### Committed-but-closed add target
 
@@ -267,8 +317,8 @@ All state lives under `/var/lib/braid/`:
 
 | File | Purpose |
 | --- | --- |
-| `pool.json` | Pool membership (disk names and by-id paths) |
-| `pending-op.json` | Pending operation journal (present only during mutations) |
+| `pool.json` | UUID-keyed pool membership; each value stores disk name, by-id path, prior devid, and added-at timestamp |
+| `pending-op.json` | UUID-keyed pending operation journal (present only during mutations) |
 | `acked-stats.json` | Acknowledged btrfs device stats baseline |
 | `smartd-alert` | Flag file set by smartd alert script |
 | `alert-latch.json` | Active alert state |

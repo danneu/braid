@@ -11,14 +11,24 @@
 # Scenario: Admin holds the pool operation lock with one recovery action, then
 # runs `braid discover --write` or diagnostic `braid discover` from another
 # shell against a host with a discoverable braid-labeled LUKS disk. Both
-# commands should fail at the wrapper lock and leave pool.json absent.
+# commands should fail at the wrapper lock and leave the existing UUID-keyed
+# pool.json bytes unchanged.
+
+import json
 
 start_all()
 machine.wait_for_unit("multi-user.target", timeout=120)
 
-with subtest("Precondition: discoverable disk with no pool.json"):
+with subtest("Precondition: discover writes UUID-keyed pool.json"):
     machine.succeed("test ! -e /var/lib/braid/pool.json")
     machine.succeed("test -L /dev/disk/by-id/virtio-disk1")
+    machine.succeed("braid discover --write --expect-count 1")
+    pool_before = machine.succeed("cat /var/lib/braid/pool.json")
+    pool = json.loads(pool_before)
+    assert set(pool["disks"].keys()) == {
+        "11111111-1111-1111-1111-111111111111"
+    }, pool_before
+    assert pool["disks"]["11111111-1111-1111-1111-111111111111"]["name"] == "disk1"
 
 with subtest("braid discover fails fast when pool lock is held"):
     holder_pid = machine.succeed(
@@ -31,13 +41,13 @@ with subtest("braid discover fails fast when pool lock is held"):
     locks = machine.succeed("cat /proc/locks")
     assert "FLOCK" in locks, "no flock in /proc/locks: " + locks
 
-    rc, out = machine.execute("timeout 5 braid discover --write 2>&1")
+    rc, out = machine.execute("timeout 5 braid discover --write --expect-count 1 2>&1")
     assert rc != 0, "expected discover --write to fail; out=" + out
     assert rc != 124, "discover --write hung past 5s cap; out=" + out
     assert "another braid operation is already in progress" in out, (
         "expected contention message; out=" + out
     )
-    machine.fail("test -e /var/lib/braid/pool.json")
+    assert machine.succeed("cat /var/lib/braid/pool.json") == pool_before
 
     rc, out = machine.execute("timeout 5 braid discover 2>&1")
     assert rc != 0, "expected discover to fail; out=" + out
@@ -45,10 +55,11 @@ with subtest("braid discover fails fast when pool lock is held"):
     assert "another braid operation is already in progress" in out, (
         "expected contention message; out=" + out
     )
+    assert machine.succeed("cat /var/lib/braid/pool.json") == pool_before
 
     machine.execute(f"kill {holder_pid} 2>/dev/null || true")
     machine.wait_until_succeeds("flock -n /run/braid-pool.lock true", timeout=10)
 
 with subtest("discover succeeds after lock release"):
-    machine.succeed("braid discover --write")
+    machine.succeed("braid discover --write --expect-count 1")
     machine.succeed("test -e /var/lib/braid/pool.json")

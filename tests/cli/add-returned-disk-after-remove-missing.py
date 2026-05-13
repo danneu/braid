@@ -12,6 +12,17 @@
 # disk3 should succeed, preserve data, update pool.json, and leave no journal.
 
 import json
+
+
+def member_names(pool):
+    return {member["name"] for member in pool["disks"].values()}
+
+
+def member(pool, name):
+    for entry in pool["disks"].values():
+        if entry["name"] == name:
+            return entry
+    raise AssertionError(f"{name} missing from pool.json: {pool}")
 import shlex
 
 start_all()
@@ -62,7 +73,7 @@ with subtest("Make disk3 missing and remove it from btrfs membership"):
     assert "/dev/mapper/braid-disk3" not in fi_show, f"disk3 still live:\n{fi_show}"
 
     pool_json = json.loads(machine.succeed("cat /var/lib/braid/pool.json"))
-    assert "disk3" not in pool_json["disks"], f"disk3 still in pool.json: {pool_json}"
+    assert "disk3" not in member_names(pool_json), f"disk3 still in pool.json: {pool_json}"
 
 
 with subtest("Returned disk3 re-adds without manual wiping"):
@@ -73,7 +84,7 @@ with subtest("Returned disk3 re-adds without manual wiping"):
     assert "missing" not in fi_show.lower(), f"pool still degraded after re-add:\n{fi_show}"
 
     pool_json = json.loads(machine.succeed("cat /var/lib/braid/pool.json"))
-    assert set(pool_json["disks"]) == {"disk1", "disk2", "disk3"}, pool_json
+    assert member_names(pool_json) == {"disk1", "disk2", "disk3"}, pool_json
     machine.fail("test -e /var/lib/braid/pending-op.json")
 
 

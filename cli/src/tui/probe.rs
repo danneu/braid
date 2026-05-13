@@ -26,6 +26,8 @@ pub fn probe_pool_for_tui<R: CommandRunner, F: Filesystem + ?Sized>(
     fs: &F,
     mount_point: &MountPoint,
     disk_by_id: &HashMap<String, String>,
+    disk_luks_uuid: &HashMap<String, LuksUuid>,
+    disk_devid: &HashMap<String, u64>,
     paths: &StatePaths,
 ) -> Result<Option<PoolState>, String> {
     let domain = probe_pool(runner, fs, mount_point).map_err(|e| e.to_string())?;
@@ -48,33 +50,25 @@ pub fn probe_pool_for_tui<R: CommandRunner, F: Filesystem + ?Sized>(
         .map_err(|e| e.to_string())?;
     let dev_usage = parse_btrfs_device_usage(&dev_usage_raw).map_err(|e| e.to_string())?;
 
-    // Map devid → disk name via probe_pool's devices (from btrfs filesystem show,
-    // which reports stable /dev/mapper/braid-* paths). btrfs device usage may
-    // report raw /dev/dm-N paths that don't match config disk names.
+    // Map devid -> disk name from UUID-keyed membership. btrfs device usage may
+    // report raw /dev/dm-N paths that do not match braid mapper names.
     //
-    // Include null_underlying devices so device_errors still surfaces
-    // hot-unplugged drives (btrfs device stats keeps reporting their mapper
-    // path). NullUnderlyingDevice carries `mapper` and `devid` -- enough for
-    // this map; LUKS UUIDs are absent there, which is why name_to_luks_uuid
-    // below stays scoped to domain.devices.
+    // Include null_underlying devices through persisted prior devid, the
+    // authorized fallback identity when the backing LUKS UUID is not observable.
+    let uuid_to_name: HashMap<&LuksUuid, &str> = disk_luks_uuid
+        .iter()
+        .map(|(name, uuid)| (uuid, name.as_str()))
+        .collect();
     let devid_to_name: HashMap<u64, &str> = domain
         .devices
         .iter()
-        .filter_map(|d| crate::config::name_from_mapper(&d.mapper.0).map(|name| (d.devid, name)))
+        .filter_map(|d| uuid_to_name.get(&d.luks_uuid).map(|name| (d.devid, *name)))
         .chain(domain.null_underlying.iter().filter_map(|d| {
-            crate::config::name_from_mapper(&d.mapper.0).map(|name| (d.devid, name))
+            disk_devid
+                .iter()
+                .find(|(_, devid)| **devid == d.devid)
+                .map(|(name, _)| (d.devid, name.as_str()))
         }))
-        .collect();
-
-    // Map disk name -> LuksUuid for physical-identity keying of the TUI's
-    // session temperature watermarks. Same pattern as devid_to_name --
-    // mapper-name parse keys both onto the config disk name.
-    let name_to_luks_uuid: HashMap<&str, LuksUuid> = domain
-        .devices
-        .iter()
-        .filter_map(|d| {
-            crate::config::name_from_mapper(&d.mapper.0).map(|name| (name, d.luks_uuid.clone()))
-        })
         .collect();
 
     let mut disk_usage = HashMap::new();
@@ -120,9 +114,11 @@ pub fn probe_pool_for_tui<R: CommandRunner, F: Filesystem + ?Sized>(
         smart_health.insert(disk_name.clone(), probe.health);
 
         if let Some(celsius) = probe.celsius {
-            let id = match name_to_luks_uuid.get(disk_name.as_str()) {
+            let id = match disk_luks_uuid.get(disk_name.as_str()) {
                 Some(uuid) => TemperatureDiskId::LuksUuid(uuid.clone()),
-                None => TemperatureDiskId::ByIdPath(ByIdPath(by_id_path.clone())),
+                None => TemperatureDiskId::ByIdPath(
+                    ByIdPath::parse(by_id_path).expect("membership by-id paths are validated"),
+                ),
             };
             disk_temperature_readings.insert(disk_name.clone(), TemperatureReading { id, celsius });
         }
@@ -152,6 +148,7 @@ pub fn probe_pool_for_tui<R: CommandRunner, F: Filesystem + ?Sized>(
         for dev in &lsblk.blockdevices {
             if let Some(tran) = &dev.tran {
                 for child in &dev.children {
+                    // Pattern #3: display-only -- do not use for identity decisions.
                     if let Some(name) = crate::config::name_from_mapper(&child.name) {
                         disk_transport.insert(name.to_owned(), tran.clone());
                     }
@@ -207,19 +204,19 @@ pub fn probe_pool_for_tui<R: CommandRunner, F: Filesystem + ?Sized>(
     // answer the "valid LUKS but not in this pool" question.
     let live_pool_uuids: HashSet<LuksUuid> =
         domain.devices.iter().map(|d| d.luks_uuid.clone()).collect();
-    let mut unpooled_disks: HashMap<String, UnpooledDiskRender> = HashMap::new();
+    let mut unpooled_by_name: HashMap<String, UnpooledDiskRender> = HashMap::new();
     for (disk_name, by_id_path) in disk_by_id {
         if disk_usage.contains_key(disk_name) {
             continue;
         }
-        let by_id = ByIdPath(by_id_path.clone());
+        let by_id = ByIdPath::parse(by_id_path).expect("membership by-id paths are validated");
         let probed = match probe_config_disk(runner, fs, disk_name, &by_id) {
             Ok(p) => p,
             Err(ProbeError::UnsupportedLuksVersion { version, .. }) => {
                 // Surface the wrong-version disk explicitly instead of
                 // silently skipping it. The TUI is the only diagnostic
                 // path that doesn't bail on the gateway error.
-                unpooled_disks.insert(
+                unpooled_by_name.insert(
                     disk_name.clone(),
                     UnpooledDiskRender::WrongLuksVersion(version),
                 );
@@ -253,7 +250,7 @@ pub fn probe_pool_for_tui<R: CommandRunner, F: Filesystem + ?Sized>(
                 }
             }
         };
-        unpooled_disks.insert(disk_name.clone(), render);
+        unpooled_by_name.insert(disk_name.clone(), render);
     }
 
     let capacity_used_bytes = df.logical_used_bytes();
@@ -267,7 +264,7 @@ pub fn probe_pool_for_tui<R: CommandRunner, F: Filesystem + ?Sized>(
         disk_temperature_readings,
         luks_info,
         device_errors,
-        unpooled_disks,
+        unpooled_disks: unpooled_by_name,
         alert_state,
         scrub,
         balance,
@@ -706,6 +703,23 @@ mod tests {
         }
     }
 
+    fn tui_disk_luks_uuid() -> HashMap<String, LuksUuid> {
+        HashMap::from([
+            (
+                "toshiba".to_owned(),
+                LuksUuid::parse("11111111-1111-1111-1111-111111111111").unwrap(),
+            ),
+            (
+                "ironwolf".to_owned(),
+                LuksUuid::parse("22222222-2222-2222-2222-222222222222").unwrap(),
+            ),
+        ])
+    }
+
+    fn tui_disk_devid() -> HashMap<String, u64> {
+        HashMap::from([("toshiba".to_owned(), 1), ("ironwolf".to_owned(), 2)])
+    }
+
     /// Intent: probe_pool_for_tui passes through per-device allocations and
     /// unallocated bytes from btrfs device usage into DiskUsage, rather than
     /// collapsing them into aggregate data/metadata sums.
@@ -822,6 +836,8 @@ mod tests {
             &StubFs::empty(),
             &MountPoint("/mnt/storage".into()),
             &HashMap::new(),
+            &tui_disk_luks_uuid(),
+            &tui_disk_devid(),
             &test_paths().1,
         )
         .unwrap();
@@ -977,6 +993,8 @@ mod tests {
             &StubFs::empty(),
             &MountPoint("/mnt/storage".into()),
             &HashMap::new(),
+            &tui_disk_luks_uuid(),
+            &tui_disk_devid(),
             &test_paths().1,
         )
         .unwrap();
@@ -1109,6 +1127,8 @@ mod tests {
             &StubFs::empty(),
             &MountPoint("/mnt/storage".into()),
             &HashMap::new(),
+            &tui_disk_luks_uuid(),
+            &tui_disk_devid(),
             &test_paths().1,
         )
         .unwrap();
@@ -1245,6 +1265,8 @@ mod tests {
             &fs,
             &MountPoint("/mnt/storage".into()),
             &disk_by_id,
+            &tui_disk_luks_uuid(),
+            &tui_disk_devid(),
             &test_paths().1,
         )
         .unwrap()
@@ -1325,6 +1347,8 @@ mod tests {
             &fs,
             &MountPoint("/mnt/storage".into()),
             &disk_by_id,
+            &tui_disk_luks_uuid(),
+            &tui_disk_devid(),
             &test_paths().1,
         )
         .unwrap()
@@ -1392,6 +1416,8 @@ mod tests {
             &fs,
             &MountPoint("/mnt/storage".into()),
             &disk_by_id,
+            &tui_disk_luks_uuid(),
+            &tui_disk_devid(),
             &test_paths().1,
         )
         .unwrap()
@@ -1470,6 +1496,8 @@ mod tests {
             &fs,
             &MountPoint("/mnt/storage".into()),
             &disk_by_id,
+            &tui_disk_luks_uuid(),
+            &tui_disk_devid(),
             &test_paths().1,
         )
         .unwrap()
@@ -1538,6 +1566,8 @@ mod tests {
             &fs,
             &MountPoint("/mnt/storage".into()),
             &disk_by_id,
+            &tui_disk_luks_uuid(),
+            &tui_disk_devid(),
             &test_paths().1,
         )
         .unwrap()

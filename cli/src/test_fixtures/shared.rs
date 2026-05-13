@@ -253,14 +253,14 @@ impl PoolFixture {
     pub(crate) fn two_disk_healthy() -> Self {
         let base = Self::empty_inner();
         let mut m = PoolMembership::empty();
-        m.disks.insert(
-            "disk1".into(),
-            DiskMember::from_by_id(ByIdPath("/dev/disk/by-id/virtio-disk1".into())),
-        );
-        m.disks.insert(
-            "disk2".into(),
-            DiskMember::from_by_id(ByIdPath("/dev/disk/by-id/virtio-disk2".into())),
-        );
+        let (_, member) = disk_member(1, "disk1", "/dev/disk/by-id/virtio-disk1");
+        let uuid = LuksUuid::parse("11111111-1111-1111-1111-111111111111")
+            .expect("canonical fixture UUID");
+        m.insert(uuid, member).expect("insert disk1");
+        let (_, member) = disk_member(2, "disk2", "/dev/disk/by-id/virtio-disk2");
+        let uuid = LuksUuid::parse("22222222-2222-2222-2222-222222222222")
+            .expect("canonical fixture UUID");
+        m.insert(uuid, member).expect("insert disk2");
         membership::save_membership(&m, &base.paths).expect("save_membership");
         Self {
             _state_tmp: base.state_tmp,
@@ -279,13 +279,15 @@ impl PoolFixture {
     pub(crate) fn one_live_one_missing() -> Self {
         let base = Self::empty_inner();
         let mut m = PoolMembership::empty();
-        m.disks.insert(
-            "disk1".into(),
-            DiskMember::from_by_id(ByIdPath("/dev/disk/by-id/virtio-disk1".into())),
-        );
-        let mut disk2 = DiskMember::from_by_id(ByIdPath("/dev/disk/by-id/virtio-disk2".into()));
-        disk2.devid = Some(2);
-        m.disks.insert("disk2".into(), disk2);
+        let (_, member) = disk_member(1, "disk1", "/dev/disk/by-id/virtio-disk1");
+        let uuid = LuksUuid::parse("11111111-1111-1111-1111-111111111111")
+            .expect("canonical fixture UUID");
+        m.insert(uuid, member).expect("insert disk1");
+        let (_, member) =
+            disk_member_with(2, "disk2", "/dev/disk/by-id/virtio-disk2", Some(2), None);
+        let uuid = LuksUuid::parse("22222222-2222-2222-2222-222222222222")
+            .expect("canonical fixture UUID");
+        m.insert(uuid, member).expect("insert disk2");
         membership::save_membership(&m, &base.paths).expect("save_membership");
         Self {
             _state_tmp: base.state_tmp,

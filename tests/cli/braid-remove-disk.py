@@ -15,6 +15,17 @@
 
 import json
 
+
+def member_names(pool):
+    return {member["name"] for member in pool["disks"].values()}
+
+
+def member(pool, name):
+    for entry in pool["disks"].values():
+        if entry["name"] == name:
+            return entry
+    raise AssertionError(f"{name} missing from pool.json: {pool}")
+
 start_all()
 machine.wait_for_unit("multi-user.target")
 
@@ -78,10 +89,9 @@ with subtest("Setup: build 3-drive pool with braid add"):
 with subtest("Pool membership has all 3 disks after add"):
     pm = read_pool()
     for name in ["disk1", "disk2", "disk3"]:
-        assert name in pm["disks"], f"{name} missing from pool: {pm}"
-        entry = pm["disks"][name]
+        assert name in member_names(pm), f"{name} missing from pool: {pm}"
+        entry = member(pm, name)
         assert "by_id" in entry, f"Missing by_id for {name}"
-        assert "luks_uuid" in entry, f"Missing luks_uuid for {name}"
         assert "devid" in entry, f"Missing devid for {name}"
         assert "added_at" in entry, f"Missing added_at for {name}"
 
@@ -118,9 +128,9 @@ with subtest("disk3 gone from pool, disk1+disk2 remain, RAID1 profile"):
 
 with subtest("Pool membership updated after graceful remove"):
     pm = read_pool()
-    assert "disk3" not in pm["disks"], f"disk3 still in pool after remove: {pm}"
-    assert "disk1" in pm["disks"], f"disk1 missing from pool: {pm}"
-    assert "disk2" in pm["disks"], f"disk2 missing from pool: {pm}"
+    assert "disk3" not in member_names(pm), f"disk3 still in pool after remove: {pm}"
+    assert "disk1" in member_names(pm), f"disk1 missing from pool: {pm}"
+    assert "disk2" in member_names(pm), f"disk2 missing from pool: {pm}"
 
 with subtest("LUKS mapper closed after graceful remove"):
     machine.fail("test -e /dev/mapper/braid-disk3")
@@ -234,9 +244,9 @@ with subtest("Pool unchanged after failed remove"):
 with subtest("Pool membership unchanged after failed remove"):
     pm = read_pool()
     # Pool should still have all 3 disks from the rebuild
-    assert "disk1" in pm["disks"], f"disk1 missing from pool: {pm}"
-    assert "disk2" in pm["disks"], f"disk2 missing from pool: {pm}"
-    assert "disk3" in pm["disks"], f"disk3 missing from pool: {pm}"
+    assert "disk1" in member_names(pm), f"disk1 missing from pool: {pm}"
+    assert "disk2" in member_names(pm), f"disk2 missing from pool: {pm}"
+    assert "disk3" in member_names(pm), f"disk3 missing from pool: {pm}"
 
 # --- Phase 5: Explicit remove-missing succeeds ---
 
@@ -255,9 +265,9 @@ with subtest("No missing devices after remove-missing"):
 
 with subtest("Pool membership pruned after remove-missing"):
     pm = read_pool()
-    assert "disk3" not in pm["disks"], f"disk3 still in pool after remove-missing: {pm}"
-    assert "disk1" in pm["disks"], f"disk1 missing from pool: {pm}"
-    assert "disk2" in pm["disks"], f"disk2 missing from pool: {pm}"
+    assert "disk3" not in member_names(pm), f"disk3 still in pool after remove-missing: {pm}"
+    assert "disk1" in member_names(pm), f"disk1 missing from pool: {pm}"
+    assert "disk2" in member_names(pm), f"disk2 missing from pool: {pm}"
 
 with subtest("Data intact after remove-missing"):
     content = machine.succeed("cat /mnt/storage/precious.txt").strip()

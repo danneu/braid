@@ -807,6 +807,11 @@ impl ReplacePlan {
             // foreign-UUID admission (no insert), so the discard is safe.
             let _ = membership::enrich_from_pool_state(&mut target_membership, &pool_after)?;
         }
+        if let Some(new_member) = target_membership.by_uuid_mut(&new_uuid)
+            && new_member.added_at.is_none()
+        {
+            new_member.added_at = Some(crate::util::now_iso());
+        }
         membership::save_membership(&target_membership, params.paths).map_err(|e| {
             ReplaceError::Validation(format!("failed to persist pool membership: {e}"))
         })?;
@@ -2025,21 +2030,6 @@ mod tests {
         DiskName::parse(s).expect("valid disk name in fixture")
     }
 
-    /// Build a `(LuksUuid, DiskMember)` pair for a disk identified by its
-    /// devid -- typical fixture shape for replace tests where the
-    /// persisted member has a known devid.
-    fn member_for_test(name: &str, by_id: &str, devid: u64) -> (LuksUuid, membership::DiskMember) {
-        let uuid = LuksUuid::parse(&format!("00000000-0000-0000-0000-{devid:012x}"))
-            .expect("synthetic UUID is canonical");
-        let member = membership::DiskMember {
-            name: disk_name(name),
-            by_id: ByIdPath::parse(by_id).expect("valid by-id in fixture"),
-            devid: Some(devid),
-            added_at: None,
-        };
-        (uuid, member)
-    }
-
     /// Create a mock runner that returns device usage output with specific
     /// missing devids (device_size == 0). Devid 1 is always present.
     fn mock_with_missing_devids(missing_devids: &[u64]) -> MockRunner {
@@ -3220,8 +3210,8 @@ mod tests {
         );
 
         assert!(
-            matches!(result, Err(ReplaceError::Validation(_))),
-            "expected Err(ReplaceError::Validation(_)) for --old absent from pool.json, got: {result:?}"
+            matches!(result, Err(ReplaceError::OldMemberNotFound { .. })),
+            "expected Err(ReplaceError::OldMemberNotFound) for --old absent from pool.json, got: {result:?}"
         );
         assert_eq!(
             f.inhibitor.acquire_count(),
@@ -4875,25 +4865,53 @@ mod tests {
         )
     }
 
+    fn runner_with_active_mapper_uuid(
+        mapper: &'static str,
+        backing_device: &'static str,
+        canned: RawCommandOutput,
+    ) -> MockRunner {
+        MockRunner::default()
+            .with_output(
+                CmdRequest::CryptsetupStatus {
+                    mapper: mapper.to_owned(),
+                },
+                mock_ok(
+                    &format!("cryptsetup status {mapper}"),
+                    &format!(
+                        "{mapper} is active and is in use.\n  type:    LUKS2\n  device:  {backing_device}\n  mode:    read/write\n"
+                    ),
+                ),
+            )
+            .with_output(
+                CmdRequest::CryptsetupLuksUuid {
+                    device: backing_device.to_owned(),
+                },
+                canned,
+            )
+    }
+
     /// Seed 620: Post-commit close double-drift probe mismatch arm.
-    /// When the live LUKS UUID at the observed mapper disagrees with
-    /// the journaled `old_uuid`, the close is demoted to a logged
-    /// warning skip; zero `CryptsetupClose` requests reach the runner.
+    /// When the active mapper's backing-device LUKS UUID disagrees
+    /// with the journaled `old_uuid`, the close is demoted to a
+    /// logged warning skip; zero `CryptsetupClose` requests reach the
+    /// runner.
     //
     // Intent: probe_observed_mapper_uuid returns false on mismatch and
     //   the caller skips the close.
     // Why: defense-in-depth against operator double-drift -- closing
     //   the wrong dm slot would tear down a foreign disk's mapper.
     // Scenario: journaled old_uuid = U_OLD, observed mapper
-    //   "braid-WRONG" now resolves to U_FOREIGN via cryptsetup luksUUID.
+    //   "braid-WRONG" now reports backing device /dev/vdf, whose LUKS
+    //   UUID is U_FOREIGN.
     #[test]
     fn replace_post_commit_close_probe_mismatch_skips_close() {
         let u_old = LuksUuid::parse("eeeeeeee-eeee-eeee-eeee-eeeeeeee0620").unwrap();
         let u_foreign = LuksUuid::parse("ffffffff-ffff-ffff-ffff-ffffffff0621").unwrap();
-        let runner = runner_with_luks_uuid_probe(
-            "/dev/mapper/braid-WRONG",
+        let runner = runner_with_active_mapper_uuid(
+            "braid-WRONG",
+            "/dev/vdf",
             RawCommandOutput {
-                cmd: "cryptsetup luksUUID /dev/mapper/braid-WRONG".into(),
+                cmd: "cryptsetup luksUUID /dev/vdf".into(),
                 stdout: format!("{u_foreign}\n"),
                 stderr: String::new(),
                 exit_status: 0,
@@ -4909,11 +4927,13 @@ mod tests {
         let requests = runner.requests();
         let probe_count = requests
             .iter()
-            .filter(|r| matches!(r, CmdRequest::CryptsetupLuksUuid { device } if device == "/dev/mapper/braid-WRONG"))
+            .filter(
+                |r| matches!(r, CmdRequest::CryptsetupLuksUuid { device } if device == "/dev/vdf"),
+            )
             .count();
         assert_eq!(
             probe_count, 1,
-            "exactly one probe must run before the skip decision"
+            "exactly one backing-device probe must run before the skip decision"
         );
         let close_count = requests
             .iter()
@@ -4926,23 +4946,25 @@ mod tests {
     }
 
     /// Seed 621: Control arm for the post-commit close double-drift
-    /// probe. When the live LUKS UUID matches the journaled value,
-    /// `probe_observed_mapper_uuid` returns true so the caller proceeds
-    /// to close.
+    /// probe. When the active mapper's backing-device LUKS UUID matches
+    /// the journaled value, `probe_observed_mapper_uuid` returns true so
+    /// the caller proceeds to close.
     //
     // Intent: probe match returns true; caller continues to close.
     // Why: pins the fail-safe-skip-only semantic so a future change
     //   that turned the probe into fail-skip-on-any-condition would
     //   flip this assertion.
     // Scenario: journaled old_uuid = U_OLD, observed mapper
-    //   "braid-disk2" probe returns U_OLD.
+    //   "braid-disk2" reports backing device /dev/vdc, whose probe
+    //   returns U_OLD.
     #[test]
     fn replace_post_commit_close_probe_match_allows_close() {
         let u_old = LuksUuid::parse("11111111-1111-1111-1111-111111110621").unwrap();
-        let runner = runner_with_luks_uuid_probe(
-            "/dev/mapper/braid-disk2",
+        let runner = runner_with_active_mapper_uuid(
+            "braid-disk2",
+            "/dev/vdc",
             RawCommandOutput {
-                cmd: "cryptsetup luksUUID /dev/mapper/braid-disk2".into(),
+                cmd: "cryptsetup luksUUID /dev/vdc".into(),
                 stdout: format!("{u_old}\n"),
                 stderr: String::new(),
                 exit_status: 0,

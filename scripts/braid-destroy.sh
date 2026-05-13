@@ -2,12 +2,12 @@
 set -euo pipefail
 
 # Destroy an entire braid pool: wipe LUKS signatures + state files.
-# Dev use only — not shipped as part of braid.
+# Dev use only -- not shipped as part of braid.
 
 # Preflight: check required tools
 missing=()
 for cmd in jq lsblk wipefs braid; do
-    command -v "$cmd" &>/dev/null || missing+=("$cmd")
+    command -v "$cmd" >/dev/null 2>&1 || missing+=("$cmd")
 done
 if [ ${#missing[@]} -gt 0 ]; then
     echo "Error: missing required tools: ${missing[*]}" >&2
@@ -25,6 +25,11 @@ if [ ! -f "$pool_json" ]; then
     exit 1
 fi
 
+if ! jq -e '.disks | keys | all(test("^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$"))' "$pool_json" >/dev/null; then
+    echo "error: $pool_json is not in UUID-keyed format (expected canonical UUID keys under .disks); refusing to destroy" >&2
+    exit 1
+fi
+
 # Validate membership and emit name<TAB>by_id tuples. Any reject arm aborts
 # before braid lock, wipefs, or rm -rf.
 # shellcheck disable=SC2016  # $path and $e are jq expressions, not shell
@@ -33,29 +38,33 @@ read_filter='
     "pool has no disks in \($path)\n" | halt_error(1)
   else
     .disks | to_entries[] as $e
-    | if ($e.value.by_id // "") == "" then
+    | if ($e.value.name // "") == "" then
+        "disk \"\($e.key)\" has no name in \($path)\n" | halt_error(1)
+      elif ($e.value.by_id // "") == "" then
         "disk \"\($e.key)\" has no by_id in \($path)\n" | halt_error(1)
       else
-        [$e.key, $e.value.by_id] | @tsv
+        [$e.key, $e.value.name, $e.value.by_id] | @tsv
       end
   end'
 
 tsv="$(jq -r --arg path "$pool_json" "$read_filter" "$pool_json")" || exit 1
 
-declare -a keys=()
+declare -a uuids=()
+declare -A names=()
 declare -A by_id=()
-while IFS=$'\t' read -r name path; do
-    keys+=("$name")
-    by_id[$name]="$path"
+while IFS=$'\t' read -r uuid name path; do
+    uuids+=("$uuid")
+    names[$uuid]="$name"
+    by_id[$uuid]="$path"
 done <<< "$tsv"
 
 # Print summary table
 echo "This will destroy the entire braid pool:"
-for key in "${keys[@]}"; do
-    size=$(lsblk --nodeps --noheadings --output SIZE "${by_id[$key]}" 2>/dev/null || echo "???")
+for uuid in "${uuids[@]}"; do
+    size=$(lsblk --nodeps --noheadings --output SIZE "${by_id[$uuid]}" 2>/dev/null || echo "???")
     # Trim whitespace from lsblk output
     size=$(echo "$size" | xargs)
-    printf "  %-12s %-50s %s\n" "$key" "${by_id[$key]}" "$size"
+    printf "  %-12s %-50s %s\n" "${names[$uuid]}" "${by_id[$uuid]}" "$size"
 done
 echo "State directory to delete:"
 echo "  /var/lib/braid/"
@@ -72,9 +81,9 @@ fi
 sudo braid lock --config "$config"
 
 # Wipe LUKS + btrfs signatures from each disk
-for key in "${keys[@]}"; do
-    echo "Wiping ${by_id[$key]} ..."
-    sudo wipefs -a "${by_id[$key]}"
+for uuid in "${uuids[@]}"; do
+    echo "Wiping ${by_id[$uuid]} ..."
+    sudo wipefs -a "${by_id[$uuid]}"
 done
 
 # Remove all state

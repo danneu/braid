@@ -59,6 +59,17 @@ impl fmt::Display for LuksUuid {
     }
 }
 
+/// Render UUIDs in canonical lexicographic order for stable diagnostics.
+pub(crate) fn format_uuid_list(uuids: &[LuksUuid]) -> String {
+    let mut sorted: Vec<&LuksUuid> = uuids.iter().collect();
+    sorted.sort();
+    sorted
+        .into_iter()
+        .map(|u| u.to_string())
+        .collect::<Vec<_>>()
+        .join(", ")
+}
+
 impl Serialize for LuksUuid {
     fn serialize<S>(&self, ser: S) -> Result<S::Ok, S::Error>
     where

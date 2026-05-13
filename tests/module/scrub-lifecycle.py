@@ -24,6 +24,7 @@
 #   concurrency: dm-delay-backed pool with saved scrub progress + overdue timer
 #                stamp; on unlock, both activation paths target braid-scrub.service.
 
+import json
 import shlex
 
 start_all()
@@ -61,6 +62,18 @@ def dm_delay_create(node, name):
             name, shlex.quote(dm_delay_table(node, name))
         )
     )
+    node.succeed(
+        "ln -sfn /dev/mapper/{}-delay /dev/disk/by-id/braid-test-{}-delay".format(
+            name, name
+        )
+    )
+
+
+def luks_uuid_for_name(name):
+    return {
+        "disk1": "11111111-1111-1111-1111-111111111111",
+        "disk2": "22222222-2222-2222-2222-222222222222",
+    }[name]
 
 
 def dm_delay_activate(node, read_delay_ms=0, write_delay_ms=0):
@@ -77,15 +90,17 @@ def dm_delay_activate(node, read_delay_ms=0, write_delay_ms=0):
 def setup_resume_pool(node):
     for name in ["disk1", "disk2"]:
         dm_delay_create(node, name)
+        by_id = "/dev/disk/by-id/braid-test-{}-delay".format(name)
         node.succeed(
             "printf '%s' {} | cryptsetup luksFormat --batch-mode --key-file=- "
-            "--pbkdf pbkdf2 --pbkdf-force-iterations 1000 /dev/mapper/{}-delay".format(
-                pq, name
+            "--pbkdf pbkdf2 --pbkdf-force-iterations 1000 "
+            "--uuid {} --label braid-{} {}".format(
+                pq, luks_uuid_for_name(name), name, by_id
             )
         )
         node.succeed(
-            "printf '%s' {} | cryptsetup open --key-file=- /dev/mapper/{}-delay braid-{}".format(
-                pq, name, name
+            "printf '%s' {} | cryptsetup open --key-file=- {} braid-{}".format(
+                pq, by_id, name
             )
         )
 
@@ -95,6 +110,20 @@ def setup_resume_pool(node):
     )
     node.succeed("cryptsetup close braid-disk1")
     node.succeed("cryptsetup close braid-disk2")
+    pool_json = {
+        "disks": {
+            luks_uuid_for_name(name): {
+                "name": name,
+                "by_id": "/dev/disk/by-id/braid-test-{}-delay".format(name),
+            }
+            for name in ["disk1", "disk2"]
+        }
+    }
+    node.succeed(
+        "cat > /var/lib/braid/pool.json << 'EOF'\n{}\nEOF".format(
+            json.dumps(pool_json)
+        )
+    )
 
 
 def unlock(node):

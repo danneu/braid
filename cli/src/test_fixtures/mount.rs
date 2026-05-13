@@ -23,7 +23,7 @@ use super::shared;
 use crate::cmd::{CmdRequest, CommandRunner, MockRunner, RawCommandOutput};
 use crate::config::Config;
 use crate::credential::OpenCredential;
-use crate::membership::{DiskMember, PoolMembership};
+use crate::membership::PoolMembership;
 use crate::mount::{
     MountError, OpenPlan, UnlockAndMountFailure, execute_mount_only, execute_unlock_and_mount,
     plan_open_pool,
@@ -31,8 +31,7 @@ use crate::mount::{
 use crate::probe::Filesystem;
 use crate::progress::Sleeper;
 use crate::secret::Passphrase;
-use crate::types::{ByIdPath, MountPoint};
-use std::collections::BTreeMap;
+use crate::types::{ByIdPath, LuksUuid, MountPoint};
 use zeroize::Zeroizing;
 
 // ---------------------------------------------------------------------------
@@ -189,32 +188,52 @@ pub(crate) fn test_passphrase() -> OpenCredential {
 }
 
 pub(crate) fn two_disk_membership() -> PoolMembership {
-    let mut disks = BTreeMap::new();
-    for (name, path) in [
-        ("disk1", "/dev/disk/by-id/virtio-disk1"),
-        ("disk2", "/dev/disk/by-id/virtio-disk2"),
+    let mut membership = PoolMembership::empty();
+    for (uuid, name, path) in [
+        (
+            "11111111-1111-1111-1111-111111111111",
+            "disk1",
+            "/dev/disk/by-id/virtio-disk1",
+        ),
+        (
+            "22222222-2222-2222-2222-222222222222",
+            "disk2",
+            "/dev/disk/by-id/virtio-disk2",
+        ),
     ] {
-        disks.insert(
-            name.to_owned(),
-            DiskMember::from_by_id(ByIdPath(path.to_owned())),
-        );
+        let (_, member) = shared::disk_member(1, name, path);
+        membership
+            .insert(LuksUuid::parse(uuid).unwrap(), member)
+            .expect("insert mount member");
     }
-    PoolMembership { disks }
+    membership
 }
 
 pub(crate) fn three_disk_membership() -> PoolMembership {
-    let mut disks = BTreeMap::new();
-    for (name, path) in [
-        ("disk1", "/dev/disk/by-id/virtio-disk1"),
-        ("disk2", "/dev/disk/by-id/virtio-disk2"),
-        ("disk3", "/dev/disk/by-id/virtio-disk3"),
+    let mut membership = PoolMembership::empty();
+    for (uuid, name, path) in [
+        (
+            "11111111-1111-1111-1111-111111111111",
+            "disk1",
+            "/dev/disk/by-id/virtio-disk1",
+        ),
+        (
+            "22222222-2222-2222-2222-222222222222",
+            "disk2",
+            "/dev/disk/by-id/virtio-disk2",
+        ),
+        (
+            "33333333-3333-3333-3333-333333333333",
+            "disk3",
+            "/dev/disk/by-id/virtio-disk3",
+        ),
     ] {
-        disks.insert(
-            name.to_owned(),
-            DiskMember::from_by_id(ByIdPath(path.to_owned())),
-        );
+        let (_, member) = shared::disk_member(1, name, path);
+        membership
+            .insert(LuksUuid::parse(uuid).unwrap(), member)
+            .expect("insert mount member");
     }
-    PoolMembership { disks }
+    membership
 }
 
 /// Distinct sentinel `MountError` used by `explain_open_failure` tests to
@@ -256,11 +275,11 @@ pub(crate) fn arbitrary_fallback() -> MountError {
 pub(crate) fn base_two_disk_runner() -> MockRunner {
     let (uuid1_req, uuid1_out) = luks_uuid_ok(
         "/dev/disk/by-id/virtio-disk1",
-        "aaaaaaaa-1111-2222-3333-444444444444",
+        "11111111-1111-1111-1111-111111111111",
     );
     let (uuid2_req, uuid2_out) = luks_uuid_ok(
         "/dev/disk/by-id/virtio-disk2",
-        "bbbbbbbb-1111-2222-3333-444444444444",
+        "22222222-2222-2222-2222-222222222222",
     );
     MockRunner::default()
         .with_output(
@@ -303,11 +322,11 @@ pub(crate) fn direct_two_disk_plan() -> OpenPlan {
         to_unlock: vec![
             (
                 "disk1".to_owned(),
-                ByIdPath("/dev/disk/by-id/virtio-disk1".to_owned()),
+                ByIdPath::parse("/dev/disk/by-id/virtio-disk1").unwrap(),
             ),
             (
                 "disk2".to_owned(),
-                ByIdPath("/dev/disk/by-id/virtio-disk2".to_owned()),
+                ByIdPath::parse("/dev/disk/by-id/virtio-disk2").unwrap(),
             ),
         ],
         any_open: false,

@@ -12,6 +12,7 @@ use crate::membership::{self, DiskMember, PoolMembership};
 use crate::probe::Filesystem;
 use crate::progress::ProgressOutput;
 use crate::state_paths::StatePaths;
+use crate::types::{ByIdPath, DiskName, LuksUuid};
 use std::path::Path;
 use std::sync::Arc;
 use std::sync::Mutex;
@@ -27,14 +28,13 @@ impl PoolFixture {
     pub(crate) fn live_one_disk() -> Self {
         let base = Self::empty_inner();
         let mut m = PoolMembership::empty();
-        // Rekeyed under the UUID-keyed `PoolMembership::insert` invariant.
-        // Seed 500 sits in the add-scope test allocation (see plan
-        // "Test Plan / Add" seed range 500-599).
+        let uuid = LuksUuid::parse("11111111-1111-1111-1111-111111111111")
+            .expect("canonical fixture UUID");
         m.insert(
-            super::shared::test_uuid(500),
+            uuid,
             DiskMember {
-                name: crate::types::DiskName::parse("disk1").unwrap(),
-                by_id: crate::types::ByIdPath::parse("/dev/disk/by-id/virtio-disk1").unwrap(),
+                name: DiskName::parse("disk1").unwrap(),
+                by_id: ByIdPath::parse("/dev/disk/by-id/virtio-disk1").unwrap(),
                 devid: None,
                 added_at: None,
             },

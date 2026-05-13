@@ -11,15 +11,14 @@
 //! allowed the staged migration to import fixture helpers while same-purpose
 //! local helpers still existed in `status.rs::tests`.
 
-use super::shared::mock_ok;
+use super::shared::{disk_member, mock_ok};
 use crate::alert::AlertCause;
 use crate::cmd::{CmdRequest, LsblkFieldKind, MockRunner, RawCommandOutput};
 use crate::config::Config;
-use crate::membership::{DiskMember, PoolMembership};
+use crate::membership::PoolMembership;
 use crate::probe::Filesystem;
 use crate::status::{DiskReport, DiskStatus, ScrubReport, StatusCode, StatusReport};
 use crate::types::*;
-use std::collections::BTreeMap;
 
 // ---------------------------------------------------------------------------
 // Filesystem
@@ -116,12 +115,15 @@ pub(crate) fn status_config() -> Config {
 
 /// Single-disk membership fixture for compact-drive status rendering.
 pub(crate) fn status_membership_1disk() -> PoolMembership {
-    let mut disks = BTreeMap::new();
-    disks.insert(
-        "disk1".to_owned(),
-        DiskMember::from_by_id(ByIdPath("/dev/disk/by-id/disk1".to_owned())),
-    );
-    PoolMembership { disks }
+    let mut membership = PoolMembership::empty();
+    let (_, member) = disk_member(1, "disk1", "/dev/disk/by-id/disk1");
+    membership
+        .insert(
+            LuksUuid::parse("11111111-1111-1111-1111-111111111111").unwrap(),
+            member,
+        )
+        .expect("insert disk1");
+    membership
 }
 
 // ---------------------------------------------------------------------------
@@ -584,7 +586,7 @@ pub(crate) fn status_pool_empty() -> PoolState {
 pub(crate) fn status_cfg_present_not_luks(name: &str, by_id: &str) -> Vec<ConfigDisk> {
     vec![ConfigDisk {
         name: name.to_owned(),
-        by_id_path: ByIdPath(by_id.to_owned()),
+        by_id_path: ByIdPath::parse(by_id).unwrap(),
         state: ConfigDiskState::PresentNotLuks,
     }]
 }

@@ -871,9 +871,8 @@ fn disk_name_candidates() -> Vec<CompletionCandidate> {
         return Vec::new();
     };
     membership
-        .disks
-        .keys()
-        .map(|name| CompletionCandidate::new(name.clone()))
+        .names()
+        .map(|name| CompletionCandidate::new(name.as_str().to_owned()))
         .collect()
 }
 

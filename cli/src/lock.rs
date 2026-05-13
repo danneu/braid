@@ -951,26 +951,17 @@ mod tests {
     // Why it exists: closing a mapper that was not in the plan reopens
     //   the cryptsetup-close-btrfs-held race because the forget call's
     //   argv is plan-derived.
-    // Scenario: plan_lock runs while braid-aaa is closed; between plan
-    //   and execute braid-aaa reappears. Execute must not issue
-    //   CryptsetupClose or BtrfsDeviceScanForget for that unplanned
-    //   mapper.
+    // Scenario: plan_lock runs while the pool is unmounted and
+    //   braid-aaa is closed; between plan and execute braid-aaa
+    //   reappears. Execute must not issue CryptsetupClose for that
+    //   unplanned mapper.
     #[test]
     fn execute_does_not_close_membership_mapper_absent_from_plan() {
-        let runner = lock_with_fsid_probe_mocks(
-            MockRunner::default()
-                .with_output(
-                    CmdRequest::MountpointCheck {
-                        path: MountPoint("/mnt/storage".into()),
-                    },
-                    lock_ok_raw("mountpoint -q /mnt/storage"),
-                )
-                .with_output(
-                    CmdRequest::Umount {
-                        mount_point: MountPoint("/mnt/storage".into()),
-                    },
-                    lock_ok_raw("umount /mnt/storage"),
-                ),
+        let runner = MockRunner::default().with_output(
+            CmdRequest::MountpointCheck {
+                path: MountPoint("/mnt/storage".into()),
+            },
+            lock_err_raw("mountpoint -q /mnt/storage", 1, ""),
         );
         let plan_fs = lock_fs(&[]);
         let config = lock_test_config();

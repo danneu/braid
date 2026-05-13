@@ -2657,15 +2657,6 @@ mod tests {
                     CmdRequest::CryptsetupLuksUuid { device } if device == "/dev/vdc" => Some(Ok(
                         mock_ok("cryptsetup luksUUID /dev/vdc", &format!("{u_r}\n")),
                     )),
-                    // post-commit close probe (lookups against /dev/mapper/...)
-                    CmdRequest::CryptsetupLuksUuid { device }
-                        if device == "/dev/mapper/braid-disk2" =>
-                    {
-                        Some(Ok(mock_ok(
-                            &format!("cryptsetup luksUUID {device}"),
-                            &format!("{u_r}\n"),
-                        )))
-                    }
                     _ => None,
                 }
             });
@@ -2783,11 +2774,6 @@ mod tests {
                             &format!("{u_r_for_probe}\n"),
                         ))),
                         "/dev/vdd" => "33333333-3333-3333-3333-333333333333",
-                        // post-commit close probe -- braid-WRONG holds U_R
-                        "/dev/mapper/braid-WRONG" => return Some(Ok(mock_ok(
-                            "cryptsetup luksUUID /dev/mapper/braid-WRONG",
-                            &format!("{u_r_for_probe}\n"),
-                        ))),
                         _ => return None,
                     };
                     Some(Ok(mock_ok(
@@ -2855,10 +2841,11 @@ mod tests {
     //   single-drift gap; this probe closes the double-drift gap where
     //   the operator reopens a foreign disk under the same mapper.
     //
-    // Scenario: same drifted setup as the previous test but the recording
-    //   runner returns U_FOREIGN != U_R for /dev/mapper/braid-WRONG.
-    //   Assert: exactly one CryptsetupLuksUuid probe against
-    //   /dev/mapper/braid-WRONG; zero CryptsetupClose for braid-WRONG.
+    // Scenario: same drifted setup as the previous test but after btrfs
+    //   commit, `cryptsetup status braid-WRONG` resolves to a foreign
+    //   backing device whose LUKS UUID is U_FOREIGN != U_R.
+    //   Assert: the post-commit probe follows the active mapper to that
+    //   backing device; zero CryptsetupClose for braid-WRONG.
     #[test]
     fn post_commit_close_uuid_probe_demotes_to_skip_on_mismatch() {
         let f = PoolFixture::empty();
@@ -2890,6 +2877,9 @@ mod tests {
              \tdevid    3 size 496.00MiB used 121.56MiB path /dev/mapper/braid-disk3\n";
         let u_r_for_plan = u_r.clone();
         let u_foreign_for_probe = u_foreign.clone();
+        let remove_committed = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let remove_committed_for_status = std::sync::Arc::clone(&remove_committed);
+        let remove_committed_for_remove = std::sync::Arc::clone(&remove_committed);
         let runner = MockRunner::default().with_handler({
             move |req| match req {
                 CmdRequest::BtrfsFilesystemShow { .. } => {
@@ -2898,7 +2888,14 @@ mod tests {
                 CmdRequest::CryptsetupStatus { mapper } => {
                     let dev = match mapper.as_str() {
                         "braid-disk1" => "/dev/vdb",
-                        "braid-WRONG" => "/dev/vdc",
+                        "braid-WRONG" => {
+                            if remove_committed_for_status.load(std::sync::atomic::Ordering::SeqCst)
+                            {
+                                "/dev/vdf"
+                            } else {
+                                "/dev/vdc"
+                            }
+                        }
                         "braid-disk3" => "/dev/vdd",
                         _ => return None,
                     };
@@ -2915,8 +2912,9 @@ mod tests {
                         // planning-time backing probe: U_R is still here
                         "/dev/vdc" => format!("{u_r_for_plan}"),
                         "/dev/vdd" => "33333333-3333-3333-3333-333333333333".to_string(),
-                        // POST-COMMIT probe: foreign UUID at the same mapper
-                        "/dev/mapper/braid-WRONG" => format!("{u_foreign_for_probe}"),
+                        // Post-commit probe follows braid-WRONG's active
+                        // mapper to the backing disk now holding U_FOREIGN.
+                        "/dev/vdf" => format!("{u_foreign_for_probe}"),
                         _ => return None,
                     };
                     Some(Ok(mock_ok(
@@ -2936,7 +2934,10 @@ mod tests {
                     "btrfs --format json filesystem df /mnt/storage",
                     valid_three_disk_df_json(),
                 ))),
-                CmdRequest::BtrfsDeviceRemove { .. } => Some(Ok(mock_ok("btrfs device remove", ""))),
+                CmdRequest::BtrfsDeviceRemove { .. } => {
+                    remove_committed_for_remove.store(true, std::sync::atomic::Ordering::SeqCst);
+                    Some(Ok(mock_ok("btrfs device remove", "")))
+                }
                 CmdRequest::CryptsetupClose { .. } => Some(Ok(mock_ok("cryptsetup close", ""))),
                 _ => None,
             }
@@ -2950,13 +2951,15 @@ mod tests {
         .expect("remove command must complete -- close skip is logged-warning, not error");
 
         let calls = runner.requests();
-        let probe_for_wrong = calls
+        let probe_for_foreign_backing = calls
             .iter()
-            .filter(|c| matches!(c, CmdRequest::CryptsetupLuksUuid { device } if device == "/dev/mapper/braid-WRONG"))
+            .filter(
+                |c| matches!(c, CmdRequest::CryptsetupLuksUuid { device } if device == "/dev/vdf"),
+            )
             .count();
         assert_eq!(
-            probe_for_wrong, 1,
-            "exactly one post-commit UUID probe against /dev/mapper/braid-WRONG"
+            probe_for_foreign_backing, 1,
+            "exactly one post-commit UUID probe against braid-WRONG's foreign backing device"
         );
         let closes_for_wrong = calls
             .iter()

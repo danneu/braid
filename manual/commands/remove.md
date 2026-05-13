@@ -47,7 +47,7 @@ sudo braid remove toshiba3 --yes
 4. If removing the second-to-last disk (going from 2 to 1): first balances the pool from RAID1 to single profile, then removes the device
 5. Runs `btrfs device remove` to migrate all data off the disk (this is the long-running step)
 6. Closes the LUKS mapper on the removed disk
-7. Updates pool.json to remove the disk entry
+7. Updates pool.json to remove the member's UUID entry
 
 A sleep inhibitor is held during data migration and cleanup.
 

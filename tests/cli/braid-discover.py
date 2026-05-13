@@ -9,6 +9,20 @@
 # retain their braid LUKS labels. They run discover to reconstruct pool.json,
 # then verify the recovered config actually unlocks the pool.
 
+import json
+
+
+def member_names(pool):
+    return {member["name"] for member in pool["disks"].values()}
+
+
+def member(pool, name):
+    for entry in pool["disks"].values():
+        if entry["name"] == name:
+            return entry
+    raise AssertionError(f"{name} missing from pool.json: {pool}")
+
+
 start_all()
 machine.wait_for_unit("multi-user.target", timeout=120)
 
@@ -27,18 +41,16 @@ with subtest("discover --write creates pool.json"):
     machine.succeed("test -f /var/lib/braid/pool.json")
 
 with subtest("pool.json contains disk entries with by-id paths"):
-    import json
     pool_raw = machine.succeed("cat /var/lib/braid/pool.json")
     pool = json.loads(pool_raw)
-    disks = pool["disks"]
-    recovered = {name: entry["by_id"] for name, entry in disks.items()}
+    recovered = {entry["name"]: entry["by_id"] for entry in pool["disks"].values()}
     expected = {
         "disk1": "/dev/disk/by-id/virtio-disk1",
         "disk2": "/dev/disk/by-id/virtio-disk2",
     }
     assert recovered == expected, f"pool.json mismatch: got {recovered}, expected {expected}"
 
-with subtest("recovered pool.json is usable — unlock succeeds"):
+with subtest("recovered pool.json is usable -- unlock succeeds"):
     machine.succeed("echo -n 'testpassphrase' | braid unlock --passphrase-stdin")
     machine.succeed("mountpoint /mnt/storage")
 

@@ -27,6 +27,17 @@
 #   sees disk4 in place of disk2; data is intact.
 
 import json
+
+
+def member_names(pool):
+    return {member["name"] for member in pool["disks"].values()}
+
+
+def member(pool, name):
+    for entry in pool["disks"].values():
+        if entry["name"] == name:
+            return entry
+    raise AssertionError(f"{name} missing from pool.json: {pool}")
 import shlex
 
 start_all()
@@ -104,8 +115,8 @@ with subtest("btrfs replace itself succeeded: disk2 gone, disk4 present"):
 
 with subtest("Pool membership updated"):
     pm = json.loads(machine.succeed("cat /var/lib/braid/pool.json"))
-    assert "disk2" not in pm["disks"], f"disk2 still in pool: {pm}"
-    assert "disk4" in pm["disks"], f"disk4 missing from pool: {pm}"
+    assert "disk2" not in member_names(pm), f"disk2 still in pool: {pm}"
+    assert "disk4" in member_names(pm), f"disk4 missing from pool: {pm}"
 
 with subtest("Data intact throughout"):
     content = machine.succeed("cat /mnt/storage/precious.txt").strip()

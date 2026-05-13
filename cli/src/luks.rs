@@ -810,22 +810,23 @@ pub fn ensure_luks_open<R: CommandRunner>(
     passphrase: &Passphrase,
 ) -> Result<OpenOutcome, LuksError> {
     let mn = mapper_name(name);
-    if classify_mapper_ownership(runner, name, &mn, || luks_uuid_for_device(runner, &by_id.0))?
-        == MapperOwnership::Owned
+    if classify_mapper_ownership(runner, name, &mn, || {
+        luks_uuid_for_device(runner, by_id.as_str())
+    })? == MapperOwnership::Owned
     {
         return Ok(OpenOutcome::AlreadyOwned);
     }
 
     let result = runner.run_with_stdin(
         &CmdRequest::CryptsetupLuksOpen {
-            device: by_id.0.clone(),
+            device: by_id.as_str().to_owned(),
             mapper: mn.0.clone(),
         },
         passphrase.expose_secret().as_bytes(),
     )?;
     if result.exit_status != 0 {
         return Err(LuksError::OpenFailed {
-            device: by_id.0.clone(),
+            device: by_id.as_str().to_owned(),
             exit_code: result.exit_status,
             hint: cryptsetup_open_hint(result.exit_status),
             stderr: result.stderr.trim().to_owned(),
@@ -855,20 +856,21 @@ pub fn ensure_luks_open_with_key_file<R: CommandRunner>(
     key_file_path: &std::path::Path,
 ) -> Result<OpenOutcome, LuksError> {
     let mn = mapper_name(name);
-    if classify_mapper_ownership(runner, name, &mn, || luks_uuid_for_device(runner, &by_id.0))?
-        == MapperOwnership::Owned
+    if classify_mapper_ownership(runner, name, &mn, || {
+        luks_uuid_for_device(runner, by_id.as_str())
+    })? == MapperOwnership::Owned
     {
         return Ok(OpenOutcome::AlreadyOwned);
     }
 
     let result = runner.run(&CmdRequest::CryptsetupLuksOpenKeyFile {
-        device: by_id.0.clone(),
+        device: by_id.as_str().to_owned(),
         mapper: mn.0.clone(),
         key_file_path: key_file_path.display().to_string(),
     })?;
     if result.exit_status != 0 {
         return Err(LuksError::OpenFailed {
-            device: by_id.0.clone(),
+            device: by_id.as_str().to_owned(),
             exit_code: result.exit_status,
             hint: cryptsetup_open_hint(result.exit_status),
             stderr: result.stderr.trim().to_owned(),
@@ -1621,7 +1623,7 @@ mod tests {
         let err = ensure_luks_open(
             &runner,
             "testdisk",
-            &ByIdPath("/dev/disk/by-id/test-disk".into()),
+            &ByIdPath::parse("/dev/disk/by-id/test-disk").unwrap(),
             &zpass("wrong"),
         )
         .unwrap_err();
@@ -1670,7 +1672,7 @@ mod tests {
         let err = ensure_luks_open(
             &runner,
             "vanished",
-            &ByIdPath("/dev/disk/by-id/vanished-disk".into()),
+            &ByIdPath::parse("/dev/disk/by-id/vanished-disk").unwrap(),
             &zpass("pass"),
         )
         .unwrap_err();
@@ -1718,7 +1720,7 @@ mod tests {
         let err = ensure_luks_open_with_key_file(
             &runner,
             "testdisk",
-            &ByIdPath("/dev/disk/by-id/test-disk".into()),
+            &ByIdPath::parse("/dev/disk/by-id/test-disk").unwrap(),
             kf.path(),
         )
         .unwrap_err();
@@ -1766,7 +1768,7 @@ mod tests {
         let err = ensure_luks_open_with_key_file(
             &runner,
             "vanished",
-            &ByIdPath("/dev/disk/by-id/vanished-disk".into()),
+            &ByIdPath::parse("/dev/disk/by-id/vanished-disk").unwrap(),
             kf.path(),
         )
         .unwrap_err();
@@ -1789,7 +1791,7 @@ mod tests {
      */
     #[test]
     fn ensure_luks_open_inactive_mapper_runs_open() {
-        let by_id = ByIdPath("/dev/disk/by-id/disk1".into());
+        let by_id = ByIdPath::parse("/dev/disk/by-id/disk1").unwrap();
         let runner = MockRunner::default()
             .with_output(
                 CmdRequest::CryptsetupStatus {
@@ -1799,7 +1801,7 @@ mod tests {
             )
             .with_output_stdin(
                 CmdRequest::CryptsetupLuksOpen {
-                    device: by_id.0.clone(),
+                    device: by_id.as_str().to_owned(),
                     mapper: "braid-disk1".into(),
                 },
                 b"pass".to_vec(),
@@ -1820,7 +1822,7 @@ mod tests {
                     mapper: "braid-disk1".into(),
                 },
                 CmdRequest::CryptsetupLuksOpen {
-                    device: by_id.0,
+                    device: by_id.as_str().to_owned(),
                     mapper: "braid-disk1".into(),
                 },
             ]
@@ -1836,7 +1838,7 @@ mod tests {
      */
     #[test]
     fn ensure_luks_open_active_mapper_matching_uuid_skips_open() {
-        let by_id = ByIdPath("/dev/disk/by-id/disk1".into());
+        let by_id = ByIdPath::parse("/dev/disk/by-id/disk1").unwrap();
         let uuid = "11111111-1111-1111-1111-111111111111";
         let runner = MockRunner::default()
             .with_output(
@@ -1847,9 +1849,9 @@ mod tests {
             )
             .with_output(
                 CmdRequest::CryptsetupLuksUuid {
-                    device: by_id.0.clone(),
+                    device: by_id.as_str().to_owned(),
                 },
-                luks_uuid_output(&by_id.0, uuid),
+                luks_uuid_output(by_id.as_str(), uuid),
             )
             .with_output(
                 CmdRequest::CryptsetupLuksUuid {
@@ -1866,7 +1868,9 @@ mod tests {
                 CmdRequest::CryptsetupStatus {
                     mapper: "braid-disk1".into(),
                 },
-                CmdRequest::CryptsetupLuksUuid { device: by_id.0 },
+                CmdRequest::CryptsetupLuksUuid {
+                    device: by_id.as_str().to_owned()
+                },
                 CmdRequest::CryptsetupLuksUuid {
                     device: "/dev/vdb".into(),
                 },
@@ -1883,7 +1887,7 @@ mod tests {
      */
     #[test]
     fn ensure_luks_open_active_mapper_different_uuid_conflicts() {
-        let by_id = ByIdPath("/dev/disk/by-id/disk1".into());
+        let by_id = ByIdPath::parse("/dev/disk/by-id/disk1").unwrap();
         let expected_uuid = "11111111-1111-1111-1111-111111111111";
         let found_uuid = "99999999-9999-9999-9999-999999999999";
         let runner = MockRunner::default()
@@ -1895,9 +1899,9 @@ mod tests {
             )
             .with_output(
                 CmdRequest::CryptsetupLuksUuid {
-                    device: by_id.0.clone(),
+                    device: by_id.as_str().to_owned(),
                 },
-                luks_uuid_output(&by_id.0, expected_uuid),
+                luks_uuid_output(by_id.as_str(), expected_uuid),
             )
             .with_output(
                 CmdRequest::CryptsetupLuksUuid {
@@ -1915,8 +1919,11 @@ mod tests {
                 found,
             } => {
                 assert_eq!(name, "disk1");
-                assert_eq!(expected.0, expected_uuid);
-                assert_eq!(found.map(|uuid| uuid.0), Some(found_uuid.to_owned()));
+                assert_eq!(expected.as_str(), expected_uuid);
+                assert_eq!(
+                    found.map(|uuid| uuid.as_str().to_owned()),
+                    Some(found_uuid.to_owned())
+                );
             }
             other => panic!("expected MapperConflict, got {other:?}"),
         }
@@ -1938,7 +1945,7 @@ mod tests {
      */
     #[test]
     fn ensure_luks_open_active_mapper_null_device_conflicts() {
-        let by_id = ByIdPath("/dev/disk/by-id/disk1".into());
+        let by_id = ByIdPath::parse("/dev/disk/by-id/disk1").unwrap();
         let expected_uuid = "11111111-1111-1111-1111-111111111111";
         let runner = MockRunner::default()
             .with_output(
@@ -1949,9 +1956,9 @@ mod tests {
             )
             .with_output(
                 CmdRequest::CryptsetupLuksUuid {
-                    device: by_id.0.clone(),
+                    device: by_id.as_str().to_owned(),
                 },
-                luks_uuid_output(&by_id.0, expected_uuid),
+                luks_uuid_output(by_id.as_str(), expected_uuid),
             );
 
         let err = ensure_luks_open(&runner, "disk1", &by_id, &zpass("pass")).unwrap_err();
@@ -1963,7 +1970,7 @@ mod tests {
                 found,
             } => {
                 assert_eq!(name, "disk1");
-                assert_eq!(expected.0, expected_uuid);
+                assert_eq!(expected.as_str(), expected_uuid);
                 assert_eq!(found, None);
             }
             other => panic!("expected MapperConflict, got {other:?}"),
@@ -1979,7 +1986,7 @@ mod tests {
      */
     #[test]
     fn ensure_luks_open_active_mapper_non_luks_backing_conflicts() {
-        let by_id = ByIdPath("/dev/disk/by-id/disk1".into());
+        let by_id = ByIdPath::parse("/dev/disk/by-id/disk1").unwrap();
         let expected_uuid = "11111111-1111-1111-1111-111111111111";
         let runner = MockRunner::default()
             .with_output(
@@ -1990,9 +1997,9 @@ mod tests {
             )
             .with_output(
                 CmdRequest::CryptsetupLuksUuid {
-                    device: by_id.0.clone(),
+                    device: by_id.as_str().to_owned(),
                 },
-                luks_uuid_output(&by_id.0, expected_uuid),
+                luks_uuid_output(by_id.as_str(), expected_uuid),
             )
             .with_output(
                 CmdRequest::CryptsetupLuksUuid {
@@ -2022,7 +2029,7 @@ mod tests {
      */
     #[test]
     fn ensure_luks_open_with_key_file_active_mapper_matching_uuid_skips_open() {
-        let by_id = ByIdPath("/dev/disk/by-id/disk1".into());
+        let by_id = ByIdPath::parse("/dev/disk/by-id/disk1").unwrap();
         let uuid = "11111111-1111-1111-1111-111111111111";
         let kf = tempfile::NamedTempFile::new().unwrap();
         let runner = MockRunner::default()
@@ -2034,9 +2041,9 @@ mod tests {
             )
             .with_output(
                 CmdRequest::CryptsetupLuksUuid {
-                    device: by_id.0.clone(),
+                    device: by_id.as_str().to_owned(),
                 },
-                luks_uuid_output(&by_id.0, uuid),
+                luks_uuid_output(by_id.as_str(), uuid),
             )
             .with_output(
                 CmdRequest::CryptsetupLuksUuid {
@@ -2066,7 +2073,7 @@ mod tests {
      */
     #[test]
     fn ensure_luks_open_with_key_file_active_mapper_different_uuid_conflicts() {
-        let by_id = ByIdPath("/dev/disk/by-id/disk1".into());
+        let by_id = ByIdPath::parse("/dev/disk/by-id/disk1").unwrap();
         let expected_uuid = "11111111-1111-1111-1111-111111111111";
         let found_uuid = "99999999-9999-9999-9999-999999999999";
         let kf = tempfile::NamedTempFile::new().unwrap();
@@ -2079,9 +2086,9 @@ mod tests {
             )
             .with_output(
                 CmdRequest::CryptsetupLuksUuid {
-                    device: by_id.0.clone(),
+                    device: by_id.as_str().to_owned(),
                 },
-                luks_uuid_output(&by_id.0, expected_uuid),
+                luks_uuid_output(by_id.as_str(), expected_uuid),
             )
             .with_output(
                 CmdRequest::CryptsetupLuksUuid {
@@ -2113,7 +2120,7 @@ mod tests {
      */
     #[test]
     fn ensure_luks_open_with_key_file_active_mapper_null_device_conflicts() {
-        let by_id = ByIdPath("/dev/disk/by-id/disk1".into());
+        let by_id = ByIdPath::parse("/dev/disk/by-id/disk1").unwrap();
         let expected_uuid = "11111111-1111-1111-1111-111111111111";
         let kf = tempfile::NamedTempFile::new().unwrap();
         let runner = MockRunner::default()
@@ -2125,9 +2132,9 @@ mod tests {
             )
             .with_output(
                 CmdRequest::CryptsetupLuksUuid {
-                    device: by_id.0.clone(),
+                    device: by_id.as_str().to_owned(),
                 },
-                luks_uuid_output(&by_id.0, expected_uuid),
+                luks_uuid_output(by_id.as_str(), expected_uuid),
             );
 
         let err = ensure_luks_open_with_key_file(&runner, "disk1", &by_id, kf.path()).unwrap_err();
@@ -2144,7 +2151,7 @@ mod tests {
      */
     #[test]
     fn ensure_luks_open_malformed_active_status_returns_parse_error() {
-        let by_id = ByIdPath("/dev/disk/by-id/disk1".into());
+        let by_id = ByIdPath::parse("/dev/disk/by-id/disk1").unwrap();
         let runner = MockRunner::default().with_output(
             CmdRequest::CryptsetupStatus {
                 mapper: "braid-disk1".into(),
@@ -2169,7 +2176,7 @@ mod tests {
      */
     #[test]
     fn ensure_luks_open_invalid_backing_uuid_returns_parse_error() {
-        let by_id = ByIdPath("/dev/disk/by-id/disk1".into());
+        let by_id = ByIdPath::parse("/dev/disk/by-id/disk1").unwrap();
         let expected_uuid = "11111111-1111-1111-1111-111111111111";
         let runner = MockRunner::default()
             .with_output(
@@ -2180,9 +2187,9 @@ mod tests {
             )
             .with_output(
                 CmdRequest::CryptsetupLuksUuid {
-                    device: by_id.0.clone(),
+                    device: by_id.as_str().to_owned(),
                 },
-                luks_uuid_output(&by_id.0, expected_uuid),
+                luks_uuid_output(by_id.as_str(), expected_uuid),
             )
             .with_output(
                 CmdRequest::CryptsetupLuksUuid {
@@ -2773,7 +2780,7 @@ mod tests {
     fn make_pool_device(name: &str, underlying: &str) -> PoolDevice {
         PoolDevice {
             mapper: MapperName(format!("braid-{name}")),
-            luks_uuid: LuksUuid("aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee".into()),
+            luks_uuid: LuksUuid::parse("aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee").unwrap(),
             devid: 1,
             underlying: underlying.into(),
         }

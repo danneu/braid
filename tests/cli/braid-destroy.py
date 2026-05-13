@@ -4,14 +4,15 @@
 # 2-disk RAID1 pool, runs the script, and confirms the pool is unmounted,
 # mappers closed, LUKS headers wiped, and /var/lib/braid gone. Three
 # negative paths each point pool.json at a shape the shell validator must
-# reject (empty by_id, empty .disks, missing file), and confirm the script
-# aborts before running braid lock or rm -rf.
+# reject (old name-keyed shape, missing name, empty by_id, empty .disks,
+# missing file), and confirm the script aborts before running braid lock
+# or rm -rf.
 #
 # Why: After commit 74feca5, braid-destroy.sh silently no-op'd the wipe
 # loop and left LUKS signatures on every disk while still deleting local
 # state. This test pins the fix (pool.json as source of truth, validated
-# by_id, reject-before-lock ordering) so the regression cannot come back
-# silently.
+# UUID-keyed schema sniff, by_id/name validation, and reject-before-lock
+# ordering) so the regression cannot come back silently.
 #
 # Scenario: dev blows away a test pool before re-provisioning. Happy path
 # must actually destroy; malformed or missing pool.json must abort before
@@ -87,15 +88,52 @@ with subtest("happy path: destroys live pool"):
     machine.fail("test -e /dev/mapper/braid-disk2")
 
 
-# --- Scenario 2: empty by_id rejects before braid lock runs ---
+# --- Scenario 2: old name-keyed pool.json rejects before braid lock runs ---
+
+with subtest("old name-keyed pool.json rejects before lock"):
+    build_pool()
+    write_pool_json(
+        '{"disks":{"disk1":{"name":"disk1","by_id":"/dev/disk/by-id/virtio-disk1"}}}'
+    )
+
+    output = run_destroy_expect_fail()
+    assert "is not in UUID-keyed format" in output, (
+        f"expected UUID-keyed format error in stderr:\n{output}"
+    )
+
+    # Nothing destructive happened.
+    machine.succeed("test -e /var/lib/braid")
+    machine.succeed("cryptsetup isLuks /dev/disk/by-id/virtio-disk1")
+    machine.succeed("cryptsetup isLuks /dev/disk/by-id/virtio-disk2")
+    # Load-bearing: mount and mappers untouched proves braid lock never ran.
+    machine.succeed("mountpoint -q /mnt/storage")
+    machine.succeed("test -e /dev/mapper/braid-disk1")
+    machine.succeed("test -e /dev/mapper/braid-disk2")
+
+
+# --- Scenario 3: missing name rejects before braid lock runs ---
+
+with subtest("missing name rejects before lock"):
+    write_pool_json(
+        '{"disks":{"11111111-1111-1111-1111-111111111111":{"by_id":"/dev/disk/by-id/virtio-disk1"}}}'
+    )
+
+    output = run_destroy_expect_fail()
+    assert "no name" in output, f"expected 'no name' in stderr:\n{output}"
+
+    machine.succeed("test -e /var/lib/braid")
+    machine.succeed("cryptsetup isLuks /dev/disk/by-id/virtio-disk1")
+    machine.succeed("cryptsetup isLuks /dev/disk/by-id/virtio-disk2")
+    machine.succeed("mountpoint -q /mnt/storage")
+    machine.succeed("test -e /dev/mapper/braid-disk1")
+    machine.succeed("test -e /dev/mapper/braid-disk2")
+
+
+# --- Scenario 4: empty by_id rejects before braid lock runs ---
 
 with subtest("empty by_id rejects before lock"):
-    build_pool()
-    # by_id="" is valid per ByIdPath's schema (transparent String), so braid
-    # lock's own loader would accept this. The shell validator is the sole
-    # guard against env-side work here.
     write_pool_json(
-        '{"disks":{"disk1":{"by_id":""},"disk2":{"by_id":""}}}'
+        '{"disks":{"11111111-1111-1111-1111-111111111111":{"name":"disk1","by_id":""},"22222222-2222-2222-2222-222222222222":{"name":"disk2","by_id":""}}}'
     )
 
     output = run_destroy_expect_fail()
@@ -111,10 +149,10 @@ with subtest("empty by_id rejects before lock"):
     machine.succeed("test -e /dev/mapper/braid-disk2")
 
 
-# --- Scenario 3: empty .disks rejects before braid lock runs ---
+# --- Scenario 5: empty .disks rejects before braid lock runs ---
 
 with subtest("empty .disks rejects before lock"):
-    # Reuse the live pool from Scenario 2's setup.
+    # Reuse the live pool from the earlier negative scenarios.
     write_pool_json('{"disks":{}}')
 
     output = run_destroy_expect_fail()
@@ -128,7 +166,7 @@ with subtest("empty .disks rejects before lock"):
     machine.succeed("test -e /dev/mapper/braid-disk2")
 
 
-# --- Teardown before Scenario 4: direct primitives, NOT braid lock ---
+# --- Teardown before Scenario 6: direct primitives, NOT braid lock ---
 # A malformed/empty pool.json puts `braid lock` in orphan-mapper territory
 # whose behavior is outside this test's contract. Use umount + cryptsetup
 # close so a future braid-lock regression does not fail this test for
@@ -139,7 +177,7 @@ machine.succeed("cryptsetup close braid-disk2")
 machine.succeed("rm -rf /var/lib/braid")
 
 
-# --- Scenario 4: missing pool.json rejects before rm -rf ---
+# --- Scenario 6: missing pool.json rejects before rm -rf ---
 
 with subtest("missing pool.json rejects before rm -rf"):
     machine.succeed("mkdir -p /var/lib/braid")

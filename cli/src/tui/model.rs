@@ -246,6 +246,12 @@ pub struct Model {
     pub tab: Tab,
     pub disk_names: Vec<String>,
     pub disk_by_id: HashMap<String, String>,
+    /// Persistent disk identity map so TUI probes do not infer pool
+    /// membership from mapper names.
+    pub disk_luks_uuid: HashMap<String, LuksUuid>,
+    /// Prior btrfs devid bindings used when a live probe cannot observe the
+    /// underlying LUKS UUID for a mounted device.
+    pub disk_devid: HashMap<String, u64>,
     pub selected_disk: usize,
     pub pool: PoolStatus,
     pub mount_point: MountPoint,
@@ -266,9 +272,14 @@ pub struct Model {
 }
 
 impl Model {
+    // Constructor mirrors persisted config plus optional subsystem configs;
+    // grouping them would hide the call-site mapping this boundary owns.
+    #[allow(clippy::too_many_arguments)]
     pub fn new(
         disk_names: Vec<String>,
         disk_by_id: HashMap<String, String>,
+        disk_luks_uuid: HashMap<String, LuksUuid>,
+        disk_devid: HashMap<String, u64>,
         mount_point: String,
         fan_control: Option<crate::config::FanControl>,
         ups_config: Option<crate::config::Ups>,
@@ -279,6 +290,8 @@ impl Model {
         let mut effects: Vec<Effect> = vec![Effect::ProbePool {
             mount_point: mount_point.clone(),
             disk_by_id: disk_by_id.clone(),
+            disk_luks_uuid: disk_luks_uuid.clone(),
+            disk_devid: disk_devid.clone(),
             paths: paths.clone(),
         }];
         let fan_probe_inflight = fan_control.is_some();
@@ -306,6 +319,8 @@ impl Model {
             tab: Tab::Data,
             disk_names,
             disk_by_id,
+            disk_luks_uuid,
+            disk_devid,
             selected_disk: 0,
             pool: PoolStatus::Loading,
             mount_point,
@@ -335,6 +350,8 @@ impl Model {
             tab: Tab::Data,
             disk_names,
             disk_by_id: HashMap::new(),
+            disk_luks_uuid: HashMap::new(),
+            disk_devid: HashMap::new(),
             selected_disk: 0,
             pool,
             mount_point: MountPoint(String::new()),

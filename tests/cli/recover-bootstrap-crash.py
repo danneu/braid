@@ -27,12 +27,14 @@ machine.wait_for_unit("multi-user.target")
 passphrase = "testpassphrase"
 pq = shlex.quote(passphrase)
 luks_opts = "--pbkdf pbkdf2 --pbkdf-force-iterations 1000"
+disk1_uuid = "11111111-1111-1111-1111-111111111111"
 
 # --- Phase 1: Simulate interrupted bootstrap (LUKS format, no mkfs) ---
 
 with subtest("LUKS format disk1 without mkfs"):
     machine.succeed(
         f"printf '%s' {pq} | cryptsetup luksFormat {luks_opts} "
+        f"--uuid {disk1_uuid} --label braid-disk1 "
         f"/dev/disk/by-id/virtio-disk1 -"
     )
     # Verify LUKS header exists, then leave it closed
@@ -49,16 +51,12 @@ with subtest("Inject bootstrap journal"):
             "op": "Add",
             "phase": "PoolMutation",
             "targets": {
-                "disk1": {
+                disk1_uuid: {
+                    "name": "disk1",
                     "by_id": "/dev/disk/by-id/virtio-disk1",
-                    "mapper_name": "braid-disk1",
                     "mode": {
                         "FreshLuks": {
-                            "luks_label": "braid-disk1",
-                            "luks_format_extra_opts": [
-                                "--label",
-                                "braid-disk1",
-                            ],
+                            "extra_opts": [],
                             "enroll_key_file": None,
                         }
                     },
@@ -68,7 +66,10 @@ with subtest("Inject bootstrap journal"):
         "pre_membership": {"disks": {}},
         "target_membership": {
             "disks": {
-                "disk1": {"by_id": "/dev/disk/by-id/virtio-disk1"},
+                disk1_uuid: {
+                    "name": "disk1",
+                    "by_id": "/dev/disk/by-id/virtio-disk1",
+                },
             }
         },
     }

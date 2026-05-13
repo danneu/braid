@@ -53,6 +53,7 @@ pub struct AddJournalTarget {
 /// only as the surrounding `LuksUuidMap` key; mode-specific fields stay
 /// inside the variant.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
 pub enum AddJournalMode {
     /// Adoption of a returning braid-labeled disk whose pool FSID has been
     /// verified at planning time. `verified_pool_fsid` backstops the
@@ -132,6 +133,7 @@ pub struct ReplaceJournalTarget {
 /// lives at the op level as `new_uuid`; this enum carries only the
 /// per-mode argv extras or adoption metadata.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
 pub enum ReplaceJournalMode {
     /// Fresh `cryptsetup luksFormat` of the new disk. Label is derived
     /// as `format!("braid-{new_name}")` at the format call site; only

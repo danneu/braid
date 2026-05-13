@@ -1,8 +1,8 @@
 # Test: replace --new disk already in pool is caught by braid guard
 #
 # Intent:
-#   `braid replace --old disk1 --new disk2` is rejected with an
-#   "already a member" error when disk2 is already a pool member, AND
+#   `braid replace --old disk1 --new disk2` is rejected with a
+#   duplicate-LUKS-UUID membership error when disk2 is already a pool member, AND
 #   the rejection leaves no observable side effects:
 #     - pool membership and metadata on disk (pool.json) bit-identical
 #     - btrfs fi show output unchanged (same devids, no "missing")
@@ -11,8 +11,9 @@
 #
 # Why it exists:
 #   The live `btrfs replace start` path has no natural duplicate-device
-#   guard. Without check_new_not_in_pool, the command would reach btrfs
-#   and either corrupt the pool or produce a confusing btrfs-level error.
+#   guard. Without braid's pre-journal UUID uniqueness guard, the command would
+#   reach btrfs and either corrupt the pool or produce a confusing btrfs-level
+#   error.
 #   Additionally, a preflight failure must not mutate on-disk membership
 #   metadata or strand recovery state -- if it did, the user would be
 #   forced into `braid recover` for what is conceptually a rejected
@@ -65,8 +66,8 @@ with subtest("Replace with existing member rejected by braid guard"):
     (status, output) = machine.execute(replace_cmd("disk1", "disk2") + " 2>&1")
     print(f"Guard output (exit {status}):\n{output}")
     assert status != 0, f"Expected non-zero exit, got 0: {output}"
-    assert "already a member" in output, (
-        f"Expected braid guard message 'already a member' in output, got:\n{output}"
+    assert "duplicate LUKS UUID" in output and "already present in membership" in output, (
+        f"Expected braid duplicate-UUID membership guard in output, got:\n{output}"
     )
 
 with subtest("Pool unchanged after failed replace"):

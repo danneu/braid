@@ -18,6 +18,17 @@
 #     the new disk at its full ~1GiB size.
 
 import json
+
+
+def member_names(pool):
+    return {member["name"] for member in pool["disks"].values()}
+
+
+def member(pool, name):
+    for entry in pool["disks"].values():
+        if entry["name"] == name:
+            return entry
+    raise AssertionError(f"{name} missing from pool.json: {pool}")
 import re
 
 start_all()
@@ -136,8 +147,8 @@ with subtest("Data intact after larger-disk replace"):
 
 with subtest("Pool membership updated after larger-disk replace"):
     pm = read_pool()
-    assert "disk2" not in pm["disks"], f"disk2 still in pool: {pm}"
-    assert "disk3" in pm["disks"], f"disk3 missing from pool: {pm}"
-    assert "disk1" in pm["disks"], f"disk1 missing from pool: {pm}"
+    assert "disk2" not in member_names(pm), f"disk2 still in pool: {pm}"
+    assert "disk3" in member_names(pm), f"disk3 missing from pool: {pm}"
+    assert "disk1" in member_names(pm), f"disk1 missing from pool: {pm}"
 
 machine.shutdown()

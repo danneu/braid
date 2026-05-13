@@ -251,11 +251,11 @@ mod tests {
         let mp = MountPoint("/mnt/storage".to_owned());
         let (uuid1_req, uuid1_out) = luks_uuid_ok(
             "/dev/disk/by-id/virtio-disk1",
-            "aaaaaaaa-1111-2222-3333-444444444444",
+            "11111111-1111-1111-1111-111111111111",
         );
         let (uuid2_req, uuid2_out) = luks_uuid_ok(
             "/dev/disk/by-id/virtio-disk2",
-            "bbbbbbbb-1111-2222-3333-444444444444",
+            "22222222-2222-2222-2222-222222222222",
         );
         let (uuid3_req, uuid3_out) = unlock_luks_uuid_not_luks("/dev/disk/by-id/virtio-disk3");
         let (scan_req, scan_out) = unlock_btrfs_device_scan_ok();
@@ -325,11 +325,11 @@ mod tests {
         let mp = MountPoint("/mnt/storage".to_owned());
         let (uuid1_req, uuid1_out) = luks_uuid_ok(
             "/dev/disk/by-id/virtio-disk1",
-            "aaaaaaaa-1111-2222-3333-444444444444",
+            "11111111-1111-1111-1111-111111111111",
         );
         let (uuid2_req, uuid2_out) = luks_uuid_ok(
             "/dev/disk/by-id/virtio-disk2",
-            "bbbbbbbb-1111-2222-3333-444444444444",
+            "22222222-2222-2222-2222-222222222222",
         );
         let (uuid3_req, uuid3_out) = unlock_luks_uuid_not_luks("/dev/disk/by-id/virtio-disk3");
         let (scan_req, scan_out) = unlock_btrfs_device_scan_ok();
@@ -610,15 +610,15 @@ mod tests {
         let mp = MountPoint("/mnt/storage".to_owned());
         let (uuid1_req, uuid1_out) = luks_uuid_ok(
             "/dev/disk/by-id/virtio-disk1",
-            "aaaaaaaa-1111-2222-3333-444444444444",
+            "11111111-1111-1111-1111-111111111111",
         );
         let (uuid2_req, uuid2_out) = luks_uuid_ok(
             "/dev/disk/by-id/virtio-disk2",
-            "bbbbbbbb-1111-2222-3333-444444444444",
+            "22222222-2222-2222-2222-222222222222",
         );
         let (uuid3_req, uuid3_out) = luks_uuid_ok(
             "/dev/disk/by-id/virtio-disk3",
-            "cccccccc-1111-2222-3333-444444444444",
+            "33333333-3333-3333-3333-333333333333",
         );
         let (scan_req, scan_out) = unlock_btrfs_device_scan_ok();
         let (balance_req, balance_out) = unlock_btrfs_balance_status_paused(&mp);
@@ -861,11 +861,11 @@ mod tests {
         let mp = MountPoint("/mnt/storage".to_owned());
         let (uuid1_req, uuid1_out) = luks_uuid_ok(
             "/dev/disk/by-id/virtio-disk1",
-            "aaaaaaaa-1111-2222-3333-444444444444",
+            "11111111-1111-1111-1111-111111111111",
         );
         let (uuid2_req, uuid2_out) = luks_uuid_ok(
             "/dev/disk/by-id/virtio-disk2",
-            "bbbbbbbb-1111-2222-3333-444444444444",
+            "22222222-2222-2222-2222-222222222222",
         );
         let (uuid3_req, uuid3_out) = unlock_luks_uuid_not_luks("/dev/disk/by-id/virtio-disk3");
         let runner = MockRunner::default()
@@ -968,15 +968,15 @@ mod tests {
         let mp = MountPoint("/mnt/storage".to_owned());
         let (uuid1_req, uuid1_out) = luks_uuid_ok(
             "/dev/disk/by-id/virtio-disk1",
-            "aaaaaaaa-1111-2222-3333-444444444444",
+            "11111111-1111-1111-1111-111111111111",
         );
         let (uuid2_req, uuid2_out) = luks_uuid_ok(
             "/dev/disk/by-id/virtio-disk2",
-            "bbbbbbbb-1111-2222-3333-444444444444",
+            "22222222-2222-2222-2222-222222222222",
         );
         let (uuid3_req, uuid3_out) = luks_uuid_ok(
             "/dev/disk/by-id/virtio-disk3",
-            "cccccccc-1111-2222-3333-444444444444",
+            "33333333-3333-3333-3333-333333333333",
         );
         let (scan_req, scan_out) = unlock_btrfs_device_scan_ok();
         let (balance_req, balance_out) = unlock_btrfs_balance_status_idle(&mp);
@@ -1028,16 +1028,11 @@ mod tests {
         let loaded = membership::load_membership(&sp)
             .expect("pool.json should still be loadable after unlock");
         for name in ["disk1", "disk2", "disk3"] {
+            let disk_name = crate::types::DiskName::parse(name).unwrap();
             let member = loaded
-                .disks
-                .get(name)
+                .by_name(&disk_name)
+                .map(|(_, member)| member)
                 .unwrap_or_else(|| panic!("missing disk {name} in pool.json"));
-            assert!(
-                member.luks_uuid.is_none(),
-                "{name}.luks_uuid must remain None when probe_pool returns \
-                 mounted=false, got: {:?}",
-                member.luks_uuid
-            );
             assert!(
                 member.devid.is_none(),
                 "{name}.devid must remain None when probe_pool returns \
@@ -1074,15 +1069,15 @@ mod tests {
         let mp = MountPoint("/mnt/storage".to_owned());
         let (uuid1_req, uuid1_out) = luks_uuid_ok(
             "/dev/disk/by-id/virtio-disk1",
-            "aaaaaaaa-1111-2222-3333-444444444444",
+            "11111111-1111-1111-1111-111111111111",
         );
         let (uuid2_req, uuid2_out) = luks_uuid_ok(
             "/dev/disk/by-id/virtio-disk2",
-            "bbbbbbbb-1111-2222-3333-444444444444",
+            "22222222-2222-2222-2222-222222222222",
         );
         let (uuid3_req, uuid3_out) = luks_uuid_ok(
             "/dev/disk/by-id/virtio-disk3",
-            "cccccccc-1111-2222-3333-444444444444",
+            "33333333-3333-3333-3333-333333333333",
         );
         let (scan_req, scan_out) = unlock_btrfs_device_scan_ok();
         let (balance_req, balance_out) = unlock_btrfs_balance_status_idle(&mp);

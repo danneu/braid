@@ -40,6 +40,10 @@ def post_add_balance_op():
     }
 
 
+def has_member(pool, name):
+    return any(member["name"] == name for member in pool["disks"].values())
+
+
 # --- Phase 1: Build 2-disk RAID1 pool and write test data ---
 
 with subtest("Build 2-disk pool"):
@@ -119,7 +123,10 @@ with subtest("Test 3a: dry-run preserved-context failure -> stdout empty, stderr
     target_with_disk3 = {
         "disks": {
             **pool_json["disks"],
-            "disk3": {"by_id": "/dev/disk/by-id/virtio-disk3"},
+            "33333333-3333-3333-3333-333333333333": {
+                "name": "disk3",
+                "by_id": "/dev/disk/by-id/virtio-disk3",
+            },
         },
     }
     journal_deg = {
@@ -317,8 +324,8 @@ with subtest("braid recover self-mounts and rebuilds pool.json"):
 
     # pool.json must exist and contain disk1 + disk2
     recovered = json.loads(machine.succeed("cat /var/lib/braid/pool.json"))
-    assert "disk1" in recovered["disks"], f"disk1 missing from recovered pool.json: {recovered}"
-    assert "disk2" in recovered["disks"], f"disk2 missing from recovered pool.json: {recovered}"
+    assert has_member(recovered, "disk1"), f"disk1 missing from recovered pool.json: {recovered}"
+    assert has_member(recovered, "disk2"), f"disk2 missing from recovered pool.json: {recovered}"
 
     # pending-op.json must be cleared
     machine.fail("test -f /var/lib/braid/pending-op.json")

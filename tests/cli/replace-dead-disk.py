@@ -21,6 +21,19 @@
 #     replaced using `--missing-id` to disambiguate.
 
 import json
+
+
+def member_names(pool):
+    return {member["name"] for member in pool["disks"].values()}
+
+
+def member(pool, name):
+    for entry in pool["disks"].values():
+        if entry["name"] == name:
+            return entry
+    raise AssertionError(f"{name} missing from pool.json: {pool}")
+
+
 import re
 
 start_all()
@@ -148,10 +161,10 @@ with subtest("Data intact after dead replace (auto-detect)"):
 
 with subtest("Pool membership updated after dead replace (auto-detect)"):
     pm = read_pool()
-    assert "disk2" not in pm["disks"], f"disk2 still in pool: {pm}"
-    assert "disk4" in pm["disks"], f"disk4 missing from pool: {pm}"
+    assert "disk2" not in member_names(pm), f"disk2 still in pool: {pm}"
+    assert "disk4" in member_names(pm), f"disk4 missing from pool: {pm}"
     for name in ["disk1", "disk3"]:
-        assert name in pm["disks"], f"{name} missing from pool: {pm}"
+        assert name in member_names(pm), f"{name} missing from pool: {pm}"
 
 # --- Phase 2: Kill disk3, replace with disk5 (explicit --missing-id) ---
 
@@ -210,9 +223,9 @@ with subtest("Data intact after dead replace (--missing-id)"):
 
 with subtest("Pool membership updated after dead replace (--missing-id)"):
     pm = read_pool()
-    assert "disk3" not in pm["disks"], f"disk3 still in pool: {pm}"
-    assert "disk5" in pm["disks"], f"disk5 missing from pool: {pm}"
+    assert "disk3" not in member_names(pm), f"disk3 still in pool: {pm}"
+    assert "disk5" in member_names(pm), f"disk5 missing from pool: {pm}"
     for name in ["disk1", "disk4"]:
-        assert name in pm["disks"], f"{name} missing from pool: {pm}"
+        assert name in member_names(pm), f"{name} missing from pool: {pm}"
 
 machine.shutdown()

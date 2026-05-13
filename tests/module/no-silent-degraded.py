@@ -4,10 +4,15 @@ start_all()
 machine.wait_for_unit("multi-user.target", timeout=180)
 
 # Seed pool.json with all 3 members including the bricked disk3.
-# braid discover can't be used here — it only finds disks with intact LUKS
+# braid discover can't be used here -- it only finds disks with intact LUKS
 # headers, so it would miss disk3, and unlock wouldn't know a member is missing.
+UUIDS = {
+    "disk1": "11111111-1111-1111-1111-111111111111",
+    "disk2": "22222222-2222-2222-2222-222222222222",
+    "disk3": "33333333-3333-3333-3333-333333333333",
+}
 pool = json.dumps({"disks": {
-    d: {"by_id": f"/dev/disk/by-id/virtio-{d}"}
+    UUIDS[d]: {"name": d, "by_id": f"/dev/disk/by-id/virtio-{d}"}
     for d in ["disk1", "disk2", "disk3"]
 }})
 machine.succeed(f"mkdir -p /var/lib/braid && echo '{pool}' > /var/lib/braid/pool.json")

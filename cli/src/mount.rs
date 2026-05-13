@@ -226,12 +226,20 @@ fn plan_open_pool_inner<R: CommandRunner, F: Filesystem + ?Sized>(
     let mut first_open_mapper: Option<String> = None;
     let mut missing: Vec<(String, MissingReason)> = Vec::new();
 
-    for (name, member) in &membership.disks {
+    let mut members: Vec<_> = membership.iter().collect();
+    // Membership is UUID-keyed for persistence, but this probe emits
+    // operator-visible rows. Keep the visible unlock order by disk name.
+    members.sort_by(|(_, left), (_, right)| left.name.cmp(&right.name));
+
+    for (expected_uuid, member) in members {
+        let name = member.name.as_str();
         let probed = probe::probe_config_disk(runner, fs, name, &member.by_id)?;
         match &probed.state {
             ConfigDiskState::Absent => {
-                events.push(ProbeEvent::DiskAbsent { name: name.clone() });
-                missing.push((name.clone(), MissingReason::Unplugged));
+                events.push(ProbeEvent::DiskAbsent {
+                    name: name.to_owned(),
+                });
+                missing.push((name.to_owned(), MissingReason::Unplugged));
             }
             ConfigDiskState::PresentNotLuks => {
                 // Refine PresentNotLuks (luksUuid failed) into Unreadable vs
@@ -240,7 +248,7 @@ fn plan_open_pool_inner<R: CommandRunner, F: Filesystem + ?Sized>(
                 // seeing the coarse PresentNotLuks state to preserve their
                 // destructive-format guards on potentially recoverable
                 // damaged headers.
-                let reason = match luks::probe_luks_header(runner, &member.by_id.0) {
+                let reason = match luks::probe_luks_header(runner, member.by_id.as_str()) {
                     luks::LuksHeaderState::Damaged => MissingReason::LuksHeaderDamaged,
                     // Unreadable, the inconsistent Ok-but-luksUuid-failed
                     // case, and ProbeFailed all collapse to Unreadable.
@@ -251,36 +259,40 @@ fn plan_open_pool_inner<R: CommandRunner, F: Filesystem + ?Sized>(
                     _ => MissingReason::LuksHeaderUnreadable,
                 };
                 events.push(match reason {
-                    MissingReason::LuksHeaderDamaged => {
-                        ProbeEvent::DiskLuksHeaderDamaged { name: name.clone() }
-                    }
-                    _ => ProbeEvent::DiskLuksHeaderUnreadable { name: name.clone() },
+                    MissingReason::LuksHeaderDamaged => ProbeEvent::DiskLuksHeaderDamaged {
+                        name: name.to_owned(),
+                    },
+                    _ => ProbeEvent::DiskLuksHeaderUnreadable {
+                        name: name.to_owned(),
+                    },
                 });
-                missing.push((name.clone(), reason));
+                missing.push((name.to_owned(), reason));
             }
             ConfigDiskState::PresentLuks {
                 uuid, mapper_open, ..
             } => {
-                if let Some(expected) = &member.luks_uuid
-                    && expected != uuid
-                {
+                if expected_uuid != uuid {
                     return Err(MountError::Failed(format!(
                         "disk '{}' LUKS UUID mismatch at {}:\n  \
                              expected  {}\n  \
                              found     {}",
-                        name, member.by_id, expected, uuid
+                        name, member.by_id, expected_uuid, uuid
                     )));
                 }
 
                 if *mapper_open {
-                    events.push(ProbeEvent::DiskAlreadyOpen { name: name.clone() });
+                    events.push(ProbeEvent::DiskAlreadyOpen {
+                        name: name.to_owned(),
+                    });
                     any_open = true;
                     if first_open_mapper.is_none() {
-                        first_open_mapper = Some(name.clone());
+                        first_open_mapper = Some(name.to_owned());
                     }
                 } else {
-                    events.push(ProbeEvent::DiskAvailable { name: name.clone() });
-                    to_unlock.push((name.clone(), member.by_id.clone()));
+                    events.push(ProbeEvent::DiskAvailable {
+                        name: name.to_owned(),
+                    });
+                    to_unlock.push((name.to_owned(), member.by_id.clone()));
                 }
             }
         }
@@ -365,7 +377,7 @@ pub fn compile_open_steps(
                 risk: "safe",
                 description: format!("LUKS open {} → {}", by_id, mn),
                 commands: vec![CmdRequest::CryptsetupLuksOpenKeyFile {
-                    device: by_id.0.clone(),
+                    device: by_id.as_str().to_owned(),
                     mapper: mn.0.clone(),
                     key_file_path: kf.display().to_string(),
                 }],
@@ -375,7 +387,7 @@ pub fn compile_open_steps(
                 risk: "safe",
                 description: format!("LUKS open {} → {}", by_id, mn),
                 commands: vec![CmdRequest::CryptsetupLuksOpen {
-                    device: by_id.0.clone(),
+                    device: by_id.as_str().to_owned(),
                     mapper: mn.0.clone(),
                 }],
             });
@@ -464,7 +476,7 @@ fn credential_verify_targets(to_unlock: &[(String, ByIdPath)]) -> Vec<Credential
         .iter()
         .map(|(name, by_id)| CredentialVerifyTarget {
             name: name.clone(),
-            device: by_id.0.clone(),
+            device: by_id.as_str().to_owned(),
         })
         .collect()
 }
@@ -543,7 +555,7 @@ fn open_disks_with_credential<R: CommandRunner>(
             Ok(OpenOutcome::Opened) => opened.push(mapper_name(name)),
             Ok(OpenOutcome::AlreadyOwned) => {}
             Err(e) => {
-                let header_state = luks::probe_luks_header(runner, &by_id.0);
+                let header_state = luks::probe_luks_header(runner, by_id.as_str());
                 let (original_summary, ok_fallback) = match &e {
                     LuksError::OpenFailed {
                         exit_code: 2,
@@ -567,7 +579,7 @@ fn open_disks_with_credential<R: CommandRunner>(
                 };
                 return Err(explain_open_failure(
                     name,
-                    &by_id.0,
+                    by_id.as_str(),
                     header_state,
                     &original_summary,
                     ok_fallback,
@@ -834,8 +846,8 @@ mod tests {
     use crate::test_fixtures::{
         MOUNT_TEST_PASSPHRASE_BYTES, NoopSleeper, arbitrary_fallback, base_two_disk_runner,
         direct_two_disk_fs_with_mappers, direct_two_disk_open_runner, direct_two_disk_plan,
-        err_raw, is_luks_fail, is_luks_ok, luks_dump_text_fail, luks_dump_text_ok, luks_uuid_ok,
-        mount_fs, ok_raw, open_and_mount_for_test, test_config, test_passphrase,
+        disk_member, err_raw, is_luks_fail, is_luks_ok, luks_dump_text_fail, luks_dump_text_ok,
+        luks_uuid_ok, mount_fs, ok_raw, open_and_mount_for_test, test_config, test_passphrase,
         test_passphrase_fail, three_disk_membership, two_disk_membership,
     };
     use crate::types::{ByIdPath, LuksUuid, MountPoint};
@@ -919,7 +931,7 @@ mod tests {
         let plan = OpenPlan {
             to_unlock: vec![(
                 "disk1".to_owned(),
-                ByIdPath("/dev/disk/by-id/virtio-disk1".to_owned()),
+                ByIdPath::parse("/dev/disk/by-id/virtio-disk1").unwrap(),
             )],
             any_open: false,
             any_missing_member: false,
@@ -1020,6 +1032,92 @@ mod tests {
         assert!(result.unwrap());
     }
 
+    /// Intent: `plan_open_pool` renders probe rows and unlock targets in
+    /// disk-name order even though membership is keyed by LUKS UUID.
+    ///
+    /// Why: Raw UUID-key iteration is effectively random to operators and
+    /// made keyfile/passphrase verification rows shuffle between pools.
+    ///
+    /// Scenario: membership is deliberately inserted so UUID order is the
+    /// reverse of disk-name order; planning must still report and unlock
+    /// `a-disk`, then `m-disk`, then `z-disk`.
+    #[test]
+    fn plan_open_pool_sorts_operator_visible_members_by_disk_name() {
+        let config = test_config();
+        let fs = mount_fs(&[
+            "/dev/disk/by-id/virtio-a",
+            "/dev/disk/by-id/virtio-m",
+            "/dev/disk/by-id/virtio-z",
+        ]);
+
+        let mut membership = PoolMembership::empty();
+        for (seed, name, by_id) in [
+            (99, "a-disk", "/dev/disk/by-id/virtio-a"),
+            (50, "m-disk", "/dev/disk/by-id/virtio-m"),
+            (1, "z-disk", "/dev/disk/by-id/virtio-z"),
+        ] {
+            let (uuid, member) = disk_member(seed, name, by_id);
+            membership.insert(uuid, member).expect("insert member");
+        }
+
+        let (uuid_a_req, uuid_a_out) = luks_uuid_ok(
+            "/dev/disk/by-id/virtio-a",
+            "00000000-0000-0000-0000-000000000063",
+        );
+        let (uuid_m_req, uuid_m_out) = luks_uuid_ok(
+            "/dev/disk/by-id/virtio-m",
+            "00000000-0000-0000-0000-000000000032",
+        );
+        let (uuid_z_req, uuid_z_out) = luks_uuid_ok(
+            "/dev/disk/by-id/virtio-z",
+            "00000000-0000-0000-0000-000000000001",
+        );
+
+        let runner = MockRunner::default()
+            .with_output(
+                CmdRequest::MountpointCheck {
+                    path: MountPoint("/mnt/storage".to_owned()),
+                },
+                err_raw("mountpoint", 1, ""),
+            )
+            .with_output(uuid_a_req, uuid_a_out)
+            .with_output(uuid_m_req, uuid_m_out)
+            .with_output(uuid_z_req, uuid_z_out)
+            .with_luks_dump_text_luks2("/dev/disk/by-id/virtio-a")
+            .with_luks_dump_text_luks2("/dev/disk/by-id/virtio-m")
+            .with_luks_dump_text_luks2("/dev/disk/by-id/virtio-z")
+            .with_mappers_closed(&["braid-a-disk", "braid-m-disk", "braid-z-disk"]);
+
+        let report = plan_open_pool(&runner, &fs, &config, &membership, false, "unlock");
+        let plan = report
+            .result
+            .expect("planning should succeed")
+            .expect("pool should need unlock");
+
+        assert_eq!(
+            report.events,
+            vec![
+                ProbeEvent::DiskAvailable {
+                    name: "a-disk".to_owned()
+                },
+                ProbeEvent::DiskAvailable {
+                    name: "m-disk".to_owned()
+                },
+                ProbeEvent::DiskAvailable {
+                    name: "z-disk".to_owned()
+                },
+            ]
+        );
+
+        let to_unlock_names: Vec<&str> = plan
+            .to_unlock
+            .iter()
+            .map(|(name, _)| name.as_str())
+            .collect();
+        assert_eq!(to_unlock_names, ["a-disk", "m-disk", "z-disk"]);
+        assert_eq!(plan.mount_device, "/dev/mapper/braid-a-disk");
+    }
+
     /// Intent: When a disk is absent and --allow-degraded is passed, the pool
     /// should mount with the degraded option.
     ///
@@ -1040,11 +1138,11 @@ mod tests {
 
         let (uuid1_req, uuid1_out) = luks_uuid_ok(
             "/dev/disk/by-id/virtio-disk1",
-            "aaaaaaaa-1111-2222-3333-444444444444",
+            "11111111-1111-1111-1111-111111111111",
         );
         let (uuid2_req, uuid2_out) = luks_uuid_ok(
             "/dev/disk/by-id/virtio-disk2",
-            "bbbbbbbb-1111-2222-3333-444444444444",
+            "22222222-2222-2222-2222-222222222222",
         );
 
         let runner = MockRunner::default()
@@ -1130,11 +1228,11 @@ mod tests {
 
         let (uuid1_req, uuid1_out) = luks_uuid_ok(
             "/dev/disk/by-id/virtio-disk1",
-            "aaaaaaaa-1111-2222-3333-444444444444",
+            "11111111-1111-1111-1111-111111111111",
         );
         let (uuid2_req, uuid2_out) = luks_uuid_ok(
             "/dev/disk/by-id/virtio-disk2",
-            "bbbbbbbb-1111-2222-3333-444444444444",
+            "22222222-2222-2222-2222-222222222222",
         );
 
         let runner = MockRunner::default()
@@ -1611,11 +1709,11 @@ mod tests {
 
         let (uuid1_req, uuid1_out) = luks_uuid_ok(
             "/dev/disk/by-id/virtio-disk1",
-            "aaaaaaaa-1111-2222-3333-444444444444",
+            "11111111-1111-1111-1111-111111111111",
         );
         let (uuid2_req, uuid2_out) = luks_uuid_ok(
             "/dev/disk/by-id/virtio-disk2",
-            "bbbbbbbb-1111-2222-3333-444444444444",
+            "22222222-2222-2222-2222-222222222222",
         );
 
         let runner = MockRunner::default()
@@ -1632,12 +1730,12 @@ mod tests {
             .with_mapper_open(
                 "braid-disk1",
                 "/dev/vda",
-                "aaaaaaaa-1111-2222-3333-444444444444",
+                "11111111-1111-1111-1111-111111111111",
             )
             .with_mapper_open(
                 "braid-disk2",
                 "/dev/vdb",
-                "bbbbbbbb-1111-2222-3333-444444444444",
+                "22222222-2222-2222-2222-222222222222",
             )
             // No passphrase or LUKS open mocks — should not be called
             .with_output(CmdRequest::BtrfsDeviceScanAll, ok_raw("btrfs device scan"))
@@ -1687,11 +1785,11 @@ mod tests {
 
         let (uuid2_req, uuid2_out) = luks_uuid_ok(
             "/dev/disk/by-id/virtio-disk2",
-            "bbbbbbbb-1111-2222-3333-444444444444",
+            "22222222-2222-2222-2222-222222222222",
         );
         let (uuid3_req, uuid3_out) = luks_uuid_ok(
             "/dev/disk/by-id/virtio-disk3",
-            "cccccccc-1111-2222-3333-444444444444",
+            "33333333-3333-3333-3333-333333333333",
         );
 
         let runner = MockRunner::default()
@@ -1708,12 +1806,12 @@ mod tests {
             .with_mapper_open(
                 "braid-disk2",
                 "/dev/vdb",
-                "bbbbbbbb-1111-2222-3333-444444444444",
+                "22222222-2222-2222-2222-222222222222",
             )
             .with_mapper_open(
                 "braid-disk3",
                 "/dev/vdc",
-                "cccccccc-1111-2222-3333-444444444444",
+                "33333333-3333-3333-3333-333333333333",
             );
 
         let report = plan_open_pool(&runner, &fs, &config, &membership, true, "unlock");
@@ -1963,11 +2061,11 @@ pool already mounted at /mnt/storage
 
         let (uuid2_req, uuid2_out) = luks_uuid_ok(
             "/dev/disk/by-id/virtio-disk2",
-            "bbbbbbbb-1111-2222-3333-444444444444",
+            "22222222-2222-2222-2222-222222222222",
         );
         let (uuid3_req, uuid3_out) = luks_uuid_ok(
             "/dev/disk/by-id/virtio-disk3",
-            "cccccccc-1111-2222-3333-444444444444",
+            "33333333-3333-3333-3333-333333333333",
         );
 
         let runner = MockRunner::default()
@@ -1984,12 +2082,12 @@ pool already mounted at /mnt/storage
             .with_mapper_open(
                 "braid-disk2",
                 "/dev/vdb",
-                "bbbbbbbb-1111-2222-3333-444444444444",
+                "22222222-2222-2222-2222-222222222222",
             )
             .with_mapper_open(
                 "braid-disk3",
                 "/dev/vdc",
-                "cccccccc-1111-2222-3333-444444444444",
+                "33333333-3333-3333-3333-333333333333",
             )
             .with_output(CmdRequest::BtrfsDeviceScanAll, ok_raw("btrfs device scan"))
             .with_output(
@@ -2023,8 +2121,16 @@ pool already mounted at /mnt/storage
     fn mount_luks_uuid_mismatch_closed() {
         let config = test_config();
         let mut membership = two_disk_membership();
-        membership.disks.get_mut("disk1").unwrap().luks_uuid =
-            Some(LuksUuid("aaaaaaaa-1111-2222-3333-444444444444".into()));
+        let disk1_uuid = LuksUuid::parse("11111111-1111-1111-1111-111111111111").unwrap();
+        let disk1 = membership
+            .remove_by_uuid(&disk1_uuid)
+            .expect("disk1 fixture member");
+        membership
+            .insert(
+                LuksUuid::parse("11111111-1111-1111-1111-111111111111").unwrap(),
+                disk1,
+            )
+            .expect("replace disk1 fixture UUID");
 
         let fs = mount_fs(&[
             "/dev/disk/by-id/virtio-disk1",
@@ -2049,7 +2155,7 @@ pool already mounted at /mnt/storage
             "error should name the disk, got: {msg}"
         );
         assert!(
-            msg.contains("aaaaaaaa"),
+            msg.contains("111111"),
             "error should show expected UUID, got: {msg}"
         );
         assert!(
@@ -2070,8 +2176,16 @@ pool already mounted at /mnt/storage
     fn mount_luks_uuid_mismatch_already_open() {
         let config = test_config();
         let mut membership = two_disk_membership();
-        membership.disks.get_mut("disk1").unwrap().luks_uuid =
-            Some(LuksUuid("aaaaaaaa-1111-2222-3333-444444444444".into()));
+        let disk1_uuid = LuksUuid::parse("11111111-1111-1111-1111-111111111111").unwrap();
+        let disk1 = membership
+            .remove_by_uuid(&disk1_uuid)
+            .expect("disk1 fixture member");
+        membership
+            .insert(
+                LuksUuid::parse("11111111-1111-1111-1111-111111111111").unwrap(),
+                disk1,
+            )
+            .expect("replace disk1 fixture UUID");
 
         let fs = mount_fs(&[
             "/dev/disk/by-id/virtio-disk1",
@@ -2085,7 +2199,7 @@ pool already mounted at /mnt/storage
         );
         let (uuid2_req, uuid2_out) = luks_uuid_ok(
             "/dev/disk/by-id/virtio-disk2",
-            "bbbbbbbb-1111-2222-3333-444444444444",
+            "22222222-2222-2222-2222-222222222222",
         );
 
         let runner = MockRunner::default()
@@ -2116,7 +2230,7 @@ pool already mounted at /mnt/storage
             "error should name the disk, got: {msg}"
         );
         assert!(
-            msg.contains("aaaaaaaa"),
+            msg.contains("111111"),
             "error should show expected UUID, got: {msg}"
         );
         assert!(
@@ -2568,7 +2682,7 @@ pool already mounted at /mnt/storage
             .with_mapper_open(
                 "braid-disk1",
                 "/dev/vdb",
-                "aaaaaaaa-1111-2222-3333-444444444444",
+                "11111111-1111-1111-1111-111111111111",
             )
             .with_output(
                 CmdRequest::CryptsetupLuksUuid {
@@ -2576,7 +2690,7 @@ pool already mounted at /mnt/storage
                 },
                 RawCommandOutput {
                     cmd: "cryptsetup luksUUID".into(),
-                    stdout: "aaaaaaaa-1111-2222-3333-444444444444\n".into(),
+                    stdout: "11111111-1111-1111-1111-111111111111\n".into(),
                     stderr: String::new(),
                     exit_status: 0,
                 },

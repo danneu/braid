@@ -367,10 +367,14 @@ fn discover_from_dir<R: CommandRunner>(
             }
         };
 
-        let priority = by_id_priority(&name_str);
         let filename = name_str.into_owned();
-        let by_id =
-            ByIdPath::parse(&path_str).expect("by-id path comes from /dev/disk/by-id/ enumeration");
+        let priority = by_id_priority(&filename);
+        let by_id_path = Path::new("/dev/disk/by-id")
+            .join(&filename)
+            .to_string_lossy()
+            .into_owned();
+        let by_id = ByIdPath::parse(&by_id_path)
+            .expect("by-id path comes from /dev/disk/by-id/ enumeration");
 
         let candidate = AliasCandidate {
             priority,
@@ -469,6 +473,7 @@ fn discover_from_dir<R: CommandRunner>(
 /// 1. `pending-op.json` must not exist (covered by `PendingOpExists`).
 /// 2. Existing `pool.json` must not be in the legacy name-keyed shape
 ///    (covered by `NameKeyedPoolJson`).
+///
 /// When `expected_count` is set, the gate refuses if the produced
 /// membership has fewer than `expected_count` members (cutover
 /// partial-attach guard).
@@ -1106,7 +1111,8 @@ mod tests {
                 assert_eq!(name, "foo");
                 let pair = [path1.as_str(), path2.as_str()];
                 assert!(
-                    pair.contains(&alias_a.as_str()) && pair.contains(&alias_b.as_str()),
+                    pair.iter().any(|path| path.ends_with("ata-CLONE_A"))
+                        && pair.iter().any(|path| path.ends_with("ata-CLONE_B")),
                     "collision must reference both aliases: {pair:?}",
                 );
             }
@@ -1115,8 +1121,8 @@ mod tests {
 
         let msg = err.to_string();
         assert!(msg.contains("braid-foo"), "missing label name: {msg}");
-        assert!(msg.contains(&alias_a), "missing alias_a: {msg}");
-        assert!(msg.contains(&alias_b), "missing alias_b: {msg}");
+        assert!(msg.contains("ata-CLONE_A"), "missing alias_a: {msg}");
+        assert!(msg.contains("ata-CLONE_B"), "missing alias_b: {msg}");
     }
 
     #[test]

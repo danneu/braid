@@ -36,6 +36,26 @@ def read_pool():
     return json.loads(machine.succeed("cat /var/lib/braid/pool.json"))
 
 
+def member_entry(pool, name):
+    for uuid, member in pool["disks"].items():
+        if member["name"] == name:
+            return uuid, member
+    raise AssertionError(f"{name} missing from pool.json: {pool}")
+
+
+def members_except(pool, *names):
+    skip = set(names)
+    return {
+        uuid: member
+        for uuid, member in pool["disks"].items()
+        if member["name"] not in skip
+    }
+
+
+def has_member(pool, name):
+    return any(member["name"] == name for member in pool["disks"].values())
+
+
 def missing_devid():
     raw = machine.succeed("braid status --json")
     report = json.loads(raw)
@@ -45,8 +65,7 @@ def missing_devid():
 
 
 def inject_remove_missing_journal(pre_pool, devid):
-    target_pool = json.loads(json.dumps(pre_pool))
-    del target_pool["disks"]["disk3"]
+    target_pool = {"disks": members_except(pre_pool, "disk3")}
     journal = {
         "started_at": "2026-01-01T00:00:00Z",
         "op": {
@@ -134,15 +153,16 @@ with subtest("braid recover completes committed remove-missing"):
 with subtest("pool.json reflects disk1+disk2 only"):
     recovered = read_pool()
     for name in ["disk1", "disk2"]:
-        assert name in recovered["disks"], (
+        assert has_member(recovered, name), (
             f"{name} missing from recovered pool.json: {recovered}"
         )
+        _, recovered_member = member_entry(recovered, name)
         expected_by_id = f"/dev/disk/by-id/virtio-{name}"
-        actual_by_id = recovered["disks"][name]["by_id"]
+        actual_by_id = recovered_member["by_id"]
         assert actual_by_id == expected_by_id, (
             f"{name} by_id mismatch: expected {expected_by_id}, got {actual_by_id}"
         )
-    assert "disk3" not in recovered["disks"], (
+    assert not has_member(recovered, "disk3"), (
         f"disk3 should not be in recovered pool.json: {recovered}"
     )
 

@@ -45,6 +45,22 @@ def replace_cmd(old, new):
     )
 
 
+def member_entry(pool, name):
+    for uuid, member in pool["disks"].items():
+        if member["name"] == name:
+            return uuid, member
+    raise AssertionError(f"{name} missing from pool.json: {pool}")
+
+
+def members_except(pool, *names):
+    skip = set(names)
+    return {
+        uuid: member
+        for uuid, member in pool["disks"].items()
+        if member["name"] not in skip
+    }
+
+
 # --- Phase 1: Build 3-disk RAID1 pool and write test data ---
 
 with subtest("Build 3-disk pool"):
@@ -72,6 +88,9 @@ with subtest("Perform real replace disk2 with disk4"):
     assert "braid-disk2" not in fi_show, (
         f"disk2 should be removed after replace:\n{fi_show}"
     )
+    new_uuid = machine.succeed(
+        "cryptsetup luksUUID /dev/disk/by-id/virtio-disk4"
+    ).strip()
 
 # --- Phase 3: Lock pool and simulate crash state ---
 
@@ -88,12 +107,14 @@ with subtest("Lock pool and roll back metadata to simulate crash"):
         f"POOL_EOF"
     )
 
+    old_uuid, old_member = member_entry(pre_replace_json, "disk2")
+
     # Build target_membership: disk2 removed, disk4 added
-    target_disks = {}
-    for name, member in pre_replace_json["disks"].items():
-        if name != "disk2":
-            target_disks[name] = member
-    target_disks["disk4"] = {"by_id": "/dev/disk/by-id/virtio-disk4"}
+    target_disks = members_except(pre_replace_json, "disk2")
+    target_disks[new_uuid] = {
+        "name": "disk4",
+        "by_id": "/dev/disk/by-id/virtio-disk4",
+    }
     target_json = {"disks": target_disks}
 
     # Inject pending-op.json
@@ -102,21 +123,19 @@ with subtest("Lock pool and roll back metadata to simulate crash"):
         "op": {
             "op": "Replace",
             "phase": "PoolMutation",
+            "old_uuid": old_uuid,
             "old_name": "disk2",
+            "new_uuid": new_uuid,
             "new_name": "disk4",
             "new_target": {
                 "by_id": "/dev/disk/by-id/virtio-disk4",
-                "mapper_name": "braid-disk4",
                 "mode": {
                     "FreshLuks": {
-                        "luks_label": "braid-disk4",
-                        "luks_format_extra_opts": [
+                        "extra_opts": [
                             "--pbkdf",
                             "pbkdf2",
                             "--pbkdf-force-iterations",
                             "1000",
-                            "--label",
-                            "braid-disk4",
                         ],
                         "enroll_key_file": None,
                     }
@@ -124,7 +143,7 @@ with subtest("Lock pool and roll back metadata to simulate crash"):
             },
             "source": {
                 "Live": {
-                    "old_devid": pre_replace_json["disks"]["disk2"]["devid"],
+                    "old_devid": old_member["devid"],
                     "old_mapper": "braid-disk2",
                 }
             },
@@ -169,16 +188,14 @@ with subtest("braid recover rebuilds pool.json from live pool"):
         "disk4": "/dev/disk/by-id/virtio-disk4",
     }
     for name, expected_by_id in expected_members.items():
-        assert name in recovered["disks"], (
-            f"{name} missing from recovered pool.json: {recovered}"
-        )
-        actual_by_id = recovered["disks"][name]["by_id"]
+        _, recovered_member = member_entry(recovered, name)
+        actual_by_id = recovered_member["by_id"]
         assert actual_by_id == expected_by_id, (
             f"{name} by_id mismatch: expected {expected_by_id}, got {actual_by_id}"
         )
 
     # Must NOT contain disk2 (replaced and no longer in btrfs)
-    assert "disk2" not in recovered["disks"], (
+    assert all(member["name"] != "disk2" for member in recovered["disks"].values()), (
         f"disk2 should not be in recovered pool.json: {recovered}"
     )
 

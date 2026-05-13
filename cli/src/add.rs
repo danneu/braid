@@ -311,7 +311,6 @@ struct FreshLuksTarget {
 struct RecoverableBraidTarget {
     name: DiskName,
     by_id: ByIdPath,
-    mapper_name: MapperName,
     mapper_path: String,
     luks_uuid: LuksUuid,
     verified_pool_fsid: String,
@@ -932,7 +931,6 @@ impl AddPlan {
                     let verified = RecoverableBraidTarget {
                         name: target.name.clone(),
                         by_id: target.by_id.clone(),
-                        mapper_name: target.mapper_name.clone(),
                         mapper_path: target.mapper_path.clone(),
                         luks_uuid: target.luks_uuid.clone(),
                         verified_pool_fsid,
@@ -1290,6 +1288,9 @@ impl AddPlan {
 /// and the semantic add work planner. On success, every accumulated note lives
 /// on `plan.notes`; on failure after note accumulation, notes survive on
 /// `PlanFailure::notes` so `cmd_add` can render them to stderr before the error.
+// CLI planning path -- preserving preview notes with the full typed error keeps
+// diagnostics local to `cmd_add`; boxing only this branch would churn callers.
+#[allow(clippy::result_large_err)]
 pub fn plan_add<R: CommandRunner + Sync, F: Filesystem + ?Sized>(
     runner: &R,
     fs: &F,
@@ -1388,7 +1389,9 @@ pub fn plan_add<R: CommandRunner + Sync, F: Filesystem + ?Sized>(
     // throwaway clone. This enforces the full four-axis uniqueness
     // invariant (UUID + name + by-id + non-None devid) in one place;
     // the historical `validate_no_conflicts` checked only name + by-id
-    // and is gone from the membership API.
+    // and is gone from the membership API. Exact existing members are
+    // allowed through so the planner can classify them as the documented
+    // already-in-pool no-op.
     {
         let mut prospective = pool_membership.clone();
         // Use placeholder UUIDs sentinel-seeded from each spec's by_id
@@ -1408,6 +1411,12 @@ pub fn plan_add<R: CommandRunner + Sync, F: Filesystem + ?Sized>(
                 devid: None,
                 added_at: None,
             };
+            if pool_membership
+                .by_name(name)
+                .is_some_and(|(_, existing)| &existing.name == name && &existing.by_id == by_id)
+            {
+                continue;
+            }
             if let Err(e) = prospective.insert(placeholder, member) {
                 return Err(PlanFailure::empty(e.into()));
             }
@@ -1788,7 +1797,6 @@ fn build_add_work_plan<R: CommandRunner>(
                             let target = RecoverableBraidTarget {
                                 name: name.clone(),
                                 by_id: (*by_id).clone(),
-                                mapper_name: mn.clone(),
                                 mapper_path,
                                 luks_uuid: uuid.clone(),
                                 verified_pool_fsid,
@@ -7127,6 +7135,9 @@ mod tests {
                 .iter()
                 .find(|(by_id, _)| by_id == device)
                 .map(|(_, uuid)| Ok(mock_ok("cryptsetup luksUUID", &format!("{uuid}\n")))),
+            CmdRequest::BtrfsFilesystemShowTarget { .. } => Some(Ok(btrfs_show_with_uuid(
+                "cc86845b-aec3-408e-bef5-553affc1f2b1",
+            ))),
             _ => None,
         })
     }

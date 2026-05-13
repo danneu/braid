@@ -78,13 +78,15 @@ impl PoolFixture {
         let base = Self::empty_inner();
         let mut m = PoolMembership::empty();
         for (seed, name) in [(1u64, "disk1"), (2, "disk2"), (3, "disk3")] {
-            let (uuid, member) = disk_member_with(
+            let (_, member) = disk_member_with(
                 seed,
                 name,
                 &format!("/dev/disk/by-id/virtio-{name}"),
                 None,
                 None,
             );
+            let uuid = LuksUuid::parse(luks_uuid_for_disk_name(name).expect("fixture disk name"))
+                .expect("canonical fixture UUID");
             m.insert(uuid, member).expect("fixture insert");
         }
         membership::save_membership(&m, &base.paths).expect("save_membership");

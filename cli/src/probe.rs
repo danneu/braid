@@ -122,7 +122,7 @@ pub fn probe_config_disk<R: CommandRunner, F: Filesystem + ?Sized>(
     name: &str,
     by_id: &ByIdPath,
 ) -> Result<ConfigDisk, ProbeError> {
-    if !fs.exists(&by_id.0) {
+    if !fs.exists(by_id.as_str()) {
         return Ok(ConfigDisk {
             name: name.to_owned(),
             by_id_path: by_id.clone(),
@@ -131,7 +131,7 @@ pub fn probe_config_disk<R: CommandRunner, F: Filesystem + ?Sized>(
     }
 
     let raw = runner.run(&CmdRequest::CryptsetupLuksUuid {
-        device: by_id.0.clone(),
+        device: by_id.as_str().to_owned(),
     })?;
 
     let uuid = match parse_cryptsetup_luks_uuid(&raw) {
@@ -158,7 +158,7 @@ pub fn probe_config_disk<R: CommandRunner, F: Filesystem + ?Sized>(
     // The user-facing error is technical (cryptsetup's stderr) but
     // accurate; cryptsetup repair is the documented recovery.
     let dump_raw = runner.run(&CmdRequest::CryptsetupLuksDumpText {
-        device: by_id.0.clone(),
+        device: by_id.as_str().to_owned(),
     })?;
     let version = parse_cryptsetup_luks_version(&dump_raw)?.version;
     if version != 2 {
@@ -457,7 +457,7 @@ mod tests {
     }
 
     fn by_id(path: &str) -> ByIdPath {
-        ByIdPath(path.to_owned())
+        ByIdPath::parse(path).unwrap()
     }
 
     fn mp() -> MountPoint {
@@ -603,7 +603,7 @@ mod tests {
         assert_eq!(
             result.state,
             ConfigDiskState::PresentLuks {
-                uuid: LuksUuid("a1b2c3d4-e5f6-7890-abcd-ef1234567890".into()),
+                uuid: LuksUuid::parse("a1b2c3d4-e5f6-7890-abcd-ef1234567890").unwrap(),
                 label: Some("braid-toshiba".to_owned()),
                 mapper_open: false,
             }
@@ -661,7 +661,7 @@ mod tests {
         assert_eq!(
             result.state,
             ConfigDiskState::PresentLuks {
-                uuid: LuksUuid("a1b2c3d4-e5f6-7890-abcd-ef1234567890".into()),
+                uuid: LuksUuid::parse("a1b2c3d4-e5f6-7890-abcd-ef1234567890").unwrap(),
                 label: Some("braid-toshiba".to_owned()),
                 mapper_open: true,
             }
@@ -729,11 +729,11 @@ mod tests {
                 assert_eq!(name, "toshiba");
                 assert_eq!(
                     expected,
-                    LuksUuid("aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa".into())
+                    LuksUuid::parse("aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa").unwrap()
                 );
                 assert_eq!(
                     found,
-                    Some(LuksUuid("bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb".into()))
+                    Some(LuksUuid::parse("bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb").unwrap())
                 );
             }
             other => panic!("expected ProbeError::MapperConflict, got: {other:?}"),
@@ -809,7 +809,7 @@ mod tests {
                 assert_eq!(name, "toshiba");
                 assert_eq!(
                     expected,
-                    LuksUuid("aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa".into())
+                    LuksUuid::parse("aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa").unwrap()
                 );
                 assert_eq!(found, None);
             }
@@ -861,7 +861,7 @@ mod tests {
         assert_eq!(
             result.state,
             ConfigDiskState::PresentLuks {
-                uuid: LuksUuid("a1b2c3d4-e5f6-7890-abcd-ef1234567890".into()),
+                uuid: LuksUuid::parse("a1b2c3d4-e5f6-7890-abcd-ef1234567890").unwrap(),
                 label: Some("braid-toshiba".to_owned()),
                 mapper_open: false,
             }
@@ -919,7 +919,7 @@ mod tests {
                 assert_eq!(name, "toshiba");
                 assert_eq!(
                     expected,
-                    LuksUuid("aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa".into())
+                    LuksUuid::parse("aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa").unwrap()
                 );
                 assert_eq!(found, None);
             }
@@ -1188,7 +1188,7 @@ mod tests {
         assert_eq!(result.devices[0].mapper, MapperName("braid-toshiba".into()));
         assert_eq!(
             result.devices[0].luks_uuid,
-            LuksUuid("11111111-1111-1111-1111-111111111111".into())
+            LuksUuid::parse("11111111-1111-1111-1111-111111111111").unwrap()
         );
         assert_eq!(result.devices[0].devid, 1);
         assert_eq!(

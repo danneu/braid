@@ -157,17 +157,17 @@ pub(crate) fn unlock_with_three_mappers_open(runner: MockRunner) -> MockRunner {
         .with_mapper_open(
             "braid-disk1",
             "/dev/vda",
-            "aaaaaaaa-1111-2222-3333-444444444444",
+            "11111111-1111-1111-1111-111111111111",
         )
         .with_mapper_open(
             "braid-disk2",
             "/dev/vdb",
-            "bbbbbbbb-1111-2222-3333-444444444444",
+            "22222222-2222-2222-2222-222222222222",
         )
         .with_mapper_open(
             "braid-disk3",
             "/dev/vdc",
-            "cccccccc-1111-2222-3333-444444444444",
+            "33333333-3333-3333-3333-333333333333",
         )
 }
 

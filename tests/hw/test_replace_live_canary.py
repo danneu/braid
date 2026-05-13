@@ -17,6 +17,17 @@
 """
 
 import json
+
+
+def member_names(pool):
+    return {member["name"] for member in pool["disks"].values()}
+
+
+def member(pool, name):
+    for entry in pool["disks"].values():
+        if entry["name"] == name:
+            return entry
+    raise AssertionError(f"{name} missing from pool.json: {pool}")
 import sys
 import os
 
@@ -78,8 +89,8 @@ with section("Data intact after live replace"):
 with section("Pool membership updated after live replace"):
     pm_raw = run("cat /var/lib/braid/pool.json")
     pm = json.loads(pm_raw)
-    assert "hwtest2" not in pm["disks"], f"hwtest2 still in pool: {pm}"
-    assert "hwtest3" in pm["disks"], f"hwtest3 missing from pool: {pm}"
-    assert "hwtest1" in pm["disks"], f"hwtest1 missing from pool: {pm}"
+    assert "hwtest2" not in member_names(pm), f"hwtest2 still in pool: {pm}"
+    assert "hwtest3" in member_names(pm), f"hwtest3 missing from pool: {pm}"
+    assert "hwtest1" in member_names(pm), f"hwtest1 missing from pool: {pm}"
 
 print("\nAll replace live canary tests passed.")

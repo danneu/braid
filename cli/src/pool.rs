@@ -1872,10 +1872,11 @@ mod tests {
                 MapperName(format!("braid-disk{i}")),
                 DeviceIdentity {
                     devid: i,
-                    luks_uuid: LuksUuid(format!(
+                    luks_uuid: LuksUuid::parse(&format!(
                         "{:08x}-{:04x}-{:04x}-{:04x}-{:012x}",
                         i as u32, i as u16, i as u16, i as u16, i
-                    )),
+                    ))
+                    .expect("valid fixture UUID"),
                 },
             );
         }

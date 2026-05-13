@@ -1482,23 +1482,23 @@ pub(crate) mod tests {
     #[test]
     fn snapshot_temperature_column() {
         use crate::types::LuksUuid;
+        fn uuid(raw: &str) -> LuksUuid {
+            LuksUuid::parse(raw).expect("valid UUID in temperature fixture")
+        }
+
         let mut pool = sample_pool();
         pool.disk_temperature_readings = HashMap::from([
             (
                 "toshiba".to_owned(),
                 TemperatureReading {
-                    id: TemperatureDiskId::LuksUuid(LuksUuid(
-                        "11111111-1111-1111-1111-111111111111".to_owned(),
-                    )),
+                    id: TemperatureDiskId::LuksUuid(uuid("11111111-1111-1111-1111-111111111111")),
                     celsius: 38,
                 },
             ),
             (
                 "ironwolf".to_owned(),
                 TemperatureReading {
-                    id: TemperatureDiskId::LuksUuid(LuksUuid(
-                        "22222222-2222-2222-2222-222222222222".to_owned(),
-                    )),
+                    id: TemperatureDiskId::LuksUuid(uuid("22222222-2222-2222-2222-222222222222")),
                     celsius: 41,
                 },
             ),
@@ -1507,9 +1507,7 @@ pub(crate) mod tests {
         let mut model = Model::new_demo(sample_disk_names(), PoolStatus::Mounted(pool));
         model.session_temperature_stats = HashMap::from([
             (
-                TemperatureDiskId::LuksUuid(LuksUuid(
-                    "11111111-1111-1111-1111-111111111111".to_owned(),
-                )),
+                TemperatureDiskId::LuksUuid(uuid("11111111-1111-1111-1111-111111111111")),
                 TemperatureWatermark {
                     min_celsius: 32,
                     max_celsius: 45,
@@ -1517,9 +1515,7 @@ pub(crate) mod tests {
                 },
             ),
             (
-                TemperatureDiskId::LuksUuid(LuksUuid(
-                    "22222222-2222-2222-2222-222222222222".to_owned(),
-                )),
+                TemperatureDiskId::LuksUuid(uuid("22222222-2222-2222-2222-222222222222")),
                 TemperatureWatermark {
                     min_celsius: 41,
                     max_celsius: 41,
