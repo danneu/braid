@@ -119,26 +119,26 @@ impl From<OwnershipError> for ProbeError {
 pub fn probe_config_disk<R: CommandRunner, F: Filesystem + ?Sized>(
     runner: &R,
     fs: &F,
-    name: &str,
+    name: &DiskName,
     by_id: &ByIdPath,
 ) -> Result<ConfigDisk, ProbeError> {
-    if !fs.exists(&by_id.0) {
+    if !fs.exists(by_id.as_str()) {
         return Ok(ConfigDisk {
-            name: name.to_owned(),
+            name: name.clone(),
             by_id_path: by_id.clone(),
             state: ConfigDiskState::Absent,
         });
     }
 
     let raw = runner.run(&CmdRequest::CryptsetupLuksUuid {
-        device: by_id.0.clone(),
+        device: by_id.as_str().to_owned(),
     })?;
 
     let uuid = match parse_cryptsetup_luks_uuid(&raw) {
         Ok(out) => out.uuid,
         Err(ParseError::CommandFailed { .. }) => {
             return Ok(ConfigDisk {
-                name: name.to_owned(),
+                name: name.clone(),
                 by_id_path: by_id.clone(),
                 state: ConfigDiskState::PresentNotLuks,
             });
@@ -158,22 +158,22 @@ pub fn probe_config_disk<R: CommandRunner, F: Filesystem + ?Sized>(
     // The user-facing error is technical (cryptsetup's stderr) but
     // accurate; cryptsetup repair is the documented recovery.
     let dump_raw = runner.run(&CmdRequest::CryptsetupLuksDumpText {
-        device: by_id.0.clone(),
+        device: by_id.as_str().to_owned(),
     })?;
     let version = parse_cryptsetup_luks_version(&dump_raw)?.version;
     if version != 2 {
         return Err(ProbeError::UnsupportedLuksVersion {
-            name: name.to_owned(),
+            name: name.as_str().to_owned(),
             version,
         });
     }
     let label = parse_cryptsetup_luks_label(&dump_raw)?.label;
 
-    let mn = mapper_name(name);
-    let mapper_open = probe_mapper_open(runner, name, &mn, &uuid)?;
+    let mn = mapper_name(name.as_str());
+    let mapper_open = probe_mapper_open(runner, name.as_str(), &mn, &uuid)?;
 
     Ok(ConfigDisk {
-        name: name.to_owned(),
+        name: name.clone(),
         by_id_path: by_id.clone(),
         state: ConfigDiskState::PresentLuks {
             uuid,
@@ -266,7 +266,7 @@ pub fn probe_pool<R: CommandRunner, F: Filesystem + ?Sized>(
             .to_owned();
 
         let status_raw = runner.run(&CmdRequest::CryptsetupStatus {
-            mapper: name.clone(),
+            mapper: MapperName(name.clone()),
         })?;
         let status = parse_cryptsetup_status(&status_raw)?;
 
@@ -457,7 +457,11 @@ mod tests {
     }
 
     fn by_id(path: &str) -> ByIdPath {
-        ByIdPath(path.to_owned())
+        ByIdPath::parse(path).unwrap()
+    }
+
+    fn dn(name: &str) -> DiskName {
+        DiskName::parse(name).expect("valid disk name in test fixture")
     }
 
     fn mp() -> MountPoint {
@@ -472,8 +476,8 @@ mod tests {
         let fs = MockFs::new(&[]);
         let d = by_id("/dev/disk/by-id/disk-1");
 
-        let result = probe_config_disk(&runner, &fs, "toshiba", &d).unwrap();
-        assert_eq!(result.name, "toshiba");
+        let result = probe_config_disk(&runner, &fs, &dn("toshiba"), &d).unwrap();
+        assert_eq!(result.name.as_str(), "toshiba");
         assert_eq!(result.state, ConfigDiskState::Absent);
     }
 
@@ -492,7 +496,7 @@ mod tests {
         let fs = MockFs::new(&["/dev/disk/by-id/disk-1"]);
         let d = by_id("/dev/disk/by-id/disk-1");
 
-        let result = probe_config_disk(&runner, &fs, "toshiba", &d).unwrap();
+        let result = probe_config_disk(&runner, &fs, &dn("toshiba"), &d).unwrap();
         assert_eq!(result.state, ConfigDiskState::PresentNotLuks);
     }
 
@@ -502,7 +506,7 @@ mod tests {
         let fs = MockFs::new(&["/dev/disk/by-id/disk-1"]);
         let d = by_id("/dev/disk/by-id/disk-1");
 
-        let result = probe_config_disk(&runner, &fs, "toshiba", &d);
+        let result = probe_config_disk(&runner, &fs, &dn("toshiba"), &d);
         assert!(result.is_err());
         let err = result.unwrap_err();
         assert!(
@@ -522,7 +526,7 @@ mod tests {
         let fs = MockFs::new(&["/dev/disk/by-id/disk-1"]);
         let d = by_id("/dev/disk/by-id/disk-1");
 
-        let result = probe_config_disk(&runner, &fs, "toshiba", &d);
+        let result = probe_config_disk(&runner, &fs, &dn("toshiba"), &d);
         assert!(result.is_err());
         let err = result.unwrap_err();
         assert!(
@@ -591,19 +595,19 @@ mod tests {
             )
             .with_output(
                 CmdRequest::CryptsetupStatus {
-                    mapper: "braid-toshiba".into(),
+                    mapper: MapperName("braid-toshiba".into()),
                 },
                 cryptsetup_status_inactive("braid-toshiba"),
             );
         let fs = MockFs::new(&["/dev/disk/by-id/disk-1"]);
         let d = by_id("/dev/disk/by-id/disk-1");
 
-        let result = probe_config_disk(&runner, &fs, "toshiba", &d).unwrap();
-        assert_eq!(result.name, "toshiba");
+        let result = probe_config_disk(&runner, &fs, &dn("toshiba"), &d).unwrap();
+        assert_eq!(result.name.as_str(), "toshiba");
         assert_eq!(
             result.state,
             ConfigDiskState::PresentLuks {
-                uuid: LuksUuid("a1b2c3d4-e5f6-7890-abcd-ef1234567890".into()),
+                uuid: LuksUuid::parse("a1b2c3d4-e5f6-7890-abcd-ef1234567890").unwrap(),
                 label: Some("braid-toshiba".to_owned()),
                 mapper_open: false,
             }
@@ -641,7 +645,7 @@ mod tests {
             )
             .with_output(
                 CmdRequest::CryptsetupStatus {
-                    mapper: "braid-toshiba".into(),
+                    mapper: MapperName("braid-toshiba".into()),
                 },
                 cryptsetup_status_active("braid-toshiba", "/dev/vda"),
             )
@@ -657,11 +661,11 @@ mod tests {
         let fs = MockFs::new(&["/dev/disk/by-id/disk-1"]);
         let d = by_id("/dev/disk/by-id/disk-1");
 
-        let result = probe_config_disk(&runner, &fs, "toshiba", &d).unwrap();
+        let result = probe_config_disk(&runner, &fs, &dn("toshiba"), &d).unwrap();
         assert_eq!(
             result.state,
             ConfigDiskState::PresentLuks {
-                uuid: LuksUuid("a1b2c3d4-e5f6-7890-abcd-ef1234567890".into()),
+                uuid: LuksUuid::parse("a1b2c3d4-e5f6-7890-abcd-ef1234567890").unwrap(),
                 label: Some("braid-toshiba".to_owned()),
                 mapper_open: true,
             }
@@ -703,7 +707,7 @@ mod tests {
             )
             .with_output(
                 CmdRequest::CryptsetupStatus {
-                    mapper: "braid-toshiba".into(),
+                    mapper: MapperName("braid-toshiba".into()),
                 },
                 cryptsetup_status_active("braid-toshiba", "/dev/vdz"),
             )
@@ -719,7 +723,7 @@ mod tests {
         let fs = MockFs::new(&["/dev/disk/by-id/disk-1"]);
         let d = by_id("/dev/disk/by-id/disk-1");
 
-        let err = probe_config_disk(&runner, &fs, "toshiba", &d).unwrap_err();
+        let err = probe_config_disk(&runner, &fs, &dn("toshiba"), &d).unwrap_err();
         match err {
             ProbeError::MapperConflict {
                 name,
@@ -729,11 +733,11 @@ mod tests {
                 assert_eq!(name, "toshiba");
                 assert_eq!(
                     expected,
-                    LuksUuid("aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa".into())
+                    LuksUuid::parse("aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa").unwrap()
                 );
                 assert_eq!(
                     found,
-                    Some(LuksUuid("bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb".into()))
+                    Some(LuksUuid::parse("bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb").unwrap())
                 );
             }
             other => panic!("expected ProbeError::MapperConflict, got: {other:?}"),
@@ -781,7 +785,7 @@ mod tests {
             )
             .with_output(
                 CmdRequest::CryptsetupStatus {
-                    mapper: "braid-toshiba".into(),
+                    mapper: MapperName("braid-toshiba".into()),
                 },
                 cryptsetup_status_active("braid-toshiba", "/dev/vdz"),
             )
@@ -798,7 +802,7 @@ mod tests {
         let fs = MockFs::new(&["/dev/disk/by-id/disk-1"]);
         let d = by_id("/dev/disk/by-id/disk-1");
 
-        let err = probe_config_disk(&runner, &fs, "toshiba", &d).unwrap_err();
+        let err = probe_config_disk(&runner, &fs, &dn("toshiba"), &d).unwrap_err();
 
         match err {
             ProbeError::MapperConflict {
@@ -809,7 +813,7 @@ mod tests {
                 assert_eq!(name, "toshiba");
                 assert_eq!(
                     expected,
-                    LuksUuid("aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa".into())
+                    LuksUuid::parse("aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa").unwrap()
                 );
                 assert_eq!(found, None);
             }
@@ -850,18 +854,18 @@ mod tests {
             )
             .with_output(
                 CmdRequest::CryptsetupStatus {
-                    mapper: "braid-toshiba".into(),
+                    mapper: MapperName("braid-toshiba".into()),
                 },
                 cryptsetup_status_inactive("braid-toshiba"),
             );
         let fs = MockFs::new(&["/dev/disk/by-id/disk-1"]);
         let d = by_id("/dev/disk/by-id/disk-1");
 
-        let result = probe_config_disk(&runner, &fs, "toshiba", &d).unwrap();
+        let result = probe_config_disk(&runner, &fs, &dn("toshiba"), &d).unwrap();
         assert_eq!(
             result.state,
             ConfigDiskState::PresentLuks {
-                uuid: LuksUuid("a1b2c3d4-e5f6-7890-abcd-ef1234567890".into()),
+                uuid: LuksUuid::parse("a1b2c3d4-e5f6-7890-abcd-ef1234567890").unwrap(),
                 label: Some("braid-toshiba".to_owned()),
                 mapper_open: false,
             }
@@ -902,14 +906,14 @@ mod tests {
             )
             .with_output(
                 CmdRequest::CryptsetupStatus {
-                    mapper: "braid-toshiba".into(),
+                    mapper: MapperName("braid-toshiba".into()),
                 },
                 cryptsetup_status_active_null("braid-toshiba"),
             );
         let fs = MockFs::new(&["/dev/disk/by-id/disk-1"]);
         let d = by_id("/dev/disk/by-id/disk-1");
 
-        let err = probe_config_disk(&runner, &fs, "toshiba", &d).unwrap_err();
+        let err = probe_config_disk(&runner, &fs, &dn("toshiba"), &d).unwrap_err();
         match err {
             ProbeError::MapperConflict {
                 name,
@@ -919,7 +923,7 @@ mod tests {
                 assert_eq!(name, "toshiba");
                 assert_eq!(
                     expected,
-                    LuksUuid("aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa".into())
+                    LuksUuid::parse("aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa").unwrap()
                 );
                 assert_eq!(found, None);
             }
@@ -961,7 +965,7 @@ mod tests {
         let fs = MockFs::new(&["/dev/disk/by-id/disk-1"]);
         let d = by_id("/dev/disk/by-id/disk-1");
 
-        let err = probe_config_disk(&runner, &fs, "toshiba", &d).unwrap_err();
+        let err = probe_config_disk(&runner, &fs, &dn("toshiba"), &d).unwrap_err();
         match err {
             ProbeError::UnsupportedLuksVersion { name, version } => {
                 assert_eq!(name, "toshiba");
@@ -995,7 +999,7 @@ mod tests {
         let fs = MockFs::new(&["/dev/disk/by-id/disk-1"]);
         let d = by_id("/dev/disk/by-id/disk-1");
 
-        let err = probe_config_disk(&runner, &fs, "toshiba", &d).unwrap_err();
+        let err = probe_config_disk(&runner, &fs, &dn("toshiba"), &d).unwrap_err();
         assert!(
             matches!(err, ProbeError::Cmd(_)),
             "expected ProbeError::Cmd, got: {err:?}"
@@ -1034,7 +1038,7 @@ mod tests {
         let fs = MockFs::new(&["/dev/disk/by-id/disk-1"]);
         let d = by_id("/dev/disk/by-id/disk-1");
 
-        let err = probe_config_disk(&runner, &fs, "toshiba", &d).unwrap_err();
+        let err = probe_config_disk(&runner, &fs, &dn("toshiba"), &d).unwrap_err();
         assert!(
             matches!(err, ProbeError::Parse(_)),
             "expected ProbeError::Parse, got: {err:?}"
@@ -1157,7 +1161,7 @@ mod tests {
             )
             .with_output(
                 CmdRequest::CryptsetupStatus {
-                    mapper: "braid-toshiba".into(),
+                    mapper: MapperName("braid-toshiba".into()),
                 },
                 cryptsetup_status_active("braid-toshiba", "/dev/vda"),
             )
@@ -1169,7 +1173,7 @@ mod tests {
             )
             .with_output(
                 CmdRequest::CryptsetupStatus {
-                    mapper: "braid-ironwolf".into(),
+                    mapper: MapperName("braid-ironwolf".into()),
                 },
                 cryptsetup_status_active("braid-ironwolf", "/dev/vdb"),
             )
@@ -1188,7 +1192,7 @@ mod tests {
         assert_eq!(result.devices[0].mapper, MapperName("braid-toshiba".into()));
         assert_eq!(
             result.devices[0].luks_uuid,
-            LuksUuid("11111111-1111-1111-1111-111111111111".into())
+            LuksUuid::parse("11111111-1111-1111-1111-111111111111").unwrap()
         );
         assert_eq!(result.devices[0].devid, 1);
         assert_eq!(
@@ -1214,7 +1218,7 @@ mod tests {
             )
             .with_output(
                 CmdRequest::CryptsetupStatus {
-                    mapper: "braid-toshiba".into(),
+                    mapper: MapperName("braid-toshiba".into()),
                 },
                 cryptsetup_status_active("braid-toshiba", "/dev/vda"),
             )
@@ -1226,7 +1230,7 @@ mod tests {
             )
             .with_output(
                 CmdRequest::CryptsetupStatus {
-                    mapper: "braid-ironwolf".into(),
+                    mapper: MapperName("braid-ironwolf".into()),
                 },
                 cryptsetup_status_active("braid-ironwolf", "/dev/vdb"),
             )
@@ -1263,7 +1267,7 @@ mod tests {
             )
             .with_output(
                 CmdRequest::CryptsetupStatus {
-                    mapper: "braid-toshiba".into(),
+                    mapper: MapperName("braid-toshiba".into()),
                 },
                 cryptsetup_status_active("braid-toshiba", "/dev/vda"),
             )
@@ -1299,7 +1303,7 @@ mod tests {
             )
             .with_output(
                 CmdRequest::CryptsetupStatus {
-                    mapper: "braid-toshiba".into(),
+                    mapper: MapperName("braid-toshiba".into()),
                 },
                 err_raw(
                     "cryptsetup status braid-toshiba",
@@ -1364,7 +1368,7 @@ mod tests {
             )
             .with_output(
                 CmdRequest::CryptsetupStatus {
-                    mapper: "braid-toshiba".into(),
+                    mapper: MapperName("braid-toshiba".into()),
                 },
                 cryptsetup_status_active("braid-toshiba", "/dev/vda"),
             )
@@ -1376,7 +1380,7 @@ mod tests {
             )
             .with_output(
                 CmdRequest::CryptsetupStatus {
-                    mapper: "braid-ironwolf".into(),
+                    mapper: MapperName("braid-ironwolf".into()),
                 },
                 // cryptsetup reports device: (null) when backing device vanishes
                 ok_raw(
@@ -1430,7 +1434,7 @@ mod tests {
             )
             .with_output(
                 CmdRequest::CryptsetupStatus {
-                    mapper: "braid-toshiba".into(),
+                    mapper: MapperName("braid-toshiba".into()),
                 },
                 cryptsetup_status_active("braid-toshiba", "/dev/vda"),
             )

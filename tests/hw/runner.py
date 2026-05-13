@@ -87,7 +87,7 @@ def disk_info(path):
 
 
 def devices_from_pool(pool_path):
-    """Read disk by_id paths from pool.json, sorted by key name."""
+    """Read disk by_id paths from pool.json, sorted by display name."""
     try:
         with open(pool_path) as f:
             pool = json.load(f)
@@ -98,12 +98,14 @@ def devices_from_pool(pool_path):
     if not disks:
         die(f"No disks found in {pool_path}")
 
-    # Sort by key name for deterministic ordering
     paths = []
-    for key in sorted(disks.keys()):
-        by_id = disks[key].get("by_id")
+    for uuid, member in sorted(disks.items(), key=lambda item: item[1].get("name", "")):
+        name = member.get("name")
+        if not name:
+            die(f"Member '{uuid}' in {pool_path} has no name field")
+        by_id = member.get("by_id")
         if not by_id:
-            die(f"Disk '{key}' in {pool_path} has no by_id field")
+            die(f"Disk '{name}' in {pool_path} has no by_id field")
         paths.append(by_id)
 
     return paths

@@ -7,7 +7,7 @@ use crate::cmd::RealRunner;
 use crate::config::FanControl;
 use crate::state_paths::StatePaths;
 use crate::tui::event::Event;
-use crate::types::MountPoint;
+use crate::types::{LuksUuid, MountPoint};
 
 use std::time::Duration;
 
@@ -19,6 +19,11 @@ pub enum Effect {
     ProbePool {
         mount_point: MountPoint,
         disk_by_id: HashMap<String, String>,
+        /// Persistent disk identity map passed to the worker probe thread.
+        disk_luks_uuid: HashMap<String, LuksUuid>,
+        /// Prior btrfs devid bindings for devices whose current probe lacks a
+        /// visible LUKS UUID.
+        disk_devid: HashMap<String, u64>,
         paths: StatePaths,
     },
     ScheduleProbe {
@@ -49,6 +54,8 @@ pub fn execute_effect(effect: Effect, cmd_tx: &mpsc::Sender<Event>) {
         Effect::ProbePool {
             mount_point,
             disk_by_id,
+            disk_luks_uuid,
+            disk_devid,
             paths,
         } => {
             let tx = cmd_tx.clone();
@@ -61,6 +68,8 @@ pub fn execute_effect(effect: Effect, cmd_tx: &mpsc::Sender<Event>) {
                     &fs,
                     &mount_point,
                     &disk_by_id,
+                    &disk_luks_uuid,
+                    &disk_devid,
                     &paths,
                 );
                 let elapsed = start.elapsed();

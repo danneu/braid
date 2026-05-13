@@ -4,11 +4,10 @@
 use super::shared::{PoolFixture, mock_ok};
 use crate::cmd::{CmdRequest, MockRunner, RawCommandOutput};
 use crate::inhibit::RecordingInhibitor;
-use crate::membership::{self, DiskMember, PoolMembership};
+use crate::membership::{self, PoolMembership};
 use crate::progress::{self, ProgressOutput};
 use crate::replace::ReplaceParams;
 use crate::state_paths::StatePaths;
-use crate::types::ByIdPath;
 use std::collections::{HashMap, HashSet};
 use std::path::Path;
 use std::sync::Arc;
@@ -91,15 +90,27 @@ impl ReplacementPool {
         HashMap::from([
             ("/dev/vdb", "11111111-1111-1111-1111-111111111111"),
             (
+                "/dev/mapper/braid-disk1",
+                "11111111-1111-1111-1111-111111111111",
+            ),
+            (
                 "/dev/disk/by-id/virtio-disk1",
                 "11111111-1111-1111-1111-111111111111",
             ),
             ("/dev/vdc", "22222222-2222-2222-2222-222222222222"),
             (
+                "/dev/mapper/braid-disk2",
+                "22222222-2222-2222-2222-222222222222",
+            ),
+            (
                 "/dev/disk/by-id/virtio-disk2",
                 "22222222-2222-2222-2222-222222222222",
             ),
             ("/dev/vdd", "33333333-3333-3333-3333-333333333333"),
+            (
+                "/dev/mapper/braid-disk3",
+                "33333333-3333-3333-3333-333333333333",
+            ),
             (
                 "/dev/disk/by-id/virtio-disk3",
                 "33333333-3333-3333-3333-333333333333",
@@ -228,9 +239,20 @@ impl PoolFixture {
     pub(crate) fn one_live_only() -> Self {
         let base = Self::empty_inner();
         let mut m = PoolMembership::empty();
-        let mut disk1 = DiskMember::from_by_id(ByIdPath("/dev/disk/by-id/virtio-disk1".into()));
-        disk1.devid = Some(1);
-        m.disks.insert("disk1".into(), disk1);
+        // Use the canonical disk1 UUID the `ReplacementPool` fixture
+        // wires to `/dev/disk/by-id/virtio-disk1`, so the post-replace
+        // `enrich_from_pool_state` hop correlates this member by UUID.
+        let canonical_uuid = crate::types::LuksUuid::parse("11111111-1111-1111-1111-111111111111")
+            .expect("canonical UUID");
+        let member = crate::membership::DiskMember {
+            name: crate::types::DiskName::parse("disk1").expect("valid disk name"),
+            by_id: crate::types::ByIdPath::parse("/dev/disk/by-id/virtio-disk1")
+                .expect("valid by-id"),
+            devid: Some(1),
+            added_at: None,
+        };
+        m.insert(canonical_uuid, member)
+            .expect("seed disk1 in fixture membership");
         membership::save_membership(&m, &base.paths).expect("save_membership");
         Self {
             _state_tmp: base.state_tmp,
@@ -292,7 +314,7 @@ impl<'a> ReplaceParamsBuilder<'a> {
         self.old_name = name;
         self
     }
-    pub(crate) fn new(mut self, spec: &'a str) -> Self {
+    pub(crate) fn new_disk(mut self, spec: &'a str) -> Self {
         self.new_name = spec;
         self
     }

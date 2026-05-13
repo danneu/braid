@@ -19,6 +19,7 @@ use std::sync::Mutex;
 pub(crate) struct DiscoverLabelMap {
     labels: HashMap<String, String>,
     versions: HashMap<String, u32>,
+    uuids: HashMap<String, String>,
     dump_responses: HashMap<String, RawCommandOutput>,
     calls: Mutex<Vec<(String, String)>>,
 }
@@ -32,6 +33,7 @@ impl DiscoverLabelMap {
                 .map(|(path, label)| (path.to_string(), label.to_string()))
                 .collect(),
             versions: HashMap::new(),
+            uuids: HashMap::new(),
             dump_responses: HashMap::new(),
             calls: Mutex::new(Vec::new()),
         }
@@ -40,6 +42,17 @@ impl DiscoverLabelMap {
     /// Override the LUKS version for one path while defaulting all others to LUKS2.
     pub(crate) fn with_version(mut self, path: &str, version: u32) -> Self {
         self.versions.insert(path.to_string(), version);
+        self
+    }
+
+    /// Set the LUKS UUID emitted in the synthetic luksDump body for one path.
+    /// Test paths without a configured UUID default to a deterministic
+    /// per-path UUID so the dump parser always sees one and discover's
+    /// missing/invalid UUID handling can be exercised separately by
+    /// `with_dump_response`.
+    #[allow(dead_code)]
+    pub(crate) fn with_uuid(mut self, path: &str, uuid: &str) -> Self {
+        self.uuids.insert(path.to_string(), uuid.to_string());
         self
     }
 
@@ -53,6 +66,21 @@ impl DiscoverLabelMap {
     pub(crate) fn calls(&self) -> Vec<(String, String)> {
         self.calls.lock().unwrap().clone()
     }
+}
+
+/// Stable deterministic synthetic UUID per device path so fixture tests
+/// satisfy `parse_cryptsetup_luks_uuid_from_dump` without forcing every
+/// test to pin a UUID. The mapping is content-addressed (hash of the
+/// path bytes) so distinct paths produce distinct UUIDs. The last
+/// block is 12 hex digits (canonical hyphenated form); the leading
+/// blocks are zero so the fixture UUID space cannot collide with
+/// production-shape UUIDs.
+fn synthesize_uuid_for(path: &str) -> String {
+    use std::hash::{Hash, Hasher};
+    let mut h = std::collections::hash_map::DefaultHasher::new();
+    path.hash(&mut h);
+    let bits = h.finish() & 0xffff_ffff_ffff; // mask to 48 bits
+    format!("00000000-0000-0000-0000-{:012x}", bits)
 }
 
 impl CommandRunner for DiscoverLabelMap {
@@ -83,9 +111,16 @@ impl CommandRunner for DiscoverLabelMap {
                     Ok(response.clone())
                 } else if let Some(label) = self.labels.get(device.as_str()) {
                     let version = self.versions.get(device.as_str()).copied().unwrap_or(2);
+                    let uuid = self
+                        .uuids
+                        .get(device.as_str())
+                        .cloned()
+                        .unwrap_or_else(|| synthesize_uuid_for(device));
                     Ok(mock_ok(
                         "cryptsetup",
-                        &format!("LUKS header information\nVersion:\t{version}\nLabel:\t{label}\n"),
+                        &format!(
+                            "LUKS header information\nVersion:\t{version}\nUUID:\t{uuid}\nLabel:\t{label}\n"
+                        ),
                     ))
                 } else {
                     Ok(RawCommandOutput {

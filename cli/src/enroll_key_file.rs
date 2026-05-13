@@ -82,31 +82,52 @@ fn discover_enrollment_candidates<R: CommandRunner, F: Filesystem + ?Sized>(
     let mut notes: Vec<PreviewNote> = Vec::new();
     let mut candidates: Vec<EnrollmentCandidate> = Vec::new();
 
-    for (name, member) in &membership.disks {
-        let probed = match probe::probe_config_disk(runner, fs, name, &member.by_id) {
+    for (_, member) in membership.iter() {
+        let name = member.name.as_str();
+        let probed = match probe::probe_config_disk(runner, fs, &member.name, &member.by_id) {
             Ok(p) => p,
             Err(e) => return (notes, Err(e.into())),
         };
         match &probed.state {
             ConfigDiskState::Absent => {
                 notes.push(PreviewNote::PerDisk {
-                    name: name.clone(),
+                    name: name.to_owned(),
                     level: NoteLevel::Skip,
                     message: "not present".into(),
                 });
             }
             ConfigDiskState::PresentNotLuks => {
                 notes.push(PreviewNote::PerDisk {
-                    name: name.clone(),
+                    name: name.to_owned(),
                     level: NoteLevel::Skip,
                     message: "not LUKS-formatted".into(),
                 });
             }
             ConfigDiskState::PresentLuks { .. } => {
-                candidates.push((name.clone(), member.by_id.clone()));
+                candidates.push((name.to_owned(), member.by_id.clone()));
             }
         }
     }
+
+    // Pool membership iterates by LUKS UUID for persistence stability.
+    // Enroll is operator-facing, so discovery results must be presented
+    // by disk name instead.
+    candidates.sort_by(|(left, _), (right, _)| left.cmp(right));
+    notes.sort_by(|left, right| {
+        if let (
+            PreviewNote::PerDisk {
+                name: left_name, ..
+            },
+            PreviewNote::PerDisk {
+                name: right_name, ..
+            },
+        ) = (left, right)
+        {
+            left_name.cmp(right_name)
+        } else {
+            std::cmp::Ordering::Equal
+        }
+    });
 
     if candidates.is_empty() {
         return (
@@ -127,7 +148,7 @@ fn check_slot_one_available<R: CommandRunner>(
     name: &str,
     by_id: &ByIdPath,
 ) -> Result<(), EnrollKeyFileError> {
-    let slot_state = luks::check_key_slot(runner, &by_id.0, LUKS_SLOT_KEYFILE)?;
+    let slot_state = luks::check_key_slot(runner, by_id.as_str(), LUKS_SLOT_KEYFILE)?;
     if slot_state == KeySlotState::Occupied {
         return Err(EnrollKeyFileError::Validation(format!(
             "slot 1 on {} ({}) is occupied by an unknown key. \
@@ -178,7 +199,7 @@ pub(crate) fn plan_single_disk_enrollment<R: CommandRunner>(
         // may not even be readable.
         let target = CredentialVerifyTarget {
             name: name.to_owned(),
-            device: by_id.0.clone(),
+            device: by_id.as_str().to_owned(),
         };
         let color_enabled = color_enabled_for_stderr();
         if matches!(
@@ -217,7 +238,7 @@ fn plan_enrollment<R: CommandRunner>(
         .iter()
         .map(|(name, by_id)| CredentialVerifyTarget {
             name: name.clone(),
-            device: by_id.0.clone(),
+            device: by_id.as_str().to_owned(),
         })
         .collect();
     match verify_credential_for_targets(
@@ -274,7 +295,7 @@ fn apply_enrollment<R: CommandRunner>(
                     &format!("disk {name}: enrolling keyfile in slot 1..."),
                 )
             );
-            luks::enroll_key_file(runner, &by_id.0, passphrase, key_file_path)?;
+            luks::enroll_key_file(runner, by_id.as_str(), passphrase, key_file_path)?;
             eprint!(
                 "{}",
                 status_line(
@@ -286,7 +307,7 @@ fn apply_enrollment<R: CommandRunner>(
 
             let mn = mapper_name(name);
             let backup_path =
-                luks::backup_luks_header_post_mutation(runner, &by_id.0, &mn.0, paths)?;
+                luks::backup_luks_header_post_mutation(runner, by_id.as_str(), &mn.0, paths)?;
             eprintln!("LUKS header backed up: {}", backup_path.display());
         }
     }
@@ -351,7 +372,7 @@ pub fn compile_enroll_steps(
     if generate {
         steps.push(Step {
             risk: "safe",
-            description: format!("generate keyfile → {}", key_file_path.display()),
+            description: format!("generate keyfile -> {}", key_file_path.display()),
             commands: vec![],
         });
     }
@@ -360,9 +381,9 @@ pub fn compile_enroll_steps(
         let mn = mapper_name(name);
         steps.push(Step {
             risk: "safe",
-            description: format!("enroll keyfile → LUKS slot 1 on {}", by_id),
+            description: format!("enroll keyfile -> LUKS slot 1 on {}", by_id),
             commands: vec![CmdRequest::CryptsetupLuksAddKeyFile {
-                device: by_id.0.clone(),
+                device: by_id.as_str().to_owned(),
                 key_file_path: key_file_path.display().to_string(),
             }],
         });
@@ -371,9 +392,9 @@ pub fn compile_enroll_steps(
             .join(format!("{}.luksheader", mn.0));
         steps.push(Step {
             risk: "safe",
-            description: format!("LUKS header backup → {}", backup_path.display()),
+            description: format!("LUKS header backup -> {}", backup_path.display()),
             commands: vec![CmdRequest::CryptsetupLuksHeaderBackup {
-                device: by_id.0.clone(),
+                device: by_id.as_str().to_owned(),
                 backup_path: backup_path.display().to_string(),
             }],
         });
@@ -584,7 +605,7 @@ pub fn plan_enroll<R: CommandRunner, F: Filesystem + ?Sized>(
         for (name, by_id) in &candidates {
             let target = CredentialVerifyTarget {
                 name: name.clone(),
-                device: by_id.0.clone(),
+                device: by_id.as_str().to_owned(),
             };
             match probe_keyfile_enrollment(
                 runner,
@@ -660,7 +681,7 @@ mod tests {
     use crate::cmd::{CmdRequest, MockRunner};
     use crate::test_fixtures::err_raw as enroll_err_raw;
     use crate::test_fixtures::{
-        enroll_add_keyfile_ok, enroll_by_id, enroll_discovery_two_disks, enroll_fs,
+        disk_member, enroll_add_keyfile_ok, enroll_by_id, enroll_discovery_two_disks, enroll_fs,
         enroll_luks_dump_slot1_empty, enroll_luks_dump_slot1_occupied, enroll_luks_uuid_not_luks,
         enroll_luks_uuid_ok, enroll_make_existing_keyfile, enroll_make_membership,
         enroll_passphrase, enroll_test_keyfile_fail, enroll_test_keyfile_ok,
@@ -1264,11 +1285,11 @@ mod tests {
             "preview must not list an enroll step for disk1 (already enrolled). Render: {rendered}"
         );
         assert!(
-            rendered.contains("enroll keyfile → LUKS slot 1 on /dev/disk/by-id/d2"),
+            rendered.contains("enroll keyfile -> LUKS slot 1 on /dev/disk/by-id/d2"),
             "preview must include enroll step for disk2. Render: {rendered}"
         );
         assert!(
-            rendered.contains("LUKS header backup → "),
+            rendered.contains("LUKS header backup -> "),
             "preview must include header-backup step for disk2. Render: {rendered}"
         );
         assert!(
@@ -1287,7 +1308,8 @@ mod tests {
     //   the emit_status seam and the VM-test wording. This test
     //   owns the dry-run call-site row-emission contract.
     // Scenario: 2-disk pool, disk1 already has the keyfile in slot
-    //   1, disk2 does not; user runs `braid enroll --dry-run`.
+    //   1, disk2 does not, and UUID order is opposite disk-name order;
+    //   user runs `braid enroll --dry-run`.
     #[test]
     fn plan_enroll_dry_run_emits_keyfile_probe_rows_via_emit_status() {
         let d1 = "/dev/disk/by-id/d1";
@@ -1302,7 +1324,11 @@ mod tests {
             .with_output(tkf1_req, tkf1_out)
             .with_output(tkf2_req, tkf2_out);
         let fs = enroll_fs(&[d1, d2]);
-        let membership = enroll_make_membership(&[("disk1", d1), ("disk2", d2)]);
+        let mut membership = PoolMembership::empty();
+        let (u1, m1) = disk_member(501, "disk1", d1);
+        let (u2, m2) = disk_member(500, "disk2", d2);
+        membership.insert(u1, m1).unwrap();
+        membership.insert(u2, m2).unwrap();
 
         let captured = crate::status_tag::testing::capture_with_color(false, || {
             plan_enroll(&runner, &fs, &membership, &kf, false, true, &paths)
@@ -2658,7 +2684,7 @@ mod tests {
             crate::membership::PoolMembership::empty(),
             crate::journal::OpKind::Add {
                 phase: crate::journal::AddPhase::PoolMutation,
-                targets: std::collections::BTreeMap::new(),
+                targets: crate::membership::LuksUuidMap::new(),
             },
         );
         crate::journal::write_journal(&paths, &journal).unwrap();

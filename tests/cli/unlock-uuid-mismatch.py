@@ -16,6 +16,26 @@
 # refuses to proceed, preventing silent data corruption.
 
 import json
+
+
+def member_names(pool):
+    return {member["name"] for member in pool["disks"].values()}
+
+
+def member(pool, name):
+    for entry in pool["disks"].values():
+        if entry["name"] == name:
+            return entry
+    raise AssertionError(f"{name} missing from pool.json: {pool}")
+
+
+def member_uuid(pool, name):
+    for uuid, entry in pool["disks"].items():
+        if entry["name"] == name:
+            return uuid
+    raise AssertionError(f"{name} missing from pool.json: {pool}")
+
+
 import shlex
 
 start_all()
@@ -53,7 +73,7 @@ with subtest("Setup: create pool and enrich pool.json with LUKS UUIDs"):
     machine.succeed(add_cmd("disk1"))
     machine.succeed(add_cmd("disk2"))
 
-    # Tear down and re-unlock so pool.json gets enriched with luks_uuid fields
+    # Tear down and re-unlock so pool.json has UUID keys and live metadata.
     close_all()
     machine.succeed(unlock_cmd())
     machine.succeed("mountpoint -q /mnt/storage")
@@ -61,9 +81,9 @@ with subtest("Setup: create pool and enrich pool.json with LUKS UUIDs"):
     # Verify enrichment happened
     pool_raw = machine.succeed("cat /var/lib/braid/pool.json")
     pool = json.loads(pool_raw)
-    expected_uuid = pool["disks"]["disk2"]["luks_uuid"]
+    expected_uuid = member_uuid(pool, "disk2")
     assert expected_uuid is not None, (
-        "disk2.luks_uuid should be populated after unlock"
+        "disk2 UUID key should be populated after unlock"
     )
 
 # --- Test: LUKS UUID mismatch detected on reformatted disk ---

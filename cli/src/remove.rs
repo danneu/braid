@@ -1,17 +1,22 @@
 use crate::alert;
 use crate::cmd::{CmdRequest, CommandRunner, Step};
-use crate::config::{config_read, mapper_name};
+use crate::config::config_read;
 use crate::confirm;
 use crate::inhibit::AcquireSleepInhibitor;
 use crate::journal;
+use crate::mapper_close::close_mapper_best_effort;
 use crate::membership;
 use crate::parse::{ParseError, parse_btrfs_device_usage, parse_btrfs_df_json};
-use crate::pool::{DeviceIdentity, evict_present_device, validate_pool_topology};
+use crate::pool::{
+    DeviceIdentity, pool_balance_single, pool_remove_device, validate_pool_topology,
+};
 use crate::preflight;
 use crate::preview::{self, PerDiskStyle, PlanFailure, Preview, PreviewCompleteness, PreviewNote};
 use crate::probe::{Filesystem, ProbeError, probe_pool};
+use crate::probe_mapper_uuid::probe_observed_mapper_uuid;
 use crate::progress::{self, ProgressOutput};
 use crate::state_paths::StatePaths;
+use crate::status_tag::{StatusTag, color_enabled_for_stderr, status_line};
 use crate::types::*;
 use std::collections::BTreeMap;
 use std::path::Path;
@@ -66,6 +71,23 @@ fn absent_from_membership_error(name: &str) -> RemoveError {
     ))
 }
 
+/// Resolve a user-typed `--name` argument to its `(LuksUuid, DiskName)`
+/// pair via `PoolMembership::by_name`. Used at the planning and execute
+/// boundaries so identity decisions flow through `LuksUuid` and the
+/// display name follows from the persisted member, not from raw CLI bytes.
+fn resolve_target_in_membership(
+    membership: &membership::PoolMembership,
+    raw_name: &str,
+) -> Result<(LuksUuid, DiskName), RemoveError> {
+    let parsed = DiskName::parse(raw_name).map_err(|e| {
+        RemoveError::Validation(format!("'{raw_name}' is not a valid disk name: {e}"))
+    })?;
+    let (uuid, member) = membership
+        .by_name(&parsed)
+        .ok_or_else(|| absent_from_membership_error(raw_name))?;
+    Ok((uuid.clone(), member.name.clone()))
+}
+
 pub struct RemoveParams<'a> {
     pub config_path: &'a Path,
     pub name: &'a str,
@@ -96,8 +118,21 @@ pub struct RemovePlan {
 
 #[derive(Debug, Clone)]
 struct RemoveWorkPlan {
-    name: String,
+    /// Persisted disk name resolved from the user-typed `--name` via
+    /// `PoolMembership::by_name`. Used for log/progress rendering and as
+    /// the journaled `OpKind::Remove.name` field; identity decisions
+    /// flow through `target_uuid` exclusively.
+    name: DiskName,
+    /// Persistent LUKS identity for the target, resolved once at the
+    /// planning boundary and threaded through executor + journal.
+    target_uuid: LuksUuid,
     target_devid: u64,
+    /// Observed mapper from `PoolDevice.mapper` at planning time. NEVER
+    /// reconstructed via `mapper_name(&name)` -- the close-time
+    /// `CryptsetupClose` consumes this byte-identically so operator
+    /// drift between plan and post-commit close still targets the right
+    /// dm slot. See plan section "remove.rs" for the parallel with
+    /// lock.rs's "close observed, not reconstructed" doctrine.
     target_mapper: MapperName,
     target_underlying: String,
     remaining: usize,
@@ -114,7 +149,8 @@ struct RemoveWorkPlan {
 
 impl RemoveWorkPlan {
     fn new(
-        name: String,
+        name: DiskName,
+        target_uuid: LuksUuid,
         target: &PoolDevice,
         devices: &[PoolDevice],
         mount_point: MountPoint,
@@ -140,6 +176,7 @@ impl RemoveWorkPlan {
             .collect();
         Ok(Self {
             name,
+            target_uuid,
             target_devid: target.devid,
             target_mapper: target.mapper.clone(),
             target_underlying: target.underlying.clone(),
@@ -178,7 +215,7 @@ impl RemoveWorkPlan {
             risk: "safe",
             description: format!("cryptsetup close {}", self.target_mapper),
             commands: vec![CmdRequest::CryptsetupClose {
-                mapper: self.target_mapper.0.clone(),
+                mapper: self.target_mapper.clone(),
             }],
         });
         steps
@@ -224,7 +261,7 @@ impl RemovePlan {
                 "{}",
                 format_remove_confirm(
                     &RemoveConfirmDisk {
-                        name: &work_plan.name,
+                        name: work_plan.name.as_str(),
                         hw: Some(&hw),
                         devid: work_plan.target_devid,
                     },
@@ -270,7 +307,7 @@ impl RemovePlan {
             runner,
             fs,
             &work_plan.mount_point,
-            &work_plan.target_mapper.0,
+            work_plan.target_mapper.as_str(),
             &work_plan.expected_present_identities,
         )
         .map_err(|drift| {
@@ -290,21 +327,26 @@ impl RemovePlan {
         // Build target membership and write journal before irreversible disk op.
         let pre_membership = membership::load_membership(params.paths)
             .map_err(|e| RemoveError::Validation(format!("failed to load pool membership: {e}")))?;
-        if !pre_membership.disks.contains_key(&work_plan.name) {
-            return Err(absent_from_membership_error(&work_plan.name));
+        if pre_membership.by_uuid(&work_plan.target_uuid).is_none() {
+            return Err(absent_from_membership_error(work_plan.name.as_str()));
         }
-        // Pin the target's live btrfs devid into the journal so recovery can
-        // drop the matching acked-stats entry after a committed eviction.
+        // Pin every live member's btrfs devid into the journal. Recovery is
+        // allowed to use persisted devid as the fallback identity for
+        // null-underlying or MISSING btrfs devices, but must not fall back to
+        // mapper-name correlation when the LUKS UUID is no longer observable.
         let mut pre_membership = pre_membership;
-        if let Some(member) = pre_membership.disks.get_mut(&work_plan.name) {
-            member.devid = Some(work_plan.target_devid);
+        for identity in work_plan.expected_present_identities.values() {
+            if let Some(member) = pre_membership.by_uuid_mut(&identity.luks_uuid) {
+                member.devid = Some(identity.devid);
+            }
         }
         let mut target_membership = pre_membership.clone();
-        target_membership.disks.remove(&work_plan.name);
+        target_membership.remove_by_uuid(&work_plan.target_uuid);
         let journal = journal::build_journal(
             pre_membership,
             target_membership.clone(),
             journal::OpKind::Remove {
+                luks_uuid: work_plan.target_uuid.clone(),
                 name: work_plan.name.clone(),
             },
         );
@@ -323,7 +365,7 @@ impl RemovePlan {
             runner,
             fs,
             &work_plan.mount_point,
-            &work_plan.target_mapper.0,
+            work_plan.target_mapper.as_str(),
             &work_plan.expected_present_identities,
         )
         .map_err(|drift| {
@@ -342,15 +384,72 @@ impl RemovePlan {
             RemoveError::Validation(format!("{detail}. {suffix}"))
         })?;
 
-        // Execute
-        evict_present_device(
+        // Execute -- inlined so the close has a UUID-probe gate (the
+        // defense-in-depth double-drift probe specified in the plan's
+        // "Double-drift defense-in-depth UUID probe" section). Original
+        // `evict_present_device` did balance + remove + close as one
+        // call; we keep balance + remove inline and gate the close on a
+        // probe of the journaled identity.
+        let color_enabled = color_enabled_for_stderr();
+        let mapper_str = work_plan.target_mapper.as_str();
+        if work_plan.remaining == 1 {
+            eprint!(
+                "{}",
+                status_line(
+                    StatusTag::Wait,
+                    color_enabled,
+                    "pool: balancing RAID1 to single profile...",
+                )
+            );
+            pool_balance_single(runner, &work_plan.mount_point, params.progress)?;
+            eprint!(
+                "{}",
+                status_line(
+                    StatusTag::Ok,
+                    color_enabled,
+                    "pool: balanced to single profile",
+                )
+            );
+        }
+        let device_path = format!("/dev/mapper/{mapper_str}");
+        eprint!(
+            "{}",
+            status_line(
+                StatusTag::Wait,
+                color_enabled,
+                &format!("pool: removing {mapper_str}..."),
+            )
+        );
+        pool_remove_device(
             runner,
-            params.sleeper,
-            &work_plan.target_mapper.0,
+            &device_path,
             &work_plan.mount_point,
-            work_plan.remaining == 1,
             params.progress,
         )?;
+        eprint!(
+            "{}",
+            status_line(
+                StatusTag::Ok,
+                color_enabled,
+                &format!("pool: {mapper_str} removed"),
+            )
+        );
+
+        // Defense-in-depth: probe the journaled identity at the
+        // observed mapper before close. On mismatch (or probe failure)
+        // demote the close to a logged-warning skip so we don't tear
+        // down a foreign dm slot that the operator opened under the
+        // same mapper between plan and this point.
+        let close_label = mapper_str.strip_prefix("braid-").unwrap_or(mapper_str);
+        if probe_observed_mapper_uuid(runner, &work_plan.target_mapper, &work_plan.target_uuid) {
+            close_mapper_best_effort(
+                runner,
+                params.sleeper,
+                &work_plan.target_mapper,
+                close_label,
+                color_enabled,
+            );
+        }
 
         // Post-commit: write pool.json and clear journal.
         membership::save_membership(&target_membership, params.paths)
@@ -423,10 +522,28 @@ pub fn plan_remove<R: CommandRunner + Sync, F: Filesystem + ?Sized>(
         return Err(PlanFailure::with_notes(notes, RemoveError::Validation(msg)));
     }
 
-    let mn = mapper_name(params.name);
+    // Resolve user-typed name to UUID against persisted membership FIRST.
+    // pool.json is the identity source of truth; the live pool probe is
+    // only used to locate the matching live device by UUID below. This
+    // ordering implements the boundary contract from the plan's "Shared
+    // Patterns": user name -> by_name -> UUID, then UUID -> live device.
+    let pre_membership = match membership::load_membership(params.paths) {
+        Ok(m) => m,
+        Err(e) => {
+            return Err(PlanFailure::with_notes(
+                notes,
+                RemoveError::Validation(format!("failed to load pool membership: {e}")),
+            ));
+        }
+    };
+    let (target_uuid, target_name) =
+        match resolve_target_in_membership(&pre_membership, params.name) {
+            Ok(p) => p,
+            Err(e) => return Err(PlanFailure::with_notes(notes, e)),
+        };
 
-    // Is the disk present in the pool?
-    let target = match pool.devices.iter().find(|d| d.mapper == mn) {
+    // Is the disk present in the live pool under that UUID?
+    let target = match pool.devices.iter().find(|d| d.luks_uuid == target_uuid) {
         Some(d) => d,
         None => {
             let mut msg = format!("disk '{}' not found in pool.", params.name);
@@ -449,32 +566,15 @@ pub fn plan_remove<R: CommandRunner + Sync, F: Filesystem + ?Sized>(
         return Err(PlanFailure::with_notes(notes, RemoveError::Validation(msg)));
     }
 
-    // The live pool probe above proves btrfs still sees the target mapper.
-    // Pin that against pool.json before dry-run can report a successful plan;
-    // otherwise execute would remove a live device while
-    // target_membership.disks.remove silently no-ops.
-    let pre_membership = match membership::load_membership(params.paths) {
-        Ok(m) => m,
-        Err(e) => {
-            return Err(PlanFailure::with_notes(
-                notes,
-                RemoveError::Validation(format!("failed to load pool membership: {e}")),
-            ));
-        }
-    };
-    if !pre_membership.disks.contains_key(params.name) {
-        return Err(PlanFailure::with_notes(
-            notes,
-            absent_from_membership_error(params.name),
-        ));
-    }
-
     // RemoveWorkPlan::new owns the remaining == 0 rejection (last-disk
     // gate). Run it first so that `check_eviction_space` is always reached
     // with `remaining >= 1`; the capacity helper does not need to handle
-    // the 0-case.
+    // the 0-case. `target.mapper` is the observed mapper; the work plan
+    // stores it as-is so post-commit close still targets the right dm
+    // slot under benign mapper drift.
     let work_plan = match RemoveWorkPlan::new(
-        params.name.to_owned(),
+        target_name,
+        target_uuid,
         target,
         &pool.devices,
         config.mount_point().clone(),
@@ -714,6 +814,11 @@ fn remove_present_work_plan_for_test(
     pool: &PoolState,
     mount_point: &MountPoint,
 ) -> Result<RemoveWorkPlan, RemoveError> {
+    // Render-only test helper. UUID identity has no effect on rendered
+    // dry-run steps; we still need a valid LuksUuid value for the
+    // PoolDevice fallback because LuksUuid's inner string is validated.
+    let placeholder_uuid =
+        LuksUuid::parse("00000000-0000-0000-0000-000000000000").expect("placeholder UUID");
     let target = pool
         .devices
         .iter()
@@ -722,13 +827,14 @@ fn remove_present_work_plan_for_test(
         .unwrap_or_else(|| PoolDevice {
             devid: 0,
             mapper: mn.clone(),
-            luks_uuid: LuksUuid(String::new()),
+            luks_uuid: placeholder_uuid.clone(),
             underlying: String::new(),
         });
+    let name_raw = mn.as_str().strip_prefix("braid-").unwrap_or(mn.as_str());
+    let name = DiskName::parse(name_raw).expect("test fixture disk name");
     RemoveWorkPlan::new(
-        mn.0.strip_prefix("braid-")
-            .unwrap_or(mn.0.as_str())
-            .to_owned(),
+        name,
+        target.luks_uuid.clone(),
         &target,
         &pool.devices,
         mount_point.clone(),
@@ -778,8 +884,8 @@ mod tests {
     use crate::membership::PoolMembership;
     use crate::state_paths::StatePaths;
     use crate::test_fixtures::{
-        MockFs, PoolFixture, RemovalPool, mock_ok, target_device, valid_two_disk_df_json,
-        valid_two_disk_usage_stdout,
+        MockFs, PoolFixture, RemovalPool, mock_ok, target_device, valid_three_disk_df_json,
+        valid_three_disk_usage_stdout, valid_two_disk_df_json, valid_two_disk_usage_stdout,
     };
     use std::collections::BTreeMap;
 
@@ -794,14 +900,20 @@ mod tests {
     }
 
     fn disk2_disk3_membership() -> PoolMembership {
+        // Seed UUIDs match the disk-number mirroring used in
+        // `PoolFixture::three_disk_healthy`, so a fixture that loads
+        // and then a test re-serializes the same set get bit-equal
+        // pool.json bodies on disk.
         let mut m = PoolMembership::empty();
-        for name in ["disk2", "disk3"] {
-            m.disks.insert(
-                name.to_owned(),
-                membership::DiskMember::from_by_id(ByIdPath(format!(
-                    "/dev/disk/by-id/virtio-{name}"
-                ))),
+        for (seed, name) in [(2u64, "disk2"), (3, "disk3")] {
+            let (uuid, member) = crate::test_fixtures::disk_member_with(
+                seed,
+                name,
+                &format!("/dev/disk/by-id/virtio-{name}"),
+                None,
+                None,
             );
+            m.insert(uuid, member).expect("fixture insert");
         }
         m
     }
@@ -894,18 +1006,20 @@ mod tests {
     }
 
     // Intent
-    // `cmd_remove` writes the target's live btrfs devid into the journal's
+    // `cmd_remove` writes every live member's btrfs devid into the journal's
     // pre_membership before mutating the pool.
     //
     // Why it exists
-    // Recovery uses the journaled devid for acked-stats hygiene; pool.json
-    // entries written from by-id discovery may not carry devids yet.
+    // Recovery uses the journaled devid as its only fallback identity when
+    // btrfs later reports a null-underlying or MISSING device without an
+    // observable LUKS UUID. pool.json entries written from by-id discovery may
+    // not carry devids yet.
     //
     // Scenario
     // Starting from a healthy two-disk pool.json with no devids, device remove
     // fails after journal write, leaving the journal inspectable.
     #[test]
-    fn remove_journal_pre_membership_carries_target_devid() {
+    fn remove_journal_pre_membership_carries_live_member_devids() {
         let f = PoolFixture::two_disk_healthy();
         let runner = RemovalPool::two_disk()
             .install(MockRunner::default())
@@ -926,13 +1040,29 @@ mod tests {
         let journal = journal::load_journal(&f.paths)
             .unwrap()
             .expect("failed device remove should preserve pending journal");
+        let disk1_uuid = LuksUuid::parse("11111111-1111-1111-1111-111111111111").unwrap();
+        let disk1 = journal
+            .pre_membership
+            .by_uuid(&disk1_uuid)
+            .expect("pre_membership must still carry disk1's UUID");
         assert_eq!(
-            journal.pre_membership.disks["disk2"].devid,
+            disk1.devid,
+            Some(1),
+            "journaled pre_membership must pin disk1's live devid"
+        );
+
+        let disk2_uuid = LuksUuid::parse("22222222-2222-2222-2222-222222222222").unwrap();
+        let disk2 = journal
+            .pre_membership
+            .by_uuid(&disk2_uuid)
+            .expect("pre_membership must still carry disk2's UUID");
+        assert_eq!(
+            disk2.devid,
             Some(2),
             "journaled pre_membership must pin disk2's live devid"
         );
         assert!(
-            !journal.target_membership.disks.contains_key("disk2"),
+            journal.target_membership.by_uuid(&disk2_uuid).is_none(),
             "target membership should still remove disk2"
         );
     }
@@ -1144,19 +1274,19 @@ mod tests {
                 PoolDevice {
                     devid: 1,
                     mapper: MapperName("braid-disk1".into()),
-                    luks_uuid: LuksUuid("11111111-1111-1111-1111-111111111111".into()),
+                    luks_uuid: LuksUuid::parse("11111111-1111-1111-1111-111111111111").unwrap(),
                     underlying: "/dev/vda".into(),
                 },
                 PoolDevice {
                     devid: 2,
                     mapper: MapperName("braid-disk2".into()),
-                    luks_uuid: LuksUuid("22222222-2222-2222-2222-222222222222".into()),
+                    luks_uuid: LuksUuid::parse("22222222-2222-2222-2222-222222222222").unwrap(),
                     underlying: "/dev/vdb".into(),
                 },
                 PoolDevice {
                     devid: 3,
                     mapper: MapperName("braid-disk3".into()),
-                    luks_uuid: LuksUuid("33333333-3333-3333-3333-333333333333".into()),
+                    luks_uuid: LuksUuid::parse("33333333-3333-3333-3333-333333333333").unwrap(),
                     underlying: "/dev/vdc".into(),
                 },
             ],
@@ -1198,13 +1328,13 @@ mod tests {
                 PoolDevice {
                     devid: 1,
                     mapper: MapperName("braid-disk1".into()),
-                    luks_uuid: LuksUuid("11111111-1111-1111-1111-111111111111".into()),
+                    luks_uuid: LuksUuid::parse("11111111-1111-1111-1111-111111111111").unwrap(),
                     underlying: "/dev/vda".into(),
                 },
                 PoolDevice {
                     devid: 2,
                     mapper: MapperName("braid-disk2".into()),
-                    luks_uuid: LuksUuid("22222222-2222-2222-2222-222222222222".into()),
+                    luks_uuid: LuksUuid::parse("22222222-2222-2222-2222-222222222222").unwrap(),
                     underlying: "/dev/vdb".into(),
                 },
             ],
@@ -2067,7 +2197,7 @@ mod tests {
     -> impl Fn(&CmdRequest) -> Option<Result<RawCommandOutput, CmdError>> + Send + Sync + 'static
     {
         |req| match req {
-            CmdRequest::CryptsetupStatus { mapper } if mapper == "braid-disk4" => {
+            CmdRequest::CryptsetupStatus { mapper } if mapper.as_str() == "braid-disk4" => {
                 Some(Ok(mock_ok(
                     "cryptsetup status braid-disk4",
                     "braid-disk4 is active and is in use.\n  type:    LUKS2\n  device:  /dev/vde\n  mode:    read/write\n",
@@ -2342,7 +2472,7 @@ mod tests {
                 _ => None,
             })
             .with_handler(move |req| match req {
-                CmdRequest::CryptsetupStatus { mapper } if mapper == "braid-disk2" => {
+                CmdRequest::CryptsetupStatus { mapper } if mapper.as_str() == "braid-disk2" => {
                     let phase = show_counter_for_status.load(Ordering::SeqCst);
                     let device = if phase >= 2 { "(null)" } else { "/dev/vdc" };
                     Some(Ok(mock_ok(
@@ -2413,7 +2543,7 @@ mod tests {
                 _ => None,
             })
             .with_handler(move |req| match req {
-                CmdRequest::CryptsetupStatus { mapper } if mapper == "braid-disk2" => {
+                CmdRequest::CryptsetupStatus { mapper } if mapper.as_str() == "braid-disk2" => {
                     // First two probes (planning + pre-journal): healthy.
                     // Probe #3 (post-journal): hot-unplugged.
                     let phase = show_counter_for_status.load(Ordering::SeqCst);
@@ -2453,6 +2583,411 @@ mod tests {
         assert!(
             journal::load_journal(&f.paths).unwrap().is_some(),
             "post-journal hot-unplug must preserve pending-op.json for recover",
+        );
+    }
+
+    // ---------------------------------------------------------------------
+    // UUID-identity boundary tests (Phase 3a)
+    //
+    // Test-module seed allocation note: remove.rs uses 400-449 for new
+    // UUID-identity tests, leaving 100-199 to membership.rs, 200 to
+    // luks.rs, 201-299 to journal.rs, 300-399 to cmd.rs.
+    // ---------------------------------------------------------------------
+
+    use crate::test_fixtures::{disk_member_with, test_uuid};
+
+    /// Build a fresh 3-disk pool fixture whose membership pins one
+    /// specific (uuid, name, by_id, devid) -> entry. Other entries
+    /// (`disk1`, `disk3`) use seed-default UUIDs and devids that line
+    /// up with the `RemovalPool::three_disk` topology mocks (UUIDs
+    /// `11111111...`, `33333333...`).
+    fn three_disk_membership_with_pinned_disk2(target_uuid: &LuksUuid) -> PoolMembership {
+        let mut m = PoolMembership::empty();
+        // disk1: seed 1, UUID 11111111..., devid 1.
+        let disk1_uuid = LuksUuid::parse("11111111-1111-1111-1111-111111111111").unwrap();
+        m.insert(
+            disk1_uuid,
+            membership::DiskMember {
+                name: DiskName::parse("disk1").unwrap(),
+                by_id: ByIdPath::parse("/dev/disk/by-id/virtio-disk1").unwrap(),
+                devid: Some(1),
+                added_at: None,
+            },
+        )
+        .unwrap();
+        // disk2: pinned UUID under the operator-typed name "disk2",
+        // devid 2 to match the RemovalPool topology.
+        m.insert(
+            target_uuid.clone(),
+            membership::DiskMember {
+                name: DiskName::parse("disk2").unwrap(),
+                by_id: ByIdPath::parse("/dev/disk/by-id/virtio-disk2").unwrap(),
+                devid: Some(2),
+                added_at: None,
+            },
+        )
+        .unwrap();
+        // disk3: seed 3, UUID 33333333..., devid 3.
+        let disk3_uuid = LuksUuid::parse("33333333-3333-3333-3333-333333333333").unwrap();
+        m.insert(
+            disk3_uuid,
+            membership::DiskMember {
+                name: DiskName::parse("disk3").unwrap(),
+                by_id: ByIdPath::parse("/dev/disk/by-id/virtio-disk3").unwrap(),
+                devid: Some(3),
+                added_at: None,
+            },
+        )
+        .unwrap();
+        m
+    }
+
+    // Intent: cmd_remove resolves the user-typed name to UUID via
+    //   membership.by_name at the boundary, journals OpKind::Remove with
+    //   that UUID, and removes the member by UUID from target_membership.
+    //
+    // Why: this is the load-bearing boundary contract -- a regression
+    //   that found by mapper or by name in target_membership would
+    //   silently skip the remove (no-op) on benign drift.
+    //
+    // Scenario: 3-disk healthy pool. User runs `braid remove disk2`.
+    //   Membership has disk2 pinned under U_R. Pool.devices reports
+    //   disk2 with that UUID. Assert: journal records OpKind::Remove
+    //   { luks_uuid: U_R, name: "disk2" }; target_membership on disk
+    //   no longer has U_R; surviving disks unchanged.
+    #[test]
+    fn cmd_remove_resolves_name_to_uuid_and_journals_uuid() {
+        let f = PoolFixture::three_disk_healthy();
+        // Override disk2's UUID to a sentinel value pinned by this test.
+        let u_r = test_uuid(400);
+        let m = three_disk_membership_with_pinned_disk2(&u_r);
+        membership::save_membership(&m, &f.paths).unwrap();
+
+        // The RemovalPool topology returns canonical UUIDs for disk1/2/3.
+        // Override disk2's UUID probe to return the pinned u_r so the
+        // pool.devices entry matches the membership UUID we just pinned.
+        let runner = RemovalPool::three_disk()
+            .install(MockRunner::default())
+            .with_handler({
+                let u_r = u_r.clone();
+                move |req| match req {
+                    CmdRequest::CryptsetupLuksUuid { device } if device == "/dev/vdc" => Some(Ok(
+                        mock_ok("cryptsetup luksUUID /dev/vdc", &format!("{u_r}\n")),
+                    )),
+                    _ => None,
+                }
+            });
+        let fs = MockFs::storage(vec![]);
+
+        // Wedge the journal-write step: force btrfs device remove to
+        // fail so the journal survives for our assertion.
+        let runner = runner.with_handler(|req| match req {
+            CmdRequest::BtrfsDeviceRemove { .. } => Some(Ok(RawCommandOutput {
+                cmd: "btrfs device remove".into(),
+                stdout: String::new(),
+                stderr: "ERROR: error removing device".into(),
+                exit_status: 1,
+            })),
+            _ => None,
+        });
+
+        let result = cmd_remove(
+            &runner,
+            &fs,
+            &f.remove_params().name("disk2").yes(true).build(),
+        );
+        assert!(result.is_err(), "device-remove fault must surface");
+
+        let journal = journal::load_journal(&f.paths)
+            .unwrap()
+            .expect("journal must survive device-remove failure");
+        match journal.op {
+            journal::OpKind::Remove { luks_uuid, name } => {
+                assert_eq!(luks_uuid, u_r, "journaled UUID must be the resolved one");
+                assert_eq!(
+                    name.as_str(),
+                    "disk2",
+                    "journaled name must be the persisted one"
+                );
+            }
+            other => panic!("expected OpKind::Remove, got: {other:?}"),
+        }
+        assert!(
+            journal.target_membership.by_uuid(&u_r).is_none(),
+            "target_membership must remove the UUID, not a name-keyed entry"
+        );
+    }
+
+    // Intent: drifted-member remove preserves the observed PoolDevice.mapper
+    //   on RemoveWorkPlan.target_mapper (not the reconstructed
+    //   mapper_name(&name)) so the post-commit CryptsetupClose still targets
+    //   the right dm slot under benign mapper drift.
+    //
+    // Why: the close in pool.rs:642 consumes target_mapper byte-for-byte;
+    //   reconstructing it from the disk name re-opens the same drift hazard
+    //   the lock.rs migration closes.
+    //
+    // Scenario: membership has U_R -> { name: "right", devid: 2 }. PoolState
+    //   reports a PoolDevice for U_R with mapper = "braid-WRONG" (drifted).
+    //   Plan and execute remove name = "right"; the post-commit close
+    //   request must be CryptsetupClose { mapper: "braid-WRONG" }.
+    #[test]
+    fn drifted_member_remove_closes_observed_mapper() {
+        let f = PoolFixture::empty();
+        let u_r = test_uuid(401);
+        let mut m = PoolMembership::empty();
+        let (u1, m1) =
+            disk_member_with(410, "disk1", "/dev/disk/by-id/virtio-disk1", Some(1), None);
+        m.insert(u1.clone(), m1).unwrap();
+        m.insert(
+            u_r.clone(),
+            membership::DiskMember {
+                name: DiskName::parse("right").unwrap(),
+                by_id: ByIdPath::parse("/dev/disk/by-id/virtio-right").unwrap(),
+                devid: Some(2),
+                added_at: None,
+            },
+        )
+        .unwrap();
+        let (u3, m3) =
+            disk_member_with(411, "disk3", "/dev/disk/by-id/virtio-disk3", Some(3), None);
+        m.insert(u3.clone(), m3).unwrap();
+        membership::save_membership(&m, &f.paths).unwrap();
+
+        // Live pool: U_R observed under MAPPER "braid-WRONG", not "braid-right".
+        let show = "Label: none  uuid: cc86845b-aec3-408e-bef5-553affc1f2b1\n\
+             \tTotal devices 3 FS bytes used 16.17MiB\n\
+             \tdevid    1 size 496.00MiB used 121.56MiB path /dev/mapper/braid-disk1\n\
+             \tdevid    2 size 496.00MiB used 121.56MiB path /dev/mapper/braid-WRONG\n\
+             \tdevid    3 size 496.00MiB used 121.56MiB path /dev/mapper/braid-disk3\n"
+            .to_string();
+        let u_r_for_probe = u_r.clone();
+        let runner = MockRunner::default().with_handler({
+            move |req| match req {
+                CmdRequest::BtrfsFilesystemShow { .. } => {
+                    Some(Ok(mock_ok("btrfs filesystem show", &show)))
+                }
+                CmdRequest::CryptsetupStatus { mapper } => {
+                    let dev = match mapper.as_str() {
+                        "braid-disk1" => "/dev/vdb",
+                        "braid-WRONG" => "/dev/vdc",
+                        "braid-disk3" => "/dev/vdd",
+                        _ => return None,
+                    };
+                    Some(Ok(mock_ok(
+                        &format!("cryptsetup status {mapper}"),
+                        &format!(
+                            "{mapper} is active and is in use.\n  type:    LUKS2\n  device:  {dev}\n  mode:    read/write\n"
+                        ),
+                    )))
+                }
+                CmdRequest::CryptsetupLuksUuid { device } => {
+                    let uuid = match device.as_str() {
+                        "/dev/vdb" => "11111111-1111-1111-1111-111111111111",
+                        // /dev/vdc backs braid-WRONG -> U_R
+                        "/dev/vdc" => return Some(Ok(mock_ok(
+                            "cryptsetup luksUUID /dev/vdc",
+                            &format!("{u_r_for_probe}\n"),
+                        ))),
+                        "/dev/vdd" => "33333333-3333-3333-3333-333333333333",
+                        _ => return None,
+                    };
+                    Some(Ok(mock_ok(
+                        &format!("cryptsetup luksUUID {device}"),
+                        &format!("{uuid}\n"),
+                    )))
+                }
+                CmdRequest::BtrfsBalanceStatus { .. } => Some(Ok(mock_ok(
+                    "btrfs balance status",
+                    "No balance found on '/mnt/storage'\n",
+                ))),
+                CmdRequest::BtrfsDeviceUsageRaw { .. } => Some(Ok(mock_ok(
+                    "btrfs device usage --raw /mnt/storage",
+                    valid_three_disk_usage_stdout(),
+                ))),
+                CmdRequest::BtrfsFilesystemDfJson { .. } => Some(Ok(mock_ok(
+                    "btrfs --format json filesystem df /mnt/storage",
+                    valid_three_disk_df_json(),
+                ))),
+                CmdRequest::BtrfsDeviceRemove { .. } => Some(Ok(mock_ok("btrfs device remove", ""))),
+                CmdRequest::CryptsetupClose { .. } => Some(Ok(mock_ok("cryptsetup close", ""))),
+                _ => None,
+            }
+        });
+        let fs = MockFs::storage(vec![]);
+        let params = f.remove_params().name("right").yes(true).build();
+
+        // Plan first to assert target_mapper preservation directly.
+        let plan = plan_remove(&runner, &fs, &params).expect("plan succeeds");
+        assert_eq!(
+            plan.work_plan.target_mapper.as_str(),
+            "braid-WRONG",
+            "target_mapper must be the observed PoolDevice.mapper, not mapper_name(&name)"
+        );
+
+        // Now execute; the post-commit close must target "braid-WRONG".
+        plan.execute(&runner, &fs, &params)
+            .expect("remove succeeds");
+        let calls = runner.requests();
+        let close_calls: Vec<&CmdRequest> = calls
+            .iter()
+            .filter(|c| matches!(c, CmdRequest::CryptsetupClose { .. }))
+            .collect();
+        assert_eq!(
+            close_calls.len(),
+            1,
+            "exactly one CryptsetupClose expected; got: {close_calls:?}"
+        );
+        match close_calls[0] {
+            CmdRequest::CryptsetupClose { mapper } => {
+                assert_eq!(
+                    mapper.as_str(),
+                    "braid-WRONG",
+                    "close must target the observed mapper, not the reconstructed one"
+                );
+            }
+            other => panic!("unexpected: {other:?}"),
+        }
+    }
+
+    // Intent: post-commit close UUID-probe demotes to a skip when the
+    //   observed mapper now holds a different LUKS UUID (operator
+    //   double-drift between plan and execute). The control arm with a
+    //   matching UUID still issues the close.
+    //
+    // Why: defense-in-depth. Journaling the observed mapper closes the
+    //   single-drift gap; this probe closes the double-drift gap where
+    //   the operator reopens a foreign disk under the same mapper.
+    //
+    // Scenario: same drifted setup as the previous test but after btrfs
+    //   commit, `cryptsetup status braid-WRONG` resolves to a foreign
+    //   backing device whose LUKS UUID is U_FOREIGN != U_R.
+    //   Assert: the post-commit probe follows the active mapper to that
+    //   backing device; zero CryptsetupClose for braid-WRONG.
+    #[test]
+    fn post_commit_close_uuid_probe_demotes_to_skip_on_mismatch() {
+        let f = PoolFixture::empty();
+        let u_r = test_uuid(402);
+        let u_foreign = test_uuid(403);
+        let mut m = PoolMembership::empty();
+        let (u1, m1) =
+            disk_member_with(420, "disk1", "/dev/disk/by-id/virtio-disk1", Some(1), None);
+        m.insert(u1.clone(), m1).unwrap();
+        m.insert(
+            u_r.clone(),
+            membership::DiskMember {
+                name: DiskName::parse("right").unwrap(),
+                by_id: ByIdPath::parse("/dev/disk/by-id/virtio-right").unwrap(),
+                devid: Some(2),
+                added_at: None,
+            },
+        )
+        .unwrap();
+        let (u3, m3) =
+            disk_member_with(421, "disk3", "/dev/disk/by-id/virtio-disk3", Some(3), None);
+        m.insert(u3.clone(), m3).unwrap();
+        membership::save_membership(&m, &f.paths).unwrap();
+
+        let show = "Label: none  uuid: cc86845b-aec3-408e-bef5-553affc1f2b1\n\
+             \tTotal devices 3 FS bytes used 16.17MiB\n\
+             \tdevid    1 size 496.00MiB used 121.56MiB path /dev/mapper/braid-disk1\n\
+             \tdevid    2 size 496.00MiB used 121.56MiB path /dev/mapper/braid-WRONG\n\
+             \tdevid    3 size 496.00MiB used 121.56MiB path /dev/mapper/braid-disk3\n";
+        let u_r_for_plan = u_r.clone();
+        let u_foreign_for_probe = u_foreign.clone();
+        let remove_committed = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let remove_committed_for_status = std::sync::Arc::clone(&remove_committed);
+        let remove_committed_for_remove = std::sync::Arc::clone(&remove_committed);
+        let runner = MockRunner::default().with_handler({
+            move |req| match req {
+                CmdRequest::BtrfsFilesystemShow { .. } => {
+                    Some(Ok(mock_ok("btrfs filesystem show", show)))
+                }
+                CmdRequest::CryptsetupStatus { mapper } => {
+                    let dev = match mapper.as_str() {
+                        "braid-disk1" => "/dev/vdb",
+                        "braid-WRONG" => {
+                            if remove_committed_for_status.load(std::sync::atomic::Ordering::SeqCst)
+                            {
+                                "/dev/vdf"
+                            } else {
+                                "/dev/vdc"
+                            }
+                        }
+                        "braid-disk3" => "/dev/vdd",
+                        _ => return None,
+                    };
+                    Some(Ok(mock_ok(
+                        &format!("cryptsetup status {mapper}"),
+                        &format!(
+                            "{mapper} is active and is in use.\n  type:    LUKS2\n  device:  {dev}\n  mode:    read/write\n"
+                        ),
+                    )))
+                }
+                CmdRequest::CryptsetupLuksUuid { device } => {
+                    let body = match device.as_str() {
+                        "/dev/vdb" => "11111111-1111-1111-1111-111111111111".to_string(),
+                        // planning-time backing probe: U_R is still here
+                        "/dev/vdc" => format!("{u_r_for_plan}"),
+                        "/dev/vdd" => "33333333-3333-3333-3333-333333333333".to_string(),
+                        // Post-commit probe follows braid-WRONG's active
+                        // mapper to the backing disk now holding U_FOREIGN.
+                        "/dev/vdf" => format!("{u_foreign_for_probe}"),
+                        _ => return None,
+                    };
+                    Some(Ok(mock_ok(
+                        &format!("cryptsetup luksUUID {device}"),
+                        &format!("{body}\n"),
+                    )))
+                }
+                CmdRequest::BtrfsBalanceStatus { .. } => Some(Ok(mock_ok(
+                    "btrfs balance status",
+                    "No balance found on '/mnt/storage'\n",
+                ))),
+                CmdRequest::BtrfsDeviceUsageRaw { .. } => Some(Ok(mock_ok(
+                    "btrfs device usage --raw /mnt/storage",
+                    valid_three_disk_usage_stdout(),
+                ))),
+                CmdRequest::BtrfsFilesystemDfJson { .. } => Some(Ok(mock_ok(
+                    "btrfs --format json filesystem df /mnt/storage",
+                    valid_three_disk_df_json(),
+                ))),
+                CmdRequest::BtrfsDeviceRemove { .. } => {
+                    remove_committed_for_remove.store(true, std::sync::atomic::Ordering::SeqCst);
+                    Some(Ok(mock_ok("btrfs device remove", "")))
+                }
+                CmdRequest::CryptsetupClose { .. } => Some(Ok(mock_ok("cryptsetup close", ""))),
+                _ => None,
+            }
+        });
+        let fs = MockFs::storage(vec![]);
+        cmd_remove(
+            &runner,
+            &fs,
+            &f.remove_params().name("right").yes(true).build(),
+        )
+        .expect("remove command must complete -- close skip is logged-warning, not error");
+
+        let calls = runner.requests();
+        let probe_for_foreign_backing = calls
+            .iter()
+            .filter(
+                |c| matches!(c, CmdRequest::CryptsetupLuksUuid { device } if device == "/dev/vdf"),
+            )
+            .count();
+        assert_eq!(
+            probe_for_foreign_backing, 1,
+            "exactly one post-commit UUID probe against braid-WRONG's foreign backing device"
+        );
+        let closes_for_wrong = calls
+            .iter()
+            .filter(
+                |c| matches!(c, CmdRequest::CryptsetupClose { mapper } if mapper.as_str() == "braid-WRONG"),
+            )
+            .count();
+        assert_eq!(
+            closes_for_wrong, 0,
+            "zero CryptsetupClose against braid-WRONG -- probe mismatch must demote to skip"
         );
     }
 }

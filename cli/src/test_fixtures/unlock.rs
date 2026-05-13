@@ -15,7 +15,7 @@
 use super::mount::{MOUNT_TEST_PASSPHRASE_BYTES, err_raw, ok_raw};
 use super::shared;
 use crate::cmd::{CmdRequest, MockRunner, RawCommandOutput};
-use crate::types::MountPoint;
+use crate::types::{MapperName, MountPoint};
 use std::io::Write;
 
 /// Unlock tests mostly model a mounted `/mnt/storage` post-mount probe;
@@ -107,7 +107,7 @@ pub(crate) fn unlock_with_open_mapper_ok(
     runner.with_output_stdin(
         CmdRequest::CryptsetupLuksOpen {
             device: device.to_owned(),
-            mapper: mapper.to_owned(),
+            mapper: MapperName(mapper.to_owned()),
         },
         MOUNT_TEST_PASSPHRASE_BYTES.to_vec(),
         ok_raw("cryptsetup open"),
@@ -157,17 +157,17 @@ pub(crate) fn unlock_with_three_mappers_open(runner: MockRunner) -> MockRunner {
         .with_mapper_open(
             "braid-disk1",
             "/dev/vda",
-            "aaaaaaaa-1111-2222-3333-444444444444",
+            "11111111-1111-1111-1111-111111111111",
         )
         .with_mapper_open(
             "braid-disk2",
             "/dev/vdb",
-            "bbbbbbbb-1111-2222-3333-444444444444",
+            "22222222-2222-2222-2222-222222222222",
         )
         .with_mapper_open(
             "braid-disk3",
             "/dev/vdc",
-            "cccccccc-1111-2222-3333-444444444444",
+            "33333333-3333-3333-3333-333333333333",
         )
 }
 

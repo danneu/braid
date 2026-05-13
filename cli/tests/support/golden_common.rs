@@ -183,7 +183,7 @@ golden_test!(
     parse::cryptsetup_luks_uuid::parse_cryptsetup_luks_uuid,
     |out: parse::types::CryptsetupLuksUuidOutput| {
         // UUID should be valid (parser already validates via uuid crate)
-        assert!(!out.uuid.0.is_empty());
+        assert!(!out.uuid.as_str().is_empty());
     }
 );
 

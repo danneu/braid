@@ -13,21 +13,104 @@ use crate::luks::{
 };
 use crate::mapper_close::close_mapper_best_effort;
 use crate::membership::{self, PoolMembership};
-use crate::parse::parse_btrfs_device_stats;
+use crate::parse::{parse_btrfs_device_stats, parse_cryptsetup_luks_uuid};
 use crate::pool::{pool_replace_device, pool_resize_device};
 use crate::preflight;
 use crate::preview::{self, PerDiskStyle, PlanFailure, Preview, PreviewCompleteness, PreviewNote};
 use crate::probe::{Filesystem, ProbeError, probe_config_disk, probe_pool};
+use crate::probe_mapper_uuid::probe_observed_mapper_uuid;
 use crate::progress::{self, ProgressOutput};
 use crate::state_paths::StatePaths;
 use crate::status_tag::{StatusTag, color_enabled_for_stderr, status_line};
 use crate::types::*;
+use std::fmt;
 use std::path::{Path, PathBuf};
+
+/// Which uniqueness axis `assert_new_uuid_unique` collided on. Rendered as
+/// `"membership"` and `"live_pool"` so the operator-facing message names
+/// the same surface the pre-migration text contract used.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DuplicateUuidScope {
+    Membership,
+    LivePool,
+}
+
+impl fmt::Display for DuplicateUuidScope {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            DuplicateUuidScope::Membership => f.write_str("membership"),
+            DuplicateUuidScope::LivePool => f.write_str("live_pool"),
+        }
+    }
+}
 
 #[derive(Debug, thiserror::Error)]
 pub enum ReplaceError {
     #[error("{0}")]
     Validation(String),
+    /// Pre-journal-write refusal raised when the new target's UUID
+    /// (generated for fresh-LUKS or probed for existing-LUKS) collides
+    /// with a UUID already present in membership (excluding `old_uuid`,
+    /// which is being replaced) or with a UUID observed in the live
+    /// `pool.devices` set at planning time. Refused BEFORE any journal
+    /// write and BEFORE any `CryptsetupLuksFormat` so the residual blast
+    /// radius is bounded.
+    #[error(
+        "duplicate LUKS UUID {uuid} for new replace target: already present in {scope} -- detach the conflicting disk before retrying"
+    )]
+    DuplicateUuid {
+        uuid: LuksUuid,
+        scope: DuplicateUuidScope,
+    },
+    /// Operator passed `--luks-format-arg` containing a braid-managed
+    /// cryptsetup option (`--uuid`, `--label`). Surfaced through
+    /// `ReplaceError` (rather than `LuksFormatExtraOptsError` directly) so
+    /// the CLI matches one error type at the boundary; mirrors
+    /// `AddError::ManagedFormatFlag`.
+    #[error("{0}")]
+    ManagedFormatFlag(#[from] LuksFormatExtraOptsError),
+    /// New-target identity drift between planning-time probe (or the
+    /// generated `new_uuid` for FreshLuks via journal replay) and the
+    /// live disk at `new_target.by_id` immediately before
+    /// `ensure_luks_open`. Symmetric with the post-commit close
+    /// double-drift probe but targets the open boundary so a foreign disk
+    /// swap-in-place cannot pass through `cryptsetup open` to the
+    /// destructive `btrfs replace start`.
+    #[error(
+        "replace target '{by_id}' LUKS UUID mismatch: expected {expected}, found {observed} -- detach the foreign disk and retry"
+    )]
+    NewTargetUuidMismatchAtOpen {
+        by_id: ByIdPath,
+        expected: LuksUuid,
+        observed: String,
+    },
+    /// Operator-supplied `--old <name>` did not resolve to a member of
+    /// the persisted pool membership. The display name they typed has
+    /// no `(uuid, member)` entry; planning aborts before any inhibitor,
+    /// probe, or journal write.
+    #[error(
+        "'{name}' not found in pool.json membership -- no disk entry has this name. Pool membership may need manual repair."
+    )]
+    OldMemberNotFound { name: String },
+    /// `--missing-id` cross-check against the old member's persisted
+    /// `devid` failed: either the persisted devid is `None`, or the
+    /// resolved missing devid does not match the persisted value.
+    #[error(
+        "--old '{old_name}' records devid {pool_devid:?} in pool.json, but btrfs reports missing devid {observed}. --old and --missing-id disagree about which member is being replaced."
+    )]
+    OldDevidMismatch {
+        old_name: String,
+        pool_devid: Option<u64>,
+        observed: u64,
+    },
+    /// Old member is being replaced via the missing path but the
+    /// persisted membership row has no `devid`. Without a persisted
+    /// devid there is no way to confirm the operator and btrfs are
+    /// referring to the same physical slot.
+    #[error(
+        "'{name}' has no persisted devid in pool.json. Cannot confirm which missing btrfs devid corresponds to '{name}'; pool membership may need manual repair."
+    )]
+    OldMemberMissingDevid { name: String },
     #[error("probe error: {0}")]
     Probe(#[from] ProbeError),
     #[error("luks error: {0}")]
@@ -40,6 +123,8 @@ pub enum ReplaceError {
     Cmd(#[from] crate::cmd::CmdError),
     #[error("parse error: {0}")]
     Parse(#[from] crate::parse::ParseError),
+    #[error("membership error: {0}")]
+    Membership(#[from] membership::MembershipError),
 }
 
 pub struct ReplaceParams<'a> {
@@ -78,7 +163,13 @@ pub struct ReplacePlan {
 #[derive(Debug, Clone)]
 enum ReplaceTargetPrep {
     FreshLuks {
-        luks_format_extra_opts: Vec<String>,
+        /// Validated `--luks-format-arg` extras. Managed flags
+        /// (`--uuid`, `--label`) are rejected by
+        /// `LuksFormatExtraOpts::parse` at the CLI boundary inside
+        /// `plan_replace`; the structured `uuid` and `label` fields on
+        /// `CmdRequest::CryptsetupLuksFormat` carry the managed
+        /// identity. No raw `--label braid-<name>` injection.
+        extra_opts: LuksFormatExtraOpts,
         enroll_key_file: Option<PathBuf>,
         header_backup_path: PathBuf,
     },
@@ -109,8 +200,10 @@ impl ReplaceTargetPrep {
 #[derive(Debug, Clone)]
 struct ReplaceWorkPlan {
     config: Config,
-    old_name: String,
-    new_name: String,
+    old_uuid: LuksUuid,
+    old_name: DiskName,
+    new_uuid: LuksUuid,
+    new_name: DiskName,
     new_by_id: ByIdPath,
     pool: PoolState,
     replace_source: ReplaceSource,
@@ -130,16 +223,19 @@ impl ReplaceWorkPlan {
 
         match &self.target_prep {
             ReplaceTargetPrep::FreshLuks {
-                luks_format_extra_opts,
+                extra_opts,
                 enroll_key_file,
                 header_backup_path,
             } => {
+                let label = format!("braid-{}", self.new_name);
                 steps.push(Step {
                     risk: "destructive",
                     description: format!("LUKS format {}", self.new_by_id),
                     commands: vec![CmdRequest::CryptsetupLuksFormat {
-                        device: self.new_by_id.0.clone(),
-                        extra_opts: luks_format_extra_opts.clone(),
+                        device: self.new_by_id.as_str().to_owned(),
+                        uuid: self.new_uuid.clone(),
+                        label,
+                        extra_opts: extra_opts.clone(),
                     }],
                 });
                 if let Some(kf) = enroll_key_file {
@@ -147,7 +243,7 @@ impl ReplaceWorkPlan {
                         risk: "safe",
                         description: format!("enroll keyfile -> LUKS slot 1 on {}", self.new_by_id),
                         commands: vec![CmdRequest::CryptsetupLuksAddKeyFile {
-                            device: self.new_by_id.0.clone(),
+                            device: self.new_by_id.as_str().to_owned(),
                             key_file_path: kf.display().to_string(),
                         }],
                     });
@@ -156,7 +252,7 @@ impl ReplaceWorkPlan {
                     risk: "safe",
                     description: format!("LUKS header backup -> {}", header_backup_path.display()),
                     commands: vec![CmdRequest::CryptsetupLuksHeaderBackup {
-                        device: self.new_by_id.0.clone(),
+                        device: self.new_by_id.as_str().to_owned(),
                         backup_path: header_backup_path.display().to_string(),
                     }],
                 });
@@ -164,8 +260,8 @@ impl ReplaceWorkPlan {
                     risk: "safe",
                     description: format!("LUKS open -> {}", self.new_mapper),
                     commands: vec![CmdRequest::CryptsetupLuksOpen {
-                        device: self.new_by_id.0.clone(),
-                        mapper: self.new_mapper.0.clone(),
+                        device: self.new_by_id.as_str().to_owned(),
+                        mapper: self.new_mapper.clone(),
                     }],
                 });
             }
@@ -179,7 +275,7 @@ impl ReplaceWorkPlan {
                         risk: "safe",
                         description: format!("enroll keyfile -> LUKS slot 1 on {}", self.new_by_id),
                         commands: vec![CmdRequest::CryptsetupLuksAddKeyFile {
-                            device: self.new_by_id.0.clone(),
+                            device: self.new_by_id.as_str().to_owned(),
                             key_file_path: kf.display().to_string(),
                         }],
                     });
@@ -190,7 +286,7 @@ impl ReplaceWorkPlan {
                             header_backup_path.display()
                         ),
                         commands: vec![CmdRequest::CryptsetupLuksHeaderBackup {
-                            device: self.new_by_id.0.clone(),
+                            device: self.new_by_id.as_str().to_owned(),
                             backup_path: header_backup_path.display().to_string(),
                         }],
                     });
@@ -200,8 +296,8 @@ impl ReplaceWorkPlan {
                         risk: "safe",
                         description: format!("LUKS open -> {}", self.new_mapper),
                         commands: vec![CmdRequest::CryptsetupLuksOpen {
-                            device: self.new_by_id.0.clone(),
-                            mapper: self.new_mapper.0.clone(),
+                            device: self.new_by_id.as_str().to_owned(),
+                            mapper: self.new_mapper.clone(),
                         }],
                     });
                 }
@@ -232,7 +328,7 @@ impl ReplaceWorkPlan {
                 risk: "safe",
                 description: format!("cryptsetup close {}", mapper),
                 commands: vec![CmdRequest::CryptsetupClose {
-                    mapper: mapper.0.clone(),
+                    mapper: mapper.clone(),
                 }],
             });
         }
@@ -294,7 +390,9 @@ impl ReplacePlan {
         let ReplacePlan { notes, work_plan } = self;
         let ReplaceWorkPlan {
             config,
+            old_uuid,
             old_name,
+            new_uuid,
             new_name,
             new_by_id,
             pool,
@@ -315,33 +413,40 @@ impl ReplacePlan {
         // failure, and dry-run stdout.
         emit_replace_notes_to_stderr(&notes);
 
-        let old_mn = mapper_name(&old_name);
-
         // Confirm
         if !params.yes {
             let old_underlying = match &replace_source {
-                ReplaceSource::Live { .. } => pool
+                ReplaceSource::Live { mapper, .. } => pool
                     .devices
                     .iter()
-                    .find(|d| d.mapper == old_mn)
-                    .map(|d| d.underlying.as_str()),
+                    .find(|d| d.luks_uuid == old_uuid)
+                    .map(|d| d.underlying.as_str())
+                    .or_else(|| {
+                        // Fallback for tests that synthesize a pool whose
+                        // observed mapper matches but luks_uuid differs;
+                        // identity decisions already flowed via old_uuid.
+                        pool.devices
+                            .iter()
+                            .find(|d| d.mapper == *mapper)
+                            .map(|d| d.underlying.as_str())
+                    }),
                 ReplaceSource::Missing { .. } => None,
             };
             let old_hw = old_underlying.map(|u| confirm::query_disk_hw_info(runner, u));
-            let new_hw = confirm::query_disk_hw_info(runner, &new_by_id.0);
+            let new_hw = confirm::query_disk_hw_info(runner, new_by_id.as_str());
             let is_missing = matches!(&replace_source, ReplaceSource::Missing { .. });
 
             emit_replace_stderr(&format!(
                 "{}\n",
                 format_replace_confirm(
                     &ReplaceConfirmOld {
-                        name: &old_name,
+                        name: old_name.as_str(),
                         hw: old_hw.as_ref(),
                         source: &replace_source,
                     },
                     &ReplaceConfirmNew {
                         name: new_name.as_str(),
-                        by_id: &new_by_id.0,
+                        by_id: new_by_id.as_str(),
                         hw: &new_hw,
                         needs_luks_format: target_prep.needs_luks_format(),
                         is_rebuild: is_missing,
@@ -364,7 +469,7 @@ impl ReplacePlan {
             ReplaceSource::Live { .. } => pool
                 .devices
                 .iter()
-                .filter(|device| device.mapper != old_mn)
+                .filter(|device| device.luks_uuid != old_uuid)
                 .collect(),
             ReplaceSource::Missing { .. } => pool.devices.iter().collect(),
         };
@@ -373,7 +478,7 @@ impl ReplacePlan {
         {
             pool.devices
                 .iter()
-                .filter(|device| device.mapper == old_mn)
+                .filter(|device| device.luks_uuid == old_uuid)
                 .collect()
         } else {
             retained_members
@@ -381,16 +486,18 @@ impl ReplacePlan {
         let mut credential_targets: Vec<CredentialVerifyTarget> = anchor_members
             .into_iter()
             .map(|device| CredentialVerifyTarget {
-                name: name_from_mapper(&device.mapper.0)
-                    .unwrap_or(device.mapper.0.as_str())
+                // Display-only fallback for credential error messages; replace
+                // source identity is resolved by LUKS UUID before this point.
+                name: name_from_mapper(device.mapper.as_str())
+                    .unwrap_or(device.mapper.as_str())
                     .to_owned(),
                 device: device.underlying.clone(),
             })
             .collect();
         let new_disk_target = match &target_prep {
             ReplaceTargetPrep::ExistingLuks { .. } => Some(CredentialVerifyTarget {
-                name: new_name.clone(),
-                device: new_by_id.0.clone(),
+                name: new_name.as_str().to_owned(),
+                device: new_by_id.as_str().to_owned(),
             }),
             ReplaceTargetPrep::FreshLuks { .. } => None,
         };
@@ -428,7 +535,7 @@ impl ReplacePlan {
         }
 
         // Guard: new disk must not already be in the pool.
-        check_new_not_in_pool(&new_name, &new_mn, &pool)?;
+        check_new_not_in_pool(new_name.as_str(), &new_mn, &pool)?;
 
         // Hold a logind sleep inhibitor for the rest of the replace operation --
         // covers Step 1 LUKS init, the long-running btrfs replace start, and
@@ -459,7 +566,9 @@ impl ReplacePlan {
             target_membership.clone(),
             journal::OpKind::Replace {
                 phase: journal::ReplacePhase::PoolMutation,
+                old_uuid: old_uuid.clone(),
                 old_name: old_name.clone(),
+                new_uuid: new_uuid.clone(),
                 new_name: new_name.clone(),
                 new_target: new_target.clone(),
                 source: journal_source.clone(),
@@ -472,7 +581,7 @@ impl ReplacePlan {
         // Step 1: Init new disk (LUKS format/open) -- irreversible from here.
         match &target_prep {
             ReplaceTargetPrep::FreshLuks {
-                luks_format_extra_opts,
+                extra_opts,
                 enroll_key_file,
                 ..
             } => {
@@ -485,7 +594,15 @@ impl ReplacePlan {
                         &format!("disk {new_name}: formatting LUKS..."),
                     )
                 );
-                luks_format(runner, &new_by_id.0, &passphrase, luks_format_extra_opts)?;
+                let label = format!("braid-{}", new_name);
+                luks_format(
+                    runner,
+                    new_by_id.as_str(),
+                    &passphrase,
+                    &new_uuid,
+                    &label,
+                    extra_opts,
+                )?;
                 eprint!(
                     "{}",
                     status_line(
@@ -504,7 +621,7 @@ impl ReplacePlan {
                             &format!("disk {new_name}: enrolling keyfile in slot 1..."),
                         )
                     );
-                    crate::luks::enroll_key_file(runner, &new_by_id.0, &passphrase, kf)?;
+                    crate::luks::enroll_key_file(runner, new_by_id.as_str(), &passphrase, kf)?;
                     eprint!(
                         "{}",
                         status_line(
@@ -517,8 +634,8 @@ impl ReplacePlan {
 
                 let backup_path = backup_luks_header_post_mutation(
                     runner,
-                    &new_by_id.0,
-                    &new_mn.0,
+                    new_by_id.as_str(),
+                    new_mn.as_str(),
                     params.paths,
                 )?;
                 eprintln!("LUKS header backed up: {}", backup_path.display());
@@ -531,7 +648,13 @@ impl ReplacePlan {
                         &format!("disk {new_name}: unlocking..."),
                     )
                 );
-                ensure_luks_open(runner, &new_name, &new_by_id, &passphrase)?;
+                // FreshLuks paths do NOT need the by-id-form re-probe at the
+                // open boundary: the structured `uuid` field on
+                // `CmdRequest::CryptsetupLuksFormat` above writes the
+                // journaled UUID into the disk's header before the open,
+                // and any swap-in-place reformat is caught by FreshLuks
+                // adoption gates at finish-time and recovery replay.
+                ensure_luks_open(runner, new_name.as_str(), &new_by_id, &passphrase)?;
                 eprint!(
                     "{}",
                     status_line(
@@ -562,7 +685,7 @@ impl ReplacePlan {
                             &format!("disk {new_name}: enrolling keyfile in slot 1..."),
                         )
                     );
-                    crate::luks::enroll_key_file(runner, &new_by_id.0, &passphrase, kf)?;
+                    crate::luks::enroll_key_file(runner, new_by_id.as_str(), &passphrase, kf)?;
                     eprint!(
                         "{}",
                         status_line(
@@ -573,8 +696,8 @@ impl ReplacePlan {
                     );
                     let backup_path = backup_luks_header_post_mutation(
                         runner,
-                        &new_by_id.0,
-                        &new_mn.0,
+                        new_by_id.as_str(),
+                        new_mn.as_str(),
                         params.paths,
                     )?;
                     eprintln!("LUKS header backed up: {}", backup_path.display());
@@ -589,7 +712,14 @@ impl ReplacePlan {
                             &format!("disk {new_name}: unlocking..."),
                         )
                     );
-                    ensure_luks_open(runner, &new_name, &new_by_id, &passphrase)?;
+                    // Open-boundary defense-in-depth: re-probe the LUKS UUID
+                    // at the by-id form right before `ensure_luks_open` so a
+                    // disk-swap between planning and execution cannot route
+                    // pool data into a foreign LUKS volume. Fresh-LUKS new
+                    // targets skip this gate (the `cryptsetup luksFormat`
+                    // step writes the journaled UUID directly).
+                    probe_existing_luks_new_target_uuid(runner, &new_by_id, &new_uuid)?;
+                    ensure_luks_open(runner, new_name.as_str(), &new_by_id, &passphrase)?;
                     eprint!(
                         "{}",
                         status_line(
@@ -599,6 +729,9 @@ impl ReplacePlan {
                         )
                     );
                 } else if !pool.devices.iter().any(|d| d.mapper == new_mn) {
+                    // mapper_open: identity has already been verified by
+                    // `verify_credential_for_targets` against `new_by_id`
+                    // above, so the by-id re-probe is not required here.
                     eprintln!(
                         "note: LUKS mapper is already open but device is not yet in pool. Completing replace."
                     );
@@ -671,7 +804,15 @@ impl ReplacePlan {
         // we crash before clear_journal.
         let mut target_membership = target_membership;
         if let Ok(pool_after) = probe_pool(runner, fs, config.mount_point()) {
-            membership::enrich_from_pool_state(&pool_after, &mut target_membership);
+            // Discard `EnrichmentReport.foreign` for now; doctor/status
+            // wiring is Phase 5. The function is fail-closed on
+            // foreign-UUID admission (no insert), so the discard is safe.
+            let _ = membership::enrich_from_pool_state(&mut target_membership, &pool_after)?;
+        }
+        if let Some(new_member) = target_membership.by_uuid_mut(&new_uuid)
+            && new_member.added_at.is_none()
+        {
+            new_member.added_at = Some(crate::util::now_iso());
         }
         membership::save_membership(&target_membership, params.paths).map_err(|e| {
             ReplaceError::Validation(format!("failed to persist pool membership: {e}"))
@@ -681,7 +822,9 @@ impl ReplacePlan {
             &journal,
             journal::OpKind::Replace {
                 phase: journal::ReplacePhase::PostReplaceMaintenance,
+                old_uuid: old_uuid.clone(),
                 old_name: old_name.clone(),
+                new_uuid: new_uuid.clone(),
                 new_name: new_name.clone(),
                 new_target,
                 source: journal_source,
@@ -695,16 +838,36 @@ impl ReplacePlan {
         // so a resize failure does not `?` out and strand the old dm slot
         // bound to the backing disk until `braid lock` or reboot. Missing has
         // no old mapper to close.
+        //
+        // Defense-in-depth double-drift probe: before `CryptsetupClose`,
+        // probe the live LUKS UUID at the observed mapper and require it
+        // to equal the journaled `old_uuid`. On mismatch or probe failure,
+        // demote the close to a logged-warning skip so we don't tear down
+        // a foreign dm slot that the operator opened under the same
+        // mapper between plan and this point. Mirrors the
+        // `remove.rs::probe_observed_mapper_uuid` site (Phase 3a) at the
+        // same defense-in-depth seam.
         if let journal::OpKind::Replace {
             source:
                 journal::ReplaceJournalSource::Live {
                     old_mapper: mapper, ..
                 },
+            old_uuid: journaled_old_uuid,
             ..
         } = &journal.op
         {
-            let old_label = mapper.0.strip_prefix("braid-").unwrap_or(&mapper.0);
-            if close_mapper_best_effort(runner, params.sleeper, &mapper.0, old_label, color_enabled)
+            let old_label = mapper
+                .as_str()
+                .strip_prefix("braid-")
+                .unwrap_or(mapper.as_str());
+            if probe_observed_mapper_uuid(runner, mapper, journaled_old_uuid)
+                && close_mapper_best_effort(
+                    runner,
+                    params.sleeper,
+                    mapper,
+                    old_label,
+                    color_enabled,
+                )
             {
                 eprintln!(
                     "Old device closed. If repurposing the physical disk, wipe it separately."
@@ -732,6 +895,47 @@ impl ReplacePlan {
 
         eprintln!("Done. Replaced {} with {}.", old_name, new_name);
         Ok(())
+    }
+}
+
+/// Open-boundary re-probe for `ReplaceJournalMode::ExistingLuks` new
+/// targets. The planning-time `cryptsetup luksUUID` probe identifies the
+/// physical disk that should be opened; between planning and execution
+/// the operator could swap the disk at `new_target.by_id` (USB shuffle,
+/// hot-plug into the wrong slot). Re-probing the by-id form right before
+/// `ensure_luks_open` rejects the swap so pool data cannot be routed
+/// into a foreign LUKS volume by the subsequent `btrfs replace start`.
+/// Mismatch and probe failure both abort with
+/// `ReplaceError::NewTargetUuidMismatchAtOpen`; the wording mirrors the
+/// `finish_uncommitted_replace_recovery` `:2697` recovery arm so
+/// operator remediation reads identically across planning, execution,
+/// and recovery boundaries.
+fn probe_existing_luks_new_target_uuid<R: CommandRunner>(
+    runner: &R,
+    new_by_id: &ByIdPath,
+    expected: &LuksUuid,
+) -> Result<(), ReplaceError> {
+    let probe = runner
+        .run(&CmdRequest::CryptsetupLuksUuid {
+            device: new_by_id.as_str().to_owned(),
+        })
+        .map_err(|e| ReplaceError::NewTargetUuidMismatchAtOpen {
+            by_id: new_by_id.clone(),
+            expected: expected.clone(),
+            observed: format!("probe failed: {e}"),
+        })?;
+    match parse_cryptsetup_luks_uuid(&probe) {
+        Ok(parsed) if parsed.uuid == *expected => Ok(()),
+        Ok(parsed) => Err(ReplaceError::NewTargetUuidMismatchAtOpen {
+            by_id: new_by_id.clone(),
+            expected: expected.clone(),
+            observed: parsed.uuid.as_str().to_owned(),
+        }),
+        Err(e) => Err(ReplaceError::NewTargetUuidMismatchAtOpen {
+            by_id: new_by_id.clone(),
+            expected: expected.clone(),
+            observed: format!("probe parse failed: {e}"),
+        }),
     }
 }
 
@@ -840,15 +1044,25 @@ pub fn plan_replace<R: CommandRunner + Sync, F: Filesystem + ?Sized>(
         Err(e) => return Err(PlanFailure::empty(e.into())),
     };
 
+    // Validate `--luks-format-arg` at the CLI boundary BEFORE any
+    // probing, journal write, or `cryptsetup luksFormat`. A managed
+    // token (`--uuid`/`--label`) surfaces as
+    // `ReplaceError::ManagedFormatFlag`; mirrors `add.rs` so the CLI
+    // matches one error type at the boundary.
+    let luks_format_extra_opts = match LuksFormatExtraOpts::parse(params.luks_format_extra_opts) {
+        Ok(o) => o,
+        Err(e) => return Err(PlanFailure::empty(ReplaceError::ManagedFormatFlag(e))),
+    };
+
     // Parse new_name as name=by_id spec
     let (new_name_parsed, new_by_id) = match membership::parse_disk_spec(params.new_name) {
         Ok(v) => v,
         Err(e) => return Err(PlanFailure::empty(ReplaceError::Validation(e.to_string()))),
     };
-    let new_name = new_name_parsed.as_str();
+    let new_name_str = new_name_parsed.as_str();
 
     // --old == --new: reject before any pool or disk probes.
-    if params.old_name == new_name {
+    if params.old_name == new_name_str {
         return Err(PlanFailure::empty(ReplaceError::Validation(
             "--old and --new must be different disks".into(),
         )));
@@ -893,12 +1107,56 @@ pub fn plan_replace<R: CommandRunner + Sync, F: Filesystem + ?Sized>(
         ));
     }
 
-    // Resolve --old: live or missing (by devid).
-    let old_mn = mapper_name(params.old_name);
+    // Load membership BEFORE replace-source resolution so we can resolve
+    // `--old <name>` to a `(uuid, member)` pair and route every downstream
+    // identity decision through `old_uuid`.
+    let pre_membership = match membership::load_membership(params.paths) {
+        Ok(m) => m,
+        Err(e) => {
+            return Err(PlanFailure::with_notes(
+                notes,
+                ReplaceError::Validation(format!("failed to load pool membership: {e}")),
+            ));
+        }
+    };
+
+    // Resolve `--old <name>` to its UUID-keyed member. The name typed
+    // by the operator is presentation; identity decisions read the
+    // resolved UUID from here on. Mirrors `remove.rs`'s
+    // `resolve_target_in_membership`.
+    let old_name_parsed = match DiskName::parse(params.old_name) {
+        Ok(n) => n,
+        Err(e) => {
+            return Err(PlanFailure::with_notes(
+                notes,
+                ReplaceError::Validation(format!(
+                    "'{}' is not a valid disk name: {e}",
+                    params.old_name
+                )),
+            ));
+        }
+    };
+    let (old_uuid, old_member) = match pre_membership.by_name(&old_name_parsed) {
+        Some((u, m)) => (u.clone(), m.clone()),
+        None => {
+            return Err(PlanFailure::with_notes(
+                notes,
+                ReplaceError::OldMemberNotFound {
+                    name: params.old_name.to_owned(),
+                },
+            ));
+        }
+    };
+
+    // Resolve replace source via UUID (live) or persisted devid + btrfs
+    // missing_devids cross-check (missing). Pattern 4: live find is by
+    // `PoolDevice.luks_uuid == old_uuid`; the observed `mapper` is cloned
+    // from the matched device, not reconstructed from the resolved name.
     let replace_source = match resolve_replace_source(
         runner,
-        params.old_name,
-        &old_mn,
+        &old_name_parsed,
+        &old_uuid,
+        &old_member,
         params.missing_id,
         &pool,
         config.mount_point(),
@@ -909,35 +1167,8 @@ pub fn plan_replace<R: CommandRunner + Sync, F: Filesystem + ?Sized>(
         }
     };
 
-    // Validate --old against pool.json membership before any irreversible work.
-    // build_replacement_membership rejects absent old_name and (on Missing path)
-    // a devid mismatch between pool.json and the resolved missing devid. Running
-    // it here -- before the inhibitor and journal write -- means a typo in --old
-    // aborts cleanly with no pending-op.json on disk and no systemd-inhibit held.
-    let pre_membership = match membership::load_membership(params.paths) {
-        Ok(m) => m,
-        Err(e) => {
-            return Err(PlanFailure::with_notes(
-                notes,
-                ReplaceError::Validation(format!("failed to load pool membership: {e}")),
-            ));
-        }
-    };
-    let target_membership = match build_replacement_membership(
-        &pre_membership,
-        params.old_name,
-        new_name,
-        &new_by_id,
-        &replace_source,
-    ) {
-        Ok(m) => m,
-        Err(e) => {
-            return Err(PlanFailure::with_notes(notes, e));
-        }
-    };
-
     // Probe --new disk state
-    let new_probed = match probe_config_disk(runner, fs, new_name, &new_by_id) {
+    let new_probed = match probe_config_disk(runner, fs, &new_name_parsed, &new_by_id) {
         Ok(p) => p,
         Err(e) => {
             return Err(PlanFailure::with_notes(notes, e.into()));
@@ -974,7 +1205,7 @@ pub fn plan_replace<R: CommandRunner + Sync, F: Filesystem + ?Sized>(
             (ConfigDiskState::PresentLuks { .. }, Some(kf)) => {
                 match crate::enroll_key_file::plan_single_disk_enrollment(
                     runner,
-                    new_name,
+                    new_name_str,
                     &new_by_id,
                     kf,
                     crate::enroll_key_file::EnrollmentPlanMode::ExistingKeyfile,
@@ -994,10 +1225,60 @@ pub fn plan_replace<R: CommandRunner + Sync, F: Filesystem + ?Sized>(
             (_, kf) => kf.map(Path::to_path_buf),
         };
 
+    // Derive `new_uuid`:
+    //   - FreshLuks: generate via `LuksUuid::new_v4()`. Recorded into
+    //     the journal at op level BEFORE `cryptsetup luksFormat` runs,
+    //     and into the structured `uuid` field on
+    //     `CmdRequest::CryptsetupLuksFormat` so the kernel writes the
+    //     journaled identity.
+    //   - ExistingLuks: read from the planning-time probe via
+    //     `probe_config_disk`. The open-boundary re-probe at execute
+    //     time defends against operator disk swap between plan and
+    //     execute.
+    //   - Absent: rejected by `build_replace_work_plan`.
+    let new_uuid = match &new_probed.state {
+        ConfigDiskState::PresentNotLuks => LuksUuid::new_v4(),
+        ConfigDiskState::PresentLuks { uuid, .. } => uuid.clone(),
+        ConfigDiskState::Absent => {
+            return Err(PlanFailure::with_notes(
+                notes,
+                ReplaceError::Validation(format!(
+                    "new disk '{}' ({}) is not present. Is it plugged in?",
+                    new_name_str, new_by_id
+                )),
+            ));
+        }
+    };
+
+    // Pre-journal-write `new_uuid` uniqueness assert. Refused BEFORE
+    // any journal write and BEFORE `CryptsetupLuksFormat`. Membership
+    // check excludes `old_uuid` (which is being replaced); live-pool
+    // check inspects the planning-time `pool.devices` UUID set.
+    if let Err(e) = assert_new_uuid_unique(&new_uuid, &old_uuid, &pre_membership, &pool) {
+        return Err(PlanFailure::with_notes(notes, e));
+    }
+
+    // Build target_membership through `PoolMembership::insert` so the
+    // four-axis uniqueness invariant runs once. Mirrors the
+    // `validate_no_conflicts` deletion called out in the plan.
+    let mut target_membership = pre_membership.clone();
+    target_membership.remove_by_uuid(&old_uuid);
+    let new_member = membership::DiskMember {
+        name: new_name_parsed.clone(),
+        by_id: new_by_id.clone(),
+        devid: None,
+        added_at: None,
+    };
+    if let Err(e) = target_membership.insert(new_uuid.clone(), new_member) {
+        return Err(PlanFailure::with_notes(notes, e.into()));
+    }
+
     let work_plan = match build_replace_work_plan(ReplaceWorkPlanInput {
         config,
-        old_name: params.old_name,
-        new_name,
+        old_uuid,
+        old_name: old_member.name.clone(),
+        new_uuid,
+        new_name: new_name_parsed,
         new_by_id,
         new_probed,
         replace_source,
@@ -1006,7 +1287,7 @@ pub fn plan_replace<R: CommandRunner + Sync, F: Filesystem + ?Sized>(
         target_membership,
         paths: params.paths,
         enroll_key_file: resolved_enroll_key_file,
-        luks_format_extra_opts: params.luks_format_extra_opts,
+        luks_format_extra_opts,
     }) {
         Ok(plan) => plan,
         Err(e) => {
@@ -1015,6 +1296,35 @@ pub fn plan_replace<R: CommandRunner + Sync, F: Filesystem + ?Sized>(
     };
 
     Ok(ReplacePlan { notes, work_plan })
+}
+
+/// Pre-journal-write refusal for a colliding `new_uuid`. Inspects
+/// membership keys (excluding `old_uuid`) and the live `pool.devices`
+/// UUID set; the first collision returns the structured
+/// `ReplaceError::DuplicateUuid`. Membership scope wins ordering ties
+/// because the membership-side collision is the more common operator
+/// failure mode (a foreign disk attached and discovered between
+/// command invocations). Mirrors `add.rs::assert_target_uuid_unique`
+/// at the same defense-in-depth seam.
+fn assert_new_uuid_unique(
+    new_uuid: &LuksUuid,
+    old_uuid: &LuksUuid,
+    membership: &PoolMembership,
+    pool: &PoolState,
+) -> Result<(), ReplaceError> {
+    if new_uuid != old_uuid && membership.by_uuid(new_uuid).is_some() {
+        return Err(ReplaceError::DuplicateUuid {
+            uuid: new_uuid.clone(),
+            scope: DuplicateUuidScope::Membership,
+        });
+    }
+    if pool.devices.iter().any(|d| d.luks_uuid == *new_uuid) {
+        return Err(ReplaceError::DuplicateUuid {
+            uuid: new_uuid.clone(),
+            scope: DuplicateUuidScope::LivePool,
+        });
+    }
+    Ok(())
 }
 
 pub fn cmd_replace<R: CommandRunner + Sync, F: Filesystem + ?Sized>(
@@ -1049,17 +1359,12 @@ pub enum ReplaceSource {
     Missing { devid: u64 },
 }
 
-fn effective_luks_format_opts(new_name: &str, extra_opts: &[String]) -> Vec<String> {
-    let mut opts = extra_opts.to_vec();
-    opts.push("--label".into());
-    opts.push(format!("braid-{new_name}"));
-    opts
-}
-
 struct ReplaceWorkPlanInput<'a> {
     config: Config,
-    old_name: &'a str,
-    new_name: &'a str,
+    old_uuid: LuksUuid,
+    old_name: DiskName,
+    new_uuid: LuksUuid,
+    new_name: DiskName,
     new_by_id: ByIdPath,
     new_probed: ConfigDisk,
     replace_source: ReplaceSource,
@@ -1074,20 +1379,19 @@ struct ReplaceWorkPlanInput<'a> {
     /// `Absent` paths, resolution is a no-op so this carries the raw
     /// user input.
     enroll_key_file: Option<PathBuf>,
-    luks_format_extra_opts: &'a [String],
+    luks_format_extra_opts: LuksFormatExtraOpts,
 }
 
 fn build_replace_work_plan(
     input: ReplaceWorkPlanInput<'_>,
 ) -> Result<ReplaceWorkPlan, ReplaceError> {
-    let new_mapper = mapper_name(input.new_name);
-    let new_mapper_path = format!("/dev/mapper/{}", new_mapper.0);
+    let new_mapper = mapper_name(input.new_name.as_str());
+    let new_mapper_path = format!("/dev/mapper/{new_mapper}");
     let journal_target = build_replace_journal_target(
-        input.new_name,
         &input.new_by_id,
         &input.new_probed,
         input.enroll_key_file.as_deref(),
-        input.luks_format_extra_opts,
+        &input.luks_format_extra_opts,
     )?;
     let journal_source = build_replace_journal_source(&input.replace_source);
     let restore_raid1_after_commit = matches!(&input.replace_source, ReplaceSource::Missing { .. })
@@ -1101,15 +1405,12 @@ fn build_replace_work_plan(
             )));
         }
         ConfigDiskState::PresentNotLuks => ReplaceTargetPrep::FreshLuks {
-            luks_format_extra_opts: effective_luks_format_opts(
-                input.new_name,
-                input.luks_format_extra_opts,
-            ),
+            extra_opts: input.luks_format_extra_opts.clone(),
             enroll_key_file: input.enroll_key_file.clone(),
             header_backup_path: input
                 .paths
                 .luks_headers_dir()
-                .join(format!("{}.luksheader", new_mapper.0)),
+                .join(format!("{new_mapper}.luksheader")),
         },
         ConfigDiskState::PresentLuks { mapper_open, .. } => ReplaceTargetPrep::ExistingLuks {
             mapper_open,
@@ -1117,14 +1418,16 @@ fn build_replace_work_plan(
             header_backup_path: input
                 .paths
                 .luks_headers_dir()
-                .join(format!("{}.luksheader", new_mapper.0)),
+                .join(format!("{new_mapper}.luksheader")),
         },
     };
 
     Ok(ReplaceWorkPlan {
         config: input.config,
-        old_name: input.old_name.to_owned(),
-        new_name: input.new_name.to_owned(),
+        old_uuid: input.old_uuid,
+        old_name: input.old_name,
+        new_uuid: input.new_uuid,
+        new_name: input.new_name,
         new_by_id: input.new_by_id,
         pool: input.pool,
         replace_source: input.replace_source,
@@ -1152,32 +1455,28 @@ fn build_replace_journal_source(source: &ReplaceSource) -> journal::ReplaceJourn
 }
 
 fn build_replace_journal_target(
-    new_name: &str,
     new_by_id: &ByIdPath,
     new_probed: &ConfigDisk,
     enroll_key_file: Option<&Path>,
-    luks_format_extra_opts: &[String],
+    luks_format_extra_opts: &LuksFormatExtraOpts,
 ) -> Result<journal::ReplaceJournalTarget, ReplaceError> {
     let mode = match &new_probed.state {
         ConfigDiskState::PresentNotLuks => journal::ReplaceJournalMode::FreshLuks {
-            luks_label: format!("braid-{new_name}"),
-            luks_format_extra_opts: effective_luks_format_opts(new_name, luks_format_extra_opts),
+            extra_opts: luks_format_extra_opts.clone(),
             enroll_key_file: enroll_key_file.map(|p| p.to_path_buf()),
         },
-        ConfigDiskState::PresentLuks { uuid, .. } => journal::ReplaceJournalMode::ExistingLuks {
-            luks_uuid: uuid.clone(),
+        ConfigDiskState::PresentLuks { .. } => journal::ReplaceJournalMode::ExistingLuks {
             enroll_key_file: enroll_key_file.map(|p| p.to_path_buf()),
         },
         ConfigDiskState::Absent => {
             return Err(ReplaceError::Validation(format!(
-                "new disk '{}' ({}) is not present. Is it plugged in?",
-                new_name, new_by_id
+                "new disk '{}' is not present. Is it plugged in?",
+                new_by_id
             )));
         }
     };
     Ok(journal::ReplaceJournalTarget {
         by_id: new_by_id.clone(),
-        mapper_name: mapper_name(new_name).0,
         mode,
     })
 }
@@ -1196,17 +1495,30 @@ fn check_new_not_in_pool(
     Ok(())
 }
 
+/// Resolve the replace source from the resolved `(old_uuid, old_member)`
+/// pair, the pool's live state, and the operator's optional
+/// `--missing-id` override. Pattern 4 site:
+///   - Live find predicate: `d.luks_uuid == old_uuid`. The observed
+///     `mapper` is cloned from the matched `PoolDevice.mapper`, NOT
+///     reconstructed via `mapper_name(&old_name)`. The cloned value
+///     propagates into `ReplaceJournalSource::Live.old_mapper` and
+///     downstream to the post-commit `close_mapper_best_effort` call so
+///     mapper drift between plan and execute still targets the right
+///     dm slot.
+///   - Missing arm: cross-check `old_member.devid` against the resolved
+///     btrfs missing devid; reject any disagreement and reject any
+///     `--old` whose persisted member has no devid.
 fn resolve_replace_source<R: CommandRunner>(
     runner: &R,
-    old_name: &str,
-    old_mn: &MapperName,
+    old_name: &DiskName,
+    old_uuid: &LuksUuid,
+    old_member: &membership::DiskMember,
     missing_id: Option<u64>,
     pool: &PoolState,
     mount_point: &MountPoint,
 ) -> Result<ReplaceSource, ReplaceError> {
-    let old_in_pool = pool.devices.iter().any(|d| d.mapper == *old_mn);
-
-    if old_in_pool {
+    // Pattern 4: find by UUID, not by reconstructed mapper.
+    if let Some(matched) = pool.devices.iter().find(|d| d.luks_uuid == *old_uuid) {
         // Live old disk in pool.
         if missing_id.is_some() {
             return Err(ReplaceError::Validation(
@@ -1223,56 +1535,76 @@ fn resolve_replace_source<R: CommandRunner>(
                 if pool.missing_count == 1 { "" } else { "s" },
             )));
         }
-        let devid = pool
-            .devices
-            .iter()
-            .find(|d| d.mapper == *old_mn)
-            .map(|d| d.devid)
-            .expect("old_in_pool was true but device not found");
+        // Observed mapper, NOT mapper_name(&old_name). Journaling the
+        // reconstructed name would leak the post-commit close past
+        // operator-applied mapper drift.
         return Ok(ReplaceSource::Live {
-            mapper: old_mn.clone(),
-            devid,
+            mapper: matched.mapper.clone(),
+            devid: matched.devid,
         });
     }
 
     // Old disk not in pool -- dead/missing path.
+    // Cross-check persisted devid against the resolved btrfs missing devid.
+    let persisted_devid = match old_member.devid {
+        Some(d) => d,
+        None => {
+            return Err(ReplaceError::OldMemberMissingDevid {
+                name: old_name.as_str().to_owned(),
+            });
+        }
+    };
+
     // Probe actual missing devids for validation and auto-resolution.
     let missing_devids =
         preflight::probe_missing_devids(runner, mount_point).map_err(ReplaceError::Validation)?;
 
-    if let Some(devid) = missing_id {
-        // Validate --missing-id refers to an actually-missing device.
-        if pool.devices.iter().any(|d| d.devid == devid) {
+    let resolved = if let Some(supplied) = missing_id {
+        // --missing-id supplied: must equal persisted devid AND appear
+        // in the btrfs missing set.
+        if supplied != persisted_devid {
+            return Err(ReplaceError::OldDevidMismatch {
+                old_name: old_name.as_str().to_owned(),
+                pool_devid: Some(persisted_devid),
+                observed: supplied,
+            });
+        }
+        if pool.devices.iter().any(|d| d.devid == supplied) {
             return Err(ReplaceError::Validation(format!(
-                "devid {devid} is a live device, not a missing one."
+                "devid {supplied} is a live device, not a missing one."
             )));
         }
-        if !missing_devids.contains(&devid) {
+        if !missing_devids.contains(&supplied) {
             return Err(ReplaceError::Validation(format!(
-                "devid {devid} is not a missing device in this pool. \
+                "devid {supplied} is not a missing device in this pool. \
                  Use 'braid status' to see device IDs."
             )));
         }
-        return Ok(ReplaceSource::Missing { devid });
-    }
+        supplied
+    } else {
+        // Auto-resolve: the persisted devid must be missing in btrfs.
+        if missing_devids.is_empty() {
+            return Err(ReplaceError::Validation(format!(
+                "disk '{}' not found in pool and no missing devices detected.",
+                old_name
+            )));
+        }
+        if !missing_devids.contains(&persisted_devid) {
+            return Err(ReplaceError::Validation(format!(
+                "disk '{}' records devid {} in pool.json, but btrfs reports it is not missing. \
+                 Pool membership may be out of date; run `braid status` to inspect.",
+                old_name, persisted_devid
+            )));
+        }
+        // Sanity: if multiple devids are missing, the operator must
+        // supply `--missing-id` to disambiguate UNLESS the persisted
+        // devid pinpoints exactly one. We confirmed
+        // `missing_devids.contains(&persisted_devid)`, so the persisted
+        // value already picks the right one.
+        persisted_devid
+    };
 
-    if missing_devids.is_empty() {
-        return Err(ReplaceError::Validation(format!(
-            "disk '{}' not found in pool and no missing devices detected.",
-            old_name
-        )));
-    }
-
-    if missing_devids.len() == 1 {
-        return Ok(ReplaceSource::Missing {
-            devid: missing_devids[0],
-        });
-    }
-
-    Err(ReplaceError::Validation(format!(
-        "multiple missing devices ({} missing). Pass --missing-id <devid> to target the specific dead disk. Use 'braid status' to see device IDs.",
-        missing_devids.len()
-    )))
+    Ok(ReplaceSource::Missing { devid: resolved })
 }
 
 #[cfg(test)]
@@ -1299,10 +1631,25 @@ fn replace_work_plan_for_test(
         input.will_clear_last_missing,
         input.total_devices,
     );
+    // Synthesize an op-level identity for the test plan. The synthesized
+    // `new_uuid` lines up with what the planner would have produced from
+    // the probed `ConfigDiskState`: FreshLuks gets a fresh v4, ExistingLuks
+    // reuses the probed value.
+    let new_uuid = match &input.new_probed.state {
+        ConfigDiskState::PresentLuks { uuid, .. } => uuid.clone(),
+        _ => LuksUuid::new_v4(),
+    };
+    let old_uuid = LuksUuid::parse("99999999-9999-9999-9999-999999999999").unwrap();
+    let old_name = DiskName::parse("disk2").expect("valid disk name");
+    let new_name = DiskName::parse(input.new_name).expect("valid new disk name in test");
+    let extra_opts = LuksFormatExtraOpts::parse(input.luks_format_extra_opts)
+        .expect("test extras must be valid (no managed flags)");
     build_replace_work_plan(ReplaceWorkPlanInput {
         config,
-        old_name: "disk2",
-        new_name: input.new_name,
+        old_uuid,
+        old_name,
+        new_uuid,
+        new_name,
         new_by_id: (*input.new_by_id).clone(),
         new_probed: input.new_probed.clone(),
         replace_source: input.replace_source.clone(),
@@ -1311,7 +1658,7 @@ fn replace_work_plan_for_test(
         target_membership: PoolMembership::empty(),
         paths: input.paths,
         enroll_key_file: input.enroll_key_file.map(Path::to_path_buf),
-        luks_format_extra_opts: input.luks_format_extra_opts,
+        luks_format_extra_opts: extra_opts,
     })
 }
 
@@ -1334,7 +1681,7 @@ fn replace_work_plan_test_pool(
     {
         devices.push(PoolDevice {
             mapper: mapper.clone(),
-            luks_uuid: LuksUuid(format!("{devid:032x}")),
+            luks_uuid: synth_test_uuid(*devid),
             devid: *devid,
             underlying: format!("/dev/test-{devid}"),
         });
@@ -1344,7 +1691,7 @@ fn replace_work_plan_test_pool(
     while devices.len() < live_device_count {
         devices.push(PoolDevice {
             mapper: MapperName(format!("braid-test{}", devices.len() + 1)),
-            luks_uuid: LuksUuid(format!("{next_devid:032x}")),
+            luks_uuid: synth_test_uuid(next_devid),
             devid: next_devid,
             underlying: format!("/dev/test-{next_devid}"),
         });
@@ -1360,6 +1707,16 @@ fn replace_work_plan_test_pool(
         missing_devids: Vec::new(),
         null_underlying: Vec::new(),
     }
+}
+
+/// Build a deterministic canonical `LuksUuid` keyed on a small integer
+/// seed (typically `devid`). Used inside `replace_work_plan_test_pool`
+/// so synthetic `PoolDevice` rows carry well-formed UUIDs that pass
+/// `LuksUuid::parse`.
+#[cfg(test)]
+fn synth_test_uuid(seed: u64) -> LuksUuid {
+    LuksUuid::parse(&format!("00000000-0000-0000-0000-{seed:012x}"))
+        .expect("seed produces a canonical UUID")
 }
 
 // ---------------------------------------------------------------------------
@@ -1446,42 +1803,6 @@ fn format_replace_confirm(
     ));
 
     msg
-}
-
-fn build_replacement_membership(
-    existing: &membership::PoolMembership,
-    old_name: &str,
-    new_name: &str,
-    new_by_id: &ByIdPath,
-    replace_source: &ReplaceSource,
-) -> Result<membership::PoolMembership, ReplaceError> {
-    let existing_member = existing.disks.get(old_name).ok_or_else(|| {
-        ReplaceError::Validation(format!(
-            "'{old_name}' not found in pool.json membership -- \
-             no disk entry has this name. Pool membership may need manual repair."
-        ))
-    })?;
-
-    if let ReplaceSource::Missing { devid } = replace_source
-        && existing_member.devid != Some(*devid)
-    {
-        return Err(ReplaceError::Validation(format!(
-            "--old '{old_name}' records devid {pool_devid:?} in pool.json, \
-             but btrfs reports missing devid {devid}. \
-             --old and --missing-id disagree about which member is being replaced.",
-            pool_devid = existing_member.devid
-        )));
-    }
-
-    let mut next = existing.clone();
-    next.disks.remove(old_name);
-    membership::validate_no_conflicts(&next, new_name, &new_by_id.0)
-        .map_err(|e| ReplaceError::Validation(e.to_string()))?;
-    next.disks.insert(
-        new_name.to_owned(),
-        membership::DiskMember::from_by_id(new_by_id.clone()),
-    );
-    Ok(next)
 }
 
 #[cfg(test)]
@@ -1689,13 +2010,13 @@ mod tests {
             devices: vec![
                 PoolDevice {
                     mapper: MapperName("braid-disk1".into()),
-                    luks_uuid: LuksUuid("11111111-1111-1111-1111-111111111111".into()),
+                    luks_uuid: LuksUuid::parse("11111111-1111-1111-1111-111111111111").unwrap(),
                     devid: 1,
                     underlying: "/dev/vda".into(),
                 },
                 PoolDevice {
                     mapper: MapperName("braid-disk2".into()),
-                    luks_uuid: LuksUuid("22222222-2222-2222-2222-222222222222".into()),
+                    luks_uuid: LuksUuid::parse("22222222-2222-2222-2222-222222222222").unwrap(),
                     devid: 2,
                     underlying: "/dev/vdb".into(),
                 },
@@ -1706,6 +2027,12 @@ mod tests {
             fsid: None,
             null_underlying: vec![],
         }
+    }
+
+    /// Build a `DiskName` from a literal, panicking on invalid input.
+    /// Test-only helper to keep call sites short.
+    fn disk_name(s: &str) -> DiskName {
+        DiskName::parse(s).expect("valid disk name in fixture")
     }
 
     /// Create a mock runner that returns device usage output with specific
@@ -1735,6 +2062,20 @@ mod tests {
         )
     }
 
+    /// Build the disk2 `(uuid, member)` pair used by the live-resolution
+    /// tests against `two_device_pool`. UUID matches the synthetic
+    /// pool entry so Pattern 4's UUID-keyed find succeeds.
+    fn disk2_member_for_two_device_pool() -> (LuksUuid, membership::DiskMember) {
+        let uuid = LuksUuid::parse("22222222-2222-2222-2222-222222222222").unwrap();
+        let member = membership::DiskMember {
+            name: disk_name("disk2"),
+            by_id: ByIdPath::parse("/dev/disk/by-id/virtio-disk2").unwrap(),
+            devid: Some(2),
+            added_at: None,
+        };
+        (uuid, member)
+    }
+
     #[test]
     // Intent: live old disk in healthy pool resolves to ReplaceSource::Live.
     // Why: core behavior -- replace must accept live disks when pool has no missing.
@@ -1742,8 +2083,16 @@ mod tests {
     fn live_old_resolution_succeeds_no_missing() {
         let pool = two_device_pool();
         let runner = MockRunner::default();
-        let mn = MapperName("braid-disk2".into());
-        let result = resolve_replace_source(&runner, "disk2", &mn, None, &pool, &mp());
+        let (uuid, member) = disk2_member_for_two_device_pool();
+        let result = resolve_replace_source(
+            &runner,
+            &disk_name("disk2"),
+            &uuid,
+            &member,
+            None,
+            &pool,
+            &mp(),
+        );
         assert!(
             matches!(result, Ok(ReplaceSource::Live { .. })),
             "expected Live target, got: {result:?}"
@@ -1757,9 +2106,17 @@ mod tests {
     fn live_old_with_missing_id_rejects() {
         let pool = two_device_pool();
         let runner = MockRunner::default();
-        let mn = MapperName("braid-disk2".into());
-        let err =
-            resolve_replace_source(&runner, "disk2", &mn, Some(99), &pool, &mp()).unwrap_err();
+        let (uuid, member) = disk2_member_for_two_device_pool();
+        let err = resolve_replace_source(
+            &runner,
+            &disk_name("disk2"),
+            &uuid,
+            &member,
+            Some(99),
+            &pool,
+            &mp(),
+        )
+        .unwrap_err();
         assert!(
             err.to_string().contains("--missing-id cannot be used"),
             "unexpected error: {err}"
@@ -1775,8 +2132,17 @@ mod tests {
         pool.missing_count = 1;
         pool.total_devices = 3;
         let runner = MockRunner::default();
-        let mn = MapperName("braid-disk2".into());
-        let err = resolve_replace_source(&runner, "disk2", &mn, None, &pool, &mp()).unwrap_err();
+        let (uuid, member) = disk2_member_for_two_device_pool();
+        let err = resolve_replace_source(
+            &runner,
+            &disk_name("disk2"),
+            &uuid,
+            &member,
+            None,
+            &pool,
+            &mp(),
+        )
+        .unwrap_err();
         assert!(
             err.to_string().contains("missing device"),
             "unexpected error: {err}"
@@ -1791,196 +2157,21 @@ mod tests {
         );
     }
 
-    #[test]
-    // Intent: replace must reject a post-replace membership that reuses another
-    // member's by-id under a new name.
-    // Why: docs and invariants say mutating commands reject name reassignment /
-    // by-id rename rather than silently corrupting pool membership.
-    // Scenario: operator tries `braid replace --old disk1 --new newname=<disk2 by-id>`.
-    fn build_replacement_membership_rejects_by_id_rename_conflict() {
-        let mut membership = membership::PoolMembership::empty();
-        membership.disks.insert(
-            "disk1".into(),
-            membership::DiskMember::from_by_id(ByIdPath("/dev/disk/by-id/virtio-disk1".into())),
-        );
-        membership.disks.insert(
-            "disk2".into(),
-            membership::DiskMember::from_by_id(ByIdPath("/dev/disk/by-id/virtio-disk2".into())),
-        );
-
-        let err = build_replacement_membership(
-            &membership,
-            "disk1",
-            "newname",
-            &ByIdPath("/dev/disk/by-id/virtio-disk2".into()),
-            &ReplaceSource::Live {
-                mapper: MapperName("braid-disk1".into()),
-                devid: 1,
-            },
-        )
-        .expect_err("should reject by-id rename conflict");
-
-        assert!(
-            err.to_string().contains("cannot register"),
-            "unexpected error: {err}"
-        );
-    }
-
-    fn disk_member_with_devid(by_id: &str, devid: u64) -> membership::DiskMember {
-        let mut m = membership::DiskMember::from_by_id(ByIdPath(by_id.into()));
-        m.devid = Some(devid);
-        m
-    }
-
-    #[test]
-    // Intent: Missing-path build rejects when --old is absent from pool.json.
-    // Why: silent HashMap::remove on a missing key previously produced orphan
-    //   entries in pool.json on operator typo, which broke the next unlock
-    //   via mount::plan_open_pool's Absent-member detection.
-    // Scenario: operator types `braid replace --old disk2 --missing-id 2 --new ...`
-    //   but pool.json only knows about disk1.
-    fn build_replacement_membership_missing_rejects_absent_old_name() {
-        let mut m = membership::PoolMembership::empty();
-        m.disks.insert(
-            "disk1".into(),
-            disk_member_with_devid("/dev/disk/by-id/virtio-disk1", 1),
-        );
-
-        let result = build_replacement_membership(
-            &m,
-            "disk2",
-            "disk3",
-            &ByIdPath("/dev/disk/by-id/virtio-disk3".into()),
-            &ReplaceSource::Missing { devid: 2 },
-        );
-
-        assert!(
-            matches!(result, Err(ReplaceError::Validation(_))),
-            "expected Err(Validation(_)), got: {result:?}"
-        );
-    }
-
-    #[test]
-    // Intent: Missing-path build rejects when pool.json's devid for --old
-    //   disagrees with the resolved missing devid.
-    // Why: --old and --missing-id disagreeing silently would let the journal
-    //   record one devid while pool.json describes another, leaving
-    //   pool.json inconsistent with btrfs.
-    // Scenario: operator runs --old disk2 --missing-id 2, but pool.json
-    //   records disk2 with devid 3.
-    fn build_replacement_membership_missing_rejects_devid_mismatch() {
-        let mut m = membership::PoolMembership::empty();
-        m.disks.insert(
-            "disk2".into(),
-            disk_member_with_devid("/dev/disk/by-id/virtio-disk2", 3),
-        );
-
-        let result = build_replacement_membership(
-            &m,
-            "disk2",
-            "disk3",
-            &ByIdPath("/dev/disk/by-id/virtio-disk3".into()),
-            &ReplaceSource::Missing { devid: 2 },
-        );
-
-        assert!(
-            matches!(result, Err(ReplaceError::Validation(_))),
-            "expected Err(Validation(_)), got: {result:?}"
-        );
-    }
-
-    #[test]
-    // Intent: Live-path build also rejects when --old is absent from pool.json.
-    // Why: symmetric guard -- the silent .remove no-op applies to both paths;
-    //   a Live-path typo would also leave an orphan btrfs member in pool.json.
-    // Scenario: operator runs live replace with a typo in --old.
-    fn build_replacement_membership_live_rejects_absent_old_name() {
-        let mut m = membership::PoolMembership::empty();
-        m.disks.insert(
-            "disk1".into(),
-            disk_member_with_devid("/dev/disk/by-id/virtio-disk1", 1),
-        );
-
-        let result = build_replacement_membership(
-            &m,
-            "disk2",
-            "disk3",
-            &ByIdPath("/dev/disk/by-id/virtio-disk3".into()),
-            &ReplaceSource::Live {
-                mapper: MapperName("braid-disk2".into()),
-                devid: 2,
-            },
-        );
-
-        assert!(
-            matches!(result, Err(ReplaceError::Validation(_))),
-            "expected Err(Validation(_)), got: {result:?}"
-        );
-    }
-
-    #[test]
-    // Intent: Missing-path happy path returns Ok with the old entry removed
-    //   and the new entry inserted.
-    // Why: pins the positive branch so the rejection tests can't drift into
-    //   false positives (e.g. a bug that rejects everything).
-    // Scenario: operator replaces disk2 (missing devid 2) with disk3; pool.json
-    //   has disk2 recorded with devid 2.
-    fn build_replacement_membership_missing_happy_path() {
-        let mut m = membership::PoolMembership::empty();
-        m.disks.insert(
-            "disk1".into(),
-            disk_member_with_devid("/dev/disk/by-id/virtio-disk1", 1),
-        );
-        m.disks.insert(
-            "disk2".into(),
-            disk_member_with_devid("/dev/disk/by-id/virtio-disk2", 2),
-        );
-
-        let next = build_replacement_membership(
-            &m,
-            "disk2",
-            "disk3",
-            &ByIdPath("/dev/disk/by-id/virtio-disk3".into()),
-            &ReplaceSource::Missing { devid: 2 },
-        )
-        .expect("happy path");
-
-        assert!(!next.disks.contains_key("disk2"));
-        assert!(next.disks.contains_key("disk3"));
-        assert!(next.disks.contains_key("disk1"));
-    }
-
-    #[test]
-    // Intent: Live-path happy path returns Ok with the old entry removed and
-    //   the new entry inserted. Devid cross-check does not apply.
-    // Why: same rationale as the Missing-path happy path.
-    // Scenario: operator swaps a live disk2 for a fresh disk3.
-    fn build_replacement_membership_live_happy_path() {
-        let mut m = membership::PoolMembership::empty();
-        m.disks.insert(
-            "disk1".into(),
-            disk_member_with_devid("/dev/disk/by-id/virtio-disk1", 1),
-        );
-        m.disks.insert(
-            "disk2".into(),
-            disk_member_with_devid("/dev/disk/by-id/virtio-disk2", 2),
-        );
-
-        let next = build_replacement_membership(
-            &m,
-            "disk2",
-            "disk3",
-            &ByIdPath("/dev/disk/by-id/virtio-disk3".into()),
-            &ReplaceSource::Live {
-                mapper: MapperName("braid-disk2".into()),
-                devid: 2,
-            },
-        )
-        .expect("happy path");
-
-        assert!(!next.disks.contains_key("disk2"));
-        assert!(next.disks.contains_key("disk3"));
-    }
+    // Pool.json plumbing tests for the previous `build_replacement_membership`
+    // helper are now covered by the inline membership construction in
+    // `plan_replace`. Coverage:
+    //   - by-id rename conflict: blocked by `PoolMembership::insert` axis 3
+    //     (by-id collision). The `assert_target_uuid_unique` invariants in
+    //     add.rs + `PoolMembership::insert` four-axis check exercise the
+    //     same surface; replace inherits via the shared insert call.
+    //   - absent old-name: covered by `OldMemberNotFound` (see
+    //     `cmd_replace_missing_path_rejects_old_name_absent_from_membership`).
+    //   - missing-path devid mismatch: covered by `OldDevidMismatch`
+    //     emitted from `resolve_replace_source` (the missing-path
+    //     decoy-regression test exercises the persisted-devid cross-check
+    //     at the same boundary).
+    //   - happy paths: exercised end-to-end by the live and missing-path
+    //     execute tests, which now also assert membership transitions.
 
     #[test]
     // Intent: dry-run for live path shows btrfs replace and resize steps.
@@ -1998,8 +2189,8 @@ mod tests {
         let _config: crate::config::Config =
             serde_json::from_value(config_json).expect("valid config");
         let new_probed = ConfigDisk {
-            name: "disk3".into(),
-            by_id_path: ByIdPath("/dev/disk/by-id/virtio-disk3".into()),
+            name: DiskName::parse("disk3").expect("valid disk name in test fixture"),
+            by_id_path: ByIdPath::parse("/dev/disk/by-id/virtio-disk3").unwrap(),
             state: ConfigDiskState::PresentNotLuks,
         };
         let source = ReplaceSource::Live {
@@ -2008,7 +2199,7 @@ mod tests {
         };
         let steps = replace_work_plan_for_test(&ReplaceWorkPlanTestInput {
             new_name: "disk3",
-            new_by_id: &ByIdPath("/dev/disk/by-id/virtio-disk3".into()),
+            new_by_id: &ByIdPath::parse("/dev/disk/by-id/virtio-disk3").unwrap(),
             new_probed: &new_probed,
             replace_source: &source,
             mount_point: &MountPoint("/mnt/storage".into()),
@@ -2063,14 +2254,14 @@ mod tests {
         let _config: crate::config::Config =
             serde_json::from_value(config_json).expect("valid config");
         let new_probed = ConfigDisk {
-            name: "disk3".into(),
-            by_id_path: ByIdPath("/dev/disk/by-id/virtio-disk3".into()),
+            name: DiskName::parse("disk3").expect("valid disk name in test fixture"),
+            by_id_path: ByIdPath::parse("/dev/disk/by-id/virtio-disk3").unwrap(),
             state: ConfigDiskState::PresentNotLuks,
         };
         let source = ReplaceSource::Missing { devid: 2 };
         let steps = replace_work_plan_for_test(&ReplaceWorkPlanTestInput {
             new_name: "disk3",
-            new_by_id: &ByIdPath("/dev/disk/by-id/virtio-disk3".into()),
+            new_by_id: &ByIdPath::parse("/dev/disk/by-id/virtio-disk3").unwrap(),
             new_probed: &new_probed,
             replace_source: &source,
             mount_point: &MountPoint("/mnt/storage".into()),
@@ -2184,18 +2375,29 @@ mod tests {
     }
 
     #[test]
-    // Intent: dead path resolution auto-detects the missing devid.
-    // Why: when exactly one device is missing, the operator shouldn't need --missing-id.
+    // Intent: dead path resolution auto-detects the missing devid from
+    // the persisted member.
+    // Why: when the operator does not supply `--missing-id`, planning uses
+    // `old_member.devid` (cross-checked against btrfs missing_devids) to
+    // pick the target. Pattern 4 / persisted-devid cross-check.
     // Scenario: operator replaces a dead disk (1 missing device, no --missing-id).
     fn dead_old_resolution_single_missing() {
         let mut pool = two_device_pool();
         // Simulate disk2 missing
-        pool.devices.retain(|d| d.mapper.0 != "braid-disk2");
+        pool.devices.retain(|d| d.mapper.as_str() != "braid-disk2");
         pool.missing_count = 1;
         pool.total_devices = 2;
         let runner = mock_with_missing_devids(&[2]);
-        let mn = MapperName("braid-disk2".into());
-        let result = resolve_replace_source(&runner, "disk2", &mn, None, &pool, &mp());
+        let (uuid, member) = disk2_member_for_two_device_pool();
+        let result = resolve_replace_source(
+            &runner,
+            &disk_name("disk2"),
+            &uuid,
+            &member,
+            None,
+            &pool,
+            &mp(),
+        );
         assert!(
             matches!(result, Ok(ReplaceSource::Missing { devid: 2 })),
             "expected Missing {{ devid: 2 }}, got: {result:?}"
@@ -2203,17 +2405,27 @@ mod tests {
     }
 
     #[test]
-    // Intent: dead path with explicit --missing-id resolves to that devid.
+    // Intent: dead path with explicit --missing-id resolves to that devid
+    // when it matches the persisted devid.
     // Why: regression guard for --missing-id path.
-    // Scenario: operator passes --missing-id for a specific dead device.
+    // Scenario: operator passes --missing-id 2 for disk2 whose pool.json
+    // entry records devid 2.
     fn dead_old_resolution_with_devid() {
         let mut pool = two_device_pool();
-        pool.devices.retain(|d| d.mapper.0 != "braid-disk2");
+        pool.devices.retain(|d| d.mapper.as_str() != "braid-disk2");
         pool.missing_count = 1;
         pool.total_devices = 2;
         let runner = mock_with_missing_devids(&[2]);
-        let mn = MapperName("braid-disk2".into());
-        let result = resolve_replace_source(&runner, "disk2", &mn, Some(2), &pool, &mp());
+        let (uuid, member) = disk2_member_for_two_device_pool();
+        let result = resolve_replace_source(
+            &runner,
+            &disk_name("disk2"),
+            &uuid,
+            &member,
+            Some(2),
+            &pool,
+            &mp(),
+        );
         assert!(
             matches!(result, Ok(ReplaceSource::Missing { devid: 2 })),
             "expected Missing {{ devid: 2 }}, got: {result:?}"
@@ -2224,16 +2436,34 @@ mod tests {
     // Intent: --missing-id pointing to a live device is rejected.
     // Why: the operator may have confused devids; replacing a live device
     //   via the missing path would corrupt data.
-    // Scenario: operator passes --missing-id with the devid of a healthy disk.
+    // Scenario: operator passes --missing-id with the devid of a healthy
+    //   disk while pool.json records devid 1 for `--old`.
     fn missing_id_pointing_to_live_device_rejected() {
         let mut pool = two_device_pool();
-        pool.devices.retain(|d| d.mapper.0 != "braid-disk2");
+        pool.devices.retain(|d| d.mapper.as_str() != "braid-disk2");
         pool.missing_count = 1;
         pool.total_devices = 2;
         let runner = mock_with_missing_devids(&[2]);
-        let mn = MapperName("braid-disk2".into());
-        // Devid 1 is live (in pool.devices)
-        let err = resolve_replace_source(&runner, "disk2", &mn, Some(1), &pool, &mp()).unwrap_err();
+        // disk2's persisted member pins devid 1 (the live one) so the
+        // operator's --missing-id 1 lines up with the persisted entry --
+        // but devid 1 is live in `pool.devices`, so the live-check fires.
+        let uuid = LuksUuid::parse("22222222-2222-2222-2222-222222222222").unwrap();
+        let member = membership::DiskMember {
+            name: disk_name("disk2"),
+            by_id: ByIdPath::parse("/dev/disk/by-id/virtio-disk2").unwrap(),
+            devid: Some(1),
+            added_at: None,
+        };
+        let err = resolve_replace_source(
+            &runner,
+            &disk_name("disk2"),
+            &uuid,
+            &member,
+            Some(1),
+            &pool,
+            &mp(),
+        )
+        .unwrap_err();
         assert!(
             err.to_string().contains("live device"),
             "expected 'live device' error, got: {err}"
@@ -2241,39 +2471,109 @@ mod tests {
     }
 
     #[test]
-    // Intent: --missing-id pointing to a nonexistent devid is rejected.
-    // Why: a bogus devid would cause btrfs replace start to fail; catch it early.
-    // Scenario: operator typos the devid.
-    fn missing_id_nonexistent_devid_rejected() {
+    // Intent: --missing-id that disagrees with the persisted member's
+    // devid is rejected before any btrfs cross-check.
+    // Why: --old and --missing-id must agree about which member is being
+    //   replaced; the persisted devid is the source of truth and a
+    //   disagreement is a typo guard.
+    // Scenario: operator passes --missing-id 99 but disk2's persisted
+    //   member records devid 2.
+    fn missing_id_disagrees_with_persisted_devid() {
         let mut pool = two_device_pool();
-        pool.devices.retain(|d| d.mapper.0 != "braid-disk2");
+        pool.devices.retain(|d| d.mapper.as_str() != "braid-disk2");
         pool.missing_count = 1;
         pool.total_devices = 2;
         let runner = mock_with_missing_devids(&[2]);
-        let mn = MapperName("braid-disk2".into());
-        let err =
-            resolve_replace_source(&runner, "disk2", &mn, Some(99), &pool, &mp()).unwrap_err();
+        let (uuid, member) = disk2_member_for_two_device_pool();
+        let err = resolve_replace_source(
+            &runner,
+            &disk_name("disk2"),
+            &uuid,
+            &member,
+            Some(99),
+            &pool,
+            &mp(),
+        )
+        .unwrap_err();
+        match err {
+            ReplaceError::OldDevidMismatch {
+                old_name,
+                pool_devid,
+                observed,
+            } => {
+                assert_eq!(old_name, "disk2");
+                assert_eq!(pool_devid, Some(2));
+                assert_eq!(observed, 99);
+            }
+            other => panic!("expected OldDevidMismatch, got: {other:?}"),
+        }
+    }
+
+    #[test]
+    // Intent: persisted devid not in btrfs missing_devids fails closed.
+    // Why: pool.json's view of which devid is missing must agree with
+    //   btrfs's view; a stale pool.json (e.g. devid was reclaimed by a
+    //   subsequent add) must not silently fall through to the live
+    //   path through the missing arm.
+    // Scenario: pool.json records disk2 with devid 2, but btrfs reports
+    //   devid 3 missing instead.
+    fn persisted_devid_not_in_missing_set_rejected() {
+        let mut pool = two_device_pool();
+        pool.devices.retain(|d| d.mapper.as_str() != "braid-disk2");
+        pool.missing_count = 1;
+        pool.total_devices = 2;
+        let runner = mock_with_missing_devids(&[3]);
+        let (uuid, member) = disk2_member_for_two_device_pool();
+        let err = resolve_replace_source(
+            &runner,
+            &disk_name("disk2"),
+            &uuid,
+            &member,
+            None,
+            &pool,
+            &mp(),
+        )
+        .unwrap_err();
         assert!(
-            err.to_string().contains("not a missing device"),
-            "expected 'not a missing device' error, got: {err}"
+            err.to_string()
+                .contains("Pool membership may be out of date"),
+            "expected stale-pool message, got: {err}"
         );
     }
 
     #[test]
-    // Intent: multiple missing devices without --missing-id is rejected.
-    // Why: auto-detect is ambiguous when multiple devices are missing.
-    // Scenario: two drives died; operator must specify which to replace first.
-    fn multiple_missing_without_id_rejected() {
+    // Intent: missing-path with no persisted devid fails closed.
+    // Why: without a persisted devid the operator and btrfs cannot agree
+    //   on which physical member is being replaced. Reject with the
+    //   structured `OldMemberMissingDevid` variant.
+    // Scenario: pool.json's disk2 entry has `devid: None` (e.g. discover
+    //   bootstrap had not enriched it yet).
+    fn missing_path_without_persisted_devid_rejected() {
         let mut pool = two_device_pool();
-        pool.devices.retain(|d| d.mapper.0 != "braid-disk2");
-        pool.missing_count = 2;
-        pool.total_devices = 3;
-        let runner = mock_with_missing_devids(&[2, 3]);
-        let mn = MapperName("braid-disk2".into());
-        let err = resolve_replace_source(&runner, "disk2", &mn, None, &pool, &mp()).unwrap_err();
+        pool.devices.retain(|d| d.mapper.as_str() != "braid-disk2");
+        pool.missing_count = 1;
+        pool.total_devices = 2;
+        let runner = mock_with_missing_devids(&[2]);
+        let uuid = LuksUuid::parse("22222222-2222-2222-2222-222222222222").unwrap();
+        let member = membership::DiskMember {
+            name: disk_name("disk2"),
+            by_id: ByIdPath::parse("/dev/disk/by-id/virtio-disk2").unwrap(),
+            devid: None,
+            added_at: None,
+        };
+        let err = resolve_replace_source(
+            &runner,
+            &disk_name("disk2"),
+            &uuid,
+            &member,
+            None,
+            &pool,
+            &mp(),
+        )
+        .unwrap_err();
         assert!(
-            err.to_string().contains("multiple missing"),
-            "expected 'multiple missing' error, got: {err}"
+            matches!(err, ReplaceError::OldMemberMissingDevid { .. }),
+            "expected OldMemberMissingDevid, got: {err:?}"
         );
     }
 
@@ -2286,8 +2586,8 @@ mod tests {
 
     fn new_probed_not_luks() -> ConfigDisk {
         ConfigDisk {
-            name: "disk3".into(),
-            by_id_path: ByIdPath("/dev/disk/by-id/virtio-disk3".into()),
+            name: DiskName::parse("disk3").expect("valid disk name in test fixture"),
+            by_id_path: ByIdPath::parse("/dev/disk/by-id/virtio-disk3").unwrap(),
             state: ConfigDiskState::PresentNotLuks,
         }
     }
@@ -2300,37 +2600,30 @@ mod tests {
     // key file and extra luksFormat options.
     #[test]
     fn build_replace_journal_target_records_fresh_luks_target() {
-        let new_by_id = ByIdPath("/dev/disk/by-id/virtio-disk3".into());
+        let new_by_id = ByIdPath::parse("/dev/disk/by-id/virtio-disk3").unwrap();
         let key_file = std::path::Path::new("/run/keys/braid-disk3.key");
-        let extra_opts = vec!["--pbkdf".to_owned(), "pbkdf2".to_owned()];
+        let extra_opts = LuksFormatExtraOpts::parse(&["--pbkdf".to_owned(), "pbkdf2".to_owned()])
+            .expect("valid extras");
         let new_probed = ConfigDisk {
-            name: "disk3".into(),
+            name: DiskName::parse("disk3").expect("valid disk name in test fixture"),
             by_id_path: new_by_id.clone(),
             state: ConfigDiskState::PresentNotLuks,
         };
 
-        let target = build_replace_journal_target(
-            "disk3",
-            &new_by_id,
-            &new_probed,
-            Some(key_file),
-            &extra_opts,
-        )
-        .expect("fresh disk should build a replace journal target");
+        let target =
+            build_replace_journal_target(&new_by_id, &new_probed, Some(key_file), &extra_opts)
+                .expect("fresh disk should build a replace journal target");
 
         assert_eq!(target.by_id, new_by_id);
-        assert_eq!(target.mapper_name, "braid-disk3");
         match target.mode {
             journal::ReplaceJournalMode::FreshLuks {
-                luks_label,
-                luks_format_extra_opts,
+                extra_opts: got_extras,
                 enroll_key_file,
             } => {
-                assert_eq!(luks_label, "braid-disk3");
-                assert_eq!(
-                    luks_format_extra_opts,
-                    vec!["--pbkdf", "pbkdf2", "--label", "braid-disk3"]
-                );
+                // Structured extras: only the user-supplied tokens. No
+                // raw `--label braid-<name>` injection -- label flows
+                // through the structured `CryptsetupLuksFormat.label` field.
+                assert_eq!(got_extras.as_slice(), &["--pbkdf", "pbkdf2"]);
                 assert_eq!(enroll_key_file, Some(key_file.to_path_buf()));
             }
             other => panic!("expected FreshLuks journal target, got {other:?}"),
@@ -2338,17 +2631,18 @@ mod tests {
     }
 
     // Intent: build_replace_journal_target records an already-LUKS
-    // replacement disk as ExistingLuks with its UUID.
+    // replacement disk as ExistingLuks; identity flows through the
+    // op-level `new_uuid` rather than a value-side field in the variant.
     // Why it exists: recovery must not run FreshLuks label matching or
     // keyfile/header-prep replay for a disk that was already LUKS.
     // Scenario: replace plans against a present LUKS disk whose mapper is not
     // yet open.
     #[test]
     fn build_replace_journal_target_records_existing_luks_target() {
-        let new_by_id = ByIdPath("/dev/disk/by-id/virtio-disk3".into());
-        let luks_uuid = LuksUuid("33333333-3333-3333-3333-333333333333".into());
+        let new_by_id = ByIdPath::parse("/dev/disk/by-id/virtio-disk3").unwrap();
+        let luks_uuid = LuksUuid::parse("33333333-3333-3333-3333-333333333333").unwrap();
         let new_probed = ConfigDisk {
-            name: "disk3".into(),
+            name: DiskName::parse("disk3").expect("valid disk name in test fixture"),
             by_id_path: new_by_id.clone(),
             state: ConfigDiskState::PresentLuks {
                 uuid: luks_uuid.clone(),
@@ -2358,22 +2652,16 @@ mod tests {
         };
 
         let target = build_replace_journal_target(
-            "disk3",
             &new_by_id,
             &new_probed,
             None,
-            &["--label".to_owned(), "ignored".to_owned()],
+            &LuksFormatExtraOpts::default(),
         )
         .expect("existing LUKS disk should build a replace journal target");
 
         assert_eq!(target.by_id, new_by_id);
-        assert_eq!(target.mapper_name, "braid-disk3");
         match target.mode {
-            journal::ReplaceJournalMode::ExistingLuks {
-                luks_uuid: got,
-                enroll_key_file,
-            } => {
-                assert_eq!(got, luks_uuid);
+            journal::ReplaceJournalMode::ExistingLuks { enroll_key_file } => {
                 assert_eq!(enroll_key_file, None);
             }
             other => panic!("expected ExistingLuks journal target, got {other:?}"),
@@ -2431,7 +2719,7 @@ mod tests {
         let source = ReplaceSource::Missing { devid: 2 };
         let steps = replace_work_plan_for_test(&ReplaceWorkPlanTestInput {
             new_name: "disk3",
-            new_by_id: &ByIdPath("/dev/disk/by-id/virtio-disk3".into()),
+            new_by_id: &ByIdPath::parse("/dev/disk/by-id/virtio-disk3").unwrap(),
             new_probed: &new_probed,
             replace_source: &source,
             mount_point: &MountPoint("/mnt/storage".into()),
@@ -2462,7 +2750,7 @@ mod tests {
         let source = ReplaceSource::Missing { devid: 2 };
         let steps = replace_work_plan_for_test(&ReplaceWorkPlanTestInput {
             new_name: "disk3",
-            new_by_id: &ByIdPath("/dev/disk/by-id/virtio-disk3".into()),
+            new_by_id: &ByIdPath::parse("/dev/disk/by-id/virtio-disk3").unwrap(),
             new_probed: &new_probed,
             replace_source: &source,
             mount_point: &MountPoint("/mnt/storage".into()),
@@ -2583,7 +2871,7 @@ mod tests {
             &fs,
             &f.replace_params()
                 .old("disk1")
-                .new("disk1=/dev/disk/by-id/virtio-disk3")
+                .new_disk("disk1=/dev/disk/by-id/virtio-disk3")
                 .build(),
         );
 
@@ -2703,7 +2991,7 @@ mod tests {
             .position(|r| {
                 matches!(
                     r,
-                    CmdRequest::CryptsetupClose { mapper } if mapper == "braid-disk2"
+                    CmdRequest::CryptsetupClose { mapper } if mapper.as_str() == "braid-disk2"
                 )
             })
             .expect("cryptsetup close on braid-disk2 must be issued even when resize fails");
@@ -2740,21 +3028,24 @@ mod tests {
         // the new topology even when the post-replace resize fails.
         let saved = membership::load_membership(&f.paths)
             .expect("pool.json must exist after the membership commit");
+        let saved_names: Vec<&str> = saved.names().map(|n| n.as_str()).collect();
         assert!(
-            !saved.disks.contains_key("disk2"),
+            !saved_names.contains(&"disk2"),
             "old disk must be gone from pool.json once btrfs replace succeeds, \
-             even when the post-replace resize fails (saved: {:?})",
-            saved.disks.keys().collect::<Vec<_>>()
+             even when the post-replace resize fails (saved: {saved_names:?})",
         );
-        let disk3 = saved.disks.get("disk3").unwrap_or_else(|| {
-            panic!(
-                "new disk must be in pool.json once btrfs replace succeeds (saved: {:?})",
-                saved.disks.keys().collect::<Vec<_>>()
-            )
-        });
+        let disk3_name = DiskName::parse("disk3").unwrap();
+        let (_disk3_uuid, disk3) = saved
+            .by_name(&disk3_name)
+            .unwrap_or_else(|| panic!(
+                "new disk must be in pool.json once btrfs replace succeeds (saved: {saved_names:?})",
+            ));
+        // luks_uuid is the key under which `disk3` is stored, so its
+        // presence is implicit. `devid` and `added_at` must be present
+        // from the post-replace enrichment.
         assert!(
-            disk3.luks_uuid.is_some() && disk3.devid.is_some() && disk3.added_at.is_some(),
-            "new disk must carry enriched metadata (luks_uuid, devid, added_at) \
+            disk3.devid.is_some() && disk3.added_at.is_some(),
+            "new disk must carry enriched metadata (devid, added_at) \
              from the post-replace probe: {disk3:?}"
         );
     }
@@ -2783,7 +3074,7 @@ mod tests {
                         replace_done.store(true, std::sync::atomic::Ordering::Relaxed);
                         Some(Ok(mock_ok("btrfs replace start", "")))
                     }
-                    CmdRequest::CryptsetupClose { mapper } if mapper == "braid-disk2" => {
+                    CmdRequest::CryptsetupClose { mapper } if mapper.as_str() == "braid-disk2" => {
                         Some(Ok(RawCommandOutput {
                             cmd: "cryptsetup close".into(),
                             stdout: String::new(),
@@ -2842,7 +3133,7 @@ mod tests {
                         replace_done.store(true, Ordering::Relaxed);
                         Some(Ok(mock_ok("btrfs replace start", "")))
                     }
-                    CmdRequest::CryptsetupClose { mapper } if mapper == "braid-disk2" => {
+                    CmdRequest::CryptsetupClose { mapper } if mapper.as_str() == "braid-disk2" => {
                         let attempt = close_attempts.fetch_add(1, Ordering::SeqCst) + 1;
                         if attempt == 1 {
                             Some(Ok(RawCommandOutput {
@@ -2875,7 +3166,7 @@ mod tests {
             .requests()
             .iter()
             .filter(|request| {
-                matches!(request, CmdRequest::CryptsetupClose { mapper } if mapper == "braid-disk2")
+                matches!(request, CmdRequest::CryptsetupClose { mapper } if mapper.as_str() == "braid-disk2")
             })
             .count();
         assert_eq!(close_count, 2);
@@ -2918,14 +3209,14 @@ mod tests {
             &fs,
             &f.replace_params()
                 .old("disk2")
-                .new("disk3=/dev/disk/by-id/virtio-disk3")
+                .new_disk("disk3=/dev/disk/by-id/virtio-disk3")
                 .missing_id(Some(2))
                 .build(),
         );
 
         assert!(
-            matches!(result, Err(ReplaceError::Validation(_))),
-            "expected Err(ReplaceError::Validation(_)) for --old absent from pool.json, got: {result:?}"
+            matches!(result, Err(ReplaceError::OldMemberNotFound { .. })),
+            "expected Err(ReplaceError::OldMemberNotFound) for --old absent from pool.json, got: {result:?}"
         );
         assert_eq!(
             f.inhibitor.acquire_count(),
@@ -2951,7 +3242,7 @@ mod tests {
         };
         let steps = replace_work_plan_for_test(&ReplaceWorkPlanTestInput {
             new_name: "disk3",
-            new_by_id: &ByIdPath("/dev/disk/by-id/virtio-disk3".into()),
+            new_by_id: &ByIdPath::parse("/dev/disk/by-id/virtio-disk3").unwrap(),
             new_probed: &new_probed,
             replace_source: &source,
             mount_point: &MountPoint("/mnt/storage".into()),
@@ -2991,7 +3282,7 @@ mod tests {
         ];
         let steps = replace_work_plan_for_test(&ReplaceWorkPlanTestInput {
             new_name: "disk3",
-            new_by_id: &ByIdPath("/dev/disk/by-id/virtio-disk3".into()),
+            new_by_id: &ByIdPath::parse("/dev/disk/by-id/virtio-disk3").unwrap(),
             new_probed: &new_probed,
             replace_source: &source,
             mount_point: &MountPoint("/mnt/storage".into()),
@@ -3063,12 +3354,12 @@ mod tests {
     //   pre-formatted `PresentLuks` new disk with empty slot 1.
     #[test]
     fn dry_run_render_existing_luks_replace_with_enroll_renders_addkey_and_backup() {
-        let luks_uuid = LuksUuid("33333333-3333-3333-3333-333333333333".into());
+        let luks_uuid = LuksUuid::parse("33333333-3333-3333-3333-333333333333").unwrap();
         let new_probed = ConfigDisk {
-            name: "disk3".into(),
-            by_id_path: ByIdPath("/dev/disk/by-id/virtio-disk3".into()),
+            name: DiskName::parse("disk3").expect("valid disk name in test fixture"),
+            by_id_path: ByIdPath::parse("/dev/disk/by-id/virtio-disk3").unwrap(),
             state: ConfigDiskState::PresentLuks {
-                uuid: luks_uuid,
+                uuid: luks_uuid.clone(),
                 label: Some("braid-disk3".to_owned()),
                 mapper_open: false,
             },
@@ -3080,11 +3371,16 @@ mod tests {
         let kf = Path::new("/mnt/usb/braid.key");
         let (_tmp, paths) = test_paths();
 
+        let old_uuid = LuksUuid::parse("99999999-9999-9999-9999-999999999999").unwrap();
+        // ExistingLuks: new_uuid carries the probed value from new_probed.
+        let new_uuid_for_test = luks_uuid.clone();
         let work_plan = build_replace_work_plan(ReplaceWorkPlanInput {
             config: Config::new(MountPoint("/mnt/storage".into())).unwrap(),
-            old_name: "disk2",
-            new_name: "disk3",
-            new_by_id: ByIdPath("/dev/disk/by-id/virtio-disk3".into()),
+            old_uuid,
+            old_name: DiskName::parse("disk2").unwrap(),
+            new_uuid: new_uuid_for_test,
+            new_name: DiskName::parse("disk3").unwrap(),
+            new_by_id: ByIdPath::parse("/dev/disk/by-id/virtio-disk3").unwrap(),
             new_probed,
             replace_source: source,
             pool: replace_work_plan_test_pool(
@@ -3103,7 +3399,7 @@ mod tests {
             // `plan_single_disk_enrollment` and the slot-1 check
             // returned `Empty`, so the keyfile path flows in as `Some`.
             enroll_key_file: Some(kf.to_path_buf()),
-            luks_format_extra_opts: &[],
+            luks_format_extra_opts: LuksFormatExtraOpts::default(),
         })
         .expect("ExistingLuks + enroll should plan");
 
@@ -3160,7 +3456,7 @@ mod tests {
         let source = ReplaceSource::Missing { devid: 2 };
         let steps = replace_work_plan_for_test(&ReplaceWorkPlanTestInput {
             new_name: "disk3",
-            new_by_id: &ByIdPath("/dev/disk/by-id/virtio-disk3".into()),
+            new_by_id: &ByIdPath::parse("/dev/disk/by-id/virtio-disk3").unwrap(),
             new_probed: &new_probed,
             replace_source: &source,
             mount_point: &MountPoint("/mnt/storage".into()),
@@ -3393,7 +3689,7 @@ mod tests {
             &fs,
             &f.replace_params()
                 .old("disk2")
-                .new("disk3=/dev/disk/by-id/virtio-disk3")
+                .new_disk("disk3=/dev/disk/by-id/virtio-disk3")
                 .missing_id(Some(2))
                 .build(),
         );
@@ -3533,7 +3829,7 @@ mod tests {
             &fs,
             &f.replace_params()
                 .old("disk2")
-                .new("disk3=/dev/disk/by-id/virtio-disk3")
+                .new_disk("disk3=/dev/disk/by-id/virtio-disk3")
                 .missing_id(Some(2))
                 .enroll_key_file(Some(kf_path.as_path()))
                 .luks_format_extra_opts(&luks_format_extra_opts)
@@ -3554,19 +3850,33 @@ mod tests {
         let format = position("LuksFormat", |r| {
             matches!(r, CmdRequest::CryptsetupLuksFormat { .. })
         });
-        let CmdRequest::CryptsetupLuksFormat { extra_opts, .. } = &log[format] else {
+        let CmdRequest::CryptsetupLuksFormat {
+            extra_opts,
+            uuid: format_uuid,
+            label,
+            ..
+        } = &log[format]
+        else {
             unreachable!("format index matched CryptsetupLuksFormat")
         };
+        // Structured extras now exclude the managed `--label` token; the
+        // label is carried in the structured `label` field. The UUID
+        // field carries the journaled op-level identity.
         assert_eq!(
-            extra_opts,
-            &vec![
+            extra_opts.as_slice(),
+            &[
                 "--pbkdf".to_owned(),
                 "pbkdf2".to_owned(),
                 "--iter-time".to_owned(),
                 "1".to_owned(),
-                "--label".to_owned(),
-                "braid-disk3".to_owned(),
             ]
+        );
+        assert_eq!(label, "braid-disk3");
+        // The journaled UUID is generated at planning time; assert
+        // canonical UUID form rather than a specific value.
+        assert!(
+            uuid::Uuid::parse_str(format_uuid.as_str()).is_ok(),
+            "structured uuid field must be a canonical UUID, got: {format_uuid}"
         );
         let addkey = position("LuksAddKeyFile", |r| {
             matches!(r, CmdRequest::CryptsetupLuksAddKeyFile { .. })
@@ -3632,7 +3942,7 @@ mod tests {
             &fs,
             &f.replace_params()
                 .old("disk2")
-                .new("disk3=/dev/disk/by-id/virtio-disk3")
+                .new_disk("disk3=/dev/disk/by-id/virtio-disk3")
                 .missing_id(Some(2))
                 .build(),
         )
@@ -3709,7 +4019,7 @@ mod tests {
             &fs,
             &f.replace_params()
                 .old("disk2")
-                .new("disk3=/dev/disk/by-id/virtio-disk3")
+                .new_disk("disk3=/dev/disk/by-id/virtio-disk3")
                 .missing_id(Some(2))
                 .build(),
         );
@@ -3740,21 +4050,21 @@ mod tests {
 
         let saved = membership::load_membership(&f.paths)
             .expect("pool.json must exist after the membership commit");
+        let saved_names: Vec<&str> = saved.names().map(|n| n.as_str()).collect();
         assert!(
-            !saved.disks.contains_key("disk2"),
+            !saved_names.contains(&"disk2"),
             "old missing disk must be gone from pool.json once btrfs replace succeeds, \
-             even when the post-replace soft balance fails (saved: {:?})",
-            saved.disks.keys().collect::<Vec<_>>()
+             even when the post-replace soft balance fails (saved: {saved_names:?})",
         );
-        let disk3 = saved.disks.get("disk3").unwrap_or_else(|| {
+        let disk3_name = DiskName::parse("disk3").unwrap();
+        let (_disk3_uuid, disk3) = saved.by_name(&disk3_name).unwrap_or_else(|| {
             panic!(
-                "new disk must be in pool.json once btrfs replace succeeds (saved: {:?})",
-                saved.disks.keys().collect::<Vec<_>>()
+                "new disk must be in pool.json once btrfs replace succeeds (saved: {saved_names:?})",
             )
         });
         assert!(
-            disk3.luks_uuid.is_some() && disk3.devid.is_some() && disk3.added_at.is_some(),
-            "new disk must carry enriched metadata (luks_uuid, devid, added_at) \
+            disk3.devid.is_some() && disk3.added_at.is_some(),
+            "new disk must carry enriched metadata (devid, added_at) \
              from the post-replace probe: {disk3:?}"
         );
     }
@@ -3849,7 +4159,7 @@ mod tests {
             &fs,
             &f.replace_params()
                 .old("disk2")
-                .new("disk3=/dev/disk/by-id/virtio-disk3")
+                .new_disk("disk3=/dev/disk/by-id/virtio-disk3")
                 .missing_id(Some(2))
                 .dry_run(true)
                 .build(),
@@ -4304,7 +4614,7 @@ mod tests {
                 &PanicRunner,
                 &PanicFilesystem,
                 &f.replace_params()
-                    .new("disk2=/dev/disk/by-id/virtio-disk2")
+                    .new_disk("disk2=/dev/disk/by-id/virtio-disk2")
                     .passphrase_file(None)
                     .build(),
             )
@@ -4329,5 +4639,725 @@ mod tests {
             "expected no preserved notes, got:\n{stderr}"
         );
         assert_eq!(f.inhibitor.acquire_count(), 0);
+    }
+
+    // -----------------------------------------------------------------
+    // Phase 3c -- UUID identity migration test surface (seeds 600-699)
+    // -----------------------------------------------------------------
+
+    /// Build a `PoolMembership` from `(uuid, member)` pairs by routing
+    /// through `PoolMembership::insert` so the four-axis uniqueness
+    /// invariant is exercised at fixture-construction time. Mirrors the
+    /// remove.rs / add.rs test fixture pattern.
+    fn membership_from(pairs: Vec<(LuksUuid, membership::DiskMember)>) -> PoolMembership {
+        let mut m = PoolMembership::empty();
+        for (uuid, member) in pairs {
+            m.insert(uuid, member).expect("test seed inserts uniquely");
+        }
+        m
+    }
+
+    /// Seed 600: missing-path decoy regression for `--old <name>` ->
+    /// UUID resolution. Pool membership has two entries with intentionally
+    /// confusing presentation:
+    ///   - U_R -> { name: "misleading-label", by_id: "/dev/disk/by-id/right", devid: Some(2) }
+    ///   - U_D -> { name: "decoy", by_id: "/dev/disk/by-id/misleading-label", devid: Some(99) }
+    ///
+    /// btrfs reports `missing_devids = [2]`. A buggy by-id-keyed lookup
+    /// would chase the basename "misleading-label" inside U_D's by-id;
+    /// the UUID-keyed model must select U_R via `by_name(&"misleading-label")`
+    /// and confirm the persisted devid (2) appears in `missing_devids`.
+    /// Pinned by Test Plan section "Missing-path `replace` decoy regression".
+    //
+    // Intent: name-to-UUID resolution at the boundary picks the member by
+    //   `DiskName`, not by by-id basename. Persisted-devid cross-check
+    //   confirms the resolved UUID names a member whose devid appears in
+    //   btrfs missing_devids; the journal records `old_uuid = U_R`.
+    // Why it exists: a regression that reverted to by-id-keyed lookup on
+    //   the missing path would silently select U_D (whose by-id basename
+    //   matches the typed name) and corrupt pool.json.
+    // Scenario: operator runs
+    //   `braid replace --old misleading-label --new replacement=/dev/disk/by-id/new`
+    //   with the decoy membership and one missing devid.
+    #[test]
+    fn replace_missing_path_decoy_regression_resolves_by_name_to_uuid() {
+        let u_r = LuksUuid::parse("aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaa0600").unwrap();
+        let u_d = LuksUuid::parse("bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbb0601").unwrap();
+        let member_r = membership::DiskMember {
+            name: disk_name("misleading-label"),
+            by_id: ByIdPath::parse("/dev/disk/by-id/right").unwrap(),
+            devid: Some(2),
+            added_at: None,
+        };
+        let member_d = membership::DiskMember {
+            name: disk_name("decoy"),
+            by_id: ByIdPath::parse("/dev/disk/by-id/misleading-label").unwrap(),
+            devid: Some(99),
+            added_at: None,
+        };
+        let pre = membership_from(vec![(u_r.clone(), member_r), (u_d.clone(), member_d)]);
+        // Pool reports devid 2 as the one missing device. No live device
+        // has the U_R or U_D UUID -- the live arm of resolve_replace_source
+        // must NOT match (Pattern 4 find by UUID), and resolution must
+        // flow to the missing-path branch.
+        let pool = PoolState {
+            mounted: true,
+            devices: vec![PoolDevice {
+                mapper: MapperName("braid-keeper".into()),
+                luks_uuid: LuksUuid::parse("cccccccc-cccc-cccc-cccc-cccccccc0602").unwrap(),
+                devid: 1,
+                underlying: "/dev/vda".into(),
+            }],
+            missing_count: 1,
+            missing_devids: vec![2],
+            total_devices: 2,
+            fsid: None,
+            null_underlying: vec![],
+        };
+        let runner = mock_with_missing_devids(&[2]);
+        let target_name = disk_name("misleading-label");
+        let (resolved_uuid, resolved_member) = pre
+            .by_name(&target_name)
+            .expect("name resolution must find U_R");
+        assert_eq!(
+            resolved_uuid, &u_r,
+            "name 'misleading-label' must resolve to U_R, not U_D"
+        );
+        assert_eq!(
+            resolved_member.devid,
+            Some(2),
+            "U_R's persisted devid must be 2 (the missing devid)"
+        );
+        let source = resolve_replace_source(
+            &runner,
+            &target_name,
+            resolved_uuid,
+            resolved_member,
+            None,
+            &pool,
+            &mp(),
+        )
+        .expect("missing-path resolution must succeed for U_R");
+        match source {
+            ReplaceSource::Missing { devid } => assert_eq!(devid, 2),
+            other => panic!("expected ReplaceSource::Missing {{ devid: 2 }}, got {other:?}"),
+        }
+        // Build target_membership the way plan_replace does and assert
+        // U_R is gone, U_D is unchanged, a fresh UUID is inserted under
+        // the new name.
+        let new_uuid = LuksUuid::new_v4();
+        assert_ne!(
+            new_uuid, u_r,
+            "freshly generated UUID must not collide with U_R"
+        );
+        assert_ne!(
+            new_uuid, u_d,
+            "freshly generated UUID must not collide with U_D"
+        );
+        let mut target_membership = pre.clone();
+        target_membership.remove_by_uuid(&u_r);
+        target_membership
+            .insert(
+                new_uuid.clone(),
+                membership::DiskMember {
+                    name: disk_name("replacement"),
+                    by_id: ByIdPath::parse("/dev/disk/by-id/new").unwrap(),
+                    devid: None,
+                    added_at: None,
+                },
+            )
+            .expect("insert new replacement member");
+        assert!(target_membership.by_uuid(&u_r).is_none(), "U_R is removed");
+        assert!(
+            target_membership.by_uuid(&u_d).is_some(),
+            "U_D entry unchanged"
+        );
+        assert!(
+            target_membership.by_uuid(&new_uuid).is_some(),
+            "new UUID inserted"
+        );
+        // No CryptsetupLuksUuid was issued for any decoy by-id: the
+        // missing-path resolution path uses persisted state, not probes.
+        let requests = runner.requests();
+        assert!(
+            !requests
+                .iter()
+                .any(|r| matches!(r, CmdRequest::CryptsetupLuksUuid { .. })),
+            "missing-path planning must not probe LUKS UUID against any decoy by-id: {requests:?}"
+        );
+    }
+
+    /// Seed 610: Pattern 4 observed-mapper journaling regression. When
+    /// the matching `PoolDevice.mapper` has drifted ("braid-WRONG")
+    /// between plan and the in-process post-commit close, the journaled
+    /// `ReplaceJournalSource::Live.old_mapper` MUST clone the observed
+    /// value, NOT reconstruct via `mapper_name(&old_name)`. This pins
+    /// Pattern 4's "close observed, not reconstructed" doctrine at the
+    /// planning site.
+    //
+    // Intent: resolve_replace_source returns the observed mapper.
+    // Why: a regression that journaled `mapper_name(&right)` would
+    //   make the post-commit close target the wrong dm slot when the
+    //   operator drifted the mapper between plan and execute.
+    // Scenario: pool has one device whose mapper is "braid-WRONG" but
+    //   whose luks_uuid matches `old_uuid`; membership records the
+    //   same UUID under name "right".
+    #[test]
+    fn replace_live_observed_mapper_journaling_regression() {
+        let u_old = LuksUuid::parse("dddddddd-dddd-dddd-dddd-dddddddd0610").unwrap();
+        let member = membership::DiskMember {
+            name: disk_name("right"),
+            by_id: ByIdPath::parse("/dev/disk/by-id/virtio-right").unwrap(),
+            devid: Some(7),
+            added_at: None,
+        };
+        let pool = PoolState {
+            mounted: true,
+            devices: vec![PoolDevice {
+                mapper: MapperName("braid-WRONG".into()),
+                luks_uuid: u_old.clone(),
+                devid: 7,
+                underlying: "/dev/vdz".into(),
+            }],
+            missing_count: 0,
+            missing_devids: vec![],
+            total_devices: 1,
+            fsid: None,
+            null_underlying: vec![],
+        };
+        let runner = MockRunner::default();
+        let source = resolve_replace_source(
+            &runner,
+            &disk_name("right"),
+            &u_old,
+            &member,
+            None,
+            &pool,
+            &mp(),
+        )
+        .expect("Pattern 4 find by UUID must succeed");
+        match source.clone() {
+            ReplaceSource::Live { mapper, devid } => {
+                assert_eq!(
+                    mapper.as_str(),
+                    "braid-WRONG",
+                    "observed mapper must be cloned, not reconstructed"
+                );
+                assert_eq!(devid, 7);
+            }
+            other => panic!("expected ReplaceSource::Live, got {other:?}"),
+        }
+        // build_replace_journal_source propagates the observed mapper
+        // into ReplaceJournalSource::Live.old_mapper.
+        let journal_source = build_replace_journal_source(&source);
+        assert_eq!(
+            journal_source,
+            journal::ReplaceJournalSource::Live {
+                old_devid: 7,
+                old_mapper: MapperName("braid-WRONG".into()),
+            }
+        );
+    }
+
+    /// Build a recording `MockRunner` that injects a `CryptsetupLuksUuid`
+    /// probe response for `device`, returning the supplied canned
+    /// `RawCommandOutput`. Used by the open-boundary re-probe and
+    /// post-commit close double-drift regression tests.
+    fn runner_with_luks_uuid_probe(device: &'static str, canned: RawCommandOutput) -> MockRunner {
+        MockRunner::default().with_output(
+            CmdRequest::CryptsetupLuksUuid {
+                device: device.to_owned(),
+            },
+            canned,
+        )
+    }
+
+    fn runner_with_active_mapper_uuid(
+        mapper: &'static str,
+        backing_device: &'static str,
+        canned: RawCommandOutput,
+    ) -> MockRunner {
+        MockRunner::default()
+            .with_output(
+                CmdRequest::CryptsetupStatus {
+                    mapper: MapperName(mapper.to_owned()),
+                },
+                mock_ok(
+                    &format!("cryptsetup status {mapper}"),
+                    &format!(
+                        "{mapper} is active and is in use.\n  type:    LUKS2\n  device:  {backing_device}\n  mode:    read/write\n"
+                    ),
+                ),
+            )
+            .with_output(
+                CmdRequest::CryptsetupLuksUuid {
+                    device: backing_device.to_owned(),
+                },
+                canned,
+            )
+    }
+
+    /// Seed 620: Post-commit close double-drift probe mismatch arm.
+    /// When the active mapper's backing-device LUKS UUID disagrees
+    /// with the journaled `old_uuid`, the close is demoted to a
+    /// logged warning skip; zero `CryptsetupClose` requests reach the
+    /// runner.
+    //
+    // Intent: probe_observed_mapper_uuid returns false on mismatch and
+    //   the caller skips the close.
+    // Why: defense-in-depth against operator double-drift -- closing
+    //   the wrong dm slot would tear down a foreign disk's mapper.
+    // Scenario: journaled old_uuid = U_OLD, observed mapper
+    //   "braid-WRONG" now reports backing device /dev/vdf, whose LUKS
+    //   UUID is U_FOREIGN.
+    #[test]
+    fn replace_post_commit_close_probe_mismatch_skips_close() {
+        let u_old = LuksUuid::parse("eeeeeeee-eeee-eeee-eeee-eeeeeeee0620").unwrap();
+        let u_foreign = LuksUuid::parse("ffffffff-ffff-ffff-ffff-ffffffff0621").unwrap();
+        let runner = runner_with_active_mapper_uuid(
+            "braid-WRONG",
+            "/dev/vdf",
+            RawCommandOutput {
+                cmd: "cryptsetup luksUUID /dev/vdf".into(),
+                stdout: format!("{u_foreign}\n"),
+                stderr: String::new(),
+                exit_status: 0,
+            },
+        );
+        let mapper = MapperName("braid-WRONG".into());
+        let matched = probe_observed_mapper_uuid(&runner, &mapper, &u_old);
+        assert!(
+            !matched,
+            "probe mismatch must signal skip-close (returned false)"
+        );
+        // Caller must NOT issue CryptsetupClose on the false arm.
+        let requests = runner.requests();
+        let probe_count = requests
+            .iter()
+            .filter(
+                |r| matches!(r, CmdRequest::CryptsetupLuksUuid { device } if device == "/dev/vdf"),
+            )
+            .count();
+        assert_eq!(
+            probe_count, 1,
+            "exactly one backing-device probe must run before the skip decision"
+        );
+        let close_count = requests
+            .iter()
+            .filter(|r| matches!(r, CmdRequest::CryptsetupClose { .. }))
+            .count();
+        assert_eq!(
+            close_count, 0,
+            "no close may issue when the probe disagrees with the journaled UUID"
+        );
+    }
+
+    /// Seed 621: Control arm for the post-commit close double-drift
+    /// probe. When the active mapper's backing-device LUKS UUID matches
+    /// the journaled value, `probe_observed_mapper_uuid` returns true so
+    /// the caller proceeds to close.
+    //
+    // Intent: probe match returns true; caller continues to close.
+    // Why: pins the fail-safe-skip-only semantic so a future change
+    //   that turned the probe into fail-skip-on-any-condition would
+    //   flip this assertion.
+    // Scenario: journaled old_uuid = U_OLD, observed mapper
+    //   "braid-disk2" reports backing device /dev/vdc, whose probe
+    //   returns U_OLD.
+    #[test]
+    fn replace_post_commit_close_probe_match_allows_close() {
+        let u_old = LuksUuid::parse("11111111-1111-1111-1111-111111110621").unwrap();
+        let runner = runner_with_active_mapper_uuid(
+            "braid-disk2",
+            "/dev/vdc",
+            RawCommandOutput {
+                cmd: "cryptsetup luksUUID /dev/vdc".into(),
+                stdout: format!("{u_old}\n"),
+                stderr: String::new(),
+                exit_status: 0,
+            },
+        );
+        let mapper = MapperName("braid-disk2".into());
+        let matched = probe_observed_mapper_uuid(&runner, &mapper, &u_old);
+        assert!(matched, "probe match must allow close (returned true)");
+    }
+
+    /// Seed 630: ExistingLuks new-target open-boundary re-probe
+    /// mismatch arm. A disk-swap between planning and execution
+    /// (operator moves the by-id slot to a foreign LUKS volume)
+    /// returns `U_FOREIGN`. `probe_existing_luks_new_target_uuid`
+    /// aborts with a structured error naming the by-id, expected
+    /// UUID, and observed UUID. Pinned by Test Plan section
+    /// "Replace ExistingLuks new-target open-boundary UUID re-probe".
+    //
+    // Intent: probe_existing_luks_new_target_uuid returns
+    //   NewTargetUuidMismatchAtOpen on mismatch.
+    // Why: closes the open-boundary swap hazard before any
+    //   CryptsetupLuksOpen or BtrfsReplaceStart hits the foreign disk.
+    // Scenario: op-level new_uuid = U_NEW; probe at
+    //   /dev/disk/by-id/Y returns U_FOREIGN.
+    #[test]
+    fn replace_existing_luks_open_boundary_probe_mismatch_aborts() {
+        let u_new = LuksUuid::parse("22222222-2222-2222-2222-222222220630").unwrap();
+        let u_foreign = LuksUuid::parse("33333333-3333-3333-3333-333333330631").unwrap();
+        let by_id = ByIdPath::parse("/dev/disk/by-id/Y").unwrap();
+        let runner = runner_with_luks_uuid_probe(
+            "/dev/disk/by-id/Y",
+            RawCommandOutput {
+                cmd: "cryptsetup luksUUID /dev/disk/by-id/Y".into(),
+                stdout: format!("{u_foreign}\n"),
+                stderr: String::new(),
+                exit_status: 0,
+            },
+        );
+        let err = probe_existing_luks_new_target_uuid(&runner, &by_id, &u_new).unwrap_err();
+        match err {
+            ReplaceError::NewTargetUuidMismatchAtOpen {
+                by_id: err_by_id,
+                expected,
+                observed,
+            } => {
+                assert_eq!(err_by_id, by_id);
+                assert_eq!(expected, u_new);
+                assert_eq!(observed, u_foreign.as_str().to_owned());
+            }
+            other => panic!("expected NewTargetUuidMismatchAtOpen, got: {other:?}"),
+        }
+        let requests = runner.requests();
+        assert_eq!(
+            requests.len(),
+            1,
+            "exactly one probe must run before the abort"
+        );
+        assert!(
+            matches!(&requests[0], CmdRequest::CryptsetupLuksUuid { device } if device == "/dev/disk/by-id/Y"),
+            "probe must target the new target's by-id form: {:?}",
+            requests[0],
+        );
+        // No open / replace start can have issued on the abort path.
+        assert!(
+            !requests
+                .iter()
+                .any(|r| matches!(r, CmdRequest::CryptsetupLuksOpen { .. })),
+            "no CryptsetupLuksOpen may issue on the mismatch path"
+        );
+        assert!(
+            !requests
+                .iter()
+                .any(|r| matches!(r, CmdRequest::BtrfsReplaceStart { .. })),
+            "no BtrfsReplaceStart may issue on the mismatch path"
+        );
+    }
+
+    /// Seed 631: Control arm for the ExistingLuks open-boundary
+    /// re-probe. When the live UUID at by-id matches `new_uuid`,
+    /// `probe_existing_luks_new_target_uuid` returns Ok and execution
+    /// proceeds to `ensure_luks_open`.
+    //
+    // Intent: probe match returns Ok(()); fail-safe-skip-only semantic.
+    // Why: a future change to gate any condition (e.g. fail on any
+    //   probe call) would flip this assertion.
+    // Scenario: op-level new_uuid = U_NEW; probe at by-id returns U_NEW.
+    #[test]
+    fn replace_existing_luks_open_boundary_probe_match_continues() {
+        let u_new = LuksUuid::parse("44444444-4444-4444-4444-444444440631").unwrap();
+        let by_id = ByIdPath::parse("/dev/disk/by-id/Y").unwrap();
+        let runner = runner_with_luks_uuid_probe(
+            "/dev/disk/by-id/Y",
+            RawCommandOutput {
+                cmd: "cryptsetup luksUUID /dev/disk/by-id/Y".into(),
+                stdout: format!("{u_new}\n"),
+                stderr: String::new(),
+                exit_status: 0,
+            },
+        );
+        probe_existing_luks_new_target_uuid(&runner, &by_id, &u_new)
+            .expect("matched probe must return Ok(())");
+    }
+
+    /// Seed 640: Pre-journal-write `new_uuid` uniqueness assert,
+    /// Membership scope. A `new_uuid` that already exists in
+    /// `PoolMembership` (under a different `old_uuid`) is refused
+    /// before any journal write or `CryptsetupLuksFormat`.
+    //
+    // Intent: assert_new_uuid_unique returns
+    //   DuplicateUuid { scope: Membership } when the candidate UUID
+    //   exists in membership under a different key.
+    // Why: protects the UUID-uniqueness invariant against operator
+    //   actions that surface a colliding UUID between commands.
+    // Scenario: new_uuid happens to match an existing membership UUID
+    //   (other than old_uuid); planning aborts pre-write.
+    #[test]
+    fn replace_pre_write_uniqueness_membership_scope_collision() {
+        let colliding = LuksUuid::parse("55555555-5555-5555-5555-555555550640").unwrap();
+        let old_uuid = LuksUuid::parse("66666666-6666-6666-6666-666666660641").unwrap();
+        let member = membership::DiskMember {
+            name: disk_name("clash"),
+            by_id: ByIdPath::parse("/dev/disk/by-id/clash").unwrap(),
+            devid: Some(9),
+            added_at: None,
+        };
+        let pre = membership_from(vec![
+            (
+                old_uuid.clone(),
+                membership::DiskMember {
+                    name: disk_name("oldname"),
+                    by_id: ByIdPath::parse("/dev/disk/by-id/old").unwrap(),
+                    devid: Some(7),
+                    added_at: None,
+                },
+            ),
+            (colliding.clone(), member),
+        ]);
+        let pool = PoolState {
+            mounted: true,
+            devices: vec![],
+            missing_count: 0,
+            missing_devids: vec![],
+            total_devices: 0,
+            fsid: None,
+            null_underlying: vec![],
+        };
+        let err = assert_new_uuid_unique(&colliding, &old_uuid, &pre, &pool).unwrap_err();
+        match err {
+            ReplaceError::DuplicateUuid { uuid, scope } => {
+                assert_eq!(uuid, colliding);
+                assert_eq!(scope, DuplicateUuidScope::Membership);
+                assert_eq!(scope.to_string(), "membership");
+            }
+            other => panic!("expected DuplicateUuid {{ Membership }}, got: {other:?}"),
+        }
+    }
+
+    /// Seed 641: Pre-journal-write `new_uuid` uniqueness assert,
+    /// LivePool scope. A `new_uuid` observed in `pool.devices` (but
+    /// not in membership) is refused before any journal write or
+    /// `CryptsetupLuksFormat`.
+    //
+    // Intent: assert_new_uuid_unique returns
+    //   DuplicateUuid { scope: LivePool } when the candidate UUID
+    //   appears in the live pool devices.
+    // Why: planning-time observation of a colliding live UUID must
+    //   refuse before kernel state is mutated.
+    // Scenario: live pool has a device with U_FOREIGN; replacing
+    //   `--old <name>` with a fresh disk happens to generate (or
+    //   probe) the same U_FOREIGN. Refused.
+    #[test]
+    fn replace_pre_write_uniqueness_live_pool_scope_collision() {
+        let colliding = LuksUuid::parse("77777777-7777-7777-7777-777777770641").unwrap();
+        let old_uuid = LuksUuid::parse("88888888-8888-8888-8888-888888880642").unwrap();
+        let pre = membership_from(vec![(
+            old_uuid.clone(),
+            membership::DiskMember {
+                name: disk_name("oldname"),
+                by_id: ByIdPath::parse("/dev/disk/by-id/old").unwrap(),
+                devid: Some(11),
+                added_at: None,
+            },
+        )]);
+        let pool = PoolState {
+            mounted: true,
+            devices: vec![PoolDevice {
+                mapper: MapperName("braid-foreign".into()),
+                luks_uuid: colliding.clone(),
+                devid: 22,
+                underlying: "/dev/foreign".into(),
+            }],
+            missing_count: 0,
+            missing_devids: vec![],
+            total_devices: 1,
+            fsid: None,
+            null_underlying: vec![],
+        };
+        let err = assert_new_uuid_unique(&colliding, &old_uuid, &pre, &pool).unwrap_err();
+        match err {
+            ReplaceError::DuplicateUuid { uuid, scope } => {
+                assert_eq!(uuid, colliding);
+                assert_eq!(scope, DuplicateUuidScope::LivePool);
+                assert_eq!(scope.to_string(), "live_pool");
+            }
+            other => panic!("expected DuplicateUuid {{ LivePool }}, got: {other:?}"),
+        }
+    }
+
+    /// Seed 642: Old-UUID exclusion. The membership scope check
+    /// EXCLUDES `old_uuid` (which is being replaced), so a fresh
+    /// `new_uuid == old_uuid` (degenerate but defendable case) does
+    /// not trip the Membership-scope refusal. Sanity check on the
+    /// gate ordering.
+    //
+    // Intent: assert_new_uuid_unique tolerates `new_uuid == old_uuid`
+    //   for the Membership-scope check (excluding the row being
+    //   replaced).
+    // Why: a regression that removed the `new_uuid != old_uuid` guard
+    //   would deadlock the gate.
+    #[test]
+    fn replace_pre_write_uniqueness_excludes_old_uuid() {
+        let old_uuid = LuksUuid::parse("99999999-9999-9999-9999-999999990642").unwrap();
+        let pre = membership_from(vec![(
+            old_uuid.clone(),
+            membership::DiskMember {
+                name: disk_name("oldname"),
+                by_id: ByIdPath::parse("/dev/disk/by-id/old").unwrap(),
+                devid: Some(11),
+                added_at: None,
+            },
+        )]);
+        let pool = PoolState {
+            mounted: true,
+            devices: vec![],
+            missing_count: 0,
+            missing_devids: vec![],
+            total_devices: 0,
+            fsid: None,
+            null_underlying: vec![],
+        };
+        assert_new_uuid_unique(&old_uuid, &old_uuid, &pre, &pool)
+            .expect("old_uuid exclusion must let new_uuid == old_uuid pass the membership scope");
+    }
+
+    /// Seed 650: `--luks-format-arg` rejection covers `replace` for the
+    /// shared validation surface. One symmetric case (`--label=foo`)
+    /// proves the wiring through `ReplaceError::ManagedFormatFlag`.
+    //
+    // Intent: plan_replace fails closed on a managed token in
+    //   `--luks-format-arg` before any probe, journal write, or
+    //   format request.
+    // Why: pinning the rejection at the planner boundary mirrors the
+    //   `add.rs` contract and protects the journaled identity from
+    //   user override.
+    // Scenario: operator passes `--luks-format-arg=--label=foo`.
+    #[test]
+    fn plan_replace_rejects_managed_format_flag() {
+        let state_tmp = tempfile::tempdir().unwrap();
+        let paths = StatePaths::custom(state_tmp.path().into());
+        let config_tmp = tempfile::tempdir().unwrap();
+        let config_path = config_tmp.path().join("config.json");
+        std::fs::write(
+            &config_path,
+            serde_json::to_vec(&serde_json::json!({ "mount_point": "/mnt/storage" })).unwrap(),
+        )
+        .unwrap();
+        let inhibitor = crate::inhibit::RecordingInhibitor::new();
+        let bad = vec!["--label=foo".to_owned()];
+        let result = plan_replace(
+            &PanicRunner,
+            &PanicFilesystem,
+            &ReplaceParams {
+                config_path: &config_path,
+                old_name: "disk2",
+                new_name: "disk3=/dev/disk/by-id/virtio-disk3",
+                missing_id: None,
+                dry_run: true,
+                yes: true,
+                passphrase_stdin: false,
+                passphrase_file: None,
+                enroll_key_file: None,
+                luks_format_extra_opts: &bad,
+                progress: crate::progress::ProgressOutput::Off,
+                paths: &paths,
+                sleep_inhibitor: &inhibitor,
+                sleeper: &crate::progress::NoopSleeper,
+            },
+        );
+        match result {
+            Err(PlanFailure {
+                error:
+                    ReplaceError::ManagedFormatFlag(
+                        crate::types::LuksFormatExtraOptsError::ManagedFormatFlag { token },
+                    ),
+                ..
+            }) => {
+                assert_eq!(token, "--label=foo");
+            }
+            Err(PlanFailure { error, .. }) => {
+                panic!("expected ManagedFormatFlag refusal, got: {error:?}")
+            }
+            Ok(_) => panic!("expected ManagedFormatFlag refusal, got Ok(_)"),
+        }
+        assert_eq!(
+            inhibitor.acquire_count(),
+            0,
+            "managed-flag rejection must fire before the inhibitor seam"
+        );
+    }
+
+    /// Seed 660: Positive-extras forwarding. A valid
+    /// `--luks-format-arg=--use-random` flows through
+    /// `CryptsetupLuksFormat.extra_opts` unchanged, in argv order, and
+    /// does NOT leak into the structured `uuid` or `label` fields.
+    /// Pinned by Test Plan section "Positive-extras forwarding".
+    //
+    // Intent: structured `extra_opts` carries user-supplied non-managed
+    //   tokens verbatim; managed identity flows through the structured
+    //   `uuid` and `label` fields.
+    // Why: a regression that silently dropped accepted extras at
+    //   execute time would pass parse and pass the empty-extras suite
+    //   but fail this test.
+    // Scenario: live replace of disk2 -> disk3 with one extra token.
+    #[test]
+    fn cmd_replace_forwards_positive_luks_format_extra_to_request() {
+        let f = PoolFixture::two_disk_healthy();
+        let fs = MockFs::storage(vec![
+            "/dev/disk/by-id/virtio-disk3".into(),
+            "/dev/mapper/braid-disk3".into(),
+        ]);
+        let replace_done = Arc::new(AtomicBool::new(false));
+        // Force replace to fail at BtrfsReplaceStart so we don't have to
+        // mock the full post-commit chain; the assertion targets the
+        // structured CryptsetupLuksFormat that already shipped.
+        let runner = ReplacementPool::two_disk_healthy()
+            .with_mapper_closed("braid-disk3")
+            .install(MockRunner::default(), replace_done)
+            .with_handler(|req| match req {
+                CmdRequest::CryptsetupLuksUuid { device }
+                    if device == "/dev/disk/by-id/virtio-disk3" =>
+                {
+                    Some(Ok(RawCommandOutput {
+                        cmd: format!("cryptsetup luksUUID {device}"),
+                        stdout: String::new(),
+                        stderr: "Device is not a valid LUKS device.\n".into(),
+                        exit_status: 1,
+                    }))
+                }
+                CmdRequest::CryptsetupLuksFormat { device, .. } => {
+                    Some(Ok(mock_ok(&format!("cryptsetup luksFormat {device}"), "")))
+                }
+                _ => None,
+            });
+        let extras = vec!["--use-random".to_owned()];
+        let _ = cmd_replace(
+            &runner,
+            &fs,
+            &f.replace_params().luks_format_extra_opts(&extras).build(),
+        );
+
+        let log = runner.requests();
+        let fmt_idx = log
+            .iter()
+            .position(|r| matches!(r, CmdRequest::CryptsetupLuksFormat { .. }))
+            .expect("CryptsetupLuksFormat must be issued for fresh replace");
+        let CmdRequest::CryptsetupLuksFormat {
+            uuid,
+            label,
+            extra_opts,
+            ..
+        } = &log[fmt_idx]
+        else {
+            unreachable!("position predicate matched");
+        };
+        assert_eq!(
+            extra_opts.as_slice(),
+            &["--use-random".to_owned()],
+            "user-supplied extras must round-trip through extra_opts"
+        );
+        assert_eq!(
+            label, "braid-disk3",
+            "structured label is derived at boundary"
+        );
+        assert!(
+            uuid::Uuid::parse_str(uuid.as_str()).is_ok(),
+            "structured uuid carries the journaled identity"
+        );
     }
 }

@@ -11,7 +11,7 @@ use crate::probe::Filesystem;
 use crate::state_paths::StatePaths;
 use crate::status::format_bytes;
 use crate::types::{MountPoint, PoolState};
-use crate::ups::{query_ups, UpsQueryError};
+use crate::ups::{UpsQueryError, query_ups};
 
 /// Refuse if pool.json lists members but the pool is not mounted (locked).
 /// Catches the silent-bootstrap case where `braid add` against a locked pool
@@ -21,11 +21,12 @@ pub fn check_pool_unlocked_if_membership_exists(
     membership: &PoolMembership,
     pool: &PoolState,
 ) -> Result<(), String> {
-    if pool.mounted || membership.disks.is_empty() {
+    if pool.mounted || membership.is_empty() {
         return Ok(());
     }
-    let n = membership.disks.len();
-    let names: Vec<&str> = membership.disks.keys().map(String::as_str).collect();
+    let n = membership.len();
+    let mut names: Vec<&str> = membership.names().map(|n| n.as_str()).collect();
+    names.sort();
     Err(format!(
         "pool exists but is not unlocked -- pool.json lists {n} member(s): {}.\n\
          Run `braid unlock` first, then re-run `braid add`.\n\
@@ -1290,7 +1291,7 @@ mod tests {
             crate::membership::PoolMembership::empty(),
             crate::journal::OpKind::Add {
                 phase: crate::journal::AddPhase::PoolMutation,
-                targets: std::collections::BTreeMap::new(),
+                targets: crate::membership::LuksUuidMap::new(),
             },
         );
         crate::journal::write_journal(&paths, &journal).unwrap();
@@ -1649,13 +1650,20 @@ mod tests {
 
     fn membership_with(names: &[&str]) -> PoolMembership {
         use crate::membership::DiskMember;
-        use crate::types::ByIdPath;
+        use crate::types::{ByIdPath, DiskName, LuksUuid};
         let mut m = PoolMembership::empty();
-        for n in names {
-            m.disks.insert(
-                (*n).to_owned(),
-                DiskMember::from_by_id(ByIdPath(format!("/dev/disk/by-id/virtio-{n}"))),
+        for (idx, n) in names.iter().enumerate() {
+            let member = DiskMember::new(
+                DiskName::parse(n).expect("valid fixture disk name"),
+                ByIdPath::parse(&format!("/dev/disk/by-id/virtio-{n}"))
+                    .expect("valid fixture by-id"),
             );
+            m.insert(
+                LuksUuid::parse(&format!("00000000-0000-0000-0000-{:012x}", idx + 1))
+                    .expect("valid fixture UUID"),
+                member,
+            )
+            .expect("insert fixture member");
         }
         m
     }

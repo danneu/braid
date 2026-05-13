@@ -30,17 +30,33 @@ Hot-unplug while mounted. The LUKS mapper (`/dev/mapper/braid-X`) is still open 
 
 braid handles this correctly: `probe_pool` detects the `(null)` device, records it in `pool.null_underlying`, and `monitor` includes its devid in `alert_missing_devids`. The stats row reports both the mapper path and the devid; the alert pipeline pairs by devid directly.
 
+Post-UUID-identity rule: when a mapper is null-underlying, the live LUKS UUID is
+not observable from the missing backing device. braid may bind that live mapper
+back to membership through persisted `DiskMember.devid`, but only for this
+restricted case. The persisted devid is prior-binding state, not display
+authority; status output still uses live btrfs stats for displayed devids.
+
 ### MISSING with path
 
 btrfs has registered the device as missing, but still remembers which mapper path it had. `btrfs filesystem show` appends `MISSING` to the path. The parser puts the devid into `missing_devids` but discards the path. `probe_pool` never processes this device (it only iterates `show.devices`), so it doesn't appear in `pool.devices` or `pool.null_underlying`.
 
 **Handling:** `btrfs device stats` rows always carry a mandatory `devid` field, so the alert pipeline identifies the row by devid regardless of which path string btrfs reports (`[/dev/mapper/X]` or `[<missing disk>]`). The `MissingDevice` alert is generated independently from `missing_devids`, and any matching stats row contributes its counters via the same devid key.
 
+The same restricted devid fallback applies to membership correlation: when
+btrfs reports a missing device only by devid, braid can resolve the member whose
+persisted `DiskMember.devid` matches. It must not infer membership by parsing a
+mapper name or LUKS label.
+
 **Uncertainty:** We haven't empirically confirmed which path string `btrfs device stats` reports for a device in this state -- the `??` in the table marks this. The answer no longer affects correctness (devid drives the lookup), but it would still be useful empirical data.
 
 ### Fully gone
 
 Device is completely absent — either the LUKS mapper was torn down, or the device was missing at mount time (degraded mount). `btrfs filesystem show` reports bare `path MISSING` (no mapper path). `btrfs device stats` reports `[<missing disk>]`. Both parsers handle this correctly.
+
+At this point there is no mapper and no observable LUKS UUID. Mutating commands
+that target the missing device, such as `remove-missing` and missing-path
+`replace`, resolve the requested btrfs devid through UUID-keyed membership and
+fail closed if no persisted member carries that devid.
 
 ## Transitions
 

@@ -56,6 +56,7 @@ Architecture decision records. Each has a status: `Draft`, `Active`, `Superseded
 - [decisions/021-wait-in-unlock.md](decisions/021-wait-in-unlock.md) — **Superseded by [Principle 13](principles.md#13-announce-long-running-work).** `braid unlock` (and `braid recover`'s shared mount tail) emitted a `[wait]` row before per-disk LUKS open and before the mount phase; promotion to a project-wide principle landed once the rest of the interactive commands complied.
 - [decisions/022-dry-run-preview-model.md](decisions/022-dry-run-preview-model.md) — **Active.** Dry-run previews for migrated mutating commands render from the same typed work plans that execution consumes; `Step` is output-only.
 - [decisions/023-secret-handling.md](decisions/023-secret-handling.md) — **Active.** Required types and disciplines for in-process LUKS secret material: Zeroizing typing, no BufRead in passphrase paths, hard byte caps, subprocess stdin (never argv), drop-before-fsync for generated secrets, redacted Debug, and typed passphrase boundaries.
+- [decisions/024-luks-uuid-identity.md](decisions/024-luks-uuid-identity.md) — **Active.** LUKS UUID is braid's persistent disk identity; disk names and labels are presentation, by-id paths are hardware addresses, and btrfs devid is a restricted fallback.
 
 ## tool-behavior/
 

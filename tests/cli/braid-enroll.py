@@ -306,7 +306,8 @@ with subtest("Test 4c: real-run success path renders plain `skip:` on stderr"):
 
     machine.succeed("cp /var/lib/braid/pool.json /tmp/pool.bak.json")
     machine.succeed(
-        "jq '.disks.disk3 = {\"by_id\": \"/dev/disk/by-id/virtio-missing\"}' "
+        "jq '.disks[\"33333333-3333-3333-3333-333333333333\"] = "
+        "{\"name\": \"disk3\", \"by_id\": \"/dev/disk/by-id/virtio-missing\"}' "
         "/var/lib/braid/pool.json > /tmp/pool.json && "
         "mv /tmp/pool.json /var/lib/braid/pool.json"
     )
@@ -367,15 +368,16 @@ with subtest("Test 4d: dry-run + real-run success path render `skip: not LUKS-fo
     close_all()
 
     # A zero-filled regular file is enough to trip `cryptsetup
-    # luksUUID` into non-zero exit. We do not need a block device
-    # -- cryptsetup reads the payload, fails to find the LUKS
-    # header, and exits with "not a valid LUKS device". That path
-    # is what classifies the disk as PresentNotLuks.
+    # luksUUID` into non-zero exit. Membership still requires a
+    # /dev/disk/by-id path, so expose the fake payload through a
+    # synthetic by-id symlink.
     machine.succeed("dd if=/dev/zero of=/tmp/fake-not-luks.bin bs=1M count=1")
+    machine.succeed("ln -sf /tmp/fake-not-luks.bin /dev/disk/by-id/virtio-not-luks")
 
     machine.succeed("cp /var/lib/braid/pool.json /tmp/pool.bak2.json")
     machine.succeed(
-        "jq '.disks.disk3 = {\"by_id\": \"/tmp/fake-not-luks.bin\"}' "
+        "jq '.disks[\"33333333-3333-3333-3333-333333333333\"] = "
+        "{\"name\": \"disk3\", \"by_id\": \"/dev/disk/by-id/virtio-not-luks\"}' "
         "/var/lib/braid/pool.json > /tmp/pool.json && "
         "mv /tmp/pool.json /var/lib/braid/pool.json"
     )
@@ -423,7 +425,7 @@ with subtest("Test 4d: dry-run + real-run success path render `skip: not LUKS-fo
 
     # Restore real pool.json and clean up the synthetic device.
     machine.succeed("mv /tmp/pool.bak2.json /var/lib/braid/pool.json")
-    machine.succeed("rm /tmp/fake-not-luks.bin")
+    machine.succeed("rm -f /dev/disk/by-id/virtio-not-luks /tmp/fake-not-luks.bin")
 
 # --- Test 5: Preflight detects slot conflict before any enrollment ---
 

@@ -36,8 +36,8 @@ sudo braid lock --dry-run
 2. Checks that no btrfs exclusive operation (balance, device remove, etc.) is running
 3. Unmounts the btrfs filesystem
 4. Runs `btrfs device scan --forget` to clear the kernel's device registry (prevents stale references from racing with mapper close)
-5. Closes each LUKS mapper listed in pool.json, retrying up to 3 times if the device is busy
-6. Scans for orphaned `braid-*` mappers not in pool.json (e.g. from a prior crash) and closes those too
+5. Classifies live mappers by LUKS UUID/devid ownership, then closes member-owned observed mapper names, retrying up to 3 times if the device is busy
+6. Scans for orphaned `braid-*` mappers not owned by UUID-keyed membership (e.g. from a prior crash) and closes those too
 
 If the pool is already unmounted and all mappers are already closed, lock reports "pool already locked" and exits cleanly.
 

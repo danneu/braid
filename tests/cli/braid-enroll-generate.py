@@ -188,7 +188,8 @@ with subtest("Test 5: dry-run + real-run surface mixed skip notes"):
     # renders in bracketed form.
     machine.succeed("wipefs --all --force /dev/disk/by-id/virtio-disk1")
     machine.succeed(
-        "jq '.disks.disk3 = {\"by_id\": \"/dev/disk/by-id/virtio-missing\"}' "
+        "jq '.disks[\"33333333-3333-3333-3333-333333333333\"] = "
+        "{\"name\": \"disk3\", \"by_id\": \"/dev/disk/by-id/virtio-missing\"}' "
         "/var/lib/braid/pool.json > /tmp/pool.json && "
         "mv /tmp/pool.json /var/lib/braid/pool.json"
     )

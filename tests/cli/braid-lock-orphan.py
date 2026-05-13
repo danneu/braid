@@ -14,7 +14,12 @@
 # the crash window). `braid lock` must close all three mappers — the two
 # membership-known ones and the orphan — and leave the system fully locked.
 
+import json
 import shlex
+
+
+def member_names(pool):
+    return {member["name"] for member in pool["disks"].values()}
 
 start_all()
 machine.wait_for_unit("multi-user.target")
@@ -61,11 +66,9 @@ with subtest("Setup: create orphan mapper (crash window simulation)"):
 # --- Test: braid lock closes orphan and membership mappers ---
 
 with subtest("Pre-lock: orphan is outside pool.json membership"):
-    import json
-
     pool_raw = machine.succeed("cat /var/lib/braid/pool.json")
     pool = json.loads(pool_raw)
-    members = set(pool["disks"].keys())
+    members = member_names(pool)
     assert members == {"disk1", "disk2"}, f"expected {{disk1, disk2}}, got {members}"
 
 with subtest("Pre-lock: all three mappers exist"):

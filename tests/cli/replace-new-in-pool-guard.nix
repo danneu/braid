@@ -1,7 +1,7 @@
 # Test: replace-new-in-pool-guard
 #
-# What: `braid replace` rejects --new with "already a member" when
-# the new disk is already in the pool, at the braid layer (before
+# What: `braid replace` rejects --new with a duplicate-LUKS-UUID membership
+# error when the new disk is already in the pool, at the braid layer (before
 # reaching btrfs).
 #
 # Why: The live `btrfs replace start` path has no natural guard
@@ -9,7 +9,7 @@
 # braid-level check, the command would pass the duplicate device to
 # btrfs, risking corruption or a confusing btrfs-level error.
 #
-# Dependencies: braid add (builds the test pool), check_new_not_in_pool guard.
+# Dependencies: braid add (builds the test pool), replace new-UUID uniqueness guard.
 { braid }:
 {
   name = "replace-new-in-pool-guard";

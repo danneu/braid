@@ -10,7 +10,7 @@ use crate::alert::{AlertCause, AlertState, save_alert_latch};
 use crate::cmd::{CmdError, CmdRequest, CommandRunner, MockRunner, RawCommandOutput};
 use crate::probe::Filesystem;
 use crate::state_paths::StatePaths;
-use crate::types::MountPoint;
+use crate::types::{MapperName, MountPoint};
 
 const MOUNTINFO_EXT4: &str = "36 35 0:32 / /mnt/storage rw,noatime shared:1 - ext4 /dev/sda1 rw\n";
 const MOUNTINFO_BTRFS: &str =
@@ -217,7 +217,7 @@ pub(crate) fn ack_mounted_probe_runner() -> MockRunner {
         )
         .with_output(
             CmdRequest::CryptsetupStatus {
-                mapper: "braid-disk1".into(),
+                mapper: MapperName("braid-disk1".into()),
             },
             cryptsetup_status_active("braid-disk1", "/dev/vda"),
         )
@@ -229,7 +229,7 @@ pub(crate) fn ack_mounted_probe_runner() -> MockRunner {
         )
         .with_output(
             CmdRequest::CryptsetupStatus {
-                mapper: "braid-disk3".into(),
+                mapper: MapperName("braid-disk3".into()),
             },
             cryptsetup_status_active("braid-disk3", "/dev/vdc"),
         )

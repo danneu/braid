@@ -1,4 +1,4 @@
-use crate::types::MountPoint;
+use crate::types::{LuksFormatExtraOpts, LuksUuid, MapperName, MountPoint};
 use std::os::unix::process::ExitStatusExt;
 use thiserror::Error;
 
@@ -33,7 +33,7 @@ pub enum CmdRequest {
         target: String,
     },
     CryptsetupStatus {
-        mapper: String,
+        mapper: MapperName,
     },
     CryptsetupLuksUuid {
         device: String,
@@ -69,13 +69,13 @@ pub enum CmdRequest {
     // Mutation commands for apply
     CryptsetupLuksOpen {
         device: String,
-        mapper: String,
+        mapper: MapperName,
     },
     CryptsetupIsLuks {
         device: String,
     },
     CryptsetupClose {
-        mapper: String,
+        mapper: MapperName,
     },
     BtrfsDeviceAdd {
         device: String,
@@ -151,9 +151,17 @@ pub enum CmdRequest {
         mount_point: MountPoint,
     },
     // init-disk commands
+    /// LUKS2 format with journaled identity and braid label. `uuid` is the
+    /// pre-generated `LuksUuid` recorded in `OpKind::Add`/`OpKind::Replace`
+    /// so a mid-format crash and replay reformat under the same identity;
+    /// `label` is `braid-<DiskName>` and `extra_opts` are user-supplied
+    /// argv extras already validated by `LuksFormatExtraOpts::parse`
+    /// (which rejects managed flags like `--uuid` and `--label`).
     CryptsetupLuksFormat {
         device: String,
-        extra_opts: Vec<String>,
+        uuid: LuksUuid,
+        label: String,
+        extra_opts: LuksFormatExtraOpts,
     },
     CryptsetupTestPassphrase {
         device: String,
@@ -190,7 +198,7 @@ pub enum CmdRequest {
     // Keyfile commands (auto-unlock)
     CryptsetupLuksOpenKeyFile {
         device: String,
-        mapper: String,
+        mapper: MapperName,
         key_file_path: String,
     },
     CryptsetupTestKeyFile {
@@ -336,7 +344,7 @@ impl CmdRequest {
             },
             CmdRequest::CryptsetupStatus { mapper } => CmdArgs {
                 program: "cryptsetup".to_owned(),
-                args: vec!["status".into(), mapper.clone()],
+                args: vec!["status".into(), mapper.as_str().to_owned()],
             },
             CmdRequest::CryptsetupLuksUuid { device } => CmdArgs {
                 program: "cryptsetup".to_owned(),
@@ -459,7 +467,7 @@ impl CmdRequest {
                     "--perf-no_read_workqueue".into(),
                     "--perf-no_write_workqueue".into(),
                     device.clone(),
-                    mapper.clone(),
+                    mapper.as_str().to_owned(),
                 ],
             },
             CmdRequest::CryptsetupIsLuks { device } => CmdArgs {
@@ -468,7 +476,7 @@ impl CmdRequest {
             },
             CmdRequest::CryptsetupClose { mapper } => CmdArgs {
                 program: "cryptsetup".to_owned(),
-                args: vec!["close".into(), mapper.clone()],
+                args: vec!["close".into(), mapper.as_str().to_owned()],
             },
             CmdRequest::BtrfsDeviceAdd {
                 device,
@@ -684,7 +692,12 @@ impl CmdRequest {
                     device.clone(),
                 ],
             },
-            CmdRequest::CryptsetupLuksFormat { device, extra_opts } => {
+            CmdRequest::CryptsetupLuksFormat {
+                device,
+                uuid,
+                label,
+                extra_opts,
+            } => {
                 let mut args: Vec<String> = vec![
                     "luksFormat".into(),
                     // luks2 is already the default but might as well
@@ -692,8 +705,16 @@ impl CmdRequest {
                     "luks2".into(),
                     "--batch-mode".into(),
                     "--key-file=-".into(),
+                    // Managed identity. The plan pins `--uuid` before
+                    // `--label` before user extras before device so a
+                    // regression that reorders these tokens fails the
+                    // argv pin in cmd.rs::tests.
+                    "--uuid".into(),
+                    uuid.as_str().to_owned(),
+                    "--label".into(),
+                    label.clone(),
                 ];
-                for opt in extra_opts {
+                for opt in extra_opts.as_slice() {
                     args.push(opt.clone());
                 }
                 args.push(device.clone());
@@ -744,7 +765,7 @@ impl CmdRequest {
                     "--perf-no_read_workqueue".into(),
                     "--perf-no_write_workqueue".into(),
                     device.clone(),
-                    mapper.clone(),
+                    mapper.as_str().to_owned(),
                 ],
             },
             CmdRequest::CryptsetupTestKeyFile {
@@ -1120,7 +1141,7 @@ impl MockRunner {
     pub fn with_mapper_closed(self, mapper: &str) -> Self {
         self.with_output(
             CmdRequest::CryptsetupStatus {
-                mapper: mapper.into(),
+                mapper: MapperName(mapper.into()),
             },
             RawCommandOutput {
                 cmd: format!("cryptsetup status {mapper}"),
@@ -1147,7 +1168,7 @@ impl MockRunner {
     pub fn with_mapper_open(self, mapper: &str, underlying: &str, uuid: &str) -> Self {
         self.with_output(
             CmdRequest::CryptsetupStatus {
-                mapper: mapper.into(),
+                mapper: MapperName(mapper.into()),
             },
             RawCommandOutput {
                 cmd: format!("cryptsetup status {mapper}"),
@@ -1211,6 +1232,23 @@ impl CommandRunner for MockRunner {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // Test-module seed allocation: cli/src/cmd.rs uses 300-399 so it does
+    // not clash with membership.rs (100-199), luks.rs (200), or
+    // journal.rs (201-299).
+    fn test_uuid(seed: u64) -> LuksUuid {
+        LuksUuid::parse(&format!("00000000-0000-0000-0000-{:012x}", seed))
+            .expect("hand-padded UUID is canonical")
+    }
+
+    fn empty_extras() -> LuksFormatExtraOpts {
+        LuksFormatExtraOpts::parse(&[]).expect("empty extras parse")
+    }
+
+    fn extras_from(tokens: &[&str]) -> LuksFormatExtraOpts {
+        let owned: Vec<String> = tokens.iter().map(|t| (*t).to_owned()).collect();
+        LuksFormatExtraOpts::parse(&owned).expect("extras parse")
+    }
 
     #[test]
     fn mock_runner_returns_seeded_output() {
@@ -1616,7 +1654,9 @@ mod tests {
         let runner = RealRunner;
         let req = CmdRequest::CryptsetupLuksFormat {
             device: "/dev/vda".to_owned(),
-            extra_opts: vec![],
+            uuid: test_uuid(300),
+            label: "braid-test".to_owned(),
+            extra_opts: empty_extras(),
         };
         let result = runner.run(&req);
         assert!(result.is_err());
@@ -1646,7 +1686,9 @@ mod tests {
     fn luks_format_run_with_stdin_routes_correctly() {
         let req = CmdRequest::CryptsetupLuksFormat {
             device: "/dev/vda".to_owned(),
-            extra_opts: vec!["--pbkdf".to_owned(), "pbkdf2".to_owned()],
+            uuid: test_uuid(301),
+            label: "braid-test".to_owned(),
+            extra_opts: extras_from(&["--pbkdf", "pbkdf2"]),
         };
         let mock = MockRunner::default().with_output_stdin(
             req.clone(),
@@ -1668,7 +1710,7 @@ mod tests {
     fn luks_open_key_file_run_dispatches_directly() {
         let req = CmdRequest::CryptsetupLuksOpenKeyFile {
             device: "/dev/vda".to_owned(),
-            mapper: "braid-test".to_owned(),
+            mapper: MapperName("braid-test".into()),
             key_file_path: "/run/braid-key/braid.key".to_owned(),
         };
         let mock = MockRunner::default().with_output(
@@ -2127,20 +2169,31 @@ mod tests {
     }
 
     #[test]
-    // Intent: to_shell_string produces correct output for LUKS format with label.
-    // Why: this is the most complex real command with env opts + label.
-    // Scenario: dry-run of braid add with a fresh disk.
+    // Intent: to_shell_string produces correct output for LUKS format with the
+    //   structured uuid/label/extras shape pinned by the LUKS-UUID identity
+    //   migration. The argv ordering is `--uuid <uuid> --label <label>
+    //   <extras...> <device>`.
+    // Why: this is the user-facing dry-run string for the most complex real
+    //   command; a reorder regression that lets user extras precede `--label`
+    //   would also let user input shadow the journaled identity at the argv
+    //   layer if the boundary validator were ever bypassed.
+    // Scenario: dry-run of braid add with a fresh disk, passing through a
+    //   single non-managed extra (`--use-random`).
     fn to_shell_string_luks_format_with_label() {
+        let uuid = test_uuid(302);
         let s = CmdRequest::CryptsetupLuksFormat {
             device: "/dev/disk/by-id/disk1".to_owned(),
-            extra_opts: vec!["--label".into(), "braid-aaa".into()],
+            uuid: uuid.clone(),
+            label: "braid-aaa".to_owned(),
+            extra_opts: extras_from(&["--use-random"]),
         }
         .to_argv()
         .to_shell_string();
-        assert_eq!(
-            s,
-            "cryptsetup luksFormat --type luks2 --batch-mode '--key-file=-' --label braid-aaa /dev/disk/by-id/disk1"
+        let expected = format!(
+            "cryptsetup luksFormat --type luks2 --batch-mode '--key-file=-' --uuid {} --label braid-aaa --use-random /dev/disk/by-id/disk1",
+            uuid.as_str()
         );
+        assert_eq!(s, expected);
     }
 
     #[test]
@@ -2154,15 +2207,17 @@ mod tests {
                 description: "LUKS format /dev/disk/by-id/disk1".into(),
                 commands: vec![CmdRequest::CryptsetupLuksFormat {
                     device: "/dev/disk/by-id/disk1".to_owned(),
-                    extra_opts: vec!["--label".into(), "braid-aaa".into()],
+                    uuid: test_uuid(303),
+                    label: "braid-aaa".to_owned(),
+                    extra_opts: empty_extras(),
                 }],
             },
             Step {
                 risk: "safe",
-                description: "LUKS open → braid-aaa".into(),
+                description: "LUKS open -> braid-aaa".into(),
                 commands: vec![CmdRequest::CryptsetupLuksOpen {
                     device: "/dev/disk/by-id/disk1".to_owned(),
-                    mapper: "braid-aaa".to_owned(),
+                    mapper: MapperName("braid-aaa".into()),
                 }],
             },
         ];
@@ -2171,8 +2226,12 @@ mod tests {
         assert_eq!(lines.len(), 4);
         assert_eq!(lines[0], "[destructive] LUKS format /dev/disk/by-id/disk1");
         assert!(lines[1].contains("$ cryptsetup luksFormat"));
-        assert_eq!(lines[2], "[safe       ] LUKS open → braid-aaa");
+        assert_eq!(lines[2], "[safe       ] LUKS open -> braid-aaa");
         assert!(lines[3].contains("$ cryptsetup open --type luks"));
+        assert!(
+            output.is_ascii(),
+            "dry-run renderer output must stay ASCII: {output:?}"
+        );
     }
 
     #[test]
@@ -2282,7 +2341,7 @@ mod tests {
     fn cryptsetup_luks_open_omits_keyfile_size() {
         let cmd = CmdRequest::CryptsetupLuksOpen {
             device: "/dev/disk/by-id/disk1".to_owned(),
-            mapper: "braid-disk1".to_owned(),
+            mapper: MapperName("braid-disk1".into()),
         }
         .to_argv();
         assert_eq!(cmd.program, "cryptsetup");
@@ -2338,15 +2397,19 @@ mod tests {
 
     #[test]
     // Intent: CryptsetupLuksFormat (passphrase-via-stdin) must NOT carry
-    // --keyfile-size. Pin full argv for the empty-extra-opts shape.
+    // --keyfile-size. Pin full argv for the structured (uuid + label +
+    // empty extras) shape.
     // Why: luksFormat consumes the initial passphrase from stdin; forcing a
     // fixed read size would break first-time format the same way it would
     // break unlock.
     // Scenario: a cleanup PR normalizes all cryptsetup variants. Fails here.
     fn cryptsetup_luks_format_omits_keyfile_size() {
+        let uuid = test_uuid(304);
         let cmd = CmdRequest::CryptsetupLuksFormat {
             device: "/dev/disk/by-id/disk1".to_owned(),
-            extra_opts: vec![],
+            uuid: uuid.clone(),
+            label: "braid-disk1".to_owned(),
+            extra_opts: empty_extras(),
         }
         .to_argv();
         assert_eq!(cmd.program, "cryptsetup");
@@ -2358,6 +2421,10 @@ mod tests {
                 "luks2",
                 "--batch-mode",
                 "--key-file=-",
+                "--uuid",
+                uuid.as_str(),
+                "--label",
+                "braid-disk1",
                 "/dev/disk/by-id/disk1",
             ]
         );
@@ -2382,7 +2449,7 @@ mod tests {
     fn cryptsetup_luks_open_key_file_sets_keyfile_size_4096() {
         let cmd = CmdRequest::CryptsetupLuksOpenKeyFile {
             device: "/dev/disk/by-id/disk1".to_owned(),
-            mapper: "braid-disk1".to_owned(),
+            mapper: MapperName("braid-disk1".into()),
             key_file_path: "/var/lib/braid/keyfiles/braid-disk1.key".to_owned(),
         }
         .to_argv();
@@ -2461,6 +2528,87 @@ mod tests {
                 "4096",
                 "/dev/disk/by-id/disk1",
                 "/var/lib/braid/keyfiles/braid-disk1.key",
+            ]
+        );
+    }
+
+    #[test]
+    // Intent: CryptsetupLuksFormat's argv emits the structured `uuid` and
+    //   `label` fields as `--uuid <uuid> --label <label>` BEFORE any user-
+    //   supplied extras, and the device is the final positional argument.
+    //   Empty `LuksFormatExtraOpts` leaves zero tokens between `--label
+    //   <label>` and `<device>`.
+    // Why: this is the LUKS-UUID identity boundary in argv form. A
+    //   regression that swapped order (e.g. extras before `--uuid`) would
+    //   let user input either shadow the journaled identity or break
+    //   recovery's "reformat under the same UUID" contract. The pinned
+    //   slice asserts both the structured shape and the ordering.
+    // Scenario: a planner emits `CryptsetupLuksFormat` with the structured
+    //   uuid+label and no user extras; argv is exactly the pinned slice.
+    fn cryptsetup_luks_format_renders_uuid_label_before_extras_and_device() {
+        let uuid = test_uuid(305);
+        let cmd = CmdRequest::CryptsetupLuksFormat {
+            device: "/dev/disk/by-id/disk1".to_owned(),
+            uuid: uuid.clone(),
+            label: "braid-disk1".to_owned(),
+            extra_opts: empty_extras(),
+        }
+        .to_argv();
+        assert_eq!(cmd.program, "cryptsetup");
+        assert_eq!(
+            cmd.args,
+            vec![
+                "luksFormat",
+                "--type",
+                "luks2",
+                "--batch-mode",
+                "--key-file=-",
+                "--uuid",
+                uuid.as_str(),
+                "--label",
+                "braid-disk1",
+                "/dev/disk/by-id/disk1",
+            ],
+            "managed --uuid/--label precede extras and device"
+        );
+    }
+
+    #[test]
+    // Intent: a positive non-managed extra (`--use-random`) passes through
+    //   the structured `LuksFormatExtraOpts` and reaches argv in the
+    //   pinned position: AFTER `--label <label>` and BEFORE `<device>`.
+    // Why: this is the positive-extras forwarding regression pinned in
+    //   the plan's Test Plan > LUKS format boundary section. A regression
+    //   that silently dropped accepted extras passes the rejection suite
+    //   and the empty-extras suite yet fails this test.
+    // Scenario: operator passes `--luks-format-arg=--use-random`; the
+    //   token survives validation (it is not a managed flag), is stored
+    //   inside `LuksFormatExtraOpts`, and renders in argv between
+    //   `--label <label>` and `<device>` unchanged.
+    fn cryptsetup_luks_format_forwards_non_managed_extras_in_order() {
+        let uuid = test_uuid(306);
+        let cmd = CmdRequest::CryptsetupLuksFormat {
+            device: "/dev/disk/by-id/disk2".to_owned(),
+            uuid: uuid.clone(),
+            label: "braid-disk2".to_owned(),
+            extra_opts: extras_from(&["--use-random"]),
+        }
+        .to_argv();
+        assert_eq!(cmd.program, "cryptsetup");
+        assert_eq!(
+            cmd.args,
+            vec![
+                "luksFormat",
+                "--type",
+                "luks2",
+                "--batch-mode",
+                "--key-file=-",
+                "--uuid",
+                uuid.as_str(),
+                "--label",
+                "braid-disk2",
+                "--use-random",
+                "/dev/disk/by-id/disk2",
             ]
         );
     }

@@ -72,7 +72,8 @@ pub fn mapper_name(name: &str) -> MapperName {
     MapperName(format!("braid-{name}"))
 }
 
-/// Extract the disk name from a mapper name, if it has the braid- prefix.
+/// Display-only mapper parser for diagnostics and explicit carve-outs.
+/// Identity decisions must use LUKS UUID/devid membership instead.
 pub fn name_from_mapper(mapper: &str) -> Option<&str> {
     mapper.strip_prefix("braid-")
 }

@@ -221,8 +221,14 @@ fn build_compact_drives(pool: &PoolState, membership: &PoolMembership) -> Vec<Co
 
     // Present pool devices
     let pool_mappers: HashSet<&str> = pool.devices.iter().map(|d| d.mapper.0.as_str()).collect();
+    let pool_luks_uuids: HashSet<&LuksUuid> = pool.devices.iter().map(|d| &d.luks_uuid).collect();
     for pd in &pool.devices {
-        let name = config::name_from_mapper(&pd.mapper.0)
+        let name = membership
+            .by_uuid(&pd.luks_uuid)
+            .map(|member| member.name.as_str())
+            // Display-only fallback for foreign live devices; UUID-keyed
+            // membership remains the identity boundary.
+            .or_else(|| config::name_from_mapper(&pd.mapper.0))
             .unwrap_or(&pd.mapper.0)
             .to_owned();
         let device_short = pd
@@ -239,11 +245,17 @@ fn build_compact_drives(pool: &PoolState, membership: &PoolMembership) -> Vec<Co
     }
 
     // Unpooled membership disks
-    for name in membership.disks.keys() {
+    let mut members: Vec<_> = membership.iter().collect();
+    members.sort_by(|(_, a), (_, b)| a.name.cmp(&b.name));
+    for (uuid, member) in members {
+        if pool_luks_uuids.contains(uuid) {
+            continue;
+        }
+        let name = member.name.as_str();
         let expected_mapper = format!("braid-{name}");
         if !pool_mappers.contains(expected_mapper.as_str()) {
             drives.push(CompactDrive {
-                name: name.clone(),
+                name: name.to_owned(),
                 device_short: "-".to_owned(),
                 devid: None,
                 status: DiskStatus::Missing,
@@ -358,7 +370,11 @@ fn build_status<R: CommandRunner, F: Filesystem>(
 
     let membership = match membership::load_membership(paths) {
         Ok(m) => m,
-        Err(membership::MembershipError::NotFound(_)) => PoolMembership::empty(),
+        Err(membership::MembershipError::Io { source, .. })
+            if source.kind() == std::io::ErrorKind::NotFound =>
+        {
+            PoolMembership::empty()
+        }
         Err(e) => return Err(e.into()),
     };
 
@@ -376,10 +392,11 @@ fn build_status<R: CommandRunner, F: Filesystem>(
 
     let compact_drives = build_compact_drives(&pool, &membership);
 
-    let config_disks: Vec<ConfigDisk> = membership
-        .disks
-        .iter()
-        .map(|(name, member)| probe_config_disk(runner, fs, name, &member.by_id))
+    let mut members: Vec<_> = membership.iter().map(|(_, member)| member).collect();
+    members.sort_by(|a, b| a.name.cmp(&b.name));
+    let config_disks: Vec<ConfigDisk> = members
+        .into_iter()
+        .map(|member| probe_config_disk(runner, fs, &member.name, &member.by_id))
         .collect::<Result<Vec<_>, _>>()?;
     let device_stats = get_device_stats(runner, config.mount_point())?;
     let verbose_ctx = build_disk_reports(runner, &config_disks, &pool, &device_stats);
@@ -727,15 +744,18 @@ fn build_disk_reports<R: CommandRunner>(
             matches!(&cd.state, ConfigDiskState::PresentLuks { uuid, .. } if uuid == &pd.luks_uuid)
         });
 
-        let disk_name = matched_config.map(|cd| cd.name.clone()).unwrap_or_else(|| {
-            // Derive name from mapper (strip braid- prefix)
-            config::name_from_mapper(&pd.mapper.0)
-                .unwrap_or(&pd.mapper.0)
-                .to_owned()
-        });
+        let disk_name = matched_config
+            .map(|cd| cd.name.as_str().to_owned())
+            .unwrap_or_else(|| {
+                // Display-only fallback for foreign live devices; UUID-keyed
+                // config matching remains the identity boundary.
+                config::name_from_mapper(&pd.mapper.0)
+                    .unwrap_or(&pd.mapper.0)
+                    .to_owned()
+            });
 
         let by_id = matched_config
-            .map(|cd| cd.by_id_path.0.clone())
+            .map(|cd| cd.by_id_path.as_str().to_owned())
             .unwrap_or_else(|| format!("/dev/mapper/{}", pd.mapper.0));
 
         let mapper = pd.mapper.0.clone();
@@ -763,7 +783,7 @@ fn build_disk_reports<R: CommandRunner>(
             name: disk_name.clone(),
             mapper: mapper.clone(),
             by_id: by_id.clone(),
-            luks_uuid: pd.luks_uuid.0.clone(),
+            luks_uuid: pd.luks_uuid.as_str().to_owned(),
             devid: Some(pd.devid.to_string()),
             underlying: Some(pd.underlying.clone()),
             status: DiskStatus::Present,
@@ -773,7 +793,7 @@ fn build_disk_reports<R: CommandRunner>(
         human_details.push(HumanDisk {
             name: disk_name,
             by_id: by_id.clone(),
-            luks_uuid: pd.luks_uuid.0.clone(),
+            luks_uuid: pd.luks_uuid.as_str().to_owned(),
             devid: Some(pd.devid.to_string()),
             status: DiskStatus::Present,
             model,
@@ -788,7 +808,7 @@ fn build_disk_reports<R: CommandRunner>(
             ConfigDiskState::Absent => true,
             ConfigDiskState::PresentLuks { uuid, .. } => !pool_uuid_set.contains(uuid),
             ConfigDiskState::PresentNotLuks => {
-                !pool_mapper_set.contains(mapper_name(&cd.name).0.as_str())
+                !pool_mapper_set.contains(mapper_name(cd.name.as_str()).0.as_str())
             }
         };
 
@@ -805,7 +825,7 @@ fn build_disk_reports<R: CommandRunner>(
                 // ConfigDiskState (mutating commands like add/replace must keep
                 // seeing the coarse PresentNotLuks state to preserve their
                 // destructive-format guards).
-                match luks::probe_luks_header(runner, &cd.by_id_path.0) {
+                match luks::probe_luks_header(runner, cd.by_id_path.as_str()) {
                     luks::LuksHeaderState::Unreadable => DiskStatus::LuksHeaderUnreadable,
                     luks::LuksHeaderState::Damaged => DiskStatus::LuksHeaderDamaged,
                     // luksUuid failed but isLuks + luksDump succeeded -- the
@@ -823,12 +843,12 @@ fn build_disk_reports<R: CommandRunner>(
                 }
             }
         };
-        let mapper = mapper_name(&cd.name).0;
+        let mapper = mapper_name(cd.name.as_str()).0;
 
         disk_reports.push(DiskReport {
-            name: cd.name.clone(),
+            name: cd.name.as_str().to_owned(),
             mapper: mapper.clone(),
-            by_id: cd.by_id_path.0.clone(),
+            by_id: cd.by_id_path.as_str().to_owned(),
             luks_uuid: String::new(),
             devid: None,
             underlying: None,
@@ -837,8 +857,8 @@ fn build_disk_reports<R: CommandRunner>(
         });
 
         human_details.push(HumanDisk {
-            name: cd.name.clone(),
-            by_id: cd.by_id_path.0.clone(),
+            name: cd.name.as_str().to_owned(),
+            by_id: cd.by_id_path.as_str().to_owned(),
             luks_uuid: String::new(),
             devid: None,
             status,
@@ -1140,8 +1160,6 @@ mod tests {
         status_report_with_scrub, status_runner_healthy_3disk_base,
         status_runner_healthy_3disk_verbose,
     };
-    use std::collections::BTreeMap;
-
     // =======================================================================
     // Schema envelope tests
     // =======================================================================
@@ -2734,7 +2752,7 @@ mod tests {
             )
             .with_output(
                 CmdRequest::CryptsetupStatus {
-                    mapper: "disk1".into(),
+                    mapper: MapperName("disk1".into()),
                 },
                 status_cryptsetup_status_active("disk1", "/dev/vda"),
             )
@@ -2746,7 +2764,7 @@ mod tests {
             )
             .with_output(
                 CmdRequest::CryptsetupStatus {
-                    mapper: "disk2".into(),
+                    mapper: MapperName("disk2".into()),
                 },
                 status_cryptsetup_status_active("disk2", "/dev/vdb"),
             )
@@ -2857,7 +2875,7 @@ mod tests {
             )
             .with_output(
                 CmdRequest::CryptsetupStatus {
-                    mapper: "disk2".into(),
+                    mapper: MapperName("disk2".into()),
                 },
                 status_cryptsetup_status_active("disk2", "(null)"),
             );
@@ -2888,7 +2906,7 @@ mod tests {
             )
             .with_output(
                 CmdRequest::CryptsetupStatus {
-                    mapper: "disk1".into(),
+                    mapper: MapperName("disk1".into()),
                 },
                 status_cryptsetup_status_active("disk1", "/dev/vda"),
             )
@@ -3108,7 +3126,7 @@ mod tests {
             mounted: true,
             devices: vec![PoolDevice {
                 mapper: MapperName("braid-disk1".to_owned()),
-                luks_uuid: LuksUuid("11111111-1111-1111-1111-111111111111".to_owned()),
+                luks_uuid: LuksUuid::parse("11111111-1111-1111-1111-111111111111").unwrap(),
                 devid: 1,
                 underlying: "/dev/vda".to_owned(),
             }],
@@ -3181,6 +3199,31 @@ mod tests {
         let drives = build_compact_drives(&pool, &membership);
         assert_eq!(drives.len(), 1);
         assert_eq!(drives[0].status, DiskStatus::Missing);
+    }
+
+    #[test]
+    fn status_compact_names_present_disk_from_membership_uuid() {
+        let pool = PoolState {
+            mounted: true,
+            devices: vec![PoolDevice {
+                mapper: MapperName("braid-drifted".to_owned()),
+                luks_uuid: LuksUuid::parse("11111111-1111-1111-1111-111111111111").unwrap(),
+                devid: 1,
+                underlying: "/dev/vda".to_owned(),
+            }],
+            missing_count: 0,
+            missing_devids: vec![],
+            total_devices: 1,
+            fsid: None,
+            null_underlying: vec![],
+        };
+        let membership = status_membership_1disk();
+
+        let drives = build_compact_drives(&pool, &membership);
+
+        assert_eq!(drives.len(), 1);
+        assert_eq!(drives[0].name, "disk1");
+        assert_eq!(drives[0].status, DiskStatus::Present);
     }
 
     // =======================================================================
@@ -3371,7 +3414,7 @@ mod tests {
         assert!(
             matches!(
                 result.unwrap_err(),
-                StatusError::Membership(membership::MembershipError::Corrupt(_, _))
+                StatusError::Membership(membership::MembershipError::Corrupt { .. })
             ),
             "expected StatusError::Membership(Corrupt(..))"
         );
@@ -3425,12 +3468,16 @@ mod tests {
 
         let (_tmp, paths) = isolated_paths();
 
-        let mut disks = BTreeMap::new();
-        disks.insert(
-            "disk1".to_owned(),
-            DiskMember::from_by_id(ByIdPath("/dev/disk/by-id/disk1".to_owned())),
-        );
-        let membership = PoolMembership { disks };
+        let mut membership = PoolMembership::empty();
+        membership
+            .insert(
+                LuksUuid::parse("11111111-1111-1111-1111-111111111111").unwrap(),
+                DiskMember::new(
+                    DiskName::parse("disk1").unwrap(),
+                    ByIdPath::parse("/dev/disk/by-id/disk1").unwrap(),
+                ),
+            )
+            .expect("insert disk1 fixture member");
 
         // Healthy 1-disk mounted pool for probe_pool + data-gathering; the
         // pool-side mapper "disk1" is distinct from the config-side mapper
@@ -3444,7 +3491,7 @@ mod tests {
             )
             .with_output(
                 CmdRequest::CryptsetupStatus {
-                    mapper: "disk1".into(),
+                    mapper: MapperName("disk1".into()),
                 },
                 status_cryptsetup_status_active("disk1", "/dev/vda"),
             )
@@ -3511,7 +3558,7 @@ mod tests {
             )
             .with_output(
                 CmdRequest::CryptsetupStatus {
-                    mapper: "braid-disk1".into(),
+                    mapper: MapperName("braid-disk1".into()),
                 },
                 status_cryptsetup_status_active("braid-disk1", "/dev/vdz"),
             )
@@ -3537,11 +3584,11 @@ mod tests {
                 assert_eq!(name, "disk1");
                 assert_eq!(
                     expected,
-                    LuksUuid("11111111-1111-1111-1111-111111111111".into())
+                    LuksUuid::parse("11111111-1111-1111-1111-111111111111").unwrap()
                 );
                 assert_eq!(
                     found,
-                    Some(LuksUuid("99999999-9999-9999-9999-999999999999".into()))
+                    Some(LuksUuid::parse("99999999-9999-9999-9999-999999999999").unwrap())
                 );
             }
             Err(other) => panic!("expected StatusError::Probe(MapperConflict), got: {other:?}"),
@@ -3570,13 +3617,13 @@ mod tests {
     #[test]
     fn disk_report_pairs_stats_by_devid_when_path_differs() {
         use crate::parse::types::{BtrfsDeviceStatsOutput, DeviceErrorStats, DeviceStatsTarget};
-        use crate::types::{LuksUuid, MapperName, PoolDevice};
+        use crate::types::{DiskName, LuksUuid, MapperName, PoolDevice};
 
         let pool = PoolState {
             mounted: true,
             devices: vec![PoolDevice {
                 mapper: MapperName("braid-disk1".to_owned()),
-                luks_uuid: LuksUuid("11111111-1111-1111-1111-111111111111".to_owned()),
+                luks_uuid: LuksUuid::parse("11111111-1111-1111-1111-111111111111").unwrap(),
                 devid: 1,
                 underlying: "/dev/vda".to_owned(),
             }],
@@ -3587,10 +3634,10 @@ mod tests {
             null_underlying: vec![],
         };
         let config_disks = vec![ConfigDisk {
-            name: "disk1".to_owned(),
-            by_id_path: ByIdPath("/dev/disk/by-id/disk1".to_owned()),
+            name: DiskName::parse("disk1").unwrap(),
+            by_id_path: ByIdPath::parse("/dev/disk/by-id/disk1").unwrap(),
             state: ConfigDiskState::PresentLuks {
-                uuid: LuksUuid("11111111-1111-1111-1111-111111111111".to_owned()),
+                uuid: LuksUuid::parse("11111111-1111-1111-1111-111111111111").unwrap(),
                 label: None,
                 mapper_open: true,
             },

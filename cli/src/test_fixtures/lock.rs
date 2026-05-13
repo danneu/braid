@@ -8,8 +8,8 @@
 use super::shared;
 use crate::cmd::{CmdError, CmdRequest, CommandRunner, MockRunner, RawCommandOutput, Step};
 use crate::membership::{DiskMember, PoolMembership};
-use crate::types::{ByIdPath, MountPoint};
-use std::collections::{BTreeMap, HashMap, VecDeque};
+use crate::types::{ByIdPath, DiskName, LuksUuid, MountPoint};
+use std::collections::{HashMap, VecDeque};
 use std::sync::Mutex;
 
 // ---------------------------------------------------------------------------
@@ -72,9 +72,12 @@ impl RecordingRunner {
 impl CommandRunner for RecordingRunner {
     fn run(&self, request: &CmdRequest) -> Result<RawCommandOutput, CmdError> {
         if let CmdRequest::CryptsetupClose { mapper } = request {
-            self.close_calls.lock().unwrap().push(mapper.clone());
+            self.close_calls
+                .lock()
+                .unwrap()
+                .push(mapper.as_str().to_owned());
             let mut seqs = self.close_sequences.lock().unwrap();
-            if let Some(queue) = seqs.get_mut(mapper)
+            if let Some(queue) = seqs.get_mut(mapper.as_str())
                 && let Some(out) = queue.pop_front()
             {
                 return Ok(out);
@@ -117,29 +120,45 @@ pub(crate) fn lock_fs(paths: &[&str]) -> shared::MockFs {
 // Pool fixture
 // ---------------------------------------------------------------------------
 
-/// Canonical lock-test membership keyed by the short names asserted in
-/// mapper and forget-contract tests.
+/// Canonical lock-test membership keyed by the lock-test seed range
+/// (700-799). Two members named `aaa` and `bbb` so the existing close
+/// and forget tests address the same mapper names they did before the
+/// LUKS-UUID-as-identity migration.
 pub(crate) fn lock_test_membership() -> PoolMembership {
-    let mut disks = BTreeMap::new();
-    disks.insert(
-        "aaa".to_owned(),
-        DiskMember::from_by_id(ByIdPath("/dev/disk/by-id/a".to_owned())),
-    );
-    disks.insert(
-        "bbb".to_owned(),
-        DiskMember::from_by_id(ByIdPath("/dev/disk/by-id/b".to_owned())),
-    );
-    PoolMembership { disks }
+    let mut m = PoolMembership::empty();
+    m.insert(
+        LuksUuid::parse("00000000-0000-0000-0000-0000000002bc").unwrap(),
+        DiskMember::new(
+            DiskName::parse("aaa").unwrap(),
+            ByIdPath::parse("/dev/disk/by-id/a").unwrap(),
+        ),
+    )
+    .unwrap();
+    m.insert(
+        LuksUuid::parse("00000000-0000-0000-0000-0000000002bd").unwrap(),
+        DiskMember::new(
+            DiskName::parse("bbb").unwrap(),
+            ByIdPath::parse("/dev/disk/by-id/b").unwrap(),
+        ),
+    )
+    .unwrap();
+    m
 }
 
 // ---------------------------------------------------------------------------
 // Composite runners
 // ---------------------------------------------------------------------------
 
-/// Add the mounted-pool FSID probe result without seeding per-device
-/// cryptsetup probes that lock tests deliberately omit.
+/// Add the mounted-pool probe results. `probe_pool` calls
+/// `BtrfsFilesystemShow` and then a per-device cryptsetup status +
+/// luksUUID pair for each device. The recording-runner fixtures
+/// historically only seeded the FsidOnly probe surface; for the Full
+/// arm to drive UUID-based classification the per-device probes are
+/// also seeded by default. Tests that intentionally trigger the
+/// FsidOnly fallback override one of these to fail; tests that want
+/// a stranded-mapper scenario add extra per-mapper probes.
 pub(crate) fn lock_with_fsid_probe_mocks(runner: MockRunner) -> MockRunner {
-    runner.with_output(
+    let runner = runner.with_output(
         CmdRequest::BtrfsFilesystemShow {
             mount_point: MountPoint("/mnt/storage".to_owned()),
         },
@@ -153,7 +172,21 @@ pub(crate) fn lock_with_fsid_probe_mocks(runner: MockRunner) -> MockRunner {
             stderr: String::new(),
             exit_status: 0,
         },
-    )
+    );
+    // Per-device probe responses for the Full-arm classifier. The
+    // member UUIDs are the same ones lock_test_membership inserts so
+    // probe_pool -> by_uuid yields MemberOwned.
+    runner
+        .with_mapper_open(
+            "braid-aaa",
+            "/dev/disk/by-id/a",
+            "00000000-0000-0000-0000-0000000002bc",
+        )
+        .with_mapper_open(
+            "braid-bbb",
+            "/dev/disk/by-id/b",
+            "00000000-0000-0000-0000-0000000002bd",
+        )
 }
 
 /// Pre-built mounted lock runner with umount and scoped forget success,

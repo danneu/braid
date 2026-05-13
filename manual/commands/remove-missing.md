@@ -64,10 +64,10 @@ sudo braid remove-missing --missing-id 3 --yes
 
 1. Probes the pool to verify missing devices exist
 2. Validates that the specified devid is actually a missing device (not a live one)
-3. Resolves the devid to a disk name in pool.json
+3. Resolves the btrfs devid to the UUID-keyed pool member whose persisted prior devid matches
 4. Shows a confirmation prompt with the disk name, devid, and resulting pool size
 5. Writes a `PoolMutation` journal and runs `btrfs device remove <devid>` to clear the missing device entry
-6. Updates pool.json to remove the disk entry, then advances the journal to post-remove-missing maintenance
+6. Updates pool.json to remove the member's UUID entry, then advances the journal to post-remove-missing maintenance
 7. If this was the last missing device and 2+ disks remain: runs a soft RAID1 balance (`-dconvert=raid1,soft -mconvert=raid1,soft`) to restore redundancy on any single-profile chunks created during degraded operation
 8. Clears the journal
 

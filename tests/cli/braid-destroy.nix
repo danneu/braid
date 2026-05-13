@@ -8,9 +8,9 @@
 # 74feca5 moved pool membership from /etc/braid/config.json to
 # /var/lib/braid/pool.json. The script nuked local state while leaving LUKS
 # headers intact on every disk. This test pins the fix to pool.json as the
-# source of truth, the non-empty by_id validator, and the "reject before
-# braid lock" ordering that keeps a malformed membership from unmounting
-# the live pool.
+# source of truth, the UUID-keyed schema sniff, the non-empty name/by_id
+# validator, and the "reject before braid lock" ordering that keeps a
+# malformed membership from unmounting the live pool.
 #
 # Dependencies: braid add (builds the test pool).
 { braid }:

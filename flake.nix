@@ -143,6 +143,11 @@
               braid = linuxCrane.braid;
             }
           );
+          braid-discover-migration = pkgs.testers.nixosTest (
+            import ./tests/cli/braid-discover-migration.nix {
+              braid = linuxCrane.braid;
+            }
+          );
           multi-add = pkgs.testers.nixosTest (
             import ./tests/cli/multi-add.nix {
               braid = linuxCrane.braid;
@@ -394,6 +399,11 @@
           );
           braid-lock = pkgs.testers.nixosTest (
             import ./tests/cli/braid-lock.nix {
+              braid = linuxCrane.braid;
+            }
+          );
+          luks-mapper-drift = pkgs.testers.nixosTest (
+            import ./tests/cli/luks-mapper-drift.nix {
               braid = linuxCrane.braid;
             }
           );

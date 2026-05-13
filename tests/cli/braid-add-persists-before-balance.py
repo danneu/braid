@@ -12,6 +12,18 @@
 # while the balance is still running and pending-op.json still exists.
 
 import json
+import uuid
+
+
+def member_names(pool):
+    return {member["name"] for member in pool["disks"].values()}
+
+
+def member(pool, name):
+    for entry in pool["disks"].values():
+        if entry["name"] == name:
+            return entry
+    raise AssertionError(f"{name} missing from pool.json: {pool}")
 import re
 import shlex
 import time
@@ -88,13 +100,23 @@ with subtest("pool.json already contains the new disk during balance"):
     pool_json = machine.succeed("cat /var/lib/braid/pool.json")
     print(f"=== pool.json during balance ===\n{pool_json}")
     membership = json.loads(pool_json)
-    disks = membership["disks"]
 
-    assert "disk1" in disks, f"disk1 missing from pool.json:\n{pool_json}"
-    assert "disk2" in disks, f"disk2 missing from pool.json:\n{pool_json}"
+    assert "disk1" in member_names(membership), f"disk1 missing from pool.json:\n{pool_json}"
+    assert "disk2" in member_names(membership), f"disk2 missing from pool.json:\n{pool_json}"
 
-    disk2 = disks["disk2"]
-    assert disk2.get("luks_uuid"), f"disk2 luks_uuid missing:\n{pool_json}"
+    disk2_uuid = next(
+        uuid
+        for uuid, entry in membership["disks"].items()
+        if entry["name"] == "disk2"
+    )
+    disk2 = member(membership, "disk2")
+    assert disk2_uuid, f"disk2 UUID key missing:\n{pool_json}"
+    assert str(uuid.UUID(disk2_uuid)) == disk2_uuid, (
+        f"disk2 pool.json key is not canonical LUKS UUID form:\n{pool_json}"
+    )
+    assert "luks_uuid" not in disk2, (
+        f"disk2 must not carry duplicate value-side luks_uuid:\n{pool_json}"
+    )
     assert disk2.get("devid") is not None, f"disk2 devid missing:\n{pool_json}"
     assert disk2.get("added_at"), f"disk2 added_at missing:\n{pool_json}"
 

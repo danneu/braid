@@ -13,7 +13,7 @@ use crate::luks::{
     probe_pool_keyfile_enrollment, read_passphrase_with,
 };
 use crate::mapper_close::close_mapper_with_retry;
-use crate::membership::{self, PoolMembership};
+use crate::membership::{self, DiskMember, LuksUuidMap, PoolMembership};
 use crate::parse::btrfs_filesystem_show::{DeviceBtrfsProbe, classify_btrfs_probe};
 use crate::parse::parse_btrfs_filesystem_show;
 use crate::pool::{
@@ -27,9 +27,17 @@ use crate::progress::RealSleeper;
 use crate::state_paths::StatePaths;
 use crate::status_tag::{StatusTag, color_enabled_for_stderr, emit_status, status_line};
 use crate::types::*;
-use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
+/// Errors raised by `braid add` planning and execution. `DuplicateUuid` is
+/// the discover-symmetric refusal for the cloned-disk planning path:
+/// raised from planning BEFORE any `LuksUuidMap::insert` on the journal
+/// `targets` map AND BEFORE `PoolMembership::insert`, so the operator
+/// message names both colliding `(name, by_id)` pairs explicitly rather
+/// than falling through to the generic `MembershipError::Conflict`.
+/// `ManagedFormatFlag` surfaces a rejected `--luks-format-arg` through
+/// the `AddError` chain so the CLI matches a single error type at the
+/// boundary.
 #[derive(Debug, thiserror::Error)]
 pub enum AddError {
     #[error("{0}")]
@@ -40,6 +48,29 @@ pub enum AddError {
          before trusting `braid monitor`."
     )]
     AckCleanupFailed { stage: &'static str, detail: String },
+    /// Two adoption targets in a single `braid add` invocation point at
+    /// distinct by-id paths but share a LUKS UUID -- the dd-cloned-disk
+    /// case. Raised before journal write, before any
+    /// `CryptsetupLuksFormat`, and before any `PoolMembership::insert`,
+    /// so the operator-facing message names both by-id paths and
+    /// suggests cloning as the typical cause. Mirrors
+    /// `DiscoverError::DuplicateUuid`.
+    #[error(
+        "duplicate LUKS UUID across add targets: braid-{name1} ({by_id1}) and braid-{name2} ({by_id2}) share UUID {uuid} -- relabel or detach one before retrying (this typically indicates a dd-cloned disk)"
+    )]
+    DuplicateUuid {
+        uuid: LuksUuid,
+        name1: DiskName,
+        by_id1: ByIdPath,
+        name2: DiskName,
+        by_id2: ByIdPath,
+    },
+    /// Operator passed `--luks-format-arg` containing a braid-managed
+    /// cryptsetup option (`--uuid`, `--label`). Surfaced through
+    /// `AddError` (rather than `LuksFormatExtraOptsError` directly) so
+    /// the CLI matches one error type at the boundary.
+    #[error("{0}")]
+    ManagedFormatFlag(#[from] LuksFormatExtraOptsError),
     #[error("probe error: {0}")]
     Probe(#[from] ProbeError),
     #[error("luks error: {0}")]
@@ -184,7 +215,7 @@ fn identity_to_error(identity: &AddLuksIdentity, name: &str) -> Option<AddError>
 /// Call `disarm()` on the success path to skip cleanup.
 struct LuksCleanupGuard<'a, R: CommandRunner> {
     runner: &'a R,
-    mappers: Vec<String>,
+    mappers: Vec<MapperName>,
     armed: bool,
 }
 
@@ -197,7 +228,7 @@ impl<'a, R: CommandRunner> LuksCleanupGuard<'a, R> {
         }
     }
 
-    fn track(&mut self, mapper: String) {
+    fn track(&mut self, mapper: MapperName) {
         self.mappers.push(mapper);
     }
 
@@ -214,7 +245,10 @@ impl<R: CommandRunner> Drop for LuksCleanupGuard<'_, R> {
         let color_enabled = color_enabled_for_stderr();
         let sleeper = RealSleeper;
         for mapper in self.mappers.iter().rev() {
-            let label = mapper.strip_prefix("braid-").unwrap_or(mapper);
+            let label = mapper
+                .as_str()
+                .strip_prefix("braid-")
+                .unwrap_or(mapper.as_str());
             emit_status(&status_line(
                 StatusTag::Wait,
                 color_enabled,
@@ -247,7 +281,7 @@ struct PoolAddExecutionTarget {
 
 #[derive(Debug, Clone)]
 struct AddConfirmDiskPlan {
-    name: String,
+    name: DiskName,
     by_id: ByIdPath,
     needs_luks_format: bool,
 }
@@ -260,23 +294,26 @@ struct AddCredentialPrelude {
     pool_target_count: usize,
 }
 
+/// Fresh-LUKS target adopted into `AddWorkPlan`. `luks_uuid` is generated
+/// at planning time via `LuksUuid::new_v4()` so the journal records the
+/// authoritative identity before `cryptsetup luksFormat` runs, and so a
+/// mid-format crash and replay reformat under the same identity.
 #[derive(Debug, Clone)]
 struct FreshLuksTarget {
-    name: String,
+    name: DiskName,
     by_id: ByIdPath,
-    mapper_name: String,
+    mapper_name: MapperName,
     mapper_path: String,
-    luks_label: String,
-    luks_format_extra_opts: Vec<String>,
+    luks_uuid: LuksUuid,
+    luks_format_extra_opts: LuksFormatExtraOpts,
     enroll_key_file: Option<PathBuf>,
     header_backup_path: PathBuf,
 }
 
 #[derive(Debug, Clone)]
 struct RecoverableBraidTarget {
-    name: String,
+    name: DiskName,
     by_id: ByIdPath,
-    mapper_name: String,
     mapper_path: String,
     luks_uuid: LuksUuid,
     verified_pool_fsid: String,
@@ -295,9 +332,9 @@ struct RecoverableBraidTarget {
 
 #[derive(Debug, Clone)]
 struct ClosedPresentLuksCandidate {
-    name: String,
+    name: DiskName,
     by_id: ByIdPath,
-    mapper_name: String,
+    mapper_name: MapperName,
     mapper_path: String,
     luks_uuid: LuksUuid,
     /// Same semantics as `RecoverableBraidTarget::enroll_key_file`.
@@ -325,13 +362,29 @@ impl AddTargetWork {
             AddTargetWork::ClosedPresentLuks(target) => &target.mapper_path,
         }
     }
+
+    /// Borrow the target's display `DiskName`. Used by the sort helper
+    /// that builds the operator-visible iteration order; see
+    /// `AddWorkPlan::targets_sorted_by_name`.
+    fn name(&self) -> &DiskName {
+        match self {
+            AddTargetWork::Fresh(target) => &target.name,
+            AddTargetWork::OpenRecoverable(target) => &target.name,
+            AddTargetWork::ClosedPresentLuks(target) => &target.name,
+        }
+    }
 }
 
+/// Semantic add work plan. `initial_journal_targets` is keyed by
+/// `LuksUuid` so the journaled identity is the authoritative key from
+/// t=0; operator-visible iteration sorts by `DiskName` separately. The
+/// in-flight uniqueness assert runs once per target during planning
+/// before this map is committed.
 #[derive(Debug, Clone)]
 struct AddWorkPlan {
     prelude: AddCredentialPrelude,
     targets: Vec<AddTargetWork>,
-    initial_journal_targets: BTreeMap<String, journal::AddJournalTarget>,
+    initial_journal_targets: LuksUuidMap<journal::AddJournalTarget>,
     mount_point: MountPoint,
     pool_was_mounted: bool,
     existing_pool_device_count: usize,
@@ -353,17 +406,36 @@ impl AddWorkPlan {
             .collect()
     }
 
+    /// Build a `DiskName`-sorted view of `self.targets`. Every
+    /// operator-visible iteration of work-plan targets MUST iterate
+    /// this sorted view so progress lines and dry-run output do not
+    /// reorder on each fresh `braid add` (UUIDs are random per disk
+    /// for fresh targets, so a UUID-keyed iteration is effectively
+    /// random per invocation). Internal-only loops iterate `self.targets`
+    /// directly.
+    fn targets_sorted_by_name(&self) -> Vec<&AddTargetWork> {
+        let mut v: Vec<&AddTargetWork> = self.targets.iter().collect();
+        v.sort_by(|a, b| a.name().cmp(b.name()));
+        v
+    }
+
     fn render_steps(&self) -> Vec<Step> {
         let mut steps = Vec::new();
 
-        for target in &self.targets {
+        // Operator-visible iteration: sort targets by DiskName so dry-run
+        // preview ordering is independent of UUID-lex order.
+        let sorted_targets = self.targets_sorted_by_name();
+        for target in &sorted_targets {
             match target {
                 AddTargetWork::Fresh(target) => {
+                    let label = format!("braid-{}", target.name);
                     steps.push(Step {
                         risk: "destructive",
                         description: format!("LUKS format {}", target.by_id),
                         commands: vec![CmdRequest::CryptsetupLuksFormat {
-                            device: target.by_id.0.clone(),
+                            device: target.by_id.as_str().to_owned(),
+                            uuid: target.luks_uuid.clone(),
+                            label,
                             extra_opts: target.luks_format_extra_opts.clone(),
                         }],
                     });
@@ -371,11 +443,11 @@ impl AddWorkPlan {
                         steps.push(Step {
                             risk: "safe",
                             description: format!(
-                                "enroll keyfile → LUKS slot 1 on {}",
+                                "enroll keyfile -> LUKS slot 1 on {}",
                                 target.by_id
                             ),
                             commands: vec![CmdRequest::CryptsetupLuksAddKeyFile {
-                                device: target.by_id.0.clone(),
+                                device: target.by_id.as_str().to_owned(),
                                 key_file_path: kf.display().to_string(),
                             }],
                         });
@@ -383,19 +455,19 @@ impl AddWorkPlan {
                     steps.push(Step {
                         risk: "safe",
                         description: format!(
-                            "LUKS header backup → {}",
+                            "LUKS header backup -> {}",
                             target.header_backup_path.display()
                         ),
                         commands: vec![CmdRequest::CryptsetupLuksHeaderBackup {
-                            device: target.by_id.0.clone(),
+                            device: target.by_id.as_str().to_owned(),
                             backup_path: target.header_backup_path.display().to_string(),
                         }],
                     });
                     steps.push(Step {
                         risk: "safe",
-                        description: format!("LUKS open → {}", target.mapper_name),
+                        description: format!("LUKS open -> {}", target.mapper_name),
                         commands: vec![CmdRequest::CryptsetupLuksOpen {
-                            device: target.by_id.0.clone(),
+                            device: target.by_id.as_str().to_owned(),
                             mapper: target.mapper_name.clone(),
                         }],
                     });
@@ -419,11 +491,11 @@ impl AddWorkPlan {
                     steps.push(Step {
                         risk: "safe",
                         description: format!(
-                            "LUKS open + identity verification at execution time → {}",
+                            "LUKS open + identity verification at execution time -> {}",
                             target.mapper_name
                         ),
                         commands: vec![CmdRequest::CryptsetupLuksOpen {
-                            device: target.by_id.0.clone(),
+                            device: target.by_id.as_str().to_owned(),
                             mapper: target.mapper_name.clone(),
                         }],
                     });
@@ -460,7 +532,7 @@ impl AddWorkPlan {
                 });
                 steps.push(Step {
                     risk: "safe",
-                    description: format!("mount → {}", self.mount_point),
+                    description: format!("mount -> {}", self.mount_point),
                     commands: vec![CmdRequest::Mount {
                         device: mapper_paths[0].clone(),
                         mount_point: self.mount_point.clone(),
@@ -480,7 +552,7 @@ impl AddWorkPlan {
                 });
                 steps.push(Step {
                     risk: "safe",
-                    description: format!("mount → {}", self.mount_point),
+                    description: format!("mount -> {}", self.mount_point),
                     commands: vec![CmdRequest::Mount {
                         device: mapper_path,
                         mount_point: self.mount_point.clone(),
@@ -488,7 +560,9 @@ impl AddWorkPlan {
                 });
             }
         } else {
-            for target in &self.targets {
+            // Operator-visible iteration: sort by DiskName for the device-add
+            // step ordering shown in dry-run preview.
+            for target in &sorted_targets {
                 if let AddTargetWork::Fresh(target) = target {
                     steps.push(Step {
                         risk: "safe",
@@ -532,17 +606,17 @@ fn push_returned_disk_enrollment_steps(
 ) {
     steps.push(Step {
         risk: "safe",
-        description: format!("enroll keyfile → LUKS slot 1 on {}", by_id),
+        description: format!("enroll keyfile -> LUKS slot 1 on {}", by_id),
         commands: vec![CmdRequest::CryptsetupLuksAddKeyFile {
-            device: by_id.0.clone(),
+            device: by_id.as_str().to_owned(),
             key_file_path: key_file.display().to_string(),
         }],
     });
     steps.push(Step {
         risk: "safe",
-        description: format!("LUKS header backup → {}", header_backup_path.display()),
+        description: format!("LUKS header backup -> {}", header_backup_path.display()),
         commands: vec![CmdRequest::CryptsetupLuksHeaderBackup {
-            device: by_id.0.clone(),
+            device: by_id.as_str().to_owned(),
             backup_path: header_backup_path.display().to_string(),
         }],
     });
@@ -572,6 +646,11 @@ fn forced_returned_device_add_step(
     }
 }
 
+/// Per-invocation `braid add` configuration. `luks_format_extra_opts` is
+/// the raw CLI vector; the planner parses it into a single
+/// `LuksFormatExtraOpts` early so a managed flag (`--uuid`/`--label`) is
+/// refused before any probing, journal write, or `CryptsetupLuksFormat`.
+/// The same vector flows through `replace`'s symmetric path.
 pub struct AddParams<'a> {
     pub config_path: &'a Path,
     pub disk_specs: &'a [String],
@@ -609,26 +688,32 @@ fn format_add_missing_devices_warning(missing_count: u64) -> String {
 }
 
 /// Labels the disk set for no-op / done messages. Single-disk returns the
-/// bare name; multi-disk joins names with `, `.
-fn format_disk_name_list(names: &[String]) -> String {
+/// bare name; multi-disk joins names with `, `. The slice is iterated in
+/// input order so the operator-visible list matches the spec order the
+/// operator typed.
+fn format_disk_name_list(names: &[DiskName]) -> String {
     if names.len() == 1 {
-        names[0].clone()
+        names[0].to_string()
     } else {
-        names.join(", ")
+        names
+            .iter()
+            .map(|n| n.as_str().to_owned())
+            .collect::<Vec<_>>()
+            .join(", ")
     }
 }
 
 /// Returns the no-op "nothing to do" message, without any channel-specific
 /// formatting. Shared by the dry-run `PreviewNote::Info` and the real-run
 /// stderr `eprintln!` so both paths see byte-identical wording.
-fn format_add_noop(names: &[String]) -> String {
+fn format_add_noop(names: &[DiskName]) -> String {
     format!(
         "Nothing to do -- {} already in pool.",
         format_disk_name_list(names)
     )
 }
 
-fn format_add_done(names: &[String]) -> String {
+fn format_add_done(names: &[DiskName]) -> String {
     let verb = if names.len() == 1 { "is" } else { "are" };
     format!(
         "Done. {} {verb} now part of the pool.",
@@ -660,8 +745,8 @@ pub struct AddPlan {
     pub notes: Vec<PreviewNote>,
     work_plan: AddWorkPlan,
     pub config: Config,
-    pub parsed: Vec<(String, ByIdPath)>,
-    pub names: Vec<String>,
+    pub parsed: Vec<(DiskName, ByIdPath)>,
+    pub names: Vec<DiskName>,
     pub by_ids: Vec<ByIdPath>,
     pub probed: Vec<ConfigDisk>,
     pub pool: PoolState,
@@ -715,10 +800,10 @@ impl AddPlan {
                 .confirm_disks
                 .iter()
                 .map(|disk| {
-                    let hw = confirm::query_disk_hw_info(runner, &disk.by_id.0);
+                    let hw = confirm::query_disk_hw_info(runner, disk.by_id.as_str());
                     AddConfirmDisk {
                         name: disk.name.as_str(),
-                        by_id: &disk.by_id.0,
+                        by_id: disk.by_id.as_str(),
                         hw,
                         needs_luks_format: disk.needs_luks_format,
                     }
@@ -782,7 +867,13 @@ impl AddPlan {
         let mut needs_pool_add: Vec<PoolAddExecutionTarget> = Vec::new();
         let mut journal_targets = self.work_plan.initial_journal_targets.clone();
 
-        for target in &self.work_plan.targets {
+        // Operator-visible iteration: sort by DiskName before emitting
+        // the "verified as pool member" note. The internal needs_pool_add
+        // push order can follow input order without UX impact because
+        // mapper_paths flow through later loops that the sorted-vec
+        // contract covers separately.
+        let sorted_targets = self.work_plan.targets_sorted_by_name();
+        for target in &sorted_targets {
             if let AddTargetWork::OpenRecoverable(target) = target {
                 eprintln!(
                     "note: braid-labeled disk '{}' verified as pool member. \
@@ -796,7 +887,9 @@ impl AddPlan {
             }
         }
 
-        for target in &self.work_plan.targets {
+        // Operator-visible iteration: sort by DiskName for the
+        // closed-PresentLuks unlock+identity progress lines.
+        for target in &sorted_targets {
             let AddTargetWork::ClosedPresentLuks(target) = target else {
                 continue;
             };
@@ -805,7 +898,7 @@ impl AddPlan {
                 color_enabled,
                 &format!("disk {}: unlocking...", target.name),
             ));
-            if ensure_luks_open(runner, &target.name, &target.by_id, &passphrase)?
+            if ensure_luks_open(runner, target.name.as_str(), &target.by_id, &passphrase)?
                 == OpenOutcome::Opened
             {
                 luks_guard.track(target.mapper_name.clone());
@@ -816,9 +909,13 @@ impl AddPlan {
                 &format!("disk {}: unlocked", target.name),
             ));
 
-            let mapper = MapperName(target.mapper_name.clone());
-            let identity = classify_braid_disk_fsid(runner, &target.name, &mapper, &self.pool)?;
-            if let Some(err) = identity_to_error(&identity, &target.name) {
+            let identity = classify_braid_disk_fsid(
+                runner,
+                target.name.as_str(),
+                &target.mapper_name,
+                &self.pool,
+            )?;
+            if let Some(err) = identity_to_error(&identity, target.name.as_str()) {
                 return Err(err);
             }
             match identity {
@@ -837,7 +934,6 @@ impl AddPlan {
                     let verified = RecoverableBraidTarget {
                         name: target.name.clone(),
                         by_id: target.by_id.clone(),
-                        mapper_name: target.mapper_name.clone(),
                         mapper_path: target.mapper_path.clone(),
                         luks_uuid: target.luks_uuid.clone(),
                         verified_pool_fsid,
@@ -845,7 +941,11 @@ impl AddPlan {
                         header_backup_path: target.header_backup_path.clone(),
                     };
                     journal_targets
-                        .insert(verified.name.clone(), recoverable_journal_target(&verified));
+                        .insert(
+                            verified.luks_uuid.clone(),
+                            recoverable_journal_target(&verified),
+                        )
+                        .map_err(|conflict| target_uuid_map_conflict_to_validation(&conflict))?;
                     needs_pool_add.push(PoolAddExecutionTarget {
                         mapper_path: verified.mapper_path,
                         force: true,
@@ -884,12 +984,24 @@ impl AddPlan {
             })?;
 
         // All identity checks passed. Write journal before irreversible disk operations.
+        // Build target_membership via the typed PoolMembership::insert
+        // path (four-axis uniqueness invariant: UUID + name + by-id +
+        // non-None devid). The pre-write `assert_target_uuid_unique`
+        // gate ran during planning so UUID collisions were already
+        // refused with `AddError::DuplicateUuid`; this insert is the
+        // defense-in-depth backstop.
         let mut target_membership = self.pool_membership.clone();
-        for (name, target) in &journal_targets {
-            target_membership.disks.insert(
-                name.clone(),
-                membership::DiskMember::from_by_id(target.by_id.clone()),
-            );
+        // Internal iteration: operator-visible output uses the sorted
+        // vec built above (sorted_targets) and the sorted journal vec
+        // built below for Pass-3 keyfile enrollment progress lines.
+        for (uuid, target) in &journal_targets {
+            let member = DiskMember {
+                name: target.name.clone(),
+                by_id: target.by_id.clone(),
+                devid: None,
+                added_at: None,
+            };
+            target_membership.insert(uuid.clone(), member)?;
         }
         let journal = journal::build_journal(
             self.pool_membership.clone(),
@@ -903,14 +1015,17 @@ impl AddPlan {
             .map_err(|e| AddError::Validation(e.to_string()))?;
 
         // Pass 2: execute irreversible operations for fresh disks.
-        for target in &self.work_plan.targets {
+        // Operator-visible iteration: sort by DiskName so progress
+        // lines stay in alphabetical order regardless of UUID-lex
+        // order of the journal map.
+        for target in &sorted_targets {
             let AddTargetWork::Fresh(target) = target else {
                 continue;
             };
-            let name = target.name.as_str();
+            let name = &target.name;
 
             if !matches!(
-                journal_targets.get(name).map(|t| &t.mode),
+                journal_targets.get(&target.luks_uuid).map(|t| &t.mode),
                 Some(journal::AddJournalMode::FreshLuks { .. })
             ) {
                 return Err(AddError::Validation(format!(
@@ -919,6 +1034,7 @@ impl AddPlan {
                 )));
             }
 
+            let label = format!("braid-{}", name);
             eprint!(
                 "{}",
                 status_line(
@@ -929,8 +1045,10 @@ impl AddPlan {
             );
             luks_format(
                 runner,
-                &target.by_id.0,
+                target.by_id.as_str(),
                 &passphrase,
+                &target.luks_uuid,
+                &label,
                 &target.luks_format_extra_opts,
             )?;
             eprint!(
@@ -948,7 +1066,7 @@ impl AddPlan {
                     color_enabled,
                     &format!("disk {name}: enrolling keyfile in slot 1..."),
                 ));
-                crate::luks::enroll_key_file(runner, &target.by_id.0, &passphrase, kf)?;
+                crate::luks::enroll_key_file(runner, target.by_id.as_str(), &passphrase, kf)?;
                 emit_status(&status_line(
                     StatusTag::Ok,
                     color_enabled,
@@ -958,8 +1076,8 @@ impl AddPlan {
 
             let backup_path = backup_luks_header_post_mutation(
                 runner,
-                &target.by_id.0,
-                &target.mapper_name,
+                target.by_id.as_str(),
+                target.mapper_name.0.as_str(),
                 params.paths,
             )?;
             eprintln!("LUKS header backed up: {}", backup_path.display());
@@ -972,7 +1090,9 @@ impl AddPlan {
                     &format!("disk {name}: unlocking..."),
                 )
             );
-            if ensure_luks_open(runner, name, &target.by_id, &passphrase)? == OpenOutcome::Opened {
+            if ensure_luks_open(runner, name.as_str(), &target.by_id, &passphrase)?
+                == OpenOutcome::Opened
+            {
                 luks_guard.track(target.mapper_name.clone());
             }
             eprint!(
@@ -1000,7 +1120,13 @@ impl AddPlan {
         // because verified-`ClosedPresentLuks` targets only land in
         // that map (not in `work_plan.targets`); driving off the
         // journal also matches what recovery replays.
-        for (name, journal_target) in &journal_targets {
+        //
+        // Operator-visible iteration: sort by DiskName so per-target
+        // progress lines are alphabetical.
+        let mut sorted_journal: Vec<(&LuksUuid, &journal::AddJournalTarget)> =
+            journal_targets.iter().collect();
+        sorted_journal.sort_by(|a, b| a.1.name.cmp(&b.1.name));
+        for (_, journal_target) in &sorted_journal {
             let journal::AddJournalMode::RecoverableBraidLabeled {
                 enroll_key_file: Some(kf),
                 ..
@@ -1008,21 +1134,23 @@ impl AddPlan {
             else {
                 continue;
             };
+            let name = &journal_target.name;
             emit_status(&status_line(
                 StatusTag::Wait,
                 color_enabled,
                 &format!("disk {name}: enrolling keyfile in slot 1..."),
             ));
-            crate::luks::enroll_key_file(runner, &journal_target.by_id.0, &passphrase, kf)?;
+            crate::luks::enroll_key_file(runner, journal_target.by_id.as_str(), &passphrase, kf)?;
             emit_status(&status_line(
                 StatusTag::Ok,
                 color_enabled,
                 &format!("disk {name}: keyfile enrolled in slot 1"),
             ));
+            let mapper = mapper_name(name.as_str());
             let backup_path = backup_luks_header_post_mutation(
                 runner,
-                &journal_target.by_id.0,
-                &journal_target.mapper_name,
+                journal_target.by_id.as_str(),
+                mapper.0.as_str(),
                 params.paths,
             )?;
             eprintln!("LUKS header backed up: {}", backup_path.display());
@@ -1057,10 +1185,14 @@ impl AddPlan {
             })?;
 
             // Bootstrap post-commit persist: write pool.json after mkfs + mount.
-            // Enrich with live metadata (luks_uuid, devid) from pool probe.
+            // Enrich with live metadata (devid) from pool probe.
+            // `enrich_from_pool_state` correlates by LUKS UUID only and
+            // surfaces any foreign UUIDs through `EnrichmentReport`;
+            // downstream consumption of `foreign` lives in doctor/status
+            // (Phase 5), so the report is discarded here.
             let mut final_membership = journal.target_membership.clone();
             if let Ok(pool_after) = probe_pool(runner, fs, mount_point) {
-                membership::enrich_from_pool_state(&pool_after, &mut final_membership);
+                let _ = membership::enrich_from_pool_state(&mut final_membership, &pool_after)?;
             }
             membership::save_membership(&final_membership, params.paths)?;
             // Order matters: save_membership before clear_journal. If
@@ -1098,9 +1230,13 @@ impl AddPlan {
             // the long post-add balance while leaving the journal in place so
             // recovery still knows the balance is owed if interrupted.
             let pool_after = probe_pool(runner, fs, mount_point)?;
-            for target in journal_targets.values() {
-                let mapper = &target.mapper_name;
-                if !pool_after.devices.iter().any(|d| d.mapper.0 == *mapper) {
+            // Internal iteration: the per-target presence check runs
+            // for every UUID-keyed target; the operator-visible error
+            // body names the missing target by its derived mapper
+            // (`braid-<name>`).
+            for target in journal_targets.iter().map(|(_, t)| t) {
+                let mapper = mapper_name(target.name.as_str());
+                if !pool_after.devices.iter().any(|d| d.mapper == mapper) {
                     return Err(AddError::Validation(format!(
                         "disk '{}' was not found in the live pool after add",
                         mapper
@@ -1108,7 +1244,7 @@ impl AddPlan {
                 }
             }
             let mut final_membership = journal.target_membership.clone();
-            membership::enrich_from_pool_state(&pool_after, &mut final_membership);
+            let _ = membership::enrich_from_pool_state(&mut final_membership, &pool_after)?;
             membership::save_membership(&final_membership, params.paths)?;
 
             let mut balance_journal = journal.clone();
@@ -1155,6 +1291,9 @@ impl AddPlan {
 /// and the semantic add work planner. On success, every accumulated note lives
 /// on `plan.notes`; on failure after note accumulation, notes survive on
 /// `PlanFailure::notes` so `cmd_add` can render them to stderr before the error.
+// CLI planning path -- preserving preview notes with the full typed error keeps
+// diagnostics local to `cmd_add`; boxing only this branch would churn callers.
+#[allow(clippy::result_large_err)]
 pub fn plan_add<R: CommandRunner + Sync, F: Filesystem + ?Sized>(
     runner: &R,
     fs: &F,
@@ -1174,25 +1313,37 @@ pub fn plan_add<R: CommandRunner + Sync, F: Filesystem + ?Sized>(
         Err(e) => return Err(PlanFailure::empty(e.into())),
     };
 
-    // Parse disk specs: name=by_id
-    let parsed: Vec<(String, ByIdPath)> = match params
+    // Validate `--luks-format-arg` at the CLI boundary BEFORE any
+    // probing, journal write, or `cryptsetup luksFormat`. A managed
+    // token (`--uuid`/`--label`) surfaces as
+    // `AddError::ManagedFormatFlag` so the CLI matches one error type
+    // at the boundary.
+    let luks_format_extra_opts = match LuksFormatExtraOpts::parse(params.luks_format_extra_opts) {
+        Ok(o) => o,
+        Err(e) => return Err(PlanFailure::empty(AddError::ManagedFormatFlag(e))),
+    };
+
+    // Parse disk specs into typed (DiskName, ByIdPath). Validation
+    // (name character set, by-id prefix) happens at this boundary; the
+    // rest of the planner consumes the typed values.
+    let parsed: Vec<(DiskName, ByIdPath)> = match params
         .disk_specs
         .iter()
         .map(|s| membership::parse_disk_spec(s))
         .collect::<Result<Vec<_>, _>>()
     {
         Ok(v) => v,
-        Err(e) => return Err(PlanFailure::empty(e.into())),
+        Err(e) => return Err(PlanFailure::empty(AddError::Validation(e.to_string()))),
     };
 
-    let names: Vec<String> = parsed.iter().map(|(n, _)| n.clone()).collect();
+    let names: Vec<DiskName> = parsed.iter().map(|(n, _)| n.clone()).collect();
     let by_ids: Vec<ByIdPath> = parsed.iter().map(|(_, b)| b.clone()).collect();
 
-    // Reject duplicate names upfront
+    // Reject duplicate names upfront (by typed DiskName).
     {
-        let mut seen = std::collections::HashSet::new();
+        let mut seen: std::collections::HashSet<&DiskName> = std::collections::HashSet::new();
         for name in &names {
-            if !seen.insert(name.as_str()) {
+            if !seen.insert(name) {
                 return Err(PlanFailure::empty(AddError::Validation(format!(
                     "duplicate disk name: '{name}'"
                 ))));
@@ -1206,12 +1357,12 @@ pub fn plan_add<R: CommandRunner + Sync, F: Filesystem + ?Sized>(
     // fails fast with no side effects. Compares raw strings only -- symlink
     // alias resolution is out of scope.
     {
-        let mut seen = std::collections::HashSet::new();
+        let mut seen: std::collections::HashSet<&str> = std::collections::HashSet::new();
         for by_id in &by_ids {
-            if !seen.insert(by_id.0.as_str()) {
+            if !seen.insert(by_id.as_str()) {
                 return Err(PlanFailure::empty(AddError::Validation(format!(
                     "duplicate by_id: '{}'",
-                    by_id.0
+                    by_id
                 ))));
             }
         }
@@ -1223,17 +1374,55 @@ pub fn plan_add<R: CommandRunner + Sync, F: Filesystem + ?Sized>(
         return Err(PlanFailure::empty(AddError::Validation(e.to_string())));
     }
 
-    // Load existing membership (or empty if first add)
+    // Load existing membership (or empty if pool.json absent). A
+    // hard-corrupt pool.json fails closed via `MembershipError::Corrupt`;
+    // a missing file is the legitimate bootstrap case and maps to
+    // `PoolMembership::empty()`.
     let pool_membership = match membership::load_membership(params.paths) {
         Ok(m) => m,
-        Err(membership::MembershipError::NotFound(_)) => PoolMembership::empty(),
+        Err(membership::MembershipError::Io { source, .. })
+            if source.kind() == std::io::ErrorKind::NotFound =>
+        {
+            PoolMembership::empty()
+        }
         Err(e) => return Err(PlanFailure::empty(e.into())),
     };
 
-    // Validate no conflicts
-    for (name, by_id) in &parsed {
-        if let Err(e) = membership::validate_no_conflicts(&pool_membership, name, &by_id.0) {
-            return Err(PlanFailure::empty(e.into()));
+    // Route conflict-detection through `PoolMembership::insert` on a
+    // throwaway clone. This enforces the full four-axis uniqueness
+    // invariant (UUID + name + by-id + non-None devid) in one place;
+    // the historical `validate_no_conflicts` checked only name + by-id
+    // and is gone from the membership API. Exact existing members are
+    // allowed through so the planner can classify them as the documented
+    // already-in-pool no-op.
+    {
+        let mut prospective = pool_membership.clone();
+        // Use placeholder UUIDs sentinel-seeded from each spec's by_id
+        // string so two specs hitting the same existing-name/by-id
+        // produce distinct prospective UUIDs and the actual collision
+        // surface is the name/by-id axis we mean to test.
+        for (i, (name, by_id)) in parsed.iter().enumerate() {
+            let placeholder = LuksUuid::parse(&format!(
+                "fffffff{:01x}-ffff-ffff-ffff-{:012x}",
+                i & 0xf,
+                (i as u64) + 1,
+            ))
+            .expect("placeholder UUID is canonical");
+            let member = DiskMember {
+                name: name.clone(),
+                by_id: by_id.clone(),
+                devid: None,
+                added_at: None,
+            };
+            if pool_membership
+                .by_name(name)
+                .is_some_and(|(_, existing)| &existing.name == name && &existing.by_id == by_id)
+            {
+                continue;
+            }
+            if let Err(e) = prospective.insert(placeholder, member) {
+                return Err(PlanFailure::empty(e.into()));
+            }
         }
     }
 
@@ -1241,7 +1430,7 @@ pub fn plan_add<R: CommandRunner + Sync, F: Filesystem + ?Sized>(
     let probed: Vec<ConfigDisk> = match names
         .iter()
         .zip(by_ids.iter())
-        .map(|(name, by_id)| probe_config_disk(runner, fs, name.as_str(), by_id))
+        .map(|(name, by_id)| probe_config_disk(runner, fs, name, by_id))
         .collect::<Result<Vec<_>, _>>()
     {
         Ok(v) => v,
@@ -1321,19 +1510,19 @@ pub fn plan_add<R: CommandRunner + Sync, F: Filesystem + ?Sized>(
     // guards -- any accumulated notes up to here (missing-devices,
     // keyfile-asymmetry) must survive on `PlanFailure::notes` so the caller can
     // render them to stderr before the error.
-    let names_refs: Vec<&str> = names.iter().map(String::as_str).collect();
     let by_ids_refs: Vec<&ByIdPath> = by_ids.iter().collect();
     let work_plan = match build_add_work_plan(
         runner,
         &AddStepsInput {
-            names: &names_refs,
+            names: &names,
             by_ids: &by_ids_refs,
             probed: &probed,
             pool: &pool,
             mount_point: config.mount_point(),
             paths: params.paths,
             enroll_key_file: params.enroll_key_file,
-            luks_format_extra_opts: params.luks_format_extra_opts,
+            luks_format_extra_opts: &luks_format_extra_opts,
+            pool_membership: &pool_membership,
         },
     ) {
         Ok(s) => s,
@@ -1394,14 +1583,17 @@ pub fn cmd_add<R: CommandRunner + Sync, F: Filesystem + ?Sized>(
 }
 
 struct AddStepsInput<'a> {
-    names: &'a [&'a str],
+    names: &'a [DiskName],
     by_ids: &'a [&'a ByIdPath],
     probed: &'a [ConfigDisk],
     pool: &'a PoolState,
     mount_point: &'a MountPoint,
     paths: &'a StatePaths,
     enroll_key_file: Option<&'a Path>,
-    luks_format_extra_opts: &'a [String],
+    luks_format_extra_opts: &'a LuksFormatExtraOpts,
+    /// Borrowed pool membership for the pre-journal-write uniqueness
+    /// assert on freshly generated / probed UUIDs.
+    pool_membership: &'a PoolMembership,
 }
 
 fn build_add_credential_prelude(input: &AddStepsInput<'_>) -> AddCredentialPrelude {
@@ -1411,7 +1603,7 @@ fn build_add_credential_prelude(input: &AddStepsInput<'_>) -> AddCredentialPrelu
         .zip(input.by_ids.iter())
         .zip(input.probed.iter())
         .map(|((name, by_id), probed)| AddConfirmDiskPlan {
-            name: (*name).to_owned(),
+            name: name.clone(),
             by_id: (*by_id).clone(),
             needs_luks_format: matches!(probed.state, ConfigDiskState::PresentNotLuks),
         })
@@ -1429,6 +1621,9 @@ fn build_add_credential_prelude(input: &AddStepsInput<'_>) -> AddCredentialPrelu
         .devices
         .iter()
         .map(|device| CredentialVerifyTarget {
+            // Display-only fallback: name_from_mapper here labels live
+            // pool members for the credential-verify error message,
+            // NOT for identity decisions.
             name: name_from_mapper(&device.mapper.0)
                 .unwrap_or(device.mapper.0.as_str())
                 .to_owned(),
@@ -1438,8 +1633,8 @@ fn build_add_credential_prelude(input: &AddStepsInput<'_>) -> AddCredentialPrelu
     verify_targets.extend(input.probed.iter().enumerate().filter_map(|(i, probed)| {
         match &probed.state {
             ConfigDiskState::PresentLuks { .. } => Some(CredentialVerifyTarget {
-                name: input.names[i].to_owned(),
-                device: input.by_ids[i].0.clone(),
+                name: input.names[i].as_str().to_owned(),
+                device: input.by_ids[i].as_str().to_owned(),
             }),
             ConfigDiskState::Absent | ConfigDiskState::PresentNotLuks => None,
         }
@@ -1453,25 +1648,30 @@ fn build_add_credential_prelude(input: &AddStepsInput<'_>) -> AddCredentialPrelu
     }
 }
 
+/// Build an `AddJournalTarget` for a fresh-format target. Identity
+/// lives in the `LuksUuidMap` key the planner uses for `insert`; this
+/// helper carries only the presentation `name`, hardware `by_id`, and
+/// mode-specific extras.
 fn fresh_journal_target(target: &FreshLuksTarget) -> journal::AddJournalTarget {
     journal::AddJournalTarget {
+        name: target.name.clone(),
         by_id: target.by_id.clone(),
-        mapper_name: target.mapper_name.clone(),
         mode: journal::AddJournalMode::FreshLuks {
-            luks_label: target.luks_label.clone(),
-            luks_format_extra_opts: target.luks_format_extra_opts.clone(),
+            extra_opts: target.luks_format_extra_opts.clone(),
             enroll_key_file: target.enroll_key_file.clone(),
         },
     }
 }
 
+/// Build an `AddJournalTarget` for a returning braid-labeled target.
+/// Identity is the `LuksUuid` key; `verified_pool_fsid` backstops the
+/// Add-recovery FSID cross-check that UUID alone does not subsume.
 fn recoverable_journal_target(target: &RecoverableBraidTarget) -> journal::AddJournalTarget {
     journal::AddJournalTarget {
+        name: target.name.clone(),
         by_id: target.by_id.clone(),
-        mapper_name: target.mapper_name.clone(),
         mode: journal::AddJournalMode::RecoverableBraidLabeled {
             verified_pool_fsid: target.verified_pool_fsid.clone(),
-            luks_uuid: target.luks_uuid.clone(),
             enroll_key_file: target.enroll_key_file.clone(),
         },
     }
@@ -1486,7 +1686,7 @@ fn recoverable_journal_target(target: &RecoverableBraidTarget) -> journal::AddJo
 /// silent-drop bug is structurally impossible on either path.
 fn resolve_existing_luks_enroll<R: CommandRunner>(
     runner: &R,
-    name: &str,
+    name: &DiskName,
     by_id: &ByIdPath,
     user_enroll_key_file: Option<&Path>,
 ) -> Result<Option<PathBuf>, AddError> {
@@ -1495,7 +1695,7 @@ fn resolve_existing_luks_enroll<R: CommandRunner>(
     };
     match crate::enroll_key_file::plan_single_disk_enrollment(
         runner,
-        name,
+        name.as_str(),
         by_id,
         kf,
         crate::enroll_key_file::EnrollmentPlanMode::ExistingKeyfile,
@@ -1513,14 +1713,17 @@ fn build_add_work_plan<R: CommandRunner>(
     input: &AddStepsInput<'_>,
 ) -> Result<AddWorkPlan, AddError> {
     let mut targets = Vec::new();
-    let mut initial_journal_targets: BTreeMap<String, journal::AddJournalTarget> = BTreeMap::new();
+    let mut initial_journal_targets: LuksUuidMap<journal::AddJournalTarget> = LuksUuidMap::new();
 
+    // Internal iteration: build the work plan in input spec order so
+    // each probe gets visited deterministically. Operator-visible
+    // output uses `AddWorkPlan::targets_sorted_by_name` (in
+    // `AddPlan::execute` and `render_steps`).
     for (i, p) in input.probed.iter().enumerate() {
-        let name = input.names[i];
+        let name = &input.names[i];
         let by_id = input.by_ids[i];
-        let mn = mapper_name(name);
-        let mapper_name = mn.0.clone();
-        let mapper_path = format!("/dev/mapper/{mapper_name}");
+        let mn = mapper_name(name.as_str());
+        let mapper_path = format!("/dev/mapper/{}", mn.0);
 
         match &p.state {
             ConfigDiskState::Absent => {
@@ -1530,24 +1733,36 @@ fn build_add_work_plan<R: CommandRunner>(
                 )));
             }
             ConfigDiskState::PresentNotLuks => {
-                let mut extra_opts = input.luks_format_extra_opts.to_vec();
-                let luks_label = format!("braid-{name}");
-                extra_opts.push("--label".into());
-                extra_opts.push(luks_label.clone());
+                // FreshLuks: pre-generate the LUKS UUID at planning so
+                // the journal records authoritative identity from t=0.
+                // A mid-format crash and replay reformats under the
+                // same identity.
+                let luks_uuid = LuksUuid::new_v4();
+                let header_backup_path = input
+                    .paths
+                    .luks_headers_dir()
+                    .join(format!("{}.luksheader", mn.0));
                 let target = FreshLuksTarget {
-                    name: name.to_owned(),
+                    name: name.clone(),
                     by_id: (*by_id).clone(),
-                    mapper_name,
+                    mapper_name: mn.clone(),
                     mapper_path,
-                    luks_label,
-                    luks_format_extra_opts: extra_opts,
+                    luks_uuid: luks_uuid.clone(),
+                    luks_format_extra_opts: input.luks_format_extra_opts.clone(),
                     enroll_key_file: input.enroll_key_file.map(Path::to_path_buf),
-                    header_backup_path: input
-                        .paths
-                        .luks_headers_dir()
-                        .join(format!("{}.luksheader", mn.0)),
+                    header_backup_path,
                 };
-                initial_journal_targets.insert(name.to_owned(), fresh_journal_target(&target));
+                assert_target_uuid_unique(
+                    &luks_uuid,
+                    input.pool_membership,
+                    input.pool,
+                    &initial_journal_targets,
+                    name,
+                    by_id,
+                )?;
+                initial_journal_targets
+                    .insert(luks_uuid, fresh_journal_target(&target))
+                    .map_err(|conflict| target_uuid_map_conflict_to_validation(&conflict))?;
                 targets.push(AddTargetWork::Fresh(target));
             }
             ConfigDiskState::PresentLuks {
@@ -1556,15 +1771,21 @@ fn build_add_work_plan<R: CommandRunner>(
                 label,
             } => {
                 // Preconditions always checked — no mapper required.
-                validate_braid_preconditions(name, &by_id.0, label.as_deref(), input.pool)?;
+                validate_braid_preconditions(
+                    name.as_str(),
+                    by_id.as_str(),
+                    label.as_deref(),
+                    input.pool,
+                )?;
 
                 let resolved_enroll_key_file =
                     resolve_existing_luks_enroll(runner, name, by_id, input.enroll_key_file)?;
 
                 if *mapper_open {
                     // Mapper is open — full classification without side effects
-                    let identity = classify_braid_disk_fsid(runner, name, &mn, input.pool)?;
-                    if let Some(err) = identity_to_error(&identity, name) {
+                    let identity =
+                        classify_braid_disk_fsid(runner, name.as_str(), &mn, input.pool)?;
+                    if let Some(err) = identity_to_error(&identity, name.as_str()) {
                         return Err(err);
                     }
                     match identity {
@@ -1577,9 +1798,8 @@ fn build_add_work_plan<R: CommandRunner>(
                                 )
                             })?;
                             let target = RecoverableBraidTarget {
-                                name: name.to_owned(),
+                                name: name.clone(),
                                 by_id: (*by_id).clone(),
-                                mapper_name,
                                 mapper_path,
                                 luks_uuid: uuid.clone(),
                                 verified_pool_fsid,
@@ -1589,19 +1809,46 @@ fn build_add_work_plan<R: CommandRunner>(
                                     .luks_headers_dir()
                                     .join(format!("{}.luksheader", mn.0)),
                             };
+                            assert_target_uuid_unique(
+                                &target.luks_uuid,
+                                input.pool_membership,
+                                input.pool,
+                                &initial_journal_targets,
+                                name,
+                                by_id,
+                            )?;
                             initial_journal_targets
-                                .insert(name.to_owned(), recoverable_journal_target(&target));
+                                .insert(
+                                    target.luks_uuid.clone(),
+                                    recoverable_journal_target(&target),
+                                )
+                                .map_err(|conflict| {
+                                    target_uuid_map_conflict_to_validation(&conflict)
+                                })?;
                             targets.push(AddTargetWork::OpenRecoverable(target));
                         }
                         _ => unreachable!("error variants handled by identity_to_error above"),
                     }
                 } else {
                     // Mapper closed — FSID verification deferred to execution time.
+                    // The deferred path stores the probed UUID; the
+                    // pre-write uniqueness assert covers
+                    // ClosedPresentLuks via the same gate that runs
+                    // when the target promotes to a
+                    // RecoverableBraidTarget at execute time.
+                    assert_target_uuid_unique(
+                        uuid,
+                        input.pool_membership,
+                        input.pool,
+                        &initial_journal_targets,
+                        name,
+                        by_id,
+                    )?;
                     targets.push(AddTargetWork::ClosedPresentLuks(
                         ClosedPresentLuksCandidate {
-                            name: name.to_owned(),
+                            name: name.clone(),
                             by_id: (*by_id).clone(),
-                            mapper_name,
+                            mapper_name: mn.clone(),
                             mapper_path,
                             luks_uuid: uuid.clone(),
                             enroll_key_file: resolved_enroll_key_file,
@@ -1624,6 +1871,122 @@ fn build_add_work_plan<R: CommandRunner>(
         pool_was_mounted: input.pool.mounted,
         existing_pool_device_count: input.pool.devices.len(),
     })
+}
+
+/// Pre-journal-write per-target UUID uniqueness assert. Runs once per
+/// target inside `build_add_work_plan` after the target's UUID is
+/// generated (FreshLuks) or probed (PresentLuks /
+/// RecoverableBraidLabeled). Order per plan section "`add.rs`" / "Gate
+/// ordering vs in-flight `targets` map":
+///   1. If the UUID is already in the in-flight `targets` map under a
+///      different by-id, raise `AddError::DuplicateUuid` naming both
+///      `(name, by_id)` pairs (the cloned-disk-across-targets case).
+///   2. Otherwise, check membership keys and live `pool.devices` UUIDs.
+///      On collision, raise `AddError::DuplicateUuid` naming the
+///      in-flight target plus a synthesized `(name, by_id)` for the
+///      colliding existing member (membership case) or live device
+///      (live-pool case).
+///
+/// `LuksUuidMap::insert` fail-closed and `PoolMembership::insert` are
+/// the defense-in-depth backstops; this gate is the pre-write refusal
+/// so the operator message names both by-id paths explicitly rather
+/// than falling through to a generic conflict error.
+fn assert_target_uuid_unique(
+    uuid: &LuksUuid,
+    membership: &PoolMembership,
+    live_pool: &PoolState,
+    in_flight: &LuksUuidMap<journal::AddJournalTarget>,
+    this_name: &DiskName,
+    this_by_id: &ByIdPath,
+) -> Result<(), AddError> {
+    // (1) In-flight collision (cloned-disk-across-targets).
+    if let Some(prior) = in_flight.get(uuid) {
+        return Err(duplicate_uuid_error(
+            uuid.clone(),
+            this_name,
+            this_by_id,
+            &prior.name,
+            &prior.by_id,
+        ));
+    }
+    // (2a) Membership-key collision.
+    if let Some(existing) = membership.by_uuid(uuid) {
+        return Err(duplicate_uuid_error(
+            uuid.clone(),
+            this_name,
+            this_by_id,
+            &existing.name,
+            &existing.by_id,
+        ));
+    }
+    // (2b) Live-pool collision. The colliding device has no by-id
+    // observation; we render its observed `mapper` via
+    // `MapperName::Display` as the "name" surface, and use an empty
+    // by-id placeholder (the test plan accepts this for the live-pool
+    // arm).
+    if let Some(dev) = live_pool.devices.iter().find(|d| d.luks_uuid == *uuid) {
+        let synth_name = DiskName::parse(&dev.mapper.0)
+            // Mapper "braid-<diskname>" should parse cleanly. If it
+            // does not (operator created a non-standard mapper),
+            // fall back to a placeholder so the error message still
+            // names both pairs.
+            .unwrap_or_else(|_| DiskName::parse("foreign").expect("placeholder DiskName is valid"));
+        let synth_by_id = ByIdPath::parse("/dev/disk/by-id/").expect("placeholder by-id is valid");
+        return Err(duplicate_uuid_error(
+            uuid.clone(),
+            this_name,
+            this_by_id,
+            &synth_name,
+            &synth_by_id,
+        ));
+    }
+    Ok(())
+}
+
+/// Sort the two `(name, by_id)` pairs lexicographically by `by_id`
+/// (matching `discover.rs`'s `label_collision` ordering) so the
+/// rendered `Display` is deterministic across cloned-disk inputs.
+fn duplicate_uuid_error(
+    uuid: LuksUuid,
+    a_name: &DiskName,
+    a_by_id: &ByIdPath,
+    b_name: &DiskName,
+    b_by_id: &ByIdPath,
+) -> AddError {
+    let (n1, b1, n2, b2) = if a_by_id <= b_by_id {
+        (
+            a_name.clone(),
+            a_by_id.clone(),
+            b_name.clone(),
+            b_by_id.clone(),
+        )
+    } else {
+        (
+            b_name.clone(),
+            b_by_id.clone(),
+            a_name.clone(),
+            a_by_id.clone(),
+        )
+    };
+    AddError::DuplicateUuid {
+        uuid,
+        name1: n1,
+        by_id1: b1,
+        name2: n2,
+        by_id2: b2,
+    }
+}
+
+/// Defense-in-depth backstop: convert a `LuksUuidMap::insert`
+/// conflict (which only fires if `assert_target_uuid_unique`
+/// missed a case -- a logic bug) into an `AddError::Validation`.
+/// The pre-write gate is the primary refusal; this path should
+/// never trigger in practice.
+fn target_uuid_map_conflict_to_validation(conflict: &membership::LuksUuidMapConflict) -> AddError {
+    AddError::Validation(format!(
+        "internal: duplicate LUKS UUID {} inserted into add targets map (defense-in-depth backstop fired; should have been refused by assert_target_uuid_unique)",
+        conflict.uuid
+    ))
 }
 
 struct AddConfirmDisk<'a> {
@@ -1851,7 +2214,7 @@ mod tests {
             mounted: true,
             devices: vec![PoolDevice {
                 mapper: MapperName("braid-existing".into()),
-                luks_uuid: LuksUuid("11111111-1111-1111-1111-111111111111".into()),
+                luks_uuid: LuksUuid::parse("11111111-1111-1111-1111-111111111111").unwrap(),
                 devid: 1,
                 underlying: "/dev/vda".into(),
             }],
@@ -1924,7 +2287,7 @@ mod tests {
             mounted: true,
             devices: vec![PoolDevice {
                 mapper: MapperName("braid-disk1".into()),
-                luks_uuid: LuksUuid("11111111-1111-1111-1111-111111111111".into()),
+                luks_uuid: LuksUuid::parse("11111111-1111-1111-1111-111111111111").unwrap(),
                 devid: 1,
                 underlying: "/dev/vda".into(),
             }],
@@ -2005,7 +2368,7 @@ mod tests {
             mounted: true,
             devices: vec![PoolDevice {
                 mapper: MapperName("braid-disk2".into()),
-                luks_uuid: LuksUuid("22222222-2222-2222-2222-222222222222".into()),
+                luks_uuid: LuksUuid::parse("22222222-2222-2222-2222-222222222222").unwrap(),
                 devid: 4,
                 underlying: "/dev/vdc".into(),
             }],
@@ -2027,10 +2390,10 @@ mod tests {
 
     fn probed_present_luks(name: &str, mapper_open: bool, label: Option<String>) -> ConfigDisk {
         ConfigDisk {
-            name: name.to_owned(),
-            by_id_path: ByIdPath("/dev/disk/by-id/disk1".to_owned()),
+            name: DiskName::parse(name).expect("valid disk name in test fixture"),
+            by_id_path: ByIdPath::parse("/dev/disk/by-id/disk1").unwrap(),
             state: ConfigDiskState::PresentLuks {
-                uuid: LuksUuid("a1b2c3d4-e5f6-7890-abcd-ef1234567890".into()),
+                uuid: LuksUuid::parse("a1b2c3d4-e5f6-7890-abcd-ef1234567890").unwrap(),
                 label,
                 mapper_open,
             },
@@ -2046,14 +2409,15 @@ mod tests {
         let result = build_add_work_plan(
             &runner,
             &AddStepsInput {
-                names: &["disk1"],
-                by_ids: &[&ByIdPath("/dev/disk/by-id/disk1".into())],
+                names: &[DiskName::parse("disk1").unwrap()],
+                by_ids: &[&ByIdPath::parse("/dev/disk/by-id/disk1").unwrap()],
                 probed: &probed,
                 pool: &pool,
                 mount_point: &MountPoint("/mnt/storage".into()),
                 paths: &test_paths().1,
                 enroll_key_file: None,
-                luks_format_extra_opts: &[],
+                luks_format_extra_opts: &LuksFormatExtraOpts::default(),
+                pool_membership: &PoolMembership::empty(),
             },
         );
         assert!(result.is_err());
@@ -2085,14 +2449,15 @@ mod tests {
         let result = build_add_work_plan(
             &runner,
             &AddStepsInput {
-                names: &["disk1"],
-                by_ids: &[&ByIdPath("/dev/disk/by-id/disk1".into())],
+                names: &[DiskName::parse("disk1").unwrap()],
+                by_ids: &[&ByIdPath::parse("/dev/disk/by-id/disk1").unwrap()],
                 probed: &probed,
                 pool: &pool,
                 mount_point: &MountPoint("/mnt/storage".into()),
                 paths: &test_paths().1,
                 enroll_key_file: None,
-                luks_format_extra_opts: &[],
+                luks_format_extra_opts: &LuksFormatExtraOpts::default(),
+                pool_membership: &PoolMembership::empty(),
             },
         );
         assert!(result.is_err());
@@ -2116,14 +2481,15 @@ mod tests {
         let steps = build_add_work_plan(
             &runner,
             &AddStepsInput {
-                names: &["disk1"],
-                by_ids: &[&ByIdPath("/dev/disk/by-id/disk1".into())],
+                names: &[DiskName::parse("disk1").unwrap()],
+                by_ids: &[&ByIdPath::parse("/dev/disk/by-id/disk1").unwrap()],
                 probed: &probed,
                 pool: &pool,
                 mount_point: &MountPoint("/mnt/storage".into()),
                 paths: &test_paths().1,
                 enroll_key_file: None,
-                luks_format_extra_opts: &[],
+                luks_format_extra_opts: &LuksFormatExtraOpts::default(),
+                pool_membership: &PoolMembership::empty(),
             },
         )
         .unwrap()
@@ -2151,14 +2517,15 @@ mod tests {
         let result = build_add_work_plan(
             &runner,
             &AddStepsInput {
-                names: &["disk1"],
-                by_ids: &[&ByIdPath("/dev/disk/by-id/disk1".into())],
+                names: &[DiskName::parse("disk1").unwrap()],
+                by_ids: &[&ByIdPath::parse("/dev/disk/by-id/disk1").unwrap()],
                 probed: &probed,
                 pool: &pool,
                 mount_point: &MountPoint("/mnt/storage".into()),
                 paths: &test_paths().1,
                 enroll_key_file: None,
-                luks_format_extra_opts: &[],
+                luks_format_extra_opts: &LuksFormatExtraOpts::default(),
+                pool_membership: &PoolMembership::empty(),
             },
         );
         assert!(result.is_err());
@@ -2173,8 +2540,8 @@ mod tests {
     fn dry_run_raw_disk_still_shows_destructive_format() {
         let runner = MockRunner::default();
         let probed = vec![ConfigDisk {
-            name: "disk1".to_owned(),
-            by_id_path: ByIdPath("/dev/disk/by-id/disk1".to_owned()),
+            name: DiskName::parse("disk1").expect("valid disk name in test fixture"),
+            by_id_path: ByIdPath::parse("/dev/disk/by-id/disk1").unwrap(),
             state: ConfigDiskState::PresentNotLuks,
         }];
         let pool = pool_unmounted();
@@ -2182,14 +2549,15 @@ mod tests {
         let steps = build_add_work_plan(
             &runner,
             &AddStepsInput {
-                names: &["disk1"],
-                by_ids: &[&ByIdPath("/dev/disk/by-id/disk1".into())],
+                names: &[DiskName::parse("disk1").unwrap()],
+                by_ids: &[&ByIdPath::parse("/dev/disk/by-id/disk1").unwrap()],
                 probed: &probed,
                 pool: &pool,
                 mount_point: &MountPoint("/mnt/storage".into()),
                 paths: &test_paths().1,
                 enroll_key_file: None,
-                luks_format_extra_opts: &[],
+                luks_format_extra_opts: &LuksFormatExtraOpts::default(),
+                pool_membership: &PoolMembership::empty(),
             },
         )
         .unwrap()
@@ -2224,10 +2592,10 @@ mod tests {
         }
 
         let pool_fsid = POOL_FSID;
-        let by_id = ByIdPath("/dev/disk/by-id/virtio-disk2".into());
-        let luks_uuid = LuksUuid("a1b2c3d4-e5f6-7890-abcd-ef1234567890".into());
+        let by_id = ByIdPath::parse("/dev/disk/by-id/virtio-disk2").unwrap();
+        let luks_uuid = LuksUuid::parse("a1b2c3d4-e5f6-7890-abcd-ef1234567890").unwrap();
         let probed = vec![ConfigDisk {
-            name: "disk2".into(),
+            name: DiskName::parse("disk2").expect("valid disk name in test fixture"),
             by_id_path: by_id.clone(),
             state: ConfigDiskState::PresentLuks {
                 uuid: luks_uuid.clone(),
@@ -2239,7 +2607,7 @@ mod tests {
             mounted: true,
             devices: vec![PoolDevice {
                 mapper: MapperName("braid-disk1".into()),
-                luks_uuid: LuksUuid("11111111-1111-1111-1111-111111111111".into()),
+                luks_uuid: LuksUuid::parse("11111111-1111-1111-1111-111111111111").unwrap(),
                 devid: 1,
                 underlying: "/dev/vdb".into(),
             }],
@@ -2250,10 +2618,17 @@ mod tests {
             null_underlying: vec![],
         };
         let mut pool_membership = PoolMembership::empty();
-        pool_membership.disks.insert(
-            "disk1".into(),
-            membership::DiskMember::from_by_id(ByIdPath("/dev/disk/by-id/virtio-disk1".into())),
-        );
+        pool_membership
+            .insert(
+                crate::test_fixtures::test_uuid(500),
+                membership::DiskMember {
+                    name: DiskName::parse("disk1").unwrap(),
+                    by_id: ByIdPath::parse("/dev/disk/by-id/virtio-disk1").unwrap(),
+                    devid: None,
+                    added_at: None,
+                },
+            )
+            .expect("test fixture insert");
         let runner = NoDumpRunner {
             inner: UnlockingAddRunner {
                 inner: AddTestRunner {
@@ -2267,14 +2642,15 @@ mod tests {
         let work_plan = build_add_work_plan(
             &runner,
             &AddStepsInput {
-                names: &["disk2"],
+                names: &[DiskName::parse("disk2").unwrap()],
                 by_ids: &[&by_id],
                 probed: &probed,
                 pool: &pool,
                 mount_point: &MountPoint("/mnt/storage".into()),
                 paths: &paths,
                 enroll_key_file: None,
-                luks_format_extra_opts: &[],
+                luks_format_extra_opts: &LuksFormatExtraOpts::default(),
+                pool_membership: &PoolMembership::empty(),
             },
         )
         .expect("planning should use cached LUKS label");
@@ -2288,8 +2664,8 @@ mod tests {
             notes: vec![],
             work_plan,
             config: Config::new(MountPoint("/mnt/storage".into())).unwrap(),
-            parsed: vec![("disk2".into(), by_id.clone())],
-            names: vec!["disk2".into()],
+            parsed: vec![(DiskName::parse("disk2").unwrap(), by_id.clone())],
+            names: vec![DiskName::parse("disk2").unwrap()],
             by_ids: vec![by_id.clone()],
             probed,
             pool,
@@ -2441,14 +2817,15 @@ mod tests {
         let dry_err = build_add_work_plan(
             &runner,
             &AddStepsInput {
-                names: &["disk1"],
-                by_ids: &[&ByIdPath("/dev/disk/by-id/disk1".into())],
+                names: &[DiskName::parse("disk1").unwrap()],
+                by_ids: &[&ByIdPath::parse("/dev/disk/by-id/disk1").unwrap()],
                 probed: &probed,
                 pool: &pool,
                 mount_point: &MountPoint("/mnt/storage".into()),
                 paths: &test_paths().1,
                 enroll_key_file: None,
-                luks_format_extra_opts: &[],
+                luks_format_extra_opts: &LuksFormatExtraOpts::default(),
+                pool_membership: &PoolMembership::empty(),
             },
         )
         .unwrap_err()
@@ -2502,7 +2879,7 @@ mod tests {
     impl CommandRunner for SpyRunner {
         fn run(&self, request: &CmdRequest) -> Result<RawCommandOutput, CmdError> {
             if let CmdRequest::CryptsetupClose { mapper } = request {
-                self.closed.lock().unwrap().push(mapper.clone());
+                self.closed.lock().unwrap().push(mapper.as_str().to_owned());
                 let mut output = self.close_output.clone();
                 output.cmd = format!("cryptsetup close {mapper}");
                 return Ok(output);
@@ -2528,8 +2905,8 @@ mod tests {
         let runner = SpyRunner::new(MockRunner::default());
         let captured = crate::status_tag::testing::capture_with_color(false, || {
             let mut guard = LuksCleanupGuard::new(&runner);
-            guard.track("braid-aaa".into());
-            guard.track("braid-bbb".into());
+            guard.track(MapperName("braid-aaa".into()));
+            guard.track(MapperName("braid-bbb".into()));
             // guard drops here while still armed
         });
         let closed = runner.closed.lock().unwrap();
@@ -2569,7 +2946,7 @@ mod tests {
         });
         let captured = crate::status_tag::testing::capture_with_color(false, || {
             let mut guard = LuksCleanupGuard::new(&runner);
-            guard.track("braid-aaa".into());
+            guard.track(MapperName("braid-aaa".into()));
             // guard drops here while still armed
         });
         let wait = "[wait] disk aaa: locking (cleanup)...";
@@ -2590,7 +2967,7 @@ mod tests {
         // Scenario: cleanup close for a mapper is busy once, then succeeds.
         let runner = MockRunner::default().with_output_sequence(
             CmdRequest::CryptsetupClose {
-                mapper: "braid-aaa".into(),
+                mapper: MapperName("braid-aaa".into()),
             },
             vec![
                 RawCommandOutput {
@@ -2609,7 +2986,7 @@ mod tests {
         );
         let captured = crate::status_tag::testing::capture_with_color(false, || {
             let mut guard = LuksCleanupGuard::new(&runner);
-            guard.track("braid-aaa".into());
+            guard.track(MapperName("braid-aaa".into()));
             // guard drops here while still armed
         });
 
@@ -2642,7 +3019,7 @@ mod tests {
         let runner = SpyRunner::new(MockRunner::default());
         {
             let mut guard = LuksCleanupGuard::new(&runner);
-            guard.track("braid-aaa".into());
+            guard.track(MapperName("braid-aaa".into()));
             guard.disarm();
             // guard drops here, disarmed
         }
@@ -2665,7 +3042,7 @@ mod tests {
             let mut guard = LuksCleanupGuard::new(&runner);
             // Only track mappers we opened ourselves.
             // Pre-existing mapper "braid-existing" is NOT tracked.
-            guard.track("braid-new".into());
+            guard.track(MapperName("braid-new".into()));
             // guard drops here while armed — simulates error path
         }
         let closed = runner.closed.lock().unwrap();
@@ -2685,13 +3062,13 @@ mod tests {
         // a later failure.
         // Scenario: ensure_luks_open finds braid-existing already active with
         // the requested LUKS UUID, then the armed guard drops.
-        let by_id = ByIdPath("/dev/disk/by-id/existing".into());
+        let by_id = ByIdPath::parse("/dev/disk/by-id/existing").unwrap();
         let uuid = "11111111-1111-1111-1111-111111111111";
         let runner = MockRunner::default()
             .with_mapper_open("braid-existing", "/dev/vdb", uuid)
             .with_output(
                 CmdRequest::CryptsetupLuksUuid {
-                    device: by_id.0.clone(),
+                    device: by_id.as_str().to_owned(),
                 },
                 RawCommandOutput {
                     cmd: "cryptsetup luksUUID".into(),
@@ -2706,7 +3083,7 @@ mod tests {
             if ensure_luks_open(&runner, "existing", &by_id, &passphrase("testpass")).unwrap()
                 == OpenOutcome::Opened
             {
-                guard.track("braid-existing".into());
+                guard.track(MapperName("braid-existing".into()));
             }
             // guard drops here while still armed
         }
@@ -2715,7 +3092,7 @@ mod tests {
             !runner
                 .requests()
                 .iter()
-                .any(|r| matches!(r, CmdRequest::CryptsetupClose { mapper } if mapper == "braid-existing")),
+                .any(|r| matches!(r, CmdRequest::CryptsetupClose { mapper } if mapper.as_str() == "braid-existing")),
             "already-owned mapper must not be closed by add cleanup guard"
         );
     }
@@ -2818,8 +3195,8 @@ mod tests {
     impl CommandRunner for ClosedNoBtrfsRunner {
         fn run(&self, request: &CmdRequest) -> Result<RawCommandOutput, CmdError> {
             match request {
-                CmdRequest::CryptsetupStatus { mapper } if mapper == "braid-disk2" => {
-                    Ok(mock_status_inactive(mapper))
+                CmdRequest::CryptsetupStatus { mapper } if mapper.as_str() == "braid-disk2" => {
+                    Ok(mock_status_inactive(mapper.as_str()))
                 }
                 CmdRequest::CryptsetupLuksOpen { .. } => Ok(mock_ok("cryptsetup luksOpen", "")),
                 _ => self.inner.run(request),
@@ -2870,17 +3247,24 @@ mod tests {
         let inhibitor = crate::inhibit::RecordingInhibitor::new();
 
         let config = crate::config::Config::new(MountPoint("/mnt/storage".into())).unwrap();
-        let by_id_disk2 = ByIdPath("/dev/disk/by-id/virtio-disk2".into());
+        let by_id_disk2 = ByIdPath::parse("/dev/disk/by-id/virtio-disk2").unwrap();
         let mut pool_membership = membership::PoolMembership::empty();
-        pool_membership.disks.insert(
-            "disk1".into(),
-            membership::DiskMember::from_by_id(ByIdPath("/dev/disk/by-id/virtio-disk1".into())),
-        );
+        pool_membership
+            .insert(
+                crate::test_fixtures::test_uuid(501),
+                membership::DiskMember {
+                    name: DiskName::parse("disk1").unwrap(),
+                    by_id: ByIdPath::parse("/dev/disk/by-id/virtio-disk1").unwrap(),
+                    devid: None,
+                    added_at: None,
+                },
+            )
+            .expect("test fixture insert");
         let pool = PoolState {
             mounted: true,
             devices: vec![PoolDevice {
                 mapper: MapperName("braid-disk1".into()),
-                luks_uuid: LuksUuid("11111111-1111-1111-1111-111111111111".into()),
+                luks_uuid: LuksUuid::parse("11111111-1111-1111-1111-111111111111").unwrap(),
                 devid: 1,
                 underlying: "/dev/vdb".into(),
             }],
@@ -2891,10 +3275,10 @@ mod tests {
             null_underlying: vec![],
         };
         let probed = vec![ConfigDisk {
-            name: "disk2".into(),
+            name: DiskName::parse("disk2").expect("valid disk name in test fixture"),
             by_id_path: by_id_disk2.clone(),
             state: ConfigDiskState::PresentLuks {
-                uuid: LuksUuid("22222222-2222-2222-2222-222222222222".into()),
+                uuid: LuksUuid::parse("22222222-2222-2222-2222-222222222222").unwrap(),
                 label: Some("braid-disk2".to_owned()),
                 mapper_open: false,
             },
@@ -2902,14 +3286,15 @@ mod tests {
         let work_plan = build_add_work_plan(
             &runner,
             &AddStepsInput {
-                names: &["disk2"],
+                names: &[DiskName::parse("disk2").unwrap()],
                 by_ids: &[&by_id_disk2],
                 probed: &probed,
                 pool: &pool,
                 mount_point: config.mount_point(),
                 paths: &paths,
                 enroll_key_file: None,
-                luks_format_extra_opts: &[],
+                luks_format_extra_opts: &LuksFormatExtraOpts::default(),
+                pool_membership: &PoolMembership::empty(),
             },
         )
         .expect("closed recoverable target should plan");
@@ -2917,8 +3302,8 @@ mod tests {
             notes: vec![],
             work_plan,
             config,
-            parsed: vec![("disk2".into(), by_id_disk2.clone())],
-            names: vec!["disk2".into()],
+            parsed: vec![(DiskName::parse("disk2").unwrap(), by_id_disk2.clone())],
+            names: vec![DiskName::parse("disk2").unwrap()],
             by_ids: vec![by_id_disk2.clone()],
             probed,
             pool,
@@ -3181,10 +3566,16 @@ mod tests {
         let state_tmp = tempfile::tempdir().unwrap();
         let paths = StatePaths::custom(state_tmp.path().into());
         let mut m = membership::PoolMembership::empty();
-        m.disks.insert(
-            "disk1".into(),
-            membership::DiskMember::from_by_id(ByIdPath("/dev/disk/by-id/virtio-disk1".into())),
-        );
+        m.insert(
+            crate::test_fixtures::test_uuid(502),
+            membership::DiskMember {
+                name: DiskName::parse("disk1").unwrap(),
+                by_id: ByIdPath::parse("/dev/disk/by-id/virtio-disk1").unwrap(),
+                devid: None,
+                added_at: None,
+            },
+        )
+        .expect("test fixture insert");
         membership::save_membership(&m, &paths).unwrap();
 
         let tmp = tempfile::tempdir().unwrap();
@@ -3425,12 +3816,18 @@ mod tests {
                     ))
                 }
                 CmdRequest::CryptsetupStatus { mapper } => {
-                    if self.opened.lock().unwrap().iter().any(|m| m == mapper) {
+                    if self
+                        .opened
+                        .lock()
+                        .unwrap()
+                        .iter()
+                        .any(|m| m == mapper.as_str())
+                    {
                         Ok(mock_ok(
                             &format!("cryptsetup status {mapper}"),
                             &format!(
                                 "{mapper} is active and is in use.\n  type:    LUKS2\n  device:  {}\n  mode:    read/write\n",
-                                Self::mapper_underlying(mapper)
+                                Self::mapper_underlying(mapper.as_str())
                             ),
                         ))
                     } else {
@@ -3483,7 +3880,7 @@ mod tests {
                     ))
                 }
                 CmdRequest::CryptsetupLuksOpen { device, mapper } => {
-                    self.opened.lock().unwrap().push(mapper.clone());
+                    self.opened.lock().unwrap().push(mapper.as_str().to_owned());
                     Ok(mock_ok(
                         &format!("cryptsetup open --type luks {device} {mapper}"),
                         "",
@@ -4048,29 +4445,31 @@ mod tests {
             panic!("expected add journal, got: {:?}", journal.op);
         };
         assert_eq!(phase, journal::AddPhase::PoolMutation);
-        let target = targets
-            .get("disk2")
-            .expect("disk2 target should be journaled");
-        assert_eq!(target.by_id.0, "/dev/disk/by-id/virtio-disk2");
-        assert_eq!(target.mapper_name, "braid-disk2");
+        // Identity is the LuksUuidMap key. There is exactly one target
+        // in this single-disk fresh add; recover its UUID by iterating.
+        assert_eq!(targets.len(), 1);
+        let (_uuid, target) = targets.iter().next().expect("one fresh target");
+        assert_eq!(target.name.as_str(), "disk2");
+        assert_eq!(target.by_id.as_str(), "/dev/disk/by-id/virtio-disk2");
         let journal::AddJournalMode::FreshLuks {
-            luks_label,
-            luks_format_extra_opts,
+            extra_opts,
             enroll_key_file,
         } = &target.mode
         else {
             panic!("expected fresh LUKS target, got: {:?}", target.mode);
         };
-        assert_eq!(luks_label, "braid-disk2");
+        // The structured `extra_opts` carries user-supplied
+        // non-managed tokens unchanged. Managed flags (`--uuid`,
+        // `--label`) are journaled at the op level (UUID is the map
+        // key; the label is derived from `name` at the format call
+        // site), so they MUST NOT appear here.
         assert_eq!(
-            luks_format_extra_opts,
-            &vec![
+            extra_opts.as_slice(),
+            &[
                 "--pbkdf".to_owned(),
                 "pbkdf2".to_owned(),
                 "--iter-time".to_owned(),
                 "1".to_owned(),
-                "--label".to_owned(),
-                "braid-disk2".to_owned(),
             ]
         );
         assert!(enroll_key_file.is_none());
@@ -4395,12 +4794,14 @@ mod tests {
     fn cmd_add_fresh_bootstrap_mapper_conflict_stops_before_mkfs() {
         let (_state_tmp, paths, _tmp, config_path, pass_path) = fresh_add_setup();
         let by_id = "/dev/disk/by-id/virtio-disk1";
-        let expected_uuid = "11111111-1111-1111-1111-111111111111";
         let backup_tmp = paths
             .luks_headers_dir()
             .join("braid-disk1.luksheader.tmp")
             .display()
             .to_string();
+        // CryptsetupLuksFormat carries a randomly generated LuksUuid at
+        // runtime (Phase 2's t=0 identity), so the runner matches it via
+        // a handler keyed on `device` instead of by full-value equality.
         let runner = MockRunner::default()
             .with_output_sequence(
                 CmdRequest::CryptsetupLuksUuid {
@@ -4408,17 +4809,21 @@ mod tests {
                 },
                 vec![
                     mock_not_luks(&format!("cryptsetup luksUUID {by_id}")),
-                    mock_luks_uuid(by_id, expected_uuid),
+                    mock_luks_uuid(by_id, "11111111-1111-1111-1111-111111111111"),
                 ],
             )
-            .with_output_stdin(
-                CmdRequest::CryptsetupLuksFormat {
-                    device: by_id.into(),
-                    extra_opts: vec!["--label".into(), "braid-disk1".into()],
-                },
-                b"test-passphrase".to_vec(),
-                mock_ok("cryptsetup luksFormat", ""),
-            )
+            .with_handler({
+                let by_id = by_id.to_owned();
+                move |req| {
+                    if let CmdRequest::CryptsetupLuksFormat { device, .. } = req
+                        && *device == by_id
+                    {
+                        Some(Ok(mock_ok("cryptsetup luksFormat", "")))
+                    } else {
+                        None
+                    }
+                }
+            })
             .with_output(
                 CmdRequest::CryptsetupLuksHeaderBackup {
                     device: by_id.into(),
@@ -4428,7 +4833,7 @@ mod tests {
             )
             .with_output(
                 CmdRequest::CryptsetupStatus {
-                    mapper: "braid-disk1".into(),
+                    mapper: MapperName("braid-disk1".into()),
                 },
                 mock_status_active("braid-disk1", "/dev/vdz"),
             )
@@ -4514,7 +4919,7 @@ mod tests {
             )
             .with_output(
                 CmdRequest::CryptsetupStatus {
-                    mapper: "braid-disk2".into(),
+                    mapper: MapperName("braid-disk2".into()),
                 },
                 mock_status_inactive("braid-disk2"),
             )
@@ -4580,8 +4985,8 @@ mod tests {
     fn dry_run_render_fresh_single_disk_bootstrap() {
         let runner = MockRunner::default();
         let probed = vec![ConfigDisk {
-            name: "disk1".to_owned(),
-            by_id_path: ByIdPath("/dev/disk/by-id/disk1".to_owned()),
+            name: DiskName::parse("disk1").expect("valid disk name in test fixture"),
+            by_id_path: ByIdPath::parse("/dev/disk/by-id/disk1").unwrap(),
             state: ConfigDiskState::PresentNotLuks,
         }];
         let pool = pool_unmounted();
@@ -4595,14 +5000,16 @@ mod tests {
         let steps = build_add_work_plan(
             &runner,
             &AddStepsInput {
-                names: &["disk1"],
-                by_ids: &[&ByIdPath("/dev/disk/by-id/disk1".into())],
+                names: &[DiskName::parse("disk1").unwrap()],
+                by_ids: &[&ByIdPath::parse("/dev/disk/by-id/disk1").unwrap()],
                 probed: &probed,
                 pool: &pool,
                 mount_point: &MountPoint("/mnt/storage".into()),
                 paths: &test_paths().1,
                 enroll_key_file: None,
-                luks_format_extra_opts: &luks_format_extra_opts,
+                luks_format_extra_opts: &LuksFormatExtraOpts::parse(&luks_format_extra_opts)
+                    .unwrap(),
+                pool_membership: &PoolMembership::empty(),
             },
         )
         .unwrap()
@@ -4657,8 +5064,8 @@ mod tests {
     fn dry_run_render_fresh_disk_with_keyfile_orders_backup_after_addkey() {
         let runner = MockRunner::default();
         let probed = vec![ConfigDisk {
-            name: "disk1".to_owned(),
-            by_id_path: ByIdPath("/dev/disk/by-id/disk1".to_owned()),
+            name: DiskName::parse("disk1").expect("valid disk name in test fixture"),
+            by_id_path: ByIdPath::parse("/dev/disk/by-id/disk1").unwrap(),
             state: ConfigDiskState::PresentNotLuks,
         }];
         let pool = pool_unmounted();
@@ -4667,14 +5074,15 @@ mod tests {
         let steps = build_add_work_plan(
             &runner,
             &AddStepsInput {
-                names: &["disk1"],
-                by_ids: &[&ByIdPath("/dev/disk/by-id/disk1".into())],
+                names: &[DiskName::parse("disk1").unwrap()],
+                by_ids: &[&ByIdPath::parse("/dev/disk/by-id/disk1").unwrap()],
                 probed: &probed,
                 pool: &pool,
                 mount_point: &MountPoint("/mnt/storage".into()),
                 paths: &test_paths().1,
                 enroll_key_file: Some(kf),
-                luks_format_extra_opts: &[],
+                luks_format_extra_opts: &LuksFormatExtraOpts::default(),
+                pool_membership: &PoolMembership::empty(),
             },
         )
         .unwrap()
@@ -4764,14 +5172,15 @@ mod tests {
         let steps = build_add_work_plan(
             &runner,
             &AddStepsInput {
-                names: &["disk1"],
-                by_ids: &[&ByIdPath("/dev/disk/by-id/disk1".into())],
+                names: &[DiskName::parse("disk1").unwrap()],
+                by_ids: &[&ByIdPath::parse("/dev/disk/by-id/disk1").unwrap()],
                 probed: &probed,
                 pool: &pool,
                 mount_point: &MountPoint("/mnt/storage".into()),
                 paths: &test_paths().1,
                 enroll_key_file: Some(kf),
-                luks_format_extra_opts: &[],
+                luks_format_extra_opts: &LuksFormatExtraOpts::default(),
+                pool_membership: &PoolMembership::empty(),
             },
         )
         .unwrap()
@@ -4837,14 +5246,15 @@ mod tests {
         let steps = build_add_work_plan(
             &runner,
             &AddStepsInput {
-                names: &["disk1"],
-                by_ids: &[&ByIdPath("/dev/disk/by-id/disk1".into())],
+                names: &[DiskName::parse("disk1").unwrap()],
+                by_ids: &[&ByIdPath::parse("/dev/disk/by-id/disk1").unwrap()],
                 probed: &probed,
                 pool: &pool,
                 mount_point: &MountPoint("/mnt/storage".into()),
                 paths: &test_paths().1,
                 enroll_key_file: Some(kf),
-                luks_format_extra_opts: &[],
+                luks_format_extra_opts: &LuksFormatExtraOpts::default(),
+                pool_membership: &PoolMembership::empty(),
             },
         )
         .unwrap()
@@ -4871,8 +5281,8 @@ mod tests {
     fn dry_run_render_add_to_existing_pool_with_balance() {
         let runner = MockRunner::default();
         let probed = vec![ConfigDisk {
-            name: "disk2".to_owned(),
-            by_id_path: ByIdPath("/dev/disk/by-id/disk2".to_owned()),
+            name: DiskName::parse("disk2").expect("valid disk name in test fixture"),
+            by_id_path: ByIdPath::parse("/dev/disk/by-id/disk2").unwrap(),
             state: ConfigDiskState::PresentNotLuks,
         }];
         let pool = pool_mounted_with_fsid("aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee");
@@ -4880,14 +5290,15 @@ mod tests {
         let steps = build_add_work_plan(
             &runner,
             &AddStepsInput {
-                names: &["disk2"],
-                by_ids: &[&ByIdPath("/dev/disk/by-id/disk2".into())],
+                names: &[DiskName::parse("disk2").unwrap()],
+                by_ids: &[&ByIdPath::parse("/dev/disk/by-id/disk2").unwrap()],
                 probed: &probed,
                 pool: &pool,
                 mount_point: &MountPoint("/mnt/storage".into()),
                 paths: &test_paths().1,
                 enroll_key_file: None,
-                luks_format_extra_opts: &[],
+                luks_format_extra_opts: &LuksFormatExtraOpts::default(),
+                pool_membership: &PoolMembership::empty(),
             },
         )
         .unwrap()
@@ -5023,7 +5434,13 @@ mod tests {
                     exit_status: 0,
                 }),
                 CmdRequest::CryptsetupStatus { mapper } => {
-                    if self.opened.lock().unwrap().iter().any(|m| m == mapper) {
+                    if self
+                        .opened
+                        .lock()
+                        .unwrap()
+                        .iter()
+                        .any(|m| m == mapper.as_str())
+                    {
                         let underlying = match mapper.as_str() {
                             "braid-disk1" => "/dev/vdb",
                             "braid-disk2" => "/dev/vdc",
@@ -5779,7 +6196,7 @@ mod tests {
                     ))
                 }
                 CmdRequest::CryptsetupStatus { mapper } => {
-                    let Some(suffix) = mapper.strip_prefix("braid-disk") else {
+                    let Some(suffix) = mapper.as_str().strip_prefix("braid-disk") else {
                         return Err(CmdError::MissingMock);
                     };
                     let index = suffix
@@ -6162,8 +6579,11 @@ mod tests {
     //   reports either an already-in-pool no-op or a completed add.
     #[test]
     fn format_add_messages_pin_disk_name_list_and_grammar() {
-        let single = vec!["disk2".to_string()];
-        let multi = vec!["disk1".to_string(), "disk2".to_string()];
+        let single = vec![DiskName::parse("disk2").unwrap()];
+        let multi = vec![
+            DiskName::parse("disk1").unwrap(),
+            DiskName::parse("disk2").unwrap(),
+        ];
 
         assert_eq!(
             format_add_noop(&single),
@@ -6703,6 +7123,584 @@ mod tests {
         assert!(
             !err.contains("not unlocked"),
             "locked-pool error must NOT preempt the pending-op error, got: {err}"
+        );
+    }
+
+    // -----------------------------------------------------------------------
+    // Phase 3b: LUKS UUID identity migration test pins
+    //
+    // Test-module seed allocation: cli/src/add.rs uses 500-599. See
+    // cli/src/test_fixtures/shared.rs::test_uuid for the cross-module
+    // seed-allocation table (membership 100-199, luks 200,
+    // journal 201-299, cmd 300-399, remove 400-449,
+    // remove_missing 450-499, add 500-599).
+    // -----------------------------------------------------------------------
+
+    /// Build a recording runner that resolves `cryptsetup luksDump`
+    /// label probes for one or more by-id paths to a fixed
+    /// `braid-<name>` label, so PresentLuks adoption planning resolves
+    /// for tests that drive multiple cloned-disk targets.
+    fn cloned_disk_runner(devices: &[(&'static str, &'static str)]) -> MockRunner {
+        let devices: Vec<(String, String)> = devices
+            .iter()
+            .map(|(by_id, uuid)| ((*by_id).to_owned(), (*uuid).to_owned()))
+            .collect();
+        MockRunner::default().with_handler(move |req| match req {
+            CmdRequest::CryptsetupLuksUuid { device } => devices
+                .iter()
+                .find(|(by_id, _)| by_id == device)
+                .map(|(_, uuid)| Ok(mock_ok("cryptsetup luksUUID", &format!("{uuid}\n")))),
+            CmdRequest::BtrfsFilesystemShowTarget { .. } => Some(Ok(btrfs_show_with_uuid(
+                "cc86845b-aec3-408e-bef5-553affc1f2b1",
+            ))),
+            _ => None,
+        })
+    }
+
+    /// Build a `ConfigDisk` matching a PresentLuks already-open
+    /// disk under the given by-id path and probed LUKS UUID. The
+    /// label is `braid-<name>` so the precondition gate accepts it.
+    fn cloned_disk_probed(name: &str, by_id: &str, uuid: &str) -> ConfigDisk {
+        ConfigDisk {
+            name: DiskName::parse(name).expect("valid disk name in test fixture"),
+            by_id_path: ByIdPath::parse(by_id).unwrap(),
+            state: ConfigDiskState::PresentLuks {
+                uuid: LuksUuid::parse(uuid).unwrap(),
+                label: Some(format!("braid-{name}")),
+                mapper_open: true,
+            },
+        }
+    }
+
+    /* Intent: two PresentLuks adoption targets in a single `braid add`
+     * invocation that point at distinct by-ids and distinct disk names
+     * but probe to the same LUKS UUID (the dd-cloned-disk case) fail
+     * planning with `AddError::DuplicateUuid` before any journal write,
+     * before any `LuksUuidMap::insert`, and before any
+     * `CryptsetupLuksFormat` or `BtrfsDeviceAdd`.
+     *
+     * Why it exists: discover already closes this case with
+     * `DiscoverError::DuplicateUuid`; falling through to a generic
+     * `LuksUuidMapConflict` or `MembershipError::Conflict` would not
+     * name both by-id paths and would not flag the cloned-disk
+     * diagnosis. The structured error is the pre-write refusal; the
+     * map/membership insert paths remain the defense-in-depth backstop.
+     *
+     * Scenario: operator clones disk2 to disk3 with `dd`, then runs
+     * `braid add disk3=... disk4=...` against an empty membership.
+     * Both targets probe to the same LUKS UUID. The shared-UUID
+     * refusal fires inside `build_add_work_plan` BEFORE the second
+     * target's journal-targets insertion.
+     */
+    #[test]
+    fn add_cloned_disk_duplicate_uuid_refusal() {
+        use crate::cmd::CmdRequest;
+        let runner = cloned_disk_runner(&[
+            (
+                "/dev/disk/by-id/usb-CLONE-AAAA",
+                "55555555-5555-5555-5555-555555555555",
+            ),
+            (
+                "/dev/disk/by-id/usb-CLONE-BBBB",
+                "55555555-5555-5555-5555-555555555555",
+            ),
+        ]);
+        let by_id_a = ByIdPath::parse("/dev/disk/by-id/usb-CLONE-AAAA").unwrap();
+        let by_id_b = ByIdPath::parse("/dev/disk/by-id/usb-CLONE-BBBB").unwrap();
+        let probed = vec![
+            cloned_disk_probed(
+                "diska",
+                "/dev/disk/by-id/usb-CLONE-AAAA",
+                "55555555-5555-5555-5555-555555555555",
+            ),
+            cloned_disk_probed(
+                "diskb",
+                "/dev/disk/by-id/usb-CLONE-BBBB",
+                "55555555-5555-5555-5555-555555555555",
+            ),
+        ];
+        let pool = pool_mounted_with_fsid("cc86845b-aec3-408e-bef5-553affc1f2b1");
+        let names = vec![
+            DiskName::parse("diska").unwrap(),
+            DiskName::parse("diskb").unwrap(),
+        ];
+        let by_ids_refs: Vec<&ByIdPath> = vec![&by_id_a, &by_id_b];
+
+        let recording = RequestRecordingRunner::new(runner);
+        let result = build_add_work_plan(
+            &recording,
+            &AddStepsInput {
+                names: &names,
+                by_ids: &by_ids_refs,
+                probed: &probed,
+                pool: &pool,
+                mount_point: &MountPoint("/mnt/storage".into()),
+                paths: &test_paths().1,
+                enroll_key_file: None,
+                luks_format_extra_opts: &LuksFormatExtraOpts::default(),
+                pool_membership: &PoolMembership::empty(),
+            },
+        );
+        match result {
+            Err(AddError::DuplicateUuid {
+                uuid,
+                name1,
+                by_id1,
+                name2,
+                by_id2,
+            }) => {
+                assert_eq!(uuid.as_str(), "55555555-5555-5555-5555-555555555555");
+                // Sorted lexicographically by by_id (matches discover's
+                // label_collision ordering).
+                assert_eq!(by_id1.as_str(), "/dev/disk/by-id/usb-CLONE-AAAA");
+                assert_eq!(by_id2.as_str(), "/dev/disk/by-id/usb-CLONE-BBBB");
+                assert_eq!(name1.as_str(), "diska");
+                assert_eq!(name2.as_str(), "diskb");
+                // The Display body is the pinned operator-facing string.
+                let body = AddError::DuplicateUuid {
+                    uuid,
+                    name1,
+                    by_id1,
+                    name2,
+                    by_id2,
+                }
+                .to_string();
+                assert!(
+                    body.contains(
+                        "duplicate LUKS UUID across add targets: braid-diska (/dev/disk/by-id/usb-CLONE-AAAA) and braid-diskb (/dev/disk/by-id/usb-CLONE-BBBB) share UUID 55555555-5555-5555-5555-555555555555"
+                    ),
+                    "Display must match the pinned wording: {body}"
+                );
+            }
+            other => panic!("expected AddError::DuplicateUuid, got: {other:?}"),
+        }
+        // Defense-in-depth: NO CryptsetupLuksFormat or BtrfsDeviceAdd
+        // reached the recording runner. The pre-write refusal fires
+        // inside the planner BEFORE the insertion into journal
+        // targets / membership, and BEFORE any executor step.
+        let requests = recording.requests();
+        assert!(
+            !requests.iter().any(|r| matches!(
+                r,
+                CmdRequest::CryptsetupLuksFormat { .. } | CmdRequest::BtrfsDeviceAdd { .. }
+            )),
+            "no CryptsetupLuksFormat or BtrfsDeviceAdd may run on refusal path: {requests:?}"
+        );
+    }
+
+    /* Intent: planning-time progress messages and dry-run preview
+     * iterate `OpKind::Add.targets` sorted by `DiskName`, NOT by the
+     * (UUID-lex) key order of the underlying `LuksUuidMap`. With three
+     * fresh-format targets whose generated UUIDs are randomized, the
+     * preview step iteration must still come out alphabetical by name.
+     *
+     * Why it exists: UUID-keyed iteration is effectively random per
+     * invocation (each fresh disk gets a fresh v4); without the sort
+     * helper the operator-visible target order would reorder on every
+     * fresh `braid add`. The TUI/status/doctor/preflight fixtures
+     * already pin this ordering for other surfaces; this is the
+     * symmetric pin for the add path.
+     *
+     * Scenario: three fresh PresentNotLuks disks named a-disk, m-disk,
+     * z-disk. Build the preview and assert the rendered step block
+     * names them in that order regardless of the UUID-lex order of
+     * their `LuksUuid::new_v4()` keys.
+     */
+    #[test]
+    fn add_preview_iteration_sorts_by_disk_name() {
+        let runner = MockRunner::default();
+        let probed = vec![
+            ConfigDisk {
+                name: DiskName::parse("a-disk").expect("valid disk name in test fixture"),
+                by_id_path: ByIdPath::parse("/dev/disk/by-id/usb-A").unwrap(),
+                state: ConfigDiskState::PresentNotLuks,
+            },
+            ConfigDisk {
+                name: DiskName::parse("m-disk").expect("valid disk name in test fixture"),
+                by_id_path: ByIdPath::parse("/dev/disk/by-id/usb-M").unwrap(),
+                state: ConfigDiskState::PresentNotLuks,
+            },
+            ConfigDisk {
+                name: DiskName::parse("z-disk").expect("valid disk name in test fixture"),
+                by_id_path: ByIdPath::parse("/dev/disk/by-id/usb-Z").unwrap(),
+                state: ConfigDiskState::PresentNotLuks,
+            },
+        ];
+        let pool = pool_unmounted();
+        let names = vec![
+            DiskName::parse("a-disk").unwrap(),
+            DiskName::parse("m-disk").unwrap(),
+            DiskName::parse("z-disk").unwrap(),
+        ];
+        let by_a = ByIdPath::parse("/dev/disk/by-id/usb-A").unwrap();
+        let by_m = ByIdPath::parse("/dev/disk/by-id/usb-M").unwrap();
+        let by_z = ByIdPath::parse("/dev/disk/by-id/usb-Z").unwrap();
+        let by_ids_refs: Vec<&ByIdPath> = vec![&by_a, &by_m, &by_z];
+
+        let work_plan = build_add_work_plan(
+            &runner,
+            &AddStepsInput {
+                names: &names,
+                by_ids: &by_ids_refs,
+                probed: &probed,
+                pool: &pool,
+                mount_point: &MountPoint("/mnt/storage".into()),
+                paths: &test_paths().1,
+                enroll_key_file: None,
+                luks_format_extra_opts: &LuksFormatExtraOpts::default(),
+                pool_membership: &PoolMembership::empty(),
+            },
+        )
+        .expect("planning should succeed for three fresh disks");
+        let steps = work_plan.render_steps();
+        let rendered = Step::render_dry_run(&steps);
+
+        // Each target produces a "LUKS format <by_id>" step. The
+        // ordering must be alphabetical by DiskName -- a-disk, m-disk,
+        // z-disk -- regardless of the UUID-lex order of the
+        // freshly-generated UUIDs that key the underlying
+        // `LuksUuidMap`.
+        let a_pos = rendered
+            .find("LUKS format /dev/disk/by-id/usb-A")
+            .expect("a-disk LUKS format step must appear");
+        let m_pos = rendered
+            .find("LUKS format /dev/disk/by-id/usb-M")
+            .expect("m-disk LUKS format step must appear");
+        let z_pos = rendered
+            .find("LUKS format /dev/disk/by-id/usb-Z")
+            .expect("z-disk LUKS format step must appear");
+        assert!(
+            a_pos < m_pos && m_pos < z_pos,
+            "preview iteration must be DiskName-sorted (a < m < z), got positions a={a_pos} m={m_pos} z={z_pos}\nrendered:\n{rendered}"
+        );
+    }
+
+    /* Intent: `--luks-format-arg` carrying a managed cryptsetup flag
+     * (`--uuid`, `--uuid=...`, `--label`, `--label=...`) is rejected
+     * BEFORE any probing, journal write, inhibitor acquisition, or
+     * `CryptsetupLuksFormat` request. The refusal surfaces as
+     * `AddError::ManagedFormatFlag(_)`.
+     *
+     * Why it exists: braid sets `--uuid` (the journaled identity from
+     * t=0) and `--label` (the `braid-<name>` operator label) itself.
+     * User-supplied overrides would bypass the identity invariant and
+     * leave the journal pointing at a UUID different from what
+     * cryptsetup wrote; refusing at the parse boundary keeps the
+     * invariant load-bearing.
+     *
+     * Scenario: operator types `braid add disk1=... --luks-format-arg
+     * --uuid=DEADBEEF`. The planner returns the structured rejection
+     * with the offending token named, having executed zero shell
+     * commands.
+     */
+    #[test]
+    fn add_rejects_managed_luks_format_args() {
+        for token in [
+            "--uuid=DEADBEEF-DEAD-BEEF-DEAD-BEEFDEADBEEF",
+            "--uuid",
+            "--label=foo",
+            "--label",
+        ] {
+            let (_state_tmp, paths, _tmp, config_path, pass_path) = fresh_add_setup();
+            let recording = RequestRecordingRunner::new(MockRunner::default());
+            let fs = AddOfflineMockFs(vec!["/dev/disk/by-id/virtio-disk1".into()]);
+            let inhibitor = crate::inhibit::RecordingInhibitor::new();
+            let extras = vec![token.to_owned()];
+
+            let result = cmd_add(
+                &recording,
+                &fs,
+                &AddParams {
+                    config_path: &config_path,
+                    disk_specs: &["disk1=/dev/disk/by-id/virtio-disk1".into()],
+                    dry_run: false,
+                    yes: true,
+                    passphrase_stdin: false,
+                    passphrase_file: Some(pass_path.as_path()),
+                    enroll_key_file: None,
+                    luks_format_extra_opts: &extras,
+                    progress: ProgressOutput::Off,
+                    paths: &paths,
+                    sleep_inhibitor: &inhibitor,
+                    passphrase_reader: &RealTty,
+                },
+            );
+            match result {
+                Err(AddError::ManagedFormatFlag(
+                    crate::types::LuksFormatExtraOptsError::ManagedFormatFlag { token: t },
+                )) => {
+                    assert_eq!(t, token, "token must be the offending input verbatim");
+                }
+                other => panic!("expected ManagedFormatFlag refusal for {token:?}, got: {other:?}"),
+            }
+            // Pre-parse rejection: nothing reached the runner, no
+            // journal, no inhibitor.
+            assert!(
+                recording.requests().is_empty(),
+                "managed-flag refusal must not invoke the runner for {token:?}: {:?}",
+                recording.requests()
+            );
+            assert!(
+                journal::load_journal(&paths).unwrap().is_none(),
+                "managed-flag refusal must not write a journal for {token:?}"
+            );
+            assert_eq!(
+                inhibitor.acquire_count(),
+                0,
+                "managed-flag refusal must not acquire the sleep inhibitor for {token:?}"
+            );
+        }
+    }
+
+    /* Intent: a successful fresh add issues `CryptsetupLuksFormat`
+     * with structured `uuid`, `label = "braid-<name>"`, and
+     * user-supplied extras (`--use-random` here) unchanged in
+     * `extra_opts`. Managed tokens MUST NOT appear inside
+     * `extra_opts`.
+     *
+     * Why it exists: the structured-format-fields contract is
+     * load-bearing for the t=0 journaled identity. A regression that
+     * dropped or shadowed the structured fields (e.g. with a stray
+     * `--uuid` token inside extras) would either fail this test or
+     * fail the rejection suite.
+     *
+     * Scenario: bootstrap `braid add disk1=...
+     * --luks-format-arg=--use-random`. The journal is forced to
+     * survive by failing `luksFormat`, and the recorded
+     * `CryptsetupLuksFormat` request is inspected.
+     */
+    #[test]
+    fn add_fresh_records_structured_luks_format_request() {
+        let (_state_tmp, paths, _tmp, config_path, pass_path) = add_test_setup();
+        let runner = AddFullPathRunner::live().with_luks_format_failure();
+        let fs = runner.fs(vec!["/dev/disk/by-id/virtio-disk2".into()]);
+        let recording = RequestRecordingRunner::new(runner);
+        let extras = vec!["--use-random".to_owned()];
+        let inhibitor = crate::inhibit::RecordingInhibitor::new();
+
+        let result = cmd_add(
+            &recording,
+            &fs,
+            &AddParams {
+                config_path: &config_path,
+                disk_specs: &["disk2=/dev/disk/by-id/virtio-disk2".into()],
+                dry_run: false,
+                yes: true,
+                passphrase_stdin: false,
+                passphrase_file: Some(pass_path.as_path()),
+                enroll_key_file: None,
+                luks_format_extra_opts: &extras,
+                progress: ProgressOutput::Off,
+                paths: &paths,
+                sleep_inhibitor: &inhibitor,
+                passphrase_reader: &RealTty,
+            },
+        );
+        assert!(
+            result.is_err(),
+            "forced luksFormat failure should abort add"
+        );
+
+        // Inspect the recorded CryptsetupLuksFormat: structured
+        // uuid + label + extras.
+        let requests = recording.requests();
+        let format = requests
+            .iter()
+            .find_map(|r| match r {
+                CmdRequest::CryptsetupLuksFormat {
+                    device,
+                    uuid,
+                    label,
+                    extra_opts,
+                } if device == "/dev/disk/by-id/virtio-disk2" => {
+                    Some((uuid.clone(), label.clone(), extra_opts.clone()))
+                }
+                _ => None,
+            })
+            .expect("CryptsetupLuksFormat must reach the runner");
+        let (uuid, label, extra_opts) = format;
+        // The label is derived from the DiskName at the call site.
+        assert_eq!(label, "braid-disk2");
+        // UUID is a generated v4 -- non-nil, canonical hyphenated form.
+        assert_ne!(uuid.as_str(), "00000000-0000-0000-0000-000000000000");
+        assert_eq!(uuid.as_str().len(), 36);
+        // The user-supplied non-managed token reaches the structured
+        // extras slice in argv order, unchanged. No managed token
+        // leaked into `extra_opts`.
+        assert_eq!(extra_opts.as_slice(), &["--use-random".to_owned()]);
+        // The journal records the same uuid and the structured extras.
+        let journal = journal::load_journal(&paths)
+            .unwrap()
+            .expect("journal must survive forced luksFormat failure");
+        let journal::OpKind::Add { targets, .. } = journal.op else {
+            panic!("expected Add op kind");
+        };
+        let (journaled_uuid, target) = targets.iter().next().expect("one target journaled");
+        assert_eq!(journaled_uuid.as_str(), uuid.as_str());
+        let journal::AddJournalMode::FreshLuks {
+            extra_opts: journaled_extras,
+            ..
+        } = &target.mode
+        else {
+            panic!("expected FreshLuks mode");
+        };
+        assert_eq!(journaled_extras.as_slice(), &["--use-random".to_owned()]);
+    }
+
+    /* Intent: pre-journal-write UUID uniqueness assert refuses a
+     * generated/probed target UUID that collides with an existing
+     * `PoolMembership` UUID key BEFORE any journal write or
+     * `CryptsetupLuksFormat` request.
+     *
+     * Why it exists: defense-in-depth backstops live at
+     * `LuksUuidMap::insert` and `PoolMembership::insert`. The
+     * pre-write gate exists so the operator-facing message names both
+     * by-id pairs (the in-flight target + the colliding existing
+     * member) rather than falling through to a generic
+     * conflict error.
+     *
+     * Scenario: a returning braid-labeled disk probes to the same UUID
+     * as an existing pool member (e.g. the operator cloned a current
+     * pool member's disk and is trying to add the clone). Planning
+     * refuses with `AddError::DuplicateUuid`.
+     */
+    #[test]
+    fn add_pre_write_uniqueness_assert_membership_collision() {
+        let collision_uuid = "33333333-3333-3333-3333-333333333333";
+        let mut membership = PoolMembership::empty();
+        membership
+            .insert(
+                LuksUuid::parse(collision_uuid).unwrap(),
+                DiskMember {
+                    name: DiskName::parse("existing").unwrap(),
+                    by_id: ByIdPath::parse("/dev/disk/by-id/ata-EXISTING").unwrap(),
+                    devid: Some(1),
+                    added_at: None,
+                },
+            )
+            .expect("seed membership");
+        let runner = cloned_disk_runner(&[("/dev/disk/by-id/usb-CLONE", collision_uuid)]);
+        let recording = RequestRecordingRunner::new(runner);
+        let probed = vec![cloned_disk_probed(
+            "clone",
+            "/dev/disk/by-id/usb-CLONE",
+            collision_uuid,
+        )];
+        let pool = pool_mounted_with_fsid("cc86845b-aec3-408e-bef5-553affc1f2b1");
+        let names = vec![DiskName::parse("clone").unwrap()];
+        let by_id = ByIdPath::parse("/dev/disk/by-id/usb-CLONE").unwrap();
+        let by_ids_refs: Vec<&ByIdPath> = vec![&by_id];
+
+        let result = build_add_work_plan(
+            &recording,
+            &AddStepsInput {
+                names: &names,
+                by_ids: &by_ids_refs,
+                probed: &probed,
+                pool: &pool,
+                mount_point: &MountPoint("/mnt/storage".into()),
+                paths: &test_paths().1,
+                enroll_key_file: None,
+                luks_format_extra_opts: &LuksFormatExtraOpts::default(),
+                pool_membership: &membership,
+            },
+        );
+        match result {
+            Err(AddError::DuplicateUuid {
+                uuid,
+                by_id1,
+                by_id2,
+                ..
+            }) => {
+                assert_eq!(uuid.as_str(), collision_uuid);
+                // by-id pairs sorted lexicographically.
+                assert_eq!(by_id1.as_str(), "/dev/disk/by-id/ata-EXISTING");
+                assert_eq!(by_id2.as_str(), "/dev/disk/by-id/usb-CLONE");
+            }
+            other => panic!("expected DuplicateUuid (membership collision), got: {other:?}"),
+        }
+        // No CryptsetupLuksFormat issued on the refusal path.
+        let requests = recording.requests();
+        assert!(
+            !requests
+                .iter()
+                .any(|r| matches!(r, CmdRequest::CryptsetupLuksFormat { .. })),
+            "membership-collision refusal must not invoke luksFormat: {requests:?}"
+        );
+    }
+
+    /* Intent: pre-journal-write UUID uniqueness assert refuses a
+     * generated/probed target UUID that collides with a UUID observed
+     * in the live `pool.devices` set BEFORE any journal write or
+     * `CryptsetupLuksFormat` request.
+     *
+     * Why it exists: a UUID drift between pool.json and the live
+     * btrfs/cryptsetup state (e.g. the operator manually opened a
+     * mapper for a disk that isn't in membership) would otherwise
+     * allow the planner to issue a duplicate identity to the kernel.
+     * The pre-write gate is the structured refusal; insertion paths
+     * remain the defense-in-depth backstop.
+     *
+     * Scenario: a returning braid-labeled disk probes to the same UUID
+     * as an unrecognized live `PoolDevice` (foreign mapper). Planning
+     * refuses with `AddError::DuplicateUuid` and names the in-flight
+     * target plus the foreign mapper.
+     */
+    #[test]
+    fn add_pre_write_uniqueness_assert_live_pool_collision() {
+        let collision_uuid = "44444444-4444-4444-4444-444444444444";
+        let pool = PoolState {
+            mounted: true,
+            devices: vec![PoolDevice {
+                mapper: MapperName("braid-foreign".into()),
+                luks_uuid: LuksUuid::parse(collision_uuid).unwrap(),
+                devid: 1,
+                underlying: "/dev/vdb".into(),
+            }],
+            missing_count: 0,
+            missing_devids: vec![],
+            total_devices: 1,
+            fsid: Some("cc86845b-aec3-408e-bef5-553affc1f2b1".into()),
+            null_underlying: vec![],
+        };
+        let runner = cloned_disk_runner(&[("/dev/disk/by-id/usb-CLONE", collision_uuid)]);
+        let recording = RequestRecordingRunner::new(runner);
+        let probed = vec![cloned_disk_probed(
+            "clone",
+            "/dev/disk/by-id/usb-CLONE",
+            collision_uuid,
+        )];
+        let names = vec![DiskName::parse("clone").unwrap()];
+        let by_id = ByIdPath::parse("/dev/disk/by-id/usb-CLONE").unwrap();
+        let by_ids_refs: Vec<&ByIdPath> = vec![&by_id];
+
+        let result = build_add_work_plan(
+            &recording,
+            &AddStepsInput {
+                names: &names,
+                by_ids: &by_ids_refs,
+                probed: &probed,
+                pool: &pool,
+                mount_point: &MountPoint("/mnt/storage".into()),
+                paths: &test_paths().1,
+                enroll_key_file: None,
+                luks_format_extra_opts: &LuksFormatExtraOpts::default(),
+                pool_membership: &PoolMembership::empty(),
+            },
+        );
+        match result {
+            Err(AddError::DuplicateUuid { uuid, .. }) => {
+                assert_eq!(uuid.as_str(), collision_uuid);
+            }
+            other => panic!("expected DuplicateUuid (live-pool collision), got: {other:?}"),
+        }
+        // No CryptsetupLuksFormat issued on the refusal path.
+        let requests = recording.requests();
+        assert!(
+            !requests
+                .iter()
+                .any(|r| matches!(r, CmdRequest::CryptsetupLuksFormat { .. })),
+            "live-pool collision refusal must not invoke luksFormat: {requests:?}"
         );
     }
 }

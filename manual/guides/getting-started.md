@@ -15,7 +15,7 @@ braid owns two things:
 
 The NixOS module provides the systemd units, mount point, and toolchain. The CLI owns which disks are in the pool -- adding or removing a drive is a `braid` command, not a `nixos-rebuild`.
 
-Pool membership lives in `/var/lib/braid/pool.json`. This file is created by `braid add` and read by `braid unlock`.
+Pool membership lives in `/var/lib/braid/pool.json`. This file is created by `braid add` and read by `braid unlock`. It is keyed by each member's LUKS UUID; the disk name is stored inside each entry for commands and display.
 
 ## Install the NixOS module
 
@@ -100,7 +100,7 @@ braid will:
 4. Mount the pool at `/mnt/storage`.
 5. Write pool membership to `/var/lib/braid/pool.json`.
 
-The disk names (`toshiba1`, `toshiba2`, etc.) are permanent labels used in all future commands. Pick something short and meaningful.
+The disk names (`toshiba1`, `toshiba2`, etc.) are permanent presentation labels used in all future commands. Pick something short and meaningful. braid uses the LUKS UUID, not the name or LUKS label, as the persistent disk identity.
 
 After `braid add` completes, the pool is online and mounted. You can start using it immediately:
 

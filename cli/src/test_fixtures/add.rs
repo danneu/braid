@@ -12,7 +12,7 @@ use crate::membership::{self, DiskMember, PoolMembership};
 use crate::probe::Filesystem;
 use crate::progress::ProgressOutput;
 use crate::state_paths::StatePaths;
-use crate::types::ByIdPath;
+use crate::types::{ByIdPath, DiskName, LuksUuid};
 use std::path::Path;
 use std::sync::Arc;
 use std::sync::Mutex;
@@ -28,10 +28,18 @@ impl PoolFixture {
     pub(crate) fn live_one_disk() -> Self {
         let base = Self::empty_inner();
         let mut m = PoolMembership::empty();
-        m.disks.insert(
-            "disk1".into(),
-            DiskMember::from_by_id(ByIdPath("/dev/disk/by-id/virtio-disk1".into())),
-        );
+        let uuid = LuksUuid::parse("11111111-1111-1111-1111-111111111111")
+            .expect("canonical fixture UUID");
+        m.insert(
+            uuid,
+            DiskMember {
+                name: DiskName::parse("disk1").unwrap(),
+                by_id: ByIdPath::parse("/dev/disk/by-id/virtio-disk1").unwrap(),
+                devid: None,
+                added_at: None,
+            },
+        )
+        .expect("fixture insert");
         membership::save_membership(&m, &base.paths).expect("save_membership");
         Self {
             _state_tmp: base.state_tmp,
@@ -434,8 +442,13 @@ impl AddStatefulPool {
                 )))
             }
             CmdRequest::CryptsetupStatus { mapper } => {
-                if h_opened.lock().unwrap().iter().any(|m| m == mapper) {
-                    let underlying = mapper_underlying(mapper);
+                if h_opened
+                    .lock()
+                    .unwrap()
+                    .iter()
+                    .any(|m| m == mapper.as_str())
+                {
+                    let underlying = mapper_underlying(mapper.as_str());
                     Some(Ok(mock_ok(
                         &format!("cryptsetup status {mapper}"),
                         &format!(
@@ -484,7 +497,7 @@ impl AddStatefulPool {
                 "",
             ))),
             CmdRequest::CryptsetupLuksOpen { device, mapper } => {
-                h_opened.lock().unwrap().push(mapper.clone());
+                h_opened.lock().unwrap().push(mapper.as_str().to_owned());
                 Some(Ok(mock_ok(
                     &format!("cryptsetup open --type luks {device} {mapper}"),
                     "",
@@ -727,7 +740,7 @@ impl AddPlanTopology {
                 )))
             }
             CmdRequest::CryptsetupStatus { mapper } => {
-                let suffix = mapper.strip_prefix("braid-disk")?;
+                let suffix = mapper.as_str().strip_prefix("braid-disk")?;
                 let index = suffix.parse::<usize>().ok()?.checked_sub(1)?;
                 if index >= keyfile_probes.len() {
                     return None;

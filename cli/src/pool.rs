@@ -589,7 +589,7 @@ pub fn pool_resize_device<R: CommandRunner + Sync>(
 pub fn evict_present_device<R, S>(
     runner: &R,
     sleeper: &S,
-    mapper: &str,
+    mapper: &MapperName,
     mount_point: &MountPoint,
     needs_balance: bool,
     progress: ProgressOutput,
@@ -638,7 +638,10 @@ where
         )
     );
 
-    let close_label = mapper.strip_prefix("braid-").unwrap_or(mapper);
+    let close_label = mapper
+        .as_str()
+        .strip_prefix("braid-")
+        .unwrap_or(mapper.as_str());
     close_mapper_best_effort(runner, sleeper, mapper, close_label, color_enabled);
 
     Ok(())
@@ -1803,7 +1806,7 @@ mod tests {
             let result = evict_present_device(
                 &runner,
                 &progress::NoopSleeper,
-                "braid-disk2",
+                &MapperName("braid-disk2".into()),
                 &mp(),
                 false,
                 ProgressOutput::Off,
@@ -1836,7 +1839,7 @@ mod tests {
             let result = evict_present_device(
                 &runner,
                 &progress::NoopSleeper,
-                "braid-disk2",
+                &MapperName("braid-disk2".into()),
                 &mp(),
                 false,
                 ProgressOutput::Off,
@@ -1872,10 +1875,11 @@ mod tests {
                 MapperName(format!("braid-disk{i}")),
                 DeviceIdentity {
                     devid: i,
-                    luks_uuid: LuksUuid(format!(
+                    luks_uuid: LuksUuid::parse(&format!(
                         "{:08x}-{:04x}-{:04x}-{:04x}-{:012x}",
                         i as u32, i as u16, i as u16, i as u16, i
-                    )),
+                    ))
+                    .expect("valid fixture UUID"),
                 },
             );
         }
@@ -1906,7 +1910,7 @@ mod tests {
                 CmdRequest::CryptsetupStatus { mapper } => {
                     let device = self
                         .statuses
-                        .get(mapper)
+                        .get(mapper.as_str())
                         .cloned()
                         .unwrap_or_else(|| format!("/dev/sd{mapper}"));
                     Ok(RawCommandOutput {

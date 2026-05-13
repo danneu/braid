@@ -29,6 +29,17 @@
 # (7) actual VM shutdown/reboot runs ExecStop=braid lock to completion.
 
 import json
+
+
+def member_names(pool):
+    return {member["name"] for member in pool["disks"].values()}
+
+
+def member(pool, name):
+    for entry in pool["disks"].values():
+        if entry["name"] == name:
+            return entry
+    raise AssertionError(f"{name} missing from pool.json: {pool}")
 import shlex
 
 start_all()
@@ -393,7 +404,7 @@ with subtest("Concurrent adds reject the loser cleanly"):
     pool_raw = machine.succeed("cat /var/lib/braid/pool.json")
     pool = json.loads(pool_raw)
     expected = {"disk1", "disk2", "disk3", winner_disk}
-    actual = set(pool["disks"].keys())
+    actual = member_names(pool)
     assert actual == expected, (
         "pool.json mismatch.\nexpected: {}\nactual:   {}".format(expected, actual)
     )

@@ -61,13 +61,13 @@ sudo braid unlock --dry-run
 ## What happens under the hood
 
 1. Checks that no other braid operation is pending
-2. Probes each disk in pool.json: checks whether the device is present and whether its LUKS mapper is already open
+2. Probes each UUID-keyed member in pool.json: checks whether the by-id device is present, whether its LUKS UUID matches, and whether its LUKS mapper is already open
 3. Verifies the passphrase against the first unlockable disk
 4. Opens LUKS mappers for all locked disks using the verified passphrase
 5. Runs `btrfs device scan` to let the kernel discover all pool members
 6. Mounts the btrfs filesystem with `noatime`, `skip_balance`, and `subvolid=5`
 7. If any disks are unavailable and `--allow-degraded` is set: mounts with the `degraded` option
-8. After mount: enriches pool.json with live metadata (LUKS UUIDs, device IDs) -- best-effort
+8. After mount: enriches pool.json with live btrfs device IDs and related metadata -- best-effort
 9. Checks for a paused balance and prints a warning if one is found
 
 If all mappers are already open and the pool is already mounted, unlock is a no-op.

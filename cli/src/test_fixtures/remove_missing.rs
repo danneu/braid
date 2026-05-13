@@ -6,14 +6,13 @@
 //! through the pool.json membership map; the shared `two_disk_healthy`
 //! and `one_live_one_missing` constructors only pin disk2.
 
-use super::shared::{PoolFixture, mock_ok};
+use super::shared::{PoolFixture, disk_member_with, mock_ok};
 use crate::cmd::{CmdRequest, MockRunner};
 use crate::inhibit::RecordingInhibitor;
-use crate::membership::{self, DiskMember, PoolMembership};
+use crate::membership::{self, PoolMembership};
 use crate::progress::{self, ProgressOutput};
 use crate::remove_missing::RemoveMissingParams;
 use crate::state_paths::StatePaths;
-use crate::types::ByIdPath;
 use std::path::Path;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -120,7 +119,7 @@ impl RemoveMissingPool {
                 )))
             }
             CmdRequest::CryptsetupStatus { mapper } => {
-                let dev = mapper_underlying(mapper)?;
+                let dev = mapper_underlying(mapper.as_str())?;
                 Some(Ok(mock_ok(
                     &format!("cryptsetup status {mapper}"),
                     &format!(
@@ -160,16 +159,21 @@ impl RemoveMissingPool {
 impl PoolFixture {
     /// pool.json: disk1 (devid=1) + disk2 (devid=2) + disk3 (devid=3).
     /// All devids pinned because `--missing-id N` resolves through the
-    /// membership map; without pinning, `build_replacement_membership`
-    /// cannot match the requested id to a pool.json entry.
+    /// membership map via `by_devid`; without pinning, the lookup
+    /// cannot match the requested id to a pool.json entry. UUID seeds
+    /// mirror disk numbers for readability.
     pub(crate) fn three_disk_devids_pinned() -> Self {
         let base = Self::empty_inner();
         let mut m = PoolMembership::empty();
-        for (name, devid) in [("disk1", 1u64), ("disk2", 2), ("disk3", 3)] {
-            let mut member =
-                DiskMember::from_by_id(ByIdPath(format!("/dev/disk/by-id/virtio-{name}")));
-            member.devid = Some(devid);
-            m.disks.insert(name.to_owned(), member);
+        for (seed, name, devid) in [(1u64, "disk1", 1u64), (2, "disk2", 2), (3, "disk3", 3)] {
+            let (uuid, member) = disk_member_with(
+                seed,
+                name,
+                &format!("/dev/disk/by-id/virtio-{name}"),
+                Some(devid),
+                None,
+            );
+            m.insert(uuid, member).expect("fixture insert");
         }
         membership::save_membership(&m, &base.paths).expect("save_membership");
         Self {
@@ -185,16 +189,20 @@ impl PoolFixture {
 
     /// pool.json: disk1 (devid=1) + disk2 (devid=2). Both devids pinned
     /// so validation-precedence tests can pass `--missing-id 1` (live
-    /// device branch reachable in principle) without
-    /// `build_replacement_membership` losing the disk1 row.
+    /// device branch reachable in principle) without `by_devid` losing
+    /// the disk1 row.
     pub(crate) fn two_disk_devids_pinned() -> Self {
         let base = Self::empty_inner();
         let mut m = PoolMembership::empty();
-        for (name, devid) in [("disk1", 1u64), ("disk2", 2)] {
-            let mut member =
-                DiskMember::from_by_id(ByIdPath(format!("/dev/disk/by-id/virtio-{name}")));
-            member.devid = Some(devid);
-            m.disks.insert(name.to_owned(), member);
+        for (seed, name, devid) in [(1u64, "disk1", 1u64), (2, "disk2", 2)] {
+            let (uuid, member) = disk_member_with(
+                seed,
+                name,
+                &format!("/dev/disk/by-id/virtio-{name}"),
+                Some(devid),
+                None,
+            );
+            m.insert(uuid, member).expect("fixture insert");
         }
         membership::save_membership(&m, &base.paths).expect("save_membership");
         Self {

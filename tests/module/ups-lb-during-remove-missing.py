@@ -56,12 +56,20 @@ luks_format = (
 )
 
 
+def luks_uuid_for_name(name):
+    return {
+        "disk1": "11111111-1111-1111-1111-111111111111",
+        "disk2": "22222222-2222-2222-2222-222222222222",
+        "disk3": "33333333-3333-3333-3333-333333333333",
+    }[name]
+
+
 def luks_format_open(name):
     """Format and open a LUKS container at /dev/disk/by-id/virtio-NAME."""
     dev = f"/dev/disk/by-id/virtio-{name}"
     machine.succeed(
         f"printf '%s' {pq} | cryptsetup luksFormat {luks_format} "
-        f"--label braid-{name} {dev}"
+        f"--uuid {luks_uuid_for_name(name)} --label braid-{name} {dev}"
     )
     machine.succeed(
         f"printf '%s' {pq} | cryptsetup luksOpen --key-file=- "
@@ -188,15 +196,20 @@ with subtest("Seed pool.json with all three disks (incl. devids)"):
     # not need to be present; recover writes it from the live probe.
     pool_json = {
         "disks": {
-            "disk1": {
+            luks_uuid_for_name("disk1"): {
+                "name": "disk1",
                 "by_id": "/dev/disk/by-id/virtio-disk1",
                 "devid": disk1_devid,
             },
-            "disk2": {
+            luks_uuid_for_name("disk2"): {
+                "name": "disk2",
                 "by_id": "/dev/disk/by-id/virtio-disk2",
                 "devid": disk2_devid,
             },
-            "disk3": {"by_id": "/dev/disk/by-id/virtio-disk3"},
+            luks_uuid_for_name("disk3"): {
+                "name": "disk3",
+                "by_id": "/dev/disk/by-id/virtio-disk3",
+            },
         }
     }
     machine.succeed(

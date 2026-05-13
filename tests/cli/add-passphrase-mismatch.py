@@ -17,6 +17,17 @@
 #   effects on disk state or membership.
 
 import json
+
+
+def member_names(pool):
+    return {member["name"] for member in pool["disks"].values()}
+
+
+def member(pool, name):
+    for entry in pool["disks"].values():
+        if entry["name"] == name:
+            return entry
+    raise AssertionError(f"{name} missing from pool.json: {pool}")
 import shlex
 
 start_all()
@@ -101,8 +112,8 @@ with subtest("Data intact after failed add"):
 
 with subtest("Membership unchanged after failed add"):
     m = read_membership()
-    assert "disk1" in m["disks"], "disk1 missing from membership: " + str(m)
-    assert "disk2" in m["disks"], "disk2 missing from membership: " + str(m)
-    assert "disk3" not in m["disks"], "disk3 should not be in membership: " + str(m)
+    assert "disk1" in member_names(m), "disk1 missing from membership: " + str(m)
+    assert "disk2" in member_names(m), "disk2 missing from membership: " + str(m)
+    assert "disk3" not in member_names(m), "disk3 should not be in membership: " + str(m)
 
 machine.shutdown()

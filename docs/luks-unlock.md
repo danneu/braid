@@ -135,6 +135,38 @@ If `doctor` pointed users at the local files, the product would be internally in
 
 Red flags when reviewing recovery messaging: `/var/lib/braid/luks-headers/`, `.luksheader`, `luks_headers_dir()`, and any `Path::exists` against a backup path.
 
+## Unparseable state-file reconciliation
+
+There are two state files that can block normal operation when they are
+unparseable: `/var/lib/braid/pool.json` and
+`/var/lib/braid/pending-op.json`.
+
+For corrupt or old-shape `pool.json`, the remediation phrase is:
+
+`run 'braid discover --write' to rebuild from existing disks (with all intended pool members attached; see docs/luks-unlock.md)`
+
+Move the old `pool.json` aside only after confirming the attached disks are the
+intended pool members. Then rebuild with `braid discover --write`; during a
+single-user cutover, pass `--expect-count` with the member count from the old
+file so a temporarily detached disk cannot silently produce a smaller
+membership and an unrelated braid-labeled disk cannot be silently admitted.
+
+For an unparseable pending-operation journal, the remediation phrase is:
+
+`Remove /var/lib/braid/pending-op.json after manual reconciliation (see docs/luks-unlock.md) and re-run.`
+
+It is safe to remove `pending-op.json` only when one of these is true:
+
+- The operation has not yet committed any disk-level mutation: no LUKS format
+  was applied, no `btrfs device add` ran, and no fresh-format target was opened.
+- The user has confirmed with `braid status` that the live pool already
+  reflects the intended state and the journal entry is stale.
+
+It is not safe to remove `pending-op.json` when a partially completed mutation
+is in flight, such as `mkfs.btrfs` succeeding but `btrfs device add` not yet
+running, or a `replace` paused mid-rebuild. In those cases, follow the recovery
+scenario guide instead: [manual/guides/recovery-scenarios.md](../manual/guides/recovery-scenarios.md).
+
 ## Failed unlock cleanup
 
 If `braid unlock` or a recovery mount path opens one or more LUKS mappers

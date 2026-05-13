@@ -85,6 +85,8 @@ pub fn update(model: &mut Model, msg: Message) -> Vec<Effect> {
                 effects.push(Effect::ProbePool {
                     mount_point: model.mount_point.clone(),
                     disk_by_id: model.disk_by_id.clone(),
+                    disk_luks_uuid: model.disk_luks_uuid.clone(),
+                    disk_devid: model.disk_devid.clone(),
                     paths,
                 });
             }
@@ -317,6 +319,8 @@ mod tests {
         let (mut model, init_effects) = Model::new(
             sample_disk_names(),
             std::collections::HashMap::new(),
+            std::collections::HashMap::new(),
+            std::collections::HashMap::new(),
             "/mnt/storage".to_owned(),
             Some(sample_fan_control()),
             Some(sample_ups_config()),
@@ -468,12 +472,16 @@ mod tests {
     use crate::tui::model::{TemperatureDiskId, TemperatureReading};
     use crate::types::LuksUuid;
 
+    fn temp_uuid(raw: &str) -> LuksUuid {
+        LuksUuid::parse(raw).expect("valid UUID in temperature fixture")
+    }
+
     fn pool_with_temperature(name: &str, uuid_hex: &str, celsius: i16) -> PoolState {
         let mut pool = sample_pool();
         pool.disk_temperature_readings.insert(
             name.to_owned(),
             TemperatureReading {
-                id: TemperatureDiskId::LuksUuid(LuksUuid(uuid_hex.to_owned())),
+                id: TemperatureDiskId::LuksUuid(temp_uuid(uuid_hex)),
                 celsius,
             },
         );
@@ -495,9 +503,7 @@ mod tests {
             &mut model,
             Message::PoolProbeFinished(Ok(Some(pool)), Duration::from_millis(10)),
         );
-        let id = TemperatureDiskId::LuksUuid(LuksUuid(
-            "11111111-1111-1111-1111-111111111111".to_owned(),
-        ));
+        let id = TemperatureDiskId::LuksUuid(temp_uuid("11111111-1111-1111-1111-111111111111"));
         let w = model
             .session_temperature_stats
             .get(&id)
@@ -516,7 +522,7 @@ mod tests {
     fn probe_finished_widens_max_on_higher_sample() {
         let mut model = Model::new_demo(sample_disk_names(), PoolStatus::Loading);
         let uuid = "11111111-1111-1111-1111-111111111111";
-        let id = TemperatureDiskId::LuksUuid(LuksUuid(uuid.to_owned()));
+        let id = TemperatureDiskId::LuksUuid(temp_uuid(uuid));
         update(
             &mut model,
             Message::PoolProbeFinished(
@@ -544,7 +550,7 @@ mod tests {
     fn probe_finished_widens_min_on_lower_sample() {
         let mut model = Model::new_demo(sample_disk_names(), PoolStatus::Loading);
         let uuid = "11111111-1111-1111-1111-111111111111";
-        let id = TemperatureDiskId::LuksUuid(LuksUuid(uuid.to_owned()));
+        let id = TemperatureDiskId::LuksUuid(temp_uuid(uuid));
         update(
             &mut model,
             Message::PoolProbeFinished(
@@ -577,7 +583,7 @@ mod tests {
     fn probe_finished_missing_reading_preserves_watermark() {
         let mut model = Model::new_demo(sample_disk_names(), PoolStatus::Loading);
         let uuid = "11111111-1111-1111-1111-111111111111";
-        let id = TemperatureDiskId::LuksUuid(LuksUuid(uuid.to_owned()));
+        let id = TemperatureDiskId::LuksUuid(temp_uuid(uuid));
         update(
             &mut model,
             Message::PoolProbeFinished(

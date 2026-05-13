@@ -16,6 +16,17 @@
 
 import base64
 import json
+
+
+def member_names(pool):
+    return {member["name"] for member in pool["disks"].values()}
+
+
+def member(pool, name):
+    for entry in pool["disks"].values():
+        if entry["name"] == name:
+            return entry
+    raise AssertionError(f"{name} missing from pool.json: {pool}")
 import shlex
 import time
 
@@ -123,7 +134,7 @@ def stop_lock_holder(holder_pid):
 
 def get_pool_devid(name):
     pool = json.loads(machine.succeed("cat /var/lib/braid/pool.json"))
-    entry = pool["disks"][name]
+    entry = member(pool, name)
     assert "devid" in entry, f"{name} has no devid in pool.json: {pool}"
     return int(entry["devid"])
 

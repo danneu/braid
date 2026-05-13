@@ -10,6 +10,17 @@
 
 import json
 
+
+def member_names(pool):
+    return {member["name"] for member in pool["disks"].values()}
+
+
+def member(pool, name):
+    for entry in pool["disks"].values():
+        if entry["name"] == name:
+            return entry
+    raise AssertionError(f"{name} missing from pool.json: {pool}")
+
 start_all()
 machine.wait_for_unit("multi-user.target")
 
@@ -37,8 +48,8 @@ with subtest("Setup: build 2-disk pool and pool membership"):
 
     raw_pool = machine.succeed("cat /var/lib/braid/pool.json")
     pool_m = json.loads(raw_pool)
-    assert "disk1" in pool_m["disks"], pool_m
-    assert "disk2" in pool_m["disks"], pool_m
+    assert "disk1" in member_names(pool_m), pool_m
+    assert "disk2" in member_names(pool_m), pool_m
 
 with subtest("Add with renamed name for same disk is rejected"):
     # Try to add the same physical disk (virtio-disk1) under a new name (wd-red).

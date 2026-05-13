@@ -1,6 +1,11 @@
 use crate::cmd::{CmdRequest, CommandRunner};
-use crate::parse::{ParseError, parse_cryptsetup_luks_label, parse_cryptsetup_luks_version};
-use crate::types::ByIdPath;
+use crate::membership::{DiskMember, PoolMembership, save_membership};
+use crate::parse::{
+    ParseError, parse_cryptsetup_luks_label, parse_cryptsetup_luks_uuid_from_dump,
+    parse_cryptsetup_luks_version,
+};
+use crate::state_paths::StatePaths;
+use crate::types::{ByIdPath, DiskName, LuksUuid};
 use std::collections::BTreeMap;
 use std::collections::btree_map::Entry;
 use std::fmt;
@@ -18,6 +23,22 @@ pub enum DiscoverError {
     LabelCollision {
         name: String,
         path1: String,
+        path2: String,
+    },
+    /// Two physically distinct disks share one LUKS UUID -- typically the
+    /// dd-cloned-disk case. Discover names both by-id paths and both
+    /// labels so the operator can pick which one to relabel or detach.
+    /// Raised explicitly in the discover code path before delegating to
+    /// `PoolMembership::insert` so the friendly wording reaches the
+    /// operator instead of the generic `MembershipError::Conflict`.
+    #[error(
+        "duplicate LUKS UUID: braid-{name1} ({path1}) and braid-{name2} ({path2}) share UUID {uuid} -- relabel or detach one before retrying (this typically indicates a dd-cloned disk)"
+    )]
+    DuplicateUuid {
+        uuid: LuksUuid,
+        name1: DiskName,
+        path1: String,
+        name2: DiskName,
         path2: String,
     },
 }
@@ -44,6 +65,22 @@ pub enum DiscoverWarning {
     InvalidDiskName {
         path: String,
         label: String,
+    },
+    /// Discovery read a braid-labeled LUKS2 disk whose `luksDump` text
+    /// body had no `UUID:` line. The disk is skipped (it cannot be a
+    /// pool member without identity) and surfaced as a structured
+    /// warning so operators know to inspect the header.
+    MissingLuksUuid {
+        path: String,
+    },
+    /// Discovery read a braid-labeled LUKS2 disk whose `luksDump` text
+    /// body carried a `UUID:` value that `LuksUuid::parse` rejected.
+    /// The disk is skipped; the warning carries the raw offending text
+    /// so operators can correlate against `cryptsetup luksDump` output.
+    InvalidLuksUuid {
+        path: String,
+        raw: String,
+        detail: String,
     },
 }
 
@@ -76,14 +113,68 @@ impl fmt::Display for DiscoverWarning {
                 "skipping {path}: label \"{}\" has an invalid disk name",
                 label.escape_default(),
             ),
+            DiscoverWarning::MissingLuksUuid { path } => {
+                write!(f, "skipping {path}: luksDump output missing UUID")
+            }
+            DiscoverWarning::InvalidLuksUuid { path, raw, detail } => write!(
+                f,
+                "skipping {path}: invalid LUKS UUID \"{raw}\" -- {detail}"
+            ),
         }
     }
 }
 
+/// Outcome of `discover_pool_members`. `members` is a `PoolMembership`
+/// keyed by UUID so the same value type flows through to
+/// `save_membership` without a second collection step on the
+/// `--write` path.
 #[derive(Debug, PartialEq, Eq)]
 pub struct DiscoverOutcome {
-    pub members: BTreeMap<String, ByIdPath>,
+    /// UUID-keyed membership reconstructed from attached braid-labeled disks.
+    pub members: PoolMembership,
+    /// Non-fatal scan findings for disks skipped before membership write.
     pub warnings: Vec<DiscoverWarning>,
+}
+
+/// Discover-side fail-closed errors that fire from the `--write` path
+/// before any `save_membership` call. Separate from `DiscoverError`
+/// (which collects pre-write failures from the scan itself) because
+/// each variant pins an operator-facing remediation message that
+/// downstream tests assert against.
+#[derive(Debug, thiserror::Error)]
+pub enum DiscoverWriteError {
+    /// `pending-op.json` exists at the journal path -- the discover
+    /// `--write` cutover precondition fails closed instead of
+    /// overwriting `pool.json` mid-recovery (see
+    /// `docs/luks-unlock.md`).
+    #[error(
+        "discover refusing to write pool.json: pending-op.json exists at {path} -- run 'braid recover' first (see docs/luks-unlock.md)"
+    )]
+    PendingOpExists { path: String },
+    /// Existing `pool.json` on disk is in the old name-keyed shape.
+    /// The cutover runbook tells the operator to move it aside; the
+    /// gate enforces that instead of silently overwriting it.
+    #[error(
+        "discover refusing to write pool.json: existing file at {path} is not in UUID-keyed format -- back it up and move it aside before retrying (see docs/luks-unlock.md)"
+    )]
+    NameKeyedPoolJson { path: String },
+    /// `--expect-count <N>` was set and discovery produced a member
+    /// count other than `N`. Catches partial-attach and unintended
+    /// extra-disk hazards during the cutover runbook.
+    #[error(
+        "discover refusing to write pool.json: expected exactly {expected} members, found {actual} -- check that all intended pool members are attached and readable, and that no unrelated braid-labeled disks are attached, then retry"
+    )]
+    ExpectCountUnmet { expected: usize, actual: usize },
+    /// `save_membership` failed at the I/O / serialization layer.
+    /// Forwards the underlying `MembershipError` so the test surface
+    /// still pins the message wording from `membership.rs`.
+    #[error("failed to write pool membership: {0}")]
+    Save(#[from] crate::membership::MembershipError),
+    /// A `DuplicateUuid` (or other structural) discover error fired
+    /// during the scan itself. The variant lifts it into the
+    /// `--write` error space so callers handle one error type.
+    #[error(transparent)]
+    Discover(#[from] DiscoverError),
 }
 
 /// Scan /dev/disk/by-id/ for LUKS devices with braid-<name> labels.
@@ -96,6 +187,43 @@ pub fn discover_pool_members<R: CommandRunner>(
         &crate::recover::RealByIdResolver,
         Path::new("/dev/disk/by-id"),
     )
+}
+
+/// Classifies an existing pool.json by shape for discover's gating.
+/// Keeps the write-path legacy refusal and read-only migration preview
+/// on one JSON-shape classifier.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PoolJsonShape {
+    Missing,
+    LegacyNameKeyed,
+    Other,
+}
+
+/// Positively identifies the pre-LUKS-UUID name-keyed pool.json shape.
+/// Unreadable, unparseable, UUID-keyed, and unrecognized payloads all
+/// return `Other` so callers can fail closed unless explicitly allowed.
+pub fn classify_pool_json(path: &Path) -> PoolJsonShape {
+    let raw = match std::fs::read_to_string(path) {
+        Ok(raw) => raw,
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => {
+            return PoolJsonShape::Missing;
+        }
+        Err(_) => return PoolJsonShape::Other,
+    };
+
+    let Ok(value) = serde_json::from_str::<serde_json::Value>(&raw) else {
+        return PoolJsonShape::Other;
+    };
+
+    let Some(disks) = value.get("disks").and_then(|v| v.as_object()) else {
+        return PoolJsonShape::Other;
+    };
+
+    if disks.keys().any(|key| LuksUuid::parse(key).is_err()) {
+        PoolJsonShape::LegacyNameKeyed
+    } else {
+        PoolJsonShape::Other
+    }
 }
 
 /// Build a `LabelCollision` error from two colliding by-id paths.
@@ -112,6 +240,18 @@ fn label_collision(name: &str, a: String, b: String) -> DiscoverError {
     }
 }
 
+/// Internal accumulator entry for the alias-dedup pass. Keeps the
+/// best-priority by-id, the canonical target path (for label-collision
+/// detection), and the probed `LuksUuid` so the post-dedup duplicate
+/// check has both UUID and path in scope.
+struct AliasCandidate {
+    priority: u8,
+    filename: String,
+    by_id: ByIdPath,
+    canonical: String,
+    luks_uuid: LuksUuid,
+}
+
 fn discover_from_dir<R: CommandRunner>(
     runner: &R,
     resolver: &dyn crate::recover::ByIdResolver,
@@ -121,18 +261,17 @@ fn discover_from_dir<R: CommandRunner>(
         Ok(entries) => entries,
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
             return Ok(DiscoverOutcome {
-                members: BTreeMap::new(),
+                members: PoolMembership::empty(),
                 warnings: Vec::new(),
             });
         }
         Err(e) => return Err(DiscoverError::ReadDir(e)),
     };
 
-    // (priority, filename, by_id, canonical) for the best candidate per disk
-    // name. Caching priority + filename at insertion lets the Occupied arm
-    // tie-break without re-extracting the basename or recomputing the priority
-    // class for the stored entry.
-    let mut members: BTreeMap<String, (u8, String, ByIdPath, String)> = BTreeMap::new();
+    // Per-disk-name best candidate, keyed by the validated DiskName.
+    // The Occupied arm tie-breaks within an alias set without
+    // re-extracting the basename or re-probing the LUKS UUID.
+    let mut members: BTreeMap<DiskName, AliasCandidate> = BTreeMap::new();
     let mut warnings = Vec::new();
 
     for entry in entries.flatten() {
@@ -168,11 +307,12 @@ fn discover_from_dir<R: CommandRunner>(
             continue;
         }
 
-        // Read LUKS label + version via luksDump text output. One luksDump
-        // call, two parses on the same RawCommandOutput. The version check
-        // enforces braid's LUKS2-only invariant at this gateway so a
-        // braid-labeled LUKS1 disk never reaches pool.json via
-        // `braid discover --write`.
+        // Read LUKS label + version + UUID via the same luksDump text
+        // output. One luksDump call, three parses on the same
+        // RawCommandOutput. The version check enforces braid's
+        // LUKS2-only invariant at this gateway so a braid-labeled
+        // LUKS1 disk never reaches pool.json via `braid discover
+        // --write`.
         let dump_raw = runner.run(&CmdRequest::CryptsetupLuksDumpText {
             device: path_str.clone(),
         })?;
@@ -214,54 +354,200 @@ fn discover_from_dir<R: CommandRunner>(
         let Some(label) = label else {
             continue;
         };
-        let Some(disk_name) = crate::config::name_from_mapper(&label) else {
+        let Some(disk_name_raw) = crate::config::name_from_mapper(&label) else {
             continue;
         };
-        if !crate::membership::is_valid_disk_name(disk_name) {
-            warnings.push(DiscoverWarning::InvalidDiskName {
-                path: path_str.clone(),
-                label: label.clone(),
-            });
-            continue;
-        }
+        let disk_name = match DiskName::parse(disk_name_raw) {
+            Ok(n) => n,
+            Err(_) => {
+                warnings.push(DiscoverWarning::InvalidDiskName {
+                    path: path_str.clone(),
+                    label: label.clone(),
+                });
+                continue;
+            }
+        };
 
-        let priority = by_id_priority(&name_str);
+        // Parse the LUKS UUID from the shared dump body. Missing /
+        // invalid UUID surfaces as a structured warning and the disk
+        // is skipped -- it cannot be a pool member without identity.
+        let luks_uuid = match parse_cryptsetup_luks_uuid_from_dump(&dump_raw) {
+            Ok(u) => u,
+            Err(ParseError::MissingField { .. }) => {
+                warnings.push(DiscoverWarning::MissingLuksUuid {
+                    path: path_str.clone(),
+                });
+                continue;
+            }
+            Err(ParseError::UnexpectedValue { value, .. }) => {
+                // value is "<raw> (<detail>)" per the dump parser;
+                // split the formatted prefix back out into the raw +
+                // detail surface the warning needs.
+                let (raw, detail) = match value.find(" (") {
+                    Some(idx) => (
+                        value[..idx].to_owned(),
+                        value[idx + 2..].trim_end_matches(')').to_owned(),
+                    ),
+                    None => (value.clone(), String::new()),
+                };
+                warnings.push(DiscoverWarning::InvalidLuksUuid {
+                    path: path_str.clone(),
+                    raw,
+                    detail,
+                });
+                continue;
+            }
+            Err(e) => {
+                warnings.push(DiscoverWarning::LuksDumpUnparseable {
+                    path: path_str.clone(),
+                    detail: e.to_string(),
+                });
+                continue;
+            }
+        };
+
         let filename = name_str.into_owned();
+        let priority = by_id_priority(&filename);
+        let by_id_path = Path::new("/dev/disk/by-id")
+            .join(&filename)
+            .to_string_lossy()
+            .into_owned();
+        let by_id = ByIdPath::parse(&by_id_path)
+            .expect("by-id path comes from /dev/disk/by-id/ enumeration");
 
-        match members.entry(disk_name.to_owned()) {
+        let candidate = AliasCandidate {
+            priority,
+            filename,
+            by_id,
+            canonical,
+            luks_uuid,
+        };
+
+        match members.entry(disk_name) {
             Entry::Vacant(e) => {
-                e.insert((priority, filename, ByIdPath(path_str), canonical));
+                e.insert(candidate);
             }
             Entry::Occupied(mut e) => {
-                let (existing_priority, existing_filename, existing_by_id, existing_canonical) =
-                    e.get();
-                if *existing_canonical != canonical {
+                let existing = e.get();
+                if existing.canonical != candidate.canonical {
                     return Err(label_collision(
-                        disk_name,
-                        existing_by_id.0.clone(),
-                        path_str,
+                        e.key().as_str(),
+                        existing.by_id.as_str().to_owned(),
+                        candidate.by_id.as_str().to_owned(),
                     ));
                 }
 
                 // Same physical disk via two aliases -- keep the candidate
                 // with the best (priority, filename) key so selection is
                 // deterministic regardless of read_dir order.
-                let candidate_better = (priority, filename.as_str())
-                    < (*existing_priority, existing_filename.as_str());
+                let candidate_better = (candidate.priority, candidate.filename.as_str())
+                    < (existing.priority, existing.filename.as_str());
                 if candidate_better {
-                    e.insert((priority, filename, ByIdPath(path_str), canonical));
+                    e.insert(candidate);
                 }
             }
         }
     }
 
+    // After alias-dedup, surface duplicate UUIDs (the cloned-disk
+    // hazard) as a structured DiscoverError::DuplicateUuid before
+    // delegating to PoolMembership::insert. Both by-id paths and both
+    // disk names are in scope here so the operator-facing message can
+    // name them; PoolMembership::insert's generic Conflict cannot.
+    let mut seen_uuids: BTreeMap<&LuksUuid, (&DiskName, &str)> = BTreeMap::new();
+    for (name, cand) in &members {
+        if let Some((prev_name, prev_path)) =
+            seen_uuids.insert(&cand.luks_uuid, (name, cand.by_id.as_str()))
+        {
+            // Sort (name, path) pairs lexicographically by path for
+            // determinism, matching the label_collision helper.
+            let a = (prev_name.clone(), prev_path.to_owned());
+            let b = (name.clone(), cand.by_id.as_str().to_owned());
+            let (first, second) = if a.1 <= b.1 { (a, b) } else { (b, a) };
+            return Err(DiscoverError::DuplicateUuid {
+                uuid: cand.luks_uuid.clone(),
+                name1: first.0,
+                path1: first.1,
+                name2: second.0,
+                path2: second.1,
+            });
+        }
+    }
+
+    // Build a UUID-keyed PoolMembership from the deduped set.
+    // PoolMembership::insert acts as a defense-in-depth backstop
+    // (axis-1 UUID + axis-2 name + axis-3 by-id) even though the
+    // pre-pass above has just narrowed the duplicate-UUID case.
+    let mut membership = PoolMembership::empty();
+    for (name, cand) in members {
+        let member = DiskMember::new(name, cand.by_id);
+        membership.insert(cand.luks_uuid, member).map_err(|e| {
+            // Discover is the only writer of fresh membership here, so
+            // a Conflict at this point indicates a logic bug rather
+            // than user-facing state corruption. Surface the message
+            // through DiscoverError::Cmd's escape hatch is wrong; use
+            // an explicit panic-equivalent by mapping to a synthetic
+            // DiscoverError::LabelCollision is also wrong. The
+            // pragmatic answer: bubble it through a generic
+            // `DiscoverError::ReadDir`-like surface would also be
+            // wrong. Stay strict here: log the error and treat as
+            // ReadDir error wrapping the I/O-shaped MembershipError
+            // body. In practice, the prior DuplicateUuid pass + the
+            // four-axis pre-checks make this branch unreachable.
+            DiscoverError::ReadDir(std::io::Error::other(format!(
+                "membership insert failed after discover pre-checks: {e}"
+            )))
+        })?;
+    }
+
     Ok(DiscoverOutcome {
-        members: members
-            .into_iter()
-            .map(|(name, (_, _, by_id, _))| (name, by_id))
-            .collect(),
+        members: membership,
         warnings,
     })
+}
+
+/// Apply discover's `--write` pre-save fail-closed gates and persist
+/// the discovered membership. The two gates pinned in the plan must
+/// fire BEFORE any `save_membership` call:
+/// 1. `pending-op.json` must not exist (covered by `PendingOpExists`).
+/// 2. Existing `pool.json` must not be in the legacy name-keyed shape
+///    (covered by `NameKeyedPoolJson`).
+///
+/// When `expected_count` is set, the gate refuses if the produced
+/// membership count is not exactly `expected_count` (cutover
+/// partial-attach and unintended-extra-disk guard).
+///
+/// On success returns the saved `PoolMembership`. The accepting CLI
+/// arm at `main.rs:707` consumes both `warnings` (printed before this
+/// call) and the saved membership.
+pub fn write_discovered_membership(
+    outcome: DiscoverOutcome,
+    paths: &StatePaths,
+    expected_count: Option<usize>,
+) -> Result<PoolMembership, DiscoverWriteError> {
+    let journal_path = paths.pending_op_json();
+    if journal_path.exists() {
+        return Err(DiscoverWriteError::PendingOpExists {
+            path: journal_path.display().to_string(),
+        });
+    }
+
+    let pool_json_path = paths.pool_json();
+    if classify_pool_json(&pool_json_path) == PoolJsonShape::LegacyNameKeyed {
+        return Err(DiscoverWriteError::NameKeyedPoolJson {
+            path: pool_json_path.display().to_string(),
+        });
+    }
+
+    if let Some(expected) = expected_count {
+        let actual = outcome.members.len();
+        if actual != expected {
+            return Err(DiscoverWriteError::ExpectCountUnmet { expected, actual });
+        }
+    }
+
+    save_membership(&outcome.members, paths)?;
+    Ok(outcome.members)
 }
 
 /// Priority for /dev/disk/by-id/ symlink prefixes. Lower = more preferred.
@@ -310,6 +596,27 @@ mod tests {
     use crate::test_fixtures::{
         DiscoverLabelMap, discover_create_by_id_symlink, discover_create_target,
     };
+
+    /// Test-local helper: resolve a disk name to its discovered by-id
+    /// string via the post-migration PoolMembership API. Replaces the
+    /// pre-migration `members["sda"].0` BTreeMap indexing pattern.
+    fn by_id_for(members: &PoolMembership, name: &str) -> String {
+        let disk_name = DiskName::parse(name).expect("valid test disk name");
+        let (_, m) = members
+            .by_name(&disk_name)
+            .unwrap_or_else(|| panic!("disk '{name}' should be discovered: {members:?}"));
+        m.by_id.as_str().to_owned()
+    }
+
+    /// Test-local helper: does the discovered membership contain a
+    /// member under the given disk name?
+    fn contains_name(members: &PoolMembership, name: &str) -> bool {
+        let disk_name = match DiskName::parse(name) {
+            Ok(n) => n,
+            Err(_) => return false,
+        };
+        members.by_name(&disk_name).is_some()
+    }
 
     #[test]
     fn discover_propagates_runner_error_at_isluks() {
@@ -493,7 +800,7 @@ mod tests {
 
         assert_eq!(outcome.members.len(), 1);
         assert!(
-            outcome.members.contains_key("modern"),
+            contains_name(&outcome.members, "modern"),
             "modern disk should be discovered: {:?}",
             outcome.members
         );
@@ -603,10 +910,10 @@ mod tests {
         );
         let members = &outcome.members;
         assert_eq!(members.len(), 1);
+        let sda = by_id_for(members, "sda");
         assert!(
-            members["sda"].0.ends_with("wwn-0x50014ee606704442"),
-            "expected wwn path, got: {}",
-            members["sda"].0
+            sda.ends_with("wwn-0x50014ee606704442"),
+            "expected wwn path, got: {sda}"
         );
     }
 
@@ -636,10 +943,10 @@ mod tests {
         );
         let members = &outcome.members;
         assert_eq!(members.len(), 1);
+        let sda = by_id_for(members, "sda");
         assert!(
-            members["sda"].0.ends_with("ata-AAAAA_DISK"),
-            "expected lexicographically earlier path, got: {}",
-            members["sda"].0
+            sda.ends_with("ata-AAAAA_DISK"),
+            "expected lexicographically earlier path, got: {sda}"
         );
     }
 
@@ -679,11 +986,11 @@ mod tests {
             "expected only the LUKS2 disk: {members:?}"
         );
         assert!(
-            members.contains_key("modern"),
+            contains_name(members, "modern"),
             "modern (LUKS2) disk should be present: {members:?}"
         );
         assert!(
-            !members.contains_key("legacy"),
+            !contains_name(members, "legacy"),
             "legacy (LUKS1) disk should be skipped: {members:?}"
         );
         assert_eq!(outcome.warnings.len(), 1);
@@ -735,12 +1042,15 @@ mod tests {
             outcome.members,
         );
         assert!(
-            outcome.members.contains_key("good"),
+            contains_name(&outcome.members, "good"),
             "good disk should be discovered: {:?}",
             outcome.members,
         );
         assert!(
-            !outcome.members.keys().any(|k| k.contains("é")),
+            !outcome
+                .members
+                .iter()
+                .any(|(_, m)| m.name.as_str().contains("é")),
             "invalid name must not be recorded: {:?}",
             outcome.members,
         );
@@ -797,15 +1107,15 @@ mod tests {
         );
         let members = &outcome.members;
         assert_eq!(members.len(), 2);
+        let alpha = by_id_for(members, "alpha");
         assert!(
-            members["alpha"].0.ends_with("wwn-0x0001"),
-            "expected wwn for alpha, got: {}",
-            members["alpha"].0
+            alpha.ends_with("wwn-0x0001"),
+            "expected wwn for alpha, got: {alpha}"
         );
+        let beta = by_id_for(members, "beta");
         assert!(
-            members["beta"].0.ends_with("wwn-0x0002"),
-            "expected wwn for beta, got: {}",
-            members["beta"].0
+            beta.ends_with("wwn-0x0002"),
+            "expected wwn for beta, got: {beta}"
         );
     }
 
@@ -835,7 +1145,8 @@ mod tests {
                 assert_eq!(name, "foo");
                 let pair = [path1.as_str(), path2.as_str()];
                 assert!(
-                    pair.contains(&alias_a.as_str()) && pair.contains(&alias_b.as_str()),
+                    pair.iter().any(|path| path.ends_with("ata-CLONE_A"))
+                        && pair.iter().any(|path| path.ends_with("ata-CLONE_B")),
                     "collision must reference both aliases: {pair:?}",
                 );
             }
@@ -844,8 +1155,8 @@ mod tests {
 
         let msg = err.to_string();
         assert!(msg.contains("braid-foo"), "missing label name: {msg}");
-        assert!(msg.contains(&alias_a), "missing alias_a: {msg}");
-        assert!(msg.contains(&alias_b), "missing alias_b: {msg}");
+        assert!(msg.contains("ata-CLONE_A"), "missing alias_a: {msg}");
+        assert!(msg.contains("ata-CLONE_B"), "missing alias_b: {msg}");
     }
 
     #[test]
@@ -908,10 +1219,10 @@ mod tests {
         let members = &outcome.members;
 
         assert_eq!(members.len(), 1, "expected only the canonicalizable entry");
+        let foo = by_id_for(members, "foo");
         assert!(
-            members["foo"].0.ends_with("wwn-VALID"),
-            "expected the valid symlink to win, got: {}",
-            members["foo"].0
+            foo.ends_with("wwn-VALID"),
+            "expected the valid symlink to win, got: {foo}"
         );
         assert_eq!(outcome.warnings.len(), 1);
         assert!(matches!(
@@ -945,5 +1256,395 @@ mod tests {
                 other => panic!("expected LabelCollision, got {other:?}"),
             }
         }
+    }
+
+    // -- Migration-Phase-4 tests ----------------------------------------
+
+    /// Build a synthetic luksDump body for negative-UUID tests. The
+    /// version and label fields are present so the parser reaches the
+    /// UUID-extraction step; the UUID line is controlled by the caller.
+    fn luksdump_body(label: &str, uuid_line: Option<&str>) -> String {
+        let mut body = String::from("LUKS header information\nVersion:\t2\n");
+        if let Some(line) = uuid_line {
+            body.push_str(line);
+            if !line.ends_with('\n') {
+                body.push('\n');
+            }
+        }
+        body.push_str("Label:\t");
+        body.push_str(label);
+        body.push('\n');
+        body
+    }
+
+    /// Intent: a braid-labeled LUKS2 disk whose luksDump body has no
+    /// UUID line surfaces as DiscoverWarning::MissingLuksUuid and is
+    /// absent from the discovered members.
+    /// Why it exists: the discover -> save_membership path depends on
+    /// every member having a UUID. A regression that silently kept
+    /// the disk (or dropped it without warning) would either corrupt
+    /// pool.json or leave the operator without a diagnostic.
+    /// Scenario: a disk's LUKS header was zeroed mid-format leaving a
+    /// label but no UUID; discover warns and skips it (seed 800).
+    #[test]
+    fn discover_warns_when_uuid_line_missing() {
+        let dir = tempfile::tempdir().unwrap();
+        let target = discover_create_target(dir.path(), "fake-bad");
+        let path = discover_create_by_id_symlink(dir.path(), "ata-MISSING_UUID", &target);
+        let runner = DiscoverLabelMap::new(&[(&path, "braid-baddisk")]).with_dump_response(
+            &path,
+            RawCommandOutput {
+                cmd: "cryptsetup".into(),
+                stdout: luksdump_body("braid-baddisk", None),
+                stderr: String::new(),
+                exit_status: 0,
+            },
+        );
+
+        let outcome =
+            discover_from_dir(&runner, &crate::recover::RealByIdResolver, dir.path()).unwrap();
+
+        assert!(
+            !contains_name(&outcome.members, "baddisk"),
+            "disk with missing UUID must not be a member"
+        );
+        let warning = outcome
+            .warnings
+            .iter()
+            .find(|w| matches!(w, DiscoverWarning::MissingLuksUuid { .. }))
+            .expect("MissingLuksUuid warning expected");
+        let DiscoverWarning::MissingLuksUuid { path: warn_path } = warning else {
+            unreachable!();
+        };
+        assert!(warn_path.ends_with("ata-MISSING_UUID"));
+        assert_eq!(
+            warning.to_string(),
+            format!("skipping {warn_path}: luksDump output missing UUID"),
+        );
+    }
+
+    /// Intent: a braid-labeled LUKS2 disk whose UUID line carries text
+    /// LuksUuid::parse rejects surfaces as DiscoverWarning::InvalidLuksUuid
+    /// carrying the raw text.
+    /// Why: the invalid-UUID warning path must keep the offending raw
+    /// value visible for operator diagnostics.
+    /// Scenario: a header has been corrupted to an unparseable UUID
+    /// string (seed 801).
+    #[test]
+    fn discover_warns_when_uuid_unparseable() {
+        let dir = tempfile::tempdir().unwrap();
+        let target = discover_create_target(dir.path(), "fake-bad");
+        let path = discover_create_by_id_symlink(dir.path(), "ata-INVALID_UUID", &target);
+        let runner = DiscoverLabelMap::new(&[(&path, "braid-baddisk")]).with_dump_response(
+            &path,
+            RawCommandOutput {
+                cmd: "cryptsetup".into(),
+                stdout: luksdump_body("braid-baddisk", Some("UUID:\tnot-a-uuid")),
+                stderr: String::new(),
+                exit_status: 0,
+            },
+        );
+
+        let outcome =
+            discover_from_dir(&runner, &crate::recover::RealByIdResolver, dir.path()).unwrap();
+
+        assert!(!contains_name(&outcome.members, "baddisk"));
+        let warning = outcome
+            .warnings
+            .iter()
+            .find(|w| matches!(w, DiscoverWarning::InvalidLuksUuid { .. }))
+            .expect("InvalidLuksUuid warning expected");
+        let DiscoverWarning::InvalidLuksUuid {
+            path: warn_path,
+            raw,
+            ..
+        } = warning
+        else {
+            unreachable!();
+        };
+        assert!(warn_path.ends_with("ata-INVALID_UUID"));
+        assert_eq!(raw, "not-a-uuid");
+        let rendered = warning.to_string();
+        assert!(
+            rendered.starts_with(&format!(
+                "skipping {warn_path}: invalid LUKS UUID \"{raw}\" --"
+            )),
+            "rendered: {rendered}",
+        );
+    }
+
+    /// Intent: two physical disks with distinct names but the same
+    /// LUKS UUID (cloned/dd-imaged case) surface as
+    /// DiscoverError::DuplicateUuid; both by-id paths and names are
+    /// named in the error, and the lexicographic-by-path ordering is
+    /// deterministic.
+    /// Why: this is the cloned-disk friendly-error pin from plan
+    /// lines 4123-4129.
+    /// Scenario: dd-cloned disk plugged in alongside the original
+    /// with a relabel (seed 802).
+    #[test]
+    fn discover_duplicate_uuid_surfaces_friendly_error() {
+        let dir = tempfile::tempdir().unwrap();
+        let target_a = discover_create_target(dir.path(), "fake-original");
+        let target_b = discover_create_target(dir.path(), "fake-clone");
+        let path_a = discover_create_by_id_symlink(dir.path(), "ata-ORIGINAL", &target_a);
+        let path_b = discover_create_by_id_symlink(dir.path(), "ata-CLONE", &target_b);
+        let shared_uuid = "11111111-2222-3333-4444-555566667777";
+        let runner = DiscoverLabelMap::new(&[(&path_a, "braid-disk1"), (&path_b, "braid-disk2")])
+            .with_uuid(&path_a, shared_uuid)
+            .with_uuid(&path_b, shared_uuid);
+
+        let err = discover_from_dir(&runner, &crate::recover::RealByIdResolver, dir.path())
+            .expect_err("duplicate UUID must surface as DuplicateUuid");
+
+        let DiscoverError::DuplicateUuid {
+            uuid,
+            name1,
+            path1,
+            name2,
+            path2,
+        } = &err
+        else {
+            panic!("expected DuplicateUuid, got {err:?}");
+        };
+        assert_eq!(uuid.as_str(), shared_uuid);
+        // (name1, path1) and (name2, path2) sorted lexicographically by path:
+        // path_b ends with "ata-CLONE", path_a ends with "ata-ORIGINAL", so
+        // path1 must be path_b (CLONE) since CLONE < ORIGINAL lex.
+        assert!(
+            path1 < path2,
+            "expected lex-sorted paths: path1={path1}, path2={path2}",
+        );
+        assert!(path1.ends_with("ata-CLONE"), "path1 was {path1}");
+        assert!(path2.ends_with("ata-ORIGINAL"), "path2 was {path2}");
+        assert_eq!(name1.as_str(), "disk2");
+        assert_eq!(name2.as_str(), "disk1");
+        let msg = err.to_string();
+        assert!(msg.contains(shared_uuid), "missing uuid: {msg}");
+        assert!(msg.contains("braid-disk1"), "missing disk1 label: {msg}");
+        assert!(msg.contains("braid-disk2"), "missing disk2 label: {msg}");
+        assert!(
+            msg.contains("dd-cloned disk"),
+            "missing remediation suffix: {msg}"
+        );
+    }
+
+    /// Intent: a label collision (same braid-<name> on two distinct
+    /// physical disks) AND the same LUKS UUID across both disks must
+    /// surface as LabelCollision -- not DuplicateUuid. Pins the
+    /// precedence rule from plan 2831-2847.
+    /// Why: the cloned-disk-under-same-name scenario hits both axes;
+    /// the operator should see LabelCollision so the remediation
+    /// (relabel) is identical to the regular label-collision path.
+    /// Scenario: seed 803.
+    #[test]
+    fn discover_label_collision_fires_before_duplicate_uuid() {
+        let dir = tempfile::tempdir().unwrap();
+        let target_a = discover_create_target(dir.path(), "fake-original");
+        let target_b = discover_create_target(dir.path(), "fake-clone");
+        let path_a = discover_create_by_id_symlink(dir.path(), "ata-A", &target_a);
+        let path_b = discover_create_by_id_symlink(dir.path(), "ata-B", &target_b);
+        let shared_uuid = "22222222-3333-4444-5555-666677778888";
+        let runner = DiscoverLabelMap::new(&[(&path_a, "braid-foo"), (&path_b, "braid-foo")])
+            .with_uuid(&path_a, shared_uuid)
+            .with_uuid(&path_b, shared_uuid);
+
+        let err = discover_from_dir(&runner, &crate::recover::RealByIdResolver, dir.path())
+            .expect_err("expected an error");
+
+        assert!(
+            matches!(err, DiscoverError::LabelCollision { .. }),
+            "expected LabelCollision before DuplicateUuid, got: {err:?}"
+        );
+    }
+
+    /// Intent: write_discovered_membership refuses when pending-op.json
+    /// exists; no save_membership call happens; pool.json is untouched.
+    /// Why: the cutover precondition gate from plan 2849-2887.
+    /// Scenario: seed 804.
+    #[test]
+    fn discover_write_refuses_when_pending_op_exists() {
+        let root = tempfile::tempdir().unwrap();
+        let paths = StatePaths::custom(root.path().to_path_buf());
+        // Seed pending-op.json with valid-looking JSON; the gate only
+        // checks for file existence.
+        std::fs::write(paths.pending_op_json(), "{}").unwrap();
+        // Seed an existing pool.json (UUID-keyed shape) so we can
+        // assert it's unchanged after the refusal.
+        let pool_json_pre = "{\"disks\":{}}";
+        std::fs::write(paths.pool_json(), pool_json_pre).unwrap();
+
+        let outcome = DiscoverOutcome {
+            members: PoolMembership::empty(),
+            warnings: Vec::new(),
+        };
+
+        let err = write_discovered_membership(outcome, &paths, None)
+            .expect_err("must refuse with PendingOpExists");
+        let msg = err.to_string();
+        assert!(
+            msg.contains("discover refusing to write pool.json: pending-op.json exists at"),
+            "got: {msg}"
+        );
+        let pool_json_post = std::fs::read_to_string(paths.pool_json()).unwrap();
+        assert_eq!(
+            pool_json_post, pool_json_pre,
+            "pool.json must be byte-for-byte unchanged after refusal"
+        );
+    }
+
+    /// Intent: write_discovered_membership refuses when on-disk
+    /// pool.json is in old name-keyed shape; no save happens; the
+    /// existing file is byte-for-byte unchanged.
+    /// Why: the cutover schema-sniff gate from plan 2888-2920.
+    /// Scenario: seed 805 -- operator forgot step 4 of the runbook.
+    #[test]
+    fn discover_write_refuses_when_pool_json_is_name_keyed() {
+        let root = tempfile::tempdir().unwrap();
+        let paths = StatePaths::custom(root.path().to_path_buf());
+        // Synthetic old-shape pool.json: top-level keys are disk names,
+        // not UUIDs.
+        let stale = r#"{"disks":{"toshiba1":{"by_id":"/dev/disk/by-id/ata-X"}}}"#;
+        std::fs::write(paths.pool_json(), stale).unwrap();
+
+        let outcome = DiscoverOutcome {
+            members: PoolMembership::empty(),
+            warnings: Vec::new(),
+        };
+
+        let err = write_discovered_membership(outcome, &paths, None)
+            .expect_err("must refuse with NameKeyedPoolJson");
+        let msg = err.to_string();
+        assert!(
+            msg.contains("is not in UUID-keyed format -- back it up and move it aside"),
+            "got: {msg}"
+        );
+        let pool_json_post = std::fs::read_to_string(paths.pool_json()).unwrap();
+        assert_eq!(
+            pool_json_post, stale,
+            "name-keyed pool.json must be byte-for-byte unchanged after refusal"
+        );
+    }
+
+    /// Intent: write_discovered_membership proceeds normally when
+    /// neither fail-closed gate applies. Pins that the gates are
+    /// fail-closed-on-condition, not fail-closed-by-default.
+    /// Why: plan 2952-2956.
+    /// Scenario: seed 806.
+    #[test]
+    fn discover_write_proceeds_when_no_gates_fire() {
+        let root = tempfile::tempdir().unwrap();
+        let paths = StatePaths::custom(root.path().to_path_buf());
+        // No pending-op.json, no pool.json -- both gates pass.
+
+        let mut members = PoolMembership::empty();
+        members
+            .insert(
+                LuksUuid::parse("aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee").unwrap(),
+                DiskMember::new(
+                    DiskName::parse("disk1").unwrap(),
+                    ByIdPath::parse("/dev/disk/by-id/ata-X").unwrap(),
+                ),
+            )
+            .unwrap();
+        let outcome = DiscoverOutcome {
+            members,
+            warnings: Vec::new(),
+        };
+
+        let saved = write_discovered_membership(outcome, &paths, None)
+            .expect("expected save to proceed when no gates fire");
+        assert_eq!(saved.len(), 1);
+        assert!(
+            paths.pool_json().exists(),
+            "save_membership must have written pool.json"
+        );
+    }
+
+    /// Intent: write_discovered_membership refuses when
+    /// --expect-count exceeds the produced membership size and does
+    /// not call save_membership.
+    /// Why: the cutover exact-count guard must catch partial attach.
+    /// Scenario: runbook step with a momentarily detached disk.
+    #[test]
+    fn discover_write_refuses_when_count_mismatches_below() {
+        let root = tempfile::tempdir().unwrap();
+        let paths = StatePaths::custom(root.path().to_path_buf());
+
+        let mut members = PoolMembership::empty();
+        for (i, name) in ["disk1", "disk2"].iter().enumerate() {
+            members
+                .insert(
+                    LuksUuid::parse(&format!("00000000-0000-0000-0000-{:012x}", 807 + i as u64))
+                        .unwrap(),
+                    DiskMember::new(
+                        DiskName::parse(name).unwrap(),
+                        ByIdPath::parse(&format!("/dev/disk/by-id/ata-{name}")).unwrap(),
+                    ),
+                )
+                .unwrap();
+        }
+        let outcome = DiscoverOutcome {
+            members,
+            warnings: Vec::new(),
+        };
+
+        let err = write_discovered_membership(outcome, &paths, Some(3))
+            .expect_err("must refuse with ExpectCountUnmet");
+        let msg = err.to_string();
+        assert!(
+            msg.contains(
+                "discover refusing to write pool.json: expected exactly 3 members, found 2"
+            ),
+            "got: {msg}"
+        );
+        assert!(
+            !paths.pool_json().exists(),
+            "pool.json must not have been written"
+        );
+    }
+
+    /// Intent: write_discovered_membership refuses when
+    /// --expect-count is lower than the produced membership size and
+    /// does not call save_membership.
+    /// Why: the cutover exact-count guard must catch unrelated
+    /// braid-labeled disks that would otherwise be admitted.
+    /// Scenario: runbook step with an extra recovery disk attached.
+    #[test]
+    fn discover_write_refuses_when_count_mismatches_above() {
+        let root = tempfile::tempdir().unwrap();
+        let paths = StatePaths::custom(root.path().to_path_buf());
+
+        let mut members = PoolMembership::empty();
+        for (i, name) in ["disk1", "disk2"].iter().enumerate() {
+            members
+                .insert(
+                    LuksUuid::parse(&format!("00000000-0000-0000-0000-{:012x}", 900 + i as u64))
+                        .unwrap(),
+                    DiskMember::new(
+                        DiskName::parse(name).unwrap(),
+                        ByIdPath::parse(&format!("/dev/disk/by-id/ata-{name}")).unwrap(),
+                    ),
+                )
+                .unwrap();
+        }
+        let outcome = DiscoverOutcome {
+            members,
+            warnings: Vec::new(),
+        };
+
+        let err = write_discovered_membership(outcome, &paths, Some(1))
+            .expect_err("must refuse with ExpectCountUnmet");
+        let msg = err.to_string();
+        assert!(
+            msg.contains(
+                "discover refusing to write pool.json: expected exactly 1 members, found 2"
+            ),
+            "got: {msg}"
+        );
+        assert!(
+            !paths.pool_json().exists(),
+            "pool.json must not have been written"
+        );
     }
 }

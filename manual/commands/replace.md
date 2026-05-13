@@ -88,7 +88,7 @@ sudo braid replace --old toshiba1 --new toshiba4=/dev/disk/by-id/ata-TOSHIBA_MN0
 
 **For a fresh replacement disk (no LUKS):**
 
-1. LUKS-formats the new disk with the pool passphrase and a `braid-<name>` label
+1. Pre-generates the replacement member's LUKS UUID and LUKS-formats the new disk with the pool passphrase and a `braid-<name>` label
 2. Optionally enrolls a keyfile in slot 1
 3. Creates a LUKS header backup
 4. Opens the LUKS mapper
@@ -96,7 +96,7 @@ sudo braid replace --old toshiba1 --new toshiba4=/dev/disk/by-id/ata-TOSHIBA_MN0
 **Then, for all replacements:**
 
 5. Runs `btrfs replace start` to copy data from the old device (or its mirrors) to the new device
-6. Writes committed membership to `pool.json` and advances the journal to post-replace maintenance
+6. Writes committed UUID-keyed membership to `pool.json` and advances the journal to post-replace maintenance
 7. For live replacements: closes the old disk's LUKS mapper
 8. Resizes the new device to use its full capacity (important when the new disk is larger)
 9. For missing-disk replacements that clear the last missing device: runs a soft RAID1 balance to restore redundancy on any single-profile chunks
@@ -108,7 +108,7 @@ A sleep inhibitor is held throughout the replace to prevent the system from susp
 
 - Refuses if the pool is not mounted
 - Refuses if `--old` and `--new` are the same disk
-- Refuses if the new disk is already a member of the pool
+- Refuses if the new disk's LUKS UUID is already a member of the pool
 - Refuses if the new disk is absent (not plugged in)
 - For live replacements: refuses if the pool has missing devices (resolve those first)
 - For missing replacements: refuses if `--missing-id` points to a live device
