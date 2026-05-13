@@ -5,7 +5,7 @@ use std::collections::BTreeSet;
 use crate::alert::{self, AlertCause, compute_alert_state, merge_into_latch, save_acked_stats};
 use crate::cmd::{CmdRequest, CommandRunner};
 use crate::parse::parse_btrfs_device_stats;
-use crate::probe::{Filesystem, ProbeError, probe_pool};
+use crate::probe::{Filesystem, ProbeError, probe_pool_alerts};
 use crate::state_paths::StatePaths;
 use crate::types::MountPoint;
 
@@ -48,7 +48,7 @@ pub fn cmd_monitor<R: CommandRunner, F: Filesystem + ?Sized>(
         // reviewer is forced to classify it as either offline or fail-closed
         // alert. monitor is the headless surface, so the wrong default would
         // propagate silently into operator-visible behavior.
-        let pool = match probe_pool(runner, fs, mount_point) {
+        let pool = match probe_pool_alerts(runner, fs, mount_point) {
             Ok(p) => p,
             // Mount target holds a non-btrfs filesystem -- our pool is not here.
             // Treat as offline; no fail-closed beep needed.
@@ -56,9 +56,9 @@ pub fn cmd_monitor<R: CommandRunner, F: Filesystem + ?Sized>(
             // All remaining variants describe indeterminate pool state --
             // tooling breakage (Cmd/Parse), pool show internally inconsistent
             // (PoolDevice), or LUKS-side mismatch (UnsupportedLuksVersion /
-            // MapperConflict, both unreachable from probe_pool today but listed
-            // for the gate). Fail closed per ADR 014: latch ComputationError so
-            // the wrapper beeps.
+            // MapperConflict, both unreachable from probe_pool_alerts today
+            // but listed for the gate). Fail closed per ADR 014: latch
+            // ComputationError so the wrapper beeps.
             Err(
                 e @ (ProbeError::Cmd(_)
                 | ProbeError::Parse(_)
@@ -96,7 +96,7 @@ pub fn cmd_monitor<R: CommandRunner, F: Filesystem + ?Sized>(
 
         // 6. Reconcile stale ack state: prune orphan devids and self-heal
         //    missing_acked for devices that are present again.
-        let present_devids: BTreeSet<u64> = pool.devices.iter().map(|d| d.devid).collect();
+        let present_devids: BTreeSet<u64> = pool.present_devids.iter().copied().collect();
         let still_relevant_devids: BTreeSet<u64> = present_devids
             .iter()
             .copied()
@@ -327,7 +327,7 @@ mod tests {
     }
 
     /*
-     * Intent: When probe_pool returns any non-NotBtrfs error, cmd_monitor
+     * Intent: When probe_pool_alerts returns any non-NotBtrfs error, cmd_monitor
      * must latch a ComputationError and return MonitorResult::Alert. This
      * fixes the strictly-worse-than-the-original gap: today these paths
      * exit 2 with NO latch, so braid status shows nothing AND the speaker
@@ -339,8 +339,8 @@ mod tests {
      * requires fail-closed: indeterminate pool state must beep.
      *
      * Scenario: mountinfo says the pool is mounted, but the btrfs filesystem
-     * show command fails to spawn. probe_pool returns ProbeError::Cmd before
-     * any pool device data is available.
+     * show command fails to spawn. probe_pool_alerts returns ProbeError::Cmd
+     * before any pool device data is available.
      */
     #[test]
     fn probe_error_returns_alert_with_latched_computation_error() {
@@ -543,7 +543,7 @@ mod tests {
      *
      * Scenario: the operator's mount target /mnt/storage is currently held
      * by an ext4 filesystem (perhaps left over from an OS reinstall, or
-     * because someone mounted the wrong thing). probe_pool returns
+     * because someone mounted the wrong thing). probe_pool_alerts returns
      * ProbeError::NotBtrfs.
      */
     #[test]
@@ -564,7 +564,7 @@ mod tests {
      * Intent: When btrfs filesystem show exits non-zero with non-empty
      * stderr, parse_btrfs_filesystem_show maps that to
      * ParseError::CommandFailed,
-     * probe_pool wraps it as ProbeError::Parse, and cmd_monitor must
+     * probe_pool_alerts wraps it as ProbeError::Parse, and cmd_monitor must
      * latch a ComputationError and return MonitorResult::Alert.
      *
      * Why it exists: the existing probe_error_returns_alert_... test
@@ -601,22 +601,22 @@ mod tests {
 
     /*
      * Intent: When btrfs filesystem show reports a device path that is
-     * not /dev/mapper/-prefixed, probe_pool returns ProbeError::PoolDevice;
+     * not /dev/mapper/-prefixed, probe_pool_alerts returns ProbeError::PoolDevice;
      * cmd_monitor must latch a ComputationError and return
      * MonitorResult::Alert.
      *
      * Why it exists: PoolDevice is the third reachable variant from
-     * probe_pool (alongside Cmd and Parse). Without this test, a future
+     * probe_pool_alerts (alongside Cmd and Parse). Without this test, a future
      * edit that wrongly maps PoolDevice to PoolOffline would still compile
      * (the match remains exhaustive) and no other test would catch the
      * regression -- breaking the fail-closed contract for the
-     * non-/dev/mapper path / no-FSID / inactive-mapper class of pool-show
-     * inconsistencies (cli/src/probe.rs:259, :270, :287).
+     * non-/dev/mapper path / inactive-mapper class of pool-show
+     * inconsistencies.
      *
      * Scenario: btrfs filesystem show reports a single-disk pool whose
      * device path is /dev/sda1 (raw block device, no LUKS mapper).
-     * probe_pool's invariant -- every pool device must live under
-     * /dev/mapper/ -- fails at probe.rs:270.
+     * probe_pool_alerts' invariant -- every pool device must live under
+     * /dev/mapper/ -- fails.
      */
     #[test]
     fn probe_pool_device_failure_returns_alert_with_latched_computation_error() {

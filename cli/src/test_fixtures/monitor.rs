@@ -43,8 +43,6 @@ const CRYPTSETUP_STATUS_VDC: &str = "/dev/mapper/braid-vdc is active and is in u
       size:    2064384 [512-byte units] (1056964608 [bytes])\n\
       mode:    read/write\n";
 
-const LUKS_UUID: &str = "8c78a966-ef17-4610-b835-5b376ef10b4e\n";
-
 const STATS_2DISK_HEALTHY: &str = r#"{
     "__header": {"version": "1"},
     "device-stats": [
@@ -161,7 +159,6 @@ impl CommandRunner for MonitorTestRunner {
                 "braid-vdc" => Ok(ok_output(CRYPTSETUP_STATUS_VDC)),
                 other => panic!("unexpected CryptsetupStatus mapper: {other}"),
             },
-            CmdRequest::CryptsetupLuksUuid { .. } => Ok(ok_output(LUKS_UUID)),
             CmdRequest::BtrfsDeviceStatsJson { .. } => {
                 if let Some(r) = self.take_stats_result() {
                     return r;
@@ -195,7 +192,6 @@ impl CommandRunner for MonitorReconcileRunner {
                 "braid-vdc" => Ok(ok_output(CRYPTSETUP_STATUS_VDC_NULL)),
                 other => panic!("unexpected CryptsetupStatus mapper: {other}"),
             },
-            CmdRequest::CryptsetupLuksUuid { .. } => Ok(ok_output(LUKS_UUID)),
             CmdRequest::BtrfsDeviceStatsJson { .. } => Ok(ok_output(STATS_2DISK_HEALTHY)),
             other => panic!("unexpected CmdRequest in monitor reconcile test: {other:?}"),
         }

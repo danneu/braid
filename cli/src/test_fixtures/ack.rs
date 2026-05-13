@@ -171,13 +171,6 @@ fn cryptsetup_status_active(mapper: &str, device: &str) -> RawCommandOutput {
     )
 }
 
-fn cryptsetup_uuid_ok(device: &str, uuid: &str) -> RawCommandOutput {
-    mock_ok(
-        &format!("cryptsetup luksUUID {device}"),
-        &format!("{uuid}\n"),
-    )
-}
-
 fn btrfs_device_stats_healthy() -> RawCommandOutput {
     mock_ok(
         "btrfs --format json device stats /mnt/storage",
@@ -222,22 +215,10 @@ pub(crate) fn ack_mounted_probe_runner() -> MockRunner {
             cryptsetup_status_active("braid-disk1", "/dev/vda"),
         )
         .with_output(
-            CmdRequest::CryptsetupLuksUuid {
-                device: "/dev/vda".into(),
-            },
-            cryptsetup_uuid_ok("/dev/vda", "11111111-1111-1111-1111-111111111111"),
-        )
-        .with_output(
             CmdRequest::CryptsetupStatus {
                 mapper: MapperName("braid-disk3".into()),
             },
             cryptsetup_status_active("braid-disk3", "/dev/vdc"),
-        )
-        .with_output(
-            CmdRequest::CryptsetupLuksUuid {
-                device: "/dev/vdc".into(),
-            },
-            cryptsetup_uuid_ok("/dev/vdc", "33333333-3333-3333-3333-333333333333"),
         )
 }
 

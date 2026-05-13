@@ -3,7 +3,7 @@ use crate::alert::{
 };
 use crate::cmd::{CmdRequest, CommandRunner};
 use crate::parse::parse_btrfs_device_stats;
-use crate::probe::{Filesystem, ProbeError, probe_pool};
+use crate::probe::{Filesystem, ProbeError, probe_pool_alerts};
 use crate::state_paths::StatePaths;
 use crate::types::MountPoint;
 
@@ -25,10 +25,10 @@ fn cmd_ack_impl<R: CommandRunner, F: Filesystem + ?Sized>(
 ) -> Result<(), AckError> {
     // Snapshot the gating inputs (alert latch + smartd flag) before probing
     // the pool. Both feed the "is there an alert?" decision and the
-    // snapshot-scoped cleanup decision. probe_pool is slow enough (multiple
-    // per-disk shell-outs) for the asynchronous smartd hook to fire during it;
-    // reading smartd after the probe would let a hook firing during the probe
-    // either flip an empty-latch gate or get swallowed by cleanup. An
+    // snapshot-scoped cleanup decision. probe_pool_alerts still has per-disk
+    // shell-outs, so the asynchronous smartd hook can fire during it; reading
+    // smartd after the probe would let a hook firing during the probe either
+    // flip an empty-latch gate or get swallowed by cleanup. An
     // unreadable latch counts as active for gating so the user can clear a
     // corrupt file even with the pool offline.
     let (latch_state, latch_corrupt) = match alert::load_alert_latch(paths) {
@@ -46,7 +46,7 @@ fn cmd_ack_impl<R: CommandRunner, F: Filesystem + ?Sized>(
     let smartd_active = alert::smartd_alert_active(paths);
 
     // 2. Check if pool is mounted
-    let pool = match probe_pool(runner, fs, mount_point) {
+    let pool = match probe_pool_alerts(runner, fs, mount_point) {
         Ok(p) => p,
         Err(e) => return Err(AckError::Probe(e)),
     };
@@ -383,7 +383,7 @@ mod tests {
     // Intent: Offline ack does not let a smartd flag written during probing
     // turn an empty entry snapshot into an acknowledged alert.
     // Why it exists: The smartd hook is not under the pool lock, so it can
-    // fire while probe_pool is reading mountinfo. A post-probe gate read
+    // fire while probe_pool_alerts is reading mountinfo. A post-probe gate read
     // would consume that new flag and hide it from the next monitor cycle.
     // Scenario: pool is offline and there are no alerts at ack entry, but
     // smartd writes the flag while ack is probing the mount point.
@@ -414,9 +414,9 @@ mod tests {
 
     // Intent: Mounted no-op ack does not let a smartd flag written during
     // probing turn an empty entry snapshot into a full ack path.
-    // Why it exists: Reading smartd after probe_pool would make the no-alert
-    // gate observe the late flag, query btrfs device stats, and then delete
-    // the flag before monitor could latch it.
+    // Why it exists: Reading smartd after probe_pool_alerts would make the
+    // no-alert gate observe the late flag, query btrfs device stats, and then
+    // delete the flag before monitor could latch it.
     // Scenario: pool is mounted and healthy; there are no alerts at ack
     // entry, but smartd writes the flag while ack is probing the pool.
     #[test]

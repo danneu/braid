@@ -1,3 +1,5 @@
+use std::collections::BTreeSet;
+
 use crate::cmd::{CmdError, CmdRequest, CommandRunner};
 use crate::config::mapper_name;
 use crate::luks::{MapperOwnership, OwnershipError, classify_mapper_ownership};
@@ -208,6 +210,117 @@ fn probe_mapper_open<R: CommandRunner>(
 // ---------------------------------------------------------------------------
 // probe_pool
 // ---------------------------------------------------------------------------
+
+/// Devid-only pool view for the alert pipeline. Ack and monitor need mount
+/// state, live devids, btrfs-MISSING devids, and null-underlying devices,
+/// but not per-device LUKS identity, FSID, or device counts.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AlertPoolState {
+    pub mounted: bool,
+    pub present_devids: Vec<u64>,
+    pub missing_devids: Vec<u64>,
+    pub null_underlying: Vec<NullUnderlyingDevice>,
+}
+
+impl AlertPoolState {
+    /// Same alert semantics as `PoolState::alert_missing_devids`, without
+    /// carrying the full identity-correlated pool state.
+    pub fn alert_missing_devids(&self) -> Vec<u64> {
+        self.missing_devids
+            .iter()
+            .copied()
+            .chain(self.null_underlying.iter().map(|d| d.devid))
+            .collect::<BTreeSet<u64>>()
+            .into_iter()
+            .collect()
+    }
+}
+
+/// Narrowed alert-pipeline probe for `cmd_ack` and `cmd_monitor`. Preserves
+/// `probe_pool`'s mount-state, btrfs-MISSING, and null-underlying detection
+/// while omitting per-device LUKS UUID lookup and FSID extraction because the
+/// alert pipeline is devid-keyed and does not consume either identity.
+pub fn probe_pool_alerts<R: CommandRunner, F: Filesystem + ?Sized>(
+    runner: &R,
+    fs: &F,
+    mount_point: &MountPoint,
+) -> Result<AlertPoolState, ProbeError> {
+    match crate::mount_check::fstype_at_mount_via_fs(fs, mount_point.as_str())? {
+        None => {
+            return Ok(AlertPoolState {
+                mounted: false,
+                present_devids: vec![],
+                missing_devids: vec![],
+                null_underlying: vec![],
+            });
+        }
+        Some(fstype) if fstype != "btrfs" => {
+            return Err(ProbeError::NotBtrfs {
+                mount_point: mount_point.0.clone(),
+                fstype,
+            });
+        }
+        Some(_) => {}
+    }
+
+    let show_raw = runner.run(&CmdRequest::BtrfsFilesystemShow {
+        mount_point: mount_point.clone(),
+    })?;
+    let show = parse_btrfs_filesystem_show(&show_raw)?;
+
+    let mut present_devids = Vec::new();
+    let mut null_underlying = Vec::new();
+    for bdev in &show.devices {
+        let path = &bdev.path;
+
+        if !path.starts_with("/dev/mapper/") {
+            return Err(ProbeError::PoolDevice {
+                mapper: path.clone(),
+                detail: "not a /dev/mapper/ path".to_owned(),
+            });
+        }
+
+        let name = path
+            .strip_prefix("/dev/mapper/")
+            .expect("checked above")
+            .to_owned();
+
+        let status_raw = runner.run(&CmdRequest::CryptsetupStatus {
+            mapper: MapperName(name.clone()),
+        })?;
+        let status = parse_cryptsetup_status(&status_raw)?;
+
+        if !status.is_active {
+            return Err(ProbeError::PoolDevice {
+                mapper: name,
+                detail: "not active".to_owned(),
+            });
+        }
+
+        match status.device {
+            None => {
+                null_underlying.push(NullUnderlyingDevice {
+                    mapper: MapperName(name),
+                    devid: bdev.devid,
+                });
+            }
+            Some(device) if device == "(null)" => {
+                null_underlying.push(NullUnderlyingDevice {
+                    mapper: MapperName(name),
+                    devid: bdev.devid,
+                });
+            }
+            Some(_) => present_devids.push(bdev.devid),
+        }
+    }
+
+    Ok(AlertPoolState {
+        mounted: true,
+        present_devids,
+        missing_devids: show.missing_devids,
+        null_underlying,
+    })
+}
 
 pub fn probe_pool<R: CommandRunner, F: Filesystem + ?Sized>(
     runner: &R,
@@ -1517,6 +1630,331 @@ mod tests {
                 crate::mount_check::MountInfoError::Malformed { .. }
             ))
         ));
+    }
+
+    // Intent: probe_pool_alerts reports an unmounted pool without running
+    // any subprocesses.
+    // Why it exists: ack and monitor treat genuine mount absence as offline,
+    // so the narrowed probe must preserve probe_pool's offline contract.
+    // Scenario: the NAS has booted but the encrypted pool has not been
+    // unlocked and mounted yet.
+    #[test]
+    fn probe_pool_alerts_unmounted() {
+        let fs = MockFs::with_mountinfo(&mountinfo_without_target());
+        let runner = MockRunner::default();
+
+        let result = probe_pool_alerts(&runner, &fs, &mp()).unwrap();
+
+        assert!(!result.mounted);
+        assert!(result.present_devids.is_empty());
+        assert!(result.missing_devids.is_empty());
+        assert!(result.null_underlying.is_empty());
+        assert!(runner.requests().is_empty());
+    }
+
+    // Intent: probe_pool_alerts observes a healthy mounted two-disk pool
+    // using btrfs-show plus one cryptsetup-status call per device.
+    // Why it exists: the alert pipeline only needs btrfs devids; issuing
+    // cryptsetup luksUUID here would re-expand the failure surface this
+    // refactor removes.
+    // Scenario: ack or monitor runs while both encrypted pool members are
+    // mounted and active.
+    #[test]
+    fn probe_pool_alerts_mounted_2disk() {
+        let fs = MockFs::with_mountinfo(&mountinfo_btrfs());
+        let runner = MockRunner::default()
+            .with_output(
+                CmdRequest::BtrfsFilesystemShow {
+                    mount_point: MountPoint("/mnt/storage".to_owned()),
+                },
+                btrfs_show_2disk(),
+            )
+            .with_output(
+                CmdRequest::CryptsetupStatus {
+                    mapper: MapperName("braid-toshiba".into()),
+                },
+                cryptsetup_status_active("braid-toshiba", "/dev/vda"),
+            )
+            .with_output(
+                CmdRequest::CryptsetupStatus {
+                    mapper: MapperName("braid-ironwolf".into()),
+                },
+                cryptsetup_status_active("braid-ironwolf", "/dev/vdb"),
+            );
+
+        let result = probe_pool_alerts(&runner, &fs, &mp()).unwrap();
+
+        assert!(result.mounted);
+        assert_eq!(result.present_devids, vec![1, 2]);
+        assert!(result.missing_devids.is_empty());
+        assert!(result.null_underlying.is_empty());
+        assert!(
+            !runner
+                .requests()
+                .iter()
+                .any(|request| matches!(request, CmdRequest::CryptsetupLuksUuid { .. })),
+            "alert probe must not request cryptsetup luksUUID"
+        );
+    }
+
+    // Intent: probe_pool_alerts carries btrfs MISSING sentinel devids without
+    // trying to probe a missing mapper.
+    // Why it exists: MissingDevice alerts are keyed by btrfs devid and must
+    // not depend on LUKS identity for a device btrfs already marks missing.
+    // Scenario: one drive has disappeared and btrfs filesystem show reports
+    // its devid with a MISSING sentinel.
+    #[test]
+    fn probe_pool_alerts_with_btrfs_missing_sentinel() {
+        let fs = MockFs::with_mountinfo(&mountinfo_btrfs());
+        let runner = MockRunner::default()
+            .with_output(
+                CmdRequest::BtrfsFilesystemShow {
+                    mount_point: MountPoint("/mnt/storage".to_owned()),
+                },
+                ok_raw(
+                    "btrfs filesystem show /mnt/storage",
+                    "Label: none  uuid: aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee\n\
+                     \tTotal devices 2 FS bytes used 1.00GiB\n\
+                     \tdevid    1 size 10.00GiB used 2.00GiB path /dev/mapper/braid-toshiba\n\
+                     \tdevid    2 size 0 used 0 path /dev/mapper/braid-ironwolf MISSING\n\
+                     \t*** Some devices missing\n",
+                ),
+            )
+            .with_output(
+                CmdRequest::CryptsetupStatus {
+                    mapper: MapperName("braid-toshiba".into()),
+                },
+                cryptsetup_status_active("braid-toshiba", "/dev/vda"),
+            );
+
+        let result = probe_pool_alerts(&runner, &fs, &mp()).unwrap();
+
+        assert!(result.mounted);
+        assert_eq!(result.present_devids, vec![1]);
+        assert_eq!(result.missing_devids, vec![2]);
+        assert!(result.null_underlying.is_empty());
+    }
+
+    // Intent: probe_pool_alerts records active mappers whose backing device
+    // has become `(null)` separately from btrfs MISSING sentinel devids.
+    // Why it exists: alerting should fire for hot-unplugged backing devices
+    // while destructive remove-missing logic stays tied to btrfs MISSING.
+    // Scenario: one pool mapper remains open after its underlying block
+    // device has disappeared.
+    #[test]
+    fn probe_pool_alerts_with_null_underlying() {
+        let fs = MockFs::with_mountinfo(&mountinfo_btrfs());
+        let runner = MockRunner::default()
+            .with_output(
+                CmdRequest::BtrfsFilesystemShow {
+                    mount_point: MountPoint("/mnt/storage".to_owned()),
+                },
+                btrfs_show_2disk(),
+            )
+            .with_output(
+                CmdRequest::CryptsetupStatus {
+                    mapper: MapperName("braid-toshiba".into()),
+                },
+                cryptsetup_status_active("braid-toshiba", "/dev/vda"),
+            )
+            .with_output(
+                CmdRequest::CryptsetupStatus {
+                    mapper: MapperName("braid-ironwolf".into()),
+                },
+                cryptsetup_status_active_null("braid-ironwolf"),
+            );
+
+        let result = probe_pool_alerts(&runner, &fs, &mp()).unwrap();
+
+        assert!(result.mounted);
+        assert_eq!(result.present_devids, vec![1]);
+        assert!(result.missing_devids.is_empty());
+        assert_eq!(
+            result.null_underlying,
+            vec![NullUnderlyingDevice {
+                mapper: MapperName("braid-ironwolf".into()),
+                devid: 2,
+            }]
+        );
+    }
+
+    // Intent: probe_pool_alerts does not reject mounted btrfs-show output
+    // solely because the FSID line is absent.
+    // Why it exists: ack and monitor do not consume the pool FSID; retaining
+    // probe_pool's FSID rejection would keep an unnecessary failure path in
+    // the alert pipeline.
+    // Scenario: btrfs filesystem show still reports total devices and mapper
+    // rows, but the uuid line is absent from the payload.
+    #[test]
+    fn probe_pool_alerts_tolerates_missing_fsid() {
+        let fs = MockFs::with_mountinfo(&mountinfo_btrfs());
+        let runner = MockRunner::default()
+            .with_output(
+                CmdRequest::BtrfsFilesystemShow {
+                    mount_point: MountPoint("/mnt/storage".to_owned()),
+                },
+                ok_raw(
+                    "btrfs filesystem show /mnt/storage",
+                    "\tTotal devices 2 FS bytes used 1.00GiB\n\
+                     \tdevid    1 size 10.00GiB used 2.00GiB path /dev/mapper/braid-toshiba\n\
+                     \tdevid    2 size 10.00GiB used 2.00GiB path /dev/mapper/braid-ironwolf\n",
+                ),
+            )
+            .with_output(
+                CmdRequest::CryptsetupStatus {
+                    mapper: MapperName("braid-toshiba".into()),
+                },
+                cryptsetup_status_active("braid-toshiba", "/dev/vda"),
+            )
+            .with_output(
+                CmdRequest::CryptsetupStatus {
+                    mapper: MapperName("braid-ironwolf".into()),
+                },
+                cryptsetup_status_active("braid-ironwolf", "/dev/vdb"),
+            );
+
+        let result = probe_pool_alerts(&runner, &fs, &mp()).unwrap();
+
+        assert!(result.mounted);
+        assert_eq!(result.present_devids, vec![1, 2]);
+        assert!(result.missing_devids.is_empty());
+        assert!(result.null_underlying.is_empty());
+    }
+
+    // Intent: probe_pool_alerts preserves the typed NotBtrfs response when
+    // the configured mount point is occupied by another filesystem.
+    // Why it exists: ack and monitor classify foreign mounts differently
+    // from indeterminate probe failures.
+    // Scenario: /mnt/storage is currently an ext4 mount, not the btrfs pool.
+    #[test]
+    fn probe_pool_alerts_not_btrfs() {
+        let fs = MockFs::with_mountinfo(&mountinfo_ext4());
+        let runner = MockRunner::default();
+
+        let err = probe_pool_alerts(&runner, &fs, &mp()).unwrap_err();
+
+        assert!(
+            matches!(err, ProbeError::NotBtrfs { ref fstype, .. } if fstype == "ext4"),
+            "expected ProbeError::NotBtrfs, got: {err:?}"
+        );
+    }
+
+    // Intent: probe_pool_alerts rejects a mapper listed by btrfs when
+    // cryptsetup status says that mapper is inactive.
+    // Why it exists: the alert probe still depends on cryptsetup status to
+    // distinguish present devices from null-underlying or inconsistent state.
+    // Scenario: btrfs filesystem show names /dev/mapper/braid-toshiba, but
+    // cryptsetup status reports the mapper as inactive.
+    #[test]
+    fn probe_pool_alerts_mapper_not_active() {
+        let fs = MockFs::with_mountinfo(&mountinfo_btrfs());
+        let runner = MockRunner::default()
+            .with_output(
+                CmdRequest::BtrfsFilesystemShow {
+                    mount_point: MountPoint("/mnt/storage".to_owned()),
+                },
+                ok_raw(
+                    "btrfs filesystem show /mnt/storage",
+                    "Label: none  uuid: aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee\n\
+                     \tTotal devices 1 FS bytes used 1.00GiB\n\
+                     \tdevid    1 size 10.00GiB used 2.00GiB path /dev/mapper/braid-toshiba\n",
+                ),
+            )
+            .with_output(
+                CmdRequest::CryptsetupStatus {
+                    mapper: MapperName("braid-toshiba".into()),
+                },
+                err_raw(
+                    "cryptsetup status braid-toshiba",
+                    4,
+                    "/dev/mapper/braid-toshiba is not active.\n",
+                ),
+            );
+
+        let err = probe_pool_alerts(&runner, &fs, &mp()).unwrap_err();
+
+        assert!(
+            matches!(err, ProbeError::PoolDevice { ref detail, .. } if detail == "not active"),
+            "expected ProbeError::PoolDevice not active, got: {err:?}"
+        );
+    }
+
+    // Intent: probe_pool_alerts rejects real btrfs device paths that are not
+    // /dev/mapper paths.
+    // Why it exists: braid pools are expected to sit behind LUKS mappers, and
+    // the narrowed alert probe must not weaken that invariant.
+    // Scenario: btrfs filesystem show reports a raw block path for a mounted
+    // pool member.
+    #[test]
+    fn probe_pool_alerts_non_mapper_device() {
+        let fs = MockFs::with_mountinfo(&mountinfo_btrfs());
+        let runner = MockRunner::default().with_output(
+            CmdRequest::BtrfsFilesystemShow {
+                mount_point: MountPoint("/mnt/storage".to_owned()),
+            },
+            ok_raw(
+                "btrfs filesystem show /mnt/storage",
+                "Label: none  uuid: aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee\n\
+                     \tTotal devices 1 FS bytes used 1.00GiB\n\
+                     \tdevid    1 size 10.00GiB used 2.00GiB path /dev/sda1\n",
+            ),
+        );
+
+        let err = probe_pool_alerts(&runner, &fs, &mp()).unwrap_err();
+
+        assert!(
+            matches!(err, ProbeError::PoolDevice { ref mapper, ref detail }
+                if mapper == "/dev/sda1" && detail == "not a /dev/mapper/ path"),
+            "expected ProbeError::PoolDevice non-mapper, got: {err:?}"
+        );
+    }
+
+    // Intent: probe_pool_alerts propagates mountinfo IO errors instead of
+    // treating the pool as offline.
+    // Why it exists: monitor must fail closed when mount state is
+    // indeterminate, and ack must not clear alerts from an unreadable mount
+    // probe.
+    // Scenario: /proc/self/mountinfo cannot be read.
+    #[test]
+    fn probe_pool_alerts_propagates_mountinfo_io_error() {
+        let fs = MockFs::with_mountinfo_error(std::io::ErrorKind::PermissionDenied);
+        let runner = MockRunner::default();
+
+        let result = probe_pool_alerts(&runner, &fs, &mp());
+
+        assert!(matches!(
+            result,
+            Err(ProbeError::MountInfo(
+                crate::mount_check::MountInfoError::Io(_)
+            ))
+        ));
+    }
+
+    // Intent: AlertPoolState::alert_missing_devids returns the alert-local
+    // union of btrfs MISSING devids and null-underlying devids.
+    // Why it exists: deduplication and sorting are part of the alert cause
+    // contract, not a property callers should reimplement.
+    // Scenario: btrfs has promoted one devid to MISSING while another mapper
+    // still reports a null underlying, with one devid present in both inputs.
+    #[test]
+    fn probe_pool_alerts_alert_missing_devids_method() {
+        let state = AlertPoolState {
+            mounted: true,
+            present_devids: vec![1],
+            missing_devids: vec![4, 2],
+            null_underlying: vec![
+                NullUnderlyingDevice {
+                    mapper: MapperName("braid-two".into()),
+                    devid: 2,
+                },
+                NullUnderlyingDevice {
+                    mapper: MapperName("braid-three".into()),
+                    devid: 3,
+                },
+            ],
+        };
+
+        assert_eq!(state.alert_missing_devids(), vec![2, 3, 4]);
     }
 
     // -- probe_fsid tests --
