@@ -1,5 +1,5 @@
 use crate::alert::{
-    self, AlertCause, AlertState, load_acked_stats_fallible, save_acked_stats, snapshot_current,
+    self, AlertCause, load_acked_stats_fallible, save_acked_stats, snapshot_current,
 };
 use crate::cmd::{CmdRequest, CommandRunner};
 use crate::parse::parse_btrfs_device_stats;
@@ -44,6 +44,8 @@ fn cmd_ack_impl<R: CommandRunner, F: Filesystem + ?Sized>(
         .map(|s| s.causes.as_slice())
         .unwrap_or(&[]);
     let smartd_active = alert::smartd_alert_active(paths);
+    let latch_had_smartd = causes.iter().any(|c| matches!(c, AlertCause::SmartdAlert));
+    let remove_smartd = smartd_active || latch_had_smartd;
 
     // 2. Check if pool is mounted
     let pool = match probe_pool_alerts(runner, fs, mount_point) {
@@ -53,9 +55,10 @@ fn cmd_ack_impl<R: CommandRunner, F: Filesystem + ?Sized>(
 
     if !pool.mounted {
         return ack_offline(
-            latch_state,
+            causes,
             latch_corrupt,
             smartd_active,
+            remove_smartd,
             paths,
             stop_beeper,
         );
@@ -80,8 +83,6 @@ fn cmd_ack_impl<R: CommandRunner, F: Filesystem + ?Sized>(
     let new_acked = snapshot_current(&device_stats, &alert_missing_devids);
     save_acked_stats(&new_acked, paths)?;
 
-    let latch_had_smartd = causes.iter().any(|c| matches!(c, AlertCause::SmartdAlert));
-    let remove_smartd = smartd_active || latch_had_smartd;
     if let Err(e) = cleanup_alert_files_and_beeper(paths, stop_beeper, remove_smartd) {
         return Err(AckError::CleanupFailed(e));
     }
@@ -99,17 +100,13 @@ fn cmd_ack_impl<R: CommandRunner, F: Filesystem + ?Sized>(
 }
 
 fn ack_offline(
-    latch_state: Option<AlertState>,
+    causes: &[AlertCause],
     latch_corrupt: bool,
     smartd_active: bool,
+    remove_smartd: bool,
     paths: &StatePaths,
     stop_beeper: &dyn Fn(),
 ) -> Result<(), AckError> {
-    let causes: &[AlertCause] = latch_state
-        .as_ref()
-        .map(|s| s.causes.as_slice())
-        .unwrap_or(&[]);
-
     let has_alert = !causes.is_empty() || smartd_active || latch_corrupt;
     if !has_alert {
         return Err(AckError::PoolNotMounted);
@@ -148,8 +145,6 @@ fn ack_offline(
         save_acked_stats(&acked, paths)?;
     }
 
-    let latch_had_smartd = causes.iter().any(|c| matches!(c, AlertCause::SmartdAlert));
-    let remove_smartd = smartd_active || latch_had_smartd;
     if let Err(e) = cleanup_alert_files_and_beeper(paths, stop_beeper, remove_smartd) {
         return Err(AckError::CleanupFailed(e));
     }
@@ -165,12 +160,11 @@ fn ack_offline(
 /// subsequent removals and the `stop_beeper` invocation are skipped, and the
 /// error is propagated.
 ///
-/// Callers compute `remove_smartd` as `smartd_active || latch_had_smartd`
-/// from inputs snapshotted at entry. Cleanup deletes the smartd flag only
-/// when the snapshot already represented an active smartd source: the flag was
-/// present at entry, or the latch carried a `SmartdAlert` cause. A flag that
-/// arrives after a snapshot with neither condition is left for the next
-/// monitor cycle.
+/// `cmd_ack_impl` derives `remove_smartd` once from inputs snapshotted at
+/// entry. Cleanup deletes the smartd flag only when the snapshot already
+/// represented an active smartd source: the flag was present at entry, or the
+/// latch carried a `SmartdAlert` cause. A flag that arrives after a snapshot
+/// with neither condition is left for the next monitor cycle.
 ///
 /// The `stop_beeper` parameter is the injected `&dyn Fn()` from
 /// `cmd_ack_impl`; callers must forward their own hook so tests can record
@@ -551,8 +545,9 @@ mod tests {
 
     // Intent: Mounted cleanup removes a smartd flag written during probing
     // when the entry snapshot already had a latched SmartdAlert.
-    // Why it exists: The mounted path computes its own cleanup decision; this
-    // pins the same crash-recovery exception as the offline path.
+    // Why it exists: The mounted branch must apply the shared entry-snapshotted
+    // SmartdAlert cleanup decision instead of regressing to `remove_smartd =
+    // smartd_active`.
     // Scenario: a prior monitor cycle latched SmartdAlert, the flag is absent
     // at ack entry, and the smartd hook writes it again during the mounted
     // probe.
