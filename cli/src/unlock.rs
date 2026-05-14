@@ -120,11 +120,18 @@ impl UnlockPlan {
         let mount_point = params.config.mount_point();
 
         // Enrich pool.json with live metadata (devid, added_at) -- best-effort.
-        // A rare race where probe_pool sees mounted=false after a successful
-        // mount leaves `pool_after.devices` empty, so refresh_pool_metadata
-        // no-ops. That is acceptable: correctness never depends on this write
-        // (see contract above). Pinned by
-        // unlock_tolerates_post_mount_probe_mounted_false.
+        // Two outcomes are tolerated and leave membership data unenriched:
+        //   * `Ok(PoolState { mounted: false, devices: vec![], ... })` -- a
+        //     mountinfo race after a successful mount; refresh_pool_metadata
+        //     still runs and re-saves, but enrich_from_pool_state walks an
+        //     empty devices vec so no fields change.
+        //   * `Err(_)` from probe_pool itself (e.g. a parser drift in
+        //     `btrfs filesystem show`) -- the `if let Ok` arm short-circuits,
+        //     refresh_pool_metadata is never called, and pool.json is not
+        //     rewritten.
+        // Correctness never depends on this enrichment (see contract above).
+        // Pinned by unlock_tolerates_post_mount_probe_mounted_false and
+        // unlock_tolerates_post_mount_probe_err.
         if let Ok(pool_after) = probe::probe_pool(runner, fs, mount_point) {
             membership::refresh_pool_metadata(&pool_after, params.paths);
         }
@@ -216,7 +223,7 @@ pub fn cmd_unlock<R: CommandRunner, F: Filesystem + ?Sized>(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::cmd::{CmdRequest, MockRunner};
+    use crate::cmd::{CmdRequest, MockRunner, RawCommandOutput};
     use crate::mount::MountError;
     use crate::preview::NoteLevel;
     use crate::test_fixtures::{
@@ -1040,6 +1047,122 @@ mod tests {
                 "{name}.devid must remain None when probe_pool returns \
                  mounted=false, got: {:?}",
                 member.devid
+            );
+        }
+    }
+
+    // Intent: `cmd_unlock` must tolerate a post-mount `probe_pool` that
+    //   returns `Err(ProbeError::Parse(_))` without enriching membership
+    //   metadata and without failing.
+    // Why it exists: post-mount enrichment is best-effort. The sibling test
+    //   pins the `Ok(mounted=false)` race; this pins the realistic Err branch
+    //   -- a parser drift after a nixpkgs bump.
+    // Scenario: 3-disk pool, clean mount. Mountinfo declares `/mnt/storage` as
+    //   btrfs, but `btrfs filesystem show` returns malformed stdout lacking
+    //   `Total devices`, so the post-mount probe yields
+    //   `Err(ProbeError::Parse(_))`.
+    #[test]
+    fn unlock_tolerates_post_mount_probe_err() {
+        let (_state_dir, sp) = isolated_paths();
+        let config = test_config();
+        let membership = unlock_three_disk_membership();
+        membership::save_membership(&membership, &sp)
+            .expect("seed pool.json for assertion baseline");
+
+        let fs = unlock_storage_fs(&[
+            "/dev/disk/by-id/virtio-disk1",
+            "/dev/disk/by-id/virtio-disk2",
+            "/dev/disk/by-id/virtio-disk3",
+        ]);
+
+        let mp = MountPoint("/mnt/storage".to_owned());
+        let (uuid1_req, uuid1_out) = luks_uuid_ok(
+            "/dev/disk/by-id/virtio-disk1",
+            "11111111-1111-1111-1111-111111111111",
+        );
+        let (uuid2_req, uuid2_out) = luks_uuid_ok(
+            "/dev/disk/by-id/virtio-disk2",
+            "22222222-2222-2222-2222-222222222222",
+        );
+        let (uuid3_req, uuid3_out) = luks_uuid_ok(
+            "/dev/disk/by-id/virtio-disk3",
+            "33333333-3333-3333-3333-333333333333",
+        );
+        let (scan_req, scan_out) = unlock_btrfs_device_scan_ok();
+        let (balance_req, balance_out) = unlock_btrfs_balance_status_idle(&mp);
+        let runner = MockRunner::default()
+            .with_output(
+                CmdRequest::MountpointCheck { path: mp.clone() },
+                unlock_err_raw("mountpoint", 1, ""),
+            )
+            .with_output(uuid1_req, uuid1_out)
+            .with_output(uuid2_req, uuid2_out)
+            .with_output(uuid3_req, uuid3_out)
+            .with_luks_dump_text_luks2_for(&[
+                "/dev/disk/by-id/virtio-disk1",
+                "/dev/disk/by-id/virtio-disk2",
+                "/dev/disk/by-id/virtio-disk3",
+            ])
+            .with_mappers_closed(&["braid-disk1", "braid-disk2", "braid-disk3"]);
+        let runner = unlock_with_test_passphrase_ok(runner, "/dev/disk/by-id/virtio-disk1");
+        let runner = unlock_with_test_passphrase_ok(runner, "/dev/disk/by-id/virtio-disk2");
+        let runner = unlock_with_test_passphrase_ok(runner, "/dev/disk/by-id/virtio-disk3");
+        let runner =
+            unlock_with_open_mapper_ok(runner, "/dev/disk/by-id/virtio-disk1", "braid-disk1");
+        let runner =
+            unlock_with_open_mapper_ok(runner, "/dev/disk/by-id/virtio-disk2", "braid-disk2");
+        let runner =
+            unlock_with_open_mapper_ok(runner, "/dev/disk/by-id/virtio-disk3", "braid-disk3");
+        let runner = runner.with_output(scan_req, scan_out);
+        let runner = unlock_with_mount_ok(runner, "/dev/mapper/braid-disk1", &mp)
+            .with_output(balance_req, balance_out);
+        let runner = runner.with_output(
+            CmdRequest::BtrfsFilesystemShow {
+                mount_point: mp.clone(),
+            },
+            RawCommandOutput {
+                cmd: "btrfs filesystem show".to_owned(),
+                stdout: "This is not btrfs output at all\nrandom garbage data".to_owned(),
+                stderr: String::new(),
+                exit_status: 0,
+            },
+        );
+        let tmp = unlock_passphrase_file();
+
+        let result = cmd_unlock(
+            &runner,
+            &fs,
+            &UnlockParams {
+                config: &config,
+                membership: &membership,
+                paths: &sp,
+                passphrase_stdin: false,
+                passphrase_file: Some(tmp.path()),
+                key_file: None,
+                allow_degraded: false,
+                dry_run: false,
+            },
+        );
+
+        result.expect("unlock should tolerate probe_pool returning Err(ProbeError::Parse(_))");
+
+        let loaded = membership::load_membership(&sp)
+            .expect("pool.json should still be loadable after unlock");
+        for name in ["disk1", "disk2", "disk3"] {
+            let disk_name = crate::types::DiskName::parse(name).unwrap();
+            let member = loaded
+                .by_name(&disk_name)
+                .map(|(_, member)| member)
+                .unwrap_or_else(|| panic!("missing disk {name} in pool.json"));
+            assert!(
+                member.devid.is_none(),
+                "{name}.devid must remain None when probe_pool returns Err, got: {:?}",
+                member.devid
+            );
+            assert!(
+                member.added_at.is_none(),
+                "{name}.added_at must remain None when probe_pool returns Err, got: {:?}",
+                member.added_at
             );
         }
     }
