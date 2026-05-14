@@ -318,8 +318,10 @@ mod tests {
         let (_dir, paths) = isolated_paths();
         std::fs::write(paths.alert_latch_json(), b"not json").unwrap();
         let runner = ack_mounted_probe_runner_with_device_stats();
+        let beeper_calls = std::cell::Cell::new(0u32);
+        let beeper = || beeper_calls.set(beeper_calls.get() + 1);
 
-        let result = cmd_ack(&runner, &ack_fs_btrfs(), &ack_mp(), &paths);
+        let result = cmd_ack_impl(&runner, &ack_fs_btrfs(), &ack_mp(), &paths, &beeper);
 
         assert!(
             result.is_ok(),
@@ -340,6 +342,11 @@ mod tests {
             paths.acked_stats_json().exists(),
             "snapshot must have been saved"
         );
+        assert_eq!(
+            beeper_calls.get(),
+            1,
+            "stop_beeper must fire once on mounted corrupt-latch ack"
+        );
     }
 
     /*
@@ -356,8 +363,10 @@ mod tests {
         let (_dir, paths) = isolated_paths();
         std::fs::write(paths.smartd_alert(), b"").unwrap();
         let runner = ack_mounted_probe_runner_with_device_stats();
+        let beeper_calls = std::cell::Cell::new(0u32);
+        let beeper = || beeper_calls.set(beeper_calls.get() + 1);
 
-        let result = cmd_ack(&runner, &ack_fs_btrfs(), &ack_mp(), &paths);
+        let result = cmd_ack_impl(&runner, &ack_fs_btrfs(), &ack_mp(), &paths, &beeper);
 
         assert!(
             result.is_ok(),
@@ -377,6 +386,11 @@ mod tests {
         assert!(
             paths.acked_stats_json().exists(),
             "snapshot must have been saved"
+        );
+        assert_eq!(
+            beeper_calls.get(),
+            1,
+            "stop_beeper must fire once on mounted smartd-only ack"
         );
     }
 
@@ -974,14 +988,28 @@ mod tests {
     fn ack_offline_corrupt_latch_still_clears_files() {
         let (_dir, paths) = isolated_paths();
         std::fs::write(paths.alert_latch_json(), b"not json").unwrap();
+        let beeper_calls = std::cell::Cell::new(0u32);
+        let beeper = || beeper_calls.set(beeper_calls.get() + 1);
 
-        cmd_ack(&AckPanicRunner, &ack_fs_not_mounted(), &ack_mp(), &paths).unwrap();
+        cmd_ack_impl(
+            &AckPanicRunner,
+            &ack_fs_not_mounted(),
+            &ack_mp(),
+            &paths,
+            &beeper,
+        )
+        .unwrap();
 
         assert!(!paths.alert_latch_json().exists());
         assert!(!paths.alert_latch_corrupt().exists());
         assert!(
             !paths.acked_stats_json().exists(),
             "no MissingDevice cause means no acked-stats write"
+        );
+        assert_eq!(
+            beeper_calls.get(),
+            1,
+            "stop_beeper must fire once on offline corrupt-latch ack"
         );
     }
 
