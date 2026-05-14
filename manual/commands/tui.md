@@ -44,6 +44,7 @@ Demo mode shows three fake disks with sample data, useful for exploring the inte
 | `Enter` | Open disk detail popup |
 | `Esc` | Close disk detail popup |
 | `?` | Toggle help overlay |
+| `Shift-R` | Reset session temperature hi/lo watermarks |
 
 ## What it shows
 

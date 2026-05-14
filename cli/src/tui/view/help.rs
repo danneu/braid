@@ -5,6 +5,11 @@ use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Borders, Clear, Padding, Paragraph};
 
 pub fn view_help(frame: &mut Frame, area: Rect) {
+    // `R` (reset temp hi/lo) is intentionally NOT listed here.
+    // Pressing any key while the help overlay is open is consumed by the
+    // close-on-any-key handler in keymap.rs, so advertising R here would
+    // mislead -- users would press R, help would close, and stats would
+    // remain. The footer in view/mod.rs is the in-app surface for R.
     let lines = vec![
         Line::from(vec![
             Span::styled("q       ", Style::default().fg(Color::Cyan)),
