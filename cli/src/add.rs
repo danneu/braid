@@ -1235,9 +1235,10 @@ impl AddPlan {
             })?;
 
             // Bootstrap post-commit persist: write pool.json after mkfs + mount.
-            // Enrich with live metadata (devid) from pool probe.
-            // `enrich_from_pool_state` correlates by LUKS UUID only and
-            // surfaces any foreign UUIDs through `EnrichmentReport`;
+            // Enrich with live metadata (devid) from pool probe, best-effort:
+            // if the probe itself fails, save the target membership
+            // unenriched. `enrich_from_pool_state` correlates by LUKS UUID only
+            // and surfaces any foreign UUIDs through `EnrichmentReport`;
             // downstream consumption of `foreign` lives in doctor/status
             // (Phase 5), so the report is discarded here.
             let mut final_membership = journal.target_membership.clone();
@@ -3699,6 +3700,7 @@ mod tests {
         opened: Mutex<Vec<String>>,
         formatted_uuids: Mutex<std::collections::BTreeMap<String, String>>,
         fail_bootstrap_post_mount_probe: bool,
+        malformed_bootstrap_post_mount_probe: bool,
         fail_second_add: bool,
         fail_post_add_probe: bool,
         fail_luks_format: bool,
@@ -3715,6 +3717,7 @@ mod tests {
                 opened: Mutex::new(vec!["braid-disk1".to_owned()]),
                 formatted_uuids: Mutex::new(std::collections::BTreeMap::new()),
                 fail_bootstrap_post_mount_probe: false,
+                malformed_bootstrap_post_mount_probe: false,
                 fail_second_add: false,
                 fail_post_add_probe: false,
                 fail_luks_format: false,
@@ -3733,6 +3736,11 @@ mod tests {
 
         fn with_bootstrap_post_mount_probe_failure(mut self) -> Self {
             self.fail_bootstrap_post_mount_probe = true;
+            self
+        }
+
+        fn with_malformed_bootstrap_post_mount_probe(mut self) -> Self {
+            self.malformed_bootstrap_post_mount_probe = true;
             self
         }
 
@@ -3919,6 +3927,17 @@ mod tests {
                     }
                     if self.fail_bootstrap_post_mount_probe && self.mounted.load(Ordering::SeqCst) {
                         return Err(CmdError::Failed("post-mount probe failed".into()));
+                    }
+                    if self.malformed_bootstrap_post_mount_probe
+                        && self.mounted.load(Ordering::SeqCst)
+                        && !has_added
+                    {
+                        return Ok(RawCommandOutput {
+                            cmd: format!("btrfs filesystem show {mount_point}"),
+                            stdout: "This is not btrfs output at all\nrandom garbage data".into(),
+                            stderr: String::new(),
+                            exit_status: 0,
+                        });
                     }
                     Ok(mock_ok(
                         &format!("btrfs filesystem show {mount_point}"),
@@ -4213,6 +4232,65 @@ mod tests {
         assert!(
             !paths.acked_stats_json().exists(),
             "bootstrap cleanup must delete every stale acked baseline before enrichment"
+        );
+    }
+
+    // Intent: bootstrap `cmd_add` must tolerate a post-mount enrichment
+    //   `probe_pool` that returns `Err(ProbeError::Parse(_))`, persist the
+    //   target membership, and clear the journal.
+    // Why it exists: bootstrap enrichment after mkfs+mount is best-effort.
+    //   A parser drift in `btrfs filesystem show` must not turn a committed
+    //   fresh-pool add into a hard failure or leave recovery work pending.
+    // Scenario: first-disk bootstrap succeeds through LUKS format, open, mkfs,
+    //   and mount. Mountinfo then declares `/mnt/storage` as btrfs, but
+    //   `BtrfsFilesystemShow` returns malformed stdout lacking `Total
+    //   devices`, so the best-effort post-mount probe yields a parse error.
+    #[test]
+    fn cmd_add_bootstrap_tolerates_post_mount_probe_err() {
+        let (_state_tmp, paths, _tmp, config_path, pass_path) = fresh_add_setup();
+        let runner = AddFullPathRunner::bootstrap().with_malformed_bootstrap_post_mount_probe();
+        let fs = runner.fs(vec!["/dev/disk/by-id/virtio-disk1".into()]);
+        let inhibitor = crate::inhibit::RecordingInhibitor::new();
+
+        cmd_add(
+            &runner,
+            &fs,
+            &AddParams {
+                config_path: &config_path,
+                disk_specs: &["disk1=/dev/disk/by-id/virtio-disk1".into()],
+                dry_run: false,
+                yes: true,
+                passphrase_stdin: false,
+                passphrase_file: Some(pass_path.as_path()),
+                enroll_key_file: None,
+                luks_format_extra_opts: &[],
+                progress: ProgressOutput::Off,
+                paths: &paths,
+                sleep_inhibitor: &inhibitor,
+                passphrase_reader: &RealTty,
+            },
+        )
+        .expect("bootstrap should tolerate post-mount probe parse errors");
+
+        let membership =
+            membership::load_membership(&paths).expect("pool.json should be persisted");
+        let disk1_name = DiskName::parse("disk1").unwrap();
+        let (_uuid, disk1) = membership
+            .by_name(&disk1_name)
+            .expect("disk1 membership should be saved");
+        assert!(
+            disk1.devid.is_none(),
+            "disk1.devid must remain None when post-mount probe returns Err, got: {:?}",
+            disk1.devid
+        );
+        assert!(
+            disk1.added_at.is_none(),
+            "disk1.added_at must remain None when post-mount probe returns Err, got: {:?}",
+            disk1.added_at
+        );
+        assert!(
+            journal::load_journal(&paths).unwrap().is_none(),
+            "pending-op.json should be cleared after successful bootstrap"
         );
     }
 

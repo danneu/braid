@@ -798,10 +798,11 @@ impl ReplacePlan {
         );
 
         // Membership committed by btrfs replace. Enrich with kernel-assigned
-        // devid + observed luks_uuid from a fresh probe, then persist before
-        // the post-replace cleanup, resize, and (missing-path) soft balance.
-        // The journal still covers maintenance, so recovery can replay it if
-        // we crash before clear_journal.
+        // devid + observed luks_uuid from a fresh probe, best-effort: if the
+        // probe itself fails, persist the target membership unenriched. The
+        // new member's added_at fallback is still stamped below. The journal
+        // still covers maintenance, so recovery can replay it if we crash
+        // before clear_journal.
         let mut target_membership = target_membership;
         if let Ok(pool_after) = probe_pool(runner, fs, config.mount_point()) {
             // Discard `EnrichmentReport.foreign` for now; doctor/status
@@ -4174,7 +4175,90 @@ mod tests {
         assert!(
             disk3.devid.is_some() && disk3.added_at.is_some(),
             "new disk must carry enriched metadata (devid, added_at) \
-             from the post-replace probe: {disk3:?}"
+            from the post-replace probe: {disk3:?}"
+        );
+    }
+
+    // Intent: `cmd_replace` must tolerate a post-replace enrichment
+    //   `probe_pool` that returns `Err(ProbeError::Parse(_))`, persist the
+    //   target membership, and clear the journal.
+    // Why it exists: the post-replace membership commit is the durable
+    //   bookkeeping boundary after `btrfs replace start`; enrichment is
+    //   best-effort. Parser drift in `btrfs filesystem show` must not turn a
+    //   completed replace into a hard failure.
+    // Scenario: live replace of disk2 -> disk3 succeeds. The first
+    //   post-replace `BtrfsFilesystemShow` returns malformed stdout lacking
+    //   `Total devices`, so the enrichment probe fails, but resize and cleanup
+    //   still complete.
+    #[test]
+    fn cmd_replace_tolerates_post_replace_probe_err() {
+        let f = PoolFixture::two_disk_healthy();
+        let fs = MockFs::storage(vec![
+            "/dev/disk/by-id/virtio-disk3".into(),
+            "/dev/mapper/braid-disk3".into(),
+        ]);
+        let replace_done = Arc::new(AtomicBool::new(false));
+        let malformed_post_replace_probe_emitted = Arc::new(AtomicBool::new(false));
+        let runner = ReplacementPool::two_disk_healthy()
+            .install(MockRunner::default(), replace_done.clone())
+            .with_handler({
+                let replace_done = replace_done.clone();
+                let malformed_post_replace_probe_emitted =
+                    malformed_post_replace_probe_emitted.clone();
+                move |req| match req {
+                    CmdRequest::BtrfsReplaceStart { .. } => {
+                        replace_done.store(true, std::sync::atomic::Ordering::Relaxed);
+                        Some(Ok(mock_ok("btrfs replace start", "")))
+                    }
+                    CmdRequest::BtrfsFilesystemShow { mount_point }
+                        if replace_done.load(std::sync::atomic::Ordering::Relaxed)
+                            && !malformed_post_replace_probe_emitted
+                                .swap(true, std::sync::atomic::Ordering::Relaxed) =>
+                    {
+                        Some(Ok(RawCommandOutput {
+                            cmd: format!("btrfs filesystem show {mount_point}"),
+                            stdout: "This is not btrfs output at all\nrandom garbage data".into(),
+                            stderr: String::new(),
+                            exit_status: 0,
+                        }))
+                    }
+                    CmdRequest::CryptsetupClose { .. } => Some(Ok(mock_ok("cryptsetup close", ""))),
+                    CmdRequest::BtrfsFilesystemResize { .. } => {
+                        Some(Ok(mock_ok("btrfs filesystem resize", "")))
+                    }
+                    _ => None,
+                }
+            });
+
+        cmd_replace(&runner, &fs, &f.replace_params().build())
+            .expect("replace should tolerate post-replace probe parse errors");
+
+        assert!(
+            journal::load_journal(&f.paths).unwrap().is_none(),
+            "pending-op.json should be cleared after successful replace"
+        );
+        let saved = membership::load_membership(&f.paths)
+            .expect("pool.json must exist after the membership commit");
+        let saved_names: Vec<&str> = saved.names().map(|n| n.as_str()).collect();
+        assert!(
+            !saved_names.contains(&"disk2"),
+            "old disk must be gone from pool.json once btrfs replace succeeds \
+             (saved: {saved_names:?})",
+        );
+        let disk3_name = DiskName::parse("disk3").unwrap();
+        let (_disk3_uuid, disk3) = saved.by_name(&disk3_name).unwrap_or_else(|| {
+            panic!(
+                "new disk must be in pool.json once btrfs replace succeeds (saved: {saved_names:?})",
+            )
+        });
+        assert!(
+            disk3.devid.is_none(),
+            "new disk devid must remain None when post-replace probe returns Err, got: {:?}",
+            disk3.devid
+        );
+        assert!(
+            disk3.added_at.is_some(),
+            "new disk added_at fallback must be stamped even when post-replace probe returns Err"
         );
     }
 
