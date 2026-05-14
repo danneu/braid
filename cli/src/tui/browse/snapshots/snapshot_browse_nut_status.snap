@@ -1,0 +1,18 @@
+---
+source: cli/src/tui/browse/view.rs
+expression: "buffer_to_string(&render(&model, 80, 14))"
+---
+┌ Pgm ─────┐┌ Cmd ─────────┐┌ Content ─────────────────────────────────────────┐
+│  Btrfs   ││> Status      ││Status   OL                                       │
+│> NUT     ││  Variables   ││Battery  100%                                     │
+│          ││  Commands    ││Runtime  30:00                                    │
+│          ││              ││Load     20% (100 W est.)                         │
+│          ││              ││                                                  │
+│          ││              ││                                                  │
+│          ││              ││                                                  │
+│          ││              ││                                                  │
+│          ││              ││                                                  │
+│          ││              ││                                                  │
+│          ││              ││                                                  │
+└──────────┘└──────────────┘└──────────────────────────────────────────────────┘
+$ upsc ups

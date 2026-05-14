@@ -57,6 +57,7 @@ Architecture decision records. Each has a status: `Draft`, `Active`, `Superseded
 - [decisions/022-dry-run-preview-model.md](decisions/022-dry-run-preview-model.md) — **Active.** Dry-run previews for migrated mutating commands render from the same typed work plans that execution consumes; `Step` is output-only.
 - [decisions/023-secret-handling.md](decisions/023-secret-handling.md) — **Active.** Required types and disciplines for in-process LUKS secret material: Zeroizing typing, no BufRead in passphrase paths, hard byte caps, subprocess stdin (never argv), drop-before-fsync for generated secrets, redacted Debug, and typed passphrase boundaries.
 - [decisions/024-luks-uuid-identity.md](decisions/024-luks-uuid-identity.md) — **Active.** LUKS UUID is braid's persistent disk identity; disk names and labels are presentation, by-id paths are hardware addresses, and btrfs devid is a restricted fallback.
+- [decisions/025-browse-vs-curated.md](decisions/025-browse-vs-curated.md) — **Active.** `braid tui` owns the interactive UI; Browse is the raw command-output inspector while Data/Scrub are curated first-class UX.
 
 ## tool-behavior/
 

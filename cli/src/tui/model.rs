@@ -5,40 +5,41 @@ use crate::alert::AlertState;
 use crate::parse::types::{BtrfsDfEntry, DeviceAllocation, ScrubState, SmartHealth, UpsStatusFlag};
 use crate::state_paths::StatePaths;
 use crate::status::{BalanceReport, DiskErrors};
+use crate::tui::browse::BrowseState;
 use crate::tui::effect::Effect;
 use crate::types::{ByIdPath, LuksUuid, MountPoint};
 
-#[derive(Clone, Copy, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Tab {
     Data,
     Scrub,
-    Sharing,
+    Browse,
 }
 
 impl Tab {
-    pub const ALL: [Tab; 3] = [Tab::Data, Tab::Scrub, Tab::Sharing];
+    pub const ALL: [Tab; 3] = [Tab::Data, Tab::Scrub, Tab::Browse];
 
     pub fn label(self) -> &'static str {
         match self {
             Tab::Data => "Data",
             Tab::Scrub => "Scrub",
-            Tab::Sharing => "Sharing",
+            Tab::Browse => "Browse",
         }
     }
 
     pub fn next(self) -> Tab {
         match self {
             Tab::Data => Tab::Scrub,
-            Tab::Scrub => Tab::Sharing,
-            Tab::Sharing => Tab::Data,
+            Tab::Scrub => Tab::Browse,
+            Tab::Browse => Tab::Data,
         }
     }
 
     pub fn prev(self) -> Tab {
         match self {
-            Tab::Data => Tab::Sharing,
+            Tab::Data => Tab::Browse,
             Tab::Scrub => Tab::Data,
-            Tab::Sharing => Tab::Scrub,
+            Tab::Browse => Tab::Scrub,
         }
     }
 }
@@ -131,6 +132,9 @@ pub struct UpsSnapshot {
     /// available. When `None`, the view omits the watts annotation
     /// entirely rather than guessing.
     pub watts_estimated: Option<u32>,
+    /// Raw `upsc <name>` stdout captured for the Browse tab's Variables
+    /// view without widening the parsed `braid ups status --json` model.
+    pub raw_text: String,
     pub daemon: DaemonStatus,
     pub probed_at: Instant,
 }
@@ -296,6 +300,9 @@ pub struct Model {
     pub ups: Option<UpsSnapshot>,
     pub ups_probe_inflight: bool,
     pub ups_scheduler_pending: bool,
+    /// Session state for the raw-output Browse tab, kept inside the TUI
+    /// model so tab changes and probe results can drive its loader.
+    pub browse: BrowseState,
 }
 
 impl Model {
@@ -366,6 +373,7 @@ impl Model {
             ups: None,
             ups_probe_inflight,
             ups_scheduler_pending: false,
+            browse: BrowseState::default(),
         };
         (model, effects)
     }
@@ -398,6 +406,7 @@ impl Model {
             ups: None,
             ups_probe_inflight: false,
             ups_scheduler_pending: false,
+            browse: BrowseState::default(),
         }
     }
 }

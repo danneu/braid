@@ -3,7 +3,7 @@ use std::path::PathBuf;
 use std::sync::mpsc;
 use std::thread;
 
-use crate::cmd::RealRunner;
+use crate::cmd::{CommandRunner, RawCommandOutput, RealRunner};
 use crate::config::FanControl;
 use crate::state_paths::StatePaths;
 use crate::tui::event::Event;
@@ -46,6 +46,12 @@ pub enum Effect {
     },
     ScheduleUpsProbe {
         delay: Duration,
+    },
+    /// Run a raw Browse-tab command on a worker thread and route stdout
+    /// back through generation-checked TUI update.
+    BrowseRunCommand {
+        request: crate::cmd::CmdRequest,
+        generation: u64,
     },
 }
 
@@ -124,6 +130,25 @@ pub fn execute_effect(effect: Effect, cmd_tx: &mpsc::Sender<Event>) {
             thread::spawn(move || {
                 thread::sleep(delay);
                 let _ = tx.send(Event::PollUpsRefresh);
+            });
+        }
+        Effect::BrowseRunCommand {
+            request,
+            generation,
+        } => {
+            let tx = cmd_tx.clone();
+            thread::spawn(move || {
+                let runner = RealRunner;
+                let raw = match runner.run(&request) {
+                    Ok(raw) => raw,
+                    Err(e) => RawCommandOutput {
+                        cmd: format!("{request:?}"),
+                        stdout: String::new(),
+                        stderr: format!("error: {e}"),
+                        exit_status: 1,
+                    },
+                };
+                let _ = tx.send(Event::BrowseCommandFinished { raw, generation });
             });
         }
     }

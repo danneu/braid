@@ -1,4 +1,5 @@
 mod app;
+pub(crate) mod browse;
 mod demo;
 mod effect;
 mod event;
@@ -16,6 +17,7 @@ use std::time::Duration;
 use app::update;
 use effect::{Effect, execute_effect};
 use event::InputHandler;
+use keymap::KeyContext;
 use model::{Model, PoolStatus};
 use view::view;
 
@@ -106,11 +108,13 @@ fn run_loop(
 
         let mut messages = Vec::new();
         if let Ok(event) = rx.recv_timeout(FRAME_BUDGET) {
-            messages.extend(event.into_message(model.show_help, model.show_disk_detail));
+            let ctx = key_context(model);
+            messages.extend(event.into_message(&ctx));
             for _ in 1..MAX_EVENTS_PER_FRAME {
                 match rx.try_recv() {
                     Ok(event) => {
-                        messages.extend(event.into_message(model.show_help, model.show_disk_detail))
+                        let ctx = key_context(model);
+                        messages.extend(event.into_message(&ctx))
                     }
                     Err(_) => break,
                 }
@@ -127,4 +131,13 @@ fn run_loop(
         }
     }
     Ok(())
+}
+
+fn key_context(model: &Model) -> KeyContext {
+    KeyContext {
+        tab: model.tab,
+        show_help: model.show_help,
+        show_disk_detail: model.show_disk_detail,
+        browse_focus: model.browse.focus,
+    }
 }

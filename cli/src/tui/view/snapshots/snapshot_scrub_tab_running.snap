@@ -1,9 +1,8 @@
 ---
 source: cli/src/tui/view/mod.rs
-assertion_line: 1558
 expression: buffer_to_string(&terminal)
 ---
-Data  Scrub  Sharing
+Data  Scrub  Browse
  Scrub ─────────────────────────────────────────────────────
  Status       running (14.78%)
  Progress     82.1 GiB / 555.4 GiB

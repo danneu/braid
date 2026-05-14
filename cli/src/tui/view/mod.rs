@@ -1048,14 +1048,6 @@ fn view_data(model: &Model, frame: &mut Frame, area: Rect, _now: PrimitiveDateTi
     }
 }
 
-fn view_placeholder(frame: &mut Frame, area: Rect, name: &str) {
-    frame.render_widget(
-        Paragraph::new(format!("{name} -- coming soon"))
-            .style(Style::default().fg(Color::DarkGray)),
-        area,
-    );
-}
-
 fn view_scrub(model: &Model, frame: &mut Frame, area: Rect, now: PrimitiveDateTime) {
     match &model.pool {
         PoolStatus::Loading => {
@@ -1394,7 +1386,7 @@ pub fn view(model: &Model, frame: &mut Frame, now: PrimitiveDateTime) {
     match model.tab {
         Tab::Data => view_data(model, frame, outer[off + 2], now),
         Tab::Scrub => view_scrub(model, frame, outer[off + 2], now),
-        Tab::Sharing => view_placeholder(frame, outer[off + 2], "Sharing"),
+        Tab::Browse => crate::tui::browse::view::view_browse(model, frame, outer[off + 2]),
     }
 
     let spinning =
@@ -2201,6 +2193,7 @@ pub(crate) mod tests {
             runtime_secs: None,
             load_pct: Some(40),
             watts_estimated: None,
+            raw_text: String::new(),
             daemon: DaemonStatus::Active,
             probed_at: Instant::now(),
         };

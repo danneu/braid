@@ -1,9 +1,8 @@
 ---
 source: cli/src/tui/view/mod.rs
-assertion_line: 1476
 expression: buffer_to_string(&terminal)
 ---
-Data  Scrub  Sharing
+Data  Scrub  Browse
  Scrub ─────────────────────────────────────────────────────
  Last run     Tue Feb 24 02:00:07 2026 (11 min ago)
  Errors       0

@@ -1,10 +1,9 @@
 ---
 source: cli/src/tui/view/mod.rs
-assertion_line: 1580
 expression: "format!(\"-- toshiba --\\n{unlocked}\\n-- ironwolf --\\n{locked}\")"
 ---
 -- toshiba --
-Data  Scrub  Sharing
+Data  Scrub  Browse
  Pool ──────────────────────────────────────────────────────
  not mounted
  Disks ─────────────────────────────────────────────────────
@@ -24,7 +23,7 @@ Data  Scrub  Sharing
 Quit: q │ Help: ? │ Reset temp hi/lo: R │ Reload: r
 
 -- ironwolf --
-Data  Scrub  Sharing
+Data  Scrub  Browse
  Pool ──────────────────────────────────────────────────────
  not mounted
  Disks ─────────────────────────────────────────────────────

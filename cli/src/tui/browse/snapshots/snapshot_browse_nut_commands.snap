@@ -1,0 +1,18 @@
+---
+source: cli/src/tui/browse/view.rs
+expression: "buffer_to_string(&render(&model, 80, 14))"
+---
+┌ Pgm ─────┐┌ Cmd ─────────┐┌ Content ─────────────────────────────────────────┐
+│  Btrfs   ││  Status      ││Instant commands supported on UPS [ups]:          │
+│> NUT     ││  Variables   ││beeper.disable                                    │
+│          ││> Commands    ││                                                  │
+│          ││              ││                                                  │
+│          ││              ││                                                  │
+│          ││              ││                                                  │
+│          ││              ││                                                  │
+│          ││              ││                                                  │
+│          ││              ││                                                  │
+│          ││              ││                                                  │
+│          ││              ││                                                  │
+└──────────┘└──────────────┘└──────────────────────────────────────────────────┘
+$ upscmd -l ups

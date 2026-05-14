@@ -1,0 +1,18 @@
+---
+source: cli/src/tui/browse/view.rs
+expression: "buffer_to_string(&render(&model, 80, 14))"
+---
+┌ Pgm ─────┐┌ Cmd ─────────┐┌ View ────┐┌ Content ─────────────────────────────┐
+│> Btrfs   ││> Filesystem  ││  Usage   ││Label: none uuid: abc-123             │
+│  NUT     ││  Devices     ││> Show    ││Total devices 2                       │
+│          ││  Subvolumes  ││  Df      ││                                      │
+│          ││  Scrub       ││          ││                                      │
+│          ││  Balance     ││          ││                                      │
+│          ││              ││          ││                                      │
+│          ││              ││          ││                                      │
+│          ││              ││          ││                                      │
+│          ││              ││          ││                                      │
+│          ││              ││          ││                                      │
+│          ││              ││          ││                                      │
+└──────────┘└──────────────┘└──────────┘└──────────────────────────────────────┘
+$ btrfs filesystem show ''

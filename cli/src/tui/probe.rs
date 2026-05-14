@@ -5,6 +5,7 @@ use std::time::Instant;
 use crate::cmd::{CmdRequest, CommandRunner};
 use crate::config::FanControl;
 use crate::luks::{self, BackingPathResolver};
+use crate::parse::parse_upsc;
 use crate::parse::types::{ScrubState, SmartHealth, SmartProbe};
 use crate::parse::{
     parse_btrfs_device_stats, parse_btrfs_device_usage, parse_btrfs_scrub_status,
@@ -20,7 +21,6 @@ use crate::tui::model::{
     FanSnapshot, PoolState, TemperatureDiskId, TemperatureReading, UnpooledDiskRender, UpsSnapshot,
 };
 use crate::types::{ByIdPath, ConfigDiskState, LuksUuid, MapperName, MountPoint};
-use crate::ups::{UpsQueryError, query_ups};
 
 /// Best-effort ownership-aware lock classifier for a disk that the mounted
 /// pool probe could not identify by LUKS UUID or persisted devid.
@@ -739,18 +739,23 @@ const UPS_DAEMON_UNIT: &str = "upsd.service";
 /// the plan's risk 3 ("TUI snapshot drifts from UpscOutput"): all
 /// conversion happens here, tests snapshot the converter output.
 pub fn probe_ups_for_tui<R: CommandRunner>(runner: &R, name: &str) -> UpsSnapshot {
-    let parsed = match query_ups(runner, name) {
-        Ok(p) => p,
-        Err(UpsQueryError::InvocationFailed(_)) | Err(UpsQueryError::QueryFailed { .. }) => {
-            return ups_snapshot_query_failed(runner);
-        }
+    let raw = match runner.run(&CmdRequest::UpscQuery {
+        name: name.to_owned(),
+    }) {
+        Ok(raw) => raw,
+        Err(_) => return ups_snapshot_query_failed(runner),
     };
+    if raw.exit_status != 0 {
+        return ups_snapshot_query_failed(runner);
+    }
+    let parsed = parse_upsc(&raw.stdout);
     UpsSnapshot {
         flags: parsed.status_flags.clone(),
         battery_charge_pct: parsed.battery.charge_pct,
         runtime_secs: parsed.battery.runtime_secs,
         load_pct: parsed.load_pct,
         watts_estimated: parsed.watts_estimated(),
+        raw_text: raw.stdout,
         // A successful `upsc` implies the daemon is reachable -- call
         // the unit status just in case the upstream check captures a
         // transitional state worth rendering (active / failed).
@@ -766,6 +771,7 @@ fn ups_snapshot_query_failed<R: CommandRunner>(runner: &R) -> UpsSnapshot {
         runtime_secs: None,
         load_pct: None,
         watts_estimated: None,
+        raw_text: String::new(),
         // Fall back to the unit probe so we can still distinguish
         // "daemon has crashed" vs. "nothing running" vs. "transitional".
         daemon: probe_daemon_status(runner, UPS_DAEMON_UNIT),

@@ -3,7 +3,8 @@ use std::time::{Duration, Instant};
 
 use crate::tui::effect::{Effect, FAN_PROBE_INTERVAL, UPS_PROBE_INTERVAL};
 use crate::tui::model::{
-    DiskLuksState, FanSnapshot, Model, PoolState, PoolStatus, TemperatureWatermark, UpsSnapshot,
+    DiskLuksState, FanSnapshot, Model, PoolState, PoolStatus, Tab, TemperatureWatermark,
+    UpsSnapshot,
 };
 
 // Single large variant by design; probe results are rare, and boxing added an extra allocation/deref without a measured benefit -- revisit if profiling shows enum size matters.
@@ -19,6 +20,21 @@ pub enum Message {
     OpenDiskDetail,
     CloseDiskDetail,
     ResetTemperatureStats,
+    BrowseFocusLeft,
+    BrowseFocusRight,
+    BrowseSelectNext,
+    BrowseSelectPrev,
+    BrowseEnter,
+    BrowseBack,
+    BrowseReload,
+    BrowseCommandFinished {
+        raw: crate::cmd::RawCommandOutput,
+        generation: u64,
+    },
+    BrowseScrollDown,
+    BrowseScrollUp,
+    BrowsePageDown,
+    BrowsePageUp,
     PoolProbeFinished(
         Result<(HashMap<String, DiskLuksState>, Option<PoolState>), String>,
         Duration,
@@ -68,11 +84,11 @@ pub fn update(model: &mut Model, msg: Message) -> Vec<Effect> {
         }
         Message::NextTab => {
             model.tab = model.tab.next();
-            vec![]
+            browse_load_if_active(model)
         }
         Message::PrevTab => {
             model.tab = model.tab.prev();
-            vec![]
+            browse_load_if_active(model)
         }
         Message::RefreshPool => {
             let Some(paths) = model.paths.clone() else {
@@ -141,6 +157,59 @@ pub fn update(model: &mut Model, msg: Message) -> Vec<Effect> {
             model.session_temperature_stats.clear();
             vec![]
         }
+        Message::BrowseFocusLeft => {
+            model.browse.focus_left();
+            vec![]
+        }
+        Message::BrowseFocusRight => {
+            model.browse.focus_right();
+            vec![]
+        }
+        Message::BrowseSelectNext => {
+            model.browse.select_next();
+            browse_load_if_active(model)
+        }
+        Message::BrowseSelectPrev => {
+            model.browse.select_prev();
+            browse_load_if_active(model)
+        }
+        Message::BrowseEnter => model.browse.enter(&model.pool).into_iter().collect(),
+        Message::BrowseBack => {
+            model.browse.back();
+            vec![]
+        }
+        Message::BrowseReload => {
+            if model.browse.is_subvolume_detail() {
+                model
+                    .browse
+                    .reload_detail(&model.pool)
+                    .into_iter()
+                    .collect()
+            } else {
+                model.browse.force_next_load();
+                browse_load_if_active(model)
+            }
+        }
+        Message::BrowseCommandFinished { raw, generation } => {
+            model.browse.command_finished(raw, generation);
+            vec![]
+        }
+        Message::BrowseScrollDown => {
+            model.browse.select_next();
+            vec![]
+        }
+        Message::BrowseScrollUp => {
+            model.browse.select_prev();
+            vec![]
+        }
+        Message::BrowsePageDown => {
+            model.browse.page_down();
+            vec![]
+        }
+        Message::BrowsePageUp => {
+            model.browse.page_up();
+            vec![]
+        }
         Message::PoolProbeFinished(result, elapsed) => {
             let stale = model.pool.current().cloned();
             model.pool = match result {
@@ -177,6 +246,9 @@ pub fn update(model: &mut Model, msg: Message) -> Vec<Effect> {
                 },
             };
             model.probe_duration = Some(elapsed);
+            if model.tab == Tab::Browse {
+                return browse_load_if_active(model);
+            }
             // TODO: re-enable auto-polling
             // vec![Effect::ScheduleProbe {
             //     mount_point: model.mount_point.clone(),
@@ -249,6 +321,18 @@ pub fn update(model: &mut Model, msg: Message) -> Vec<Effect> {
     }
 }
 
+fn browse_load_if_active(model: &mut Model) -> Vec<Effect> {
+    if model.tab == Tab::Browse {
+        model
+            .browse
+            .load_current(&model.pool, model.ups_config.as_ref())
+            .into_iter()
+            .collect()
+    } else {
+        vec![]
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -289,6 +373,7 @@ mod tests {
             runtime_secs: None,
             load_pct: None,
             watts_estimated: None,
+            raw_text: String::new(),
             daemon: DaemonStatus::Active,
             probed_at: Instant::now(),
         }
@@ -329,6 +414,52 @@ mod tests {
             underlying_present: Some("/dev/vdb".to_owned()),
             metadata: None,
         }
+    }
+
+    // Intent: entering the Browse top tab schedules its default command.
+    // Why it exists: NextTab used to return no effects, which would leave
+    // Browse blank on first entry.
+    // Scenario: user starts on Data, tabs through Scrub into Browse.
+    #[test]
+    fn next_tab_into_browse_emits_effect() {
+        let mut model = Model::new_demo(sample_disk_names(), PoolStatus::Mounted(sample_pool()));
+        assert_eq!(model.tab, Tab::Data);
+        assert!(update(&mut model, Message::NextTab).is_empty());
+        let effects = update(&mut model, Message::NextTab);
+        assert_eq!(model.tab, Tab::Browse);
+        assert!(matches!(
+            effects.as_slice(),
+            [Effect::BrowseRunCommand {
+                request: crate::cmd::CmdRequest::BtrfsFilesystemUsage { .. },
+                generation: 1,
+            }]
+        ));
+    }
+
+    // Intent: Browse content scroll messages never schedule command reloads.
+    // Why it exists: content-local j/k are for moving through the current
+    // output, not for reloading and snapping back to the top.
+    // Scenario: user scrolls down inside a long raw btrfs output panel.
+    #[test]
+    fn browse_scroll_down_does_not_emit_effect() {
+        let mut model = Model::new_demo(sample_disk_names(), PoolStatus::Mounted(sample_pool()));
+        model.tab = Tab::Browse;
+        model.browse.focus = crate::tui::browse::BrowseFocus::Content;
+        model.browse.set_viewport_height(1);
+        model.browse.command_finished(
+            crate::cmd::RawCommandOutput {
+                cmd: "btrfs filesystem usage /mnt/storage".into(),
+                stdout: "line one\nline two\nline three\n".into(),
+                stderr: String::new(),
+                exit_status: 0,
+            },
+            0,
+        );
+
+        let effects = update(&mut model, Message::BrowseScrollDown);
+
+        assert!(effects.is_empty());
+        assert_eq!(model.browse.scroll_offset(), 1);
     }
 
     // Intent: production startup must probe fan and UPS immediately without

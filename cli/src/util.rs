@@ -5,14 +5,7 @@ fn require_tty_inner(cmd: &str, stdin_tty: bool, stdout_tty: bool) -> io::Result
         return Ok(());
     }
 
-    let hint = if cmd == "browse" {
-        " -- use --check for non-interactive mode"
-    } else {
-        ""
-    };
-    Err(io::Error::other(format!(
-        "braid {cmd} requires a terminal{hint}"
-    )))
+    Err(io::Error::other(format!("braid {cmd} requires a terminal")))
 }
 
 pub fn require_tty(cmd: &str) -> io::Result<()> {
@@ -31,31 +24,18 @@ mod tests {
     use super::require_tty_inner;
 
     // Intent: require_tty_inner returns Ok only when both stdin and stdout
-    // are terminals, and surfaces a "--check" hint for browse only.
-    // Why it exists: the predicate and the per-cmd hint are the entire
-    // contract of the public require_tty wrapper.
-    // Scenario: each combination of (stdin_tty, stdout_tty) for both cmds.
+    // are terminals.
+    // Why it exists: the predicate is the entire contract of the public
+    // require_tty wrapper.
+    // Scenario: each stdio combination for the surviving TUI caller.
     #[test]
     fn require_tty_inner_blocks_when_either_stdio_is_not_a_tty() {
         assert!(require_tty_inner("tui", true, true).is_ok());
-        assert!(require_tty_inner("browse", true, true).is_ok());
 
         let e = require_tty_inner("tui", false, true).unwrap_err();
         assert_eq!(e.to_string(), "braid tui requires a terminal");
 
         let e = require_tty_inner("tui", true, false).unwrap_err();
         assert_eq!(e.to_string(), "braid tui requires a terminal");
-
-        let e = require_tty_inner("browse", false, true).unwrap_err();
-        assert_eq!(
-            e.to_string(),
-            "braid browse requires a terminal -- use --check for non-interactive mode"
-        );
-
-        let e = require_tty_inner("browse", true, false).unwrap_err();
-        assert_eq!(
-            e.to_string(),
-            "braid browse requires a terminal -- use --check for non-interactive mode"
-        );
     }
 }

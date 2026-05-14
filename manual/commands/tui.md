@@ -40,9 +40,10 @@ Demo mode shows three fake disks with sample data, useful for exploring the inte
 | `r` | Reload pool data |
 | `Tab` | Next tab |
 | `Shift-Tab` | Previous tab |
-| `j` / `k` | Select next/previous disk |
-| `Enter` | Open disk detail popup |
-| `Esc` | Close disk detail popup |
+| `j` / `k` | Select next/previous disk (Data/Scrub) or move within the focused Browse region |
+| `h` / `l` | Move left/right across Browse regions |
+| `Enter` | Open disk detail popup (Data) or drill into Browse content |
+| `Esc` | Close disk detail popup or return from Browse drill-in |
 | `?` | Toggle help overlay |
 | `Shift-R` | Reset session temperature hi/lo watermarks |
 
@@ -58,9 +59,9 @@ Demo mode shows three fake disks with sample data, useful for exploring the inte
 
 - **Data** (default) -- pool allocation breakdown, disk table, capacity bar.
 - **Scrub** -- per-device scrub state, progress, and timing.
-- **Sharing** -- placeholder (coming soon).
+- **Browse** -- raw CLI output inspector for Btrfs and UPS data. Btrfs views include filesystem usage/show/df, device usage/stats, subvolumes with drill-in, scrub status, and balance status. UPS views include status, raw variables, and supported instant commands when `ups.name` is configured.
 
 ## Related commands
 
 - [status](status.md) -- non-interactive pool health output
-- [browse](browse.md) -- tabbed browser for raw btrfs command output
+- [ups status](ups-status.md) -- non-interactive UPS state output

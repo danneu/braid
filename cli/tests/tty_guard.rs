@@ -14,7 +14,6 @@ fn maybe_run_probe() {
     detach_session();
     redirect_stdio_to_dev_null();
     let result: std::io::Result<()> = match probe.as_str() {
-        "browse" => braid_cli::browse::run("/mnt/storage"),
         "tui" => {
             let paths = braid_cli::state_paths::StatePaths::production();
             braid_cli::tui::run(Path::new("/etc/nonexistent"), &paths)
@@ -86,18 +85,6 @@ fn run_child_probe(probe: &str, parent_test_name: &str) {
         }
         std::thread::sleep(Duration::from_millis(10));
     }
-}
-
-// Intent: braid_cli::browse::run rejects redirected stdio with an io::Error
-// before ratatui::init() runs.
-// Why it exists: protects against removing require_tty, moving it after
-// ratatui::init, or reintroducing the /dev/tty silent-wedge path.
-// Scenario: a user runs `braid browse </dev/null >/dev/null`; we want a
-// clean error and exit, not a panic, hang, or corrupted tty.
-#[test]
-fn browse_rejects_non_tty_stdio() {
-    maybe_run_probe();
-    run_child_probe("browse", "browse_rejects_non_tty_stdio");
 }
 
 // Intent: braid_cli::tui::run rejects redirected stdio with an io::Error

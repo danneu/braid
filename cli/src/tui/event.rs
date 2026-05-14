@@ -9,6 +9,7 @@ use ratatui::crossterm::event::{self, KeyEvent, KeyEventKind};
 
 use crate::tui::app::Message;
 use crate::tui::keymap;
+use crate::tui::keymap::KeyContext;
 use crate::tui::model::{DiskLuksState, FanSnapshot, PoolState, UpsSnapshot};
 use crate::types::MountPoint;
 
@@ -27,16 +28,20 @@ pub enum Event {
     PollFanRefresh,
     UpsProbeFinished(UpsSnapshot),
     PollUpsRefresh,
+    BrowseCommandFinished {
+        raw: crate::cmd::RawCommandOutput,
+        generation: u64,
+    },
 }
 
 impl Event {
-    pub fn into_message(self, show_help: bool, show_disk_detail: bool) -> Option<Message> {
+    pub fn into_message(self, ctx: &KeyContext) -> Option<Message> {
         match self {
             Event::Key(key) => {
                 if !matches!(key.kind, KeyEventKind::Press | KeyEventKind::Repeat) {
                     return None;
                 }
-                keymap::handle_key(key, show_help, show_disk_detail)
+                keymap::handle_key(key, ctx)
             }
             Event::PoolProbeFinished(result, elapsed) => {
                 Some(Message::PoolProbeFinished(result, elapsed))
@@ -46,6 +51,9 @@ impl Event {
             Event::PollFanRefresh => Some(Message::RefreshFan),
             Event::UpsProbeFinished(snapshot) => Some(Message::UpsProbeFinished(snapshot)),
             Event::PollUpsRefresh => Some(Message::RefreshUps),
+            Event::BrowseCommandFinished { raw, generation } => {
+                Some(Message::BrowseCommandFinished { raw, generation })
+            }
         }
     }
 }
@@ -102,6 +110,17 @@ mod tests {
     use ratatui::crossterm::event::{KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
 
     use super::*;
+    use crate::tui::browse::BrowseFocus;
+    use crate::tui::model::Tab;
+
+    fn ctx() -> KeyContext {
+        KeyContext {
+            tab: Tab::Data,
+            show_help: false,
+            show_disk_detail: false,
+            browse_focus: BrowseFocus::Program,
+        }
+    }
 
     fn q_event(kind: KeyEventKind) -> Event {
         Event::Key(KeyEvent::new_with_kind(
@@ -119,7 +138,7 @@ mod tests {
     fn release_q_is_ignored() {
         assert!(
             q_event(KeyEventKind::Release)
-                .into_message(false, false)
+                .into_message(&ctx())
                 .is_none()
         );
     }
@@ -131,11 +150,11 @@ mod tests {
     #[test]
     fn press_and_repeat_q_emit_quit() {
         assert!(matches!(
-            q_event(KeyEventKind::Press).into_message(false, false),
+            q_event(KeyEventKind::Press).into_message(&ctx()),
             Some(Message::Quit)
         ));
         assert!(matches!(
-            q_event(KeyEventKind::Repeat).into_message(false, false),
+            q_event(KeyEventKind::Repeat).into_message(&ctx()),
             Some(Message::Quit)
         ));
     }

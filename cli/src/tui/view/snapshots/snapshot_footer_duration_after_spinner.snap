@@ -1,9 +1,8 @@
 ---
 source: cli/src/tui/view/mod.rs
-assertion_line: 1444
 expression: buffer_to_string(&terminal)
 ---
-Data  Scrub  Sharing
+Data  Scrub  Browse
  Pool ──────────────────────────────────────────────────────
  Path       /mnt/storage
  Usage      29% 2.1 TiB / 7.3 TiB (Estimated)

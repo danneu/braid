@@ -143,8 +143,8 @@
               braid = linuxCrane.braid;
             }
           );
-          braid-browse = pkgs.testers.nixosTest (
-            import ./tests/cli/braid-browse.nix {
+          braid-tui-browse = pkgs.testers.nixosTest (
+            import ./tests/cli/braid-tui-browse.nix {
               braid = linuxCrane.braid;
             }
           );

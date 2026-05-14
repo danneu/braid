@@ -1,10 +1,9 @@
 ---
 source: cli/src/tui/view/mod.rs
-assertion_line: 1660
 expression: out
 ---
  pool data stale -- last pool refresh failed: btrfs spawn failed: ENOENT
-Data  Scrub  Sharing
+Data  Scrub  Browse
  Pool ──────────────────────────────────────────────────────────────────────────
  Path       /mnt/storage
  Usage      29% 2.1 TiB / 7.3 TiB (Estimated)

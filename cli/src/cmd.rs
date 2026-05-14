@@ -251,6 +251,11 @@ pub enum CmdRequest {
     UpscQuery {
         name: String,
     },
+    /// `upscmd -l <name>` — raw list of supported NUT instant commands
+    /// for Browse's Commands view.
+    UpscmdList {
+        name: String,
+    },
 }
 
 #[derive(Debug)]
@@ -833,6 +838,10 @@ impl CmdRequest {
             CmdRequest::UpscQuery { name } => CmdArgs {
                 program: "upsc".to_owned(),
                 args: vec![name.clone()],
+            },
+            CmdRequest::UpscmdList { name } => CmdArgs {
+                program: "upscmd".to_owned(),
+                args: vec!["-l".into(), name.clone()],
             },
         }
     }

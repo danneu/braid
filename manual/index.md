@@ -43,8 +43,7 @@ braid is a NixOS CLI tool for managing an encrypted btrfs RAID1 NAS. This manual
 | [enroll](commands/enroll.md)                 | Enroll a USB keyfile for auto-unlock              |
 | [discover](commands/discover.md)             | Scan for braid LUKS devices and rebuild pool.json |
 | [recover](commands/recover.md)               | Recover from an interrupted operation             |
-| [tui](commands/tui.md)                       | Interactive dashboard                             |
-| [browse](commands/browse.md)                 | Read-only browser for raw btrfs output            |
+| [tui](commands/tui.md)                       | Interactive dashboard with raw-output Browse tab  |
 
 ## Development
 

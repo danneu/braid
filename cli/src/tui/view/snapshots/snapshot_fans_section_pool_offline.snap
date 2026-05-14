@@ -2,7 +2,7 @@
 source: cli/src/tui/view/mod.rs
 expression: buffer_to_string(&terminal)
 ---
-Data  Scrub  Sharing
+Data  Scrub  Browse
  Pool ──────────────────────────────────────────────────────────────────
  not mounted
  Disks ─────────────────────────────────────────────────────────────────

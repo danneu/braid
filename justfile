@@ -98,7 +98,7 @@ test-fast:
 
 # Run parser compatibility canary tests (CLI parsers against live tool output)
 test-parsers *args:
-    just test-vm braid-status-rust braid-status-during-balance braid-status-ups braid-idle braid-discover braid-browse {{args}}
+    just test-vm braid-status-rust braid-status-during-balance braid-status-ups braid-idle braid-discover braid-tui-browse {{args}}
 
 # Run Rust unit tests (excludes unstable golden tests)
 test-rust:

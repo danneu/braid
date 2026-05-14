@@ -1,9 +1,8 @@
 ---
 source: cli/src/tui/view/mod.rs
-assertion_line: 1347
 expression: buffer_to_string(&terminal)
 ---
-Data  Scrub  Sharing
+Data  Scrub  Browse
  Pool ──────────────────────────────────────────────────────
  Path       /mnt/storage
  Balance    rebalancing -- 108/160 chunks (68% complete)

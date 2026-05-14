@@ -34,7 +34,6 @@
 - [discover](commands/discover.md)
 - [recover](commands/recover.md)
 - [tui](commands/tui.md)
-- [browse](commands/browse.md)
 - [ups status](commands/ups-status.md)
 
 # Development

@@ -1,7 +1,6 @@
 pub mod ack;
 pub mod add;
 pub mod alert;
-pub mod browse;
 pub mod cmd;
 pub mod config;
 pub mod confirm;

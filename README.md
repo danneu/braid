@@ -143,8 +143,7 @@ If a mutation is interrupted, braid leaves `/var/lib/braid/pending-op.json` in p
 | [discover](manual/commands/discover.md) | Scan for braid LUKS devices and rebuild pool.json |
 | [recover](manual/commands/recover.md) | Recover from an interrupted operation |
 | [idle](manual/commands/idle.md) | Check if the pool is idle (for auto-suspend) |
-| [tui](manual/commands/tui.md) | Interactive dashboard |
-| [browse](manual/commands/browse.md) | Read-only browser for raw btrfs output |
+| [tui](manual/commands/tui.md) | Interactive dashboard with raw-output Browse tab |
 | [ups status](manual/commands/ups-status.md) | Live UPS state (NUT); `--json` for scripts |
 
 ### Guides

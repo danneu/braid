@@ -93,8 +93,8 @@ mod tests {
      * Why it exists: ensures the nom grammar matches the actual output format
      * produced by btrfs-progs on NixOS 25.11.
      *
-     * Scenario: user runs `braid browse`, switches to Subvolumes tab, and the
-     * TUI parses the listing to populate the selectable subvolume list.
+     * Scenario: user opens the TUI Browse tab, switches to Subvolumes, and
+     * the TUI parses the listing to populate the selectable subvolume list.
      */
     #[test]
     fn subvolume_list_parses_nixos_25_11_fixture() {
@@ -124,7 +124,7 @@ mod tests {
      * Why it exists: a fresh pool with no subvolumes is a valid state; the
      * parser must not reject it.
      *
-     * Scenario: user creates a new pool, runs `braid browse`, Subvolumes tab
+     * Scenario: user creates a new pool and the TUI Browse Subvolumes view
      * shows "(no subvolumes)" instead of crashing.
      */
     #[test]
@@ -185,7 +185,8 @@ mod tests {
      * Why it exists: if the filesystem is not mounted, btrfs returns an error;
      * the parser must propagate it rather than attempting to parse garbage.
      *
-     * Scenario: user runs `braid browse` on an unmounted pool.
+     * Scenario: the Browse loader requests subvolumes while the pool is
+     * unmounted.
      */
     #[test]
     fn subvolume_list_nonzero_exit() {

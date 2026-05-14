@@ -1,0 +1,18 @@
+---
+source: cli/src/tui/browse/view.rs
+expression: "buffer_to_string(&render(&model, 80, 14))"
+---
+┌ Pgm ─────┐┌ Cmd ─────────┐┌ Content ─────────────────────────────────────────┐
+│> Btrfs   ││  Filesystem  ││data                                              │
+│  NUT     ││  Devices     ││Name:data                                         │
+│          ││> Subvolumes  ││UUID:abc-123                                      │
+│          ││  Scrub       ││                                                  │
+│          ││  Balance     ││                                                  │
+│          ││              ││                                                  │
+│          ││              ││                                                  │
+│          ││              ││                                                  │
+│          ││              ││                                                  │
+│          ││              ││                                                  │
+│          ││              ││                                                  │
+└──────────┘└──────────────┘└──────────────────────────────────────────────────┘
+$ btrfs subvolume list ''
