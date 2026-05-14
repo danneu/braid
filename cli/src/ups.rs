@@ -384,6 +384,68 @@ mod tests {
         );
     }
 
+    // Intent: --json status_flags is lex-sorted across every known flag, so
+    // scripts that diff or hash the document do not see spurious churn
+    // between runs.
+    // Why it exists: HashSet iteration is randomized; the manual advertises
+    // a stable shape; the human render already sorts -- the JSON side must
+    // match. A 17-element exact-array assertion makes accidental passage on a
+    // HashSet without the serialize_with hook vanishingly unlikely.
+    // Scenario: a hypothetical UPS reporting every known flag at once plus
+    // an unrecognized driver-extension token.
+    #[test]
+    fn json_output_status_flags_are_sorted() {
+        let mut flags = std::collections::HashSet::new();
+        for flag in [
+            UpsStatusFlag::Ol,
+            UpsStatusFlag::Ob,
+            UpsStatusFlag::Lb,
+            UpsStatusFlag::Rb,
+            UpsStatusFlag::Hb,
+            UpsStatusFlag::Chrg,
+            UpsStatusFlag::Dischrg,
+            UpsStatusFlag::Cal,
+            UpsStatusFlag::Bypass,
+            UpsStatusFlag::Off,
+            UpsStatusFlag::Over,
+            UpsStatusFlag::Trim,
+            UpsStatusFlag::Boost,
+            UpsStatusFlag::Fsd,
+            UpsStatusFlag::TestFail,
+            UpsStatusFlag::CommBad,
+            UpsStatusFlag::Unknown("ZZZ".into()),
+        ] {
+            flags.insert(flag);
+        }
+        let parsed = UpscOutput {
+            status_flags: flags,
+            battery: BatteryFields::default(),
+            load_pct: None,
+            realpower_nominal_watts: None,
+            input: InputFields::default(),
+            test_result: None,
+            device: DeviceFields::default(),
+            extra: std::collections::BTreeMap::new(),
+        };
+        let value: serde_json::Value =
+            serde_json::from_str(&serde_json::to_string(&JsonReport::success(&parsed)).unwrap())
+                .unwrap();
+        let actual: Vec<&str> = value["status_flags"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|v| v.as_str().unwrap())
+            .collect();
+
+        assert_eq!(
+            actual,
+            vec![
+                "BOOST", "BYPASS", "CAL", "CHRG", "COMMBAD", "DISCHRG", "FSD", "HB", "LB", "OB",
+                "OFF", "OL", "OVER", "RB", "TESTFAIL", "TRIM", "ZZZ",
+            ],
+        );
+    }
+
     // Intent: JSON output marks empty status_flags with a warning sentinel.
     // Why it exists: scripts need a machine-readable signal that the
     // flattened typed body is telemetry, not trusted healthy UPS state.
