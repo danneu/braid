@@ -235,7 +235,29 @@ pub fn probe_pool_for_tui<R: CommandRunner, F: Filesystem + ?Sized>(
                     );
                     continue;
                 }
-                Err(_) => continue, // degrade gracefully — skip this disk
+                Err(ProbeError::MapperBackingMismatch { .. })
+                | Err(ProbeError::MapperConflict { .. }) => {
+                    // Surface mapper hijack / drift / stale dm-crypt
+                    // explicitly so operators see a distinct red cell instead
+                    // of the yellow "missing" used for unplugged disks. Both
+                    // errors share one render state because the recovery is
+                    // identical: close the offending mapper, then unlock.
+                    unpooled_by_name.insert(disk_name.clone(), UnpooledDiskRender::MapperHijacked);
+                    continue;
+                }
+                // Exhaustive residual arm: future ProbeError variants must be
+                // classified here rather than silently swallowed. PoolDevice,
+                // NotBtrfs, and MountInfo are unreachable from
+                // probe_config_disk today, but listing them keeps this gate in
+                // lockstep with the other diagnostic surfaces.
+                Err(
+                    ProbeError::Cmd(_)
+                    | ProbeError::Parse(_)
+                    | ProbeError::PoolDevice { .. }
+                    | ProbeError::NotBtrfs { .. }
+                    | ProbeError::MapperBackingResolveError { .. }
+                    | ProbeError::MountInfo(_),
+                ) => continue,
             };
         let render = match probed.state {
             ConfigDiskState::Absent => UnpooledDiskRender::Missing,
@@ -1712,6 +1734,162 @@ mod tests {
         assert_eq!(
             pool.unpooled_disks.get("ironwolf"),
             Some(&UnpooledDiskRender::WrongLuksVersion(1))
+        );
+    }
+
+    // Intent: probe_pool_for_tui must classify a declared disk whose
+    // expected mapper is open against a different backing path as
+    // `UnpooledDiskRender::MapperHijacked`.
+    //
+    // Why it exists: this is the common unrelated-device hijack shape. The old
+    // catch-all swallowed `ProbeError::MapperBackingMismatch`, so the TUI
+    // fell back to the same yellow "missing" cell used for unplugged disks.
+    //
+    // Scenario: 1-disk live pool. Second declared disk exists and is LUKS2,
+    // but `/dev/mapper/braid-ironwolf` is already active with `/dev/vdz` as
+    // its backing device.
+    #[test]
+    fn unpooled_disk_mapper_backing_mismatch_classified_correctly() {
+        let runner = one_disk_mounted_pool_runner()
+            .with_output(
+                CmdRequest::CryptsetupLuksUuid {
+                    device: "/dev/disk/by-id/braid-ironwolf".into(),
+                },
+                ok_raw(
+                    "cryptsetup luksUUID",
+                    "22222222-2222-2222-2222-222222222222\n",
+                ),
+            )
+            .with_output(
+                CmdRequest::CryptsetupLuksDumpText {
+                    device: "/dev/disk/by-id/braid-ironwolf".into(),
+                },
+                ok_raw(
+                    "cryptsetup luksDump",
+                    "LUKS header information\nVersion:       \t2\n",
+                ),
+            )
+            .with_output(
+                CmdRequest::CryptsetupStatus {
+                    mapper: MapperName("braid-ironwolf".into()),
+                },
+                ok_raw(
+                    "cryptsetup status braid-ironwolf",
+                    "/dev/mapper/braid-ironwolf is active and is in use.\n\
+                     \ttype:    LUKS2\n\
+                     \tdevice:  /dev/vdz\n",
+                ),
+            );
+        let fs = StubFs::with_paths(&[
+            "/dev/disk/by-id/braid-toshiba",
+            "/dev/disk/by-id/braid-ironwolf",
+        ]);
+
+        let disk_by_id = HashMap::from([
+            (
+                "toshiba".to_owned(),
+                "/dev/disk/by-id/braid-toshiba".to_owned(),
+            ),
+            (
+                "ironwolf".to_owned(),
+                "/dev/disk/by-id/braid-ironwolf".to_owned(),
+            ),
+        ]);
+
+        let pool = probe_pool_for_tui(
+            &runner,
+            &fs,
+            &MountPoint("/mnt/storage".into()),
+            &disk_by_id,
+            &tui_disk_luks_uuid(),
+            &tui_disk_devid(),
+            &test_paths().1,
+            crate::test_fixtures::mock_virtio_backing_path_resolver(),
+        )
+        .unwrap()
+        .expect("pool should be Some");
+
+        assert_eq!(
+            pool.unpooled_disks.get("ironwolf"),
+            Some(&UnpooledDiskRender::MapperHijacked)
+        );
+    }
+
+    // Intent: probe_pool_for_tui must classify a declared disk whose
+    // expected mapper is active with no backing as
+    // `UnpooledDiskRender::MapperHijacked`.
+    //
+    // Why it exists: stale dm-crypt produces `ProbeError::MapperConflict {
+    // found: None }`. It needs the same visible red TUI state as
+    // path-mismatch hijacks instead of disappearing into the generic
+    // graceful-degrade path.
+    //
+    // Scenario: 1-disk live pool. Second declared disk exists and is LUKS2,
+    // but `/dev/mapper/braid-ironwolf` reports `device: (null)`.
+    #[test]
+    fn unpooled_disk_mapper_conflict_null_backing_classified_correctly() {
+        let runner = one_disk_mounted_pool_runner()
+            .with_output(
+                CmdRequest::CryptsetupLuksUuid {
+                    device: "/dev/disk/by-id/braid-ironwolf".into(),
+                },
+                ok_raw(
+                    "cryptsetup luksUUID",
+                    "22222222-2222-2222-2222-222222222222\n",
+                ),
+            )
+            .with_output(
+                CmdRequest::CryptsetupLuksDumpText {
+                    device: "/dev/disk/by-id/braid-ironwolf".into(),
+                },
+                ok_raw(
+                    "cryptsetup luksDump",
+                    "LUKS header information\nVersion:       \t2\n",
+                ),
+            )
+            .with_output(
+                CmdRequest::CryptsetupStatus {
+                    mapper: MapperName("braid-ironwolf".into()),
+                },
+                ok_raw(
+                    "cryptsetup status braid-ironwolf",
+                    "/dev/mapper/braid-ironwolf is active and is in use.\n\
+                     \ttype:    LUKS2\n\
+                     \tdevice:  (null)\n",
+                ),
+            );
+        let fs = StubFs::with_paths(&[
+            "/dev/disk/by-id/braid-toshiba",
+            "/dev/disk/by-id/braid-ironwolf",
+        ]);
+
+        let disk_by_id = HashMap::from([
+            (
+                "toshiba".to_owned(),
+                "/dev/disk/by-id/braid-toshiba".to_owned(),
+            ),
+            (
+                "ironwolf".to_owned(),
+                "/dev/disk/by-id/braid-ironwolf".to_owned(),
+            ),
+        ]);
+
+        let pool = probe_pool_for_tui(
+            &runner,
+            &fs,
+            &MountPoint("/mnt/storage".into()),
+            &disk_by_id,
+            &tui_disk_luks_uuid(),
+            &tui_disk_devid(),
+            &test_paths().1,
+            crate::test_fixtures::mock_virtio_backing_path_resolver(),
+        )
+        .unwrap()
+        .expect("pool should be Some");
+
+        assert_eq!(
+            pool.unpooled_disks.get("ironwolf"),
+            Some(&UnpooledDiskRender::MapperHijacked)
         );
     }
 

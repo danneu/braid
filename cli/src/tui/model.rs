@@ -182,6 +182,11 @@ pub enum UnpooledDiskRender {
     /// The disk is on-disk LUKS but the wrong version (LUKS1 — braid
     /// requires LUKS2). Recovery: back up data, re-add via `braid add`.
     WrongLuksVersion(u32),
+    /// `probe_config_disk` found `braid-<DiskName>` open for the wrong
+    /// backing device or LUKS UUID. Recovery for all ownership-conflict
+    /// shapes is to close the mapper and unlock again; detailed
+    /// expected/found data lives on the underlying `ProbeError`.
+    MapperHijacked,
 }
 
 #[derive(Clone)]

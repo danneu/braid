@@ -729,6 +729,9 @@ fn unpooled_disk_status_cell(state: &PoolState, name: &str) -> Option<Span<'stat
             format!("LUKS{v} (unsupported)"),
             Style::default().fg(Color::Red),
         ),
+        UnpooledDiskRender::MapperHijacked => {
+            Span::styled("mapper conflict", Style::default().fg(Color::Red))
+        }
     })
 }
 
@@ -2018,6 +2021,7 @@ pub(crate) mod tests {
             ),
             ("delta".to_owned(), UnpooledDiskRender::LuksHeaderDamaged),
             ("echo".to_owned(), UnpooledDiskRender::WrongLuksVersion(1)),
+            ("foxtrot".to_owned(), UnpooledDiskRender::MapperHijacked),
         ]);
 
         let cell = |name: &str| {
@@ -2032,8 +2036,12 @@ pub(crate) mod tests {
         assert_eq!(cell("charlie"), "LUKS header unreadable");
         assert_eq!(cell("delta"), "LUKS header damaged");
         assert_eq!(cell("echo"), "LUKS1 (unsupported)");
+        assert_eq!(cell("foxtrot"), "mapper conflict");
+
+        let foxtrot_span = unpooled_disk_status_cell(&pool, "foxtrot").expect("expected an entry");
+        assert_eq!(foxtrot_span.style.fg, Some(Color::Red));
         assert!(
-            unpooled_disk_status_cell(&pool, "foxtrot").is_none(),
+            unpooled_disk_status_cell(&pool, "hotel").is_none(),
             "names not in unpooled_disks must return None so callers can fall back"
         );
     }
