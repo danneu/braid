@@ -313,15 +313,18 @@ mod tests {
         assert_eq!(format_status(&flags), "LB OB");
     }
 
-    // Intent: empty flag set renders an explicit `unknown` sentinel.
-    // Why: preflight fails closed on an empty set; `braid ups status` needs
-    // to print something the operator can act on, not a blank line.
+    // Intent: format_status returns the literal sentinel
+    // `(unknown -- ups.status missing)` for an empty flag set.
+    // Why it exists: preflight fails closed on an empty set; the rendered
+    // sentinel must read verbatim so the doctor/preflight referral
+    // (`Check 'braid ups status'`) stays actionable. A substring check
+    // would let `(unknown)` or `unknown status` ride through.
     // Scenario: dummy-ups fixture with no ups.status line yet.
     #[test]
     fn format_status_empty_is_unknown() {
         let flags = std::collections::HashSet::new();
         let rendered = format_status(&flags);
-        assert!(rendered.contains("unknown"));
+        assert_eq!(rendered, "(unknown -- ups.status missing)");
     }
 
     // Intent: format_runtime uses HH:MM for >= 1 hour, MM:SS for shorter.
@@ -469,6 +472,34 @@ mod tests {
         let lines: Vec<&str> = rendered.lines().collect();
         assert!(lines.contains(&"Load: 50%"), "got: {rendered}");
         assert!(!rendered.contains("estimated"), "got: {rendered}");
+    }
+
+    // Intent: format_human emits exactly the line
+    // `Status: (unknown -- ups.status missing)` when status_flags is empty.
+    // Why it exists: preflight and doctor both point operators at
+    // `braid ups status` when ups.status is empty. A refactor that drops
+    // the parenthetical, adds a prefix/suffix, or changes the sentinel
+    // would leave that referral unactionable; snapshots only cover
+    // non-empty flag sets.
+    // Scenario: dummy-ups driver published telemetry before populating ups.status.
+    #[test]
+    fn format_human_empty_status_renders_sentinel() {
+        let parsed = UpscOutput {
+            status_flags: std::collections::HashSet::new(),
+            battery: BatteryFields::default(),
+            load_pct: None,
+            realpower_nominal_watts: None,
+            input: InputFields::default(),
+            test_result: None,
+            device: DeviceFields::default(),
+            extra: std::collections::BTreeMap::new(),
+        };
+        let rendered = format_human("ups", &parsed);
+        let lines: Vec<&str> = rendered.lines().collect();
+        assert!(
+            lines.contains(&"Status: (unknown -- ups.status missing)"),
+            "got: {rendered}"
+        );
     }
 
     // Intent: not-enabled --json surfaces the stable error sentinel.

@@ -66,6 +66,11 @@ assert parsed_empty["load_pct"] == 12, parsed_empty
 assert parsed_empty["device"]["model"] == "Back-UPS ES 550G", parsed_empty
 assert parsed_empty["device"]["mfr"] == "APC", parsed_empty
 assert "error" not in parsed_empty, parsed_empty
+human_empty = machine.succeed("braid --config /tmp/empty-ups.json ups status")
+assert "Status: (unknown -- ups.status missing)" in human_empty.splitlines(), (
+    "expected empty-status sentinel as a whole line in human output, got:\n"
+    + human_empty
+)
 
 # --- Query-failed branch ---
 # Stop upsd and confirm the query-failed JSON shape has the sentinel
