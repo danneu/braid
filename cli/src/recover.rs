@@ -1588,11 +1588,20 @@ fn live_pool_matches_membership(
     membership: &PoolMembership,
 ) -> Result<bool, JournaledSnapshotError> {
     let live_uuids = live_member_uuids(pool);
-    let mut missing_uuids = std::collections::BTreeSet::new();
-    for devid in pool.missing_devids.iter().copied() {
+    let live_devids: std::collections::BTreeSet<u64> =
+        pool.devices.iter().map(|d| d.devid).collect();
+    let mut fallback_uuids = std::collections::BTreeSet::new();
+    let mut fallback_devids = std::collections::BTreeSet::new();
+    for devid in pool
+        .missing_devids
+        .iter()
+        .copied()
+        .chain(pool.null_underlying.iter().map(|n| n.devid))
+    {
+        fallback_devids.insert(devid);
         match membership.by_devid(devid) {
             Ok(Some((uuid, _))) => {
-                missing_uuids.insert(uuid.clone());
+                fallback_uuids.insert(uuid.clone());
             }
             Ok(None) => {
                 return Err(JournaledSnapshotError::NoMemberForDevid { devid });
@@ -1614,9 +1623,10 @@ fn live_pool_matches_membership(
     let expected: std::collections::BTreeSet<LuksUuid> =
         membership.iter().map(|(uuid, _)| uuid.clone()).collect();
     let union: std::collections::BTreeSet<LuksUuid> =
-        live_uuids.union(&missing_uuids).cloned().collect();
-    let disjoint = live_uuids.is_disjoint(&missing_uuids);
-    Ok(union == expected && disjoint)
+        live_uuids.union(&fallback_uuids).cloned().collect();
+    let uuid_disjoint = live_uuids.is_disjoint(&fallback_uuids);
+    let devid_disjoint = live_devids.is_disjoint(&fallback_devids);
+    Ok(union == expected && uuid_disjoint && devid_disjoint)
 }
 
 fn recover_membership_matching_expected(
@@ -1650,15 +1660,22 @@ fn recover_membership_matching_expected(
             },
         )?;
     }
-    // Re-insert any expected member whose live binding is devid-only. Per
-    // principle 2/5, btrfs devid is the authorized fallback when LUKS UUID is
-    // unobservable. The live_pool_matches_membership gate has already proven
-    // every pool.missing_devids devid resolves uniquely through expected; this
-    // loop materializes that resolution in the rebuilt membership.
-    // pool.null_underlying is intentionally not consulted -- the gate doesn't
-    // gate on it today, and broadening this loop without broadening the gate
-    // would regress currently-accepted replays.
-    for devid in pool.missing_devids.iter().copied() {
+    // Re-insert any expected member whose live binding is devid-only.
+    // Per principles 2/5, btrfs devid is the authorized fallback when
+    // the LUKS UUID is unobservable -- the two devid-only sources are
+    // pool.missing_devids (btrfs-MISSING sentinels) and
+    // pool.null_underlying (hot-unplugged mappers). The
+    // live_pool_matches_membership gate has already proven every such
+    // devid resolves uniquely through expected; this loop materializes
+    // that resolution in the rebuilt membership. The by_uuid
+    // short-circuit makes the loop idempotent in the rare case the
+    // same devid appears in both sources.
+    for devid in pool
+        .missing_devids
+        .iter()
+        .copied()
+        .chain(pool.null_underlying.iter().map(|n| n.devid))
+    {
         match expected.by_devid(devid) {
             Ok(Some((uuid, expected_member))) => {
                 if recovered.by_uuid(uuid).is_some() {
@@ -10531,6 +10548,136 @@ mod tests {
         assert!(!f.paths.pending_op_json().exists());
     }
 
+    // Intent: cmd_recover preserves a non-target null-underlying disk during
+    // Replace::PostReplaceMaintenance while still replaying the resize for
+    // the live replacement disk.
+    // Why it exists: replace has path-specific work after
+    // recover_membership_matching_expected; this pins both the widened helper
+    // fallback and the post-helper new_uuid lookup in pool.devices.
+    // Scenario: replace committed old -> disk-new, then unrelated disk3's
+    // underlying block device hot-unplugged before recovery rebuilt pool.json.
+    #[test]
+    fn cmd_recover_replace_post_maintenance_preserves_non_target_null_underlying_disk() {
+        let f = PoolFixture::empty();
+        let fs = MockFs::new(&[]);
+        let new_uuid = uuid_for_name("disk-new");
+        let new_uuid_text = new_uuid.to_string();
+        let pre = membership_from(vec![
+            membership_entry("disk1", "/dev/disk/by-id/virtio-disk1", None, Some(1)),
+            membership_entry("old", "/dev/disk/by-id/virtio-old", None, None),
+            membership_entry("disk3", "/dev/disk/by-id/virtio-disk3", None, Some(3)),
+        ]);
+        let target = membership_from(vec![
+            membership_entry("disk1", "/dev/disk/by-id/virtio-disk1", None, Some(1)),
+            (
+                new_uuid.clone(),
+                disk_member_named("disk-new", "/dev/disk/by-id/virtio-disk-new", None, Some(2)),
+            ),
+            membership_entry("disk3", "/dev/disk/by-id/virtio-disk3", None, Some(3)),
+        ]);
+        let journal = journal::Journal {
+            started_at: "2026-01-01T00:00:00Z".into(),
+            op: OpKind::Replace {
+                phase: journal::ReplacePhase::PostReplaceMaintenance,
+                old_uuid: uuid_for_name("old"),
+                old_name: disk_name("old"),
+                new_uuid: new_uuid.clone(),
+                new_name: disk_name("disk-new"),
+                new_target: journal::ReplaceJournalTarget {
+                    by_id: ByIdPath::parse("/dev/disk/by-id/virtio-disk-new").unwrap(),
+                    mode: journal::ReplaceJournalMode::ExistingLuks {
+                        enroll_key_file: None,
+                    },
+                },
+                source: journal::ReplaceJournalSource::Missing { old_devid: 2 },
+                restore_raid1_after_commit: false,
+            },
+            pre_membership: pre,
+            target_membership: target,
+        };
+        journal::write_journal(&f.paths, &journal).unwrap();
+
+        let show = ok_raw(
+            "btrfs filesystem show /mnt/storage",
+            "Label: none  uuid: aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee\n\
+             \tTotal devices 3 FS bytes used 1.00GiB\n\
+             \tdevid    1 size 10.00GiB used 2.00GiB path /dev/mapper/braid-disk1\n\
+             \tdevid    2 size 10.00GiB used 2.00GiB path /dev/mapper/braid-disk-new\n\
+             \tdevid    3 size 10.00GiB used 2.00GiB path /dev/mapper/braid-disk3\n",
+        );
+        let (mp_req, mp_out) = mountpoint_ok();
+        let runner = MockRunner::default()
+            .with_output(mp_req, mp_out)
+            .with_output(
+                CmdRequest::BtrfsFilesystemShow {
+                    mount_point: MountPoint("/mnt/storage".into()),
+                },
+                show,
+            )
+            .with_output(
+                CmdRequest::CryptsetupStatus {
+                    mapper: MapperName("braid-disk1".into()),
+                },
+                cryptsetup_status_active("braid-disk1", "/dev/vda"),
+            )
+            .with_output(
+                CmdRequest::CryptsetupLuksUuid {
+                    device: "/dev/vda".into(),
+                },
+                cryptsetup_uuid_ok("/dev/vda", "11111111-1111-1111-1111-111111111111"),
+            )
+            .with_output(
+                CmdRequest::CryptsetupStatus {
+                    mapper: MapperName("braid-disk-new".into()),
+                },
+                cryptsetup_status_active("braid-disk-new", "/dev/vdb"),
+            )
+            .with_output(
+                CmdRequest::CryptsetupLuksUuid {
+                    device: "/dev/vdb".into(),
+                },
+                cryptsetup_uuid_ok("/dev/vdb", &new_uuid_text),
+            )
+            .with_output(
+                CmdRequest::CryptsetupStatus {
+                    mapper: MapperName("braid-disk3".into()),
+                },
+                cryptsetup_status_active("braid-disk3", "(null)"),
+            )
+            .with_output(
+                CmdRequest::BtrfsFilesystemResize {
+                    devid: 2,
+                    mount_point: MountPoint("/mnt/storage".into()),
+                },
+                ok_raw_empty("btrfs filesystem resize"),
+            );
+        let resolver = resolver_for(&[
+            ("/dev/vda", "virtio-disk1"),
+            ("/dev/vdb", "virtio-disk-new"),
+        ]);
+        let params = f.recover_params().passphrase_file(None).build();
+
+        let result = cmd_recover(&runner, &fs, &resolver, &params);
+        result.expect("recover should preserve null-underlying disk3 and resize disk-new");
+
+        let recovered = membership::load_membership(&f.paths).unwrap();
+        assert!(recovered.by_name(&disk_name("disk1")).is_some());
+        assert!(recovered.by_name(&disk_name("disk-new")).is_some());
+        assert!(recovered.by_name(&disk_name("old")).is_none());
+        assert!(
+            recovered.by_name(&disk_name("disk3")).is_some(),
+            "non-target null-underlying disk3 must be preserved after replace commits"
+        );
+        let requests = runner.requests();
+        assert!(
+            requests.iter().any(|request| {
+                matches!(request, CmdRequest::BtrfsFilesystemResize { devid: 2, .. })
+            }),
+            "post-replace recovery must resize disk-new's live devid: {requests:?}"
+        );
+        assert!(!f.paths.pending_op_json().exists());
+    }
+
     // Intent: post-maintenance inhibitor failure preserves the replace
     // journal and runs no maintenance command.
     // Why it exists: close, resize, and balance are all post-commit
@@ -10693,6 +10840,188 @@ mod tests {
         assert_eq!(disk3.by_id.as_str(), "/dev/disk/by-id/virtio-disk3");
         assert_eq!(disk3.devid, Some(3));
         assert_eq!(disk3.added_at.as_deref(), Some(prior_added_at));
+    }
+
+    // Intent: live_pool_matches_membership accepts an expected member whose
+    // only live binding is a null-underlying mapper's devid.
+    // Why it exists: phased recovery must use the same authorized devid
+    // fallback for null-underlying mappers that it already uses for btrfs
+    // MISSING sentinels.
+    // Scenario: disk1 is fully observable, and disk2's mapper remains open
+    // with `device: (null)` while target membership still carries devid 2.
+    #[test]
+    fn live_pool_matches_membership_accepts_null_underlying_devid() {
+        let pool = pool_state_disk1_with_null_underlying_disk2();
+        let expected = membership_from(vec![
+            membership_entry("disk1", "/dev/disk/by-id/virtio-disk1", None, Some(1)),
+            membership_entry("disk2", "/dev/disk/by-id/virtio-disk2", None, Some(2)),
+        ]);
+
+        let matches = live_pool_matches_membership(&pool, &expected)
+            .expect("null-underlying devid should resolve through membership");
+
+        assert!(matches);
+    }
+
+    // Intent: live_pool_matches_membership fails closed when a
+    // null-underlying mapper's devid has no expected membership binding.
+    // Why it exists: Decision 024 requires recovery to stop when the live
+    // btrfs device has no observable LUKS UUID and the journal has no
+    // persisted devid binding for it.
+    // Scenario: disk1 is live, but btrfs also reports a null-underlying
+    // mapper at devid 99 while the expected membership only has devids 1/2.
+    #[test]
+    fn live_pool_matches_membership_rejects_null_underlying_without_expected_devid() {
+        let mut pool = pool_state_disk1_with_null_underlying_disk2();
+        pool.null_underlying[0].devid = 99;
+        let expected = membership_from(vec![
+            membership_entry("disk1", "/dev/disk/by-id/virtio-disk1", None, Some(1)),
+            membership_entry("disk2", "/dev/disk/by-id/virtio-disk2", None, Some(2)),
+        ]);
+
+        match live_pool_matches_membership(&pool, &expected) {
+            Err(JournaledSnapshotError::NoMemberForDevid { devid }) => {
+                assert_eq!(devid, 99);
+            }
+            other => panic!("expected NoMemberForDevid for devid 99, got {other:?}"),
+        }
+    }
+
+    // Intent: recover_membership_matching_expected re-inserts a member whose
+    // only live binding is a null-underlying mapper's devid, preserving
+    // added_at precedence.
+    // Why it exists: the rebuild half must stay in lockstep with the
+    // live_pool_matches_membership gate, or recovery can accept a topology but
+    // still drop the unobservable member from pool.json.
+    // Scenario: disk1 and disk2 are fully observable, disk3 is
+    // null-underlying at devid 3, and prior pool.json has disk3's older
+    // added_at value.
+    #[test]
+    fn recover_membership_matching_expected_reinserts_null_underlying_member() {
+        let mut pool = pool_state_two_disks();
+        pool.total_devices = 3;
+        pool.null_underlying.push(NullUnderlyingDevice {
+            mapper: MapperName("braid-disk3".into()),
+            devid: 3,
+        });
+
+        let expected_added_at = "2026-04-01T00:00:00Z";
+        let prior_added_at = "2026-01-01T00:00:00Z";
+        let expected = membership_from(vec![
+            membership_entry("disk1", "/dev/disk/by-id/virtio-disk1", None, Some(1)),
+            membership_entry("disk2", "/dev/disk/by-id/virtio-disk2", None, Some(2)),
+            membership_entry(
+                "disk3",
+                "/dev/disk/by-id/virtio-disk3",
+                Some(expected_added_at),
+                Some(3),
+            ),
+        ]);
+        let prior = membership_from(vec![
+            membership_entry("disk1", "/dev/disk/by-id/virtio-disk1", None, Some(1)),
+            membership_entry("disk2", "/dev/disk/by-id/virtio-disk2", None, Some(2)),
+            membership_entry(
+                "disk3",
+                "/dev/disk/by-id/virtio-disk3",
+                Some(prior_added_at),
+                Some(3),
+            ),
+        ]);
+        let resolver = resolver_for(&[("/dev/vda", "virtio-disk1"), ("/dev/vdb", "virtio-disk2")]);
+
+        let recovered =
+            recover_membership_matching_expected(&pool, &expected, Some(&prior), &resolver)
+                .expect("null-underlying member should be restored from expected membership");
+
+        let disk3 = recovered
+            .by_uuid(&uuid_for_name("disk3"))
+            .expect("null-underlying disk3 must remain in recovered membership");
+        assert_eq!(disk3.name, disk_name("disk3"));
+        assert_eq!(disk3.by_id.as_str(), "/dev/disk/by-id/virtio-disk3");
+        assert_eq!(disk3.devid, Some(3));
+        assert_eq!(disk3.added_at.as_deref(), Some(prior_added_at));
+    }
+
+    // Intent: recover_membership_matching_expected treats the same devid in
+    // missing_devids and null_underlying as one recovered membership entry.
+    // Why it exists: PoolState already acknowledges this transient shape, and
+    // recovery must not fail or double-insert when both probe sources identify
+    // the same journaled member.
+    // Scenario: disk2's devid appears both as a btrfs MISSING sentinel and as
+    // a null-underlying mapper while expected membership carries devid 2.
+    #[test]
+    fn recover_membership_matching_expected_dedups_missing_and_null_underlying_devid() {
+        let mut pool = pool_state_one_disk();
+        pool.missing_count = 1;
+        pool.total_devices = 2;
+        pool.missing_devids = vec![2];
+        pool.null_underlying.push(NullUnderlyingDevice {
+            mapper: MapperName("braid-disk2".into()),
+            devid: 2,
+        });
+        let expected = membership_from(vec![
+            membership_entry("disk1", "/dev/disk/by-id/virtio-disk1", None, Some(1)),
+            membership_entry("disk2", "/dev/disk/by-id/virtio-disk2", None, Some(2)),
+        ]);
+        let resolver = resolver_for(&[("/dev/vda", "virtio-disk1")]);
+
+        let recovered = recover_membership_matching_expected(&pool, &expected, None, &resolver)
+            .expect("duplicate fallback sources for one devid should be idempotent");
+
+        assert!(recovered.by_uuid(&uuid_for_name("disk2")).is_some());
+        assert_eq!(recovered.iter().count(), 2);
+    }
+
+    // Intent: live_pool_matches_membership rejects a topology where a live
+    // device and a null-underlying mapper report the same devid.
+    // Why it exists: the gate must fail closed on devid-level collisions even
+    // when UUID set equality and UUID disjointness would otherwise pass.
+    // Scenario: live disk2 reports devid 2, while a synthetic
+    // null-underlying mapper also reports devid 2 and resolves through
+    // expected membership to a different UUID.
+    #[test]
+    fn live_pool_matches_membership_rejects_null_underlying_devid_colliding_with_live_devid() {
+        let mut pool = pool_state_two_disks();
+        pool.total_devices = 3;
+        pool.null_underlying.push(NullUnderlyingDevice {
+            mapper: MapperName("braid-disk4".into()),
+            devid: 2,
+        });
+        let expected = membership_from(vec![
+            membership_entry("disk1", "/dev/disk/by-id/virtio-disk1", None, Some(1)),
+            membership_entry("disk2", "/dev/disk/by-id/virtio-disk2", None, Some(22)),
+            membership_entry("disk4", "/dev/disk/by-id/virtio-disk4", None, Some(2)),
+        ]);
+
+        let matches = live_pool_matches_membership(&pool, &expected)
+            .expect("devid collision should be a topology mismatch, not corruption");
+
+        assert!(!matches);
+    }
+
+    // Intent: live_pool_matches_membership propagates duplicate-devid
+    // corruption reached through a null-underlying mapper.
+    // Why it exists: the widened fallback iterator must preserve the existing
+    // duplicate-devid bridge instead of treating corrupt journal membership as
+    // an ordinary topology mismatch.
+    // Scenario: a null-underlying mapper reports devid 2, and the expected
+    // membership snapshot has two UUIDs with devid 2.
+    #[test]
+    fn live_pool_matches_membership_propagates_duplicate_devid_from_null_underlying() {
+        let pool = pool_state_disk1_with_null_underlying_disk2();
+        let expected = PoolMembership::for_corruption_tests(vec![
+            membership_entry("disk1", "/dev/disk/by-id/virtio-disk1", None, Some(1)),
+            membership_entry("disk2", "/dev/disk/by-id/virtio-disk2", None, Some(2)),
+            membership_entry("disk4", "/dev/disk/by-id/virtio-disk4", None, Some(2)),
+        ]);
+
+        match live_pool_matches_membership(&pool, &expected) {
+            Err(JournaledSnapshotError::DuplicateDevid { devid, members }) => {
+                assert_eq!(devid, 2);
+                assert_eq!(members.len(), 2);
+            }
+            other => panic!("expected DuplicateDevid for devid 2, got {other:?}"),
+        }
     }
 
     #[test]
@@ -14710,6 +15039,75 @@ mod tests {
         assert!(
             recovered.by_name(&disk_name("disk3")).is_some(),
             "non-target MISSING disk3 must be preserved after remove-missing commits"
+        );
+        assert!(!f.paths.pending_op_json().exists());
+    }
+
+    // Intent: cmd_recover preserves non-target null-underlying members through
+    // the RemoveMissing::PoolMutation committed path.
+    // Why it exists: the phased remove-missing dispatcher uses
+    // recover_membership_matching_expected instead of the OpKind::Remove
+    // external guard, so this pins the helper-internal null-underlying
+    // fallback at the command boundary.
+    // Scenario: remove-missing committed for devid 2, then unrelated disk3's
+    // underlying block device hot-unplugged before recovery rebuilt pool.json.
+    #[test]
+    fn cmd_recover_remove_missing_pool_mutation_preserves_non_target_null_underlying_disk() {
+        let f = PoolFixture::empty();
+        let fs = MockFs::new(&[]);
+
+        let journal = remove_missing_3to2_journal_pool_mutation_with_devids();
+        journal::write_journal(&f.paths, &journal).unwrap();
+
+        let show = ok_raw(
+            "btrfs filesystem show /mnt/storage",
+            "Label: none  uuid: aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee\n\
+             \tTotal devices 2 FS bytes used 1.00GiB\n\
+             \tdevid    1 size 10.00GiB used 2.00GiB path /dev/mapper/braid-disk1\n\
+             \tdevid    3 size 10.00GiB used 2.00GiB path /dev/mapper/braid-disk3\n",
+        );
+        let (mp_req, mp_out) = mountpoint_ok();
+        let runner = with_balance_replay(MockRunner::default())
+            .with_output(mp_req, mp_out)
+            .with_output(
+                CmdRequest::BtrfsFilesystemShow {
+                    mount_point: MountPoint("/mnt/storage".into()),
+                },
+                show,
+            )
+            .with_output(
+                CmdRequest::CryptsetupStatus {
+                    mapper: MapperName("braid-disk1".into()),
+                },
+                cryptsetup_status_active("braid-disk1", "/dev/vda"),
+            )
+            .with_output(
+                CmdRequest::CryptsetupLuksUuid {
+                    device: "/dev/vda".into(),
+                },
+                cryptsetup_uuid_ok("/dev/vda", "11111111-1111-1111-1111-111111111111"),
+            )
+            .with_output(
+                CmdRequest::CryptsetupStatus {
+                    mapper: MapperName("braid-disk3".into()),
+                },
+                cryptsetup_status_active("braid-disk3", "(null)"),
+            );
+
+        let resolver = resolver_for(&[("/dev/vda", "virtio-disk1")]);
+        let params = f.recover_params().passphrase_file(None).build();
+        let result = cmd_recover(&runner, &fs, &resolver, &params);
+        result.expect("recover should succeed and preserve non-target null-underlying");
+
+        let recovered = membership::load_membership(&f.paths).unwrap();
+        assert!(recovered.by_name(&disk_name("disk1")).is_some());
+        assert!(
+            recovered.by_name(&disk_name("disk2")).is_none(),
+            "removed devid 2 must stay absent"
+        );
+        assert!(
+            recovered.by_name(&disk_name("disk3")).is_some(),
+            "non-target null-underlying disk3 must be preserved after remove-missing commits"
         );
         assert!(!f.paths.pending_op_json().exists());
     }
