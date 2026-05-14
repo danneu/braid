@@ -846,16 +846,22 @@ impl ReplacePlan {
 
         // Membership committed by btrfs replace. Enrich with kernel-assigned
         // devid + observed luks_uuid from a fresh probe, best-effort: if the
-        // probe itself fails, persist the target membership unenriched. The
-        // new member's added_at fallback is still stamped below. The journal
-        // still covers maintenance, so recovery can replay it if we crash
-        // before clear_journal.
+        // probe itself fails, warn and persist the target membership
+        // unenriched. The new member's added_at fallback is still stamped
+        // below. The journal still covers maintenance, so recovery can replay
+        // it if we crash before clear_journal. Pinned by
+        // cmd_replace_warns_when_post_mount_probe_errors.
         let mut target_membership = target_membership;
-        if let Ok(pool_after) = probe_pool(runner, fs, config.mount_point()) {
-            // Discard `EnrichmentReport.foreign` for now; doctor/status
-            // wiring is Phase 5. The function is fail-closed on
-            // foreign-UUID admission (no insert), so the discard is safe.
-            let _ = membership::enrich_from_pool_state(&mut target_membership, &pool_after)?;
+        match probe_pool(runner, fs, config.mount_point()) {
+            Ok(pool_after) => {
+                // Discard `EnrichmentReport.foreign` for now; doctor/status
+                // wiring is Phase 5. The function is fail-closed on
+                // foreign-UUID admission (no insert), so the discard is safe.
+                let _ = membership::enrich_from_pool_state(&mut target_membership, &pool_after)?;
+            }
+            Err(e) => crate::status_tag::emit_status(&format!(
+                "Warning: failed to probe pool for metadata refresh: {e}\n"
+            )),
         }
         if let Some(new_member) = target_membership.by_uuid_mut(&new_uuid)
             && new_member.added_at.is_none()
@@ -4278,6 +4284,72 @@ mod tests {
             disk3.devid.is_some() && disk3.added_at.is_some(),
             "new disk must carry enriched metadata (devid, added_at) \
             from the post-replace probe: {disk3:?}"
+        );
+    }
+
+    // Intent: `cmd_replace` warns when its best-effort post-replace
+    //   `probe_pool` returns an error, while still succeeding.
+    // Why it exists: a completed `btrfs replace` must not silently skip
+    //   optional pool.json metadata enrichment; operators need one visible
+    //   warning while the durable membership commit still happens.
+    // Scenario: live replace of disk2 -> disk3 succeeds. The first
+    //   post-replace pool probe returns a command error, then resize and
+    //   cleanup complete normally.
+    #[test]
+    fn cmd_replace_warns_when_post_mount_probe_errors() {
+        let f = PoolFixture::two_disk_healthy();
+        let fs = MockFs::storage(vec![
+            "/dev/disk/by-id/virtio-disk3".into(),
+            "/dev/mapper/braid-disk3".into(),
+        ]);
+        let replace_done = Arc::new(AtomicBool::new(false));
+        let runner = ReplacementPool::two_disk_healthy()
+            .with_post_replace_probe_failure()
+            .install(MockRunner::default(), replace_done.clone())
+            .with_handler({
+                let replace_done = replace_done.clone();
+                move |req| match req {
+                    CmdRequest::BtrfsReplaceStart { .. } => {
+                        replace_done.store(true, std::sync::atomic::Ordering::Relaxed);
+                        Some(Ok(mock_ok("btrfs replace start", "")))
+                    }
+                    CmdRequest::CryptsetupClose { .. } => Some(Ok(mock_ok("cryptsetup close", ""))),
+                    CmdRequest::BtrfsFilesystemResize { .. } => {
+                        Some(Ok(mock_ok("btrfs filesystem resize", "")))
+                    }
+                    _ => None,
+                }
+            });
+
+        let mut result = None;
+        let captured = crate::status_tag::testing::capture_with_color(false, || {
+            result = Some(cmd_replace(&runner, &fs, &f.replace_params().build()));
+        });
+
+        result
+            .expect("cmd_replace should run")
+            .expect("replace should tolerate post-replace probe errors");
+        assert_eq!(
+            captured
+                .matches("Warning: failed to probe pool for metadata refresh: ")
+                .count(),
+            1,
+            "expected one metadata-refresh warning, got: {captured:?}"
+        );
+        assert!(
+            captured.contains("post-replace probe failed"),
+            "warning should include the probe error detail, got: {captured:?}"
+        );
+        assert!(
+            journal::load_journal(&f.paths).unwrap().is_none(),
+            "pending-op.json should be cleared after successful replace"
+        );
+        let saved = membership::load_membership(&f.paths)
+            .expect("pool.json must exist after the membership commit");
+        let disk3_name = DiskName::parse("disk3").unwrap();
+        assert!(
+            saved.by_name(&disk3_name).is_some(),
+            "new disk must be in pool.json once btrfs replace succeeds"
         );
     }
 

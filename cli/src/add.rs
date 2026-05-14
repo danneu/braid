@@ -1249,14 +1249,20 @@ impl AddPlan {
 
             // Bootstrap post-commit persist: write pool.json after mkfs + mount.
             // Enrich with live metadata (devid) from pool probe, best-effort:
-            // if the probe itself fails, save the target membership
+            // if the probe itself fails, warn and save the target membership
             // unenriched. `enrich_from_pool_state` correlates by LUKS UUID only
             // and surfaces any foreign UUIDs through `EnrichmentReport`;
             // downstream consumption of `foreign` lives in doctor/status
-            // (Phase 5), so the report is discarded here.
+            // (Phase 5), so the report is discarded here. Pinned by
+            // cmd_add_bootstrap_warns_when_post_mount_probe_errors.
             let mut final_membership = journal.target_membership.clone();
-            if let Ok(pool_after) = probe_pool(runner, fs, mount_point) {
-                let _ = membership::enrich_from_pool_state(&mut final_membership, &pool_after)?;
+            match probe_pool(runner, fs, mount_point) {
+                Ok(pool_after) => {
+                    let _ = membership::enrich_from_pool_state(&mut final_membership, &pool_after)?;
+                }
+                Err(e) => crate::status_tag::emit_status(&format!(
+                    "Warning: failed to probe pool for metadata refresh: {e}\n"
+                )),
             }
             membership::save_membership(&final_membership, params.paths)?;
             // Order matters: save_membership before clear_journal. If
@@ -4268,6 +4274,68 @@ mod tests {
         assert!(
             !paths.acked_stats_json().exists(),
             "bootstrap cleanup must delete every stale acked baseline before enrichment"
+        );
+    }
+
+    // Intent: bootstrap `cmd_add` warns when its best-effort post-mount
+    //   `probe_pool` returns an error, while still succeeding.
+    // Why it exists: a committed first-disk bootstrap must not hide that
+    //   optional pool.json metadata enrichment was skipped.
+    // Scenario: first-disk bootstrap succeeds through LUKS format, open, mkfs,
+    //   and mount. The post-mount pool probe returns a command error, so add
+    //   saves the unenriched target membership and clears the journal.
+    #[test]
+    fn cmd_add_bootstrap_warns_when_post_mount_probe_errors() {
+        let (_state_tmp, paths, _tmp, config_path, pass_path) = fresh_add_setup();
+        let runner = AddFullPathRunner::bootstrap().with_bootstrap_post_mount_probe_failure();
+        let fs = runner.fs(vec!["/dev/disk/by-id/virtio-disk1".into()]);
+        let inhibitor = crate::inhibit::RecordingInhibitor::new();
+
+        let mut result = None;
+        let captured = crate::status_tag::testing::capture_with_color(false, || {
+            result = Some(cmd_add(
+                &runner,
+                &fs,
+                &AddParams {
+                    config_path: &config_path,
+                    disk_specs: &["disk1=/dev/disk/by-id/virtio-disk1".into()],
+                    dry_run: false,
+                    yes: true,
+                    passphrase_stdin: false,
+                    passphrase_file: Some(pass_path.as_path()),
+                    enroll_key_file: None,
+                    luks_format_extra_opts: &[],
+                    progress: ProgressOutput::Off,
+                    paths: &paths,
+                    sleep_inhibitor: &inhibitor,
+                    passphrase_reader: &RealTty,
+                    backing_path_resolver:
+                        crate::test_fixtures::mock_virtio_offset_backing_path_resolver(),
+                },
+            ));
+        });
+
+        result
+            .expect("cmd_add should run")
+            .expect("bootstrap should tolerate post-mount probe errors");
+        assert_eq!(
+            captured
+                .matches("Warning: failed to probe pool for metadata refresh: ")
+                .count(),
+            1,
+            "expected one metadata-refresh warning, got: {captured:?}"
+        );
+        assert!(
+            captured.contains("post-mount probe failed"),
+            "warning should include the probe error detail, got: {captured:?}"
+        );
+        assert!(
+            membership::load_membership(&paths).is_ok(),
+            "pool.json should still be persisted when enrichment is skipped"
+        );
+        assert!(
+            journal::load_journal(&paths).unwrap().is_none(),
+            "pending-op.json should be cleared after successful bootstrap"
         );
     }
 

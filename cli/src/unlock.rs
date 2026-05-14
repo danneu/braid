@@ -136,14 +136,19 @@ impl UnlockPlan {
         //     still runs and re-saves, but enrich_from_pool_state walks an
         //     empty devices vec so no fields change.
         //   * `Err(_)` from probe_pool itself (e.g. a parser drift in
-        //     `btrfs filesystem show`) -- the `if let Ok` arm short-circuits,
-        //     refresh_pool_metadata is never called, and pool.json is not
+        //     `btrfs filesystem show`) -- a Warning line is emitted,
+        //     refresh_pool_metadata is not called, and pool.json is not
         //     rewritten.
         // Correctness never depends on this enrichment (see contract above).
         // Pinned by unlock_tolerates_post_mount_probe_mounted_false and
-        // unlock_tolerates_post_mount_probe_err.
-        if let Ok(pool_after) = probe::probe_pool(runner, fs, mount_point) {
-            membership::refresh_pool_metadata(&pool_after, params.paths);
+        // unlock_warns_when_post_mount_probe_errors.
+        match probe::probe_pool(runner, fs, mount_point) {
+            Ok(pool_after) => {
+                membership::refresh_pool_metadata(&pool_after, params.paths);
+            }
+            Err(e) => crate::status_tag::emit_status(&format!(
+                "Warning: failed to probe pool for metadata refresh: {e}\n"
+            )),
         }
 
         // Best-effort: warn if a paused balance was found on mount.
@@ -971,12 +976,89 @@ mod tests {
         );
     }
 
+    // Intent: `cmd_unlock` warns when its best-effort post-mount
+    //   `probe_pool` returns an error, while still succeeding.
+    // Why it exists: post-mount enrichment failures used to disappear
+    //   silently, leaving operators no hint that pool.json metadata refresh
+    //   was skipped.
+    // Scenario: 2-disk pool, clean unlock and mount. Mountinfo declares
+    //   `/mnt/storage` as btrfs, but `btrfs filesystem show` fails during the
+    //   best-effort metadata probe.
+    #[test]
+    fn unlock_warns_when_post_mount_probe_errors() {
+        let (_state_dir, sp) = isolated_paths();
+        let config = test_config();
+        let membership = two_disk_membership();
+        let fs = unlock_storage_fs(&[
+            "/dev/disk/by-id/virtio-disk1",
+            "/dev/disk/by-id/virtio-disk2",
+        ]);
+
+        let mp = MountPoint("/mnt/storage".to_owned());
+        let (scan_req, scan_out) = unlock_btrfs_device_scan_ok();
+        let (balance_req, balance_out) = unlock_btrfs_balance_status_idle(&mp);
+        let runner = base_two_disk_runner();
+        let runner =
+            unlock_with_open_mapper_ok(runner, "/dev/disk/by-id/virtio-disk1", "braid-disk1");
+        let runner =
+            unlock_with_open_mapper_ok(runner, "/dev/disk/by-id/virtio-disk2", "braid-disk2");
+        let runner = unlock_with_mount_ok(
+            runner.with_output(scan_req, scan_out),
+            "/dev/mapper/braid-disk1",
+            &mp,
+        )
+        .with_output(
+            CmdRequest::BtrfsFilesystemShow {
+                mount_point: mp.clone(),
+            },
+            unlock_err_raw("btrfs filesystem show", 1, "no devices found"),
+        )
+        .with_output(balance_req, balance_out);
+        let tmp = unlock_passphrase_file();
+
+        let mut result = None;
+        let captured = crate::status_tag::testing::capture_with_color(false, || {
+            result = Some(cmd_unlock(
+                &runner,
+                &fs,
+                &UnlockParams {
+                    config: &config,
+                    membership: &membership,
+                    paths: &sp,
+                    passphrase_stdin: false,
+                    passphrase_file: Some(tmp.path()),
+                    key_file: None,
+                    allow_degraded: false,
+                    dry_run: false,
+                    backing_path_resolver: crate::test_fixtures::mock_virtio_backing_path_resolver(
+                    ),
+                },
+            ));
+        });
+
+        result
+            .expect("cmd_unlock should run")
+            .expect("unlock should tolerate post-mount probe errors");
+        assert_eq!(
+            captured
+                .matches("Warning: failed to probe pool for metadata refresh: ")
+                .count(),
+            1,
+            "expected one metadata-refresh warning, got: {captured:?}"
+        );
+        assert!(
+            captured.contains("no devices found"),
+            "warning should include the probe error detail, got: {captured:?}"
+        );
+    }
+
     // Intent: `cmd_unlock` must tolerate a post-mount `probe_pool` that returns
     //   `Ok(PoolState { mounted: false, devices: vec![], ... })` without
-    //   enriching pool.json and without failing.
+    //   enriching pool.json, without failing, and without emitting the
+    //   probe-error warning.
     // Why it exists: post-mount enrichment is best-effort; a readable
     //   mountinfo without the target must not become a hard failure or stale
-    //   metadata write.
+    //   metadata write, and must stay distinct from real probe errors.
     // Scenario: 3-disk pool, clean mount. The best-effort post-mount probe sees
     //   well-formed mountinfo with no `/mnt/storage` entry.
     #[test]
@@ -1038,23 +1120,33 @@ mod tests {
             .with_output(balance_req, balance_out);
         let tmp = unlock_passphrase_file();
 
-        let result = cmd_unlock(
-            &runner,
-            &fs,
-            &UnlockParams {
-                config: &config,
-                membership: &membership,
-                paths: &sp,
-                passphrase_stdin: false,
-                passphrase_file: Some(tmp.path()),
-                key_file: None,
-                allow_degraded: false,
-                dry_run: false,
-                backing_path_resolver: crate::test_fixtures::mock_virtio_backing_path_resolver(),
-            },
-        );
+        let mut result = None;
+        let captured = crate::status_tag::testing::capture_with_color(false, || {
+            result = Some(cmd_unlock(
+                &runner,
+                &fs,
+                &UnlockParams {
+                    config: &config,
+                    membership: &membership,
+                    paths: &sp,
+                    passphrase_stdin: false,
+                    passphrase_file: Some(tmp.path()),
+                    key_file: None,
+                    allow_degraded: false,
+                    dry_run: false,
+                    backing_path_resolver: crate::test_fixtures::mock_virtio_backing_path_resolver(
+                    ),
+                },
+            ));
+        });
 
-        result.expect("unlock should tolerate probe_pool returning mounted=false");
+        result
+            .expect("cmd_unlock should run")
+            .expect("unlock should tolerate probe_pool returning mounted=false");
+        assert!(
+            !captured.contains("Warning: failed to probe pool for metadata refresh: "),
+            "mounted=false race should not emit probe-error warning, got: {captured:?}"
+        );
 
         let loaded = membership::load_membership(&sp)
             .expect("pool.json should still be loadable after unlock");

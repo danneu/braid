@@ -2,7 +2,7 @@
 //! and the replace-only `PoolFixture` constructors.
 
 use super::shared::{PoolFixture, mock_ok, mock_virtio_offset_backing_path_resolver};
-use crate::cmd::{CmdRequest, MockRunner, RawCommandOutput};
+use crate::cmd::{CmdError, CmdRequest, MockRunner, RawCommandOutput};
 use crate::inhibit::RecordingInhibitor;
 use crate::membership::{self, PoolMembership};
 use crate::progress::{self, ProgressOutput};
@@ -76,6 +76,7 @@ pub(crate) struct ReplacementPool {
     mapper_to_dev: HashMap<&'static str, &'static str>,
     dev_to_uuid: HashMap<&'static str, &'static str>,
     closed_mappers: HashSet<&'static str>,
+    fail_post_replace_probe: bool,
 }
 
 impl ReplacementPool {
@@ -129,6 +130,7 @@ impl ReplacementPool {
             mapper_to_dev: Self::canonical_mapper_to_dev(),
             dev_to_uuid: Self::canonical_dev_to_uuid(),
             closed_mappers: HashSet::new(),
+            fail_post_replace_probe: false,
         }
     }
 
@@ -142,6 +144,7 @@ impl ReplacementPool {
             mapper_to_dev: Self::canonical_mapper_to_dev(),
             dev_to_uuid: Self::canonical_dev_to_uuid(),
             closed_mappers: HashSet::new(),
+            fail_post_replace_probe: false,
         }
     }
 
@@ -150,6 +153,13 @@ impl ReplacementPool {
     /// the closed-LUKS / fresh-disk variants.
     pub(crate) fn with_mapper_closed(mut self, mapper: &'static str) -> Self {
         self.closed_mappers.insert(mapper);
+        self
+    }
+
+    /// Force post-commit pool probes to fail so command tests can
+    /// exercise replace's best-effort metadata-enrichment warning path.
+    pub(crate) fn with_post_replace_probe_failure(mut self) -> Self {
+        self.fail_post_replace_probe = true;
         self
     }
 
@@ -167,9 +177,15 @@ impl ReplacementPool {
         let mapper_to_dev = self.mapper_to_dev;
         let dev_to_uuid = self.dev_to_uuid;
         let closed_mappers = self.closed_mappers;
+        let fail_post_replace_probe = self.fail_post_replace_probe;
 
         runner.with_handler(move |req| match req {
             CmdRequest::BtrfsFilesystemShow { mount_point } => {
+                if fail_post_replace_probe && replace_done.load(Ordering::Relaxed) {
+                    return Some(Err(CmdError::Failed(
+                        "post-replace probe failed".into(),
+                    )));
+                }
                 let body = if replace_done.load(Ordering::Relaxed) {
                     post_show
                 } else {
