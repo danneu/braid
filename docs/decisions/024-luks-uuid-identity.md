@@ -159,11 +159,16 @@ one.
 - `cli/src/recover.rs` unit tests verify recovery refuses a null-underlying
   member when the journal lacks both observable UUID and persisted devid,
   instead of falling back to mapper-name inference.
+- `cli/src/enroll_key_file.rs` unit tests verify standalone enroll rejects a
+  member whose live LUKS UUID does not match the pool.json membership key
+  before any slot inventory or keyfile mutation runs.
 - `tests/cli/luks-mapper-drift.py` verifies `braid lock` closes the observed
   drifted mapper owned by a member UUID.
-- `tests/cli/unlock-uuid-mismatch.py` and
+- `tests/cli/unlock-uuid-mismatch.py`,
+  `tests/cli/enroll-uuid-mismatch.py`, and
   `tests/cli/recover-replace-existing-luks-uuid-mismatch.py` verify swapped or
-  reformatted disks fail UUID re-checks before unsafe replay or mount.
+  reformatted disks fail UUID re-checks before unsafe replay, slot enrollment,
+  or mount.
 - `tests/cli/replace-new-in-pool-guard.py` verifies duplicate LUKS UUIDs are
   rejected before braid writes membership or calls into btrfs mutation.
 - `tests/cli/braid-add-persists-before-balance.py` verifies fresh add writes
