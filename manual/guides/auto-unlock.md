@@ -142,9 +142,9 @@ The keyfile on the USB drive can unlock your pool without a passphrase. Treat it
 
 ## LUKS header backups
 
-After enrolling a keyfile, braid modifies the LUKS header on each drive (adding slot 1). braid stores LUKS header backups in `/var/lib/braid/luks-headers/`.
+After enrolling a keyfile, braid modifies the LUKS header on each drive (adding slot 1). braid stores LUKS header backups in `/var/lib/braid/luks-headers/` as a transient byproduct.
 
-Copy these backups to a separate location (external drive, another machine). If a drive's LUKS header is corrupted, the header backup is the only way to recover access to that drive's data.
+Copy each `.luksheader` file to a separate location (external drive, another machine), then delete the local file. `braid status` warns until the local copies are removed. If a drive's LUKS header is corrupted, the off-system backup is the only way to recover access to that drive's data.
 
 ## What's next
 

@@ -143,7 +143,22 @@ Disk states in the detail view:
 
 ### Advisories
 
-Warnings appear when LUKS header backups are missing for one or more disks.
+When a header-mutating operation (`braid add`, `braid replace`,
+`braid enroll`) writes a local LUKS header backup to
+`/var/lib/braid/luks-headers/<disk>.luksheader`, `braid status`
+prints a warning until those files are removed:
+
+```
+warning: LUKS header backups exist in /var/lib/braid/luks-headers -- copy offsite and delete local copies
+```
+
+The local copy is a transient byproduct of the header-mutating
+operation, not the intended backup target. Copy each `.luksheader`
+file to an off-system location (USB, another machine, cloud key
+storage), then remove the local copy to silence the warning.
+
+See [LUKS header backup workflow](../../docs/luks-unlock.md#header-backup-workflow-and-messaging)
+for the full rationale.
 
 ## JSON output
 
@@ -153,6 +168,9 @@ Warnings appear when LUKS header backups are missing for one or more disks.
 - `disks`: array of disk reports with `name`, `status`, `devid`, `errors`, etc.
 - `alert_active`: boolean
 - `alert_causes`: array of alert cause objects
+- `advisories`: array of human-readable advisory strings (omitted when
+  none). See the Advisories section above for what currently produces
+  them.
 - `missing_devids`: array of every devid counted in `missing_count`
   (btrfs-MISSING devices and null-underlying mappers whose backing device has
   disappeared). For destructive `remove-missing` / `replace --missing-id`

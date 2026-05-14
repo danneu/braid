@@ -157,7 +157,7 @@ See [Monitoring and alerts](monitoring-and-alerts.md) for details on how alerts 
 ## Good operator habits
 
 - **Check `braid status` after unlocking** -- a quick glance catches problems early.
-- **Keep LUKS header backups** -- braid stores header backups in `/var/lib/braid/luks-headers/` after operations that modify LUKS headers. Copy these off the NAS to a separate location. If a drive's LUKS header is corrupted and you have no backup, the data on that drive is unrecoverable.
+- **Keep LUKS header backups** -- braid stores header backups in `/var/lib/braid/luks-headers/` after operations that modify LUKS headers. Copy each `.luksheader` file off the NAS to a separate location, then delete the local file (`braid status` warns until they are removed). If a drive's LUKS header is corrupted and you have no off-system backup, the data on that drive is unrecoverable.
 - **Run `braid doctor`** -- periodically check for configuration problems:
   ```sh
   sudo braid doctor
