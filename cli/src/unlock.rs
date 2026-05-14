@@ -29,6 +29,9 @@ pub struct UnlockParams<'a> {
     pub key_file: Option<&'a Path>,
     pub allow_degraded: bool,
     pub dry_run: bool,
+    /// Seam for resolving by-id paths and mapper backings during probe
+    /// and already-open unlock checks.
+    pub backing_path_resolver: &'a dyn crate::luks::BackingPathResolver,
 }
 
 /// Dry-run preview source of truth for `braid unlock` plus the execute
@@ -102,7 +105,14 @@ impl UnlockPlan {
                 params.key_file,
             )
             .map_err(MountError::from)?;
-            match mount::execute_unlock_and_mount(runner, fs, params.config, &plan, &credential) {
+            match mount::execute_unlock_and_mount(
+                runner,
+                fs,
+                params.config,
+                &plan,
+                params.backing_path_resolver,
+                &credential,
+            ) {
                 Ok(_) => {}
                 Err(failure) => {
                     let _ = mount::close_opened_mappers(
@@ -169,6 +179,7 @@ pub fn plan_unlock<R: CommandRunner, F: Filesystem + ?Sized>(
         fs,
         params.config,
         params.membership,
+        params.backing_path_resolver,
         params.allow_degraded,
         "unlock",
     );
@@ -306,6 +317,7 @@ mod tests {
                 key_file: None,
                 allow_degraded: true,
                 dry_run: false,
+                backing_path_resolver: crate::test_fixtures::mock_virtio_backing_path_resolver(),
             },
         );
 
@@ -378,6 +390,7 @@ mod tests {
                 key_file: None,
                 allow_degraded: false,
                 dry_run: false,
+                backing_path_resolver: crate::test_fixtures::mock_virtio_backing_path_resolver(),
             },
         );
 
@@ -451,6 +464,7 @@ mod tests {
                 key_file: None,
                 allow_degraded: false,
                 dry_run: false,
+                backing_path_resolver: crate::test_fixtures::mock_virtio_backing_path_resolver(),
             },
         );
 
@@ -540,6 +554,8 @@ mod tests {
                     key_file: None,
                     allow_degraded: false,
                     dry_run: false,
+                    backing_path_resolver: crate::test_fixtures::mock_virtio_backing_path_resolver(
+                    ),
                 },
             ));
         });
@@ -671,6 +687,7 @@ mod tests {
                 key_file: None,
                 allow_degraded: false,
                 dry_run: false,
+                backing_path_resolver: crate::test_fixtures::mock_virtio_backing_path_resolver(),
             },
         );
 
@@ -704,6 +721,7 @@ mod tests {
             key_file: None,
             allow_degraded: false,
             dry_run: true,
+            backing_path_resolver: crate::test_fixtures::mock_virtio_backing_path_resolver(),
         };
 
         let rendered = plan_unlock(&runner, &fs, &params)
@@ -770,6 +788,7 @@ mod tests {
             key_file: Some(Path::new("/run/keys/braid.key")),
             allow_degraded: false,
             dry_run: true,
+            backing_path_resolver: crate::test_fixtures::mock_virtio_backing_path_resolver(),
         };
 
         let rendered = plan_unlock(&runner, &fs, &params)
@@ -828,6 +847,7 @@ mod tests {
             key_file: None,
             allow_degraded: false,
             dry_run: true,
+            backing_path_resolver: crate::test_fixtures::mock_virtio_backing_path_resolver(),
         };
 
         let plan = plan_unlock(&runner, &fs, &params)
@@ -900,6 +920,7 @@ mod tests {
             key_file: None,
             allow_degraded: false,
             dry_run: true,
+            backing_path_resolver: crate::test_fixtures::mock_virtio_backing_path_resolver(),
         };
 
         let failure = match plan_unlock(&runner, &fs, &params) {
@@ -1029,6 +1050,7 @@ mod tests {
                 key_file: None,
                 allow_degraded: false,
                 dry_run: false,
+                backing_path_resolver: crate::test_fixtures::mock_virtio_backing_path_resolver(),
             },
         );
 
@@ -1141,6 +1163,7 @@ mod tests {
                 key_file: None,
                 allow_degraded: false,
                 dry_run: false,
+                backing_path_resolver: crate::test_fixtures::mock_virtio_backing_path_resolver(),
             },
         );
 
@@ -1243,6 +1266,7 @@ mod tests {
                 key_file: None,
                 allow_degraded: false,
                 dry_run: false,
+                backing_path_resolver: crate::test_fixtures::mock_virtio_backing_path_resolver(),
             },
         );
 

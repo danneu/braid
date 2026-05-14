@@ -3,7 +3,7 @@ use crate::config::{Config, mapper_name};
 use crate::credential_verify::{
     Credential, CredentialVerifyError, CredentialVerifyTarget, verify_credential_for_targets,
 };
-use crate::luks::{self, LuksError, OpenOutcome};
+use crate::luks::{self, BackingPathResolver, LuksError, OpenOutcome};
 use crate::mapper_close::{CloseMapperError, close_mapper_with_retry};
 use crate::membership::PoolMembership;
 use crate::preview::{self, NoteLevel, PerDiskStyle, PreviewNote};
@@ -182,6 +182,7 @@ pub fn plan_open_pool<R: CommandRunner, F: Filesystem + ?Sized>(
     fs: &F,
     config: &Config,
     membership: &PoolMembership,
+    backing_path_resolver: &dyn BackingPathResolver,
     allow_degraded: bool,
     command_hint: &str,
 ) -> PlanReport {
@@ -191,6 +192,7 @@ pub fn plan_open_pool<R: CommandRunner, F: Filesystem + ?Sized>(
         fs,
         config,
         membership,
+        backing_path_resolver,
         allow_degraded,
         command_hint,
         &mut events,
@@ -203,6 +205,7 @@ fn plan_open_pool_inner<R: CommandRunner, F: Filesystem + ?Sized>(
     fs: &F,
     config: &Config,
     membership: &PoolMembership,
+    backing_path_resolver: &dyn BackingPathResolver,
     allow_degraded: bool,
     command_hint: &str,
     events: &mut Vec<ProbeEvent>,
@@ -228,7 +231,13 @@ fn plan_open_pool_inner<R: CommandRunner, F: Filesystem + ?Sized>(
 
     for (expected_uuid, member) in membership.iter_by_name() {
         let name = member.name.as_str();
-        let probed = probe::probe_config_disk(runner, fs, &member.name, &member.by_id)?;
+        let probed = probe::probe_config_disk(
+            runner,
+            fs,
+            &member.name,
+            &member.by_id,
+            backing_path_resolver,
+        )?;
         match &probed.state {
             ConfigDiskState::Absent => {
                 events.push(ProbeEvent::DiskAbsent {
@@ -491,6 +500,7 @@ fn credential_noun(c: Credential<'_>) -> &'static str {
 fn open_disks_with_credential<R: CommandRunner>(
     runner: &R,
     to_unlock: &[(String, ByIdPath)],
+    backing_path_resolver: &dyn BackingPathResolver,
     credential: Credential<'_>,
     color_enabled: bool,
     opened: &mut Vec<MapperName>,
@@ -541,9 +551,11 @@ fn open_disks_with_credential<R: CommandRunner>(
             )
         );
         let outcome = match credential {
-            Credential::Passphrase(pp) => luks::ensure_luks_open(runner, name, by_id, pp),
+            Credential::Passphrase(pp) => {
+                luks::ensure_luks_open(runner, name, by_id, backing_path_resolver, pp)
+            }
             Credential::KeyFile(kf) => {
-                luks::ensure_luks_open_with_key_file(runner, name, by_id, kf)
+                luks::ensure_luks_open_with_key_file(runner, name, by_id, backing_path_resolver, kf)
             }
         };
         match outcome {
@@ -643,6 +655,7 @@ pub fn execute_unlock_and_mount<R: CommandRunner, F: Filesystem + ?Sized>(
     fs: &F,
     config: &Config,
     plan: &OpenPlan,
+    backing_path_resolver: &dyn BackingPathResolver,
     credential: &crate::credential::OpenCredential,
 ) -> Result<bool, UnlockAndMountFailure> {
     let color_enabled = color_enabled_for_stderr();
@@ -660,6 +673,7 @@ pub fn execute_unlock_and_mount<R: CommandRunner, F: Filesystem + ?Sized>(
     open_disks_with_credential(
         runner,
         &plan.to_unlock,
+        backing_path_resolver,
         cred,
         color_enabled,
         &mut opened_mappers,
@@ -886,7 +900,14 @@ mod tests {
         };
 
         let cred = test_passphrase();
-        let res = execute_unlock_and_mount(&runner, &fs, &config, &plan, &cred);
+        let res = execute_unlock_and_mount(
+            &runner,
+            &fs,
+            &config,
+            &plan,
+            crate::test_fixtures::mock_virtio_backing_path_resolver(),
+            &cred,
+        );
         match res {
             Err(UnlockAndMountFailure {
                 error: MountError::Failed(msg),
@@ -1086,7 +1107,15 @@ mod tests {
             .with_luks_dump_text_luks2("/dev/disk/by-id/virtio-z")
             .with_mappers_closed(&["braid-a-disk", "braid-m-disk", "braid-z-disk"]);
 
-        let report = plan_open_pool(&runner, &fs, &config, &membership, false, "unlock");
+        let report = plan_open_pool(
+            &runner,
+            &fs,
+            &config,
+            &membership,
+            crate::test_fixtures::mock_virtio_backing_path_resolver(),
+            false,
+            "unlock",
+        );
         let plan = report
             .result
             .expect("planning should succeed")
@@ -1812,7 +1841,15 @@ mod tests {
                 "33333333-3333-3333-3333-333333333333",
             );
 
-        let report = plan_open_pool(&runner, &fs, &config, &membership, true, "unlock");
+        let report = plan_open_pool(
+            &runner,
+            &fs,
+            &config,
+            &membership,
+            crate::test_fixtures::mock_virtio_backing_path_resolver(),
+            true,
+            "unlock",
+        );
         let plan = report
             .result
             .expect("plan should succeed with --allow-degraded")
@@ -2007,7 +2044,15 @@ pool already mounted at /mnt/storage
 
         let runner = base_two_disk_runner();
 
-        let report = plan_open_pool(&runner, &fs, &config, &membership, false, "unlock");
+        let report = plan_open_pool(
+            &runner,
+            &fs,
+            &config,
+            &membership,
+            crate::test_fixtures::mock_virtio_backing_path_resolver(),
+            false,
+            "unlock",
+        );
 
         let err = report
             .result
@@ -2580,8 +2625,15 @@ pool already mounted at /mnt/storage
                 ok_raw("cryptsetup close"),
             );
 
-        let failure = execute_unlock_and_mount(&runner, &fs, &config, &plan, &test_passphrase())
-            .expect_err("mount should fail");
+        let failure = execute_unlock_and_mount(
+            &runner,
+            &fs,
+            &config,
+            &plan,
+            crate::test_fixtures::mock_virtio_backing_path_resolver(),
+            &test_passphrase(),
+        )
+        .expect_err("mount should fail");
         assert!(
             failure.error.to_string().starts_with("mount failed"),
             "primary error should be mount failure: {}",
@@ -2631,8 +2683,17 @@ pool already mounted at /mnt/storage
             err_raw("btrfs device scan", 1, "scan failed"),
         );
 
-        let failure = execute_unlock_and_mount(&runner, &fs, &config, &plan, &test_passphrase())
-            .expect_err("scan should fail");
+        let backing_path_resolver = crate::test_fixtures::MockBackingPathResolver::default()
+            .with_path("/dev/disk/by-id/virtio-disk1", "/dev/vdb");
+        let failure = execute_unlock_and_mount(
+            &runner,
+            &fs,
+            &config,
+            &plan,
+            &backing_path_resolver,
+            &test_passphrase(),
+        )
+        .expect_err("scan should fail");
 
         assert!(
             failure
@@ -2719,11 +2780,22 @@ pool already mounted at /mnt/storage
                 ok_raw("cryptsetup close"),
             );
 
-        let failure = execute_unlock_and_mount(&runner, &fs, &config, &plan, &test_passphrase())
-            .expect_err("scan should fail");
+        let backing_path_resolver = crate::test_fixtures::MockBackingPathResolver::default()
+            .with_path("/dev/disk/by-id/virtio-disk1", "/dev/vdb");
+        let failure = execute_unlock_and_mount(
+            &runner,
+            &fs,
+            &config,
+            &plan,
+            &backing_path_resolver,
+            &test_passphrase(),
+        )
+        .expect_err("scan should fail");
         assert_eq!(
             failure.opened_mappers,
-            vec![MapperName("braid-disk2".into())]
+            vec![MapperName("braid-disk2".into())],
+            "unexpected failure: {}",
+            failure.error
         );
 
         close_opened_mappers(&runner, &NoopSleeper, &fs, &failure.opened_mappers, false).unwrap();
@@ -2771,8 +2843,15 @@ pool already mounted at /mnt/storage
                 ok_raw("cryptsetup close"),
             );
 
-        let failure = execute_unlock_and_mount(&runner, &fs, &config, &plan, &test_passphrase())
-            .expect_err("disk2 open should fail");
+        let failure = execute_unlock_and_mount(
+            &runner,
+            &fs,
+            &config,
+            &plan,
+            crate::test_fixtures::mock_virtio_backing_path_resolver(),
+            &test_passphrase(),
+        )
+        .expect_err("disk2 open should fail");
         assert!(
             failure.error.to_string().contains("disk2"),
             "primary error should name disk2: {}",
@@ -2861,8 +2940,15 @@ pool already mounted at /mnt/storage
             .with_output(is_req, is_out)
             .with_output(dump_req, dump_out);
 
-        let failure = execute_unlock_and_mount(&runner, &fs, &config, &plan, &test_passphrase())
-            .expect_err("credential verify should fail");
+        let failure = execute_unlock_and_mount(
+            &runner,
+            &fs,
+            &config,
+            &plan,
+            crate::test_fixtures::mock_virtio_backing_path_resolver(),
+            &test_passphrase(),
+        )
+        .expect_err("credential verify should fail");
         assert!(
             failure.opened_mappers.is_empty(),
             "wrong passphrase should not report opened mappers"
@@ -2957,6 +3043,7 @@ pool already mounted at /mnt/storage
             &fs,
             &config,
             &plan,
+            crate::test_fixtures::mock_virtio_backing_path_resolver(),
             &OpenCredential::KeyFile(keyfile.path().to_path_buf()),
         )
         .expect_err("scan should fail");

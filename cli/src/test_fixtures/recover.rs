@@ -12,7 +12,7 @@
 //! topology installer; tests compose with `MockRunner::with_handler`
 //! per-call.
 
-use super::shared::PoolFixture;
+use super::shared::{PoolFixture, mock_virtio_backing_path_resolver};
 use crate::cmd::{CmdRequest, CommandRunner, MockRunner, RawCommandOutput};
 use crate::config::Config;
 use crate::inhibit::{AcquireSleepInhibitor, SleepGuard};
@@ -107,6 +107,7 @@ impl<'a> RecoverParamsBuilder<'a> {
             progress: self.progress,
             sleep_inhibitor: self.sleep_inhibitor,
             sleeper: &progress::NoopSleeper,
+            backing_path_resolver: mock_virtio_backing_path_resolver(),
         }
     }
 }

@@ -6,7 +6,7 @@ use crate::alert::{self, AlertCause, AlertState};
 use crate::cmd::{CmdError, CmdRequest, CommandRunner, LsblkFieldKind};
 use crate::config::{Config, mapper_name};
 use crate::confirm::get_lsblk_field;
-use crate::luks;
+use crate::luks::{self, BackingPathResolver};
 use crate::membership::{self, PoolMembership};
 use crate::parse::types::BalanceState;
 use crate::parse::types::BtrfsDfOutput;
@@ -387,6 +387,7 @@ fn build_status<R: CommandRunner, F: Filesystem>(
     fs: &F,
     config: &Config,
     paths: &StatePaths,
+    backing_path_resolver: &dyn BackingPathResolver,
 ) -> Result<BuiltStatus, StatusError> {
     let advisories = luks::header_backup_advisories(paths);
 
@@ -434,7 +435,15 @@ fn build_status<R: CommandRunner, F: Filesystem>(
         .collect();
     let config_disks: Vec<ConfigDisk> = members
         .into_iter()
-        .map(|member| probe_config_disk(runner, fs, &member.name, &member.by_id))
+        .map(|member| {
+            probe_config_disk(
+                runner,
+                fs,
+                &member.name,
+                &member.by_id,
+                backing_path_resolver,
+            )
+        })
         .collect::<Result<Vec<_>, _>>()?;
     let device_stats = get_device_stats(runner, config.mount_point())?;
     let verbose_ctx = build_disk_reports(runner, &membership, &config_disks, &pool, &device_stats);
@@ -480,8 +489,9 @@ pub fn cmd_status<R: CommandRunner, F: Filesystem>(
     config: &Config,
     json: bool,
     paths: &StatePaths,
+    backing_path_resolver: &dyn BackingPathResolver,
 ) -> Result<(), StatusError> {
-    let built = build_status(runner, fs, config, paths)?;
+    let built = build_status(runner, fs, config, paths, backing_path_resolver)?;
 
     if json {
         println!("{}", serde_json::to_string_pretty(&built.report)?);
@@ -1269,7 +1279,14 @@ mod tests {
 
         // Also verify cmd_status doesn't error
         let (_tmp, paths) = isolated_paths();
-        let _ = cmd_status(&runner, &fs, &config, false, &paths);
+        let _ = cmd_status(
+            &runner,
+            &fs,
+            &config,
+            false,
+            &paths,
+            crate::test_fixtures::mock_virtio_backing_path_resolver(),
+        );
     }
 
     /*
@@ -2753,7 +2770,14 @@ mod tests {
 
         // cmd_status should succeed (not error), treating it as not-mounted
         let (_tmp, paths) = isolated_paths();
-        let result = cmd_status(&runner, &fs, &config, false, &paths);
+        let result = cmd_status(
+            &runner,
+            &fs,
+            &config,
+            false,
+            &paths,
+            crate::test_fixtures::mock_virtio_backing_path_resolver(),
+        );
         assert!(result.is_ok(), "expected Ok, got: {result:?}");
     }
 
@@ -2772,7 +2796,14 @@ mod tests {
         let config = status_config();
 
         let (_tmp, paths) = isolated_paths();
-        let result = cmd_status(&runner, &fs, &config, false, &paths);
+        let result = cmd_status(
+            &runner,
+            &fs,
+            &config,
+            false,
+            &paths,
+            crate::test_fixtures::mock_virtio_backing_path_resolver(),
+        );
         assert!(result.is_ok(), "expected Ok, got: {result:?}");
     }
 
@@ -2783,7 +2814,14 @@ mod tests {
         let config = status_config();
 
         let (_tmp, paths) = isolated_paths();
-        let result = cmd_status(&runner, &fs, &config, false, &paths);
+        let result = cmd_status(
+            &runner,
+            &fs,
+            &config,
+            false,
+            &paths,
+            crate::test_fixtures::mock_virtio_backing_path_resolver(),
+        );
         assert!(result.is_ok());
     }
 
@@ -2794,7 +2832,14 @@ mod tests {
         let config = status_config();
 
         let (_tmp, paths) = isolated_paths();
-        let result = cmd_status(&runner, &fs, &config, true, &paths);
+        let result = cmd_status(
+            &runner,
+            &fs,
+            &config,
+            true,
+            &paths,
+            crate::test_fixtures::mock_virtio_backing_path_resolver(),
+        );
         assert!(result.is_ok());
     }
 
@@ -2887,7 +2932,14 @@ mod tests {
         let config = status_config();
 
         let (_tmp, paths) = isolated_paths();
-        let result = cmd_status(&runner, &fs, &config, false, &paths);
+        let result = cmd_status(
+            &runner,
+            &fs,
+            &config,
+            false,
+            &paths,
+            crate::test_fixtures::mock_virtio_backing_path_resolver(),
+        );
         assert!(result.is_ok());
     }
 
@@ -2942,7 +2994,14 @@ mod tests {
         let (_tmp, paths) = isolated_paths();
         membership::save_membership(&PoolMembership::empty(), &paths).unwrap();
 
-        let built = build_status(&runner, &fs, &config, &paths).unwrap();
+        let built = build_status(
+            &runner,
+            &fs,
+            &config,
+            &paths,
+            crate::test_fixtures::mock_virtio_backing_path_resolver(),
+        )
+        .unwrap();
 
         assert_eq!(built.report.missing_count, Some(2));
         assert_eq!(built.report.missing_devids, vec![2, 3]);
@@ -3018,7 +3077,14 @@ mod tests {
         )
         .unwrap();
 
-        let built = build_status(&runner, &fs, &config, &paths).unwrap();
+        let built = build_status(
+            &runner,
+            &fs,
+            &config,
+            &paths,
+            crate::test_fixtures::mock_virtio_backing_path_resolver(),
+        )
+        .unwrap();
         let extras = built.mounted_extras.as_ref().unwrap();
         let human = format_status_human(
             &built.report,
@@ -3111,7 +3177,14 @@ mod tests {
         let config = status_config();
 
         let (_tmp, paths) = isolated_paths();
-        let result = cmd_status(&runner, &fs, &config, false, &paths);
+        let result = cmd_status(
+            &runner,
+            &fs,
+            &config,
+            false,
+            &paths,
+            crate::test_fixtures::mock_virtio_backing_path_resolver(),
+        );
         assert!(result.is_ok());
     }
 
@@ -4122,7 +4195,14 @@ mod tests {
         let fs = status_fs_three_disk();
         let config = status_config();
 
-        let result = cmd_status(&runner, &fs, &config, false, &paths);
+        let result = cmd_status(
+            &runner,
+            &fs,
+            &config,
+            false,
+            &paths,
+            crate::test_fixtures::mock_virtio_backing_path_resolver(),
+        );
         assert!(result.is_err(), "expected error for corrupt pool.json");
         assert!(
             matches!(
@@ -4152,7 +4232,14 @@ mod tests {
         let fs = status_fs_not_mounted(&[]);
         let config = status_config();
 
-        let result = cmd_status(&runner, &fs, &config, false, &paths);
+        let result = cmd_status(
+            &runner,
+            &fs,
+            &config,
+            false,
+            &paths,
+            crate::test_fixtures::mock_virtio_backing_path_resolver(),
+        );
         assert!(
             result.is_ok(),
             "expected offline status to ignore pool.json corruption"
@@ -4287,7 +4374,9 @@ mod tests {
 
         membership::save_membership(&membership, &paths).unwrap();
 
-        let result = build_status(&runner, &fs, &config, &paths);
+        let backing_path_resolver = crate::test_fixtures::MockBackingPathResolver::default()
+            .with_path("/dev/disk/by-id/disk1", "/dev/vdz");
+        let result = build_status(&runner, &fs, &config, &paths, &backing_path_resolver);
         match result {
             Err(StatusError::Probe(ProbeError::MapperConflict {
                 name,

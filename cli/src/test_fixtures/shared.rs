@@ -4,10 +4,12 @@
 use crate::cmd::RawCommandOutput;
 use crate::config::Config;
 use crate::inhibit::RecordingInhibitor;
+use crate::luks::BackingPathResolver;
 use crate::membership::{self, DiskMember, PoolMembership};
 use crate::probe::Filesystem;
 use crate::state_paths::StatePaths;
 use crate::types::{ByIdPath, DiskName, LuksUuid, MountPoint};
+use std::collections::BTreeMap;
 use std::path::PathBuf;
 use tempfile::TempDir;
 
@@ -183,6 +185,73 @@ impl Filesystem for MockFs {
             Ok(vec![])
         }
     }
+}
+
+// ---------------------------------------------------------------------------
+// MockBackingPathResolver
+// ---------------------------------------------------------------------------
+
+/// Test resolver for mapper ownership checks. Unknown paths resolve to
+/// themselves so tests only seed by-id -> kernel-path pairs they care about.
+#[derive(Debug, Clone, Default)]
+pub(crate) struct MockBackingPathResolver {
+    overrides: BTreeMap<String, Result<String, std::io::ErrorKind>>,
+}
+
+impl MockBackingPathResolver {
+    /// Seed a successful canonical path override.
+    pub(crate) fn with_path(mut self, path: &str, canonical: &str) -> Self {
+        self.overrides
+            .insert(path.to_owned(), Ok(canonical.to_owned()));
+        self
+    }
+
+    /// Seed a failing canonical path override.
+    pub(crate) fn with_error(mut self, path: &str, kind: std::io::ErrorKind) -> Self {
+        self.overrides.insert(path.to_owned(), Err(kind));
+        self
+    }
+
+    /// Common virtio-disk fixture mapping used by command-level tests.
+    pub(crate) fn with_virtio_defaults() -> Self {
+        Self::default()
+            .with_path("/dev/disk/by-id/virtio-disk1", "/dev/vda")
+            .with_path("/dev/disk/by-id/virtio-disk2", "/dev/vdb")
+            .with_path("/dev/disk/by-id/virtio-disk3", "/dev/vdc")
+            .with_path("/dev/disk/by-id/virtio-disk4", "/dev/vdd")
+    }
+
+    /// Virtio fixture mapping for add/replace topologies whose first
+    /// modeled data disk starts at `/dev/vdb`.
+    pub(crate) fn with_virtio_offset_defaults() -> Self {
+        Self::default()
+            .with_path("/dev/disk/by-id/virtio-disk1", "/dev/vdb")
+            .with_path("/dev/disk/by-id/virtio-disk2", "/dev/vdc")
+            .with_path("/dev/disk/by-id/virtio-disk3", "/dev/vdd")
+            .with_path("/dev/disk/by-id/virtio-disk4", "/dev/vde")
+    }
+}
+
+impl BackingPathResolver for MockBackingPathResolver {
+    fn canonicalize(&self, path: &str) -> Result<String, std::io::Error> {
+        match self.overrides.get(path) {
+            Some(Ok(canonical)) => Ok(canonical.clone()),
+            Some(Err(kind)) => Err(std::io::Error::new(*kind, "mock canonicalize error")),
+            None => Ok(path.to_owned()),
+        }
+    }
+}
+
+/// Shared resolver seeded with the standard virtio-disk fixture mapping.
+pub(crate) fn mock_virtio_backing_path_resolver() -> &'static MockBackingPathResolver {
+    static RESOLVER: std::sync::OnceLock<MockBackingPathResolver> = std::sync::OnceLock::new();
+    RESOLVER.get_or_init(MockBackingPathResolver::with_virtio_defaults)
+}
+
+/// Shared resolver for add/replace fixtures that model disks as `/dev/vdb+`.
+pub(crate) fn mock_virtio_offset_backing_path_resolver() -> &'static MockBackingPathResolver {
+    static RESOLVER: std::sync::OnceLock<MockBackingPathResolver> = std::sync::OnceLock::new();
+    RESOLVER.get_or_init(MockBackingPathResolver::with_virtio_offset_defaults)
 }
 
 // ---------------------------------------------------------------------------

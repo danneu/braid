@@ -348,6 +348,7 @@ fn main() {
             );
             let runner = RealRunner;
             let fs = RealFilesystem;
+            let backing_path_resolver = braid_cli::luks::RealBackingPathResolver;
             let enroll_kf = args
                 .enroll_key_file
                 .as_ref()
@@ -368,6 +369,7 @@ fn main() {
                     paths: &paths,
                     sleep_inhibitor: &sleep_inhibitor,
                     passphrase_reader: &braid_cli::luks::RealTty,
+                    backing_path_resolver: &backing_path_resolver,
                 },
             ) {
                 print_cli_error(&e.to_string());
@@ -434,6 +436,7 @@ fn main() {
             );
             let runner = RealRunner;
             let fs = RealFilesystem;
+            let backing_path_resolver = braid_cli::luks::RealBackingPathResolver;
             let enroll_kf = args
                 .enroll_key_file
                 .as_ref()
@@ -456,6 +459,7 @@ fn main() {
                     paths: &paths,
                     sleep_inhibitor: &sleep_inhibitor,
                     sleeper: &braid_cli::progress::RealSleeper,
+                    backing_path_resolver: &backing_path_resolver,
                 },
             ) {
                 print_cli_error(&e.to_string());
@@ -472,8 +476,15 @@ fn main() {
             };
             let runner = RealRunner;
             let fs = RealFilesystem;
-            if let Err(e) = braid_cli::status::cmd_status(&runner, &fs, &config, args.json, &paths)
-            {
+            let backing_path_resolver = braid_cli::luks::RealBackingPathResolver;
+            if let Err(e) = braid_cli::status::cmd_status(
+                &runner,
+                &fs,
+                &config,
+                args.json,
+                &paths,
+                &backing_path_resolver,
+            ) {
                 print_cli_error(&e.to_string());
                 std::process::exit(1);
             }
@@ -508,6 +519,7 @@ fn main() {
             };
             let runner = RealRunner;
             let fs = RealFilesystem;
+            let backing_path_resolver = braid_cli::luks::RealBackingPathResolver;
             match braid_cli::unlock::cmd_unlock(
                 &runner,
                 &fs,
@@ -520,6 +532,7 @@ fn main() {
                     key_file: args.key_file.as_deref(),
                     allow_degraded: args.allow_degraded,
                     dry_run: args.dry_run,
+                    backing_path_resolver: &backing_path_resolver,
                 },
             ) {
                 Ok(()) => {}
@@ -545,6 +558,7 @@ fn main() {
             };
             let runner = RealRunner;
             let fs = RealFilesystem;
+            let backing_path_resolver = braid_cli::luks::RealBackingPathResolver;
             let key_file_path = args.dir.join(braid_cli::luks::KEYFILE_NAME);
             if let Err(e) = braid_cli::enroll_key_file::cmd_enroll_key_file(
                 &runner,
@@ -557,6 +571,7 @@ fn main() {
                     passphrase_file: args.passphrase_file.as_deref(),
                     dry_run: args.dry_run,
                     paths: &paths,
+                    backing_path_resolver: &backing_path_resolver,
                 },
             ) {
                 print_cli_error(&e.to_string());
@@ -805,6 +820,7 @@ fn main() {
             let runner = RealRunner;
             let fs = RealFilesystem;
             let by_id_resolver = braid_cli::recover::RealByIdResolver;
+            let backing_path_resolver = braid_cli::luks::RealBackingPathResolver;
             match braid_cli::recover::cmd_recover(
                 &runner,
                 &fs,
@@ -819,6 +835,7 @@ fn main() {
                     progress,
                     sleep_inhibitor: &sleep_inhibitor,
                     sleeper: &braid_cli::progress::RealSleeper,
+                    backing_path_resolver: &backing_path_resolver,
                 },
             ) {
                 Ok(()) => {}

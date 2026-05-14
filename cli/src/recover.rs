@@ -7,7 +7,7 @@ use crate::credential_verify::{Credential, CredentialVerifyTarget, verify_creden
 use crate::discover;
 use crate::inhibit::AcquireSleepInhibitor;
 use crate::journal::{self, Journal};
-use crate::luks::{self, VerifyOutcome};
+use crate::luks::{self, BackingPathResolver, VerifyOutcome};
 use crate::mapper_close::close_mapper_best_effort;
 use crate::membership::{self, DiskMember, LuksUuidMap, PoolMembership};
 use crate::mount::{self, MountError, OpenPlan};
@@ -222,6 +222,9 @@ pub struct RecoverParams<'a> {
     /// Sleeper seam for retrying transiently-busy mapper closes without
     /// slowing unit tests.
     pub sleeper: &'a dyn progress::Sleeper,
+    /// Seam for resolving by-id paths and mapper backings during recovery
+    /// probes and already-open mapper checks.
+    pub backing_path_resolver: &'a dyn BackingPathResolver,
 }
 
 /// Dry-run preview source of truth for `braid recover` plus the
@@ -496,6 +499,7 @@ impl RecoverWorkAction {
                         fs,
                         params.config,
                         &recovery_mount_membership,
+                        params.backing_path_resolver,
                         params.allow_degraded,
                         cred,
                         close_names,
@@ -987,8 +991,15 @@ fn execute_recover_initial_open<R: CommandRunner + Sync, F: Filesystem + ?Sized>
             .credential
             .as_ref()
             .expect("credential resolved above when open_plan is Some");
-        mount::execute_unlock_and_mount(runner, fs, params.config, open_plan, cred)
-            .map_err(InitialOpenFailure::Unlock)
+        mount::execute_unlock_and_mount(
+            runner,
+            fs,
+            params.config,
+            open_plan,
+            params.backing_path_resolver,
+            cred,
+        )
+        .map_err(InitialOpenFailure::Unlock)
     };
 
     state.just_mounted = match res {
@@ -1281,6 +1292,7 @@ pub fn plan_recover<R: CommandRunner + Sync, F: Filesystem + ?Sized>(
         fs,
         params.config,
         mount_membership,
+        params.backing_path_resolver,
         params.allow_degraded,
         "recover",
     );
@@ -2088,7 +2100,13 @@ fn discover_add_targets_before_mount<R: CommandRunner, F: Filesystem + ?Sized>(
             continue;
         }
 
-        let probed = probe::probe_config_disk(runner, fs, &target.name, &target.by_id)?;
+        let probed = probe::probe_config_disk(
+            runner,
+            fs,
+            &target.name,
+            &target.by_id,
+            params.backing_path_resolver,
+        )?;
         let ConfigDiskState::PresentLuks {
             uuid,
             label,
@@ -2135,7 +2153,13 @@ fn discover_add_targets_before_mount<R: CommandRunner, F: Filesystem + ?Sized>(
                 credential.as_ref().expect("credential was resolved above"),
                 "add recovery pre-mount discovery",
             )?;
-            luks::ensure_luks_open(runner, target.name.as_str(), &target.by_id, passphrase)?;
+            luks::ensure_luks_open(
+                runner,
+                target.name.as_str(),
+                &target.by_id,
+                params.backing_path_resolver,
+                passphrase,
+            )?;
         }
 
         let mapper = config::mapper_name(target.name.as_str());
@@ -2150,6 +2174,7 @@ fn verify_recover_passphrase_for_add_replay<R: CommandRunner, F: Filesystem + ?S
     fs: &F,
     pool: &PoolState,
     targets: &LuksUuidMap<journal::AddJournalTarget>,
+    backing_path_resolver: &dyn BackingPathResolver,
     passphrase: &Passphrase,
 ) -> Result<(), RecoverError> {
     let mut verify_targets: Vec<_> = pool
@@ -2175,7 +2200,13 @@ fn verify_recover_passphrase_for_add_replay<R: CommandRunner, F: Filesystem + ?S
         if live.contains(target_uuid) {
             continue;
         }
-        let probed = probe::probe_config_disk(runner, fs, &target.name, &target.by_id)?;
+        let probed = probe::probe_config_disk(
+            runner,
+            fs,
+            &target.name,
+            &target.by_id,
+            backing_path_resolver,
+        )?;
         let ConfigDiskState::PresentLuks { uuid, label, .. } = probed.state else {
             continue;
         };
@@ -2387,7 +2418,13 @@ fn execute_add_pool_mutation_recovery<R: CommandRunner + Sync, F: Filesystem + ?
             if live_member_uuids(&pool).contains(target_uuid) {
                 continue;
             }
-            let probed = probe::probe_config_disk(runner, fs, &target.name, &target.by_id)?;
+            let probed = probe::probe_config_disk(
+                runner,
+                fs,
+                &target.name,
+                &target.by_id,
+                params.backing_path_resolver,
+            )?;
             let ConfigDiskState::PresentLuks {
                 uuid,
                 label,
@@ -2429,7 +2466,13 @@ fn execute_add_pool_mutation_recovery<R: CommandRunner + Sync, F: Filesystem + ?
                     .as_ref()
                     .map(|p| p.expose_secret())
                     .expect("passphrase was resolved above");
-                luks::ensure_luks_open(runner, target.name.as_str(), &target.by_id, passphrase)?;
+                luks::ensure_luks_open(
+                    runner,
+                    target.name.as_str(),
+                    &target.by_id,
+                    params.backing_path_resolver,
+                    passphrase,
+                )?;
             }
             let mapper = config::mapper_name(target.name.as_str());
             if scan_mapper_if_btrfs_visible(runner, &format!("/dev/mapper/{}", mapper.0))? {
@@ -2450,6 +2493,7 @@ fn execute_add_pool_mutation_recovery<R: CommandRunner + Sync, F: Filesystem + ?
             fs,
             &pool,
             targets,
+            params.backing_path_resolver,
             passphrase.expose_secret(),
         )?;
         let _guard = params
@@ -2468,7 +2512,13 @@ fn execute_add_pool_mutation_recovery<R: CommandRunner + Sync, F: Filesystem + ?
                     verified_pool_fsid,
                     enroll_key_file,
                 } => {
-                    let probed = probe::probe_config_disk(runner, fs, &target.name, &target.by_id)?;
+                    let probed = probe::probe_config_disk(
+                        runner,
+                        fs,
+                        &target.name,
+                        &target.by_id,
+                        params.backing_path_resolver,
+                    )?;
                     let ConfigDiskState::PresentLuks {
                         uuid, mapper_open, ..
                     } = probed.state
@@ -2489,6 +2539,7 @@ fn execute_add_pool_mutation_recovery<R: CommandRunner + Sync, F: Filesystem + ?
                             runner,
                             target.name.as_str(),
                             &target.by_id,
+                            params.backing_path_resolver,
                             passphrase.expose_secret(),
                         )?;
                     }
@@ -2527,7 +2578,13 @@ fn execute_add_pool_mutation_recovery<R: CommandRunner + Sync, F: Filesystem + ?
                     extra_opts,
                     enroll_key_file,
                 } => {
-                    let probed = probe::probe_config_disk(runner, fs, &target.name, &target.by_id)?;
+                    let probed = probe::probe_config_disk(
+                        runner,
+                        fs,
+                        &target.name,
+                        &target.by_id,
+                        params.backing_path_resolver,
+                    )?;
                     let expected_label = format!("braid-{}", target.name);
                     match probed.state {
                         ConfigDiskState::PresentNotLuks => {
@@ -2584,6 +2641,7 @@ fn execute_add_pool_mutation_recovery<R: CommandRunner + Sync, F: Filesystem + ?
                         runner,
                         target.name.as_str(),
                         &target.by_id,
+                        params.backing_path_resolver,
                         passphrase.expose_secret(),
                     )?;
                     crate::pool::pool_add_device(runner, &mapper_path, mount_point, false)
@@ -2933,7 +2991,13 @@ fn finish_uncommitted_replace_recovery<R: CommandRunner + Sync, F: Filesystem + 
             // FreshLuks `luks_label` guard at finish-time. We use LUKS
             // UUID (not a braid label) because ExistingLuks targets
             // carry no braid label by definition.
-            let probed = probe::probe_config_disk(runner, fs, new_name, &new_target.by_id)?;
+            let probed = probe::probe_config_disk(
+                runner,
+                fs,
+                new_name,
+                &new_target.by_id,
+                params.backing_path_resolver,
+            )?;
             match &probed.state {
                 ConfigDiskState::PresentLuks { uuid, .. } if uuid == new_uuid => {}
                 ConfigDiskState::PresentLuks { uuid, .. } => {
@@ -3002,7 +3066,13 @@ fn finish_uncommitted_replace_recovery<R: CommandRunner + Sync, F: Filesystem + 
         journal::ReplaceJournalMode::FreshLuks {
             enroll_key_file, ..
         } => {
-            let probed = probe::probe_config_disk(runner, fs, new_name, &new_target.by_id)?;
+            let probed = probe::probe_config_disk(
+                runner,
+                fs,
+                new_name,
+                &new_target.by_id,
+                params.backing_path_resolver,
+            )?;
             let expected_label = format!("braid-{new_name}");
             match probed.state {
                 ConfigDiskState::PresentNotLuks => {
@@ -3412,6 +3482,7 @@ fn relock_and_remount<R: CommandRunner, F: Filesystem + ?Sized>(
     fs: &F,
     config: &Config,
     membership: &PoolMembership,
+    backing_path_resolver: &dyn BackingPathResolver,
     allow_degraded: bool,
     credential: &OpenCredential,
     close_names: &[DiskName],
@@ -3532,8 +3603,15 @@ fn relock_and_remount<R: CommandRunner, F: Filesystem + ?Sized>(
     // The cycle just closed planned mappers, so the cycle's plan ALWAYS has
     // `to_unlock` non-empty — we always pass the credential. (If somehow
     // plan_open_pool returns None here it means another mounter raced us.)
-    let cycle_report =
-        mount::plan_open_pool(runner, fs, config, membership, allow_degraded, "recover");
+    let cycle_report = mount::plan_open_pool(
+        runner,
+        fs,
+        config,
+        membership,
+        backing_path_resolver,
+        allow_degraded,
+        "recover",
+    );
     mount::print_probe_events(&cycle_report.events);
     let cycle_plan = cycle_report
         .result
@@ -3541,7 +3619,14 @@ fn relock_and_remount<R: CommandRunner, F: Filesystem + ?Sized>(
         .ok_or_else(|| {
             RecoverError::Failed("recover remount cycle: pool already mounted after umount?".into())
         })?;
-    match mount::execute_unlock_and_mount(runner, fs, config, &cycle_plan, credential) {
+    match mount::execute_unlock_and_mount(
+        runner,
+        fs,
+        config,
+        &cycle_plan,
+        backing_path_resolver,
+        credential,
+    ) {
         Ok(_) => {}
         Err(failure) => {
             let _ = mount::close_opened_mappers(
@@ -11858,11 +11943,17 @@ mod tests {
             );
         let close_names = vec![disk_name("disk1"), disk_name("disk2")];
 
+        let backing_path_resolver = crate::test_fixtures::MockBackingPathResolver::default()
+            .with_path("/dev/disk/by-id/virtio-disk1", "/dev/vda")
+            .with_path("/dev/disk/by-id/virtio-disk2", "/dev/vdb")
+            .with_path("/dev/disk/by-id/virtio-extra", "/dev/vdc");
+
         relock_and_remount(
             &runner,
             &fs,
             &config,
             &membership,
+            &backing_path_resolver,
             false,
             &OpenCredential::Passphrase(Passphrase::from_zeroizing(zeroize::Zeroizing::new(
                 "testpass".to_owned(),
@@ -12017,6 +12108,7 @@ mod tests {
             &fs,
             &config,
             &membership,
+            crate::test_fixtures::mock_virtio_backing_path_resolver(),
             false,
             &OpenCredential::Passphrase(Passphrase::from_zeroizing(zeroize::Zeroizing::new(
                 "testpass".to_owned(),
@@ -12170,6 +12262,7 @@ mod tests {
             &fs,
             &config,
             &membership,
+            crate::test_fixtures::mock_virtio_backing_path_resolver(),
             false,
             &OpenCredential::Passphrase(Passphrase::from_zeroizing(zeroize::Zeroizing::new(
                 "testpass".to_owned(),

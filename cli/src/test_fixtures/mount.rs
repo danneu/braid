@@ -409,7 +409,16 @@ pub(crate) fn open_and_mount_for_test<R: CommandRunner, F: Filesystem + ?Sized>(
     allow_degraded: bool,
     command_hint: &str,
 ) -> Result<bool, MountError> {
-    let report = plan_open_pool(runner, fs, config, membership, allow_degraded, command_hint);
+    let backing_path_resolver = shared::mock_virtio_backing_path_resolver();
+    let report = plan_open_pool(
+        runner,
+        fs,
+        config,
+        membership,
+        backing_path_resolver,
+        allow_degraded,
+        command_hint,
+    );
     let plan = match report.result? {
         Some(p) => p,
         None => return Ok(false),
@@ -420,7 +429,7 @@ pub(crate) fn open_and_mount_for_test<R: CommandRunner, F: Filesystem + ?Sized>(
         let credential = credential
             .as_ref()
             .expect("test passed empty credential with non-empty plan");
-        execute_unlock_and_mount(runner, fs, config, &plan, credential)
+        execute_unlock_and_mount(runner, fs, config, &plan, backing_path_resolver, credential)
             .map_err(|failure: UnlockAndMountFailure| failure.error)
     }
 }

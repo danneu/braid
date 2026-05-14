@@ -128,6 +128,11 @@
               braid = linuxCrane.braid;
             }
           );
+          braid-add-cloned-luks-header-rejected = pkgs.testers.nixosTest (
+            import ./tests/cli/braid-add-cloned-luks-header-rejected.nix {
+              braid = linuxCrane.braid;
+            }
+          );
           braid-add-persists-before-balance = pkgs.testers.nixosTest (
             import ./tests/cli/braid-add-persists-before-balance.nix {
               braid = linuxCrane.braid;
@@ -325,6 +330,11 @@
           );
           replace-new-already-luks = pkgs.testers.nixosTest (
             import ./tests/cli/replace-new-already-luks.nix {
+              braid = linuxCrane.braid;
+            }
+          );
+          replace-cloned-luks-header-rejected = pkgs.testers.nixosTest (
+            import ./tests/cli/replace-cloned-luks-header-rejected.nix {
               braid = linuxCrane.braid;
             }
           );

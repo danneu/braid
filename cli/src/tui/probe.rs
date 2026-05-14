@@ -4,7 +4,7 @@ use std::time::Instant;
 
 use crate::cmd::{CmdRequest, CommandRunner};
 use crate::config::FanControl;
-use crate::luks;
+use crate::luks::{self, BackingPathResolver};
 use crate::parse::types::{ScrubState, SmartHealth, SmartProbe};
 use crate::parse::{
     parse_btrfs_device_stats, parse_btrfs_device_usage, parse_btrfs_scrub_status,
@@ -29,6 +29,7 @@ pub fn probe_pool_for_tui<R: CommandRunner, F: Filesystem + ?Sized>(
     disk_luks_uuid: &HashMap<String, LuksUuid>,
     disk_devid: &HashMap<String, u64>,
     paths: &StatePaths,
+    backing_path_resolver: &dyn BackingPathResolver,
 ) -> Result<Option<PoolState>, String> {
     let domain = probe_pool(runner, fs, mount_point).map_err(|e| e.to_string())?;
 
@@ -221,20 +222,21 @@ pub fn probe_pool_for_tui<R: CommandRunner, F: Filesystem + ?Sized>(
         let by_id = ByIdPath::parse(by_id_path).expect("membership by-id paths are validated");
         let parsed_name =
             crate::types::DiskName::parse(disk_name).expect("membership disk names are validated");
-        let probed = match probe_config_disk(runner, fs, &parsed_name, &by_id) {
-            Ok(p) => p,
-            Err(ProbeError::UnsupportedLuksVersion { version, .. }) => {
-                // Surface the wrong-version disk explicitly instead of
-                // silently skipping it. The TUI is the only diagnostic
-                // path that doesn't bail on the gateway error.
-                unpooled_by_name.insert(
-                    disk_name.clone(),
-                    UnpooledDiskRender::WrongLuksVersion(version),
-                );
-                continue;
-            }
-            Err(_) => continue, // degrade gracefully — skip this disk
-        };
+        let probed =
+            match probe_config_disk(runner, fs, &parsed_name, &by_id, backing_path_resolver) {
+                Ok(p) => p,
+                Err(ProbeError::UnsupportedLuksVersion { version, .. }) => {
+                    // Surface the wrong-version disk explicitly instead of
+                    // silently skipping it. The TUI is the only diagnostic
+                    // path that doesn't bail on the gateway error.
+                    unpooled_by_name.insert(
+                        disk_name.clone(),
+                        UnpooledDiskRender::WrongLuksVersion(version),
+                    );
+                    continue;
+                }
+                Err(_) => continue, // degrade gracefully — skip this disk
+            };
         let render = match probed.state {
             ConfigDiskState::Absent => UnpooledDiskRender::Missing,
             ConfigDiskState::PresentLuks { uuid, .. } => {
@@ -851,6 +853,7 @@ mod tests {
             &tui_disk_luks_uuid(),
             &tui_disk_devid(),
             &test_paths().1,
+            crate::test_fixtures::mock_virtio_backing_path_resolver(),
         )
         .unwrap();
         let pool = result.expect("pool should be Some");
@@ -1008,6 +1011,7 @@ mod tests {
             &tui_disk_luks_uuid(),
             &tui_disk_devid(),
             &test_paths().1,
+            crate::test_fixtures::mock_virtio_backing_path_resolver(),
         )
         .unwrap();
         let pool = result.expect("pool should be Some");
@@ -1124,6 +1128,7 @@ mod tests {
             &tui_disk_luks_uuid(),
             &tui_disk_devid(),
             &test_paths().1,
+            crate::test_fixtures::mock_virtio_backing_path_resolver(),
         )
         .unwrap()
         .expect("pool should be Some");
@@ -1255,6 +1260,7 @@ mod tests {
             &tui_disk_luks_uuid(),
             &tui_disk_devid(),
             &test_paths().1,
+            crate::test_fixtures::mock_virtio_backing_path_resolver(),
         )
         .unwrap();
         let pool = result.expect("pool should be Some");
@@ -1393,6 +1399,7 @@ mod tests {
             &tui_disk_luks_uuid(),
             &tui_disk_devid(),
             &test_paths().1,
+            crate::test_fixtures::mock_virtio_backing_path_resolver(),
         )
         .unwrap()
         .expect("pool should be Some");
@@ -1475,6 +1482,7 @@ mod tests {
             &tui_disk_luks_uuid(),
             &tui_disk_devid(),
             &test_paths().1,
+            crate::test_fixtures::mock_virtio_backing_path_resolver(),
         )
         .unwrap()
         .expect("pool should be Some");
@@ -1544,6 +1552,7 @@ mod tests {
             &tui_disk_luks_uuid(),
             &tui_disk_devid(),
             &test_paths().1,
+            crate::test_fixtures::mock_virtio_backing_path_resolver(),
         )
         .unwrap()
         .expect("pool should be Some");
@@ -1624,6 +1633,7 @@ mod tests {
             &tui_disk_luks_uuid(),
             &tui_disk_devid(),
             &test_paths().1,
+            crate::test_fixtures::mock_virtio_backing_path_resolver(),
         )
         .unwrap()
         .expect("pool should be Some");
@@ -1694,6 +1704,7 @@ mod tests {
             &tui_disk_luks_uuid(),
             &tui_disk_devid(),
             &test_paths().1,
+            crate::test_fixtures::mock_virtio_backing_path_resolver(),
         )
         .unwrap()
         .expect("pool should be Some");

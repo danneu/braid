@@ -110,6 +110,27 @@ pub enum LuksError {
         expected: LuksUuid,
         found: Option<LuksUuid>,
     },
+    #[error(
+        "disk '{name}' mapper '/dev/mapper/braid-{name}' is open but backed by \
+         '{found_path}', not the configured disk at '{expected_path}'. Close \
+         the conflicting mapper with 'sudo cryptsetup close braid-{name}' and \
+         re-run."
+    )]
+    MapperBackingMismatch {
+        name: String,
+        expected_path: String,
+        found_path: String,
+    },
+    #[error(
+        "disk '{name}' mapper backing-path check failed: could not \
+         canonicalize '{by_id}' ({source}). Check that the configured disk is \
+         plugged in and that udev has populated /dev/disk/by-id/."
+    )]
+    MapperBackingResolveError {
+        name: String,
+        by_id: String,
+        source: std::io::Error,
+    },
     #[error("parse error: {0}")]
     Parse(#[from] ParseError),
     #[error("command failed: {0}")]
@@ -676,6 +697,23 @@ pub(crate) fn luks_header_unreadable_guidance() -> &'static str {
     off-system backup, recovery may be limited or impossible."
 }
 
+/// Resolves live block-device paths for mapper ownership checks without
+/// widening the generic filesystem probe surface.
+pub trait BackingPathResolver {
+    /// Canonicalize a device path so by-id symlinks and mapper backing
+    /// paths can be compared as kernel block devices.
+    fn canonicalize(&self, path: &str) -> Result<String, std::io::Error>;
+}
+
+/// Production backing-path resolver backed by `std::fs::canonicalize`.
+pub struct RealBackingPathResolver;
+
+impl BackingPathResolver for RealBackingPathResolver {
+    fn canonicalize(&self, path: &str) -> Result<String, std::io::Error> {
+        std::fs::canonicalize(path).map(|p| p.to_string_lossy().into_owned())
+    }
+}
+
 /// Guidance text for a damaged-metadata LUKS header. Always pairs the
 /// `cryptsetup repair` suggestion with an explicit safe-backup warning
 /// because repair mutates the header.
@@ -689,8 +727,8 @@ pub(crate) fn luks_header_damaged_guidance(device: &str) -> String {
 
 /// Shared mapper ownership classifier surface. Keep this top-level so
 /// planner-time probes and executor-time unlocks use the same ownership
-/// invariant: an active braid mapper is ours only when its backing LUKS
-/// UUID matches the configured by-id disk.
+/// invariant: an active braid mapper is ours only when its backing block
+/// device and LUKS UUID both match the configured by-id disk.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum MapperOwnership {
     Inactive,
@@ -704,6 +742,18 @@ pub(crate) enum OwnershipError {
         name: String,
         expected: LuksUuid,
         found: Option<LuksUuid>,
+    },
+    #[error("mapper backing mismatch on '{name}': expected {expected_path}, found {found_path}")]
+    BackingPathMismatch {
+        name: String,
+        expected_path: String,
+        found_path: String,
+    },
+    #[error("mapper backing path resolve error on '{name}' for '{by_id}': {source}")]
+    BackingPathResolveError {
+        name: String,
+        by_id: String,
+        source: std::io::Error,
     },
     #[error("parse error: {0}")]
     Parse(#[from] ParseError),
@@ -722,6 +772,24 @@ impl From<OwnershipError> for LuksError {
                 name,
                 expected,
                 found,
+            },
+            OwnershipError::BackingPathMismatch {
+                name,
+                expected_path,
+                found_path,
+            } => LuksError::MapperBackingMismatch {
+                name,
+                expected_path,
+                found_path,
+            },
+            OwnershipError::BackingPathResolveError {
+                name,
+                by_id,
+                source,
+            } => LuksError::MapperBackingResolveError {
+                name,
+                by_id,
+                source,
             },
             OwnershipError::Parse(err) => LuksError::Parse(err),
             OwnershipError::Cmd(err) => LuksError::Cmd(err),
@@ -749,6 +817,8 @@ pub(crate) fn classify_mapper_ownership<R, F>(
     runner: &R,
     name: &str,
     mapper: &MapperName,
+    expected_by_id: &ByIdPath,
+    backing_path_resolver: &dyn BackingPathResolver,
     expected_uuid: F,
 ) -> Result<MapperOwnership, OwnershipError>
 where
@@ -764,9 +834,9 @@ where
         return Ok(MapperOwnership::Inactive);
     }
 
-    let expected = expected_uuid()?;
     let underlying = match status.device.as_deref() {
         None | Some("") | Some("(null)") => {
+            let expected = expected_uuid()?;
             return Err(OwnershipError::Conflict {
                 name: name.to_owned(),
                 expected,
@@ -776,6 +846,29 @@ where
         Some(device) => device,
     };
 
+    let expected_path = backing_path_resolver
+        .canonicalize(expected_by_id.as_str())
+        .map_err(|e| OwnershipError::BackingPathResolveError {
+            name: name.to_owned(),
+            by_id: expected_by_id.as_str().to_owned(),
+            source: e,
+        })?;
+    let found_path = backing_path_resolver
+        .canonicalize(underlying)
+        .map_err(|e| OwnershipError::BackingPathResolveError {
+            name: name.to_owned(),
+            by_id: underlying.to_owned(),
+            source: e,
+        })?;
+    if expected_path != found_path {
+        return Err(OwnershipError::BackingPathMismatch {
+            name: name.to_owned(),
+            expected_path,
+            found_path,
+        });
+    }
+
+    let expected = expected_uuid()?;
     let backing_raw = runner.run(&CmdRequest::CryptsetupLuksUuid {
         device: underlying.to_owned(),
     })?;
@@ -807,10 +900,11 @@ pub fn ensure_luks_open<R: CommandRunner>(
     runner: &R,
     name: &str,
     by_id: &ByIdPath,
+    backing_path_resolver: &dyn BackingPathResolver,
     passphrase: &Passphrase,
 ) -> Result<OpenOutcome, LuksError> {
     let mn = mapper_name(name);
-    if classify_mapper_ownership(runner, name, &mn, || {
+    if classify_mapper_ownership(runner, name, &mn, by_id, backing_path_resolver, || {
         luks_uuid_for_device(runner, by_id.as_str())
     })? == MapperOwnership::Owned
     {
@@ -853,10 +947,11 @@ pub fn ensure_luks_open_with_key_file<R: CommandRunner>(
     runner: &R,
     name: &str,
     by_id: &ByIdPath,
+    backing_path_resolver: &dyn BackingPathResolver,
     key_file_path: &std::path::Path,
 ) -> Result<OpenOutcome, LuksError> {
     let mn = mapper_name(name);
-    if classify_mapper_ownership(runner, name, &mn, || {
+    if classify_mapper_ownership(runner, name, &mn, by_id, backing_path_resolver, || {
         luks_uuid_for_device(runner, by_id.as_str())
     })? == MapperOwnership::Owned
     {
@@ -1020,6 +1115,7 @@ pub fn header_backup_advisories(paths: &StatePaths) -> Vec<String> {
 mod tests {
     use super::*;
     use crate::cmd::{CmdRequest, MockRunner, RawCommandOutput};
+    use crate::test_fixtures::MockBackingPathResolver;
     use crate::types::ByIdPath;
     use std::os::unix::io::{AsRawFd, FromRawFd, RawFd};
 
@@ -1624,6 +1720,7 @@ mod tests {
             &runner,
             "testdisk",
             &ByIdPath::parse("/dev/disk/by-id/test-disk").unwrap(),
+            &MockBackingPathResolver::default(),
             &zpass("wrong"),
         )
         .unwrap_err();
@@ -1673,6 +1770,7 @@ mod tests {
             &runner,
             "vanished",
             &ByIdPath::parse("/dev/disk/by-id/vanished-disk").unwrap(),
+            &MockBackingPathResolver::default(),
             &zpass("pass"),
         )
         .unwrap_err();
@@ -1721,6 +1819,7 @@ mod tests {
             &runner,
             "testdisk",
             &ByIdPath::parse("/dev/disk/by-id/test-disk").unwrap(),
+            &MockBackingPathResolver::default(),
             kf.path(),
         )
         .unwrap_err();
@@ -1769,6 +1868,7 @@ mod tests {
             &runner,
             "vanished",
             &ByIdPath::parse("/dev/disk/by-id/vanished-disk").unwrap(),
+            &MockBackingPathResolver::default(),
             kf.path(),
         )
         .unwrap_err();
@@ -1813,7 +1913,14 @@ mod tests {
                 },
             );
 
-        ensure_luks_open(&runner, "disk1", &by_id, &zpass("pass")).unwrap();
+        ensure_luks_open(
+            &runner,
+            "disk1",
+            &by_id,
+            &MockBackingPathResolver::default(),
+            &zpass("pass"),
+        )
+        .unwrap();
 
         assert_eq!(
             runner.requests(),
@@ -1860,7 +1967,10 @@ mod tests {
                 luks_uuid_output("/dev/vdb", uuid),
             );
 
-        ensure_luks_open(&runner, "disk1", &by_id, &zpass("pass")).unwrap();
+        let resolver =
+            MockBackingPathResolver::default().with_path("/dev/disk/by-id/disk1", "/dev/vdb");
+
+        ensure_luks_open(&runner, "disk1", &by_id, &resolver, &zpass("pass")).unwrap();
 
         assert_eq!(
             runner.requests(),
@@ -1875,6 +1985,230 @@ mod tests {
                     device: "/dev/vdb".into(),
                 },
             ]
+        );
+    }
+
+    /*
+     * Intent: mapper ownership rejects an active mapper whose canonical
+     *   backing path differs from the configured by-id path even if UUID
+     *   probing would otherwise be possible.
+     * Why it exists: cloned LUKS headers make UUID equality insufficient at
+     *   the live mapper boundary.
+     * Scenario: braid-disk1 is already open against /dev/vdz while the
+     *   configured by-id path resolves to /dev/vdb.
+     */
+    #[test]
+    fn classify_mapper_ownership_backing_path_mismatch_errors() {
+        let by_id = ByIdPath::parse("/dev/disk/by-id/disk1").unwrap();
+        let runner = MockRunner::default().with_output(
+            CmdRequest::CryptsetupStatus {
+                mapper: MapperName("braid-disk1".into()),
+            },
+            crypt_status_active("braid-disk1", "/dev/vdz"),
+        );
+        let resolver =
+            MockBackingPathResolver::default().with_path("/dev/disk/by-id/disk1", "/dev/vdb");
+
+        let err = classify_mapper_ownership(
+            &runner,
+            "disk1",
+            &MapperName("braid-disk1".into()),
+            &by_id,
+            &resolver,
+            || Ok(LuksUuid::parse("11111111-1111-1111-1111-111111111111").unwrap()),
+        )
+        .unwrap_err();
+
+        match err {
+            OwnershipError::BackingPathMismatch {
+                name,
+                expected_path,
+                found_path,
+            } => {
+                assert_eq!(name, "disk1");
+                assert_eq!(expected_path, "/dev/vdb");
+                assert_eq!(found_path, "/dev/vdz");
+            }
+            other => panic!("expected BackingPathMismatch, got {other:?}"),
+        }
+        assert!(
+            !runner
+                .requests()
+                .iter()
+                .any(|request| matches!(request, CmdRequest::CryptsetupLuksUuid { .. })),
+            "path mismatch must fail before UUID probing"
+        );
+    }
+
+    /*
+     * Intent: mapper ownership still accepts the already-open mapper when
+     *   both canonical backing path and LUKS UUID match.
+     * Why it exists: the path check must tighten, not break, idempotent
+     *   unlock of the correct mapper.
+     * Scenario: by-id resolves to /dev/vdb and cryptsetup status reports the
+     *   mapper is backed by /dev/vdb with the expected UUID.
+     */
+    #[test]
+    fn classify_mapper_ownership_backing_path_and_uuid_match_is_owned() {
+        let by_id = ByIdPath::parse("/dev/disk/by-id/disk1").unwrap();
+        let uuid = "11111111-1111-1111-1111-111111111111";
+        let runner = MockRunner::default()
+            .with_output(
+                CmdRequest::CryptsetupStatus {
+                    mapper: MapperName("braid-disk1".into()),
+                },
+                crypt_status_active("braid-disk1", "/dev/vdb"),
+            )
+            .with_output(
+                CmdRequest::CryptsetupLuksUuid {
+                    device: "/dev/vdb".into(),
+                },
+                luks_uuid_output("/dev/vdb", uuid),
+            );
+        let resolver =
+            MockBackingPathResolver::default().with_path("/dev/disk/by-id/disk1", "/dev/vdb");
+
+        let ownership = classify_mapper_ownership(
+            &runner,
+            "disk1",
+            &MapperName("braid-disk1".into()),
+            &by_id,
+            &resolver,
+            || Ok(LuksUuid::parse(uuid).unwrap()),
+        )
+        .unwrap();
+
+        assert_eq!(ownership, MapperOwnership::Owned);
+    }
+
+    /*
+     * Intent: canonicalization failure on the configured by-id path surfaces
+     *   as a resolve error, not a mismatch.
+     * Why it exists: operators need udev/device-presence remediation for
+     *   vanished by-id paths, not "close mapper" guidance.
+     * Scenario: status reports an active mapper, but the configured by-id
+     *   symlink cannot be canonicalized.
+     */
+    #[test]
+    fn classify_mapper_ownership_expected_path_resolve_error_is_distinct() {
+        let by_id = ByIdPath::parse("/dev/disk/by-id/disk1").unwrap();
+        let runner = MockRunner::default().with_output(
+            CmdRequest::CryptsetupStatus {
+                mapper: MapperName("braid-disk1".into()),
+            },
+            crypt_status_active("braid-disk1", "/dev/vdb"),
+        );
+        let resolver = MockBackingPathResolver::default()
+            .with_error("/dev/disk/by-id/disk1", std::io::ErrorKind::NotFound);
+
+        let err = classify_mapper_ownership(
+            &runner,
+            "disk1",
+            &MapperName("braid-disk1".into()),
+            &by_id,
+            &resolver,
+            || Ok(LuksUuid::parse("11111111-1111-1111-1111-111111111111").unwrap()),
+        )
+        .unwrap_err();
+
+        match err {
+            OwnershipError::BackingPathResolveError {
+                name,
+                by_id,
+                source,
+            } => {
+                assert_eq!(name, "disk1");
+                assert_eq!(by_id, "/dev/disk/by-id/disk1");
+                assert_eq!(source.kind(), std::io::ErrorKind::NotFound);
+            }
+            other => panic!("expected BackingPathResolveError, got {other:?}"),
+        }
+    }
+
+    /*
+     * Intent: canonicalization failure on the mapper backing path surfaces
+     *   as the same resolve-error family and names the backing path.
+     * Why it exists: backing path resolution can fail independently of the
+     *   configured by-id symlink.
+     * Scenario: cryptsetup status reports /dev/vdb, but canonicalizing that
+     *   kernel path fails.
+     */
+    #[test]
+    fn classify_mapper_ownership_backing_path_resolve_error_names_backing() {
+        let by_id = ByIdPath::parse("/dev/disk/by-id/disk1").unwrap();
+        let runner = MockRunner::default().with_output(
+            CmdRequest::CryptsetupStatus {
+                mapper: MapperName("braid-disk1".into()),
+            },
+            crypt_status_active("braid-disk1", "/dev/vdb"),
+        );
+        let resolver = MockBackingPathResolver::default()
+            .with_path("/dev/disk/by-id/disk1", "/dev/vdb")
+            .with_error("/dev/vdb", std::io::ErrorKind::PermissionDenied);
+
+        let err = classify_mapper_ownership(
+            &runner,
+            "disk1",
+            &MapperName("braid-disk1".into()),
+            &by_id,
+            &resolver,
+            || Ok(LuksUuid::parse("11111111-1111-1111-1111-111111111111").unwrap()),
+        )
+        .unwrap_err();
+
+        match err {
+            OwnershipError::BackingPathResolveError {
+                name,
+                by_id,
+                source,
+            } => {
+                assert_eq!(name, "disk1");
+                assert_eq!(by_id, "/dev/vdb");
+                assert_eq!(source.kind(), std::io::ErrorKind::PermissionDenied);
+            }
+            other => panic!("expected BackingPathResolveError, got {other:?}"),
+        }
+    }
+
+    /*
+     * Intent: ensure_luks_open preserves the dedicated backing resolve error
+     *   variant and remediation wording from the ownership classifier.
+     * Why it exists: the command boundary must not collapse resolver errors
+     *   into generic validation or UUID-conflict text.
+     * Scenario: an already-open mapper exists, but the configured by-id path
+     *   cannot be resolved during the ownership check.
+     */
+    #[test]
+    fn ensure_luks_open_backing_resolve_error_preserves_remediation() {
+        let by_id = ByIdPath::parse("/dev/disk/by-id/disk1").unwrap();
+        let runner = MockRunner::default().with_output(
+            CmdRequest::CryptsetupStatus {
+                mapper: MapperName("braid-disk1".into()),
+            },
+            crypt_status_active("braid-disk1", "/dev/vdb"),
+        );
+        let resolver = MockBackingPathResolver::default()
+            .with_error("/dev/disk/by-id/disk1", std::io::ErrorKind::NotFound);
+
+        let err =
+            ensure_luks_open(&runner, "disk1", &by_id, &resolver, &zpass("pass")).unwrap_err();
+        let msg = err.to_string();
+
+        match &err {
+            LuksError::MapperBackingResolveError {
+                name,
+                by_id,
+                source,
+            } => {
+                assert_eq!(name, "disk1");
+                assert_eq!(by_id, "/dev/disk/by-id/disk1");
+                assert_eq!(source.kind(), std::io::ErrorKind::NotFound);
+            }
+            other => panic!("expected MapperBackingResolveError, got {other:?}"),
+        }
+        assert!(
+            msg.contains("Check that the configured disk is plugged in"),
+            "resolver remediation missing from Display: {msg}"
         );
     }
 
@@ -1910,7 +2244,11 @@ mod tests {
                 luks_uuid_output("/dev/vdz", found_uuid),
             );
 
-        let err = ensure_luks_open(&runner, "disk1", &by_id, &zpass("pass")).unwrap_err();
+        let resolver =
+            MockBackingPathResolver::default().with_path("/dev/disk/by-id/disk1", "/dev/vdz");
+
+        let err =
+            ensure_luks_open(&runner, "disk1", &by_id, &resolver, &zpass("pass")).unwrap_err();
 
         match err {
             LuksError::MapperConflict {
@@ -1961,7 +2299,14 @@ mod tests {
                 luks_uuid_output(by_id.as_str(), expected_uuid),
             );
 
-        let err = ensure_luks_open(&runner, "disk1", &by_id, &zpass("pass")).unwrap_err();
+        let err = ensure_luks_open(
+            &runner,
+            "disk1",
+            &by_id,
+            &MockBackingPathResolver::default(),
+            &zpass("pass"),
+        )
+        .unwrap_err();
 
         match err {
             LuksError::MapperConflict {
@@ -2008,7 +2353,11 @@ mod tests {
                 luks_uuid_not_luks("/dev/vdz"),
             );
 
-        let err = ensure_luks_open(&runner, "disk1", &by_id, &zpass("pass")).unwrap_err();
+        let resolver =
+            MockBackingPathResolver::default().with_path("/dev/disk/by-id/disk1", "/dev/vdz");
+
+        let err =
+            ensure_luks_open(&runner, "disk1", &by_id, &resolver, &zpass("pass")).unwrap_err();
 
         assert!(matches!(err, LuksError::MapperConflict { found: None, .. }));
         assert!(
@@ -2052,7 +2401,10 @@ mod tests {
                 luks_uuid_output("/dev/vdb", uuid),
             );
 
-        ensure_luks_open_with_key_file(&runner, "disk1", &by_id, kf.path()).unwrap();
+        let resolver =
+            MockBackingPathResolver::default().with_path("/dev/disk/by-id/disk1", "/dev/vdb");
+
+        ensure_luks_open_with_key_file(&runner, "disk1", &by_id, &resolver, kf.path()).unwrap();
 
         assert!(
             !runner
@@ -2097,7 +2449,11 @@ mod tests {
                 luks_uuid_output("/dev/vdz", found_uuid),
             );
 
-        let err = ensure_luks_open_with_key_file(&runner, "disk1", &by_id, kf.path()).unwrap_err();
+        let resolver =
+            MockBackingPathResolver::default().with_path("/dev/disk/by-id/disk1", "/dev/vdz");
+
+        let err = ensure_luks_open_with_key_file(&runner, "disk1", &by_id, &resolver, kf.path())
+            .unwrap_err();
 
         assert!(matches!(
             err,
@@ -2137,7 +2493,14 @@ mod tests {
                 luks_uuid_output(by_id.as_str(), expected_uuid),
             );
 
-        let err = ensure_luks_open_with_key_file(&runner, "disk1", &by_id, kf.path()).unwrap_err();
+        let err = ensure_luks_open_with_key_file(
+            &runner,
+            "disk1",
+            &by_id,
+            &MockBackingPathResolver::default(),
+            kf.path(),
+        )
+        .unwrap_err();
 
         assert!(matches!(err, LuksError::MapperConflict { found: None, .. }));
     }
@@ -2159,7 +2522,14 @@ mod tests {
             crypt_status_active_missing_device("braid-disk1"),
         );
 
-        let err = ensure_luks_open(&runner, "disk1", &by_id, &zpass("pass")).unwrap_err();
+        let err = ensure_luks_open(
+            &runner,
+            "disk1",
+            &by_id,
+            &MockBackingPathResolver::default(),
+            &zpass("pass"),
+        )
+        .unwrap_err();
 
         assert!(matches!(
             err,
@@ -2198,7 +2568,11 @@ mod tests {
                 luks_uuid_invalid("/dev/vdb"),
             );
 
-        let err = ensure_luks_open(&runner, "disk1", &by_id, &zpass("pass")).unwrap_err();
+        let resolver =
+            MockBackingPathResolver::default().with_path("/dev/disk/by-id/disk1", "/dev/vdb");
+
+        let err =
+            ensure_luks_open(&runner, "disk1", &by_id, &resolver, &zpass("pass")).unwrap_err();
 
         assert!(matches!(
             err,

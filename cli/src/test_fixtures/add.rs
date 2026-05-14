@@ -3,7 +3,7 @@
 //! plan-boundary topology, `AddParamsBuilder`, and the add-only
 //! `PoolFixture` constructors.
 
-use super::shared::{PoolFixture, mock_ok};
+use super::shared::{PoolFixture, mock_ok, mock_virtio_offset_backing_path_resolver};
 use crate::add::AddParams;
 use crate::cmd::{CmdRequest, MockRunner, RawCommandOutput};
 use crate::inhibit::RecordingInhibitor;
@@ -73,6 +73,7 @@ impl PoolFixture {
             paths: &self.paths,
             inhibitor: &self.inhibitor,
             passphrase_reader: &RealTty,
+            backing_path_resolver: mock_virtio_offset_backing_path_resolver(),
         }
     }
 }
@@ -101,6 +102,7 @@ pub(crate) struct AddParamsBuilder<'a> {
     paths: &'a StatePaths,
     inhibitor: &'a RecordingInhibitor,
     passphrase_reader: &'a dyn PassphraseReader,
+    backing_path_resolver: &'a dyn crate::luks::BackingPathResolver,
 }
 
 #[allow(dead_code)]
@@ -137,6 +139,13 @@ impl<'a> AddParamsBuilder<'a> {
         self.passphrase_reader = reader;
         self
     }
+    pub(crate) fn backing_path_resolver(
+        mut self,
+        resolver: &'a dyn crate::luks::BackingPathResolver,
+    ) -> Self {
+        self.backing_path_resolver = resolver;
+        self
+    }
     pub(crate) fn build(self) -> AddParams<'a> {
         AddParams {
             config_path: self.config_path,
@@ -151,6 +160,7 @@ impl<'a> AddParamsBuilder<'a> {
             paths: self.paths,
             sleep_inhibitor: self.inhibitor,
             passphrase_reader: self.passphrase_reader,
+            backing_path_resolver: self.backing_path_resolver,
         }
     }
 }

@@ -732,6 +732,8 @@ where
                 | ProbeError::PoolDevice { .. }
                 | ProbeError::UnsupportedLuksVersion { .. }
                 | ProbeError::MapperConflict { .. }
+                | ProbeError::MapperBackingMismatch { .. }
+                | ProbeError::MapperBackingResolveError { .. }
                 | ProbeError::MountInfo(_)),
             ) => {
                 let fsid = probe_fsid(runner, fs, &mount_point)

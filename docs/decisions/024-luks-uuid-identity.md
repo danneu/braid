@@ -115,7 +115,12 @@ one.
    LUKS UUIDs. If a `null_underlying` mapper's persisted devid resolves to
    multiple membership UUIDs, `lock` warns, leaves that mapper open, and marks
    cleanup uncertain instead of demoting it to orphan cleanup.
-8. Recovery must fail closed when a live btrfs device lacks an observable LUKS
+8. Commands that reuse an already-open expected mapper for a requested by-id
+   path must verify the mapper's canonical backing path before trusting the
+   mapper's LUKS UUID. A cloned LUKS header can give two physical devices the
+   same UUID, so the runtime proof is backing path match first, then UUID
+   match.
+9. Recovery must fail closed when a live btrfs device lacks an observable LUKS
    UUID and the journal has no persisted devid binding. It must not recover by
    inferring identity from `braid-<DiskName>`.
 
@@ -162,6 +167,9 @@ one.
 - `cli/src/enroll_key_file.rs` unit tests verify standalone enroll rejects a
   member whose live LUKS UUID does not match the pool.json membership key
   before any slot inventory or keyfile mutation runs.
+- `cli/src/luks.rs` and `cli/src/probe.rs` unit tests verify already-open
+  expected mappers must have the requested backing path before UUID ownership
+  is accepted.
 - `tests/cli/luks-mapper-drift.py` verifies `braid lock` closes the observed
   drifted mapper owned by a member UUID.
 - `tests/cli/unlock-uuid-mismatch.py`,
@@ -171,6 +179,10 @@ one.
   or mount.
 - `tests/cli/replace-new-in-pool-guard.py` verifies duplicate LUKS UUIDs are
   rejected before braid writes membership or calls into btrfs mutation.
+- `tests/cli/braid-add-cloned-luks-header-rejected.py` and
+  `tests/cli/replace-cloned-luks-header-rejected.py` verify cloned LUKS
+  headers cannot make add or replace reuse a mapper opened from the wrong
+  physical device.
 - `tests/cli/braid-add-persists-before-balance.py` verifies fresh add writes
   canonical UUID-keyed membership, without a duplicate value-side `luks_uuid`,
   before post-add maintenance continues.

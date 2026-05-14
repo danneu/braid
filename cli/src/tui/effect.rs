@@ -63,6 +63,7 @@ pub fn execute_effect(effect: Effect, cmd_tx: &mpsc::Sender<Event>) {
                 let start = std::time::Instant::now();
                 let runner = RealRunner;
                 let fs = crate::probe::RealFilesystem;
+                let backing_path_resolver = crate::luks::RealBackingPathResolver;
                 let result = crate::tui::probe::probe_pool_for_tui(
                     &runner,
                     &fs,
@@ -71,6 +72,7 @@ pub fn execute_effect(effect: Effect, cmd_tx: &mpsc::Sender<Event>) {
                     &disk_luks_uuid,
                     &disk_devid,
                     &paths,
+                    &backing_path_resolver,
                 );
                 let elapsed = start.elapsed();
                 let _ = tx.send(Event::PoolProbeFinished(result, elapsed));

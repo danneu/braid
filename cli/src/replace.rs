@@ -7,7 +7,8 @@ use crate::credential_verify::{
 use crate::inhibit::AcquireSleepInhibitor;
 use crate::journal;
 use crate::luks::{
-    backup_luks_header_post_mutation, ensure_luks_open, format_keyfile_asymmetry_warning,
+    BackingPathResolver, OwnershipError, backup_luks_header_post_mutation,
+    classify_mapper_ownership, ensure_luks_open, format_keyfile_asymmetry_warning,
     format_keyfile_enrollment_probe_failure, luks_format, probe_pool_keyfile_enrollment,
     read_passphrase,
 };
@@ -84,6 +85,26 @@ pub enum ReplaceError {
         expected: LuksUuid,
         observed: String,
     },
+    #[error(
+        "replace target '{by_id}' open mapper backing mismatch: mapper is backed by \
+         '{found_path}', expected '{expected_path}' -- close the conflicting mapper \
+         with 'sudo cryptsetup close braid-<name>' and re-run."
+    )]
+    NewTargetMapperBackingMismatch {
+        by_id: ByIdPath,
+        expected_path: String,
+        found_path: String,
+    },
+    #[error(
+        "replace target '{by_id}' open mapper backing-path check failed: could not \
+         canonicalize '{resolved}' ({source_message}) -- check that the disk is plugged in \
+         and that udev has populated /dev/disk/by-id/."
+    )]
+    NewTargetMapperBackingResolveError {
+        by_id: ByIdPath,
+        resolved: String,
+        source_message: String,
+    },
     /// Operator-supplied `--old <name>` did not resolve to a member of
     /// the persisted pool membership. The display name they typed has
     /// no `(uuid, member)` entry; planning aborts before any inhibitor,
@@ -147,6 +168,9 @@ pub struct ReplaceParams<'a> {
     /// Sleeper seam for retrying transiently-busy mapper closes without
     /// slowing unit tests.
     pub sleeper: &'a dyn progress::Sleeper,
+    /// Seam for resolving by-id paths and mapper backings to the same
+    /// kernel block-device namespace at the already-open mapper boundary.
+    pub backing_path_resolver: &'a dyn BackingPathResolver,
 }
 
 /// Dry-run preview source of truth for `braid replace` plus the preflight
@@ -654,7 +678,13 @@ impl ReplacePlan {
                 // journaled UUID into the disk's header before the open,
                 // and any swap-in-place reformat is caught by FreshLuks
                 // adoption gates at finish-time and recovery replay.
-                ensure_luks_open(runner, new_name.as_str(), &new_by_id, &passphrase)?;
+                ensure_luks_open(
+                    runner,
+                    new_name.as_str(),
+                    &new_by_id,
+                    params.backing_path_resolver,
+                    &passphrase,
+                )?;
                 eprint!(
                     "{}",
                     status_line(
@@ -719,7 +749,13 @@ impl ReplacePlan {
                     // targets skip this gate (the `cryptsetup luksFormat`
                     // step writes the journaled UUID directly).
                     probe_existing_luks_new_target_uuid(runner, &new_by_id, &new_uuid)?;
-                    ensure_luks_open(runner, new_name.as_str(), &new_by_id, &passphrase)?;
+                    ensure_luks_open(
+                        runner,
+                        new_name.as_str(),
+                        &new_by_id,
+                        params.backing_path_resolver,
+                        &passphrase,
+                    )?;
                     eprint!(
                         "{}",
                         status_line(
@@ -729,9 +765,20 @@ impl ReplacePlan {
                         )
                     );
                 } else if !pool.devices.iter().any(|d| d.mapper == new_mn) {
-                    // mapper_open: identity has already been verified by
-                    // `verify_credential_for_targets` against `new_by_id`
-                    // above, so the by-id re-probe is not required here.
+                    // Open-boundary defense-in-depth for the already-open
+                    // path: re-classify ownership right before
+                    // `pool_replace_device` so a close+reopen between
+                    // planning and execution cannot route pool data into a
+                    // foreign disk. The classifier checks both backing path
+                    // and UUID, which catches cloned LUKS headers.
+                    verify_existing_luks_open_mapper_target(
+                        runner,
+                        new_name.as_str(),
+                        &new_mn,
+                        &new_by_id,
+                        &new_uuid,
+                        params.backing_path_resolver,
+                    )?;
                     eprintln!(
                         "note: LUKS mapper is already open but device is not yet in pool. Completing replace."
                     );
@@ -938,6 +985,54 @@ fn probe_existing_luks_new_target_uuid<R: CommandRunner>(
             observed: format!("probe parse failed: {e}"),
         }),
     }
+}
+
+/// Re-classify an already-open ExistingLuks replace target at execute time
+/// so the final mutation boundary checks live mapper backing path and UUID.
+fn verify_existing_luks_open_mapper_target<R: CommandRunner>(
+    runner: &R,
+    new_name: &str,
+    new_mapper: &MapperName,
+    new_by_id: &ByIdPath,
+    new_uuid: &LuksUuid,
+    backing_path_resolver: &dyn BackingPathResolver,
+) -> Result<(), ReplaceError> {
+    classify_mapper_ownership(
+        runner,
+        new_name,
+        new_mapper,
+        new_by_id,
+        backing_path_resolver,
+        || Ok(new_uuid.clone()),
+    )
+    .map(|_| ())
+    .map_err(|e| match e {
+        OwnershipError::BackingPathMismatch {
+            expected_path,
+            found_path,
+            ..
+        } => ReplaceError::NewTargetMapperBackingMismatch {
+            by_id: new_by_id.clone(),
+            expected_path,
+            found_path,
+        },
+        OwnershipError::BackingPathResolveError { by_id, source, .. } => {
+            ReplaceError::NewTargetMapperBackingResolveError {
+                by_id: new_by_id.clone(),
+                resolved: by_id,
+                source_message: source.to_string(),
+            }
+        }
+        OwnershipError::Conflict { found, .. } => ReplaceError::NewTargetUuidMismatchAtOpen {
+            by_id: new_by_id.clone(),
+            expected: new_uuid.clone(),
+            observed: found
+                .map(|u| u.as_str().to_owned())
+                .unwrap_or_else(|| "(no backing)".into()),
+        },
+        OwnershipError::Parse(e) => ReplaceError::Validation(e.to_string()),
+        OwnershipError::Cmd(e) => ReplaceError::Validation(e.to_string()),
+    })
 }
 
 /// True iff the stats row identified by `devid` has any non-zero error
@@ -1169,7 +1264,13 @@ pub fn plan_replace<R: CommandRunner + Sync, F: Filesystem + ?Sized>(
     };
 
     // Probe --new disk state
-    let new_probed = match probe_config_disk(runner, fs, &new_name_parsed, &new_by_id) {
+    let new_probed = match probe_config_disk(
+        runner,
+        fs,
+        &new_name_parsed,
+        &new_by_id,
+        params.backing_path_resolver,
+    ) {
         Ok(p) => p,
         Err(e) => {
             return Err(PlanFailure::with_notes(notes, e.into()));
@@ -1829,6 +1930,7 @@ mod tests {
     use super::*;
     use crate::cmd::{CmdRequest, MockRunner, RawCommandOutput};
     use crate::state_paths::StatePaths;
+    use crate::test_fixtures::MockBackingPathResolver;
 
     fn test_paths() -> (tempfile::TempDir, StatePaths) {
         let tmp = tempfile::TempDir::new().unwrap();
@@ -4487,6 +4589,8 @@ mod tests {
                 paths: &paths,
                 sleep_inhibitor: &inhibitor,
                 sleeper: &crate::progress::NoopSleeper,
+                backing_path_resolver:
+                    crate::test_fixtures::mock_virtio_offset_backing_path_resolver(),
             },
         ) {
             Ok(_) => panic!("expected Err(Validation), got Ok(_)"),
@@ -4548,6 +4652,8 @@ mod tests {
                 paths: &paths,
                 sleep_inhibitor: &inhibitor,
                 sleeper: &crate::progress::NoopSleeper,
+                backing_path_resolver:
+                    crate::test_fixtures::mock_virtio_offset_backing_path_resolver(),
             },
         );
 
@@ -4609,6 +4715,8 @@ mod tests {
                 paths: &paths,
                 sleep_inhibitor: &inhibitor,
                 sleeper: &crate::progress::NoopSleeper,
+                backing_path_resolver:
+                    crate::test_fixtures::mock_virtio_offset_backing_path_resolver(),
             },
         );
 
@@ -5268,6 +5376,167 @@ mod tests {
             .expect("matched probe must return Ok(())");
     }
 
+    /// Seed 632: already-open ExistingLuks replace target backing-path
+    /// mismatch arm. A cloned LUKS header can make UUIDs match, so the
+    /// open mapper must be rejected when its canonical backing path differs
+    /// from the configured by-id target.
+    //
+    // Intent: verify_existing_luks_open_mapper_target returns
+    //   NewTargetMapperBackingMismatch before replace can start.
+    // Why: closes the cloned-header hole in the mapper_open=true path.
+    // Scenario: /dev/disk/by-id/Y resolves to /dev/vdb, but braid-disk3 is
+    //   already open against /dev/vdz.
+    #[test]
+    fn replace_existing_luks_open_mapper_backing_mismatch_aborts() {
+        let u_new = LuksUuid::parse("55555555-5555-5555-5555-555555550632").unwrap();
+        let by_id = ByIdPath::parse("/dev/disk/by-id/Y").unwrap();
+        let runner = runner_with_active_mapper_uuid(
+            "braid-disk3",
+            "/dev/vdz",
+            RawCommandOutput {
+                cmd: "cryptsetup luksUUID /dev/vdz".into(),
+                stdout: format!("{u_new}\n"),
+                stderr: String::new(),
+                exit_status: 0,
+            },
+        );
+        let resolver =
+            MockBackingPathResolver::default().with_path("/dev/disk/by-id/Y", "/dev/vdb");
+
+        let err = verify_existing_luks_open_mapper_target(
+            &runner,
+            "disk3",
+            &MapperName("braid-disk3".into()),
+            &by_id,
+            &u_new,
+            &resolver,
+        )
+        .unwrap_err();
+
+        match err {
+            ReplaceError::NewTargetMapperBackingMismatch {
+                by_id: err_by_id,
+                expected_path,
+                found_path,
+            } => {
+                assert_eq!(err_by_id, by_id);
+                assert_eq!(expected_path, "/dev/vdb");
+                assert_eq!(found_path, "/dev/vdz");
+            }
+            other => panic!("expected NewTargetMapperBackingMismatch, got: {other:?}"),
+        }
+        let requests = runner.requests();
+        assert!(
+            !requests
+                .iter()
+                .any(|r| matches!(r, CmdRequest::CryptsetupLuksOpen { .. })),
+            "no CryptsetupLuksOpen may issue on the backing-mismatch path"
+        );
+        assert!(
+            !requests
+                .iter()
+                .any(|r| matches!(r, CmdRequest::BtrfsReplaceStart { .. })),
+            "no BtrfsReplaceStart may issue on the backing-mismatch path"
+        );
+    }
+
+    /// Seed 633: control arm for the already-open ExistingLuks replace
+    /// target check. Matching canonical backing path and UUID allow
+    /// execution to proceed.
+    //
+    // Intent: verify_existing_luks_open_mapper_target returns Ok.
+    // Why: the new path check must not reject the healthy already-open case.
+    // Scenario: /dev/disk/by-id/Y resolves to the same /dev/vdb backing that
+    //   cryptsetup status reports for braid-disk3.
+    #[test]
+    fn replace_existing_luks_open_mapper_backing_match_continues() {
+        let u_new = LuksUuid::parse("66666666-6666-6666-6666-666666660633").unwrap();
+        let by_id = ByIdPath::parse("/dev/disk/by-id/Y").unwrap();
+        let runner = runner_with_active_mapper_uuid(
+            "braid-disk3",
+            "/dev/vdb",
+            RawCommandOutput {
+                cmd: "cryptsetup luksUUID /dev/vdb".into(),
+                stdout: format!("{u_new}\n"),
+                stderr: String::new(),
+                exit_status: 0,
+            },
+        );
+        let resolver =
+            MockBackingPathResolver::default().with_path("/dev/disk/by-id/Y", "/dev/vdb");
+
+        verify_existing_luks_open_mapper_target(
+            &runner,
+            "disk3",
+            &MapperName("braid-disk3".into()),
+            &by_id,
+            &u_new,
+            &resolver,
+        )
+        .expect("matching backing path and UUID must continue");
+    }
+
+    /// Seed 634: already-open ExistingLuks replace target backing-path
+    /// resolve-error arm. Resolver failures must stay distinct from both
+    /// UUID mismatch and backing mismatch.
+    //
+    // Intent: maps OwnershipError::BackingPathResolveError to the
+    //   replace-specific NewTargetMapperBackingResolveError variant.
+    // Why: stale by-id/udev failures have different operator remediation.
+    // Scenario: cryptsetup status sees braid-disk3, but canonicalizing the
+    //   configured replace target by-id path fails.
+    #[test]
+    fn replace_existing_luks_open_mapper_backing_resolve_error_aborts() {
+        let u_new = LuksUuid::parse("77777777-7777-7777-7777-777777770634").unwrap();
+        let by_id = ByIdPath::parse("/dev/disk/by-id/Y").unwrap();
+        let runner = MockRunner::default().with_output(
+            CmdRequest::CryptsetupStatus {
+                mapper: MapperName("braid-disk3".into()),
+            },
+            mock_ok(
+                "cryptsetup status braid-disk3",
+                "braid-disk3 is active and is in use.\n  type:    LUKS2\n  device:  /dev/vdb\n  mode:    read/write\n",
+            ),
+        );
+        let resolver = MockBackingPathResolver::default()
+            .with_error("/dev/disk/by-id/Y", std::io::ErrorKind::NotFound);
+
+        let err = verify_existing_luks_open_mapper_target(
+            &runner,
+            "disk3",
+            &MapperName("braid-disk3".into()),
+            &by_id,
+            &u_new,
+            &resolver,
+        )
+        .unwrap_err();
+        let msg = err.to_string();
+
+        match err {
+            ReplaceError::NewTargetMapperBackingResolveError {
+                by_id: err_by_id,
+                resolved,
+                source_message,
+            } => {
+                assert_eq!(err_by_id, by_id);
+                assert_eq!(resolved, "/dev/disk/by-id/Y");
+                assert!(source_message.contains("mock canonicalize error"));
+            }
+            other => panic!("expected NewTargetMapperBackingResolveError, got: {other:?}"),
+        }
+        assert!(
+            msg.contains("check that the disk is plugged in"),
+            "resolver remediation missing from Display: {msg}"
+        );
+        let requests = runner.requests();
+        assert!(
+            !requests
+                .iter()
+                .any(|r| matches!(r, CmdRequest::BtrfsReplaceStart { .. })),
+            "no BtrfsReplaceStart may issue on the resolve-error path"
+        );
+    }
+
     /// Seed 640: Pre-journal-write `new_uuid` uniqueness assert,
     /// Membership scope. A `new_uuid` that already exists in
     /// `PoolMembership` (under a different `old_uuid`) is refused
@@ -5451,6 +5720,8 @@ mod tests {
                 paths: &paths,
                 sleep_inhibitor: &inhibitor,
                 sleeper: &crate::progress::NoopSleeper,
+                backing_path_resolver:
+                    crate::test_fixtures::mock_virtio_offset_backing_path_resolver(),
             },
         );
         match result {

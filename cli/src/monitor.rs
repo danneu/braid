@@ -65,6 +65,8 @@ pub fn cmd_monitor<R: CommandRunner, F: Filesystem + ?Sized>(
                 | ProbeError::PoolDevice { .. }
                 | ProbeError::UnsupportedLuksVersion { .. }
                 | ProbeError::MapperConflict { .. }
+                | ProbeError::MapperBackingMismatch { .. }
+                | ProbeError::MapperBackingResolveError { .. }
                 | ProbeError::MountInfo(_)),
             ) => return Err(e.to_string()),
         };

@@ -2,7 +2,9 @@ use std::collections::BTreeSet;
 
 use crate::cmd::{CmdError, CmdRequest, CommandRunner};
 use crate::config::mapper_name;
-use crate::luks::{MapperOwnership, OwnershipError, classify_mapper_ownership};
+use crate::luks::{
+    BackingPathResolver, MapperOwnership, OwnershipError, classify_mapper_ownership,
+};
 use crate::parse::{
     ParseError, parse_btrfs_filesystem_show, parse_cryptsetup_luks_label,
     parse_cryptsetup_luks_uuid, parse_cryptsetup_luks_version, parse_cryptsetup_status,
@@ -85,6 +87,27 @@ pub enum ProbeError {
         expected: LuksUuid,
         found: Option<LuksUuid>,
     },
+    #[error(
+        "disk '{name}' mapper '/dev/mapper/braid-{name}' is open but backed by \
+         '{found_path}', not the configured disk at '{expected_path}'. Close \
+         the conflicting mapper with 'sudo cryptsetup close braid-{name}' and \
+         re-run."
+    )]
+    MapperBackingMismatch {
+        name: String,
+        expected_path: String,
+        found_path: String,
+    },
+    #[error(
+        "disk '{name}' mapper backing-path check failed: could not \
+         canonicalize '{by_id}' ({source}). Check that the configured disk is \
+         plugged in and that udev has populated /dev/disk/by-id/."
+    )]
+    MapperBackingResolveError {
+        name: String,
+        by_id: String,
+        source: std::io::Error,
+    },
     #[error("mountinfo error: {0}")]
     MountInfo(#[from] crate::mount_check::MountInfoError),
 }
@@ -108,6 +131,24 @@ impl From<OwnershipError> for ProbeError {
                 expected,
                 found,
             },
+            OwnershipError::BackingPathMismatch {
+                name,
+                expected_path,
+                found_path,
+            } => ProbeError::MapperBackingMismatch {
+                name,
+                expected_path,
+                found_path,
+            },
+            OwnershipError::BackingPathResolveError {
+                name,
+                by_id,
+                source,
+            } => ProbeError::MapperBackingResolveError {
+                name,
+                by_id,
+                source,
+            },
             OwnershipError::Parse(err) => ProbeError::Parse(err),
             OwnershipError::Cmd(err) => ProbeError::Cmd(err),
         }
@@ -123,6 +164,7 @@ pub fn probe_config_disk<R: CommandRunner, F: Filesystem + ?Sized>(
     fs: &F,
     name: &DiskName,
     by_id: &ByIdPath,
+    backing_path_resolver: &dyn BackingPathResolver,
 ) -> Result<ConfigDisk, ProbeError> {
     if !fs.exists(by_id.as_str()) {
         return Ok(ConfigDisk {
@@ -172,7 +214,14 @@ pub fn probe_config_disk<R: CommandRunner, F: Filesystem + ?Sized>(
     let label = parse_cryptsetup_luks_label(&dump_raw)?.label;
 
     let mn = mapper_name(name.as_str());
-    let mapper_open = probe_mapper_open(runner, name.as_str(), &mn, &uuid)?;
+    let mapper_open = probe_mapper_open(
+        runner,
+        name.as_str(),
+        &mn,
+        by_id,
+        backing_path_resolver,
+        &uuid,
+    )?;
 
     Ok(ConfigDisk {
         name: name.clone(),
@@ -199,9 +248,13 @@ fn probe_mapper_open<R: CommandRunner>(
     runner: &R,
     name: &str,
     mapper: &MapperName,
+    by_id: &ByIdPath,
+    backing_path_resolver: &dyn BackingPathResolver,
     expected_uuid: &LuksUuid,
 ) -> Result<bool, ProbeError> {
-    match classify_mapper_ownership(runner, name, mapper, || Ok(expected_uuid.clone()))? {
+    match classify_mapper_ownership(runner, name, mapper, by_id, backing_path_resolver, || {
+        Ok(expected_uuid.clone())
+    })? {
         MapperOwnership::Inactive => Ok(false),
         MapperOwnership::Owned => Ok(true),
     }
@@ -490,6 +543,7 @@ pub fn probe_fsid<R: CommandRunner, F: Filesystem + ?Sized>(
 mod tests {
     use super::*;
     use crate::cmd::{MockRunner, RawCommandOutput};
+    use crate::test_fixtures::MockBackingPathResolver;
 
     struct MockFs {
         paths: Vec<String>,
@@ -589,7 +643,14 @@ mod tests {
         let fs = MockFs::new(&[]);
         let d = by_id("/dev/disk/by-id/disk-1");
 
-        let result = probe_config_disk(&runner, &fs, &dn("toshiba"), &d).unwrap();
+        let result = probe_config_disk(
+            &runner,
+            &fs,
+            &dn("toshiba"),
+            &d,
+            &MockBackingPathResolver::default(),
+        )
+        .unwrap();
         assert_eq!(result.name.as_str(), "toshiba");
         assert_eq!(result.state, ConfigDiskState::Absent);
     }
@@ -609,7 +670,14 @@ mod tests {
         let fs = MockFs::new(&["/dev/disk/by-id/disk-1"]);
         let d = by_id("/dev/disk/by-id/disk-1");
 
-        let result = probe_config_disk(&runner, &fs, &dn("toshiba"), &d).unwrap();
+        let result = probe_config_disk(
+            &runner,
+            &fs,
+            &dn("toshiba"),
+            &d,
+            &MockBackingPathResolver::default(),
+        )
+        .unwrap();
         assert_eq!(result.state, ConfigDiskState::PresentNotLuks);
     }
 
@@ -619,7 +687,13 @@ mod tests {
         let fs = MockFs::new(&["/dev/disk/by-id/disk-1"]);
         let d = by_id("/dev/disk/by-id/disk-1");
 
-        let result = probe_config_disk(&runner, &fs, &dn("toshiba"), &d);
+        let result = probe_config_disk(
+            &runner,
+            &fs,
+            &dn("toshiba"),
+            &d,
+            &MockBackingPathResolver::default(),
+        );
         assert!(result.is_err());
         let err = result.unwrap_err();
         assert!(
@@ -639,7 +713,13 @@ mod tests {
         let fs = MockFs::new(&["/dev/disk/by-id/disk-1"]);
         let d = by_id("/dev/disk/by-id/disk-1");
 
-        let result = probe_config_disk(&runner, &fs, &dn("toshiba"), &d);
+        let result = probe_config_disk(
+            &runner,
+            &fs,
+            &dn("toshiba"),
+            &d,
+            &MockBackingPathResolver::default(),
+        );
         assert!(result.is_err());
         let err = result.unwrap_err();
         assert!(
@@ -715,7 +795,14 @@ mod tests {
         let fs = MockFs::new(&["/dev/disk/by-id/disk-1"]);
         let d = by_id("/dev/disk/by-id/disk-1");
 
-        let result = probe_config_disk(&runner, &fs, &dn("toshiba"), &d).unwrap();
+        let result = probe_config_disk(
+            &runner,
+            &fs,
+            &dn("toshiba"),
+            &d,
+            &MockBackingPathResolver::default(),
+        )
+        .unwrap();
         assert_eq!(result.name.as_str(), "toshiba");
         assert_eq!(
             result.state,
@@ -774,7 +861,9 @@ mod tests {
         let fs = MockFs::new(&["/dev/disk/by-id/disk-1"]);
         let d = by_id("/dev/disk/by-id/disk-1");
 
-        let result = probe_config_disk(&runner, &fs, &dn("toshiba"), &d).unwrap();
+        let resolver =
+            MockBackingPathResolver::default().with_path("/dev/disk/by-id/disk-1", "/dev/vda");
+        let result = probe_config_disk(&runner, &fs, &dn("toshiba"), &d, &resolver).unwrap();
         assert_eq!(
             result.state,
             ConfigDiskState::PresentLuks {
@@ -836,24 +925,25 @@ mod tests {
         let fs = MockFs::new(&["/dev/disk/by-id/disk-1"]);
         let d = by_id("/dev/disk/by-id/disk-1");
 
-        let err = probe_config_disk(&runner, &fs, &dn("toshiba"), &d).unwrap_err();
+        let err = probe_config_disk(
+            &runner,
+            &fs,
+            &dn("toshiba"),
+            &d,
+            &MockBackingPathResolver::default(),
+        )
+        .unwrap_err();
         match err {
-            ProbeError::MapperConflict {
+            ProbeError::MapperBackingMismatch {
                 name,
-                expected,
-                found,
+                expected_path,
+                found_path,
             } => {
                 assert_eq!(name, "toshiba");
-                assert_eq!(
-                    expected,
-                    LuksUuid::parse("aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa").unwrap()
-                );
-                assert_eq!(
-                    found,
-                    Some(LuksUuid::parse("bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb").unwrap())
-                );
+                assert_eq!(expected_path, "/dev/disk/by-id/disk-1");
+                assert_eq!(found_path, "/dev/vdz");
             }
-            other => panic!("expected ProbeError::MapperConflict, got: {other:?}"),
+            other => panic!("expected ProbeError::MapperBackingMismatch, got: {other:?}"),
         }
         let by_id_luks_uuid_requests = runner
             .requests()
@@ -869,6 +959,63 @@ mod tests {
         assert_eq!(
             by_id_luks_uuid_requests, 1,
             "planner must not refetch the configured by-id LUKS UUID during mapper ownership check"
+        );
+    }
+
+    /*
+     * Intent: probe_config_disk preserves backing-path resolve failures as a
+     *   dedicated ProbeError variant with udev/device remediation wording.
+     * Why it exists: probe callers must not see these failures as UUID
+     *   conflicts or generic parse errors.
+     * Scenario: the configured by-id path vanishes between the initial
+     *   existence check and the already-open mapper ownership check.
+     */
+    #[test]
+    fn probe_config_disk_mapper_backing_resolve_error_is_distinct() {
+        let runner = MockRunner::default()
+            .with_output(
+                CmdRequest::CryptsetupLuksUuid {
+                    device: "/dev/disk/by-id/disk-1".into(),
+                },
+                ok_raw(
+                    "cryptsetup luksUUID /dev/disk/by-id/disk-1",
+                    "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa\n",
+                ),
+            )
+            .with_output(
+                CmdRequest::CryptsetupLuksDumpText {
+                    device: "/dev/disk/by-id/disk-1".into(),
+                },
+                luks_dump_text_luks2(),
+            )
+            .with_output(
+                CmdRequest::CryptsetupStatus {
+                    mapper: MapperName("braid-toshiba".into()),
+                },
+                cryptsetup_status_active("braid-toshiba", "/dev/vda"),
+            );
+        let fs = MockFs::new(&["/dev/disk/by-id/disk-1"]);
+        let d = by_id("/dev/disk/by-id/disk-1");
+        let resolver = MockBackingPathResolver::default()
+            .with_error("/dev/disk/by-id/disk-1", std::io::ErrorKind::NotFound);
+
+        let err = probe_config_disk(&runner, &fs, &dn("toshiba"), &d, &resolver).unwrap_err();
+        let msg = err.to_string();
+        match &err {
+            ProbeError::MapperBackingResolveError {
+                name,
+                by_id,
+                source,
+            } => {
+                assert_eq!(name, "toshiba");
+                assert_eq!(by_id, "/dev/disk/by-id/disk-1");
+                assert_eq!(source.kind(), std::io::ErrorKind::NotFound);
+            }
+            other => panic!("expected MapperBackingResolveError, got {other:?}"),
+        }
+        assert!(
+            msg.contains("Check that the configured disk is plugged in"),
+            "resolver remediation missing from Display: {msg}"
         );
     }
 
@@ -915,7 +1062,9 @@ mod tests {
         let fs = MockFs::new(&["/dev/disk/by-id/disk-1"]);
         let d = by_id("/dev/disk/by-id/disk-1");
 
-        let err = probe_config_disk(&runner, &fs, &dn("toshiba"), &d).unwrap_err();
+        let resolver =
+            MockBackingPathResolver::default().with_path("/dev/disk/by-id/disk-1", "/dev/vdz");
+        let err = probe_config_disk(&runner, &fs, &dn("toshiba"), &d, &resolver).unwrap_err();
 
         match err {
             ProbeError::MapperConflict {
@@ -974,7 +1123,14 @@ mod tests {
         let fs = MockFs::new(&["/dev/disk/by-id/disk-1"]);
         let d = by_id("/dev/disk/by-id/disk-1");
 
-        let result = probe_config_disk(&runner, &fs, &dn("toshiba"), &d).unwrap();
+        let result = probe_config_disk(
+            &runner,
+            &fs,
+            &dn("toshiba"),
+            &d,
+            &MockBackingPathResolver::default(),
+        )
+        .unwrap();
         assert_eq!(
             result.state,
             ConfigDiskState::PresentLuks {
@@ -1026,7 +1182,14 @@ mod tests {
         let fs = MockFs::new(&["/dev/disk/by-id/disk-1"]);
         let d = by_id("/dev/disk/by-id/disk-1");
 
-        let err = probe_config_disk(&runner, &fs, &dn("toshiba"), &d).unwrap_err();
+        let err = probe_config_disk(
+            &runner,
+            &fs,
+            &dn("toshiba"),
+            &d,
+            &MockBackingPathResolver::default(),
+        )
+        .unwrap_err();
         match err {
             ProbeError::MapperConflict {
                 name,
@@ -1078,7 +1241,14 @@ mod tests {
         let fs = MockFs::new(&["/dev/disk/by-id/disk-1"]);
         let d = by_id("/dev/disk/by-id/disk-1");
 
-        let err = probe_config_disk(&runner, &fs, &dn("toshiba"), &d).unwrap_err();
+        let err = probe_config_disk(
+            &runner,
+            &fs,
+            &dn("toshiba"),
+            &d,
+            &MockBackingPathResolver::default(),
+        )
+        .unwrap_err();
         match err {
             ProbeError::UnsupportedLuksVersion { name, version } => {
                 assert_eq!(name, "toshiba");
@@ -1112,7 +1282,14 @@ mod tests {
         let fs = MockFs::new(&["/dev/disk/by-id/disk-1"]);
         let d = by_id("/dev/disk/by-id/disk-1");
 
-        let err = probe_config_disk(&runner, &fs, &dn("toshiba"), &d).unwrap_err();
+        let err = probe_config_disk(
+            &runner,
+            &fs,
+            &dn("toshiba"),
+            &d,
+            &MockBackingPathResolver::default(),
+        )
+        .unwrap_err();
         assert!(
             matches!(err, ProbeError::Cmd(_)),
             "expected ProbeError::Cmd, got: {err:?}"
@@ -1151,7 +1328,14 @@ mod tests {
         let fs = MockFs::new(&["/dev/disk/by-id/disk-1"]);
         let d = by_id("/dev/disk/by-id/disk-1");
 
-        let err = probe_config_disk(&runner, &fs, &dn("toshiba"), &d).unwrap_err();
+        let err = probe_config_disk(
+            &runner,
+            &fs,
+            &dn("toshiba"),
+            &d,
+            &MockBackingPathResolver::default(),
+        )
+        .unwrap_err();
         assert!(
             matches!(err, ProbeError::Parse(_)),
             "expected ProbeError::Parse, got: {err:?}"

@@ -1,7 +1,7 @@
 //! Replace-scope fixtures: `ReplacementPool` topology, `ReplaceParamsBuilder`,
 //! and the replace-only `PoolFixture` constructors.
 
-use super::shared::{PoolFixture, mock_ok};
+use super::shared::{PoolFixture, mock_ok, mock_virtio_offset_backing_path_resolver};
 use crate::cmd::{CmdRequest, MockRunner, RawCommandOutput};
 use crate::inhibit::RecordingInhibitor;
 use crate::membership::{self, PoolMembership};
@@ -284,6 +284,7 @@ impl PoolFixture {
             config_path: &self.config_path,
             paths: &self.paths,
             inhibitor: &self.inhibitor,
+            backing_path_resolver: mock_virtio_offset_backing_path_resolver(),
         }
     }
 }
@@ -308,6 +309,7 @@ pub(crate) struct ReplaceParamsBuilder<'a> {
     config_path: &'a Path,
     paths: &'a StatePaths,
     inhibitor: &'a RecordingInhibitor,
+    backing_path_resolver: &'a dyn crate::luks::BackingPathResolver,
 }
 
 impl<'a> ReplaceParamsBuilder<'a> {
@@ -369,6 +371,7 @@ impl<'a> ReplaceParamsBuilder<'a> {
             paths: self.paths,
             sleep_inhibitor: self.inhibitor,
             sleeper: &progress::NoopSleeper,
+            backing_path_resolver: self.backing_path_resolver,
         }
     }
 }

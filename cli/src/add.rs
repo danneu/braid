@@ -8,9 +8,9 @@ use crate::credential_verify::{
 use crate::inhibit::AcquireSleepInhibitor;
 use crate::journal;
 use crate::luks::{
-    OpenOutcome, PassphraseReader, backup_luks_header_post_mutation, ensure_luks_open,
-    format_keyfile_asymmetry_warning, format_keyfile_enrollment_probe_failure, luks_format,
-    probe_pool_keyfile_enrollment, read_passphrase_with,
+    BackingPathResolver, OpenOutcome, PassphraseReader, backup_luks_header_post_mutation,
+    ensure_luks_open, format_keyfile_asymmetry_warning, format_keyfile_enrollment_probe_failure,
+    luks_format, probe_pool_keyfile_enrollment, read_passphrase_with,
 };
 use crate::mapper_close::close_mapper_with_retry;
 use crate::membership::{self, DiskMember, LuksUuidMap, PoolMembership};
@@ -718,6 +718,9 @@ pub struct AddParams<'a> {
     /// passes `&RealTty`; tests pass a scripted reader so the
     /// bootstrap-confirm path is observable at the `cmd_add` layer.
     pub passphrase_reader: &'a dyn PassphraseReader,
+    /// Seam for resolving by-id paths and mapper backings to the same
+    /// kernel block-device namespace at the already-open mapper boundary.
+    pub backing_path_resolver: &'a dyn BackingPathResolver,
 }
 
 /// Returns the missing-devices warning body (no legacy `warning:` prefix).
@@ -944,8 +947,13 @@ impl AddPlan {
                 color_enabled,
                 &format!("disk {}: unlocking...", target.name),
             ));
-            if ensure_luks_open(runner, target.name.as_str(), &target.by_id, &passphrase)?
-                == OpenOutcome::Opened
+            if ensure_luks_open(
+                runner,
+                target.name.as_str(),
+                &target.by_id,
+                params.backing_path_resolver,
+                &passphrase,
+            )? == OpenOutcome::Opened
             {
                 luks_guard.track(target.mapper_name.clone());
             }
@@ -1138,8 +1146,13 @@ impl AddPlan {
                     &format!("disk {name}: unlocking..."),
                 )
             );
-            if ensure_luks_open(runner, name.as_str(), &target.by_id, &passphrase)?
-                == OpenOutcome::Opened
+            if ensure_luks_open(
+                runner,
+                name.as_str(),
+                &target.by_id,
+                params.backing_path_resolver,
+                &passphrase,
+            )? == OpenOutcome::Opened
             {
                 luks_guard.track(target.mapper_name.clone());
             }
@@ -1479,7 +1492,9 @@ pub fn plan_add<R: CommandRunner + Sync, F: Filesystem + ?Sized>(
     let probed: Vec<ConfigDisk> = match names
         .iter()
         .zip(by_ids.iter())
-        .map(|(name, by_id)| probe_config_disk(runner, fs, name, by_id))
+        .map(|(name, by_id)| {
+            probe_config_disk(runner, fs, name, by_id, params.backing_path_resolver)
+        })
         .collect::<Result<Vec<_>, _>>()
     {
         Ok(v) => v,
@@ -2218,6 +2233,8 @@ mod tests {
                 paths: &sp,
                 sleep_inhibitor: &inhibitor,
                 passphrase_reader: &RealTty,
+                backing_path_resolver:
+                    crate::test_fixtures::mock_virtio_offset_backing_path_resolver(),
             },
         );
         let err = result.unwrap_err().to_string();
@@ -2739,6 +2756,8 @@ mod tests {
                 paths: &paths,
                 sleep_inhibitor: &inhibitor,
                 passphrase_reader: &RealTty,
+                backing_path_resolver:
+                    crate::test_fixtures::mock_virtio_offset_backing_path_resolver(),
             },
         )
         .expect("execute Pass 1 should use cached LUKS label");
@@ -3128,10 +3147,19 @@ mod tests {
                     exit_status: 0,
                 },
             );
+        let backing_path_resolver = crate::test_fixtures::MockBackingPathResolver::default()
+            .with_path("/dev/disk/by-id/existing", "/dev/vdb");
 
         {
             let mut guard = LuksCleanupGuard::new(&runner);
-            if ensure_luks_open(&runner, "existing", &by_id, &passphrase("testpass")).unwrap()
+            if ensure_luks_open(
+                &runner,
+                "existing",
+                &by_id,
+                &backing_path_resolver,
+                &passphrase("testpass"),
+            )
+            .unwrap()
                 == OpenOutcome::Opened
             {
                 guard.track(MapperName("braid-existing".into()));
@@ -3378,6 +3406,8 @@ mod tests {
                     paths: &paths,
                     sleep_inhibitor: &inhibitor,
                     passphrase_reader: &crate::luks::RealTty,
+                    backing_path_resolver:
+                        crate::test_fixtures::mock_virtio_offset_backing_path_resolver(),
                 },
             );
             // The recoverable add must succeed end-to-end -- if it does not,
@@ -4105,6 +4135,8 @@ mod tests {
                 paths: &paths,
                 sleep_inhibitor: &inhibitor,
                 passphrase_reader: &RealTty,
+                backing_path_resolver:
+                    crate::test_fixtures::mock_virtio_offset_backing_path_resolver(),
             },
         )
         .expect("live add should succeed");
@@ -4157,6 +4189,8 @@ mod tests {
                 paths: &paths,
                 sleep_inhibitor: &inhibitor,
                 passphrase_reader: &RealTty,
+                backing_path_resolver:
+                    crate::test_fixtures::mock_virtio_offset_backing_path_resolver(),
             },
         );
 
@@ -4225,6 +4259,8 @@ mod tests {
                 paths: &paths,
                 sleep_inhibitor: &inhibitor,
                 passphrase_reader: &RealTty,
+                backing_path_resolver:
+                    crate::test_fixtures::mock_virtio_offset_backing_path_resolver(),
             },
         )
         .expect("bootstrap should succeed even when post-mount enrichment probe fails");
@@ -4268,6 +4304,8 @@ mod tests {
                 paths: &paths,
                 sleep_inhibitor: &inhibitor,
                 passphrase_reader: &RealTty,
+                backing_path_resolver:
+                    crate::test_fixtures::mock_virtio_offset_backing_path_resolver(),
             },
         )
         .expect("bootstrap should tolerate post-mount probe parse errors");
@@ -4338,6 +4376,8 @@ mod tests {
                 paths: &paths,
                 sleep_inhibitor: &inhibitor,
                 passphrase_reader: &RealTty,
+                backing_path_resolver:
+                    crate::test_fixtures::mock_virtio_offset_backing_path_resolver(),
             },
         );
 
@@ -4391,6 +4431,8 @@ mod tests {
                 paths: &paths,
                 sleep_inhibitor: &inhibitor,
                 passphrase_reader: &RealTty,
+                backing_path_resolver:
+                    crate::test_fixtures::mock_virtio_offset_backing_path_resolver(),
             },
         );
 
@@ -4443,6 +4485,8 @@ mod tests {
                 paths: &paths,
                 sleep_inhibitor: &inhibitor,
                 passphrase_reader: &RealTty,
+                backing_path_resolver:
+                    crate::test_fixtures::mock_virtio_offset_backing_path_resolver(),
             },
         );
 
@@ -4504,6 +4548,8 @@ mod tests {
                     paths: &paths,
                     sleep_inhibitor: &inhibitor,
                     passphrase_reader: &RealTty,
+                    backing_path_resolver: crate::test_fixtures::mock_virtio_backing_path_resolver(
+                    ),
                 },
             );
 
@@ -4559,6 +4605,8 @@ mod tests {
                 paths: &paths,
                 sleep_inhibitor: &inhibitor,
                 passphrase_reader: &RealTty,
+                backing_path_resolver:
+                    crate::test_fixtures::mock_virtio_offset_backing_path_resolver(),
             },
         )
         .expect("no-op add should succeed");
@@ -4615,6 +4663,8 @@ mod tests {
                 paths: &paths,
                 sleep_inhibitor: &inhibitor,
                 passphrase_reader: &RealTty,
+                backing_path_resolver:
+                    crate::test_fixtures::mock_virtio_offset_backing_path_resolver(),
             },
         );
 
@@ -4676,6 +4726,8 @@ mod tests {
                 paths: &paths,
                 sleep_inhibitor: &inhibitor,
                 passphrase_reader: &RealTty,
+                backing_path_resolver:
+                    crate::test_fixtures::mock_virtio_offset_backing_path_resolver(),
             },
         );
 
@@ -4762,6 +4814,8 @@ mod tests {
                 paths: &paths,
                 sleep_inhibitor: &inhibitor,
                 passphrase_reader: &RealTty,
+                backing_path_resolver:
+                    crate::test_fixtures::mock_virtio_offset_backing_path_resolver(),
             },
         );
 
@@ -4823,6 +4877,8 @@ mod tests {
                     paths: &paths,
                     sleep_inhibitor: &inhibitor,
                     passphrase_reader: &RealTty,
+                    backing_path_resolver: crate::test_fixtures::mock_virtio_backing_path_resolver(
+                    ),
                 },
             );
         });
@@ -4920,6 +4976,8 @@ mod tests {
                 paths: &paths,
                 sleep_inhibitor: &inhibitor,
                 passphrase_reader: &RealTty,
+                backing_path_resolver:
+                    crate::test_fixtures::mock_virtio_offset_backing_path_resolver(),
             },
         );
 
@@ -5008,6 +5066,8 @@ mod tests {
                 paths: &paths,
                 sleep_inhibitor: &inhibitor,
                 passphrase_reader: &RealTty,
+                backing_path_resolver:
+                    crate::test_fixtures::mock_virtio_offset_backing_path_resolver(),
             },
         );
 
@@ -5107,12 +5167,21 @@ mod tests {
                 paths: &paths,
                 sleep_inhibitor: &inhibitor,
                 passphrase_reader: &RealTty,
+                backing_path_resolver:
+                    crate::test_fixtures::mock_virtio_offset_backing_path_resolver(),
             },
         );
 
         match result {
-            Err(AddError::Luks(crate::luks::LuksError::MapperConflict { found: None, .. })) => {}
-            other => panic!("expected MapperConflict with found=None, got {other:?}"),
+            Err(AddError::Luks(crate::luks::LuksError::MapperBackingMismatch {
+                expected_path,
+                found_path,
+                ..
+            })) => {
+                assert_eq!(expected_path, "/dev/vdb");
+                assert_eq!(found_path, "/dev/vdz");
+            }
+            other => panic!("expected MapperBackingMismatch, got {other:?}"),
         }
         let requests = runner.requests();
         assert!(
@@ -5197,6 +5266,8 @@ mod tests {
                 paths: &paths,
                 sleep_inhibitor: &inhibitor,
                 passphrase_reader: &RealTty,
+                backing_path_resolver:
+                    crate::test_fixtures::mock_virtio_offset_backing_path_resolver(),
             },
         );
 
@@ -5891,6 +5962,8 @@ mod tests {
                 paths: &paths,
                 sleep_inhibitor: &inhibitor,
                 passphrase_reader: &crate::luks::RealTty,
+                backing_path_resolver:
+                    crate::test_fixtures::mock_virtio_offset_backing_path_resolver(),
             },
         ) {
             Ok(_) => panic!("expected Err(Validation), got Ok(_)"),
@@ -5941,6 +6014,8 @@ mod tests {
                 paths: &paths,
                 sleep_inhibitor: &inhibitor,
                 passphrase_reader: &crate::luks::RealTty,
+                backing_path_resolver:
+                    crate::test_fixtures::mock_virtio_offset_backing_path_resolver(),
             },
         ) {
             Ok(_) => panic!("expected Err(Validation), got Ok(_)"),
@@ -6002,6 +6077,8 @@ mod tests {
                 paths: &paths,
                 sleep_inhibitor: &inhibitor,
                 passphrase_reader: &tty,
+                backing_path_resolver:
+                    crate::test_fixtures::mock_virtio_offset_backing_path_resolver(),
             },
         );
 
@@ -6070,6 +6147,8 @@ mod tests {
                 paths: &paths,
                 sleep_inhibitor: &inhibitor,
                 passphrase_reader: &tty,
+                backing_path_resolver:
+                    crate::test_fixtures::mock_virtio_offset_backing_path_resolver(),
             },
         );
 
@@ -6117,6 +6196,8 @@ mod tests {
                 paths: &paths,
                 sleep_inhibitor: &inhibitor,
                 passphrase_reader: &tty,
+                backing_path_resolver:
+                    crate::test_fixtures::mock_virtio_offset_backing_path_resolver(),
             },
         )
         .expect_err("post-format header-backup failure should abort add")
@@ -6184,6 +6265,8 @@ mod tests {
                 paths: &paths,
                 sleep_inhibitor: &inhibitor,
                 passphrase_reader: &tty,
+                backing_path_resolver:
+                    crate::test_fixtures::mock_virtio_offset_backing_path_resolver(),
             },
         );
 
@@ -6254,6 +6337,8 @@ mod tests {
                 paths: &paths,
                 sleep_inhibitor: &inhibitor,
                 passphrase_reader: &tty,
+                backing_path_resolver:
+                    crate::test_fixtures::mock_virtio_offset_backing_path_resolver(),
             },
         );
 
@@ -6330,6 +6415,8 @@ mod tests {
                 paths: &paths,
                 sleep_inhibitor: &inhibitor,
                 passphrase_reader: &tty,
+                backing_path_resolver:
+                    crate::test_fixtures::mock_virtio_offset_backing_path_resolver(),
             },
         );
 
@@ -6574,6 +6661,8 @@ mod tests {
                 paths: &self.paths,
                 sleep_inhibitor: &self.inhibitor,
                 passphrase_reader: &RealTty,
+                backing_path_resolver:
+                    crate::test_fixtures::mock_virtio_offset_backing_path_resolver(),
             }
         }
     }
@@ -6891,6 +6980,8 @@ mod tests {
                 paths: &paths,
                 sleep_inhibitor: &inhibitor,
                 passphrase_reader: &RealTty,
+                backing_path_resolver:
+                    crate::test_fixtures::mock_virtio_offset_backing_path_resolver(),
             },
         );
         let plan = report.expect("plan_add should succeed for noop");
@@ -6958,6 +7049,8 @@ mod tests {
                 paths: &paths,
                 sleep_inhibitor: &inhibitor,
                 passphrase_reader: &RealTty,
+                backing_path_resolver:
+                    crate::test_fixtures::mock_virtio_offset_backing_path_resolver(),
             },
         );
         let plan = report.expect("plan_add should succeed for fresh bootstrap");
@@ -7672,6 +7765,8 @@ mod tests {
                     paths: &paths,
                     sleep_inhibitor: &inhibitor,
                     passphrase_reader: &RealTty,
+                    backing_path_resolver: crate::test_fixtures::mock_virtio_backing_path_resolver(
+                    ),
                 },
             );
             match result {
@@ -7743,6 +7838,8 @@ mod tests {
                 paths: &paths,
                 sleep_inhibitor: &inhibitor,
                 passphrase_reader: &RealTty,
+                backing_path_resolver:
+                    crate::test_fixtures::mock_virtio_offset_backing_path_resolver(),
             },
         );
         assert!(
