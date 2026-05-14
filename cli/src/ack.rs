@@ -634,14 +634,14 @@ mod tests {
      * Intent: When cmd_ack succeeds at save_acked_stats but
      * cleanup_alert_files_and_beeper fails, the user-visible error names
      * the partial state and points at the recovery path. The new baseline
-     * is durable on disk and the latch is not removed -- the witnesses
+     * is durable on disk and the corrupt sidecar remains -- the witnesses
      * that distinguish CleanupFailed from a generic AckError::Io.
      * Why it exists: Without the dedicated variant, a cleanup-phase I/O
      * error surfaces as "I/O error: <kind>" with no hint that re-running
      * ack will eventually clear the latch. The user observes "alert
      * latched but no live cause" on the next monitor cycle and has no
      * signpost to recovery.
-     * Scenario: a directory sits at the smartd-alert path (manual
+     * Scenario: a directory sits at the corrupt-latch sidecar path (manual
      * tampering, leftover from a previous bug, or permission drift), so
      * remove_file fails with EISDIR/EPERM. The latch carried
      * BtrfsDeviceErrors. Mounted pool, healthy device stats. cmd_ack must
@@ -649,13 +649,13 @@ mod tests {
      * variant.
      */
     #[test]
-    fn cmd_ack_returns_cleanup_failed_when_remove_smartd_alert_errors_after_baseline_saved() {
+    fn cmd_ack_returns_cleanup_failed_when_corrupt_latch_cleanup_errors_after_baseline_saved() {
         let (_dir, paths) = isolated_paths();
         ack_write_latch(&paths, vec![AlertCause::BtrfsDeviceErrors { devid: 1 }]);
         // remove_file on a directory returns EISDIR (Linux) / EPERM (macOS)
         // -- a platform-portable non-NotFound io::Error from
-        // remove_smartd_alert_flag.
-        std::fs::create_dir(paths.smartd_alert()).unwrap();
+        // remove_alert_latch_corrupt.
+        std::fs::create_dir(paths.alert_latch_corrupt()).unwrap();
 
         let runner = ack_mounted_probe_runner_with_device_stats();
         let err = cmd_ack(&runner, &ack_fs_btrfs(), &ack_mp(), &paths)
@@ -679,8 +679,12 @@ mod tests {
             "save_acked_stats runs before cleanup -- baseline must be durable"
         );
         assert!(
-            paths.alert_latch_json().exists(),
-            "cleanup short-circuited on the first remove_* -- latch must remain"
+            !paths.alert_latch_json().exists(),
+            "cleanup must remove the latch before failing on the corrupt sidecar"
+        );
+        assert!(
+            paths.alert_latch_corrupt().exists(),
+            "cleanup poison directory must remain and prove where cleanup failed"
         );
     }
 
@@ -898,14 +902,17 @@ mod tests {
      * pass. Pinning both branches forces both to keep returning
      * CleanupFailed.
      * Scenario: pool offline, latch contains MissingDevice{devid:1}, and a
-     * directory sits at the smartd-alert path so remove_file fails with
-     * EISDIR/EPERM.
+     * directory sits at the corrupt-latch sidecar path so remove_file fails
+     * with EISDIR/EPERM.
      */
     #[test]
     fn ack_offline_cleanup_failure_after_missing_acked_returns_cleanup_failed() {
         let (_dir, paths) = isolated_paths();
         ack_write_latch(&paths, vec![AlertCause::MissingDevice { devid: 1 }]);
-        std::fs::create_dir(paths.smartd_alert()).unwrap();
+        // remove_file on a directory returns EISDIR (Linux) / EPERM (macOS)
+        // -- a platform-portable non-NotFound io::Error from
+        // remove_alert_latch_corrupt.
+        std::fs::create_dir(paths.alert_latch_corrupt()).unwrap();
 
         let err = cmd_ack(&AckPanicRunner, &ack_fs_not_mounted(), &ack_mp(), &paths)
             .expect_err("offline cleanup failure must propagate");
@@ -928,8 +935,12 @@ mod tests {
             "save_acked_stats runs before cleanup -- baseline must be durable"
         );
         assert!(
-            paths.alert_latch_json().exists(),
-            "cleanup short-circuited on the first remove_* -- latch must remain"
+            !paths.alert_latch_json().exists(),
+            "cleanup must remove the latch before failing on the corrupt sidecar"
+        );
+        assert!(
+            paths.alert_latch_corrupt().exists(),
+            "cleanup poison directory must remain and prove where cleanup failed"
         );
     }
 

@@ -274,8 +274,16 @@ pub fn reconcile_acked_stats(
 }
 
 /// Check if the smartd alert flag file exists.
+///
+/// Treats only a regular file at the path as an active alert: a directory or
+/// other non-file is ignored so a stray inode cannot wedge `braid ack` (whose
+/// cleanup uses `remove_file`).
 pub fn smartd_alert_active(paths: &StatePaths) -> bool {
-    paths.smartd_alert().exists()
+    paths
+        .smartd_alert()
+        .metadata()
+        .map(|m| m.is_file())
+        .unwrap_or(false)
 }
 
 /// Remove the smartd alert flag file. Returns Ok(()) even if it didn't exist.
@@ -726,6 +734,52 @@ mod tests {
         let live = std::fs::read(paths.alert_latch_json())
             .expect("second corrupt latch remains for caller overwrite");
         assert_eq!(live, second, "second bytes should remain at live path");
+    }
+
+    // Intent: smartd_alert_active treats only a regular file at the flag path
+    //   as an active alert source. Absent paths and directories are false; a
+    //   symlink resolving to a regular file is true (matches the smartd hook's
+    //   `touch` output, including symlink-on-tmpfs deployments).
+    // Why it exists: prior behavior used Path::exists(), which counted any
+    //   inode -- including a directory -- as an active alert. The subsequent
+    //   cleanup (remove_smartd_alert_flag) calls remove_file, which fails on a
+    //   directory, so `braid ack` was permanently wedged behind
+    //   AckError::CleanupFailed any time a non-file ended up at the flag path.
+    //   This test fails loudly on a regression back to Path::exists().
+    // Scenario: test scaffolding, a manual operator mistake, or a future hook
+    //   bug leaves a directory at /var/lib/braid/smartd-alert.
+    //   smartd_alert_active must report false so the ack cleanup chain does not
+    //   try to remove_file the directory and wedge subsequent `braid ack`
+    //   invocations.
+    #[cfg(unix)]
+    #[test]
+    fn smartd_alert_active_requires_regular_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let paths = StatePaths::custom(dir.path().to_path_buf());
+
+        assert!(!smartd_alert_active(&paths), "absent path must be false");
+
+        std::fs::write(paths.smartd_alert(), b"").unwrap();
+        assert!(
+            smartd_alert_active(&paths),
+            "regular file must be true (matches smartd hook `touch` output)"
+        );
+        std::fs::remove_file(paths.smartd_alert()).unwrap();
+
+        std::fs::create_dir(paths.smartd_alert()).unwrap();
+        assert!(
+            !smartd_alert_active(&paths),
+            "directory must be false (regression guard for Path::exists revert)"
+        );
+        std::fs::remove_dir(paths.smartd_alert()).unwrap();
+
+        let target = dir.path().join("real-flag");
+        std::fs::write(&target, b"").unwrap();
+        std::os::unix::fs::symlink(&target, paths.smartd_alert()).unwrap();
+        assert!(
+            smartd_alert_active(&paths),
+            "symlink resolving to a regular file must be true"
+        );
     }
 
     // Intent: A hard_link I/O failure during quarantine is folded into the
