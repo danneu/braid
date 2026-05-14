@@ -333,6 +333,7 @@ struct VerboseContext {
 
 struct HumanDisk {
     name: String,
+    member_name: Option<DiskName>,
     by_id: String,
     luks_uuid: String,
     devid: Option<String>,
@@ -834,6 +835,7 @@ fn build_disk_reports<R: CommandRunner>(
 
         human_details.push(HumanDisk {
             name: disk_name,
+            member_name: matched_member.map(|m| m.name.clone()),
             by_id: by_id.clone(),
             luks_uuid: pd.luks_uuid.as_str().to_owned(),
             devid: Some(pd.devid.to_string()),
@@ -895,6 +897,7 @@ fn build_disk_reports<R: CommandRunner>(
 
         human_details.push(HumanDisk {
             name: cd.name.as_str().to_owned(),
+            member_name: Some(cd.name.clone()),
             by_id: cd.by_id_path.as_str().to_owned(),
             luks_uuid: String::new(),
             devid: None,
@@ -1155,10 +1158,14 @@ fn format_status_human(
                 DiskStatus::LuksHeaderUnreadable | DiskStatus::LuksHeaderDamaged
             );
             if has_errors || d.status == DiskStatus::Missing {
-                out.push_str(&format!(
-                    "    Action:  add replacement disk to config, then: braid replace --old {} --new <new-name>\n",
-                    d.name
-                ));
+                match &d.member_name {
+                    Some(name) => out.push_str(&format!(
+                        "    Action:  add replacement disk to config, then: braid replace --old {name} --new <new-name>\n",
+                    )),
+                    None => out.push_str(
+                        "    Action:  foreign mapper detected -- run 'braid doctor' to investigate\n",
+                    ),
+                }
             } else if needs_doctor {
                 out.push_str("    Action:  run 'braid doctor' for recovery guidance\n");
             }
@@ -1865,6 +1872,7 @@ mod tests {
     fn status_verbose_present_disks() {
         let human_disks = vec![HumanDisk {
             name: "disk1".to_owned(),
+            member_name: Some(DiskName::parse("disk1").unwrap()),
             by_id: "/dev/disk/by-id/disk1".to_owned(),
             luks_uuid: "11111111-1111-1111-1111-111111111111".to_owned(),
             devid: Some("1".to_owned()),
@@ -1916,6 +1924,7 @@ mod tests {
     fn status_verbose_missing_disk() {
         let human_disks = vec![HumanDisk {
             name: "disk3".to_owned(),
+            member_name: Some(DiskName::parse("disk3").unwrap()),
             by_id: "/dev/disk/by-id/disk3".to_owned(),
             luks_uuid: String::new(),
             devid: None,
@@ -1969,6 +1978,7 @@ mod tests {
     fn status_verbose_luks_header_unreadable_disk() {
         let human_disks = vec![HumanDisk {
             name: "disk4".to_owned(),
+            member_name: Some(DiskName::parse("disk4").unwrap()),
             by_id: "/dev/disk/by-id/disk4".to_owned(),
             luks_uuid: String::new(),
             devid: None,
@@ -2031,6 +2041,7 @@ mod tests {
     fn status_verbose_luks_header_damaged_disk() {
         let human_disks = vec![HumanDisk {
             name: "disk5".to_owned(),
+            member_name: Some(DiskName::parse("disk5").unwrap()),
             by_id: "/dev/disk/by-id/disk5".to_owned(),
             luks_uuid: String::new(),
             devid: None,
@@ -2079,6 +2090,7 @@ mod tests {
     fn status_verbose_lsblk_failure() {
         let human_disks = vec![HumanDisk {
             name: "disk1".to_owned(),
+            member_name: Some(DiskName::parse("disk1").unwrap()),
             by_id: "/dev/disk/by-id/disk1".to_owned(),
             luks_uuid: "11111111-1111-1111-1111-111111111111".to_owned(),
             devid: Some("1".to_owned()),
@@ -3441,6 +3453,184 @@ mod tests {
         assert_eq!(ctx.disks[1].status, DiskStatus::Unknown);
     }
 
+    // Intent: foreign live mappers with btrfs errors must not receive a
+    // member-scoped `braid replace --old` action in verbose status.
+    // Why it exists: replacement targets are member names joined by LUKS UUID;
+    // a runtime mapper basename can look like a member while identifying a
+    // different encrypted device.
+    // Scenario: one pool row is a foreign `braid-disk1` mapper with errors
+    // and another pool row is the real disk1 member with errors.
+    #[test]
+    fn build_disk_reports_routes_foreign_mapper_errors_to_doctor() {
+        use crate::parse::types::{DeviceErrorStats, DeviceStatsTarget};
+
+        let member_uuid = LuksUuid::parse("11111111-1111-1111-1111-111111111111").unwrap();
+        let foreign_uuid = LuksUuid::parse("99999999-9999-9999-9999-999999999999").unwrap();
+        let pool = PoolState {
+            mounted: true,
+            devices: vec![
+                PoolDevice {
+                    mapper: MapperName("braid-disk1".to_owned()),
+                    luks_uuid: foreign_uuid,
+                    devid: 1,
+                    underlying: "/dev/vdz".to_owned(),
+                },
+                PoolDevice {
+                    mapper: MapperName("braid-member".to_owned()),
+                    luks_uuid: member_uuid.clone(),
+                    devid: 2,
+                    underlying: "/dev/vda".to_owned(),
+                },
+            ],
+            missing_count: 0,
+            missing_devids: vec![],
+            total_devices: 2,
+            fsid: None,
+            null_underlying: vec![],
+        };
+        let config_disks = vec![ConfigDisk {
+            name: DiskName::parse("disk1").unwrap(),
+            by_id_path: ByIdPath::parse("/dev/disk/by-id/disk1").unwrap(),
+            state: ConfigDiskState::PresentLuks {
+                uuid: member_uuid,
+                label: None,
+                mapper_open: true,
+            },
+        }];
+        let stats = BtrfsDeviceStatsOutput {
+            devices: vec![
+                DeviceErrorStats {
+                    devid: 1,
+                    target: DeviceStatsTarget::Path("/dev/mapper/braid-disk1".to_owned()),
+                    read_io_errs: 5,
+                    write_io_errs: 0,
+                    flush_io_errs: 0,
+                    corruption_errs: 0,
+                    generation_errs: 0,
+                },
+                DeviceErrorStats {
+                    devid: 2,
+                    target: DeviceStatsTarget::Path("/dev/mapper/braid-member".to_owned()),
+                    read_io_errs: 7,
+                    write_io_errs: 0,
+                    flush_io_errs: 0,
+                    corruption_errs: 0,
+                    generation_errs: 0,
+                },
+            ],
+        };
+        let runner = MockRunner::default();
+        let membership = status_membership_1disk();
+
+        let ctx = build_disk_reports(&runner, &membership, &config_disks, &pool, &stats);
+
+        let foreign = ctx
+            .human_details
+            .iter()
+            .find(|d| d.name == "braid-disk1")
+            .expect("foreign mapper row");
+        assert!(foreign.member_name.is_none());
+        let member = ctx
+            .human_details
+            .iter()
+            .find(|d| d.name == "disk1")
+            .expect("member row");
+        assert_eq!(
+            member.member_name.as_ref().map(DiskName::as_str),
+            Some("disk1")
+        );
+
+        let report = StatusReport {
+            mount_point: MountPoint("/mnt/storage".to_owned()),
+            status: StatusCode::Degraded,
+            total_devices: Some(2),
+            present_count: Some(2),
+            missing_count: Some(0),
+            profile: Some("RAID1".to_owned()),
+            capacity: None,
+            last_scrub: Some(ScrubReport::Never),
+            balance: None,
+            allocation: None,
+            disks: ctx.disks.clone(),
+            advisories: vec![],
+            alert_active: false,
+            alert_causes: vec![],
+            missing_devids: vec![],
+        };
+        let human = format_status_human(&report, None, Some(&ctx.human_details), None);
+
+        assert!(
+            !human.contains("braid replace --old braid-"),
+            "foreign mapper must not be rendered as a replace target; got:\n{human}"
+        );
+        assert!(human.contains("foreign mapper detected"), "got:\n{human}");
+        assert!(human.contains("run 'braid doctor'"), "got:\n{human}");
+        assert!(
+            human.contains("braid replace --old disk1 --new <new-name>"),
+            "member row must keep replacement guidance; got:\n{human}"
+        );
+    }
+
+    // Intent: missing member rows built from config disks must retain their
+    // typed member name for verbose replacement guidance.
+    // Why it exists: the same formatter branch handles missing disks and
+    // erroring present disks; only real members may render `braid replace`.
+    // Scenario: disk1 is declared in membership and config, but the mounted
+    // pool has no live device for it.
+    #[test]
+    fn build_disk_reports_missing_member_keeps_replace_action_target() {
+        let config_disks = vec![ConfigDisk {
+            name: DiskName::parse("disk1").unwrap(),
+            by_id_path: ByIdPath::parse("/dev/disk/by-id/disk1").unwrap(),
+            state: ConfigDiskState::Absent,
+        }];
+        let runner = MockRunner::default();
+        let stats = BtrfsDeviceStatsOutput { devices: vec![] };
+        let membership = status_membership_1disk();
+
+        let ctx = build_disk_reports(
+            &runner,
+            &membership,
+            &config_disks,
+            &status_pool_empty(),
+            &stats,
+        );
+
+        assert_eq!(ctx.human_details.len(), 1);
+        assert_eq!(ctx.human_details[0].status, DiskStatus::Missing);
+        assert_eq!(
+            ctx.human_details[0]
+                .member_name
+                .as_ref()
+                .map(DiskName::as_str),
+            Some("disk1")
+        );
+
+        let report = StatusReport {
+            mount_point: MountPoint("/mnt/storage".to_owned()),
+            status: StatusCode::Degraded,
+            total_devices: Some(1),
+            present_count: Some(0),
+            missing_count: Some(1),
+            profile: Some("RAID1".to_owned()),
+            capacity: None,
+            last_scrub: Some(ScrubReport::Never),
+            balance: None,
+            allocation: None,
+            disks: ctx.disks.clone(),
+            advisories: vec![],
+            alert_active: false,
+            alert_causes: vec![],
+            missing_devids: vec![],
+        };
+        let human = format_status_human(&report, None, Some(&ctx.human_details), None);
+
+        assert!(
+            human.contains("braid replace --old disk1 --new <new-name>"),
+            "missing member must keep replacement guidance; got:\n{human}"
+        );
+    }
+
     // =======================================================================
     // build_devid_names tests
     // =======================================================================
@@ -3715,6 +3905,7 @@ mod tests {
     fn status_verbose_unknown_disk() {
         let human_disks = vec![HumanDisk {
             name: "disk2".to_owned(),
+            member_name: Some(DiskName::parse("disk2").unwrap()),
             by_id: "/dev/disk/by-id/disk2".to_owned(),
             luks_uuid: String::new(),
             devid: None,
