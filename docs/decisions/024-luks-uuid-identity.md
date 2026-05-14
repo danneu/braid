@@ -112,7 +112,9 @@ one.
    correctly. If mounted per-device probing fails, `lock` first requires the
    mounted filesystem FSID to prove braid owns the mount, then scans
    `/dev/mapper/braid-*` candidates and closes only those with verified backing
-   LUKS UUIDs.
+   LUKS UUIDs. If a `null_underlying` mapper's persisted devid resolves to
+   multiple membership UUIDs, `lock` warns, leaves that mapper open, and marks
+   cleanup uncertain instead of demoting it to orphan cleanup.
 8. Recovery must fail closed when a live btrfs device lacks an observable LUKS
    UUID and the journal has no persisted devid binding. It must not recover by
    inferring identity from `braid-<DiskName>`.
@@ -148,8 +150,9 @@ one.
 - `cli/src/status.rs` unit tests pin compact status names by resolving live
   pool UUIDs back to `DiskName`, including a drifted mapper case.
 - `cli/src/lock.rs` unit tests pin the normal UUID/devid-classified close set,
-  observed-mapper closing, UUID-scanned fallback cleanup, orphan classification
-  for readable non-members, and skip warnings for unverified candidates.
+  observed-mapper closing, UUID-scanned fallback cleanup, orphan warnings for
+  non-member UUID/devid cases, duplicate-devid `null_underlying` skip behavior,
+  and skip warnings for unverified candidates.
 - `cli/src/remove.rs` unit tests pin all live member devids into the
   pre-operation journal snapshot before mutation, so recovery has a legitimate
   fallback binding when LUKS UUID is not observable.
