@@ -37,7 +37,7 @@ pub(crate) fn view_browse(model: &Model, frame: &mut Frame, area: Rect) {
 
     let mut constraints = vec![Constraint::Length(12), Constraint::Length(16)];
     if model.browse.has_subviews() {
-        constraints.push(Constraint::Length(12));
+        constraints.push(Constraint::Length(16));
     }
     constraints.push(Constraint::Min(20));
     let cols = Layout::horizontal(constraints).split(body);
@@ -366,6 +366,25 @@ mod tests {
     }
 
     #[test]
+    fn snapshot_browse_btrfs_filesystem_commit_stats() {
+        let mut model = model();
+        model.browse.focus = BrowseFocus::Subview;
+        for _ in 0..3 {
+            model.browse.select_next();
+        }
+        model.browse.command_finished(
+            RawCommandOutput {
+                cmd: "btrfs filesystem commit-stats /mnt/storage".into(),
+                stdout: "Commit stats since mount:\n  Total commits: 42\n".into(),
+                stderr: String::new(),
+                exit_status: 0,
+            },
+            0,
+        );
+        snap!(buffer_to_string(&render(&model, 80, 14)));
+    }
+
+    #[test]
     fn snapshot_browse_btrfs_devices_usage() {
         let mut model = model();
         model.browse.focus = BrowseFocus::Command;
@@ -411,6 +430,26 @@ mod tests {
             RawCommandOutput {
                 cmd: "btrfs subvolume list /mnt/storage".into(),
                 stdout: "ID 256 gen 10 top level 5 path data\n".into(),
+                stderr: String::new(),
+                exit_status: 0,
+            },
+            0,
+        );
+        snap!(buffer_to_string(&render(&model, 80, 14)));
+    }
+
+    #[test]
+    fn snapshot_browse_btrfs_subvolumes_full() {
+        let mut model = model();
+        model.browse.focus = BrowseFocus::Command;
+        model.browse.select_next();
+        model.browse.select_next();
+        model.browse.focus = BrowseFocus::Subview;
+        model.browse.select_next();
+        model.browse.command_finished(
+            RawCommandOutput {
+                cmd: "btrfs subvolume list -a -p -c -u -q -R -t --sort=path /mnt/storage".into(),
+                stdout: "ID gen parent top level path uuid\n256 10 5 5 data abc-123\n".into(),
                 stderr: String::new(),
                 exit_status: 0,
             },
@@ -468,6 +507,27 @@ mod tests {
     }
 
     #[test]
+    fn snapshot_browse_btrfs_scrub_limits() {
+        let mut model = model();
+        model.browse.focus = BrowseFocus::Command;
+        for _ in 0..3 {
+            model.browse.select_next();
+        }
+        model.browse.focus = BrowseFocus::Subview;
+        model.browse.select_next();
+        model.browse.command_finished(
+            RawCommandOutput {
+                cmd: "btrfs scrub limit /mnt/storage".into(),
+                stdout: "Device 1: scrub limit 0B (unlimited)\n".into(),
+                stderr: String::new(),
+                exit_status: 0,
+            },
+            0,
+        );
+        snap!(buffer_to_string(&render(&model, 80, 14)));
+    }
+
+    #[test]
     fn snapshot_browse_btrfs_balance() {
         let mut model = model();
         model.browse.focus = BrowseFocus::Command;
@@ -478,6 +538,48 @@ mod tests {
             RawCommandOutput {
                 cmd: "btrfs balance status /mnt/storage".into(),
                 stdout: "No balance found on '/mnt/storage'\n".into(),
+                stderr: String::new(),
+                exit_status: 0,
+            },
+            0,
+        );
+        snap!(buffer_to_string(&render(&model, 80, 14)));
+    }
+
+    #[test]
+    fn snapshot_browse_btrfs_quota_qgroups() {
+        let mut model = model();
+        model.browse.focus = BrowseFocus::Command;
+        for _ in 0..5 {
+            model.browse.select_next();
+        }
+        model.browse.focus = BrowseFocus::Subview;
+        model.browse.select_next();
+        model.browse.command_finished(
+            RawCommandOutput {
+                cmd: "btrfs qgroup show -p -c -r -e /mnt/storage".into(),
+                stdout: "qgroupid         rfer         excl max_rfer max_excl\n0/5          16.00KiB     16.00KiB     none     none\n".into(),
+                stderr: String::new(),
+                exit_status: 0,
+            },
+            0,
+        );
+        snap!(buffer_to_string(&render(&model, 80, 14)));
+    }
+
+    #[test]
+    fn snapshot_browse_btrfs_inspect_chunks() {
+        let mut model = model();
+        model.browse.focus = BrowseFocus::Command;
+        for _ in 0..6 {
+            model.browse.select_next();
+        }
+        model.browse.command_finished(
+            RawCommandOutput {
+                cmd: "btrfs inspect-internal list-chunks --sort=devid,pstart /mnt/storage".into(),
+                stdout:
+                    "Devid PNumber Type/profile PStart Length\n1 1 Data/RAID1 1.00MiB 64.00MiB\n"
+                        .into(),
                 stderr: String::new(),
                 exit_status: 0,
             },
@@ -520,6 +622,68 @@ mod tests {
                 stdout: "Instant commands supported on UPS [ups]:\nbeeper.disable\n".into(),
                 stderr: String::new(),
                 exit_status: 0,
+            },
+            0,
+        );
+        snap!(buffer_to_string(&render(&model, 80, 14)));
+    }
+
+    #[test]
+    fn snapshot_browse_nut_clients() {
+        let mut model = model();
+        model.ups_config = Some(Ups { name: "ups".into() });
+        model.browse.select_next();
+        model.browse.focus = BrowseFocus::Command;
+        for _ in 0..3 {
+            model.browse.select_next();
+        }
+        model.browse.command_finished(
+            RawCommandOutput {
+                cmd: "upsc -c ups".into(),
+                stdout: "127.0.0.1\n".into(),
+                stderr: String::new(),
+                exit_status: 0,
+            },
+            0,
+        );
+        snap!(buffer_to_string(&render(&model, 80, 14)));
+    }
+
+    #[test]
+    fn snapshot_browse_nut_rw_vars() {
+        let mut model = model();
+        model.ups_config = Some(Ups { name: "ups".into() });
+        model.browse.select_next();
+        model.browse.focus = BrowseFocus::Command;
+        for _ in 0..4 {
+            model.browse.select_next();
+        }
+        model.browse.command_finished(
+            RawCommandOutput {
+                cmd: "upsrw -l ups".into(),
+                stdout: "[input.transfer.high]\nHigh transfer voltage\n".into(),
+                stderr: String::new(),
+                exit_status: 0,
+            },
+            0,
+        );
+        snap!(buffer_to_string(&render(&model, 80, 14)));
+    }
+
+    #[test]
+    fn snapshot_browse_nut_upses() {
+        let mut model = model();
+        model.browse.select_next();
+        model.browse.focus = BrowseFocus::Command;
+        for _ in 0..5 {
+            model.browse.select_next();
+        }
+        model.browse.command_finished(
+            RawCommandOutput {
+                cmd: "upsc -L localhost".into(),
+                stdout: String::new(),
+                stderr: "Error: Connection failure: Connection refused\n".into(),
+                exit_status: 1,
             },
             0,
         );

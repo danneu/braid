@@ -2,17 +2,17 @@
 source: cli/src/tui/browse/view.rs
 expression: "buffer_to_string(&render(&model, 80, 14))"
 ---
-┌ Pgm ─────┐┌ Cmd ─────────┐┌ Content ─────────────────────────────────────────┐
-│> Btrfs   ││  Filesystem  ││data                                              │
-│  NUT     ││  Devices     ││Name:data                                         │
-│          ││> Subvolumes  ││UUID:abc-123                                      │
-│          ││  Scrub       ││                                                  │
-│          ││  Balance     ││                                                  │
-│          ││              ││                                                  │
-│          ││              ││                                                  │
-│          ││              ││                                                  │
-│          ││              ││                                                  │
-│          ││              ││                                                  │
-│          ││              ││                                                  │
-└──────────┘└──────────────┘└──────────────────────────────────────────────────┘
+┌ Pgm ─────┐┌ Cmd ─────────┐┌ View ────────┐┌ Content ─────────────────────────┐
+│> Btrfs   ││  Filesystem  ││> List        ││data                              │
+│  NUT     ││  Devices     ││  Full        ││Name:data                         │
+│          ││> Subvolumes  ││  Snapshots   ││UUID:abc-123                      │
+│          ││  Scrub       ││  Deleted     ││                                  │
+│          ││  Balance     ││  Default     ││                                  │
+│          ││  Quota       ││              ││                                  │
+│          ││  Inspect     ││              ││                                  │
+│          ││              ││              ││                                  │
+│          ││              ││              ││                                  │
+│          ││              ││              ││                                  │
+│          ││              ││              ││                                  │
+└──────────┘└──────────────┘└──────────────┘└──────────────────────────────────┘
 $ btrfs subvolume list ''

@@ -6,9 +6,9 @@ expression: "buffer_to_string(&render(&model, 80, 14))"
 │  Btrfs   ││  Status      ││Instant commands supported on UPS [ups]:          │
 │> NUT     ││  Variables   ││beeper.disable                                    │
 │          ││> Commands    ││                                                  │
-│          ││              ││                                                  │
-│          ││              ││                                                  │
-│          ││              ││                                                  │
+│          ││  Clients     ││                                                  │
+│          ││  RW Vars     ││                                                  │
+│          ││  UPSes       ││                                                  │
 │          ││              ││                                                  │
 │          ││              ││                                                  │
 │          ││              ││                                                  │

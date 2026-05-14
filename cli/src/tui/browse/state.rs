@@ -46,20 +46,34 @@ pub(crate) enum BrowseCommand {
     BtrfsSubvolumes,
     BtrfsScrub,
     BtrfsBalance,
+    BtrfsQuota,
+    BtrfsInspect,
     NutStatus,
     NutVariables,
     NutCommands,
+    NutClients,
+    NutRwVars,
+    NutUpses,
 }
 
 impl BrowseCommand {
-    const BTRFS: [Self; 5] = [
+    const BTRFS: [Self; 7] = [
         Self::BtrfsFilesystem,
         Self::BtrfsDevices,
         Self::BtrfsSubvolumes,
         Self::BtrfsScrub,
         Self::BtrfsBalance,
+        Self::BtrfsQuota,
+        Self::BtrfsInspect,
     ];
-    const NUT: [Self; 3] = [Self::NutStatus, Self::NutVariables, Self::NutCommands];
+    const NUT: [Self; 6] = [
+        Self::NutStatus,
+        Self::NutVariables,
+        Self::NutCommands,
+        Self::NutClients,
+        Self::NutRwVars,
+        Self::NutUpses,
+    ];
 
     pub(crate) fn label(self) -> &'static str {
         match self {
@@ -68,9 +82,14 @@ impl BrowseCommand {
             Self::BtrfsSubvolumes => "Subvolumes",
             Self::BtrfsScrub => "Scrub",
             Self::BtrfsBalance => "Balance",
+            Self::BtrfsQuota => "Quota",
+            Self::BtrfsInspect => "Inspect",
             Self::NutStatus => "Status",
             Self::NutVariables => "Variables",
             Self::NutCommands => "Commands",
+            Self::NutClients => "Clients",
+            Self::NutRwVars => "RW Vars",
+            Self::NutUpses => "UPSes",
         }
     }
 }
@@ -82,16 +101,18 @@ pub(crate) enum FilesystemSubview {
     Usage,
     Show,
     Df,
+    CommitStats,
 }
 
 impl FilesystemSubview {
-    const ALL: [Self; 3] = [Self::Usage, Self::Show, Self::Df];
+    const ALL: [Self; 4] = [Self::Usage, Self::Show, Self::Df, Self::CommitStats];
 
     pub(crate) fn label(self) -> &'static str {
         match self {
             Self::Usage => "Usage",
             Self::Show => "Show",
             Self::Df => "Df",
+            Self::CommitStats => "Commit Stats",
         }
     }
 }
@@ -111,6 +132,91 @@ impl DeviceSubview {
         match self {
             Self::Usage => "Usage",
             Self::Stats => "Stats",
+        }
+    }
+}
+
+/// Btrfs subvolume subviews split the parsed default list from raw
+/// inventories that use different field and type filters.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub(crate) enum SubvolumeSubview {
+    List,
+    Full,
+    Snapshots,
+    Deleted,
+    Default,
+}
+
+impl SubvolumeSubview {
+    const ALL: [Self; 5] = [
+        Self::List,
+        Self::Full,
+        Self::Snapshots,
+        Self::Deleted,
+        Self::Default,
+    ];
+
+    pub(crate) fn label(self) -> &'static str {
+        match self {
+            Self::List => "List",
+            Self::Full => "Full",
+            Self::Snapshots => "Snapshots",
+            Self::Deleted => "Deleted",
+            Self::Default => "Default",
+        }
+    }
+}
+
+/// Scrub subviews separate live scrub state from read-only throttle limits.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub(crate) enum ScrubSubview {
+    Status,
+    Limits,
+}
+
+impl ScrubSubview {
+    const ALL: [Self; 2] = [Self::Status, Self::Limits];
+
+    pub(crate) fn label(self) -> &'static str {
+        match self {
+            Self::Status => "Status",
+            Self::Limits => "Limits",
+        }
+    }
+}
+
+/// Quota subviews expose global quota status and qgroup accounting without
+/// enabling, disabling, or rescanning quotas.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub(crate) enum QuotaSubview {
+    Status,
+    Qgroups,
+}
+
+impl QuotaSubview {
+    const ALL: [Self; 2] = [Self::Status, Self::Qgroups];
+
+    pub(crate) fn label(self) -> &'static str {
+        match self {
+            Self::Status => "Status",
+            Self::Qgroups => "Qgroups",
+        }
+    }
+}
+
+/// Inspect subviews are raw btrfs inspect-internal reports that do not
+/// mutate filesystem state.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub(crate) enum InspectSubview {
+    Chunks,
+}
+
+impl InspectSubview {
+    const ALL: [Self; 1] = [Self::Chunks];
+
+    pub(crate) fn label(self) -> &'static str {
+        match self {
+            Self::Chunks => "Chunks",
         }
     }
 }
@@ -144,12 +250,34 @@ enum BrowseMode {
 enum BrowseSelection {
     BtrfsFilesystem(FilesystemSubview),
     BtrfsDevices(DeviceSubview),
-    BtrfsSubvolumes,
-    BtrfsScrub,
+    BtrfsSubvolumes(SubvolumeSubview),
+    BtrfsScrub(ScrubSubview),
     BtrfsBalance,
+    BtrfsQuota(QuotaSubview),
+    BtrfsInspect(InspectSubview),
     NutStatus,
     NutVariables,
     NutCommands,
+    NutClients,
+    NutRwVars,
+    NutUpses,
+}
+
+impl BrowseSelection {
+    fn requires_ups_name(self) -> bool {
+        matches!(
+            self,
+            Self::NutStatus
+                | Self::NutVariables
+                | Self::NutCommands
+                | Self::NutClients
+                | Self::NutRwVars
+        )
+    }
+
+    fn uses_model_snapshot(self) -> bool {
+        matches!(self, Self::NutStatus | Self::NutVariables)
+    }
 }
 
 #[derive(Clone, Default)]
@@ -168,6 +296,10 @@ pub(crate) struct BrowseState {
     nut_command: BrowseCommand,
     filesystem_subview: FilesystemSubview,
     device_subview: DeviceSubview,
+    subvolume_subview: SubvolumeSubview,
+    scrub_subview: ScrubSubview,
+    quota_subview: QuotaSubview,
+    inspect_subview: InspectSubview,
     output: Vec<String>,
     cache: HashMap<BrowseSelection, CachedOutput>,
     empty_state: Option<BrowseEmptyState>,
@@ -191,6 +323,10 @@ impl Default for BrowseState {
             nut_command: BrowseCommand::NutStatus,
             filesystem_subview: FilesystemSubview::Usage,
             device_subview: DeviceSubview::Usage,
+            subvolume_subview: SubvolumeSubview::List,
+            scrub_subview: ScrubSubview::Status,
+            quota_subview: QuotaSubview::Status,
+            inspect_subview: InspectSubview::Chunks,
             output: Vec::new(),
             cache: HashMap::new(),
             empty_state: None,
@@ -228,15 +364,12 @@ impl BrowseState {
             self.install_empty(BrowseEmptyState::PoolOffline);
             return None;
         }
-        if self.is_nut_selected() && ups_config.is_none() {
+        if selection.requires_ups_name() && ups_config.is_none() {
             self.install_empty(BrowseEmptyState::UpsNotConfigured);
             return None;
         }
 
-        if matches!(
-            selection,
-            BrowseSelection::NutStatus | BrowseSelection::NutVariables
-        ) {
+        if selection.uses_model_snapshot() {
             self.output.clear();
             self.subvolumes.clear();
             return None;
@@ -327,7 +460,7 @@ impl BrowseState {
     pub(crate) fn enter(&mut self, pool: &PoolStatus) -> Option<Effect> {
         if self.focus != BrowseFocus::Content
             || self.mode != BrowseMode::Normal
-            || self.current_selection() != BrowseSelection::BtrfsSubvolumes
+            || !self.is_subvolume_list()
             || self.subvolumes.is_empty()
         {
             return None;
@@ -378,17 +511,18 @@ impl BrowseState {
         }
         self.scroll_offset = 0;
 
-        if self.current_selection() == BrowseSelection::BtrfsSubvolumes
-            && self.mode == BrowseMode::Normal
-        {
-            match parse_btrfs_subvolume_list(&raw) {
-                Ok(parsed) => {
-                    self.subvolumes = parsed.subvolumes;
-                    self.subvol_selected = self
-                        .subvol_selected
-                        .min(self.subvolumes.len().saturating_sub(1));
+        if self.mode == BrowseMode::Normal {
+            self.subvolumes.clear();
+            if self.is_subvolume_list() {
+                match parse_btrfs_subvolume_list(&raw) {
+                    Ok(parsed) => {
+                        self.subvolumes = parsed.subvolumes;
+                        self.subvol_selected = self
+                            .subvol_selected
+                            .min(self.subvolumes.len().saturating_sub(1));
+                    }
+                    Err(_) => self.subvolumes.clear(),
                 }
-                Err(_) => self.subvolumes.clear(),
             }
         }
 
@@ -452,6 +586,22 @@ impl BrowseState {
                 .iter()
                 .map(|s| (s.label(), *s == self.device_subview))
                 .collect(),
+            BrowseCommand::BtrfsSubvolumes => SubvolumeSubview::ALL
+                .iter()
+                .map(|s| (s.label(), *s == self.subvolume_subview))
+                .collect(),
+            BrowseCommand::BtrfsScrub => ScrubSubview::ALL
+                .iter()
+                .map(|s| (s.label(), *s == self.scrub_subview))
+                .collect(),
+            BrowseCommand::BtrfsQuota => QuotaSubview::ALL
+                .iter()
+                .map(|s| (s.label(), *s == self.quota_subview))
+                .collect(),
+            BrowseCommand::BtrfsInspect => InspectSubview::ALL
+                .iter()
+                .map(|s| (s.label(), *s == self.inspect_subview))
+                .collect(),
             _ => Vec::new(),
         }
     }
@@ -459,7 +609,12 @@ impl BrowseState {
     pub(crate) fn has_subviews(&self) -> bool {
         matches!(
             self.current_command(),
-            BrowseCommand::BtrfsFilesystem | BrowseCommand::BtrfsDevices
+            BrowseCommand::BtrfsFilesystem
+                | BrowseCommand::BtrfsDevices
+                | BrowseCommand::BtrfsSubvolumes
+                | BrowseCommand::BtrfsScrub
+                | BrowseCommand::BtrfsQuota
+                | BrowseCommand::BtrfsInspect
         )
     }
 
@@ -472,7 +627,7 @@ impl BrowseState {
     }
 
     pub(crate) fn is_subvolume_list(&self) -> bool {
-        self.current_selection() == BrowseSelection::BtrfsSubvolumes
+        self.current_selection() == BrowseSelection::BtrfsSubvolumes(SubvolumeSubview::List)
             && self.mode == BrowseMode::Normal
     }
 
@@ -525,27 +680,77 @@ impl BrowseState {
                     mount_point: mount_point.clone(),
                 }
             }
+            BrowseSelection::BtrfsFilesystem(FilesystemSubview::CommitStats) => {
+                CmdRequest::BtrfsFilesystemCommitStats {
+                    mount_point: mount_point.clone(),
+                }
+            }
             BrowseSelection::BtrfsDevices(DeviceSubview::Usage) => CmdRequest::BtrfsDeviceUsage {
                 mount_point: mount_point.clone(),
             },
             BrowseSelection::BtrfsDevices(DeviceSubview::Stats) => CmdRequest::BtrfsDeviceStats {
                 mount_point: mount_point.clone(),
             },
-            BrowseSelection::BtrfsSubvolumes => CmdRequest::BtrfsSubvolumeList {
-                mount_point: mount_point.clone(),
-            },
-            BrowseSelection::BtrfsScrub => CmdRequest::BtrfsScrubStatusHuman {
+            BrowseSelection::BtrfsSubvolumes(SubvolumeSubview::List) => {
+                CmdRequest::BtrfsSubvolumeList {
+                    mount_point: mount_point.clone(),
+                }
+            }
+            BrowseSelection::BtrfsSubvolumes(SubvolumeSubview::Full) => {
+                CmdRequest::BtrfsSubvolumeListFull {
+                    mount_point: mount_point.clone(),
+                }
+            }
+            BrowseSelection::BtrfsSubvolumes(SubvolumeSubview::Snapshots) => {
+                CmdRequest::BtrfsSubvolumeListSnapshots {
+                    mount_point: mount_point.clone(),
+                }
+            }
+            BrowseSelection::BtrfsSubvolumes(SubvolumeSubview::Deleted) => {
+                CmdRequest::BtrfsSubvolumeListDeleted {
+                    mount_point: mount_point.clone(),
+                }
+            }
+            BrowseSelection::BtrfsSubvolumes(SubvolumeSubview::Default) => {
+                CmdRequest::BtrfsSubvolumeGetDefault {
+                    mount_point: mount_point.clone(),
+                }
+            }
+            BrowseSelection::BtrfsScrub(ScrubSubview::Status) => {
+                CmdRequest::BtrfsScrubStatusHuman {
+                    mount_point: mount_point.clone(),
+                }
+            }
+            BrowseSelection::BtrfsScrub(ScrubSubview::Limits) => CmdRequest::BtrfsScrubLimit {
                 mount_point: mount_point.clone(),
             },
             BrowseSelection::BtrfsBalance => CmdRequest::BtrfsBalanceStatus {
                 mount_point: mount_point.clone(),
             },
+            BrowseSelection::BtrfsQuota(QuotaSubview::Status) => CmdRequest::BtrfsQuotaStatus {
+                mount_point: mount_point.clone(),
+            },
+            BrowseSelection::BtrfsQuota(QuotaSubview::Qgroups) => CmdRequest::BtrfsQgroupShow {
+                mount_point: mount_point.clone(),
+            },
+            BrowseSelection::BtrfsInspect(InspectSubview::Chunks) => {
+                CmdRequest::BtrfsInspectListChunks {
+                    mount_point: mount_point.clone(),
+                }
+            }
             BrowseSelection::NutStatus | BrowseSelection::NutVariables => CmdRequest::UpscQuery {
                 name: ups_config?.name.clone(),
             },
             BrowseSelection::NutCommands => CmdRequest::UpscmdList {
                 name: ups_config?.name.clone(),
             },
+            BrowseSelection::NutClients => CmdRequest::UpscClients {
+                name: ups_config?.name.clone(),
+            },
+            BrowseSelection::NutRwVars => CmdRequest::UpsrwList {
+                name: ups_config?.name.clone(),
+            },
+            BrowseSelection::NutUpses => CmdRequest::UpscListUpses,
         };
         Some(request.to_argv().to_shell_string())
     }
@@ -586,6 +791,11 @@ impl BrowseState {
                     mount_point: mount_point?.clone(),
                 })
             }
+            BrowseSelection::BtrfsFilesystem(FilesystemSubview::CommitStats) => {
+                Some(CmdRequest::BtrfsFilesystemCommitStats {
+                    mount_point: mount_point?.clone(),
+                })
+            }
             BrowseSelection::BtrfsDevices(DeviceSubview::Usage) => {
                 Some(CmdRequest::BtrfsDeviceUsage {
                     mount_point: mount_point?.clone(),
@@ -596,19 +806,70 @@ impl BrowseState {
                     mount_point: mount_point?.clone(),
                 })
             }
-            BrowseSelection::BtrfsSubvolumes => Some(CmdRequest::BtrfsSubvolumeList {
-                mount_point: mount_point?.clone(),
-            }),
-            BrowseSelection::BtrfsScrub => Some(CmdRequest::BtrfsScrubStatusHuman {
-                mount_point: mount_point?.clone(),
-            }),
+            BrowseSelection::BtrfsSubvolumes(SubvolumeSubview::List) => {
+                Some(CmdRequest::BtrfsSubvolumeList {
+                    mount_point: mount_point?.clone(),
+                })
+            }
+            BrowseSelection::BtrfsSubvolumes(SubvolumeSubview::Full) => {
+                Some(CmdRequest::BtrfsSubvolumeListFull {
+                    mount_point: mount_point?.clone(),
+                })
+            }
+            BrowseSelection::BtrfsSubvolumes(SubvolumeSubview::Snapshots) => {
+                Some(CmdRequest::BtrfsSubvolumeListSnapshots {
+                    mount_point: mount_point?.clone(),
+                })
+            }
+            BrowseSelection::BtrfsSubvolumes(SubvolumeSubview::Deleted) => {
+                Some(CmdRequest::BtrfsSubvolumeListDeleted {
+                    mount_point: mount_point?.clone(),
+                })
+            }
+            BrowseSelection::BtrfsSubvolumes(SubvolumeSubview::Default) => {
+                Some(CmdRequest::BtrfsSubvolumeGetDefault {
+                    mount_point: mount_point?.clone(),
+                })
+            }
+            BrowseSelection::BtrfsScrub(ScrubSubview::Status) => {
+                Some(CmdRequest::BtrfsScrubStatusHuman {
+                    mount_point: mount_point?.clone(),
+                })
+            }
+            BrowseSelection::BtrfsScrub(ScrubSubview::Limits) => {
+                Some(CmdRequest::BtrfsScrubLimit {
+                    mount_point: mount_point?.clone(),
+                })
+            }
             BrowseSelection::BtrfsBalance => Some(CmdRequest::BtrfsBalanceStatus {
                 mount_point: mount_point?.clone(),
             }),
+            BrowseSelection::BtrfsQuota(QuotaSubview::Status) => {
+                Some(CmdRequest::BtrfsQuotaStatus {
+                    mount_point: mount_point?.clone(),
+                })
+            }
+            BrowseSelection::BtrfsQuota(QuotaSubview::Qgroups) => {
+                Some(CmdRequest::BtrfsQgroupShow {
+                    mount_point: mount_point?.clone(),
+                })
+            }
+            BrowseSelection::BtrfsInspect(InspectSubview::Chunks) => {
+                Some(CmdRequest::BtrfsInspectListChunks {
+                    mount_point: mount_point?.clone(),
+                })
+            }
             BrowseSelection::NutStatus | BrowseSelection::NutVariables => None,
             BrowseSelection::NutCommands => Some(CmdRequest::UpscmdList {
                 name: ups_config?.name.clone(),
             }),
+            BrowseSelection::NutClients => Some(CmdRequest::UpscClients {
+                name: ups_config?.name.clone(),
+            }),
+            BrowseSelection::NutRwVars => Some(CmdRequest::UpsrwList {
+                name: ups_config?.name.clone(),
+            }),
+            BrowseSelection::NutUpses => Some(CmdRequest::UpscListUpses),
         }
     }
 
@@ -618,12 +879,19 @@ impl BrowseState {
                 BrowseSelection::BtrfsFilesystem(self.filesystem_subview)
             }
             BrowseCommand::BtrfsDevices => BrowseSelection::BtrfsDevices(self.device_subview),
-            BrowseCommand::BtrfsSubvolumes => BrowseSelection::BtrfsSubvolumes,
-            BrowseCommand::BtrfsScrub => BrowseSelection::BtrfsScrub,
+            BrowseCommand::BtrfsSubvolumes => {
+                BrowseSelection::BtrfsSubvolumes(self.subvolume_subview)
+            }
+            BrowseCommand::BtrfsScrub => BrowseSelection::BtrfsScrub(self.scrub_subview),
             BrowseCommand::BtrfsBalance => BrowseSelection::BtrfsBalance,
+            BrowseCommand::BtrfsQuota => BrowseSelection::BtrfsQuota(self.quota_subview),
+            BrowseCommand::BtrfsInspect => BrowseSelection::BtrfsInspect(self.inspect_subview),
             BrowseCommand::NutStatus => BrowseSelection::NutStatus,
             BrowseCommand::NutVariables => BrowseSelection::NutVariables,
             BrowseCommand::NutCommands => BrowseSelection::NutCommands,
+            BrowseCommand::NutClients => BrowseSelection::NutClients,
+            BrowseCommand::NutRwVars => BrowseSelection::NutRwVars,
+            BrowseCommand::NutUpses => BrowseSelection::NutUpses,
         }
     }
 
@@ -643,10 +911,6 @@ impl BrowseState {
 
     fn is_btrfs_selected(&self) -> bool {
         self.program == BrowseProgram::Btrfs
-    }
-
-    fn is_nut_selected(&self) -> bool {
-        self.program == BrowseProgram::Nut
     }
 
     fn cycle_program(&mut self, delta: isize) {
@@ -689,6 +953,38 @@ impl BrowseState {
                     .expect("active device subview is in ALL");
                 self.device_subview =
                     DeviceSubview::ALL[wrap_index(idx, DeviceSubview::ALL.len(), delta)];
+            }
+            BrowseCommand::BtrfsSubvolumes => {
+                let idx = SubvolumeSubview::ALL
+                    .iter()
+                    .position(|s| *s == self.subvolume_subview)
+                    .expect("active subvolume subview is in ALL");
+                self.subvolume_subview =
+                    SubvolumeSubview::ALL[wrap_index(idx, SubvolumeSubview::ALL.len(), delta)];
+            }
+            BrowseCommand::BtrfsScrub => {
+                let idx = ScrubSubview::ALL
+                    .iter()
+                    .position(|s| *s == self.scrub_subview)
+                    .expect("active scrub subview is in ALL");
+                self.scrub_subview =
+                    ScrubSubview::ALL[wrap_index(idx, ScrubSubview::ALL.len(), delta)];
+            }
+            BrowseCommand::BtrfsQuota => {
+                let idx = QuotaSubview::ALL
+                    .iter()
+                    .position(|s| *s == self.quota_subview)
+                    .expect("active quota subview is in ALL");
+                self.quota_subview =
+                    QuotaSubview::ALL[wrap_index(idx, QuotaSubview::ALL.len(), delta)];
+            }
+            BrowseCommand::BtrfsInspect => {
+                let idx = InspectSubview::ALL
+                    .iter()
+                    .position(|s| *s == self.inspect_subview)
+                    .expect("active inspect subview is in ALL");
+                self.inspect_subview =
+                    InspectSubview::ALL[wrap_index(idx, InspectSubview::ALL.len(), delta)];
             }
             _ => {}
         }
@@ -763,6 +1059,13 @@ mod tests {
         Ups { name: "ups".into() }
     }
 
+    fn browse_request(effect: Option<Effect>) -> CmdRequest {
+        match effect {
+            Some(Effect::BrowseRunCommand { request, .. }) => request,
+            _ => panic!("expected BrowseRunCommand effect"),
+        }
+    }
+
     // Intent: h at the leftmost Browse column stays on Program.
     // Why it exists: boundary movement should be stable, not wrap
     // sideways into content.
@@ -790,13 +1093,14 @@ mod tests {
     // command has no subviews.
     // Why it exists: the fourth column is conditional; focus movement
     // must match what is rendered.
-    // Scenario: user selects Btrfs Subvolumes and presses l from Command.
+    // Scenario: user selects Btrfs Balance and presses l from Command.
     #[test]
     fn l_from_command_skips_subview_when_no_subviews() {
         let mut state = BrowseState::default();
         state.focus = BrowseFocus::Command;
-        state.select_next();
-        state.select_next();
+        for _ in 0..4 {
+            state.select_next();
+        }
         state.focus_right();
         assert_eq!(state.focus(), BrowseFocus::Content);
     }
@@ -841,23 +1145,43 @@ mod tests {
         assert_eq!(state.program_rows(), vec![("Btrfs", true), ("NUT", false)]);
     }
 
-    // Intent: filesystem subview selection cycles Usage -> Show -> Df.
-    // Why it exists: all three raw filesystem commands are exposed under
+    // Intent: filesystem subview selection cycles through all filesystem views.
+    // Why it exists: all raw filesystem commands are exposed under
     // one command group.
     // Scenario: user focuses the subview column and presses j repeatedly.
     #[test]
-    fn j_in_subview_cycles_filesystem_usage_show_df() {
+    fn j_in_subview_cycles_filesystem_views() {
         let mut state = BrowseState::default();
         state.focus = BrowseFocus::Subview;
         state.select_next();
         assert_eq!(
             state.subview_rows(),
-            vec![("Usage", false), ("Show", true), ("Df", false)]
+            vec![
+                ("Usage", false),
+                ("Show", true),
+                ("Df", false),
+                ("Commit Stats", false)
+            ]
         );
         state.select_next();
         assert_eq!(
             state.subview_rows(),
-            vec![("Usage", false), ("Show", false), ("Df", true)]
+            vec![
+                ("Usage", false),
+                ("Show", false),
+                ("Df", true),
+                ("Commit Stats", false)
+            ]
+        );
+        state.select_next();
+        assert_eq!(
+            state.subview_rows(),
+            vec![
+                ("Usage", false),
+                ("Show", false),
+                ("Df", false),
+                ("Commit Stats", true)
+            ]
         );
     }
 
@@ -876,6 +1200,161 @@ mod tests {
             state.subview_rows(),
             vec![("Usage", false), ("Stats", true)]
         );
+    }
+
+    // Intent: Browse command rows append new top-level groups without
+    // moving existing entries.
+    // Why it exists: Browse muscle memory and ADR 025 ordering depend on
+    // existing rows keeping their positions as the inventory grows.
+    // Scenario: user opens Browse and scans the Btrfs and NUT command columns.
+    #[test]
+    fn command_rows_append_new_read_only_groups() {
+        let mut state = BrowseState::default();
+        assert_eq!(
+            state.command_rows(),
+            vec![
+                ("Filesystem", true),
+                ("Devices", false),
+                ("Subvolumes", false),
+                ("Scrub", false),
+                ("Balance", false),
+                ("Quota", false),
+                ("Inspect", false),
+            ]
+        );
+
+        state.select_next();
+        assert_eq!(
+            state.command_rows(),
+            vec![
+                ("Status", true),
+                ("Variables", false),
+                ("Commands", false),
+                ("Clients", false),
+                ("RW Vars", false),
+                ("UPSes", false),
+            ]
+        );
+    }
+
+    // Intent: new Btrfs command groups expose the expected subview rows.
+    // Why it exists: these command groups are raw Browse surfaces, but the
+    // selected subview determines which typed command is executed.
+    // Scenario: user moves through Subvolumes, Scrub, Quota, and Inspect.
+    #[test]
+    fn new_btrfs_command_groups_have_expected_subviews() {
+        let mut state = BrowseState::default();
+
+        state.btrfs_command = BrowseCommand::BtrfsSubvolumes;
+        assert_eq!(
+            state.subview_rows(),
+            vec![
+                ("List", true),
+                ("Full", false),
+                ("Snapshots", false),
+                ("Deleted", false),
+                ("Default", false),
+            ]
+        );
+
+        state.btrfs_command = BrowseCommand::BtrfsScrub;
+        assert_eq!(
+            state.subview_rows(),
+            vec![("Status", true), ("Limits", false)]
+        );
+
+        state.btrfs_command = BrowseCommand::BtrfsQuota;
+        assert_eq!(
+            state.subview_rows(),
+            vec![("Status", true), ("Qgroups", false)]
+        );
+
+        state.btrfs_command = BrowseCommand::BtrfsInspect;
+        assert_eq!(state.subview_rows(), vec![("Chunks", true)]);
+    }
+
+    // Intent: new Browse selections map to their exact typed command
+    // request variants.
+    // Why it exists: all raw Browse commands run through CmdRequest, so
+    // selection-to-request drift changes the command users see and run.
+    // Scenario: user opens every new Btrfs/NUT view with a mounted pool
+    // and configured UPS.
+    #[test]
+    fn new_browse_selections_map_to_expected_requests() {
+        let mut state = BrowseState::default();
+        state.filesystem_subview = FilesystemSubview::CommitStats;
+        assert!(matches!(
+            browse_request(state.load_current(&pool(), Some(&ups()))),
+            CmdRequest::BtrfsFilesystemCommitStats { .. }
+        ));
+
+        state = BrowseState::default();
+        state.btrfs_command = BrowseCommand::BtrfsSubvolumes;
+        state.subvolume_subview = SubvolumeSubview::Full;
+        assert!(matches!(
+            browse_request(state.load_current(&pool(), Some(&ups()))),
+            CmdRequest::BtrfsSubvolumeListFull { .. }
+        ));
+        state.subvolume_subview = SubvolumeSubview::Snapshots;
+        assert!(matches!(
+            browse_request(state.load_current(&pool(), Some(&ups()))),
+            CmdRequest::BtrfsSubvolumeListSnapshots { .. }
+        ));
+        state.subvolume_subview = SubvolumeSubview::Deleted;
+        assert!(matches!(
+            browse_request(state.load_current(&pool(), Some(&ups()))),
+            CmdRequest::BtrfsSubvolumeListDeleted { .. }
+        ));
+        state.subvolume_subview = SubvolumeSubview::Default;
+        assert!(matches!(
+            browse_request(state.load_current(&pool(), Some(&ups()))),
+            CmdRequest::BtrfsSubvolumeGetDefault { .. }
+        ));
+
+        state = BrowseState::default();
+        state.btrfs_command = BrowseCommand::BtrfsScrub;
+        state.scrub_subview = ScrubSubview::Limits;
+        assert!(matches!(
+            browse_request(state.load_current(&pool(), Some(&ups()))),
+            CmdRequest::BtrfsScrubLimit { .. }
+        ));
+
+        state = BrowseState::default();
+        state.btrfs_command = BrowseCommand::BtrfsQuota;
+        assert!(matches!(
+            browse_request(state.load_current(&pool(), Some(&ups()))),
+            CmdRequest::BtrfsQuotaStatus { .. }
+        ));
+        state.quota_subview = QuotaSubview::Qgroups;
+        assert!(matches!(
+            browse_request(state.load_current(&pool(), Some(&ups()))),
+            CmdRequest::BtrfsQgroupShow { .. }
+        ));
+
+        state = BrowseState::default();
+        state.btrfs_command = BrowseCommand::BtrfsInspect;
+        assert!(matches!(
+            browse_request(state.load_current(&pool(), Some(&ups()))),
+            CmdRequest::BtrfsInspectListChunks { .. }
+        ));
+
+        state = BrowseState::default();
+        state.program = BrowseProgram::Nut;
+        state.nut_command = BrowseCommand::NutClients;
+        assert!(matches!(
+            browse_request(state.load_current(&pool(), Some(&ups()))),
+            CmdRequest::UpscClients { .. }
+        ));
+        state.nut_command = BrowseCommand::NutRwVars;
+        assert!(matches!(
+            browse_request(state.load_current(&pool(), Some(&ups()))),
+            CmdRequest::UpsrwList { .. }
+        ));
+        state.nut_command = BrowseCommand::NutUpses;
+        assert!(matches!(
+            browse_request(state.load_current(&pool(), Some(&ups()))),
+            CmdRequest::UpscListUpses
+        ));
     }
 
     // Intent: Btrfs Browse commands show a local empty state while the
@@ -906,6 +1385,58 @@ mod tests {
             state.empty_state(),
             Some(BrowseEmptyState::UpsNotConfigured)
         );
+    }
+
+    // Intent: NUT > UPSes runs without a configured UPS name.
+    // Why it exists: this view is the bootstrap path for discovering the
+    // name to put in braid.ups.name.
+    // Scenario: a host has braid installed but has not enabled the UPS module.
+    #[test]
+    fn nut_upses_without_config_runs_discovery_command() {
+        let mut state = BrowseState::default();
+        state.program = BrowseProgram::Nut;
+        state.nut_command = BrowseCommand::NutUpses;
+
+        let effect = state.load_current(&pool(), None);
+
+        assert!(matches!(
+            effect,
+            Some(Effect::BrowseRunCommand {
+                request: CmdRequest::UpscListUpses,
+                ..
+            })
+        ));
+        assert_eq!(state.empty_state(), None);
+    }
+
+    // Intent: name-required NUT views still install the missing-config
+    // empty state instead of running partial commands.
+    // Why it exists: only UPS discovery can work without braid.ups.name;
+    // other NUT views need a concrete target UPS.
+    // Scenario: user has not enabled the UPS module and selects every
+    // NUT view except UPSes.
+    #[test]
+    fn nut_views_that_need_a_name_still_require_config() {
+        for command in [
+            BrowseCommand::NutStatus,
+            BrowseCommand::NutVariables,
+            BrowseCommand::NutCommands,
+            BrowseCommand::NutClients,
+            BrowseCommand::NutRwVars,
+        ] {
+            let mut state = BrowseState::default();
+            state.program = BrowseProgram::Nut;
+            state.nut_command = command;
+
+            let effect = state.load_current(&pool(), None);
+
+            assert!(effect.is_none(), "unexpected effect for {command:?}");
+            assert_eq!(
+                state.empty_state(),
+                Some(BrowseEmptyState::UpsNotConfigured),
+                "missing empty state for {command:?}",
+            );
+        }
     }
 
     // Intent: command scheduling bumps the generation and returns a
@@ -963,6 +1494,33 @@ mod tests {
             })
         ));
         assert!(state.is_subvolume_detail());
+    }
+
+    // Intent: only Subvolumes > List supports parsed-table drill-in.
+    // Why it exists: the other subvolume views use richer/different raw
+    // output shapes that the existing parser and detail path do not own.
+    // Scenario: user selects Subvolumes > Full and presses Enter in content.
+    #[test]
+    fn non_list_subvolume_views_do_not_drill_in() {
+        let mut state = BrowseState::default();
+        state.btrfs_command = BrowseCommand::BtrfsSubvolumes;
+        state.subvolume_subview = SubvolumeSubview::Full;
+        state.focus = BrowseFocus::Content;
+        state.command_finished(
+            RawCommandOutput {
+                cmd: "btrfs subvolume list -a /mnt/storage".into(),
+                stdout: "ID 256 gen 10 parent 5 top level 5 path data\n".into(),
+                stderr: String::new(),
+                exit_status: 0,
+            },
+            0,
+        );
+
+        let effect = state.enter(&pool());
+
+        assert!(effect.is_none());
+        assert!(!state.is_subvolume_detail());
+        assert!(state.subvolumes().is_empty());
     }
 
     // Intent: Esc/Backspace from subvolume detail restores the cached

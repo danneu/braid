@@ -3,10 +3,10 @@ source: cli/src/tui/browse/view.rs
 expression: "buffer_to_string(&render(&model, 80, 14))"
 ---
 ┌ Pgm ─────┐┌ Cmd ─────────┐┌ View ────────┐┌ Content ─────────────────────────┐
-│> Btrfs   ││  Filesystem  ││> Usage       ││/dev/mapper/braid-disk1, ID: 1    │
-│  NUT     ││> Devices     ││  Stats       ││   Device size: 256.00MiB         │
-│          ││  Subvolumes  ││              ││                                  │
-│          ││  Scrub       ││              ││                                  │
+│> Btrfs   ││> Filesystem  ││  Usage       ││Commit stats since mount:         │
+│  NUT     ││  Devices     ││  Show        ││  Total commits: 42               │
+│          ││  Subvolumes  ││  Df          ││                                  │
+│          ││  Scrub       ││> Commit Stats││                                  │
 │          ││  Balance     ││              ││                                  │
 │          ││  Quota       ││              ││                                  │
 │          ││  Inspect     ││              ││                                  │
@@ -15,4 +15,4 @@ expression: "buffer_to_string(&render(&model, 80, 14))"
 │          ││              ││              ││                                  │
 │          ││              ││              ││                                  │
 └──────────┘└──────────────┘└──────────────┘└──────────────────────────────────┘
-$ btrfs device usage ''
+$ btrfs filesystem commit-stats ''

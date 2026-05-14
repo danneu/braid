@@ -59,7 +59,7 @@ Demo mode shows three fake disks with sample data, useful for exploring the inte
 
 - **Data** (default) -- pool allocation breakdown, disk table, capacity bar.
 - **Scrub** -- per-device scrub state, progress, and timing.
-- **Browse** -- raw CLI output inspector for Btrfs and UPS data. Btrfs views include filesystem usage/show/df, device usage/stats, subvolumes with drill-in, scrub status, and balance status. UPS views include status, raw variables, and supported instant commands when `ups.name` is configured.
+- **Browse** -- raw CLI output inspector for Btrfs and UPS data. Btrfs views include filesystem usage/show/df/commit-stats, device usage/stats, subvolumes with drill-in plus raw full/snapshot/deleted/default views, scrub status/limits, balance status, quota status/qgroups, and inspect-internal chunks. UPS views include status, raw variables, supported instant commands, connected clients, settable variables, and UPS discovery. `NUT > UPSes` can help find the correct `ups.name` before UPS support is enabled.
 
 ## Related commands
 

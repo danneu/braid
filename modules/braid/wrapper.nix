@@ -17,9 +17,9 @@ let
       cryptsetup
       btrfsProgs
       utilLinux
+      nut
     ])
-    ++ [ pkgs.systemd ]
-    ++ lib.optional cfg.ups.enable cfg.packages.nut;
+    ++ [ pkgs.systemd ];
 in
 pkgs.runCommand "braid" { } ''
   mkdir -p $out/bin

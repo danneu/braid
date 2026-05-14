@@ -3,16 +3,16 @@ source: cli/src/tui/browse/view.rs
 expression: "buffer_to_string(&render(&model, 80, 14))"
 ---
 ┌ Pgm ─────┐┌ Cmd ─────────┐┌ Content ─────────────────────────────────────────┐
-│  Btrfs   ││  Status      ││ups.status: OL                                    │
-│> NUT     ││> Variables   ││battery.charge: 100                               │
+│  Btrfs   ││  Status      ││Error: Connection failure: Connection refused     │
+│> NUT     ││  Variables   ││                                                  │
 │          ││  Commands    ││                                                  │
 │          ││  Clients     ││                                                  │
 │          ││  RW Vars     ││                                                  │
-│          ││  UPSes       ││                                                  │
+│          ││> UPSes       ││                                                  │
 │          ││              ││                                                  │
 │          ││              ││                                                  │
 │          ││              ││                                                  │
 │          ││              ││                                                  │
 │          ││              ││                                                  │
 └──────────┘└──────────────┘└──────────────────────────────────────────────────┘
-$ upsc ups
+$ upsc -L localhost

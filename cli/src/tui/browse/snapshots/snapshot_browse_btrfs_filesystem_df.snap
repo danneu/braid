@@ -2,17 +2,17 @@
 source: cli/src/tui/browse/view.rs
 expression: "buffer_to_string(&render(&model, 80, 14))"
 ---
-┌ Pgm ─────┐┌ Cmd ─────────┐┌ View ────┐┌ Content ─────────────────────────────┐
-│> Btrfs   ││> Filesystem  ││  Usage   ││Data, RAID1: total=2.00GiB, used=1.00G│
-│  NUT     ││  Devices     ││  Show    ││                                      │
-│          ││  Subvolumes  ││> Df      ││                                      │
-│          ││  Scrub       ││          ││                                      │
-│          ││  Balance     ││          ││                                      │
-│          ││              ││          ││                                      │
-│          ││              ││          ││                                      │
-│          ││              ││          ││                                      │
-│          ││              ││          ││                                      │
-│          ││              ││          ││                                      │
-│          ││              ││          ││                                      │
-└──────────┘└──────────────┘└──────────┘└──────────────────────────────────────┘
+┌ Pgm ─────┐┌ Cmd ─────────┐┌ View ────────┐┌ Content ─────────────────────────┐
+│> Btrfs   ││> Filesystem  ││  Usage       ││Data, RAID1: total=2.00GiB, used=1│
+│  NUT     ││  Devices     ││  Show        ││                                  │
+│          ││  Subvolumes  ││> Df          ││                                  │
+│          ││  Scrub       ││  Commit Stats││                                  │
+│          ││  Balance     ││              ││                                  │
+│          ││  Quota       ││              ││                                  │
+│          ││  Inspect     ││              ││                                  │
+│          ││              ││              ││                                  │
+│          ││              ││              ││                                  │
+│          ││              ││              ││                                  │
+│          ││              ││              ││                                  │
+└──────────┘└──────────────┘└──────────────┘└──────────────────────────────────┘
 $ btrfs filesystem df ''

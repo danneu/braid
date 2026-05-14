@@ -148,6 +148,11 @@
               braid = linuxCrane.braid;
             }
           );
+          braid-tui-browse-ups-discovery = pkgs.testers.nixosTest (
+            import ./tests/cli/braid-tui-browse-ups-discovery.nix {
+              braid = linuxCrane.braid;
+            }
+          );
           braid-discover = pkgs.testers.nixosTest (
             import ./tests/cli/braid-discover.nix {
               braid = linuxCrane.braid;

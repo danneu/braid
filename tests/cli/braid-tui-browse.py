@@ -7,6 +7,14 @@
 # Scenario: user opens `sudo braid tui`, tabs to Browse, selects Btrfs
 # Subvolumes, drills into a row, and backs out to the list.
 
+import time
+
+
+def press(key):
+    machine.send_key(key)
+    time.sleep(0.1)
+
+
 start_all()
 machine.wait_for_unit("multi-user.target", timeout=120)
 
@@ -25,19 +33,20 @@ with subtest("launch live tui on tty2"):
     machine.wait_until_tty_matches("2", r"Data\s+Scrub\s+Browse")
 
 with subtest("navigate to Browse > Btrfs > Subvolumes"):
-    machine.send_key("tab")
-    machine.send_key("tab")
-    machine.wait_until_tty_matches("2", r"Browse")
-    machine.send_key("l")
-    machine.send_key("j")
-    machine.send_key("j")
+    press("tab")
+    press("tab")
+    machine.wait_until_tty_matches("2", r"Pgm")
+    press("l")
+    press("j")
+    press("j")
     machine.wait_until_tty_matches("2", r"test-subvol")
 
 with subtest("drill into subvolume detail and return"):
-    machine.send_key("l")
-    machine.send_key("ret")
+    press("l")
+    press("l")
+    press("ret")
     machine.wait_until_tty_matches("2", r"Name:\s+test-subvol")
-    machine.send_key("esc")
+    press("esc")
     machine.wait_until_tty_matches("2", r"test-subvol")
 
 machine.succeed("systemctl stop braid-tui-canary.service")

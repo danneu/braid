@@ -3,10 +3,10 @@ source: cli/src/tui/browse/view.rs
 expression: "buffer_to_string(&render(&model, 80, 14))"
 ---
 ┌ Pgm ─────┐┌ Cmd ─────────┐┌ View ────────┐┌ Content ─────────────────────────┐
-│> Btrfs   ││  Filesystem  ││> Usage       ││/dev/mapper/braid-disk1, ID: 1    │
-│  NUT     ││> Devices     ││  Stats       ││   Device size: 256.00MiB         │
+│> Btrfs   ││  Filesystem  ││  Status      ││Device 1: scrub limit 0B (unlimite│
+│  NUT     ││  Devices     ││> Limits      ││                                  │
 │          ││  Subvolumes  ││              ││                                  │
-│          ││  Scrub       ││              ││                                  │
+│          ││> Scrub       ││              ││                                  │
 │          ││  Balance     ││              ││                                  │
 │          ││  Quota       ││              ││                                  │
 │          ││  Inspect     ││              ││                                  │
@@ -15,4 +15,4 @@ expression: "buffer_to_string(&render(&model, 80, 14))"
 │          ││              ││              ││                                  │
 │          ││              ││              ││                                  │
 └──────────┘└──────────────┘└──────────────┘└──────────────────────────────────┘
-$ btrfs device usage ''
+$ btrfs scrub limit ''

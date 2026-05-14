@@ -2,17 +2,17 @@
 source: cli/src/tui/browse/view.rs
 expression: "buffer_to_string(&render(&model, 80, 14))"
 ---
-┌ Pgm ─────┐┌ Cmd ─────────┐┌ View ────┐┌ Content ─────────────────────────────┐
-│> Btrfs   ││  Filesystem  ││  Usage   ││[/dev/mapper/braid-disk1].write_io_err│
-│  NUT     ││> Devices     ││> Stats   ││                                      │
-│          ││  Subvolumes  ││          ││                                      │
-│          ││  Scrub       ││          ││                                      │
-│          ││  Balance     ││          ││                                      │
-│          ││              ││          ││                                      │
-│          ││              ││          ││                                      │
-│          ││              ││          ││                                      │
-│          ││              ││          ││                                      │
-│          ││              ││          ││                                      │
-│          ││              ││          ││                                      │
-└──────────┘└──────────────┘└──────────┘└──────────────────────────────────────┘
+┌ Pgm ─────┐┌ Cmd ─────────┐┌ View ────────┐┌ Content ─────────────────────────┐
+│> Btrfs   ││  Filesystem  ││  Usage       ││[/dev/mapper/braid-disk1].write_io│
+│  NUT     ││> Devices     ││> Stats       ││                                  │
+│          ││  Subvolumes  ││              ││                                  │
+│          ││  Scrub       ││              ││                                  │
+│          ││  Balance     ││              ││                                  │
+│          ││  Quota       ││              ││                                  │
+│          ││  Inspect     ││              ││                                  │
+│          ││              ││              ││                                  │
+│          ││              ││              ││                                  │
+│          ││              ││              ││                                  │
+│          ││              ││              ││                                  │
+└──────────┘└──────────────┘└──────────────┘└──────────────────────────────────┘
 $ btrfs device stats ''

@@ -216,6 +216,11 @@ pub enum CmdRequest {
     BtrfsFilesystemDf {
         mount_point: MountPoint,
     },
+    /// Browse-only commit latency counters from btrfs. The reset flag is
+    /// intentionally absent so the Browse tab stays read-only.
+    BtrfsFilesystemCommitStats {
+        mount_point: MountPoint,
+    },
     BtrfsDeviceUsage {
         mount_point: MountPoint,
     },
@@ -224,11 +229,50 @@ pub enum CmdRequest {
     BtrfsScrubStatusHuman {
         mount_point: MountPoint,
     },
+    /// Browse-only scrub throttling report. The setter flags are intentionally
+    /// absent so this remains an inspection surface.
+    BtrfsScrubLimit {
+        mount_point: MountPoint,
+    },
     BtrfsSubvolumeList {
+        mount_point: MountPoint,
+    },
+    /// Browse-only full subvolume inventory with stable path sorting.
+    BtrfsSubvolumeListFull {
+        mount_point: MountPoint,
+    },
+    /// Browse-only snapshot inventory, kept separate from the parsed default
+    /// list so drill-in behavior remains tied to the simple list shape.
+    BtrfsSubvolumeListSnapshots {
+        mount_point: MountPoint,
+    },
+    /// Browse-only inventory of deleted subvolumes, exposed separately because
+    /// its output is a raw diagnostic list rather than a drill-in table.
+    BtrfsSubvolumeListDeleted {
+        mount_point: MountPoint,
+    },
+    /// Browse-only default subvolume report, useful for confirming mount
+    /// routing without changing the default.
+    BtrfsSubvolumeGetDefault {
         mount_point: MountPoint,
     },
     BtrfsSubvolumeShow {
         path: String,
+    },
+    /// Browse-only quota enablement/accounting status. Mutating quota
+    /// operations stay outside the raw Browse surface.
+    BtrfsQuotaStatus {
+        mount_point: MountPoint,
+    },
+    /// Browse-only qgroup accounting report with parent/child and limit
+    /// columns so quota diagnosis does not need a separate shell.
+    BtrfsQgroupShow {
+        mount_point: MountPoint,
+    },
+    /// Browse-only chunk layout report for low-level btrfs inspection.
+    /// Kept as raw output because braid does not own this diagnostic schema.
+    BtrfsInspectListChunks {
+        mount_point: MountPoint,
     },
     /// Run the canonical `braid-beep-probe` wrapper. The path is read at
     /// runtime from `/etc/braid/notifier-config.json` (written by the NixOS
@@ -256,6 +300,17 @@ pub enum CmdRequest {
     UpscmdList {
         name: String,
     },
+    /// `upsc -c <name>` -- raw list of NUT clients connected to a UPS.
+    UpscClients {
+        name: String,
+    },
+    /// `upsrw -l <name>` -- raw list of settable NUT variables. This omits
+    /// `-s` and credentials so Browse cannot mutate UPS state.
+    UpsrwList {
+        name: String,
+    },
+    /// `upsc -L localhost` -- discovery entry point for configured UPS names.
+    UpscListUpses,
 }
 
 #[derive(Debug)]
@@ -811,6 +866,14 @@ impl CmdRequest {
                 program: "btrfs".to_owned(),
                 args: vec!["filesystem".into(), "df".into(), mount_point.0.clone()],
             },
+            CmdRequest::BtrfsFilesystemCommitStats { mount_point } => CmdArgs {
+                program: "btrfs".to_owned(),
+                args: vec![
+                    "filesystem".into(),
+                    "commit-stats".into(),
+                    mount_point.0.clone(),
+                ],
+            },
             CmdRequest::BtrfsDeviceUsage { mount_point } => CmdArgs {
                 program: "btrfs".to_owned(),
                 args: vec!["device".into(), "usage".into(), mount_point.0.clone()],
@@ -819,13 +882,90 @@ impl CmdRequest {
                 program: "btrfs".to_owned(),
                 args: vec!["scrub".into(), "status".into(), mount_point.0.clone()],
             },
+            CmdRequest::BtrfsScrubLimit { mount_point } => CmdArgs {
+                program: "btrfs".to_owned(),
+                args: vec!["scrub".into(), "limit".into(), mount_point.0.clone()],
+            },
             CmdRequest::BtrfsSubvolumeList { mount_point } => CmdArgs {
                 program: "btrfs".to_owned(),
                 args: vec!["subvolume".into(), "list".into(), mount_point.0.clone()],
             },
+            CmdRequest::BtrfsSubvolumeListFull { mount_point } => CmdArgs {
+                program: "btrfs".to_owned(),
+                args: vec![
+                    "subvolume".into(),
+                    "list".into(),
+                    "-a".into(),
+                    "-p".into(),
+                    "-c".into(),
+                    "-u".into(),
+                    "-q".into(),
+                    "-R".into(),
+                    "-t".into(),
+                    "--sort=path".into(),
+                    mount_point.0.clone(),
+                ],
+            },
+            CmdRequest::BtrfsSubvolumeListSnapshots { mount_point } => CmdArgs {
+                program: "btrfs".to_owned(),
+                args: vec![
+                    "subvolume".into(),
+                    "list".into(),
+                    "-s".into(),
+                    "-a".into(),
+                    "-u".into(),
+                    "-q".into(),
+                    "-R".into(),
+                    "-t".into(),
+                    "--sort=path".into(),
+                    mount_point.0.clone(),
+                ],
+            },
+            CmdRequest::BtrfsSubvolumeListDeleted { mount_point } => CmdArgs {
+                program: "btrfs".to_owned(),
+                args: vec![
+                    "subvolume".into(),
+                    "list".into(),
+                    "-d".into(),
+                    mount_point.0.clone(),
+                ],
+            },
+            CmdRequest::BtrfsSubvolumeGetDefault { mount_point } => CmdArgs {
+                program: "btrfs".to_owned(),
+                args: vec![
+                    "subvolume".into(),
+                    "get-default".into(),
+                    mount_point.0.clone(),
+                ],
+            },
             CmdRequest::BtrfsSubvolumeShow { path } => CmdArgs {
                 program: "btrfs".to_owned(),
                 args: vec!["subvolume".into(), "show".into(), path.clone()],
+            },
+            CmdRequest::BtrfsQuotaStatus { mount_point } => CmdArgs {
+                program: "btrfs".to_owned(),
+                args: vec!["quota".into(), "status".into(), mount_point.0.clone()],
+            },
+            CmdRequest::BtrfsQgroupShow { mount_point } => CmdArgs {
+                program: "btrfs".to_owned(),
+                args: vec![
+                    "qgroup".into(),
+                    "show".into(),
+                    "-p".into(),
+                    "-c".into(),
+                    "-r".into(),
+                    "-e".into(),
+                    mount_point.0.clone(),
+                ],
+            },
+            CmdRequest::BtrfsInspectListChunks { mount_point } => CmdArgs {
+                program: "btrfs".to_owned(),
+                args: vec![
+                    "inspect-internal".into(),
+                    "list-chunks".into(),
+                    "--sort=devid,pstart".into(),
+                    mount_point.0.clone(),
+                ],
             },
             CmdRequest::BraidBeepProbe { path } => CmdArgs {
                 program: path.clone(),
@@ -842,6 +982,18 @@ impl CmdRequest {
             CmdRequest::UpscmdList { name } => CmdArgs {
                 program: "upscmd".to_owned(),
                 args: vec!["-l".into(), name.clone()],
+            },
+            CmdRequest::UpscClients { name } => CmdArgs {
+                program: "upsc".to_owned(),
+                args: vec!["-c".into(), name.clone()],
+            },
+            CmdRequest::UpsrwList { name } => CmdArgs {
+                program: "upsrw".to_owned(),
+                args: vec!["-l".into(), name.clone()],
+            },
+            CmdRequest::UpscListUpses => CmdArgs {
+                program: "upsc".to_owned(),
+                args: vec!["-L".into(), "localhost".into()],
             },
         }
     }
@@ -1296,6 +1448,127 @@ mod tests {
         .to_shell_string();
 
         assert_eq!(argv, "btrfs scrub status /mnt/storage");
+    }
+
+    // Intent: new Browse-only raw command variants render the exact external
+    // command lines they represent.
+    // Why it exists: Browse selections are typed as CmdRequest variants; an
+    // argv drift would make the TUI show the wrong raw inspection surface.
+    // Scenario: user opens each new read-only Browse view and copies the
+    // footer command for a mounted pool named /mnt/storage.
+    #[test]
+    fn browse_read_only_command_variants_generate_expected_argv() {
+        let mp = MountPoint("/mnt/storage".into());
+        let cases: Vec<(CmdRequest, &str, Vec<&str>)> = vec![
+            (
+                CmdRequest::BtrfsFilesystemCommitStats {
+                    mount_point: mp.clone(),
+                },
+                "btrfs",
+                vec!["filesystem", "commit-stats", "/mnt/storage"],
+            ),
+            (
+                CmdRequest::BtrfsSubvolumeListFull {
+                    mount_point: mp.clone(),
+                },
+                "btrfs",
+                vec![
+                    "subvolume",
+                    "list",
+                    "-a",
+                    "-p",
+                    "-c",
+                    "-u",
+                    "-q",
+                    "-R",
+                    "-t",
+                    "--sort=path",
+                    "/mnt/storage",
+                ],
+            ),
+            (
+                CmdRequest::BtrfsSubvolumeListSnapshots {
+                    mount_point: mp.clone(),
+                },
+                "btrfs",
+                vec![
+                    "subvolume",
+                    "list",
+                    "-s",
+                    "-a",
+                    "-u",
+                    "-q",
+                    "-R",
+                    "-t",
+                    "--sort=path",
+                    "/mnt/storage",
+                ],
+            ),
+            (
+                CmdRequest::BtrfsSubvolumeListDeleted {
+                    mount_point: mp.clone(),
+                },
+                "btrfs",
+                vec!["subvolume", "list", "-d", "/mnt/storage"],
+            ),
+            (
+                CmdRequest::BtrfsSubvolumeGetDefault {
+                    mount_point: mp.clone(),
+                },
+                "btrfs",
+                vec!["subvolume", "get-default", "/mnt/storage"],
+            ),
+            (
+                CmdRequest::BtrfsScrubLimit {
+                    mount_point: mp.clone(),
+                },
+                "btrfs",
+                vec!["scrub", "limit", "/mnt/storage"],
+            ),
+            (
+                CmdRequest::BtrfsQuotaStatus {
+                    mount_point: mp.clone(),
+                },
+                "btrfs",
+                vec!["quota", "status", "/mnt/storage"],
+            ),
+            (
+                CmdRequest::BtrfsQgroupShow {
+                    mount_point: mp.clone(),
+                },
+                "btrfs",
+                vec!["qgroup", "show", "-p", "-c", "-r", "-e", "/mnt/storage"],
+            ),
+            (
+                CmdRequest::BtrfsInspectListChunks {
+                    mount_point: mp.clone(),
+                },
+                "btrfs",
+                vec![
+                    "inspect-internal",
+                    "list-chunks",
+                    "--sort=devid,pstart",
+                    "/mnt/storage",
+                ],
+            ),
+            (
+                CmdRequest::UpscClients { name: "ups".into() },
+                "upsc",
+                vec!["-c", "ups"],
+            ),
+            (
+                CmdRequest::UpsrwList { name: "ups".into() },
+                "upsrw",
+                vec!["-l", "ups"],
+            ),
+            (CmdRequest::UpscListUpses, "upsc", vec!["-L", "localhost"]),
+        ];
+
+        for (request, program, args) in cases {
+            let cmd = request.to_argv();
+            assert_eq!(cmd.program, program);
+            assert_eq!(cmd.args, args);
+        }
     }
 
     #[test]

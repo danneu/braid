@@ -3,10 +3,10 @@ source: cli/src/tui/browse/view.rs
 expression: "buffer_to_string(&render(&model, 80, 14))"
 ---
 ┌ Pgm ─────┐┌ Cmd ─────────┐┌ Content ─────────────────────────────────────────┐
-│  Btrfs   ││  Status      ││ups.status: OL                                    │
-│> NUT     ││> Variables   ││battery.charge: 100                               │
+│  Btrfs   ││  Status      ││127.0.0.1                                         │
+│> NUT     ││  Variables   ││                                                  │
 │          ││  Commands    ││                                                  │
-│          ││  Clients     ││                                                  │
+│          ││> Clients     ││                                                  │
 │          ││  RW Vars     ││                                                  │
 │          ││  UPSes       ││                                                  │
 │          ││              ││                                                  │
@@ -15,4 +15,4 @@ expression: "buffer_to_string(&render(&model, 80, 14))"
 │          ││              ││                                                  │
 │          ││              ││                                                  │
 └──────────┘└──────────────┘└──────────────────────────────────────────────────┘
-$ upsc ups
+$ upsc -c ups

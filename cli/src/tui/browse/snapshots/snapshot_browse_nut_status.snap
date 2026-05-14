@@ -6,9 +6,9 @@ expression: "buffer_to_string(&render(&model, 80, 14))"
 │  Btrfs   ││> Status      ││Status   OL                                       │
 │> NUT     ││  Variables   ││Battery  100%                                     │
 │          ││  Commands    ││Runtime  30:00                                    │
-│          ││              ││Load     20% (100 W est.)                         │
-│          ││              ││                                                  │
-│          ││              ││                                                  │
+│          ││  Clients     ││Load     20% (100 W est.)                         │
+│          ││  RW Vars     ││                                                  │
+│          ││  UPSes       ││                                                  │
 │          ││              ││                                                  │
 │          ││              ││                                                  │
 │          ││              ││                                                  │

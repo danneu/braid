@@ -3,16 +3,16 @@ source: cli/src/tui/browse/view.rs
 expression: "buffer_to_string(&render(&model, 80, 14))"
 ---
 ┌ Pgm ─────┐┌ Cmd ─────────┐┌ View ────────┐┌ Content ─────────────────────────┐
-│> Btrfs   ││  Filesystem  ││> Usage       ││/dev/mapper/braid-disk1, ID: 1    │
-│  NUT     ││> Devices     ││  Stats       ││   Device size: 256.00MiB         │
+│> Btrfs   ││  Filesystem  ││> Chunks      ││Devid PNumber Type/profile PStart │
+│  NUT     ││  Devices     ││              ││1 1 Data/RAID1 1.00MiB 64.00MiB   │
 │          ││  Subvolumes  ││              ││                                  │
 │          ││  Scrub       ││              ││                                  │
 │          ││  Balance     ││              ││                                  │
 │          ││  Quota       ││              ││                                  │
-│          ││  Inspect     ││              ││                                  │
+│          ││> Inspect     ││              ││                                  │
 │          ││              ││              ││                                  │
 │          ││              ││              ││                                  │
 │          ││              ││              ││                                  │
 │          ││              ││              ││                                  │
 └──────────┘└──────────────┘└──────────────┘└──────────────────────────────────┘
-$ btrfs device usage ''
+$ btrfs inspect-internal list-chunks '--sort=devid,pstart' ''
