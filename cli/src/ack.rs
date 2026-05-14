@@ -575,6 +575,61 @@ mod tests {
         );
     }
 
+    // Intent: Mounted ack with a parseable latch whose only cause is
+    // ComputationError runs the full ack path -- btrfs device stats are
+    // queried, the latch is removed, a fresh acked-stats baseline is written,
+    // and the beeper hook fires exactly once.
+    // Why it exists: The mounted gate at cmd_ack_impl falls through on any
+    // non-empty `causes`. A future refactor that narrowed the gate to
+    // "actionable" causes, or that special-cased SmartdAlert without doing the
+    // same for ComputationError, would silently no-op this mounted ack and
+    // leave the latch on disk with the beeper still running. The offline
+    // equivalent does not catch this because the offline branch has a different
+    // gate. The beeper-call assertion additionally pins the cleanup hook on the
+    // mounted success path, which was previously only covered for NotBtrfs and
+    // offline success.
+    // Scenario: monitor latched a ComputationError on a prior cycle, such as a
+    // transient probe failure. The pool is now mounted and healthy; the
+    // operator runs `braid ack`. The latch must be cleared, a fresh baseline
+    // persisted, and the beeper silenced.
+    #[test]
+    fn cmd_ack_with_mounted_pool_and_computation_error_only_latch_runs_full_ack_path() {
+        let (_dir, paths) = isolated_paths();
+        ack_write_latch(
+            &paths,
+            vec![AlertCause::ComputationError {
+                detail: "test".to_owned(),
+            }],
+        );
+        let runner = ack_mounted_probe_runner_with_device_stats();
+        let beeper_calls = std::cell::Cell::new(0u32);
+        let beeper = || beeper_calls.set(beeper_calls.get() + 1);
+
+        let result = cmd_ack_impl(&runner, &ack_fs_btrfs(), &ack_mp(), &paths, &beeper);
+
+        assert!(
+            result.is_ok(),
+            "computation-error-only ack should succeed, got {result:?}"
+        );
+        assert!(
+            runner
+                .requests()
+                .iter()
+                .any(|r| matches!(r, CmdRequest::BtrfsDeviceStatsJson { .. })),
+            "computation-error-only ack must run the full ack path"
+        );
+        assert!(!paths.alert_latch_json().exists(), "latch must be removed");
+        assert!(
+            paths.acked_stats_json().exists(),
+            "mounted ack must persist a fresh baseline"
+        );
+        assert_eq!(
+            beeper_calls.get(),
+            1,
+            "stop_beeper must fire once on mounted-ack success"
+        );
+    }
+
     /*
      * Intent: When cmd_ack succeeds at save_acked_stats but
      * cleanup_alert_files_and_beeper fails, the user-visible error names
