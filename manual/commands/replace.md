@@ -25,17 +25,13 @@ sudo braid replace --old toshiba1 --new toshiba4=/dev/disk/by-id/ata-TOSHIBA_MN0
 
 ## Common variations
 
-Note: `braid status` lists every devid that contributes to `missing_count`,
-including drives whose LUKS mapper is still open but whose physical device just
-disappeared (null-underlying). btrfs has not yet promoted those devids to its
-authoritative `MISSING` state, and `replace --missing-id` operates only on that
-authoritative set. If `replace --missing-id N` reports that devid `N` is not a
-device in this pool for a devid that `status` reports as missing, that error
-itself is the signal -- btrfs has not promoted the devid yet. To make progress,
-follow the missing-disk recovery workflow in
-[`recovery-scenarios.md`](../guides/recovery-scenarios.md). Typically: confirm
-the disk is truly gone, remount the pool degraded if it is not already, then
-retry once btrfs reports an authoritative missing device.
+Note: `braid replace` operates only on btrfs-authoritative `MISSING` devids. A
+drive that is hot-unplugged while the pool is mounted contributes to
+`missing_count` and appears in `missing_devids` in `braid status` before btrfs
+promotes its devid to `MISSING`; both `replace --missing-id N` and the no-flag
+auto-resolve path refuse the devid with a specific hot-unplug diagnostic until
+that promotion happens. See
+[Hot-unplug while pool is mounted](../guides/recovery-scenarios.md#hot-unplug-while-pool-is-mounted).
 
 Replace a dead disk when multiple devices are missing (must specify which):
 

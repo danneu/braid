@@ -13,7 +13,7 @@ use crate::probe::{Filesystem, ProbeError, probe_pool};
 use crate::progress::{self, ProgressOutput};
 use crate::state_paths::StatePaths;
 use crate::status_tag::{StatusTag, color_enabled_for_stderr, status_line};
-use crate::types::{DiskName, LuksUuid, MountPoint};
+use crate::types::{DiskName, LuksUuid, MountPoint, PoolState};
 use std::path::Path;
 
 #[derive(Debug, thiserror::Error)]
@@ -319,6 +319,35 @@ impl RemoveMissingPlan {
     }
 }
 
+/// Shared `--missing-id` classifier so dry-run, execute planning, and
+/// overlap regression tests use the same btrfs-authoritative target order.
+fn validate_missing_id_target(pool: &PoolState, missing_id: u64) -> Result<(), String> {
+    if pool.devices.iter().any(|d| d.devid == missing_id) {
+        return Err(format!(
+            "devid {missing_id} is a live device, not a missing one. \
+             Use 'braid remove' to remove live devices."
+        ));
+    }
+    if pool.missing_devids.contains(&missing_id) {
+        return Ok(());
+    }
+    if pool.null_underlying.iter().any(|d| d.devid == missing_id) {
+        return Err(format!(
+            "devid {missing_id} is hot-unplugged but btrfs has not yet \
+             promoted it to MISSING (LUKS mapper open, backing device \
+             gone). `braid remove-missing` only operates on \
+             btrfs-authoritative MISSING devids. Confirm the disk is \
+             truly gone, then relock and re-unlock the pool degraded \
+             (`braid lock` then `braid unlock --allow-degraded`) so \
+             btrfs promotes devid {missing_id}, and retry."
+        ));
+    }
+    Err(format!(
+        "devid {missing_id} is not a device in this pool. \
+         Use 'braid status' to see device IDs."
+    ))
+}
+
 /// Plan a `braid remove-missing` run. Owns everything above today's
 /// `--dry-run` gate: pending-op preflight, config read, pool probe /
 /// mounted validation, mutation preflight, UPS preflight,
@@ -388,24 +417,10 @@ pub fn plan_remove_missing<R: CommandRunner + Sync, F: Filesystem + ?Sized>(
         ));
     }
 
-    if pool.devices.iter().any(|d| d.devid == params.missing_id) {
+    if let Err(msg) = validate_missing_id_target(&pool, params.missing_id) {
         return Err(PlanFailure::with_notes(
             notes,
-            RemoveMissingError::Validation(format!(
-                "devid {} is a live device, not a missing one. \
-                 Use 'braid remove' to remove live devices.",
-                params.missing_id
-            )),
-        ));
-    }
-    if !pool.missing_devids.contains(&params.missing_id) {
-        return Err(PlanFailure::with_notes(
-            notes,
-            RemoveMissingError::Validation(format!(
-                "devid {} is not a device in this pool. \
-                 Use 'braid status' to see device IDs.",
-                params.missing_id
-            )),
+            RemoveMissingError::Validation(msg),
         ));
     }
 
@@ -661,9 +676,39 @@ mod tests {
     use crate::cmd::{CmdError, CmdRequest, CommandRunner, MockRunner, RawCommandOutput};
     use crate::membership::PoolMembership;
     use crate::test_fixtures::{MockFs, PoolFixture, RemoveMissingPool, mock_ok};
+    use crate::types::{MapperName, NullUnderlyingDevice, PoolDevice};
 
     fn mp() -> MountPoint {
         MountPoint("/mnt/storage".into())
+    }
+
+    fn target_validation_pool() -> PoolState {
+        PoolState {
+            mounted: true,
+            devices: vec![],
+            missing_count: 1,
+            total_devices: 2,
+            fsid: Some("cc86845b-aec3-408e-bef5-553affc1f2b1".to_owned()),
+            missing_devids: vec![],
+            null_underlying: vec![],
+        }
+    }
+
+    fn target_validation_device(devid: u64) -> PoolDevice {
+        PoolDevice {
+            mapper: MapperName(format!("braid-disk{devid}")),
+            luks_uuid: LuksUuid::parse(&format!("00000000-0000-0000-0000-{devid:012x}"))
+                .expect("valid synthetic UUID"),
+            devid,
+            underlying: format!("/dev/vd{devid}"),
+        }
+    }
+
+    fn target_validation_null_underlying(devid: u64) -> NullUnderlyingDevice {
+        NullUnderlyingDevice {
+            mapper: MapperName(format!("braid-disk{devid}")),
+            devid,
+        }
     }
 
     struct EnospcRunner {
@@ -2125,11 +2170,88 @@ mod tests {
                 );
                 assert_eq!(
                     msg,
-                    "devid 2 is not a device in this pool. Use 'braid status' to see device IDs.",
+                    "devid 2 is hot-unplugged but btrfs has not yet promoted it to MISSING \
+                     (LUKS mapper open, backing device gone). `braid remove-missing` only \
+                     operates on btrfs-authoritative MISSING devids. Confirm the disk is truly \
+                     gone, then relock and re-unlock the pool degraded (`braid lock` then \
+                     `braid unlock --allow-degraded`) so btrfs promotes devid 2, and retry.",
                 );
             }
             other => panic!("expected Validation, got: {other:?}"),
         }
+    }
+
+    // Intent: live devids are classified before missing or null-underlying
+    // state.
+    // Why it exists: `remove-missing` must never treat a present pool member
+    // as a destructive missing-device target.
+    // Scenario: the operator passes a live btrfs devid to
+    // `braid remove-missing --missing-id`.
+    #[test]
+    fn validate_missing_id_target_live_rejected() {
+        let mut pool = target_validation_pool();
+        pool.devices.push(target_validation_device(2));
+        pool.missing_devids.push(2);
+        pool.null_underlying
+            .push(target_validation_null_underlying(2));
+
+        let msg = validate_missing_id_target(&pool, 2).unwrap_err();
+        assert_eq!(
+            msg,
+            "devid 2 is a live device, not a missing one. Use 'braid remove' to remove live devices."
+        );
+    }
+
+    // Intent: btrfs-authoritative MISSING devids are accepted.
+    // Why it exists: the helper is the sole per-target gate before
+    // destructive remove-missing planning.
+    // Scenario: btrfs has promoted devid 2 to MISSING and the operator
+    // supplies that exact devid.
+    #[test]
+    fn validate_missing_id_target_authoritative_missing_accepted() {
+        let mut pool = target_validation_pool();
+        pool.missing_devids.push(2);
+
+        validate_missing_id_target(&pool, 2).expect("authoritative missing devid should pass");
+    }
+
+    // Intent: null-underlying-only devids get the hot-unplug diagnostic.
+    // Why it exists: a hot-unplugged mapper contributes to status alerts but
+    // is not yet a btrfs-authoritative remove-missing target.
+    // Scenario: cryptsetup reports `device: (null)` for devid 2 while btrfs
+    // has not promoted that devid to MISSING.
+    #[test]
+    fn validate_missing_id_target_null_underlying_only_rejected() {
+        let mut pool = target_validation_pool();
+        pool.null_underlying
+            .push(target_validation_null_underlying(2));
+
+        let msg = validate_missing_id_target(&pool, 2).unwrap_err();
+        assert_eq!(
+            msg,
+            "devid 2 is hot-unplugged but btrfs has not yet promoted it to MISSING \
+             (LUKS mapper open, backing device gone). `braid remove-missing` only \
+             operates on btrfs-authoritative MISSING devids. Confirm the disk is truly \
+             gone, then relock and re-unlock the pool degraded (`braid lock` then \
+             `braid unlock --allow-degraded`) so btrfs promotes devid 2, and retry."
+        );
+    }
+
+    // Intent: the overlap of btrfs MISSING and null-underlying is accepted.
+    // Why it exists: status alerting deduplicates this defensive state, and
+    // command validation must keep btrfs-authoritative MISSING ahead of the
+    // null-underlying refusal.
+    // Scenario: btrfs has promoted a hot-unplugged devid to MISSING while
+    // its mapper still reports a null backing device.
+    #[test]
+    fn validate_missing_id_target_missing_and_null_underlying_accepted() {
+        let mut pool = target_validation_pool();
+        pool.missing_devids.push(2);
+        pool.null_underlying
+            .push(target_validation_null_underlying(2));
+
+        validate_missing_id_target(&pool, 2)
+            .expect("authoritative missing devid should win over null-underlying");
     }
 
     // ---------------------------------------------------------------------

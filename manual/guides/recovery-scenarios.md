@@ -230,6 +230,28 @@ sudo braid unlock --allow-degraded
 
 This mounts the pool in degraded mode. All data is still accessible (btrfs RAID1 keeps a copy on the surviving disk(s)), but new writes have no redundancy until you replace the dead drive.
 
+### Hot-unplug while pool is mounted
+
+If a drive is physically disconnected while the pool is mounted, its LUKS
+mapper can remain open with `cryptsetup status` reporting `device: (null)`.
+btrfs continues to list the devid but has not yet promoted it to MISSING.
+`braid status` reports the devid -- it contributes to `missing_count` and
+appears in `missing_devids` -- but `braid remove-missing --missing-id N` and
+`braid replace` (with or without `--missing-id`) refuse the devid because they
+only act on btrfs-authoritative MISSING entries.
+
+To make progress:
+
+1. Confirm the disk is truly gone (not just a loose cable).
+2. Relock and re-unlock the pool degraded so btrfs re-evaluates membership and
+   promotes the devid:
+   ```sh
+   sudo braid lock
+   sudo braid unlock --allow-degraded
+   ```
+3. Re-run `braid status` -- the devid should now appear as authoritatively
+   MISSING -- then retry `braid remove-missing` or `braid replace`.
+
 ### Option A: Replace the disk
 
 Replaces the dead disk with a new one, rebuilding data from surviving copies:

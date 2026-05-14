@@ -21,6 +21,7 @@ const PRE_SHOW_TWO_HEALTHY: &str = "Label: none  uuid: cc86845b-aec3-408e-bef5-5
 const PRE_SHOW_ONE_LIVE_MISSING: &str = "Label: none  uuid: cc86845b-aec3-408e-bef5-553affc1f2b1\n\
      \tTotal devices 2 FS bytes used 16.17MiB\n\
      \tdevid    1 size 496.00MiB used 121.56MiB path /dev/mapper/braid-disk1\n\
+     \tdevid    2 size 0 used 0 path MISSING\n\
      \t*** Some devices missing\n";
 
 const POST_SHOW_DISK1_DISK3: &str = "Label: none  uuid: cc86845b-aec3-408e-bef5-553affc1f2b1\n\

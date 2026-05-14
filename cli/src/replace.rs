@@ -1509,13 +1509,13 @@ fn check_new_not_in_pool(
 ///     btrfs missing devid; reject any disagreement and reject any
 ///     `--old` whose persisted member has no devid.
 fn resolve_replace_source<R: CommandRunner>(
-    runner: &R,
+    _runner: &R,
     old_name: &DiskName,
     old_uuid: &LuksUuid,
     old_member: &membership::DiskMember,
     missing_id: Option<u64>,
     pool: &PoolState,
-    mount_point: &MountPoint,
+    _mount_point: &MountPoint,
 ) -> Result<ReplaceSource, ReplaceError> {
     // Pattern 4: find by UUID, not by reconstructed mapper.
     if let Some(matched) = pool.devices.iter().find(|d| d.luks_uuid == *old_uuid) {
@@ -1555,9 +1555,17 @@ fn resolve_replace_source<R: CommandRunner>(
         }
     };
 
-    // Probe actual missing devids for validation and auto-resolution.
-    let missing_devids =
-        preflight::probe_missing_devids(runner, mount_point).map_err(ReplaceError::Validation)?;
+    let null_underlying_refusal = |devid: u64| {
+        ReplaceError::Validation(format!(
+            "devid {devid} is hot-unplugged but btrfs has not yet \
+             promoted it to MISSING (LUKS mapper open, backing device \
+             gone). `braid replace` only operates on btrfs-authoritative \
+             MISSING devids. Confirm the disk is truly gone, then relock \
+             and re-unlock the pool degraded (`braid lock` then `braid \
+             unlock --allow-degraded`) so btrfs promotes devid {devid}, \
+             and retry."
+        ))
+    };
 
     let resolved = if let Some(supplied) = missing_id {
         // --missing-id supplied: must equal persisted devid AND appear
@@ -1574,7 +1582,10 @@ fn resolve_replace_source<R: CommandRunner>(
                 "devid {supplied} is a live device, not a missing one."
             )));
         }
-        if !missing_devids.contains(&supplied) {
+        if !pool.missing_devids.contains(&supplied) {
+            if pool.null_underlying.iter().any(|d| d.devid == supplied) {
+                return Err(null_underlying_refusal(supplied));
+            }
             return Err(ReplaceError::Validation(format!(
                 "devid {supplied} is not a missing device in this pool. \
                  Use 'braid status' to see device IDs."
@@ -1583,13 +1594,20 @@ fn resolve_replace_source<R: CommandRunner>(
         supplied
     } else {
         // Auto-resolve: the persisted devid must be missing in btrfs.
-        if missing_devids.is_empty() {
-            return Err(ReplaceError::Validation(format!(
-                "disk '{}' not found in pool and no missing devices detected.",
-                old_name
-            )));
-        }
-        if !missing_devids.contains(&persisted_devid) {
+        if !pool.missing_devids.contains(&persisted_devid) {
+            if pool
+                .null_underlying
+                .iter()
+                .any(|d| d.devid == persisted_devid)
+            {
+                return Err(null_underlying_refusal(persisted_devid));
+            }
+            if pool.missing_devids.is_empty() {
+                return Err(ReplaceError::Validation(format!(
+                    "disk '{}' not found in pool and no missing devices detected.",
+                    old_name
+                )));
+            }
             return Err(ReplaceError::Validation(format!(
                 "disk '{}' records devid {} in pool.json, but btrfs reports it is not missing. \
                  Pool membership may be out of date; run `braid status` to inspect.",
@@ -2029,37 +2047,17 @@ mod tests {
         }
     }
 
+    fn null_underlying_device(devid: u64) -> NullUnderlyingDevice {
+        NullUnderlyingDevice {
+            mapper: MapperName(format!("braid-disk{devid}")),
+            devid,
+        }
+    }
+
     /// Build a `DiskName` from a literal, panicking on invalid input.
     /// Test-only helper to keep call sites short.
     fn disk_name(s: &str) -> DiskName {
         DiskName::parse(s).expect("valid disk name in fixture")
-    }
-
-    /// Create a mock runner that returns device usage output with specific
-    /// missing devids (device_size == 0). Devid 1 is always present.
-    fn mock_with_missing_devids(missing_devids: &[u64]) -> MockRunner {
-        let mut output = String::new();
-        output.push_str("/dev/mapper/braid-disk1, ID: 1\n");
-        output.push_str("   Device size:           520093696\n");
-        output.push_str("   Device slack:                  0\n");
-        output.push_str("   Data,RAID1:            469762048\n");
-        output.push_str("   Unallocated:            50331648\n\n");
-        for &devid in missing_devids {
-            output.push_str(&format!("<missing disk>, ID: {}\n", devid));
-            output.push_str("   Device size:                  0\n");
-            output.push_str("   Device slack:                  0\n");
-            output.push_str("   Data,RAID1:            469762048\n");
-            output.push_str("   Unallocated:                  0\n\n");
-        }
-        MockRunner::default().with_output(
-            CmdRequest::BtrfsDeviceUsageRaw { mount_point: mp() },
-            RawCommandOutput {
-                cmd: "btrfs device usage --raw /mnt/storage".into(),
-                stdout: output,
-                stderr: String::new(),
-                exit_status: 0,
-            },
-        )
     }
 
     /// Build the disk2 `(uuid, member)` pair used by the live-resolution
@@ -2387,7 +2385,8 @@ mod tests {
         pool.devices.retain(|d| d.mapper.as_str() != "braid-disk2");
         pool.missing_count = 1;
         pool.total_devices = 2;
-        let runner = mock_with_missing_devids(&[2]);
+        pool.missing_devids = vec![2];
+        let runner = MockRunner::default();
         let (uuid, member) = disk2_member_for_two_device_pool();
         let result = resolve_replace_source(
             &runner,
@@ -2415,7 +2414,8 @@ mod tests {
         pool.devices.retain(|d| d.mapper.as_str() != "braid-disk2");
         pool.missing_count = 1;
         pool.total_devices = 2;
-        let runner = mock_with_missing_devids(&[2]);
+        pool.missing_devids = vec![2];
+        let runner = MockRunner::default();
         let (uuid, member) = disk2_member_for_two_device_pool();
         let result = resolve_replace_source(
             &runner,
@@ -2426,6 +2426,114 @@ mod tests {
             &pool,
             &mp(),
         );
+        assert!(
+            matches!(result, Ok(ReplaceSource::Missing { devid: 2 })),
+            "expected Missing {{ devid: 2 }}, got: {result:?}"
+        );
+    }
+
+    // Intent: explicit `--missing-id` refuses a null-underlying-only devid
+    // with the hot-unplug diagnostic.
+    // Why it exists: status reports null-underlying devids as alert-missing,
+    // but replace must wait until btrfs promotes the devid to MISSING.
+    // Scenario: the old disk's mapper remains open with `device: (null)`,
+    // and the operator passes its devid to `braid replace --missing-id`.
+    #[test]
+    fn missing_id_null_underlying_refused() {
+        let mut pool = two_device_pool();
+        pool.devices.retain(|d| d.mapper.as_str() != "braid-disk2");
+        pool.missing_count = 1;
+        pool.total_devices = 2;
+        pool.null_underlying.push(null_underlying_device(2));
+        let runner = MockRunner::default();
+        let (uuid, member) = disk2_member_for_two_device_pool();
+
+        let err = resolve_replace_source(
+            &runner,
+            &disk_name("disk2"),
+            &uuid,
+            &member,
+            Some(2),
+            &pool,
+            &mp(),
+        )
+        .unwrap_err();
+
+        assert_eq!(
+            err.to_string(),
+            "devid 2 is hot-unplugged but btrfs has not yet promoted it to MISSING \
+             (LUKS mapper open, backing device gone). `braid replace` only operates on \
+             btrfs-authoritative MISSING devids. Confirm the disk is truly gone, then \
+             relock and re-unlock the pool degraded (`braid lock` then `braid unlock \
+             --allow-degraded`) so btrfs promotes devid 2, and retry."
+        );
+    }
+
+    // Intent: auto-resolve refuses a persisted null-underlying-only devid
+    // with the hot-unplug diagnostic.
+    // Why it exists: no-flag dead-disk replacement must not fall back to the
+    // generic no-missing wording when status has already surfaced the devid.
+    // Scenario: pool.json records disk2 as devid 2, that mapper is
+    // null-underlying, and the operator runs `braid replace` without
+    // `--missing-id`.
+    #[test]
+    fn auto_resolve_null_underlying_refused() {
+        let mut pool = two_device_pool();
+        pool.devices.retain(|d| d.mapper.as_str() != "braid-disk2");
+        pool.missing_count = 1;
+        pool.total_devices = 2;
+        pool.null_underlying.push(null_underlying_device(2));
+        let runner = MockRunner::default();
+        let (uuid, member) = disk2_member_for_two_device_pool();
+
+        let err = resolve_replace_source(
+            &runner,
+            &disk_name("disk2"),
+            &uuid,
+            &member,
+            None,
+            &pool,
+            &mp(),
+        )
+        .unwrap_err();
+
+        assert_eq!(
+            err.to_string(),
+            "devid 2 is hot-unplugged but btrfs has not yet promoted it to MISSING \
+             (LUKS mapper open, backing device gone). `braid replace` only operates on \
+             btrfs-authoritative MISSING devids. Confirm the disk is truly gone, then \
+             relock and re-unlock the pool degraded (`braid lock` then `braid unlock \
+             --allow-degraded`) so btrfs promotes devid 2, and retry."
+        );
+    }
+
+    // Intent: a supplied devid present in both missing and null-underlying
+    // resolves through the btrfs-authoritative missing path.
+    // Why it exists: btrfs can promote a hot-unplugged devid while the mapper
+    // still reports `(null)`, and that overlap must not be refused.
+    // Scenario: operator supplies `--missing-id 2` after btrfs has promoted
+    // the hot-unplugged old disk to MISSING.
+    #[test]
+    fn missing_id_in_both_missing_and_null_underlying_proceeds() {
+        let mut pool = two_device_pool();
+        pool.devices.retain(|d| d.mapper.as_str() != "braid-disk2");
+        pool.missing_count = 1;
+        pool.total_devices = 2;
+        pool.missing_devids = vec![2];
+        pool.null_underlying.push(null_underlying_device(2));
+        let runner = MockRunner::default();
+        let (uuid, member) = disk2_member_for_two_device_pool();
+
+        let result = resolve_replace_source(
+            &runner,
+            &disk_name("disk2"),
+            &uuid,
+            &member,
+            Some(2),
+            &pool,
+            &mp(),
+        );
+
         assert!(
             matches!(result, Ok(ReplaceSource::Missing { devid: 2 })),
             "expected Missing {{ devid: 2 }}, got: {result:?}"
@@ -2443,7 +2551,7 @@ mod tests {
         pool.devices.retain(|d| d.mapper.as_str() != "braid-disk2");
         pool.missing_count = 1;
         pool.total_devices = 2;
-        let runner = mock_with_missing_devids(&[2]);
+        let runner = MockRunner::default();
         // disk2's persisted member pins devid 1 (the live one) so the
         // operator's --missing-id 1 lines up with the persisted entry --
         // but devid 1 is live in `pool.devices`, so the live-check fires.
@@ -2483,7 +2591,7 @@ mod tests {
         pool.devices.retain(|d| d.mapper.as_str() != "braid-disk2");
         pool.missing_count = 1;
         pool.total_devices = 2;
-        let runner = mock_with_missing_devids(&[2]);
+        let runner = MockRunner::default();
         let (uuid, member) = disk2_member_for_two_device_pool();
         let err = resolve_replace_source(
             &runner,
@@ -2522,7 +2630,8 @@ mod tests {
         pool.devices.retain(|d| d.mapper.as_str() != "braid-disk2");
         pool.missing_count = 1;
         pool.total_devices = 2;
-        let runner = mock_with_missing_devids(&[3]);
+        pool.missing_devids = vec![3];
+        let runner = MockRunner::default();
         let (uuid, member) = disk2_member_for_two_device_pool();
         let err = resolve_replace_source(
             &runner,
@@ -2553,7 +2662,7 @@ mod tests {
         pool.devices.retain(|d| d.mapper.as_str() != "braid-disk2");
         pool.missing_count = 1;
         pool.total_devices = 2;
-        let runner = mock_with_missing_devids(&[2]);
+        let runner = MockRunner::default();
         let uuid = LuksUuid::parse("22222222-2222-2222-2222-222222222222").unwrap();
         let member = membership::DiskMember {
             name: disk_name("disk2"),
@@ -4714,7 +4823,7 @@ mod tests {
             fsid: None,
             null_underlying: vec![],
         };
-        let runner = mock_with_missing_devids(&[2]);
+        let runner = MockRunner::default();
         let target_name = disk_name("misleading-label");
         let (resolved_uuid, resolved_member) = pre
             .by_name(&target_name)
