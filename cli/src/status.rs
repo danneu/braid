@@ -1,4 +1,4 @@
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 
 use serde::{Deserialize, Serialize};
 
@@ -241,20 +241,61 @@ fn build_compact_drives(pool: &PoolState, membership: &PoolMembership) -> Vec<Co
     }
 
     // Unpooled membership disks
+    let alert_devids: HashSet<u64> = pool.alert_missing_devids().into_iter().collect();
     for (uuid, member) in membership.iter_by_name() {
         if pool_luks_uuids.contains(uuid) {
             continue;
         }
         let name = member.name.as_str();
+        let devid = member.devid.filter(|d| alert_devids.contains(d));
         drives.push(CompactDrive {
             name: name.to_owned(),
             device_short: "-".to_owned(),
-            devid: None,
+            devid,
             status: DiskStatus::Missing,
         });
     }
 
     drives
+}
+
+/// Resolve every btrfs-surfaced devid to the display name status should show.
+/// Present devices mirror `build_disk_reports`'s UUID-first name rule; missing
+/// and null-underlying entries use persisted devid only as the no-live-UUID
+/// fallback authorized for display joins.
+/// The TUI has parallel input-specific logic that can collapse into this once
+/// both paths expose the same membership-shaped inputs.
+fn build_devid_names(
+    pool: &PoolState,
+    membership: &PoolMembership,
+) -> Result<HashMap<u64, String>, membership::MembershipError> {
+    let mut names = HashMap::new();
+
+    for pd in &pool.devices {
+        let name = membership
+            .by_uuid(&pd.luks_uuid)
+            .map(|member| member.name.as_str().to_owned())
+            .unwrap_or_else(|| pd.mapper.0.clone());
+        names.insert(pd.devid, name);
+    }
+
+    for nu in &pool.null_underlying {
+        if let Some((_, member)) = membership.by_devid(nu.devid)? {
+            names
+                .entry(nu.devid)
+                .or_insert_with(|| member.name.as_str().to_owned());
+        }
+    }
+
+    for devid in &pool.missing_devids {
+        if let Some((_, member)) = membership.by_devid(*devid)? {
+            names
+                .entry(*devid)
+                .or_insert_with(|| member.name.as_str().to_owned());
+        }
+    }
+
+    Ok(names)
 }
 
 // ---------------------------------------------------------------------------
@@ -313,6 +354,7 @@ struct BuiltStatus {
 struct MountedExtras {
     compact_drives: Vec<CompactDrive>,
     human_details: Vec<HumanDisk>,
+    devid_names: HashMap<u64, String>,
 }
 
 fn not_mounted_status(config: &Config, paths: &StatePaths, advisories: Vec<String>) -> BuiltStatus {
@@ -382,6 +424,7 @@ fn build_status<R: CommandRunner, F: Filesystem>(
     };
 
     let compact_drives = build_compact_drives(&pool, &membership);
+    let devid_names = build_devid_names(&pool, &membership)?;
 
     let members: Vec<_> = membership
         .iter_by_name()
@@ -421,6 +464,7 @@ fn build_status<R: CommandRunner, F: Filesystem>(
         mounted_extras: Some(MountedExtras {
             compact_drives,
             human_details: verbose_ctx.human_details,
+            devid_names,
         }),
     })
 }
@@ -448,6 +492,7 @@ pub fn cmd_status<R: CommandRunner, F: Filesystem>(
                 &built.report,
                 extras.map(|e| e.compact_drives.as_slice()),
                 extras.map(|e| e.human_details.as_slice()),
+                extras.map(|e| &e.devid_names),
             )
         );
     }
@@ -870,13 +915,10 @@ fn build_disk_reports<R: CommandRunner>(
 // Human output formatting
 // ---------------------------------------------------------------------------
 
-fn devid_to_name(report: &StatusReport, devid: u64) -> String {
-    let key = devid.to_string();
-    report
-        .disks
-        .iter()
-        .find(|d| d.devid.as_deref() == Some(&key))
-        .map(|d| format!("{} (devid {devid})", d.name))
+fn devid_to_name(devid_names: Option<&HashMap<u64, String>>, devid: u64) -> String {
+    devid_names
+        .and_then(|names| names.get(&devid))
+        .map(|name| format!("{name} (devid {devid})"))
         .unwrap_or_else(|| format!("devid {devid}"))
 }
 
@@ -884,6 +926,7 @@ fn format_status_human(
     report: &StatusReport,
     compact_drives: Option<&[CompactDrive]>,
     human_disks: Option<&[HumanDisk]>,
+    devid_names: Option<&HashMap<u64, String>>,
 ) -> String {
     let mut out = String::new();
 
@@ -895,11 +938,11 @@ fn format_status_human(
         for cause in &report.alert_causes {
             match cause {
                 AlertCause::BtrfsDeviceErrors { devid } => {
-                    let name = devid_to_name(report, *devid);
+                    let name = devid_to_name(devid_names, *devid);
                     out.push_str(&format!("  - btrfs device errors on {name}\n"));
                 }
                 AlertCause::MissingDevice { devid } => {
-                    let name = devid_to_name(report, *devid);
+                    let name = devid_to_name(devid_names, *devid);
                     out.push_str(&format!("  - missing device: {name}\n"));
                 }
                 AlertCause::SmartdAlert => {
@@ -1138,20 +1181,30 @@ mod tests {
     use crate::membership::{DiskMember, PoolMembership};
     // Keep the err_raw alias to document that status reuses mount's raw
     // error factory through the test fixture facade.
+    use crate::test_fixtures::{disk_member_with, test_uuid};
     use crate::test_fixtures::{
         err_raw as status_err_raw, isolated_paths, mock_ok, status_btrfs_device_stats_3disk,
         status_btrfs_device_usage_raw_1disk, status_btrfs_df_raid1, status_btrfs_df_single,
         status_btrfs_scrub_aborted, status_btrfs_scrub_finished,
         status_btrfs_scrub_finished_with_errors, status_btrfs_scrub_interrupted,
         status_btrfs_scrub_never, status_btrfs_show_1disk, status_btrfs_show_3disk_1missing,
-        status_btrfs_show_3disk_1null_underlying_1missing, status_btrfs_usage_raw,
-        status_cfg_present_not_luks, status_config, status_cryptsetup_status_active,
-        status_cryptsetup_uuid_ok, status_disk_report_named, status_fs_ext4, status_fs_not_mounted,
+        status_btrfs_show_3disk_1null_underlying_1missing, status_btrfs_show_3disk_missing_devid3,
+        status_btrfs_usage_raw, status_cfg_present_not_luks, status_config,
+        status_cryptsetup_status_active, status_cryptsetup_uuid_ok, status_disk_report_missing,
+        status_disk_report_named, status_fs_ext4, status_fs_mounted, status_fs_not_mounted,
         status_fs_one_disk, status_fs_three_disk, status_is_luks_raw, status_luks_dump_text_raw,
         status_membership_1disk, status_mp, status_pool_empty, status_report_with_alerts,
         status_report_with_scrub, status_runner_healthy_3disk_base,
         status_runner_healthy_3disk_verbose,
     };
+
+    fn membership_from(entries: Vec<(LuksUuid, DiskMember)>) -> PoolMembership {
+        let mut membership = PoolMembership::empty();
+        for (uuid, member) in entries {
+            membership.insert(uuid, member).expect("insert test member");
+        }
+        membership
+    }
     // =======================================================================
     // Schema envelope tests
     // =======================================================================
@@ -1575,7 +1628,7 @@ mod tests {
             alert_causes: vec![],
             missing_devids: vec![],
         };
-        let human = format_status_human(&report, None, None);
+        let human = format_status_human(&report, None, None, None);
         assert!(human.contains("not mounted"), "got:\n{human}");
         assert!(!human.contains("Capacity"), "got:\n{human}");
         assert!(!human.contains("Allocation:"), "got:\n{human}");
@@ -1630,7 +1683,7 @@ mod tests {
             devid: Some(1),
             status: DiskStatus::Present,
         }];
-        let human = format_status_human(&report, Some(&compact), None);
+        let human = format_status_human(&report, Some(&compact), None, None);
         assert!(human.contains("intact"), "got:\n{human}");
         assert!(human.contains("Drives:"), "got:\n{human}");
         assert!(human.contains("disk1"), "got:\n{human}");
@@ -1709,7 +1762,7 @@ mod tests {
                 status: DiskStatus::Present,
             },
         ];
-        let human = format_status_human(&report, Some(&compact), None);
+        let human = format_status_human(&report, Some(&compact), None, None);
         assert!(human.contains("intact"), "got:\n{human}");
         assert!(human.contains("Drives:"), "got:\n{human}");
         assert!(human.contains("disk1"), "got:\n{human}");
@@ -1764,7 +1817,7 @@ mod tests {
                 status: DiskStatus::Missing,
             },
         ];
-        let human = format_status_human(&report, Some(&compact), None);
+        let human = format_status_human(&report, Some(&compact), None, None);
         assert!(
             human.contains("DEGRADED (1 missing device)"),
             "got:\n{human}"
@@ -1797,7 +1850,7 @@ mod tests {
             alert_causes: vec![],
             missing_devids: vec![],
         };
-        let human = format_status_human(&report, None, None);
+        let human = format_status_human(&report, None, None, None);
         assert!(
             human.contains("DEGRADED (2 missing devices)"),
             "got:\n{human}"
@@ -1850,7 +1903,7 @@ mod tests {
             missing_devids: vec![],
         };
 
-        let human = format_status_human(&report, None, Some(&human_disks));
+        let human = format_status_human(&report, None, Some(&human_disks), None);
         assert!(human.contains("present"), "got:\n{human}");
         assert!(human.contains("devid 1"), "got:\n{human}");
         assert!(human.contains("LUKS:"), "got:\n{human}");
@@ -1895,7 +1948,7 @@ mod tests {
             missing_devids: vec![],
         };
 
-        let human = format_status_human(&report, None, Some(&human_disks));
+        let human = format_status_human(&report, None, Some(&human_disks), None);
         assert!(human.contains("MISSING"), "got:\n{human}");
         assert!(human.contains("not found"), "got:\n{human}");
         assert!(human.contains("device absent"), "got:\n{human}");
@@ -1947,7 +2000,7 @@ mod tests {
             missing_devids: vec![],
         };
 
-        let human = format_status_human(&report, None, Some(&human_disks));
+        let human = format_status_human(&report, None, Some(&human_disks), None);
         assert!(human.contains("LUKS HEADER UNREADABLE"), "got:\n{human}");
         assert!(
             human.contains("unknown (LUKS header unreadable)"),
@@ -2009,7 +2062,7 @@ mod tests {
             missing_devids: vec![],
         };
 
-        let human = format_status_human(&report, None, Some(&human_disks));
+        let human = format_status_human(&report, None, Some(&human_disks), None);
         assert!(human.contains("LUKS HEADER DAMAGED"), "got:\n{human}");
         assert!(
             human.contains("unknown (LUKS header damaged)"),
@@ -2064,7 +2117,7 @@ mod tests {
             missing_devids: vec![],
         };
 
-        let human = format_status_human(&report, None, Some(&human_disks));
+        let human = format_status_human(&report, None, Some(&human_disks), None);
         assert!(human.contains("(unknown)"), "got:\n{human}");
     }
 
@@ -2268,7 +2321,7 @@ mod tests {
             started_at: "Mon Feb 23 10:00:00 2026".to_owned(),
             error_count: 0,
         });
-        let human = format_status_human(&report, None, None);
+        let human = format_status_human(&report, None, None, None);
         assert!(
             human.contains("\nLast scrub: Mon Feb 23 10:00:00 2026 (no errors)\n"),
             "expected exact last-scrub line, got:\n{human}"
@@ -2284,7 +2337,7 @@ mod tests {
             started_at: "Mon Feb 23 10:00:00 2026".to_owned(),
             error_count: 3,
         });
-        let human = format_status_human(&report, None, None);
+        let human = format_status_human(&report, None, None, None);
         assert!(
             human.contains("\nLast scrub: Mon Feb 23 10:00:00 2026 (3 errors)\n"),
             "expected exact last-scrub line, got:\n{human}"
@@ -2300,7 +2353,7 @@ mod tests {
             started_at: "Mon Feb 23 10:00:00 2026".to_owned(),
             error_count: 0,
         });
-        let human = format_status_human(&report, None, None);
+        let human = format_status_human(&report, None, None, None);
         assert!(
             human.contains("\nLast scrub: Mon Feb 23 10:00:00 2026 cancelled (will resume)\n"),
             "expected exact cancelled last-scrub line, got:\n{human}"
@@ -2316,7 +2369,7 @@ mod tests {
             started_at: "Mon Feb 23 10:00:00 2026".to_owned(),
             error_count: 0,
         });
-        let human = format_status_human(&report, None, None);
+        let human = format_status_human(&report, None, None, None);
         assert!(
             human.contains("\nLast scrub: Mon Feb 23 10:00:00 2026 interrupted\n"),
             "expected exact interrupted last-scrub line, got:\n{human}"
@@ -2484,7 +2537,7 @@ mod tests {
             alert_causes: vec![],
             missing_devids: vec![],
         };
-        let human = format_status_human(&report, None, None);
+        let human = format_status_human(&report, None, None, None);
         assert!(
             human.contains("Balance:  running, 108/160 chunks (68% complete)"),
             "got:\n{human}"
@@ -2515,7 +2568,7 @@ mod tests {
             alert_causes: vec![],
             missing_devids: vec![],
         };
-        let human = format_status_human(&report, None, None);
+        let human = format_status_human(&report, None, None, None);
         assert!(human.contains("Balance:  unknown"), "got:\n{human}");
     }
 
@@ -2543,7 +2596,7 @@ mod tests {
             alert_causes: vec![],
             missing_devids: vec![],
         };
-        let human = format_status_human(&report, None, None);
+        let human = format_status_human(&report, None, None, None);
         assert!(
             !human.contains("Balance:"),
             "Idle balance should not show Balance line, got:\n{human}"
@@ -2888,6 +2941,95 @@ mod tests {
     }
 
     #[test]
+    fn build_status_missing_device_banner_and_compact_row_name_member_end_to_end() {
+        // Intent: exercise the full mounted-status assembly and human
+        // formatter path for a btrfs-MISSING member whose only name join is
+        // persisted membership devid.
+        // Why it exists: the banner and compact `Drives:` list are plumbed
+        // separately, so builder-only tests could pass while the user-facing
+        // output still showed bare `devid 3` or `-`.
+        // Scenario: disk3 is absent, btrfs reports devid 3 as MISSING, and the
+        // alert latch contains `MissingDevice { devid: 3 }`.
+        let (_, member1) = disk_member_with(1, "toshiba1", "/dev/disk/by-id/disk1", Some(1), None);
+        let (_, member2) = disk_member_with(2, "toshiba2", "/dev/disk/by-id/disk2", Some(2), None);
+        let (_, member3) = disk_member_with(3, "toshiba3", "/dev/disk/by-id/disk3", Some(3), None);
+        let membership = membership_from(vec![
+            (
+                LuksUuid::parse("11111111-1111-1111-1111-111111111111").unwrap(),
+                member1,
+            ),
+            (
+                LuksUuid::parse("22222222-2222-2222-2222-222222222222").unwrap(),
+                member2,
+            ),
+            (
+                LuksUuid::parse("33333333-3333-3333-3333-333333333333").unwrap(),
+                member3,
+            ),
+        ]);
+        let runner = status_runner_healthy_3disk_base()
+            .with_output(
+                CmdRequest::BtrfsFilesystemShow {
+                    mount_point: status_mp(),
+                },
+                status_btrfs_show_3disk_missing_devid3(),
+            )
+            .with_output(
+                CmdRequest::CryptsetupLuksUuid {
+                    device: "/dev/disk/by-id/disk1".into(),
+                },
+                status_cryptsetup_uuid_ok(
+                    "/dev/disk/by-id/disk1",
+                    "11111111-1111-1111-1111-111111111111",
+                ),
+            )
+            .with_output(
+                CmdRequest::CryptsetupLuksUuid {
+                    device: "/dev/disk/by-id/disk2".into(),
+                },
+                status_cryptsetup_uuid_ok(
+                    "/dev/disk/by-id/disk2",
+                    "22222222-2222-2222-2222-222222222222",
+                ),
+            )
+            .with_luks_dump_text_luks2_for(&["/dev/disk/by-id/disk1", "/dev/disk/by-id/disk2"])
+            .with_mappers_closed(&["braid-toshiba1", "braid-toshiba2"]);
+        let fs = status_fs_mounted(&["/dev/disk/by-id/disk1", "/dev/disk/by-id/disk2"]);
+        let config = status_config();
+        let (_tmp, paths) = isolated_paths();
+        membership::save_membership(&membership, &paths).unwrap();
+        alert::save_alert_latch(
+            &AlertState {
+                causes: vec![AlertCause::MissingDevice { devid: 3 }],
+            },
+            &paths,
+        )
+        .unwrap();
+
+        let built = build_status(&runner, &fs, &config, &paths).unwrap();
+        let extras = built.mounted_extras.as_ref().unwrap();
+        let human = format_status_human(
+            &built.report,
+            Some(&extras.compact_drives),
+            Some(&extras.human_details),
+            Some(&extras.devid_names),
+        );
+
+        assert!(
+            human.contains("missing device: toshiba3 (devid 3)"),
+            "expected missing-device alert to name toshiba3, got:\n{human}"
+        );
+        let toshiba3_row = human
+            .lines()
+            .find(|line| line.trim_start().starts_with("toshiba3") && line.contains("missing"))
+            .expect("missing compact row for toshiba3");
+        assert!(
+            toshiba3_row.contains("devid=3"),
+            "missing compact row must show live-confirmed devid, got:\n{human}"
+        );
+    }
+
+    #[test]
     fn cmd_status_single_disk_ok() {
         let runner = MockRunner::default()
             .with_output(
@@ -3186,7 +3328,7 @@ mod tests {
             alert_causes: vec![],
             missing_devids: vec![],
         };
-        let human = format_status_human(&report, None, Some(&ctx.human_details));
+        let human = format_status_human(&report, None, Some(&ctx.human_details), None);
 
         assert!(human.contains("disk1"), "got:\n{human}");
         assert!(
@@ -3300,6 +3442,118 @@ mod tests {
     }
 
     // =======================================================================
+    // build_devid_names tests
+    // =======================================================================
+
+    #[test]
+    fn build_devid_names_covers_present_null_underlying_and_missing() {
+        // Intent: the alert-name map covers every live btrfs devid source:
+        // present devices, null-underlying devices, and btrfs-MISSING rows.
+        // Why it exists: missing and null-underlying rows have no live
+        // DiskReport.devid join, so they must resolve through persisted
+        // membership devids instead.
+        // Scenario: a three-disk pool has one present disk, one hot-unplugged
+        // null-underlying mapper, and one btrfs-MISSING placeholder.
+        let (uuid1, member1) =
+            disk_member_with(11, "toshiba1", "/dev/disk/by-id/disk1", Some(1), None);
+        let (uuid2, member2) =
+            disk_member_with(12, "toshiba2", "/dev/disk/by-id/disk2", Some(2), None);
+        let (uuid3, member3) =
+            disk_member_with(13, "toshiba3", "/dev/disk/by-id/disk3", Some(3), None);
+        let membership = membership_from(vec![
+            (uuid1.clone(), member1),
+            (uuid2, member2),
+            (uuid3, member3),
+        ]);
+        let pool = PoolState {
+            mounted: true,
+            devices: vec![PoolDevice {
+                mapper: MapperName("braid-toshiba1".to_owned()),
+                luks_uuid: uuid1,
+                devid: 1,
+                underlying: "/dev/vda".to_owned(),
+            }],
+            missing_count: 2,
+            missing_devids: vec![3],
+            total_devices: 3,
+            fsid: None,
+            null_underlying: vec![NullUnderlyingDevice {
+                mapper: MapperName("braid-toshiba2".to_owned()),
+                devid: 2,
+            }],
+        };
+
+        let names = build_devid_names(&pool, &membership).unwrap();
+
+        assert_eq!(names.get(&1).map(String::as_str), Some("toshiba1"));
+        assert_eq!(names.get(&2).map(String::as_str), Some("toshiba2"));
+        assert_eq!(names.get(&3).map(String::as_str), Some("toshiba3"));
+    }
+
+    #[test]
+    fn build_devid_names_present_foreign_live_uses_mapper_basename() {
+        // Intent: present live devices without a membership UUID match still
+        // get a display name in the devid alert map.
+        // Why it exists: btrfs device-error alerts are keyed by devid; a
+        // foreign live mapper must not degrade to a bare `devid N` banner.
+        // Scenario: btrfs reports a live mapper whose LUKS UUID is not in
+        // pool.json, so status falls back to the observed mapper basename.
+        let pool = PoolState {
+            mounted: true,
+            devices: vec![PoolDevice {
+                mapper: MapperName("foreign-live".to_owned()),
+                luks_uuid: test_uuid(910),
+                devid: 7,
+                underlying: "/dev/vdz".to_owned(),
+            }],
+            missing_count: 0,
+            missing_devids: vec![],
+            total_devices: 1,
+            fsid: None,
+            null_underlying: vec![],
+        };
+
+        let names = build_devid_names(&pool, &PoolMembership::empty()).unwrap();
+
+        assert_eq!(names.get(&7).map(String::as_str), Some("foreign-live"));
+    }
+
+    #[test]
+    fn build_devid_names_propagates_duplicate_devid() {
+        // Intent: corrupt membership with duplicate persisted devids fails
+        // closed during missing-device name resolution.
+        // Why it exists: silently picking one member would attach the wrong
+        // operator-facing disk name to a missing-device alert.
+        // Scenario: two pool.json entries both claim devid 7 and btrfs
+        // reports devid 7 as MISSING.
+        let (uuid1, member1) =
+            disk_member_with(921, "toshiba1", "/dev/disk/by-id/disk1", Some(7), None);
+        let (uuid2, member2) =
+            disk_member_with(922, "toshiba2", "/dev/disk/by-id/disk2", Some(7), None);
+        let membership =
+            PoolMembership::for_corruption_tests(vec![(uuid1, member1), (uuid2, member2)]);
+        let pool = PoolState {
+            mounted: true,
+            devices: vec![],
+            missing_count: 1,
+            missing_devids: vec![7],
+            total_devices: 1,
+            fsid: None,
+            null_underlying: vec![],
+        };
+
+        let err = build_devid_names(&pool, &membership).unwrap_err();
+
+        assert!(
+            matches!(
+                err,
+                membership::MembershipError::DuplicateDevid { devid: 7, .. }
+            ),
+            "expected DuplicateDevid, got: {err:?}"
+        );
+    }
+
+    // =======================================================================
     // Compact drive tests
     // =======================================================================
 
@@ -3386,6 +3640,62 @@ mod tests {
         assert_eq!(drives[1].status, DiskStatus::Missing);
     }
 
+    #[test]
+    fn build_compact_drives_missing_member_shows_devid_when_live_confirmed() {
+        // Intent: a missing compact row shows a persisted devid only when live
+        // btrfs confirms that devid is currently missing.
+        // Why it exists: this is the compact `Drives:` half of the missing
+        // device UX; the alert banner fix alone would still leave `-`.
+        // Scenario: pool.json remembers disk1 as devid 3 and btrfs reports
+        // devid 3 in the alert-local missing set.
+        let (_, member) = disk_member_with(931, "toshiba3", "/dev/disk/by-id/disk3", Some(3), None);
+        let membership = membership_from(vec![(test_uuid(931), member)]);
+        let pool = PoolState {
+            mounted: true,
+            devices: vec![],
+            missing_count: 1,
+            missing_devids: vec![3],
+            total_devices: 1,
+            fsid: None,
+            null_underlying: vec![],
+        };
+
+        let drives = build_compact_drives(&pool, &membership);
+
+        assert_eq!(drives.len(), 1);
+        assert_eq!(drives[0].name, "toshiba3");
+        assert_eq!(drives[0].devid, Some(3));
+        assert_eq!(drives[0].status, DiskStatus::Missing);
+    }
+
+    #[test]
+    fn build_compact_drives_missing_member_hides_stale_persisted_devid() {
+        // Intent: a missing compact row hides a persisted devid when live
+        // btrfs does not currently report that devid as missing.
+        // Why it exists: persisted membership is only a fallback join key; it
+        // must not make stale devids look btrfs-authoritative in display.
+        // Scenario: pool.json remembers disk1 as devid 3, but live btrfs has
+        // no MISSING or null-underlying record for devid 3.
+        let (_, member) = disk_member_with(941, "toshiba3", "/dev/disk/by-id/disk3", Some(3), None);
+        let membership = membership_from(vec![(test_uuid(941), member)]);
+        let pool = PoolState {
+            mounted: true,
+            devices: vec![],
+            missing_count: 0,
+            missing_devids: vec![],
+            total_devices: 0,
+            fsid: None,
+            null_underlying: vec![],
+        };
+
+        let drives = build_compact_drives(&pool, &membership);
+
+        assert_eq!(drives.len(), 1);
+        assert_eq!(drives[0].name, "toshiba3");
+        assert_eq!(drives[0].devid, None);
+        assert_eq!(drives[0].status, DiskStatus::Missing);
+    }
+
     // =======================================================================
     // Verbose unknown tests
     // =======================================================================
@@ -3437,7 +3747,7 @@ mod tests {
             missing_devids: vec![],
         };
 
-        let human = format_status_human(&report, None, Some(&human_disks));
+        let human = format_status_human(&report, None, Some(&human_disks), None);
         assert!(human.contains("UNKNOWN"), "got:\n{human}");
         assert!(human.contains("metadata unavailable"), "got:\n{human}");
         assert!(
@@ -3459,29 +3769,38 @@ mod tests {
     // =======================================================================
 
     #[test]
-    fn alert_missing_device_shows_name() {
-        let disks = vec![
-            status_disk_report_named("aaa", 1),
-            status_disk_report_named("bbb", 2),
-            status_disk_report_named("ccc", 3),
-        ];
+    fn alert_missing_device_uses_devid_names_map() {
+        // Intent: a missing-device alert names the member through the explicit
+        // devid map even when the missing DiskReport row has no devid field.
+        // Why it exists: this is the regression where the alert banner dropped
+        // the disk name for btrfs-MISSING/null-underlying members.
+        // Scenario: report.disks contains the unpooled missing-row shape and
+        // the human formatter receives `{3: "toshiba3"}` from build_status.
+        let disks = vec![status_disk_report_missing("toshiba3")];
         let report = status_report_with_alerts(disks, vec![AlertCause::MissingDevice { devid: 3 }]);
-        let human = format_status_human(&report, None, None);
+        let devid_names = std::collections::HashMap::from([(3, "toshiba3".to_owned())]);
+        let human = format_status_human(&report, None, None, Some(&devid_names));
         assert!(
-            human.contains("missing device: ccc (devid 3)"),
+            human.contains("missing device: toshiba3 (devid 3)"),
             "expected device name in alert, got:\n{human}"
         );
     }
 
     #[test]
     fn alert_btrfs_errors_shows_name() {
+        // Intent: a btrfs device-error alert names the matching present disk.
+        // Why it exists: alert causes are keyed by devid, but operators need
+        // the display name in the banner.
+        // Scenario: devid 1 has an entry in the status-built devid name map.
         let disks = vec![
             status_disk_report_named("aaa", 1),
             status_disk_report_named("bbb", 2),
         ];
         let report =
             status_report_with_alerts(disks, vec![AlertCause::BtrfsDeviceErrors { devid: 1 }]);
-        let human = format_status_human(&report, None, None);
+        let devid_names =
+            std::collections::HashMap::from([(1, "aaa".to_owned()), (2, "bbb".to_owned())]);
+        let human = format_status_human(&report, None, None, Some(&devid_names));
         assert!(
             human.contains("btrfs device errors on aaa (devid 1)"),
             "expected device name in alert, got:\n{human}"
@@ -3489,14 +3808,57 @@ mod tests {
     }
 
     #[test]
-    fn alert_unknown_devid_falls_back() {
-        let disks = vec![status_disk_report_named("aaa", 1)];
+    fn alert_missing_device_falls_back_when_map_missing_entry() {
+        // Intent: a missing-device alert falls back to the raw devid when the
+        // explicit name map lacks that devid.
+        // Why it exists: report.disks is no longer the fallback join; missing
+        // rows with stale or unrelated devids must not influence the banner.
+        // Scenario: the report has a DiskReport with devid 99, but the status
+        // path did not authorize a display-name binding for devid 99.
+        let disks = vec![status_disk_report_named("aaa", 99)];
         let report =
             status_report_with_alerts(disks, vec![AlertCause::MissingDevice { devid: 99 }]);
-        let human = format_status_human(&report, None, None);
+        let devid_names = std::collections::HashMap::new();
+        let human = format_status_human(&report, None, None, Some(&devid_names));
         assert!(
             human.contains("missing device: devid 99"),
             "unknown devid should fall back to raw id, got:\n{human}"
+        );
+    }
+
+    #[test]
+    fn alert_btrfs_errors_foreign_live_mapper_keeps_basename() {
+        // Intent: a foreign live mapper still names btrfs device errors by its
+        // observed mapper basename.
+        // Why it exists: present devices without membership matches have a
+        // live display fallback and should not regress to bare `devid N`.
+        // Scenario: btrfs reports devid 1 on a mapper whose LUKS UUID is not
+        // present in pool.json, and an alert fires for that devid.
+        let pool = PoolState {
+            mounted: true,
+            devices: vec![PoolDevice {
+                mapper: MapperName("foreign-live".to_owned()),
+                luks_uuid: test_uuid(950),
+                devid: 1,
+                underlying: "/dev/vdz".to_owned(),
+            }],
+            missing_count: 0,
+            missing_devids: vec![],
+            total_devices: 1,
+            fsid: None,
+            null_underlying: vec![],
+        };
+        let devid_names = build_devid_names(&pool, &PoolMembership::empty()).unwrap();
+        let report = status_report_with_alerts(
+            vec![status_disk_report_named("foreign-live", 1)],
+            vec![AlertCause::BtrfsDeviceErrors { devid: 1 }],
+        );
+
+        let human = format_status_human(&report, None, None, Some(&devid_names));
+
+        assert!(
+            human.contains("btrfs device errors on foreign-live (devid 1)"),
+            "expected foreign mapper basename in alert, got:\n{human}"
         );
     }
 

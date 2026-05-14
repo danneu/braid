@@ -164,6 +164,19 @@ pub(crate) fn status_btrfs_show_3disk_1missing() -> RawCommandOutput {
     )
 }
 
+/// Degraded three-device output where btrfs names the missing devid explicitly.
+pub(crate) fn status_btrfs_show_3disk_missing_devid3() -> RawCommandOutput {
+    mock_ok(
+        "btrfs filesystem show",
+        "Label: none  uuid: aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee\n\
+         \tTotal devices 3 FS bytes used 1.00GiB\n\
+         \tdevid    1 size 10.00GiB used 2.00GiB path /dev/mapper/disk1\n\
+         \tdevid    2 size 10.00GiB used 2.00GiB path /dev/mapper/disk2\n\
+         \tdevid    3 size 0 used 0 path MISSING\n\
+         \t*** Some devices missing\n",
+    )
+}
+
 /// Mixed missing output that drives the null-underlying plus btrfs-missing union test.
 pub(crate) fn status_btrfs_show_3disk_1null_underlying_1missing() -> RawCommandOutput {
     mock_ok(
@@ -646,6 +659,20 @@ pub(crate) fn status_disk_report_named(name: &str, devid: u64) -> DiskReport {
         devid: Some(devid.to_string()),
         underlying: None,
         status: DiskStatus::Present,
+        errors: None,
+    }
+}
+
+/// Missing disk report shape emitted for unpooled members.
+pub(crate) fn status_disk_report_missing(name: &str) -> DiskReport {
+    DiskReport {
+        name: name.into(),
+        mapper: format!("braid-{name}"),
+        by_id: format!("/dev/disk/by-id/{name}"),
+        luks_uuid: String::new(),
+        devid: None,
+        underlying: None,
+        status: DiskStatus::Missing,
         errors: None,
     }
 }
