@@ -1,0 +1,44 @@
+---
+source: cli/src/tui/view/mod.rs
+assertion_line: 1580
+expression: "format!(\"-- toshiba --\\n{unlocked}\\n-- ironwolf --\\n{locked}\")"
+---
+-- toshiba --
+Data  Scrub  Sharing
+ Pool ──────────────────────────────────────────────────────
+ not mounted
+ Disks ─────────────────────────────────────────────────────
+     Name     Bus SMART Temp btrfs Allocated
+ ▶ 1 toshiba  --
+   2 ironwolf --
+   3 wdc      --
+      ┌ Disk Detail ─────────────────────────────────┐
+      │ Disk       toshiba                           │
+      │ Status     unlocked                          │
+      │ Cipher     aes-xts-plain64                   │
+      │ Key size   512 bits                          │
+      │ Keyslots   1 of 32 slots used                │
+      │                                              │
+      │ r reload · Esc to go back                    │
+      └──────────────────────────────────────────────┘
+Quit: q │ Help: ? │ Reset temp hi/lo: R │ Reload: r
+
+-- ironwolf --
+Data  Scrub  Sharing
+ Pool ──────────────────────────────────────────────────────
+ not mounted
+ Disks ─────────────────────────────────────────────────────
+     Name     Bus SMART Temp btrfs Allocated
+   1 toshiba  --
+ ▶ 2 ironwolf --
+   3 wdc      --
+      ┌ Disk Detail ─────────────────────────────────┐
+      │ Disk       ironwolf                          │
+      │ Status     locked                            │
+      │ Cipher     aes-xts-plain64                   │
+      │ Key size   512 bits                          │
+      │ Keyslots   1 of 32 slots used                │
+      │                                              │
+      │ r reload · Esc to go back                    │
+      └──────────────────────────────────────────────┘
+Quit: q │ Help: ? │ Reset temp hi/lo: R │ Reload: r

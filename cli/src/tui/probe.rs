@@ -8,18 +8,133 @@ use crate::luks::{self, BackingPathResolver};
 use crate::parse::types::{ScrubState, SmartHealth, SmartProbe};
 use crate::parse::{
     parse_btrfs_device_stats, parse_btrfs_device_usage, parse_btrfs_scrub_status,
-    parse_cryptsetup_luks_dump, parse_lsblk_json, parse_smartctl,
+    parse_cryptsetup_luks_dump, parse_cryptsetup_luks_uuid, parse_cryptsetup_status,
+    parse_lsblk_json, parse_smartctl,
 };
 use crate::probe::{Filesystem, ProbeError, probe_config_disk, probe_pool};
 use crate::state_paths::StatePaths;
 use crate::status::resolve_alert_state;
 use crate::status::{DiskErrors, estimate_pool_capacity, get_balance_report};
 use crate::tui::model::{
-    DaemonStatus, DiskLuksInfo, DiskUsage, DrivingDrive, FanReading, FanSnapshot, PoolState,
-    TemperatureDiskId, TemperatureReading, UnpooledDiskRender, UpsSnapshot,
+    DaemonStatus, DiskLockState, DiskLuksInfo, DiskLuksState, DiskUsage, DrivingDrive, FanReading,
+    FanSnapshot, PoolState, TemperatureDiskId, TemperatureReading, UnpooledDiskRender, UpsSnapshot,
 };
-use crate::types::{ByIdPath, ConfigDiskState, LuksUuid, MountPoint};
+use crate::types::{ByIdPath, ConfigDiskState, LuksUuid, MapperName, MountPoint};
 use crate::ups::{UpsQueryError, query_ups};
+
+/// Best-effort ownership-aware lock classifier for a disk that the mounted
+/// pool probe could not identify by LUKS UUID or persisted devid.
+fn fallback_disk_luks_lock<R: CommandRunner>(
+    runner: &R,
+    disk_name: &str,
+    by_id_path: &str,
+    expected_uuid: Option<&LuksUuid>,
+    backing_path_resolver: &dyn BackingPathResolver,
+) -> (DiskLockState, Option<String>) {
+    let status_raw = match runner.run(&CmdRequest::CryptsetupStatus {
+        mapper: MapperName(format!("braid-{disk_name}")),
+    }) {
+        Ok(raw) => raw,
+        Err(_) => return (DiskLockState::Unknown, None),
+    };
+    let status = match parse_cryptsetup_status(&status_raw) {
+        Ok(status) => status,
+        Err(_) => return (DiskLockState::Unknown, None),
+    };
+    if !status.is_active {
+        return (DiskLockState::Locked, None);
+    }
+
+    let underlying = match status.device.as_deref() {
+        Some(path) if !path.is_empty() && path != "(null)" => path.to_owned(),
+        _ => return (DiskLockState::Unknown, None),
+    };
+
+    let expected_path = match backing_path_resolver.canonicalize(by_id_path) {
+        Ok(path) => path,
+        Err(_) => return (DiskLockState::Unknown, Some(underlying)),
+    };
+    let found_path = match backing_path_resolver.canonicalize(&underlying) {
+        Ok(path) => path,
+        Err(_) => return (DiskLockState::Unknown, Some(underlying)),
+    };
+    if expected_path != found_path {
+        return (DiskLockState::Unknown, Some(underlying));
+    }
+
+    let Some(expected_uuid) = expected_uuid else {
+        return (DiskLockState::Unknown, Some(underlying));
+    };
+    let uuid_raw = match runner.run(&CmdRequest::CryptsetupLuksUuid {
+        device: underlying.clone(),
+    }) {
+        Ok(raw) => raw,
+        Err(_) => return (DiskLockState::Unknown, Some(underlying)),
+    };
+    let found_uuid = match parse_cryptsetup_luks_uuid(&uuid_raw) {
+        Ok(out) => out.uuid,
+        Err(_) => return (DiskLockState::Unknown, Some(underlying)),
+    };
+
+    if &found_uuid == expected_uuid {
+        (DiskLockState::Unlocked, Some(underlying))
+    } else {
+        (DiskLockState::Unknown, Some(underlying))
+    }
+}
+
+/// Best-effort LUKS metadata bridge for the disk detail popup.
+fn probe_disk_luks_metadata<R: CommandRunner>(
+    runner: &R,
+    by_id_path: &str,
+) -> Option<DiskLuksInfo> {
+    let raw = runner
+        .run(&CmdRequest::CryptsetupLuksDump {
+            device: by_id_path.to_owned(),
+        })
+        .ok()?;
+    let dump = parse_cryptsetup_luks_dump(&raw).ok()?;
+    Some(DiskLuksInfo {
+        cipher: dump.cipher,
+        key_size_bits: dump.key_size_bits,
+        keyslot_count: dump.keyslot_count,
+    })
+}
+
+/// Build the model-level LUKS state map before btrfs mount status gates
+/// pool-specific probes.
+fn build_disk_luks_states<R: CommandRunner>(
+    runner: &R,
+    disk_by_id: &HashMap<String, String>,
+    disk_luks_uuid: &HashMap<String, LuksUuid>,
+    mounted_classification: &HashMap<String, (DiskLockState, Option<String>)>,
+    backing_path_resolver: &dyn BackingPathResolver,
+) -> HashMap<String, DiskLuksState> {
+    let mut disk_luks_states = HashMap::new();
+    for (disk_name, by_id_path) in disk_by_id {
+        let (lock, underlying_present) = mounted_classification
+            .get(disk_name)
+            .cloned()
+            .unwrap_or_else(|| {
+                fallback_disk_luks_lock(
+                    runner,
+                    disk_name,
+                    by_id_path,
+                    disk_luks_uuid.get(disk_name),
+                    backing_path_resolver,
+                )
+            });
+        disk_luks_states.insert(
+            disk_name.clone(),
+            DiskLuksState {
+                lock,
+                underlying_present,
+                metadata: probe_disk_luks_metadata(runner, by_id_path),
+            },
+        );
+    }
+    disk_luks_states
+}
 
 pub fn probe_pool_for_tui<R: CommandRunner, F: Filesystem + ?Sized>(
     runner: &R,
@@ -30,11 +145,41 @@ pub fn probe_pool_for_tui<R: CommandRunner, F: Filesystem + ?Sized>(
     disk_devid: &HashMap<String, u64>,
     paths: &StatePaths,
     backing_path_resolver: &dyn BackingPathResolver,
-) -> Result<Option<PoolState>, String> {
+) -> Result<(HashMap<String, DiskLuksState>, Option<PoolState>), String> {
     let domain = probe_pool(runner, fs, mount_point).map_err(|e| e.to_string())?;
 
+    let uuid_to_name: HashMap<&LuksUuid, &str> = disk_luks_uuid
+        .iter()
+        .map(|(name, uuid)| (uuid, name.as_str()))
+        .collect();
+    let persisted_devid_to_name: HashMap<u64, &str> = disk_devid
+        .iter()
+        .map(|(name, devid)| (*devid, name.as_str()))
+        .collect();
+    let mut mounted_classification = HashMap::new();
+    for device in &domain.devices {
+        if let Some(name) = uuid_to_name.get(&device.luks_uuid) {
+            mounted_classification.insert(
+                (*name).to_owned(),
+                (DiskLockState::Unlocked, Some(device.underlying.clone())),
+            );
+        }
+    }
+    for device in &domain.null_underlying {
+        if let Some(name) = persisted_devid_to_name.get(&device.devid) {
+            mounted_classification.insert((*name).to_owned(), (DiskLockState::Unlocked, None));
+        }
+    }
+    let disk_luks_states = build_disk_luks_states(
+        runner,
+        disk_by_id,
+        disk_luks_uuid,
+        &mounted_classification,
+        backing_path_resolver,
+    );
+
     if !domain.mounted {
-        return Ok(None);
+        return Ok((disk_luks_states, None));
     }
 
     let df_raw = runner
@@ -57,14 +202,6 @@ pub fn probe_pool_for_tui<R: CommandRunner, F: Filesystem + ?Sized>(
     // null_underlying and missing_devids are exactly the cases where btrfs
     // still reports a device but no live LUKS UUID is observable; bind those
     // through the persisted prior devid.
-    let uuid_to_name: HashMap<&LuksUuid, &str> = disk_luks_uuid
-        .iter()
-        .map(|(name, uuid)| (uuid, name.as_str()))
-        .collect();
-    let persisted_devid_to_name: HashMap<u64, &str> = disk_devid
-        .iter()
-        .map(|(name, devid)| (*devid, name.as_str()))
-        .collect();
     let devid_to_name: HashMap<u64, &str> = domain
         .devices
         .iter()
@@ -110,7 +247,6 @@ pub fn probe_pool_for_tui<R: CommandRunner, F: Filesystem + ?Sized>(
 
     let mut smart_health = HashMap::new();
     let mut disk_temperature_readings = HashMap::new();
-    let mut luks_info = HashMap::new();
     for (disk_name, by_id_path) in disk_by_id {
         let probe = runner
             .run(&CmdRequest::SmartctlHealthJson {
@@ -131,20 +267,6 @@ pub fn probe_pool_for_tui<R: CommandRunner, F: Filesystem + ?Sized>(
                 ),
             };
             disk_temperature_readings.insert(disk_name.clone(), TemperatureReading { id, celsius });
-        }
-
-        if let Ok(raw) = runner.run(&CmdRequest::CryptsetupLuksDump {
-            device: by_id_path.clone(),
-        }) && let Ok(dump) = parse_cryptsetup_luks_dump(&raw)
-        {
-            luks_info.insert(
-                disk_name.clone(),
-                DiskLuksInfo {
-                    cipher: dump.cipher,
-                    key_size_bits: dump.key_size_bits,
-                    keyslot_count: dump.keyslot_count,
-                },
-            );
         }
     }
 
@@ -209,9 +331,7 @@ pub fn probe_pool_for_tui<R: CommandRunner, F: Filesystem + ?Sized>(
     // Classify any declared disk that is NOT in the live pool's
     // disk_usage so the disk table can render Unreadable / Damaged /
     // UnknownLuks / Missing distinctly. The live-pool UUID set is built
-    // from `domain.devices` (the authoritative live source); luks_info
-    // here only carries cipher/keyslot metadata, not UUIDs, so it cannot
-    // answer the "valid LUKS but not in this pool" question.
+    // from `domain.devices` (the authoritative live source).
     let live_pool_uuids: HashSet<LuksUuid> =
         domain.devices.iter().map(|d| d.luks_uuid.clone()).collect();
     let mut unpooled_by_name: HashMap<String, UnpooledDiskRender> = HashMap::new();
@@ -290,23 +410,25 @@ pub fn probe_pool_for_tui<R: CommandRunner, F: Filesystem + ?Sized>(
 
     let capacity_used_bytes = df.logical_used_bytes();
 
-    Ok(Some(PoolState {
-        mount_point: mount_point.clone(),
-        df_entries: df.entries,
-        disk_usage,
-        disk_transport,
-        smart_health,
-        disk_temperature_readings,
-        luks_info,
-        device_errors,
-        unpooled_disks: unpooled_by_name,
-        alert_state,
-        scrub,
-        balance,
-        capacity_total_bytes,
-        capacity_used_bytes,
-        probed_at: Instant::now(),
-    }))
+    Ok((
+        disk_luks_states,
+        Some(PoolState {
+            mount_point: mount_point.clone(),
+            df_entries: df.entries,
+            disk_usage,
+            disk_transport,
+            smart_health,
+            disk_temperature_readings,
+            device_errors,
+            unpooled_disks: unpooled_by_name,
+            alert_state,
+            scrub,
+            balance,
+            capacity_total_bytes,
+            capacity_used_bytes,
+            probed_at: Instant::now(),
+        }),
+    ))
 }
 
 /// Unit that backs `braid.fanControl` on the host. Single source of truth
@@ -690,18 +812,30 @@ mod tests {
     /// empty default returns false (treated as Absent).
     struct StubFs {
         present_paths: Vec<String>,
+        mountinfo: String,
     }
 
     impl StubFs {
         fn empty() -> Self {
             Self {
                 present_paths: vec![],
+                mountinfo:
+                    "36 35 0:32 / /mnt/storage rw shared:1 - btrfs /dev/mapper/braid-disk1 rw\n"
+                        .to_owned(),
             }
         }
 
         fn with_paths(paths: &[&str]) -> Self {
             Self {
                 present_paths: paths.iter().map(|s| (*s).to_owned()).collect(),
+                ..Self::empty()
+            }
+        }
+
+        fn unmounted_with_paths(paths: &[&str]) -> Self {
+            Self {
+                present_paths: paths.iter().map(|s| (*s).to_owned()).collect(),
+                mountinfo: "26 25 0:23 / / rw,noatime shared:1 - ext4 /dev/sda1 rw\n".to_owned(),
             }
         }
     }
@@ -721,10 +855,7 @@ mod tests {
 
         fn read_to_string(&self, path: &str) -> Result<String, std::io::Error> {
             if path == "/proc/self/mountinfo" {
-                return Ok(
-                    "36 35 0:32 / /mnt/storage rw shared:1 - btrfs /dev/mapper/braid-disk1 rw\n"
-                        .to_owned(),
-                );
+                return Ok(self.mountinfo.clone());
             }
             Err(std::io::Error::new(std::io::ErrorKind::NotFound, "stub"))
         }
@@ -737,6 +868,48 @@ mod tests {
             stderr: String::new(),
             exit_status: 0,
         }
+    }
+
+    fn err_raw(cmd: &str, stderr: &str, exit_status: i32) -> RawCommandOutput {
+        RawCommandOutput {
+            cmd: cmd.to_owned(),
+            stdout: String::new(),
+            stderr: stderr.to_owned(),
+            exit_status,
+        }
+    }
+
+    fn luks_dump_json(cipher: &str) -> String {
+        format!(
+            r#"{{
+                "keyslots": {{
+                    "0": {{
+                        "type": "luks2",
+                        "key_size": 64,
+                        "af": {{}},
+                        "area": {{}},
+                        "kdf": {{}}
+                    }}
+                }},
+                "tokens": {{}},
+                "segments": {{
+                    "0": {{
+                        "type": "crypt",
+                        "offset": "16777216",
+                        "size": "dynamic",
+                        "iv_tweak": "0",
+                        "encryption": "{cipher}",
+                        "sector_size": 512
+                    }}
+                }},
+                "digests": {{}},
+                "config": {{}}
+            }}"#
+        )
+    }
+
+    fn expect_pool(result: (HashMap<String, DiskLuksState>, Option<PoolState>)) -> PoolState {
+        result.1.expect("pool should be Some")
     }
 
     fn tui_disk_luks_uuid() -> HashMap<String, LuksUuid> {
@@ -878,7 +1051,7 @@ mod tests {
             crate::test_fixtures::mock_virtio_backing_path_resolver(),
         )
         .unwrap();
-        let pool = result.expect("pool should be Some");
+        let pool = expect_pool(result);
 
         // Verify balance is idle
         assert_eq!(pool.balance, crate::status::BalanceReport::Idle);
@@ -1036,7 +1209,7 @@ mod tests {
             crate::test_fixtures::mock_virtio_backing_path_resolver(),
         )
         .unwrap();
-        let pool = result.expect("pool should be Some");
+        let pool = expect_pool(result);
 
         let errors = pool
             .device_errors
@@ -1142,18 +1315,19 @@ mod tests {
                 ),
             );
 
-        let pool = probe_pool_for_tui(
-            &runner,
-            &StubFs::empty(),
-            &MountPoint("/mnt/storage".into()),
-            &HashMap::new(),
-            &tui_disk_luks_uuid(),
-            &tui_disk_devid(),
-            &test_paths().1,
-            crate::test_fixtures::mock_virtio_backing_path_resolver(),
-        )
-        .unwrap()
-        .expect("pool should be Some");
+        let pool = expect_pool(
+            probe_pool_for_tui(
+                &runner,
+                &StubFs::empty(),
+                &MountPoint("/mnt/storage".into()),
+                &HashMap::new(),
+                &tui_disk_luks_uuid(),
+                &tui_disk_devid(),
+                &test_paths().1,
+                crate::test_fixtures::mock_virtio_backing_path_resolver(),
+            )
+            .unwrap(),
+        );
 
         let errors = pool
             .device_errors
@@ -1285,7 +1459,7 @@ mod tests {
             crate::test_fixtures::mock_virtio_backing_path_resolver(),
         )
         .unwrap();
-        let pool = result.expect("pool should be Some");
+        let pool = expect_pool(result);
 
         // 2 equal 536 MB disks → min(sum/2, sum-max) = 536870912.
         assert_eq!(pool.capacity_total_bytes, Some(536_870_912));
@@ -1302,6 +1476,216 @@ mod tests {
         // Exact value pins the semantic: Data + Metadata + System
         // logical used from df, GlobalReserve excluded.
         assert_eq!(pool.capacity_used_bytes, 285_229_056);
+    }
+
+    // Intent: unmounted TUI probes must still classify open and closed
+    //         mappers per declared disk.
+    // Why it exists: disk detail used to derive lock state from mounted
+    //      btrfs membership, so an unmounted pool rendered every disk as
+    //      locked regardless of cryptsetup truth.
+    // Scenario: pool is not mounted; toshiba's mapper is open against the
+    //           configured device and ironwolf's mapper is inactive.
+    #[test]
+    fn probe_classifies_unmounted_open_and_closed_mappers() {
+        let disk_by_id = HashMap::from([
+            (
+                "toshiba".to_owned(),
+                "/dev/disk/by-id/braid-toshiba".to_owned(),
+            ),
+            (
+                "ironwolf".to_owned(),
+                "/dev/disk/by-id/braid-ironwolf".to_owned(),
+            ),
+        ]);
+        let runner = MockRunner::default()
+            .with_output(
+                CmdRequest::CryptsetupStatus {
+                    mapper: MapperName("braid-toshiba".into()),
+                },
+                ok_raw(
+                    "cryptsetup status braid-toshiba",
+                    "/dev/mapper/braid-toshiba is active and is in use.\n\
+                     \tdevice:  /dev/vdb\n",
+                ),
+            )
+            .with_output(
+                CmdRequest::CryptsetupLuksUuid {
+                    device: "/dev/vdb".into(),
+                },
+                ok_raw(
+                    "cryptsetup luksUUID /dev/vdb",
+                    "11111111-1111-1111-1111-111111111111\n",
+                ),
+            )
+            .with_output(
+                CmdRequest::CryptsetupLuksDump {
+                    device: "/dev/disk/by-id/braid-toshiba".into(),
+                },
+                ok_raw("cryptsetup luksDump", &luks_dump_json("aes-xts-plain64")),
+            )
+            .with_output(
+                CmdRequest::CryptsetupStatus {
+                    mapper: MapperName("braid-ironwolf".into()),
+                },
+                err_raw(
+                    "cryptsetup status braid-ironwolf",
+                    "/dev/mapper/braid-ironwolf is inactive.\n",
+                    4,
+                ),
+            )
+            .with_output(
+                CmdRequest::CryptsetupLuksDump {
+                    device: "/dev/disk/by-id/braid-ironwolf".into(),
+                },
+                ok_raw(
+                    "cryptsetup luksDump",
+                    &luks_dump_json("serpent-xts-plain64"),
+                ),
+            );
+        let resolver = crate::test_fixtures::MockBackingPathResolver::default()
+            .with_path("/dev/disk/by-id/braid-toshiba", "/dev/vdb");
+
+        let (states, pool) = probe_pool_for_tui(
+            &runner,
+            &StubFs::unmounted_with_paths(&[]),
+            &MountPoint("/mnt/storage".into()),
+            &disk_by_id,
+            &tui_disk_luks_uuid(),
+            &tui_disk_devid(),
+            &test_paths().1,
+            &resolver,
+        )
+        .unwrap();
+
+        assert!(pool.is_none());
+        let open = states.get("toshiba").expect("toshiba state");
+        assert_eq!(open.lock, DiskLockState::Unlocked);
+        assert_eq!(open.underlying_present.as_deref(), Some("/dev/vdb"));
+        assert_eq!(
+            open.metadata.as_ref().map(|info| info.cipher.as_str()),
+            Some("aes-xts-plain64")
+        );
+        let closed = states.get("ironwolf").expect("ironwolf state");
+        assert_eq!(closed.lock, DiskLockState::Locked);
+        assert_eq!(closed.underlying_present, None);
+        assert_eq!(
+            closed.metadata.as_ref().map(|info| info.cipher.as_str()),
+            Some("serpent-xts-plain64")
+        );
+    }
+
+    // Intent: lock state and LUKS metadata availability are independent
+    //         in the TUI probe result.
+    // Why it exists: a failed `luksDump` should not hide that an
+    //      ownership-verified mapper is open.
+    // Scenario: unmounted pool; cryptsetup status and luksUUID succeed,
+    //           but the metadata dump command fails.
+    #[test]
+    fn probe_status_active_metadata_failed_decouples_lock_and_metadata() {
+        let disk_by_id = HashMap::from([(
+            "toshiba".to_owned(),
+            "/dev/disk/by-id/braid-toshiba".to_owned(),
+        )]);
+        let runner = MockRunner::default()
+            .with_output(
+                CmdRequest::CryptsetupStatus {
+                    mapper: MapperName("braid-toshiba".into()),
+                },
+                ok_raw(
+                    "cryptsetup status braid-toshiba",
+                    "/dev/mapper/braid-toshiba is active and is in use.\n\
+                     \tdevice:  /dev/vdb\n",
+                ),
+            )
+            .with_output(
+                CmdRequest::CryptsetupLuksUuid {
+                    device: "/dev/vdb".into(),
+                },
+                ok_raw(
+                    "cryptsetup luksUUID /dev/vdb",
+                    "11111111-1111-1111-1111-111111111111\n",
+                ),
+            )
+            .with_output(
+                CmdRequest::CryptsetupLuksDump {
+                    device: "/dev/disk/by-id/braid-toshiba".into(),
+                },
+                err_raw("cryptsetup luksDump", "metadata read failed\n", 1),
+            );
+        let resolver = crate::test_fixtures::MockBackingPathResolver::default()
+            .with_path("/dev/disk/by-id/braid-toshiba", "/dev/vdb");
+
+        let (states, pool) = probe_pool_for_tui(
+            &runner,
+            &StubFs::unmounted_with_paths(&[]),
+            &MountPoint("/mnt/storage".into()),
+            &disk_by_id,
+            &tui_disk_luks_uuid(),
+            &tui_disk_devid(),
+            &test_paths().1,
+            &resolver,
+        )
+        .unwrap();
+
+        assert!(pool.is_none());
+        let state = states.get("toshiba").expect("toshiba state");
+        assert_eq!(state.lock, DiskLockState::Unlocked);
+        assert_eq!(state.underlying_present.as_deref(), Some("/dev/vdb"));
+        assert_eq!(state.metadata, None);
+    }
+
+    // Intent: the fallback classifier must not trust mapper basename alone
+    //         when reporting an open disk.
+    // Why it exists: `braid-<name>` can point at a foreign LUKS device;
+    //      disk detail must render that as unknown, not unlocked.
+    // Scenario: unmounted pool; the mapper is active against the configured
+    //           path, but the backing LUKS UUID does not match membership.
+    #[test]
+    fn probe_fallback_classifies_foreign_uuid_mapper_as_unknown() {
+        let disk_by_id = HashMap::from([(
+            "toshiba".to_owned(),
+            "/dev/disk/by-id/braid-toshiba".to_owned(),
+        )]);
+        let runner = MockRunner::default()
+            .with_output(
+                CmdRequest::CryptsetupStatus {
+                    mapper: MapperName("braid-toshiba".into()),
+                },
+                ok_raw(
+                    "cryptsetup status braid-toshiba",
+                    "/dev/mapper/braid-toshiba is active and is in use.\n\
+                     \tdevice:  /dev/vdb\n",
+                ),
+            )
+            .with_output(
+                CmdRequest::CryptsetupLuksUuid {
+                    device: "/dev/vdb".into(),
+                },
+                ok_raw(
+                    "cryptsetup luksUUID /dev/vdb",
+                    "99999999-9999-9999-9999-999999999999\n",
+                ),
+            );
+        let resolver = crate::test_fixtures::MockBackingPathResolver::default()
+            .with_path("/dev/disk/by-id/braid-toshiba", "/dev/vdb");
+
+        let (states, pool) = probe_pool_for_tui(
+            &runner,
+            &StubFs::unmounted_with_paths(&[]),
+            &MountPoint("/mnt/storage".into()),
+            &disk_by_id,
+            &tui_disk_luks_uuid(),
+            &tui_disk_devid(),
+            &test_paths().1,
+            &resolver,
+        )
+        .unwrap();
+
+        assert!(pool.is_none());
+        assert_eq!(
+            states.get("toshiba").map(|state| state.lock),
+            Some(DiskLockState::Unknown)
+        );
     }
 
     /// Helper: build the minimum mock-runner mocks for a single-disk
@@ -1413,18 +1797,19 @@ mod tests {
             ),
         ]);
 
-        let pool = probe_pool_for_tui(
-            &runner,
-            &fs,
-            &MountPoint("/mnt/storage".into()),
-            &disk_by_id,
-            &tui_disk_luks_uuid(),
-            &tui_disk_devid(),
-            &test_paths().1,
-            crate::test_fixtures::mock_virtio_backing_path_resolver(),
-        )
-        .unwrap()
-        .expect("pool should be Some");
+        let pool = expect_pool(
+            probe_pool_for_tui(
+                &runner,
+                &fs,
+                &MountPoint("/mnt/storage".into()),
+                &disk_by_id,
+                &tui_disk_luks_uuid(),
+                &tui_disk_devid(),
+                &test_paths().1,
+                crate::test_fixtures::mock_virtio_backing_path_resolver(),
+            )
+            .unwrap(),
+        );
 
         assert_eq!(
             pool.unpooled_disks.get("ironwolf"),
@@ -1496,18 +1881,19 @@ mod tests {
             ),
         ]);
 
-        let pool = probe_pool_for_tui(
-            &runner,
-            &fs,
-            &MountPoint("/mnt/storage".into()),
-            &disk_by_id,
-            &tui_disk_luks_uuid(),
-            &tui_disk_devid(),
-            &test_paths().1,
-            crate::test_fixtures::mock_virtio_backing_path_resolver(),
-        )
-        .unwrap()
-        .expect("pool should be Some");
+        let pool = expect_pool(
+            probe_pool_for_tui(
+                &runner,
+                &fs,
+                &MountPoint("/mnt/storage".into()),
+                &disk_by_id,
+                &tui_disk_luks_uuid(),
+                &tui_disk_devid(),
+                &test_paths().1,
+                crate::test_fixtures::mock_virtio_backing_path_resolver(),
+            )
+            .unwrap(),
+        );
 
         assert_eq!(
             pool.unpooled_disks.get("ironwolf"),
@@ -1566,18 +1952,19 @@ mod tests {
             ),
         ]);
 
-        let pool = probe_pool_for_tui(
-            &runner,
-            &fs,
-            &MountPoint("/mnt/storage".into()),
-            &disk_by_id,
-            &tui_disk_luks_uuid(),
-            &tui_disk_devid(),
-            &test_paths().1,
-            crate::test_fixtures::mock_virtio_backing_path_resolver(),
-        )
-        .unwrap()
-        .expect("pool should be Some");
+        let pool = expect_pool(
+            probe_pool_for_tui(
+                &runner,
+                &fs,
+                &MountPoint("/mnt/storage".into()),
+                &disk_by_id,
+                &tui_disk_luks_uuid(),
+                &tui_disk_devid(),
+                &test_paths().1,
+                crate::test_fixtures::mock_virtio_backing_path_resolver(),
+            )
+            .unwrap(),
+        );
 
         assert_eq!(
             pool.unpooled_disks.get("ironwolf"),
@@ -1647,18 +2034,19 @@ mod tests {
             ),
         ]);
 
-        let pool = probe_pool_for_tui(
-            &runner,
-            &fs,
-            &MountPoint("/mnt/storage".into()),
-            &disk_by_id,
-            &tui_disk_luks_uuid(),
-            &tui_disk_devid(),
-            &test_paths().1,
-            crate::test_fixtures::mock_virtio_backing_path_resolver(),
-        )
-        .unwrap()
-        .expect("pool should be Some");
+        let pool = expect_pool(
+            probe_pool_for_tui(
+                &runner,
+                &fs,
+                &MountPoint("/mnt/storage".into()),
+                &disk_by_id,
+                &tui_disk_luks_uuid(),
+                &tui_disk_devid(),
+                &test_paths().1,
+                crate::test_fixtures::mock_virtio_backing_path_resolver(),
+            )
+            .unwrap(),
+        );
 
         assert_eq!(
             pool.unpooled_disks.get("ironwolf"),
@@ -1718,18 +2106,19 @@ mod tests {
             ),
         ]);
 
-        let pool = probe_pool_for_tui(
-            &runner,
-            &fs,
-            &MountPoint("/mnt/storage".into()),
-            &disk_by_id,
-            &tui_disk_luks_uuid(),
-            &tui_disk_devid(),
-            &test_paths().1,
-            crate::test_fixtures::mock_virtio_backing_path_resolver(),
-        )
-        .unwrap()
-        .expect("pool should be Some");
+        let pool = expect_pool(
+            probe_pool_for_tui(
+                &runner,
+                &fs,
+                &MountPoint("/mnt/storage".into()),
+                &disk_by_id,
+                &tui_disk_luks_uuid(),
+                &tui_disk_devid(),
+                &test_paths().1,
+                crate::test_fixtures::mock_virtio_backing_path_resolver(),
+            )
+            .unwrap(),
+        );
 
         assert_eq!(
             pool.unpooled_disks.get("ironwolf"),
@@ -1796,18 +2185,19 @@ mod tests {
             ),
         ]);
 
-        let pool = probe_pool_for_tui(
-            &runner,
-            &fs,
-            &MountPoint("/mnt/storage".into()),
-            &disk_by_id,
-            &tui_disk_luks_uuid(),
-            &tui_disk_devid(),
-            &test_paths().1,
-            crate::test_fixtures::mock_virtio_backing_path_resolver(),
-        )
-        .unwrap()
-        .expect("pool should be Some");
+        let pool = expect_pool(
+            probe_pool_for_tui(
+                &runner,
+                &fs,
+                &MountPoint("/mnt/storage".into()),
+                &disk_by_id,
+                &tui_disk_luks_uuid(),
+                &tui_disk_devid(),
+                &test_paths().1,
+                crate::test_fixtures::mock_virtio_backing_path_resolver(),
+            )
+            .unwrap(),
+        );
 
         assert_eq!(
             pool.unpooled_disks.get("ironwolf"),
@@ -1874,18 +2264,19 @@ mod tests {
             ),
         ]);
 
-        let pool = probe_pool_for_tui(
-            &runner,
-            &fs,
-            &MountPoint("/mnt/storage".into()),
-            &disk_by_id,
-            &tui_disk_luks_uuid(),
-            &tui_disk_devid(),
-            &test_paths().1,
-            crate::test_fixtures::mock_virtio_backing_path_resolver(),
-        )
-        .unwrap()
-        .expect("pool should be Some");
+        let pool = expect_pool(
+            probe_pool_for_tui(
+                &runner,
+                &fs,
+                &MountPoint("/mnt/storage".into()),
+                &disk_by_id,
+                &tui_disk_luks_uuid(),
+                &tui_disk_devid(),
+                &test_paths().1,
+                crate::test_fixtures::mock_virtio_backing_path_resolver(),
+            )
+            .unwrap(),
+        );
 
         assert_eq!(
             pool.unpooled_disks.get("ironwolf"),

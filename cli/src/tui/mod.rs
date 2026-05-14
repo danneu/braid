@@ -67,10 +67,11 @@ pub fn run(config_path: &Path, paths: &StatePaths) -> io::Result<()> {
 
 pub fn run_demo() -> io::Result<()> {
     crate::util::require_tty("tui")?;
-    let model = Model::new_demo(
+    let mut model = Model::new_demo(
         demo::sample_disk_names(),
         PoolStatus::Mounted(demo::sample_pool()),
     );
+    model.disk_luks_states = demo::sample_disk_luks_states();
     run_with_model(model, vec![])
 }
 

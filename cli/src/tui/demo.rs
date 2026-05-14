@@ -6,7 +6,7 @@ use crate::parse::types::{
     SmartHealth,
 };
 use crate::status::{BalanceReport, DiskErrors};
-use crate::tui::model::{DiskLuksInfo, DiskUsage, PoolState};
+use crate::tui::model::{DiskLockState, DiskLuksInfo, DiskLuksState, DiskUsage, PoolState};
 use crate::types::MountPoint;
 
 pub(crate) fn sample_disk_names() -> Vec<String> {
@@ -15,6 +15,28 @@ pub(crate) fn sample_disk_names() -> Vec<String> {
         "ironwolf".to_owned(),
         "wdc".to_owned(),
     ]
+}
+
+/// Demo-only LUKS snapshot kept separate from `sample_pool` because the
+/// real TUI observes cryptsetup state even when btrfs is unavailable.
+pub(crate) fn sample_disk_luks_states() -> HashMap<String, DiskLuksState> {
+    sample_disk_names()
+        .into_iter()
+        .map(|name| {
+            (
+                name.clone(),
+                DiskLuksState {
+                    lock: DiskLockState::Unlocked,
+                    underlying_present: Some(format!("/dev/disk/by-id/{name}")),
+                    metadata: Some(DiskLuksInfo {
+                        cipher: "aes-xts-plain64".to_owned(),
+                        key_size_bits: 512,
+                        keyslot_count: 1,
+                    }),
+                },
+            )
+        })
+        .collect()
 }
 
 pub(crate) fn sample_pool() -> PoolState {
@@ -97,32 +119,6 @@ pub(crate) fn sample_pool() -> PoolState {
         ("ironwolf".to_owned(), SmartHealth::Degraded),
         ("wdc".to_owned(), SmartHealth::Unknown),
     ]);
-    let luks_info = HashMap::from([
-        (
-            "toshiba".to_owned(),
-            DiskLuksInfo {
-                cipher: "aes-xts-plain64".to_owned(),
-                key_size_bits: 512,
-                keyslot_count: 1,
-            },
-        ),
-        (
-            "ironwolf".to_owned(),
-            DiskLuksInfo {
-                cipher: "aes-xts-plain64".to_owned(),
-                key_size_bits: 512,
-                keyslot_count: 1,
-            },
-        ),
-        (
-            "wdc".to_owned(),
-            DiskLuksInfo {
-                cipher: "aes-xts-plain64".to_owned(),
-                key_size_bits: 512,
-                keyslot_count: 1,
-            },
-        ),
-    ]);
     let disk_transport = HashMap::from([
         ("toshiba".to_owned(), "sata".to_owned()),
         ("ironwolf".to_owned(), "sata".to_owned()),
@@ -160,7 +156,6 @@ pub(crate) fn sample_pool() -> PoolState {
         disk_transport,
         smart_health,
         disk_temperature_readings: HashMap::new(),
-        luks_info,
         device_errors: HashMap::from([
             (
                 "toshiba".to_owned(),

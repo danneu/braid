@@ -15,8 +15,9 @@ use crate::config::FanControl;
 use crate::parse::types::{BtrfsBgType, ScrubState, SmartHealth, UpsStatusFlag};
 use crate::status::{BalanceReport, DiskErrors};
 use crate::tui::model::{
-    DaemonStatus, DrivingDrive, FanReading, Model, PoolState, PoolStatus, Tab, TemperatureDiskId,
-    TemperatureReading, TemperatureWatermark, UnpooledDiskRender, UpsSnapshot,
+    DaemonStatus, DiskLockState, DiskLuksState, DrivingDrive, FanReading, Model, PoolState,
+    PoolStatus, Tab, TemperatureDiskId, TemperatureReading, TemperatureWatermark,
+    UnpooledDiskRender, UpsSnapshot,
 };
 
 fn format_timestamp(dt: &PrimitiveDateTime) -> String {
@@ -1098,11 +1099,21 @@ fn view_disk_detail(model: &Model, frame: &mut Frame, area: Rect) {
         None => return,
     };
     let pool = model.pool.current();
-    let has_usage = pool
-        .map(|p| p.disk_usage.contains_key(&disk_name))
-        .unwrap_or(false);
-    let lock_status = if has_usage { "unlocked" } else { "locked" };
-    let luks = pool.and_then(|p| p.luks_info.get(&disk_name));
+    let state = model.disk_luks_states.get(&disk_name);
+    let lock_status = match state.map(|s| &s.lock) {
+        Some(DiskLockState::Unlocked) => "unlocked",
+        Some(DiskLockState::Locked) => "locked",
+        Some(DiskLockState::Unknown) | None => "unknown",
+    };
+    let luks = state.and_then(|s| s.metadata.as_ref());
+    let show_underlying_gone = matches!(
+        state,
+        Some(DiskLuksState {
+            lock: DiskLockState::Unlocked,
+            underlying_present: None,
+            ..
+        })
+    );
 
     let mut lines = vec![
         Line::from(vec![
@@ -1114,6 +1125,13 @@ fn view_disk_detail(model: &Model, frame: &mut Frame, area: Rect) {
             Span::raw(lock_status),
         ]),
     ];
+
+    if show_underlying_gone {
+        lines.push(Line::from(Span::styled(
+            "underlying device gone",
+            Style::default().fg(Color::Yellow),
+        )));
+    }
 
     if let Some(info) = luks {
         lines.push(Line::from(vec![
@@ -1415,7 +1433,7 @@ pub(crate) mod tests {
     use super::*;
     use crate::parse::types::{BtrfsBgType, BtrfsDfEntry, BtrfsProfile};
     use crate::parse::types::{ScrubState, ScrubTimestamp};
-    use crate::tui::demo::{sample_disk_names, sample_pool};
+    use crate::tui::demo::{sample_disk_luks_states, sample_disk_names, sample_pool};
     use ratatui::Terminal;
     use ratatui::backend::TestBackend;
 
@@ -1533,7 +1551,55 @@ pub(crate) mod tests {
     #[test]
     fn snapshot_disk_detail() {
         let mut model = Model::new_demo(sample_disk_names(), PoolStatus::Mounted(sample_pool()));
+        model.disk_luks_states = sample_disk_luks_states();
         model.show_disk_detail = true;
+        let terminal = render(&model, 60, 30);
+        snap!(buffer_to_string(&terminal));
+    }
+
+    // Intent: disk detail uses model-level LUKS state even when the pool is
+    //         not mounted.
+    // Why it exists: the old view inferred lock state from mounted btrfs
+    //      allocations, so an unmounted pool made open mappers look locked.
+    // Scenario: toshiba is open with metadata while ironwolf is closed and
+    //           the pool itself is `NotMounted`.
+    #[test]
+    fn snapshot_disk_detail_unmounted_mixed() {
+        let mut states = sample_disk_luks_states();
+        let ironwolf = states.get_mut("ironwolf").expect("ironwolf state");
+        ironwolf.lock = DiskLockState::Locked;
+        ironwolf.underlying_present = None;
+
+        let mut model = Model::new_demo(sample_disk_names(), PoolStatus::NotMounted);
+        model.disk_luks_states = states;
+        model.show_disk_detail = true;
+
+        let unlocked = buffer_to_string(&render(&model, 60, 30));
+        model.selected_disk = 1;
+        let locked = buffer_to_string(&render(&model, 60, 30));
+        snap!(format!(
+            "-- toshiba --\n{unlocked}\n-- ironwolf --\n{locked}"
+        ));
+    }
+
+    // Intent: disk detail surfaces hot-unplugged backing devices without
+    //         reclassifying the mapper as locked.
+    // Why it exists: mounted btrfs can still attest a null-underlying member
+    //      by persisted devid, so lock state and physical presence must stay
+    //      as separate render axes.
+    // Scenario: mounted pool; toshiba is unlocked, but cryptsetup reports no
+    //           backing device for the mapper.
+    #[test]
+    fn snapshot_disk_detail_null_underlying() {
+        let mut states = sample_disk_luks_states();
+        let toshiba = states.get_mut("toshiba").expect("toshiba state");
+        toshiba.lock = DiskLockState::Unlocked;
+        toshiba.underlying_present = None;
+
+        let mut model = Model::new_demo(sample_disk_names(), PoolStatus::Mounted(sample_pool()));
+        model.disk_luks_states = states;
+        model.show_disk_detail = true;
+
         let terminal = render(&model, 60, 30);
         snap!(buffer_to_string(&terminal));
     }

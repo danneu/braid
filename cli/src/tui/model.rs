@@ -43,11 +43,33 @@ impl Tab {
     }
 }
 
-#[derive(Clone)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub struct DiskLuksInfo {
     pub cipher: String,
     pub key_size_bits: u32,
     pub keyslot_count: u32,
+}
+
+/// Per-declared-disk lock state surfaced independently of pool mount
+/// status so disk detail can stay truthful while the pool is offline.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum DiskLockState {
+    Unlocked,
+    Locked,
+    /// Probe failure or failed mapper ownership confirmation.
+    Unknown,
+}
+
+/// Mount-independent LUKS snapshot for one declared disk. Kept on
+/// `Model`, not `PoolState`, because cryptsetup state exists even when
+/// btrfs cannot mount.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct DiskLuksState {
+    pub lock: DiskLockState,
+    /// Backing block device from `cryptsetup status`. `None` means either
+    /// the mapper is closed or an open mapper reports no backing device.
+    pub underlying_present: Option<String>,
+    pub metadata: Option<DiskLuksInfo>,
 }
 
 /// Raw chassis fan telemetry from sysfs. `pwm_raw` is the PWM register value
@@ -197,7 +219,6 @@ pub struct PoolState {
     pub disk_transport: HashMap<String, String>,
     pub smart_health: HashMap<String, SmartHealth>,
     pub disk_temperature_readings: HashMap<String, TemperatureReading>,
-    pub luks_info: HashMap<String, DiskLuksInfo>,
     pub device_errors: HashMap<String, DiskErrors>,
     /// Per-declared-disk render classification for disks NOT in
     /// `disk_usage`. Populated by `tui::probe` via `probe_config_disk`
@@ -265,6 +286,7 @@ pub struct Model {
     pub spinner_deadline: Option<Instant>,
     pub advisories: Vec<String>,
     pub paths: Option<StatePaths>,
+    pub disk_luks_states: HashMap<String, DiskLuksState>,
     pub session_temperature_stats: HashMap<TemperatureDiskId, TemperatureWatermark>,
     pub fan_control: Option<crate::config::FanControl>,
     pub fan: Option<FanSnapshot>,
@@ -334,6 +356,7 @@ impl Model {
             spinner_deadline: Some(Instant::now() + Duration::from_millis(500)),
             advisories,
             paths: Some(paths),
+            disk_luks_states: HashMap::new(),
             session_temperature_stats: HashMap::new(),
             fan_control,
             fan: None,
@@ -365,6 +388,7 @@ impl Model {
             spinner_deadline: None,
             advisories: vec![],
             paths: None,
+            disk_luks_states: HashMap::new(),
             session_temperature_stats: HashMap::new(),
             fan_control: None,
             fan: None,

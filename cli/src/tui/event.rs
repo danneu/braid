@@ -1,3 +1,4 @@
+use std::collections::HashMap;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc;
@@ -8,15 +9,20 @@ use ratatui::crossterm::event::{self, KeyEvent, KeyEventKind};
 
 use crate::tui::app::Message;
 use crate::tui::keymap;
-use crate::tui::model::{FanSnapshot, PoolState, UpsSnapshot};
+use crate::tui::model::{DiskLuksState, FanSnapshot, PoolState, UpsSnapshot};
 use crate::types::MountPoint;
 
 // Single large variant by design; probe results are rare, and boxing added an extra allocation/deref without a measured benefit -- revisit if profiling shows enum size matters.
 #[allow(clippy::large_enum_variant)]
 pub enum Event {
     Key(KeyEvent),
-    PoolProbeFinished(Result<Option<PoolState>, String>, Duration),
-    PollRefresh { mount_point: MountPoint },
+    PoolProbeFinished(
+        Result<(HashMap<String, DiskLuksState>, Option<PoolState>), String>,
+        Duration,
+    ),
+    PollRefresh {
+        mount_point: MountPoint,
+    },
     FanProbeFinished(FanSnapshot),
     PollFanRefresh,
     UpsProbeFinished(UpsSnapshot),
