@@ -1032,7 +1032,7 @@ impl AddPlan {
         //     and forcing the user into recovery mode for an environmental error.
         let _sleep_inhibitor_guard = params
             .sleep_inhibitor
-            .acquire("adding disk(s) to pool")
+            .acquire("adding disks to pool")
             .map_err(|e| {
                 AddError::Validation(format!(
                     "could not acquire sleep inhibitor (is logind running?): {e}"

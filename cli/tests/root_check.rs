@@ -37,6 +37,49 @@ fn help_works_without_root() {
         "expected success, got {:?}",
         output.status
     );
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        !stdout.contains("(s)"),
+        "help should not contain literal plural marker, got: {stdout}"
+    );
+}
+
+// Intent: `braid help <command>` remains a non-root help path.
+// Why it exists: braid replaces Clap's generated help subcommand text so root
+//   help output can avoid literal `(s)` plural markers.
+// Scenario: a user runs `braid help add` before sudo and sees the same add
+//   command help they would get from `braid add --help`.
+#[test]
+fn help_subcommand_works_without_root() {
+    if is_root() {
+        return;
+    }
+    let output = braid()
+        .args(["help", "add"])
+        .output()
+        .expect("failed to execute braid");
+    assert!(
+        output.status.success(),
+        "expected success, got {:?}",
+        output.status
+    );
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        stdout.contains("Usage: braid add"),
+        "help add should show the full add command usage, got: {stdout}"
+    );
+    assert!(
+        stdout.contains("--config"),
+        "help add should include global options, got: {stdout}"
+    );
+    assert!(
+        stdout.contains("--dry-run"),
+        "help add should show --dry-run, got: {stdout}"
+    );
+    assert!(
+        !stdout.contains("(s)"),
+        "help add should not contain literal plural marker, got: {stdout}"
+    );
 }
 
 #[test]
@@ -72,6 +115,10 @@ fn add_dry_run_flag_accepted() {
     assert!(
         stdout.contains("--yes"),
         "add --help should show --yes, got: {stdout}"
+    );
+    assert!(
+        !stdout.contains("(s)"),
+        "add --help should not contain literal plural marker, got: {stdout}"
     );
 }
 

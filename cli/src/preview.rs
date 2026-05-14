@@ -547,13 +547,13 @@ mod tests {
                 level: NoteLevel::Skip,
                 message: "not found (unplugged?)".into(),
             },
-            PreviewNote::Warn("pool has 1 missing device(s)".into()),
+            PreviewNote::Warn("pool has 1 missing device".into()),
         ];
         let rendered = render_notes_for_stderr(&notes, PerDiskStyle::Bracketed);
         let expected = "\
 pool already mounted at /mnt/storage
 [skip] disk disk1: not found (unplugged?)
-[warn] pool has 1 missing device(s)
+[warn] pool has 1 missing device
 ";
         assert_eq!(rendered, expected);
     }
@@ -574,13 +574,13 @@ pool already mounted at /mnt/storage
                 level: NoteLevel::Skip,
                 message: "not found (unplugged?)".into(),
             },
-            PreviewNote::Warn("pool has 1 missing device(s)".into()),
+            PreviewNote::Warn("pool has 1 missing device".into()),
         ];
         let rendered = render_notes_for_stderr_with(&notes, PerDiskStyle::Bracketed, true);
         let expected = "\
 pool already mounted at /mnt/storage
 \x1b[90m[skip]\x1b[0m disk disk1: not found (unplugged?)
-\x1b[33m[warn]\x1b[0m pool has 1 missing device(s)
+\x1b[33m[warn]\x1b[0m pool has 1 missing device
 ";
         assert_eq!(rendered, expected);
     }

@@ -388,7 +388,10 @@ fn summarize_declared_disks(classifications: &[(String, String, DiskState)]) -> 
     if problem_count == 0 {
         return CheckResult::ok(
             "declared_disks",
-            format!("all {total} declared disk(s) present"),
+            format!(
+                "all {total} declared {} present",
+                if total == 1 { "disk" } else { "disks" }
+            ),
         );
     }
 
@@ -437,9 +440,10 @@ fn summarize_declared_disks(classifications: &[(String, String, DiskState)]) -> 
     }
 
     let message = format!(
-        "{}/{} disk(s) have problems: {}",
+        "{}/{} {} problems: {}",
         problem_count,
         total,
+        if total == 1 { "disk has" } else { "disks have" },
         parts.join("; ")
     );
     if uuid_mismatch.is_empty() {
@@ -1559,8 +1563,7 @@ mod tests {
     fn summarize_ok_when_all_headers_intact() {
         /*
          * Intent: when every declared disk passes both LUKS probes, the check
-         *   returns Ok with the existing "all N declared disk(s) present"
-         *   message.
+         *   returns Ok with the healthy declared-disks summary message.
          * Why it exists: protects the happy path against regressions introduced
          *   by extracting DiskState classification from the original check.
          * Scenario: a healthy multi-disk NAS with no header damage on any drive.
@@ -1571,7 +1574,7 @@ mod tests {
         ];
         let result = summarize_declared_disks(&inputs);
         assert_eq!(result.status, CheckStatus::Ok);
-        assert_eq!(result.message, "all 2 declared disk(s) present");
+        assert_eq!(result.message, "all 2 declared disks present");
     }
 
     #[test]

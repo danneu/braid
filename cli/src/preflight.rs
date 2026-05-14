@@ -28,11 +28,12 @@ pub fn check_pool_unlocked_if_membership_exists(
     let mut names: Vec<&str> = membership.names().map(|n| n.as_str()).collect();
     names.sort();
     Err(format!(
-        "pool exists but is not unlocked -- pool.json lists {n} member(s): {}.\n\
+        "pool exists but is not unlocked -- pool.json lists {n} member{}: {}.\n\
          Run `braid unlock` first, then re-run `braid add`.\n\
          If pool.json is stale (members no longer plugged in or you intend \
          to start over), reconcile with `braid discover` / `braid remove-missing`, \
          or remove /var/lib/braid/pool.json manually.",
+        if n == 1 { "" } else { "s" },
         names.join(", ")
     ))
 }
@@ -373,11 +374,12 @@ pub fn check_raid1_relocation_space(
         if raid1_capacity < bytes_on_target {
             return Err(format!(
                 "not enough space to relocate {} chunks.\n\n  \
-                 {} allocated on device(s) being removed: {}\n  \
+                 {} allocated on device{} being removed: {}\n  \
                  RAID1 capacity on remaining devices: {}\n\n\
                  Each RAID1 chunk requires space on 2 devices simultaneously.",
                 alloc_type,
                 alloc_type,
+                if target_devs.len() == 1 { "" } else { "s" },
                 format_bytes(bytes_on_target),
                 format_bytes(raid1_capacity),
             ));

@@ -101,8 +101,13 @@ impl TopologyDrift {
         }
         if self.observed_missing_count > 0 {
             parts.push(format!(
-                "{} btrfs-MISSING device(s)",
-                self.observed_missing_count
+                "{} btrfs-MISSING device{}",
+                self.observed_missing_count,
+                if self.observed_missing_count == 1 {
+                    ""
+                } else {
+                    "s"
+                }
             ));
         }
         if self.is_target_hot_unplug() {

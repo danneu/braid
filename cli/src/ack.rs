@@ -91,7 +91,11 @@ fn cmd_ack_impl<R: CommandRunner, F: Filesystem + ?Sized>(
     // gated acknowledgments still completed real cleanup, but have no
     // meaningful latch count to report.
     if !causes.is_empty() {
-        println!("acknowledged {} alert(s)", causes.len());
+        println!(
+            "acknowledged {} alert{}",
+            causes.len(),
+            if causes.len() == 1 { "" } else { "s" }
+        );
     } else {
         println!("acknowledged current alerts");
     }
