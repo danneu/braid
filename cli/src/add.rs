@@ -1705,13 +1705,16 @@ fn build_add_credential_prelude(input: &AddStepsInput<'_>) -> AddCredentialPrelu
         })
         .collect();
     verify_targets.extend(input.probed.iter().enumerate().filter_map(|(i, probed)| {
-        match &probed.state {
-            ConfigDiskState::PresentLuks { .. } => Some(CredentialVerifyTarget {
-                name: input.names[i].as_str().to_owned(),
-                device: input.by_ids[i].as_str().to_owned(),
-            }),
-            ConfigDiskState::Absent | ConfigDiskState::PresentNotLuks => None,
+        let ConfigDiskState::PresentLuks { uuid, .. } = &probed.state else {
+            return None;
+        };
+        if input.pool.devices.iter().any(|d| d.luks_uuid == *uuid) {
+            return None;
         }
+        Some(CredentialVerifyTarget {
+            name: input.names[i].as_str().to_owned(),
+            device: input.by_ids[i].as_str().to_owned(),
+        })
     }));
 
     AddCredentialPrelude {
@@ -5852,6 +5855,7 @@ mod tests {
         /// where the test deliberately aborts via `MissingMock`.
         backup_succeeds: bool,
         backup_failure_stderr: &'static str,
+        disk1_present_luks_member: bool,
     }
 
     impl AddRecordingRunner {
@@ -5866,6 +5870,7 @@ mod tests {
                 })),
                 backup_succeeds: false,
                 backup_failure_stderr: "mock: header backup forced to fail",
+                disk1_present_luks_member: false,
             }
         }
         fn with_backup_success(mut self) -> Self {
@@ -5874,6 +5879,10 @@ mod tests {
         }
         fn with_backup_failure_stderr(mut self, stderr: &'static str) -> Self {
             self.backup_failure_stderr = stderr;
+            self
+        }
+        fn with_disk1_present_luks_member(mut self) -> Self {
+            self.disk1_present_luks_member = true;
             self
         }
         fn log(&self) -> std::sync::MutexGuard<'_, Vec<CmdRequest>> {
@@ -5956,6 +5965,17 @@ mod tests {
                         exit_status: 0,
                     })
                 }
+                CmdRequest::CryptsetupLuksUuid { device }
+                    if self.disk1_present_luks_member
+                        && device == "/dev/disk/by-id/virtio-disk1" =>
+                {
+                    Ok(RawCommandOutput {
+                        cmd: format!("cryptsetup luksUUID {device}"),
+                        stdout: format!("{DISK1_UUID}\n"),
+                        stderr: String::new(),
+                        exit_status: 0,
+                    })
+                }
                 CmdRequest::CryptsetupLuksUuid { device } => {
                     // Disk under test is PresentNotLuks -- luksUUID fails.
                     Ok(RawCommandOutput {
@@ -6009,6 +6029,26 @@ mod tests {
                             exit_status: 1,
                         })
                     }
+                }
+                CmdRequest::CryptsetupLuksDumpText { device }
+                    if self.disk1_present_luks_member
+                        && device == "/dev/disk/by-id/virtio-disk1" =>
+                {
+                    Ok(RawCommandOutput {
+                        cmd: format!("cryptsetup luksDump {device}"),
+                        stdout: "LUKS header information\n\
+                                 Version:       \t2\n\
+                                 Label:         \tbraid-disk1\n\
+                                 Subsystem:     \t(no subsystem)\n"
+                            .into(),
+                        stderr: String::new(),
+                        exit_status: 0,
+                    })
+                }
+                CmdRequest::BtrfsFilesystemShowTarget { target }
+                    if self.disk1_present_luks_member && target == "/dev/mapper/braid-disk1" =>
+                {
+                    Ok(btrfs_show_with_uuid(LIVE_POOL_FSID))
                 }
                 CmdRequest::BtrfsBalanceStatus { .. } => Ok(RawCommandOutput {
                     cmd: "btrfs balance status".into(),
@@ -6597,6 +6637,74 @@ mod tests {
             tty.remaining(),
             1,
             "exactly one prompt must have been read (SENTINEL remains)"
+        );
+    }
+
+    /*
+     * Intent: when the operator passes a disk already in the pool alongside
+     *   a fresh disk, `braid add` verifies the in-pool disk only through the
+     *   live pool-member credential target.
+     *
+     * Why it exists: each verify target costs a full Argon2 round and emits
+     *   an operator-visible wait/ok row. Re-verifying the same LUKS UUID via
+     *   the candidate side wastes time and renders a duplicate progress row.
+     *
+     * Scenario: pool has disk1 already open as a live member; operator runs
+     *   `braid add disk1=... disk2=...`, where disk2 is fresh. The command
+     *   reaches the credential prelude, then later aborts at the forced
+     *   header-backup failure for disk2, leaving the request log behind.
+     */
+    #[test]
+    fn cmd_add_mixed_already_in_pool_and_fresh_verifies_each_disk_once() {
+        let (_state_tmp, paths, _tmp, config_path, pass_path) = add_test_setup();
+        let fs = AddMockFs(vec![
+            "/dev/disk/by-id/virtio-disk1".into(),
+            "/dev/disk/by-id/virtio-disk2".into(),
+        ]);
+        let runner = AddRecordingRunner::new(true).with_disk1_present_luks_member();
+        let inhibitor = crate::inhibit::RecordingInhibitor::new();
+
+        let result = cmd_add(
+            &runner,
+            &fs,
+            &AddParams {
+                config_path: &config_path,
+                disk_specs: &[
+                    "disk1=/dev/disk/by-id/virtio-disk1".into(),
+                    "disk2=/dev/disk/by-id/virtio-disk2".into(),
+                ],
+                dry_run: false,
+                yes: true,
+                passphrase_stdin: false,
+                passphrase_file: Some(pass_path.as_path()),
+                enroll_key_file: None,
+                luks_format_extra_opts: &[],
+                progress: ProgressOutput::Off,
+                paths: &paths,
+                sleep_inhibitor: &inhibitor,
+                passphrase_reader: &RealTty,
+                backing_path_resolver:
+                    crate::test_fixtures::mock_virtio_offset_backing_path_resolver(),
+            },
+        );
+
+        assert!(
+            result.is_err(),
+            "cmd_add must abort at forced header-backup failure"
+        );
+
+        let log = runner.log();
+        let verify_devices: Vec<&str> = log
+            .iter()
+            .filter_map(|request| match request {
+                CmdRequest::CryptsetupTestPassphrase { device } => Some(device.as_str()),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(
+            verify_devices,
+            vec!["/dev/vdb"],
+            "must verify the live pool member once, got log: {log:?}"
         );
     }
 
