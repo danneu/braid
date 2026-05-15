@@ -813,9 +813,7 @@ fn render_add_pool_mutation_recovery_steps(
                     });
                     commands.push(CmdRequest::CryptsetupLuksHeaderBackup {
                         device: target.by_id.as_str().to_owned(),
-                        backup_path: plan
-                            .luks_headers_dir
-                            .join(format!("{}.luksheader", mapper.0))
+                        backup_path: luks::luks_header_backup_path(&plan.luks_headers_dir, &mapper)
                             .display()
                             .to_string(),
                     });
@@ -859,9 +857,7 @@ fn render_add_pool_mutation_recovery_steps(
                 }
                 commands.push(CmdRequest::CryptsetupLuksHeaderBackup {
                     device: target.by_id.as_str().to_owned(),
-                    backup_path: plan
-                        .luks_headers_dir
-                        .join(format!("{}.luksheader", mapper.0))
+                    backup_path: luks::luks_header_backup_path(&plan.luks_headers_dir, &mapper)
                         .display()
                         .to_string(),
                 });
@@ -2567,7 +2563,7 @@ fn execute_add_pool_mutation_recovery<R: CommandRunner + Sync, F: Filesystem + ?
                         luks::backup_luks_header(
                             runner,
                             target.by_id.as_str(),
-                            &mapper.0,
+                            &mapper,
                             params.paths,
                         )?;
                     }
@@ -2631,12 +2627,7 @@ fn execute_add_pool_mutation_recovery<R: CommandRunner + Sync, F: Filesystem + ?
                             key_file,
                         )?;
                     }
-                    luks::backup_luks_header(
-                        runner,
-                        target.by_id.as_str(),
-                        &mapper.0,
-                        params.paths,
-                    )?;
+                    luks::backup_luks_header(runner, target.by_id.as_str(), &mapper, params.paths)?;
                     luks::ensure_luks_open(
                         runner,
                         target.name.as_str(),
@@ -3051,12 +3042,7 @@ fn finish_uncommitted_replace_recovery<R: CommandRunner + Sync, F: Filesystem + 
                     key_file,
                 )?;
                 let mapper = config::mapper_name(new_name.as_str());
-                luks::backup_luks_header(
-                    runner,
-                    new_target.by_id.as_str(),
-                    &mapper.0,
-                    params.paths,
-                )?;
+                luks::backup_luks_header(runner, new_target.by_id.as_str(), &mapper, params.paths)?;
             }
 
             membership::save_membership(&journal.pre_membership, params.paths)?;
@@ -3121,7 +3107,7 @@ fn finish_uncommitted_replace_recovery<R: CommandRunner + Sync, F: Filesystem + 
                     luks::backup_luks_header(
                         runner,
                         new_target.by_id.as_str(),
-                        &mapper.0,
+                        &mapper,
                         params.paths,
                     )?;
                     membership::save_membership(&journal.pre_membership, params.paths)?;

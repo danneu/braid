@@ -10,7 +10,7 @@ use crate::journal;
 use crate::luks::{
     BackingPathResolver, OpenOutcome, PassphraseReader, backup_luks_header_post_mutation,
     ensure_luks_open, format_keyfile_asymmetry_warning, format_keyfile_enrollment_probe_failure,
-    luks_format, probe_pool_keyfile_enrollment, read_passphrase_with,
+    luks_format, luks_header_backup_path, probe_pool_keyfile_enrollment, read_passphrase_with,
 };
 use crate::mapper_close::close_mapper_with_retry;
 use crate::membership::{self, DiskMember, LuksUuidMap, PoolMembership};
@@ -1133,7 +1133,7 @@ impl AddPlan {
             let backup_path = backup_luks_header_post_mutation(
                 runner,
                 target.by_id.as_str(),
-                target.mapper_name.0.as_str(),
+                &target.mapper_name,
                 params.paths,
             )?;
             eprintln!("LUKS header backed up: {}", backup_path.display());
@@ -1213,7 +1213,7 @@ impl AddPlan {
             let backup_path = backup_luks_header_post_mutation(
                 runner,
                 journal_target.by_id.as_str(),
-                mapper.0.as_str(),
+                &mapper,
                 params.paths,
             )?;
             eprintln!("LUKS header backed up: {}", backup_path.display());
@@ -1815,10 +1815,8 @@ fn build_add_work_plan<R: CommandRunner>(
                 // A mid-format crash and replay reformats under the
                 // same identity.
                 let luks_uuid = LuksUuid::new_v4();
-                let header_backup_path = input
-                    .paths
-                    .luks_headers_dir()
-                    .join(format!("{}.luksheader", mn.0));
+                let header_backup_path =
+                    luks_header_backup_path(&input.paths.luks_headers_dir(), &mn);
                 let target = FreshLuksTarget {
                     name: name.clone(),
                     by_id: (*by_id).clone(),
@@ -1881,10 +1879,10 @@ fn build_add_work_plan<R: CommandRunner>(
                                 luks_uuid: uuid.clone(),
                                 verified_pool_fsid,
                                 enroll_key_file: resolved_enroll_key_file,
-                                header_backup_path: input
-                                    .paths
-                                    .luks_headers_dir()
-                                    .join(format!("{}.luksheader", mn.0)),
+                                header_backup_path: luks_header_backup_path(
+                                    &input.paths.luks_headers_dir(),
+                                    &mn,
+                                ),
                             };
                             assert_target_uuid_unique(
                                 &target.luks_uuid,
@@ -1932,10 +1930,10 @@ fn build_add_work_plan<R: CommandRunner>(
                             mapper_path,
                             luks_uuid: uuid.clone(),
                             enroll_key_file: resolved_enroll_key_file,
-                            header_backup_path: input
-                                .paths
-                                .luks_headers_dir()
-                                .join(format!("{}.luksheader", mn.0)),
+                            header_backup_path: luks_header_backup_path(
+                                &input.paths.luks_headers_dir(),
+                                &mn,
+                            ),
                         },
                     ));
                 }

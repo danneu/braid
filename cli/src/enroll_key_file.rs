@@ -308,7 +308,7 @@ fn apply_enrollment<R: CommandRunner>(
 
             let mn = mapper_name(name);
             let backup_path =
-                luks::backup_luks_header_post_mutation(runner, by_id.as_str(), &mn.0, paths)?;
+                luks::backup_luks_header_post_mutation(runner, by_id.as_str(), &mn, paths)?;
             eprintln!("LUKS header backed up: {}", backup_path.display());
         }
     }
@@ -388,9 +388,7 @@ pub fn compile_enroll_steps(
                 key_file_path: key_file_path.display().to_string(),
             }],
         });
-        let backup_path = paths
-            .luks_headers_dir()
-            .join(format!("{}.luksheader", mn.0));
+        let backup_path = luks::luks_header_backup_path(&paths.luks_headers_dir(), &mn);
         steps.push(Step {
             risk: "safe",
             description: format!("LUKS header backup -> {}", backup_path.display()),

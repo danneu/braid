@@ -474,12 +474,18 @@ pub fn luks_format<R: CommandRunner>(
     Ok(())
 }
 
+/// Single source of truth for the `<headers_dir>/<mapper>.luksheader`
+/// convention shared by planner previews, journal replay, and the writer.
+pub(crate) fn luks_header_backup_path(headers_dir: &Path, mapper: &MapperName) -> PathBuf {
+    headers_dir.join(format!("{}.luksheader", mapper.0))
+}
+
 /// Back up the LUKS header to `dir/<mapper>.luksheader`.
 /// Extracted so tests can pass a tempdir instead of the real path.
 pub(crate) fn backup_luks_header_to<R: CommandRunner>(
     runner: &R,
     device: &str,
-    mapper: &str,
+    mapper: &MapperName,
     dir: &std::path::Path,
 ) -> Result<PathBuf, LuksError> {
     if !dir.exists() {
@@ -487,8 +493,12 @@ pub(crate) fn backup_luks_header_to<R: CommandRunner>(
         std::fs::set_permissions(dir, std::fs::Permissions::from_mode(0o700))?;
     }
 
-    let backup_path = dir.join(format!("{mapper}.luksheader"));
-    let tmp_path = dir.join(format!("{mapper}.luksheader.tmp"));
+    let backup_path = luks_header_backup_path(dir, mapper);
+    let tmp_path = {
+        let mut tmp = backup_path.clone().into_os_string();
+        tmp.push(".tmp");
+        PathBuf::from(tmp)
+    };
     // Write to temp file, then atomic rename so we never lose an existing backup
     if tmp_path.exists() {
         std::fs::remove_file(&tmp_path)?;
@@ -516,7 +526,7 @@ pub(crate) fn backup_luks_header_to<R: CommandRunner>(
 pub fn backup_luks_header<R: CommandRunner>(
     runner: &R,
     device: &str,
-    mapper: &str,
+    mapper: &MapperName,
     paths: &StatePaths,
 ) -> Result<PathBuf, LuksError> {
     backup_luks_header_to(runner, device, mapper, &paths.luks_headers_dir())
@@ -537,7 +547,7 @@ fn header_backup_failure_message(device: &str, underlying: &LuksError) -> String
 pub fn backup_luks_header_post_mutation<R: CommandRunner>(
     runner: &R,
     device: &str,
-    mapper: &str,
+    mapper: &MapperName,
     paths: &StatePaths,
 ) -> Result<PathBuf, LuksError> {
     backup_luks_header(runner, device, mapper, paths)
@@ -1134,6 +1144,24 @@ mod tests {
         }
     }
 
+    // Intent: the helper produces <dir>/<mapper>.luksheader and nothing
+    //   else, so every callsite that routes through it stays in lockstep
+    //   with backup_luks_header_to's writer.
+    // Why it exists: production sites formerly hand-rolled this formula;
+    //   this pins the helper's output so a typo fails fast.
+    // Scenario: a planner site and the writer derive the same path for
+    //   braid-disk1; verify the formula directly.
+    #[test]
+    fn luks_header_backup_path_combines_dir_and_mapper_with_luksheader_ext() {
+        let dir = Path::new("/var/lib/braid/luks-headers");
+        let mapper = MapperName("braid-disk1".to_owned());
+
+        assert_eq!(
+            luks_header_backup_path(dir, &mapper),
+            PathBuf::from("/var/lib/braid/luks-headers/braid-disk1.luksheader"),
+        );
+    }
+
     // Intent: post-mutation backup failures keep the underlying error and
     // include the direct off-system backup command.
     // Why it exists: the recovery hint is shared across enroll, add, and
@@ -1179,7 +1207,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let paths = StatePaths::custom(dir.path().into());
         let device = "/dev/disk/by-id/disk1";
-        let mapper = "braid-disk1";
+        let mapper = MapperName("braid-disk1".to_owned());
         let tmp_path = paths
             .luks_headers_dir()
             .join("braid-disk1.luksheader.tmp")
@@ -1199,7 +1227,7 @@ mod tests {
         );
 
         let msg = validation_message(
-            backup_luks_header_post_mutation(&runner, device, mapper, &paths)
+            backup_luks_header_post_mutation(&runner, device, &mapper, &paths)
                 .expect_err("backup failure must be wrapped"),
         );
 
@@ -1224,7 +1252,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let paths = StatePaths::custom(dir.path().into());
         let device = "/dev/disk/by-id/disk1";
-        let mapper = "braid-disk1";
+        let mapper = MapperName("braid-disk1".to_owned());
         let tmp_path = paths
             .luks_headers_dir()
             .join("braid-disk1.luksheader.tmp")
@@ -1243,7 +1271,7 @@ mod tests {
             },
         );
 
-        let path = backup_luks_header_post_mutation(&runner, device, mapper, &paths)
+        let path = backup_luks_header_post_mutation(&runner, device, &mapper, &paths)
             .expect("successful backup should pass through");
 
         assert_eq!(

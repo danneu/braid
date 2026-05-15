@@ -9,8 +9,8 @@ use crate::journal;
 use crate::luks::{
     BackingPathResolver, OwnershipError, backup_luks_header_post_mutation,
     classify_mapper_ownership, ensure_luks_open, format_keyfile_asymmetry_warning,
-    format_keyfile_enrollment_probe_failure, luks_format, probe_pool_keyfile_enrollment,
-    read_passphrase,
+    format_keyfile_enrollment_probe_failure, luks_format, luks_header_backup_path,
+    probe_pool_keyfile_enrollment, read_passphrase,
 };
 use crate::mapper_close::close_mapper_best_effort;
 use crate::membership::{self, PoolMembership};
@@ -659,7 +659,7 @@ impl ReplacePlan {
                 let backup_path = backup_luks_header_post_mutation(
                     runner,
                     new_by_id.as_str(),
-                    new_mn.as_str(),
+                    &new_mn,
                     params.paths,
                 )?;
                 eprintln!("LUKS header backed up: {}", backup_path.display());
@@ -727,7 +727,7 @@ impl ReplacePlan {
                     let backup_path = backup_luks_header_post_mutation(
                         runner,
                         new_by_id.as_str(),
-                        new_mn.as_str(),
+                        &new_mn,
                         params.paths,
                     )?;
                     eprintln!("LUKS header backed up: {}", backup_path.display());
@@ -1515,18 +1515,18 @@ fn build_replace_work_plan(
         ConfigDiskState::PresentNotLuks => ReplaceTargetPrep::FreshLuks {
             extra_opts: input.luks_format_extra_opts.clone(),
             enroll_key_file: input.enroll_key_file.clone(),
-            header_backup_path: input
-                .paths
-                .luks_headers_dir()
-                .join(format!("{new_mapper}.luksheader")),
+            header_backup_path: luks_header_backup_path(
+                &input.paths.luks_headers_dir(),
+                &new_mapper,
+            ),
         },
         ConfigDiskState::PresentLuks { mapper_open, .. } => ReplaceTargetPrep::ExistingLuks {
             mapper_open,
             enroll_key_file: input.enroll_key_file.clone(),
-            header_backup_path: input
-                .paths
-                .luks_headers_dir()
-                .join(format!("{new_mapper}.luksheader")),
+            header_backup_path: luks_header_backup_path(
+                &input.paths.luks_headers_dir(),
+                &new_mapper,
+            ),
         },
     };
 
