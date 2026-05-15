@@ -68,9 +68,9 @@ sudo braid discover --write --expect-count 3
 ## Safety checks
 
 - Refuses if `pool.json` already exists in the new UUID-keyed shape or an unrecognized shape; legacy name-keyed files are allowed only for read-only preview.
-- Refuses if a pending operation journal exists.
+- Refuses if a pending operation journal (`pending-op.json`) exists -- run `braid recover` to reconcile.
+- Refuses if another braid operation is in progress (`/run/braid-pool.lock` is held by another wrapper) -- retry once it finishes.
 - With `--expect-count`, refuses to write if the discovered member count is not exactly the requested count.
-- Refuses if another braid operation is in progress (`/run/braid-pool.lock` is held by another wrapper).
 - Without `--write`, makes no changes at all -- read-only scan.
 - Dangling `/dev/disk/by-id/` symlinks are skipped with a warning -- a diagnostic operators need when udev leaves a stale alias behind after a disk swap.
 - LUKS1 devices are skipped with a warning.

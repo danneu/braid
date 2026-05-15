@@ -109,7 +109,8 @@ braid classifies each disk before acting:
 - Verifies the passphrase against an existing pool member before formatting new disks
 - Warns if the pool has missing devices (suggests `braid replace` first)
 - Warns if existing pool drives have a keyfile but `--enroll` was not passed
-- Refuses to proceed if another braid operation is pending (pending-op.json exists)
+- Refuses if a pending operation journal (`pending-op.json`) exists -- run `braid recover` to reconcile.
+- Refuses if another braid operation is in progress (`/run/braid-pool.lock` is held by another wrapper) -- retry once it finishes.
 - Refuses if a btrfs exclusive operation (balance, device remove, resize) is already running on the pool
 
 ## Interrupted adds
