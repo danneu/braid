@@ -1,19 +1,19 @@
 ---
 source: cli/src/tui/browse/view.rs
-assertion_line: 783
+assertion_line: 961
 expression: "buffer_to_string(&render(&model, 80, 14))"
 ---
 ┌ Pgm ─────┐┌ Cmd ─────────┐┌ Content ─────────────────────────────────────────┐
-│  Btrfs   ││  Status      ││[input.transfer.high]                             │
-│> NUT     ││  Variables   ││High transfer voltage                             │
-│  Systemd ││  Commands    ││                                                  │
-│  SMART   ││  Clients     ││                                                  │
-│  lsblk   ││> RW Vars     ││                                                  │
-│          ││  UPSes       ││                                                  │
+│  Btrfs   ││  Tree        ││NAME FSTYPE FSVER LABEL UUID FSAVAIL FSUSE% MOUNTP│
+│  NUT     ││> Filesystems ││vdb crypto_LUKS 2 braid-disk1 abc                 │
+│  Systemd ││  Disks       ││`-braid-disk1 btrfs abc 100M 1% /mnt/storage      │
+│  SMART   ││  All Columns ││                                                  │
+│> lsblk   ││  SCSI        ││                                                  │
+│          ││              ││                                                  │
 │          ││              ││                                                  │
 │          ││              ││                                                  │
 │          ││              ││                                                  │
 │          ││              ││                                                  │
 │          ││              ││                                                  │
 └──────────┘└──────────────┘└──────────────────────────────────────────────────┘
-$ upsrw -l ups
+$ lsblk -f

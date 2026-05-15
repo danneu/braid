@@ -1,19 +1,19 @@
 ---
 source: cli/src/tui/browse/view.rs
-assertion_line: 783
+assertion_line: 875
 expression: "buffer_to_string(&render(&model, 80, 14))"
 ---
 ┌ Pgm ─────┐┌ Cmd ─────────┐┌ Content ─────────────────────────────────────────┐
-│  Btrfs   ││  Status      ││[input.transfer.high]                             │
-│> NUT     ││  Variables   ││High transfer voltage                             │
-│  Systemd ││  Commands    ││                                                  │
-│  SMART   ││  Clients     ││                                                  │
-│  lsblk   ││> RW Vars     ││                                                  │
-│          ││  UPSes       ││                                                  │
+│  Btrfs   ││  Status      ││  UNIT LOAD ACTIVE SUB DESCRIPTION                │
+│  NUT     ││  Show        ││0 loaded units listed.                            │
+│> Systemd ││  Braid       ││                                                  │
+│  SMART   ││> Failed      ││                                                  │
+│  lsblk   ││  Timers      ││                                                  │
+│          ││  Mounts      ││                                                  │
 │          ││              ││                                                  │
 │          ││              ││                                                  │
 │          ││              ││                                                  │
 │          ││              ││                                                  │
 │          ││              ││                                                  │
 └──────────┘└──────────────┘└──────────────────────────────────────────────────┘
-$ upsrw -l ups
+$ systemctl list-units --failed --all --no-pager

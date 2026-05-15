@@ -1,0 +1,16 @@
+[
+  {
+    "unit": "braid-online.service",
+    "load": "loaded",
+    "active": "active",
+    "sub": "exited",
+    "description": "braid pool online sentinel"
+  },
+  {
+    "unit": "hddfancontrol-braid.service",
+    "load": "loaded",
+    "active": "active",
+    "sub": "running",
+    "description": "braid HDD fan control"
+  }
+]

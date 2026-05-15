@@ -1,13 +1,14 @@
 ---
 source: cli/src/tui/browse/view.rs
+assertion_line: 659
 expression: "buffer_to_string(&render(&model, 80, 14))"
 ---
 ┌ Pgm ─────┐┌ Cmd ─────────┐┌ Content ─────────────────────────────────────────┐
 │> Btrfs   ││  Filesystem  ││No balance found on '/mnt/storage'                │
 │  NUT     ││  Devices     ││                                                  │
-│          ││  Subvolumes  ││                                                  │
-│          ││  Scrub       ││                                                  │
-│          ││> Balance     ││                                                  │
+│  Systemd ││  Subvolumes  ││                                                  │
+│  SMART   ││  Scrub       ││                                                  │
+│  lsblk   ││> Balance     ││                                                  │
 │          ││  Quota       ││                                                  │
 │          ││  Inspect     ││                                                  │
 │          ││              ││                                                  │

@@ -1,0 +1,19 @@
+---
+source: cli/src/tui/browse/view.rs
+assertion_line: 822
+expression: "buffer_to_string(&render(&model, 100, 14))"
+---
+┌ Pgm ─────┐┌ Cmd ─────────┐┌ Content ─────────────────────────────────────────────────────────────┐
+│  Btrfs   ││> Status      ││   Unit                  Load     Active   Sub        Description     │
+│  NUT     ││  Show        ││>  braid-online.service  loaded   active   exited     braid pool onlin│
+│> Systemd ││  Braid       ││   hddfancontrol-braid.s loaded   active   running    braid HDD fan co│
+│  SMART   ││  Failed      ││                                                                      │
+│  lsblk   ││  Timers      ││                                                                      │
+│          ││  Mounts      ││                                                                      │
+│          ││              ││                                                                      │
+│          ││              ││                                                                      │
+│          ││              ││                                                                      │
+│          ││              ││                                                                      │
+│          ││              ││                                                                      │
+└──────────┘└──────────────┘└──────────────────────────────────────────────────────────────────────┘
+$ systemctl list-units '--output=json' --all 'braid-*' hddfancontrol-braid.service

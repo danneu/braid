@@ -3,8 +3,8 @@ use std::collections::HashMap;
 
 use crate::cmd::{CmdRequest, RawCommandOutput};
 use crate::config::Ups;
-use crate::parse::parse_btrfs_subvolume_list;
 use crate::parse::types::BtrfsSubvolume;
+use crate::parse::{SystemdUnitRow, parse_btrfs_subvolume_list, parse_systemctl_list_units_json};
 use crate::tui::effect::Effect;
 use crate::tui::model::PoolStatus;
 use crate::types::MountPoint;
@@ -25,15 +25,27 @@ pub(crate) enum BrowseFocus {
 pub(crate) enum BrowseProgram {
     Btrfs,
     Nut,
+    Systemd,
+    Smartctl,
+    Lsblk,
 }
 
 impl BrowseProgram {
-    const ALL: [Self; 2] = [Self::Btrfs, Self::Nut];
+    const ALL: [Self; 5] = [
+        Self::Btrfs,
+        Self::Nut,
+        Self::Systemd,
+        Self::Smartctl,
+        Self::Lsblk,
+    ];
 
     pub(crate) fn label(self) -> &'static str {
         match self {
             Self::Btrfs => "Btrfs",
             Self::Nut => "NUT",
+            Self::Systemd => "Systemd",
+            Self::Smartctl => "SMART",
+            Self::Lsblk => "lsblk",
         }
     }
 }
@@ -54,6 +66,23 @@ pub(crate) enum BrowseCommand {
     NutClients,
     NutRwVars,
     NutUpses,
+    SystemdStatus,
+    SystemdShow,
+    SystemdBraid,
+    SystemdFailed,
+    SystemdTimers,
+    SystemdMounts,
+    SmartctlScan,
+    SmartctlHealth,
+    SmartctlInfo,
+    SmartctlAttributes,
+    SmartctlSelftestLog,
+    SmartctlErrorLog,
+    LsblkTree,
+    LsblkFilesystems,
+    LsblkDisks,
+    LsblkAllColumns,
+    LsblkScsi,
 }
 
 impl BrowseCommand {
@@ -74,6 +103,29 @@ impl BrowseCommand {
         Self::NutRwVars,
         Self::NutUpses,
     ];
+    const SYSTEMD: [Self; 6] = [
+        Self::SystemdStatus,
+        Self::SystemdShow,
+        Self::SystemdBraid,
+        Self::SystemdFailed,
+        Self::SystemdTimers,
+        Self::SystemdMounts,
+    ];
+    const SMARTCTL: [Self; 6] = [
+        Self::SmartctlScan,
+        Self::SmartctlHealth,
+        Self::SmartctlInfo,
+        Self::SmartctlAttributes,
+        Self::SmartctlSelftestLog,
+        Self::SmartctlErrorLog,
+    ];
+    const LSBLK: [Self; 5] = [
+        Self::LsblkTree,
+        Self::LsblkFilesystems,
+        Self::LsblkDisks,
+        Self::LsblkAllColumns,
+        Self::LsblkScsi,
+    ];
 
     pub(crate) fn label(self) -> &'static str {
         match self {
@@ -90,6 +142,23 @@ impl BrowseCommand {
             Self::NutClients => "Clients",
             Self::NutRwVars => "RW Vars",
             Self::NutUpses => "UPSes",
+            Self::SystemdStatus => "Status",
+            Self::SystemdShow => "Show",
+            Self::SystemdBraid => "Braid",
+            Self::SystemdFailed => "Failed",
+            Self::SystemdTimers => "Timers",
+            Self::SystemdMounts => "Mounts",
+            Self::SmartctlScan => "Scan",
+            Self::SmartctlHealth => "Health",
+            Self::SmartctlInfo => "Info",
+            Self::SmartctlAttributes => "Attributes",
+            Self::SmartctlSelftestLog => "Self-test Log",
+            Self::SmartctlErrorLog => "Error Log",
+            Self::LsblkTree => "Tree",
+            Self::LsblkFilesystems => "Filesystems",
+            Self::LsblkDisks => "Disks",
+            Self::LsblkAllColumns => "All Columns",
+            Self::LsblkScsi => "SCSI",
         }
     }
 }
@@ -227,6 +296,7 @@ impl InspectSubview {
 pub(crate) enum BrowseEmptyState {
     PoolOffline,
     UpsNotConfigured,
+    NoDisksKnown,
 }
 
 impl BrowseEmptyState {
@@ -236,14 +306,25 @@ impl BrowseEmptyState {
             Self::UpsNotConfigured => {
                 "UPS not configured -- set `ups.name` in the braid NixOS module"
             }
+            Self::NoDisksKnown => {
+                "no disks known to braid -- run `braid discover` or add disks first"
+            }
         }
     }
+}
+
+/// Borrowed disk inventory lets Browse derive device pickers from the live
+/// model without owning or cloning the TUI's authoritative disk identity map.
+pub(crate) struct DiskInventory<'a> {
+    pub(crate) by_id: &'a HashMap<String, String>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum BrowseMode {
     Normal,
     SubvolDetail,
+    SmartctlDeviceDetail,
+    SystemdUnitDetail,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -261,6 +342,23 @@ enum BrowseSelection {
     NutClients,
     NutRwVars,
     NutUpses,
+    SystemdStatus,
+    SystemdShow,
+    SystemdBraid,
+    SystemdFailed,
+    SystemdTimers,
+    SystemdMounts,
+    SmartctlScan,
+    SmartctlHealth,
+    SmartctlInfo,
+    SmartctlAttributes,
+    SmartctlSelftestLog,
+    SmartctlErrorLog,
+    LsblkTree,
+    LsblkFilesystems,
+    LsblkDisks,
+    LsblkAllColumns,
+    LsblkScsi,
 }
 
 impl BrowseSelection {
@@ -278,12 +376,28 @@ impl BrowseSelection {
     fn uses_model_snapshot(self) -> bool {
         matches!(self, Self::NutStatus | Self::NutVariables)
     }
+
+    fn is_smartctl_picker(self) -> bool {
+        matches!(
+            self,
+            Self::SmartctlHealth
+                | Self::SmartctlInfo
+                | Self::SmartctlAttributes
+                | Self::SmartctlSelftestLog
+                | Self::SmartctlErrorLog
+        )
+    }
+
+    fn is_systemd_picker(self) -> bool {
+        matches!(self, Self::SystemdStatus | Self::SystemdShow)
+    }
 }
 
 #[derive(Clone, Default)]
 struct CachedOutput {
     output: Vec<String>,
     subvolumes: Vec<BtrfsSubvolume>,
+    systemd_units: Vec<SystemdUnitRow>,
 }
 
 /// State owned by the `tui` model for the Browse tab. It centralizes
@@ -294,6 +408,9 @@ pub(crate) struct BrowseState {
     program: BrowseProgram,
     btrfs_command: BrowseCommand,
     nut_command: BrowseCommand,
+    systemd_command: BrowseCommand,
+    smartctl_command: BrowseCommand,
+    lsblk_command: BrowseCommand,
     filesystem_subview: FilesystemSubview,
     device_subview: DeviceSubview,
     subvolume_subview: SubvolumeSubview,
@@ -311,6 +428,12 @@ pub(crate) struct BrowseState {
     subvolumes: Vec<BtrfsSubvolume>,
     subvol_selected: usize,
     subvol_list_output: Vec<String>,
+    smartctl_devices: Vec<(String, String)>,
+    smartctl_selected: usize,
+    smartctl_picker_output: Vec<String>,
+    systemd_units: Vec<SystemdUnitRow>,
+    systemd_unit_selected: usize,
+    systemd_picker_output: Vec<String>,
     force_reload_once: bool,
 }
 
@@ -321,6 +444,9 @@ impl Default for BrowseState {
             program: BrowseProgram::Btrfs,
             btrfs_command: BrowseCommand::BtrfsFilesystem,
             nut_command: BrowseCommand::NutStatus,
+            systemd_command: BrowseCommand::SystemdStatus,
+            smartctl_command: BrowseCommand::SmartctlScan,
+            lsblk_command: BrowseCommand::LsblkTree,
             filesystem_subview: FilesystemSubview::Usage,
             device_subview: DeviceSubview::Usage,
             subvolume_subview: SubvolumeSubview::List,
@@ -338,6 +464,12 @@ impl Default for BrowseState {
             subvolumes: Vec::new(),
             subvol_selected: 0,
             subvol_list_output: Vec::new(),
+            smartctl_devices: Vec::new(),
+            smartctl_selected: 0,
+            smartctl_picker_output: Vec::new(),
+            systemd_units: Vec::new(),
+            systemd_unit_selected: 0,
+            systemd_picker_output: Vec::new(),
             force_reload_once: false,
         }
     }
@@ -351,6 +483,7 @@ impl BrowseState {
         &mut self,
         pool: &PoolStatus,
         ups_config: Option<&Ups>,
+        disks: &DiskInventory<'_>,
     ) -> Option<Effect> {
         self.mode = BrowseMode::Normal;
         self.scroll_offset = 0;
@@ -371,7 +504,21 @@ impl BrowseState {
 
         if selection.uses_model_snapshot() {
             self.output.clear();
-            self.subvolumes.clear();
+            self.clear_picker_rows();
+            return None;
+        }
+
+        if selection.is_smartctl_picker() {
+            self.populate_smartctl_devices(disks);
+            if self.smartctl_devices.is_empty() {
+                self.install_empty(BrowseEmptyState::NoDisksKnown);
+            } else {
+                self.empty_state = None;
+                self.loading = false;
+                self.output = vec!["press Enter for SMART data".to_owned()];
+                self.subvolumes.clear();
+                self.systemd_units.clear();
+            }
             return None;
         }
 
@@ -379,17 +526,15 @@ impl BrowseState {
             && !force_reload
             && let Some(cached) = self.cache.get(&selection).cloned()
         {
-            self.output = cached.output;
-            self.subvolumes = cached.subvolumes;
+            self.install_cached(cached);
             return None;
         }
 
         if let Some(cached) = self.cache.get(&selection).cloned() {
-            self.output = cached.output;
-            self.subvolumes = cached.subvolumes;
+            self.install_cached(cached);
         } else {
             self.output.clear();
-            self.subvolumes.clear();
+            self.clear_picker_rows();
         }
 
         let request = self.current_request(pool, ups_config)?;
@@ -455,46 +600,85 @@ impl BrowseState {
         self.normalize_focus();
     }
 
-    /// Drill into the selected content row when Browse owns a drill-in
-    /// surface, currently the Btrfs subvolume list.
-    pub(crate) fn enter(&mut self, pool: &PoolStatus) -> Option<Effect> {
-        if self.focus != BrowseFocus::Content
-            || self.mode != BrowseMode::Normal
-            || !self.is_subvolume_list()
-            || self.subvolumes.is_empty()
-        {
+    /// Drill into the selected content row when Browse owns a parsed picker
+    /// surface. Btrfs, SMART, and Systemd keep separate detail modes because
+    /// their target identifiers come from different model boundaries.
+    pub(crate) fn enter(&mut self, pool: &PoolStatus, disks: &DiskInventory<'_>) -> Option<Effect> {
+        if self.focus != BrowseFocus::Content || self.mode != BrowseMode::Normal {
             return None;
         }
-        let pool = pool.current()?;
-        let subvol = &self.subvolumes[self.subvol_selected];
-        let path = format!("{}/{}", pool.mount_point.as_str(), subvol.path);
-        self.mode = BrowseMode::SubvolDetail;
-        self.subvol_list_output = self.output.clone();
-        self.dispatch(CmdRequest::BtrfsSubvolumeShow { path })
+        if self.is_subvolume_list() && !self.subvolumes.is_empty() {
+            let pool = pool.current()?;
+            let subvol = &self.subvolumes[self.subvol_selected];
+            let path = format!("{}/{}", pool.mount_point.as_str(), subvol.path);
+            self.mode = BrowseMode::SubvolDetail;
+            self.subvol_list_output = self.output.clone();
+            return self.dispatch(CmdRequest::BtrfsSubvolumeShow { path });
+        }
+        if self.is_smartctl_picker() {
+            if self.smartctl_devices.is_empty() {
+                self.populate_smartctl_devices(disks);
+            }
+            let request = self.selected_smartctl_request()?;
+            self.mode = BrowseMode::SmartctlDeviceDetail;
+            self.smartctl_picker_output = self.output.clone();
+            return self.dispatch(request);
+        }
+        if self.is_systemd_picker() && !self.systemd_units.is_empty() {
+            let request = self.selected_systemd_request()?;
+            self.mode = BrowseMode::SystemdUnitDetail;
+            self.systemd_picker_output = self.output.clone();
+            return self.dispatch(request);
+        }
+        None
     }
 
     /// Return from drill-in content to the cached list, invalidating the
     /// in-flight detail command so stale detail output cannot overwrite it.
     pub(crate) fn back(&mut self) {
-        if self.mode == BrowseMode::SubvolDetail {
-            self.mode = BrowseMode::Normal;
-            self.output = self.subvol_list_output.clone();
-            self.scroll_offset = 0;
-            self.command_gen = self.command_gen.saturating_add(1);
-            self.loading = false;
-        }
+        let restored = match self.mode {
+            BrowseMode::Normal => return,
+            BrowseMode::SubvolDetail => self.subvol_list_output.clone(),
+            BrowseMode::SmartctlDeviceDetail => self.smartctl_picker_output.clone(),
+            BrowseMode::SystemdUnitDetail => self.systemd_picker_output.clone(),
+        };
+        self.mode = BrowseMode::Normal;
+        self.output = restored;
+        self.scroll_offset = 0;
+        self.command_gen = self.command_gen.saturating_add(1);
+        self.loading = false;
     }
 
-    /// Reload the currently open subvolume detail while preserving the
-    /// sidebar selection that owns the list beneath it.
-    pub(crate) fn reload_detail(&mut self, pool: &PoolStatus) -> Option<Effect> {
-        if self.mode != BrowseMode::SubvolDetail || self.subvolumes.is_empty() {
-            return None;
+    /// Reload the currently open detail while preserving the picker selection
+    /// that owns the list beneath it.
+    pub(crate) fn reload_detail(
+        &mut self,
+        pool: &PoolStatus,
+        disks: &DiskInventory<'_>,
+    ) -> Option<Effect> {
+        match self.mode {
+            BrowseMode::Normal => None,
+            BrowseMode::SubvolDetail => {
+                if self.subvolumes.is_empty() {
+                    return None;
+                }
+                let pool = pool.current()?;
+                let subvol = &self.subvolumes[self.subvol_selected];
+                let path = format!("{}/{}", pool.mount_point.as_str(), subvol.path);
+                self.dispatch(CmdRequest::BtrfsSubvolumeShow { path })
+            }
+            BrowseMode::SmartctlDeviceDetail => {
+                if self.smartctl_devices.is_empty() {
+                    self.populate_smartctl_devices(disks);
+                }
+                let request = self.selected_smartctl_request()?;
+                self.dispatch(request)
+            }
+            BrowseMode::SystemdUnitDetail => {
+                let request = self.selected_systemd_request()?;
+                self.dispatch(request)
+            }
         }
-        let pool = pool.current()?;
-        let subvol = &self.subvolumes[self.subvol_selected];
-        let path = format!("{}/{}", pool.mount_point.as_str(), subvol.path);
-        self.dispatch(CmdRequest::BtrfsSubvolumeShow { path })
     }
 
     /// Apply raw command output if its generation still matches the
@@ -513,6 +697,7 @@ impl BrowseState {
 
         if self.mode == BrowseMode::Normal {
             self.subvolumes.clear();
+            self.systemd_units.clear();
             if self.is_subvolume_list() {
                 match parse_btrfs_subvolume_list(&raw) {
                     Ok(parsed) => {
@@ -523,6 +708,16 @@ impl BrowseState {
                     }
                     Err(_) => self.subvolumes.clear(),
                 }
+            } else if self.is_systemd_picker() {
+                match parse_systemctl_list_units_json(&raw) {
+                    Ok(parsed) => {
+                        self.systemd_units = parsed;
+                        self.systemd_unit_selected = self
+                            .systemd_unit_selected
+                            .min(self.systemd_units.len().saturating_sub(1));
+                    }
+                    Err(_) => self.systemd_units.clear(),
+                }
             }
         }
 
@@ -532,6 +727,7 @@ impl BrowseState {
                 CachedOutput {
                     output: self.output.clone(),
                     subvolumes: self.subvolumes.clone(),
+                    systemd_units: self.systemd_units.clone(),
                 },
             );
         }
@@ -635,6 +831,18 @@ impl BrowseState {
         self.mode == BrowseMode::SubvolDetail
     }
 
+    pub(crate) fn is_detail(&self) -> bool {
+        self.mode != BrowseMode::Normal
+    }
+
+    pub(crate) fn is_smartctl_picker(&self) -> bool {
+        self.current_selection().is_smartctl_picker() && self.mode == BrowseMode::Normal
+    }
+
+    pub(crate) fn is_systemd_picker(&self) -> bool {
+        self.current_selection().is_systemd_picker() && self.mode == BrowseMode::Normal
+    }
+
     pub(crate) fn is_nut_status(&self) -> bool {
         self.current_selection() == BrowseSelection::NutStatus
     }
@@ -659,12 +867,35 @@ impl BrowseState {
         self.subvol_selected
     }
 
+    pub(crate) fn smartctl_devices(&self) -> &[(String, String)] {
+        &self.smartctl_devices
+    }
+
+    pub(crate) fn selected_smartctl_device(&self) -> usize {
+        self.smartctl_selected
+    }
+
+    pub(crate) fn systemd_units(&self) -> &[SystemdUnitRow] {
+        &self.systemd_units
+    }
+
+    pub(crate) fn selected_systemd_unit(&self) -> usize {
+        self.systemd_unit_selected
+    }
+
     pub(crate) fn command_display(
         &self,
         mount_point: &MountPoint,
         ups_config: Option<&Ups>,
     ) -> Option<String> {
-        let request = match self.current_selection() {
+        let selection = self.current_selection();
+        let request = match selection {
+            _ if matches!(self.mode, BrowseMode::SmartctlDeviceDetail) => {
+                self.selected_smartctl_request()?
+            }
+            _ if matches!(self.mode, BrowseMode::SystemdUnitDetail) => {
+                self.selected_systemd_request()?
+            }
             BrowseSelection::BtrfsFilesystem(FilesystemSubview::Usage) => {
                 CmdRequest::BtrfsFilesystemUsage {
                     mount_point: mount_point.clone(),
@@ -751,14 +982,59 @@ impl BrowseState {
                 name: ups_config?.name.clone(),
             },
             BrowseSelection::NutUpses => CmdRequest::UpscListUpses,
+            BrowseSelection::SystemdStatus | BrowseSelection::SystemdShow => {
+                CmdRequest::SystemctlListUnitsBraidJson
+            }
+            BrowseSelection::SystemdBraid => CmdRequest::SystemctlListUnitsBraid,
+            BrowseSelection::SystemdFailed => CmdRequest::SystemctlListUnitsFailed,
+            BrowseSelection::SystemdTimers => CmdRequest::SystemctlListTimers,
+            BrowseSelection::SystemdMounts => CmdRequest::SystemctlListMounts,
+            BrowseSelection::SmartctlScan => CmdRequest::SmartctlScan,
+            BrowseSelection::SmartctlHealth
+            | BrowseSelection::SmartctlInfo
+            | BrowseSelection::SmartctlAttributes
+            | BrowseSelection::SmartctlSelftestLog
+            | BrowseSelection::SmartctlErrorLog => self.selected_smartctl_request()?,
+            BrowseSelection::LsblkTree => CmdRequest::LsblkTree,
+            BrowseSelection::LsblkFilesystems => CmdRequest::LsblkFilesystems,
+            BrowseSelection::LsblkDisks => CmdRequest::LsblkDisks,
+            BrowseSelection::LsblkAllColumns => CmdRequest::LsblkAllColumns,
+            BrowseSelection::LsblkScsi => CmdRequest::LsblkScsi,
         };
         Some(request.to_argv().to_shell_string())
     }
 
     fn install_empty(&mut self, state: BrowseEmptyState) {
         self.output.clear();
-        self.subvolumes.clear();
+        self.clear_picker_rows();
         self.empty_state = Some(state);
+    }
+
+    fn install_cached(&mut self, cached: CachedOutput) {
+        self.output = cached.output;
+        self.subvolumes = cached.subvolumes;
+        self.systemd_units = cached.systemd_units;
+        if !self.current_selection().is_smartctl_picker() {
+            self.smartctl_devices.clear();
+        }
+    }
+
+    fn clear_picker_rows(&mut self) {
+        self.subvolumes.clear();
+        self.smartctl_devices.clear();
+        self.systemd_units.clear();
+    }
+
+    fn populate_smartctl_devices(&mut self, disks: &DiskInventory<'_>) {
+        self.smartctl_devices = disks
+            .by_id
+            .iter()
+            .map(|(name, path)| (name.clone(), path.clone()))
+            .collect();
+        self.smartctl_devices.sort_by(|a, b| a.0.cmp(&b.0));
+        self.smartctl_selected = self
+            .smartctl_selected
+            .min(self.smartctl_devices.len().saturating_sub(1));
     }
 
     fn dispatch(&mut self, request: CmdRequest) -> Option<Effect> {
@@ -870,6 +1146,59 @@ impl BrowseState {
                 name: ups_config?.name.clone(),
             }),
             BrowseSelection::NutUpses => Some(CmdRequest::UpscListUpses),
+            BrowseSelection::SystemdStatus | BrowseSelection::SystemdShow => {
+                Some(CmdRequest::SystemctlListUnitsBraidJson)
+            }
+            BrowseSelection::SystemdBraid => Some(CmdRequest::SystemctlListUnitsBraid),
+            BrowseSelection::SystemdFailed => Some(CmdRequest::SystemctlListUnitsFailed),
+            BrowseSelection::SystemdTimers => Some(CmdRequest::SystemctlListTimers),
+            BrowseSelection::SystemdMounts => Some(CmdRequest::SystemctlListMounts),
+            BrowseSelection::SmartctlScan => Some(CmdRequest::SmartctlScan),
+            BrowseSelection::SmartctlHealth
+            | BrowseSelection::SmartctlInfo
+            | BrowseSelection::SmartctlAttributes
+            | BrowseSelection::SmartctlSelftestLog
+            | BrowseSelection::SmartctlErrorLog => None,
+            BrowseSelection::LsblkTree => Some(CmdRequest::LsblkTree),
+            BrowseSelection::LsblkFilesystems => Some(CmdRequest::LsblkFilesystems),
+            BrowseSelection::LsblkDisks => Some(CmdRequest::LsblkDisks),
+            BrowseSelection::LsblkAllColumns => Some(CmdRequest::LsblkAllColumns),
+            BrowseSelection::LsblkScsi => Some(CmdRequest::LsblkScsi),
+        }
+    }
+
+    fn selected_smartctl_request(&self) -> Option<CmdRequest> {
+        let (_, device) = self.smartctl_devices.get(self.smartctl_selected)?;
+        match self.current_selection() {
+            BrowseSelection::SmartctlHealth => Some(CmdRequest::SmartctlHealth {
+                device: device.clone(),
+            }),
+            BrowseSelection::SmartctlInfo => Some(CmdRequest::SmartctlInfo {
+                device: device.clone(),
+            }),
+            BrowseSelection::SmartctlAttributes => Some(CmdRequest::SmartctlAttributes {
+                device: device.clone(),
+            }),
+            BrowseSelection::SmartctlSelftestLog => Some(CmdRequest::SmartctlSelftestLog {
+                device: device.clone(),
+            }),
+            BrowseSelection::SmartctlErrorLog => Some(CmdRequest::SmartctlErrorLog {
+                device: device.clone(),
+            }),
+            _ => None,
+        }
+    }
+
+    fn selected_systemd_request(&self) -> Option<CmdRequest> {
+        let unit = self
+            .systemd_units
+            .get(self.systemd_unit_selected)?
+            .unit
+            .clone();
+        match self.current_selection() {
+            BrowseSelection::SystemdStatus => Some(CmdRequest::SystemctlStatusUnit { unit }),
+            BrowseSelection::SystemdShow => Some(CmdRequest::SystemctlShowUnit { unit }),
+            _ => None,
         }
     }
 
@@ -892,6 +1221,23 @@ impl BrowseState {
             BrowseCommand::NutClients => BrowseSelection::NutClients,
             BrowseCommand::NutRwVars => BrowseSelection::NutRwVars,
             BrowseCommand::NutUpses => BrowseSelection::NutUpses,
+            BrowseCommand::SystemdStatus => BrowseSelection::SystemdStatus,
+            BrowseCommand::SystemdShow => BrowseSelection::SystemdShow,
+            BrowseCommand::SystemdBraid => BrowseSelection::SystemdBraid,
+            BrowseCommand::SystemdFailed => BrowseSelection::SystemdFailed,
+            BrowseCommand::SystemdTimers => BrowseSelection::SystemdTimers,
+            BrowseCommand::SystemdMounts => BrowseSelection::SystemdMounts,
+            BrowseCommand::SmartctlScan => BrowseSelection::SmartctlScan,
+            BrowseCommand::SmartctlHealth => BrowseSelection::SmartctlHealth,
+            BrowseCommand::SmartctlInfo => BrowseSelection::SmartctlInfo,
+            BrowseCommand::SmartctlAttributes => BrowseSelection::SmartctlAttributes,
+            BrowseCommand::SmartctlSelftestLog => BrowseSelection::SmartctlSelftestLog,
+            BrowseCommand::SmartctlErrorLog => BrowseSelection::SmartctlErrorLog,
+            BrowseCommand::LsblkTree => BrowseSelection::LsblkTree,
+            BrowseCommand::LsblkFilesystems => BrowseSelection::LsblkFilesystems,
+            BrowseCommand::LsblkDisks => BrowseSelection::LsblkDisks,
+            BrowseCommand::LsblkAllColumns => BrowseSelection::LsblkAllColumns,
+            BrowseCommand::LsblkScsi => BrowseSelection::LsblkScsi,
         }
     }
 
@@ -899,6 +1245,9 @@ impl BrowseState {
         match self.program {
             BrowseProgram::Btrfs => self.btrfs_command,
             BrowseProgram::Nut => self.nut_command,
+            BrowseProgram::Systemd => self.systemd_command,
+            BrowseProgram::Smartctl => self.smartctl_command,
+            BrowseProgram::Lsblk => self.lsblk_command,
         }
     }
 
@@ -906,6 +1255,9 @@ impl BrowseState {
         match self.program {
             BrowseProgram::Btrfs => &BrowseCommand::BTRFS,
             BrowseProgram::Nut => &BrowseCommand::NUT,
+            BrowseProgram::Systemd => &BrowseCommand::SYSTEMD,
+            BrowseProgram::Smartctl => &BrowseCommand::SMARTCTL,
+            BrowseProgram::Lsblk => &BrowseCommand::LSBLK,
         }
     }
 
@@ -933,6 +1285,9 @@ impl BrowseState {
         match self.program {
             BrowseProgram::Btrfs => self.btrfs_command = next,
             BrowseProgram::Nut => self.nut_command = next,
+            BrowseProgram::Systemd => self.systemd_command = next,
+            BrowseProgram::Smartctl => self.smartctl_command = next,
+            BrowseProgram::Lsblk => self.lsblk_command = next,
         }
     }
 
@@ -994,6 +1349,12 @@ impl BrowseState {
         if self.is_subvolume_list() && !self.subvolumes.is_empty() {
             let max = self.subvolumes.len().saturating_sub(1);
             self.subvol_selected = (self.subvol_selected + 1).min(max);
+        } else if self.is_smartctl_picker() && !self.smartctl_devices.is_empty() {
+            let max = self.smartctl_devices.len().saturating_sub(1);
+            self.smartctl_selected = (self.smartctl_selected + 1).min(max);
+        } else if self.is_systemd_picker() && !self.systemd_units.is_empty() {
+            let max = self.systemd_units.len().saturating_sub(1);
+            self.systemd_unit_selected = (self.systemd_unit_selected + 1).min(max);
         } else {
             let max_scroll = self
                 .output
@@ -1006,6 +1367,10 @@ impl BrowseState {
     fn content_up(&mut self) {
         if self.is_subvolume_list() && !self.subvolumes.is_empty() {
             self.subvol_selected = self.subvol_selected.saturating_sub(1);
+        } else if self.is_smartctl_picker() && !self.smartctl_devices.is_empty() {
+            self.smartctl_selected = self.smartctl_selected.saturating_sub(1);
+        } else if self.is_systemd_picker() && !self.systemd_units.is_empty() {
+            self.systemd_unit_selected = self.systemd_unit_selected.saturating_sub(1);
         } else {
             self.scroll_offset = self.scroll_offset.saturating_sub(1);
         }
@@ -1064,6 +1429,30 @@ mod tests {
             Some(Effect::BrowseRunCommand { request, .. }) => request,
             _ => panic!("expected BrowseRunCommand effect"),
         }
+    }
+
+    fn load_current_for_test(
+        state: &mut BrowseState,
+        pool: &PoolStatus,
+        ups_config: Option<&Ups>,
+    ) -> Option<Effect> {
+        let disks = HashMap::new();
+        state.load_current(pool, ups_config, &DiskInventory { by_id: &disks })
+    }
+
+    fn disk_inventory() -> HashMap<String, String> {
+        [
+            (
+                "disk1".to_owned(),
+                "/dev/disk/by-id/virtio-disk1".to_owned(),
+            ),
+            (
+                "disk2".to_owned(),
+                "/dev/disk/by-id/virtio-disk2".to_owned(),
+            ),
+        ]
+        .into_iter()
+        .collect()
     }
 
     // Intent: h at the leftmost Browse column stays on Program.
@@ -1132,17 +1521,68 @@ mod tests {
         assert_eq!(state.focus(), BrowseFocus::Subview);
     }
 
-    // Intent: j in Program cycles between Btrfs and NUT.
+    // Intent: j in Program cycles through every Browse program.
     // Why it exists: Program is the top-level Browse inventory and must
     // stay keyboard-reachable.
-    // Scenario: user presses j twice in the Program column.
+    // Scenario: user presses j repeatedly in the Program column.
     #[test]
-    fn j_in_program_cycles_btrfs_nut() {
+    fn j_in_program_cycles_all_programs() {
         let mut state = BrowseState::default();
         state.select_next();
-        assert_eq!(state.program_rows(), vec![("Btrfs", false), ("NUT", true)]);
+        assert_eq!(
+            state.program_rows(),
+            vec![
+                ("Btrfs", false),
+                ("NUT", true),
+                ("Systemd", false),
+                ("SMART", false),
+                ("lsblk", false),
+            ]
+        );
         state.select_next();
-        assert_eq!(state.program_rows(), vec![("Btrfs", true), ("NUT", false)]);
+        assert_eq!(
+            state.program_rows(),
+            vec![
+                ("Btrfs", false),
+                ("NUT", false),
+                ("Systemd", true),
+                ("SMART", false),
+                ("lsblk", false),
+            ]
+        );
+        state.select_next();
+        assert_eq!(
+            state.program_rows(),
+            vec![
+                ("Btrfs", false),
+                ("NUT", false),
+                ("Systemd", false),
+                ("SMART", true),
+                ("lsblk", false),
+            ]
+        );
+        state.select_next();
+        assert_eq!(
+            state.program_rows(),
+            vec![
+                ("Btrfs", false),
+                ("NUT", false),
+                ("Systemd", false),
+                ("SMART", false),
+                ("lsblk", true),
+            ]
+        );
+        state.select_next();
+        assert_eq!(
+            state.program_rows(),
+            vec![
+                ("Btrfs", true),
+                ("NUT", false),
+                ("Systemd", false),
+                ("SMART", false),
+                ("lsblk", false),
+            ]
+        );
     }
 
     // Intent: filesystem subview selection cycles through all filesystem views.
@@ -1235,6 +1675,44 @@ mod tests {
                 ("UPSes", false),
             ]
         );
+
+        state.select_next();
+        assert_eq!(
+            state.command_rows(),
+            vec![
+                ("Status", true),
+                ("Show", false),
+                ("Braid", false),
+                ("Failed", false),
+                ("Timers", false),
+                ("Mounts", false),
+            ]
+        );
+
+        state.select_next();
+        assert_eq!(
+            state.command_rows(),
+            vec![
+                ("Scan", true),
+                ("Health", false),
+                ("Info", false),
+                ("Attributes", false),
+                ("Self-test Log", false),
+                ("Error Log", false),
+            ]
+        );
+
+        state.select_next();
+        assert_eq!(
+            state.command_rows(),
+            vec![
+                ("Tree", true),
+                ("Filesystems", false),
+                ("Disks", false),
+                ("All Columns", false),
+                ("SCSI", false),
+            ]
+        );
     }
 
     // Intent: new Btrfs command groups expose the expected subview rows.
@@ -1284,7 +1762,7 @@ mod tests {
         let mut state = BrowseState::default();
         state.filesystem_subview = FilesystemSubview::CommitStats;
         assert!(matches!(
-            browse_request(state.load_current(&pool(), Some(&ups()))),
+            browse_request(load_current_for_test(&mut state, &pool(), Some(&ups()))),
             CmdRequest::BtrfsFilesystemCommitStats { .. }
         ));
 
@@ -1292,22 +1770,22 @@ mod tests {
         state.btrfs_command = BrowseCommand::BtrfsSubvolumes;
         state.subvolume_subview = SubvolumeSubview::Full;
         assert!(matches!(
-            browse_request(state.load_current(&pool(), Some(&ups()))),
+            browse_request(load_current_for_test(&mut state, &pool(), Some(&ups()))),
             CmdRequest::BtrfsSubvolumeListFull { .. }
         ));
         state.subvolume_subview = SubvolumeSubview::Snapshots;
         assert!(matches!(
-            browse_request(state.load_current(&pool(), Some(&ups()))),
+            browse_request(load_current_for_test(&mut state, &pool(), Some(&ups()))),
             CmdRequest::BtrfsSubvolumeListSnapshots { .. }
         ));
         state.subvolume_subview = SubvolumeSubview::Deleted;
         assert!(matches!(
-            browse_request(state.load_current(&pool(), Some(&ups()))),
+            browse_request(load_current_for_test(&mut state, &pool(), Some(&ups()))),
             CmdRequest::BtrfsSubvolumeListDeleted { .. }
         ));
         state.subvolume_subview = SubvolumeSubview::Default;
         assert!(matches!(
-            browse_request(state.load_current(&pool(), Some(&ups()))),
+            browse_request(load_current_for_test(&mut state, &pool(), Some(&ups()))),
             CmdRequest::BtrfsSubvolumeGetDefault { .. }
         ));
 
@@ -1315,26 +1793,26 @@ mod tests {
         state.btrfs_command = BrowseCommand::BtrfsScrub;
         state.scrub_subview = ScrubSubview::Limits;
         assert!(matches!(
-            browse_request(state.load_current(&pool(), Some(&ups()))),
+            browse_request(load_current_for_test(&mut state, &pool(), Some(&ups()))),
             CmdRequest::BtrfsScrubLimit { .. }
         ));
 
         state = BrowseState::default();
         state.btrfs_command = BrowseCommand::BtrfsQuota;
         assert!(matches!(
-            browse_request(state.load_current(&pool(), Some(&ups()))),
+            browse_request(load_current_for_test(&mut state, &pool(), Some(&ups()))),
             CmdRequest::BtrfsQuotaStatus { .. }
         ));
         state.quota_subview = QuotaSubview::Qgroups;
         assert!(matches!(
-            browse_request(state.load_current(&pool(), Some(&ups()))),
+            browse_request(load_current_for_test(&mut state, &pool(), Some(&ups()))),
             CmdRequest::BtrfsQgroupShow { .. }
         ));
 
         state = BrowseState::default();
         state.btrfs_command = BrowseCommand::BtrfsInspect;
         assert!(matches!(
-            browse_request(state.load_current(&pool(), Some(&ups()))),
+            browse_request(load_current_for_test(&mut state, &pool(), Some(&ups()))),
             CmdRequest::BtrfsInspectListChunks { .. }
         ));
 
@@ -1342,18 +1820,118 @@ mod tests {
         state.program = BrowseProgram::Nut;
         state.nut_command = BrowseCommand::NutClients;
         assert!(matches!(
-            browse_request(state.load_current(&pool(), Some(&ups()))),
+            browse_request(load_current_for_test(&mut state, &pool(), Some(&ups()))),
             CmdRequest::UpscClients { .. }
         ));
         state.nut_command = BrowseCommand::NutRwVars;
         assert!(matches!(
-            browse_request(state.load_current(&pool(), Some(&ups()))),
+            browse_request(load_current_for_test(&mut state, &pool(), Some(&ups()))),
             CmdRequest::UpsrwList { .. }
         ));
         state.nut_command = BrowseCommand::NutUpses;
         assert!(matches!(
-            browse_request(state.load_current(&pool(), Some(&ups()))),
+            browse_request(load_current_for_test(&mut state, &pool(), Some(&ups()))),
             CmdRequest::UpscListUpses
+        ));
+
+        state = BrowseState::default();
+        state.program = BrowseProgram::Systemd;
+        state.systemd_command = BrowseCommand::SystemdStatus;
+        assert!(matches!(
+            browse_request(load_current_for_test(&mut state, &pool(), Some(&ups()))),
+            CmdRequest::SystemctlListUnitsBraidJson
+        ));
+        state.systemd_command = BrowseCommand::SystemdShow;
+        assert!(matches!(
+            browse_request(load_current_for_test(&mut state, &pool(), Some(&ups()))),
+            CmdRequest::SystemctlListUnitsBraidJson
+        ));
+        state.systemd_command = BrowseCommand::SystemdBraid;
+        assert!(matches!(
+            browse_request(load_current_for_test(&mut state, &pool(), Some(&ups()))),
+            CmdRequest::SystemctlListUnitsBraid
+        ));
+        state.systemd_command = BrowseCommand::SystemdFailed;
+        assert!(matches!(
+            browse_request(load_current_for_test(&mut state, &pool(), Some(&ups()))),
+            CmdRequest::SystemctlListUnitsFailed
+        ));
+        state.systemd_command = BrowseCommand::SystemdTimers;
+        assert!(matches!(
+            browse_request(load_current_for_test(&mut state, &pool(), Some(&ups()))),
+            CmdRequest::SystemctlListTimers
+        ));
+        state.systemd_command = BrowseCommand::SystemdMounts;
+        assert!(matches!(
+            browse_request(load_current_for_test(&mut state, &pool(), Some(&ups()))),
+            CmdRequest::SystemctlListMounts
+        ));
+
+        state = BrowseState::default();
+        state.program = BrowseProgram::Smartctl;
+        state.smartctl_command = BrowseCommand::SmartctlScan;
+        assert!(matches!(
+            browse_request(load_current_for_test(&mut state, &pool(), Some(&ups()))),
+            CmdRequest::SmartctlScan
+        ));
+        for command in [
+            BrowseCommand::SmartctlHealth,
+            BrowseCommand::SmartctlInfo,
+            BrowseCommand::SmartctlAttributes,
+            BrowseCommand::SmartctlSelftestLog,
+            BrowseCommand::SmartctlErrorLog,
+        ] {
+            state = BrowseState::default();
+            state.program = BrowseProgram::Smartctl;
+            state.smartctl_command = command;
+            let disks = disk_inventory();
+            let effect =
+                state.load_current(&pool(), Some(&ups()), &DiskInventory { by_id: &disks });
+            assert!(
+                effect.is_none(),
+                "smartctl picker should not run {command:?}"
+            );
+            assert_eq!(
+                state.smartctl_devices(),
+                &[
+                    (
+                        "disk1".to_owned(),
+                        "/dev/disk/by-id/virtio-disk1".to_owned()
+                    ),
+                    (
+                        "disk2".to_owned(),
+                        "/dev/disk/by-id/virtio-disk2".to_owned()
+                    ),
+                ]
+            );
+        }
+
+        state = BrowseState::default();
+        state.program = BrowseProgram::Lsblk;
+        state.lsblk_command = BrowseCommand::LsblkTree;
+        assert!(matches!(
+            browse_request(load_current_for_test(&mut state, &pool(), Some(&ups()))),
+            CmdRequest::LsblkTree
+        ));
+        state.lsblk_command = BrowseCommand::LsblkFilesystems;
+        assert!(matches!(
+            browse_request(load_current_for_test(&mut state, &pool(), Some(&ups()))),
+            CmdRequest::LsblkFilesystems
+        ));
+        state.lsblk_command = BrowseCommand::LsblkDisks;
+        assert!(matches!(
+            browse_request(load_current_for_test(&mut state, &pool(), Some(&ups()))),
+            CmdRequest::LsblkDisks
+        ));
+        state.lsblk_command = BrowseCommand::LsblkAllColumns;
+        assert!(matches!(
+            browse_request(load_current_for_test(&mut state, &pool(), Some(&ups()))),
+            CmdRequest::LsblkAllColumns
+        ));
+        state.lsblk_command = BrowseCommand::LsblkScsi;
+        assert!(matches!(
+            browse_request(load_current_for_test(&mut state, &pool(), Some(&ups()))),
+            CmdRequest::LsblkScsi
         ));
     }
 
@@ -1365,7 +1943,7 @@ mod tests {
     #[test]
     fn load_current_on_btrfs_offline_pool_returns_none_and_sets_empty_state() {
         let mut state = BrowseState::default();
-        let effect = state.load_current(&PoolStatus::NotMounted, Some(&ups()));
+        let effect = load_current_for_test(&mut state, &PoolStatus::NotMounted, Some(&ups()));
         assert!(effect.is_none());
         assert_eq!(state.empty_state(), Some(BrowseEmptyState::PoolOffline));
     }
@@ -1379,7 +1957,7 @@ mod tests {
     fn load_current_on_nut_without_config_returns_none_and_sets_empty_state() {
         let mut state = BrowseState::default();
         state.select_next();
-        let effect = state.load_current(&pool(), None);
+        let effect = load_current_for_test(&mut state, &pool(), None);
         assert!(effect.is_none());
         assert_eq!(
             state.empty_state(),
@@ -1397,7 +1975,7 @@ mod tests {
         state.program = BrowseProgram::Nut;
         state.nut_command = BrowseCommand::NutUpses;
 
-        let effect = state.load_current(&pool(), None);
+        let effect = load_current_for_test(&mut state, &pool(), None);
 
         assert!(matches!(
             effect,
@@ -1407,6 +1985,46 @@ mod tests {
             })
         ));
         assert_eq!(state.empty_state(), None);
+    }
+
+    // Intent: SMART per-device commands show a local empty state when braid
+    // has no stable disk paths to offer.
+    // Why it exists: per-device SMART commands need by-id targets; running an
+    // empty picker would make Enter ambiguous.
+    // Scenario: user opens Browse > SMART > Health before discovery has found
+    // any disks.
+    #[test]
+    fn smartctl_per_device_without_disks_sets_empty_state() {
+        let mut state = BrowseState::default();
+        state.program = BrowseProgram::Smartctl;
+        state.smartctl_command = BrowseCommand::SmartctlHealth;
+        let disks = HashMap::new();
+
+        let effect = state.load_current(&pool(), Some(&ups()), &DiskInventory { by_id: &disks });
+
+        assert!(effect.is_none());
+        assert_eq!(state.empty_state(), Some(BrowseEmptyState::NoDisksKnown));
+    }
+
+    // Intent: SMART scan remains runnable without braid's disk inventory.
+    // Why it exists: scan is the bootstrap diagnostic for what smartctl sees
+    // independently of braid config.
+    // Scenario: user opens Browse > SMART > Scan on a fresh host.
+    #[test]
+    fn smartctl_scan_runs_without_disks() {
+        let mut state = BrowseState::default();
+        state.program = BrowseProgram::Smartctl;
+        state.smartctl_command = BrowseCommand::SmartctlScan;
+
+        let effect = load_current_for_test(&mut state, &pool(), Some(&ups()));
+
+        assert!(matches!(
+            effect,
+            Some(Effect::BrowseRunCommand {
+                request: CmdRequest::SmartctlScan,
+                ..
+            })
+        ));
     }
 
     // Intent: name-required NUT views still install the missing-config
@@ -1428,7 +2046,7 @@ mod tests {
             state.program = BrowseProgram::Nut;
             state.nut_command = command;
 
-            let effect = state.load_current(&pool(), None);
+            let effect = load_current_for_test(&mut state, &pool(), None);
 
             assert!(effect.is_none(), "unexpected effect for {command:?}");
             assert_eq!(
@@ -1447,7 +2065,7 @@ mod tests {
     #[test]
     fn load_current_bumps_generation_and_returns_effect() {
         let mut state = BrowseState::default();
-        let effect = state.load_current(&pool(), Some(&ups()));
+        let effect = load_current_for_test(&mut state, &pool(), Some(&ups()));
         match effect {
             Some(Effect::BrowseRunCommand {
                 request:
@@ -1485,7 +2103,8 @@ mod tests {
             0,
         );
 
-        let effect = state.enter(&pool());
+        let disks = HashMap::new();
+        let effect = state.enter(&pool(), &DiskInventory { by_id: &disks });
         assert!(matches!(
             effect,
             Some(Effect::BrowseRunCommand {
@@ -1494,6 +2113,70 @@ mod tests {
             })
         ));
         assert!(state.is_subvolume_detail());
+    }
+
+    // Intent: Enter on a selected SMART device dispatches the active
+    // per-device SMART request with the device's stable by-id path.
+    // Why it exists: SMART health/info/log views are pickers, not raw commands
+    // against an implicit current disk.
+    // Scenario: user selects disk2 in Browse > SMART > Health and presses Enter.
+    #[test]
+    fn enter_in_smartctl_device_row_drills_in() {
+        let mut state = BrowseState::default();
+        state.program = BrowseProgram::Smartctl;
+        state.smartctl_command = BrowseCommand::SmartctlHealth;
+        state.focus = BrowseFocus::Content;
+        let disks = disk_inventory();
+        let _ = state.load_current(&pool(), Some(&ups()), &DiskInventory { by_id: &disks });
+        state.select_next();
+
+        let effect = state.enter(&pool(), &DiskInventory { by_id: &disks });
+
+        assert!(matches!(
+            effect,
+            Some(Effect::BrowseRunCommand {
+                request: CmdRequest::SmartctlHealth { device },
+                ..
+            }) if device == "/dev/disk/by-id/virtio-disk2"
+        ));
+        assert!(state.is_detail());
+    }
+
+    // Intent: Enter on a selected Systemd unit dispatches the active
+    // per-unit detail request.
+    // Why it exists: Status/Show share the same JSON picker but must drill
+    // into different systemctl subcommands.
+    // Scenario: user selects braid-online.service in Browse > Systemd > Status
+    // and presses Enter.
+    #[test]
+    fn enter_in_systemd_unit_row_drills_in() {
+        let mut state = BrowseState::default();
+        state.program = BrowseProgram::Systemd;
+        state.systemd_command = BrowseCommand::SystemdStatus;
+        state.focus = BrowseFocus::Content;
+        state.command_finished(
+            RawCommandOutput {
+                cmd: "systemctl list-units --output=json --all braid-* hddfancontrol-braid.service"
+                    .into(),
+                stdout: r#"[{"unit":"braid-online.service","load":"loaded","active":"active","sub":"exited","description":"online"}]"#
+                    .into(),
+                stderr: String::new(),
+                exit_status: 0,
+            },
+            0,
+        );
+        let disks = HashMap::new();
+
+        let effect = state.enter(&pool(), &DiskInventory { by_id: &disks });
+
+        assert!(matches!(
+            effect,
+            Some(Effect::BrowseRunCommand {
+                request: CmdRequest::SystemctlStatusUnit { unit },
+                ..
+            }) if unit == "braid-online.service"
+        ));
+        assert!(state.is_detail());
     }
 
     // Intent: only Subvolumes > List supports parsed-table drill-in.
@@ -1516,7 +2199,8 @@ mod tests {
             0,
         );
 
-        let effect = state.enter(&pool());
+        let disks = HashMap::new();
+        let effect = state.enter(&pool(), &DiskInventory { by_id: &disks });
 
         assert!(effect.is_none());
         assert!(!state.is_subvolume_detail());
@@ -1541,12 +2225,34 @@ mod tests {
             top_level: 5,
             path: "data".into(),
         }];
-        let _ = state.enter(&pool());
+        let disks = HashMap::new();
+        let _ = state.enter(&pool(), &DiskInventory { by_id: &disks });
         state.back();
         assert!(!state.is_subvolume_detail());
         assert_eq!(
             state.output(),
             &["ID 256 gen 10 top level 5 path data".to_owned()]
         );
+    }
+
+    // Intent: Esc/Backspace from SMART detail restores the device picker.
+    // Why it exists: late detail output should not strand the user away from
+    // the selected device list.
+    // Scenario: user drills into SMART health for a disk and backs out.
+    #[test]
+    fn esc_pops_back_from_smartctl_detail() {
+        let mut state = BrowseState::default();
+        state.program = BrowseProgram::Smartctl;
+        state.smartctl_command = BrowseCommand::SmartctlHealth;
+        state.focus = BrowseFocus::Content;
+        let disks = disk_inventory();
+        let _ = state.load_current(&pool(), Some(&ups()), &DiskInventory { by_id: &disks });
+        let _ = state.enter(&pool(), &DiskInventory { by_id: &disks });
+
+        state.back();
+
+        assert!(!state.is_detail());
+        assert_eq!(state.smartctl_devices().len(), 2);
+        assert_eq!(state.output(), &["press Enter for SMART data".to_owned()]);
     }
 }

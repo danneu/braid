@@ -1,13 +1,14 @@
 ---
 source: cli/src/tui/browse/view.rs
+assertion_line: 701
 expression: "buffer_to_string(&render(&model, 80, 14))"
 ---
 ┌ Pgm ─────┐┌ Cmd ─────────┐┌ View ────────┐┌ Content ─────────────────────────┐
 │> Btrfs   ││  Filesystem  ││> Chunks      ││Devid PNumber Type/profile PStart │
 │  NUT     ││  Devices     ││              ││1 1 Data/RAID1 1.00MiB 64.00MiB   │
-│          ││  Subvolumes  ││              ││                                  │
-│          ││  Scrub       ││              ││                                  │
-│          ││  Balance     ││              ││                                  │
+│  Systemd ││  Subvolumes  ││              ││                                  │
+│  SMART   ││  Scrub       ││              ││                                  │
+│  lsblk   ││  Balance     ││              ││                                  │
 │          ││  Quota       ││              ││                                  │
 │          ││> Inspect     ││              ││                                  │
 │          ││              ││              ││                                  │

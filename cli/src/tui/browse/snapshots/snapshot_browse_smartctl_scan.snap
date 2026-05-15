@@ -1,19 +1,19 @@
 ---
 source: cli/src/tui/browse/view.rs
-assertion_line: 783
+assertion_line: 893
 expression: "buffer_to_string(&render(&model, 80, 14))"
 ---
 ┌ Pgm ─────┐┌ Cmd ─────────┐┌ Content ─────────────────────────────────────────┐
-│  Btrfs   ││  Status      ││[input.transfer.high]                             │
-│> NUT     ││  Variables   ││High transfer voltage                             │
-│  Systemd ││  Commands    ││                                                  │
-│  SMART   ││  Clients     ││                                                  │
-│  lsblk   ││> RW Vars     ││                                                  │
-│          ││  UPSes       ││                                                  │
+│  Btrfs   ││> Scan        ││/dev/sda -d scsi # /dev/sda, SCSI device          │
+│  NUT     ││  Health      ││                                                  │
+│  Systemd ││  Info        ││                                                  │
+│> SMART   ││  Attributes  ││                                                  │
+│  lsblk   ││  Self-test Lo││                                                  │
+│          ││  Error Log   ││                                                  │
 │          ││              ││                                                  │
 │          ││              ││                                                  │
 │          ││              ││                                                  │
 │          ││              ││                                                  │
 │          ││              ││                                                  │
 └──────────┘└──────────────┘└──────────────────────────────────────────────────┘
-$ upsrw -l ups
+$ smartctl --scan

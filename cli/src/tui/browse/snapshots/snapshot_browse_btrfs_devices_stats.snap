@@ -1,13 +1,14 @@
 ---
 source: cli/src/tui/browse/view.rs
+assertion_line: 530
 expression: "buffer_to_string(&render(&model, 80, 14))"
 ---
 ┌ Pgm ─────┐┌ Cmd ─────────┐┌ View ────────┐┌ Content ─────────────────────────┐
 │> Btrfs   ││  Filesystem  ││  Usage       ││[/dev/mapper/braid-disk1].write_io│
 │  NUT     ││> Devices     ││> Stats       ││                                  │
-│          ││  Subvolumes  ││              ││                                  │
-│          ││  Scrub       ││              ││                                  │
-│          ││  Balance     ││              ││                                  │
+│  Systemd ││  Subvolumes  ││              ││                                  │
+│  SMART   ││  Scrub       ││              ││                                  │
+│  lsblk   ││  Balance     ││              ││                                  │
 │          ││  Quota       ││              ││                                  │
 │          ││  Inspect     ││              ││                                  │
 │          ││              ││              ││                                  │

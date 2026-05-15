@@ -1,6 +1,7 @@
 use std::collections::HashMap;
 use std::time::{Duration, Instant};
 
+use crate::tui::browse::state::DiskInventory;
 use crate::tui::effect::{Effect, FAN_PROBE_INTERVAL, UPS_PROBE_INTERVAL};
 use crate::tui::model::{
     DiskLuksState, FanSnapshot, Model, PoolState, PoolStatus, Tab, TemperatureWatermark,
@@ -173,16 +174,28 @@ pub fn update(model: &mut Model, msg: Message) -> Vec<Effect> {
             model.browse.select_prev();
             browse_load_if_active(model)
         }
-        Message::BrowseEnter => model.browse.enter(&model.pool).into_iter().collect(),
+        Message::BrowseEnter => {
+            let disks = DiskInventory {
+                by_id: &model.disk_by_id,
+            };
+            model
+                .browse
+                .enter(&model.pool, &disks)
+                .into_iter()
+                .collect()
+        }
         Message::BrowseBack => {
             model.browse.back();
             vec![]
         }
         Message::BrowseReload => {
-            if model.browse.is_subvolume_detail() {
+            if model.browse.is_detail() {
+                let disks = DiskInventory {
+                    by_id: &model.disk_by_id,
+                };
                 model
                     .browse
-                    .reload_detail(&model.pool)
+                    .reload_detail(&model.pool, &disks)
                     .into_iter()
                     .collect()
             } else {
@@ -323,9 +336,12 @@ pub fn update(model: &mut Model, msg: Message) -> Vec<Effect> {
 
 fn browse_load_if_active(model: &mut Model) -> Vec<Effect> {
     if model.tab == Tab::Browse {
+        let disks = DiskInventory {
+            by_id: &model.disk_by_id,
+        };
         model
             .browse
-            .load_current(&model.pool, model.ups_config.as_ref())
+            .load_current(&model.pool, model.ups_config.as_ref(), &disks)
             .into_iter()
             .collect()
     } else {

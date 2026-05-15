@@ -1,13 +1,14 @@
 ---
 source: cli/src/tui/browse/view.rs
+assertion_line: 680
 expression: "buffer_to_string(&render(&model, 80, 14))"
 ---
 ┌ Pgm ─────┐┌ Cmd ─────────┐┌ View ────────┐┌ Content ─────────────────────────┐
 │> Btrfs   ││  Filesystem  ││  Status      ││qgroupid         rfer         excl│
 │  NUT     ││  Devices     ││> Qgroups     ││0/5          16.00KiB     16.00KiB│
-│          ││  Subvolumes  ││              ││                                  │
-│          ││  Scrub       ││              ││                                  │
-│          ││  Balance     ││              ││                                  │
+│  Systemd ││  Subvolumes  ││              ││                                  │
+│  SMART   ││  Scrub       ││              ││                                  │
+│  lsblk   ││  Balance     ││              ││                                  │
 │          ││> Quota       ││              ││                                  │
 │          ││  Inspect     ││              ││                                  │
 │          ││              ││              ││                                  │

@@ -1,0 +1,19 @@
+---
+source: cli/src/tui/browse/view.rs
+assertion_line: 854
+expression: "buffer_to_string(&render(&model, 100, 14))"
+---
+┌ Pgm ─────┐┌ Cmd ─────────┐┌ Content ─────────────────────────────────────────────────────────────┐
+│  Btrfs   ││> Status      ││* braid-online.service - braid pool online sentinel                   │
+│  NUT     ││  Show        ││   Loaded: loaded                                                     │
+│> Systemd ││  Braid       ││   Active: active (exited)                                            │
+│  SMART   ││  Failed      ││                                                                      │
+│  lsblk   ││  Timers      ││                                                                      │
+│          ││  Mounts      ││                                                                      │
+│          ││              ││                                                                      │
+│          ││              ││                                                                      │
+│          ││              ││                                                                      │
+│          ││              ││                                                                      │
+│          ││              ││                                                                      │
+└──────────┘└──────────────┘└──────────────────────────────────────────────────────────────────────┘
+$ systemctl status braid-online.service --no-pager

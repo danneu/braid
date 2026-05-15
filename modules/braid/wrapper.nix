@@ -18,6 +18,7 @@ let
       btrfsProgs
       utilLinux
       nut
+      smartmontools
     ])
     ++ [ pkgs.systemd ];
 in

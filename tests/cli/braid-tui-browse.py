@@ -49,5 +49,40 @@ with subtest("drill into subvolume detail and return"):
     press("esc")
     machine.wait_until_tty_matches("2", r"test-subvol")
 
+with subtest("browse systemd status detail"):
+    press("h")
+    press("h")
+    press("h")
+    press("j")
+    press("j")
+    press("l")
+    press("l")
+    machine.wait_until_tty_matches("2", r"braid-online\.service")
+    press("ret")
+    machine.wait_until_tty_matches("2", r"Loaded:")
+    press("esc")
+    machine.wait_until_tty_matches("2", r"braid-online\.service")
+
+with subtest("browse smart health detail"):
+    press("h")
+    press("h")
+    press("j")
+    press("l")
+    press("j")
+    press("l")
+    machine.wait_until_tty_matches("2", r"disk1")
+    press("ret")
+    machine.wait_until_tty_matches("2", r"/dev/disk/by-id/")
+    press("esc")
+    machine.wait_until_tty_matches("2", r"disk1")
+
+with subtest("browse lsblk filesystems"):
+    press("h")
+    press("h")
+    press("j")
+    press("l")
+    press("j")
+    machine.wait_until_tty_matches("2", r"btrfs")
+
 machine.succeed("systemctl stop braid-tui-canary.service")
 machine.shutdown()

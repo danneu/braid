@@ -140,6 +140,16 @@ fn render_content(frame: &mut Frame, area: Rect, model: &Model) {
         return;
     }
 
+    if model.browse.is_smartctl_picker() && !model.browse.smartctl_devices().is_empty() {
+        render_smartctl_device_table(frame, inner, model);
+        return;
+    }
+
+    if model.browse.is_systemd_picker() && !model.browse.systemd_units().is_empty() {
+        render_systemd_unit_table(frame, inner, model);
+        return;
+    }
+
     let visible_height = inner.height as usize;
     let lines: Vec<Line> = model
         .browse
@@ -189,6 +199,86 @@ fn render_subvolume_table(frame: &mut Frame, area: Rect, model: &Model) {
         Constraint::Length(8),
         Constraint::Length(8),
         Constraint::Min(10),
+    ];
+    frame.render_widget(Table::new(rows, widths).header(header), area);
+}
+
+fn render_smartctl_device_table(frame: &mut Frame, area: Rect, model: &Model) {
+    let header = Row::new(["", "Name", "ByIdPath"]).style(
+        Style::default()
+            .fg(Color::DarkGray)
+            .add_modifier(Modifier::BOLD),
+    );
+    let rows: Vec<Row> = model
+        .browse
+        .smartctl_devices()
+        .iter()
+        .enumerate()
+        .map(|(idx, (name, path))| {
+            let selected = idx == model.browse.selected_smartctl_device();
+            let marker = if selected { ">" } else { "" };
+            let style = if selected {
+                Style::default()
+                    .fg(Color::Cyan)
+                    .add_modifier(Modifier::BOLD)
+            } else {
+                Style::default()
+            };
+            Row::new(vec![
+                Cell::from(marker),
+                Cell::from(name.clone()),
+                Cell::from(path.clone()),
+            ])
+            .style(style)
+        })
+        .collect();
+    let widths = [
+        Constraint::Length(2),
+        Constraint::Length(12),
+        Constraint::Min(20),
+    ];
+    frame.render_widget(Table::new(rows, widths).header(header), area);
+}
+
+fn render_systemd_unit_table(frame: &mut Frame, area: Rect, model: &Model) {
+    let header = Row::new(["", "Unit", "Load", "Active", "Sub", "Description"]).style(
+        Style::default()
+            .fg(Color::DarkGray)
+            .add_modifier(Modifier::BOLD),
+    );
+    let rows: Vec<Row> = model
+        .browse
+        .systemd_units()
+        .iter()
+        .enumerate()
+        .map(|(idx, unit)| {
+            let selected = idx == model.browse.selected_systemd_unit();
+            let marker = if selected { ">" } else { "" };
+            let style = if selected {
+                Style::default()
+                    .fg(Color::Cyan)
+                    .add_modifier(Modifier::BOLD)
+            } else {
+                Style::default()
+            };
+            Row::new(vec![
+                Cell::from(marker),
+                Cell::from(unit.unit.clone()),
+                Cell::from(unit.load.clone()),
+                Cell::from(unit.active.clone()),
+                Cell::from(unit.sub.clone()),
+                Cell::from(unit.description.clone()),
+            ])
+            .style(style)
+        })
+        .collect();
+    let widths = [
+        Constraint::Length(2),
+        Constraint::Length(28),
+        Constraint::Length(8),
+        Constraint::Length(8),
+        Constraint::Length(10),
+        Constraint::Min(16),
     ];
     frame.render_widget(Table::new(rows, widths).header(header), area);
 }
@@ -252,6 +342,7 @@ mod tests {
     use super::*;
     use crate::cmd::RawCommandOutput;
     use crate::config::Ups;
+    use crate::tui::browse::state::DiskInventory;
     use crate::tui::demo::{sample_disk_names, sample_pool};
     use crate::tui::model::{DaemonStatus, PoolStatus, UpsSnapshot};
     use ratatui::Terminal;
@@ -301,6 +392,25 @@ mod tests {
             0,
         );
         model
+    }
+
+    fn seed_disk_by_id(model: &mut Model) {
+        model.disk_by_id.insert(
+            "disk1".to_owned(),
+            "/dev/disk/by-id/virtio-disk1".to_owned(),
+        );
+        model.disk_by_id.insert(
+            "disk2".to_owned(),
+            "/dev/disk/by-id/virtio-disk2".to_owned(),
+        );
+    }
+
+    fn systemd_units_json() -> String {
+        r#"[
+  {"unit":"braid-online.service","load":"loaded","active":"active","sub":"exited","description":"braid pool online sentinel"},
+  {"unit":"hddfancontrol-braid.service","load":"loaded","active":"active","sub":"running","description":"braid HDD fan control"}
+]"#
+        .to_owned()
     }
 
     fn ups_snapshot() -> UpsSnapshot {
@@ -474,7 +584,10 @@ mod tests {
             },
             0,
         );
-        let _ = model.browse.enter(&model.pool);
+        let disks = DiskInventory {
+            by_id: &model.disk_by_id,
+        };
+        let _ = model.browse.enter(&model.pool, &disks);
         model.browse.command_finished(
             RawCommandOutput {
                 cmd: "btrfs subvolume show /mnt/storage/data".into(),
@@ -691,11 +804,172 @@ mod tests {
     }
 
     #[test]
-    fn snapshot_browse_pool_offline() {
-        let mut model = Model::new_demo(sample_disk_names(), PoolStatus::NotMounted);
+    fn snapshot_browse_systemd_status_picker() {
+        let mut model = model();
+        model.browse.select_next();
+        model.browse.select_next();
+        model.browse.focus = BrowseFocus::Content;
+        model.browse.command_finished(
+            RawCommandOutput {
+                cmd: "systemctl list-units --output=json --all braid-* hddfancontrol-braid.service"
+                    .into(),
+                stdout: systemd_units_json(),
+                stderr: String::new(),
+                exit_status: 0,
+            },
+            0,
+        );
+        snap!(buffer_to_string(&render(&model, 100, 14)));
+    }
+
+    #[test]
+    fn snapshot_browse_systemd_status_detail() {
+        let mut model = model();
+        model.browse.select_next();
+        model.browse.select_next();
+        model.browse.focus = BrowseFocus::Content;
+        model.browse.command_finished(
+            RawCommandOutput {
+                cmd: "systemctl list-units --output=json --all braid-* hddfancontrol-braid.service"
+                    .into(),
+                stdout: systemd_units_json(),
+                stderr: String::new(),
+                exit_status: 0,
+            },
+            0,
+        );
+        let disks = DiskInventory {
+            by_id: &model.disk_by_id,
+        };
+        let _ = model.browse.enter(&model.pool, &disks);
+        model.browse.command_finished(
+            RawCommandOutput {
+                cmd: "systemctl status braid-online.service --no-pager".into(),
+                stdout: "* braid-online.service - braid pool online sentinel\n   Loaded: loaded\n   Active: active (exited)\n".into(),
+                stderr: String::new(),
+                exit_status: 0,
+            },
+            1,
+        );
+        snap!(buffer_to_string(&render(&model, 100, 14)));
+    }
+
+    #[test]
+    fn snapshot_browse_systemd_failed() {
+        let mut model = model();
+        model.browse.select_next();
+        model.browse.select_next();
+        model.browse.focus = BrowseFocus::Command;
+        for _ in 0..3 {
+            model.browse.select_next();
+        }
+        model.browse.command_finished(
+            RawCommandOutput {
+                cmd: "systemctl list-units --failed --all --no-pager".into(),
+                stdout: "  UNIT LOAD ACTIVE SUB DESCRIPTION\n0 loaded units listed.\n".into(),
+                stderr: String::new(),
+                exit_status: 0,
+            },
+            0,
+        );
+        snap!(buffer_to_string(&render(&model, 80, 14)));
+    }
+
+    #[test]
+    fn snapshot_browse_smartctl_scan() {
+        let mut model = model();
+        for _ in 0..3 {
+            model.browse.select_next();
+        }
+        model.browse.command_finished(
+            RawCommandOutput {
+                cmd: "smartctl --scan".into(),
+                stdout: "/dev/sda -d scsi # /dev/sda, SCSI device\n".into(),
+                stderr: String::new(),
+                exit_status: 0,
+            },
+            0,
+        );
+        snap!(buffer_to_string(&render(&model, 80, 14)));
+    }
+
+    #[test]
+    fn snapshot_browse_smartctl_health_picker() {
+        let mut model = model();
+        seed_disk_by_id(&mut model);
+        for _ in 0..3 {
+            model.browse.select_next();
+        }
+        model.browse.focus = BrowseFocus::Command;
+        model.browse.select_next();
+        model.browse.focus = BrowseFocus::Content;
+        let disks = DiskInventory {
+            by_id: &model.disk_by_id,
+        };
         let _ = model
             .browse
-            .load_current(&model.pool, model.ups_config.as_ref());
+            .load_current(&model.pool, model.ups_config.as_ref(), &disks);
+        snap!(buffer_to_string(&render(&model, 90, 14)));
+    }
+
+    #[test]
+    fn snapshot_browse_smartctl_health_detail() {
+        let mut model = model();
+        seed_disk_by_id(&mut model);
+        for _ in 0..3 {
+            model.browse.select_next();
+        }
+        model.browse.focus = BrowseFocus::Command;
+        model.browse.select_next();
+        model.browse.focus = BrowseFocus::Content;
+        let disks = DiskInventory {
+            by_id: &model.disk_by_id,
+        };
+        let _ = model
+            .browse
+            .load_current(&model.pool, model.ups_config.as_ref(), &disks);
+        let _ = model.browse.enter(&model.pool, &disks);
+        model.browse.command_finished(
+            RawCommandOutput {
+                cmd: "smartctl -H /dev/disk/by-id/virtio-disk1".into(),
+                stdout: "SMART overall-health self-assessment test result: PASSED\n".into(),
+                stderr: String::new(),
+                exit_status: 0,
+            },
+            1,
+        );
+        snap!(buffer_to_string(&render(&model, 90, 14)));
+    }
+
+    #[test]
+    fn snapshot_browse_lsblk_filesystems() {
+        let mut model = model();
+        for _ in 0..4 {
+            model.browse.select_next();
+        }
+        model.browse.focus = BrowseFocus::Command;
+        model.browse.select_next();
+        model.browse.command_finished(
+            RawCommandOutput {
+                cmd: "lsblk -f".into(),
+                stdout: "NAME FSTYPE FSVER LABEL UUID FSAVAIL FSUSE% MOUNTPOINTS\nvdb crypto_LUKS 2 braid-disk1 abc\n`-braid-disk1 btrfs abc 100M 1% /mnt/storage\n".into(),
+                stderr: String::new(),
+                exit_status: 0,
+            },
+            0,
+        );
+        snap!(buffer_to_string(&render(&model, 80, 14)));
+    }
+
+    #[test]
+    fn snapshot_browse_pool_offline() {
+        let mut model = Model::new_demo(sample_disk_names(), PoolStatus::NotMounted);
+        let disks = DiskInventory {
+            by_id: &model.disk_by_id,
+        };
+        let _ = model
+            .browse
+            .load_current(&model.pool, model.ups_config.as_ref(), &disks);
         snap!(buffer_to_string(&render(&model, 80, 14)));
     }
 

@@ -274,6 +274,38 @@ pub enum CmdRequest {
     BtrfsInspectListChunks {
         mount_point: MountPoint,
     },
+    SystemctlListUnitsBraid,
+    SystemctlListUnitsBraidJson,
+    SystemctlListUnitsFailed,
+    SystemctlListTimers,
+    SystemctlListMounts,
+    SystemctlStatusUnit {
+        unit: String,
+    },
+    SystemctlShowUnit {
+        unit: String,
+    },
+    SmartctlScan,
+    SmartctlHealth {
+        device: String,
+    },
+    SmartctlInfo {
+        device: String,
+    },
+    SmartctlAttributes {
+        device: String,
+    },
+    SmartctlSelftestLog {
+        device: String,
+    },
+    SmartctlErrorLog {
+        device: String,
+    },
+    LsblkTree,
+    LsblkFilesystems,
+    LsblkDisks,
+    LsblkAllColumns,
+    LsblkScsi,
     /// Run the canonical `braid-beep-probe` wrapper. The path is read at
     /// runtime from `/etc/braid/notifier-config.json` (written by the NixOS
     /// monitor module). Used by `braid doctor --beep` to play the alert test beep
@@ -967,6 +999,100 @@ impl CmdRequest {
                     mount_point.0.clone(),
                 ],
             },
+            CmdRequest::SystemctlListUnitsBraid => CmdArgs {
+                program: "systemctl".to_owned(),
+                args: vec![
+                    "list-units".into(),
+                    "--all".into(),
+                    "--no-pager".into(),
+                    "braid-*".into(),
+                    "hddfancontrol-braid.service".into(),
+                ],
+            },
+            CmdRequest::SystemctlListUnitsBraidJson => CmdArgs {
+                program: "systemctl".to_owned(),
+                args: vec![
+                    "list-units".into(),
+                    "--output=json".into(),
+                    "--all".into(),
+                    "braid-*".into(),
+                    "hddfancontrol-braid.service".into(),
+                ],
+            },
+            CmdRequest::SystemctlListUnitsFailed => CmdArgs {
+                program: "systemctl".to_owned(),
+                args: vec![
+                    "list-units".into(),
+                    "--failed".into(),
+                    "--all".into(),
+                    "--no-pager".into(),
+                ],
+            },
+            CmdRequest::SystemctlListTimers => CmdArgs {
+                program: "systemctl".to_owned(),
+                args: vec!["list-timers".into(), "--all".into(), "--no-pager".into()],
+            },
+            CmdRequest::SystemctlListMounts => CmdArgs {
+                program: "systemctl".to_owned(),
+                args: vec![
+                    "list-units".into(),
+                    "--type=mount,automount".into(),
+                    "--all".into(),
+                    "--no-pager".into(),
+                ],
+            },
+            CmdRequest::SystemctlStatusUnit { unit } => CmdArgs {
+                program: "systemctl".to_owned(),
+                args: vec!["status".into(), unit.clone(), "--no-pager".into()],
+            },
+            CmdRequest::SystemctlShowUnit { unit } => CmdArgs {
+                program: "systemctl".to_owned(),
+                args: vec!["show".into(), unit.clone(), "--no-pager".into()],
+            },
+            CmdRequest::SmartctlScan => CmdArgs {
+                program: "smartctl".to_owned(),
+                args: vec!["--scan".into()],
+            },
+            CmdRequest::SmartctlHealth { device } => CmdArgs {
+                program: "smartctl".to_owned(),
+                args: vec!["-H".into(), device.clone()],
+            },
+            CmdRequest::SmartctlInfo { device } => CmdArgs {
+                program: "smartctl".to_owned(),
+                args: vec!["-i".into(), device.clone()],
+            },
+            CmdRequest::SmartctlAttributes { device } => CmdArgs {
+                program: "smartctl".to_owned(),
+                args: vec!["-A".into(), device.clone()],
+            },
+            CmdRequest::SmartctlSelftestLog { device } => CmdArgs {
+                program: "smartctl".to_owned(),
+                args: vec!["-l".into(), "selftest".into(), device.clone()],
+            },
+            CmdRequest::SmartctlErrorLog { device } => CmdArgs {
+                program: "smartctl".to_owned(),
+                args: vec!["-l".into(), "error".into(), device.clone()],
+            },
+            CmdRequest::LsblkTree => CmdArgs {
+                program: "lsblk".to_owned(),
+                args: vec![],
+            },
+            CmdRequest::LsblkFilesystems => CmdArgs {
+                program: "lsblk".to_owned(),
+                args: vec!["-f".into()],
+            },
+            CmdRequest::LsblkDisks => CmdArgs {
+                program: "lsblk".to_owned(),
+                args: vec!["-d".into()],
+            },
+            CmdRequest::LsblkAllColumns => CmdArgs {
+                program: "lsblk".to_owned(),
+                args: vec!["-O".into()],
+            },
+            CmdRequest::LsblkScsi => CmdArgs {
+                program: "lsblk".to_owned(),
+                args: vec!["-S".into()],
+            },
             CmdRequest::BraidBeepProbe { path } => CmdArgs {
                 program: path.clone(),
                 args: vec![],
@@ -1551,6 +1677,103 @@ mod tests {
                     "/mnt/storage",
                 ],
             ),
+            (
+                CmdRequest::SystemctlListUnitsBraid,
+                "systemctl",
+                vec![
+                    "list-units",
+                    "--all",
+                    "--no-pager",
+                    "braid-*",
+                    "hddfancontrol-braid.service",
+                ],
+            ),
+            (
+                CmdRequest::SystemctlListUnitsBraidJson,
+                "systemctl",
+                vec![
+                    "list-units",
+                    "--output=json",
+                    "--all",
+                    "braid-*",
+                    "hddfancontrol-braid.service",
+                ],
+            ),
+            (
+                CmdRequest::SystemctlListUnitsFailed,
+                "systemctl",
+                vec!["list-units", "--failed", "--all", "--no-pager"],
+            ),
+            (
+                CmdRequest::SystemctlListTimers,
+                "systemctl",
+                vec!["list-timers", "--all", "--no-pager"],
+            ),
+            (
+                CmdRequest::SystemctlListMounts,
+                "systemctl",
+                vec![
+                    "list-units",
+                    "--type=mount,automount",
+                    "--all",
+                    "--no-pager",
+                ],
+            ),
+            (
+                CmdRequest::SystemctlStatusUnit {
+                    unit: "braid-online.service".into(),
+                },
+                "systemctl",
+                vec!["status", "braid-online.service", "--no-pager"],
+            ),
+            (
+                CmdRequest::SystemctlShowUnit {
+                    unit: "braid-online.service".into(),
+                },
+                "systemctl",
+                vec!["show", "braid-online.service", "--no-pager"],
+            ),
+            (CmdRequest::SmartctlScan, "smartctl", vec!["--scan"]),
+            (
+                CmdRequest::SmartctlHealth {
+                    device: "/dev/disk/by-id/disk1".into(),
+                },
+                "smartctl",
+                vec!["-H", "/dev/disk/by-id/disk1"],
+            ),
+            (
+                CmdRequest::SmartctlInfo {
+                    device: "/dev/disk/by-id/disk1".into(),
+                },
+                "smartctl",
+                vec!["-i", "/dev/disk/by-id/disk1"],
+            ),
+            (
+                CmdRequest::SmartctlAttributes {
+                    device: "/dev/disk/by-id/disk1".into(),
+                },
+                "smartctl",
+                vec!["-A", "/dev/disk/by-id/disk1"],
+            ),
+            (
+                CmdRequest::SmartctlSelftestLog {
+                    device: "/dev/disk/by-id/disk1".into(),
+                },
+                "smartctl",
+                vec!["-l", "selftest", "/dev/disk/by-id/disk1"],
+            ),
+            (
+                CmdRequest::SmartctlErrorLog {
+                    device: "/dev/disk/by-id/disk1".into(),
+                },
+                "smartctl",
+                vec!["-l", "error", "/dev/disk/by-id/disk1"],
+            ),
+            (CmdRequest::LsblkTree, "lsblk", vec![]),
+            (CmdRequest::LsblkFilesystems, "lsblk", vec!["-f"]),
+            (CmdRequest::LsblkDisks, "lsblk", vec!["-d"]),
+            (CmdRequest::LsblkAllColumns, "lsblk", vec!["-O"]),
+            (CmdRequest::LsblkScsi, "lsblk", vec!["-S"]),
             (
                 CmdRequest::UpscClients { name: "ups".into() },
                 "upsc",

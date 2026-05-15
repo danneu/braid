@@ -1,13 +1,14 @@
 ---
 source: cli/src/tui/browse/view.rs
+assertion_line: 803
 expression: "buffer_to_string(&render(&model, 80, 14))"
 ---
 ┌ Pgm ─────┐┌ Cmd ─────────┐┌ Content ─────────────────────────────────────────┐
 │  Btrfs   ││  Status      ││Error: Connection failure: Connection refused     │
 │> NUT     ││  Variables   ││                                                  │
-│          ││  Commands    ││                                                  │
-│          ││  Clients     ││                                                  │
-│          ││  RW Vars     ││                                                  │
+│  Systemd ││  Commands    ││                                                  │
+│  SMART   ││  Clients     ││                                                  │
+│  lsblk   ││  RW Vars     ││                                                  │
 │          ││> UPSes       ││                                                  │
 │          ││              ││                                                  │
 │          ││              ││                                                  │

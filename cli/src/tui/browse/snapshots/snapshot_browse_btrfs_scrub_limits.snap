@@ -1,13 +1,14 @@
 ---
 source: cli/src/tui/browse/view.rs
+assertion_line: 640
 expression: "buffer_to_string(&render(&model, 80, 14))"
 ---
 ┌ Pgm ─────┐┌ Cmd ─────────┐┌ View ────────┐┌ Content ─────────────────────────┐
 │> Btrfs   ││  Filesystem  ││  Status      ││Device 1: scrub limit 0B (unlimite│
 │  NUT     ││  Devices     ││> Limits      ││                                  │
-│          ││  Subvolumes  ││              ││                                  │
-│          ││> Scrub       ││              ││                                  │
-│          ││  Balance     ││              ││                                  │
+│  Systemd ││  Subvolumes  ││              ││                                  │
+│  SMART   ││> Scrub       ││              ││                                  │
+│  lsblk   ││  Balance     ││              ││                                  │
 │          ││  Quota       ││              ││                                  │
 │          ││  Inspect     ││              ││                                  │
 │          ││              ││              ││                                  │

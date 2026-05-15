@@ -4,7 +4,7 @@ Status: Active
 
 ## Context
 
-Braid's parser-critical runtime tools (btrfs-progs, cryptsetup, util-linux, NUT) are parsed by the Rust CLI. Output formats change between tool versions — a flake update to nixpkgs-unstable could silently break parsers. Generic helpers (coreutils, systemd) are used for basic system operations but their output is never parsed by braid.
+Braid's parser-critical runtime tools (btrfs-progs, cryptsetup, util-linux, NUT, smartmontools) are parsed by the Rust CLI. Output formats change between tool versions — a flake update to nixpkgs-unstable could silently break parsers. Generic helpers (coreutils, systemd) are used for basic system operations and are outside braid's parser contract. Browse has one tolerant UI-only systemd exception: it parses `systemctl list-units --output=json` for a picker and falls back to raw output on parse failure.
 
 ## Decision
 
@@ -13,7 +13,7 @@ Pin `flake.nix` to a specific NixOS stable release (nixos-25.11). Pin only parse
 ### How it works
 
 - **Flake input**: `nixpkgs.url = "github:NixOS/nixpkgs/nixos-25.11"` — parser-critical tool packages come from this channel.
-- **Module options**: `braid.packages.*` (cryptsetup, btrfsProgs, utilLinux, nut) default to the flake's nixpkgs but can be overridden per-system.
+- **Module options**: `braid.packages.*` (cryptsetup, btrfsProgs, utilLinux, nut, smartmontools) default to the flake's nixpkgs but can be overridden per-system.
 - **PATH wrapping**: The wrapper injects `cfg.packages.*` into PATH. Generic helpers (coreutils, systemd) are resolved from the consumer's `pkgs`, not pinned.
 - **Two wrapping sites**: flake.nix wraps with `pkgs.*` defaults (for `nix run` and tests); the module wraps `cfg.package` with `cfg.packages.*` (for deployed NixOS systems where package options may be overridden).
 
@@ -25,7 +25,7 @@ Parser-critical tools are pinned by default to the flake's nixpkgs release, but 
 
 **Pin** when: braid parses the tool's output, or the tool's behavior is part of braid's correctness/safety model.
 
-**Use system `pkgs`** when: the tool is a generic helper, braid doesn't parse its output, and version drift is unlikely to affect correctness.
+**Use system `pkgs`** when: the tool is a generic helper, braid doesn't parse its output as a correctness contract, and version drift is unlikely to affect correctness. The Browse Systemd picker is a UI-only exception because it parses `systemctl list-units --output=json` tolerantly and disables drill-in on parse failure.
 
 New runtime dependencies must be classified into one of these two groups when added.
 
@@ -35,8 +35,9 @@ New runtime dependencies must be classified into one of these two groups when ad
 | cryptsetup | Yes | Yes (`braid.packages.cryptsetup`) | Output parsed by nom combinators |
 | util-linux (lsblk) | Yes | Yes (`braid.packages.utilLinux`) | `lsblk` JSON output parsed by serde |
 | NUT (`upsc`) | Yes | Yes (`braid.packages.nut`) | `upsc` key: value output parsed by `parse_upsc` for preflight safety and operator visibility |
+| smartmontools | Yes | Yes (`braid.packages.smartmontools`) | `smartctl --json` output parsed by `parse_smartctl` |
 | coreutils | No — system `pkgs` | No option | chown/chmod/realpath/stat — output not parsed |
-| systemd | No — system `pkgs` | No option | systemctl/ask-password — commodity behavior |
+| systemd | No — system `pkgs` | No option | systemctl/ask-password commodity behavior; Browse's list-units JSON picker is tolerant UI-only, not parser-critical |
 
 ### Upgrading tools
 

@@ -1,0 +1,19 @@
+---
+source: cli/src/tui/browse/view.rs
+assertion_line: 941
+expression: "buffer_to_string(&render(&model, 90, 14))"
+---
+┌ Pgm ─────┐┌ Cmd ─────────┐┌ Content ───────────────────────────────────────────────────┐
+│  Btrfs   ││  Scan        ││SMART overall-health self-assessment test result: PASSED    │
+│  NUT     ││> Health      ││                                                            │
+│  Systemd ││  Info        ││                                                            │
+│> SMART   ││  Attributes  ││                                                            │
+│  lsblk   ││  Self-test Lo││                                                            │
+│          ││  Error Log   ││                                                            │
+│          ││              ││                                                            │
+│          ││              ││                                                            │
+│          ││              ││                                                            │
+│          ││              ││                                                            │
+│          ││              ││                                                            │
+└──────────┘└──────────────┘└────────────────────────────────────────────────────────────┘
+$ smartctl -H /dev/disk/by-id/virtio-disk1

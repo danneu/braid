@@ -34,6 +34,7 @@ pub mod cryptsetup_status;
 mod helpers;
 pub mod lsblk;
 pub mod smartctl;
+pub mod systemctl_list_units;
 pub mod types;
 pub mod upsc;
 
@@ -100,4 +101,5 @@ pub use cryptsetup_luks_version::parse_cryptsetup_luks_version;
 pub use cryptsetup_status::parse_cryptsetup_status;
 pub use lsblk::parse_lsblk_json;
 pub use smartctl::parse_smartctl;
+pub use systemctl_list_units::{SystemdUnitRow, parse_systemctl_list_units_json};
 pub use upsc::parse_upsc;

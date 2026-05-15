@@ -1,13 +1,14 @@
 ---
 source: cli/src/tui/browse/view.rs
+assertion_line: 721
 expression: "buffer_to_string(&render(&model, 80, 14))"
 ---
 ┌ Pgm ─────┐┌ Cmd ─────────┐┌ Content ─────────────────────────────────────────┐
 │  Btrfs   ││  Status      ││ups.status: OL                                    │
 │> NUT     ││> Variables   ││battery.charge: 100                               │
-│          ││  Commands    ││                                                  │
-│          ││  Clients     ││                                                  │
-│          ││  RW Vars     ││                                                  │
+│  Systemd ││  Commands    ││                                                  │
+│  SMART   ││  Clients     ││                                                  │
+│  lsblk   ││  RW Vars     ││                                                  │
 │          ││  UPSes       ││                                                  │
 │          ││              ││                                                  │
 │          ││              ││                                                  │
