@@ -3,7 +3,7 @@
 # What: Tests `braid add disk1 disk2` (multi-disk add) through three scenarios:
 # (1) bootstrap a new pool with 2 disks in one command → RAID1 from the start;
 # (2) add 2 more disks to existing pool in one command → one balance;
-# (3) single-disk add to existing pool → backward compat.
+# (3) single-disk add to an existing pool.
 #
 # Why: Multi-disk add is the recommended way to start a pool. It uses
 # mkfs.btrfs -d raid1 -m raid1 to create the filesystem already in RAID1,
@@ -76,7 +76,7 @@ with subtest("Data survived multi-add expansion"):
     assert content == "multi-add data", f"Expected 'multi-add data', got '{content}'"
 
 
-# --- Phase 3: Single-disk add → backward compat ---
+# --- Phase 3: Single-disk add to an existing pool ---
 
 with subtest("Single disk add to existing pool works"):
     machine.succeed(add_cmd("disk5"))

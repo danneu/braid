@@ -3,7 +3,7 @@
 # What: Tests `braid add disk1 disk2` (multi-disk add) through three scenarios:
 # (1) bootstrap a new pool with 2 disks → RAID1 from the start, no balance;
 # (2) add 2 more disks to existing pool → one balance at the end;
-# (3) single-disk add → backward compat.
+# (3) single-disk add to an existing pool.
 #
 # Why: Multi-disk add is the recommended way to start a pool. It avoids the
 # single→RAID1 balance that rewrites all data. This test proves the mkfs.btrfs
