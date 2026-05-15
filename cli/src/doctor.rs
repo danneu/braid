@@ -331,10 +331,10 @@ fn classify_luks_identity<R: CommandRunner>(
 /// Pure rendering function: takes pre-classified per-disk states and returns
 /// the `CheckResult` for `declared_disks`.
 ///
-/// Remediation messages delegate to `luks::luks_header_unreadable_guidance`
-/// and `luks::luks_header_damaged_guidance`, which are shared with the unlock
-/// error-enrichment path. Those helpers enforce the cross-command invariant
-/// that no user-facing message ever references local
+/// Remediation messages delegate to `luks::*_guidance` helpers shared with
+/// the unlock and enroll error-enrichment paths. Those helpers enforce the
+/// cross-command invariant that no user-facing header recovery message
+/// references local
 /// `/var/lib/braid/luks-headers/` files — `braid status` and the TUI already
 /// warn about persistent local copies, because the intended workflow is to
 /// export headers off-system and remove the local copy.
@@ -352,10 +352,8 @@ fn summarize_declared_disks(classifications: &[(String, String, DiskState)]) -> 
             DiskState::LuksHeaderOk => {}
             DiskState::LuksUuidMismatch { expected, observed } => {
                 uuid_mismatch.push(format!(
-                    "{name} ({by_id}): expected {expected}, observed {observed} -- \
-                     disk was swapped, cloned, or reformatted; detach the foreign \
-                     disk and reattach the original, or run 'braid replace' if the \
-                     swap was intentional"
+                    "{name} ({by_id}): expected {expected}, observed {observed} -- {}",
+                    luks::luks_uuid_mismatch_guidance()
                 ));
             }
             DiskState::Missing => missing.push(format!("{name} ({by_id})")),

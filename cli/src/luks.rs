@@ -707,6 +707,16 @@ pub(crate) fn luks_header_unreadable_guidance() -> &'static str {
     off-system backup, recovery may be limited or impossible."
 }
 
+/// Canonical remediation hint for a LUKS UUID mismatch.
+///
+/// Shared by unlock, standalone enroll, and doctor so every membership
+/// boundary gives the same safe-default recovery path.
+pub(crate) fn luks_uuid_mismatch_guidance() -> &'static str {
+    "disk was swapped, cloned, or reformatted; detach the foreign disk \
+     and reattach the original, or run 'braid replace' if the swap was \
+     intentional"
+}
+
 /// Resolves live block-device paths for mapper ownership checks without
 /// widening the generic filesystem probe surface.
 pub trait BackingPathResolver {
@@ -3505,6 +3515,30 @@ mod tests {
         assert!(
             !msg.contains(".luksheader"),
             "must not reference local .luksheader files: {msg}"
+        );
+    }
+
+    /*
+     * Intent: the UUID-mismatch guidance points operators at the safe
+     *   remediation path and the intentional-swap command.
+     * Why it exists: UUID mismatch is the identity guard for pool membership,
+     *   so unlock, enroll, and doctor must not drift into different advice.
+     * Scenario: code review for any future edit to the helper.
+     */
+    #[test]
+    fn luks_uuid_mismatch_guidance_includes_canonical_remediation() {
+        let msg = luks_uuid_mismatch_guidance();
+        assert!(
+            msg.contains("detach the foreign disk"),
+            "missing detach guidance: {msg}"
+        );
+        assert!(
+            msg.contains("braid replace"),
+            "missing replace command: {msg}"
+        );
+        assert!(
+            msg.contains("swap was intentional"),
+            "missing intentional-swap qualifier: {msg}"
         );
     }
 

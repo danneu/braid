@@ -279,8 +279,13 @@ fn plan_open_pool_inner<R: CommandRunner, F: Filesystem + ?Sized>(
                     return Err(MountError::Failed(format!(
                         "disk '{}' LUKS UUID mismatch at {}:\n  \
                              expected  {}\n  \
-                             found     {}",
-                        name, member.by_id, expected_uuid, uuid
+                             found     {}\n\
+                         hint: {}",
+                        name,
+                        member.by_id,
+                        expected_uuid,
+                        uuid,
+                        luks::luks_uuid_mismatch_guidance()
                     )));
                 }
 
@@ -2204,6 +2209,14 @@ pool already mounted at /mnt/storage
         assert!(
             msg.contains("ffffffff"),
             "error should show found UUID, got: {msg}"
+        );
+        assert!(
+            msg.contains("detach the foreign disk"),
+            "error should include remediation guidance, got: {msg}"
+        );
+        assert!(
+            msg.contains("braid replace"),
+            "error should include replacement command, got: {msg}"
         );
     }
 

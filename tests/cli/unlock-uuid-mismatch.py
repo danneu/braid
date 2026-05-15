@@ -113,6 +113,12 @@ with subtest("UUID mismatch: reformatted disk2 detected and rejected"):
     assert "LUKS UUID mismatch" in ret[1], (
         f"Expected 'LUKS UUID mismatch' in output, got: {ret[1]}"
     )
+    assert "detach the foreign disk" in ret[1], (
+        f"Expected remediation hint in output, got: {ret[1]}"
+    )
+    assert "braid replace" in ret[1], (
+        f"Expected replacement command in output, got: {ret[1]}"
+    )
     assert "disk2" in ret[1], (
         f"Expected 'disk2' named in output, got: {ret[1]}"
     )

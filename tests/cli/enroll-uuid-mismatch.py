@@ -66,6 +66,12 @@ def assert_mismatch_output(output, old_uuid, new_uuid):
     assert "LUKS UUID mismatch" in output, (
         f"expected UUID mismatch in output, got: {output}"
     )
+    assert "detach the foreign disk" in output, (
+        f"expected remediation hint in output, got: {output}"
+    )
+    assert "braid replace" in output, (
+        f"expected replacement command in output, got: {output}"
+    )
     assert "disk2" in output, f"expected disk2 in output, got: {output}"
     assert old_uuid in output, (
         f"expected original UUID {old_uuid} in output, got: {output}"

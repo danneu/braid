@@ -120,8 +120,13 @@ fn discover_enrollment_candidates<R: CommandRunner, F: Filesystem + ?Sized>(
                         Err(EnrollKeyFileError::Validation(format!(
                             "disk '{}' LUKS UUID mismatch at {}:\n  \
                              expected  {}\n  \
-                             found     {}",
-                            name, member.by_id, expected_uuid, uuid
+                             found     {}\n\
+                             hint: {}",
+                            name,
+                            member.by_id,
+                            expected_uuid,
+                            uuid,
+                            luks::luks_uuid_mismatch_guidance()
                         ))),
                     );
                 }
@@ -804,6 +809,14 @@ mod tests {
         assert!(
             msg.contains(observed),
             "error should include observed UUID {observed}: {msg}"
+        );
+        assert!(
+            msg.contains("detach the foreign disk"),
+            "error should include remediation guidance: {msg}"
+        );
+        assert!(
+            msg.contains("braid replace"),
+            "error should include replacement command: {msg}"
         );
 
         let requests = runner.requests();
