@@ -1272,17 +1272,18 @@ impl AddPlan {
                 .map_err(|e| AddError::Validation(e.to_string()))?;
         } else {
             // Add each to existing pool
+            let mut pool_after: Option<PoolState> = None;
             for target in &needs_pool_add {
                 pool_add_device(runner, &target.mapper_path, mount_point, target.force)?;
                 eprintln!("Device added to pool: {}", target.mapper_path);
-                let pool_after = probe_pool(runner, fs, mount_point).map_err(|e| {
+                let probe = probe_pool(runner, fs, mount_point).map_err(|e| {
                     AddError::AckCleanupFailed {
                         stage: "post-add probe",
                         detail: format!("{}: {e}", target.name),
                     }
                 })?;
                 let dev =
-                    find_added_device_by_uuid(&pool_after, &target.luks_uuid).ok_or_else(|| {
+                    find_added_device_by_uuid(&probe, &target.luks_uuid).ok_or_else(|| {
                         AddError::AckCleanupFailed {
                             stage: "post-add probe",
                             detail: format!("{}: not found in pool after add", target.name),
@@ -1294,15 +1295,18 @@ impl AddPlan {
                         detail: format!("devid {}: {e}", dev.devid),
                     }
                 })?;
+                pool_after = Some(probe);
             }
 
             // Membership is committed by btrfs device add. Persist it before
             // the long post-add balance while leaving the journal in place so
             // recovery still knows the balance is owed if interrupted.
-            let pool_after = probe_pool(runner, fs, mount_point)?;
-            // Distinct from the per-target probe above: membership is about
-            // to be persisted, so re-check every journaled target in the
-            // current live pool by UUID before saving pool.json.
+            let pool_after = pool_after.expect(
+                "needs_pool_add is non-empty in the live-pool branch: \
+                 journal_targets.is_empty() short-circuits earlier, and \
+                 journal_targets and needs_pool_add are populated in lockstep",
+            );
+            // Reuse the last per-target probe before saving pool.json.
             for (uuid, target) in journal_targets.iter() {
                 if find_added_device_by_uuid(&pool_after, uuid).is_none() {
                     return Err(AddError::Validation(format!(
