@@ -4467,6 +4467,102 @@ mod tests {
         );
     }
 
+    // Intent: a partial multi-add leaves pending-op.json populated with
+    //   every originally-requested target so `braid recover` can finish
+    //   the work the loop interrupted.
+    //
+    // Why it exists: ADR-017 makes target_membership a write-once,
+    //   before-the-irreversible-loop snapshot; the live-pool add loop at
+    //   cli/src/add.rs:1273-1297 never touches the journal mid-loop. A
+    //   future refactor that pruned journaled targets to "match recovery
+    //   to live state" on partial failure would silently change what
+    //   recover replays without breaking any existing test.
+    //
+    // Scenario: cmd_add disk2,disk3 against a mounted pool seeded with
+    //   disk1 by add_test_setup, with disk3's btrfs device add forced to
+    //   fail. Assert pending-op.json carries OpKind::Add {
+    //   phase: PoolMutation, targets: {disk2, disk3} } with
+    //   pre_membership = {disk1}, target_membership = {disk1, disk2, disk3},
+    //   and per-target by-id paths intact.
+    #[test]
+    fn cmd_add_partial_multi_add_journal_carries_all_targets() {
+        let (_state_tmp, paths, _tmp, config_path, pass_path) = add_test_setup();
+        let fs = AddMockFs(vec![
+            "/dev/disk/by-id/virtio-disk2".into(),
+            "/dev/disk/by-id/virtio-disk3".into(),
+        ]);
+        let runner = AddFullPathRunner::live().with_second_add_failure();
+        let inhibitor = crate::inhibit::RecordingInhibitor::new();
+
+        let result = cmd_add(
+            &runner,
+            &fs,
+            &AddParams {
+                config_path: &config_path,
+                disk_specs: &[
+                    "disk2=/dev/disk/by-id/virtio-disk2".into(),
+                    "disk3=/dev/disk/by-id/virtio-disk3".into(),
+                ],
+                dry_run: false,
+                yes: true,
+                passphrase_stdin: false,
+                passphrase_file: Some(pass_path.as_path()),
+                enroll_key_file: None,
+                luks_format_extra_opts: &[],
+                progress: ProgressOutput::Off,
+                paths: &paths,
+                sleep_inhibitor: &inhibitor,
+                passphrase_reader: &RealTty,
+                backing_path_resolver:
+                    crate::test_fixtures::mock_virtio_offset_backing_path_resolver(),
+            },
+        );
+
+        assert!(result.is_err(), "second device add should fail");
+        assert_eq!(runner.added_mappers(), vec!["braid-disk2"]);
+        let journal = journal::load_journal(&paths)
+            .unwrap()
+            .expect("journal must survive partial failure");
+        let journal::OpKind::Add { phase, targets } = &journal.op else {
+            panic!("expected add journal, got: {:?}", journal.op);
+        };
+        assert_eq!(phase, &journal::AddPhase::PoolMutation);
+
+        let target_names: std::collections::BTreeSet<_> =
+            targets.iter().map(|(_, t)| t.name.as_str()).collect();
+        assert_eq!(
+            target_names,
+            std::collections::BTreeSet::from(["disk2", "disk3"])
+        );
+
+        let pre_membership_names: std::collections::BTreeSet<_> = journal
+            .pre_membership
+            .iter()
+            .map(|(_, m)| m.name.as_str())
+            .collect();
+        assert_eq!(
+            pre_membership_names,
+            std::collections::BTreeSet::from(["disk1"])
+        );
+
+        let target_membership_names: std::collections::BTreeSet<_> = journal
+            .target_membership
+            .iter()
+            .map(|(_, m)| m.name.as_str())
+            .collect();
+        assert_eq!(
+            target_membership_names,
+            std::collections::BTreeSet::from(["disk1", "disk2", "disk3"])
+        );
+
+        let disk3 = targets
+            .iter()
+            .find(|(_, t)| t.name.as_str() == "disk3")
+            .map(|(_, t)| t)
+            .expect("disk3 target");
+        assert_eq!(disk3.by_id.as_str(), "/dev/disk/by-id/virtio-disk3");
+    }
+
     /*
      * Intent: a live-pool cleanup read/parse failure after `btrfs device add`
      * is fatal with the typed `AckCleanupFailed` stage `live-pool add`.
