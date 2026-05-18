@@ -64,9 +64,11 @@ reachable UPS with a populated `status_flags` array and no top-level
     "serial": "3B1234X56789",
     "type_": "ups"
   },
-  "extra": { "driver.name": "usbhid-ups" }
+  "extra": { "driver.name": "usbhid-ups", "battery.charge.low": "10" }
 }
 ```
+
+`extra` is a string-keyed map of every `upsc` line that did not land in a typed field above. Its contents vary with the NUT driver and version (typically `driver.*` debug keys plus other untyped fields like `battery.charge.low` or `input.voltage.nominal`), and values are kept verbatim as strings.
 
 Distinct sentinels cover the common non-OK cases:
 
