@@ -275,6 +275,23 @@ pub(crate) fn enroll_add_keyfile_ok(
     )
 }
 
+/// Failing `CryptsetupLuksAddKeyFile` triple for apply-path tests that
+/// need a post-preflight mutation failure after earlier disks changed.
+pub(crate) fn enroll_add_keyfile_fail(
+    device: &str,
+    key_file: &str,
+    passphrase: &str,
+) -> (CmdRequest, Vec<u8>, RawCommandOutput) {
+    (
+        CmdRequest::CryptsetupLuksAddKeyFile {
+            device: device.to_owned(),
+            key_file_path: key_file.to_owned(),
+        },
+        passphrase.as_bytes().to_vec(),
+        err_raw("cryptsetup luksAddKey", 5, "Device or resource busy"),
+    )
+}
+
 // ---------------------------------------------------------------------------
 // Runner-chaining wrappers
 // ---------------------------------------------------------------------------

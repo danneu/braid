@@ -57,7 +57,7 @@ sudo braid enroll /mnt/usb --generate --dry-run
 ## What happens under the hood
 
 1. Checks for a pending operation journal (refuses if one exists).
-2. **With `--generate`:** Validates that the target directory exists, is a directory, is already a mount point, and does not already contain `braid.key` (refuses if it does -- remove it manually first).
+2. **With `--generate`:** Validates that the target directory exists, is a directory, is already a mount point, and does not already contain `braid.key` (if a prior `--generate` run was interrupted, drop `--generate` and re-run to finish enrolling the existing keyfile; otherwise remove it manually first).
 3. **Without `--generate`:** Validates that `DIR/braid.key` already exists and is a regular file.
 4. Scans pool membership for present LUKS disks. Absent or non-LUKS disks are skipped with a message.
 5. Verifies the passphrase against every present pool disk before any keyfile probe.
@@ -75,7 +75,7 @@ sudo braid enroll /mnt/usb --generate --dry-run
 - With `--generate`, refuses unless the target directory is already a mount point.
 - Passphrase is verified before any mutations.
 - Slot 1 conflicts are detected before the keyfile is generated, so you never end up with an orphan keyfile.
-- With `--generate`, refuses if `braid.key` already exists at the target path.
+- With `--generate`, refuses if `braid.key` already exists at the target path; if a prior `--generate` run was interrupted, drop `--generate` and re-run to finish enrolling the existing keyfile.
 - Without `--generate`, refuses if the keyfile doesn't exist.
 - Idempotent: if the keyfile is already enrolled on a disk, that disk is skipped.
 

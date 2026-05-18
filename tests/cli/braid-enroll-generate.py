@@ -108,8 +108,20 @@ with subtest("Test 2: unlock with generated keyfile"):
 
 with subtest("Test 3: --generate refuses overwrite"):
     pq = shlex.quote(passphrase)
-    machine.fail(
-        f"printf '%s\\n' {pq} | braid enroll /tmp/usb --generate --passphrase-stdin"
+    status, output = machine.execute(
+        f"printf '%s\\n' {pq} | braid enroll /tmp/usb --generate --passphrase-stdin 2>&1"
+    )
+    assert status != 0, (
+        f"expected nonzero exit; got status={status}, output={output!r}"
+    )
+    assert "braid.key already exists" in output, (
+        f"expected `already exists` error, got: {output!r}"
+    )
+    assert "drop `--generate`" in output, (
+        f"expected interrupted-run recovery hint, got: {output!r}"
+    )
+    assert "braid enroll /tmp/usb" in output, (
+        f"expected recovery command pointing at DIR, got: {output!r}"
     )
 
 # --- Test 4: Slot conflict prevents keyfile creation ---

@@ -39,7 +39,7 @@
 //!   * `enroll_key_file` -- flat collection of `enroll_`-prefixed
 //!     leaf helpers (`enroll_fs`, `enroll_by_id`, `enroll_passphrase`,
 //!     `enroll_luks_uuid_ok`, `enroll_test_passphrase_*`,
-//!     `enroll_add_keyfile_ok`, `enroll_with_mountpoint_*`,
+//!     `enroll_add_keyfile_*`, `enroll_with_mountpoint_*`,
 //!     `enroll_make_membership`, `enroll_make_existing_keyfile`,
 //!     `enroll_discovery_two_disks`). Ships flat for the same reason
 //!     mount does -- per-test request-set composition and
@@ -155,11 +155,12 @@ pub(crate) use doctor::{
     systemctl_show_active_state_output, ups_ctx, valid_config_json, write_temp,
 };
 pub(crate) use enroll_key_file::{
-    enroll_add_keyfile_ok, enroll_by_id, enroll_discovery_two_disks, enroll_fs,
-    enroll_luks_dump_slot1_empty, enroll_luks_dump_slot1_occupied, enroll_luks_uuid_not_luks,
-    enroll_luks_uuid_ok, enroll_make_existing_keyfile, enroll_make_membership, enroll_passphrase,
-    enroll_test_keyfile_fail, enroll_test_keyfile_ok, enroll_test_passphrase_fail,
-    enroll_test_passphrase_ok, enroll_with_mountpoint_fail, enroll_with_mountpoint_ok,
+    enroll_add_keyfile_fail, enroll_add_keyfile_ok, enroll_by_id, enroll_discovery_two_disks,
+    enroll_fs, enroll_luks_dump_slot1_empty, enroll_luks_dump_slot1_occupied,
+    enroll_luks_uuid_not_luks, enroll_luks_uuid_ok, enroll_make_existing_keyfile,
+    enroll_make_membership, enroll_passphrase, enroll_test_keyfile_fail, enroll_test_keyfile_ok,
+    enroll_test_passphrase_fail, enroll_test_passphrase_ok, enroll_with_mountpoint_fail,
+    enroll_with_mountpoint_ok,
 };
 #[allow(unused_imports)]
 pub(crate) use idle::{

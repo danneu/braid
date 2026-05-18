@@ -481,16 +481,39 @@ impl EnrollPlan {
             eprintln!("ok: generated {}", params.key_file_path.display());
         }
 
-        apply_enrollment(
+        let apply_result = apply_enrollment(
             runner,
             &enrollment,
             &passphrase,
             params.key_file_path,
             params.paths,
-        )?;
+        );
 
-        Ok(())
+        match apply_result {
+            Ok(()) => Ok(()),
+            Err(e) if self.generate => Err(EnrollKeyFileError::Validation(
+                partial_generate_recovery_message(&e, params.key_file_path),
+            )),
+            Err(e) => Err(e),
+        }
     }
+}
+
+/// Generate-mode apply failures need a retry command that reuses the
+/// generated keyfile instead of orphaning an already-enrolled slot.
+fn partial_generate_recovery_message(
+    underlying: &EnrollKeyFileError,
+    key_file_path: &Path,
+) -> String {
+    let dir = key_file_directory(key_file_path);
+    format!(
+        "{underlying}\n\n\
+         The keyfile at {} was generated before this failure.\n\
+         If enrollment did not complete on every disk, drop `--generate` and re-run:\n  \
+         braid enroll {}",
+        key_file_path.display(),
+        dir.display()
+    )
 }
 
 /// No-context preview-generation failure for bad `--key-file` paths.
@@ -502,9 +525,14 @@ pub fn validate_key_file_path(
 ) -> Result<(), EnrollKeyFileError> {
     if generate {
         if key_file_path.exists() {
+            let dir = key_file_directory(key_file_path);
             return Err(EnrollKeyFileError::Validation(format!(
-                "braid.key already exists at {}; remove it manually if you want to generate a new one",
-                key_file_path.display()
+                "braid.key already exists at {}.\n\
+                 If a prior `--generate` run was interrupted, drop `--generate` and re-run \
+                 `braid enroll {}` to finish enrolling the existing keyfile.\n\
+                 Otherwise remove it manually if you want to generate a new one.",
+                key_file_path.display(),
+                dir.display()
             )));
         }
     } else {
@@ -687,12 +715,13 @@ mod tests {
     use crate::cmd::{CmdRequest, MockRunner};
     use crate::test_fixtures::err_raw as enroll_err_raw;
     use crate::test_fixtures::{
-        disk_member, enroll_add_keyfile_ok, enroll_by_id, enroll_discovery_two_disks, enroll_fs,
-        enroll_luks_dump_slot1_empty, enroll_luks_dump_slot1_occupied, enroll_luks_uuid_not_luks,
-        enroll_luks_uuid_ok, enroll_make_existing_keyfile, enroll_make_membership,
-        enroll_passphrase, enroll_test_keyfile_fail, enroll_test_keyfile_ok,
-        enroll_test_passphrase_fail, enroll_test_passphrase_ok, enroll_with_mountpoint_fail,
-        enroll_with_mountpoint_ok, isolated_paths, mock_ok, test_uuid,
+        disk_member, enroll_add_keyfile_fail, enroll_add_keyfile_ok, enroll_by_id,
+        enroll_discovery_two_disks, enroll_fs, enroll_luks_dump_slot1_empty,
+        enroll_luks_dump_slot1_occupied, enroll_luks_uuid_not_luks, enroll_luks_uuid_ok,
+        enroll_make_existing_keyfile, enroll_make_membership, enroll_passphrase,
+        enroll_test_keyfile_fail, enroll_test_keyfile_ok, enroll_test_passphrase_fail,
+        enroll_test_passphrase_ok, enroll_with_mountpoint_fail, enroll_with_mountpoint_ok,
+        isolated_paths, mock_ok, test_uuid,
     };
 
     fn disk(name: &str) -> DiskName {
@@ -1393,6 +1422,15 @@ mod tests {
         assert!(
             err.to_string().contains("braid.key already exists"),
             "unexpected error: {err}"
+        );
+        assert!(
+            err.to_string().contains("drop `--generate`"),
+            "expected interrupted-run recovery hint in: {err}"
+        );
+        assert!(
+            err.to_string()
+                .contains(&format!("braid enroll {}", tmp.path().display())),
+            "expected recovery command pointing at target dir in: {err}"
         );
         assert_eq!(
             runner.requests(),
@@ -3052,12 +3090,99 @@ mod tests {
         );
     }
 
+    // Intent: EnrollPlan::execute enriches the apply-phase error with the
+    // drop-`--generate` recovery hint when --generate succeeded.
+    // Why it exists: a partial luksAddKey failure on disk2 leaves an orphan
+    // keyfile on the USB; without the hint, the documented retry command
+    // points users toward generating a new, mismatched keyfile.
+    // Scenario: 2-disk plan from plan_enrollment, disk1 enroll + backup ok,
+    // disk2 luksAddKey returns nonzero, and the user sees the reuse-keyfile
+    // retry command.
+    #[test]
+    fn execute_generate_partial_failure_reports_recovery_hint() {
+        let (tmp, paths) = isolated_paths();
+        let kf = tmp.path().join("braid.key");
+        let kf_str = kf.display().to_string();
+        let pass = "testpass";
+        let pass_path = tmp.path().join("pass");
+        std::fs::write(&pass_path, format!("{pass}\n")).unwrap();
+
+        let d1 = "/dev/disk/by-id/d1";
+        let d2 = "/dev/disk/by-id/d2";
+
+        let (tp1_req, tp1_stdin, tp1_out) = enroll_test_passphrase_ok(d1, pass);
+        let (tp2_req, tp2_stdin, tp2_out) = enroll_test_passphrase_ok(d2, pass);
+        let (ld1_req, ld1_out) = enroll_luks_dump_slot1_empty(d1);
+        let (ld2_req, ld2_out) = enroll_luks_dump_slot1_empty(d2);
+        let (e1_req, e1_stdin, e1_out) = enroll_add_keyfile_ok(d1, &kf_str, pass);
+        let (e2_req, e2_stdin, e2_out) = enroll_add_keyfile_fail(d2, &kf_str, pass);
+
+        let runner = MockRunner::default()
+            .with_output_stdin(tp1_req, tp1_stdin, tp1_out)
+            .with_output_stdin(tp2_req, tp2_stdin, tp2_out)
+            .with_output(ld1_req, ld1_out)
+            .with_output(ld2_req, ld2_out)
+            .with_output_stdin(e1_req, e1_stdin, e1_out)
+            .with_output(
+                CmdRequest::CryptsetupLuksHeaderBackup {
+                    device: d1.to_owned(),
+                    backup_path: paths
+                        .luks_headers_dir()
+                        .join("braid-disk1.luksheader.tmp")
+                        .display()
+                        .to_string(),
+                },
+                mock_ok("cryptsetup luksHeaderBackup", ""),
+            )
+            .with_output_stdin(e2_req, e2_stdin, e2_out);
+
+        let plan = EnrollPlan {
+            notes: vec![],
+            steps: vec![],
+            candidates: vec![
+                (disk("disk1"), enroll_by_id(d1)),
+                (disk("disk2"), enroll_by_id(d2)),
+            ],
+            generate: true,
+        };
+        let membership = enroll_make_membership(&[]);
+        let params = EnrollKeyFileParams {
+            membership: &membership,
+            key_file_path: &kf,
+            generate: true,
+            passphrase_stdin: false,
+            passphrase_file: Some(&pass_path),
+            dry_run: false,
+            paths: &paths,
+            backing_path_resolver: crate::test_fixtures::mock_virtio_backing_path_resolver(),
+        };
+
+        let err = plan
+            .execute(&runner, &params)
+            .expect_err("disk2 luksAddKey failure should abort generate execute")
+            .to_string();
+
+        assert!(kf.exists(), "generate execute should create braid.key");
+        assert!(
+            err.contains("cryptsetup luksAddKey failed"),
+            "expected underlying luksAddKey failure in: {err}"
+        );
+        assert!(
+            err.contains("drop `--generate`"),
+            "expected drop-generate recovery hint in: {err}"
+        );
+        assert!(
+            err.contains(&format!("braid enroll {}", tmp.path().display())),
+            "expected recovery command pointing at generated-key dir in: {err}"
+        );
+    }
+
     // ---- generate_key_file tests ----
 
     /*
      * Intent: verify --generate rejects existing keyfile.
      * Why: --generate must not silently overwrite an existing keyfile.
-     * Scenario: user runs --generate when braid.key already exists on USB.
+     * Scenario: user runs --generate when the target file already exists on USB.
      */
     #[test]
     fn generate_rejects_existing_keyfile() {
