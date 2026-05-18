@@ -8539,21 +8539,20 @@ mod tests {
         );
     }
 
-    /* Intent: `--luks-format-arg` carrying a managed cryptsetup flag
-     * (`--uuid`, `--uuid=...`, `--label`, `--label=...`) is rejected
-     * BEFORE any probing, journal write, inhibitor acquisition, or
+    /* Intent: `--luks-format-arg` carrying a braid-managed identity
+     * or storage-model-breaking cryptsetup flag is rejected BEFORE any
+     * probing, journal write, inhibitor acquisition, or
      * `CryptsetupLuksFormat` request. The refusal surfaces as
      * `AddError::ManagedFormatFlag(_)`.
      *
-     * Why it exists: braid sets `--uuid` (the journaled identity from
-     * t=0) and `--label` (the `braid-<name>` operator label) itself.
-     * User-supplied overrides would bypass the identity invariant and
-     * leave the journal pointing at a UUID different from what
-     * cryptsetup wrote; refusing at the parse boundary keeps the
-     * invariant load-bearing.
+     * Why it exists: braid owns the LUKS identity, passphrase path,
+     * keyslot layout, header placement, LUKS type, and modeled
+     * integrity mode. User-supplied overrides would bypass those
+     * invariants; refusing at the parse boundary keeps them
+     * load-bearing.
      *
      * Scenario: operator types `braid add disk1=... --luks-format-arg
-     * --uuid=DEADBEEF`. The planner returns the structured rejection
+     * --header=/tmp/header`. The planner returns the structured rejection
      * with the offending token named, having executed zero shell
      * commands.
      */
@@ -8564,6 +8563,16 @@ mod tests {
             "--uuid",
             "--label=foo",
             "--label",
+            "--header",
+            "--header=/tmp/x",
+            "--type=luks1",
+            "--key-file=/dev/null",
+            "--key-slot=2",
+            "--integrity=hmac-sha256",
+            "--keyfile-offset=64",
+            "--keyfile-size=16",
+            "-M",
+            "-qMluks1",
         ] {
             let (_state_tmp, paths, _tmp, config_path, pass_path) = fresh_add_setup();
             let recording = RequestRecordingRunner::new(MockRunner::default());

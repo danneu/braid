@@ -5870,71 +5870,93 @@ mod tests {
     }
 
     /// Seed 650: `--luks-format-arg` rejection covers `replace` for the
-    /// shared validation surface. One symmetric case (`--label=foo`)
-    /// proves the wiring through `ReplaceError::ManagedFormatFlag`.
+    /// shared validation surface. A category sample proves wiring through
+    /// `ReplaceError::ManagedFormatFlag`.
     //
-    // Intent: plan_replace fails closed on a managed token in
-    //   `--luks-format-arg` before any probe, journal write, or
-    //   format request.
+    // Intent: plan_replace fails closed on a braid-managed identity or
+    //   storage-model-breaking token in `--luks-format-arg` before any
+    //   probe, journal write, inhibitor acquisition, or format request.
     // Why: pinning the rejection at the planner boundary mirrors the
-    //   `add.rs` contract and protects the journaled identity from
-    //   user override.
-    // Scenario: operator passes `--luks-format-arg=--label=foo`.
+    //   `add.rs` contract and protects the LUKS identity, passphrase path,
+    //   keyslot layout, header placement, LUKS type, and modeled integrity
+    //   mode from user override.
+    // Scenario: operator passes `--luks-format-arg=--header=/tmp/header`.
     #[test]
     fn plan_replace_rejects_managed_format_flag() {
-        let state_tmp = tempfile::tempdir().unwrap();
-        let paths = StatePaths::custom(state_tmp.path().into());
-        let config_tmp = tempfile::tempdir().unwrap();
-        let config_path = config_tmp.path().join("config.json");
-        std::fs::write(
-            &config_path,
-            serde_json::to_vec(&serde_json::json!({ "mount_point": "/mnt/storage" })).unwrap(),
-        )
-        .unwrap();
-        let inhibitor = crate::inhibit::RecordingInhibitor::new();
-        let bad = vec!["--label=foo".to_owned()];
-        let result = plan_replace(
-            &PanicRunner,
-            &PanicFilesystem,
-            &ReplaceParams {
-                config_path: &config_path,
-                old_name: "disk2",
-                new_name: "disk3=/dev/disk/by-id/virtio-disk3",
-                missing_id: None,
-                dry_run: true,
-                yes: true,
-                passphrase_stdin: false,
-                passphrase_file: None,
-                enroll_key_file: None,
-                luks_format_extra_opts: &bad,
-                progress: crate::progress::ProgressOutput::Off,
-                paths: &paths,
-                sleep_inhibitor: &inhibitor,
-                sleeper: &crate::progress::NoopSleeper,
-                backing_path_resolver:
-                    crate::test_fixtures::mock_virtio_offset_backing_path_resolver(),
-            },
-        );
-        match result {
-            Err(PlanFailure {
-                error:
-                    ReplaceError::ManagedFormatFlag(
-                        crate::types::LuksFormatExtraOptsError::ManagedFormatFlag { token },
-                    ),
-                ..
-            }) => {
-                assert_eq!(token, "--label=foo");
+        for token in [
+            "--uuid=DEADBEEF-DEAD-BEEF-DEAD-BEEFDEADBEEF",
+            "--uuid",
+            "--label=foo",
+            "--label",
+            "--header",
+            "--header=/tmp/x",
+            "--type=luks1",
+            "--key-file=/dev/null",
+            "--key-slot=2",
+            "--integrity=hmac-sha256",
+            "--keyfile-offset=64",
+            "--keyfile-size=16",
+            "-M",
+            "-qMluks1",
+        ] {
+            let state_tmp = tempfile::tempdir().unwrap();
+            let paths = StatePaths::custom(state_tmp.path().into());
+            let config_tmp = tempfile::tempdir().unwrap();
+            let config_path = config_tmp.path().join("config.json");
+            std::fs::write(
+                &config_path,
+                serde_json::to_vec(&serde_json::json!({ "mount_point": "/mnt/storage" })).unwrap(),
+            )
+            .unwrap();
+            let inhibitor = crate::inhibit::RecordingInhibitor::new();
+            let bad = vec![token.to_owned()];
+            let result = plan_replace(
+                &PanicRunner,
+                &PanicFilesystem,
+                &ReplaceParams {
+                    config_path: &config_path,
+                    old_name: "disk2",
+                    new_name: "disk3=/dev/disk/by-id/virtio-disk3",
+                    missing_id: None,
+                    dry_run: true,
+                    yes: true,
+                    passphrase_stdin: false,
+                    passphrase_file: None,
+                    enroll_key_file: None,
+                    luks_format_extra_opts: &bad,
+                    progress: crate::progress::ProgressOutput::Off,
+                    paths: &paths,
+                    sleep_inhibitor: &inhibitor,
+                    sleeper: &crate::progress::NoopSleeper,
+                    backing_path_resolver:
+                        crate::test_fixtures::mock_virtio_offset_backing_path_resolver(),
+                },
+            );
+            match result {
+                Err(PlanFailure {
+                    error:
+                        ReplaceError::ManagedFormatFlag(
+                            crate::types::LuksFormatExtraOptsError::ManagedFormatFlag { token: t },
+                        ),
+                    ..
+                }) => {
+                    assert_eq!(t, token, "token must be the offending input verbatim");
+                }
+                Err(PlanFailure { error, .. }) => {
+                    panic!("expected ManagedFormatFlag refusal for {token:?}, got: {error:?}")
+                }
+                Ok(_) => panic!("expected ManagedFormatFlag refusal for {token:?}, got Ok(_)"),
             }
-            Err(PlanFailure { error, .. }) => {
-                panic!("expected ManagedFormatFlag refusal, got: {error:?}")
-            }
-            Ok(_) => panic!("expected ManagedFormatFlag refusal, got Ok(_)"),
+            assert_eq!(
+                inhibitor.acquire_count(),
+                0,
+                "managed-flag rejection must fire before the inhibitor seam for {token:?}"
+            );
+            assert!(
+                journal::load_journal(&paths).unwrap().is_none(),
+                "managed-flag rejection must not write a journal for {token:?}"
+            );
         }
-        assert_eq!(
-            inhibitor.acquire_count(),
-            0,
-            "managed-flag rejection must fire before the inhibitor seam"
-        );
     }
 
     /// Seed 660: Positive-extras forwarding. A valid

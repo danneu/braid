@@ -245,29 +245,28 @@ impl<'de> Deserialize<'de> for ByIdPath {
 // ---------------------------------------------------------------------------
 
 /// Validated wrapper around user-supplied `cryptsetup luksFormat` extras.
-/// The constructor rejects tokens that target braid-managed cryptsetup
-/// options (`--uuid`, `--label`) so user input cannot shadow the
-/// journaled identity or the braid label.
+/// The constructor rejects tokens that target braid-managed identity
+/// or storage-model-breaking cryptsetup options.
 #[derive(Clone, Debug, PartialEq, Eq, Default, Serialize, Deserialize)]
 #[serde(transparent)]
 pub struct LuksFormatExtraOpts(Vec<String>);
 
 /// Error returned when `LuksFormatExtraOpts::parse` rejects a token that
-/// targets a braid-managed cryptsetup option.
+/// targets a braid-managed identity or storage-model-breaking cryptsetup
+/// option.
 #[derive(Debug, Error)]
 pub enum LuksFormatExtraOptsError {
     #[error(
-        "--luks-format-arg '{token}' targets a braid-managed cryptsetup option (--uuid, --label); braid sets these itself and rejects user-supplied overrides"
+        "--luks-format-arg '{token}' targets a braid-managed identity or storage-model-breaking cryptsetup option"
     )]
     ManagedFormatFlag { token: String },
 }
 
 impl LuksFormatExtraOpts {
     /// Validate the supplied argv extras. Empty input is valid. Each token
-    /// is checked against the braid-managed reject list (`--uuid`,
-    /// `--uuid=...`, `--label`, `--label=...`) so user-supplied overrides
-    /// for managed flags fail before any `CryptsetupLuksFormat` request
-    /// reaches the executor.
+    /// is checked against the braid-managed identity and storage-model
+    /// reject list so unsafe extras fail before any
+    /// `CryptsetupLuksFormat` request reaches the executor.
     pub fn parse(extras: &[String]) -> Result<Self, LuksFormatExtraOptsError> {
         for token in extras {
             if is_managed_format_flag(token) {
@@ -287,15 +286,54 @@ impl LuksFormatExtraOpts {
     }
 }
 
+const MANAGED_LUKS_FORMAT_LONG_FLAGS: &[&str] = &[
+    "--uuid",
+    "--label",
+    "--header",
+    "--key-file",
+    "--master-key-file",
+    "--volume-key-file",
+    "--key-slot",
+    "--type",
+    "--integrity",
+    "--integrity-key-size",
+    "--integrity-inline",
+    "--integrity-no-journal",
+    "--integrity-no-wipe",
+    "--integrity-legacy-padding",
+    "--keyfile-offset",
+    "--keyfile-size",
+];
+
+const MANAGED_LUKS_FORMAT_SHORT_FLAGS: &[char] = &['d', 'S', 'M', 'I', 'l'];
+
 fn is_managed_format_flag(token: &str) -> bool {
-    // Long-form only. Per cryptsetup 2.8.4 audit (OPT_UUID at
-    // reference/cryptsetup/src/cryptsetup_arg_list.h:217 and OPT_LABEL at
-    // line 109, both with popt short name '\0'), no short alias exists
-    // for the managed flags on the pinned upstream.
-    token == "--uuid"
-        || token == "--label"
-        || token.starts_with("--uuid=")
-        || token.starts_with("--label=")
+    // These flags either overlap identity fields braid writes itself
+    // (`--uuid`, `--label`) or change the on-disk/passphrase model braid
+    // assumes after format. Names and short aliases come from
+    // reference/cryptsetup/src/cryptsetup_arg_list.h.
+    if MANAGED_LUKS_FORMAT_LONG_FLAGS.iter().any(|flag| {
+        token == *flag
+            || token
+                .strip_prefix(flag)
+                .is_some_and(|rest| rest.starts_with('='))
+    }) {
+        return true;
+    }
+
+    // popt allows short-option clusters, so a toggle can lead a
+    // value-taking short. Scan the whole single-hyphen cluster before
+    // `=` so `-qMluks1` is treated as `-q -M luks1`.
+    if let Some(shorts) = token.strip_prefix('-').filter(|_| !token.starts_with("--")) {
+        let cluster = shorts
+            .split_once('=')
+            .map_or(shorts, |(cluster, _)| cluster);
+        return cluster
+            .chars()
+            .any(|short| MANAGED_LUKS_FORMAT_SHORT_FLAGS.contains(&short));
+    }
+
+    false
 }
 
 // ---------------------------------------------------------------------------
@@ -707,7 +745,7 @@ mod tests {
         let msg = err.to_string();
         assert!(
             msg.contains(
-                "--luks-format-arg '--uuid=foo' targets a braid-managed cryptsetup option"
+                "--luks-format-arg '--uuid=foo' targets a braid-managed identity or storage-model-breaking cryptsetup option"
             ),
             "got: {msg}"
         );
@@ -720,7 +758,7 @@ mod tests {
         let err = LuksFormatExtraOpts::parse(&["--uuid".to_owned()]).unwrap_err();
         assert!(
             err.to_string()
-                .contains("--luks-format-arg '--uuid' targets a braid-managed cryptsetup option")
+                .contains("--luks-format-arg '--uuid' targets a braid-managed identity or storage-model-breaking cryptsetup option")
         );
     }
 
@@ -729,7 +767,7 @@ mod tests {
         // Intent: `--label=<value>` is rejected.
         let err = LuksFormatExtraOpts::parse(&["--label=braid-x".to_owned()]).unwrap_err();
         assert!(err.to_string().contains(
-            "--luks-format-arg '--label=braid-x' targets a braid-managed cryptsetup option"
+            "--luks-format-arg '--label=braid-x' targets a braid-managed identity or storage-model-breaking cryptsetup option"
         ));
     }
 
@@ -739,8 +777,85 @@ mod tests {
         let err = LuksFormatExtraOpts::parse(&["--label".to_owned()]).unwrap_err();
         assert!(
             err.to_string()
-                .contains("--luks-format-arg '--label' targets a braid-managed cryptsetup option")
+                .contains("--luks-format-arg '--label' targets a braid-managed identity or storage-model-breaking cryptsetup option")
         );
+    }
+
+    #[test]
+    fn luks_format_extra_opts_rejects_long_form_set() {
+        // Intent: every long-form managed/storage-breaking flag is rejected
+        //   in bare and `--flag=value` form.
+        // Why: `--luks-format-arg` accepts raw argv tokens, so each unsafe
+        //   cryptsetup spelling must be stopped at the shared parse gate.
+        // Scenario: operator passes a raw luksFormat flag that would alter
+        //   braid's identity, header, key material, type, or integrity model.
+        for flag in MANAGED_LUKS_FORMAT_LONG_FLAGS {
+            for token in [(*flag).to_owned(), format!("{flag}=value")] {
+                let err = LuksFormatExtraOpts::parse(&[token.clone()]).unwrap_err();
+                let msg = err.to_string();
+                match err {
+                    LuksFormatExtraOptsError::ManagedFormatFlag { token: offending } => {
+                        assert_eq!(
+                            offending, token,
+                            "error must preserve the offending token verbatim"
+                        );
+                    }
+                }
+                assert!(
+                    msg.contains(&format!("--luks-format-arg '{token}'")),
+                    "error must echo {token:?}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn luks_format_extra_opts_rejects_short_aliases() {
+        // Intent: managed/storage-breaking short aliases are rejected in
+        //   bare, concatenated, equals, and clustered forms.
+        // Why: cryptsetup uses popt, which accepts clusters like
+        //   `-qMluks1`; a prefix-only check would miss that spelling.
+        // Scenario: operator combines a harmless toggle with a forbidden
+        //   value-taking short in one raw `--luks-format-arg` token.
+        for short in MANAGED_LUKS_FORMAT_SHORT_FLAGS {
+            for token in [
+                format!("-{short}"),
+                format!("-{short}value"),
+                format!("-{short}=value"),
+            ] {
+                let err = LuksFormatExtraOpts::parse(&[token.clone()]).unwrap_err();
+                let msg = err.to_string();
+                match err {
+                    LuksFormatExtraOptsError::ManagedFormatFlag { token: offending } => {
+                        assert_eq!(
+                            offending, token,
+                            "error must preserve the offending token verbatim"
+                        );
+                    }
+                }
+                assert!(
+                    msg.contains(&format!("--luks-format-arg '{token}'")),
+                    "error must echo {token:?}"
+                );
+            }
+        }
+
+        for token in ["-qMluks1", "-vIhmac-sha256", "-ql16"] {
+            let err = LuksFormatExtraOpts::parse(&[token.to_owned()]).unwrap_err();
+            let msg = err.to_string();
+            match err {
+                LuksFormatExtraOptsError::ManagedFormatFlag { token: offending } => {
+                    assert_eq!(
+                        offending, token,
+                        "error must preserve the offending token verbatim"
+                    );
+                }
+            }
+            assert!(
+                msg.contains(&format!("--luks-format-arg '{token}'")),
+                "error must echo {token:?}"
+            );
+        }
     }
 
     #[test]
