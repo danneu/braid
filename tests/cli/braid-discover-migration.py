@@ -145,4 +145,19 @@ assert_corrupt_pool_json_refuses_preview(
     "bare discover gives rebuild remediation for unparseable pool.json",
 )
 
+with subtest("discover --write rebuilds corrupt pool.json"):
+    write_pool_json("not-json-at-all")
+    out = machine.succeed("braid discover --write --expect-count 3 2>&1")
+    assert "pool membership written to /var/lib/braid/pool.json" in out, (
+        "expected rebuild success in output:\n" + out
+    )
+    pool = json.loads(read_pool_json())
+    assert set(pool["disks"].keys()) == set(DISK_UUIDS.values()), (
+        "expected UUID-keyed disk set after rebuild: " + json.dumps(pool, sort_keys=True)
+    )
+    for name, uuid in DISK_UUIDS.items():
+        assert pool["disks"][uuid]["name"] == name, (
+            "expected " + uuid + " to carry name " + name + ": " + json.dumps(pool)
+        )
+
 machine.shutdown()

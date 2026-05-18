@@ -58,4 +58,13 @@ with subtest("discover fails when pool.json already exists"):
     out = machine.fail("braid discover 2>&1")
     assert "pool.json already exists at /var/lib/braid/pool.json" in out
 
+with subtest("discover --write also refuses healthy UUID-keyed pool.json"):
+    before = machine.succeed("cat /var/lib/braid/pool.json")
+    out = machine.fail("braid discover --write 2>&1")
+    assert "is already a healthy UUID-keyed membership" in out, (
+        "expected ValidUuidKeyed refusal; got:\n" + out
+    )
+    after = machine.succeed("cat /var/lib/braid/pool.json")
+    assert before == after, "pool.json must be byte-for-byte unchanged"
+
 machine.shutdown()

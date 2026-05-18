@@ -60,6 +60,15 @@ with subtest("braid discover fails fast when pool lock is held"):
     machine.execute(f"kill {holder_pid} 2>/dev/null || true")
     machine.wait_until_succeeds("flock -n /run/braid-pool.lock true", timeout=10)
 
-with subtest("discover succeeds after lock release"):
-    machine.succeed("braid discover --write --expect-count 1")
-    machine.succeed("test -e /var/lib/braid/pool.json")
+with subtest("discover reaches CLI after lock release and refuses healthy UUID-keyed pool.json"):
+    rc, out = machine.execute("braid discover --write --expect-count 1 2>&1")
+    assert rc != 0, "expected ValidUuidKeyed refusal; out=" + out
+    assert "another braid operation is already in progress" not in out, (
+        "wrapper lock check must not fire after release; out=" + out
+    )
+    assert "is already a healthy UUID-keyed membership" in out, (
+        "expected ValidUuidKeyed refusal at the gate; out=" + out
+    )
+    assert machine.succeed("cat /var/lib/braid/pool.json") == pool_before, (
+        "pool.json must be byte-for-byte unchanged after refusal"
+    )

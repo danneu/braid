@@ -772,11 +772,12 @@ fn main() {
         }
         Commands::Discover(args) => {
             // Note: the pre-save fail-closed gates for `--write`
-            // (pending-op presence + name-keyed pool.json sniff) live
-            // inside `discover::write_discovered_membership`. The
-            // bare read-only path reuses the shape classifier so
-            // operators can preview legacy cutovers before moving the
-            // old state file aside.
+            // (pending-op presence + pool.json shape check that refuses
+            // both `LegacyNameKeyed` and `ValidUuidKeyed`; `Corrupt` is
+            // the documented rebuild path per decision 017) live inside
+            // `discover::write_discovered_membership`. The bare read-only
+            // path reuses the shape classifier so operators can preview
+            // legacy cutovers before moving the old state file aside.
             let pool_json = paths.pool_json();
             let shape = braid_cli::discover::classify_pool_json(&pool_json);
             if !args.write {

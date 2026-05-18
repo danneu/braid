@@ -10,7 +10,7 @@ Scans `/dev/disk/by-id/` for LUKS devices with `braid-*` labels, reads their LUK
 - You're migrating disks to a new machine and need to rebuild pool state.
 - You want to verify which braid-labeled LUKS devices the system can see.
 
-The normal path for adding disks is `braid add`. Use `discover` only when `pool.json` is missing.
+The normal path for adding disks is `braid add`. Use `discover` when `pool.json` is missing or corrupt, or to migrate the legacy name-keyed shape -- see the runbook in `docs/luks-unlock.md`.
 
 ## Basic example
 
@@ -53,7 +53,7 @@ sudo braid discover --write --expect-count 3
 ## What happens under the hood
 
 1. Checks for a pending operation journal (refuses if one exists).
-2. Refuses if `pool.json` already exists in the new UUID-keyed shape or an unrecognized shape. If the existing file is the legacy name-keyed shape, bare read-only `discover` prints a migration hint and continues as a preview.
+2. Refuses on a healthy UUID-keyed `pool.json` (bare and `--write`). Refuses on a legacy name-keyed `pool.json` for `--write`; bare `discover` prints a migration hint and continues as a preview. A corrupt or off-schema `pool.json` is the documented rebuild path: bare `discover` prints the rebuild remediation, and `discover --write` proceeds.
 3. Reads all entries in `/dev/disk/by-id/`, skipping partition entries (e.g., `ata-TOSHIBA-part1`).
 4. Resolves each by-id symlink to its canonical kernel device. Skips with a `cannot canonicalize` warning when the symlink is dangling (e.g., udev didn't clean up after a disk removal).
 5. For each entry, runs `cryptsetup isLuks` to check if it's a LUKS device.
@@ -67,7 +67,7 @@ sudo braid discover --write --expect-count 3
 
 ## Safety checks
 
-- Refuses if `pool.json` already exists in the new UUID-keyed shape or an unrecognized shape; legacy name-keyed files are allowed only for read-only preview.
+- Refuses any operation on a healthy UUID-keyed `pool.json`. Corrupt or off-schema files are allowed for `--write` rebuild only (with all intended pool members attached; see `docs/luks-unlock.md`). Legacy name-keyed files are allowed only for read-only preview.
 - Refuses if a pending operation journal (`pending-op.json`) exists -- run `braid recover` to reconcile.
 - Refuses if another braid operation is in progress (`/run/braid-pool.lock` is held by another wrapper) -- retry once it finishes.
 - With `--expect-count`, refuses to write if the discovered member count is not exactly the requested count.
