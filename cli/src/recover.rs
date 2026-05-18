@@ -52,14 +52,6 @@ pub enum RecoverError {
          trusting `braid monitor`, then re-run `braid recover`."
     )]
     AckCleanupFailed { stage: &'static str, detail: String },
-    /// RemoveMissing replay observed a journaled `null_underlying` mapper
-    /// whose authoritative `LuksUuid` cannot be resolved because the
-    /// member entry was never enriched (devid: None). The journal alone
-    /// cannot complete the identity decision; the operator must reconcile.
-    #[error(
-        "journaled LUKS UUID {luks_uuid} has no persisted devid; cannot resolve null-underlying mapper"
-    )]
-    JournalUuidDevidGap { luks_uuid: LuksUuid },
     /// Journaled-snapshot corruption: the same `devid` resolves to two or
     /// more UUIDs inside `journal.pre_membership` / `journal.target_membership`.
     /// Surfaces in canonical lexicographic UUID order.
