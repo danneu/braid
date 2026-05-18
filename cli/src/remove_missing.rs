@@ -171,7 +171,6 @@ impl RemoveMissingPlan {
 
         let target_uuid = work_plan.target_uuid.clone();
         let name_to_remove = work_plan.target_name.clone();
-        let resolved_devid = work_plan.missing_id;
 
         // Confirm
         if !params.yes {
@@ -179,7 +178,7 @@ impl RemoveMissingPlan {
                 "{}",
                 format_remove_missing_confirm(
                     name_to_remove.as_str(),
-                    resolved_devid,
+                    work_plan.missing_id,
                     work_plan.remaining_present,
                     work_plan.missing_count,
                 )
@@ -234,7 +233,7 @@ impl RemoveMissingPlan {
             target_membership.clone(),
             journal::OpKind::RemoveMissing {
                 phase: journal::RemoveMissingPhase::PoolMutation,
-                devid: resolved_devid,
+                devid: work_plan.missing_id,
                 restore_raid1_after_commit,
             },
         );
@@ -248,12 +247,12 @@ impl RemoveMissingPlan {
             status_line(
                 StatusTag::Wait,
                 color_enabled,
-                &format!("pool: removing missing devid {resolved_devid}..."),
+                &format!("pool: removing missing devid {}...", work_plan.missing_id),
             )
         );
         pool_remove_device_using(
             runner,
-            &resolved_devid.to_string(),
+            &work_plan.missing_id.to_string(),
             &work_plan.mount_point,
             params.progress,
             params.sleeper,
@@ -264,7 +263,7 @@ impl RemoveMissingPlan {
             status_line(
                 StatusTag::Ok,
                 color_enabled,
-                &format!("pool: missing devid {resolved_devid} removed"),
+                &format!("pool: missing devid {} removed", work_plan.missing_id),
             )
         );
 
@@ -280,7 +279,7 @@ impl RemoveMissingPlan {
             &journal,
             journal::OpKind::RemoveMissing {
                 phase: journal::RemoveMissingPhase::PostRemoveMissingMaintenance,
-                devid: resolved_devid,
+                devid: work_plan.missing_id,
                 restore_raid1_after_commit,
             },
             None,
@@ -308,7 +307,7 @@ impl RemoveMissingPlan {
         // Hygiene only -- failure is non-fatal because `cmd_add` is the
         // fail-closed correctness boundary for reused devids. See
         // docs/decisions/014-alerts.md "Acked-stats hygiene".
-        if let Err(e) = alert::drop_ghost_acked_for_devids(params.paths, &[resolved_devid]) {
+        if let Err(e) = alert::drop_ghost_acked_for_devids(params.paths, &[work_plan.missing_id]) {
             eprintln!("Warning: failed to update acked stats: {e}");
         }
 
