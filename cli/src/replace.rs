@@ -1273,11 +1273,23 @@ pub fn plan_replace<R: CommandRunner + Sync, F: Filesystem + ?Sized>(
             return Err(PlanFailure::with_notes(notes, e.into()));
         }
     };
+    let new_probed: PresentConfigDisk = match PresentConfigDisk::try_from(new_probed) {
+        Ok(p) => p,
+        Err(orig) => {
+            return Err(PlanFailure::with_notes(
+                notes,
+                ReplaceError::Validation(format!(
+                    "new disk '{}' ({}) is not present. Is it plugged in?",
+                    orig.name, orig.by_id_path
+                )),
+            ));
+        }
+    };
 
     // Keyfile diagnostics are plan notes, not confirmation-only stderr.
     // This keeps dry-run stdout, real-run stderr, and preserved-error
     // stderr on the same PreviewNote contract used by `add`.
-    if matches!(new_probed.state, ConfigDiskState::PresentNotLuks)
+    if matches!(new_probed.state, PresentConfigDiskState::PresentNotLuks)
         && params.enroll_key_file.is_none()
     {
         let keyfile_probe = probe_pool_keyfile_enrollment(runner, &pool.devices);
@@ -1301,7 +1313,7 @@ pub fn plan_replace<R: CommandRunner + Sync, F: Filesystem + ?Sized>(
     // through directly -- no keyfile probe, no slot-1 check.
     let resolved_enroll_key_file: Option<PathBuf> =
         match (&new_probed.state, params.enroll_key_file) {
-            (ConfigDiskState::PresentLuks { .. }, Some(kf)) => {
+            (PresentConfigDiskState::PresentLuks { .. }, Some(kf)) => {
                 match crate::enroll_key_file::plan_single_disk_enrollment(
                     runner,
                     new_name_str,
@@ -1334,19 +1346,10 @@ pub fn plan_replace<R: CommandRunner + Sync, F: Filesystem + ?Sized>(
     //     `probe_config_disk`. The open-boundary re-probe at execute
     //     time defends against operator disk swap between plan and
     //     execute.
-    //   - Absent: rejected by `build_replace_work_plan`.
+    //   - Absent: rejected at the probe boundary above.
     let new_uuid = match &new_probed.state {
-        ConfigDiskState::PresentNotLuks => LuksUuid::new_v4(),
-        ConfigDiskState::PresentLuks { uuid, .. } => uuid.clone(),
-        ConfigDiskState::Absent => {
-            return Err(PlanFailure::with_notes(
-                notes,
-                ReplaceError::Validation(format!(
-                    "new disk '{}' ({}) is not present. Is it plugged in?",
-                    new_name_str, new_by_id
-                )),
-            ));
-        }
+        PresentConfigDiskState::PresentNotLuks => LuksUuid::new_v4(),
+        PresentConfigDiskState::PresentLuks { uuid, .. } => uuid.clone(),
     };
 
     // Pre-journal-write `new_uuid` uniqueness assert. Refused BEFORE
@@ -1372,7 +1375,7 @@ pub fn plan_replace<R: CommandRunner + Sync, F: Filesystem + ?Sized>(
         return Err(PlanFailure::with_notes(notes, e.into()));
     }
 
-    let work_plan = match build_replace_work_plan(ReplaceWorkPlanInput {
+    let work_plan = build_replace_work_plan(ReplaceWorkPlanInput {
         config,
         old_uuid,
         old_name: old_member.name.clone(),
@@ -1387,12 +1390,7 @@ pub fn plan_replace<R: CommandRunner + Sync, F: Filesystem + ?Sized>(
         paths: params.paths,
         enroll_key_file: resolved_enroll_key_file,
         luks_format_extra_opts,
-    }) {
-        Ok(plan) => plan,
-        Err(e) => {
-            return Err(PlanFailure::with_notes(notes, e));
-        }
-    };
+    });
 
     Ok(ReplacePlan { notes, work_plan })
 }
@@ -1465,7 +1463,7 @@ struct ReplaceWorkPlanInput<'a> {
     new_uuid: LuksUuid,
     new_name: DiskName,
     new_by_id: ByIdPath,
-    new_probed: ConfigDisk,
+    new_probed: PresentConfigDisk,
     replace_source: ReplaceSource,
     pool: PoolState,
     pre_membership: PoolMembership,
@@ -1474,16 +1472,13 @@ struct ReplaceWorkPlanInput<'a> {
     /// Resolved keyfile decision after `plan_single_disk_enrollment`
     /// for `PresentLuks` targets. `Some(kf)` means an enrollment will
     /// run. `None` covers the no-`--enroll` case AND the idempotent
-    /// `AlreadyEnrolled` skip. For `PresentNotLuks` (fresh format) and
-    /// `Absent` paths, resolution is a no-op so this carries the raw
-    /// user input.
+    /// `AlreadyEnrolled` skip. For `PresentNotLuks` (fresh format),
+    /// resolution is a no-op so this carries the raw user input.
     enroll_key_file: Option<PathBuf>,
     luks_format_extra_opts: LuksFormatExtraOpts,
 }
 
-fn build_replace_work_plan(
-    input: ReplaceWorkPlanInput<'_>,
-) -> Result<ReplaceWorkPlan, ReplaceError> {
+fn build_replace_work_plan(input: ReplaceWorkPlanInput<'_>) -> ReplaceWorkPlan {
     let new_mapper = mapper_name(input.new_name.as_str());
     let new_mapper_path = format!("/dev/mapper/{new_mapper}");
     let journal_target = build_replace_journal_target(
@@ -1491,7 +1486,7 @@ fn build_replace_work_plan(
         &input.new_probed,
         input.enroll_key_file.as_deref(),
         &input.luks_format_extra_opts,
-    )?;
+    );
     let journal_source = build_replace_journal_source(&input.replace_source);
     let will_clear_last_missing = matches!(&input.replace_source, ReplaceSource::Missing { .. })
         && input.pool.missing_count == 1;
@@ -1499,13 +1494,7 @@ fn build_replace_work_plan(
     let remaining_present = input.pool.devices.len() + 1;
     let restore_raid1_after_commit = will_clear_last_missing && remaining_present >= 2;
     let target_prep = match input.new_probed.state {
-        ConfigDiskState::Absent => {
-            return Err(ReplaceError::Validation(format!(
-                "new disk '{}' ({}) is not present. Is it plugged in?",
-                input.new_name, input.new_by_id
-            )));
-        }
-        ConfigDiskState::PresentNotLuks => ReplaceTargetPrep::FreshLuks {
+        PresentConfigDiskState::PresentNotLuks => ReplaceTargetPrep::FreshLuks {
             extra_opts: input.luks_format_extra_opts.clone(),
             enroll_key_file: input.enroll_key_file.clone(),
             header_backup_path: luks_header_backup_path(
@@ -1513,17 +1502,19 @@ fn build_replace_work_plan(
                 &new_mapper,
             ),
         },
-        ConfigDiskState::PresentLuks { mapper_open, .. } => ReplaceTargetPrep::ExistingLuks {
-            mapper_open,
-            enroll_key_file: input.enroll_key_file.clone(),
-            header_backup_path: luks_header_backup_path(
-                &input.paths.luks_headers_dir(),
-                &new_mapper,
-            ),
-        },
+        PresentConfigDiskState::PresentLuks { mapper_open, .. } => {
+            ReplaceTargetPrep::ExistingLuks {
+                mapper_open,
+                enroll_key_file: input.enroll_key_file.clone(),
+                header_backup_path: luks_header_backup_path(
+                    &input.paths.luks_headers_dir(),
+                    &new_mapper,
+                ),
+            }
+        }
     };
 
-    Ok(ReplaceWorkPlan {
+    ReplaceWorkPlan {
         config: input.config,
         old_uuid: input.old_uuid,
         old_name: input.old_name,
@@ -1540,7 +1531,7 @@ fn build_replace_work_plan(
         restore_raid1_after_commit,
         new_mapper,
         new_mapper_path,
-    })
+    }
 }
 
 fn build_replace_journal_source(source: &ReplaceSource) -> journal::ReplaceJournalSource {
@@ -1557,29 +1548,23 @@ fn build_replace_journal_source(source: &ReplaceSource) -> journal::ReplaceJourn
 
 fn build_replace_journal_target(
     new_by_id: &ByIdPath,
-    new_probed: &ConfigDisk,
+    new_probed: &PresentConfigDisk,
     enroll_key_file: Option<&Path>,
     luks_format_extra_opts: &LuksFormatExtraOpts,
-) -> Result<journal::ReplaceJournalTarget, ReplaceError> {
+) -> journal::ReplaceJournalTarget {
     let mode = match &new_probed.state {
-        ConfigDiskState::PresentNotLuks => journal::ReplaceJournalMode::FreshLuks {
+        PresentConfigDiskState::PresentNotLuks => journal::ReplaceJournalMode::FreshLuks {
             extra_opts: luks_format_extra_opts.clone(),
             enroll_key_file: enroll_key_file.map(|p| p.to_path_buf()),
         },
-        ConfigDiskState::PresentLuks { .. } => journal::ReplaceJournalMode::ExistingLuks {
+        PresentConfigDiskState::PresentLuks { .. } => journal::ReplaceJournalMode::ExistingLuks {
             enroll_key_file: enroll_key_file.map(|p| p.to_path_buf()),
         },
-        ConfigDiskState::Absent => {
-            return Err(ReplaceError::Validation(format!(
-                "new disk '{}' is not present. Is it plugged in?",
-                new_by_id
-            )));
-        }
     };
-    Ok(journal::ReplaceJournalTarget {
+    journal::ReplaceJournalTarget {
         by_id: new_by_id.clone(),
         mode,
-    })
+    }
 }
 
 fn check_new_not_in_pool(
@@ -1730,7 +1715,7 @@ fn resolve_replace_source<R: CommandRunner>(
 struct ReplaceWorkPlanTestInput<'a> {
     new_name: &'a str,
     new_by_id: &'a ByIdPath,
-    new_probed: &'a ConfigDisk,
+    new_probed: &'a PresentConfigDisk,
     replace_source: &'a ReplaceSource,
     mount_point: &'a MountPoint,
     will_clear_last_missing: bool,
@@ -1741,9 +1726,7 @@ struct ReplaceWorkPlanTestInput<'a> {
 }
 
 #[cfg(test)]
-fn replace_work_plan_for_test(
-    input: &ReplaceWorkPlanTestInput<'_>,
-) -> Result<ReplaceWorkPlan, ReplaceError> {
+fn replace_work_plan_for_test(input: &ReplaceWorkPlanTestInput<'_>) -> ReplaceWorkPlan {
     let config = Config::new(input.mount_point.clone()).expect("valid test mount point");
     let old_uuid = LuksUuid::parse("99999999-9999-9999-9999-999999999999").unwrap();
     let pool = replace_work_plan_test_pool(
@@ -1754,11 +1737,11 @@ fn replace_work_plan_for_test(
     );
     // Synthesize an op-level identity for the test plan. The synthesized
     // `new_uuid` lines up with what the planner would have produced from
-    // the probed `ConfigDiskState`: FreshLuks gets a fresh v4, ExistingLuks
-    // reuses the probed value.
+    // the probed `PresentConfigDiskState`: FreshLuks gets a fresh v4,
+    // ExistingLuks reuses the probed value.
     let new_uuid = match &input.new_probed.state {
-        ConfigDiskState::PresentLuks { uuid, .. } => uuid.clone(),
-        _ => LuksUuid::new_v4(),
+        PresentConfigDiskState::PresentNotLuks => LuksUuid::new_v4(),
+        PresentConfigDiskState::PresentLuks { uuid, .. } => uuid.clone(),
     };
     let old_name = DiskName::parse("disk2").expect("valid disk name");
     let new_name = DiskName::parse(input.new_name).expect("valid new disk name in test");
@@ -2290,10 +2273,10 @@ mod tests {
         });
         let _config: crate::config::Config =
             serde_json::from_value(config_json).expect("valid config");
-        let new_probed = ConfigDisk {
+        let new_probed = PresentConfigDisk {
             name: DiskName::parse("disk3").expect("valid disk name in test fixture"),
             by_id_path: ByIdPath::parse("/dev/disk/by-id/virtio-disk3").unwrap(),
-            state: ConfigDiskState::PresentNotLuks,
+            state: PresentConfigDiskState::PresentNotLuks,
         };
         let source = ReplaceSource::Live {
             mapper: MapperName("braid-disk2".into()),
@@ -2311,7 +2294,6 @@ mod tests {
             enroll_key_file: None,
             luks_format_extra_opts: &[],
         })
-        .unwrap()
         .render_steps();
         let descriptions: Vec<&str> = steps.iter().map(|s| s.description.as_str()).collect();
         assert!(
@@ -2355,10 +2337,10 @@ mod tests {
         });
         let _config: crate::config::Config =
             serde_json::from_value(config_json).expect("valid config");
-        let new_probed = ConfigDisk {
+        let new_probed = PresentConfigDisk {
             name: DiskName::parse("disk3").expect("valid disk name in test fixture"),
             by_id_path: ByIdPath::parse("/dev/disk/by-id/virtio-disk3").unwrap(),
-            state: ConfigDiskState::PresentNotLuks,
+            state: PresentConfigDiskState::PresentNotLuks,
         };
         let source = ReplaceSource::Missing { devid: 2 };
         let steps = replace_work_plan_for_test(&ReplaceWorkPlanTestInput {
@@ -2373,7 +2355,6 @@ mod tests {
             enroll_key_file: None,
             luks_format_extra_opts: &[],
         })
-        .unwrap()
         .render_steps();
         let descriptions: Vec<&str> = steps.iter().map(|s| s.description.as_str()).collect();
         assert!(
@@ -2797,11 +2778,11 @@ mod tests {
         serde_json::from_value(config_json).expect("valid config")
     }
 
-    fn new_probed_not_luks() -> ConfigDisk {
-        ConfigDisk {
+    fn new_probed_not_luks() -> PresentConfigDisk {
+        PresentConfigDisk {
             name: DiskName::parse("disk3").expect("valid disk name in test fixture"),
             by_id_path: ByIdPath::parse("/dev/disk/by-id/virtio-disk3").unwrap(),
-            state: ConfigDiskState::PresentNotLuks,
+            state: PresentConfigDiskState::PresentNotLuks,
         }
     }
 
@@ -2817,15 +2798,14 @@ mod tests {
         let key_file = std::path::Path::new("/run/keys/braid-disk3.key");
         let extra_opts = LuksFormatExtraOpts::parse(&["--pbkdf".to_owned(), "pbkdf2".to_owned()])
             .expect("valid extras");
-        let new_probed = ConfigDisk {
+        let new_probed = PresentConfigDisk {
             name: DiskName::parse("disk3").expect("valid disk name in test fixture"),
             by_id_path: new_by_id.clone(),
-            state: ConfigDiskState::PresentNotLuks,
+            state: PresentConfigDiskState::PresentNotLuks,
         };
 
         let target =
-            build_replace_journal_target(&new_by_id, &new_probed, Some(key_file), &extra_opts)
-                .expect("fresh disk should build a replace journal target");
+            build_replace_journal_target(&new_by_id, &new_probed, Some(key_file), &extra_opts);
 
         assert_eq!(target.by_id, new_by_id);
         match target.mode {
@@ -2854,10 +2834,10 @@ mod tests {
     fn build_replace_journal_target_records_existing_luks_target() {
         let new_by_id = ByIdPath::parse("/dev/disk/by-id/virtio-disk3").unwrap();
         let luks_uuid = LuksUuid::parse("33333333-3333-3333-3333-333333333333").unwrap();
-        let new_probed = ConfigDisk {
+        let new_probed = PresentConfigDisk {
             name: DiskName::parse("disk3").expect("valid disk name in test fixture"),
             by_id_path: new_by_id.clone(),
-            state: ConfigDiskState::PresentLuks {
+            state: PresentConfigDiskState::PresentLuks {
                 uuid: luks_uuid.clone(),
                 label: Some("braid-disk3".to_owned()),
                 mapper_open: false,
@@ -2869,8 +2849,7 @@ mod tests {
             &new_probed,
             None,
             &LuksFormatExtraOpts::default(),
-        )
-        .expect("existing LUKS disk should build a replace journal target");
+        );
 
         assert_eq!(target.by_id, new_by_id);
         match target.mode {
@@ -2942,7 +2921,6 @@ mod tests {
             enroll_key_file: None,
             luks_format_extra_opts: &[],
         })
-        .unwrap()
         .render_steps();
         let descriptions: Vec<&str> = steps.iter().map(|s| s.description.as_str()).collect();
         assert!(
@@ -2973,7 +2951,6 @@ mod tests {
             enroll_key_file: None,
             luks_format_extra_opts: &[],
         })
-        .unwrap()
         .render_steps();
         let descriptions: Vec<&str> = steps.iter().map(|s| s.description.as_str()).collect();
         assert!(
@@ -3465,7 +3442,6 @@ mod tests {
             enroll_key_file: None,
             luks_format_extra_opts: &[],
         })
-        .unwrap()
         .render_steps();
         let descriptions: Vec<&str> = steps.iter().map(|s| s.description.as_str()).collect();
         assert!(
@@ -3505,7 +3481,6 @@ mod tests {
             enroll_key_file: Some(kf),
             luks_format_extra_opts: &luks_format_extra_opts,
         })
-        .unwrap()
         .render_steps();
         let output = Step::render_dry_run(&steps);
         let lines: Vec<&str> = output.lines().collect();
@@ -3568,10 +3543,10 @@ mod tests {
     #[test]
     fn dry_run_render_existing_luks_replace_with_enroll_renders_addkey_and_backup() {
         let luks_uuid = LuksUuid::parse("33333333-3333-3333-3333-333333333333").unwrap();
-        let new_probed = ConfigDisk {
+        let new_probed = PresentConfigDisk {
             name: DiskName::parse("disk3").expect("valid disk name in test fixture"),
             by_id_path: ByIdPath::parse("/dev/disk/by-id/virtio-disk3").unwrap(),
-            state: ConfigDiskState::PresentLuks {
+            state: PresentConfigDiskState::PresentLuks {
                 uuid: luks_uuid.clone(),
                 label: Some("braid-disk3".to_owned()),
                 mapper_open: false,
@@ -3614,8 +3589,7 @@ mod tests {
             // returned `Empty`, so the keyfile path flows in as `Some`.
             enroll_key_file: Some(kf.to_path_buf()),
             luks_format_extra_opts: LuksFormatExtraOpts::default(),
-        })
-        .expect("ExistingLuks + enroll should plan");
+        });
 
         let steps = work_plan.render_steps();
         let output = Step::render_dry_run(&steps);
@@ -3680,7 +3654,6 @@ mod tests {
             enroll_key_file: None,
             luks_format_extra_opts: &[],
         })
-        .unwrap()
         .render_steps();
         let output = Step::render_dry_run(&steps);
         let lines: Vec<&str> = output.lines().collect();
@@ -4617,6 +4590,46 @@ mod tests {
         assert!(
             !rendered.contains("WARNING:"),
             "confirmation-only WARNING lines must not leak into preview, got:\n{rendered}",
+        );
+    }
+
+    // Intent: plan_replace rejects an absent replacement disk with the
+    //   exact validation text and the requested disk identity.
+    // Why it exists: the absent-disk rejection moved from the builder to
+    //   the probe boundary, and must keep preserving preflight notes.
+    // Scenario: the pool is healthy but sysfs reports an in-flight
+    //   device add while the requested new disk is unplugged.
+    #[test]
+    fn plan_replace_rejects_absent_new_disk_with_exact_message() {
+        let f = PoolFixture::two_disk_healthy();
+        let fs = MockFs::storage(vec![]).with_excl_op("device add\n");
+        let replace_done = Arc::new(AtomicBool::new(false));
+        let runner =
+            ReplacementPool::two_disk_healthy().install(MockRunner::default(), replace_done);
+
+        let failure = match plan_replace(&runner, &fs, &f.replace_params().dry_run(true).build()) {
+            Ok(_) => panic!("expected absent new disk to fail planning"),
+            Err(failure) => failure,
+        };
+
+        match &failure.error {
+            ReplaceError::Validation(body) => {
+                assert_eq!(
+                    body,
+                    "new disk 'disk3' (/dev/disk/by-id/virtio-disk3) is not present. Is it plugged in?"
+                );
+            }
+            other => panic!("expected Validation, got: {other:?}"),
+        }
+        assert!(
+            failure.notes.iter().any(|n| matches!(
+                n,
+                PreviewNote::Info(body)
+                    if body.contains("waiting for in-flight")
+                        && body.contains("device add")
+            )),
+            "preflight Info note must survive absent-disk rejection: {:?}",
+            failure.notes,
         );
     }
 

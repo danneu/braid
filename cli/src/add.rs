@@ -794,7 +794,7 @@ pub struct AddPlan {
     pub parsed: Vec<(DiskName, ByIdPath)>,
     pub names: Vec<DiskName>,
     pub by_ids: Vec<ByIdPath>,
-    pub probed: Vec<ConfigDisk>,
+    pub probed: Vec<PresentConfigDisk>,
     pub pool: PoolState,
     pub pool_membership: PoolMembership,
 }
@@ -1498,7 +1498,8 @@ pub fn plan_add<R: CommandRunner + Sync, F: Filesystem + ?Sized>(
         }
     }
 
-    // Probe all disks -- fail early if any absent
+    // Probe all disks, then refine to the present-only shape consumed by
+    // downstream builders.
     let probed: Vec<ConfigDisk> = match names
         .iter()
         .zip(by_ids.iter())
@@ -1511,14 +1512,17 @@ pub fn plan_add<R: CommandRunner + Sync, F: Filesystem + ?Sized>(
         Err(e) => return Err(PlanFailure::empty(e.into())),
     };
 
-    for (i, p) in probed.iter().enumerate() {
-        if matches!(p.state, ConfigDiskState::Absent) {
-            return Err(PlanFailure::empty(AddError::Validation(format!(
-                "disk '{}' ({}) is not present. Is it plugged in?",
-                names[i], by_ids[i]
-            ))));
-        }
-    }
+    let probed: Vec<PresentConfigDisk> = probed
+        .into_iter()
+        .map(|p| {
+            PresentConfigDisk::try_from(p).map_err(|orig| {
+                PlanFailure::empty(AddError::Validation(format!(
+                    "disk '{}' ({}) is not present. Is it plugged in?",
+                    orig.name, orig.by_id_path
+                )))
+            })
+        })
+        .collect::<Result<_, _>>()?;
 
     // Probe pool + preflight (once)
     let pool = match probe_pool(runner, fs, config.mount_point()) {
@@ -1564,7 +1568,7 @@ pub fn plan_add<R: CommandRunner + Sync, F: Filesystem + ?Sized>(
 
     let any_needs_format = probed
         .iter()
-        .any(|p| matches!(p.state, ConfigDiskState::PresentNotLuks));
+        .any(|p| matches!(p.state, PresentConfigDiskState::PresentNotLuks));
 
     // Keyfile-asymmetry warning: body-only, no legacy `WARNING:` prefix.
     // Appended after the missing-devices warning so `AddPlan::execute`
@@ -1659,7 +1663,7 @@ pub fn cmd_add<R: CommandRunner + Sync, F: Filesystem + ?Sized>(
 struct AddStepsInput<'a> {
     names: &'a [DiskName],
     by_ids: &'a [&'a ByIdPath],
-    probed: &'a [ConfigDisk],
+    probed: &'a [PresentConfigDisk],
     pool: &'a PoolState,
     mount_point: &'a MountPoint,
     paths: &'a StatePaths,
@@ -1679,14 +1683,14 @@ fn build_add_credential_prelude(input: &AddStepsInput<'_>) -> AddCredentialPrelu
         .map(|((name, by_id), probed)| AddConfirmDiskPlan {
             name: name.clone(),
             by_id: (*by_id).clone(),
-            needs_luks_format: matches!(probed.state, ConfigDiskState::PresentNotLuks),
+            needs_luks_format: matches!(probed.state, PresentConfigDiskState::PresentNotLuks),
         })
         .collect();
 
     let any_needs_format = input
         .probed
         .iter()
-        .any(|p| matches!(p.state, ConfigDiskState::PresentNotLuks));
+        .any(|p| matches!(p.state, PresentConfigDiskState::PresentNotLuks));
     let confirm_new = any_needs_format && input.pool.devices.is_empty();
     let pool_target_count = input.pool.devices.len();
 
@@ -1705,7 +1709,7 @@ fn build_add_credential_prelude(input: &AddStepsInput<'_>) -> AddCredentialPrelu
         })
         .collect();
     verify_targets.extend(input.probed.iter().enumerate().filter_map(|(i, probed)| {
-        let ConfigDiskState::PresentLuks { uuid, .. } = &probed.state else {
+        let PresentConfigDiskState::PresentLuks { uuid, .. } = &probed.state else {
             return None;
         };
         if input.pool.devices.iter().any(|d| d.luks_uuid == *uuid) {
@@ -1803,13 +1807,7 @@ fn build_add_work_plan<R: CommandRunner>(
         let mapper_path = format!("/dev/mapper/{}", mn.0);
 
         match &p.state {
-            ConfigDiskState::Absent => {
-                return Err(AddError::Validation(format!(
-                    "disk '{}' ({}) is not present. Is it plugged in?",
-                    name, by_id
-                )));
-            }
-            ConfigDiskState::PresentNotLuks => {
+            PresentConfigDiskState::PresentNotLuks => {
                 // FreshLuks: pre-generate the LUKS UUID at planning so
                 // the journal records authoritative identity from t=0.
                 // A mid-format crash and replay reformats under the
@@ -1840,7 +1838,7 @@ fn build_add_work_plan<R: CommandRunner>(
                     .map_err(|conflict| target_uuid_map_conflict_to_validation(&conflict))?;
                 targets.push(AddTargetWork::Fresh(target));
             }
-            ConfigDiskState::PresentLuks {
+            PresentConfigDiskState::PresentLuks {
                 uuid,
                 mapper_open,
                 label,
@@ -2463,11 +2461,15 @@ mod tests {
 
     // --- add work-plan identity tests ---
 
-    fn probed_present_luks(name: &str, mapper_open: bool, label: Option<String>) -> ConfigDisk {
-        ConfigDisk {
+    fn probed_present_luks(
+        name: &str,
+        mapper_open: bool,
+        label: Option<String>,
+    ) -> PresentConfigDisk {
+        PresentConfigDisk {
             name: DiskName::parse(name).expect("valid disk name in test fixture"),
             by_id_path: ByIdPath::parse("/dev/disk/by-id/disk1").unwrap(),
-            state: ConfigDiskState::PresentLuks {
+            state: PresentConfigDiskState::PresentLuks {
                 uuid: LuksUuid::parse("a1b2c3d4-e5f6-7890-abcd-ef1234567890").unwrap(),
                 label,
                 mapper_open,
@@ -2614,10 +2616,10 @@ mod tests {
     #[test]
     fn dry_run_raw_disk_still_shows_destructive_format() {
         let runner = MockRunner::default();
-        let probed = vec![ConfigDisk {
+        let probed = vec![PresentConfigDisk {
             name: DiskName::parse("disk1").expect("valid disk name in test fixture"),
             by_id_path: ByIdPath::parse("/dev/disk/by-id/disk1").unwrap(),
-            state: ConfigDiskState::PresentNotLuks,
+            state: PresentConfigDiskState::PresentNotLuks,
         }];
         let pool = pool_unmounted();
 
@@ -2669,10 +2671,10 @@ mod tests {
         let pool_fsid = POOL_FSID;
         let by_id = ByIdPath::parse("/dev/disk/by-id/virtio-disk2").unwrap();
         let luks_uuid = LuksUuid::parse("22222222-2222-2222-2222-222222222222").unwrap();
-        let probed = vec![ConfigDisk {
+        let probed = vec![PresentConfigDisk {
             name: DiskName::parse("disk2").expect("valid disk name in test fixture"),
             by_id_path: by_id.clone(),
-            state: ConfigDiskState::PresentLuks {
+            state: PresentConfigDiskState::PresentLuks {
                 uuid: luks_uuid.clone(),
                 label: Some("braid-disk2".to_owned()),
                 mapper_open: true,
@@ -3360,10 +3362,10 @@ mod tests {
             fsid: Some(POOL_FSID.into()),
             null_underlying: vec![],
         };
-        let probed = vec![ConfigDisk {
+        let probed = vec![PresentConfigDisk {
             name: DiskName::parse("disk2").expect("valid disk name in test fixture"),
             by_id_path: by_id_disk2.clone(),
-            state: ConfigDiskState::PresentLuks {
+            state: PresentConfigDiskState::PresentLuks {
                 uuid: LuksUuid::parse("22222222-2222-2222-2222-222222222222").unwrap(),
                 label: Some("braid-disk2".to_owned()),
                 mapper_open: false,
@@ -5465,10 +5467,10 @@ mod tests {
     // Scenario: first disk added to an empty pool (no pool mounted yet).
     fn dry_run_render_fresh_single_disk_bootstrap() {
         let runner = MockRunner::default();
-        let probed = vec![ConfigDisk {
+        let probed = vec![PresentConfigDisk {
             name: DiskName::parse("disk1").expect("valid disk name in test fixture"),
             by_id_path: ByIdPath::parse("/dev/disk/by-id/disk1").unwrap(),
-            state: ConfigDiskState::PresentNotLuks,
+            state: PresentConfigDiskState::PresentNotLuks,
         }];
         let pool = pool_unmounted();
         let luks_format_extra_opts = vec![
@@ -5544,10 +5546,10 @@ mod tests {
      */
     fn dry_run_render_fresh_disk_with_keyfile_orders_backup_after_addkey() {
         let runner = MockRunner::default();
-        let probed = vec![ConfigDisk {
+        let probed = vec![PresentConfigDisk {
             name: DiskName::parse("disk1").expect("valid disk name in test fixture"),
             by_id_path: ByIdPath::parse("/dev/disk/by-id/disk1").unwrap(),
-            state: ConfigDiskState::PresentNotLuks,
+            state: PresentConfigDiskState::PresentNotLuks,
         }];
         let pool = pool_unmounted();
         let kf = std::path::Path::new("/mnt/usb/braid.key");
@@ -5761,10 +5763,10 @@ mod tests {
     // Scenario: adding a fresh disk to a 1-disk pool (pool already mounted).
     fn dry_run_render_add_to_existing_pool_with_balance() {
         let runner = MockRunner::default();
-        let probed = vec![ConfigDisk {
+        let probed = vec![PresentConfigDisk {
             name: DiskName::parse("disk2").expect("valid disk name in test fixture"),
             by_id_path: ByIdPath::parse("/dev/disk/by-id/disk2").unwrap(),
-            state: ConfigDiskState::PresentNotLuks,
+            state: PresentConfigDiskState::PresentNotLuks,
         }];
         let pool = pool_mounted_with_fsid("aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee");
 
@@ -7683,6 +7685,40 @@ mod tests {
         );
     }
 
+    // Intent: plan_add rejects an absent requested disk with the exact
+    //   validation text and requested disk identity.
+    // Why it exists: the absent-disk rejection moved from the work-plan
+    //   builder to the probe boundary and must keep the prior message.
+    // Scenario: a mounted pool exists, but the new disk's by-id path is
+    //   not present in the filesystem probe.
+    #[test]
+    fn plan_add_rejects_absent_new_disk_with_exact_message() {
+        let fixture = plan_add_fixture();
+        let fs = AddMockFs(vec![]);
+        let runner = AddPlanTestRunner::new();
+
+        let disk_specs = ["disk2=/dev/disk/by-id/virtio-disk2".to_string()];
+        let failure = match plan_add(&runner, &fs, &fixture.params(&disk_specs, true)) {
+            Ok(_) => panic!("expected absent new disk to fail planning"),
+            Err(failure) => failure,
+        };
+
+        match &failure.error {
+            AddError::Validation(body) => {
+                assert_eq!(
+                    body,
+                    "disk 'disk2' (/dev/disk/by-id/virtio-disk2) is not present. Is it plugged in?"
+                );
+            }
+            other => panic!("expected Validation, got: {other:?}"),
+        }
+        assert!(
+            failure.notes.is_empty(),
+            "absent add rejection must preserve the empty-notes contract: {:?}",
+            failure.notes,
+        );
+    }
+
     /* Intent: when both pending-op.json and a locked pool with non-empty
      *   membership are present, plan_add returns the pending-op error,
      *   not the locked-pool error.
@@ -7765,14 +7801,14 @@ mod tests {
         })
     }
 
-    /// Build a `ConfigDisk` matching a PresentLuks already-open
-    /// disk under the given by-id path and probed LUKS UUID. The
+    /// Build a `PresentConfigDisk` matching an already-open LUKS disk
+    /// under the given by-id path and probed LUKS UUID. The
     /// label is `braid-<name>` so the precondition gate accepts it.
-    fn cloned_disk_probed(name: &str, by_id: &str, uuid: &str) -> ConfigDisk {
-        ConfigDisk {
+    fn cloned_disk_probed(name: &str, by_id: &str, uuid: &str) -> PresentConfigDisk {
+        PresentConfigDisk {
             name: DiskName::parse(name).expect("valid disk name in test fixture"),
             by_id_path: ByIdPath::parse(by_id).unwrap(),
-            state: ConfigDiskState::PresentLuks {
+            state: PresentConfigDiskState::PresentLuks {
                 uuid: LuksUuid::parse(uuid).unwrap(),
                 label: Some(format!("braid-{name}")),
                 mapper_open: true,
@@ -7922,20 +7958,20 @@ mod tests {
     fn add_preview_iteration_sorts_by_disk_name() {
         let runner = MockRunner::default();
         let probed = vec![
-            ConfigDisk {
+            PresentConfigDisk {
                 name: DiskName::parse("a-disk").expect("valid disk name in test fixture"),
                 by_id_path: ByIdPath::parse("/dev/disk/by-id/usb-A").unwrap(),
-                state: ConfigDiskState::PresentNotLuks,
+                state: PresentConfigDiskState::PresentNotLuks,
             },
-            ConfigDisk {
+            PresentConfigDisk {
                 name: DiskName::parse("m-disk").expect("valid disk name in test fixture"),
                 by_id_path: ByIdPath::parse("/dev/disk/by-id/usb-M").unwrap(),
-                state: ConfigDiskState::PresentNotLuks,
+                state: PresentConfigDiskState::PresentNotLuks,
             },
-            ConfigDisk {
+            PresentConfigDisk {
                 name: DiskName::parse("z-disk").expect("valid disk name in test fixture"),
                 by_id_path: ByIdPath::parse("/dev/disk/by-id/usb-Z").unwrap(),
-                state: ConfigDiskState::PresentNotLuks,
+                state: PresentConfigDiskState::PresentNotLuks,
             },
         ];
         let pool = pool_unmounted();

@@ -445,6 +445,67 @@ pub enum ConfigDiskState {
     },
 }
 
+/// Planner-side disk state after the command boundary rejects unplugged
+/// disks. Builders consume this narrower shape so absence checks remain
+/// centralized in the top-level planner.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum PresentConfigDiskState {
+    PresentNotLuks,
+    PresentLuks {
+        uuid: LuksUuid,
+        label: Option<String>,
+        mapper_open: bool,
+    },
+}
+
+/// `ConfigDisk` after planner-side presence validation, retaining the
+/// identity fields needed for diagnostics and downstream command planning.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PresentConfigDisk {
+    pub name: DiskName,
+    pub by_id_path: ByIdPath,
+    pub state: PresentConfigDiskState,
+}
+
+impl TryFrom<ConfigDisk> for PresentConfigDisk {
+    /// Returns the original `ConfigDisk` so the caller can format the
+    /// absent-disk diagnostic from the same identity the probe produced.
+    type Error = ConfigDisk;
+
+    fn try_from(cd: ConfigDisk) -> Result<Self, ConfigDisk> {
+        let ConfigDisk {
+            name,
+            by_id_path,
+            state,
+        } = cd;
+        match state {
+            ConfigDiskState::Absent => Err(ConfigDisk {
+                name,
+                by_id_path,
+                state: ConfigDiskState::Absent,
+            }),
+            ConfigDiskState::PresentNotLuks => Ok(PresentConfigDisk {
+                name,
+                by_id_path,
+                state: PresentConfigDiskState::PresentNotLuks,
+            }),
+            ConfigDiskState::PresentLuks {
+                uuid,
+                label,
+                mapper_open,
+            } => Ok(PresentConfigDisk {
+                name,
+                by_id_path,
+                state: PresentConfigDiskState::PresentLuks {
+                    uuid,
+                    label,
+                    mapper_open,
+                },
+            }),
+        }
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Tests
 // ---------------------------------------------------------------------------
@@ -507,6 +568,29 @@ mod tests {
         assert_eq!(s, "\"8c78a966-ef17-4610-b835-5b376ef10b4e\"");
         let back: LuksUuid = serde_json::from_str(&s).unwrap();
         assert_eq!(back, u);
+    }
+
+    #[test]
+    fn try_from_config_disk_absent_preserves_identity() {
+        // Intent: the refined present-disk conversion returns the original
+        //   identity when a probed config disk is absent.
+        // Why it exists: planner-level absent-disk errors format the disk
+        //   name and by-id path from the conversion error.
+        // Scenario: a configured replacement target is unplugged; the
+        //   planner still reports the exact requested disk identity.
+        let name = DiskName::parse("disk3").expect("valid disk name");
+        let by_id_path = ByIdPath::parse("/dev/disk/by-id/virtio-disk3").unwrap();
+        let disk = ConfigDisk {
+            name: name.clone(),
+            by_id_path: by_id_path.clone(),
+            state: ConfigDiskState::Absent,
+        };
+
+        let err = PresentConfigDisk::try_from(disk).expect_err("absent disk should not refine");
+
+        assert_eq!(err.name, name);
+        assert_eq!(err.by_id_path, by_id_path);
+        assert_eq!(err.state, ConfigDiskState::Absent);
     }
 
     #[test]
