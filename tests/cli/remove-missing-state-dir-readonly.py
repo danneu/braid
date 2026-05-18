@@ -1,20 +1,41 @@
-# Test: braid remove-missing refuses to proceed when membership cannot be saved
+# Test: braid remove-missing aborts when the state directory is read-only
 #
 # Intent:
-#   `braid remove-missing` must fail hard (exit non-zero) when pool.json
-#   cannot be written. The btrfs pool must not be touched.
+#   `braid remove-missing` must fail hard (exit non-zero) when the
+#   pending-operation journal cannot be written to /var/lib/braid. The
+#   btrfs pool must stay intact: the journal write is the first
+#   /var/lib/braid write in remove-missing, so a fully read-only state
+#   dir aborts the command before pool_remove_device_using runs.
 #
 # Why it exists:
-#   remove_missing.rs:158-161 only warns on save_membership failure and
-#   proceeds with btrfs device deletion. This allows the missing device to
-#   be removed from btrfs while pool.json retains the stale entry, creating
-#   exactly the state divergence the membership system is meant to prevent.
+#   Per ADR-017 (docs/decisions/017-runtime-disk-membership.md,
+#   "Mutation ordering"), every mutating command writes pending-op.json
+#   BEFORE the irreversible btrfs membership change, then writes
+#   pool.json AFTER btrfs commits. This test pins the
+#   journal-write-fails-first half of that invariant: if
+#   journal::write_journal cannot persist pending-op.json (read-only
+#   filesystem, ENOSPC, permissions), no btrfs mutation is permitted.
+#
+#   Scope note: this test does not -- and structurally cannot -- pin
+#   the post-mutation pool.json write phase. When the test was added
+#   (commit a9b7467), save_membership was the FIRST write in
+#   remove-missing and only logged a warning on failure -- the read-only
+#   bind mount caught exactly that. Today journal::write_journal
+#   (cli/src/remove_missing.rs ~line 243) precedes the btrfs mutation,
+#   and save_membership (~line 276) sits after it and propagates errors
+#   via `?`. A post-btrfs save_membership failure is a different
+#   failure class: btrfs has committed, the journal survives, and
+#   `braid recover` is responsible for reconciliation per ADR-017
+#   ("Mutation ordering" / recovery model). save_membership's position
+#   around btrfs device remove is covered at the unit-test seam by
+#   `journal_survives_soft_balance_failure` in
+#   cli/src/remove_missing.rs, not here.
 #
 # Scenario:
 #   /var/lib/braid becomes read-only (disk full, permissions issue, or
-#   filesystem error) while the operator runs `braid remove-missing`. The
-#   command should refuse to mutate btrfs if it cannot persist the
-#   membership change first.
+#   filesystem error) while the operator runs `braid remove-missing`.
+#   The journal write fails first, so the command refuses to mutate
+#   btrfs.
 
 import shlex
 
@@ -57,11 +78,13 @@ with subtest("Simulate disk3 death and mount degraded"):
     fi_show = machine.succeed("btrfs fi show /mnt/storage")
     assert "missing" in fi_show.lower(), "Expected missing device:\n" + fi_show
 
-# --- Phase 2: Make membership dir read-only, then attempt remove-missing ---
+# --- Phase 2: Make state directory read-only, then attempt remove-missing ---
 
-with subtest("Make membership dir read-only"):
-    # atomic_write creates .pool.json.tmp in the same directory then renames.
-    # chmod 555 is insufficient — root bypasses Unix permission bits.
+with subtest("Make state directory read-only"):
+    # atomic_write creates .pending-op.json.tmp in the same directory then
+    # renames -- this is the first /var/lib/braid write in remove-missing,
+    # so a read-only state dir blocks it before any btrfs mutation.
+    # chmod 555 is insufficient -- root bypasses Unix permission bits.
     # A read-only bind mount enforces read-only at the VFS level, blocking
     # even root from creating files in the directory.
     machine.succeed("mount --bind /var/lib/braid /var/lib/braid")
@@ -78,7 +101,7 @@ def get_missing_devid():
 
 missing_devid = get_missing_devid()
 
-with subtest("remove-missing with read-only membership dir fails"):
+with subtest("remove-missing with read-only state directory fails"):
     (status, output) = machine.execute(f"braid remove-missing --missing-id {missing_devid} --yes 2>&1")
     print("remove-missing with readonly dir (exit " + str(status) + "):\n" + output)
     assert status != 0, "Expected failure, got exit 0: " + output

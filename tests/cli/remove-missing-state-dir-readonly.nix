@@ -1,17 +1,18 @@
-# Test: remove-missing-membership-readonly
+# Test: remove-missing-state-dir-readonly
 #
-# What: `braid remove-missing` must fail hard (not warn) when pool.json
-# cannot be written.
+# What: `braid remove-missing` must fail hard when the pending-operation
+# journal cannot be written. The btrfs pool must stay intact.
 #
-# Why: remove_missing.rs:158-161 only warns on save_membership failure and
-# proceeds with btrfs device deletion. This lets btrfs state diverge from
-# pool.json — the missing device is removed from btrfs but pool.json still
-# claims it exists.
+# Why: Per ADR-017 ("Mutation ordering"), pending-op.json is written
+# before the irreversible btrfs membership change. If that write fails
+# (read-only state dir, ENOSPC, permissions), remove-missing must abort
+# before any btrfs mutation -- otherwise btrfs and pool.json could
+# diverge with no journal to drive recovery.
 #
 # Dependencies: braid add (builds the test pool).
 { braid }:
 {
-  name = "remove-missing-membership-readonly";
+  name = "remove-missing-state-dir-readonly";
 
   nodes.machine =
     { pkgs, ... }:
@@ -42,5 +43,5 @@
       };
     };
 
-  testScript = builtins.readFile ./remove-missing-membership-readonly.py;
+  testScript = builtins.readFile ./remove-missing-state-dir-readonly.py;
 }

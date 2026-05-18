@@ -549,8 +549,8 @@
               braid = linuxCrane.braid;
             }
           );
-          remove-missing-membership-readonly = pkgs.testers.nixosTest (
-            import ./tests/cli/remove-missing-membership-readonly.nix {
+          remove-missing-state-dir-readonly = pkgs.testers.nixosTest (
+            import ./tests/cli/remove-missing-state-dir-readonly.nix {
               braid = linuxCrane.braid;
             }
           );
