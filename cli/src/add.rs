@@ -2214,11 +2214,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let config_path = dir.path().join("config.json");
         let mut f = std::fs::File::create(&config_path).unwrap();
-        write!(
-            f,
-            r#"{{"disks":{{"d1":{{"by_id":"/dev/sda"}}}},"mount_point":"/mnt/storage"}}"#
-        )
-        .unwrap();
+        write!(f, r#"{{"mount_point":"/mnt/storage"}}"#).unwrap();
 
         let runner = MockRunner::default();
         let fs = MockFs;

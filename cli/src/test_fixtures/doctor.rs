@@ -60,7 +60,7 @@ pub(crate) fn beep_check_options(
 // ---------------------------------------------------------------------------
 
 pub(crate) fn valid_config_json() -> &'static str {
-    r#"{"disks":{"toshiba":{"by_id":"/dev/disk/by-id/a"}},"mount_point":"/mnt/storage"}"#
+    r#"{"mount_point":"/mnt/storage"}"#
 }
 
 pub(crate) fn config_with_ups_enabled() -> &'static str {

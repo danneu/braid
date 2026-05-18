@@ -1119,8 +1119,16 @@ mod tests {
             .unwrap_or_else(|| panic!("check '{name}' not found"))
     }
 
+    // Intent: a syntactically valid Config parses + schema-validates, and
+    //   declared_disks skips when no pool.json membership file exists.
+    // Why it exists: pins the post-ADR-017 contract that declared_disks
+    //   sources membership from pool.json (not config.json), so a valid
+    //   config without pool.json yields Skip -- not an error, not Warn.
+    // Scenario: NixOS-generated config.json reaches a host that has not
+    //   yet run `braid add`; doctor reports config OK and declared_disks
+    //   Skip in the same run.
     #[test]
-    fn valid_config_parses_ok_disks_warn() {
+    fn valid_config_parses_ok_declared_disks_skips() {
         let f = write_temp(valid_config_json());
         let (_dir, paths) = isolated_paths();
         let report = run_doctor(f.path(), &MockRunner::default(), &paths, human_options());
@@ -1220,7 +1228,7 @@ mod tests {
 
     #[test]
     fn valid_json_with_extra_fields_parses_ok() {
-        // Config no longer has disks — extra fields are ignored.
+        // Config no longer has disks -- extra fields are ignored.
         let f = write_temp(r#"{"disks":{},"mount_point":"/mnt/storage"}"#);
         let report = run_doctor(
             f.path(),
@@ -1232,9 +1240,17 @@ mod tests {
         assert_eq!(find_check(&report, "config_schema").status, CheckStatus::Ok);
     }
 
+    // Intent: empty mount_point fails Config schema validation, with the
+    //   "must not be empty" message surfaced to the doctor report.
+    // Why it exists: pins the user-facing failure mode for the most common
+    //   hand-edit mistake (blanking mount_point) so the doctor report
+    //   says exactly what is wrong.
+    // Scenario: an operator hand-edits config.json and leaves mount_point
+    //   as the empty string; doctor must Fail config_schema and include
+    //   the schema-builder error message.
     #[test]
     fn valid_json_bad_schema_empty_mount() {
-        let f = write_temp(r#"{"disks":{"a":{"by_id":"/dev/disk/by-id/a"}},"mount_point":""}"#);
+        let f = write_temp(r#"{"mount_point":""}"#);
         let report = run_doctor(
             f.path(),
             &MockRunner::default(),
@@ -1550,13 +1566,27 @@ mod tests {
         assert_eq!(check.status, CheckStatus::Skip);
     }
 
+    // Intent: declared_disks skips with the "no pool membership file"
+    //   message even when Config schema validation fails in the same
+    //   doctor run.
+    // Why it exists: pins that declared_disks is decoupled from Config
+    //   validity. The check reads pool.json directly (ADR 017 / ADR 024),
+    //   so a Config schema failure does not change its outcome -- it does
+    //   not turn the check into Fail or Warn, and the skip reason is
+    //   the absent membership file, not the broken Config.
+    // Scenario: an operator hand-edits config.json and leaves mount_point
+    //   empty on a host without pool.json; doctor reports config_schema
+    //   Fail and declared_disks Skip with "skipped (no pool membership
+    //   file)" in the same run.
     #[test]
-    fn declared_disks_skip_when_bad_schema() {
-        let f = write_temp(r#"{"disks":{},"mount_point":"/mnt/storage"}"#);
+    fn declared_disks_skips_when_no_membership_even_if_config_schema_fails() {
+        let f = write_temp(r#"{"mount_point":""}"#);
         let (_dir, paths) = isolated_paths();
         let report = run_doctor(f.path(), &MockRunner::default(), &paths, human_options());
+        assert_eq!(find_check(&report, "config_schema").status, CheckStatus::Fail);
         let check = find_check(&report, "declared_disks");
         assert_eq!(check.status, CheckStatus::Skip);
+        assert_eq!(check.message, "skipped (no pool membership file)");
     }
 
     // --- summarize_declared_disks: pure rendering tests ---
