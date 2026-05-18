@@ -1613,13 +1613,13 @@ fn live_pool_matches_membership(
             Err(membership::MembershipError::DuplicateDevid { devid, members }) => {
                 return Err(JournaledSnapshotError::DuplicateDevid { devid, members });
             }
-            Err(e) => {
-                return Err(JournaledSnapshotError::NoMemberForDevid {
-                    devid: match e {
-                        membership::MembershipError::DuplicateDevid { devid, .. } => devid,
-                        _ => devid,
-                    },
-                });
+            Err(
+                other @ (membership::MembershipError::Corrupt { .. }
+                | membership::MembershipError::Conflict(_)
+                | membership::MembershipError::Io { .. }
+                | membership::MembershipError::Save { .. }),
+            ) => {
+                unreachable!("by_devid cannot return this MembershipError variant: {other:?}");
             }
         }
     }
@@ -1704,8 +1704,13 @@ fn recover_membership_matching_expected(
             Err(membership::MembershipError::DuplicateDevid { devid, members }) => {
                 return Err(RecoverError::DuplicateDevidDuringReplay { devid, members });
             }
-            Err(err) => {
-                return Err(RecoverError::Membership(err));
+            Err(
+                other @ (membership::MembershipError::Corrupt { .. }
+                | membership::MembershipError::Conflict(_)
+                | membership::MembershipError::Io { .. }
+                | membership::MembershipError::Save { .. }),
+            ) => {
+                unreachable!("by_devid cannot return this MembershipError variant: {other:?}");
             }
         }
     }
