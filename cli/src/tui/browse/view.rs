@@ -315,7 +315,7 @@ fn ups_status_lines(snapshot: Option<&UpsSnapshot>) -> Vec<Line<'static>> {
         .unwrap_or_else(|| "--".to_owned());
     let runtime = snapshot
         .runtime_secs
-        .map(crate::ups::format_runtime)
+        .map(|secs| crate::util::format_duration_secs(secs as u64))
         .unwrap_or_else(|| "--".to_owned());
     let load = match (snapshot.load_pct, snapshot.watts_estimated) {
         (Some(pct), Some(watts)) => format!("{pct}% ({watts} W est.)"),

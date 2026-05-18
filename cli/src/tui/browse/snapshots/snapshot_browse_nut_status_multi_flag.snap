@@ -6,7 +6,7 @@ expression: "buffer_to_string(&render(&model, 80, 14))"
 ┌ Pgm ─────┐┌ Cmd ─────────┐┌ Content ─────────────────────────────────────────┐
 │  Btrfs   ││> Status      ││Status   OB LB                                    │
 │> NUT     ││  Variables   ││Battery  100%                                     │
-│  Systemd ││  Commands    ││Runtime  30:00                                    │
+│  Systemd ││  Commands    ││Runtime  30m 0s                                   │
 │  SMART   ││  Clients     ││Load     20% (100 W est.)                         │
 │  lsblk   ││  RW Vars     ││                                                  │
 │          ││  UPSes       ││                                                  │

@@ -196,7 +196,10 @@ fn format_human(name: &str, parsed: &UpscOutput) -> String {
     line(
         &mut out,
         "Runtime",
-        parsed.battery.runtime_secs.map(format_runtime),
+        parsed
+            .battery
+            .runtime_secs
+            .map(|secs| crate::util::format_duration_secs(secs as u64)),
     );
     match parsed.load_pct {
         Some(load) => match parsed.watts_estimated() {
@@ -252,21 +255,6 @@ fn format_device_line(parsed: &UpscOutput) -> Option<String> {
         (None, Some(model)) => Some(model.to_owned()),
         (Some(mfr), None) => Some(mfr.to_owned()),
         (None, None) => None,
-    }
-}
-
-/// Format a runtime in seconds as `H:MM` (or `M:SS` for sub-hour
-/// durations). The pattern matches what typical UPS dashboards show so
-/// operators can compare values across tools.
-pub fn format_runtime(secs: u32) -> String {
-    if secs >= 3600 {
-        let h = secs / 3600;
-        let m = (secs % 3600) / 60;
-        format!("{}:{:02}", h, m)
-    } else {
-        let m = secs / 60;
-        let s = secs % 60;
-        format!("{}:{:02}", m, s)
     }
 }
 
@@ -330,18 +318,6 @@ mod tests {
         let flags = Vec::new();
         let rendered = format_status(&flags);
         assert_eq!(rendered, "(unknown -- ups.status missing)");
-    }
-
-    // Intent: format_runtime uses HH:MM for >= 1 hour, MM:SS for shorter.
-    // Why: operators expect HH:MM for the typical "15 minutes left on battery"
-    // message; sub-minute sprints during self-tests benefit from seconds
-    // resolution.
-    // Scenario: 1800s (30:00), 7260s (2:01), 45s (0:45).
-    #[test]
-    fn format_runtime_splits_on_hour_boundary() {
-        assert_eq!(format_runtime(1800), "30:00");
-        assert_eq!(format_runtime(7260), "2:01");
-        assert_eq!(format_runtime(45), "0:45");
     }
 
     // Intent: JSON output of a healthy parse round-trips to a stable shape.

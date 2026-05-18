@@ -22,8 +22,8 @@ machine.wait_until_succeeds("upsc ups@localhost ups.status", timeout=60)
 human = machine.succeed("braid ups status")
 assert "Status: OL" in human, f"expected `Status: OL` in human output, got:\n{human}"
 assert "Battery: 100%" in human, f"expected `Battery: 100%` in human output, got:\n{human}"
-# Runtime 1800s = 30:00.
-assert "Runtime: 30:00" in human, f"expected `Runtime: 30:00`, got:\n{human}"
+# Runtime 1800s = 30m 0s.
+assert "Runtime: 30m 0s" in human, f"expected `Runtime: 30m 0s`, got:\n{human}"
 # Load 17% + realpower 330W -> estimated (17 * 330 + 50) / 100 = 56 W.
 assert "estimated" in human, f"expected `estimated` in human output, got:\n{human}"
 assert "Device: APC Back-UPS ES 550G" in human, (

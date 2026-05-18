@@ -257,7 +257,7 @@ fn format_ups_charge(snapshot: &UpsSnapshot) -> String {
 
 fn format_ups_runtime(snapshot: &UpsSnapshot) -> String {
     match snapshot.runtime_secs {
-        Some(secs) => crate::ups::format_runtime(secs),
+        Some(secs) => crate::util::format_duration_secs(secs as u64),
         None => "--".into(),
     }
 }
@@ -437,19 +437,6 @@ fn pool_balance_rows(pool: &PoolState) -> u16 {
     }
 }
 
-fn format_duration_secs(secs: u64) -> String {
-    let h = secs / 3600;
-    let m = (secs % 3600) / 60;
-    let s = secs % 60;
-    if h > 0 {
-        format!("{}h {}m {}s", h, m, s)
-    } else if m > 0 {
-        format!("{}m {}s", m, s)
-    } else {
-        format!("{}s", s)
-    }
-}
-
 fn scrub_terminal_rows(
     status: Option<&str>,
     started_at: &crate::parse::types::ScrubTimestamp,
@@ -485,7 +472,7 @@ fn scrub_terminal_rows(
     if let Some(secs) = duration_secs {
         rows.push(Row::new([
             "Duration".to_owned(),
-            format_duration_secs(secs),
+            crate::util::format_duration_secs(secs),
         ]));
     }
     rows
@@ -545,7 +532,7 @@ fn scrub_table(scrub: &ScrubState, now: PrimitiveDateTime) -> Table<'_> {
             if let Some(secs) = time_left_secs {
                 rows.push(Row::new([
                     "Time left".to_owned(),
-                    format_duration_secs(*secs),
+                    crate::util::format_duration_secs(*secs),
                 ]));
             }
             if let Some(eta_ts) = eta {
@@ -2198,6 +2185,32 @@ pub(crate) mod tests {
             format_ups_flags(&[UpsStatusFlag::Lb, UpsStatusFlag::Ob]),
             "LB OB"
         );
+    }
+
+    // Intent: the Data tab UPS row renders runtime with the shared
+    // unit-suffixed duration helper.
+    // Why it exists: demo snapshots leave UPS disabled, so a regression
+    // could leave the sidebar on the old clock-style formatter unnoticed.
+    // Scenario: configured UPS with a live 1800s runtime probe.
+    #[test]
+    fn data_tab_ups_runtime_uses_duration_units() {
+        let mut model = Model::new_demo(sample_disk_names(), PoolStatus::Mounted(sample_pool()));
+        model.ups_config = Some(crate::config::Ups { name: "ups".into() });
+        model.ups = Some(UpsSnapshot {
+            flags: Vec::new(),
+            battery_charge_pct: Some(100),
+            runtime_secs: Some(1800),
+            load_pct: None,
+            watts_estimated: None,
+            raw_text: String::new(),
+            daemon: DaemonStatus::Active,
+            probed_at: Instant::now(),
+        });
+
+        let terminal = render(&model, 60, 24);
+        let buf = buffer_to_string(&terminal);
+
+        assert!(buf.contains("30m 0s"), "got:\n{buf}");
     }
 
     // Intent: format_ups_load only annotates watts when both load% and
