@@ -104,7 +104,7 @@ A sleep inhibitor is held throughout the replace to prevent the system from susp
 
 - Refuses if the pool is not mounted
 - Refuses if `--old` and `--new` are the same disk
-- Refuses if the new disk's LUKS UUID is already a member of the pool
+- Refuses if the new disk's LUKS UUID is already in use by the pool (registered membership or live btrfs devices) -- detach the conflicting disk before retrying
 - Refuses if the new disk is absent (not plugged in)
 - For live replacements: refuses if the pool has missing devices (resolve those first)
 - For missing replacements: refuses if `--missing-id` points to a live device
