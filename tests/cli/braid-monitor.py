@@ -12,6 +12,8 @@
 #   banner, ack clears it, and monitor returns clean.
 
 import json
+import re
+import shlex
 
 start_all()
 machine.wait_for_unit("multi-user.target")
@@ -26,6 +28,18 @@ def acked_stats_fingerprint():
         f"stat -c '%i %s %y' {acked_stats_path}; "
         "else printf absent; fi"
     ).strip()
+
+
+def get_devid(mapper_name):
+    """Extract the btrfs devid for a given mapper from `btrfs fi show`."""
+    fi_show = machine.succeed("btrfs fi show /mnt/storage")
+    for line in fi_show.splitlines():
+        if mapper_name in line:
+            m = re.search(r"devid\s+(\d+)", line)
+            if m:
+                return int(m.group(1))
+    raise AssertionError(f"devid not found for {mapper_name} in:\n{fi_show}")
+
 
 # --- Setup: create 3-disk RAID1 pool ---
 with subtest("Create 3-disk RAID1 pool"):
@@ -71,6 +85,29 @@ with subtest("Healthy mounted pool: ack is a durable no-op"):
         f"Expected acked-stats fingerprint unchanged, before={before!r} after={after!r}"
     )
 
+with subtest("Seed pool.json membership before failure"):
+    members = {}
+    devids_by_name = {}
+    for name in ["disk1", "disk2", "disk3"]:
+        luks_uuid = machine.succeed(
+            f"cryptsetup luksUUID /dev/disk/by-id/virtio-{name}"
+        ).strip()
+        devid = get_devid(f"braid-{name}")
+        members[luks_uuid] = {
+            "name": name,
+            "by_id": f"/dev/disk/by-id/virtio-{name}",
+            "devid": devid,
+            "added_at": "2024-01-01T00:00:00Z",
+        }
+        devids_by_name[name] = devid
+    pool_json = json.dumps(
+        {"disks": members}, sort_keys=True, separators=(",", ":")
+    )
+    machine.succeed(
+        f"printf '%s' {shlex.quote(pool_json)} > /var/lib/braid/pool.json"
+    )
+    disk2_devid = devids_by_name["disk2"]
+
 # --- Simulate disk failure: close one LUKS mapper ---
 with subtest("Simulate disk failure"):
     machine.succeed("umount /mnt/storage")
@@ -87,9 +124,13 @@ with subtest("Degraded pool: latch file created"):
 
 with subtest("Degraded pool: status shows ALERT banner"):
     output = machine.succeed("braid status")
-    assert "ALERT" in output, f"Expected ALERT in degraded status, got: {output}"
+    assert "ALERT -- disk health issue detected." in output, (
+        f"Expected ALERT in degraded status, got: {output}"
+    )
     assert "braid ack" in output, f"Expected 'braid ack' hint in status, got: {output}"
-    assert "missing device" in output, f"Expected 'missing device' cause in status, got: {output}"
+    assert f"missing device: disk2 (devid {disk2_devid})" in output, (
+        f"Expected 'missing device: disk2 (devid {disk2_devid})' cause in status, got: {output}"
+    )
 
 with subtest("Degraded pool: status --json shows alert"):
     json_output = machine.succeed("braid status --json")
@@ -97,6 +138,13 @@ with subtest("Degraded pool: status --json shows alert"):
     assert report["alert_active"] == True, f"Expected alert_active=true, got: {report}"
     cause_types = [c["type"] for c in report["alert_causes"]]
     assert "missing_device" in cause_types, f"Expected missing_device cause, got: {cause_types}"
+    missing_causes = [
+        c for c in report["alert_causes"]
+        if c["type"] == "missing_device" and c.get("devid") == disk2_devid
+    ]
+    assert missing_causes, (
+        f"Expected missing_device cause with devid={disk2_devid}, got: {report['alert_causes']}"
+    )
 
 with subtest("Ack clears alert"):
     machine.succeed("braid ack")
