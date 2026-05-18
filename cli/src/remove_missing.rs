@@ -1517,6 +1517,76 @@ mod tests {
         );
     }
 
+    // Intent: pending-op.json survives when pool.json persistence fails after
+    //   the btrfs device-remove phase has succeeded.
+    // Why it exists: remove-missing must not advance the phased journal or run
+    //   post-remove maintenance until the committed btrfs membership has been
+    //   persisted to pool.json.
+    // Scenario: 3-disk NAS, one drive dies. Operator runs remove-missing;
+    //   `btrfs device remove <devid>` succeeds, but /var/lib/braid/pool.json
+    //   cannot be rewritten. The journal must remain in PoolMutation so
+    //   `braid recover` can reconcile from live btrfs state.
+    #[test]
+    fn journal_survives_save_membership_failure_after_device_remove() {
+        let f = PoolFixture::three_disk_devids_pinned();
+        let (runner, remove_done) =
+            RemoveMissingPool::three_disk_one_missing().install(MockRunner::default());
+        let pool_json = f.paths.pool_json();
+        let runner = runner.with_handler(move |req| match req {
+            CmdRequest::BtrfsDeviceRemove { .. } => {
+                remove_done.store(true, Ordering::SeqCst);
+                std::fs::remove_file(&pool_json).expect("remove existing pool.json");
+                std::fs::create_dir(&pool_json)
+                    .expect("replace pool.json with directory to force save failure");
+                Some(Ok(mock_ok("btrfs device remove", "")))
+            }
+            _ => None,
+        });
+
+        let result = cmd_remove_missing(
+            &runner,
+            &MockFs::storage(vec![]),
+            &f.remove_missing_params().build(),
+        );
+
+        let err = result.unwrap_err().to_string();
+        assert!(
+            err.contains("failed to persist pool membership"),
+            "remove-missing should fail from the membership persist step: {err}"
+        );
+        assert!(
+            err.contains("pool.json"),
+            "membership persist failure should name pool.json: {err}"
+        );
+        let calls = runner.requests();
+        assert!(
+            calls
+                .iter()
+                .any(|c| matches!(c, CmdRequest::BtrfsDeviceRemove { .. })),
+            "expected BtrfsDeviceRemove; calls: {calls:?}"
+        );
+        assert!(
+            !calls
+                .iter()
+                .any(|c| matches!(c, CmdRequest::BtrfsBalanceRaid1Soft { .. })),
+            "soft balance must not run after membership persist fails; calls: {calls:?}"
+        );
+        let journal = journal::load_journal(&f.paths)
+            .unwrap()
+            .expect("pending-op.json must survive membership persist failure");
+        assert!(
+            matches!(
+                journal.op,
+                journal::OpKind::RemoveMissing {
+                    phase: journal::RemoveMissingPhase::PoolMutation,
+                    ..
+                }
+            ),
+            "journal must remain in PoolMutation until pool.json persists: {:?}",
+            journal.op
+        );
+    }
+
     #[test]
     // Intent: pending-op.json survives when soft balance fails after a successful
     //   device removal.
