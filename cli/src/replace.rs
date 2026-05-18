@@ -752,7 +752,7 @@ impl ReplacePlan {
                             &format!("disk {new_name}: unlocked"),
                         )
                     );
-                } else if !pool.devices.iter().any(|d| d.mapper == new_mn) {
+                } else {
                     // Open-boundary defense-in-depth for the already-open
                     // path: re-classify ownership right before
                     // `pool_replace_device` so a close+reopen between
@@ -767,9 +767,6 @@ impl ReplacePlan {
                         &new_uuid,
                         params.backing_path_resolver,
                     )?;
-                    eprintln!(
-                        "note: LUKS mapper is already open but device is not yet in pool. Completing replace."
-                    );
                 }
             }
         }
@@ -3771,6 +3768,89 @@ mod tests {
         assert_eq!(
             open_calls, 0,
             "mapper_open: true must not trigger CryptsetupLuksOpen on the new disk"
+        );
+    }
+
+    #[test]
+    // Intent: a drifted live-pool row with the replacement mapper name
+    //   must not skip the already-open replacement mapper verifier.
+    // Why it exists: mapper names are runtime handles, not membership
+    //   identity; a mapper-keyed skip would let a foreign open mapper reach
+    //   `btrfs replace start` when the live row's UUID differs from the
+    //   planned replacement UUID.
+    // Scenario: planning observes a pool row named `braid-disk3` with a
+    //   foreign LUKS UUID, then the replacement disk plans as the correct
+    //   already-open `braid-disk3`. Before execute reaches the final
+    //   mutation boundary, the open mapper's backing UUID drifts again.
+    fn mapper_name_drift_does_not_skip_open_mapper_verifier() {
+        let f = PoolFixture::two_disk_healthy();
+        let fs = MockFs::storage(vec![
+            "/dev/disk/by-id/virtio-disk3".into(),
+            "/dev/mapper/braid-disk3".into(),
+        ]);
+        let replace_done = Arc::new(AtomicBool::new(false));
+        let disk3_backing_uuid_calls = Arc::new(AtomicU32::new(0));
+        let new_uuid = LuksUuid::parse("33333333-3333-3333-3333-333333333333").unwrap();
+        let drifted_pool_uuid = LuksUuid::parse("44444444-4444-4444-4444-444444440001").unwrap();
+        let execute_uuid = LuksUuid::parse("55555555-5555-5555-5555-555555550001").unwrap();
+        let new_uuid_for_handler = new_uuid.clone();
+        let drifted_pool_uuid_for_handler = drifted_pool_uuid.clone();
+        let execute_uuid_for_handler = execute_uuid.clone();
+        let drifted_pre_show = "Label: none  uuid: cc86845b-aec3-408e-bef5-553affc1f2b1\n\
+             \tTotal devices 3 FS bytes used 16.17MiB\n\
+             \tdevid    1 size 496.00MiB used 121.56MiB path /dev/mapper/braid-disk1\n\
+             \tdevid    2 size 496.00MiB used 121.56MiB path /dev/mapper/braid-disk2\n\
+             \tdevid    3 size 496.00MiB used 121.56MiB path /dev/mapper/braid-disk3\n";
+        let runner = ReplacementPool::two_disk_healthy()
+            .install(MockRunner::default(), replace_done.clone())
+            .with_handler({
+                let replace_done = replace_done.clone();
+                let disk3_backing_uuid_calls = disk3_backing_uuid_calls.clone();
+                move |req| match req {
+                    CmdRequest::BtrfsFilesystemShow { mount_point }
+                        if !replace_done.load(Ordering::Relaxed) =>
+                    {
+                        Some(Ok(mock_ok(
+                            &format!("btrfs filesystem show {mount_point}"),
+                            drifted_pre_show,
+                        )))
+                    }
+                    CmdRequest::CryptsetupLuksUuid { device } if device == "/dev/vdd" => {
+                        let call = disk3_backing_uuid_calls.fetch_add(1, Ordering::SeqCst);
+                        let observed = match call {
+                            0 => &drifted_pool_uuid_for_handler,
+                            1 => &new_uuid_for_handler,
+                            _ => &execute_uuid_for_handler,
+                        };
+                        Some(Ok(mock_ok(
+                            &format!("cryptsetup luksUUID {device}"),
+                            &format!("{observed}\n"),
+                        )))
+                    }
+                    _ => None,
+                }
+            });
+
+        let result = cmd_replace(&runner, &fs, &f.replace_params().build());
+
+        match result {
+            Err(ReplaceError::NewTargetUuidMismatchAtOpen {
+                by_id,
+                expected,
+                observed,
+            }) => {
+                assert_eq!(by_id.as_str(), "/dev/disk/by-id/virtio-disk3");
+                assert_eq!(expected, new_uuid);
+                assert_eq!(observed, execute_uuid.as_str());
+            }
+            other => panic!("expected NewTargetUuidMismatchAtOpen, got: {other:?}"),
+        }
+        assert!(
+            !runner
+                .requests()
+                .iter()
+                .any(|r| matches!(r, CmdRequest::BtrfsReplaceStart { .. })),
+            "no BtrfsReplaceStart may issue when the open mapper verifier fails"
         );
     }
 
