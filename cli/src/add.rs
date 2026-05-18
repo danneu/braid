@@ -105,25 +105,27 @@ pub enum AddError {
 // Add-local identity classification for PresentLuks disks
 // ---------------------------------------------------------------------------
 
-/// Identity classification for a PresentLuks disk in the add path.
-/// This is add-local — not shared with unlock, status, replace, etc.
+/// Btrfs-only probe result for a braid-labeled PresentLuks mapper.
+/// Live-pool membership is decided separately from LUKS UUID plus
+/// backing-path proof so mapper names never become identity.
 #[derive(Debug, Clone, PartialEq, Eq)]
-#[allow(dead_code)] // NonBraid/BraidLabeledNoPool are handled before classify_braid_disk_fsid
-enum AddLuksIdentity {
-    /// LUKS label is not braid-<name> (or absent).
-    NonBraid,
-    /// Correct braid label, but pool is not mounted — can't verify.
-    BraidLabeledNoPool,
+enum AddLuksBtrfsProbe {
     /// Correct braid label, mapper open, no btrfs superblock.
-    /// Ambiguous: could be clean eviction, partial init, or manual wipe.
-    /// Refused — operator must wipe the disk to re-add as fresh.
-    BraidLabeledNoBtrfs,
+    NoBtrfs,
     /// Correct braid label, mapper open, btrfs FSID differs from pool.
-    BraidLabeledForeignPool,
-    /// Correct braid label, mapper open, btrfs FSID matches pool, already in pool.
-    BraidLabeledAlreadyInPool,
-    /// Correct braid label, mapper open, btrfs FSID matches pool, not yet in pool.
-    BraidLabeledRecoverable,
+    ForeignPool,
+    /// Correct braid label, mapper open, btrfs FSID matches pool.
+    SamePool,
+}
+
+/// Live-pool correlation for a PresentLuks target after UUID match.
+/// A UUID match only counts as ownership when the candidate and live
+/// pool row also resolve to the same backing block device.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum LivePoolMatch<'a> {
+    SameBacking { device: &'a PoolDevice },
+    DifferentBacking { device: &'a PoolDevice },
+    NoMatch,
 }
 
 /// Validate the preconditions for adding a PresentLuks disk.
@@ -161,14 +163,14 @@ fn classify_braid_disk_fsid<R: CommandRunner>(
     name: &str,
     mapper: &MapperName,
     pool: &PoolState,
-) -> Result<AddLuksIdentity, AddError> {
+) -> Result<AddLuksBtrfsProbe, AddError> {
     let mapper_path = format!("/dev/mapper/{}", mapper.0);
     let show_raw = runner.run(&CmdRequest::BtrfsFilesystemShowTarget {
         target: mapper_path,
     })?;
 
     match classify_btrfs_probe(&show_raw) {
-        DeviceBtrfsProbe::NoBtrfs => return Ok(AddLuksIdentity::BraidLabeledNoBtrfs),
+        DeviceBtrfsProbe::NoBtrfs => return Ok(AddLuksBtrfsProbe::NoBtrfs),
         DeviceBtrfsProbe::Unknown(msg) => {
             return Err(AddError::Cmd(CmdError::Failed(format!(
                 "disk '{}': {}",
@@ -195,32 +197,77 @@ fn classify_braid_disk_fsid<R: CommandRunner>(
     let pool_fsid = pool.fsid.as_ref().expect("mounted pool must have FSID");
 
     if device_fsid != pool_fsid {
-        return Ok(AddLuksIdentity::BraidLabeledForeignPool);
+        return Ok(AddLuksBtrfsProbe::ForeignPool);
     }
 
-    if pool.devices.iter().any(|d| d.mapper == *mapper) {
-        return Ok(AddLuksIdentity::BraidLabeledAlreadyInPool);
-    }
-
-    Ok(AddLuksIdentity::BraidLabeledRecoverable)
+    Ok(AddLuksBtrfsProbe::SamePool)
 }
 
-/// Map an AddLuksIdentity error variant to a canonical AddError.
-/// Returns None for non-error outcomes (AlreadyInPool, Recoverable).
-fn identity_to_error(identity: &AddLuksIdentity, name: &str) -> Option<AddError> {
+/// Map an AddLuksBtrfsProbe error variant to a canonical AddError.
+/// Returns None when the mapper's btrfs FSID matches the mounted pool.
+fn identity_to_error(identity: &AddLuksBtrfsProbe, name: &str) -> Option<AddError> {
     match identity {
-        AddLuksIdentity::BraidLabeledNoBtrfs => Some(AddError::Validation(format!(
+        AddLuksBtrfsProbe::NoBtrfs => Some(AddError::Validation(format!(
             "disk '{}' is braid-labeled but contains no btrfs superblock; \
              identity is ambiguous, so braid will not re-add it automatically. \
              Wipe the disk and add it again as fresh.",
             name,
         ))),
-        AddLuksIdentity::BraidLabeledForeignPool => Some(AddError::Validation(format!(
+        AddLuksBtrfsProbe::ForeignPool => Some(AddError::Validation(format!(
             "disk '{}' is a braid-managed device from a different btrfs filesystem; \
              braid will not merge foreign pools",
             name,
         ))),
-        _ => None,
+        AddLuksBtrfsProbe::SamePool => None,
+    }
+}
+
+/// Classify live-pool membership for an add target by UUID and backing path.
+/// Different backing dominates so cloned LUKS headers fail closed even if
+/// another live row proves the candidate itself is already open.
+fn classify_live_pool_match<'a>(
+    target_uuid: &LuksUuid,
+    target_by_id: &ByIdPath,
+    pool: &'a PoolState,
+    resolver: &dyn BackingPathResolver,
+) -> Result<LivePoolMatch<'a>, AddError> {
+    let target_backing = resolver
+        .canonicalize(target_by_id.as_str())
+        .map_err(|source| {
+            AddError::Validation(format!(
+                "could not canonicalize add target backing path '{}': {source}",
+                target_by_id
+            ))
+        })?;
+    let mut same_backing = None;
+    let mut different_backing = None;
+
+    for device in pool
+        .devices
+        .iter()
+        .filter(|device| device.luks_uuid == *target_uuid)
+    {
+        let live_backing = resolver
+            .canonicalize(&device.underlying)
+            .map_err(|source| {
+                AddError::Validation(format!(
+                    "could not canonicalize live pool backing path '{}' for mapper '{}': {source}",
+                    device.underlying, device.mapper
+                ))
+            })?;
+        if live_backing != target_backing {
+            different_backing.get_or_insert(device);
+        } else {
+            same_backing.get_or_insert(device);
+        }
+    }
+
+    if let Some(device) = different_backing {
+        Ok(LivePoolMatch::DifferentBacking { device })
+    } else if let Some(device) = same_backing {
+        Ok(LivePoolMatch::SameBacking { device })
+    } else {
+        Ok(LivePoolMatch::NoMatch)
     }
 }
 
@@ -973,8 +1020,7 @@ impl AddPlan {
                 return Err(err);
             }
             match identity {
-                AddLuksIdentity::BraidLabeledAlreadyInPool => continue,
-                AddLuksIdentity::BraidLabeledRecoverable => {
+                AddLuksBtrfsProbe::SamePool => {
                     let verified_pool_fsid = self.pool.fsid.clone().ok_or_else(|| {
                         AddError::Validation(
                             "mounted pool has no FSID while journaling returned add target".into(),
@@ -1600,6 +1646,7 @@ pub fn plan_add<R: CommandRunner + Sync, F: Filesystem + ?Sized>(
             paths: params.paths,
             enroll_key_file: params.enroll_key_file,
             luks_format_extra_opts: &luks_format_extra_opts,
+            backing_path_resolver: params.backing_path_resolver,
             pool_membership: &pool_membership,
         },
     ) {
@@ -1669,6 +1716,9 @@ struct AddStepsInput<'a> {
     paths: &'a StatePaths,
     enroll_key_file: Option<&'a Path>,
     luks_format_extra_opts: &'a LuksFormatExtraOpts,
+    /// Same canonical backing-path resolver used by mapper ownership
+    /// checks so PresentLuks live-pool correlation proves UUID and disk.
+    backing_path_resolver: &'a dyn BackingPathResolver,
     /// Borrowed pool membership for the pre-journal-write uniqueness
     /// assert on freshly generated / probed UUIDs.
     pool_membership: &'a PoolMembership,
@@ -1857,8 +1907,21 @@ fn build_add_work_plan<R: CommandRunner>(
                         return Err(err);
                     }
                     match identity {
-                        AddLuksIdentity::BraidLabeledAlreadyInPool => continue,
-                        AddLuksIdentity::BraidLabeledRecoverable => {
+                        AddLuksBtrfsProbe::SamePool => {
+                            match classify_live_pool_match(
+                                uuid,
+                                by_id,
+                                input.pool,
+                                input.backing_path_resolver,
+                            )? {
+                                LivePoolMatch::SameBacking { .. } => continue,
+                                LivePoolMatch::DifferentBacking { device } => {
+                                    return Err(duplicate_live_pool_uuid_error(
+                                        uuid, name, by_id, device,
+                                    ));
+                                }
+                                LivePoolMatch::NoMatch => {}
+                            }
                             let verified_pool_fsid = input.pool.fsid.clone().ok_or_else(|| {
                                 AddError::Validation(
                                     "mounted pool has no FSID while planning returned add target"
@@ -1900,13 +1963,26 @@ fn build_add_work_plan<R: CommandRunner>(
                 } else {
                     // Mapper closed -- FSID verification deferred to execution time.
                     // Two-tier defense for the cached `uuid`:
-                    //   (a) plan-time `assert_target_uuid_unique` below rejects UUID
-                    //       collisions against in-flight targets, pool membership, and
-                    //       the live pool.
+                    //   (a) plan-time live-pool matching below proves same-backing
+                    //       no-ops, rejects different-backing clones, then
+                    //       `assert_target_uuid_unique` rejects in-flight and
+                    //       membership collisions.
                     //   (b) execute-time live-UUID re-probe before `ensure_luks_open`
                     //       (see Pass-1 loop) rejects plan-to-execute disk swaps so a
                     //       foreign disk at this by-id cannot pass through to
                     //       `btrfs device add`.
+                    match classify_live_pool_match(
+                        uuid,
+                        by_id,
+                        input.pool,
+                        input.backing_path_resolver,
+                    )? {
+                        LivePoolMatch::SameBacking { .. } => continue,
+                        LivePoolMatch::DifferentBacking { device } => {
+                            return Err(duplicate_live_pool_uuid_error(uuid, name, by_id, device));
+                        }
+                        LivePoolMatch::NoMatch => {}
+                    }
                     assert_target_uuid_unique(
                         uuid,
                         input.pool_membership,
@@ -1996,22 +2072,35 @@ fn assert_target_uuid_unique(
     // by-id placeholder (the test plan accepts this for the live-pool
     // arm).
     if let Some(dev) = live_pool.devices.iter().find(|d| d.luks_uuid == *uuid) {
-        let synth_name = DiskName::parse(&dev.mapper.0)
-            // Mapper "braid-<diskname>" should parse cleanly. If it
-            // does not (operator created a non-standard mapper),
-            // fall back to a placeholder so the error message still
-            // names both pairs.
-            .unwrap_or_else(|_| DiskName::parse("foreign").expect("placeholder DiskName is valid"));
-        let synth_by_id = ByIdPath::parse("/dev/disk/by-id/").expect("placeholder by-id is valid");
-        return Err(duplicate_uuid_error(
-            uuid.clone(),
-            this_name,
-            this_by_id,
-            &synth_name,
-            &synth_by_id,
+        return Err(duplicate_live_pool_uuid_error(
+            uuid, this_name, this_by_id, dev,
         ));
     }
     Ok(())
+}
+
+/// Render a live-pool UUID collision with the same synthesized live side
+/// as `assert_target_uuid_unique` so clone refusals stay operator-stable.
+fn duplicate_live_pool_uuid_error(
+    uuid: &LuksUuid,
+    this_name: &DiskName,
+    this_by_id: &ByIdPath,
+    live_device: &PoolDevice,
+) -> AddError {
+    let synth_name = DiskName::parse(&live_device.mapper.0)
+        // Mapper "braid-<diskname>" should parse cleanly. If it
+        // does not (operator created a non-standard mapper),
+        // fall back to a placeholder so the error message still
+        // names both pairs.
+        .unwrap_or_else(|_| DiskName::parse("foreign").expect("placeholder DiskName is valid"));
+    let synth_by_id = ByIdPath::parse("/dev/disk/by-id/").expect("placeholder by-id is valid");
+    duplicate_uuid_error(
+        uuid.clone(),
+        this_name,
+        this_by_id,
+        &synth_name,
+        &synth_by_id,
+    )
 }
 
 /// Sort the two `(name, by_id)` pairs lexicographically by `by_id`
@@ -2325,7 +2414,7 @@ mod tests {
         let mn = MapperName("braid-disk1".into());
 
         let result = classify_braid_disk_fsid(&runner, "disk1", &mn, &pool).unwrap();
-        assert_eq!(result, AddLuksIdentity::BraidLabeledNoBtrfs);
+        assert_eq!(result, AddLuksBtrfsProbe::NoBtrfs);
     }
 
     #[test]
@@ -2343,11 +2432,17 @@ mod tests {
         let mn = MapperName("braid-disk1".into());
 
         let result = classify_braid_disk_fsid(&runner, "disk1", &mn, &pool).unwrap();
-        assert_eq!(result, AddLuksIdentity::BraidLabeledForeignPool);
+        assert_eq!(result, AddLuksBtrfsProbe::ForeignPool);
     }
 
+    // Intent: classify_braid_disk_fsid returns SamePool for a matching btrfs
+    // FSID without deciding live-pool membership.
+    // Why it exists: live-pool correlation must be UUID plus backing path,
+    // not mapper-name equality inside the btrfs probe.
+    // Scenario: a braid-labeled mapper has the mounted pool FSID; whether it
+    // is already live or recoverable is decided by classify_live_pool_match.
     #[test]
-    fn classify_fsid_already_in_pool() {
+    fn classify_fsid_same_pool() {
         let fsid = "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee";
         let runner = MockRunner::default().with_output(
             CmdRequest::BtrfsFilesystemShowTarget {
@@ -2373,24 +2468,7 @@ mod tests {
         let mn = MapperName("braid-disk1".into());
 
         let result = classify_braid_disk_fsid(&runner, "disk1", &mn, &pool).unwrap();
-        assert_eq!(result, AddLuksIdentity::BraidLabeledAlreadyInPool);
-    }
-
-    #[test]
-    fn classify_fsid_recoverable() {
-        let fsid = "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee";
-        let runner = MockRunner::default().with_output(
-            CmdRequest::BtrfsFilesystemShowTarget {
-                target: "/dev/mapper/braid-disk1".into(),
-            },
-            btrfs_show_with_uuid(fsid),
-        );
-        // Pool does NOT contain braid-disk1 yet
-        let pool = pool_mounted_with_fsid(fsid);
-        let mn = MapperName("braid-disk1".into());
-
-        let result = classify_braid_disk_fsid(&runner, "disk1", &mn, &pool).unwrap();
-        assert_eq!(result, AddLuksIdentity::BraidLabeledRecoverable);
+        assert_eq!(result, AddLuksBtrfsProbe::SamePool);
     }
 
     // Device has a btrfs superblock (exit 0) but the parser finds no uuid
@@ -2422,6 +2500,185 @@ mod tests {
             err.contains("no UUID"),
             "expected error about missing UUID, got: {err}"
         );
+    }
+
+    fn pool_with_live_devices(devices: Vec<PoolDevice>) -> PoolState {
+        let total_devices = devices.len() as u64;
+        PoolState {
+            mounted: true,
+            devices,
+            missing_count: 0,
+            missing_devids: vec![],
+            total_devices,
+            fsid: Some("aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee".to_owned()),
+            null_underlying: vec![],
+        }
+    }
+
+    fn live_pool_device(mapper: &str, uuid: &LuksUuid, underlying: &str) -> PoolDevice {
+        PoolDevice {
+            mapper: MapperName(mapper.to_owned()),
+            luks_uuid: uuid.clone(),
+            devid: 1,
+            underlying: underlying.to_owned(),
+        }
+    }
+
+    // Intent: classify_live_pool_match recognizes a UUID match as already
+    // live only after the target by-id and pool row backing path match.
+    // Why it exists: the add planner must tolerate mapper-name drift without
+    // using mapper names as persistent identity.
+    // Scenario: the candidate by-id resolves to the same kernel path as a
+    // live pool row whose mapper is named braid-drifted.
+    #[test]
+    fn live_pool_match_same_backing() {
+        let uuid = LuksUuid::parse("22222222-2222-2222-2222-222222222222").unwrap();
+        let by_id = ByIdPath::parse("/dev/disk/by-id/virtio-disk2").unwrap();
+        let pool =
+            pool_with_live_devices(vec![live_pool_device("braid-drifted", &uuid, "/dev/vdb")]);
+        let resolver = crate::test_fixtures::MockBackingPathResolver::default()
+            .with_path(by_id.as_str(), "/dev/vdb");
+
+        let result = classify_live_pool_match(&uuid, &by_id, &pool, &resolver).unwrap();
+
+        match result {
+            LivePoolMatch::SameBacking { device } => {
+                assert_eq!(device.mapper, MapperName("braid-drifted".into()));
+            }
+            other => panic!("expected SameBacking, got: {other:?}"),
+        }
+    }
+
+    // Intent: classify_live_pool_match rejects a UUID match whose backing
+    // path differs from the target by-id.
+    // Why it exists: a cloned LUKS header has the same UUID but is a
+    // different physical disk, so treating UUID alone as a no-op is unsafe.
+    // Scenario: the candidate by-id resolves to /dev/vdb while the live pool
+    // row with the same UUID resolves to /dev/vdc.
+    #[test]
+    fn live_pool_match_different_backing() {
+        let uuid = LuksUuid::parse("22222222-2222-2222-2222-222222222222").unwrap();
+        let by_id = ByIdPath::parse("/dev/disk/by-id/virtio-disk2").unwrap();
+        let pool = pool_with_live_devices(vec![live_pool_device("braid-clone", &uuid, "/dev/vdc")]);
+        let resolver = crate::test_fixtures::MockBackingPathResolver::default()
+            .with_path(by_id.as_str(), "/dev/vdb");
+
+        let result = classify_live_pool_match(&uuid, &by_id, &pool, &resolver).unwrap();
+
+        match result {
+            LivePoolMatch::DifferentBacking { device } => {
+                assert_eq!(device.mapper, MapperName("braid-clone".into()));
+            }
+            other => panic!("expected DifferentBacking, got: {other:?}"),
+        }
+    }
+
+    // Intent: classify_live_pool_match reports NoMatch when no live pool row
+    // carries the candidate UUID.
+    // Why it exists: returned-disk recovery must remain possible when the
+    // disk belongs to the mounted btrfs FSID but is not currently live.
+    // Scenario: the mounted pool has devices, but none have the target LUKS
+    // UUID.
+    #[test]
+    fn live_pool_match_no_uuid() {
+        let target_uuid = LuksUuid::parse("22222222-2222-2222-2222-222222222222").unwrap();
+        let other_uuid = LuksUuid::parse("11111111-1111-1111-1111-111111111111").unwrap();
+        let by_id = ByIdPath::parse("/dev/disk/by-id/virtio-disk2").unwrap();
+        let pool = pool_with_live_devices(vec![live_pool_device(
+            "braid-existing",
+            &other_uuid,
+            "/dev/vdb",
+        )]);
+
+        let result = classify_live_pool_match(
+            &target_uuid,
+            &by_id,
+            &pool,
+            crate::test_fixtures::mock_virtio_offset_backing_path_resolver(),
+        )
+        .unwrap();
+
+        assert_eq!(result, LivePoolMatch::NoMatch);
+    }
+
+    // Intent: classify_live_pool_match turns backing-path resolver failures
+    // into hard validation errors.
+    // Why it exists: ADR-024 requires backing-path proof before UUID reuse;
+    // the add planner must not guess when canonicalization fails.
+    // Scenario: a live pool row has the target UUID, but canonicalizing that
+    // row's underlying device fails.
+    #[test]
+    fn live_pool_match_canonicalize_error() {
+        let uuid = LuksUuid::parse("22222222-2222-2222-2222-222222222222").unwrap();
+        let by_id = ByIdPath::parse("/dev/disk/by-id/virtio-disk2").unwrap();
+        let pool =
+            pool_with_live_devices(vec![live_pool_device("braid-existing", &uuid, "/dev/vdb")]);
+        let resolver = crate::test_fixtures::MockBackingPathResolver::default()
+            .with_path(by_id.as_str(), "/dev/vdb")
+            .with_error("/dev/vdb", std::io::ErrorKind::NotFound);
+
+        let err = classify_live_pool_match(&uuid, &by_id, &pool, &resolver).unwrap_err();
+
+        assert!(matches!(err, AddError::Validation(_)));
+        assert!(
+            err.to_string()
+                .contains("could not canonicalize live pool backing path"),
+            "expected live backing canonicalization error, got: {err}"
+        );
+    }
+
+    // Intent: classify_live_pool_match still scans later matching UUID rows
+    // after seeing an earlier different backing.
+    // Why it exists: a clone row must not mask a later canonicalization
+    // failure; backing-path proof is required for every same-UUID live row.
+    // Scenario: the first live row has different backing, and a second
+    // same-UUID live row cannot be canonicalized.
+    #[test]
+    fn live_pool_match_canonicalize_error_after_different_backing() {
+        let uuid = LuksUuid::parse("22222222-2222-2222-2222-222222222222").unwrap();
+        let by_id = ByIdPath::parse("/dev/disk/by-id/virtio-disk2").unwrap();
+        let pool = pool_with_live_devices(vec![
+            live_pool_device("braid-clone", &uuid, "/dev/vdc"),
+            live_pool_device("braid-unknown", &uuid, "/dev/missing"),
+        ]);
+        let resolver = crate::test_fixtures::MockBackingPathResolver::default()
+            .with_path(by_id.as_str(), "/dev/vdb")
+            .with_error("/dev/missing", std::io::ErrorKind::NotFound);
+
+        let err = classify_live_pool_match(&uuid, &by_id, &pool, &resolver).unwrap_err();
+
+        assert!(matches!(err, AddError::Validation(_)));
+        assert!(
+            err.to_string().contains("/dev/missing"),
+            "expected later backing canonicalization error, got: {err}"
+        );
+    }
+
+    // Intent: classify_live_pool_match gives DifferentBacking precedence
+    // when duplicate live UUID rows include both same and different backing.
+    // Why it exists: probe_pool does not dedupe by LUKS UUID, so a clone can
+    // appear alongside the legitimate open mapper.
+    // Scenario: one live row matches the candidate backing path and another
+    // live row with the same UUID points at a different kernel device.
+    #[test]
+    fn live_pool_match_mixed_same_and_different_backing() {
+        let uuid = LuksUuid::parse("22222222-2222-2222-2222-222222222222").unwrap();
+        let by_id = ByIdPath::parse("/dev/disk/by-id/virtio-disk2").unwrap();
+        let pool = pool_with_live_devices(vec![
+            live_pool_device("braid-legit", &uuid, "/dev/vdb"),
+            live_pool_device("braid-clone", &uuid, "/dev/vdc"),
+        ]);
+        let resolver = crate::test_fixtures::MockBackingPathResolver::default()
+            .with_path(by_id.as_str(), "/dev/vdb");
+
+        let result = classify_live_pool_match(&uuid, &by_id, &pool, &resolver).unwrap();
+
+        match result {
+            LivePoolMatch::DifferentBacking { device } => {
+                assert_eq!(device.mapper, MapperName("braid-clone".into()));
+            }
+            other => panic!("expected DifferentBacking, got: {other:?}"),
+        }
     }
 
     // Intent: find_added_device_by_uuid resolves the live PoolDevice by LUKS
@@ -2493,6 +2750,8 @@ mod tests {
                 paths: &test_paths().1,
                 enroll_key_file: None,
                 luks_format_extra_opts: &LuksFormatExtraOpts::default(),
+                backing_path_resolver:
+                    crate::test_fixtures::mock_virtio_offset_backing_path_resolver(),
                 pool_membership: &PoolMembership::empty(),
             },
         );
@@ -2533,6 +2792,8 @@ mod tests {
                 paths: &test_paths().1,
                 enroll_key_file: None,
                 luks_format_extra_opts: &LuksFormatExtraOpts::default(),
+                backing_path_resolver:
+                    crate::test_fixtures::mock_virtio_offset_backing_path_resolver(),
                 pool_membership: &PoolMembership::empty(),
             },
         );
@@ -2565,6 +2826,8 @@ mod tests {
                 paths: &test_paths().1,
                 enroll_key_file: None,
                 luks_format_extra_opts: &LuksFormatExtraOpts::default(),
+                backing_path_resolver:
+                    crate::test_fixtures::mock_virtio_offset_backing_path_resolver(),
                 pool_membership: &PoolMembership::empty(),
             },
         )
@@ -2601,6 +2864,8 @@ mod tests {
                 paths: &test_paths().1,
                 enroll_key_file: None,
                 luks_format_extra_opts: &LuksFormatExtraOpts::default(),
+                backing_path_resolver:
+                    crate::test_fixtures::mock_virtio_offset_backing_path_resolver(),
                 pool_membership: &PoolMembership::empty(),
             },
         );
@@ -2633,6 +2898,8 @@ mod tests {
                 paths: &test_paths().1,
                 enroll_key_file: None,
                 luks_format_extra_opts: &LuksFormatExtraOpts::default(),
+                backing_path_resolver:
+                    crate::test_fixtures::mock_virtio_offset_backing_path_resolver(),
                 pool_membership: &PoolMembership::empty(),
             },
         )
@@ -2726,6 +2993,8 @@ mod tests {
                 paths: &paths,
                 enroll_key_file: None,
                 luks_format_extra_opts: &LuksFormatExtraOpts::default(),
+                backing_path_resolver:
+                    crate::test_fixtures::mock_virtio_offset_backing_path_resolver(),
                 pool_membership: &PoolMembership::empty(),
             },
         )
@@ -2829,12 +3098,12 @@ mod tests {
 
     #[test]
     fn identity_to_error_no_btrfs_canonical_message() {
-        // Intent: identity_to_error emits the canonical BraidLabeledNoBtrfs error.
+        // Intent: identity_to_error emits the canonical NoBtrfs error.
         // Why it exists: this was the variant where message text had already diverged
         //   between cmd_add and add work-plan rendering. Pinning it prevents recurrence.
         // Scenario: a braid-labeled disk has its LUKS contents wiped or is partially
-        //   initialized — btrfs superblock is absent.
-        let err = identity_to_error(&AddLuksIdentity::BraidLabeledNoBtrfs, "disk1")
+        //   initialized; btrfs superblock is absent.
+        let err = identity_to_error(&AddLuksBtrfsProbe::NoBtrfs, "disk1")
             .unwrap()
             .to_string();
         assert!(err.contains("contains no btrfs superblock"), "got: {err}");
@@ -2847,10 +3116,10 @@ mod tests {
 
     #[test]
     fn identity_to_error_foreign_pool_canonical_message() {
-        // Intent: identity_to_error emits the canonical BraidLabeledForeignPool error.
+        // Intent: identity_to_error emits the canonical ForeignPool error.
         // Why it exists: pins the error text so both call sites can't drift independently.
         // Scenario: user tries to add a braid-labeled disk from a different NAS.
-        let err = identity_to_error(&AddLuksIdentity::BraidLabeledForeignPool, "disk1")
+        let err = identity_to_error(&AddLuksBtrfsProbe::ForeignPool, "disk1")
             .unwrap()
             .to_string();
         assert!(err.contains("different btrfs filesystem"), "got: {err}");
@@ -2861,18 +3130,17 @@ mod tests {
     }
 
     #[test]
-    fn identity_to_error_success_variants_return_none() {
-        // Intent: identity_to_error returns None for non-error outcomes.
-        // Why it exists: callers rely on None meaning "proceed" — ensures neither
-        //   success variant accidentally becomes an error after future edits.
-        // Scenario: normal add (AlreadyInPool → no-op, Recoverable → recovery add).
-        assert!(identity_to_error(&AddLuksIdentity::BraidLabeledAlreadyInPool, "disk1").is_none());
-        assert!(identity_to_error(&AddLuksIdentity::BraidLabeledRecoverable, "disk1").is_none());
+    fn identity_to_error_same_pool_returns_none() {
+        // Intent: identity_to_error returns None for a same-pool btrfs probe.
+        // Why it exists: callers rely on None meaning the btrfs probe succeeded
+        //   and live-pool membership classification should continue separately.
+        // Scenario: normal add sees the mounted pool FSID on a braid-labeled mapper.
+        assert!(identity_to_error(&AddLuksBtrfsProbe::SamePool, "disk1").is_none());
     }
 
     #[test]
     fn dry_run_and_execution_produce_same_no_btrfs_error() {
-        // Intent: add work-plan rendering and cmd_add produce identical BraidLabeledNoBtrfs
+        // Intent: add work-plan rendering and cmd_add produce identical NoBtrfs
         //   error text, proving both call sites go through identity_to_error.
         // Why it exists: this is the exact message that had already diverged before the
         //   refactor. This test makes that divergence impossible to reintroduce silently.
@@ -2903,6 +3171,8 @@ mod tests {
                 paths: &test_paths().1,
                 enroll_key_file: None,
                 luks_format_extra_opts: &LuksFormatExtraOpts::default(),
+                backing_path_resolver:
+                    crate::test_fixtures::mock_virtio_offset_backing_path_resolver(),
                 pool_membership: &PoolMembership::empty(),
             },
         )
@@ -2910,13 +3180,13 @@ mod tests {
         .to_string();
 
         // execution path: identity_to_error is the shared function cmd_add calls
-        let exec_err = identity_to_error(&AddLuksIdentity::BraidLabeledNoBtrfs, "disk1")
+        let exec_err = identity_to_error(&AddLuksBtrfsProbe::NoBtrfs, "disk1")
             .unwrap()
             .to_string();
 
         assert_eq!(
             dry_err, exec_err,
-            "dry-run and execution paths must produce identical BraidLabeledNoBtrfs error"
+            "dry-run and execution paths must produce identical NoBtrfs error"
         );
     }
 
@@ -3305,7 +3575,7 @@ mod tests {
     /* Intent: add Pass-1's closed PresentLuks recoverable branch announces the
      * cryptsetup luksOpen with the canonical [wait]/[ok] rows.
      * Why it exists: Principle 13 requires every cryptsetup Argon2 wait window
-     * to be announced; the BraidLabeledRecoverable + closed-mapper state
+     * to be announced; the SamePool + closed-mapper state
      * cannot be composed from existing braid commands without unverified
      * btrfs assumptions, so the row pin moves to the unit-test layer.
      * Scenario: a 2-disk add where disk1 is already in the pool and disk2 is
@@ -3323,7 +3593,7 @@ mod tests {
         // disk1+disk2, letting save_membership and balance proceed cleanly.
         // The pre-add classify_braid_disk_fsid uses the AddPlan's `pool`
         // field (which we hand-build to contain only disk1), not the runner,
-        // so identity is BraidLabeledRecoverable regardless.
+        // so the btrfs probe returns SamePool regardless.
         let runner = UnlockingAddRunner {
             inner: AddTestRunner {
                 disk_in_pool: true,
@@ -3381,6 +3651,8 @@ mod tests {
                 paths: &paths,
                 enroll_key_file: None,
                 luks_format_extra_opts: &LuksFormatExtraOpts::default(),
+                backing_path_resolver:
+                    crate::test_fixtures::mock_virtio_offset_backing_path_resolver(),
                 pool_membership: &PoolMembership::empty(),
             },
         )
@@ -3541,7 +3813,7 @@ mod tests {
         /// If false, the disk's FSID matches but it's not in pool (recoverable).
         disk_in_pool: bool,
         fail_device_add: bool,
-        /// If true, BtrfsFilesystemShowTarget returns "not a valid btrfs" (BraidLabeledNoBtrfs).
+        /// If true, BtrfsFilesystemShowTarget returns "not a valid btrfs" (NoBtrfs).
         no_btrfs_superblock: bool,
     }
 
@@ -4941,10 +5213,10 @@ mod tests {
 
     #[test]
     // Intent: no journal is written when a PresentLuks disk fails identity
-    //   validation (BraidLabeledNoBtrfs).
+    //   validation (NoBtrfs).
     //
     // Why it exists: the journal was previously written before identity checks,
-    //   so a BraidLabeledNoBtrfs refusal left a stale pending-op.json that
+    //   so a NoBtrfs refusal left a stale pending-op.json that
     //   blocked all subsequent commands. The fix moves journal write to after
     //   identity validation completes.
     //
@@ -4985,7 +5257,7 @@ mod tests {
             },
         );
 
-        assert!(result.is_err(), "add should fail on BraidLabeledNoBtrfs");
+        assert!(result.is_err(), "add should fail on NoBtrfs");
         assert!(
             journal::load_journal(&paths).unwrap().is_none(),
             "no journal should exist after pre-mutation identity failure"
@@ -5008,7 +5280,7 @@ mod tests {
     // Why it exists: closed returned disks cannot be FSID-checked during
     //   dry-run-safe planning. The execution path must keep the credential
     //   prelude ahead of mapper open/identity work, while still refusing
-    //   BraidLabeledNoBtrfs before pending-op.json can be stranded.
+    //   NoBtrfs before pending-op.json can be stranded.
     //
     // Scenario: disk2 is braid-labeled and closed during planning, unlocks
     //   with the shared passphrase, but contains no btrfs superblock after
@@ -5052,7 +5324,7 @@ mod tests {
         let err = result.expect_err("closed identity failure should abort");
         assert!(
             err.to_string().contains("contains no btrfs superblock"),
-            "expected BraidLabeledNoBtrfs refusal, got: {err}"
+            "expected NoBtrfs refusal, got: {err}"
         );
         let requests = runner.requests();
         let credential = requests
@@ -5491,6 +5763,8 @@ mod tests {
                 enroll_key_file: None,
                 luks_format_extra_opts: &LuksFormatExtraOpts::parse(&luks_format_extra_opts)
                     .unwrap(),
+                backing_path_resolver:
+                    crate::test_fixtures::mock_virtio_offset_backing_path_resolver(),
                 pool_membership: &PoolMembership::empty(),
             },
         )
@@ -5564,6 +5838,8 @@ mod tests {
                 paths: &test_paths().1,
                 enroll_key_file: Some(kf),
                 luks_format_extra_opts: &LuksFormatExtraOpts::default(),
+                backing_path_resolver:
+                    crate::test_fixtures::mock_virtio_offset_backing_path_resolver(),
                 pool_membership: &PoolMembership::empty(),
             },
         )
@@ -5662,6 +5938,8 @@ mod tests {
                 paths: &test_paths().1,
                 enroll_key_file: Some(kf),
                 luks_format_extra_opts: &LuksFormatExtraOpts::default(),
+                backing_path_resolver:
+                    crate::test_fixtures::mock_virtio_offset_backing_path_resolver(),
                 pool_membership: &PoolMembership::empty(),
             },
         )
@@ -5736,6 +6014,8 @@ mod tests {
                 paths: &test_paths().1,
                 enroll_key_file: Some(kf),
                 luks_format_extra_opts: &LuksFormatExtraOpts::default(),
+                backing_path_resolver:
+                    crate::test_fixtures::mock_virtio_offset_backing_path_resolver(),
                 pool_membership: &PoolMembership::empty(),
             },
         )
@@ -5780,6 +6060,8 @@ mod tests {
                 paths: &test_paths().1,
                 enroll_key_file: None,
                 luks_format_extra_opts: &LuksFormatExtraOpts::default(),
+                backing_path_resolver:
+                    crate::test_fixtures::mock_virtio_offset_backing_path_resolver(),
                 pool_membership: &PoolMembership::empty(),
             },
         )
@@ -7438,7 +7720,7 @@ mod tests {
 
     /* Intent: when plan_add accumulates a Warn note (e.g.
      * missing-devices) and then fails later inside
-     * add work-plan rendering (e.g. BraidLabeledNoBtrfs identity), the
+     * add work-plan rendering (e.g. NoBtrfs identity), the
      * accumulated notes survive on `PlanFailure::notes` and the result is
      * Err(...).
      * Why it exists: `PlanFailure::notes` promises preserved context.
@@ -7497,7 +7779,7 @@ mod tests {
 
         let disk_specs = ["disk2=/dev/disk/by-id/virtio-disk2".to_string()];
         let failure = match plan_add(&runner, &fs, &fixture.params(&disk_specs, true)) {
-            Ok(_) => panic!("plan_add must fail on BraidLabeledNoBtrfs identity"),
+            Ok(_) => panic!("plan_add must fail on NoBtrfs identity"),
             Err(failure) => failure,
         };
         let warns: Vec<&String> = failure
@@ -7804,13 +8086,22 @@ mod tests {
     /// under the given by-id path and probed LUKS UUID. The
     /// label is `braid-<name>` so the precondition gate accepts it.
     fn cloned_disk_probed(name: &str, by_id: &str, uuid: &str) -> PresentConfigDisk {
+        cloned_disk_probed_with_mapper_state(name, by_id, uuid, true)
+    }
+
+    fn cloned_disk_probed_with_mapper_state(
+        name: &str,
+        by_id: &str,
+        uuid: &str,
+        mapper_open: bool,
+    ) -> PresentConfigDisk {
         PresentConfigDisk {
             name: DiskName::parse(name).expect("valid disk name in test fixture"),
             by_id_path: ByIdPath::parse(by_id).unwrap(),
             state: PresentConfigDiskState::PresentLuks {
                 uuid: LuksUuid::parse(uuid).unwrap(),
                 label: Some(luks_label_for(&disk(name)).as_str().to_owned()),
-                mapper_open: true,
+                mapper_open,
             },
         }
     }
@@ -7881,6 +8172,8 @@ mod tests {
                 paths: &test_paths().1,
                 enroll_key_file: None,
                 luks_format_extra_opts: &LuksFormatExtraOpts::default(),
+                backing_path_resolver:
+                    crate::test_fixtures::mock_virtio_offset_backing_path_resolver(),
                 pool_membership: &PoolMembership::empty(),
             },
         );
@@ -7932,6 +8225,228 @@ mod tests {
                 CmdRequest::CryptsetupLuksFormat { .. } | CmdRequest::BtrfsDeviceAdd { .. }
             )),
             "no CryptsetupLuksFormat or BtrfsDeviceAdd may run on refusal path: {requests:?}"
+        );
+    }
+
+    // Intent: an open PresentLuks target with the same UUID and same
+    // canonical backing as a live pool row is a no-op even when mapper names
+    // drift.
+    // Why it exists: mapper-name equality must not decide live-pool identity;
+    // UUID plus backing-path proof is the safe already-in-pool check.
+    // Scenario: the live pool reports mapper braid-drifted, while the
+    // candidate disk is named clone and resolves to the same kernel path.
+    #[test]
+    fn add_open_present_luks_same_uuid_same_backing_drift_noops() {
+        let collision_uuid = "55555555-5555-5555-5555-555555555555";
+        const BY_ID: &str = "/dev/disk/by-id/usb-CLONE";
+        let uuid = LuksUuid::parse(collision_uuid).unwrap();
+        let by_id = ByIdPath::parse(BY_ID).unwrap();
+        let mut pool =
+            pool_with_live_devices(vec![live_pool_device("braid-drifted", &uuid, "/dev/vdb")]);
+        pool.fsid = Some("cc86845b-aec3-408e-bef5-553affc1f2b1".into());
+        let runner = cloned_disk_runner(&[(BY_ID, collision_uuid)]);
+        let recording = RequestRecordingRunner::new(runner);
+        let probed = vec![cloned_disk_probed("clone", by_id.as_str(), collision_uuid)];
+        let names = vec![DiskName::parse("clone").unwrap()];
+        let by_ids_refs: Vec<&ByIdPath> = vec![&by_id];
+        let resolver = crate::test_fixtures::MockBackingPathResolver::default()
+            .with_path(by_id.as_str(), "/dev/vdb");
+
+        let work_plan = build_add_work_plan(
+            &recording,
+            &AddStepsInput {
+                names: &names,
+                by_ids: &by_ids_refs,
+                probed: &probed,
+                pool: &pool,
+                mount_point: &MountPoint("/mnt/storage".into()),
+                paths: &test_paths().1,
+                enroll_key_file: None,
+                luks_format_extra_opts: &LuksFormatExtraOpts::default(),
+                backing_path_resolver: &resolver,
+                pool_membership: &PoolMembership::empty(),
+            },
+        )
+        .expect("same UUID and same backing should be a no-op");
+
+        assert!(work_plan.is_noop(), "expected no-op plan: {work_plan:?}");
+        assert!(
+            work_plan.initial_journal_targets.iter().next().is_none(),
+            "already-in-pool no-op must not journal a target"
+        );
+        let requests = recording.requests();
+        assert!(
+            !requests.iter().any(|r| matches!(
+                r,
+                CmdRequest::CryptsetupLuksFormat { .. } | CmdRequest::BtrfsDeviceAdd { .. }
+            )),
+            "no format or device-add may run on no-op planning path: {requests:?}"
+        );
+    }
+
+    // Intent: an open PresentLuks target with a live UUID match but different
+    // backing is refused as a duplicate UUID.
+    // Why it exists: replacing the old mapper-name check with UUID-only
+    // membership would allow cloned LUKS headers to look like no-ops.
+    // Scenario: the candidate by-id resolves to /dev/vdb, but the live pool
+    // row with the same UUID resolves to /dev/vdc.
+    #[test]
+    fn add_open_present_luks_same_uuid_different_backing_rejects_clone() {
+        let collision_uuid = "55555555-5555-5555-5555-555555555555";
+        const BY_ID: &str = "/dev/disk/by-id/usb-CLONE";
+        let uuid = LuksUuid::parse(collision_uuid).unwrap();
+        let by_id = ByIdPath::parse(BY_ID).unwrap();
+        let mut pool =
+            pool_with_live_devices(vec![live_pool_device("braid-foreign", &uuid, "/dev/vdc")]);
+        pool.fsid = Some("cc86845b-aec3-408e-bef5-553affc1f2b1".into());
+        let runner = cloned_disk_runner(&[(BY_ID, collision_uuid)]);
+        let recording = RequestRecordingRunner::new(runner);
+        let probed = vec![cloned_disk_probed("clone", by_id.as_str(), collision_uuid)];
+        let names = vec![DiskName::parse("clone").unwrap()];
+        let by_ids_refs: Vec<&ByIdPath> = vec![&by_id];
+        let resolver = crate::test_fixtures::MockBackingPathResolver::default()
+            .with_path(by_id.as_str(), "/dev/vdb");
+
+        let result = build_add_work_plan(
+            &recording,
+            &AddStepsInput {
+                names: &names,
+                by_ids: &by_ids_refs,
+                probed: &probed,
+                pool: &pool,
+                mount_point: &MountPoint("/mnt/storage".into()),
+                paths: &test_paths().1,
+                enroll_key_file: None,
+                luks_format_extra_opts: &LuksFormatExtraOpts::default(),
+                backing_path_resolver: &resolver,
+                pool_membership: &PoolMembership::empty(),
+            },
+        );
+
+        match result {
+            Err(AddError::DuplicateUuid {
+                uuid,
+                by_id1,
+                by_id2,
+                ..
+            }) => {
+                assert_eq!(uuid.as_str(), collision_uuid);
+                assert!(
+                    [by_id1.as_str(), by_id2.as_str()].contains(&by_id.as_str()),
+                    "duplicate error must name the candidate by-id, got {by_id1} and {by_id2}"
+                );
+            }
+            other => panic!("expected DuplicateUuid for open clone, got: {other:?}"),
+        }
+    }
+
+    // Intent: a closed PresentLuks target with the same UUID and same backing
+    // as a live pool row is a no-op before UUID uniqueness assertions run.
+    // Why it exists: closed returned-disk planning must tolerate benign
+    // mapper drift instead of rejecting the UUID as a live-pool collision.
+    // Scenario: the candidate mapper is closed, but its by-id resolves to the
+    // same backing path as a live row with the same LUKS UUID.
+    #[test]
+    fn add_closed_present_luks_same_uuid_same_backing_drift_noops() {
+        let collision_uuid = "55555555-5555-5555-5555-555555555555";
+        let uuid = LuksUuid::parse(collision_uuid).unwrap();
+        let by_id = ByIdPath::parse("/dev/disk/by-id/usb-CLONE").unwrap();
+        let mut pool =
+            pool_with_live_devices(vec![live_pool_device("braid-drifted", &uuid, "/dev/vdb")]);
+        pool.fsid = Some("cc86845b-aec3-408e-bef5-553affc1f2b1".into());
+        let runner = RequestRecordingRunner::new(MockRunner::default());
+        let probed = vec![cloned_disk_probed_with_mapper_state(
+            "clone",
+            by_id.as_str(),
+            collision_uuid,
+            false,
+        )];
+        let names = vec![DiskName::parse("clone").unwrap()];
+        let by_ids_refs: Vec<&ByIdPath> = vec![&by_id];
+        let resolver = crate::test_fixtures::MockBackingPathResolver::default()
+            .with_path(by_id.as_str(), "/dev/vdb");
+
+        let work_plan = build_add_work_plan(
+            &runner,
+            &AddStepsInput {
+                names: &names,
+                by_ids: &by_ids_refs,
+                probed: &probed,
+                pool: &pool,
+                mount_point: &MountPoint("/mnt/storage".into()),
+                paths: &test_paths().1,
+                enroll_key_file: None,
+                luks_format_extra_opts: &LuksFormatExtraOpts::default(),
+                backing_path_resolver: &resolver,
+                pool_membership: &PoolMembership::empty(),
+            },
+        )
+        .expect("same UUID and same backing should be a no-op");
+
+        assert!(work_plan.is_noop(), "expected no-op plan: {work_plan:?}");
+        assert!(
+            work_plan.initial_journal_targets.iter().next().is_none(),
+            "closed already-in-pool no-op must not journal a target"
+        );
+        assert!(
+            runner.requests().is_empty(),
+            "closed no-op classification should not need command probes: {:?}",
+            runner.requests()
+        );
+    }
+
+    // Intent: a closed PresentLuks target with a live UUID match but different
+    // backing is refused as a duplicate UUID.
+    // Why it exists: the closed-mapper path must fail closed for cloned LUKS
+    // headers instead of skipping the target as already in pool.
+    // Scenario: the candidate mapper is closed and resolves to /dev/vdb, while
+    // a live pool row with the same UUID resolves to /dev/vdc.
+    #[test]
+    fn add_closed_present_luks_same_uuid_different_backing_rejects_clone() {
+        let collision_uuid = "55555555-5555-5555-5555-555555555555";
+        let uuid = LuksUuid::parse(collision_uuid).unwrap();
+        let by_id = ByIdPath::parse("/dev/disk/by-id/usb-CLONE").unwrap();
+        let mut pool =
+            pool_with_live_devices(vec![live_pool_device("braid-foreign", &uuid, "/dev/vdc")]);
+        pool.fsid = Some("cc86845b-aec3-408e-bef5-553affc1f2b1".into());
+        let runner = RequestRecordingRunner::new(MockRunner::default());
+        let probed = vec![cloned_disk_probed_with_mapper_state(
+            "clone",
+            by_id.as_str(),
+            collision_uuid,
+            false,
+        )];
+        let names = vec![DiskName::parse("clone").unwrap()];
+        let by_ids_refs: Vec<&ByIdPath> = vec![&by_id];
+        let resolver = crate::test_fixtures::MockBackingPathResolver::default()
+            .with_path(by_id.as_str(), "/dev/vdb");
+
+        let result = build_add_work_plan(
+            &runner,
+            &AddStepsInput {
+                names: &names,
+                by_ids: &by_ids_refs,
+                probed: &probed,
+                pool: &pool,
+                mount_point: &MountPoint("/mnt/storage".into()),
+                paths: &test_paths().1,
+                enroll_key_file: None,
+                luks_format_extra_opts: &LuksFormatExtraOpts::default(),
+                backing_path_resolver: &resolver,
+                pool_membership: &PoolMembership::empty(),
+            },
+        );
+
+        match result {
+            Err(AddError::DuplicateUuid { uuid, .. }) => {
+                assert_eq!(uuid.as_str(), collision_uuid);
+            }
+            other => panic!("expected DuplicateUuid for closed clone, got: {other:?}"),
+        }
+        assert!(
+            runner.requests().is_empty(),
+            "closed clone classification should not need command probes: {:?}",
+            runner.requests()
         );
     }
 
@@ -7995,6 +8510,8 @@ mod tests {
                 paths: &test_paths().1,
                 enroll_key_file: None,
                 luks_format_extra_opts: &LuksFormatExtraOpts::default(),
+                backing_path_resolver:
+                    crate::test_fixtures::mock_virtio_offset_backing_path_resolver(),
                 pool_membership: &PoolMembership::empty(),
             },
         )
@@ -8253,6 +8770,8 @@ mod tests {
                 paths: &test_paths().1,
                 enroll_key_file: None,
                 luks_format_extra_opts: &LuksFormatExtraOpts::default(),
+                backing_path_resolver:
+                    crate::test_fixtures::mock_virtio_offset_backing_path_resolver(),
                 pool_membership: &membership,
             },
         );
@@ -8336,6 +8855,8 @@ mod tests {
                 paths: &test_paths().1,
                 enroll_key_file: None,
                 luks_format_extra_opts: &LuksFormatExtraOpts::default(),
+                backing_path_resolver:
+                    crate::test_fixtures::mock_virtio_offset_backing_path_resolver(),
                 pool_membership: &PoolMembership::empty(),
             },
         );
