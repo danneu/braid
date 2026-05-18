@@ -862,10 +862,14 @@ fn render_add_pool_mutation_recovery_steps(
                     mount_point: plan.mount_point.clone(),
                     force: false,
                 });
+                let fresh_conditional_suffix = format!(
+                    "{conditional_suffix} (the LUKS format command is also skipped at runtime if the disk already shows a LUKS header with the journaled UUID and the 'braid-{}' label)",
+                    target.name
+                );
                 steps.push(Step {
                     risk: "destructive",
                     description: format!(
-                        "replay fresh add target {}{conditional_suffix}",
+                        "replay fresh add target {}{fresh_conditional_suffix}",
                         target.by_id
                     ),
                     commands,
@@ -16110,6 +16114,13 @@ mod tests {
                 "(skipped at runtime if open/scan reconciliation makes target live before replay)"
             ),
             "fresh replay row should advertise runtime skip: {disk2_block:?}",
+        );
+        assert!(
+            disk2_block.contains("LUKS format command is also skipped")
+                && disk2_block.contains("journaled UUID")
+                && disk2_block.contains("label")
+                && disk2_block.contains("braid-disk2"),
+            "fresh replay row should advertise per-command format skip: {disk2_block:?}",
         );
         assert!(
             disk2_block.contains(
