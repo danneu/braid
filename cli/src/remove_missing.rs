@@ -97,7 +97,6 @@ struct RemoveMissingWorkPlan {
     missing_id: u64,
     target_uuid: LuksUuid,
     target_name: DiskName,
-    will_clear_last_missing: bool,
     remaining_present: usize,
     missing_count: u64,
     mount_point: MountPoint,
@@ -105,7 +104,7 @@ struct RemoveMissingWorkPlan {
 
 impl RemoveMissingWorkPlan {
     fn restore_raid1_after_commit(&self) -> bool {
-        self.will_clear_last_missing && self.remaining_present >= 2
+        self.missing_count == 1 && self.remaining_present >= 2
     }
 
     fn render_steps(&self) -> Vec<Step> {
@@ -486,13 +485,11 @@ pub fn plan_remove_missing<R: CommandRunner + Sync, F: Filesystem + ?Sized>(
         }
     }
 
-    let will_clear_last_missing = pool.missing_count == 1;
     let remaining_present = pool.devices.len();
     let work_plan = RemoveMissingWorkPlan {
         missing_id: params.missing_id,
         target_uuid,
         target_name,
-        will_clear_last_missing,
         remaining_present,
         missing_count: pool.missing_count,
         mount_point: config.mount_point().clone(),
@@ -597,7 +594,7 @@ fn check_relocation_space<R: CommandRunner>(
 #[cfg(test)]
 fn remove_missing_work_plan_for_test(
     missing_id: u64,
-    will_clear_last_missing: bool,
+    missing_count: u64,
     remaining_present: usize,
     mount_point: &MountPoint,
 ) -> RemoveMissingWorkPlan {
@@ -605,9 +602,8 @@ fn remove_missing_work_plan_for_test(
         missing_id,
         target_uuid: LuksUuid::parse("00000000-0000-0000-0000-000000000001").unwrap(),
         target_name: DiskName::parse("disk-test").unwrap(),
-        will_clear_last_missing,
         remaining_present,
-        missing_count: if will_clear_last_missing { 1 } else { 2 },
+        missing_count,
         mount_point: mount_point.clone(),
     }
 }
@@ -1119,7 +1115,7 @@ mod tests {
     // Scenario: 3-disk pool, 1 disk failed. Dry run should show the balance.
     fn work_plan_steps_show_rebalance_when_clearing_last_missing() {
         let steps =
-            remove_missing_work_plan_for_test(3, true, 2, &MountPoint("/mnt/storage".into()))
+            remove_missing_work_plan_for_test(3, 1, 2, &MountPoint("/mnt/storage".into()))
                 .render_steps();
         assert!(
             steps
@@ -1136,7 +1132,7 @@ mod tests {
     // Scenario: 2-disk pool, 1 died. Only 1 survivor -- no balance.
     fn work_plan_steps_omit_rebalance_with_single_survivor() {
         let steps =
-            remove_missing_work_plan_for_test(3, true, 1, &MountPoint("/mnt/storage".into()))
+            remove_missing_work_plan_for_test(3, 1, 1, &MountPoint("/mnt/storage".into()))
                 .render_steps();
         assert!(
             !steps
@@ -1153,7 +1149,7 @@ mod tests {
     // Scenario: 4-disk pool, 2 missing, removing 1 of them.
     fn work_plan_steps_omit_rebalance_when_not_last_missing() {
         let steps =
-            remove_missing_work_plan_for_test(3, false, 2, &MountPoint("/mnt/storage".into()))
+            remove_missing_work_plan_for_test(3, 2, 2, &MountPoint("/mnt/storage".into()))
                 .render_steps();
         assert!(
             !steps
@@ -1687,7 +1683,7 @@ mod tests {
     // Scenario: one missing device (devid 2), last missing, 2 present -> includes balance.
     fn dry_run_render_targeted_removal_with_balance() {
         let mount_point = MountPoint("/mnt/storage".into());
-        let steps = remove_missing_work_plan_for_test(2, true, 2, &mount_point).render_steps();
+        let steps = remove_missing_work_plan_for_test(2, 1, 2, &mount_point).render_steps();
         let output = Step::render_dry_run(&steps);
         let lines: Vec<&str> = output.lines().collect();
 
@@ -1927,7 +1923,7 @@ mod tests {
     #[test]
     fn plan_preview_renders_warn_above_steps() {
         let work_plan =
-            remove_missing_work_plan_for_test(3, true, 2, &MountPoint("/mnt/storage".into()));
+            remove_missing_work_plan_for_test(3, 1, 2, &MountPoint("/mnt/storage".into()));
         let plan = RemoveMissingPlan {
             notes: vec![PreviewNote::Warn(
                 "ENOSPC pre-flight check failed: boom; proceeding anyway".into(),
