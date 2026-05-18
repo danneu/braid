@@ -477,6 +477,7 @@ impl EnrollPlan {
         )?;
 
         if self.generate {
+            validate_generated_keyfile_target(runner, params.key_file_path, true)?;
             generate_key_file(params.key_file_path)?;
             eprintln!("ok: generated {}", params.key_file_path.display());
         }
@@ -551,6 +552,7 @@ fn key_file_directory(key_file_path: &Path) -> &Path {
 fn validate_generated_keyfile_target<R: CommandRunner>(
     runner: &R,
     key_file_path: &Path,
+    recheck: bool,
 ) -> Result<(), EnrollKeyFileError> {
     let dir = key_file_directory(key_file_path);
     let dir_display = dir.display().to_string();
@@ -578,9 +580,16 @@ fn validate_generated_keyfile_target<R: CommandRunner>(
         path: MountPoint(dir_display.clone()),
     })?;
     if mountpoint.exit_status != 0 {
-        return Err(EnrollKeyFileError::Validation(format!(
-            "keyfile directory is not a mount point: {dir_display} -- mount the USB device there before running braid enroll --generate"
-        )));
+        let message = if recheck {
+            format!(
+                "keyfile directory {dir_display} was a mount point at plan time but is no longer mounted -- the USB device may have been unmounted or disconnected during enrollment; remount and re-run braid enroll --generate"
+            )
+        } else {
+            format!(
+                "keyfile directory is not a mount point: {dir_display} -- mount the USB device there before running braid enroll --generate"
+            )
+        };
+        return Err(EnrollKeyFileError::Validation(message));
     }
 
     validate_key_file_path(key_file_path, true)
@@ -621,7 +630,7 @@ pub fn plan_enroll<R: CommandRunner, F: Filesystem + ?Sized>(
     }
 
     let key_file_validation = if generate {
-        validate_generated_keyfile_target(runner, key_file_path)
+        validate_generated_keyfile_target(runner, key_file_path, false)
     } else {
         validate_key_file_path(key_file_path, false)
     };
@@ -718,10 +727,10 @@ mod tests {
         disk_member, enroll_add_keyfile_fail, enroll_add_keyfile_ok, enroll_by_id,
         enroll_discovery_two_disks, enroll_fs, enroll_luks_dump_slot1_empty,
         enroll_luks_dump_slot1_occupied, enroll_luks_uuid_not_luks, enroll_luks_uuid_ok,
-        enroll_make_existing_keyfile, enroll_make_membership, enroll_passphrase,
-        enroll_test_keyfile_fail, enroll_test_keyfile_ok, enroll_test_passphrase_fail,
-        enroll_test_passphrase_ok, enroll_with_mountpoint_fail, enroll_with_mountpoint_ok,
-        isolated_paths, mock_ok, test_uuid,
+        enroll_make_existing_keyfile, enroll_make_membership, enroll_mountpoint_fail,
+        enroll_mountpoint_ok, enroll_passphrase, enroll_test_keyfile_fail, enroll_test_keyfile_ok,
+        enroll_test_passphrase_fail, enroll_test_passphrase_ok, enroll_with_mountpoint_fail,
+        enroll_with_mountpoint_ok, isolated_paths, mock_ok, test_uuid,
     };
 
     fn disk(name: &str) -> DiskName {
@@ -3116,12 +3125,14 @@ mod tests {
         let (ld2_req, ld2_out) = enroll_luks_dump_slot1_empty(d2);
         let (e1_req, e1_stdin, e1_out) = enroll_add_keyfile_ok(d1, &kf_str, pass);
         let (e2_req, e2_stdin, e2_out) = enroll_add_keyfile_fail(d2, &kf_str, pass);
+        let (mp_req, mp_out) = enroll_mountpoint_ok(tmp.path());
 
         let runner = MockRunner::default()
             .with_output_stdin(tp1_req, tp1_stdin, tp1_out)
             .with_output_stdin(tp2_req, tp2_stdin, tp2_out)
             .with_output(ld1_req, ld1_out)
             .with_output(ld2_req, ld2_out)
+            .with_output(mp_req, mp_out)
             .with_output_stdin(e1_req, e1_stdin, e1_out)
             .with_output(
                 CmdRequest::CryptsetupLuksHeaderBackup {
@@ -3278,6 +3289,125 @@ mod tests {
         assert!(
             err.to_string().contains("interrupted operation"),
             "expected 'interrupted operation' in: {err}"
+        );
+    }
+
+    // Intent: --generate refuses to write braid.key if DIR was a mount
+    //   point at plan time but no longer is when execute reaches the
+    //   write -- and the re-check fires after the slow planning window
+    //   (passphrase verify + slot inventory), not at the top of execute.
+    // Why it exists: pins the TOCTOU fix at the execute-time re-check.
+    //   The plan-time mountpoint gate alone cannot prevent a key leak
+    //   onto the host root filesystem if DIR is unmounted between the
+    //   early check and OpenOptions::create_new. The window includes
+    //   passphrase read, Argon2 --test-passphrase verify, and per-disk
+    //   luksDump. A re-check positioned at the top of execute (before
+    //   plan_enrollment) would silently leave the same window open; the
+    //   ordering assertion below pins that the re-check is placed
+    //   immediately before generate_key_file. See docs/luks-unlock.md
+    //   "Keyfile creation target invariant".
+    // Scenario: operator mounted /tmp/usb correctly, ran enroll, but
+    //   systemd-automount timed out (or admin manually unmounted)
+    //   between passphrase prompt and key generation.
+    #[test]
+    fn cmd_generate_mountpoint_revoked_between_plan_and_write() {
+        let (tmp, paths) = isolated_paths();
+        let kf = tmp.path().join("braid.key");
+        let pass_path = tmp.path().join("pass");
+        std::fs::write(&pass_path, "rightpass\n").unwrap();
+
+        let d1 = "/dev/disk/by-id/d1";
+        let (uuid_req, uuid_out) = enroll_luks_uuid_ok(d1, test_uuid(500).as_str());
+        let (tp_req, tp_stdin, tp_out) = enroll_test_passphrase_ok(d1, "rightpass");
+        let (slot_req, slot_out) = enroll_luks_dump_slot1_empty(d1);
+
+        let (mp_req, mp_ok_out) = enroll_mountpoint_ok(tmp.path());
+        let (_, mp_fail_out) = enroll_mountpoint_fail(tmp.path());
+
+        let runner = MockRunner::default()
+            .with_output_sequence(mp_req, vec![mp_ok_out, mp_fail_out])
+            .with_output(uuid_req, uuid_out)
+            .with_luks_dump_text_luks2(d1)
+            .with_mappers_closed(&["braid-disk1"])
+            .with_output_stdin(tp_req, tp_stdin, tp_out)
+            .with_output(slot_req, slot_out);
+
+        let fs = enroll_fs(&[d1]);
+        let membership = enroll_make_membership(&[("disk1", d1)]);
+
+        let err = cmd_enroll_key_file(
+            &runner,
+            &fs,
+            &EnrollKeyFileParams {
+                membership: &membership,
+                key_file_path: &kf,
+                generate: true,
+                passphrase_stdin: false,
+                passphrase_file: Some(&pass_path),
+                dry_run: false,
+                paths: &paths,
+                backing_path_resolver: crate::test_fixtures::mock_virtio_backing_path_resolver(),
+            },
+        )
+        .expect_err("re-check must fail when mountpoint disappears mid-run");
+
+        assert!(
+            err.to_string()
+                .contains("was a mount point at plan time but is no longer mounted"),
+            "expected execute-time mountpoint error, got: {err}"
+        );
+        assert!(
+            !kf.exists(),
+            "braid.key must not be created when re-check fails"
+        );
+
+        let reqs = runner.requests();
+
+        assert!(
+            !reqs
+                .iter()
+                .any(|r| matches!(r, CmdRequest::CryptsetupLuksAddKeyFile { .. })),
+            "no luksAddKey calls expected; got requests: {reqs:?}"
+        );
+        assert!(
+            !reqs
+                .iter()
+                .any(|r| matches!(r, CmdRequest::CryptsetupLuksHeaderBackup { .. })),
+            "no header backup expected; got requests: {reqs:?}"
+        );
+
+        let mp_positions: Vec<usize> = reqs
+            .iter()
+            .enumerate()
+            .filter(|(_, r)| matches!(r, CmdRequest::MountpointCheck { .. }))
+            .map(|(i, _)| i)
+            .collect();
+        assert_eq!(
+            mp_positions.len(),
+            2,
+            "expected two MountpointCheck calls (plan + execute), got {} in {reqs:?}",
+            mp_positions.len()
+        );
+
+        let tp_position = reqs
+            .iter()
+            .position(|r| matches!(r, CmdRequest::CryptsetupTestPassphrase { .. }))
+            .expect("CryptsetupTestPassphrase must run as part of verify");
+        let dump_position = reqs
+            .iter()
+            .position(|r| matches!(r, CmdRequest::CryptsetupLuksDump { .. }))
+            .expect("CryptsetupLuksDump (slot inventory) must run as part of plan_enrollment");
+        assert!(
+            mp_positions[0] < tp_position,
+            "plan-time mountpoint check must precede passphrase verify; got mp_positions={mp_positions:?} tp={tp_position} in {reqs:?}"
+        );
+        assert!(
+            mp_positions[1] > tp_position,
+            "execute-time mountpoint re-check must follow passphrase verify (not be at top of execute); got mp_positions={mp_positions:?} tp={tp_position} in {reqs:?}"
+        );
+        assert!(
+            mp_positions[1] > dump_position,
+            "execute-time mountpoint re-check must follow slot inventory; got mp_positions={mp_positions:?} dump={dump_position} in {reqs:?}"
         );
     }
 

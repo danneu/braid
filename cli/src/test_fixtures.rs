@@ -158,9 +158,9 @@ pub(crate) use enroll_key_file::{
     enroll_add_keyfile_fail, enroll_add_keyfile_ok, enroll_by_id, enroll_discovery_two_disks,
     enroll_fs, enroll_luks_dump_slot1_empty, enroll_luks_dump_slot1_occupied,
     enroll_luks_uuid_not_luks, enroll_luks_uuid_ok, enroll_make_existing_keyfile,
-    enroll_make_membership, enroll_passphrase, enroll_test_keyfile_fail, enroll_test_keyfile_ok,
-    enroll_test_passphrase_fail, enroll_test_passphrase_ok, enroll_with_mountpoint_fail,
-    enroll_with_mountpoint_ok,
+    enroll_make_membership, enroll_mountpoint_fail, enroll_mountpoint_ok, enroll_passphrase,
+    enroll_test_keyfile_fail, enroll_test_keyfile_ok, enroll_test_passphrase_fail,
+    enroll_test_passphrase_ok, enroll_with_mountpoint_fail, enroll_with_mountpoint_ok,
 };
 #[allow(unused_imports)]
 pub(crate) use idle::{

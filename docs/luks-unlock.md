@@ -50,10 +50,15 @@ See: [cryptsetup(8) — key-file processing](https://man7.org/linux/man-pages/ma
 ## Keyfile creation target invariant
 
 Any braid command path that creates or overwrites `braid.key` in a
-user-supplied directory must first verify that directory exists, is a
-directory, and is an active mount point. This prevents a failed USB mount from
-turning `/mnt/usb/braid.key` into persistent key material on the host root
-filesystem.
+user-supplied directory must verify that directory exists, is a
+directory, and is an active mount point both at plan time and again
+immediately before writing `braid.key`. The plan-time check alone is
+insufficient: the seconds-long window between planning and the actual
+write (passphrase prompt, Argon2 `--test-passphrase` verify against
+every pool disk, per-disk `luksDump` slot inventory) lets a USB device
+be unmounted (manual `umount`, hot-unplug, `systemd-automount` idle
+timeout) after the gate passes, which would otherwise let the keyfile
+land on the host root filesystem.
 
 This currently applies to `braid enroll DIR --generate`. Existing-keyfile
 consumers may read from ordinary admin-controlled paths and must not require a
