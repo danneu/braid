@@ -138,6 +138,30 @@ with subtest("Test 4: slot conflict prevents keyfile creation"):
     # Verify keyfile was NOT created (preflight prevented generation)
     machine.fail("test -f /tmp/usb/braid.key")
 
+with subtest("Test 4b: --generate --dry-run surfaces slot 1 conflict"):
+    pq = shlex.quote(passphrase)
+    machine.succeed(
+        f"rc=0; printf '%s\\n' {pq} | "
+        f"braid enroll /tmp/usb --generate --dry-run "
+        f">/tmp/dr.out 2>/tmp/dr.err || rc=$?; echo $rc > /tmp/dr.rc"
+    )
+    rc = machine.succeed("cat /tmp/dr.rc").strip()
+    out = machine.succeed("cat /tmp/dr.out")
+    err = machine.succeed("cat /tmp/dr.err")
+    assert rc != "0", f"dry-run must fail on slot-1 conflict; got rc={rc}"
+    assert out == "", f"failed dry-run must leave stdout empty, got: {out!r}"
+    assert "slot 1 on disk2" in err, f"expected slot-1 error, got: {err!r}"
+    assert "occupied by an unknown key" in err, (
+        f"expected canonical wording, got: {err!r}"
+    )
+    machine.fail("test -f /tmp/usb/braid.key")
+
+# Clear the unknown key Test 4/4b planted in disk2 slot 1 so Test 5
+# observes a clean PresentLuks survivor. Slot 1 must be empty for Test
+# 5 Phase A's `--generate --dry-run` to render the mixed skip notes;
+# otherwise the slot-1 check refuses on disk2.
+machine.succeed("cryptsetup luksKillSlot --batch-mode /dev/disk/by-id/virtio-disk2 1")
+
 # --- Test 5: dry-run + real-run surface mixed skip notes (both variants) ---
 #
 # Intent: verify that discovery skip notes render correctly on BOTH
@@ -161,25 +185,28 @@ with subtest("Test 4: slot conflict prevents keyfile creation"):
 #      `render_notes_for_stderr(.., Plain)`) *before* the validation
 #      error, preserving today's stderr ordering byte-for-byte.
 #
-# Scenario: after Test 4, both disks are LUKS-formatted with slot-1
-# in unusual states. We wipe disk1's LUKS header (PresentNotLuks)
-# and rewrite pool.json so disk2 points at a fabricated by-id path
-# that does not exist (Absent). This produces zero candidates --
-# dry-run renders the two skip notes + nothing-to-do fallback;
-# real-run renders the two skip notes + validation error. The
-# destructive state is safe here -- this is the last subtest, and
-# the VM is torn down on shutdown.
+# Scenario: after Test 4b restores disk2 slot 1 to empty, disk1 and
+# disk2 are LUKS-formatted, with disk2 as a clean PresentLuks survivor
+# (slot 0 holds the passphrase, slot 1 empty). We wipe disk1's LUKS
+# header (PresentNotLuks) and add a third membership entry disk3 to
+# pool.json pointing at a fabricated by-id path that udev never
+# populated (Absent). This leaves disk2 as the only candidate --
+# dry-run renders the two skip notes plus the disk2 enroll step;
+# real-run renders the three skip notes plus validation error after
+# disk2 is wiped. The destructive state is safe here -- this is the
+# last subtest, and the VM is torn down on shutdown.
 with subtest("Test 5: dry-run + real-run surface mixed skip notes"):
     close_all()
 
     # Arrange three membership entries of different probe-state flavors:
     #   disk1 -- PresentNotLuks via `wipefs --all --force` (requires
     #            --force because wipefs refuses a LUKS-formatted device).
-    #   disk2 -- PresentLuks, the surviving candidate that keeps
-    #            plan_enroll on the Ok branch so the dry-run preview
-    #            actually renders (a zero-candidate plan returns Err
-    #            in plan_enroll -- there is no "successful dry-run
-    #            with zero steps" once we drop to zero candidates).
+    #   disk2 -- PresentLuks with slot 1 empty, the surviving candidate
+    #            that keeps plan_enroll on the Ok branch so the dry-run
+    #            preview actually renders (a zero-candidate plan
+    #            returns Err in plan_enroll -- there is no "successful
+    #            dry-run with zero steps" once we drop to zero
+    #            candidates).
     #   disk3 -- Absent via a pool.json edit pointing its by_id at a
     #            path udev never populated. probe_config_disk hits
     #            fs.exists=false and returns ConfigDiskState::Absent.

@@ -562,19 +562,22 @@ fn validate_generated_keyfile_target<R: CommandRunner>(
 /// keyfile-path validation, and pre-passphrase discovery. Per-disk
 /// skip notes land on `EnrollPlan.notes` when discovery produces at
 /// least one candidate, or on `PlanFailure::notes` when the
-/// planner bails (e.g. no candidates, mid-loop probe error).
+/// planner bails (e.g. no candidates, mid-loop probe error, dry-run
+/// slot-1 conflict).
 ///
-/// Dry-run keyfile probe: when `dry_run && !generate`, after discovery
-/// each candidate's keyfile state is probed via the passphrase-free
-/// `luks::verify_key_file` call. Authenticated candidates are dropped
-/// from the step list and surface as `PerDisk` Skip notes
-/// (`keyfile already enrolled`) so the preview reflects which disks
-/// the real run would silently skip via `plan_enrollment`'s
-/// `AlreadyEnrolled` branch. Real-run path (`dry_run = false`) leaves
-/// every discovered candidate in the step list and defers
-/// classification to `plan_enrollment` at execute time -- the dry-run
-/// probe is a preview-fidelity boost only and is never authoritative
-/// for mutations.
+/// Dry-run classification: when `dry_run`, each candidate is routed
+/// through `plan_single_disk_enrollment` so the preview matches the
+/// real run's classification rules. `ExistingKeyfile` mode probes the
+/// keyfile (passphrase-free, emits `[wait]/[ok]/[skip]` rows);
+/// `Authenticated` becomes a `keyfile already enrolled` Skip note,
+/// `Rejected` falls through to the slot-1 check. `GenerateNew` mode
+/// (set by `--generate`) skips the keyfile probe entirely (the file
+/// does not exist yet) and runs only the slot-1 check. Slot-1 conflicts
+/// surface as `PlanFailure` with the same canonical `cryptsetup
+/// luksKillSlot` recovery wording the real run uses. Real-run path
+/// (`dry_run = false`) leaves every discovered candidate in the step
+/// list and defers classification to `plan_enrollment` at execute time
+/// after the passphrase prompt.
 pub fn plan_enroll<R: CommandRunner, F: Filesystem + ?Sized>(
     runner: &R,
     fs: &F,
@@ -607,33 +610,27 @@ pub fn plan_enroll<R: CommandRunner, F: Filesystem + ?Sized>(
         }
     };
 
-    let steps = if dry_run && !generate {
-        let color_enabled = color_enabled_for_stderr();
+    let steps = if dry_run {
+        let mode = if generate {
+            EnrollmentPlanMode::GenerateNew
+        } else {
+            EnrollmentPlanMode::ExistingKeyfile
+        };
         let mut needs_enroll: Vec<EnrollmentCandidate> = Vec::with_capacity(candidates.len());
         for (name, by_id) in &candidates {
-            let target = CredentialVerifyTarget {
-                name: name.as_str().to_owned(),
-                device: by_id.as_str().to_owned(),
-            };
-            match probe_keyfile_enrollment(
-                runner,
-                &target,
-                key_file_path,
-                color_enabled,
-                emit_status,
-            ) {
-                Ok(VerifyOutcome::Authenticated) => {
+            match plan_single_disk_enrollment(runner, name, by_id, key_file_path, mode) {
+                Ok(DiskEnrollAction::AlreadyEnrolled { name, .. }) => {
                     notes.push(PreviewNote::PerDisk {
                         name: name.as_str().to_owned(),
                         level: NoteLevel::Skip,
                         message: "keyfile already enrolled".into(),
                     });
                 }
-                Ok(VerifyOutcome::Rejected) => {
-                    needs_enroll.push((name.clone(), by_id.clone()));
+                Ok(DiskEnrollAction::NeedsEnroll { name, by_id }) => {
+                    needs_enroll.push((name, by_id));
                 }
                 Err(e) => {
-                    return Err(PlanFailure::with_notes(notes, e.into()));
+                    return Err(PlanFailure::with_notes(notes, e));
                 }
             }
         }
@@ -1504,9 +1501,11 @@ mod tests {
 
         let (tkf1_req, tkf1_out) = enroll_test_keyfile_ok(d1, &kf_str);
         let (tkf2_req, tkf2_out) = enroll_test_keyfile_fail(d2, &kf_str);
+        let (slot2_req, slot2_out) = enroll_luks_dump_slot1_empty(d2);
         let runner = enroll_discovery_two_disks(d1, d2)
             .with_output(tkf1_req, tkf1_out)
-            .with_output(tkf2_req, tkf2_out);
+            .with_output(tkf2_req, tkf2_out)
+            .with_output(slot2_req, slot2_out);
         let fs = enroll_fs(&[d1, d2]);
         let membership = enroll_make_membership(&[("disk1", d1), ("disk2", d2)]);
 
@@ -1584,13 +1583,15 @@ mod tests {
         let (tkf2_req, tkf2_out) = enroll_test_keyfile_fail(d2, &kf_str);
         let (uuid1_req, uuid1_out) = enroll_luks_uuid_ok(d1, test_uuid(501).as_str());
         let (uuid2_req, uuid2_out) = enroll_luks_uuid_ok(d2, test_uuid(500).as_str());
+        let (slot2_req, slot2_out) = enroll_luks_dump_slot1_empty(d2);
         let runner = MockRunner::default()
             .with_output(uuid1_req, uuid1_out)
             .with_output(uuid2_req, uuid2_out)
             .with_luks_dump_text_luks2_for(&[d1, d2])
             .with_mappers_closed(&["braid-disk1", "braid-disk2"])
             .with_output(tkf1_req, tkf1_out)
-            .with_output(tkf2_req, tkf2_out);
+            .with_output(tkf2_req, tkf2_out)
+            .with_output(slot2_req, slot2_out);
         let fs = enroll_fs(&[d1, d2]);
         let mut membership = PoolMembership::empty();
         let (u1, m1) = disk_member(501, "disk1", d1);
@@ -1631,6 +1632,133 @@ mod tests {
         assert!(pos(wait1) < pos(ok1), "disk1 wait must precede ok");
         assert!(pos(ok1) < pos(wait2), "disk1 ok must precede disk2 wait");
         assert!(pos(wait2) < pos(skip2), "disk2 wait must precede skip");
+    }
+
+    // Intent: `--generate --dry-run` refuses a disk whose slot 1 is
+    //   occupied by an unknown key before rendering a bogus enroll step.
+    // Why it exists: generated-key dry-run used to bypass the slot-1
+    //   inventory check, so preview succeeded even though the real run
+    //   failed after prompting for the passphrase.
+    // Scenario: operator runs `braid enroll /mnt/usb --generate
+    //   --dry-run` against a 2-disk pool; an earlier troubleshooting
+    //   session left an unknown key in disk2 slot 1 via `cryptsetup
+    //   luksAddKey --key-slot 1`. `--generate` skips the keyfile probe
+    //   and the slot-1 check refuses with the canonical recovery hint.
+    #[test]
+    fn dry_run_with_generate_surfaces_slot1_conflict() {
+        let d1 = "/dev/disk/by-id/d1";
+        let d2 = "/dev/disk/by-id/d2";
+
+        let (slot1_req, slot1_out) = enroll_luks_dump_slot1_empty(d1);
+        let (slot2_req, slot2_out) = enroll_luks_dump_slot1_occupied(d2);
+        let runner = enroll_discovery_two_disks(d1, d2)
+            .with_output(slot1_req, slot1_out)
+            .with_output(slot2_req, slot2_out);
+        let fs = enroll_fs(&[d1, d2]);
+        let membership = enroll_make_membership(&[("disk1", d1), ("disk2", d2)]);
+
+        let (tmp, paths) = isolated_paths();
+        let kf = tmp.path().join("braid.key");
+        let runner = enroll_with_mountpoint_ok(runner, tmp.path());
+
+        let failure = match plan_enroll(
+            &runner,
+            &fs,
+            &membership,
+            &kf,
+            true,
+            true,
+            &paths,
+            crate::test_fixtures::mock_virtio_backing_path_resolver(),
+        ) {
+            Ok(_) => panic!("dry-run must fail on slot-1 conflict"),
+            Err(failure) => failure,
+        };
+        let err = failure.error.to_string();
+
+        assert!(
+            err.contains("slot 1 on disk2"),
+            "expected disk2 slot-1 error, got: {err}"
+        );
+        assert!(
+            err.contains("occupied by an unknown key"),
+            "expected canonical conflict wording, got: {err}"
+        );
+        let probe_count = runner
+            .requests()
+            .iter()
+            .filter(|r| matches!(r, CmdRequest::CryptsetupTestKeyFile { .. }))
+            .count();
+        assert_eq!(
+            probe_count, 0,
+            "--generate dry-run must not probe the nonexistent keyfile"
+        );
+    }
+
+    // Intent: existing-keyfile `--dry-run` refuses a rejected candidate
+    //   whose slot 1 is occupied by an unknown key, while preserving
+    //   earlier already-enrolled Skip notes on the failure.
+    // Why it exists: existing-keyfile dry-run used to turn a Rejected
+    //   keyfile probe directly into a preview step without running the
+    //   real path's slot-1 conflict check.
+    // Scenario: operator runs `braid enroll /mnt/usb --dry-run`
+    //   against a 2-disk pool where disk1 already has the keyfile in
+    //   slot 1 from a partial earlier run, and disk2 has a foreign key
+    //   in slot 1. The keyfile probe authenticates on disk1 and is
+    //   rejected on disk2; the slot-1 check refuses disk2 before the
+    //   preview prints, with disk1's Skip note preserved.
+    #[test]
+    fn dry_run_existing_keyfile_surfaces_slot1_conflict() {
+        let d1 = "/dev/disk/by-id/d1";
+        let d2 = "/dev/disk/by-id/d2";
+
+        let (tmp, paths) = isolated_paths();
+        let (kf, kf_str) = enroll_make_existing_keyfile(&tmp);
+
+        let (tkf1_req, tkf1_out) = enroll_test_keyfile_ok(d1, &kf_str);
+        let (tkf2_req, tkf2_out) = enroll_test_keyfile_fail(d2, &kf_str);
+        let (slot2_req, slot2_out) = enroll_luks_dump_slot1_occupied(d2);
+        let runner = enroll_discovery_two_disks(d1, d2)
+            .with_output(tkf1_req, tkf1_out)
+            .with_output(tkf2_req, tkf2_out)
+            .with_output(slot2_req, slot2_out);
+        let fs = enroll_fs(&[d1, d2]);
+        let membership = enroll_make_membership(&[("disk1", d1), ("disk2", d2)]);
+
+        let failure = match plan_enroll(
+            &runner,
+            &fs,
+            &membership,
+            &kf,
+            false,
+            true,
+            &paths,
+            crate::test_fixtures::mock_virtio_backing_path_resolver(),
+        ) {
+            Ok(_) => panic!("dry-run must fail on slot-1 conflict"),
+            Err(failure) => failure,
+        };
+        let err = failure.error.to_string();
+
+        assert!(
+            err.contains("slot 1 on disk2"),
+            "expected disk2 slot-1 error, got: {err}"
+        );
+        assert!(
+            err.contains("occupied by an unknown key"),
+            "expected canonical conflict wording, got: {err}"
+        );
+        assert!(
+            failure.notes.iter().any(|n| matches!(
+                n,
+                PreviewNote::PerDisk { name, level, message }
+                    if name.as_str() == "disk1"
+                        && matches!(level, NoteLevel::Skip)
+                        && message == "keyfile already enrolled"
+            )),
+            "disk1's Skip note must survive slot-1 conflict on disk2; got: {:?}",
+            failure.notes
+        );
     }
 
     /*
@@ -1708,7 +1836,11 @@ mod tests {
         let d1 = "/dev/disk/by-id/d1";
         let d2 = "/dev/disk/by-id/d2";
 
-        let runner = enroll_discovery_two_disks(d1, d2);
+        let (slot1_req, slot1_out) = enroll_luks_dump_slot1_empty(d1);
+        let (slot2_req, slot2_out) = enroll_luks_dump_slot1_empty(d2);
+        let runner = enroll_discovery_two_disks(d1, d2)
+            .with_output(slot1_req, slot1_out)
+            .with_output(slot2_req, slot2_out);
         let fs = enroll_fs(&[d1, d2]);
         let membership = enroll_make_membership(&[("disk1", d1), ("disk2", d2)]);
 
@@ -3092,8 +3224,10 @@ mod tests {
      *   mode. It must short-circuit before any side effect (keyfile
      *   generation, passphrase prompt, header backup), and before any
      *   keyfile probe -- the keyfile does not exist yet by definition
-     *   in --generate mode. We assert the file is still absent afterward
-     *   to prove the short-circuit fires before `generate_key_file`.
+     *   in --generate mode. The dry-run slot inventory probe is allowed
+     *   because it is passphrase-free and side-effect-free. We assert
+     *   the file is still absent afterward to prove the short-circuit
+     *   fires before `generate_key_file`.
      * Scenario: user runs `braid enroll /mnt/usb --generate --dry-run`.
      */
     #[test]
@@ -3104,14 +3238,16 @@ mod tests {
 
         let d1 = "/dev/disk/by-id/d1";
         let (uuid_req, uuid_out) = enroll_luks_uuid_ok(d1, test_uuid(500).as_str());
+        let (slot_req, slot_out) = enroll_luks_dump_slot1_empty(d1);
 
-        // No passphrase mock, no TestKeyFile mock, no slot dump. If
-        // dry-run regresses past the short-circuit, MockRunner returns
+        // No passphrase mock and no TestKeyFile mock. If dry-run
+        // regresses past the short-circuit, MockRunner returns
         // MissingMock and the test fails.
         let runner = MockRunner::default()
             .with_output(uuid_req, uuid_out)
             .with_luks_dump_text_luks2(d1)
-            .with_mappers_closed(&["braid-disk1"]);
+            .with_mappers_closed(&["braid-disk1"])
+            .with_output(slot_req, slot_out);
         let runner = enroll_with_mountpoint_ok(runner, tmp.path());
 
         let fs = enroll_fs(&[d1]);
