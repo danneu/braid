@@ -66,7 +66,7 @@ not persistent host storage.
 | `--dry-run` | Show what would happen without executing |
 | `--yes` | Skip interactive confirmation |
 | `--passphrase-stdin` | Read passphrase from stdin instead of TTY prompt |
-| `--passphrase-file <path>` | Read passphrase from a file |
+| `--passphrase-file <path>` | Read passphrase from a file (conflicts with `--passphrase-stdin`) |
 | `--enroll <dir>` | Enroll `braid.key` from this directory into LUKS slot 1 on new disks |
 | `--progress auto\|on\|off` | Control progress display (default: auto) |
 

@@ -108,12 +108,8 @@ struct UpsStatusArgs {
 
 #[derive(Debug, Args)]
 struct RecoverArgs {
-    /// Read passphrase from stdin
-    #[arg(long)]
-    passphrase_stdin: bool,
-    /// Read passphrase from file instead of TTY prompt
-    #[arg(long)]
-    passphrase_file: Option<std::path::PathBuf>,
+    #[command(flatten)]
+    passphrase: PassphraseInputArgs,
     /// Allow mounting with missing devices (degraded mode -- new writes have no redundancy)
     #[arg(long)]
     allow_degraded: bool,
@@ -144,15 +140,21 @@ struct CommonArgs {
     /// Skip interactive confirmations
     #[arg(long)]
     yes: bool,
+    /// Progress display mode
+    #[arg(long, value_enum, default_value_t = ProgressMode::Auto)]
+    progress: ProgressMode,
+}
+
+/// Single owner for passphrase-source flags so every consumer inherits
+/// the same stdin/file conflict declaration.
+#[derive(Debug, Args)]
+struct PassphraseInputArgs {
     /// Read passphrase from stdin
     #[arg(long)]
     passphrase_stdin: bool,
     /// Read passphrase from file instead of TTY prompt
-    #[arg(long)]
+    #[arg(long, conflicts_with = "passphrase_stdin")]
     passphrase_file: Option<std::path::PathBuf>,
-    /// Progress display mode
-    #[arg(long, value_enum, default_value_t = ProgressMode::Auto)]
-    progress: ProgressMode,
 }
 
 #[derive(Debug, Args)]
@@ -182,6 +184,8 @@ struct AddArgs {
     enroll_key_file: Option<std::path::PathBuf>,
     #[command(flatten)]
     luks_format: LuksFormatArgs,
+    #[command(flatten)]
+    passphrase: PassphraseInputArgs,
     #[command(flatten)]
     common: CommonArgs,
 }
@@ -221,6 +225,8 @@ struct ReplaceArgs {
     #[command(flatten)]
     luks_format: LuksFormatArgs,
     #[command(flatten)]
+    passphrase: PassphraseInputArgs,
+    #[command(flatten)]
     common: CommonArgs,
 }
 
@@ -242,12 +248,8 @@ struct DoctorArgs {
 
 #[derive(Debug, Args)]
 struct UnlockArgs {
-    /// Read passphrase from stdin
-    #[arg(long)]
-    passphrase_stdin: bool,
-    /// Read passphrase from file instead of TTY prompt
-    #[arg(long)]
-    passphrase_file: Option<std::path::PathBuf>,
+    #[command(flatten)]
+    passphrase: PassphraseInputArgs,
     /// Unlock with a binary keyfile instead of passphrase
     #[arg(long, conflicts_with_all = ["passphrase_stdin", "passphrase_file"])]
     key_file: Option<std::path::PathBuf>,
@@ -266,12 +268,8 @@ struct EnrollKeyFileArgs {
     /// Generate a new 4096-byte random keyfile in DIR; DIR must already be a mount point
     #[arg(long)]
     generate: bool,
-    /// Read passphrase from stdin
-    #[arg(long)]
-    passphrase_stdin: bool,
-    /// Read passphrase from file instead of TTY prompt
-    #[arg(long)]
-    passphrase_file: Option<std::path::PathBuf>,
+    #[command(flatten)]
+    passphrase: PassphraseInputArgs,
     /// Show what would be done without making changes
     #[arg(long)]
     dry_run: bool,
@@ -405,8 +403,8 @@ fn main() {
                     disk_specs: &args.disks,
                     dry_run: args.common.dry_run,
                     yes: args.common.yes,
-                    passphrase_stdin: args.common.passphrase_stdin,
-                    passphrase_file: args.common.passphrase_file.as_deref(),
+                    passphrase_stdin: args.passphrase.passphrase_stdin,
+                    passphrase_file: args.passphrase.passphrase_file.as_deref(),
                     enroll_key_file: enroll_kf.as_deref(),
                     luks_format_extra_opts: &args.luks_format.luks_format_extra_opts,
                     progress,
@@ -495,8 +493,8 @@ fn main() {
                     missing_id: args.missing_id,
                     dry_run: args.common.dry_run,
                     yes: args.common.yes,
-                    passphrase_stdin: args.common.passphrase_stdin,
-                    passphrase_file: args.common.passphrase_file.as_deref(),
+                    passphrase_stdin: args.passphrase.passphrase_stdin,
+                    passphrase_file: args.passphrase.passphrase_file.as_deref(),
                     enroll_key_file: enroll_kf.as_deref(),
                     luks_format_extra_opts: &args.luks_format.luks_format_extra_opts,
                     progress,
@@ -571,8 +569,8 @@ fn main() {
                     config: &config,
                     membership: &membership,
                     paths: &paths,
-                    passphrase_stdin: args.passphrase_stdin,
-                    passphrase_file: args.passphrase_file.as_deref(),
+                    passphrase_stdin: args.passphrase.passphrase_stdin,
+                    passphrase_file: args.passphrase.passphrase_file.as_deref(),
                     key_file: args.key_file.as_deref(),
                     allow_degraded: args.allow_degraded,
                     dry_run: args.dry_run,
@@ -611,8 +609,8 @@ fn main() {
                     membership: &membership,
                     key_file_path: &key_file_path,
                     generate: args.generate,
-                    passphrase_stdin: args.passphrase_stdin,
-                    passphrase_file: args.passphrase_file.as_deref(),
+                    passphrase_stdin: args.passphrase.passphrase_stdin,
+                    passphrase_file: args.passphrase.passphrase_file.as_deref(),
                     dry_run: args.dry_run,
                     paths: &paths,
                     backing_path_resolver: &backing_path_resolver,
@@ -872,8 +870,8 @@ fn main() {
                 &braid_cli::recover::RecoverParams {
                     config: &config,
                     paths: &paths,
-                    passphrase_stdin: args.passphrase_stdin,
-                    passphrase_file: args.passphrase_file.as_deref(),
+                    passphrase_stdin: args.passphrase.passphrase_stdin,
+                    passphrase_file: args.passphrase.passphrase_file.as_deref(),
                     allow_degraded: args.allow_degraded,
                     dry_run: args.dry_run,
                     progress,
@@ -1027,5 +1025,122 @@ mod tests {
         .expect_err("luks format args must use --luks-format-arg=ARG");
 
         assert!(err.to_string().contains("equal sign is needed"));
+    }
+
+    // Intent: clap rejects conflicting passphrase inputs on every command
+    // that reads one, including unlock's key-file conflicts.
+    // Why it exists: the read path used to silently prefer passphrase files
+    // over stdin when both flags were present.
+    // Scenario: an operator updates a script from one input source to another
+    // and leaves the old flag in place.
+    #[test]
+    fn passphrase_input_conflicts_are_rejected() {
+        let cases: &[&[&str]] = &[
+            &[
+                "braid",
+                "add",
+                "disk1=/dev/disk/by-id/x",
+                "--passphrase-stdin",
+                "--passphrase-file",
+                "/dev/null",
+            ],
+            &[
+                "braid",
+                "replace",
+                "--old",
+                "a",
+                "--new",
+                "b=/dev/disk/by-id/x",
+                "--passphrase-stdin",
+                "--passphrase-file",
+                "/dev/null",
+            ],
+            &[
+                "braid",
+                "unlock",
+                "--passphrase-stdin",
+                "--passphrase-file",
+                "/dev/null",
+            ],
+            &[
+                "braid",
+                "enroll",
+                "/mnt/usb",
+                "--passphrase-stdin",
+                "--passphrase-file",
+                "/dev/null",
+            ],
+            &[
+                "braid",
+                "recover",
+                "--passphrase-stdin",
+                "--passphrase-file",
+                "/dev/null",
+            ],
+            &[
+                "braid",
+                "unlock",
+                "--key-file",
+                "/dev/null",
+                "--passphrase-stdin",
+            ],
+            &[
+                "braid",
+                "unlock",
+                "--key-file",
+                "/dev/null",
+                "--passphrase-file",
+                "/dev/null",
+            ],
+        ];
+
+        for argv in cases {
+            let err = Cli::try_parse_from(argv.iter().copied())
+                .expect_err(&format!("expected ArgumentConflict for {argv:?}"));
+            assert_eq!(
+                err.kind(),
+                ErrorKind::ArgumentConflict,
+                "wrong error kind for {argv:?}: {err}"
+            );
+        }
+    }
+
+    // Intent: remove commands reject passphrase flags because they never read
+    // a passphrase.
+    // Why it exists: those flags used to arrive through CommonArgs and parse
+    // successfully even though the command bodies ignored them.
+    // Scenario: an operator copy-pastes a passphrase-input flag from add or
+    // unlock into a remove workflow.
+    #[test]
+    fn remove_commands_reject_passphrase_flags() {
+        let cases: &[&[&str]] = &[
+            &["braid", "remove", "disk1", "--passphrase-stdin"],
+            &["braid", "remove", "disk1", "--passphrase-file", "/dev/null"],
+            &[
+                "braid",
+                "remove-missing",
+                "--missing-id",
+                "1",
+                "--passphrase-stdin",
+            ],
+            &[
+                "braid",
+                "remove-missing",
+                "--missing-id",
+                "1",
+                "--passphrase-file",
+                "/dev/null",
+            ],
+        ];
+
+        for argv in cases {
+            let err = Cli::try_parse_from(argv.iter().copied())
+                .expect_err(&format!("expected UnknownArgument for {argv:?}"));
+            assert_eq!(
+                err.kind(),
+                ErrorKind::UnknownArgument,
+                "wrong error kind for {argv:?}: {err}"
+            );
+        }
     }
 }

@@ -53,7 +53,7 @@ sudo braid unlock --dry-run
 | Flag                       | Purpose                                                                              |
 | -------------------------- | ------------------------------------------------------------------------------------ |
 | `--passphrase-stdin`       | Read passphrase from stdin instead of TTY prompt                                     |
-| `--passphrase-file <path>` | Read passphrase from a file                                                          |
+| `--passphrase-file <path>` | Read passphrase from a file (conflicts with `--passphrase-stdin`)                   |
 | `--key-file <path>`        | Unlock with a binary keyfile instead of passphrase (conflicts with passphrase flags) |
 | `--allow-degraded`         | Allow mounting with missing devices (degraded mode)                                  |
 | `--dry-run`                | Show what would happen without executing                                             |

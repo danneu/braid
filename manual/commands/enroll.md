@@ -51,7 +51,7 @@ sudo braid enroll /mnt/usb --generate --dry-run
 | --- | --- |
 | `--generate` | Create a new 4096-byte random keyfile before enrolling; the target directory must already be a mount point |
 | `--passphrase-stdin` | Read passphrase from stdin instead of TTY prompt |
-| `--passphrase-file <path>` | Read passphrase from a file instead of TTY prompt |
+| `--passphrase-file <path>` | Read passphrase from a file instead of TTY prompt (conflicts with `--passphrase-stdin`) |
 | `--dry-run` | Show what would happen without making changes |
 
 ## What happens under the hood
