@@ -10745,6 +10745,133 @@ mod tests {
         assert!(!f.paths.pending_op_json().exists());
     }
 
+    // Intent: cmd_recover preserves a non-target MISSING-devid disk during
+    // Replace::PostReplaceMaintenance while still replaying the resize for the
+    // live replacement disk.
+    // Why it exists: the helper re-insert loop is already unit-pinned by
+    // recover_membership_matching_expected_reinserts_missing_devid_member; this
+    // test pins the composed command-boundary path -- post-maintenance
+    // dispatcher, live_pool_matches_membership gate, helper call site, and
+    // pool.json write -- against a btrfs MISSING devid. It mirrors the
+    // null-underlying analog cmd_recover_replace_post_maintenance_preserves_non_target_null_underlying_disk.
+    // Scenario: replace committed old -> disk-new, then unrelated disk3 went
+    // MISSING (flapping disk) before recovery rebuilt pool.json.
+    #[test]
+    fn cmd_recover_replace_post_maintenance_preserves_non_target_missing_disk() {
+        let f = PoolFixture::empty();
+        let fs = MockFs::new(&[]);
+        let new_uuid = uuid_for_name("disk-new");
+        let new_uuid_text = new_uuid.to_string();
+        let pre = membership_from(vec![
+            membership_entry("disk1", "/dev/disk/by-id/virtio-disk1", None, Some(1)),
+            membership_entry("old", "/dev/disk/by-id/virtio-old", None, None),
+            membership_entry("disk3", "/dev/disk/by-id/virtio-disk3", None, Some(3)),
+        ]);
+        let target = membership_from(vec![
+            membership_entry("disk1", "/dev/disk/by-id/virtio-disk1", None, Some(1)),
+            (
+                new_uuid.clone(),
+                disk_member_named("disk-new", "/dev/disk/by-id/virtio-disk-new", None, Some(2)),
+            ),
+            membership_entry("disk3", "/dev/disk/by-id/virtio-disk3", None, Some(3)),
+        ]);
+        let journal = journal::Journal {
+            started_at: "2026-01-01T00:00:00Z".into(),
+            op: OpKind::Replace {
+                phase: journal::ReplacePhase::PostReplaceMaintenance,
+                old_uuid: uuid_for_name("old"),
+                old_name: disk_name("old"),
+                new_uuid: new_uuid.clone(),
+                new_name: disk_name("disk-new"),
+                new_target: journal::ReplaceJournalTarget {
+                    by_id: ByIdPath::parse("/dev/disk/by-id/virtio-disk-new").unwrap(),
+                    mode: journal::ReplaceJournalMode::ExistingLuks {
+                        enroll_key_file: None,
+                    },
+                },
+                source: journal::ReplaceJournalSource::Missing { old_devid: 2 },
+                restore_raid1_after_commit: false,
+            },
+            pre_membership: pre,
+            target_membership: target,
+        };
+        journal::write_journal(&f.paths, &journal).unwrap();
+
+        let show = ok_raw(
+            "btrfs filesystem show /mnt/storage",
+            "Label: none  uuid: aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee\n\
+             \tTotal devices 3 FS bytes used 1.00GiB\n\
+             \tdevid    1 size 10.00GiB used 2.00GiB path /dev/mapper/braid-disk1\n\
+             \tdevid    2 size 10.00GiB used 2.00GiB path /dev/mapper/braid-disk-new\n\
+             \tdevid    3 size 0 used 0 path MISSING\n",
+        );
+        let (mp_req, mp_out) = mountpoint_ok();
+        let runner = MockRunner::default()
+            .with_output(mp_req, mp_out)
+            .with_output(
+                CmdRequest::BtrfsFilesystemShow {
+                    mount_point: MountPoint("/mnt/storage".into()),
+                },
+                show,
+            )
+            .with_output(
+                CmdRequest::CryptsetupStatus {
+                    mapper: MapperName("braid-disk1".into()),
+                },
+                cryptsetup_status_active("braid-disk1", "/dev/vda"),
+            )
+            .with_output(
+                CmdRequest::CryptsetupLuksUuid {
+                    device: "/dev/vda".into(),
+                },
+                cryptsetup_uuid_ok("/dev/vda", "11111111-1111-1111-1111-111111111111"),
+            )
+            .with_output(
+                CmdRequest::CryptsetupStatus {
+                    mapper: MapperName("braid-disk-new".into()),
+                },
+                cryptsetup_status_active("braid-disk-new", "/dev/vdb"),
+            )
+            .with_output(
+                CmdRequest::CryptsetupLuksUuid {
+                    device: "/dev/vdb".into(),
+                },
+                cryptsetup_uuid_ok("/dev/vdb", &new_uuid_text),
+            )
+            .with_output(
+                CmdRequest::BtrfsFilesystemResize {
+                    devid: 2,
+                    mount_point: MountPoint("/mnt/storage".into()),
+                },
+                ok_raw_empty("btrfs filesystem resize"),
+            );
+        let resolver = resolver_for(&[
+            ("/dev/vda", "virtio-disk1"),
+            ("/dev/vdb", "virtio-disk-new"),
+        ]);
+        let params = f.recover_params().passphrase_file(None).build();
+
+        let result = cmd_recover(&runner, &fs, &resolver, &params);
+        result.expect("recover should preserve MISSING disk3 and resize disk-new");
+
+        let recovered = membership::load_membership(&f.paths).unwrap();
+        assert!(recovered.by_name(&disk_name("disk1")).is_some());
+        assert!(recovered.by_name(&disk_name("disk-new")).is_some());
+        assert!(recovered.by_name(&disk_name("old")).is_none());
+        assert!(
+            recovered.by_name(&disk_name("disk3")).is_some(),
+            "non-target MISSING disk3 must be preserved after replace commits"
+        );
+        let requests = runner.requests();
+        assert!(
+            requests.iter().any(|request| {
+                matches!(request, CmdRequest::BtrfsFilesystemResize { devid: 2, .. })
+            }),
+            "post-replace recovery must resize disk-new's live devid: {requests:?}"
+        );
+        assert!(!f.paths.pending_op_json().exists());
+    }
+
     // Intent: post-maintenance inhibitor failure preserves the replace
     // journal and runs no maintenance command.
     // Why it exists: close, resize, and balance are all post-commit
