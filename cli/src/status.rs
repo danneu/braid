@@ -312,8 +312,6 @@ pub enum StatusError {
     Parse(#[from] ParseError),
     #[error("json serialization failed: {0}")]
     Json(#[from] serde_json::Error),
-    #[error("validation error: {0}")]
-    Validation(String),
     #[error("{0}")]
     Membership(#[from] membership::MembershipError),
 }
