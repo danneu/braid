@@ -721,7 +721,7 @@ fn classify_braid_online_active_state(state: &str) -> BraidOnlineActiveState {
 fn read_braid_online_active_state<R: CommandRunner>(
     runner: &R,
 ) -> Result<String, crate::cmd::CmdError> {
-    let raw = runner.run(&CmdRequest::SystemctlIsActive {
+    let raw = runner.run(&CmdRequest::SystemctlShowActiveState {
         unit: "braid-online.service".into(),
     })?;
     Ok(raw.stdout.trim().to_owned())
@@ -1046,8 +1046,8 @@ mod tests {
         PoolMissingDevicesRunner, UpscSpawnFailureRunner, beep_ctx, cls, config_with_ups_enabled,
         config_without_ups, device_usage_healthy, device_usage_with_missing, df_json, df_json_fail,
         human_options, is_luks_ok, isolated_paths, luks_dump_text_ok, luks_uuid_ok,
-        mountpoint_fail, mountpoint_ok, parsed_doctor_ctx, systemctl_is_active_output, test_uuid,
-        ups_ctx, valid_config_json, write_temp,
+        mountpoint_fail, mountpoint_ok, parsed_doctor_ctx, systemctl_show_active_state_output,
+        test_uuid, ups_ctx, valid_config_json, write_temp,
     };
     use crate::types::MountPoint;
 
@@ -2846,10 +2846,10 @@ mod tests {
                 },
             )
             .with_output(
-                CmdRequest::SystemctlIsActive {
+                CmdRequest::SystemctlShowActiveState {
                     unit: "braid-online.service".into(),
                 },
-                systemctl_is_active_output("inactive"),
+                systemctl_show_active_state_output("inactive"),
             );
         let (_dir, paths) = isolated_paths();
         let mut ctx = ups_ctx(&runner, &paths, config_with_ups_enabled());
@@ -2885,10 +2885,10 @@ mod tests {
                 },
             )
             .with_output(
-                CmdRequest::SystemctlIsActive {
+                CmdRequest::SystemctlShowActiveState {
                     unit: "braid-online.service".into(),
                 },
-                systemctl_is_active_output("inactive"),
+                systemctl_show_active_state_output("inactive"),
             );
         let (_dir, paths) = isolated_paths();
         let mut ctx = ups_ctx(&runner, &paths, config_with_ups_enabled());
@@ -2920,10 +2920,10 @@ mod tests {
                 },
             )
             .with_output(
-                CmdRequest::SystemctlIsActive {
+                CmdRequest::SystemctlShowActiveState {
                     unit: "braid-online.service".into(),
                 },
-                systemctl_is_active_output("active"),
+                systemctl_show_active_state_output("active"),
             );
         let (_dir, paths) = isolated_paths();
         let mut ctx = ups_ctx(&runner, &paths, config_with_ups_enabled());
@@ -2954,10 +2954,10 @@ mod tests {
                     },
                 )
                 .with_output(
-                    CmdRequest::SystemctlIsActive {
+                    CmdRequest::SystemctlShowActiveState {
                         unit: "braid-online.service".into(),
                     },
-                    systemctl_is_active_output(status),
+                    systemctl_show_active_state_output(status),
                 );
             let (_dir, paths) = isolated_paths();
             let mut ctx = ups_ctx(&runner, &paths, config_with_ups_enabled());
@@ -2990,10 +2990,10 @@ mod tests {
                 },
             )
             .with_output(
-                CmdRequest::SystemctlIsActive {
+                CmdRequest::SystemctlShowActiveState {
                     unit: "braid-online.service".into(),
                 },
-                systemctl_is_active_output("activating"),
+                systemctl_show_active_state_output("activating"),
             );
         let (_dir, paths) = isolated_paths();
         let mut ctx = ups_ctx(&runner, &paths, config_with_ups_enabled());
@@ -3031,10 +3031,10 @@ mod tests {
                     },
                 )
                 .with_output(
-                    CmdRequest::SystemctlIsActive {
+                    CmdRequest::SystemctlShowActiveState {
                         unit: "braid-online.service".into(),
                     },
-                    systemctl_is_active_output(status),
+                    systemctl_show_active_state_output(status),
                 );
             let (_dir, paths) = isolated_paths();
             let mut ctx = ups_ctx(&runner, &paths, config_with_ups_enabled());

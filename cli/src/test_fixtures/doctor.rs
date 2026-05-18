@@ -208,21 +208,18 @@ pub(crate) fn device_usage_with_missing() -> (CmdRequest, RawCommandOutput) {
 }
 
 /// Bare `RawCommandOutput` (not paired with a request) because braid-online
-/// tests build the `SystemctlIsActive` request inline -- the unit name
+/// tests build the `SystemctlShowActiveState` request inline -- the unit name
 /// varies in some skip tests.
-pub(crate) fn systemctl_is_active_output(state: &str) -> RawCommandOutput {
+pub(crate) fn systemctl_show_active_state_output(state: &str) -> RawCommandOutput {
     RawCommandOutput {
-        cmd: "systemctl is-active braid-online.service".into(),
+        cmd: "systemctl show -P ActiveState braid-online.service".into(),
         stdout: if state.is_empty() {
             String::new()
         } else {
             format!("{state}\n")
         },
         stderr: String::new(),
-        exit_status: match state {
-            "active" | "reloading" | "refreshing" => 0,
-            _ => 3,
-        },
+        exit_status: 0,
     }
 }
 

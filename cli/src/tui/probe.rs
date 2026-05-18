@@ -439,9 +439,9 @@ const FAN_DAEMON_UNIT: &str = "hddfancontrol-braid.service";
 ///
 /// Three independent sub-reads (fan hardware, hottest ATA drivetemp,
 /// daemon liveness), each best-effort. Failures in one do not cascade
-/// into the others. Daemon liveness via `systemctl is-active` is the
+/// into the others. Daemon liveness via `systemctl show -P ActiveState` is the
 /// source of truth for whether hddfancontrol is actually driving the
-/// fan — sensor values can look healthy while the control loop is down.
+/// fan -- sensor values can look healthy while the control loop is down.
 ///
 /// Paths are injected (`sysfs_root`, `dev_root`) so the sysfs traversal
 /// and `/dev/disk/by-id/ata-*` selector can run under tempdirs in tests.
@@ -724,7 +724,7 @@ fn pick_driving(
 }
 
 /// Unit name for the NUT server that the UPS probe watches when
-/// `upsc` fails. `systemctl is-active upsd.service` distinguishes
+/// `upsc` fails. `systemctl show -P ActiveState upsd.service` distinguishes
 /// "daemon stopped" (Inactive / Failed) from "daemon running but UPS
 /// unreachable" (Active but `upsc` non-zero -- we surface that as
 /// `DaemonStatus::Inactive` as a conservative fail-closed default).
@@ -779,12 +779,12 @@ fn ups_snapshot_query_failed<R: CommandRunner>(runner: &R) -> UpsSnapshot {
     }
 }
 
-/// Parse `systemctl is-active <unit>`. Exits non-zero (3) for
-/// `inactive`/`failed` but still prints the status word — inspect
-/// stdout regardless of exit code. Anything unrecognised, or a spawn
-/// error, becomes `Unknown`.
+/// Parse `systemctl show -P ActiveState <unit>`. It emits one ActiveState word
+/// on stdout for known units; callers parse that word instead of relying on the
+/// command exit status. Anything unrecognised, or a spawn error, becomes
+/// `Unknown`.
 fn probe_daemon_status<R: CommandRunner>(runner: &R, unit: &str) -> DaemonStatus {
-    let req = CmdRequest::SystemctlIsActive {
+    let req = CmdRequest::SystemctlShowActiveState {
         unit: unit.to_owned(),
     };
     let raw = match runner.run(&req) {
@@ -2666,26 +2666,22 @@ mod tests {
         assert_eq!(d.celsius, 42);
     }
 
-    // Intent: probe_daemon_status parses every documented systemctl
-    // is-active status word, including the inactive/failed cases where
-    // systemctl exits 3, and defaults to Unknown on garbage or spawn
-    // errors.
-    // Why: systemctl is-active exits non-zero for inactive/failed but
-    // still prints the status word -- a naive "bail on non-zero exit"
-    // would collapse everything into Unknown and silently break the
-    // Failed-state rendering.
+    // Intent: probe_daemon_status parses every documented ActiveState word
+    // and defaults to Unknown on garbage or spawn errors.
+    // Why: callers parse stdout regardless of exit status, defending against
+    // any future systemctl exit-code change.
     // Scenario: mock responses for each documented state + edge cases.
     #[test]
     fn probe_daemon_status_parses_all_states() {
         fn raw(stdout: &str, exit: i32) -> RawCommandOutput {
             RawCommandOutput {
-                cmd: "systemctl is-active".into(),
+                cmd: "systemctl show -P ActiveState".into(),
                 stdout: stdout.into(),
                 stderr: String::new(),
                 exit_status: exit,
             }
         }
-        let req = CmdRequest::SystemctlIsActive {
+        let req = CmdRequest::SystemctlShowActiveState {
             unit: "hddfancontrol-braid.service".to_owned(),
         };
         let cases: &[(&str, i32, DaemonStatus)] = &[
@@ -2733,11 +2729,11 @@ mod tests {
                 },
             )
             .with_output(
-                CmdRequest::SystemctlIsActive {
+                CmdRequest::SystemctlShowActiveState {
                     unit: "upsd.service".into(),
                 },
                 RawCommandOutput {
-                    cmd: "systemctl is-active upsd.service".into(),
+                    cmd: "systemctl show -P ActiveState upsd.service".into(),
                     stdout: unit_stdout.to_owned(),
                     stderr: String::new(),
                     exit_status: 0,
@@ -2793,11 +2789,11 @@ mod tests {
     #[test]
     fn probe_ups_falls_back_on_invocation_failure() {
         let mock = MockRunner::default().with_output(
-            CmdRequest::SystemctlIsActive {
+            CmdRequest::SystemctlShowActiveState {
                 unit: "upsd.service".into(),
             },
             RawCommandOutput {
-                cmd: "systemctl is-active upsd.service".into(),
+                cmd: "systemctl show -P ActiveState upsd.service".into(),
                 stdout: "inactive\n".into(),
                 stderr: String::new(),
                 exit_status: 3,

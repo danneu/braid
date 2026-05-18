@@ -92,8 +92,8 @@ pub struct DrivingDrive {
 }
 
 /// Live state of `hddfancontrol-braid.service` as reported by
-/// `systemctl is-active`. Sensor readings are still meaningful when the
-/// daemon is not `Active`, but the control loop isn't acting on them.
+/// `systemctl show -P ActiveState`. Sensor readings are still meaningful when
+/// the daemon is not `Active`, but the control loop isn't acting on them.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum DaemonStatus {
     Active,
@@ -101,8 +101,8 @@ pub enum DaemonStatus {
     Transitioning,
     Inactive,
     Failed,
-    /// Output from `systemctl is-active` didn't match any known state, or
-    /// the command itself failed to spawn.
+    /// Output from `systemctl show -P ActiveState` didn't match any known state,
+    /// or the command itself failed to spawn.
     Unknown,
 }
 

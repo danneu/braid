@@ -314,10 +314,9 @@ pub enum CmdRequest {
     BraidBeepProbe {
         path: String,
     },
-    /// `systemctl is-active <unit>` — exits non-zero (3) when the unit is
-    /// inactive/failed but still prints the status word to stdout. The TUI
-    /// fan probe parses stdout regardless of exit code.
-    SystemctlIsActive {
+    /// `systemctl show -P ActiveState <unit>` reads the unit's
+    /// ActiveState property and emits one status word on stdout.
+    SystemctlShowActiveState {
         unit: String,
     },
     /// `upsc <name>` — NUT status query. Emits `key: value` lines (see
@@ -1097,9 +1096,14 @@ impl CmdRequest {
                 program: path.clone(),
                 args: vec![],
             },
-            CmdRequest::SystemctlIsActive { unit } => CmdArgs {
+            CmdRequest::SystemctlShowActiveState { unit } => CmdArgs {
                 program: "systemctl".to_owned(),
-                args: vec!["is-active".into(), unit.clone()],
+                args: vec![
+                    "show".into(),
+                    "-P".into(),
+                    "ActiveState".into(),
+                    unit.clone(),
+                ],
             },
             CmdRequest::UpscQuery { name } => CmdArgs {
                 program: "upsc".to_owned(),
@@ -1732,6 +1736,13 @@ mod tests {
                 },
                 "systemctl",
                 vec!["show", "braid-online.service", "--no-pager"],
+            ),
+            (
+                CmdRequest::SystemctlShowActiveState {
+                    unit: "braid-online.service".into(),
+                },
+                "systemctl",
+                vec!["show", "-P", "ActiveState", "braid-online.service"],
             ),
             (CmdRequest::SmartctlScan, "smartctl", vec!["--scan"]),
             (
