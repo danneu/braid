@@ -43,8 +43,6 @@ pub enum RemoveMissingError {
     Pool(#[from] crate::pool::PoolError),
     #[error("config error: {0}")]
     Config(#[from] crate::config::ConfigError),
-    #[error("command error: {0}")]
-    Cmd(#[from] crate::cmd::CmdError),
 }
 
 /// Resolve a missing devid to a `(LuksUuid, DiskName)` pair via

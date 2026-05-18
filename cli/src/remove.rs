@@ -42,8 +42,6 @@ pub enum RemoveError {
     Pool(#[from] crate::pool::PoolError),
     #[error("config error: {0}")]
     Config(#[from] crate::config::ConfigError),
-    #[error("command error: {0}")]
-    Cmd(#[from] crate::cmd::CmdError),
 }
 
 /// Classify a `save_membership` failure that occurs *after* the irreversible
