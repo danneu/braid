@@ -1493,9 +1493,11 @@ fn build_replace_work_plan(
         &input.luks_format_extra_opts,
     )?;
     let journal_source = build_replace_journal_source(&input.replace_source);
-    let restore_raid1_after_commit = matches!(&input.replace_source, ReplaceSource::Missing { .. })
-        && input.pool.missing_count == 1
-        && input.pool.devices.len() + 1 >= 2;
+    let will_clear_last_missing = matches!(&input.replace_source, ReplaceSource::Missing { .. })
+        && input.pool.missing_count == 1;
+    // +1: the new device added by this replace fills the cleared missing slot.
+    let remaining_present = input.pool.devices.len() + 1;
+    let restore_raid1_after_commit = will_clear_last_missing && remaining_present >= 2;
     let target_prep = match input.new_probed.state {
         ConfigDiskState::Absent => {
             return Err(ReplaceError::Validation(format!(
