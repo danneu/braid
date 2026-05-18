@@ -152,10 +152,10 @@ pub(crate) fn lock_test_membership() -> PoolMembership {
 /// Add the mounted-pool probe results. `probe_pool` calls
 /// `BtrfsFilesystemShow` and then a per-device cryptsetup status +
 /// luksUUID pair for each device. The recording-runner fixtures
-/// historically only seeded the FsidOnly probe surface; for the Full
+/// historically only seeded the probe-failed fallback surface; for the Full
 /// arm to drive UUID-based classification the per-device probes are
 /// also seeded by default. Tests that intentionally trigger the
-/// FsidOnly fallback override one of these to fail; tests that want
+/// probe-failed fallback override one of these to fail; tests that want
 /// a stranded-mapper scenario add extra per-mapper probes.
 pub(crate) fn lock_with_fsid_probe_mocks(runner: MockRunner) -> MockRunner {
     let runner = runner.with_output(

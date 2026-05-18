@@ -31,22 +31,30 @@ impl From<CloseMapperError> for LockError {
     }
 }
 
-/// Snapshot of the pool's live state at lock-planning time. `Full`
-/// carries the UUID-classified `PoolState` from `probe_pool`; `FsidOnly`
-/// is the per-device-probe-failed fallback that keeps FSID preflight
-/// evidence separate from the later UUID-scanned mapper cleanup.
-#[allow(dead_code)] // fsid/probe_error are reserved for the mounted fallback warning.
-pub enum LockSnapshot {
-    /// Full per-device probe result with live LUKS UUIDs available.
-    Full(PoolState),
-    /// Fallback when mounted btrfs state is known but per-device UUID probing
-    /// failed before close-set construction.
-    FsidOnly {
-        /// Filesystem UUID that proved the mounted filesystem is braid's pool.
+/// Snapshot of the pool's live state at lock-planning time. Variants
+/// encode the three real branches: a successful per-device probe, a
+/// mounted pool whose per-device probe failed (FSID still proved
+/// ownership), and an unmounted pool that bypasses mounted-pool
+/// probing and FSID preflight (per-candidate UUID probing still runs
+/// during mapper cleanup).
+enum Snapshot {
+    /// Per-device probe succeeded; close-set classification routes
+    /// through observed LUKS UUIDs.
+    Probed(PoolState),
+    /// Pool is mounted and FSID matched, but per-device probing
+    /// failed. `fsid` feeds preflight; `probe_error` is quoted in the
+    /// fallback warning.
+    ProbeFailed {
         fsid: String,
-        /// Original probe failure surfaced in the fallback warning.
         probe_error: ProbeError,
     },
+    /// Pool is not mounted. Skips the mounted-pool `probe_pool` call
+    /// and the FSID preflight gate; UUID-scanned mapper cleanup still
+    /// runs via `build_close_sets_uuid_scanned_fallback` to close any
+    /// orphan braid-* mappers left behind from a previous unlock
+    /// (each candidate is verified by `cryptsetup status` + `luksUUID`
+    /// before being added to the close set).
+    Unmounted,
 }
 
 /// A mapper to close at lock execution. `mapper` is the observed name,
@@ -705,19 +713,19 @@ where
     })?;
     let pool_was_mounted = mp_result.exit_status == 0;
 
-    // 2. Try per-device probe; on success take the Full path so
+    // 2. Try per-device probe; on success take the Probed path so
     // close-set classification routes through observed UUIDs.
     // Per-device failures fall back to FSID preflight plus UUID-scanned
     // mapper cleanup; NotBtrfs aborts to preserve today's
     // mounted-non-btrfs refusal.
     let snapshot = if pool_was_mounted {
         match probe_pool(runner, fs, &mount_point) {
-            Ok(pool) => LockSnapshot::Full(pool),
+            Ok(pool) => Snapshot::Probed(pool),
             // Explicit per-variant routing. NotBtrfs aborts; every
             // other variant falls back to probe_fsid + UUID-scanned cleanup.
             // No catch-all -- if a future ProbeError variant lands,
             // it must opt in explicitly here so a real configuration
-            // error cannot be silently masked by the FsidOnly path.
+            // error cannot be silently masked by the ProbeFailed path.
             Err(ProbeError::NotBtrfs {
                 mount_point: mp,
                 fstype,
@@ -738,29 +746,19 @@ where
             ) => {
                 let fsid = probe_fsid(runner, fs, &mount_point)
                     .map_err(|e| LockError::Failed(format!("cannot probe pool: {e}")))?;
-                LockSnapshot::FsidOnly { fsid, probe_error }
+                Snapshot::ProbeFailed { fsid, probe_error }
             }
         }
     } else {
-        // Pool unmounted: skip per-device probing entirely and use
-        // the fallback-shape branch -- preflight does not run when the
-        // pool is unmounted (preflight is the mounted-pool gate for
-        // exclusive operations).
-        LockSnapshot::FsidOnly {
-            fsid: String::new(),
-            probe_error: ProbeError::PoolDevice {
-                mapper: mount_point.0.clone(),
-                detail: "unmounted (skip preflight)".into(),
-            },
-        }
+        Snapshot::Unmounted
     };
 
     let mut notes: Vec<PreviewNote> = Vec::new();
     let mut skipped_mappers: Vec<MapperName> = Vec::new();
     let mut cleanup_uncertain = false;
     let close_set = match &snapshot {
-        LockSnapshot::Full(pool) => {
-            if pool_was_mounted && let Some(fsid) = &pool.fsid {
+        Snapshot::Probed(pool) => {
+            if let Some(fsid) = &pool.fsid {
                 preflight::require_lock_preflight(fs, fsid).map_err(LockError::Failed)?;
             }
             build_close_sets_full(
@@ -773,13 +771,11 @@ where
                 &mut cleanup_uncertain,
             )
         }
-        LockSnapshot::FsidOnly { fsid, probe_error } => {
-            if pool_was_mounted {
-                notes.push(PreviewNote::Warn(uuid_scanned_fallback_warn_body(
-                    probe_error,
-                )));
-                preflight::require_lock_preflight(fs, fsid).map_err(LockError::Failed)?;
-            }
+        Snapshot::ProbeFailed { fsid, probe_error } => {
+            notes.push(PreviewNote::Warn(uuid_scanned_fallback_warn_body(
+                probe_error,
+            )));
+            preflight::require_lock_preflight(fs, fsid).map_err(LockError::Failed)?;
             build_close_sets_uuid_scanned_fallback(
                 runner,
                 fs,
@@ -789,6 +785,14 @@ where
                 &mut cleanup_uncertain,
             )
         }
+        Snapshot::Unmounted => build_close_sets_uuid_scanned_fallback(
+            runner,
+            fs,
+            membership,
+            &mut notes,
+            &mut skipped_mappers,
+            &mut cleanup_uncertain,
+        ),
     };
 
     Ok(LockPlan {
@@ -801,7 +805,7 @@ where
     })
 }
 
-/// Close-set construction for the `LockSnapshot::Full` arm. Drives the
+/// Close-set construction for the `Snapshot::Probed` arm. Drives the
 /// member-owned classification through observed `PoolDevice.mapper`
 /// strings so the close + forget + dry-run preview all share one
 /// observed-mapper source-of-truth. All three passes emit the same
@@ -2998,7 +3002,7 @@ mod tests {
         }
     }
 
-    /// Intent: in LockSnapshot::Full, a drifted member mapper
+    /// Intent: in `Snapshot::Probed`, a drifted member mapper
     /// (`PoolDevice.mapper = "braid-WRONG"`, luks_uuid matches
     /// member) appears in member_owned via UUID classification,
     /// renders into the close-set with the OBSERVED name, and the
@@ -3044,7 +3048,7 @@ mod tests {
         assert!(orphan_summaries(&close_set).is_empty());
     }
 
-    /// Intent: in LockSnapshot::Full, the forget_devs set passed to
+    /// Intent: in `Snapshot::Probed`, the forget_devs set passed to
     /// BtrfsDeviceScanForget uses the OBSERVED member mapper string
     /// (`braid-WRONG`) rather than the reconstructed
     /// `mapper_name(&member.name)` string.
