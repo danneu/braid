@@ -1114,9 +1114,8 @@ mod tests {
     // Why: operator should see the soft balance step in the plan.
     // Scenario: 3-disk pool, 1 disk failed. Dry run should show the balance.
     fn work_plan_steps_show_rebalance_when_clearing_last_missing() {
-        let steps =
-            remove_missing_work_plan_for_test(3, 1, 2, &MountPoint("/mnt/storage".into()))
-                .render_steps();
+        let steps = remove_missing_work_plan_for_test(3, 1, 2, &MountPoint("/mnt/storage".into()))
+            .render_steps();
         assert!(
             steps
                 .iter()
@@ -1131,9 +1130,8 @@ mod tests {
     // Why: can't have RAID1 with only 1 device.
     // Scenario: 2-disk pool, 1 died. Only 1 survivor -- no balance.
     fn work_plan_steps_omit_rebalance_with_single_survivor() {
-        let steps =
-            remove_missing_work_plan_for_test(3, 1, 1, &MountPoint("/mnt/storage".into()))
-                .render_steps();
+        let steps = remove_missing_work_plan_for_test(3, 1, 1, &MountPoint("/mnt/storage".into()))
+            .render_steps();
         assert!(
             !steps
                 .iter()
@@ -1148,9 +1146,8 @@ mod tests {
     // Why: if more missing devices remain, balance would be premature.
     // Scenario: 4-disk pool, 2 missing, removing 1 of them.
     fn work_plan_steps_omit_rebalance_when_not_last_missing() {
-        let steps =
-            remove_missing_work_plan_for_test(3, 2, 2, &MountPoint("/mnt/storage".into()))
-                .render_steps();
+        let steps = remove_missing_work_plan_for_test(3, 2, 2, &MountPoint("/mnt/storage".into()))
+            .render_steps();
         assert!(
             !steps
                 .iter()

@@ -1542,7 +1542,10 @@ mod tests {
         let f = write_temp(r#"{"mount_point":""}"#);
         let (_dir, paths) = isolated_paths();
         let report = run_doctor(f.path(), &MockRunner::default(), &paths, human_options());
-        assert_eq!(find_check(&report, "config_schema").status, CheckStatus::Fail);
+        assert_eq!(
+            find_check(&report, "config_schema").status,
+            CheckStatus::Fail
+        );
         let check = find_check(&report, "declared_disks");
         assert_eq!(check.status, CheckStatus::Skip);
         assert_eq!(check.message, "skipped (no pool membership file)");
