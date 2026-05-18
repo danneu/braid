@@ -143,6 +143,9 @@ mod tests {
     // Why: Scrub is not in the kernel exclop set; only `btrfs scrub status`
     //   sees it. Suspending mid-scrub interrupts data integrity verification.
     // Scenario: Monthly auto-scrub is in progress when autosuspend checks.
+    // Pre-condition: sysfs is seeded clean so the scrub probe is actually
+    //   reached -- the sysfs-first order is exercised by
+    //   `busy_exclop_short_circuits_scrub_probe`.
     #[test]
     fn busy_when_scrub_running() {
         let (scrub_req, scrub_out) = idle_scrub_running(45);
