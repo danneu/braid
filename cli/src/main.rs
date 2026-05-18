@@ -811,40 +811,37 @@ fn main() {
                 }
             }
             let runner = RealRunner;
-            match braid_cli::discover::discover_pool_members(&runner) {
-                Ok(outcome) => {
-                    for warning in &outcome.warnings {
-                        eprintln!("warning: {warning}");
-                    }
-                    if outcome.members.is_empty() {
-                        eprintln!("no braid-labeled LUKS devices found");
-                        std::process::exit(1);
-                    }
-                    for line in braid_cli::discover::render_preview_lines(&outcome) {
-                        eprintln!("{line}");
-                    }
-                    if args.write {
-                        match braid_cli::discover::write_discovered_membership(
-                            outcome,
-                            &paths,
-                            args.expect_count,
-                        ) {
-                            Ok(_) => {
-                                eprintln!("pool membership written to {}", pool_json.display());
-                            }
-                            Err(e) => {
-                                print_cli_error(&e.to_string());
-                                std::process::exit(1);
-                            }
-                        }
-                    } else {
-                        eprintln!("pass --write to save to {}", pool_json.display());
-                    }
-                }
+            let scan = braid_cli::discover::discover_pool_members(&runner);
+            let members = match braid_cli::discover::drain_warnings(scan, &mut std::io::stderr()) {
+                Ok(members) => members,
                 Err(e) => {
                     print_cli_error(&e.to_string());
                     std::process::exit(1);
                 }
+            };
+            if members.is_empty() {
+                eprintln!("no braid-labeled LUKS devices found");
+                std::process::exit(1);
+            }
+            for line in braid_cli::discover::render_preview_lines(&members) {
+                eprintln!("{line}");
+            }
+            if args.write {
+                match braid_cli::discover::write_discovered_membership(
+                    members,
+                    &paths,
+                    args.expect_count,
+                ) {
+                    Ok(_) => {
+                        eprintln!("pool membership written to {}", pool_json.display());
+                    }
+                    Err(e) => {
+                        print_cli_error(&e.to_string());
+                        std::process::exit(1);
+                    }
+                }
+            } else {
+                eprintln!("pass --write to save to {}", pool_json.display());
             }
         }
         Commands::Recover(args) => {

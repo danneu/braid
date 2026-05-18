@@ -124,27 +124,38 @@ impl fmt::Display for DiscoverWarning {
     }
 }
 
-/// Outcome of `discover_pool_members`. `members` is a `PoolMembership`
-/// keyed by UUID so the same value type flows through to
-/// `save_membership` without a second collection step on the
-/// `--write` path.
-#[derive(Debug, PartialEq, Eq)]
-pub struct DiscoverOutcome {
-    /// UUID-keyed membership reconstructed from attached braid-labeled disks.
-    pub members: PoolMembership,
-    /// Non-fatal scan findings for disks skipped before membership write.
+/// Outcome of a discover scan. Warnings are populated even when the
+/// structural result is an error so command wrappers can render sibling
+/// hazards before propagating the failure.
+#[derive(Debug)]
+pub struct DiscoverScan {
+    /// Non-fatal scan findings for disks skipped before membership use.
     pub warnings: Vec<DiscoverWarning>,
+    /// UUID-keyed membership reconstructed from attached braid-labeled disks.
+    pub result: Result<PoolMembership, DiscoverError>,
 }
 
 /// Format operator-visible discover preview rows in DiskName order.
 /// Returned as lines so the binary entry point stays easy to test.
-pub fn render_preview_lines(outcome: &DiscoverOutcome) -> Vec<String> {
-    outcome
-        .members
+pub fn render_preview_lines(members: &PoolMembership) -> Vec<String> {
+    members
         .iter_by_name()
         .into_iter()
         .map(|(_, member)| format!("  {} = {}", member.name, member.by_id))
         .collect()
+}
+
+/// Drain scan warnings before yielding the structural result, matching
+/// decision 022's report shape for plans that can accumulate notes and
+/// fail later.
+pub fn drain_warnings<W: std::io::Write>(
+    scan: DiscoverScan,
+    out: &mut W,
+) -> Result<PoolMembership, DiscoverError> {
+    for warning in &scan.warnings {
+        let _ = writeln!(out, "warning: {warning}");
+    }
+    scan.result
 }
 
 /// Discover-side fail-closed errors that fire from the `--write` path
@@ -199,10 +210,8 @@ pub enum DiscoverWriteError {
 }
 
 /// Scan /dev/disk/by-id/ for LUKS devices with braid-<name> labels.
-/// Returns discovered pool members and per-device warnings.
-pub fn discover_pool_members<R: CommandRunner>(
-    runner: &R,
-) -> Result<DiscoverOutcome, DiscoverError> {
+/// Returns a report so callers can print warnings on success or error.
+pub fn discover_pool_members<R: CommandRunner>(runner: &R) -> DiscoverScan {
     discover_from_dir(
         runner,
         &crate::recover::RealByIdResolver,
@@ -287,30 +296,43 @@ struct AliasCandidate {
     luks_uuid: LuksUuid,
 }
 
+/// Testable discover wrapper that preserves warnings collected before
+/// any structural error returned by the inner scanner.
 fn discover_from_dir<R: CommandRunner>(
     runner: &R,
     resolver: &dyn crate::recover::ByIdResolver,
     by_id_dir: &Path,
-) -> Result<DiscoverOutcome, DiscoverError> {
+) -> DiscoverScan {
+    let mut warnings = Vec::new();
+    let result = discover_from_dir_inner(runner, resolver, by_id_dir, &mut warnings);
+    DiscoverScan { warnings, result }
+}
+
+/// Inner scanner keeps the existing Result-shaped control flow while
+/// borrowing the outer warning accumulator for error-path reporting.
+fn discover_from_dir_inner<R: CommandRunner>(
+    runner: &R,
+    resolver: &dyn crate::recover::ByIdResolver,
+    by_id_dir: &Path,
+    warnings: &mut Vec<DiscoverWarning>,
+) -> Result<PoolMembership, DiscoverError> {
     let entries = match std::fs::read_dir(by_id_dir) {
         Ok(entries) => entries,
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
-            return Ok(DiscoverOutcome {
-                members: PoolMembership::empty(),
-                warnings: Vec::new(),
-            });
+            return Ok(PoolMembership::empty());
         }
         Err(e) => return Err(DiscoverError::ReadDir(e)),
     };
-    let entries: Vec<std::fs::DirEntry> = entries
+    let mut entries: Vec<std::fs::DirEntry> = entries
         .collect::<Result<Vec<_>, _>>()
         .map_err(DiscoverError::ReadDir)?;
+    entries.sort_by_key(|entry| entry.file_name());
 
     // Per-disk-name best candidate, keyed by the validated DiskName.
     // The Occupied arm tie-breaks within an alias set without
     // re-extracting the basename or re-probing the LUKS UUID.
     let mut members: BTreeMap<DiskName, AliasCandidate> = BTreeMap::new();
-    let mut warnings = Vec::new();
+    let mut first_collision: Option<DiscoverError> = None;
 
     for entry in entries {
         let name = entry.file_name();
@@ -458,11 +480,14 @@ fn discover_from_dir<R: CommandRunner>(
             Entry::Occupied(mut e) => {
                 let existing = e.get();
                 if existing.canonical != candidate.canonical {
-                    return Err(label_collision(
-                        e.key().as_str(),
-                        existing.by_id.as_str().to_owned(),
-                        candidate.by_id.as_str().to_owned(),
-                    ));
+                    if first_collision.is_none() {
+                        first_collision = Some(label_collision(
+                            e.key().as_str(),
+                            existing.by_id.as_str().to_owned(),
+                            candidate.by_id.as_str().to_owned(),
+                        ));
+                    }
+                    continue;
                 }
 
                 // Same physical disk via two aliases -- keep the candidate
@@ -475,6 +500,10 @@ fn discover_from_dir<R: CommandRunner>(
                 }
             }
         }
+    }
+
+    if let Some(err) = first_collision {
+        return Err(err);
     }
 
     // After alias-dedup, surface duplicate UUIDs (the cloned-disk
@@ -528,10 +557,7 @@ fn discover_from_dir<R: CommandRunner>(
         })?;
     }
 
-    Ok(DiscoverOutcome {
-        members: membership,
-        warnings,
-    })
+    Ok(membership)
 }
 
 /// Apply discover's `--write` pre-save fail-closed gates and persist
@@ -552,7 +578,7 @@ fn discover_from_dir<R: CommandRunner>(
 /// arm at `main.rs:707` consumes both `warnings` (printed before this
 /// call) and the saved membership.
 pub fn write_discovered_membership(
-    outcome: DiscoverOutcome,
+    members: PoolMembership,
     paths: &StatePaths,
     expected_count: Option<usize>,
 ) -> Result<PoolMembership, DiscoverWriteError> {
@@ -584,14 +610,14 @@ pub fn write_discovered_membership(
     }
 
     if let Some(expected) = expected_count {
-        let actual = outcome.members.len();
+        let actual = members.len();
         if actual != expected {
             return Err(DiscoverWriteError::ExpectCountUnmet { expected, actual });
         }
     }
 
-    save_membership(&outcome.members, paths)?;
-    Ok(outcome.members)
+    save_membership(&members, paths)?;
+    Ok(members)
 }
 
 /// Priority for /dev/disk/by-id/ symlink prefixes. Lower = more preferred.
@@ -690,13 +716,8 @@ mod tests {
                 member("alpha", "/dev/disk/by-id/ata-A"),
             )
             .unwrap();
-        let outcome = DiscoverOutcome {
-            members,
-            warnings: Vec::new(),
-        };
-
         assert_eq!(
-            render_preview_lines(&outcome),
+            render_preview_lines(&members),
             vec![
                 "  alpha = /dev/disk/by-id/ata-A",
                 "  zeta = /dev/disk/by-id/ata-Z"
@@ -739,12 +760,12 @@ mod tests {
         let target = discover_create_target(target_dir.path(), "fake-disk");
         discover_create_by_id_symlink(by_id_dir.path(), "ata-SOMEDISK", &target);
 
-        let err = discover_from_dir(
+        let scan = discover_from_dir(
             &IsLuksFailRunner,
             &crate::recover::RealByIdResolver,
             by_id_dir.path(),
-        )
-        .unwrap_err();
+        );
+        let err = scan.result.unwrap_err();
 
         assert!(
             matches!(err, DiscoverError::Cmd(_)),
@@ -795,12 +816,12 @@ mod tests {
         let target = discover_create_target(target_dir.path(), "fake-disk");
         discover_create_by_id_symlink(by_id_dir.path(), "ata-SOMEDISK", &target);
 
-        let err = discover_from_dir(
+        let scan = discover_from_dir(
             &LuksDumpFailRunner,
             &crate::recover::RealByIdResolver,
             by_id_dir.path(),
-        )
-        .unwrap_err();
+        );
+        let err = scan.result.unwrap_err();
 
         assert!(
             matches!(err, DiscoverError::Cmd(_)),
@@ -828,12 +849,12 @@ mod tests {
 
         // Only the LUKS device is in the label map; the USB stick is unknown.
         let runner = DiscoverLabelMap::new(&[(&luks_path, "braid-sda")]);
-        let outcome =
-            discover_from_dir(&runner, &crate::recover::RealByIdResolver, dir.path()).unwrap();
+        let scan = discover_from_dir(&runner, &crate::recover::RealByIdResolver, dir.path());
+        scan.result.unwrap();
         assert!(
-            outcome.warnings.is_empty(),
+            scan.warnings.is_empty(),
             "unexpected warnings: {:?}",
-            outcome.warnings
+            scan.warnings
         );
 
         let luks_dump_calls: Vec<_> = runner
@@ -881,17 +902,17 @@ mod tests {
             },
         );
 
-        let outcome =
-            discover_from_dir(&runner, &crate::recover::RealByIdResolver, dir.path()).unwrap();
+        let scan = discover_from_dir(&runner, &crate::recover::RealByIdResolver, dir.path());
+        let members = scan.result.unwrap();
 
-        assert_eq!(outcome.members.len(), 1);
+        assert_eq!(members.len(), 1);
         assert!(
-            contains_name(&outcome.members, "modern"),
+            contains_name(&members, "modern"),
             "modern disk should be discovered: {:?}",
-            outcome.members
+            members
         );
-        assert_eq!(outcome.warnings.len(), 1);
-        let warning = &outcome.warnings[0];
+        assert_eq!(scan.warnings.len(), 1);
+        let warning = &scan.warnings[0];
         assert!(matches!(
             warning,
             DiscoverWarning::LuksDumpFailed { exit_code: 1, .. }
@@ -931,16 +952,13 @@ mod tests {
             },
         );
 
-        let outcome =
-            discover_from_dir(&runner, &crate::recover::RealByIdResolver, dir.path()).unwrap();
+        let scan = discover_from_dir(&runner, &crate::recover::RealByIdResolver, dir.path());
+        let members = scan.result.unwrap();
 
-        assert!(outcome.members.is_empty());
-        assert_eq!(outcome.warnings.len(), 1);
-        let DiscoverWarning::LuksDumpUnparseable { path, detail } = &outcome.warnings[0] else {
-            panic!(
-                "expected LuksDumpUnparseable, got {:?}",
-                outcome.warnings[0]
-            );
+        assert!(members.is_empty());
+        assert_eq!(scan.warnings.len(), 1);
+        let DiscoverWarning::LuksDumpUnparseable { path, detail } = &scan.warnings[0] else {
+            panic!("expected LuksDumpUnparseable, got {:?}", scan.warnings[0]);
         };
         assert!(path.ends_with("ata-ODD_DISK"), "path was {path}");
         assert!(detail.contains("Version"), "detail was {detail}");
@@ -987,16 +1005,15 @@ mod tests {
         let ata_path = discover_create_by_id_symlink(dir.path(), "ata-SEAGATE_ST500", &target);
         let wwn_path = discover_create_by_id_symlink(dir.path(), "wwn-0x50014ee606704442", &target);
         let runner = DiscoverLabelMap::new(&[(&ata_path, "braid-sda"), (&wwn_path, "braid-sda")]);
-        let outcome =
-            discover_from_dir(&runner, &crate::recover::RealByIdResolver, dir.path()).unwrap();
+        let scan = discover_from_dir(&runner, &crate::recover::RealByIdResolver, dir.path());
+        let members = scan.result.unwrap();
         assert!(
-            outcome.warnings.is_empty(),
+            scan.warnings.is_empty(),
             "unexpected warnings: {:?}",
-            outcome.warnings
+            scan.warnings
         );
-        let members = &outcome.members;
         assert_eq!(members.len(), 1);
-        let sda = by_id_for(members, "sda");
+        let sda = by_id_for(&members, "sda");
         assert!(
             sda.ends_with("wwn-0x50014ee606704442"),
             "expected wwn path, got: {sda}"
@@ -1020,16 +1037,15 @@ mod tests {
         let ata_z = discover_create_by_id_symlink(dir.path(), "ata-ZZZZZ_DISK", &target);
         let ata_a = discover_create_by_id_symlink(dir.path(), "ata-AAAAA_DISK", &target);
         let runner = DiscoverLabelMap::new(&[(&ata_z, "braid-sda"), (&ata_a, "braid-sda")]);
-        let outcome =
-            discover_from_dir(&runner, &crate::recover::RealByIdResolver, dir.path()).unwrap();
+        let scan = discover_from_dir(&runner, &crate::recover::RealByIdResolver, dir.path());
+        let members = scan.result.unwrap();
         assert!(
-            outcome.warnings.is_empty(),
+            scan.warnings.is_empty(),
             "unexpected warnings: {:?}",
-            outcome.warnings
+            scan.warnings
         );
-        let members = &outcome.members;
         assert_eq!(members.len(), 1);
-        let sda = by_id_for(members, "sda");
+        let sda = by_id_for(&members, "sda");
         assert!(
             sda.ends_with("ata-AAAAA_DISK"),
             "expected lexicographically earlier path, got: {sda}"
@@ -1063,25 +1079,24 @@ mod tests {
         let runner =
             DiscoverLabelMap::new(&[(&luks1_path, "braid-legacy"), (&luks2_path, "braid-modern")])
                 .with_version(&luks1_path, 1);
-        let outcome =
-            discover_from_dir(&runner, &crate::recover::RealByIdResolver, dir.path()).unwrap();
-        let members = &outcome.members;
+        let scan = discover_from_dir(&runner, &crate::recover::RealByIdResolver, dir.path());
+        let members = scan.result.unwrap();
         assert_eq!(
             members.len(),
             1,
             "expected only the LUKS2 disk: {members:?}"
         );
         assert!(
-            contains_name(members, "modern"),
+            contains_name(&members, "modern"),
             "modern (LUKS2) disk should be present: {members:?}"
         );
         assert!(
-            !contains_name(members, "legacy"),
+            !contains_name(&members, "legacy"),
             "legacy (LUKS1) disk should be skipped: {members:?}"
         );
-        assert_eq!(outcome.warnings.len(), 1);
+        assert_eq!(scan.warnings.len(), 1);
         assert!(matches!(
-            &outcome.warnings[0],
+            &scan.warnings[0],
             DiscoverWarning::UnsupportedLuksVersion { path, version: 1 }
                 if path.ends_with("ata-LEGACY_DISK")
         ));
@@ -1118,32 +1133,29 @@ mod tests {
         let good_path = discover_create_by_id_symlink(dir.path(), "ata-GOOD_LABEL", &good_target);
         let runner = DiscoverLabelMap::new(&[(&bad_path, "braid-é"), (&good_path, "braid-good")]);
 
-        let outcome =
-            discover_from_dir(&runner, &crate::recover::RealByIdResolver, dir.path()).unwrap();
+        let scan = discover_from_dir(&runner, &crate::recover::RealByIdResolver, dir.path());
+        let members = scan.result.unwrap();
 
         assert_eq!(
-            outcome.members.len(),
+            members.len(),
             1,
             "expected only the valid disk: {:?}",
-            outcome.members,
+            members,
         );
         assert!(
-            contains_name(&outcome.members, "good"),
+            contains_name(&members, "good"),
             "good disk should be discovered: {:?}",
-            outcome.members,
+            members,
         );
         assert!(
-            !outcome
-                .members
-                .iter()
-                .any(|(_, m)| m.name.as_str().contains("é")),
+            !members.iter().any(|(_, m)| m.name.as_str().contains("é")),
             "invalid name must not be recorded: {:?}",
-            outcome.members,
+            members,
         );
 
-        assert_eq!(outcome.warnings.len(), 1);
-        let DiscoverWarning::InvalidDiskName { path, label } = &outcome.warnings[0] else {
-            panic!("expected InvalidDiskName, got {:?}", outcome.warnings[0]);
+        assert_eq!(scan.warnings.len(), 1);
+        let DiscoverWarning::InvalidDiskName { path, label } = &scan.warnings[0] else {
+            panic!("expected InvalidDiskName, got {:?}", scan.warnings[0]);
         };
         assert!(path.ends_with("ata-BAD_LABEL"), "path was {path}");
         assert_eq!(label, "braid-é");
@@ -1153,7 +1165,7 @@ mod tests {
         // warning. If someone replaces escape_default() with {:?} (Debug)
         // or {} (raw), the printable non-ASCII byte survives verbatim and
         // this assertion fails.
-        let rendered = outcome.warnings[0].to_string();
+        let rendered = scan.warnings[0].to_string();
         assert!(
             rendered.contains("\"braid-\\u{e9}\""),
             "expected escape_default rendering of non-ASCII label, got: {rendered:?}",
@@ -1184,21 +1196,20 @@ mod tests {
             (&ata_beta, "braid-beta"),
             (&wwn_beta, "braid-beta"),
         ]);
-        let outcome =
-            discover_from_dir(&runner, &crate::recover::RealByIdResolver, dir.path()).unwrap();
+        let scan = discover_from_dir(&runner, &crate::recover::RealByIdResolver, dir.path());
+        let members = scan.result.unwrap();
         assert!(
-            outcome.warnings.is_empty(),
+            scan.warnings.is_empty(),
             "unexpected warnings: {:?}",
-            outcome.warnings
+            scan.warnings
         );
-        let members = &outcome.members;
         assert_eq!(members.len(), 2);
-        let alpha = by_id_for(members, "alpha");
+        let alpha = by_id_for(&members, "alpha");
         assert!(
             alpha.ends_with("wwn-0x0001"),
             "expected wwn for alpha, got: {alpha}"
         );
-        let beta = by_id_for(members, "beta");
+        let beta = by_id_for(&members, "beta");
         assert!(
             beta.ends_with("wwn-0x0002"),
             "expected wwn for beta, got: {beta}"
@@ -1223,8 +1234,8 @@ mod tests {
         let alias_b = discover_create_by_id_symlink(dir.path(), "ata-CLONE_B", &target_b);
         let runner = DiscoverLabelMap::new(&[(&alias_a, "braid-foo"), (&alias_b, "braid-foo")]);
 
-        let err =
-            discover_from_dir(&runner, &crate::recover::RealByIdResolver, dir.path()).unwrap_err();
+        let scan = discover_from_dir(&runner, &crate::recover::RealByIdResolver, dir.path());
+        let err = scan.result.unwrap_err();
 
         match &err {
             DiscoverError::LabelCollision { name, path1, path2 } => {
@@ -1243,6 +1254,105 @@ mod tests {
         assert!(msg.contains("braid-foo"), "missing label name: {msg}");
         assert!(msg.contains("ata-CLONE_A"), "missing alias_a: {msg}");
         assert!(msg.contains("ata-CLONE_B"), "missing alias_b: {msg}");
+    }
+
+    // Intent: warnings accumulated during the scan survive a structural
+    //   error return so the operator sees all sibling hazards in one pass.
+    // Why it exists: every `return Err(...)` inside discover used to drop
+    //   the warning vec, and the LabelCollision early-return inside the
+    //   entry loop additionally skipped warnings that later entries would
+    //   have produced. Fixing both paths requires a test that pins both
+    //   guarantees: warnings survive the error return, and warnings from
+    //   entries scanned after the collision still appear.
+    // Scenario: multi-disk recovery -- the operator has a dangling by-id
+    //   symlink, a LUKS1 leftover, and two distinct disks sharing
+    //   `braid-foo`; `braid discover` must report all three hazards so they
+    //   can be addressed before retry.
+    #[test]
+    fn discover_surfaces_warnings_alongside_structural_error() {
+        let dir = tempfile::tempdir().unwrap();
+        discover_create_by_id_symlink(dir.path(), "ata-DANGLING", "/nonexistent/dangling");
+
+        let luks1_target = discover_create_target(dir.path(), "fake-luks1");
+        let luks1_alias = discover_create_by_id_symlink(dir.path(), "ata-LUKS1", &luks1_target);
+
+        let target_a = discover_create_target(dir.path(), "fake-sda");
+        let target_b = discover_create_target(dir.path(), "fake-sdb");
+        let alias_a = discover_create_by_id_symlink(dir.path(), "ata-CLONE_A", &target_a);
+        let alias_b = discover_create_by_id_symlink(dir.path(), "ata-CLONE_B", &target_b);
+        let runner = DiscoverLabelMap::new(&[
+            (&luks1_alias, "braid-legacy"),
+            (&alias_a, "braid-foo"),
+            (&alias_b, "braid-foo"),
+        ])
+        .with_version(&luks1_alias, 1);
+
+        let scan = discover_from_dir(&runner, &crate::recover::RealByIdResolver, dir.path());
+
+        assert!(
+            matches!(&scan.result, Err(DiscoverError::LabelCollision { .. })),
+            "expected LabelCollision, got {:?}",
+            &scan.result,
+        );
+        assert!(
+            scan.warnings.iter().any(|warning| matches!(
+                warning,
+                DiscoverWarning::CannotCanonicalize { path, .. }
+                    if path.ends_with("ata-DANGLING")
+            )),
+            "expected CannotCanonicalize warning, got: {:?}",
+            scan.warnings,
+        );
+        assert!(
+            scan.warnings.iter().any(|warning| matches!(
+                warning,
+                DiscoverWarning::UnsupportedLuksVersion { path, version: 1 }
+                    if path.ends_with("ata-LUKS1")
+            )),
+            "expected UnsupportedLuksVersion warning, got: {:?}",
+            scan.warnings,
+        );
+    }
+
+    // Intent: drain_warnings writes every warning to `out` before
+    //   returning, even when `scan.result` is `Err`.
+    // Why it exists: pins the CLI's "warnings before error" stderr ordering
+    //   at the helper boundary so it cannot silently regress to printing
+    //   the structural error first and the warnings never.
+    // Scenario: any structural error surfaced after warnings accumulated
+    //   (label collision, duplicate uuid, ...). The unit test passes a
+    //   synthetic DiscoverScan rather than driving discover_from_dir so it
+    //   stays a contract test of the helper, not of the scan.
+    #[test]
+    fn drain_warnings_writes_warnings_before_returning_error() {
+        let scan = DiscoverScan {
+            warnings: vec![
+                DiscoverWarning::CannotCanonicalize {
+                    path: "/dev/disk/by-id/ata-DANGLING".into(),
+                    detail: "no such file".into(),
+                },
+                DiscoverWarning::UnsupportedLuksVersion {
+                    path: "/dev/disk/by-id/ata-LEGACY".into(),
+                    version: 1,
+                },
+            ],
+            result: Err(DiscoverError::LabelCollision {
+                name: "foo".into(),
+                path1: "/dev/disk/by-id/ata-A".into(),
+                path2: "/dev/disk/by-id/ata-B".into(),
+            }),
+        };
+
+        let mut buf: Vec<u8> = Vec::new();
+        let err = drain_warnings(scan, &mut buf).expect_err("expected Err");
+        let out = String::from_utf8(buf).unwrap();
+
+        assert!(
+            out.contains("ata-DANGLING"),
+            "missing dangling warning: {out}"
+        );
+        assert!(out.contains("ata-LEGACY"), "missing legacy warning: {out}");
+        assert!(matches!(err, DiscoverError::LabelCollision { .. }));
     }
 
     #[test]
@@ -1267,13 +1377,13 @@ mod tests {
         );
         let runner = DiscoverLabelMap::new(&[]);
 
-        let outcome =
-            discover_from_dir(&runner, &crate::recover::RealByIdResolver, dir.path()).unwrap();
+        let scan = discover_from_dir(&runner, &crate::recover::RealByIdResolver, dir.path());
+        let members = scan.result.unwrap();
 
-        assert!(outcome.members.is_empty());
-        assert_eq!(outcome.warnings.len(), 1);
+        assert!(members.is_empty());
+        assert_eq!(scan.warnings.len(), 1);
         assert!(matches!(
-            &outcome.warnings[0],
+            &scan.warnings[0],
             DiscoverWarning::CannotCanonicalize { path, .. }
                 if path.ends_with("ata-DANGLING_OLD")
         ));
@@ -1300,19 +1410,18 @@ mod tests {
         let valid = discover_create_by_id_symlink(dir.path(), "wwn-VALID", &target);
         let runner = DiscoverLabelMap::new(&[(&dangling, "braid-foo"), (&valid, "braid-foo")]);
 
-        let outcome =
-            discover_from_dir(&runner, &crate::recover::RealByIdResolver, dir.path()).unwrap();
-        let members = &outcome.members;
+        let scan = discover_from_dir(&runner, &crate::recover::RealByIdResolver, dir.path());
+        let members = scan.result.unwrap();
 
         assert_eq!(members.len(), 1, "expected only the canonicalizable entry");
-        let foo = by_id_for(members, "foo");
+        let foo = by_id_for(&members, "foo");
         assert!(
             foo.ends_with("wwn-VALID"),
             "expected the valid symlink to win, got: {foo}"
         );
-        assert_eq!(outcome.warnings.len(), 1);
+        assert_eq!(scan.warnings.len(), 1);
         assert!(matches!(
-            &outcome.warnings[0],
+            &scan.warnings[0],
             DiscoverWarning::CannotCanonicalize { path, .. }
                 if path.ends_with("ata-DANGLING")
         ));
@@ -1387,14 +1496,14 @@ mod tests {
             },
         );
 
-        let outcome =
-            discover_from_dir(&runner, &crate::recover::RealByIdResolver, dir.path()).unwrap();
+        let scan = discover_from_dir(&runner, &crate::recover::RealByIdResolver, dir.path());
+        let members = scan.result.unwrap();
 
         assert!(
-            !contains_name(&outcome.members, "baddisk"),
+            !contains_name(&members, "baddisk"),
             "disk with missing UUID must not be a member"
         );
-        let warning = outcome
+        let warning = scan
             .warnings
             .iter()
             .find(|w| matches!(w, DiscoverWarning::MissingLuksUuid { .. }))
@@ -1431,11 +1540,11 @@ mod tests {
             },
         );
 
-        let outcome =
-            discover_from_dir(&runner, &crate::recover::RealByIdResolver, dir.path()).unwrap();
+        let scan = discover_from_dir(&runner, &crate::recover::RealByIdResolver, dir.path());
+        let members = scan.result.unwrap();
 
-        assert!(!contains_name(&outcome.members, "baddisk"));
-        let warning = outcome
+        assert!(!contains_name(&members, "baddisk"));
+        let warning = scan
             .warnings
             .iter()
             .find(|w| matches!(w, DiscoverWarning::InvalidLuksUuid { .. }))
@@ -1484,11 +1593,11 @@ mod tests {
             },
         );
 
-        let outcome =
-            discover_from_dir(&runner, &crate::recover::RealByIdResolver, dir.path()).unwrap();
+        let scan = discover_from_dir(&runner, &crate::recover::RealByIdResolver, dir.path());
+        let members = scan.result.unwrap();
 
-        assert!(!contains_name(&outcome.members, "baddisk"));
-        let warning = outcome
+        assert!(!contains_name(&members, "baddisk"));
+        let warning = scan
             .warnings
             .iter()
             .find(|w| matches!(w, DiscoverWarning::InvalidLuksUuid { .. }))
@@ -1535,7 +1644,9 @@ mod tests {
             .with_uuid(&path_a, shared_uuid)
             .with_uuid(&path_b, shared_uuid);
 
-        let err = discover_from_dir(&runner, &crate::recover::RealByIdResolver, dir.path())
+        let scan = discover_from_dir(&runner, &crate::recover::RealByIdResolver, dir.path());
+        let err = scan
+            .result
             .expect_err("duplicate UUID must surface as DuplicateUuid");
 
         let DiscoverError::DuplicateUuid {
@@ -1594,8 +1705,8 @@ mod tests {
             .with_uuid(&path_a, shared_uuid)
             .with_uuid(&path_b, shared_uuid);
 
-        let err = discover_from_dir(&runner, &crate::recover::RealByIdResolver, dir.path())
-            .expect_err("expected an error");
+        let scan = discover_from_dir(&runner, &crate::recover::RealByIdResolver, dir.path());
+        let err = scan.result.expect_err("expected an error");
 
         assert!(
             matches!(err, DiscoverError::LabelCollision { .. }),
@@ -1619,12 +1730,7 @@ mod tests {
         let pool_json_pre = "{\"disks\":{}}";
         std::fs::write(paths.pool_json(), pool_json_pre).unwrap();
 
-        let outcome = DiscoverOutcome {
-            members: PoolMembership::empty(),
-            warnings: Vec::new(),
-        };
-
-        let err = write_discovered_membership(outcome, &paths, None)
+        let err = write_discovered_membership(PoolMembership::empty(), &paths, None)
             .expect_err("must refuse with PendingOpExists");
         let msg = err.to_string();
         assert!(
@@ -1652,12 +1758,7 @@ mod tests {
         let stale = r#"{"disks":{"toshiba1":{"by_id":"/dev/disk/by-id/ata-X"}}}"#;
         std::fs::write(paths.pool_json(), stale).unwrap();
 
-        let outcome = DiscoverOutcome {
-            members: PoolMembership::empty(),
-            warnings: Vec::new(),
-        };
-
-        let err = write_discovered_membership(outcome, &paths, None)
+        let err = write_discovered_membership(PoolMembership::empty(), &paths, None)
             .expect_err("must refuse with NameKeyedPoolJson");
         let msg = err.to_string();
         assert!(
@@ -1709,12 +1810,7 @@ mod tests {
                 ),
             )
             .unwrap();
-        let outcome = DiscoverOutcome {
-            members: discovered_members,
-            warnings: Vec::new(),
-        };
-
-        let err = write_discovered_membership(outcome, &paths, None)
+        let err = write_discovered_membership(discovered_members, &paths, None)
             .expect_err("must refuse with ValidUuidKeyed");
         assert!(
             matches!(&err, DiscoverWriteError::ValidUuidKeyed { .. }),
@@ -1759,12 +1855,7 @@ mod tests {
                 ),
             )
             .unwrap();
-        let outcome = DiscoverOutcome {
-            members,
-            warnings: Vec::new(),
-        };
-
-        let saved = write_discovered_membership(outcome, &paths, None)
+        let saved = write_discovered_membership(members, &paths, None)
             .expect("expected corrupt pool.json to be rebuilt");
         assert_eq!(saved.len(), 1);
         assert_eq!(
@@ -1926,12 +2017,7 @@ mod tests {
                 ),
             )
             .unwrap();
-        let outcome = DiscoverOutcome {
-            members,
-            warnings: Vec::new(),
-        };
-
-        let saved = write_discovered_membership(outcome, &paths, None)
+        let saved = write_discovered_membership(members, &paths, None)
             .expect("expected save to proceed when no gates fire");
         assert_eq!(saved.len(), 1);
         assert!(
@@ -1963,12 +2049,7 @@ mod tests {
                 )
                 .unwrap();
         }
-        let outcome = DiscoverOutcome {
-            members,
-            warnings: Vec::new(),
-        };
-
-        let err = write_discovered_membership(outcome, &paths, Some(3))
+        let err = write_discovered_membership(members, &paths, Some(3))
             .expect_err("must refuse with ExpectCountUnmet");
         let msg = err.to_string();
         assert!(
@@ -2007,12 +2088,7 @@ mod tests {
                 )
                 .unwrap();
         }
-        let outcome = DiscoverOutcome {
-            members,
-            warnings: Vec::new(),
-        };
-
-        let err = write_discovered_membership(outcome, &paths, Some(1))
+        let err = write_discovered_membership(members, &paths, Some(1))
             .expect_err("must refuse with ExpectCountUnmet");
         let msg = err.to_string();
         assert!(
