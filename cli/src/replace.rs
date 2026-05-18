@@ -440,20 +440,11 @@ impl ReplacePlan {
         // Confirm
         if !params.yes {
             let old_underlying = match &replace_source {
-                ReplaceSource::Live { mapper, .. } => pool
+                ReplaceSource::Live { .. } => pool
                     .devices
                     .iter()
                     .find(|d| d.luks_uuid == old_uuid)
-                    .map(|d| d.underlying.as_str())
-                    .or_else(|| {
-                        // Fallback for tests that synthesize a pool whose
-                        // observed mapper matches but luks_uuid differs;
-                        // identity decisions already flowed via old_uuid.
-                        pool.devices
-                            .iter()
-                            .find(|d| d.mapper == *mapper)
-                            .map(|d| d.underlying.as_str())
-                    }),
+                    .map(|d| d.underlying.as_str()),
                 ReplaceSource::Missing { .. } => None,
             };
             let old_hw = old_underlying.map(|u| confirm::query_disk_hw_info(runner, u));
@@ -1752,8 +1743,10 @@ fn replace_work_plan_for_test(
     input: &ReplaceWorkPlanTestInput<'_>,
 ) -> Result<ReplaceWorkPlan, ReplaceError> {
     let config = Config::new(input.mount_point.clone()).expect("valid test mount point");
+    let old_uuid = LuksUuid::parse("99999999-9999-9999-9999-999999999999").unwrap();
     let pool = replace_work_plan_test_pool(
         input.replace_source,
+        &old_uuid,
         input.will_clear_last_missing,
         input.total_devices,
     );
@@ -1765,7 +1758,6 @@ fn replace_work_plan_for_test(
         ConfigDiskState::PresentLuks { uuid, .. } => uuid.clone(),
         _ => LuksUuid::new_v4(),
     };
-    let old_uuid = LuksUuid::parse("99999999-9999-9999-9999-999999999999").unwrap();
     let old_name = DiskName::parse("disk2").expect("valid disk name");
     let new_name = DiskName::parse(input.new_name).expect("valid new disk name in test");
     let extra_opts = LuksFormatExtraOpts::parse(input.luks_format_extra_opts)
@@ -1791,6 +1783,7 @@ fn replace_work_plan_for_test(
 #[cfg(test)]
 fn replace_work_plan_test_pool(
     replace_source: &ReplaceSource,
+    old_uuid: &LuksUuid,
     will_clear_last_missing: bool,
     total_devices: u64,
 ) -> PoolState {
@@ -1807,7 +1800,7 @@ fn replace_work_plan_test_pool(
     {
         devices.push(PoolDevice {
             mapper: mapper.clone(),
-            luks_uuid: synth_test_uuid(*devid),
+            luks_uuid: old_uuid.clone(),
             devid: *devid,
             underlying: format!("/dev/test-{devid}"),
         });
@@ -3594,7 +3587,7 @@ mod tests {
         let new_uuid_for_test = luks_uuid.clone();
         let work_plan = build_replace_work_plan(ReplaceWorkPlanInput {
             config: Config::new(MountPoint("/mnt/storage".into())).unwrap(),
-            old_uuid,
+            old_uuid: old_uuid.clone(),
             old_name: DiskName::parse("disk2").unwrap(),
             new_uuid: new_uuid_for_test,
             new_name: DiskName::parse("disk3").unwrap(),
@@ -3606,6 +3599,7 @@ mod tests {
                     mapper: MapperName("braid-disk2".into()),
                     devid: 2,
                 },
+                &old_uuid,
                 false,
                 2,
             ),
