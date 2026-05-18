@@ -183,7 +183,7 @@ fn emit_json(payload: &JsonReport<'_>) -> Result<(), UpsError> {
 /// Returns the rendered text with a trailing newline so the caller can
 /// `print!` it without trimming; the string shape is stable so tests
 /// can snapshot it without touching stdout.
-pub fn format_human(name: &str, parsed: &UpscOutput) -> String {
+fn format_human(name: &str, parsed: &UpscOutput) -> String {
     use std::fmt::Write;
     let mut out = String::new();
     let _ = writeln!(out, "UPS: {}", name);
