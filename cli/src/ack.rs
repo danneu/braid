@@ -160,9 +160,16 @@ fn ack_offline(
 /// mounted and offline branches of `cmd_ack_impl`.
 ///
 /// Each `remove_*` call is NotFound-tolerant, so a missing file is not an
-/// error. A real I/O error on any `remove_*` short-circuits via `?`:
-/// subsequent removals and the `stop_beeper` invocation are skipped, and the
-/// error is propagated.
+/// error. `stop_beeper` runs first so a later file-removal failure cannot
+/// prevent the beeper-stop hook from being reached. A real I/O error on any
+/// `remove_*` then short-circuits the remaining removals via `?` and
+/// propagates the error.
+///
+/// The beeper stop is best-effort: production issues `systemctl stop
+/// braid-alert.service`, logs a warning when spawning `systemctl` fails or it
+/// exits non-zero, and returns no error to cleanup. The ordering guarantees the
+/// hook is invoked on every cleanup call, not that the audible alert was
+/// silenced.
 ///
 /// `cmd_ack_impl` derives `remove_smartd` once from inputs snapshotted at
 /// entry. Cleanup deletes the smartd flag only when the snapshot already
@@ -178,12 +185,12 @@ fn cleanup_alert_files_and_beeper(
     stop_beeper: &dyn Fn(),
     remove_smartd: bool,
 ) -> Result<(), std::io::Error> {
+    stop_beeper();
     if remove_smartd {
         alert::remove_smartd_alert_flag(paths)?;
     }
     alert::remove_alert_latch(paths)?;
     alert::remove_alert_latch_corrupt(paths)?;
-    stop_beeper();
     Ok(())
 }
 
@@ -244,12 +251,12 @@ pub enum AckError {
     Parse(#[from] crate::parse::ParseError),
     #[error("I/O error: {0}")]
     Io(#[from] std::io::Error),
-    /// Cleanup of latch + smartd-alert + corrupt-latch and the beeper hook
-    /// failed after ack had already started persisting state: after
-    /// `save_acked_stats` in the mounted path, after offline missing-device
-    /// ack state was persisted, or after one cleanup file was already
-    /// removed. Re-running `braid ack` after fixing the I/O issue is
-    /// idempotent.
+    /// Cleanup of latch + smartd-alert + corrupt-latch files failed after the
+    /// best-effort beeper stop hook had already run and ack had already
+    /// started persisting state: after `save_acked_stats` in the mounted path,
+    /// after offline missing-device ack state was persisted, or after one
+    /// cleanup file was already removed. Re-running `braid ack` after fixing
+    /// the I/O issue is idempotent.
     #[error(
         "alert state cleanup failed -- some files may be in a partial state; \
          fix the I/O error and re-run `braid ack`: {0}"
@@ -635,22 +642,22 @@ mod tests {
     }
 
     /*
-     * Intent: When cmd_ack succeeds at save_acked_stats but
-     * cleanup_alert_files_and_beeper fails, the user-visible error names
-     * the partial state and points at the recovery path. The new baseline
-     * is durable on disk and the corrupt sidecar remains -- the witnesses
-     * that distinguish CleanupFailed from a generic AckError::Io.
+     * Intent: When mounted ack succeeds at save_acked_stats but the third
+     * cleanup file removal fails, the user-visible error names the partial
+     * state and points at the recovery path. The new baseline is durable,
+     * the latch is removed, the corrupt sidecar remains, and the beeper-stop
+     * hook has already fired.
      * Why it exists: Without the dedicated variant, a cleanup-phase I/O
-     * error surfaces as "I/O error: <kind>" with no hint that re-running
-     * ack will eventually clear the latch. The user observes "alert
-     * latched but no live cause" on the next monitor cycle and has no
-     * signpost to recovery.
+     * error surfaces as "I/O error: <kind>" with no hint that re-running ack
+     * will eventually clear the latch. Without the ordering pin, a failure
+     * after latch removal can leave a retry behind the no-op gate with an
+     * unreached beeper-stop hook.
      * Scenario: a directory sits at the corrupt-latch sidecar path (manual
      * tampering, leftover from a previous bug, or permission drift), so
      * remove_file fails with EISDIR/EPERM. The latch carried
      * BtrfsDeviceErrors. Mounted pool, healthy device stats. cmd_ack must
-     * save the new baseline, fail cleanup, and return the dedicated
-     * variant.
+     * save the new baseline, invoke the beeper hook, fail cleanup, and
+     * return the dedicated variant.
      */
     #[test]
     fn cmd_ack_returns_cleanup_failed_when_corrupt_latch_cleanup_errors_after_baseline_saved() {
@@ -662,7 +669,9 @@ mod tests {
         std::fs::create_dir(paths.alert_latch_corrupt()).unwrap();
 
         let runner = ack_mounted_probe_runner_with_device_stats();
-        let err = cmd_ack(&runner, &ack_fs_btrfs(), &ack_mp(), &paths)
+        let beeper_calls = std::cell::Cell::new(0u32);
+        let beeper = || beeper_calls.set(beeper_calls.get() + 1);
+        let err = cmd_ack_impl(&runner, &ack_fs_btrfs(), &ack_mp(), &paths, &beeper)
             .expect_err("cleanup failure must propagate");
 
         assert!(
@@ -689,6 +698,60 @@ mod tests {
         assert!(
             paths.alert_latch_corrupt().exists(),
             "cleanup poison directory must remain and prove where cleanup failed"
+        );
+        assert_eq!(
+            beeper_calls.get(),
+            1,
+            "stop_beeper must fire even when a later cleanup remove_* fails"
+        );
+    }
+
+    /*
+     * Intent: Mounted cleanup invokes the beeper-stop hook before the first
+     * cleanup file removal can fail.
+     * Why it exists: The corrupt-sidecar cleanup failure tests exercise the
+     * third removal. This test exercises the first removal so the union pins
+     * the stronger invariant: stop_beeper runs before every remove_*, not
+     * merely sometime during cleanup.
+     * Scenario: monitor latched SmartdAlert, but the smartd flag path is a
+     * poison directory. Mounted pool, healthy device stats. cmd_ack must save
+     * the new baseline, invoke the beeper hook, fail on the smartd flag
+     * removal, and leave later cleanup files untouched.
+     */
+    #[test]
+    fn cmd_ack_stops_beeper_before_mounted_smartd_flag_cleanup_error() {
+        let (_dir, paths) = isolated_paths();
+        ack_write_latch(&paths, vec![AlertCause::SmartdAlert]);
+        // smartd_alert_active ignores directories, but the latched
+        // SmartdAlert still opts cleanup into removing the flag path.
+        std::fs::create_dir(paths.smartd_alert()).unwrap();
+
+        let runner = ack_mounted_probe_runner_with_device_stats();
+        let beeper_calls = std::cell::Cell::new(0u32);
+        let beeper = || beeper_calls.set(beeper_calls.get() + 1);
+        let err = cmd_ack_impl(&runner, &ack_fs_btrfs(), &ack_mp(), &paths, &beeper)
+            .expect_err("smartd cleanup failure must propagate");
+
+        assert!(
+            matches!(err, AckError::CleanupFailed(_)),
+            "expected AckError::CleanupFailed, got: {err:?}"
+        );
+        assert!(
+            paths.acked_stats_json().exists(),
+            "mounted ack must persist a fresh baseline before cleanup"
+        );
+        assert!(
+            paths.alert_latch_json().exists(),
+            "latch must remain because cleanup failed on the first removal"
+        );
+        assert!(
+            paths.smartd_alert().exists(),
+            "cleanup poison directory must remain and prove where cleanup failed"
+        );
+        assert_eq!(
+            beeper_calls.get(),
+            1,
+            "stop_beeper must fire before the first cleanup remove_* fails"
         );
     }
 
@@ -896,15 +959,15 @@ mod tests {
 
     /*
      * Intent: Offline ack with a latched MissingDevice cause persists the
-     * missing-device ack update to acked-stats.json before invoking
-     * cleanup_alert_files_and_beeper. When cleanup then fails, the user-
-     * visible error names the partial state and points at the recovery
-     * path -- same contract as the mounted branch, pinned independently.
-     * Why it exists: cmd_ack_impl and ack_offline have separate cleanup
-     * call sites. A regression that reverts only the offline wrapping would
+     * missing-device ack update to acked-stats.json before cleanup. When the
+     * third cleanup file removal then fails, the user-visible error names the
+     * partial state, the latch is removed, the corrupt sidecar remains, and
+     * the beeper-stop hook has already fired.
+     * Why it exists: cmd_ack_impl and ack_offline have separate cleanup call
+     * sites. A regression that reverts only the offline wrapping would
      * silently fall back to AckError::Io and the mounted test would still
-     * pass. Pinning both branches forces both to keep returning
-     * CleanupFailed.
+     * pass. The beeper assertion independently pins that the offline path's
+     * cleanup reaches stop_beeper before a later remove_* can short-circuit.
      * Scenario: pool offline, latch contains MissingDevice{devid:1}, and a
      * directory sits at the corrupt-latch sidecar path so remove_file fails
      * with EISDIR/EPERM.
@@ -917,9 +980,17 @@ mod tests {
         // -- a platform-portable non-NotFound io::Error from
         // remove_alert_latch_corrupt.
         std::fs::create_dir(paths.alert_latch_corrupt()).unwrap();
+        let beeper_calls = std::cell::Cell::new(0u32);
+        let beeper = || beeper_calls.set(beeper_calls.get() + 1);
 
-        let err = cmd_ack(&AckPanicRunner, &ack_fs_not_mounted(), &ack_mp(), &paths)
-            .expect_err("offline cleanup failure must propagate");
+        let err = cmd_ack_impl(
+            &AckPanicRunner,
+            &ack_fs_not_mounted(),
+            &ack_mp(),
+            &paths,
+            &beeper,
+        )
+        .expect_err("offline cleanup failure must propagate");
 
         assert!(
             matches!(err, AckError::CleanupFailed(_)),
@@ -932,8 +1003,8 @@ mod tests {
         );
 
         // Witnesses for the partial-apply state in the offline branch:
-        // missing-device ack state was persisted (acked-stats exists), latch was
-        // not removed (cleanup short-circuited on remove_smartd_alert_flag).
+        // missing-device ack state was persisted (acked-stats exists), latch
+        // was removed, and cleanup stopped at the corrupt sidecar.
         assert!(
             paths.acked_stats_json().exists(),
             "save_acked_stats runs before cleanup -- baseline must be durable"
@@ -945,6 +1016,11 @@ mod tests {
         assert!(
             paths.alert_latch_corrupt().exists(),
             "cleanup poison directory must remain and prove where cleanup failed"
+        );
+        assert_eq!(
+            beeper_calls.get(),
+            1,
+            "stop_beeper must fire even when a later cleanup remove_* fails"
         );
     }
 

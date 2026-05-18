@@ -35,9 +35,10 @@ no active alerts
    - If a latch entry exists, the smartd alert flag is present, or the latch is corrupt, snapshots the current `btrfs device stats` error counters and missing-device state.
    - Writes that snapshot as the new acknowledged baseline (`acked-stats.json`). Future monitor runs compare against this baseline, so the same error counts won't trigger again.
    - If none of those alert sources is present, exits 0 with `no active alerts` and does not query btrfs or rewrite `acked-stats.json`.
-3. Removes the alert latch file (`alert-latch.json`).
-4. Removes the smartd alert flag if present.
-5. Stops `braid-alert.service` (the beeper), best-effort.
+3. Stops `braid-alert.service` (the beeper), best-effort. This runs first so the stop attempt is reached before any later file-removal I/O error can short-circuit the rest of cleanup.
+4. Removes the smartd alert flag (`smartd-alert`) if present.
+5. Removes the alert latch file (`alert-latch.json`).
+6. Removes the corrupt-latch sidecar (`alert-latch.json.corrupt`) if present.
 
 If the pool is offline but alerts exist (e.g., a latched smartd alert), ack still clears the latch and flag without snapshotting device stats. Offline means there is no mount at the configured mount point. If that path is occupied by a non-btrfs filesystem, `braid ack` returns a probe error naming the fstype and preserves `alert-latch.json`, `smartd-alert`, and `acked-stats.json`.
 
