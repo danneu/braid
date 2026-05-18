@@ -1,5 +1,5 @@
 use crate::cmd::{CmdError, CmdRequest, CommandRunner, Step};
-use crate::config::{Config, mapper_name, name_from_mapper};
+use crate::config::{Config, name_from_mapper};
 use crate::mapper_close::{CloseMapperError, close_mapper_with_retry};
 use crate::membership::{MembershipError, PoolMembership};
 use crate::parse::{parse_cryptsetup_luks_uuid, parse_cryptsetup_status};
@@ -116,27 +116,6 @@ impl LockCloseSet {
     /// Report whether lock has any mapper close work to do.
     pub fn is_empty(&self) -> bool {
         self.entries.is_empty()
-    }
-
-    /// Return all observed mapper names planned for close, including
-    /// orphan mappers, for membership prelude filtering.
-    pub fn mapper_names(&self) -> HashSet<&str> {
-        self.entries
-            .iter()
-            .map(|entry| entry.mapper.as_str())
-            .collect()
-    }
-
-    /// Return only member-owned display names so drifted member mappers
-    /// do not also print an already-closed line for the same disk.
-    pub fn member_names(&self) -> HashSet<&DiskName> {
-        self.entries
-            .iter()
-            .filter_map(|entry| match &entry.kind {
-                LockMapperCloseKind::MemberOwned { display_name } => Some(display_name),
-                LockMapperCloseKind::Orphan { .. } => None,
-            })
-            .collect()
     }
 
     /// Render the exact ordered `/dev/mapper/...` paths handed to
@@ -300,10 +279,16 @@ fn push_uuid_classified_candidate<R: CommandRunner>(
     orphan_mappers: &mut Vec<LockMapperClose>,
     skipped_mappers: &mut Vec<MapperName>,
     cleanup_uncertain: &mut bool,
+    members_potentially_present: &mut HashSet<DiskName>,
+    has_unclassified_skip: &mut bool,
 ) {
     match classify_candidate_mapper(runner, &mapper, membership) {
-        Ok(kind @ LockMapperCloseKind::MemberOwned { .. }) => {
-            member_owned.push(LockMapperClose { mapper, kind });
+        Ok(LockMapperCloseKind::MemberOwned { display_name }) => {
+            members_potentially_present.insert(display_name.clone());
+            member_owned.push(LockMapperClose {
+                mapper,
+                kind: LockMapperCloseKind::MemberOwned { display_name },
+            });
         }
         Ok(LockMapperCloseKind::Orphan { disk_name }) => {
             push_orphan_close(notes, orphan_mappers, mapper, disk_name);
@@ -314,6 +299,7 @@ fn push_uuid_classified_candidate<R: CommandRunner>(
             )));
             skipped_mappers.push(mapper);
             *cleanup_uncertain = true;
+            *has_unclassified_skip = true;
         }
     }
 }
@@ -446,23 +432,22 @@ fn compile_lock_steps(
     steps
 }
 
-/// Member names that should render as already closed, in DiskName
-/// order, before the planned close loop emits its own status lines.
-fn already_closed_names<'a>(
-    membership: &'a PoolMembership,
-    planned_members: &HashSet<&DiskName>,
-    planned_mappers: &HashSet<&str>,
-    skipped_mappers: &HashSet<&str>,
-) -> Vec<&'a DiskName> {
+/// Planner-derived member prelude source so execution never reconstructs
+/// mapper names to infer absence after scan or classification uncertainty.
+fn members_known_closed(
+    membership: &PoolMembership,
+    members_potentially_present: &HashSet<DiskName>,
+    has_unclassified_skip: bool,
+) -> Vec<DiskName> {
+    if has_unclassified_skip {
+        return Vec::new();
+    }
+
     membership
         .iter_by_name()
         .into_iter()
         .filter_map(|(_, member)| {
-            let mn = mapper_name(member.name.as_str());
-            (!planned_members.contains(&member.name)
-                && !planned_mappers.contains(mn.as_str())
-                && !skipped_mappers.contains(mn.as_str()))
-            .then_some(&member.name)
+            (!members_potentially_present.contains(&member.name)).then_some(member.name.clone())
         })
         .collect()
 }
@@ -479,6 +464,9 @@ pub struct LockPlan {
     /// Braid-prefixed mapper candidates left open because their backing
     /// LUKS UUID could not be verified during planning.
     pub skipped_mappers: Vec<MapperName>,
+    /// Planner-derived members confidently absent from every observed live
+    /// state; execute renders this instead of reconstructing mapper names.
+    pub members_known_closed: Vec<DiskName>,
     /// True when cleanup may be incomplete even if no close step exists.
     pub cleanup_uncertain: bool,
     pub mount_point: MountPoint,
@@ -504,7 +492,7 @@ impl LockPlan {
         runner: &R,
         fs: &F,
         sleeper: &S,
-        membership: &PoolMembership,
+        _membership: &PoolMembership,
     ) -> Result<(), LockError>
     where
         R: CommandRunner,
@@ -608,18 +596,9 @@ impl LockPlan {
             }
         }
 
-        // 3. Close each planned mapper. For every membership entry
-        // outside the planned member-owned names and observed mapper
-        // names, surface "already closed". This avoids contradictory
-        // output when a member-owned mapper is observed under a
-        // non-default mapper name.
-        let planned_mappers = self.close_set.mapper_names();
-        let skipped_mappers: HashSet<&str> = self
-            .skipped_mappers
-            .iter()
-            .map(|mapper| mapper.as_str())
-            .collect();
-        let planned_members = self.close_set.member_names();
+        // 3. Close each planned mapper. The membership-side prelude is
+        // planner-derived so execute never infers absence from reconstructed
+        // mapper names after scan or classification uncertainty.
         let mut all_already_closed = true;
         {
             let mut close_ctx = CloseMapperCtx {
@@ -629,18 +608,7 @@ impl LockPlan {
                 umount_error: &umount_error,
                 first_mapper_error: &mut first_mapper_error,
             };
-            // Membership-side "already closed" prelude: for every
-            // member whose name and expected mapper are both outside
-            // the planned close set, emit the already-closed status
-            // line. The expected mapper is reconstructed from name
-            // purely for display here; identity decisions for the
-            // close itself were made at plan time.
-            for name in already_closed_names(
-                membership,
-                &planned_members,
-                &planned_mappers,
-                &skipped_mappers,
-            ) {
+            for name in &self.members_known_closed {
                 eprint!(
                     "{}",
                     line(StatusTag::Ok, &format!("disk {name}: already closed"))
@@ -756,6 +724,8 @@ where
     let mut notes: Vec<PreviewNote> = Vec::new();
     let mut skipped_mappers: Vec<MapperName> = Vec::new();
     let mut cleanup_uncertain = false;
+    let mut members_potentially_present: HashSet<DiskName> = HashSet::new();
+    let mut has_unclassified_skip = false;
     let close_set = match &snapshot {
         Snapshot::Probed(pool) => {
             if let Some(fsid) = &pool.fsid {
@@ -769,6 +739,8 @@ where
                 &mut notes,
                 &mut skipped_mappers,
                 &mut cleanup_uncertain,
+                &mut members_potentially_present,
+                &mut has_unclassified_skip,
             )
         }
         Snapshot::ProbeFailed { fsid, probe_error } => {
@@ -783,6 +755,8 @@ where
                 &mut notes,
                 &mut skipped_mappers,
                 &mut cleanup_uncertain,
+                &mut members_potentially_present,
+                &mut has_unclassified_skip,
             )
         }
         Snapshot::Unmounted => build_close_sets_uuid_scanned_fallback(
@@ -792,14 +766,22 @@ where
             &mut notes,
             &mut skipped_mappers,
             &mut cleanup_uncertain,
+            &mut members_potentially_present,
+            &mut has_unclassified_skip,
         ),
     };
+    let members_known_closed = members_known_closed(
+        membership,
+        &members_potentially_present,
+        has_unclassified_skip,
+    );
 
     Ok(LockPlan {
         notes,
         pool_was_mounted,
         close_set,
         skipped_mappers,
+        members_known_closed,
         cleanup_uncertain,
         mount_point,
     })
@@ -820,6 +802,8 @@ fn build_close_sets_full<R: CommandRunner, F: Filesystem + ?Sized>(
     notes: &mut Vec<PreviewNote>,
     skipped_mappers: &mut Vec<MapperName>,
     cleanup_uncertain: &mut bool,
+    members_potentially_present: &mut HashSet<DiskName>,
+    has_unclassified_skip: &mut bool,
 ) -> LockCloseSet {
     let mut member_owned: Vec<LockMapperClose> = Vec::new();
     let mut orphan_mappers: Vec<LockMapperClose> = Vec::new();
@@ -827,6 +811,7 @@ fn build_close_sets_full<R: CommandRunner, F: Filesystem + ?Sized>(
     // Pass 1: pool.devices, classified by observed LUKS UUID.
     for dev in &pool.devices {
         if let Some(member) = membership.by_uuid(&dev.luks_uuid) {
+            members_potentially_present.insert(member.name.clone());
             member_owned.push(LockMapperClose {
                 mapper: dev.mapper.clone(),
                 kind: LockMapperCloseKind::MemberOwned {
@@ -844,12 +829,15 @@ fn build_close_sets_full<R: CommandRunner, F: Filesystem + ?Sized>(
     // Pass 2: pool.null_underlying, classified by persisted devid.
     for nu in &pool.null_underlying {
         match membership.by_devid(nu.devid) {
-            Ok(Some((_uuid, member))) => member_owned.push(LockMapperClose {
-                mapper: nu.mapper.clone(),
-                kind: LockMapperCloseKind::MemberOwned {
-                    display_name: member.name.clone(),
-                },
-            }),
+            Ok(Some((_uuid, member))) => {
+                members_potentially_present.insert(member.name.clone());
+                member_owned.push(LockMapperClose {
+                    mapper: nu.mapper.clone(),
+                    kind: LockMapperCloseKind::MemberOwned {
+                        display_name: member.name.clone(),
+                    },
+                });
+            }
             Ok(None) => {
                 let disk_name = name_from_mapper(nu.mapper.as_str())
                     .unwrap_or(nu.mapper.as_str())
@@ -861,6 +849,11 @@ fn build_close_sets_full<R: CommandRunner, F: Filesystem + ?Sized>(
                     notes.push(PreviewNote::Warn(duplicate_devid_warn_body(
                         &nu.mapper, devid, &members,
                     )));
+                    for uuid in &members {
+                        if let Some(member) = membership.by_uuid(uuid) {
+                            members_potentially_present.insert(member.name.clone());
+                        }
+                    }
                     skipped_mappers.push(nu.mapper.clone());
                     *cleanup_uncertain = true;
                 }
@@ -889,6 +882,8 @@ fn build_close_sets_full<R: CommandRunner, F: Filesystem + ?Sized>(
             Ok(entries) => entries,
             Err(e) => {
                 notes.push(PreviewNote::Warn(mapper_scan_warn_body(&e)));
+                *cleanup_uncertain = true;
+                *has_unclassified_skip = true;
                 // Preserve best-effort semantics: with no /dev/mapper
                 // listing, return what we have. Pass-1/2 member_owned
                 // is still valid.
@@ -907,6 +902,8 @@ fn build_close_sets_full<R: CommandRunner, F: Filesystem + ?Sized>(
             &mut orphan_mappers,
             skipped_mappers,
             cleanup_uncertain,
+            members_potentially_present,
+            has_unclassified_skip,
         );
     }
 
@@ -924,6 +921,8 @@ fn build_close_sets_uuid_scanned_fallback<R: CommandRunner, F: Filesystem + ?Siz
     notes: &mut Vec<PreviewNote>,
     skipped_mappers: &mut Vec<MapperName>,
     cleanup_uncertain: &mut bool,
+    members_potentially_present: &mut HashSet<DiskName>,
+    has_unclassified_skip: &mut bool,
 ) -> LockCloseSet {
     let mut member_owned: Vec<LockMapperClose> = Vec::new();
     let mut orphan_mappers: Vec<LockMapperClose> = Vec::new();
@@ -933,6 +932,7 @@ fn build_close_sets_uuid_scanned_fallback<R: CommandRunner, F: Filesystem + ?Siz
         Err(e) => {
             notes.push(PreviewNote::Warn(mapper_scan_warn_body(&e)));
             *cleanup_uncertain = true;
+            *has_unclassified_skip = true;
             return LockCloseSet::from_classified(member_owned, orphan_mappers);
         }
     };
@@ -947,6 +947,8 @@ fn build_close_sets_uuid_scanned_fallback<R: CommandRunner, F: Filesystem + ?Siz
             &mut orphan_mappers,
             skipped_mappers,
             cleanup_uncertain,
+            members_potentially_present,
+            has_unclassified_skip,
         );
     }
 
@@ -1017,34 +1019,90 @@ mod tests {
         runner.with_mapper_open(mapper, &device, ORPHAN_UUID)
     }
 
-    // Intent: the "already closed" prelude lists members in DiskName
-    //   order regardless of underlying UUID order.
-    // Why it exists: the LUKS-UUID migration left this loop iterating in
-    //   UUID order; this pins name order at the call-site helper.
+    fn lock_test_membership_with_ccc() -> PoolMembership {
+        let mut membership = lock_test_membership();
+        let (uuid, member) = disk_member(702, "ccc", "/dev/disk/by-id/c");
+        membership.insert(uuid, member).unwrap();
+        membership
+    }
+
+    fn known_closed_names(plan: &LockPlan) -> Vec<&str> {
+        plan.members_known_closed
+            .iter()
+            .map(DiskName::as_str)
+            .collect()
+    }
+
+    fn btrfs_show_for_lock_mappers(mapper_aaa: &str, mapper_bbb: &str) -> RawCommandOutput {
+        RawCommandOutput {
+            cmd: "btrfs filesystem show /mnt/storage".into(),
+            stdout: format!(
+                "Label: none  uuid: aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee\n\
+                 \tTotal devices 2 FS bytes used 16.00MiB\n\
+                 \tdevid    1 size 496.00MiB used 121.56MiB path /dev/mapper/{mapper_aaa}\n\
+                 \tdevid    2 size 496.00MiB used 121.56MiB path /dev/mapper/{mapper_bbb}\n"
+            ),
+            stderr: String::new(),
+            exit_status: 0,
+        }
+    }
+
+    fn mounted_runner_with_btrfs_show(mapper_aaa: &str, mapper_bbb: &str) -> MockRunner {
+        MockRunner::default()
+            .with_output(
+                CmdRequest::MountpointCheck {
+                    path: MountPoint("/mnt/storage".to_owned()),
+                },
+                lock_ok_raw("mountpoint -q /mnt/storage"),
+            )
+            .with_output(
+                CmdRequest::BtrfsFilesystemShow {
+                    mount_point: MountPoint("/mnt/storage".to_owned()),
+                },
+                btrfs_show_for_lock_mappers(mapper_aaa, mapper_bbb),
+            )
+            .with_mapper_open(mapper_aaa, "/dev/disk/by-id/a", AAA_UUID)
+            .with_mapper_open(mapper_bbb, "/dev/disk/by-id/b", BBB_UUID)
+    }
+
+    fn cryptsetup_status_active_null(mapper: &str) -> RawCommandOutput {
+        RawCommandOutput {
+            cmd: format!("cryptsetup status {mapper}"),
+            stdout: format!(
+                "/dev/mapper/{mapper} is active and is in use.\n\
+                 \ttype:    LUKS2\n\
+                 \tdevice:  (null)\n"
+            ),
+            stderr: String::new(),
+            exit_status: 0,
+        }
+    }
+
+    // Intent: planner-derived members_known_closed lists members in
+    //   DiskName order regardless of underlying UUID order.
+    // Why it exists: the executor prelude consumes this field directly,
+    //   so order must be pinned at the planner source of truth.
     // Scenario: a two-disk pool where UUID order is opposite name order;
-    //   no member is in the planned close set, so both appear.
+    //   no live mappers are observed, so both members are confidently closed.
     #[test]
-    fn already_closed_names_returned_in_name_order_independent_of_uuid_order() {
+    fn members_known_closed_returned_in_name_order_independent_of_uuid_order() {
         let mut membership = PoolMembership::empty();
         let (_, zeta) = disk_member(700, "zeta", "/dev/disk/by-id/ata-Z");
         let (_, alpha) = disk_member(701, "alpha", "/dev/disk/by-id/ata-A");
         membership.insert(test_uuid(700), zeta).unwrap();
         membership.insert(test_uuid(701), alpha).unwrap();
-        let planned_members: HashSet<&DiskName> = HashSet::new();
-        let planned_mappers: HashSet<&str> = HashSet::new();
-        let skipped_mappers: HashSet<&str> = HashSet::new();
+        let runner = MockRunner::default().with_output(
+            CmdRequest::MountpointCheck {
+                path: MountPoint("/mnt/storage".to_owned()),
+            },
+            lock_err_raw("mountpoint -q /mnt/storage", 1, ""),
+        );
+        let fs = lock_fs(&[]);
+        let config = lock_test_config();
 
-        let names: Vec<&str> = already_closed_names(
-            &membership,
-            &planned_members,
-            &planned_mappers,
-            &skipped_mappers,
-        )
-        .into_iter()
-        .map(DiskName::as_str)
-        .collect();
+        let plan = plan_lock(&runner, &fs, &config, &membership).expect("plan should succeed");
 
-        assert_eq!(names, vec!["alpha", "zeta"]);
+        assert_eq!(known_closed_names(&plan), vec!["alpha", "zeta"]);
     }
 
     #[test]
@@ -1542,6 +1600,10 @@ mod tests {
             .expect("plan_lock should succeed with list_dir failure");
         let output = plan.preview().render();
 
+        assert!(
+            plan.members_known_closed.is_empty(),
+            "unscannable fallback cannot prove any member closed"
+        );
         assert!(
             output.starts_with(
                 "[warn] could not scan /dev/mapper for braid mappers: permission denied (skipping)\n"
@@ -2518,6 +2580,52 @@ mod tests {
         LockCloseSet::from_classified(members, orphans)
     }
 
+    fn build_close_sets_full_for_test<R: CommandRunner, F: Filesystem + ?Sized>(
+        runner: &R,
+        fs: &F,
+        pool: &PoolState,
+        membership: &PoolMembership,
+        notes: &mut Vec<PreviewNote>,
+        skipped_mappers: &mut Vec<MapperName>,
+        cleanup_uncertain: &mut bool,
+    ) -> LockCloseSet {
+        let mut members_potentially_present = HashSet::new();
+        let mut has_unclassified_skip = false;
+        super::build_close_sets_full(
+            runner,
+            fs,
+            pool,
+            membership,
+            notes,
+            skipped_mappers,
+            cleanup_uncertain,
+            &mut members_potentially_present,
+            &mut has_unclassified_skip,
+        )
+    }
+
+    fn build_close_sets_uuid_scanned_fallback_for_test<R: CommandRunner, F: Filesystem + ?Sized>(
+        runner: &R,
+        fs: &F,
+        membership: &PoolMembership,
+        notes: &mut Vec<PreviewNote>,
+        skipped_mappers: &mut Vec<MapperName>,
+        cleanup_uncertain: &mut bool,
+    ) -> LockCloseSet {
+        let mut members_potentially_present = HashSet::new();
+        let mut has_unclassified_skip = false;
+        super::build_close_sets_uuid_scanned_fallback(
+            runner,
+            fs,
+            membership,
+            notes,
+            skipped_mappers,
+            cleanup_uncertain,
+            &mut members_potentially_present,
+            &mut has_unclassified_skip,
+        )
+    }
+
     fn member_summaries(close_set: &LockCloseSet) -> Vec<(String, String)> {
         close_set
             .entries()
@@ -3022,7 +3130,7 @@ mod tests {
         let runner = MockRunner::default();
         let mut skipped = Vec::new();
         let mut cleanup_uncertain = false;
-        let close_set = super::build_close_sets_full(
+        let close_set = build_close_sets_full_for_test(
             &runner,
             &fs,
             &pool,
@@ -3048,6 +3156,32 @@ mod tests {
         assert!(orphan_summaries(&close_set).is_empty());
     }
 
+    // Intent: a drifted member mapper classified in Pass 1 is not also
+    //   reported as a confidently closed member.
+    // Why it exists: the already-closed prelude must consume planner
+    //   presence facts, not reconstruct expected mapper names during execute.
+    // Scenario: btrfs reports member `aaa` as live under `braid-WRONG`.
+    #[test]
+    fn full_arm_drifted_member_is_not_known_closed() {
+        let fs = lock_fs(&["/dev/mapper/braid-WRONG", "/dev/mapper/braid-bbb"]);
+        let runner = mounted_runner_with_btrfs_show("braid-WRONG", "braid-bbb");
+        let config = lock_test_config();
+        let membership = lock_test_membership();
+
+        let plan = plan_lock(&runner, &fs, &config, &membership).expect("plan should succeed");
+
+        assert!(
+            member_summaries(&plan.close_set).contains(&("braid-WRONG".into(), "aaa".into())),
+            "drifted mapper must be planned as member-owned: {:?}",
+            member_summaries(&plan.close_set)
+        );
+        assert!(
+            plan.members_known_closed.is_empty(),
+            "live drifted members must not enter known-closed prelude: {:?}",
+            known_closed_names(&plan)
+        );
+    }
+
     /// Intent: in `Snapshot::Probed`, the forget_devs set passed to
     /// BtrfsDeviceScanForget uses the OBSERVED member mapper string
     /// (`braid-WRONG`) rather than the reconstructed
@@ -3065,7 +3199,7 @@ mod tests {
         let runner = MockRunner::default();
         let mut skipped = Vec::new();
         let mut cleanup_uncertain = false;
-        let close_set = super::build_close_sets_full(
+        let close_set = build_close_sets_full_for_test(
             &runner,
             &fs,
             &pool,
@@ -3118,7 +3252,7 @@ mod tests {
         let mut skipped = Vec::new();
         let mut cleanup_uncertain = false;
 
-        let close_set = super::build_close_sets_full(
+        let close_set = build_close_sets_full_for_test(
             &runner,
             &fs,
             &pool,
@@ -3161,7 +3295,7 @@ mod tests {
         let mut skipped = Vec::new();
         let mut cleanup_uncertain = false;
 
-        let close_set = super::build_close_sets_full(
+        let close_set = build_close_sets_full_for_test(
             &runner,
             &fs,
             &pool,
@@ -3225,7 +3359,7 @@ mod tests {
         let mut skipped = Vec::new();
         let mut cleanup_uncertain = false;
 
-        let close_set = super::build_close_sets_full(
+        let close_set = build_close_sets_full_for_test(
             &runner,
             &fs,
             &pool,
@@ -3287,6 +3421,45 @@ mod tests {
             status_probe_count, 0,
             "Pass 3 must not re-probe skipped null-underlying braid-dup"
         );
+
+        let plan_runner = MockRunner::default()
+            .with_output(
+                CmdRequest::MountpointCheck {
+                    path: MountPoint("/mnt/storage".to_owned()),
+                },
+                lock_ok_raw("mountpoint -q /mnt/storage"),
+            )
+            .with_output(
+                CmdRequest::BtrfsFilesystemShow {
+                    mount_point: MountPoint("/mnt/storage".to_owned()),
+                },
+                RawCommandOutput {
+                    cmd: "btrfs filesystem show /mnt/storage".to_owned(),
+                    stdout: "Label: none  uuid: aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee\n\
+                             \tTotal devices 2 FS bytes used 16.00MiB\n\
+                             \tdevid    1 size 496.00MiB used 121.56MiB path /dev/mapper/braid-aaa\n\
+                             \tdevid    7 size 496.00MiB used 121.56MiB path /dev/mapper/braid-dup\n"
+                        .to_owned(),
+                    stderr: String::new(),
+                    exit_status: 0,
+                },
+            )
+            .with_mapper_open("braid-aaa", "/dev/disk/by-id/a", AAA_UUID)
+            .with_output(
+                CmdRequest::CryptsetupStatus {
+                    mapper: MapperName("braid-dup".into()),
+                },
+                cryptsetup_status_active_null("braid-dup"),
+            );
+        let config = lock_test_config();
+
+        let plan = plan_lock(&plan_runner, &fs, &config, &membership).expect("plan should succeed");
+
+        assert!(
+            plan.members_known_closed.is_empty(),
+            "duplicate-devid claimants must not be reported closed, got: {:?}",
+            known_closed_names(&plan)
+        );
     }
 
     /// Intent: the UUID-scanned fallback preserves the close order
@@ -3312,7 +3485,7 @@ mod tests {
         );
         let mut skipped = Vec::new();
         let mut cleanup_uncertain = false;
-        let close_set = super::build_close_sets_uuid_scanned_fallback(
+        let close_set = build_close_sets_uuid_scanned_fallback_for_test(
             &runner,
             &fs,
             &membership,
@@ -3377,7 +3550,7 @@ mod tests {
         let mut notes = Vec::new();
         let mut skipped = Vec::new();
         let mut cleanup_uncertain = false;
-        let close_set = super::build_close_sets_uuid_scanned_fallback(
+        let close_set = build_close_sets_uuid_scanned_fallback_for_test(
             &runner,
             &fs,
             &membership,
@@ -3420,7 +3593,7 @@ mod tests {
         let mut notes = Vec::new();
         let mut skipped = Vec::new();
         let mut cleanup_uncertain = false;
-        let close_set = super::build_close_sets_full(
+        let close_set = build_close_sets_full_for_test(
             &runner,
             &fs,
             &pool,
@@ -3441,6 +3614,62 @@ mod tests {
                     if body.contains("skipping mapper braid-stranded")
             )),
             "skip warning expected, got: {notes:?}",
+        );
+    }
+
+    // Intent: a Pass 3 classify failure suppresses all known-closed
+    //   claims for unaccounted members.
+    // Why it exists: an unverified stranded mapper could be a drifted
+    //   member, so an execute-side "already closed" line would contradict
+    //   the planner's uncertainty.
+    // Scenario: `aaa` and `bbb` are mounted, `ccc` is in pool.json, and an
+    //   unverified `/dev/mapper/braid-stranded` cannot be classified.
+    #[test]
+    fn full_arm_pass3_classify_failure_suppresses_known_closed_members() {
+        let fs = lock_fs(&[
+            "/dev/mapper/braid-aaa",
+            "/dev/mapper/braid-bbb",
+            "/dev/mapper/braid-stranded",
+        ]);
+        let runner = mounted_runner_with_btrfs_show("braid-aaa", "braid-bbb");
+        let config = lock_test_config();
+        let membership = lock_test_membership_with_ccc();
+
+        let plan = plan_lock(&runner, &fs, &config, &membership).expect("plan should succeed");
+
+        assert_eq!(
+            plan.skipped_mappers,
+            vec![MapperName("braid-stranded".to_owned())]
+        );
+        assert!(plan.cleanup_uncertain);
+        assert!(
+            plan.members_known_closed.is_empty(),
+            "unclassified stranded mapper must suppress known-closed rows, got: {:?}",
+            known_closed_names(&plan)
+        );
+    }
+
+    // Intent: full-arm `/dev/mapper` scan failure suppresses known-closed
+    //   claims for unaccounted members and marks cleanup uncertain.
+    // Why it exists: without a mapper listing, a live drifted mapper for an
+    //   unaccounted member cannot be ruled out.
+    // Scenario: `aaa` and `bbb` are mounted, `ccc` is in pool.json, and
+    //   `/dev/mapper` cannot be listed.
+    #[test]
+    fn full_arm_scan_failure_suppresses_known_closed_members() {
+        let fs =
+            lock_fs(&["/dev/mapper/braid-aaa", "/dev/mapper/braid-bbb"]).with_dev_mapper_error();
+        let runner = mounted_runner_with_btrfs_show("braid-aaa", "braid-bbb");
+        let config = lock_test_config();
+        let membership = lock_test_membership_with_ccc();
+
+        let plan = plan_lock(&runner, &fs, &config, &membership).expect("plan should succeed");
+
+        assert!(plan.cleanup_uncertain);
+        assert!(
+            plan.members_known_closed.is_empty(),
+            "unscannable mapper namespace must suppress known-closed rows, got: {:?}",
+            known_closed_names(&plan)
         );
     }
 
@@ -3484,7 +3713,7 @@ mod tests {
         let mut notes = Vec::new();
         let mut skipped = Vec::new();
         let mut cleanup_uncertain = false;
-        let close_set = super::build_close_sets_full(
+        let close_set = build_close_sets_full_for_test(
             &runner,
             &fs,
             &pool,

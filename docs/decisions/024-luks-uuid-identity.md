@@ -114,7 +114,13 @@ one.
    `/dev/mapper/braid-*` candidates and closes only those with verified backing
    LUKS UUIDs. If a `null_underlying` mapper's persisted devid resolves to
    multiple membership UUIDs, `lock` warns, leaves that mapper open, and marks
-   cleanup uncertain instead of demoting it to orphan cleanup.
+   cleanup uncertain instead of demoting it to orphan cleanup. `lock` reports
+   `disk <name>: already closed` only for members the planner has proved absent
+   from every observed live state; it must not reconstruct
+   `mapper_name(&member.name)` during execute to infer absence. If a mapper is
+   skipped because classification failed, or `/dev/mapper` cannot be
+   enumerated in either close-set arm, cleanup is uncertain and lock suppresses
+   all already-closed claims for unobserved members.
 8. Commands that reuse an already-open expected mapper for a requested by-id
    path must verify the mapper's canonical backing path before trusting the
    mapper's LUKS UUID. A cloned LUKS header can give two physical devices the
@@ -172,6 +178,8 @@ one.
   is accepted.
 - `tests/cli/luks-mapper-drift.py` verifies `braid lock` closes the observed
   drifted mapper owned by a member UUID.
+- `tests/cli/luks-lock-skipped-no-false-closed.py` verifies skipped mapper
+  uncertainty does not produce false `already closed` rows.
 - `tests/cli/unlock-uuid-mismatch.py`,
   `tests/cli/enroll-uuid-mismatch.py`, and
   `tests/cli/recover-replace-existing-luks-uuid-mismatch.py` verify swapped or

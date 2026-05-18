@@ -444,6 +444,11 @@
               braid = linuxCrane.braid;
             }
           );
+          luks-lock-skipped-no-false-closed = pkgs.testers.nixosTest (
+            import ./tests/cli/luks-lock-skipped-no-false-closed.nix {
+              braid = linuxCrane.braid;
+            }
+          );
           braid-lock-orphan = pkgs.testers.nixosTest (
             import ./tests/cli/braid-lock-orphan.nix {
               braid = linuxCrane.braid;
