@@ -549,9 +549,6 @@ impl ReplacePlan {
             }
         }
 
-        // Guard: new disk must not already be in the pool.
-        check_new_not_in_pool(new_name.as_str(), &new_mn, &pool)?;
-
         // Hold a logind sleep inhibitor for the rest of the replace operation --
         // covers Step 1 LUKS init, the long-running btrfs replace start, and
         // the post-replace soft balance for missing-path replaces. Suspending
@@ -560,7 +557,7 @@ impl ReplacePlan {
         // reference/btrfs-progs/Documentation/btrfs-replace.rst:49-50.
         //
         // Acquired here, AFTER all interactive/reversible work (confirmation,
-        // passphrase read+verify, check_new_not_in_pool) and BEFORE
+        // passphrase read+verify) and BEFORE
         // journal::write_journal, so that:
         //   - operator-idle prompts do not block suspend
         //   - a logind failure aborts cleanly without stranding pending-op.json
@@ -1115,10 +1112,9 @@ mod replace_stderr_capture {
 /// on post-preflight failure, accumulated notes stay on `PlanFailure::notes`
 /// so `cmd_replace` can render them before returning the error.
 ///
-/// Does not read or verify the passphrase, acquire the sleep inhibitor,
-/// or run `check_new_not_in_pool` -- those happen inside
-/// `ReplacePlan::execute` so `--dry-run` keeps short-circuiting before
-/// them.
+/// Does not read or verify the passphrase or acquire the sleep
+/// inhibitor -- those happen inside `ReplacePlan::execute` so
+/// `--dry-run` keeps short-circuiting before them.
 pub fn plan_replace<R: CommandRunner + Sync, F: Filesystem + ?Sized>(
     runner: &R,
     fs: &F,
@@ -1565,20 +1561,6 @@ fn build_replace_journal_target(
         by_id: new_by_id.clone(),
         mode,
     }
-}
-
-fn check_new_not_in_pool(
-    new_name: &str,
-    new_mn: &MapperName,
-    pool: &PoolState,
-) -> Result<(), ReplaceError> {
-    if pool.devices.iter().any(|d| d.mapper == *new_mn) {
-        return Err(ReplaceError::Validation(format!(
-            "new disk '{}' is already a member of the pool. Cannot replace with an existing member.",
-            new_name
-        )));
-    }
-    Ok(())
 }
 
 /// Resolve the replace source from the resolved `(old_uuid, old_member)`
@@ -2391,33 +2373,6 @@ mod tests {
             !descriptions.iter().any(|d| d.contains("cryptsetup close")),
             "missing path should NOT show cryptsetup close (no old mapper), got: {descriptions:?}"
         );
-    }
-
-    #[test]
-    // Intent: replacing with a disk that's already in the pool is rejected.
-    // Why: without the guard, the Live path would pass an existing pool member
-    //   to `btrfs replace start`. The btrfs replace path has no natural guard
-    //   against this, so we need an explicit one.
-    // Scenario: operator typo -- specifies an existing pool member as --new.
-    fn new_disk_already_in_pool_rejected() {
-        let pool = two_device_pool(); // has braid-disk1 and braid-disk2
-        let new_mn = mapper_name(&disk_name("disk2")); // -> "braid-disk2"
-        let err = check_new_not_in_pool("disk2", &new_mn, &pool).unwrap_err();
-        assert!(
-            err.to_string().contains("already a member"),
-            "expected 'already a member' error, got: {err}"
-        );
-    }
-
-    #[test]
-    // Intent: a disk NOT in the pool passes the guard.
-    // Why: regression -- the guard must not block valid replacements.
-    // Scenario: normal replace with a fresh disk.
-    fn new_disk_not_in_pool_passes() {
-        let pool = two_device_pool();
-        let new_mn = mapper_name(&disk_name("disk3"));
-        check_new_not_in_pool("disk3", &new_mn, &pool)
-            .expect("disk3 is not in pool -- should pass");
     }
 
     #[test]
