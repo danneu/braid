@@ -1064,21 +1064,6 @@ impl<'a, R: CommandRunner> DoctorContext<'a, R> {
             df_snapshot: None,
         }
     }
-
-    pub(crate) fn for_test_ups(runner: &'a R, paths: &'a StatePaths, config_json: &str) -> Self {
-        let value: serde_json::Value =
-            serde_json::from_str(config_json).expect("test config parses");
-        let config: Option<Config> = serde_json::from_str(config_json).ok();
-        Self {
-            config_path: PathBuf::new(),
-            config_value: Some(value),
-            config,
-            runner,
-            paths,
-            mountpoint_is_mounted: None,
-            df_snapshot: None,
-        }
-    }
 }
 
 #[cfg(test)]
@@ -1313,6 +1298,25 @@ mod tests {
             braid_online.message.contains("config not available"),
             "unexpected message: {}",
             braid_online.message
+        );
+    }
+
+    // Intent: ups_ctx panics loudly when config JSON parses as Value but
+    //   fails Config schema validation.
+    // Why it exists: ups_ctx once built ctx.config = None on schema failure,
+    //   letting mistyped fixtures silently flip UPS tests to the
+    //   "config unavailable" skip branch.
+    // Scenario: a future test-only builder reintroduces silent-drop semantics
+    //   on the ups_ctx -> for_test_parsed path.
+    #[test]
+    #[should_panic(expected = "test config parses")]
+    fn ups_ctx_panics_on_schema_invalid_config() {
+        let runner = MockRunner::default();
+        let (_dir, paths) = isolated_paths();
+        let _ctx = ups_ctx(
+            &runner,
+            &paths,
+            r#"{"mount_point":"","ups":{"name":"ups"}}"#,
         );
     }
 

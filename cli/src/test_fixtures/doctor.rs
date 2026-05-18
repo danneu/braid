@@ -100,7 +100,7 @@ pub(crate) fn ups_ctx<'a, R: CommandRunner>(
     paths: &'a StatePaths,
     config_json: &str,
 ) -> DoctorContext<'a, R> {
-    DoctorContext::for_test_ups(runner, paths, config_json)
+    DoctorContext::for_test_parsed(runner, paths, config_json)
 }
 
 // ---------------------------------------------------------------------------
