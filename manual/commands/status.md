@@ -143,10 +143,27 @@ Disk states in the detail view:
 
 ### Advisories
 
-When a header-mutating operation (`braid add`, `braid replace`,
-`braid enroll`) writes a local LUKS header backup to
-`/var/lib/braid/luks-headers/<disk>.luksheader`, `braid status`
-prints a warning until those files are removed:
+`braid status` may print one or more `warning:` lines above the pool
+summary. Each warning corresponds to an entry in the JSON `advisories`
+array.
+
+**Foreign filesystem at the mount point.** When something other than
+the braid pool is mounted at the configured mount point (for example, a
+stale `tmpfs` or `ext4` mount left by another tool), `braid status`
+reports `Status: not mounted` and names the actual filesystem type:
+
+```
+warning: /mnt/storage is mounted but fstype is ext4, not btrfs
+```
+
+Unmount the foreign filesystem before retrying `braid unlock` --
+otherwise `unlock` reports "pool already mounted" because something is
+in fact mounted at that path.
+
+**Pending LUKS header backups.** When a header-mutating operation
+(`braid add`, `braid replace`, `braid enroll`) writes a local LUKS
+header backup to `/var/lib/braid/luks-headers/<disk>.luksheader`,
+`braid status` prints a warning until those files are removed:
 
 ```
 warning: LUKS header backups exist in /var/lib/braid/luks-headers -- copy offsite and delete local copies

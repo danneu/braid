@@ -387,11 +387,12 @@ fn build_status<R: CommandRunner, F: Filesystem>(
     paths: &StatePaths,
     backing_path_resolver: &dyn BackingPathResolver,
 ) -> Result<BuiltStatus, StatusError> {
-    let advisories = luks::header_backup_advisories(paths);
+    let mut advisories = luks::header_backup_advisories(paths);
 
     let pool = match probe_pool(runner, fs, config.mount_point()) {
         Ok(p) => p,
-        Err(ProbeError::NotBtrfs { .. }) => {
+        Err(e @ ProbeError::NotBtrfs { .. }) => {
+            advisories.push(e.to_string());
             return Ok(not_mounted_status(config, paths, advisories));
         }
         Err(e) => return Err(e.into()),
@@ -2760,23 +2761,37 @@ mod tests {
         assert!(result.is_err());
     }
 
+    // Intent: status keeps reporting `NotMounted` for a foreign-fstype
+    // mount, and surfaces the actual fstype through the existing
+    // `advisories` channel using `ProbeError::NotBtrfs`'s Display text.
+    // Why it exists: prior behavior dropped `ProbeError::NotBtrfs`'s
+    // `fstype` field, leaving operators with contradictory status and
+    // unlock messages and no direct diagnosis of the foreign mount.
+    // Scenario: operator left an `ext4` partition mounted at `/mnt/storage`;
+    // `braid status` must still report not mounted but also show the exact
+    // warning text naming the foreign filesystem.
     #[test]
-    fn status_not_btrfs_maps_to_not_mounted() {
+    fn build_status_not_btrfs_surfaces_fstype_advisory() {
         let runner = MockRunner::default();
         let fs = status_fs_ext4(&[]);
         let config = status_config();
-
-        // cmd_status should succeed (not error), treating it as not-mounted
         let (_tmp, paths) = isolated_paths();
-        let result = cmd_status(
+
+        let built = build_status(
             &runner,
             &fs,
             &config,
-            false,
             &paths,
             crate::test_fixtures::mock_virtio_backing_path_resolver(),
+        )
+        .expect("build_status should succeed for foreign-fstype mount");
+
+        assert_eq!(built.report.status, StatusCode::NotMounted);
+        assert_eq!(
+            built.report.advisories,
+            vec!["/mnt/storage is mounted but fstype is ext4, not btrfs"],
         );
-        assert!(result.is_ok(), "expected Ok, got: {result:?}");
+        assert!(built.mounted_extras.is_none());
     }
 
     // =======================================================================
