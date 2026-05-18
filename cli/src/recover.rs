@@ -6509,6 +6509,103 @@ mod tests {
         assert!(f.paths.pending_op_json().exists());
     }
 
+    // Intent
+    // RemoveMissing::PoolMutation recovery bridges duplicate-devid journal
+    // corruption to RecoverError::DuplicateDevidDuringReplay.
+    //
+    // Why it exists
+    // The corruption signal must stay typed after crossing the
+    // live_pool_matches_membership call site, not collapse to
+    // RecoverError::Failed.
+    //
+    // Scenario
+    // Recovery sees the removed devid still missing while the journaled
+    // pre-membership snapshot binds that devid to two members.
+    #[test]
+    fn bridges_duplicate_devid_corruption_to_typed_recover_error() {
+        let f = PoolFixture::empty();
+        let mut journal = remove_missing_journal();
+        journal.pre_membership = PoolMembership::for_corruption_tests(vec![
+            membership_entry("disk1", "/dev/disk/by-id/virtio-disk1", None, Some(1)),
+            membership_entry("disk2", "/dev/disk/by-id/virtio-disk2", None, Some(2)),
+            membership_entry("disk4", "/dev/disk/by-id/virtio-disk4", None, Some(2)),
+        ]);
+        journal::write_journal(&f.paths, &journal).unwrap();
+        let params = f.recover_params().build();
+
+        let err = execute_remove_missing_pool_mutation_recovery(
+            &MockRunner::default(),
+            &MockByIdResolver::default(),
+            &params,
+            &journal,
+            pool_state_disk1_with_missing_devid2(),
+            2,
+            true,
+        )
+        .unwrap_err();
+
+        match err {
+            RecoverError::DuplicateDevidDuringReplay { devid, members } => {
+                assert_eq!(devid, 2);
+                assert_eq!(members.len(), 2);
+            }
+            RecoverError::Failed(message) => {
+                panic!("expected DuplicateDevidDuringReplay, got Failed({message:?})");
+            }
+            other => panic!("expected DuplicateDevidDuringReplay, got {other:?}"),
+        }
+        assert!(f.paths.pending_op_json().exists());
+    }
+
+    // Intent
+    // RemoveMissing::PoolMutation recovery bridges a missing journaled devid
+    // binding to RecoverError::NoMemberForJournaledDevid.
+    //
+    // Why it exists
+    // The corruption signal must stay typed after crossing the
+    // live_pool_matches_membership call site, not collapse to
+    // RecoverError::Failed.
+    //
+    // Scenario
+    // Recovery sees devid 99 still missing, but the journaled pre-membership
+    // snapshot only binds devids 1 and 2.
+    #[test]
+    fn bridges_no_member_for_devid_to_typed_recover_error() {
+        let f = PoolFixture::empty();
+        let mut journal = remove_missing_journal();
+        journal.op = OpKind::RemoveMissing {
+            phase: journal::RemoveMissingPhase::PoolMutation,
+            devid: 99,
+            restore_raid1_after_commit: true,
+        };
+        journal::write_journal(&f.paths, &journal).unwrap();
+        let mut pool = pool_state_disk1_with_missing_devid2();
+        pool.missing_devids = vec![99];
+        let params = f.recover_params().build();
+
+        let err = execute_remove_missing_pool_mutation_recovery(
+            &MockRunner::default(),
+            &MockByIdResolver::default(),
+            &params,
+            &journal,
+            pool,
+            99,
+            true,
+        )
+        .unwrap_err();
+
+        match err {
+            RecoverError::NoMemberForJournaledDevid { devid } => {
+                assert_eq!(devid, 99);
+            }
+            RecoverError::Failed(message) => {
+                panic!("expected NoMemberForJournaledDevid, got Failed({message:?})");
+            }
+            other => panic!("expected NoMemberForJournaledDevid, got {other:?}"),
+        }
+        assert!(f.paths.pending_op_json().exists());
+    }
+
     #[test]
     fn plan_recover_discovers_add_targets_before_mount_planning() {
         let f = PoolFixture::empty();
