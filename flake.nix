@@ -509,6 +509,11 @@
               braid = linuxCrane.braid;
             }
           );
+          recover-add-mixed-batch = pkgs.testers.nixosTest (
+            import ./tests/cli/recover-add-mixed-batch.nix {
+              braid = linuxCrane.braid;
+            }
+          );
           recover-replace-existing-luks-enroll = pkgs.testers.nixosTest (
             import ./tests/cli/recover-replace-existing-luks-enroll.nix {
               braid = linuxCrane.braid;
