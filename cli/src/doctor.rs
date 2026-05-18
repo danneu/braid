@@ -587,11 +587,20 @@ fn check_profile_mismatch<R: CommandRunner>(
                         format_bytes(entry.bg_total),
                     ));
                 }
+                let suggestion = match preflight::probe_missing_devids(ctx.runner, &mount_point) {
+                    Ok(missing) if !missing.is_empty() => {
+                        "pool is degraded -- replace missing device(s) first, then rebalance"
+                            .to_owned()
+                    }
+                    _ => format!(
+                        "run: btrfs balance start -dconvert=raid1,soft -mconvert=raid1,soft {mount_point}"
+                    ),
+                };
                 CheckResult::warn(
                     check_name,
                     format!(
-                        "mixed {type_label} profiles ({}); run: btrfs balance start -dconvert=raid1,soft -mconvert=raid1,soft {mount_point}",
-                        parts.join(", "),
+                        "mixed {type_label} profiles ({}); {suggestion}",
+                        parts.join(", ")
                     ),
                 )
             }
@@ -1927,6 +1936,84 @@ mod tests {
         );
     }
 
+    // Intent: data_profile_mismatch routes to replace-first language on a degraded pool.
+    // Why it exists: braid's invariant is replace/repair first, then run the soft
+    //   RAID1 balance to drain single-profile chunks written during degraded
+    //   operation (docs/principles.md:21; tests/repro/degraded-soft-balance.py).
+    //   The mixed-profile warning's balance suggestion contradicts that order on a
+    //   degraded pool; this test pins the routing that keeps the two messages aligned.
+    // Scenario: a 2-disk RAID1 lost a disk; new chunks were allocated as `single`
+    //   while degraded. doctor reports the mixed profile and must tell the operator
+    //   to replace before balancing.
+    #[test]
+    fn data_profile_mismatch_recommends_replace_when_degraded() {
+        let (mp_req, mp_out) = mountpoint_ok();
+        let (df_req, df_out) = df_json(DF_MIXED);
+        let (du_req, du_out) = device_usage_with_missing();
+        let runner = MockRunner::default()
+            .with_output(mp_req, mp_out)
+            .with_output(df_req, df_out)
+            .with_output(du_req, du_out);
+        let f = write_temp(valid_config_json());
+        let report = run_doctor(f.path(), &runner, &isolated_paths().1, human_options());
+        let check = find_check(&report, "data_profile_mismatch");
+        assert_eq!(check.status, CheckStatus::Warn);
+        assert!(check.message.contains("mixed"), "{}", check.message);
+        assert!(
+            check.message.contains("degraded"),
+            "expected degraded language: {}",
+            check.message,
+        );
+        assert!(
+            check.message.contains("replace"),
+            "expected replace recommendation: {}",
+            check.message,
+        );
+        assert!(
+            !check.message.contains("btrfs balance"),
+            "must not recommend balance on degraded pool: {}",
+            check.message,
+        );
+    }
+
+    // Intent: a mixed profile on a healthy pool still recommends the soft RAID1 balance.
+    // Why it exists: pins the Ok(empty) probe branch. Without this, the new
+    //   routing logic could regress into always emitting the degraded message,
+    //   and the existing `data_profile_mixed_warns` would not catch it because
+    //   that test exercises the Err fallback by leaving BtrfsDeviceUsageRaw unmocked.
+    // Scenario: operator interrupted a balance midway; mixed profiles exist but
+    //   all members are present. doctor should still recommend the balance.
+    #[test]
+    fn data_profile_mismatch_recommends_balance_when_healthy() {
+        let (mp_req, mp_out) = mountpoint_ok();
+        let (df_req, df_out) = df_json(DF_MIXED);
+        let (du_req, du_out) = device_usage_healthy();
+        let runner = MockRunner::default()
+            .with_output(mp_req, mp_out)
+            .with_output(df_req, df_out)
+            .with_output(du_req, du_out);
+        let f = write_temp(valid_config_json());
+        let report = run_doctor(f.path(), &runner, &isolated_paths().1, human_options());
+        let check = find_check(&report, "data_profile_mismatch");
+        assert_eq!(check.status, CheckStatus::Warn);
+        assert!(check.message.contains("mixed"), "{}", check.message);
+        assert!(
+            check.message.contains("-dconvert=raid1,soft"),
+            "expected soft balance suggestion on healthy pool: {}",
+            check.message,
+        );
+        assert!(
+            !check.message.contains("degraded"),
+            "healthy pool must not be labeled degraded: {}",
+            check.message,
+        );
+        assert!(
+            !check.message.contains("replace"),
+            "healthy pool must not recommend replace: {}",
+            check.message,
+        );
+    }
+
     #[test]
     fn data_profile_global_reserve_single_not_warned() {
         // GlobalReserve is always "single" — must not trigger mismatch
@@ -2132,6 +2219,43 @@ mod tests {
             check.message.contains("-dconvert=raid1,soft"),
             "expected soft flag in suggestion: {}",
             check.message
+        );
+    }
+
+    // Intent: metadata_profile_mismatch routes to replace-first language on a degraded pool.
+    // Why it exists: metadata mismatch on a degraded pool follows the same
+    //   replace-first invariant; this test pins the parallel routing.
+    // Scenario: a 2-disk RAID1 lost a disk; new chunks were allocated as `single`
+    //   while degraded. doctor reports the mixed profile and must tell the operator
+    //   to replace before balancing.
+    #[test]
+    fn metadata_profile_mismatch_recommends_replace_when_degraded() {
+        let (mp_req, mp_out) = mountpoint_ok();
+        let (df_req, df_out) = df_json(DF_MIXED_METADATA);
+        let (du_req, du_out) = device_usage_with_missing();
+        let runner = MockRunner::default()
+            .with_output(mp_req, mp_out)
+            .with_output(df_req, df_out)
+            .with_output(du_req, du_out);
+        let f = write_temp(valid_config_json());
+        let report = run_doctor(f.path(), &runner, &isolated_paths().1, human_options());
+        let check = find_check(&report, "metadata_profile_mismatch");
+        assert_eq!(check.status, CheckStatus::Warn);
+        assert!(check.message.contains("mixed"), "{}", check.message);
+        assert!(
+            check.message.contains("degraded"),
+            "expected degraded language: {}",
+            check.message,
+        );
+        assert!(
+            check.message.contains("replace"),
+            "expected replace recommendation: {}",
+            check.message,
+        );
+        assert!(
+            !check.message.contains("btrfs balance"),
+            "must not recommend balance on degraded pool: {}",
+            check.message,
         );
     }
 
