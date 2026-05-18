@@ -243,6 +243,11 @@ pub(crate) fn monitor_fs_btrfs() -> impl Filesystem {
     }
 }
 
+/// Mountinfo with no entry for the configured target -- monitor's legitimate-offline branch.
+pub(crate) fn monitor_fs_not_mounted() -> impl Filesystem {
+    MonitorFs { mountinfo: Ok("") }
+}
+
 /// Mounted non-btrfs filesystem surface for the NotBtrfs monitor branch.
 pub(crate) fn monitor_fs_ext4() -> impl Filesystem {
     MonitorFs {

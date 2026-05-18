@@ -162,7 +162,7 @@ mod tests {
     use crate::test_fixtures::{
         MonitorOverride, MonitorReconcileRunner, MonitorTestRunner,
         assert_monitor_single_computation_error, isolated_paths, monitor_fs_btrfs, monitor_fs_ext4,
-        monitor_fs_mountinfo_error, monitor_mp,
+        monitor_fs_mountinfo_error, monitor_fs_not_mounted, monitor_mp,
     };
 
     fn acked_disk(missing_acked: bool, read_io_errs: u64) -> alert::AckedDisk {
@@ -592,6 +592,38 @@ mod tests {
         let runner = MonitorTestRunner::with_stale_mapper_stats();
 
         let result = cmd_monitor(&runner, &monitor_fs_ext4(), &monitor_mp(), &paths);
+
+        assert_eq!(result, MonitorResult::PoolOffline);
+        assert!(
+            !paths.alert_latch_json().exists(),
+            "PoolOffline must not write an alert latch"
+        );
+    }
+
+    /*
+     * Intent: When `/proc/self/mountinfo` is well-formed but has no entry
+     * for the configured mount point, cmd_monitor must return
+     * MonitorResult::PoolOffline and leave no alert latch behind.
+     *
+     * Why it exists: pins the only other non-fail-closed arm besides
+     * NotBtrfs. ADR 014 distinguishes this case (legitimate offline,
+     * exit 0) from any mountinfo IO/malformed/duplicate failure
+     * (ProbeError::MountInfo, fail-closed, exit 1). The probe layer is
+     * already pinned by probe_pool_alerts_unmounted, but no integration
+     * test pins how cmd_monitor classifies the Ok(p) + pool.mounted=false
+     * branch -- an over-eager refactor that drops the `if !pool.mounted`
+     * early return or flips the probe's None arm to Err would compile
+     * clean and start the beeper on every offline timer cycle.
+     *
+     * Scenario: the NAS has booted but the encrypted pool has not been
+     * unlocked or mounted yet, so mountinfo has no /mnt/storage entry.
+     */
+    #[test]
+    fn monitor_classifies_unmounted_as_offline() {
+        let (_dir, paths) = isolated_paths();
+        let runner = MonitorTestRunner::with_stale_mapper_stats();
+
+        let result = cmd_monitor(&runner, &monitor_fs_not_mounted(), &monitor_mp(), &paths);
 
         assert_eq!(result, MonitorResult::PoolOffline);
         assert!(

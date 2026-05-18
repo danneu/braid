@@ -176,7 +176,7 @@ pub(crate) use lock::{
 pub(crate) use monitor::{
     MonitorOverride, MonitorReconcileRunner, MonitorTestRunner,
     assert_monitor_single_computation_error, monitor_fs_btrfs, monitor_fs_ext4,
-    monitor_fs_mountinfo_error, monitor_mp,
+    monitor_fs_mountinfo_error, monitor_fs_not_mounted, monitor_mp,
 };
 pub(crate) use mount::{
     MOUNT_TEST_PASSPHRASE_BYTES, NoopSleeper, arbitrary_fallback, base_two_disk_runner,
