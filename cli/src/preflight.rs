@@ -130,6 +130,17 @@ pub(crate) enum ExclusiveOpError {
     Unrecognized(String),
 }
 
+/// Shared sysfs reader so policy preflight and host-wide scans classify the
+/// kernel state through the same path, trim, and parser contract.
+fn read_exclop_for_fsid<F: Filesystem + ?Sized>(
+    fs: &F,
+    fsid: &str,
+) -> Result<Option<ExclusiveOp>, ExclusiveOpError> {
+    let path = format!("/sys/fs/btrfs/{fsid}/exclusive_operation");
+    let contents = fs.read_to_string(&path).map_err(ExclusiveOpError::Read)?;
+    ExclusiveOp::parse(contents.trim()).map_err(ExclusiveOpError::Unrecognized)
+}
+
 /// How to handle `/sys/fs/btrfs/<fsid>/exclusive_operation` when it is not
 /// `none`.
 enum ExclusiveOpPolicy {
@@ -163,38 +174,20 @@ fn check_exclusive_op_with_policy<F: Filesystem + ?Sized>(
     fsid: &str,
     policy: ExclusiveOpPolicy,
 ) -> Result<Option<ExclusiveOp>, String> {
-    match check_no_exclusive_op(fs, fsid) {
-        Ok(()) => Ok(None),
-        Err(ExclusiveOpError::Busy(op)) => match policy {
-            ExclusiveOpPolicy::RejectAnyBusy => Err(format!(
-                "cannot lock: {op} is in progress. Wait for it to finish first."
-            )),
-            ExclusiveOpPolicy::RejectPausedBalanceElseEnqueue => match op {
-                ExclusiveOp::BalancePaused => {
-                    Err("a btrfs balance is paused. Resume or cancel it before proceeding.".into())
-                }
-                _ => Ok(Some(op)),
-            },
+    let op = match read_exclop_for_fsid(fs, fsid).map_err(|e| e.to_string())? {
+        None => return Ok(None),
+        Some(op) => op,
+    };
+    match policy {
+        ExclusiveOpPolicy::RejectAnyBusy => Err(format!(
+            "cannot lock: {op} is in progress. Wait for it to finish first."
+        )),
+        ExclusiveOpPolicy::RejectPausedBalanceElseEnqueue => match op {
+            ExclusiveOp::BalancePaused => {
+                Err("a btrfs balance is paused. Resume or cancel it before proceeding.".into())
+            }
+            _ => Ok(Some(op)),
         },
-        Err(e) => Err(e.to_string()),
-    }
-}
-
-/// Check `/sys/fs/btrfs/{fsid}/exclusive_operation` for an active exclusive op.
-///
-/// Returns `Ok(())` if the sysfs file reads `"none"`.
-/// Returns `Err(Busy(op))` for any other recognized state.
-/// Fail-closed: unrecognized values and read errors are errors.
-pub(crate) fn check_no_exclusive_op<F: Filesystem + ?Sized>(
-    fs: &F,
-    fsid: &str,
-) -> Result<(), ExclusiveOpError> {
-    let path = format!("/sys/fs/btrfs/{fsid}/exclusive_operation");
-    let contents = fs.read_to_string(&path).map_err(ExclusiveOpError::Read)?;
-    match ExclusiveOp::parse(contents.trim()) {
-        Ok(None) => Ok(()),
-        Ok(Some(op)) => Err(ExclusiveOpError::Busy(op)),
-        Err(s) => Err(ExclusiveOpError::Unrecognized(s)),
     }
 }
 
@@ -240,13 +233,9 @@ pub(crate) fn check_any_btrfs_exclusive_op<F: Filesystem + ?Sized>(
         if BTRFS_SYSFS_NON_FSID_ENTRIES.contains(&entry.as_str()) {
             continue;
         }
-        let path = format!("/sys/fs/btrfs/{entry}/exclusive_operation");
-        let contents = fs.read_to_string(&path).map_err(ExclusiveOpError::Read)?;
         found_fsid_dir = true;
-        match ExclusiveOp::parse(contents.trim()) {
-            Ok(None) => continue,
-            Ok(Some(op)) => return Err(ExclusiveOpError::Busy(op)),
-            Err(s) => return Err(ExclusiveOpError::Unrecognized(s)),
+        if let Some(op) = read_exclop_for_fsid(fs, &entry)? {
+            return Err(ExclusiveOpError::Busy(op));
         }
     }
     if !found_fsid_dir {
@@ -673,82 +662,6 @@ mod tests {
             "balance (paused)"
         );
         assert_eq!(format!("{}", ExclusiveOp::DeviceRemove), "device remove");
-    }
-
-    // --- check_no_exclusive_op tests ---
-
-    #[test]
-    // Intent: check_no_exclusive_op passes when sysfs reports "none".
-    // Why: Confirms the happy path doesn't block valid operations.
-    // Scenario: Operator runs a command while the pool is idle.
-    fn exclusive_op_passes_when_none() {
-        let fs = MockFs::with_sysfs(FSID, "none\n");
-        assert!(check_no_exclusive_op(&fs, FSID).is_ok());
-    }
-
-    #[test]
-    // Intent: check_no_exclusive_op returns Busy when a balance is running.
-    // Why: Callers need to distinguish active ops to decide wait-vs-error.
-    // Scenario: Operator tries a command while a RAID1 balance is in progress.
-    fn exclusive_op_busy_when_balance_running() {
-        let fs = MockFs::with_sysfs(FSID, "balance\n");
-        match check_no_exclusive_op(&fs, FSID) {
-            Err(ExclusiveOpError::Busy(ExclusiveOp::Balance)) => {}
-            other => panic!("expected Busy(Balance), got: {other:?}"),
-        }
-    }
-
-    #[test]
-    // Intent: check_no_exclusive_op returns Busy(BalancePaused) for paused balance.
-    // Why: A paused balance never clears on its own — callers must hard-error,
-    //   not enqueue (which would hang forever).
-    // Scenario: Operator paused a balance and forgot, then tries `braid add`.
-    fn exclusive_op_busy_when_balance_paused() {
-        let fs = MockFs::with_sysfs(FSID, "balance paused\n");
-        match check_no_exclusive_op(&fs, FSID) {
-            Err(ExclusiveOpError::Busy(ExclusiveOp::BalancePaused)) => {}
-            other => panic!("expected Busy(BalancePaused), got: {other:?}"),
-        }
-    }
-
-    #[test]
-    // Intent: check_no_exclusive_op returns Busy for device operations.
-    // Why: Covers the non-balance exclusive ops that the old balance-only
-    //   check could not detect.
-    // Scenario: A device remove is in progress when operator tries `braid add`.
-    fn exclusive_op_busy_when_device_remove() {
-        let fs = MockFs::with_sysfs(FSID, "device remove\n");
-        match check_no_exclusive_op(&fs, FSID) {
-            Err(ExclusiveOpError::Busy(ExclusiveOp::DeviceRemove)) => {}
-            other => panic!("expected Busy(DeviceRemove), got: {other:?}"),
-        }
-    }
-
-    #[test]
-    // Intent: check_no_exclusive_op errors on unrecognized sysfs value.
-    // Why: Fail-closed — unknown state is treated as an error.
-    // Scenario: Kernel version introduces a new exclusive op type.
-    fn exclusive_op_unrecognized_value() {
-        let fs = MockFs::with_sysfs(FSID, "something new\n");
-        match check_no_exclusive_op(&fs, FSID) {
-            Err(ExclusiveOpError::Unrecognized(s)) => {
-                assert_eq!(s, "something new");
-            }
-            other => panic!("expected Unrecognized, got: {other:?}"),
-        }
-    }
-
-    #[test]
-    // Intent: check_no_exclusive_op errors when sysfs file can't be read.
-    // Why: Fail-closed — if we can't determine state, refusing is safer than
-    //   proceeding and potentially starting a conflicting exclusive op.
-    // Scenario: sysfs not available (container, broken mount).
-    fn exclusive_op_read_failure() {
-        let fs = MockFs::empty();
-        match check_no_exclusive_op(&fs, FSID) {
-            Err(ExclusiveOpError::Read(_)) => {}
-            other => panic!("expected Read error, got: {other:?}"),
-        }
     }
 
     fn mountinfo_for_target(vfs_options: &str, fs_options: &str) -> String {
@@ -1358,6 +1271,37 @@ mod tests {
         assert!(
             err.contains("balance (paused)") && err.contains("in progress"),
             "expected 'balance (paused)' + 'in progress' in: {err}"
+        );
+    }
+
+    #[test]
+    // Intent: require_lock_preflight rejects when sysfs is unreadable.
+    // Why: Fail-closed -- if we cannot determine kernel state, lock teardown
+    //   must not proceed and risk unmounting mid exclusive-op.
+    // Scenario: /sys/fs/btrfs/{fsid}/exclusive_operation cannot be read
+    //   (for example, namespace/sandbox without sysfs or permission denied).
+    fn lock_preflight_rejects_on_sysfs_read_failure() {
+        let fs = MockFs::empty();
+        let err = require_lock_preflight(&fs, FSID).unwrap_err();
+        assert!(
+            err.contains("cannot read exclusive operation status"),
+            "expected read-failure error, got: {err}"
+        );
+    }
+
+    #[test]
+    // Intent: require_lock_preflight rejects when sysfs reports a value the
+    //   parser does not recognize.
+    // Why: Fail-closed -- a future kernel that adds a new exclop name must not
+    //   silently allow lock teardown. Pins the parser-error to caller-facing
+    //   string wiring at the boundary that actually matters for callers.
+    // Scenario: New btrfs version writes a value not in exclop_def[].
+    fn lock_preflight_rejects_on_unrecognized_value() {
+        let fs = MockFs::with_sysfs(FSID, "brand new op\n");
+        let err = require_lock_preflight(&fs, FSID).unwrap_err();
+        assert!(
+            err.contains("unrecognized exclusive operation"),
+            "expected unrecognized-value error, got: {err}"
         );
     }
 
