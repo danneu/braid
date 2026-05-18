@@ -3,12 +3,13 @@
 
 use super::shared::{PoolFixture, disk_member_with, mock_ok};
 use crate::cmd::{CmdRequest, MockRunner};
+use crate::config::mapper_name;
 use crate::inhibit::RecordingInhibitor;
 use crate::membership::{self, PoolMembership};
 use crate::progress::{self, ProgressOutput};
 use crate::remove::RemoveParams;
 use crate::state_paths::StatePaths;
-use crate::types::{LuksUuid, MapperName, PoolDevice};
+use crate::types::{DiskName, LuksUuid, PoolDevice};
 use std::path::Path;
 
 const TWO_DISK_SHOW: &str = "Label: none  uuid: cc86845b-aec3-408e-bef5-553affc1f2b1\n\
@@ -253,11 +254,13 @@ pub(crate) fn target_device(name: &str) -> PoolDevice {
     let disk = name.strip_prefix("disk").unwrap_or(name);
     let devid = disk.parse().unwrap_or(1);
     let uuid_raw = luks_uuid_for_disk_name(name).unwrap_or("00000000-0000-0000-0000-000000000000");
+    let disk_name = DiskName::parse(name).expect("valid fixture disk name");
+    let mapper = mapper_name(&disk_name);
     PoolDevice {
         devid,
-        mapper: MapperName(format!("braid-{name}")),
+        mapper: mapper.clone(),
         luks_uuid: LuksUuid::parse(uuid_raw).expect("valid fixture UUID"),
-        underlying: mapper_underlying(&format!("braid-{name}"))
+        underlying: mapper_underlying(mapper.as_str())
             .unwrap_or("/dev/vda")
             .to_owned(),
     }

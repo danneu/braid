@@ -1,4 +1,4 @@
-use crate::types::{LuksFormatExtraOpts, LuksUuid, MapperName, MountPoint};
+use crate::types::{LuksFormatExtraOpts, LuksLabel, LuksUuid, MapperName, MountPoint};
 use std::os::unix::process::ExitStatusExt;
 use thiserror::Error;
 
@@ -160,7 +160,7 @@ pub enum CmdRequest {
     CryptsetupLuksFormat {
         device: String,
         uuid: LuksUuid,
-        label: String,
+        label: LuksLabel,
         extra_opts: LuksFormatExtraOpts,
     },
     CryptsetupTestPassphrase {
@@ -803,7 +803,7 @@ impl CmdRequest {
                     "--uuid".into(),
                     uuid.as_str().to_owned(),
                     "--label".into(),
-                    label.clone(),
+                    label.as_str().to_owned(),
                 ];
                 for opt in extra_opts.as_slice() {
                     args.push(opt.clone());
@@ -1523,6 +1523,7 @@ impl CommandRunner for MockRunner {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::types::DiskName;
 
     // Test-module seed allocation: cli/src/cmd.rs uses 300-399 so it does
     // not clash with membership.rs (100-199), luks.rs (200), or
@@ -1539,6 +1540,14 @@ mod tests {
     fn extras_from(tokens: &[&str]) -> LuksFormatExtraOpts {
         let owned: Vec<String> = tokens.iter().map(|t| (*t).to_owned()).collect();
         LuksFormatExtraOpts::parse(&owned).expect("extras parse")
+    }
+
+    fn disk(name: &str) -> DiskName {
+        DiskName::parse(name).expect("test disk name")
+    }
+
+    fn luks_label(name: &str) -> LuksLabel {
+        LuksLabel::for_disk(&disk(name))
     }
 
     #[test]
@@ -2171,7 +2180,7 @@ mod tests {
         let req = CmdRequest::CryptsetupLuksFormat {
             device: "/dev/vda".to_owned(),
             uuid: test_uuid(300),
-            label: "braid-test".to_owned(),
+            label: luks_label("test"),
             extra_opts: empty_extras(),
         };
         let result = runner.run(&req);
@@ -2203,7 +2212,7 @@ mod tests {
         let req = CmdRequest::CryptsetupLuksFormat {
             device: "/dev/vda".to_owned(),
             uuid: test_uuid(301),
-            label: "braid-test".to_owned(),
+            label: luks_label("test"),
             extra_opts: extras_from(&["--pbkdf", "pbkdf2"]),
         };
         let mock = MockRunner::default().with_output_stdin(
@@ -2700,7 +2709,7 @@ mod tests {
         let s = CmdRequest::CryptsetupLuksFormat {
             device: "/dev/disk/by-id/disk1".to_owned(),
             uuid: uuid.clone(),
-            label: "braid-aaa".to_owned(),
+            label: luks_label("aaa"),
             extra_opts: extras_from(&["--use-random"]),
         }
         .to_argv()
@@ -2724,7 +2733,7 @@ mod tests {
                 commands: vec![CmdRequest::CryptsetupLuksFormat {
                     device: "/dev/disk/by-id/disk1".to_owned(),
                     uuid: test_uuid(303),
-                    label: "braid-aaa".to_owned(),
+                    label: luks_label("aaa"),
                     extra_opts: empty_extras(),
                 }],
             },
@@ -2924,7 +2933,7 @@ mod tests {
         let cmd = CmdRequest::CryptsetupLuksFormat {
             device: "/dev/disk/by-id/disk1".to_owned(),
             uuid: uuid.clone(),
-            label: "braid-disk1".to_owned(),
+            label: luks_label("disk1"),
             extra_opts: empty_extras(),
         }
         .to_argv();
@@ -3066,7 +3075,7 @@ mod tests {
         let cmd = CmdRequest::CryptsetupLuksFormat {
             device: "/dev/disk/by-id/disk1".to_owned(),
             uuid: uuid.clone(),
-            label: "braid-disk1".to_owned(),
+            label: luks_label("disk1"),
             extra_opts: empty_extras(),
         }
         .to_argv();
@@ -3106,7 +3115,7 @@ mod tests {
         let cmd = CmdRequest::CryptsetupLuksFormat {
             device: "/dev/disk/by-id/disk2".to_owned(),
             uuid: uuid.clone(),
-            label: "braid-disk2".to_owned(),
+            label: luks_label("disk2"),
             extra_opts: extras_from(&["--use-random"]),
         }
         .to_argv();

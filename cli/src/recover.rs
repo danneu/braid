@@ -369,7 +369,7 @@ impl RecoverWorkAction {
 
                 let forget_devs: Vec<String> = close_names
                     .iter()
-                    .map(|name| format!("/dev/mapper/{}", config::mapper_name(name.as_str()).0))
+                    .map(|name| format!("/dev/mapper/{}", config::mapper_name(name).0))
                     .collect();
                 if !forget_devs.is_empty() {
                     steps.push(Step {
@@ -382,7 +382,7 @@ impl RecoverWorkAction {
                 }
 
                 for name in close_names {
-                    let mn = config::mapper_name(name.as_str());
+                    let mn = config::mapper_name(name);
                     steps.push(Step {
                         risk: "safe",
                         description: format!("close LUKS mapper {} (recover remount cycle)", mn),
@@ -396,7 +396,7 @@ impl RecoverWorkAction {
                         .by_name(name)
                         .map(|(_, m)| m)
                         .expect("remount-cycle reopen target validated during planning");
-                    let mn = config::mapper_name(name.as_str());
+                    let mn = config::mapper_name(name);
                     steps.push(Step {
                         risk: "safe",
                         description: format!(
@@ -419,10 +419,8 @@ impl RecoverWorkAction {
                 let first_reopen_name = reopen_names
                     .first()
                     .expect("remount-cycle mount target validated during planning");
-                let mount_device = format!(
-                    "/dev/mapper/{}",
-                    config::mapper_name(first_reopen_name.as_str()).0
-                );
+                let mount_device =
+                    format!("/dev/mapper/{}", config::mapper_name(first_reopen_name).0);
                 if *any_missing_member {
                     steps.push(Step {
                         risk: "safe",
@@ -765,7 +763,7 @@ fn render_add_pool_mutation_recovery_steps(
     sorted.sort_by(|a, b| a.1.name.cmp(&b.1.name));
 
     for (uuid, target) in sorted {
-        let mapper = config::mapper_name(target.name.as_str());
+        let mapper = config::mapper_name(&target.name);
         let mapper_path = format!("/dev/mapper/{}", mapper.0);
         if live_uuids.is_some_and(|live| live.contains(uuid)) {
             let (kind, label) = match &target.mode {
@@ -834,11 +832,11 @@ fn render_add_pool_mutation_recovery_steps(
                 extra_opts,
                 enroll_key_file,
             } => {
-                let label = format!("braid-{}", target.name);
+                let label = config::luks_label_for(&target.name);
                 let mut commands = vec![CmdRequest::CryptsetupLuksFormat {
                     device: target.by_id.as_str().to_owned(),
                     uuid: uuid.clone(),
-                    label: label.clone(),
+                    label,
                     extra_opts: extra_opts.clone(),
                 }];
                 if let Some(key_file) = enroll_key_file {
@@ -862,9 +860,9 @@ fn render_add_pool_mutation_recovery_steps(
                     mount_point: plan.mount_point.clone(),
                     force: false,
                 });
+                let expected_label = config::luks_label_for(&target.name);
                 let fresh_conditional_suffix = format!(
-                    "{conditional_suffix} (the LUKS format command is also skipped at runtime if the disk already shows a LUKS header with the journaled UUID and the 'braid-{}' label)",
-                    target.name
+                    "{conditional_suffix} (the LUKS format command is also skipped at runtime if the disk already shows a LUKS header with the journaled UUID and the '{expected_label}' label)"
                 );
                 steps.push(Step {
                     risk: "destructive",
@@ -1008,10 +1006,7 @@ fn execute_recover_initial_open<R: CommandRunner + Sync, F: Filesystem + ?Sized>
                 && let journal::OpKind::Add { targets, .. } = &plan.journal.op
             {
                 let all_no_btrfs = targets.iter().all(|(_, target)| {
-                    let mapper = format!(
-                        "/dev/mapper/{}",
-                        config::mapper_name(target.name.as_str()).0
-                    );
+                    let mapper = format!("/dev/mapper/{}", config::mapper_name(&target.name).0);
                     match runner.run(&CmdRequest::BtrfsFilesystemShowTarget { target: mapper }) {
                         Ok(raw) => matches!(classify_btrfs_probe(&raw), DeviceBtrfsProbe::NoBtrfs),
                         Err(_) => false,
@@ -1318,7 +1313,7 @@ pub fn plan_recover<R: CommandRunner + Sync, F: Filesystem + ?Sized>(
             if cycle_reopen_names.contains(name) {
                 return Some(name.clone());
             }
-            let mapper_path = format!("/dev/mapper/{}", config::mapper_name(name.as_str()).0);
+            let mapper_path = format!("/dev/mapper/{}", config::mapper_name(name).0);
             fs.exists(&mapper_path).then(|| name.clone())
         })
         .collect();
@@ -2120,7 +2115,7 @@ fn discover_add_targets_before_mount<R: CommandRunner, F: Filesystem + ?Sized>(
                 }
             }
             journal::AddJournalMode::FreshLuks { .. } => {
-                let expected_label = format!("braid-{}", target.name);
+                let expected_label = config::luks_label_for(&target.name);
                 if label.as_deref() != Some(expected_label.as_str()) {
                     continue;
                 }
@@ -2152,14 +2147,14 @@ fn discover_add_targets_before_mount<R: CommandRunner, F: Filesystem + ?Sized>(
             )?;
             luks::ensure_luks_open(
                 runner,
-                target.name.as_str(),
+                &target.name,
                 &target.by_id,
                 params.backing_path_resolver,
                 passphrase,
             )?;
         }
 
-        let mapper = config::mapper_name(target.name.as_str());
+        let mapper = config::mapper_name(&target.name);
         scan_mapper_if_btrfs_visible(runner, &format!("/dev/mapper/{}", mapper.0))?;
     }
 
@@ -2217,7 +2212,7 @@ fn verify_recover_passphrase_for_add_replay<R: CommandRunner, F: Filesystem + ?S
                 }
             }
             journal::AddJournalMode::FreshLuks { .. } => {
-                let expected_label = format!("braid-{}", target.name);
+                let expected_label = config::luks_label_for(&target.name);
                 if label.as_deref() != Some(expected_label.as_str()) {
                     return Err(RecoverError::Failed(format!(
                         "recover add target '{}' has unexpected LUKS label",
@@ -2440,7 +2435,7 @@ fn execute_add_pool_mutation_recovery<R: CommandRunner + Sync, F: Filesystem + ?
                 }
                 journal::AddJournalMode::RecoverableBraidLabeled { .. } => {}
                 journal::AddJournalMode::FreshLuks { .. } => {
-                    let expected_label = format!("braid-{}", target.name);
+                    let expected_label = config::luks_label_for(&target.name);
                     if label.as_deref() != Some(expected_label.as_str()) {
                         continue;
                     }
@@ -2465,13 +2460,13 @@ fn execute_add_pool_mutation_recovery<R: CommandRunner + Sync, F: Filesystem + ?
                     .expect("passphrase was resolved above");
                 luks::ensure_luks_open(
                     runner,
-                    target.name.as_str(),
+                    &target.name,
                     &target.by_id,
                     params.backing_path_resolver,
                     passphrase,
                 )?;
             }
-            let mapper = config::mapper_name(target.name.as_str());
+            let mapper = config::mapper_name(&target.name);
             if scan_mapper_if_btrfs_visible(runner, &format!("/dev/mapper/{}", mapper.0))? {
                 opened_or_scanned = true;
             }
@@ -2502,7 +2497,7 @@ fn execute_add_pool_mutation_recovery<R: CommandRunner + Sync, F: Filesystem + ?
             if live_member_uuids(&pool).contains(target_uuid) {
                 continue;
             }
-            let mapper = config::mapper_name(target.name.as_str());
+            let mapper = config::mapper_name(&target.name);
             let mapper_path = format!("/dev/mapper/{}", mapper.0);
             match &target.mode {
                 journal::AddJournalMode::RecoverableBraidLabeled {
@@ -2534,7 +2529,7 @@ fn execute_add_pool_mutation_recovery<R: CommandRunner + Sync, F: Filesystem + ?
                     if !mapper_open {
                         luks::ensure_luks_open(
                             runner,
-                            target.name.as_str(),
+                            &target.name,
                             &target.by_id,
                             params.backing_path_resolver,
                             passphrase.expose_secret(),
@@ -2582,7 +2577,7 @@ fn execute_add_pool_mutation_recovery<R: CommandRunner + Sync, F: Filesystem + ?
                         &target.by_id,
                         params.backing_path_resolver,
                     )?;
-                    let expected_label = format!("braid-{}", target.name);
+                    let expected_label = config::luks_label_for(&target.name);
                     match probed.state {
                         ConfigDiskState::PresentNotLuks => {
                             luks::luks_format(
@@ -2631,7 +2626,7 @@ fn execute_add_pool_mutation_recovery<R: CommandRunner + Sync, F: Filesystem + ?
                     luks::backup_luks_header(runner, target.by_id.as_str(), &mapper, params.paths)?;
                     luks::ensure_luks_open(
                         runner,
-                        target.name.as_str(),
+                        &target.name,
                         &target.by_id,
                         params.backing_path_resolver,
                         passphrase.expose_secret(),
@@ -3042,7 +3037,7 @@ fn finish_uncommitted_replace_recovery<R: CommandRunner + Sync, F: Filesystem + 
                     passphrase.expose_secret(),
                     key_file,
                 )?;
-                let mapper = config::mapper_name(new_name.as_str());
+                let mapper = config::mapper_name(new_name);
                 luks::backup_luks_header(runner, new_target.by_id.as_str(), &mapper, params.paths)?;
             }
 
@@ -3060,7 +3055,7 @@ fn finish_uncommitted_replace_recovery<R: CommandRunner + Sync, F: Filesystem + 
                 &new_target.by_id,
                 params.backing_path_resolver,
             )?;
-            let expected_label = format!("braid-{new_name}");
+            let expected_label = config::luks_label_for(new_name);
             match probed.state {
                 ConfigDiskState::PresentNotLuks => {
                     membership::save_membership(&journal.pre_membership, params.paths)?;
@@ -3104,7 +3099,7 @@ fn finish_uncommitted_replace_recovery<R: CommandRunner + Sync, F: Filesystem + 
                             key_file,
                         )?;
                     }
-                    let mapper = config::mapper_name(new_name.as_str());
+                    let mapper = config::mapper_name(new_name);
                     luks::backup_luks_header(
                         runner,
                         new_target.by_id.as_str(),
@@ -3519,7 +3514,7 @@ fn relock_and_remount<R: CommandRunner, F: Filesystem + ?Sized>(
     //    needs to cover the mappers this cycle will close.
     let forget_devs: Vec<String> = close_names
         .iter()
-        .map(|name| format!("/dev/mapper/{}", config::mapper_name(name.as_str()).0))
+        .map(|name| format!("/dev/mapper/{}", config::mapper_name(name).0))
         .filter(|p| fs.exists(p))
         .collect();
     if !forget_devs.is_empty() {
@@ -3543,7 +3538,7 @@ fn relock_and_remount<R: CommandRunner, F: Filesystem + ?Sized>(
     //    (not just unmounted) for the next mount to bypass the kernel's
     //    stale fs_devices cache.
     for name in close_names {
-        let mn = config::mapper_name(name.as_str());
+        let mn = config::mapper_name(name);
         let mapper_path = format!("/dev/mapper/{}", mn.0);
         if !fs.exists(&mapper_path) {
             continue;
@@ -6681,7 +6676,7 @@ mod tests {
         assert_eq!(
             open_plan.to_unlock,
             vec![(
-                "disk1".to_owned(),
+                disk_name("disk1"),
                 ByIdPath::parse("/dev/disk/by-id/virtio-disk1").unwrap()
             )]
         );
@@ -6797,7 +6792,7 @@ mod tests {
         assert_eq!(
             open_plan.to_unlock,
             vec![(
-                "disk1".to_owned(),
+                disk_name("disk1"),
                 ByIdPath::parse("/dev/disk/by-id/virtio-disk1").unwrap()
             )]
         );
@@ -6918,7 +6913,7 @@ mod tests {
         assert_eq!(
             open_plan.to_unlock,
             vec![(
-                "disk1".to_owned(),
+                disk_name("disk1"),
                 ByIdPath::parse("/dev/disk/by-id/virtio-disk1").unwrap()
             )]
         );
@@ -7020,7 +7015,7 @@ mod tests {
         assert_eq!(
             open_plan.to_unlock,
             vec![(
-                "disk1".to_owned(),
+                disk_name("disk1"),
                 ByIdPath::parse("/dev/disk/by-id/virtio-disk1").unwrap()
             )]
         );
@@ -8564,7 +8559,7 @@ mod tests {
                     CmdRequest::CryptsetupLuksFormat {
                         device: "/dev/disk/by-id/virtio-disk2".into(),
                         uuid: uuid_for_name("disk2"),
-                        label: "braid-disk2".into(),
+                        label: config::luks_label_for(&disk_name("disk2")),
                         extra_opts: LuksFormatExtraOpts::parse(&strip_legacy_managed_format_opts(
                             stored_opts.clone(),
                         ))

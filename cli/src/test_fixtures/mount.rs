@@ -31,7 +31,7 @@ use crate::mount::{
 use crate::probe::Filesystem;
 use crate::progress::Sleeper;
 use crate::secret::Passphrase;
-use crate::types::{ByIdPath, LuksUuid, MapperName, MountPoint};
+use crate::types::{ByIdPath, DiskName, LuksUuid, MapperName, MountPoint};
 use zeroize::Zeroizing;
 
 // ---------------------------------------------------------------------------
@@ -321,11 +321,11 @@ pub(crate) fn direct_two_disk_plan() -> OpenPlan {
     OpenPlan {
         to_unlock: vec![
             (
-                "disk1".to_owned(),
+                DiskName::parse("disk1").expect("test disk name"),
                 ByIdPath::parse("/dev/disk/by-id/virtio-disk1").unwrap(),
             ),
             (
-                "disk2".to_owned(),
+                DiskName::parse("disk2").expect("test disk name"),
                 ByIdPath::parse("/dev/disk/by-id/virtio-disk2").unwrap(),
             ),
         ],

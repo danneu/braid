@@ -37,8 +37,8 @@ pub enum AddPhase {
 /// `OpKind::Add.targets` is the authoritative `LuksUuid` identity; this
 /// struct carries presentation (`name`) and hardware addressing (`by_id`)
 /// plus the per-target mode. `name` is required so replay derives the
-/// mapper as `mapper_name(&target.name)` and the label as
-/// `format!("braid-{name}")` at the call site that builds
+/// mapper via `config::mapper_name` and the label via
+/// `config::luks_label_for` at the call site that builds
 /// `CryptsetupLuksFormat`; the struct itself never stores `luks_uuid`,
 /// `mapper_name`, `label`, or `extra_opts`.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -70,7 +70,7 @@ pub enum AddJournalMode {
         enroll_key_file: Option<PathBuf>,
     },
     /// Fresh `cryptsetup luksFormat` of a non-LUKS or wipeable disk. The
-    /// label is derived as `format!("braid-{name}")` at the format call
+    /// label is derived via `config::luks_label_for` at the format call
     /// site; only the structured `extra_opts` argv slice is journaled.
     FreshLuks {
         extra_opts: LuksFormatExtraOpts,
@@ -136,7 +136,7 @@ pub struct ReplaceJournalTarget {
 #[serde(deny_unknown_fields)]
 pub enum ReplaceJournalMode {
     /// Fresh `cryptsetup luksFormat` of the new disk. Label is derived
-    /// as `format!("braid-{new_name}")` at the format call site; only
+    /// via `config::luks_label_for` at the format call site; only
     /// `extra_opts` is journaled.
     FreshLuks {
         extra_opts: LuksFormatExtraOpts,

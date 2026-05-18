@@ -10,7 +10,7 @@ use crate::preview::{self, NoteLevel, PerDiskStyle, PreviewNote};
 use crate::probe::{self, Filesystem, ProbeError};
 use crate::progress::Sleeper;
 use crate::status_tag::{StatusTag, color_enabled_for_stderr, emit_status, status_line};
-use crate::types::{ByIdPath, ConfigDiskState, MapperName, MountPoint};
+use crate::types::{ByIdPath, ConfigDiskState, DiskName, MapperName, MountPoint};
 use std::path::Path;
 
 #[derive(Debug, thiserror::Error)]
@@ -96,7 +96,7 @@ fn format_degraded_refused(missing: &[(String, MissingReason)], command_hint: &s
 #[derive(Debug)]
 pub struct OpenPlan {
     /// Disks that need LUKS open (name, by_id pairs).
-    pub to_unlock: Vec<(String, ByIdPath)>,
+    pub to_unlock: Vec<(DiskName, ByIdPath)>,
     /// At least one mapper was already open.
     pub any_open: bool,
     /// At least one membership disk was absent/damaged.
@@ -226,11 +226,12 @@ fn plan_open_pool_inner<R: CommandRunner, F: Filesystem + ?Sized>(
     // 2. Probe each membership disk
     let mut to_unlock = Vec::new();
     let mut any_open = false;
-    let mut first_open_mapper: Option<String> = None;
+    let mut first_open_mapper: Option<DiskName> = None;
     let mut missing: Vec<(String, MissingReason)> = Vec::new();
 
     for (expected_uuid, member) in membership.iter_by_name() {
-        let name = member.name.as_str();
+        let disk_name = &member.name;
+        let display_name = disk_name.as_str();
         let probed = probe::probe_config_disk(
             runner,
             fs,
@@ -241,9 +242,9 @@ fn plan_open_pool_inner<R: CommandRunner, F: Filesystem + ?Sized>(
         match &probed.state {
             ConfigDiskState::Absent => {
                 events.push(ProbeEvent::DiskAbsent {
-                    name: name.to_owned(),
+                    name: display_name.to_owned(),
                 });
-                missing.push((name.to_owned(), MissingReason::Unplugged));
+                missing.push((display_name.to_owned(), MissingReason::Unplugged));
             }
             ConfigDiskState::PresentNotLuks => {
                 // Refine PresentNotLuks (luksUuid failed) into Unreadable vs
@@ -264,13 +265,13 @@ fn plan_open_pool_inner<R: CommandRunner, F: Filesystem + ?Sized>(
                 };
                 events.push(match reason {
                     MissingReason::LuksHeaderDamaged => ProbeEvent::DiskLuksHeaderDamaged {
-                        name: name.to_owned(),
+                        name: display_name.to_owned(),
                     },
                     _ => ProbeEvent::DiskLuksHeaderUnreadable {
-                        name: name.to_owned(),
+                        name: display_name.to_owned(),
                     },
                 });
-                missing.push((name.to_owned(), reason));
+                missing.push((display_name.to_owned(), reason));
             }
             ConfigDiskState::PresentLuks {
                 uuid, mapper_open, ..
@@ -281,7 +282,7 @@ fn plan_open_pool_inner<R: CommandRunner, F: Filesystem + ?Sized>(
                              expected  {}\n  \
                              found     {}\n\
                          hint: {}",
-                        name,
+                        display_name,
                         member.by_id,
                         expected_uuid,
                         uuid,
@@ -291,17 +292,17 @@ fn plan_open_pool_inner<R: CommandRunner, F: Filesystem + ?Sized>(
 
                 if *mapper_open {
                     events.push(ProbeEvent::DiskAlreadyOpen {
-                        name: name.to_owned(),
+                        name: display_name.to_owned(),
                     });
                     any_open = true;
                     if first_open_mapper.is_none() {
-                        first_open_mapper = Some(name.to_owned());
+                        first_open_mapper = Some(disk_name.clone());
                     }
                 } else {
                     events.push(ProbeEvent::DiskAvailable {
-                        name: name.to_owned(),
+                        name: display_name.to_owned(),
                     });
-                    to_unlock.push((name.to_owned(), member.by_id.clone()));
+                    to_unlock.push((disk_name.clone(), member.by_id.clone()));
                 }
             }
         }
@@ -326,11 +327,11 @@ fn plan_open_pool_inner<R: CommandRunner, F: Filesystem + ?Sized>(
     // exists -- using membership.disks.keys().next() would pick the
     // alphabetically-first disk even when it is Absent/PresentNotLuks,
     // producing a stale /dev/mapper/<first> path that mount would fail on.
-    let mount_key = to_unlock
+    let mount_key: &DiskName = to_unlock
         .first()
-        .map(|(k, _)| k.as_str())
-        .or(first_open_mapper.as_deref())
-        .unwrap_or("unknown");
+        .map(|(k, _)| k)
+        .or(first_open_mapper.as_ref())
+        .expect("post-check above guarantees to_unlock or first_open_mapper is non-empty");
     let mount_device = format!("/dev/mapper/{}", mapper_name(mount_key).0);
 
     Ok(Some(OpenPlan {
@@ -480,11 +481,11 @@ fn explain_open_failure(
     }
 }
 
-fn credential_verify_targets(to_unlock: &[(String, ByIdPath)]) -> Vec<CredentialVerifyTarget> {
+fn credential_verify_targets(to_unlock: &[(DiskName, ByIdPath)]) -> Vec<CredentialVerifyTarget> {
     to_unlock
         .iter()
         .map(|(name, by_id)| CredentialVerifyTarget {
-            name: name.clone(),
+            name: name.as_str().to_owned(),
             device: by_id.as_str().to_owned(),
         })
         .collect()
@@ -504,7 +505,7 @@ fn credential_noun(c: Credential<'_>) -> &'static str {
 /// classification shared across passphrase and keyfile unlock paths.
 fn open_disks_with_credential<R: CommandRunner>(
     runner: &R,
-    to_unlock: &[(String, ByIdPath)],
+    to_unlock: &[(DiskName, ByIdPath)],
     backing_path_resolver: &dyn BackingPathResolver,
     credential: Credential<'_>,
     color_enabled: bool,
@@ -590,7 +591,7 @@ fn open_disks_with_credential<R: CommandRunner>(
                     }
                 };
                 return Err(explain_open_failure(
-                    name,
+                    name.as_str(),
                     by_id.as_str(),
                     header_state,
                     &original_summary,
@@ -870,6 +871,10 @@ mod tests {
     use crate::types::{ByIdPath, LuksUuid, MountPoint};
     use zeroize::Zeroizing;
 
+    fn disk(name: &str) -> DiskName {
+        DiskName::parse(name).expect("test disk name")
+    }
+
     /// Intent: `execute_unlock_and_mount` must reject an empty `to_unlock`
     /// plan with a typed internal error BEFORE running any LUKS or mount
     /// commands.
@@ -954,7 +959,7 @@ mod tests {
 
         let plan = OpenPlan {
             to_unlock: vec![(
-                "disk1".to_owned(),
+                disk("disk1"),
                 ByIdPath::parse("/dev/disk/by-id/virtio-disk1").unwrap(),
             )],
             any_open: false,

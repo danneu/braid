@@ -3,7 +3,7 @@ use std::path::{Path, PathBuf};
 use std::time::Instant;
 
 use crate::cmd::{CmdRequest, CommandRunner};
-use crate::config::FanControl;
+use crate::config::{FanControl, mapper_name};
 use crate::luks::{self, BackingPathResolver};
 use crate::parse::parse_upsc;
 use crate::parse::types::{ScrubState, SmartHealth, SmartProbe};
@@ -20,19 +20,19 @@ use crate::tui::model::{
     DaemonStatus, DiskLockState, DiskLuksInfo, DiskLuksState, DiskUsage, DrivingDrive, FanReading,
     FanSnapshot, PoolState, TemperatureDiskId, TemperatureReading, UnpooledDiskRender, UpsSnapshot,
 };
-use crate::types::{ByIdPath, ConfigDiskState, LuksUuid, MapperName, MountPoint};
+use crate::types::{ByIdPath, ConfigDiskState, DiskName, LuksUuid, MountPoint};
 
 /// Best-effort ownership-aware lock classifier for a disk that the mounted
 /// pool probe could not identify by LUKS UUID or persisted devid.
 fn fallback_disk_luks_lock<R: CommandRunner>(
     runner: &R,
-    disk_name: &str,
+    disk_name: &DiskName,
     by_id_path: &str,
     expected_uuid: Option<&LuksUuid>,
     backing_path_resolver: &dyn BackingPathResolver,
 ) -> (DiskLockState, Option<String>) {
     let status_raw = match runner.run(&CmdRequest::CryptsetupStatus {
-        mapper: MapperName(format!("braid-{disk_name}")),
+        mapper: mapper_name(disk_name),
     }) {
         Ok(raw) => raw,
         Err(_) => return (DiskLockState::Unknown, None),
@@ -112,13 +112,15 @@ fn build_disk_luks_states<R: CommandRunner>(
 ) -> HashMap<String, DiskLuksState> {
     let mut disk_luks_states = HashMap::new();
     for (disk_name, by_id_path) in disk_by_id {
+        let parsed_disk_name =
+            DiskName::parse(disk_name).expect("membership disk names are validated upstream");
         let (lock, underlying_present) = mounted_classification
             .get(disk_name)
             .cloned()
             .unwrap_or_else(|| {
                 fallback_disk_luks_lock(
                     runner,
-                    disk_name,
+                    &parsed_disk_name,
                     by_id_path,
                     disk_luks_uuid.get(disk_name),
                     backing_path_resolver,

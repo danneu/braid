@@ -14,7 +14,7 @@
 use super::shared::{disk_member, mock_ok};
 use crate::alert::AlertCause;
 use crate::cmd::{CmdRequest, LsblkFieldKind, MockRunner, RawCommandOutput};
-use crate::config::Config;
+use crate::config::{Config, mapper_name};
 use crate::membership::PoolMembership;
 use crate::probe::Filesystem;
 use crate::status::{DiskReport, DiskStatus, ScrubReport, StatusCode, StatusReport};
@@ -651,9 +651,10 @@ pub(crate) fn status_report_with_alerts(
 
 /// Present disk report keyed by name/devid for alert-name lookup tests.
 pub(crate) fn status_disk_report_named(name: &str, devid: u64) -> DiskReport {
+    let disk_name = DiskName::parse(name).expect("valid fixture disk name");
     DiskReport {
         name: name.into(),
-        mapper: format!("braid-{name}"),
+        mapper: mapper_name(&disk_name).0,
         by_id: format!("/dev/disk/by-id/{name}"),
         luks_uuid: "00000000-0000-0000-0000-000000000000".into(),
         devid: Some(devid.to_string()),
@@ -665,9 +666,10 @@ pub(crate) fn status_disk_report_named(name: &str, devid: u64) -> DiskReport {
 
 /// Missing disk report shape emitted for unpooled members.
 pub(crate) fn status_disk_report_missing(name: &str) -> DiskReport {
+    let disk_name = DiskName::parse(name).expect("valid fixture disk name");
     DiskReport {
         name: name.into(),
-        mapper: format!("braid-{name}"),
+        mapper: mapper_name(&disk_name).0,
         by_id: format!("/dev/disk/by-id/{name}"),
         luks_uuid: String::new(),
         devid: None,

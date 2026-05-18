@@ -99,8 +99,9 @@ impl<'de> Deserialize<'de> for LuksUuid {
 
 /// Operator-facing disk identifier used as the mapper-name and LUKS-label
 /// suffix (`braid-<DiskName>`). Not a persistent identity -- `LuksUuid` is
-/// -- but every label/mapper construction site goes through this type so
-/// the disk-name character contract is enforced once.
+/// -- but every label/mapper construction site goes through this type via
+/// `config::mapper_name` and `config::luks_label_for` so the disk-name
+/// character contract is enforced once.
 #[derive(Clone, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub struct DiskName(String);
 
@@ -316,6 +317,27 @@ impl MapperName {
     }
 }
 
+/// Wraps a LUKS2 label braid writes into the cryptsetup header so callers
+/// cannot accidentally pass an unvalidated string in its place. Observed
+/// probe labels stay `Option<String>` because cryptsetup may report
+/// non-braid text.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct LuksLabel(String);
+
+impl LuksLabel {
+    /// The sole constructor: derive `braid-<DiskName>` from a validated
+    /// disk name and keep arbitrary label bytes outside braid-owned calls.
+    pub fn for_disk(name: &DiskName) -> Self {
+        LuksLabel(format!("braid-{}", name.as_str()))
+    }
+
+    /// Borrow the label text at command argv and probe-comparison
+    /// boundaries without exposing the inner string.
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+
 /// Wraps the absolute mount path braid hands to `mount(8)` so it cannot be
 /// confused with arbitrary user paths at call sites that mix the two.
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
@@ -331,6 +353,12 @@ impl MountPoint {
 }
 
 impl fmt::Display for MapperName {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        self.0.fmt(f)
+    }
+}
+
+impl fmt::Display for LuksLabel {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         self.0.fmt(f)
     }

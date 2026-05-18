@@ -890,7 +890,7 @@ fn build_disk_reports<R: CommandRunner>(
                 }
             }
         };
-        let mapper = mapper_name(cd.name.as_str()).0;
+        let mapper = mapper_name(&cd.name).0;
 
         disk_reports.push(DiskReport {
             name: cd.name.as_str().to_owned(),

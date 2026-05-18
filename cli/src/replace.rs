@@ -1,5 +1,5 @@
 use crate::cmd::{CmdRequest, CommandRunner, Step};
-use crate::config::{Config, config_read, mapper_name, name_from_mapper};
+use crate::config::{Config, config_read, luks_label_for, mapper_name, name_from_mapper};
 use crate::confirm;
 use crate::credential_verify::{
     Credential, CredentialVerifyError, CredentialVerifyTarget, verify_credential_for_targets,
@@ -251,7 +251,7 @@ impl ReplaceWorkPlan {
                 enroll_key_file,
                 header_backup_path,
             } => {
-                let label = format!("braid-{}", self.new_name);
+                let label = luks_label_for(&self.new_name);
                 steps.push(Step {
                     risk: "destructive",
                     description: format!("LUKS format {}", self.new_by_id),
@@ -609,7 +609,7 @@ impl ReplacePlan {
                         &format!("disk {new_name}: formatting LUKS..."),
                     )
                 );
-                let label = format!("braid-{}", new_name);
+                let label = luks_label_for(&new_name);
                 luks_format(
                     runner,
                     new_by_id.as_str(),
@@ -671,7 +671,7 @@ impl ReplacePlan {
                 // adoption gates at finish-time and recovery replay.
                 ensure_luks_open(
                     runner,
-                    new_name.as_str(),
+                    &new_name,
                     &new_by_id,
                     params.backing_path_resolver,
                     &passphrase,
@@ -742,7 +742,7 @@ impl ReplacePlan {
                     probe_existing_luks_new_target_uuid(runner, &new_by_id, &new_uuid)?;
                     ensure_luks_open(
                         runner,
-                        new_name.as_str(),
+                        &new_name,
                         &new_by_id,
                         params.backing_path_resolver,
                         &passphrase,
@@ -764,7 +764,7 @@ impl ReplacePlan {
                     // and UUID, which catches cloned LUKS headers.
                     verify_existing_luks_open_mapper_target(
                         runner,
-                        new_name.as_str(),
+                        &new_name,
                         &new_mn,
                         &new_by_id,
                         &new_uuid,
@@ -988,7 +988,7 @@ fn probe_existing_luks_new_target_uuid<R: CommandRunner>(
 /// so the final mutation boundary checks live mapper backing path and UUID.
 fn verify_existing_luks_open_mapper_target<R: CommandRunner>(
     runner: &R,
-    new_name: &str,
+    new_name: &DiskName,
     new_mapper: &MapperName,
     new_by_id: &ByIdPath,
     new_uuid: &LuksUuid,
@@ -1316,7 +1316,7 @@ pub fn plan_replace<R: CommandRunner + Sync, F: Filesystem + ?Sized>(
             (PresentConfigDiskState::PresentLuks { .. }, Some(kf)) => {
                 match crate::enroll_key_file::plan_single_disk_enrollment(
                     runner,
-                    new_name_str,
+                    &new_name_parsed,
                     &new_by_id,
                     kf,
                     crate::enroll_key_file::EnrollmentPlanMode::ExistingKeyfile,
@@ -1479,7 +1479,7 @@ struct ReplaceWorkPlanInput<'a> {
 }
 
 fn build_replace_work_plan(input: ReplaceWorkPlanInput<'_>) -> ReplaceWorkPlan {
-    let new_mapper = mapper_name(input.new_name.as_str());
+    let new_mapper = mapper_name(&input.new_name);
     let new_mapper_path = format!("/dev/mapper/{new_mapper}");
     let journal_target = build_replace_journal_target(
         &input.new_by_id,
@@ -1793,8 +1793,10 @@ fn replace_work_plan_test_pool(
 
     let mut next_devid = 100;
     while devices.len() < live_device_count {
+        let test_name = DiskName::parse(&format!("test{}", devices.len() + 1))
+            .expect("valid synthetic disk name");
         devices.push(PoolDevice {
-            mapper: MapperName(format!("braid-test{}", devices.len() + 1)),
+            mapper: mapper_name(&test_name),
             luks_uuid: synth_test_uuid(next_devid),
             devid: next_devid,
             underlying: format!("/dev/test-{next_devid}"),
@@ -2136,7 +2138,7 @@ mod tests {
 
     fn null_underlying_device(devid: u64) -> NullUnderlyingDevice {
         NullUnderlyingDevice {
-            mapper: MapperName(format!("braid-disk{devid}")),
+            mapper: mapper_name(&disk_name(&format!("disk{devid}"))),
             devid,
         }
     }
@@ -2399,7 +2401,7 @@ mod tests {
     // Scenario: operator typo -- specifies an existing pool member as --new.
     fn new_disk_already_in_pool_rejected() {
         let pool = two_device_pool(); // has braid-disk1 and braid-disk2
-        let new_mn = mapper_name("disk2"); // -> "braid-disk2"
+        let new_mn = mapper_name(&disk_name("disk2")); // -> "braid-disk2"
         let err = check_new_not_in_pool("disk2", &new_mn, &pool).unwrap_err();
         assert!(
             err.to_string().contains("already a member"),
@@ -2413,7 +2415,7 @@ mod tests {
     // Scenario: normal replace with a fresh disk.
     fn new_disk_not_in_pool_passes() {
         let pool = two_device_pool();
-        let new_mn = mapper_name("disk3");
+        let new_mn = mapper_name(&disk_name("disk3"));
         check_new_not_in_pool("disk3", &new_mn, &pool)
             .expect("disk3 is not in pool -- should pass");
     }
@@ -4058,7 +4060,7 @@ mod tests {
                 "1".to_owned(),
             ]
         );
-        assert_eq!(label, "braid-disk3");
+        assert_eq!(label.as_str(), "braid-disk3");
         // The journaled UUID is generated at planning time; assert
         // canonical UUID form rather than a specific value.
         assert!(
@@ -5486,7 +5488,7 @@ mod tests {
 
         let err = verify_existing_luks_open_mapper_target(
             &runner,
-            "disk3",
+            &disk_name("disk3"),
             &MapperName("braid-disk3".into()),
             &by_id,
             &u_new,
@@ -5548,7 +5550,7 @@ mod tests {
 
         verify_existing_luks_open_mapper_target(
             &runner,
-            "disk3",
+            &disk_name("disk3"),
             &MapperName("braid-disk3".into()),
             &by_id,
             &u_new,
@@ -5584,7 +5586,7 @@ mod tests {
 
         let err = verify_existing_luks_open_mapper_target(
             &runner,
-            "disk3",
+            &disk_name("disk3"),
             &MapperName("braid-disk3".into()),
             &by_id,
             &u_new,
@@ -5656,7 +5658,7 @@ mod tests {
 
         let err = verify_existing_luks_open_mapper_target(
             &runner,
-            "disk3",
+            &disk_name("disk3"),
             &MapperName("braid-disk3".into()),
             &by_id,
             &u_new,
@@ -5970,7 +5972,8 @@ mod tests {
             "user-supplied extras must round-trip through extra_opts"
         );
         assert_eq!(
-            label, "braid-disk3",
+            label.as_str(),
+            "braid-disk3",
             "structured label is derived at boundary"
         );
         assert!(

@@ -6,7 +6,9 @@ use crate::parse::{
 };
 use crate::secret::Passphrase;
 use crate::state_paths::StatePaths;
-use crate::types::{ByIdPath, LuksFormatExtraOpts, LuksUuid, MapperName, PoolDevice};
+use crate::types::{
+    ByIdPath, DiskName, LuksFormatExtraOpts, LuksLabel, LuksUuid, MapperName, PoolDevice,
+};
 use std::io::{Read, Write};
 use std::os::unix::fs::PermissionsExt;
 use std::os::unix::io::{AsRawFd, RawFd};
@@ -451,14 +453,14 @@ pub fn luks_format<R: CommandRunner>(
     device: &str,
     passphrase: &Passphrase,
     uuid: &LuksUuid,
-    label: &str,
+    label: &LuksLabel,
     extra_opts: &LuksFormatExtraOpts,
 ) -> Result<(), LuksError> {
     let result = runner.run_with_stdin(
         &CmdRequest::CryptsetupLuksFormat {
             device: device.to_owned(),
             uuid: uuid.clone(),
-            label: label.to_owned(),
+            label: label.clone(),
             extra_opts: extra_opts.clone(),
         },
         passphrase.expose_secret().as_bytes(),
@@ -835,7 +837,7 @@ fn luks_uuid_for_device<R: CommandRunner>(
 
 pub(crate) fn classify_mapper_ownership<R, F>(
     runner: &R,
-    name: &str,
+    name: &DiskName,
     mapper: &MapperName,
     expected_by_id: &ByIdPath,
     backing_path_resolver: &dyn BackingPathResolver,
@@ -858,7 +860,7 @@ where
         None | Some("") | Some("(null)") => {
             let expected = expected_uuid()?;
             return Err(OwnershipError::Conflict {
-                name: name.to_owned(),
+                name: name.as_str().to_owned(),
                 expected,
                 found: None,
             });
@@ -869,20 +871,20 @@ where
     let expected_path = backing_path_resolver
         .canonicalize(expected_by_id.as_str())
         .map_err(|e| OwnershipError::BackingPathResolveError {
-            name: name.to_owned(),
+            name: name.as_str().to_owned(),
             by_id: expected_by_id.as_str().to_owned(),
             source: e,
         })?;
     let found_path = backing_path_resolver
         .canonicalize(underlying)
         .map_err(|e| OwnershipError::BackingPathResolveError {
-            name: name.to_owned(),
+            name: name.as_str().to_owned(),
             by_id: underlying.to_owned(),
             source: e,
         })?;
     if expected_path != found_path {
         return Err(OwnershipError::BackingPathMismatch {
-            name: name.to_owned(),
+            name: name.as_str().to_owned(),
             expected_path,
             found_path,
         });
@@ -896,7 +898,7 @@ where
         Ok(out) => out.uuid,
         Err(_) if cryptsetup_luks_uuid_reports_not_luks(&backing_raw) => {
             return Err(OwnershipError::Conflict {
-                name: name.to_owned(),
+                name: name.as_str().to_owned(),
                 expected,
                 found: None,
             });
@@ -908,7 +910,7 @@ where
         Ok(MapperOwnership::Owned)
     } else {
         Err(OwnershipError::Conflict {
-            name: name.to_owned(),
+            name: name.as_str().to_owned(),
             expected,
             found: Some(found),
         })
@@ -918,7 +920,7 @@ where
 /// Open a LUKS device if not already open.
 pub fn ensure_luks_open<R: CommandRunner>(
     runner: &R,
-    name: &str,
+    name: &DiskName,
     by_id: &ByIdPath,
     backing_path_resolver: &dyn BackingPathResolver,
     passphrase: &Passphrase,
@@ -965,7 +967,7 @@ pub fn device_has_btrfs_superblock<R: CommandRunner>(
 /// Open a LUKS device with a binary keyfile (no passphrase, no PBKDF).
 pub fn ensure_luks_open_with_key_file<R: CommandRunner>(
     runner: &R,
-    name: &str,
+    name: &DiskName,
     by_id: &ByIdPath,
     backing_path_resolver: &dyn BackingPathResolver,
     key_file_path: &std::path::Path,
@@ -1141,6 +1143,14 @@ mod tests {
 
     fn zpass(s: &str) -> Passphrase {
         Passphrase::from_zeroizing(Zeroizing::new(String::from(s)))
+    }
+
+    fn disk(name: &str) -> DiskName {
+        DiskName::parse(name).expect("test disk name")
+    }
+
+    fn luks_label(name: &str) -> LuksLabel {
+        LuksLabel::for_disk(&disk(name))
     }
 
     fn write_keyfile(path: &Path, size: usize) {
@@ -1756,7 +1766,7 @@ mod tests {
             );
         let err = ensure_luks_open(
             &runner,
-            "testdisk",
+            &disk("testdisk"),
             &ByIdPath::parse("/dev/disk/by-id/test-disk").unwrap(),
             &MockBackingPathResolver::default(),
             &zpass("wrong"),
@@ -1806,7 +1816,7 @@ mod tests {
             );
         let err = ensure_luks_open(
             &runner,
-            "vanished",
+            &disk("vanished"),
             &ByIdPath::parse("/dev/disk/by-id/vanished-disk").unwrap(),
             &MockBackingPathResolver::default(),
             &zpass("pass"),
@@ -1855,7 +1865,7 @@ mod tests {
             );
         let err = ensure_luks_open_with_key_file(
             &runner,
-            "testdisk",
+            &disk("testdisk"),
             &ByIdPath::parse("/dev/disk/by-id/test-disk").unwrap(),
             &MockBackingPathResolver::default(),
             kf.path(),
@@ -1904,7 +1914,7 @@ mod tests {
             );
         let err = ensure_luks_open_with_key_file(
             &runner,
-            "vanished",
+            &disk("vanished"),
             &ByIdPath::parse("/dev/disk/by-id/vanished-disk").unwrap(),
             &MockBackingPathResolver::default(),
             kf.path(),
@@ -1953,7 +1963,7 @@ mod tests {
 
         ensure_luks_open(
             &runner,
-            "disk1",
+            &disk("disk1"),
             &by_id,
             &MockBackingPathResolver::default(),
             &zpass("pass"),
@@ -2008,7 +2018,7 @@ mod tests {
         let resolver =
             MockBackingPathResolver::default().with_path("/dev/disk/by-id/disk1", "/dev/vdb");
 
-        ensure_luks_open(&runner, "disk1", &by_id, &resolver, &zpass("pass")).unwrap();
+        ensure_luks_open(&runner, &disk("disk1"), &by_id, &resolver, &zpass("pass")).unwrap();
 
         assert_eq!(
             runner.requests(),
@@ -2049,7 +2059,7 @@ mod tests {
 
         let err = classify_mapper_ownership(
             &runner,
-            "disk1",
+            &disk("disk1"),
             &MapperName("braid-disk1".into()),
             &by_id,
             &resolver,
@@ -2108,7 +2118,7 @@ mod tests {
 
         let ownership = classify_mapper_ownership(
             &runner,
-            "disk1",
+            &disk("disk1"),
             &MapperName("braid-disk1".into()),
             &by_id,
             &resolver,
@@ -2141,7 +2151,7 @@ mod tests {
 
         let err = classify_mapper_ownership(
             &runner,
-            "disk1",
+            &disk("disk1"),
             &MapperName("braid-disk1".into()),
             &by_id,
             &resolver,
@@ -2186,7 +2196,7 @@ mod tests {
 
         let err = classify_mapper_ownership(
             &runner,
-            "disk1",
+            &disk("disk1"),
             &MapperName("braid-disk1".into()),
             &by_id,
             &resolver,
@@ -2228,8 +2238,8 @@ mod tests {
         let resolver = MockBackingPathResolver::default()
             .with_error("/dev/disk/by-id/disk1", std::io::ErrorKind::NotFound);
 
-        let err =
-            ensure_luks_open(&runner, "disk1", &by_id, &resolver, &zpass("pass")).unwrap_err();
+        let err = ensure_luks_open(&runner, &disk("disk1"), &by_id, &resolver, &zpass("pass"))
+            .unwrap_err();
         let msg = err.to_string();
 
         match &err {
@@ -2285,8 +2295,8 @@ mod tests {
         let resolver =
             MockBackingPathResolver::default().with_path("/dev/disk/by-id/disk1", "/dev/vdz");
 
-        let err =
-            ensure_luks_open(&runner, "disk1", &by_id, &resolver, &zpass("pass")).unwrap_err();
+        let err = ensure_luks_open(&runner, &disk("disk1"), &by_id, &resolver, &zpass("pass"))
+            .unwrap_err();
 
         match err {
             LuksError::MapperConflict {
@@ -2339,7 +2349,7 @@ mod tests {
 
         let err = ensure_luks_open(
             &runner,
-            "disk1",
+            &disk("disk1"),
             &by_id,
             &MockBackingPathResolver::default(),
             &zpass("pass"),
@@ -2394,8 +2404,8 @@ mod tests {
         let resolver =
             MockBackingPathResolver::default().with_path("/dev/disk/by-id/disk1", "/dev/vdz");
 
-        let err =
-            ensure_luks_open(&runner, "disk1", &by_id, &resolver, &zpass("pass")).unwrap_err();
+        let err = ensure_luks_open(&runner, &disk("disk1"), &by_id, &resolver, &zpass("pass"))
+            .unwrap_err();
 
         assert!(matches!(err, LuksError::MapperConflict { found: None, .. }));
         assert!(
@@ -2442,7 +2452,8 @@ mod tests {
         let resolver =
             MockBackingPathResolver::default().with_path("/dev/disk/by-id/disk1", "/dev/vdb");
 
-        ensure_luks_open_with_key_file(&runner, "disk1", &by_id, &resolver, kf.path()).unwrap();
+        ensure_luks_open_with_key_file(&runner, &disk("disk1"), &by_id, &resolver, kf.path())
+            .unwrap();
 
         assert!(
             !runner
@@ -2490,8 +2501,9 @@ mod tests {
         let resolver =
             MockBackingPathResolver::default().with_path("/dev/disk/by-id/disk1", "/dev/vdz");
 
-        let err = ensure_luks_open_with_key_file(&runner, "disk1", &by_id, &resolver, kf.path())
-            .unwrap_err();
+        let err =
+            ensure_luks_open_with_key_file(&runner, &disk("disk1"), &by_id, &resolver, kf.path())
+                .unwrap_err();
 
         assert!(matches!(
             err,
@@ -2533,7 +2545,7 @@ mod tests {
 
         let err = ensure_luks_open_with_key_file(
             &runner,
-            "disk1",
+            &disk("disk1"),
             &by_id,
             &MockBackingPathResolver::default(),
             kf.path(),
@@ -2562,7 +2574,7 @@ mod tests {
 
         let err = ensure_luks_open(
             &runner,
-            "disk1",
+            &disk("disk1"),
             &by_id,
             &MockBackingPathResolver::default(),
             &zpass("pass"),
@@ -2609,8 +2621,8 @@ mod tests {
         let resolver =
             MockBackingPathResolver::default().with_path("/dev/disk/by-id/disk1", "/dev/vdb");
 
-        let err =
-            ensure_luks_open(&runner, "disk1", &by_id, &resolver, &zpass("pass")).unwrap_err();
+        let err = ensure_luks_open(&runner, &disk("disk1"), &by_id, &resolver, &zpass("pass"))
+            .unwrap_err();
 
         assert!(matches!(
             err,
@@ -2633,7 +2645,7 @@ mod tests {
             CmdRequest::CryptsetupLuksFormat {
                 device: "/dev/sda".into(),
                 uuid: uuid.clone(),
-                label: "braid-test".into(),
+                label: luks_label("test"),
                 extra_opts: extras.clone(),
             },
             b"pass".to_vec(),
@@ -2649,7 +2661,7 @@ mod tests {
             "/dev/sda",
             &zpass("pass"),
             &uuid,
-            "braid-test",
+            &luks_label("test"),
             &extras,
         )
         .unwrap_err();
@@ -2681,7 +2693,7 @@ mod tests {
             CmdRequest::CryptsetupLuksFormat {
                 device: "/dev/sdz".into(),
                 uuid: uuid.clone(),
-                label: "braid-test".into(),
+                label: luks_label("test"),
                 extra_opts: extras.clone(),
             },
             b"pass".to_vec(),
@@ -2697,7 +2709,7 @@ mod tests {
             "/dev/sdz",
             &zpass("pass"),
             &uuid,
-            "braid-test",
+            &luks_label("test"),
             &extras,
         )
         .unwrap_err();
@@ -3187,11 +3199,11 @@ mod tests {
 
     // -- probe_pool_keyfile_enrollment tests --
 
-    use crate::types::{LuksUuid, MapperName, PoolDevice};
+    use crate::types::{LuksUuid, PoolDevice};
 
     fn make_pool_device(name: &str, underlying: &str) -> PoolDevice {
         PoolDevice {
-            mapper: MapperName(format!("braid-{name}")),
+            mapper: mapper_name(&disk(name)),
             luks_uuid: LuksUuid::parse("aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee").unwrap(),
             devid: 1,
             underlying: underlying.into(),

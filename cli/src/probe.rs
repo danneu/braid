@@ -213,15 +213,8 @@ pub fn probe_config_disk<R: CommandRunner, F: Filesystem + ?Sized>(
     }
     let label = parse_cryptsetup_luks_label(&dump_raw)?.label;
 
-    let mn = mapper_name(name.as_str());
-    let mapper_open = probe_mapper_open(
-        runner,
-        name.as_str(),
-        &mn,
-        by_id,
-        backing_path_resolver,
-        &uuid,
-    )?;
+    let mn = mapper_name(name);
+    let mapper_open = probe_mapper_open(runner, name, &mn, by_id, backing_path_resolver, &uuid)?;
 
     Ok(ConfigDisk {
         name: name.clone(),
@@ -246,7 +239,7 @@ pub fn probe_config_disk<R: CommandRunner, F: Filesystem + ?Sized>(
 /// holds a different LUKS UUID (external mapper aliasing over our name).
 fn probe_mapper_open<R: CommandRunner>(
     runner: &R,
-    name: &str,
+    name: &DiskName,
     mapper: &MapperName,
     by_id: &ByIdPath,
     backing_path_resolver: &dyn BackingPathResolver,

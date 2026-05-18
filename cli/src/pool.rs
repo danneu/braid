@@ -724,7 +724,9 @@ pub fn pool_bootstrap_mount_raid1<R: CommandRunner + Sync>(
 mod tests {
     use super::*;
     use crate::cmd::{MockRunner, RawCommandOutput};
+    use crate::config::mapper_name;
     use crate::progress::{self, ProgressOutput};
+    use crate::types::DiskName;
     use std::sync::atomic::{AtomicU32, AtomicUsize, Ordering};
     use std::sync::{Arc, Condvar, Mutex};
     use std::time::Duration;
@@ -1876,8 +1878,9 @@ mod tests {
     fn three_disk_expected_identities() -> BTreeMap<MapperName, DeviceIdentity> {
         let mut m = BTreeMap::new();
         for i in 1..=3u64 {
+            let name = DiskName::parse(&format!("disk{i}")).expect("valid synthetic disk name");
             m.insert(
-                MapperName(format!("braid-disk{i}")),
+                mapper_name(&name),
                 DeviceIdentity {
                     devid: i,
                     luks_uuid: LuksUuid::parse(&format!(

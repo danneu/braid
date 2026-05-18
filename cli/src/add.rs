@@ -1,6 +1,6 @@
 use crate::alert;
 use crate::cmd::{CmdError, CmdRequest, CommandRunner, Step};
-use crate::config::{Config, config_read, mapper_name, name_from_mapper};
+use crate::config::{Config, config_read, luks_label_for, mapper_name, name_from_mapper};
 use crate::confirm;
 use crate::credential_verify::{
     Credential, CredentialVerifyError, CredentialVerifyTarget, verify_credential_for_targets,
@@ -130,12 +130,12 @@ enum AddLuksIdentity {
 /// Checks the cached LUKS label and mounted pool state.
 /// No side effects -- works on the raw device, no mapper required.
 fn validate_braid_preconditions(
-    name: &str,
+    name: &DiskName,
     device: &str,
     label: Option<&str>,
     pool: &PoolState,
 ) -> Result<(), AddError> {
-    let expected_label = format!("braid-{name}");
+    let expected_label = luks_label_for(name);
     if label != Some(expected_label.as_str()) {
         return Err(AddError::Validation(format!(
             "disk '{}' ({}) is already a LUKS container but is not labeled as {}; \
@@ -476,7 +476,7 @@ impl AddWorkPlan {
         for target in &sorted_targets {
             match target {
                 AddTargetWork::Fresh(target) => {
-                    let label = format!("braid-{}", target.name);
+                    let label = luks_label_for(&target.name);
                     steps.push(Step {
                         risk: "destructive",
                         description: format!("LUKS format {}", target.by_id),
@@ -949,7 +949,7 @@ impl AddPlan {
             ));
             if ensure_luks_open(
                 runner,
-                target.name.as_str(),
+                &target.name,
                 &target.by_id,
                 params.backing_path_resolver,
                 &passphrase,
@@ -1090,7 +1090,7 @@ impl AddPlan {
                 )));
             }
 
-            let label = format!("braid-{}", name);
+            let label = luks_label_for(name);
             eprint!(
                 "{}",
                 status_line(
@@ -1148,7 +1148,7 @@ impl AddPlan {
             );
             if ensure_luks_open(
                 runner,
-                name.as_str(),
+                name,
                 &target.by_id,
                 params.backing_path_resolver,
                 &passphrase,
@@ -1209,7 +1209,7 @@ impl AddPlan {
                 color_enabled,
                 &format!("disk {name}: keyfile enrolled in slot 1"),
             ));
-            let mapper = mapper_name(name.as_str());
+            let mapper = mapper_name(name);
             let backup_path = backup_luks_header_post_mutation(
                 runner,
                 journal_target.by_id.as_str(),
@@ -1776,7 +1776,7 @@ fn resolve_existing_luks_enroll<R: CommandRunner>(
     };
     match crate::enroll_key_file::plan_single_disk_enrollment(
         runner,
-        name.as_str(),
+        name,
         by_id,
         kf,
         crate::enroll_key_file::EnrollmentPlanMode::ExistingKeyfile,
@@ -1803,7 +1803,7 @@ fn build_add_work_plan<R: CommandRunner>(
     for (i, p) in input.probed.iter().enumerate() {
         let name = &input.names[i];
         let by_id = input.by_ids[i];
-        let mn = mapper_name(name.as_str());
+        let mn = mapper_name(name);
         let mapper_path = format!("/dev/mapper/{}", mn.0);
 
         match &p.state {
@@ -1844,12 +1844,7 @@ fn build_add_work_plan<R: CommandRunner>(
                 label,
             } => {
                 // Preconditions always checked — no mapper required.
-                validate_braid_preconditions(
-                    name.as_str(),
-                    by_id.as_str(),
-                    label.as_deref(),
-                    input.pool,
-                )?;
+                validate_braid_preconditions(name, by_id.as_str(), label.as_deref(), input.pool)?;
 
                 let resolved_enroll_key_file =
                     resolve_existing_luks_enroll(runner, name, by_id, input.enroll_key_file)?;
@@ -2100,6 +2095,10 @@ mod tests {
     use super::*;
     use crate::luks::{RealTty, ScriptedPassphraseReader};
     use crate::secret::Passphrase;
+
+    fn disk(name: &str) -> DiskName {
+        DiskName::parse(name).expect("test disk name")
+    }
 
     fn test_paths() -> (tempfile::TempDir, StatePaths) {
         let tmp = tempfile::TempDir::new().unwrap();
@@ -2788,7 +2787,7 @@ mod tests {
         // Scenario: user tries to add a LUKS disk that was not created by braid.
         let pool = pool_unmounted();
         let err = validate_braid_preconditions(
-            "disk1",
+            &disk("disk1"),
             "/dev/disk/by-id/disk1",
             Some("some-other-label"),
             &pool,
@@ -2811,7 +2810,7 @@ mod tests {
         //   (e.g. fresh bootstrap scenario with pre-existing encrypted disk).
         let pool = pool_unmounted();
         let err = validate_braid_preconditions(
-            "disk1",
+            &disk("disk1"),
             "/dev/disk/by-id/disk1",
             Some("braid-disk1"),
             &pool,
@@ -3163,7 +3162,7 @@ mod tests {
             let mut guard = LuksCleanupGuard::new(&runner);
             if ensure_luks_open(
                 &runner,
-                "existing",
+                &disk("existing"),
                 &by_id,
                 &backing_path_resolver,
                 &passphrase("testpass"),
@@ -7810,7 +7809,7 @@ mod tests {
             by_id_path: ByIdPath::parse(by_id).unwrap(),
             state: PresentConfigDiskState::PresentLuks {
                 uuid: LuksUuid::parse(uuid).unwrap(),
-                label: Some(format!("braid-{name}")),
+                label: Some(luks_label_for(&disk(name)).as_str().to_owned()),
                 mapper_open: true,
             },
         }
@@ -8172,7 +8171,7 @@ mod tests {
             .expect("CryptsetupLuksFormat must reach the runner");
         let (uuid, label, extra_opts) = format;
         // The label is derived from the DiskName at the call site.
-        assert_eq!(label, "braid-disk2");
+        assert_eq!(label.as_str(), "braid-disk2");
         // UUID is a generated v4 -- non-nil, canonical hyphenated form.
         assert_ne!(uuid.as_str(), "00000000-0000-0000-0000-000000000000");
         assert_eq!(uuid.as_str().len(), 36);

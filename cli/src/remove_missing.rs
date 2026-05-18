@@ -667,9 +667,10 @@ fn format_remove_missing_confirm(
 mod tests {
     use super::*;
     use crate::cmd::{CmdError, CmdRequest, CommandRunner, MockRunner, RawCommandOutput};
+    use crate::config::mapper_name;
     use crate::membership::PoolMembership;
     use crate::test_fixtures::{MockFs, PoolFixture, RemoveMissingPool, mock_ok};
-    use crate::types::{MapperName, NullUnderlyingDevice, PoolDevice};
+    use crate::types::{NullUnderlyingDevice, PoolDevice};
 
     fn mp() -> MountPoint {
         MountPoint("/mnt/storage".into())
@@ -688,8 +689,9 @@ mod tests {
     }
 
     fn target_validation_device(devid: u64) -> PoolDevice {
+        let name = DiskName::parse(&format!("disk{devid}")).expect("valid synthetic disk name");
         PoolDevice {
-            mapper: MapperName(format!("braid-disk{devid}")),
+            mapper: mapper_name(&name),
             luks_uuid: LuksUuid::parse(&format!("00000000-0000-0000-0000-{devid:012x}"))
                 .expect("valid synthetic UUID"),
             devid,
@@ -698,8 +700,9 @@ mod tests {
     }
 
     fn target_validation_null_underlying(devid: u64) -> NullUnderlyingDevice {
+        let name = DiskName::parse(&format!("disk{devid}")).expect("valid synthetic disk name");
         NullUnderlyingDevice {
-            mapper: MapperName(format!("braid-disk{devid}")),
+            mapper: mapper_name(&name),
             devid,
         }
     }

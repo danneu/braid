@@ -1,4 +1,4 @@
-use crate::types::{MapperName, MountPoint};
+use crate::types::{DiskName, LuksLabel, MapperName, MountPoint};
 use serde::Deserialize;
 use std::fs;
 use std::path::Path;
@@ -67,9 +67,18 @@ impl Config {
     }
 }
 
-/// Returns the mapper name for a disk name: braid-<name>
-pub fn mapper_name(name: &str) -> MapperName {
-    MapperName(format!("braid-{name}"))
+/// Returns the mapper name for a disk: braid-<name>. Validated-type
+/// signature so callers cannot synthesize a `MapperName` from unchecked
+/// text at this boundary.
+pub fn mapper_name(name: &DiskName) -> MapperName {
+    MapperName(format!("braid-{}", name.as_str()))
+}
+
+/// Thin public entry point for the canonical LUKS label constructor.
+/// Kept beside `mapper_name` so call sites use symmetric helpers for
+/// both braid-owned names.
+pub fn luks_label_for(name: &DiskName) -> LuksLabel {
+    LuksLabel::for_disk(name)
 }
 
 /// Display-only mapper parser for diagnostics and explicit carve-outs.
@@ -144,10 +153,32 @@ mod tests {
         assert!(err.to_string().contains("mount_point must not be empty"));
     }
 
+    // Intent: `mapper_name(&DiskName)` returns the canonical
+    // `braid-<name>` mapper name for representative disk names.
+    // Why it exists: pins the mapper-prefix convention at the helper
+    // boundary so argv builders and path constructors do not drift.
+    // Scenario: planner code holds a validated `DiskName` and asks for
+    // the mapper basename used in `/dev/mapper/<X>` paths.
     #[test]
     fn mapper_name_for_disk() {
-        assert_eq!(mapper_name("toshiba"), MapperName("braid-toshiba".into()));
-        assert_eq!(mapper_name("ironwolf"), MapperName("braid-ironwolf".into()));
+        let toshiba = DiskName::parse("toshiba").unwrap();
+        let ironwolf = DiskName::parse("ironwolf").unwrap();
+        assert_eq!(mapper_name(&toshiba), MapperName("braid-toshiba".into()));
+        assert_eq!(mapper_name(&ironwolf), MapperName("braid-ironwolf".into()));
+    }
+
+    // Intent: `luks_label_for(&DiskName)` returns the canonical
+    // `braid-<name>` LUKS label for representative disk names.
+    // Why it exists: pins the label-prefix convention at the helper
+    // boundary instead of at every downstream cryptsetup argv site.
+    // Scenario: planner, executor, and recovery code hold a validated
+    // `DiskName` and need the matching LUKS2 header label.
+    #[test]
+    fn luks_label_for_disk() {
+        let toshiba = DiskName::parse("toshiba").unwrap();
+        let ironwolf = DiskName::parse("ironwolf").unwrap();
+        assert_eq!(luks_label_for(&toshiba).as_str(), "braid-toshiba");
+        assert_eq!(luks_label_for(&ironwolf).as_str(), "braid-ironwolf");
     }
 
     #[test]
