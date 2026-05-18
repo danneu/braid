@@ -574,28 +574,6 @@ impl Serialize for UpsStatusFlag {
     }
 }
 
-/// Serialization-boundary sort for the script-facing `--json` contract.
-/// `HashSet` storage keeps parser semantics simple, but JSON arrays must
-/// not inherit randomized iterator order.
-fn serialize_status_flags_sorted<S>(
-    flags: &std::collections::HashSet<UpsStatusFlag>,
-    serializer: S,
-) -> Result<S::Ok, S::Error>
-where
-    S: Serializer,
-{
-    use serde::ser::SerializeSeq;
-
-    let mut sorted: Vec<&UpsStatusFlag> = flags.iter().collect();
-    sorted.sort_by(|a, b| a.as_token().cmp(b.as_token()));
-
-    let mut seq = serializer.serialize_seq(Some(sorted.len()))?;
-    for flag in sorted {
-        seq.serialize_element(flag)?;
-    }
-    seq.end()
-}
-
 /// Battery-scoped fields from `upsc`.
 ///
 /// Every field is `Option` because NUT drivers vary widely in which keys
@@ -647,8 +625,12 @@ pub struct DeviceFields {
 /// structure via `--json`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct UpscOutput {
-    #[serde(serialize_with = "serialize_status_flags_sorted")]
-    pub status_flags: std::collections::HashSet<UpsStatusFlag>,
+    /// Flags from `ups.status`, in `upsc` emission order, deduplicated on
+    /// push. Order is the script-facing contract: human render and `--json`
+    /// both iterate this Vec verbatim, matching the `ups.status:` line in
+    /// `upsc ups` byte-for-byte. Membership tests treat the Vec as a set;
+    /// dedupe-on-push keeps those calls honest.
+    pub status_flags: Vec<UpsStatusFlag>,
     pub battery: BatteryFields,
     /// `ups.load` -- percent (0-100).
     pub load_pct: Option<u8>,

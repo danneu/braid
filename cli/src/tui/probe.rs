@@ -768,7 +768,7 @@ pub fn probe_ups_for_tui<R: CommandRunner>(runner: &R, name: &str) -> UpsSnapsho
 
 fn ups_snapshot_query_failed<R: CommandRunner>(runner: &R) -> UpsSnapshot {
     UpsSnapshot {
-        flags: std::collections::HashSet::new(),
+        flags: Vec::new(),
         battery_charge_pct: None,
         runtime_secs: None,
         load_pct: None,

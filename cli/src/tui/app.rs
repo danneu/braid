@@ -384,7 +384,7 @@ mod tests {
 
     fn sample_ups_snapshot() -> UpsSnapshot {
         UpsSnapshot {
-            flags: std::collections::HashSet::new(),
+            flags: Vec::new(),
             battery_charge_pct: None,
             runtime_secs: None,
             load_pct: None,

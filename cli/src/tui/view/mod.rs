@@ -223,7 +223,7 @@ fn fan_section(model: &Model) -> Table<'_> {
 /// Shares `UpsStatusFlag::is_critical` with
 /// `preflight::check_ups_not_on_battery` so the two surfaces never
 /// disagree about which tokens count as critical.
-fn ups_severity_color(flags: &std::collections::HashSet<UpsStatusFlag>) -> Color {
+fn ups_severity_color(flags: &[UpsStatusFlag]) -> Color {
     if flags.iter().any(UpsStatusFlag::is_critical) {
         return Color::Red;
     }
@@ -236,14 +236,16 @@ fn ups_severity_color(flags: &std::collections::HashSet<UpsStatusFlag>) -> Color
     Color::DarkGray
 }
 
-/// Stable sort of ups.status tokens for display.
-fn format_ups_flags(flags: &std::collections::HashSet<UpsStatusFlag>) -> String {
+/// Format ups.status tokens in `upsc` emission order.
+fn format_ups_flags(flags: &[UpsStatusFlag]) -> String {
     if flags.is_empty() {
         return "--".into();
     }
-    let mut tokens: Vec<&str> = flags.iter().map(UpsStatusFlag::as_token).collect();
-    tokens.sort();
-    tokens.join(" ")
+    flags
+        .iter()
+        .map(UpsStatusFlag::as_token)
+        .collect::<Vec<_>>()
+        .join(" ")
 }
 
 fn format_ups_charge(snapshot: &UpsSnapshot) -> String {
@@ -2106,8 +2108,8 @@ pub(crate) mod tests {
 
     // --- UPS rendering tests ---
 
-    fn flags_set(tokens: &[UpsStatusFlag]) -> std::collections::HashSet<UpsStatusFlag> {
-        tokens.iter().cloned().collect()
+    fn flags_vec(tokens: &[UpsStatusFlag]) -> Vec<UpsStatusFlag> {
+        tokens.to_vec()
     }
 
     // Intent: ups_severity_color routes LB/TESTFAIL/COMMBAD/FSD to Red
@@ -2125,7 +2127,7 @@ pub(crate) mod tests {
             UpsStatusFlag::CommBad,
             UpsStatusFlag::Fsd,
         ] {
-            let flags = flags_set(&[UpsStatusFlag::Ol, bad.clone()]);
+            let flags = flags_vec(&[UpsStatusFlag::Ol, bad.clone()]);
             assert_eq!(
                 ups_severity_color(&flags),
                 Color::Red,
@@ -2143,7 +2145,7 @@ pub(crate) mod tests {
     // threshold is crossed.
     #[test]
     fn ups_severity_ob_alone_is_yellow() {
-        let flags = flags_set(&[UpsStatusFlag::Ob]);
+        let flags = flags_vec(&[UpsStatusFlag::Ob]);
         assert_eq!(ups_severity_color(&flags), Color::Yellow);
     }
 
@@ -2153,7 +2155,7 @@ pub(crate) mod tests {
     // Scenario: UPS on utility power, healthy battery.
     #[test]
     fn ups_severity_ol_alone_is_green() {
-        let flags = flags_set(&[UpsStatusFlag::Ol]);
+        let flags = flags_vec(&[UpsStatusFlag::Ol]);
         assert_eq!(ups_severity_color(&flags), Color::Green);
     }
 
@@ -2165,7 +2167,7 @@ pub(crate) mod tests {
     // built from a query-failed fallback.
     #[test]
     fn ups_severity_empty_is_dark_gray() {
-        let flags = std::collections::HashSet::new();
+        let flags = Vec::new();
         assert_eq!(ups_severity_color(&flags), Color::DarkGray);
     }
 
@@ -2176,8 +2178,26 @@ pub(crate) mod tests {
     // Scenario: old UPS with aging battery; utility power is fine.
     #[test]
     fn ups_severity_ol_plus_rb_is_green() {
-        let flags = flags_set(&[UpsStatusFlag::Ol, UpsStatusFlag::Rb]);
+        let flags = flags_vec(&[UpsStatusFlag::Ol, UpsStatusFlag::Rb]);
         assert_eq!(ups_severity_color(&flags), Color::Green);
+    }
+
+    // Intent: format_ups_flags renders tokens in input order, with no sort.
+    // Why it exists: the Data tab is one UPS render surface; a future sort
+    // here would diverge from `upsc`, `braid ups status`, --json, and the
+    // Browse tab while single-flag snapshots kept passing.
+    // Scenario: critical state with on-battery and low-battery flags in two
+    // opposite arrival orders.
+    #[test]
+    fn format_ups_flags_preserves_insertion_order() {
+        assert_eq!(
+            format_ups_flags(&[UpsStatusFlag::Ob, UpsStatusFlag::Lb]),
+            "OB LB"
+        );
+        assert_eq!(
+            format_ups_flags(&[UpsStatusFlag::Lb, UpsStatusFlag::Ob]),
+            "LB OB"
+        );
     }
 
     // Intent: format_ups_load only annotates watts when both load% and
@@ -2188,7 +2208,7 @@ pub(crate) mod tests {
     #[test]
     fn ups_format_load_skips_watts_when_unknown() {
         let mut s = UpsSnapshot {
-            flags: std::collections::HashSet::new(),
+            flags: Vec::new(),
             battery_charge_pct: None,
             runtime_secs: None,
             load_pct: Some(40),

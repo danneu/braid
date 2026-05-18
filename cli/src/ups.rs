@@ -270,13 +270,15 @@ pub fn format_runtime(secs: u32) -> String {
     }
 }
 
-fn format_status(flags: &std::collections::HashSet<UpsStatusFlag>) -> String {
+fn format_status(flags: &[UpsStatusFlag]) -> String {
     if flags.is_empty() {
         return "(unknown -- ups.status missing)".to_owned();
     }
-    let mut tokens: Vec<&str> = flags.iter().map(UpsStatusFlag::as_token).collect();
-    tokens.sort();
-    tokens.join(" ")
+    flags
+        .iter()
+        .map(UpsStatusFlag::as_token)
+        .collect::<Vec<_>>()
+        .join(" ")
 }
 
 #[cfg(test)]
@@ -296,21 +298,24 @@ mod tests {
     // Scenario: `braid ups status` against a healthy UPS.
     #[test]
     fn format_status_ol() {
-        let mut flags = std::collections::HashSet::new();
-        flags.insert(UpsStatusFlag::Ol);
+        let flags = vec![UpsStatusFlag::Ol];
         assert_eq!(format_status(&flags), "OL");
     }
 
-    // Intent: multi-flag status renders every token, sorted for stability.
-    // Why: sorting makes unit tests deterministic and lets operators diff
-    // two renders without spurious reordering noise.
-    // Scenario: critical state -- UPS on battery, low battery threshold hit.
+    // Intent: multi-flag status renders tokens in input order.
+    // Why it exists: braid mirrors `upsc` emission order instead of
+    // synthesizing a static sort order.
+    // Scenario: critical state arrives in both OB/LB and LB/OB order.
     #[test]
-    fn format_status_ob_lb_sorted() {
-        let mut flags = std::collections::HashSet::new();
-        flags.insert(UpsStatusFlag::Ob);
-        flags.insert(UpsStatusFlag::Lb);
-        assert_eq!(format_status(&flags), "LB OB");
+    fn format_status_preserves_insertion_order() {
+        assert_eq!(
+            format_status(&[UpsStatusFlag::Ob, UpsStatusFlag::Lb]),
+            "OB LB"
+        );
+        assert_eq!(
+            format_status(&[UpsStatusFlag::Lb, UpsStatusFlag::Ob]),
+            "LB OB"
+        );
     }
 
     // Intent: format_status returns the literal sentinel
@@ -322,7 +327,7 @@ mod tests {
     // Scenario: dummy-ups fixture with no ups.status line yet.
     #[test]
     fn format_status_empty_is_unknown() {
-        let flags = std::collections::HashSet::new();
+        let flags = Vec::new();
         let rendered = format_status(&flags);
         assert_eq!(rendered, "(unknown -- ups.status missing)");
     }
@@ -348,12 +353,7 @@ mod tests {
     #[test]
     fn json_output_has_status_and_battery_keys() {
         let parsed = UpscOutput {
-            status_flags: {
-                let mut s = std::collections::HashSet::new();
-                s.insert(UpsStatusFlag::Ol);
-                s.insert(UpsStatusFlag::Unknown("NEWFLAG".into()));
-                s
-            },
+            status_flags: vec![UpsStatusFlag::Ol, UpsStatusFlag::Unknown("NEWFLAG".into())],
             battery: BatteryFields {
                 charge_pct: Some(100),
                 ..Default::default()
@@ -384,19 +384,14 @@ mod tests {
         );
     }
 
-    // Intent: --json status_flags is lex-sorted across every known flag, so
-    // scripts that diff or hash the document do not see spurious churn
-    // between runs.
-    // Why it exists: HashSet iteration is randomized; the manual advertises
-    // a stable shape; the human render already sorts -- the JSON side must
-    // match. A 17-element exact-array assertion makes accidental passage on a
-    // HashSet without the serialize_with hook vanishingly unlikely.
+    // Intent: --json status_flags preserves parser insertion order.
+    // Why it exists: scripts should see the same order `upsc` emitted; a
+    // future array-level sort would diverge from human render and NUT.
     // Scenario: a hypothetical UPS reporting every known flag at once plus
     // an unrecognized driver-extension token.
     #[test]
-    fn json_output_status_flags_are_sorted() {
-        let mut flags = std::collections::HashSet::new();
-        for flag in [
+    fn json_output_status_flags_preserve_insertion_order() {
+        let flags = vec![
             UpsStatusFlag::Ol,
             UpsStatusFlag::Ob,
             UpsStatusFlag::Lb,
@@ -414,9 +409,7 @@ mod tests {
             UpsStatusFlag::TestFail,
             UpsStatusFlag::CommBad,
             UpsStatusFlag::Unknown("ZZZ".into()),
-        ] {
-            flags.insert(flag);
-        }
+        ];
         let parsed = UpscOutput {
             status_flags: flags,
             battery: BatteryFields::default(),
@@ -440,8 +433,8 @@ mod tests {
         assert_eq!(
             actual,
             vec![
-                "BOOST", "BYPASS", "CAL", "CHRG", "COMMBAD", "DISCHRG", "FSD", "HB", "LB", "OB",
-                "OFF", "OL", "OVER", "RB", "TESTFAIL", "TRIM", "ZZZ",
+                "OL", "OB", "LB", "RB", "HB", "CHRG", "DISCHRG", "CAL", "BYPASS", "OFF", "OVER",
+                "TRIM", "BOOST", "FSD", "TESTFAIL", "COMMBAD", "ZZZ",
             ],
         );
     }
@@ -454,7 +447,7 @@ mod tests {
     #[test]
     fn json_output_with_empty_status_has_warning_and_body() {
         let parsed = UpscOutput {
-            status_flags: std::collections::HashSet::new(),
+            status_flags: Vec::new(),
             battery: BatteryFields {
                 charge_pct: Some(55),
                 ..Default::default()
@@ -489,11 +482,7 @@ mod tests {
     #[test]
     fn format_human_renders_dash_for_missing_optional_fields() {
         let parsed = UpscOutput {
-            status_flags: {
-                let mut s = std::collections::HashSet::new();
-                s.insert(UpsStatusFlag::Ol);
-                s
-            },
+            status_flags: vec![UpsStatusFlag::Ol],
             battery: BatteryFields::default(),
             load_pct: None,
             realpower_nominal_watts: None,
@@ -517,11 +506,7 @@ mod tests {
     #[test]
     fn format_human_load_omits_estimated_when_nominal_watts_missing() {
         let parsed = UpscOutput {
-            status_flags: {
-                let mut s = std::collections::HashSet::new();
-                s.insert(UpsStatusFlag::Ol);
-                s
-            },
+            status_flags: vec![UpsStatusFlag::Ol],
             battery: BatteryFields::default(),
             load_pct: Some(50),
             realpower_nominal_watts: None,
@@ -547,7 +532,7 @@ mod tests {
     #[test]
     fn format_human_empty_status_renders_sentinel() {
         let parsed = UpscOutput {
-            status_flags: std::collections::HashSet::new(),
+            status_flags: Vec::new(),
             battery: BatteryFields::default(),
             load_pct: None,
             realpower_nominal_watts: None,
@@ -864,7 +849,7 @@ mod tests {
         assert_eq!(value["input"]["voltage"], "0.0");
     }
 
-    // Intent: lowbattery fixture renders Status: LB OB.
+    // Intent: lowbattery fixture renders Status: OB LB.
     // Why: this is the critical pair upsmon fires SHUTDOWNCMD on; the
     // human render must show both flags so the operator understands
     // that the host is about to power off.

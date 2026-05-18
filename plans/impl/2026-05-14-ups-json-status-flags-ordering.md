@@ -1,5 +1,10 @@
 # Fix non-deterministic `status_flags` JSON ordering
 
+Status: Superseded by
+`plans/impl/2026-05-18-upsc-status-flag-order.md`, which preserves
+NUT emission order across parser storage, human output, JSON output,
+and TUI render surfaces instead of imposing a lexicographic sort.
+
 ## Context
 
 `braid ups status --json` is documented as a "stable shape for scripts"

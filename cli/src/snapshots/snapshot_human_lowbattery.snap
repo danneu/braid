@@ -3,7 +3,7 @@ source: cli/src/ups.rs
 expression: "format_human(\"ups\", &parsed)"
 ---
 UPS: ups
-Status: LB OB
+Status: OB LB
 Battery: 8%
 Runtime: 0:45
 Load: 25% (83 W estimated)

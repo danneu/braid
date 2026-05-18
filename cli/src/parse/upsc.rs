@@ -43,7 +43,7 @@ impl UpsStatusFlag {
 /// Walks `key: value` lines and routes each known key to a typed field;
 /// unrecognised keys land in `extra`.
 pub fn parse_upsc(stdout: &str) -> UpscOutput {
-    let mut status_flags = std::collections::HashSet::new();
+    let mut status_flags = Vec::new();
     let mut battery = BatteryFields::default();
     let mut load_pct: Option<u8> = None;
     let mut realpower_nominal_watts: Option<u32> = None;
@@ -70,7 +70,10 @@ pub fn parse_upsc(stdout: &str) -> UpscOutput {
         match key {
             "ups.status" => {
                 for tok in value.split_ascii_whitespace() {
-                    status_flags.insert(UpsStatusFlag::from_token(tok));
+                    let flag = UpsStatusFlag::from_token(tok);
+                    if !status_flags.contains(&flag) {
+                        status_flags.push(flag);
+                    }
                 }
             }
             "battery.charge" => battery.charge_pct = parse_pct(value),
@@ -169,6 +172,38 @@ mod tests {
         let out = parse_upsc("ups.status: OB LB\n");
         assert!(out.status_flags.contains(&UpsStatusFlag::Ob));
         assert!(out.status_flags.contains(&UpsStatusFlag::Lb));
+    }
+
+    // Intent: parse_upsc preserves upsc's emission order in status_flags.
+    // Why it exists: the human render and --json output both iterate
+    // status_flags verbatim, so parser insertion order is the script-facing
+    // contract.
+    // Scenario: calibration with charging plus replace-batt advisory, which
+    // exercises four distinct flags in NUT's canonical emission order.
+    #[test]
+    fn parse_upsc_preserves_status_flag_order() {
+        let out = parse_upsc("ups.status: CAL OL CHRG RB\n");
+        assert_eq!(
+            out.status_flags,
+            vec![
+                UpsStatusFlag::Cal,
+                UpsStatusFlag::Ol,
+                UpsStatusFlag::Chrg,
+                UpsStatusFlag::Rb,
+            ],
+        );
+    }
+
+    // Intent: duplicates in ups.status collapse to a single flag in
+    // first-seen order.
+    // Why it exists: Vec replaces HashSet for ordering reasons, but set
+    // semantics for membership must survive a driver that repeats a token.
+    // Scenario: hand-crafted `ups.status: OL OB OL`, not produced by a real
+    // NUT driver but covered by the infallible parser contract.
+    #[test]
+    fn parse_upsc_dedupes_repeated_status_tokens() {
+        let out = parse_upsc("ups.status: OL OB OL\n");
+        assert_eq!(out.status_flags, vec![UpsStatusFlag::Ol, UpsStatusFlag::Ob]);
     }
 
     // Intent: parse_upsc preserves unknown flag tokens via Unknown(String).

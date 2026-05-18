@@ -302,9 +302,12 @@ fn ups_status_lines(snapshot: Option<&UpsSnapshot>) -> Vec<Line<'static>> {
     let flags = if snapshot.flags.is_empty() {
         "--".to_owned()
     } else {
-        let mut flags: Vec<&str> = snapshot.flags.iter().map(|f| f.as_token()).collect();
-        flags.sort();
-        flags.join(" ")
+        snapshot
+            .flags
+            .iter()
+            .map(|f| f.as_token())
+            .collect::<Vec<_>>()
+            .join(" ")
     };
     let charge = snapshot
         .battery_charge_pct
@@ -706,6 +709,25 @@ mod tests {
         let mut model = model();
         model.ups_config = Some(Ups { name: "ups".into() });
         model.ups = Some(ups_snapshot());
+        model.browse.select_next();
+        snap!(buffer_to_string(&render(&model, 80, 14)));
+    }
+
+    // Intent: Browse > NUT > Status renders multi-flag ups.status in upsc
+    // emission order.
+    // Why it exists: this pins the Browse render path so a future re-sort
+    // shows up as a snapshot diff.
+    // Scenario: dummy snapshot reporting "OB LB" during a critical state.
+    #[test]
+    fn snapshot_browse_nut_status_multi_flag() {
+        let mut model = model();
+        model.ups_config = Some(Ups { name: "ups".into() });
+        let mut snap = ups_snapshot();
+        snap.flags = vec![
+            crate::parse::types::UpsStatusFlag::Ob,
+            crate::parse::types::UpsStatusFlag::Lb,
+        ];
+        model.ups = Some(snap);
         model.browse.select_next();
         snap!(buffer_to_string(&render(&model, 80, 14)));
     }

@@ -1,4 +1,4 @@
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 use std::time::{Duration, Instant};
 
 use crate::alert::AlertState;
@@ -124,7 +124,7 @@ pub struct FanSnapshot {
 /// `tui::probe::probe_ups_for_tui`, the single authoritative bridge.
 #[derive(Debug, Clone)]
 pub struct UpsSnapshot {
-    pub flags: HashSet<UpsStatusFlag>,
+    pub flags: Vec<UpsStatusFlag>,
     pub battery_charge_pct: Option<u8>,
     pub runtime_secs: Option<u32>,
     pub load_pct: Option<u8>,
