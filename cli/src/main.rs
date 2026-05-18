@@ -1013,6 +1013,27 @@ mod tests {
         assert!(err.to_string().contains("unexpected argument"));
     }
 
+    // Intent: remove-missing rejects --luks-format-arg because it never
+    // formats a fresh LUKS volume.
+    // Why it exists: RemoveMissingArgs structurally does not flatten
+    // LuksFormatArgs, but only `remove` had a parse-rejection regression test
+    // before. A future reflexive flatten would regress this silently.
+    // Scenario: an operator copy-pastes a --luks-format-arg=... flag from add
+    // or replace into a remove-missing invocation.
+    #[test]
+    fn remove_missing_does_not_accept_luks_format_arg() {
+        let err = Cli::try_parse_from([
+            "braid",
+            "remove-missing",
+            "--missing-id",
+            "1",
+            "--luks-format-arg=--pbkdf",
+        ])
+        .expect_err("remove-missing must not expose LUKS format options");
+
+        assert!(err.to_string().contains("unexpected argument"));
+    }
+
     #[test]
     fn luks_format_arg_rejects_space_form_for_hyphen_value() {
         let err = Cli::try_parse_from([
