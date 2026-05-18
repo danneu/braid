@@ -5,14 +5,13 @@
 //! oriented, so this module is a flat collection of helpers rather than the
 //! `*Pool` + `*ParamsBuilder` + `PoolFixture` triad the other commands use.
 //!
-//! Field-construction of `DoctorContext` and `BeepCheckOptions` happens via
-//! the `#[cfg(test)] pub(crate)` constructors on those types in `doctor.rs`
-//! (see the "Test-only constructors" section there); doctor.rs holds the
-//! private fields, so this module cannot field-literal-construct them
-//! directly.
+//! Field-construction of `DoctorContext` happens via the `#[cfg(test)]
+//! pub(crate)` constructor on that type in `doctor.rs` (see the "Test-only
+//! constructors" section there); doctor.rs holds the private fields, so this
+//! module cannot field-literal-construct it directly.
 
 use crate::cmd::{CmdError, CmdRequest, CommandRunner, RawCommandOutput};
-use crate::doctor::{BeepCheckOptions, DiskState, DoctorContext, DoctorOptions};
+use crate::doctor::{DiskState, DoctorContext, DoctorOptions};
 use crate::state_paths::StatePaths;
 use crate::types::MountPoint;
 use std::io::Write;
@@ -45,14 +44,6 @@ pub(crate) fn human_options() -> DoctorOptions {
         json: false,
         beep: false,
     }
-}
-
-pub(crate) fn beep_check_options(
-    is_root: bool,
-    json_output: bool,
-    play_beep: bool,
-) -> BeepCheckOptions {
-    BeepCheckOptions::for_test(is_root, json_output, play_beep)
 }
 
 // ---------------------------------------------------------------------------

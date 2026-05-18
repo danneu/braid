@@ -149,10 +149,10 @@ pub(crate) use discover::{
 #[allow(unused_imports)]
 pub(crate) use doctor::{
     DF_MIXED, DF_MIXED_METADATA, DF_RAID1_CLEAN, DfQueryFailureRunner, PoolMissingDevicesRunner,
-    UpscSpawnFailureRunner, beep_check_options, beep_ctx, cls, config_with_ups_enabled,
-    config_without_ups, device_usage_healthy, device_usage_with_missing, df_json, df_json_fail,
-    human_options, isolated_paths, mountpoint_fail, mountpoint_ok, parsed_doctor_ctx,
-    systemctl_is_active_output, ups_ctx, valid_config_json, write_temp,
+    UpscSpawnFailureRunner, beep_ctx, cls, config_with_ups_enabled, config_without_ups,
+    device_usage_healthy, device_usage_with_missing, df_json, df_json_fail, human_options,
+    isolated_paths, mountpoint_fail, mountpoint_ok, parsed_doctor_ctx, systemctl_is_active_output,
+    ups_ctx, valid_config_json, write_temp,
 };
 pub(crate) use enroll_key_file::{
     enroll_add_keyfile_ok, enroll_by_id, enroll_discovery_two_disks, enroll_fs,

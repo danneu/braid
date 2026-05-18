@@ -69,15 +69,4 @@ with subtest("JSON plus --beep skips without invoking wrapper"):
     # Clean up so the next VM test (if any) starts from the healthy state.
     machine.succeed("rm -f /tmp/beep-broken /tmp/beep-invoked")
 
-# NOTE on the missing non-root subtest:
-#
-# The Skip-when-not-root branch of `check_beep_path_inner` is covered
-# deterministically by `doctor::tests::beep_path_skips_when_not_root`, which
-# constructs the context directly and asserts the runner is never invoked.
-# It is intentionally NOT exercised here. `sudo -u tester braid doctor` would
-# exit 1 with "braid must be run as root" because main.rs:244-251 rejects
-# every command except `tui --demo` for non-root users -- the request never
-# reaches cmd_doctor. Reaching the inner branch from a VM would require
-# relaxing that top-level CLI gate, which is intentionally out of scope.
-
 machine.shutdown()

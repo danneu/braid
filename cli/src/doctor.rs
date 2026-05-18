@@ -115,16 +115,6 @@ pub struct DoctorOptions {
     pub beep: bool,
 }
 
-/// Triple-gate inputs (`is_root`, `json_output`, `play_beep`) for
-/// `check_beep_path_inner`. Bundled into a struct so test code can vary
-/// one axis at a time without growing the call signature.
-#[derive(Debug, Clone, Copy)]
-pub(crate) struct BeepCheckOptions {
-    is_root: bool,
-    json_output: bool,
-    play_beep: bool,
-}
-
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum BraidOnlineActiveState {
     OkSettled,
@@ -666,28 +656,18 @@ fn check_metadata_profile_mismatch<R: CommandRunner>(
 /// A successful `--beep` run is both a notifier-health check and a positive
 /// guarantee that future disk alerts will produce the same audible beep.
 ///
-/// `--json` mode (`json_output = true`) suppresses the beep: machine-readable
-/// output must never produce audible side effects. The check still appears in
-/// the JSON report (as `Skip`) so scripts auditing doctor output can see it.
+/// `--json` mode suppresses the beep: machine-readable output must never
+/// produce audible side effects. The check still appears in the JSON report
+/// (as `Skip`) so scripts auditing doctor output can see it.
 ///
-/// This is the public entry point. It hits the real filesystem and the
-/// real `geteuid()` syscall; unit tests target `check_beep_path_inner`
-/// directly so the geteuid and json branches are exercised deterministically
-/// regardless of which UID `cargo test` runs under.
+/// This is the public entry point. It hits the real notifier config path;
+/// unit tests target `check_beep_path_inner` directly so they can inject the
+/// notifier path while keeping the side-effect gates deterministic.
 fn check_beep_path<R: CommandRunner>(
     ctx: &mut DoctorContext<'_, R>,
     options: DoctorOptions,
 ) -> CheckResult {
-    let is_root = unsafe { libc::geteuid() } == 0;
-    check_beep_path_inner(
-        ctx,
-        Path::new(NOTIFIER_CONFIG_PATH),
-        BeepCheckOptions {
-            is_root,
-            json_output: options.json,
-            play_beep: options.beep,
-        },
-    )
+    check_beep_path_inner(ctx, Path::new(NOTIFIER_CONFIG_PATH), options)
 }
 
 /// UPS doctor check for `braid.ups.enable = true`.
@@ -805,7 +785,7 @@ fn check_braid_online_active_when_mounted<R: CommandRunner>(
 fn check_beep_path_inner<R: CommandRunner>(
     ctx: &mut DoctorContext<'_, R>,
     notifier_path: &Path,
-    options: BeepCheckOptions,
+    options: DoctorOptions,
 ) -> CheckResult {
     let name = "beep_path";
 
@@ -834,39 +814,27 @@ fn check_beep_path_inner<R: CommandRunner>(
         }
     };
 
-    // 4. Lack of root is an INVOCATION CONTEXT issue, not a SPEAKER HEALTH
-    //    issue. The wrapper does setpriv --reuid=nobody, which requires
-    //    CAP_SETUID. Reporting Fail here would make doctor untrustworthy:
-    //    "speaker is broken" and "you ran doctor without sudo" are
-    //    different conditions. Checked BEFORE the JSON gate so non-root
-    //    callers always get the actionable "use sudo" hint regardless of
-    //    output mode. The is_root flag is computed by the public wrapper
-    //    above so unit tests can deterministically exercise both branches.
-    if !options.is_root {
-        return CheckResult::skip(name, "skipped (requires root to play the alert test beep)");
-    }
-
-    // 5. JSON mode is for programmatic consumption -- emitting an audible
+    // 4. JSON mode is for programmatic consumption -- emitting an audible
     //    side effect from a data-output command is wrong. The check still
     //    appears in the report (as Skip) so scripts auditing doctor output
     //    can see it; the wrapper is simply never invoked.
-    if options.json_output {
+    if options.json {
         return CheckResult::skip(
             name,
             "skipped in --json mode -- rerun with --beep without --json to play the alert test beep",
         );
     }
 
-    // 6. Plain doctor confirms beep monitoring is configured without playing
+    // 5. Plain doctor confirms beep monitoring is configured without playing
     //    sound. The runner is only invoked for explicit --beep.
-    if !options.play_beep {
+    if !options.beep {
         return CheckResult::skip(
             name,
             "skipped (pass --beep to play the audible alert test beep)",
         );
     }
 
-    // 7. Run the canonical wrapper. This PLAYS the real short alert beep
+    // 6. Run the canonical wrapper. This PLAYS the real short alert beep
     //    (1 kHz, 500 ms) -- same code path the alert service uses. Hearing
     //    the beep is both the success signal AND a preview of what real
     //    disk alerts will sound like.
@@ -1029,11 +997,10 @@ pub fn cmd_doctor(
 // Test-only constructors
 //
 // The fixture module `crate::test_fixtures::doctor` cannot field-construct
-// `DoctorContext` / `BeepCheckOptions` directly because their fields stay
-// module-private (and `DoctorContext::df_snapshot` references the
-// module-private `DfSnapshot`). These `#[cfg(test)] pub(crate)` constructors
-// keep production-side internals encapsulated while letting fixture code
-// build the same shapes.
+// `DoctorContext` directly because its fields stay module-private (and
+// `DoctorContext::df_snapshot` references the module-private `DfSnapshot`).
+// These `#[cfg(test)] pub(crate)` constructors keep production-side internals
+// encapsulated while letting fixture code build the same shapes.
 // ---------------------------------------------------------------------------
 
 #[cfg(test)]
@@ -1066,17 +1033,6 @@ impl<'a, R: CommandRunner> DoctorContext<'a, R> {
     }
 }
 
-#[cfg(test)]
-impl BeepCheckOptions {
-    pub(crate) fn for_test(is_root: bool, json_output: bool, play_beep: bool) -> Self {
-        Self {
-            is_root,
-            json_output,
-            play_beep,
-        }
-    }
-}
-
 // ---------------------------------------------------------------------------
 // Tests
 // ---------------------------------------------------------------------------
@@ -1087,12 +1043,11 @@ mod tests {
     use crate::cmd::{MockRunner, RawCommandOutput};
     use crate::test_fixtures::{
         DF_MIXED, DF_MIXED_METADATA, DF_RAID1_CLEAN, DfQueryFailureRunner,
-        PoolMissingDevicesRunner, UpscSpawnFailureRunner, beep_check_options, beep_ctx, cls,
-        config_with_ups_enabled, config_without_ups, device_usage_healthy,
-        device_usage_with_missing, df_json, df_json_fail, human_options, is_luks_ok,
-        isolated_paths, luks_dump_text_ok, luks_uuid_ok, mountpoint_fail, mountpoint_ok,
-        parsed_doctor_ctx, systemctl_is_active_output, test_uuid, ups_ctx, valid_config_json,
-        write_temp,
+        PoolMissingDevicesRunner, UpscSpawnFailureRunner, beep_ctx, cls, config_with_ups_enabled,
+        config_without_ups, device_usage_healthy, device_usage_with_missing, df_json, df_json_fail,
+        human_options, is_luks_ok, isolated_paths, luks_dump_text_ok, luks_uuid_ok,
+        mountpoint_fail, mountpoint_ok, parsed_doctor_ctx, systemctl_is_active_output, test_uuid,
+        ups_ctx, valid_config_json, write_temp,
     };
     use crate::types::MountPoint;
 
@@ -1125,9 +1080,9 @@ mod tests {
             find_check(&report, "declared_disks").status,
             CheckStatus::Skip
         );
-        // beep_path is intentionally not asserted here: it depends on real
-        // host state (/etc/braid/notifier-config.json and geteuid()).
-        // Deterministic coverage lives in the check_beep_path_inner tests.
+        // beep_path is intentionally not asserted here: it depends on real host
+        // state (/etc/braid/notifier-config.json). Deterministic coverage
+        // lives in the check_beep_path_inner tests.
     }
 
     /* Intent: valid custom config files skip canonical permission enforcement.
@@ -2480,13 +2435,11 @@ mod tests {
     }
 
     // -----------------------------------------------------------------------
-    // check_beep_path_inner — deterministic branch coverage
+    // check_beep_path_inner -- deterministic branch coverage
     //
-    // All beep_path tests target the inner helper directly, passing both the
-    // notifier-config path and the is_root flag explicitly. This isolates the
-    // check from `geteuid()` so the same tests pass regardless of whether
-    // `cargo test` is invoked as root or as an unprivileged user. The runner
-    // is mocked via MockRunner::with_output for the success/failure branches.
+    // All beep_path tests target the inner helper directly to inject the
+    // notifier-config path. The runner is mocked via MockRunner::with_output
+    // for the success/failure branches.
     // -----------------------------------------------------------------------
 
     // Intent: when the notifier config file does not exist, the check skips
@@ -2504,11 +2457,10 @@ mod tests {
         let result = check_beep_path_inner(
             &mut ctx,
             Path::new("/tmp/nonexistent-braid-notifier-config-doctor-test.json"),
-            beep_check_options(
-                true,  // is_root: irrelevant since the file doesn't exist
-                false, // json_output: irrelevant since the file doesn't exist
-                false, // play_beep: irrelevant since the file doesn't exist
-            ),
+            DoctorOptions {
+                json: false, // irrelevant since the file doesn't exist
+                beep: false, // irrelevant since the file doesn't exist
+            },
         );
         assert_eq!(result.name, "beep_path");
         assert_eq!(result.status, CheckStatus::Skip);
@@ -2531,8 +2483,14 @@ mod tests {
         let (_dir, paths) = isolated_paths();
         let runner = MockRunner::default();
         let mut ctx = beep_ctx(&runner, &paths);
-        let result =
-            check_beep_path_inner(&mut ctx, f.path(), beep_check_options(true, false, false));
+        let result = check_beep_path_inner(
+            &mut ctx,
+            f.path(),
+            DoctorOptions {
+                json: false,
+                beep: false,
+            },
+        );
         assert_eq!(result.status, CheckStatus::Fail);
         assert!(
             result.message.contains("malformed"),
@@ -2554,8 +2512,14 @@ mod tests {
         let (_dir, paths) = isolated_paths();
         let runner = MockRunner::default();
         let mut ctx = beep_ctx(&runner, &paths);
-        let result =
-            check_beep_path_inner(&mut ctx, f.path(), beep_check_options(true, false, false));
+        let result = check_beep_path_inner(
+            &mut ctx,
+            f.path(),
+            DoctorOptions {
+                json: false,
+                beep: false,
+            },
+        );
         assert_eq!(result.status, CheckStatus::Skip);
         assert!(
             result.message.contains("beep monitoring disabled"),
@@ -2564,46 +2528,9 @@ mod tests {
         );
     }
 
-    // Intent: when invoked without root, the check skips with a clear
-    //   "requires root" message AND does not invoke the runner at all.
-    // Why: lack of root is an INVOCATION CONTEXT issue, not a SPEAKER
-    //   HEALTH issue. Reporting Fail here would conflate "you ran doctor
-    //   without sudo" with "your speaker is broken" — making doctor
-    //   untrustworthy and less scriptable. The runner-not-invoked
-    //   assertion is enforced implicitly: MockRunner returns MissingMock
-    //   for any unmatched call, which would surface as a Fail rather
-    //   than a Skip. This test would catch any regression that probes
-    //   the wrapper before checking root.
-    // Scenario: unprivileged user runs `braid doctor` (without sudo) on
-    //   a real NAS where beep is enabled.
-    #[test]
-    fn beep_path_skips_when_not_root() {
-        let f = write_temp(r#"{"beep_probe_path": "/nix/store/fake/bin/braid-beep-probe"}"#);
-        let (_dir, paths) = isolated_paths();
-        // No BraidBeepProbe output configured: if the check tries to run
-        // the wrapper, MockRunner returns MissingMock, which becomes a
-        // Fail message — pinning the runner-not-invoked invariant.
-        let runner = MockRunner::default();
-        let mut ctx = beep_ctx(&runner, &paths);
-        let result =
-            check_beep_path_inner(&mut ctx, f.path(), beep_check_options(false, false, true));
-        assert_eq!(result.status, CheckStatus::Skip);
-        assert!(
-            result.message.contains("requires root"),
-            "unexpected: {}",
-            result.message
-        );
-        assert!(
-            result.message.contains("alert test beep"),
-            "skip message must mention the alert test beep (product framing): {}",
-            result.message
-        );
-    }
-
     // Intent: when invoked in --json mode, the check skips with a clear
     //   "json mode" message AND does not invoke the runner at all, even
-    //   when is_root=true, play_beep=true, and a real-looking probe path is
-    //   configured.
+    //   when --beep is set and a real-looking probe path is configured.
     // Why: `braid doctor --json` is for programmatic consumption — emitting
     //   an audible side effect from a data-output command would surprise
     //   any script piping doctor's JSON into a monitoring system. The
@@ -2625,11 +2552,10 @@ mod tests {
         let result = check_beep_path_inner(
             &mut ctx,
             f.path(),
-            beep_check_options(
-                true, // is_root: yes
-                true, // json_output: yes
-                true, // play_beep: yes, but --json still suppresses it
-            ),
+            DoctorOptions {
+                json: true,
+                beep: true, // --json still suppresses it
+            },
         );
         assert_eq!(result.status, CheckStatus::Skip);
         assert_eq!(
@@ -2651,8 +2577,14 @@ mod tests {
         let (_dir, paths) = isolated_paths();
         let runner = MockRunner::default();
         let mut ctx = beep_ctx(&runner, &paths);
-        let result =
-            check_beep_path_inner(&mut ctx, f.path(), beep_check_options(true, false, false));
+        let result = check_beep_path_inner(
+            &mut ctx,
+            f.path(),
+            DoctorOptions {
+                json: false,
+                beep: false,
+            },
+        );
         assert_eq!(result.status, CheckStatus::Skip);
         assert_eq!(
             result.message,
@@ -2683,8 +2615,14 @@ mod tests {
             },
         );
         let mut ctx = beep_ctx(&runner, &paths);
-        let result =
-            check_beep_path_inner(&mut ctx, f.path(), beep_check_options(true, false, true));
+        let result = check_beep_path_inner(
+            &mut ctx,
+            f.path(),
+            DoctorOptions {
+                json: false,
+                beep: true,
+            },
+        );
         assert_eq!(result.status, CheckStatus::Ok);
         assert_eq!(
             result.message,
@@ -2718,8 +2656,14 @@ mod tests {
             },
         );
         let mut ctx = beep_ctx(&runner, &paths);
-        let result =
-            check_beep_path_inner(&mut ctx, f.path(), beep_check_options(true, false, true));
+        let result = check_beep_path_inner(
+            &mut ctx,
+            f.path(),
+            DoctorOptions {
+                json: false,
+                beep: true,
+            },
+        );
         assert_eq!(result.status, CheckStatus::Fail);
         assert!(
             result.message.contains("could not play alert test beep"),

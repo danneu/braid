@@ -23,6 +23,27 @@ fn non_root_exits_with_error() {
     assert!(stderr.contains("must be run as root"), "got: {stderr}");
 }
 
+// Intent: `braid doctor --beep` is rejected as non-root by the universal root
+//   gate in main.rs, never reaching cmd_doctor or the beep-check logic.
+// Why it exists: check_beep_path / check_beep_path_inner no longer carry a
+//   defense-in-depth root skip arm; that branch was deleted because main.rs
+//   already gates every command except `tui --demo` and `help`.
+// Scenario: an unprivileged user runs `braid doctor --beep` to preview the
+//   alert beep without sudo.
+#[test]
+fn non_root_doctor_exits_with_error() {
+    if is_root() {
+        return;
+    }
+    let output = braid()
+        .args(["doctor", "--beep"])
+        .output()
+        .expect("failed to execute braid");
+    assert_eq!(output.status.code(), Some(1));
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(stderr.contains("must be run as root"), "got: {stderr}");
+}
+
 #[test]
 fn help_works_without_root() {
     if is_root() {
