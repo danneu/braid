@@ -84,7 +84,8 @@ impl UnlockPlan {
 
         // Contract:
         // - Pure operator command: bring the pool online from authoritative state.
-        // - Membership comes from pool.json; unlock never creates, repairs, or rewrites it.
+        // - Membership comes from pool.json; unlock never mutates membership
+        //   topology and never creates or repairs invalid/missing membership.
         // - Probe only configured members, open what is available, and mount the pool.
         // - Refuse degraded mounts unless --allow-degraded is explicit.
         // - After a successful mount, pool.json enrichment fields (devid,
@@ -130,21 +131,37 @@ impl UnlockPlan {
         let mount_point = params.config.mount_point();
 
         // Enrich pool.json with live metadata (devid, added_at) -- best-effort.
-        // Two outcomes are tolerated and leave membership data unenriched:
+        // The in-memory membership clone is authoritative here because the
+        // wrapper holds the pool flock for the lifetime of unlock.
+        // Three outcomes are tolerated and leave membership data unenriched:
         //   * `Ok(PoolState { mounted: false, devices: vec![], ... })` -- a
-        //     mountinfo race after a successful mount; refresh_pool_metadata
-        //     still runs and re-saves, but enrich_from_pool_state walks an
-        //     empty devices vec so no fields change.
+        //     mountinfo race after a successful mount; enrich_from_pool_state
+        //     walks an empty devices vec so no fields change.
         //   * `Err(_)` from probe_pool itself (e.g. a parser drift in
         //     `btrfs filesystem show`) -- a Warning line is emitted,
-        //     refresh_pool_metadata is not called, and pool.json is not
-        //     rewritten.
+        //     and pool.json is not rewritten.
+        //   * enrich/save failure -- a Warning line is emitted and unlock
+        //     still succeeds because the mount has already completed.
         // Correctness never depends on this enrichment (see contract above).
         // Pinned by unlock_tolerates_post_mount_probe_mounted_false and
         // unlock_warns_when_post_mount_probe_errors.
         match probe::probe_pool(runner, fs, mount_point) {
             Ok(pool_after) => {
-                membership::refresh_pool_metadata(&pool_after, params.paths);
+                let mut enriched = params.membership.clone();
+                match membership::enrich_from_pool_state(&mut enriched, &pool_after) {
+                    Ok(_report) => {
+                        if let Err(e) = membership::save_membership(&enriched, params.paths) {
+                            emit_post_mount_enrichment_warning(format_args!(
+                                "Warning: failed to save enriched membership: {e}"
+                            ));
+                        }
+                    }
+                    Err(e) => {
+                        emit_post_mount_enrichment_warning(format_args!(
+                            "Warning: failed to enrich pool membership: {e}"
+                        ));
+                    }
+                }
             }
             Err(e) => crate::status_tag::emit_status(&format!(
                 "Warning: failed to probe pool for metadata refresh: {e}\n"
@@ -173,8 +190,11 @@ pub fn plan_unlock<R: CommandRunner, F: Filesystem + ?Sized>(
     params: &UnlockParams<'_>,
 ) -> Result<UnlockPlan, PlanFailure<UnlockError>> {
     // `plan_add` also runs `check_pool_unlocked_if_membership_exists`
-    // here; unlock skips it because unlock never writes pool.json
-    // membership -- see the "Contract:" block in `UnlockPlan::execute`.
+    // here; unlock skips it because unlock never mutates pool.json
+    // membership topology. Execute may refresh runtime metadata
+    // (devid, added_at) after mount, but the set of members is
+    // authoritative on entry. See the "Contract:" block in
+    // `UnlockPlan::execute`.
     if let Err(msg) = preflight::check_no_pending_operation(params.paths) {
         return Err(PlanFailure::empty(UnlockError::Failed(msg)));
     }
@@ -234,6 +254,57 @@ pub fn cmd_unlock<R: CommandRunner, F: Filesystem + ?Sized>(
     }
 
     plan.execute(runner, fs, params)
+}
+
+/// Keeps post-mount enrichment warnings byte-identical in production while
+/// giving unit tests a narrow capture seam for best-effort write failures.
+fn emit_post_mount_enrichment_warning(args: std::fmt::Arguments<'_>) {
+    #[cfg(test)]
+    if unlock_stderr_capture::write(&format!("{args}\n")) {
+        return;
+    }
+    eprintln!("{args}");
+}
+
+#[cfg(test)]
+mod unlock_stderr_capture {
+    use std::cell::RefCell;
+
+    thread_local! {
+        static CAPTURED_STDERR: RefCell<Option<String>> = const { RefCell::new(None) };
+    }
+
+    pub(super) fn capture<F, T>(f: F) -> (T, String)
+    where
+        F: FnOnce() -> T,
+    {
+        CAPTURED_STDERR.with(|slot| {
+            let mut slot = slot.borrow_mut();
+            assert!(slot.is_none(), "nested unlock stderr capture");
+            *slot = Some(String::new());
+        });
+
+        let result = f();
+        let stderr = CAPTURED_STDERR.with(|slot| {
+            slot.borrow_mut()
+                .take()
+                .expect("unlock stderr capture must be active")
+        });
+        (result, stderr)
+    }
+
+    pub(super) fn write(text: &str) -> bool {
+        CAPTURED_STDERR.with(|slot| {
+            let mut slot = slot.borrow_mut();
+            match slot.as_mut() {
+                Some(stderr) => {
+                    stderr.push_str(text);
+                    true
+                }
+                None => false,
+            }
+        })
+    }
 }
 
 #[cfg(test)]
@@ -1280,6 +1351,175 @@ mod tests {
                 member.added_at
             );
         }
+    }
+
+    // Intent: `cmd_unlock` must tolerate a `save_membership` failure on the
+    //   post-mount enrichment path without failing the command.
+    // Why it exists: the mount has already succeeded by the time enrichment
+    //   runs; using `?` on the best-effort pool.json write would report a
+    //   failed unlock even though the pool is online.
+    // Scenario: 3-disk pool, clean mount, and a successful post-mount probe,
+    //   but pool.json is a directory so the atomic save cannot replace it.
+    #[test]
+    fn unlock_tolerates_post_mount_save_membership_failure() {
+        let (_state_dir, sp) = isolated_paths();
+        let config = test_config();
+        let membership = unlock_three_disk_membership();
+        std::fs::create_dir(&sp.pool_json()).expect("pool.json blocker directory");
+
+        let fs = unlock_storage_fs(&[
+            "/dev/disk/by-id/virtio-disk1",
+            "/dev/disk/by-id/virtio-disk2",
+            "/dev/disk/by-id/virtio-disk3",
+        ]);
+
+        let mp = MountPoint("/mnt/storage".to_owned());
+        let (uuid1_req, uuid1_out) = luks_uuid_ok(
+            "/dev/disk/by-id/virtio-disk1",
+            "11111111-1111-1111-1111-111111111111",
+        );
+        let (uuid2_req, uuid2_out) = luks_uuid_ok(
+            "/dev/disk/by-id/virtio-disk2",
+            "22222222-2222-2222-2222-222222222222",
+        );
+        let (uuid3_req, uuid3_out) = luks_uuid_ok(
+            "/dev/disk/by-id/virtio-disk3",
+            "33333333-3333-3333-3333-333333333333",
+        );
+        let (scan_req, scan_out) = unlock_btrfs_device_scan_ok();
+        let (balance_req, balance_out) = unlock_btrfs_balance_status_idle(&mp);
+
+        let closed_status = |mapper: &str| RawCommandOutput {
+            cmd: format!("cryptsetup status {mapper}"),
+            stdout: String::new(),
+            stderr: format!("/dev/mapper/{mapper} is inactive.\n"),
+            exit_status: 4,
+        };
+        let active_status = |mapper: &str, underlying: &str| RawCommandOutput {
+            cmd: format!("cryptsetup status {mapper}"),
+            stdout: format!(
+                "/dev/mapper/{mapper} is active and is in use.\n\
+                 \ttype:    LUKS2\n\
+                 \tcipher:  aes-xts-plain64\n\
+                 \tdevice:  {underlying}\n\
+                 \tsector size:  512\n"
+            ),
+            stderr: String::new(),
+            exit_status: 0,
+        };
+
+        let runner = MockRunner::default()
+            .with_output(
+                CmdRequest::MountpointCheck { path: mp.clone() },
+                unlock_err_raw("mountpoint", 1, ""),
+            )
+            .with_output(uuid1_req, uuid1_out)
+            .with_output(uuid2_req, uuid2_out)
+            .with_output(uuid3_req, uuid3_out)
+            .with_luks_dump_text_luks2_for(&[
+                "/dev/disk/by-id/virtio-disk1",
+                "/dev/disk/by-id/virtio-disk2",
+                "/dev/disk/by-id/virtio-disk3",
+            ])
+            // Status is checked during planning, checked again immediately
+            // before open, then checked by the post-mount metadata probe.
+            .with_output_sequence(
+                CmdRequest::CryptsetupStatus {
+                    mapper: MapperName("braid-disk1".into()),
+                },
+                vec![
+                    closed_status("braid-disk1"),
+                    closed_status("braid-disk1"),
+                    active_status("braid-disk1", "/dev/disk/by-id/virtio-disk1"),
+                ],
+            )
+            .with_output_sequence(
+                CmdRequest::CryptsetupStatus {
+                    mapper: MapperName("braid-disk2".into()),
+                },
+                vec![
+                    closed_status("braid-disk2"),
+                    closed_status("braid-disk2"),
+                    active_status("braid-disk2", "/dev/disk/by-id/virtio-disk2"),
+                ],
+            )
+            .with_output_sequence(
+                CmdRequest::CryptsetupStatus {
+                    mapper: MapperName("braid-disk3".into()),
+                },
+                vec![
+                    closed_status("braid-disk3"),
+                    closed_status("braid-disk3"),
+                    active_status("braid-disk3", "/dev/disk/by-id/virtio-disk3"),
+                ],
+            );
+        let runner = unlock_with_test_passphrase_ok(runner, "/dev/disk/by-id/virtio-disk1");
+        let runner = unlock_with_test_passphrase_ok(runner, "/dev/disk/by-id/virtio-disk2");
+        let runner = unlock_with_test_passphrase_ok(runner, "/dev/disk/by-id/virtio-disk3");
+        let runner =
+            unlock_with_open_mapper_ok(runner, "/dev/disk/by-id/virtio-disk1", "braid-disk1");
+        let runner =
+            unlock_with_open_mapper_ok(runner, "/dev/disk/by-id/virtio-disk2", "braid-disk2");
+        let runner =
+            unlock_with_open_mapper_ok(runner, "/dev/disk/by-id/virtio-disk3", "braid-disk3");
+        let runner = runner.with_output(scan_req, scan_out).with_output(
+            CmdRequest::BtrfsFilesystemShow {
+                mount_point: mp.clone(),
+            },
+            RawCommandOutput {
+                cmd: "btrfs filesystem show".to_owned(),
+                stdout: "\
+Label: none  uuid: aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee\n\
+\tTotal devices 3 FS bytes used 16.17MiB\n\
+\tdevid    1 size 496.00MiB used 121.56MiB path /dev/mapper/braid-disk1\n\
+\tdevid    2 size 496.00MiB used 121.56MiB path /dev/mapper/braid-disk2\n\
+\tdevid    3 size 496.00MiB used 121.56MiB path /dev/mapper/braid-disk3\n"
+                    .to_owned(),
+                stderr: String::new(),
+                exit_status: 0,
+            },
+        );
+        let runner = unlock_with_mount_ok(runner, "/dev/mapper/braid-disk1", &mp)
+            .with_output(balance_req, balance_out);
+        let tmp = unlock_passphrase_file();
+
+        let (result, stderr) = super::unlock_stderr_capture::capture(|| {
+            cmd_unlock(
+                &runner,
+                &fs,
+                &UnlockParams {
+                    config: &config,
+                    membership: &membership,
+                    paths: &sp,
+                    passphrase_stdin: false,
+                    passphrase_file: Some(tmp.path()),
+                    key_file: None,
+                    allow_degraded: false,
+                    dry_run: false,
+                    backing_path_resolver: crate::test_fixtures::mock_virtio_backing_path_resolver(
+                    ),
+                },
+            )
+        });
+
+        result.expect("unlock should tolerate post-mount save_membership failure");
+        assert!(
+            runner.requests().iter().any(|r| matches!(
+                r,
+                CmdRequest::Mount {
+                    device,
+                    mount_point
+                } if device == "/dev/mapper/braid-disk1" && mount_point == &mp
+            )),
+            "unlock should have mounted the pool before the save failure"
+        );
+        assert_eq!(
+            stderr
+                .matches("Warning: failed to save enriched membership: ")
+                .count(),
+            1,
+            "expected one save-membership warning, got: {stderr:?}"
+        );
     }
 
     // Intent: when every membership disk's mapper is already open, `cmd_unlock`
