@@ -292,6 +292,9 @@ fn discover_from_dir<R: CommandRunner>(
         }
         Err(e) => return Err(DiscoverError::ReadDir(e)),
     };
+    let entries: Vec<std::fs::DirEntry> = entries
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(DiscoverError::ReadDir)?;
 
     // Per-disk-name best candidate, keyed by the validated DiskName.
     // The Occupied arm tie-breaks within an alias set without
@@ -299,7 +302,7 @@ fn discover_from_dir<R: CommandRunner>(
     let mut members: BTreeMap<DiskName, AliasCandidate> = BTreeMap::new();
     let mut warnings = Vec::new();
 
-    for entry in entries.flatten() {
+    for entry in entries {
         let name = entry.file_name();
         let name_str = name.to_string_lossy();
 
