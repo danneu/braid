@@ -808,31 +808,20 @@ fn check_single_survivor<R: CommandRunner>(
 
 #[cfg(test)]
 fn remove_present_work_plan_for_test(
-    mn: &MapperName,
+    name: DiskName,
+    target_uuid: &LuksUuid,
     pool: &PoolState,
     mount_point: &MountPoint,
 ) -> Result<RemoveWorkPlan, RemoveError> {
-    // Render-only test helper. UUID identity has no effect on rendered
-    // dry-run steps; we still need a valid LuksUuid value for the
-    // PoolDevice fallback because LuksUuid's inner string is validated.
-    let placeholder_uuid =
-        LuksUuid::parse("00000000-0000-0000-0000-000000000000").expect("placeholder UUID");
     let target = pool
         .devices
         .iter()
-        .find(|device| device.mapper == *mn)
+        .find(|device| &device.luks_uuid == target_uuid)
         .cloned()
-        .unwrap_or_else(|| PoolDevice {
-            devid: 0,
-            mapper: mn.clone(),
-            luks_uuid: placeholder_uuid.clone(),
-            underlying: String::new(),
-        });
-    let name_raw = mn.as_str().strip_prefix("braid-").unwrap_or(mn.as_str());
-    let name = DiskName::parse(name_raw).expect("test fixture disk name");
+        .expect("test pool must contain target UUID");
     RemoveWorkPlan::new(
         name,
-        target.luks_uuid.clone(),
+        target_uuid.clone(),
         &target,
         &pool.devices,
         mount_point.clone(),
@@ -1265,7 +1254,8 @@ mod tests {
     // Why: verifies the Step/CmdRequest integration produces correct shell strings.
     // Scenario: 3-disk pool, removing one disk (remaining=2, no balance to single).
     fn dry_run_render_3disk_removal() {
-        let mn = MapperName("braid-disk2".into());
+        let name = DiskName::parse("disk2").unwrap();
+        let target_uuid = LuksUuid::parse("22222222-2222-2222-2222-222222222222").unwrap();
         let pool = PoolState {
             mounted: true,
             devices: vec![
@@ -1278,7 +1268,7 @@ mod tests {
                 PoolDevice {
                     devid: 2,
                     mapper: MapperName("braid-disk2".into()),
-                    luks_uuid: LuksUuid::parse("22222222-2222-2222-2222-222222222222").unwrap(),
+                    luks_uuid: target_uuid.clone(),
                     underlying: "/dev/vdb".into(),
                 },
                 PoolDevice {
@@ -1295,7 +1285,7 @@ mod tests {
             null_underlying: vec![],
         };
         let mount_point = MountPoint("/mnt/storage".into());
-        let steps = remove_present_work_plan_for_test(&mn, &pool, &mount_point)
+        let steps = remove_present_work_plan_for_test(name, &target_uuid, &pool, &mount_point)
             .unwrap()
             .render_steps();
         let output = Step::render_dry_run(&steps);
@@ -1319,7 +1309,8 @@ mod tests {
     // Why: verifies the conditional balance step renders with its command.
     // Scenario: 2-disk pool, removing one disk leaves no redundancy.
     fn dry_run_render_2disk_removal_includes_balance() {
-        let mn = MapperName("braid-disk2".into());
+        let name = DiskName::parse("disk2").unwrap();
+        let target_uuid = LuksUuid::parse("22222222-2222-2222-2222-222222222222").unwrap();
         let pool = PoolState {
             mounted: true,
             devices: vec![
@@ -1332,7 +1323,7 @@ mod tests {
                 PoolDevice {
                     devid: 2,
                     mapper: MapperName("braid-disk2".into()),
-                    luks_uuid: LuksUuid::parse("22222222-2222-2222-2222-222222222222").unwrap(),
+                    luks_uuid: target_uuid.clone(),
                     underlying: "/dev/vdb".into(),
                 },
             ],
@@ -1343,7 +1334,7 @@ mod tests {
             null_underlying: vec![],
         };
         let mount_point = MountPoint("/mnt/storage".into());
-        let steps = remove_present_work_plan_for_test(&mn, &pool, &mount_point)
+        let steps = remove_present_work_plan_for_test(name, &target_uuid, &pool, &mount_point)
             .unwrap()
             .render_steps();
         let output = Step::render_dry_run(&steps);
@@ -1355,6 +1346,66 @@ mod tests {
         assert_eq!(
             lines[1],
             "               $ btrfs balance start --enqueue '-dconvert=single' '-mconvert=dup' -f /mnt/storage"
+        );
+    }
+
+    #[test]
+    // Intent: remove render-test helper selects the live target by LUKS UUID.
+    //
+    // Why it exists: the helper is render-only, but a mapper-keyed fixture
+    //   helper preserves the old identity model and can hide regressions in
+    //   command rendering tests.
+    //
+    // Scenario: pool.json names the target "disk1", while the live pool row
+    //   for that UUID is observed as mapper "braid-renamed" after an unrelated
+    //   decoy row. The rendered remove and close commands must use the matched
+    //   UUID row's observed mapper.
+    fn dry_run_render_helper_targets_by_uuid() {
+        let name = DiskName::parse("disk1").unwrap();
+        let decoy_uuid = LuksUuid::parse("11111111-1111-1111-1111-111111111111").unwrap();
+        let target_uuid = LuksUuid::parse("22222222-2222-2222-2222-222222222222").unwrap();
+        let pool = PoolState {
+            mounted: true,
+            devices: vec![
+                PoolDevice {
+                    devid: 1,
+                    mapper: MapperName("braid-decoy".into()),
+                    luks_uuid: decoy_uuid,
+                    underlying: "/dev/vda".into(),
+                },
+                PoolDevice {
+                    devid: 2,
+                    mapper: MapperName("braid-renamed".into()),
+                    luks_uuid: target_uuid.clone(),
+                    underlying: "/dev/vdb".into(),
+                },
+            ],
+            missing_count: 0,
+            missing_devids: vec![],
+            total_devices: 2,
+            fsid: Some("aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee".into()),
+            null_underlying: vec![],
+        };
+        let mount_point = MountPoint("/mnt/storage".into());
+
+        let steps = remove_present_work_plan_for_test(name, &target_uuid, &pool, &mount_point)
+            .unwrap()
+            .render_steps();
+        let output = Step::render_dry_run(&steps);
+        let lines: Vec<&str> = output.lines().collect();
+
+        assert_eq!(
+            lines[3],
+            "               $ btrfs device remove --enqueue /dev/mapper/braid-renamed /mnt/storage"
+        );
+        assert_eq!(lines[5], "               $ cryptsetup close braid-renamed");
+        assert!(
+            !output.contains("braid-decoy"),
+            "helper must not select the decoy mapper:\n{output}"
+        );
+        assert!(
+            !output.contains("braid-disk1"),
+            "helper must not synthesize mapper from persisted name:\n{output}"
         );
     }
 
