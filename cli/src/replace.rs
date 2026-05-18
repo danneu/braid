@@ -5605,6 +5605,79 @@ mod tests {
         );
     }
 
+    /// Seed 635: already-open ExistingLuks replace target UUID-mismatch
+    /// arm. When the open mapper's backing kernel path canonicalizes to
+    /// the configured by-id target but the backing device's LUKS UUID
+    /// disagrees with the journaled `new_uuid`, the classifier returns
+    /// `OwnershipError::Conflict` and `verify_existing_luks_open_mapper_target`
+    /// maps it to `NewTargetUuidMismatchAtOpen` before any
+    /// `BtrfsReplaceStart`.
+    //
+    // Intent: verify_existing_luks_open_mapper_target maps
+    //   OwnershipError::Conflict to NewTargetUuidMismatchAtOpen on the
+    //   mapper_open=true path, with no replace mutation issued.
+    // Why: pins the only untested arm of the 4-arm OwnershipError ->
+    //   ReplaceError map at replace.rs:1015-1041; a refactor that
+    //   collapses Conflict into Validation or BackingPathMismatch would
+    //   otherwise pass.
+    // Scenario: /dev/disk/by-id/Y and the live backing /dev/vdf both
+    //   canonicalize to /dev/vdf (path check passes), but
+    //   cryptsetup luksUUID /dev/vdf returns U_FOREIGN != U_NEW.
+    #[test]
+    fn replace_existing_luks_open_mapper_backing_uuid_mismatch_aborts() {
+        let u_new = LuksUuid::parse("88888888-8888-8888-8888-888888880635").unwrap();
+        let u_foreign = LuksUuid::parse("99999999-9999-9999-9999-999999990636").unwrap();
+        let by_id = ByIdPath::parse("/dev/disk/by-id/Y").unwrap();
+        let runner = runner_with_active_mapper_uuid(
+            "braid-disk3",
+            "/dev/vdf",
+            RawCommandOutput {
+                cmd: "cryptsetup luksUUID /dev/vdf".into(),
+                stdout: format!("{u_foreign}\n"),
+                stderr: String::new(),
+                exit_status: 0,
+            },
+        );
+        let resolver =
+            MockBackingPathResolver::default().with_path("/dev/disk/by-id/Y", "/dev/vdf");
+
+        let err = verify_existing_luks_open_mapper_target(
+            &runner,
+            "disk3",
+            &MapperName("braid-disk3".into()),
+            &by_id,
+            &u_new,
+            &resolver,
+        )
+        .unwrap_err();
+
+        match err {
+            ReplaceError::NewTargetUuidMismatchAtOpen {
+                by_id: err_by_id,
+                expected,
+                observed,
+            } => {
+                assert_eq!(err_by_id, by_id);
+                assert_eq!(expected, u_new);
+                assert_eq!(observed, u_foreign.as_str().to_owned());
+            }
+            other => panic!("expected NewTargetUuidMismatchAtOpen, got: {other:?}"),
+        }
+        let requests = runner.requests();
+        assert!(
+            !requests
+                .iter()
+                .any(|r| matches!(r, CmdRequest::CryptsetupLuksOpen { .. })),
+            "no CryptsetupLuksOpen may issue on the UUID-mismatch path"
+        );
+        assert!(
+            !requests
+                .iter()
+                .any(|r| matches!(r, CmdRequest::BtrfsReplaceStart { .. })),
+            "no BtrfsReplaceStart may issue on the UUID-mismatch path"
+        );
+    }
+
     /// Seed 640: Pre-journal-write `new_uuid` uniqueness assert,
     /// Membership scope. A `new_uuid` that already exists in
     /// `PoolMembership` (under a different `old_uuid`) is refused
