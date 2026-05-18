@@ -105,6 +105,11 @@ impl fmt::Display for ExclusiveOp {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::Balance => write!(f, "balance"),
+            // Parenthesized so `braid lock`'s `RejectAnyBusy` template
+            // (`"cannot lock: {op} is in progress..."`) reads naturally.
+            // `braid idle` has its own standalone-label surface
+            // (`"balance paused"`) via `BusyReason::Display` in
+            // `cli/src/idle.rs`.
             Self::BalancePaused => write!(f, "balance (paused)"),
             Self::DeviceAdd => write!(f, "device add"),
             Self::DeviceRemove => write!(f, "device remove"),

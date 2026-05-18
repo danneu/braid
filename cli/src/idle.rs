@@ -35,6 +35,9 @@ impl std::fmt::Display for BusyReason {
             BusyReason::Unknown(msg) => write!(f, "unknown ({msg})"),
             BusyReason::ScrubRunning { pct: Some(p) } => write!(f, "scrub running ({p}%)"),
             BusyReason::ScrubRunning { pct: None } => write!(f, "scrub running"),
+            // `braid idle` renders standalone status-line labels for
+            // balance variants; other ops fall through to `ExclusiveOp`'s
+            // sentence-embedding noun phrase via the `{op} in progress` arm.
             BusyReason::Exclop(ExclusiveOp::Balance) => write!(f, "balance running"),
             BusyReason::Exclop(ExclusiveOp::BalancePaused) => write!(f, "balance paused"),
             BusyReason::Exclop(op) => write!(f, "{op} in progress"),
