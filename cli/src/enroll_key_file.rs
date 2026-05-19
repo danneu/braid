@@ -3292,6 +3292,89 @@ mod tests {
         );
     }
 
+    // Intent: standalone `braid enroll` never writes the pending-op
+    //   journal, so an interrupted apply phase cannot strand the user
+    //   in recovery mode.
+    // Why it exists: this property is the justification recorded in
+    //   `docs/decisions/019-inhibit-sleep.md`'s "Excluded: braid
+    //   enroll" subsection for not acquiring a sleep inhibitor; a
+    //   regression that silently introduces a journal write to enroll
+    //   would invalidate that justification without failing any
+    //   existing test.
+    // Scenario: an operator runs `braid enroll`, the second disk's
+    //   cryptsetup invocation fails mid-loop, and `pending-op.json`
+    //   must still not exist afterward so the operator is not pushed
+    //   into recovery mode for a non-recovery error.
+    #[test]
+    fn cmd_enroll_apply_failure_does_not_write_pending_op_journal() {
+        let (tmp, paths) = isolated_paths();
+        let (kf, kf_str) = enroll_make_existing_keyfile(&tmp);
+        let pass = "testpass";
+        let pass_path = tmp.path().join("pass");
+        std::fs::write(&pass_path, format!("{pass}\n")).unwrap();
+
+        let d1 = "/dev/disk/by-id/d1";
+        let d2 = "/dev/disk/by-id/d2";
+
+        let (tp1_req, tp1_stdin, tp1_out) = enroll_test_passphrase_ok(d1, pass);
+        let (tp2_req, tp2_stdin, tp2_out) = enroll_test_passphrase_ok(d2, pass);
+        let (tkf1_req, tkf1_out) = enroll_test_keyfile_fail(d1, &kf_str);
+        let (tkf2_req, tkf2_out) = enroll_test_keyfile_fail(d2, &kf_str);
+        let (ld1_req, ld1_out) = enroll_luks_dump_slot1_empty(d1);
+        let (ld2_req, ld2_out) = enroll_luks_dump_slot1_empty(d2);
+        let (e1_req, e1_stdin, e1_out) = enroll_add_keyfile_ok(d1, &kf_str, pass);
+        let (e2_req, e2_stdin, e2_out) = enroll_add_keyfile_fail(d2, &kf_str, pass);
+
+        let runner = enroll_discovery_two_disks(d1, d2)
+            .with_output_stdin(tp1_req, tp1_stdin, tp1_out)
+            .with_output_stdin(tp2_req, tp2_stdin, tp2_out)
+            .with_output(tkf1_req, tkf1_out)
+            .with_output(tkf2_req, tkf2_out)
+            .with_output(ld1_req, ld1_out)
+            .with_output(ld2_req, ld2_out)
+            .with_output_stdin(e1_req, e1_stdin, e1_out)
+            .with_output(
+                CmdRequest::CryptsetupLuksHeaderBackup {
+                    device: d1.to_owned(),
+                    backup_path: paths
+                        .luks_headers_dir()
+                        .join("braid-disk1.luksheader.tmp")
+                        .display()
+                        .to_string(),
+                },
+                mock_ok("cryptsetup luksHeaderBackup", ""),
+            )
+            .with_output_stdin(e2_req, e2_stdin, e2_out);
+        let fs = enroll_fs(&[d1, d2]);
+        let membership = enroll_make_membership(&[("disk1", d1), ("disk2", d2)]);
+
+        let err = cmd_enroll_key_file(
+            &runner,
+            &fs,
+            &EnrollKeyFileParams {
+                membership: &membership,
+                key_file_path: &kf,
+                generate: false,
+                passphrase_stdin: false,
+                passphrase_file: Some(&pass_path),
+                dry_run: false,
+                paths: &paths,
+                backing_path_resolver: crate::test_fixtures::mock_virtio_backing_path_resolver(),
+            },
+        )
+        .expect_err("disk2 luksAddKey failure should abort enroll")
+        .to_string();
+
+        assert!(
+            err.contains("cryptsetup luksAddKey failed"),
+            "expected disk2 luksAddKey failure in: {err}"
+        );
+        assert!(
+            !paths.pending_op_json().exists(),
+            "standalone enroll must not create pending-op.json after an apply failure"
+        );
+    }
+
     // Intent: --generate refuses to write braid.key if DIR was a mount
     //   point at plan time but no longer is when execute reaches the
     //   write -- and the re-check fires after the slow planning window

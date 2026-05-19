@@ -171,6 +171,58 @@ If a future change makes lock's mutation window genuinely long
 (e.g. a multi-minute pre-lock balance), revisit this exclusion under the
 same deciding question.
 
+### Excluded: `braid enroll`
+
+`braid enroll` does not acquire the sleep inhibitor despite mutating
+LUKS slot 1 on each pool disk. Applying the deciding question to
+standalone enroll specifically:
+
+- **No journal, no recovery-mode lockout.** Standalone enroll writes no
+  operation journal (`EnrollPlan::execute` in
+  `cli/src/enroll_key_file.rs`). Suspend mid-loop cannot strand the
+  operator in recovery mode, which is the failure surface this doc's
+  "Validation-shaped error before journal write" promise protects
+  against for the four inhibitor-using commands.
+- **Recoverability.** `plan_enrollment` probes each candidate via
+  `probe_keyfile_enrollment` and short-circuits disks whose slot 1
+  already verifies the keyfile (`AlreadyEnrolled`). A partial enroll
+  leaves only the un-enrolled disks for the next invocation: re-running
+  `braid enroll DIR` (existing-keyfile mode) advances on partial state,
+  the same property that justifies `lock`'s exclusion. Note that
+  `braid enroll --generate` is not same-command idempotent -- a
+  partial `--generate` run leaves `DIR/braid.key` on disk, and
+  `validate_key_file_path` refuses a second `--generate` against an
+  already-present keyfile. Recovery for an interrupted `--generate` run
+  is to drop `--generate` and re-run as a regular enroll against the
+  now-existing keyfile.
+- **Bounded mutation window.** Each disk pays one Argon2-bounded
+  `cryptsetup luksAddKey` (about 2-3 sec on default parameters) plus a
+  sub-second `cryptsetup luksHeaderBackup`. A three-disk pool's total
+  enroll window is single-digit seconds with no long-running btrfs work
+  to protect.
+- **No btrfs topology mutation; LUKS2 writes use cryptsetup metadata
+  locking.** Enroll does not touch btrfs membership or chunk allocation,
+  which is the topology-corruption risk surface this doc was written to
+  protect. LUKS2 metadata writes are serialized by cryptsetup's own
+  metadata locking. After each successful `cryptsetup luksAddKey`,
+  `apply_enrollment` writes a local `.luksheader` as input to the
+  existing off-system backup workflow (see `docs/luks-unlock.md`); the
+  local file is a transient byproduct of a successful mutation, not a
+  recovery mechanism for an interrupted one. Recovery from actual header
+  damage uses the operator's off-system backup, identical to every other
+  LUKS-mutating command in braid.
+
+The same `luks::enroll_key_file` call is held under an inhibitor when
+invoked from `braid add --enroll` or `braid replace --enroll`, but that
+is incidental: those commands already hold an inhibitor for their
+journal-protected btrfs work, and the keyfile call happens inside that
+existing window. Standalone `braid enroll` has no btrfs work to protect
+and no journal boundary to guard, so an inhibitor would buy nothing.
+
+If a future change adds long-running follow-up work to `braid enroll`
+(e.g. a pool-wide rekey or a balance after enrollment), revisit this
+exclusion under the same deciding question.
+
 ## Consequences
 
 - suspend is blocked only when interruption is actually dangerous
