@@ -146,15 +146,34 @@ There are two state files that can block normal operation when they are
 unparseable: `/var/lib/braid/pool.json` and
 `/var/lib/braid/pending-op.json`.
 
-For corrupt or old-shape `pool.json`, the remediation phrase is:
+For a **corrupt or off-schema** `pool.json`, the remediation phrase is:
 
 `run 'braid discover --write' to rebuild from existing disks (with all intended pool members attached; see docs/luks-unlock.md)`
 
-Move the old `pool.json` aside only after confirming the attached disks are the
-intended pool members. Then rebuild with `braid discover --write`; during a
-single-user cutover, pass `--expect-count` with the member count from the old
-file so a temporarily detached disk cannot silently produce a smaller
-membership and an unrelated braid-labeled disk cannot be silently admitted.
+Confirm the attached disks are the intended pool members, then run
+`braid discover --write` -- the corrupt file is overwritten in place and the
+original bytes are preserved at `pool.json.corrupt-<RFC3339-UTC>` next to it.
+The snapshot is a hard precondition for the rebuild: if it cannot be written
+(full disk, read-only state directory), `discover --write` refuses with
+`failed to snapshot existing corrupt file to ...` so the corrupt original is
+not destroyed; free disk space or fix permissions and retry. The sidecar is
+safe to remove once you have manually copied any still-relevant prior-binding
+bytes (e.g. `devid` for a `null_underlying` member). During a single-user
+cutover, pass `--expect-count` with the member count from the old file so a
+temporarily detached disk cannot silently produce a smaller membership and an
+unrelated braid-labeled disk cannot be silently admitted.
+
+For a **legacy name-keyed** `pool.json` (pre-UUID-identity migration),
+`discover --write` refuses with an explicit move-aside message. Back up the
+file and move it aside with
+`mv /var/lib/braid/pool.json /var/lib/braid/pool.json.legacy` before running
+`braid discover --write`.
+
+For a **healthy UUID-keyed** `pool.json`, do not run `discover --write` at all
+-- use `braid add` / `braid remove` / `braid replace` to mutate membership.
+`discover --write` is a repair tool, not a refresh; running it against a
+healthy file refuses (`is already a healthy UUID-keyed membership`) so it does
+not drop persisted devid bindings (decision 024).
 
 For an unparseable pending-operation journal, the remediation phrase is:
 

@@ -509,6 +509,120 @@ pub fn save_membership_to(m: &PoolMembership, path: &Path) -> Result<(), Members
     })
 }
 
+/// Forensic copy of a corrupt state file to a timestamped sidecar before
+/// a destructive overwrite. The helper never clobbers an existing sidecar
+/// and fsyncs the sidecar plus parent directory before returning.
+pub(crate) fn write_corrupt_sidecar(path: &Path) -> Result<(), CorruptSidecarError> {
+    write_corrupt_sidecar_at(path, std::time::SystemTime::now())
+}
+
+/// Time-injected entry point for deterministic no-clobber coverage of the
+/// corrupt-state sidecar path; production callers use `write_corrupt_sidecar`.
+pub(crate) fn write_corrupt_sidecar_at(
+    path: &Path,
+    now: std::time::SystemTime,
+) -> Result<(), CorruptSidecarError> {
+    use std::fs::OpenOptions;
+    use std::io::{ErrorKind, Write};
+
+    let raw = std::fs::read(path).map_err(|e| CorruptSidecarError {
+        target: path.to_path_buf(),
+        source: e,
+    })?;
+    let parent = path.parent().unwrap_or_else(|| Path::new("."));
+    let file_name = path
+        .file_name()
+        .and_then(|n| n.to_str())
+        .unwrap_or("pool.json");
+    let ts = format_rfc3339_utc_seconds(now);
+    let base = format!("{file_name}.corrupt-{ts}");
+
+    const MAX_COLLISIONS: u32 = 1000;
+    for n in 0..MAX_COLLISIONS {
+        let candidate = if n == 0 {
+            parent.join(&base)
+        } else {
+            parent.join(format!("{base}.{n}"))
+        };
+        match OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&candidate)
+        {
+            Ok(mut f) => {
+                f.write_all(&raw).map_err(|e| CorruptSidecarError {
+                    target: candidate.clone(),
+                    source: e,
+                })?;
+                f.sync_all().map_err(|e| CorruptSidecarError {
+                    target: candidate.clone(),
+                    source: e,
+                })?;
+                crate::state_io::sync_dir(parent).map_err(|e| CorruptSidecarError {
+                    target: candidate.clone(),
+                    source: e,
+                })?;
+                return Ok(());
+            }
+            Err(e) if e.kind() == ErrorKind::AlreadyExists => continue,
+            Err(e) => {
+                return Err(CorruptSidecarError {
+                    target: candidate,
+                    source: e,
+                });
+            }
+        }
+    }
+
+    Err(CorruptSidecarError {
+        target: parent.join(format!("{base}.{MAX_COLLISIONS}")),
+        source: std::io::Error::new(
+            ErrorKind::AlreadyExists,
+            format!(
+                "exhausted {MAX_COLLISIONS} sidecar candidates -- refusing to overwrite an existing forensic snapshot"
+            ),
+        ),
+    })
+}
+
+/// Failure surface for corrupt-state sidecar writes. Carries the sidecar
+/// target path for operator-facing errors and the underlying I/O error for
+/// source chaining.
+#[derive(Debug)]
+pub(crate) struct CorruptSidecarError {
+    target: PathBuf,
+    source: std::io::Error,
+}
+
+impl CorruptSidecarError {
+    /// Sidecar path attempted when the error occurred.
+    pub(crate) fn target(&self) -> &Path {
+        &self.target
+    }
+
+    /// Borrow the underlying I/O error without consuming the wrapper.
+    #[allow(dead_code)]
+    pub(crate) fn source(&self) -> &std::io::Error {
+        &self.source
+    }
+
+    /// Move the underlying I/O error into a caller-owned error variant.
+    pub(crate) fn into_source(self) -> std::io::Error {
+        self.source
+    }
+}
+
+/// Format the sidecar timestamp suffix as seconds-only UTC so filenames
+/// match the documented `pool.json.corrupt-<RFC3339-UTC>` shape.
+fn format_rfc3339_utc_seconds(now: std::time::SystemTime) -> String {
+    let odt: time::OffsetDateTime = now.into();
+    let format = time::format_description::parse("[year]-[month]-[day]T[hour]:[minute]:[second]Z")
+        .expect("static format description must parse");
+    odt.to_offset(time::UtcOffset::UTC)
+        .format(&format)
+        .expect("formatting OffsetDateTime as RFC3339 seconds must not fail")
+}
+
 // ---------------------------------------------------------------------------
 // parse_disk_spec
 // ---------------------------------------------------------------------------
@@ -634,6 +748,57 @@ mod tests {
 
     fn member(name: &str, by_id_s: &str) -> DiskMember {
         DiskMember::new(disk_name(name), by_id(by_id_s))
+    }
+
+    // Intent: corrupt-state sidecar creation preserves an existing
+    //   primary sidecar and appends collision suffixes.
+    // Why it exists: forensic snapshots must never clobber prior
+    //   forensic bytes, even when multiple rebuilds happen in the same
+    //   timestamp second.
+    // Scenario: an operator retries a corrupt pool.json rebuild after a
+    //   previous snapshot already exists.
+    #[test]
+    fn write_corrupt_sidecar_preserves_existing_snapshot_and_appends_suffix() {
+        let dir = tempfile::tempdir().unwrap();
+        let pool_json = dir.path().join("pool.json");
+        let seed_bytes =
+            br#"{"disks":{"disk1":{"by_id":"/dev/disk/by-id/ata-X","devid":1}}}"#.to_vec();
+        std::fs::write(&pool_json, &seed_bytes).unwrap();
+
+        let t = std::time::SystemTime::UNIX_EPOCH + std::time::Duration::from_secs(1_700_000_000);
+        let ts = format_rfc3339_utc_seconds(t);
+        let primary = dir.path().join(format!("pool.json.corrupt-{ts}"));
+        let first_retry = dir.path().join(format!("pool.json.corrupt-{ts}.1"));
+        let second_retry = dir.path().join(format!("pool.json.corrupt-{ts}.2"));
+        let sentinel = b"DO NOT CLOBBER";
+        std::fs::write(&primary, sentinel).unwrap();
+
+        write_corrupt_sidecar_at(&pool_json, t).unwrap();
+        assert_eq!(std::fs::read(&primary).unwrap(), sentinel);
+        assert_eq!(std::fs::read(&first_retry).unwrap(), seed_bytes);
+        assert_eq!(std::fs::read(&pool_json).unwrap(), seed_bytes);
+
+        write_corrupt_sidecar_at(&pool_json, t).unwrap();
+        assert_eq!(std::fs::read(&primary).unwrap(), sentinel);
+        assert_eq!(std::fs::read(&first_retry).unwrap(), seed_bytes);
+        assert_eq!(std::fs::read(&second_retry).unwrap(), seed_bytes);
+        assert_eq!(std::fs::read(&pool_json).unwrap(), seed_bytes);
+    }
+
+    // Intent: sidecar timestamp formatting emits seconds-only UTC with a
+    //   literal Z suffix.
+    // Why it exists: the operator-facing filename convention must not
+    //   drift to the subsecond shape used by util::now_iso.
+    // Scenario: a future refactor tries to share timestamp helpers and
+    //   changes sidecar names documented in recovery runbooks.
+    #[test]
+    fn format_rfc3339_utc_seconds_emits_seconds_only_with_z_suffix() {
+        let first =
+            std::time::SystemTime::UNIX_EPOCH + std::time::Duration::from_secs(1_700_000_000);
+        let second = std::time::SystemTime::UNIX_EPOCH;
+
+        assert_eq!(format_rfc3339_utc_seconds(first), "2023-11-14T22:13:20Z");
+        assert_eq!(format_rfc3339_utc_seconds(second), "1970-01-01T00:00:00Z");
     }
 
     // ----- LuksUuidMap shape regressions -----------------------------------

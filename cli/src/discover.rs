@@ -190,6 +190,17 @@ pub enum DiscoverWriteError {
         "discover refusing to write pool.json: existing file at {path} is already a healthy UUID-keyed membership -- back it up and move it aside before retrying, or use 'braid add' / 'braid remove' / 'braid replace' to mutate membership (see docs/luks-unlock.md)"
     )]
     ValidUuidKeyed { path: String },
+    /// Existing `pool.json` is corrupt and would normally be rebuilt in
+    /// place, but its forensic sidecar could not be written. Refuse the
+    /// destructive save so prior-binding bytes in the corrupt file survive.
+    #[error(
+        "discover refusing to write pool.json: failed to snapshot existing corrupt file to {sidecar}: {source} -- refusing to overwrite the corrupt original without a forensic copy; free disk space or fix permissions on the state directory and retry"
+    )]
+    CorruptSidecarFailed {
+        sidecar: String,
+        #[source]
+        source: std::io::Error,
+    },
     /// `--expect-count <N>` was set and discovery produced a member
     /// count other than `N`. Catches partial-attach and unintended
     /// extra-disk hazards during the cutover runbook.
@@ -561,7 +572,7 @@ fn discover_from_dir_inner<R: CommandRunner>(
 }
 
 /// Apply discover's `--write` pre-save fail-closed gates and persist
-/// the discovered membership. The three gates pinned in the plan must
+/// the discovered membership. The four gates pinned in the plan must
 /// fire BEFORE any `save_membership` call:
 /// 1. `pending-op.json` must not exist (covered by `PendingOpExists`).
 /// 2. Existing `pool.json` must not be in the legacy name-keyed shape
@@ -569,6 +580,12 @@ fn discover_from_dir_inner<R: CommandRunner>(
 /// 3. Existing `pool.json` must not be a healthy UUID-keyed membership
 ///    (covered by `ValidUuidKeyed`). `Corrupt` is intentionally allowed
 ///    -- it is the documented rebuild remediation per decision 017.
+/// 4. When `pool.json` is `Corrupt`, the forensic snapshot to
+///    `pool.json.corrupt-<RFC3339-UTC>` must succeed before rebuild
+///    proceeds (covered by `CorruptSidecarFailed`). The sidecar is
+///    written after `expected_count` validates, so a count-mismatch
+///    refusal does not leave behind a sidecar of a file that was not
+///    going to be overwritten.
 ///
 /// When `expected_count` is set, the gate refuses if the produced
 /// membership count is not exactly `expected_count` (cutover
@@ -590,7 +607,7 @@ pub fn write_discovered_membership(
     }
 
     let pool_json_path = paths.pool_json();
-    match classify_pool_json(&pool_json_path) {
+    let needs_corrupt_sidecar = match classify_pool_json(&pool_json_path) {
         PoolJsonShape::LegacyNameKeyed => {
             return Err(DiscoverWriteError::NameKeyedPoolJson {
                 path: pool_json_path.display().to_string(),
@@ -602,18 +619,27 @@ pub fn write_discovered_membership(
             });
         }
         // `Missing` is the normal first-write path. `Corrupt` is the
-        // documented rebuild remediation per decision 017 -- canonical
-        // membership load failed, and `discover --write` is intentionally
-        // a rebuild-from-attached-disks surface that does not salvage
-        // fields from invalid state.
-        PoolJsonShape::Missing | PoolJsonShape::Corrupt => {}
-    }
+        // documented rebuild remediation per decision 017, but the
+        // corrupt file may still carry prior-binding bytes. Defer the
+        // sidecar write until every other gate has passed.
+        PoolJsonShape::Corrupt => true,
+        PoolJsonShape::Missing => false,
+    };
 
     if let Some(expected) = expected_count {
         let actual = members.len();
         if actual != expected {
             return Err(DiscoverWriteError::ExpectCountUnmet { expected, actual });
         }
+    }
+
+    if needs_corrupt_sidecar {
+        crate::membership::write_corrupt_sidecar(&pool_json_path).map_err(|e| {
+            DiscoverWriteError::CorruptSidecarFailed {
+                sidecar: e.target().display().to_string(),
+                source: e.into_source(),
+            }
+        })?;
     }
 
     save_membership(&members, paths)?;
@@ -693,6 +719,59 @@ mod tests {
             DiskName::parse(name).expect("valid test disk name"),
             ByIdPath::parse(by_id).expect("valid test by-id path"),
         )
+    }
+
+    fn stale_luks_uuid_corrupt_pool_json() -> String {
+        r#"{"disks":{"11111111-1111-1111-1111-111111111111":{"name":"disk1","by_id":"/dev/disk/by-id/ata-old","luks_uuid":"22222222-2222-2222-2222-222222222222","devid":1}}}"#
+            .to_owned()
+    }
+
+    fn discovered_members(names: &[&str]) -> PoolMembership {
+        let mut members = PoolMembership::empty();
+        for (i, name) in names.iter().enumerate() {
+            members
+                .insert(
+                    LuksUuid::parse(&format!("aaaaaaaa-bbbb-cccc-dddd-{:012x}", i as u64 + 1))
+                        .unwrap(),
+                    member(name, &format!("/dev/disk/by-id/ata-{name}")),
+                )
+                .unwrap();
+        }
+        members
+    }
+
+    fn corrupt_sidecars(dir: &Path) -> Vec<std::path::PathBuf> {
+        let mut entries: Vec<_> = std::fs::read_dir(dir)
+            .unwrap()
+            .filter_map(|entry| {
+                let path = entry.unwrap().path();
+                let name = path.file_name()?.to_str()?;
+                name.starts_with("pool.json.corrupt-").then_some(path)
+            })
+            .collect();
+        entries.sort();
+        entries
+    }
+
+    fn is_pool_json_corrupt_rfc3339_sidecar(path: &Path) -> bool {
+        let Some(name) = path.file_name().and_then(|n| n.to_str()) else {
+            return false;
+        };
+        let Some(ts) = name.strip_prefix("pool.json.corrupt-") else {
+            return false;
+        };
+        let bytes = ts.as_bytes();
+        bytes.len() == 20
+            && bytes[4] == b'-'
+            && bytes[7] == b'-'
+            && bytes[10] == b'T'
+            && bytes[13] == b':'
+            && bytes[16] == b':'
+            && bytes[19] == b'Z'
+            && bytes
+                .iter()
+                .enumerate()
+                .all(|(i, b)| matches!(i, 4 | 7 | 10 | 13 | 16 | 19) || b.is_ascii_digit())
     }
 
     // Intent: discover preview lines are returned in DiskName order
@@ -1828,39 +1907,136 @@ mod tests {
         );
     }
 
-    /// Intent: write_discovered_membership proceeds when on-disk
-    /// pool.json is corrupt; the corrupt file is replaced with a
-    /// loadable UUID-keyed membership.
-    /// Why: decision 017 names `braid discover --write` as the
-    /// explicit recovery path for lost/corrupt pool.json, and four
-    /// operator-facing sites instruct operators to use it; a future
-    /// regression adding a `Corrupt`-refusal gate would silently break
-    /// that rebuild path.
-    /// Scenario: power loss truncates pool.json into non-JSON bytes;
-    /// the operator follows the documented `braid discover --write`
-    /// rebuild remediation and gets a working pool.json.
+    // Intent: write_discovered_membership rebuilds a corrupt pool.json
+    //   and preserves the original bytes in an adjacent sidecar.
+    // Why it exists: corrupt state can still carry prior-binding data
+    //   such as devid for null_underlying recovery; overwriting it
+    //   without a snapshot destroys forensic recovery material.
+    // Scenario: a stale value-side luks_uuid makes pool.json off-schema,
+    //   but the old entry still carries devid:1.
     #[test]
-    fn discover_write_proceeds_when_pool_json_is_corrupt() {
+    fn discover_write_rebuilds_and_snapshots_when_pool_json_is_corrupt() {
         let root = tempfile::tempdir().unwrap();
         let paths = StatePaths::custom(root.path().to_path_buf());
-        std::fs::write(paths.pool_json(), "not-json").unwrap();
+        let corrupt = stale_luks_uuid_corrupt_pool_json();
+        std::fs::write(paths.pool_json(), &corrupt).unwrap();
+        let pool_json_pre = std::fs::read(paths.pool_json()).unwrap();
 
-        let mut members = PoolMembership::empty();
-        members
-            .insert(
-                LuksUuid::parse("aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee").unwrap(),
-                DiskMember::new(
-                    DiskName::parse("disk1").unwrap(),
-                    ByIdPath::parse("/dev/disk/by-id/ata-X").unwrap(),
-                ),
-            )
-            .unwrap();
+        let members = discovered_members(&["disk1"]);
         let saved = write_discovered_membership(members, &paths, None)
             .expect("expected corrupt pool.json to be rebuilt");
         assert_eq!(saved.len(), 1);
         assert_eq!(
             classify_pool_json(&paths.pool_json()),
             PoolJsonShape::ValidUuidKeyed
+        );
+
+        let sidecars = corrupt_sidecars(root.path());
+        assert_eq!(sidecars.len(), 1, "expected exactly one sidecar");
+        assert!(
+            is_pool_json_corrupt_rfc3339_sidecar(&sidecars[0]),
+            "sidecar name should be pool.json.corrupt-<YYYY-MM-DDTHH:MM:SSZ>: {:?}",
+            sidecars[0]
+        );
+        assert_eq!(
+            std::fs::read(&sidecars[0]).unwrap(),
+            pool_json_pre,
+            "sidecar must preserve the corrupt original bytes"
+        );
+    }
+
+    // Intent: write_discovered_membership refuses to overwrite corrupt
+    //   pool.json when the forensic sidecar cannot be created.
+    // Why it exists: sidecar creation is the hard precondition that
+    //   prevents destructive rebuild from losing prior-binding bytes.
+    // Scenario: the state directory is read-only or otherwise unwritable
+    //   during a corrupt-state rebuild.
+    #[cfg(target_family = "unix")]
+    #[test]
+    fn discover_write_refuses_when_corrupt_sidecar_cannot_be_written() {
+        use std::os::unix::fs::PermissionsExt;
+
+        struct RestoreMode {
+            path: std::path::PathBuf,
+            mode: u32,
+        }
+
+        impl Drop for RestoreMode {
+            fn drop(&mut self) {
+                let Ok(metadata) = std::fs::metadata(&self.path) else {
+                    return;
+                };
+                let mut perms = metadata.permissions();
+                perms.set_mode(self.mode);
+                let _ = std::fs::set_permissions(&self.path, perms);
+            }
+        }
+
+        let root = tempfile::tempdir().unwrap();
+        let paths = StatePaths::custom(root.path().to_path_buf());
+        let corrupt = stale_luks_uuid_corrupt_pool_json();
+        std::fs::write(paths.pool_json(), &corrupt).unwrap();
+        let pool_json_pre = std::fs::read(paths.pool_json()).unwrap();
+        let _restore = RestoreMode {
+            path: root.path().to_path_buf(),
+            mode: 0o700,
+        };
+        let mut perms = std::fs::metadata(root.path()).unwrap().permissions();
+        perms.set_mode(0o500);
+        std::fs::set_permissions(root.path(), perms).unwrap();
+
+        let err = write_discovered_membership(discovered_members(&["disk1"]), &paths, None)
+            .expect_err("must refuse when sidecar cannot be written");
+        assert!(
+            matches!(&err, DiscoverWriteError::CorruptSidecarFailed { .. }),
+            "expected CorruptSidecarFailed, got: {err:?}"
+        );
+        assert_eq!(
+            std::fs::read(paths.pool_json()).unwrap(),
+            pool_json_pre,
+            "corrupt pool.json must remain byte-for-byte unchanged"
+        );
+        assert!(
+            corrupt_sidecars(root.path()).is_empty(),
+            "failed sidecar attempt must not leave a sidecar behind"
+        );
+    }
+
+    // Intent: count mismatch refuses before any corrupt-state sidecar is
+    //   written.
+    // Why it exists: a sidecar is only needed when a destructive save will
+    //   follow; count-mismatch refusals should leave no forensic artifact.
+    // Scenario: a corrupt pool.json is present, but the operator's
+    //   --expect-count guard catches an unintended extra disk.
+    #[test]
+    fn discover_write_returns_expect_count_before_sidecar_when_corrupt_and_count_mismatches() {
+        let root = tempfile::tempdir().unwrap();
+        let paths = StatePaths::custom(root.path().to_path_buf());
+        let corrupt = stale_luks_uuid_corrupt_pool_json();
+        std::fs::write(paths.pool_json(), &corrupt).unwrap();
+        let pool_json_pre = std::fs::read(paths.pool_json()).unwrap();
+
+        let err =
+            write_discovered_membership(discovered_members(&["disk1", "disk2"]), &paths, Some(1))
+                .expect_err("must refuse on count mismatch before sidecar");
+        assert!(
+            matches!(
+                &err,
+                DiscoverWriteError::ExpectCountUnmet {
+                    expected: 1,
+                    actual: 2
+                }
+            ),
+            "expected ExpectCountUnmet, got: {err:?}"
+        );
+        assert_eq!(
+            std::fs::read(paths.pool_json()).unwrap(),
+            pool_json_pre,
+            "corrupt pool.json must remain byte-for-byte unchanged"
+        );
+        assert!(
+            corrupt_sidecars(root.path()).is_empty(),
+            "count-mismatch refusal must not write a sidecar"
         );
     }
 
