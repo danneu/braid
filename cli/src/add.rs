@@ -271,6 +271,65 @@ fn classify_live_pool_match<'a>(
     }
 }
 
+/// Execute-time pool identity guard so a plan cannot be replayed against a
+/// different mount state or btrfs filesystem before journal write.
+fn validate_execute_pool_identity(
+    planned_pool: &PoolState,
+    fresh_pool: &PoolState,
+    mount_point: &MountPoint,
+) -> Result<(), AddError> {
+    if fresh_pool.mounted != planned_pool.mounted {
+        if planned_pool.mounted {
+            return Err(AddError::Validation(format!(
+                "pool unmounted between planning and execution -- aborting before journal write. Re-mount {mount_point} and re-run `braid add`."
+            )));
+        }
+        return Err(AddError::Validation(format!(
+            "a pool appeared at {mount_point} between planning and execution -- aborting before `mkfs.btrfs`. braid will not bootstrap on top of a live filesystem; identify the mounted pool and unmount it (or unify your config) before re-running `braid add`."
+        )));
+    }
+
+    if planned_pool.mounted && fresh_pool.mounted && fresh_pool.fsid != planned_pool.fsid {
+        let planned = planned_pool.fsid.as_deref().unwrap_or("<unknown>");
+        let fresh = fresh_pool.fsid.as_deref().unwrap_or("<unknown>");
+        return Err(AddError::Validation(format!(
+            "pool fsid changed between planning and execution (was {planned}, now {fresh}) -- aborting before journal write. The pool you planned against is no longer the same filesystem."
+        )));
+    }
+
+    Ok(())
+}
+
+/// Re-check pending add targets against a fresh live-pool probe after Pass 1
+/// so confirmation-time races still hit the canonical duplicate-UUID refusal.
+fn recheck_execute_live_pool_targets(
+    journal_targets: &LuksUuidMap<journal::AddJournalTarget>,
+    fresh_pool: &PoolState,
+    resolver: &dyn BackingPathResolver,
+) -> Result<(), AddError> {
+    for (uuid, target) in journal_targets {
+        match classify_live_pool_match(uuid, &target.by_id, fresh_pool, resolver)? {
+            LivePoolMatch::NoMatch => {}
+            LivePoolMatch::DifferentBacking { device } => {
+                return Err(duplicate_live_pool_uuid_error(
+                    uuid,
+                    &target.name,
+                    &target.by_id,
+                    device,
+                ));
+            }
+            LivePoolMatch::SameBacking { .. } => {
+                return Err(AddError::Validation(format!(
+                    "pool state changed between planning and execution -- disk '{}' (UUID `{}`) is now a live pool member. Re-run `braid add` to converge.",
+                    target.name, uuid
+                )));
+            }
+        }
+    }
+
+    Ok(())
+}
+
 /// Open-boundary re-probe for ClosedPresentLuks before mapper open.
 /// Mirrors replace's ExistingLuks gate so a by-id swap is rejected
 /// before braid opens a foreign LUKS volume.
@@ -1063,6 +1122,15 @@ impl AddPlan {
             return Ok(());
         }
 
+        let mount_point = self.config.mount_point();
+        let fresh_pool = probe_pool(runner, fs, mount_point)?;
+        validate_execute_pool_identity(&self.pool, &fresh_pool, mount_point)?;
+        recheck_execute_live_pool_targets(
+            &journal_targets,
+            &fresh_pool,
+            params.backing_path_resolver,
+        )?;
+
         // Hold a logind sleep inhibitor for the rest of the add operation --
         // covers Pass-2 LUKS format/open of fresh disks, the bootstrap-or-add
         // pool phase, and the conditional pool_balance_raid1 that converts
@@ -1273,8 +1341,6 @@ impl AddPlan {
             .iter()
             .map(|target| target.mapper_path.clone())
             .collect();
-
-        let mount_point = self.config.mount_point();
 
         if !self.pool.mounted {
             if mapper_paths.len() >= 2 {
@@ -1970,7 +2036,9 @@ fn build_add_work_plan<R: CommandRunner>(
                     //   (b) execute-time live-UUID re-probe before `ensure_luks_open`
                     //       (see Pass-1 loop) rejects plan-to-execute disk swaps so a
                     //       foreign disk at this by-id cannot pass through to
-                    //       `btrfs device add`.
+                    //       `btrfs device add`; after Pass 1, a fresh live-pool
+                    //       re-classification covers both ClosedPresentLuks and
+                    //       OpenRecoverable targets before journal write.
                     match classify_live_pool_match(
                         uuid,
                         by_id,
@@ -2681,6 +2749,609 @@ mod tests {
         }
     }
 
+    fn recoverable_target(name: &str, by_id: &str, uuid: &str) -> RecoverableBraidTarget {
+        let name = DiskName::parse(name).unwrap();
+        RecoverableBraidTarget {
+            mapper_path: format!("/dev/mapper/{}", mapper_name(&name)),
+            header_backup_path: PathBuf::from("/tmp/mock-header"),
+            by_id: ByIdPath::parse(by_id).unwrap(),
+            luks_uuid: LuksUuid::parse(uuid).unwrap(),
+            verified_pool_fsid: POOL_FSID.to_owned(),
+            enroll_key_file: None,
+            name,
+        }
+    }
+
+    fn fresh_target(name: &str, by_id: &str, uuid: &str) -> FreshLuksTarget {
+        let name = DiskName::parse(name).unwrap();
+        FreshLuksTarget {
+            mapper_name: mapper_name(&name),
+            mapper_path: format!("/dev/mapper/{}", mapper_name(&name)),
+            header_backup_path: PathBuf::from("/tmp/mock-header"),
+            by_id: ByIdPath::parse(by_id).unwrap(),
+            luks_uuid: LuksUuid::parse(uuid).unwrap(),
+            luks_format_extra_opts: LuksFormatExtraOpts::default(),
+            enroll_key_file: None,
+            name,
+        }
+    }
+
+    fn journal_targets_with(
+        uuid: LuksUuid,
+        target: journal::AddJournalTarget,
+    ) -> LuksUuidMap<journal::AddJournalTarget> {
+        let mut targets = LuksUuidMap::new();
+        targets.insert(uuid, target).expect("unique test UUID");
+        targets
+    }
+
+    fn plan_for_execute_target(
+        target: AddTargetWork,
+        initial_journal_targets: LuksUuidMap<journal::AddJournalTarget>,
+        pool: PoolState,
+    ) -> AddPlan {
+        let (name, by_id, probed_state) = match &target {
+            AddTargetWork::Fresh(target) => (
+                target.name.clone(),
+                target.by_id.clone(),
+                PresentConfigDiskState::PresentNotLuks,
+            ),
+            AddTargetWork::OpenRecoverable(target) => (
+                target.name.clone(),
+                target.by_id.clone(),
+                PresentConfigDiskState::PresentLuks {
+                    uuid: target.luks_uuid.clone(),
+                    label: Some(luks_label_for(&target.name).as_str().to_owned()),
+                    mapper_open: true,
+                },
+            ),
+            AddTargetWork::ClosedPresentLuks(target) => (
+                target.name.clone(),
+                target.by_id.clone(),
+                PresentConfigDiskState::PresentLuks {
+                    uuid: target.luks_uuid.clone(),
+                    label: Some(luks_label_for(&target.name).as_str().to_owned()),
+                    mapper_open: false,
+                },
+            ),
+        };
+        let probed = vec![PresentConfigDisk {
+            name: name.clone(),
+            by_id_path: by_id.clone(),
+            state: probed_state,
+        }];
+        AddPlan {
+            notes: vec![],
+            work_plan: AddWorkPlan {
+                prelude: AddCredentialPrelude {
+                    confirm_disks: vec![],
+                    confirm_new: false,
+                    verify_targets: vec![],
+                    pool_target_count: 0,
+                },
+                targets: vec![target],
+                initial_journal_targets,
+                mount_point: MountPoint("/mnt/storage".into()),
+                pool_was_mounted: pool.mounted,
+                existing_pool_device_count: pool.devices.len(),
+            },
+            config: Config::new(MountPoint("/mnt/storage".into())).unwrap(),
+            parsed: vec![(name.clone(), by_id.clone())],
+            names: vec![name],
+            by_ids: vec![by_id],
+            probed,
+            pool,
+            pool_membership: PoolMembership::empty(),
+        }
+    }
+
+    fn execute_fixture() -> (
+        tempfile::TempDir,
+        StatePaths,
+        tempfile::TempDir,
+        std::path::PathBuf,
+    ) {
+        let (state_tmp, paths) = test_paths();
+        let tmp = tempfile::tempdir().unwrap();
+        let pass_path = tmp.path().join("passphrase");
+        std::fs::write(&pass_path, b"test-passphrase\n").unwrap();
+        (state_tmp, paths, tmp, pass_path)
+    }
+
+    fn btrfs_show_pool(fsid: &str, devices: &[(&str, u64)]) -> RawCommandOutput {
+        let mut out = format!(
+            "Label: none  uuid: {fsid}\n\tTotal devices {} FS bytes used 16.17MiB\n",
+            devices.len()
+        );
+        for (mapper, devid) in devices {
+            out.push_str(&format!(
+                "\tdevid    {devid} size 496.00MiB used 121.56MiB path /dev/mapper/{mapper}\n"
+            ));
+        }
+        mock_ok("btrfs filesystem show /mnt/storage", &out)
+    }
+
+    fn pool_probe_runner(fsid: &str, devices: &[(&str, u64, &str, &str)]) -> MockRunner {
+        let show_devices: Vec<(&str, u64)> = devices
+            .iter()
+            .map(|(mapper, devid, _, _)| (*mapper, *devid))
+            .collect();
+        let mut runner = MockRunner::default().with_output(
+            CmdRequest::BtrfsFilesystemShow {
+                mount_point: MountPoint("/mnt/storage".into()),
+            },
+            btrfs_show_pool(fsid, &show_devices),
+        );
+        for (mapper, _, underlying, uuid) in devices {
+            runner = runner
+                .with_output(
+                    CmdRequest::CryptsetupStatus {
+                        mapper: MapperName((*mapper).to_owned()),
+                    },
+                    mock_status_active(mapper, underlying),
+                )
+                .with_output(
+                    CmdRequest::CryptsetupLuksUuid {
+                        device: (*underlying).to_owned(),
+                    },
+                    mock_luks_uuid(underlying, uuid),
+                );
+        }
+        runner
+    }
+
+    #[derive(Default)]
+    struct CountingBackingPathResolver {
+        inner: crate::test_fixtures::MockBackingPathResolver,
+        calls: std::sync::Mutex<Vec<String>>,
+    }
+
+    impl CountingBackingPathResolver {
+        fn with_path(mut self, path: &str, canonical: &str) -> Self {
+            self.inner = self.inner.with_path(path, canonical);
+            self
+        }
+
+        fn calls_to(&self, path: &str) -> usize {
+            self.calls
+                .lock()
+                .unwrap()
+                .iter()
+                .filter(|called| called.as_str() == path)
+                .count()
+        }
+    }
+
+    impl BackingPathResolver for CountingBackingPathResolver {
+        fn canonicalize(&self, path: &str) -> Result<String, std::io::Error> {
+            self.calls.lock().unwrap().push(path.to_owned());
+            self.inner.canonicalize(path)
+        }
+    }
+
+    // Intent: AddPlan::execute rejects an OpenRecoverable target when a fresh
+    // live-pool probe sees the same LUKS UUID under a different backing path.
+    // Why it exists: OpenRecoverable enters execute through the planner's
+    // `NoMatch` branch and had no execute-time live-pool collision check.
+    // Scenario: an external actor adds a cloned-header mapper to the pool
+    // while `braid add` is waiting for confirmation; execute must surface the
+    // canonical duplicate-UUID refusal before journal write.
+    #[test]
+    fn execute_live_pool_recheck_rejects_different_backing() {
+        const UUID: &str = "22222222-2222-2222-2222-222222222222";
+        const BY_ID: &str = "/dev/disk/by-id/virtio-disk2";
+        let target = recoverable_target("disk2", BY_ID, UUID);
+        let journal_targets = journal_targets_with(
+            target.luks_uuid.clone(),
+            recoverable_journal_target(&target),
+        );
+        let plan = plan_for_execute_target(
+            AddTargetWork::OpenRecoverable(target),
+            journal_targets,
+            pool_mounted_with_fsid(POOL_FSID),
+        );
+        let (_state_tmp, paths, _tmp, pass_path) = execute_fixture();
+        let runner = pool_probe_runner(POOL_FSID, &[("clone-foreign", 2, "/dev/vde", UUID)]);
+        let fs = AddMockFs(vec![BY_ID.into()]);
+        let inhibitor = crate::inhibit::RecordingInhibitor::new();
+        let resolver =
+            crate::test_fixtures::MockBackingPathResolver::default().with_path(BY_ID, "/dev/vdc");
+
+        let err = plan
+            .execute(
+                &runner,
+                &fs,
+                &AddParams {
+                    config_path: Path::new("/dev/null"),
+                    disk_specs: &[],
+                    dry_run: false,
+                    yes: true,
+                    passphrase_stdin: false,
+                    passphrase_file: Some(pass_path.as_path()),
+                    enroll_key_file: None,
+                    luks_format_extra_opts: &[],
+                    progress: ProgressOutput::Off,
+                    paths: &paths,
+                    sleep_inhibitor: &inhibitor,
+                    passphrase_reader: &RealTty,
+                    backing_path_resolver: &resolver,
+                },
+            )
+            .unwrap_err();
+
+        let body = err.to_string();
+        match err {
+            AddError::DuplicateUuid {
+                uuid,
+                name1,
+                by_id1,
+                name2,
+                by_id2,
+            } => {
+                assert_eq!(uuid.as_str(), UUID);
+                assert_eq!(name1.as_str(), "clone-foreign");
+                assert_eq!(by_id1.as_str(), "/dev/disk/by-id/");
+                assert_eq!(name2.as_str(), "disk2");
+                assert_eq!(by_id2.as_str(), BY_ID);
+            }
+            other => panic!("expected DuplicateUuid, got: {other:?}"),
+        }
+        assert!(
+            body.contains("duplicate LUKS UUID: braid-clone-foreign (/dev/disk/by-id/) and braid-disk2 (/dev/disk/by-id/virtio-disk2) share UUID"),
+            "unexpected duplicate UUID body: {body}"
+        );
+        assert_eq!(inhibitor.acquire_count(), 0);
+        assert!(journal::load_journal(&paths).unwrap().is_none());
+    }
+
+    // Intent: AddPlan::execute rejects a target that became a live pool member
+    // under its own backing path between planning and journal write.
+    // Why it exists: SameBacking at execute time means the plan is stale; add
+    // must fail closed rather than journal work that another actor already did.
+    // Scenario: recovery replay or a parallel operator adds the candidate
+    // mapper after planning but before this invocation reaches the pool phase.
+    #[test]
+    fn execute_live_pool_recheck_rejects_same_backing() {
+        const UUID: &str = "22222222-2222-2222-2222-222222222222";
+        const BY_ID: &str = "/dev/disk/by-id/virtio-disk2";
+        let target = recoverable_target("disk2", BY_ID, UUID);
+        let journal_targets = journal_targets_with(
+            target.luks_uuid.clone(),
+            recoverable_journal_target(&target),
+        );
+        let plan = plan_for_execute_target(
+            AddTargetWork::OpenRecoverable(target),
+            journal_targets,
+            pool_mounted_with_fsid(POOL_FSID),
+        );
+        let (_state_tmp, paths, _tmp, pass_path) = execute_fixture();
+        let runner = pool_probe_runner(POOL_FSID, &[("braid-disk2", 2, "/dev/vdc", UUID)]);
+        let fs = AddMockFs(vec![BY_ID.into()]);
+        let inhibitor = crate::inhibit::RecordingInhibitor::new();
+        let resolver =
+            crate::test_fixtures::MockBackingPathResolver::default().with_path(BY_ID, "/dev/vdc");
+
+        let err = plan
+            .execute(
+                &runner,
+                &fs,
+                &AddParams {
+                    config_path: Path::new("/dev/null"),
+                    disk_specs: &[],
+                    dry_run: false,
+                    yes: true,
+                    passphrase_stdin: false,
+                    passphrase_file: Some(pass_path.as_path()),
+                    enroll_key_file: None,
+                    luks_format_extra_opts: &[],
+                    progress: ProgressOutput::Off,
+                    paths: &paths,
+                    sleep_inhibitor: &inhibitor,
+                    passphrase_reader: &RealTty,
+                    backing_path_resolver: &resolver,
+                },
+            )
+            .unwrap_err();
+
+        match err {
+            AddError::Validation(msg) => {
+                assert!(
+                    msg.contains("pool state changed between planning and execution"),
+                    "expected stale-pool validation, got: {msg}"
+                );
+                assert!(msg.contains("disk 'disk2'"));
+                assert!(msg.contains(UUID));
+                assert!(msg.contains("Re-run `braid add`"));
+            }
+            other => panic!("expected Validation, got: {other:?}"),
+        }
+        assert_eq!(inhibitor.acquire_count(), 0);
+        assert!(journal::load_journal(&paths).unwrap().is_none());
+    }
+
+    // Intent: the NoMatch execute-time re-check actually invokes
+    // classify_live_pool_match for each journal target before journal write.
+    // Why it exists: NoMatch is the silent pass arm; a downstream failure
+    // alone would not prove the fresh-pool check still ran.
+    // Scenario: a fresh target reaches execute, the live pool has no matching
+    // UUID, and a forced luksFormat failure leaves the journal in place.
+    #[test]
+    fn execute_live_pool_recheck_no_match_invokes_resolver_for_target() {
+        const UUID: &str = "33333333-3333-3333-3333-333333333333";
+        const BY_ID: &str = "/dev/disk/by-id/virtio-disk2";
+        let target = fresh_target("disk2", BY_ID, UUID);
+        let journal_targets =
+            journal_targets_with(target.luks_uuid.clone(), fresh_journal_target(&target));
+        let plan = plan_for_execute_target(
+            AddTargetWork::Fresh(target.clone()),
+            journal_targets,
+            pool_mounted_with_fsid(POOL_FSID),
+        );
+        let (_state_tmp, paths, _tmp, pass_path) = execute_fixture();
+        let runner = pool_probe_runner(
+            POOL_FSID,
+            &[(
+                "braid-disk1",
+                1,
+                "/dev/vdb",
+                "11111111-1111-1111-1111-111111111111",
+            )],
+        )
+        .with_output(
+            CmdRequest::CryptsetupLuksFormat {
+                device: BY_ID.to_owned(),
+                uuid: target.luks_uuid.clone(),
+                label: luks_label_for(&target.name),
+                extra_opts: LuksFormatExtraOpts::default(),
+            },
+            RawCommandOutput {
+                cmd: "cryptsetup luksFormat".into(),
+                stdout: String::new(),
+                stderr: "mock luksFormat failure after journal write".into(),
+                exit_status: 9,
+            },
+        );
+        let fs = AddMockFs(vec![BY_ID.into()]);
+        let inhibitor = crate::inhibit::RecordingInhibitor::new();
+        let resolver = CountingBackingPathResolver::default().with_path(BY_ID, "/dev/vdc");
+
+        let err = plan
+            .execute(
+                &runner,
+                &fs,
+                &AddParams {
+                    config_path: Path::new("/dev/null"),
+                    disk_specs: &[],
+                    dry_run: false,
+                    yes: true,
+                    passphrase_stdin: false,
+                    passphrase_file: Some(pass_path.as_path()),
+                    enroll_key_file: None,
+                    luks_format_extra_opts: &[],
+                    progress: ProgressOutput::Off,
+                    paths: &paths,
+                    sleep_inhibitor: &inhibitor,
+                    passphrase_reader: &RealTty,
+                    backing_path_resolver: &resolver,
+                },
+            )
+            .unwrap_err();
+
+        assert!(
+            err.to_string().contains("mock luksFormat failure"),
+            "expected forced luksFormat failure, got: {err}"
+        );
+        assert!(
+            resolver.calls_to(BY_ID) >= 1,
+            "execute re-check must canonicalize the target by-id"
+        );
+        assert!(
+            journal::load_journal(&paths).unwrap().is_some(),
+            "journal should survive the forced post-write failure"
+        );
+        assert_eq!(inhibitor.acquire_count(), 1);
+    }
+
+    // Intent: execute rejects a mounted-plan snapshot when the fresh pool
+    // probe reports the mount disappeared before journal write.
+    // Why it exists: without the mount-state guard, an empty fresh pool would
+    // make every per-target UUID check look like NoMatch.
+    // Scenario: the pool unmounts after planning a live add but before
+    // execution reaches the irreversible section.
+    #[test]
+    fn execute_pool_identity_guard_rejects_planned_mounted_now_unmounted() {
+        const UUID: &str = "33333333-3333-3333-3333-333333333333";
+        const BY_ID: &str = "/dev/disk/by-id/virtio-disk2";
+        let target = fresh_target("disk2", BY_ID, UUID);
+        let journal_targets =
+            journal_targets_with(target.luks_uuid.clone(), fresh_journal_target(&target));
+        let plan = plan_for_execute_target(
+            AddTargetWork::Fresh(target),
+            journal_targets,
+            pool_mounted_with_fsid(POOL_FSID),
+        );
+        let (_state_tmp, paths, _tmp, pass_path) = execute_fixture();
+        let runner = MockRunner::default();
+        let fs = AddOfflineMockFs(vec![BY_ID.into()]);
+        let inhibitor = crate::inhibit::RecordingInhibitor::new();
+        let resolver = CountingBackingPathResolver::default().with_path(BY_ID, "/dev/vdc");
+
+        let err = plan
+            .execute(
+                &runner,
+                &fs,
+                &AddParams {
+                    config_path: Path::new("/dev/null"),
+                    disk_specs: &[],
+                    dry_run: false,
+                    yes: true,
+                    passphrase_stdin: false,
+                    passphrase_file: Some(pass_path.as_path()),
+                    enroll_key_file: None,
+                    luks_format_extra_opts: &[],
+                    progress: ProgressOutput::Off,
+                    paths: &paths,
+                    sleep_inhibitor: &inhibitor,
+                    passphrase_reader: &RealTty,
+                    backing_path_resolver: &resolver,
+                },
+            )
+            .unwrap_err();
+
+        match err {
+            AddError::Validation(msg) => {
+                assert!(msg.contains("pool unmounted between planning and execution"));
+                assert!(msg.contains("Re-mount /mnt/storage"));
+            }
+            other => panic!("expected Validation, got: {other:?}"),
+        }
+        assert_eq!(resolver.calls_to(BY_ID), 0);
+        assert_eq!(inhibitor.acquire_count(), 0);
+        assert!(journal::load_journal(&paths).unwrap().is_none());
+    }
+
+    // Intent: execute rejects a bootstrap plan when a pool appears at the
+    // mount point before the destructive mkfs.btrfs branch.
+    // Why it exists: the unmounted-plan path must not bootstrap over a
+    // filesystem that appeared after planning.
+    // Scenario: `braid add` plans a fresh bootstrap, then another actor mounts
+    // a pool at /mnt/storage before execution reaches journal write.
+    #[test]
+    fn execute_pool_identity_guard_rejects_planned_unmounted_now_mounted() {
+        const UUID: &str = "33333333-3333-3333-3333-333333333333";
+        const BY_ID: &str = "/dev/disk/by-id/virtio-disk2";
+        let target = fresh_target("disk2", BY_ID, UUID);
+        let journal_targets =
+            journal_targets_with(target.luks_uuid.clone(), fresh_journal_target(&target));
+        let plan = plan_for_execute_target(
+            AddTargetWork::Fresh(target),
+            journal_targets,
+            pool_unmounted(),
+        );
+        let (_state_tmp, paths, _tmp, pass_path) = execute_fixture();
+        let runner = RequestRecordingRunner::new(pool_probe_runner(
+            POOL_FSID,
+            &[(
+                "braid-disk1",
+                1,
+                "/dev/vdb",
+                "11111111-1111-1111-1111-111111111111",
+            )],
+        ));
+        let fs = AddMockFs(vec![BY_ID.into()]);
+        let inhibitor = crate::inhibit::RecordingInhibitor::new();
+        let resolver = CountingBackingPathResolver::default().with_path(BY_ID, "/dev/vdc");
+
+        let err = plan
+            .execute(
+                &runner,
+                &fs,
+                &AddParams {
+                    config_path: Path::new("/dev/null"),
+                    disk_specs: &[],
+                    dry_run: false,
+                    yes: true,
+                    passphrase_stdin: false,
+                    passphrase_file: Some(pass_path.as_path()),
+                    enroll_key_file: None,
+                    luks_format_extra_opts: &[],
+                    progress: ProgressOutput::Off,
+                    paths: &paths,
+                    sleep_inhibitor: &inhibitor,
+                    passphrase_reader: &RealTty,
+                    backing_path_resolver: &resolver,
+                },
+            )
+            .unwrap_err();
+
+        match err {
+            AddError::Validation(msg) => {
+                assert!(msg.contains("a pool appeared at /mnt/storage"));
+                assert!(msg.contains("aborting before `mkfs.btrfs`"));
+            }
+            other => panic!("expected Validation, got: {other:?}"),
+        }
+        assert_eq!(resolver.calls_to(BY_ID), 0);
+        assert!(
+            !runner
+                .requests()
+                .iter()
+                .any(|req| matches!(req, CmdRequest::MkfsBtrfs { .. })),
+            "mkfs.btrfs must not run after mount-state drift"
+        );
+        assert_eq!(inhibitor.acquire_count(), 0);
+        assert!(journal::load_journal(&paths).unwrap().is_none());
+    }
+
+    // Intent: execute rejects a mounted plan when the fresh pool probe reports
+    // a different btrfs FSID before journal write.
+    // Why it exists: matching mount state is not enough; live-pool
+    // re-classification must be against the same filesystem the planner saw.
+    // Scenario: a different btrfs filesystem is mounted at the configured
+    // mount point between planning and execution.
+    #[test]
+    fn execute_pool_identity_guard_rejects_fsid_drift() {
+        const UUID: &str = "33333333-3333-3333-3333-333333333333";
+        const BY_ID: &str = "/dev/disk/by-id/virtio-disk2";
+        const OLD_FSID: &str = "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee";
+        const NEW_FSID: &str = "bbbbbbbb-cccc-dddd-eeee-ffffffffffff";
+        let target = fresh_target("disk2", BY_ID, UUID);
+        let journal_targets =
+            journal_targets_with(target.luks_uuid.clone(), fresh_journal_target(&target));
+        let plan = plan_for_execute_target(
+            AddTargetWork::Fresh(target),
+            journal_targets,
+            pool_mounted_with_fsid(OLD_FSID),
+        );
+        let (_state_tmp, paths, _tmp, pass_path) = execute_fixture();
+        let runner = pool_probe_runner(
+            NEW_FSID,
+            &[(
+                "braid-disk1",
+                1,
+                "/dev/vdb",
+                "11111111-1111-1111-1111-111111111111",
+            )],
+        );
+        let fs = AddMockFs(vec![BY_ID.into()]);
+        let inhibitor = crate::inhibit::RecordingInhibitor::new();
+        let resolver = CountingBackingPathResolver::default().with_path(BY_ID, "/dev/vdc");
+
+        let err = plan
+            .execute(
+                &runner,
+                &fs,
+                &AddParams {
+                    config_path: Path::new("/dev/null"),
+                    disk_specs: &[],
+                    dry_run: false,
+                    yes: true,
+                    passphrase_stdin: false,
+                    passphrase_file: Some(pass_path.as_path()),
+                    enroll_key_file: None,
+                    luks_format_extra_opts: &[],
+                    progress: ProgressOutput::Off,
+                    paths: &paths,
+                    sleep_inhibitor: &inhibitor,
+                    passphrase_reader: &RealTty,
+                    backing_path_resolver: &resolver,
+                },
+            )
+            .unwrap_err();
+
+        match err {
+            AddError::Validation(msg) => {
+                assert!(msg.contains("pool fsid changed between planning and execution"));
+                assert!(msg.contains(OLD_FSID));
+                assert!(msg.contains(NEW_FSID));
+            }
+            other => panic!("expected Validation, got: {other:?}"),
+        }
+        assert_eq!(resolver.calls_to(BY_ID), 0);
+        assert_eq!(inhibitor.acquire_count(), 0);
+        assert!(journal::load_journal(&paths).unwrap().is_none());
+    }
+
     // Intent: find_added_device_by_uuid resolves the live PoolDevice by LUKS
     // UUID, tolerating mapper drift.
     //
@@ -2973,13 +3644,7 @@ mod tests {
             )
             .expect("test fixture insert");
         let runner = NoDumpRunner {
-            inner: UnlockingAddRunner {
-                inner: AddTestRunner {
-                    disk_in_pool: true,
-                    fail_device_add: false,
-                    no_btrfs_superblock: false,
-                },
-            },
+            inner: RecoverableAddRunner::new(),
         };
 
         let work_plan = build_add_work_plan(
@@ -3454,32 +4119,108 @@ mod tests {
         );
     }
 
-    /// Wraps `AddTestRunner` to also satisfy `CryptsetupLuksOpen` (run via
-    /// stdin) for the Pass-1 recoverable unlock test. The base runner is
-    /// scoped to scenarios where every PresentLuks mapper is already open,
-    /// so it has no built-in answer for the open-from-closed branch.
-    struct UnlockingAddRunner {
-        inner: AddTestRunner,
+    struct RecoverableAddRunner {
+        disk2_added: std::sync::atomic::AtomicBool,
+        disk2_opened: std::sync::atomic::AtomicBool,
     }
-    impl CommandRunner for UnlockingAddRunner {
-        fn run(&self, request: &CmdRequest) -> Result<RawCommandOutput, CmdError> {
-            match request {
-                CmdRequest::CryptsetupLuksOpen { .. } => Ok(mock_ok("cryptsetup luksOpen", "")),
-                CmdRequest::BtrfsDeviceScanForget { .. } => Ok(mock_ok("btrfs scan forget", "")),
-                CmdRequest::WipefsBtrfs { .. } => Ok(mock_ok("wipefs", "")),
-                CmdRequest::BtrfsBalanceRaid1 { .. } => Ok(mock_ok("btrfs balance", "")),
-                _ => self.inner.run(request),
+
+    impl RecoverableAddRunner {
+        fn new() -> Self {
+            Self {
+                disk2_added: std::sync::atomic::AtomicBool::new(false),
+                disk2_opened: std::sync::atomic::AtomicBool::new(false),
             }
         }
+
+        fn pool_show(&self) -> String {
+            let disk2_line = if self.disk2_added.load(std::sync::atomic::Ordering::SeqCst) {
+                "\tdevid    2 size 496.00MiB used 121.56MiB path /dev/mapper/braid-disk2\n"
+            } else {
+                ""
+            };
+            let total = if disk2_line.is_empty() { 1 } else { 2 };
+            format!(
+                "Label: none  uuid: {POOL_FSID}\n\
+                 \tTotal devices {total} FS bytes used 16.17MiB\n\
+                 \tdevid    1 size 496.00MiB used 121.56MiB path /dev/mapper/braid-disk1\n\
+                 {disk2_line}"
+            )
+        }
+    }
+
+    impl CommandRunner for RecoverableAddRunner {
+        fn run(&self, request: &CmdRequest) -> Result<RawCommandOutput, CmdError> {
+            match request {
+                CmdRequest::BtrfsFilesystemShow { mount_point } => Ok(mock_ok(
+                    &format!("btrfs filesystem show {mount_point}"),
+                    &self.pool_show(),
+                )),
+                CmdRequest::CryptsetupStatus { mapper } => match mapper.as_str() {
+                    "braid-disk1" => Ok(mock_status_active("braid-disk1", "/dev/vdb")),
+                    "braid-disk2"
+                        if self.disk2_opened.load(std::sync::atomic::Ordering::SeqCst)
+                            || self.disk2_added.load(std::sync::atomic::Ordering::SeqCst) =>
+                    {
+                        Ok(mock_status_active("braid-disk2", "/dev/vdc"))
+                    }
+                    "braid-disk2" => Ok(mock_status_inactive("braid-disk2")),
+                    _ => Err(CmdError::MissingMock),
+                },
+                CmdRequest::CryptsetupLuksUuid { device } => match device.as_str() {
+                    "/dev/vdb" | "/dev/disk/by-id/virtio-disk1" => Ok(mock_luks_uuid(
+                        device,
+                        "11111111-1111-1111-1111-111111111111",
+                    )),
+                    "/dev/vdc" | "/dev/disk/by-id/virtio-disk2" => Ok(mock_luks_uuid(
+                        device,
+                        "22222222-2222-2222-2222-222222222222",
+                    )),
+                    _ => Err(CmdError::MissingMock),
+                },
+                CmdRequest::BtrfsFilesystemShowTarget { target } => {
+                    let mut out = btrfs_show_with_uuid(POOL_FSID);
+                    out.cmd = format!("btrfs filesystem show {target}");
+                    Ok(out)
+                }
+                CmdRequest::CryptsetupTestPassphrase { device } => Ok(mock_ok(
+                    &format!("cryptsetup open --test-passphrase {device}"),
+                    "",
+                )),
+                CmdRequest::CryptsetupLuksOpen { .. } => {
+                    self.disk2_opened
+                        .store(true, std::sync::atomic::Ordering::SeqCst);
+                    Ok(mock_ok("cryptsetup luksOpen", ""))
+                }
+                CmdRequest::BtrfsDeviceScanForget { .. } => Ok(mock_ok("btrfs scan forget", "")),
+                CmdRequest::WipefsBtrfs { .. } => Ok(mock_ok("wipefs", "")),
+                CmdRequest::BtrfsDeviceAdd { .. } => {
+                    self.disk2_added
+                        .store(true, std::sync::atomic::Ordering::SeqCst);
+                    Ok(mock_ok("btrfs device add", ""))
+                }
+                CmdRequest::BtrfsBalanceRaid1 { .. } => Ok(mock_ok("btrfs balance", "")),
+                CmdRequest::BtrfsBalanceStatus { .. } => Ok(mock_ok(
+                    "btrfs balance status",
+                    "No balance found on '/mnt/storage'\n",
+                )),
+                _ => Err(CmdError::MissingMock),
+            }
+        }
+
         fn run_with_stdin(
             &self,
             request: &CmdRequest,
-            stdin: &[u8],
+            _stdin: &[u8],
         ) -> Result<RawCommandOutput, CmdError> {
-            if let CmdRequest::CryptsetupLuksOpen { .. } = request {
-                return Ok(mock_ok("cryptsetup luksOpen", ""));
+            match request {
+                CmdRequest::CryptsetupLuksOpen { .. } => {
+                    self.disk2_opened
+                        .store(true, std::sync::atomic::Ordering::SeqCst);
+                    Ok(mock_ok("cryptsetup luksOpen", ""))
+                }
+                CmdRequest::CryptsetupTestPassphrase { .. } => self.run(request),
+                _ => self.run(request),
             }
-            self.inner.run_with_stdin(request, stdin)
         }
     }
 
@@ -3589,18 +4330,11 @@ mod tests {
         // in Pass 1 actually issues the cryptsetup open (rather than seeing an
         // already-existing mapper and short-circuiting).
         let fs = AddMockFs(vec!["/dev/disk/by-id/virtio-disk2".into()]);
-        // disk_in_pool: true so the post-BtrfsDeviceAdd probe_pool returns
-        // disk1+disk2, letting save_membership and balance proceed cleanly.
-        // The pre-add classify_braid_disk_fsid uses the AddPlan's `pool`
-        // field (which we hand-build to contain only disk1), not the runner,
-        // so the btrfs probe returns SamePool regardless.
-        let runner = UnlockingAddRunner {
-            inner: AddTestRunner {
-                disk_in_pool: true,
-                fail_device_add: false,
-                no_btrfs_superblock: false,
-            },
-        };
+        // The runner reports only disk1 until BtrfsDeviceAdd succeeds, then
+        // reports disk1+disk2 so the execute-time re-check sees the same
+        // pre-add pool the planner saw while the post-add probe can enrich
+        // membership normally.
+        let runner = RecoverableAddRunner::new();
         let inhibitor = crate::inhibit::RecordingInhibitor::new();
 
         let config = crate::config::Config::new(MountPoint("/mnt/storage".into())).unwrap();
