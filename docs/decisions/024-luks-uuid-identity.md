@@ -61,6 +61,9 @@ one.
 - **Earlier clone and swap detection.** Duplicate LUKS UUIDs are rejected before
   membership writes or destructive operations, and UUID mismatches catch disks
   that were swapped, cloned, or reformatted after the original plan was made.
+  `add` and `replace` also re-probe the mounted pool at execution time before
+  writing the journal, so confirmation/passphrase-window races still hit the
+  UUID guard.
 - **Human-facing names stay human-facing.** Operators still type and read disk
   names such as `toshiba1`; mapper names and labels remain `braid-<DiskName>`.
   UUIDs appear where they help diagnostics or machine-readable state, not as the
@@ -129,6 +132,12 @@ one.
 9. Recovery must fail closed when a live btrfs device lacks an observable LUKS
    UUID and the journal has no persisted devid binding. It must not recover by
    inferring identity from `braid-<DiskName>`.
+10. `replace` must re-probe the mounted pool after confirmation and passphrase
+    verification but before sleep inhibitor acquisition, journal write, or
+    `btrfs replace start`. If the pool is no longer mounted, the FSID differs
+    from the planned pool, or any live pool device has the replacement target's
+    LUKS UUID, replace fails closed with the canonical pre-journal validation
+    or `DuplicateUuid { scope: LivePool }` refusal.
 
 ## Limits And Non-Goals
 
@@ -173,6 +182,9 @@ one.
 - `cli/src/enroll_key_file.rs` unit tests verify standalone enroll rejects a
   member whose live LUKS UUID does not match the pool.json membership key
   before any slot inventory or keyfile mutation runs.
+- `cli/src/replace.rs` unit tests verify `ReplacePlan::execute` re-probes the
+  live pool before journal write, rejects unmounted/FSID-drifted/colliding
+  live-pool state, and still proceeds when the fresh probe is clean.
 - `cli/src/luks.rs` and `cli/src/probe.rs` unit tests verify already-open
   expected mappers must have the requested backing path before UUID ownership
   is accepted.
@@ -187,6 +199,9 @@ one.
   or mount.
 - `tests/cli/replace-new-in-pool-guard.py` verifies duplicate LUKS UUIDs are
   rejected before braid writes membership or calls into btrfs mutation.
+- `tests/cli/replace-live-pool-collision-race-rejected.py` verifies replace's
+  execute-time live-pool re-probe rejects a cloned replacement UUID added to
+  the mounted pool while replace waits for confirmation.
 - `tests/cli/braid-add-cloned-luks-header-rejected.py` and
   `tests/cli/replace-cloned-luks-header-rejected.py` verify cloned LUKS
   headers cannot make add or replace reuse a mapper opened from the wrong

@@ -380,6 +380,11 @@
               braid = linuxCrane.braid;
             }
           );
+          replace-live-pool-collision-race-rejected = pkgs.testers.nixosTest (
+            import ./tests/cli/replace-live-pool-collision-race-rejected.nix {
+              braid = linuxCrane.braid;
+            }
+          );
           replace-preserves-devid = pkgs.testers.nixosTest (
             import ./tests/cli/replace-preserves-devid.nix {
               braid = linuxCrane.braid;

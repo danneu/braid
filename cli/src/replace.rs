@@ -549,6 +549,8 @@ impl ReplacePlan {
             }
         }
 
+        verify_replace_execute_live_pool_uuid(runner, fs, config.mount_point(), &pool, &new_uuid)?;
+
         // Hold a logind sleep inhibitor for the rest of the replace operation --
         // covers Step 1 LUKS init, the long-running btrfs replace start, and
         // the post-replace soft balance for missing-path replaces. Suspending
@@ -938,6 +940,42 @@ impl ReplacePlan {
     }
 }
 
+/// Execute-time live-pool UUID gate for `replace`'s pre-journal seam.
+/// This catches confirmation/passphrase-window races where the planned
+/// replacement UUID enters the mounted pool after planning but before the
+/// irreversible replace journal is written.
+fn verify_replace_execute_live_pool_uuid<R: CommandRunner, F: Filesystem + ?Sized>(
+    runner: &R,
+    fs: &F,
+    mount_point: &MountPoint,
+    planned_pool: &PoolState,
+    new_uuid: &LuksUuid,
+) -> Result<(), ReplaceError> {
+    let fresh_pool = probe_pool(runner, fs, mount_point)?;
+    if !fresh_pool.mounted {
+        return Err(ReplaceError::Validation(format!(
+            "pool unmounted between planning and execution -- aborting before journal write. Re-mount {mount_point} and re-run `braid replace`."
+        )));
+    }
+
+    if fresh_pool.fsid != planned_pool.fsid {
+        let planned = planned_pool.fsid.as_deref().unwrap_or("<unknown>");
+        let fresh = fresh_pool.fsid.as_deref().unwrap_or("<unknown>");
+        return Err(ReplaceError::Validation(format!(
+            "pool fsid changed between planning and execution (was {planned}, now {fresh}) -- aborting before journal write. The pool you planned against is no longer the same filesystem."
+        )));
+    }
+
+    if fresh_pool.devices.iter().any(|d| d.luks_uuid == *new_uuid) {
+        return Err(ReplaceError::DuplicateUuid {
+            uuid: new_uuid.clone(),
+            scope: DuplicateUuidScope::LivePool,
+        });
+    }
+
+    Ok(())
+}
+
 /// Open-boundary re-probe for `ReplaceJournalMode::ExistingLuks` new
 /// targets. The planning-time `cryptsetup luksUUID` probe identifies the
 /// physical disk that should be opened; between planning and execution
@@ -979,8 +1017,10 @@ fn probe_existing_luks_new_target_uuid<R: CommandRunner>(
     }
 }
 
-/// Re-classify an already-open ExistingLuks replace target at execute time
-/// so the final mutation boundary checks live mapper backing path and UUID.
+/// Re-classify an already-open ExistingLuks replace target at execute time.
+/// This verifies the configured by-id still backs the mapper and still has
+/// the planned UUID; live-pool duplicate UUIDs are handled by the separate
+/// pre-journal `verify_replace_execute_live_pool_uuid` gate.
 fn verify_existing_luks_open_mapper_target<R: CommandRunner>(
     runner: &R,
     new_name: &DiskName,
@@ -2938,6 +2978,319 @@ mod tests {
             })),
             _ => None,
         }
+    }
+
+    const REPLACE_TEST_FSID: &str = "cc86845b-aec3-408e-bef5-553affc1f2b1";
+
+    fn fresh_luks_execute_plan_for_test(f: &PoolFixture, new_uuid: LuksUuid) -> ReplacePlan {
+        let old_uuid = LuksUuid::parse("22222222-2222-2222-2222-222222222222").unwrap();
+        let new_name = disk_name("disk3");
+        let new_by_id = ByIdPath::parse("/dev/disk/by-id/virtio-disk3").unwrap();
+        let pre_membership = membership::load_membership(&f.paths).unwrap();
+        let mut target_membership = pre_membership.clone();
+        target_membership
+            .remove_by_uuid(&old_uuid)
+            .expect("fixture contains disk2");
+        target_membership
+            .insert(
+                new_uuid.clone(),
+                membership::DiskMember {
+                    name: new_name.clone(),
+                    by_id: new_by_id.clone(),
+                    devid: None,
+                    added_at: None,
+                },
+            )
+            .expect("fixture target membership is unique");
+
+        let pool = PoolState {
+            mounted: true,
+            devices: vec![
+                PoolDevice {
+                    mapper: MapperName("braid-disk1".into()),
+                    luks_uuid: LuksUuid::parse("11111111-1111-1111-1111-111111111111").unwrap(),
+                    devid: 1,
+                    underlying: "/dev/vdb".into(),
+                },
+                PoolDevice {
+                    mapper: MapperName("braid-disk2".into()),
+                    luks_uuid: old_uuid.clone(),
+                    devid: 2,
+                    underlying: "/dev/vdc".into(),
+                },
+            ],
+            missing_count: 0,
+            total_devices: 2,
+            fsid: Some(REPLACE_TEST_FSID.to_owned()),
+            missing_devids: vec![],
+            null_underlying: vec![],
+        };
+
+        ReplacePlan {
+            notes: vec![],
+            work_plan: build_replace_work_plan(ReplaceWorkPlanInput {
+                config: f.config.clone(),
+                old_uuid,
+                old_name: disk_name("disk2"),
+                new_uuid,
+                new_name: new_name.clone(),
+                new_by_id: new_by_id.clone(),
+                new_probed: PresentConfigDisk {
+                    name: new_name,
+                    by_id_path: new_by_id,
+                    state: PresentConfigDiskState::PresentNotLuks,
+                },
+                replace_source: ReplaceSource::Live {
+                    mapper: MapperName("braid-disk2".into()),
+                    devid: 2,
+                },
+                pool,
+                pre_membership,
+                target_membership,
+                paths: &f.paths,
+                enroll_key_file: None,
+                luks_format_extra_opts: LuksFormatExtraOpts::parse(&[]).unwrap(),
+            }),
+        }
+    }
+
+    fn btrfs_show_pool_text(fsid: &str, devices: &[(&str, u64)]) -> String {
+        let mut out = format!(
+            "Label: none  uuid: {fsid}\n\tTotal devices {} FS bytes used 16.17MiB\n",
+            devices.len()
+        );
+        for (mapper, devid) in devices {
+            out.push_str(&format!(
+                "\tdevid    {devid} size 496.00MiB used 121.56MiB path /dev/mapper/{mapper}\n"
+            ));
+        }
+        out
+    }
+
+    fn mock_status_active(mapper: &str, underlying: &str) -> RawCommandOutput {
+        mock_ok(
+            &format!("cryptsetup status {mapper}"),
+            &format!(
+                "{mapper} is active and is in use.\n  type:    LUKS2\n  device:  {underlying}\n  mode:    read/write\n"
+            ),
+        )
+    }
+
+    fn execute_gate_runner(
+        fresh_pool_show: Option<String>,
+        clone_uuid: LuksUuid,
+        mock_downstream_success_until_replace: bool,
+    ) -> MockRunner {
+        let replace_done = Arc::new(AtomicBool::new(false));
+        ReplacementPool::two_disk_healthy()
+            .with_mapper_closed("braid-disk3")
+            .install(MockRunner::default(), replace_done)
+            .with_handler(move |req| match req {
+                CmdRequest::BtrfsFilesystemShow { mount_point } => {
+                    fresh_pool_show.as_ref().map(|show| {
+                        Ok(mock_ok(
+                            &format!("btrfs filesystem show {mount_point}"),
+                            show,
+                        ))
+                    })
+                }
+                CmdRequest::CryptsetupStatus { mapper } if mapper.as_str() == "clone-foreign" => {
+                    Some(Ok(mock_status_active("clone-foreign", "/dev/vde")))
+                }
+                CmdRequest::CryptsetupLuksUuid { device } if device == "/dev/vde" => Some(Ok(
+                    mock_ok("cryptsetup luksUUID /dev/vde", &format!("{clone_uuid}\n")),
+                )),
+                CmdRequest::CryptsetupLuksFormat { device, .. }
+                    if mock_downstream_success_until_replace =>
+                {
+                    Some(Ok(mock_ok(&format!("cryptsetup luksFormat {device}"), "")))
+                }
+                CmdRequest::CryptsetupLuksHeaderBackup { device, .. }
+                    if mock_downstream_success_until_replace =>
+                {
+                    Some(Ok(mock_ok(
+                        &format!("cryptsetup luksHeaderBackup {device}"),
+                        "",
+                    )))
+                }
+                CmdRequest::CryptsetupLuksOpen { device, .. }
+                    if mock_downstream_success_until_replace =>
+                {
+                    Some(Ok(mock_ok(&format!("cryptsetup open {device}"), "")))
+                }
+                CmdRequest::BtrfsReplaceStart { .. } if mock_downstream_success_until_replace => {
+                    Some(Ok(RawCommandOutput {
+                        cmd: "btrfs replace start".into(),
+                        stdout: String::new(),
+                        stderr: "ERROR: target device is too small".into(),
+                        exit_status: 1,
+                    }))
+                }
+                _ => None,
+            })
+    }
+
+    // Intent: `ReplacePlan::execute` re-probes the live pool before the
+    //   inhibitor and journal, rejecting a FreshLuks target UUID that appears
+    //   in the fresh live pool.
+    // Why it exists: confirmation and passphrase prompts leave a TOCTOU window
+    //   after planning. A cloned replacement UUID added to btrfs during that
+    //   pause must hit the canonical LivePool duplicate refusal before any
+    //   pending-op.json or btrfs replace start.
+    // Scenario: disk3 was planned as a fresh replacement; before execution
+    //   reaches the journal, `/dev/mapper/clone-foreign` with disk3's UUID
+    //   appears in the mounted pool.
+    #[test]
+    fn execute_rechecks_live_pool_rejects_fresh_luks_uuid_collision() {
+        let f = PoolFixture::two_disk_healthy();
+        let new_uuid = LuksUuid::parse("33333333-3333-3333-3333-333333333333").unwrap();
+        let plan = fresh_luks_execute_plan_for_test(&f, new_uuid.clone());
+        let show = btrfs_show_pool_text(
+            REPLACE_TEST_FSID,
+            &[("braid-disk1", 1), ("braid-disk2", 2), ("clone-foreign", 3)],
+        );
+        let runner = execute_gate_runner(Some(show), new_uuid.clone(), false);
+        let fs = MockFs::storage(vec!["/dev/disk/by-id/virtio-disk3".into()]);
+
+        let result = plan.execute(&runner, &fs, &f.replace_params().build());
+
+        match result {
+            Err(ReplaceError::DuplicateUuid { uuid, scope }) => {
+                assert_eq!(uuid, new_uuid);
+                assert_eq!(scope, DuplicateUuidScope::LivePool);
+            }
+            other => panic!("expected DuplicateUuid {{ LivePool }}, got: {other:?}"),
+        }
+        assert_eq!(
+            f.inhibitor.acquire_count(),
+            0,
+            "execute-time live-pool duplicate must reject before inhibitor acquisition"
+        );
+        assert!(
+            journal::load_journal(&f.paths).unwrap().is_none(),
+            "execute-time live-pool duplicate must not write pending-op.json"
+        );
+        let log = runner.requests();
+        assert!(
+            !log.iter()
+                .any(|r| matches!(r, CmdRequest::BtrfsReplaceStart { .. })),
+            "no BtrfsReplaceStart may issue after execute-time live-pool duplicate"
+        );
+    }
+
+    // Intent: `ReplacePlan::execute` fails closed if the planned mounted pool
+    //   disappears before the pre-journal live-pool re-check.
+    // Why it exists: replacing against stale mounted-pool state would write a
+    //   journal for a filesystem that is no longer the one the user approved.
+    // Scenario: the pool was mounted during planning, but is unmounted after
+    //   confirmation/passphrase verification and before journal write.
+    #[test]
+    fn execute_rechecks_live_pool_rejects_unmounted_pool() {
+        let f = PoolFixture::two_disk_healthy();
+        let new_uuid = LuksUuid::parse("33333333-3333-3333-3333-333333333333").unwrap();
+        let plan = fresh_luks_execute_plan_for_test(&f, new_uuid.clone());
+        let runner = execute_gate_runner(None, new_uuid, false);
+        let fs = MockFs::unmounted(vec!["/dev/disk/by-id/virtio-disk3".into()]);
+
+        let result = plan.execute(&runner, &fs, &f.replace_params().build());
+
+        match result {
+            Err(ReplaceError::Validation(msg)) => {
+                assert!(
+                    msg.contains("pool unmounted between planning and execution"),
+                    "expected unmounted-pool validation, got: {msg}"
+                );
+            }
+            other => panic!("expected Validation, got: {other:?}"),
+        }
+        assert_eq!(f.inhibitor.acquire_count(), 0);
+        assert!(journal::load_journal(&f.paths).unwrap().is_none());
+        assert!(
+            !runner
+                .requests()
+                .iter()
+                .any(|r| matches!(r, CmdRequest::BtrfsReplaceStart { .. })),
+            "no BtrfsReplaceStart may issue after unmounted-pool validation"
+        );
+    }
+
+    // Intent: `ReplacePlan::execute` fails closed if the mounted pool FSID
+    //   changes before the pre-journal live-pool re-check.
+    // Why it exists: the fresh live-pool probe is only meaningful if it still
+    //   describes the same btrfs filesystem that produced the plan.
+    // Scenario: `/mnt/storage` is remounted to a different btrfs filesystem
+    //   after planning but before replace writes pending-op.json.
+    #[test]
+    fn execute_rechecks_live_pool_rejects_fsid_drift() {
+        let f = PoolFixture::two_disk_healthy();
+        let new_uuid = LuksUuid::parse("33333333-3333-3333-3333-333333333333").unwrap();
+        let plan = fresh_luks_execute_plan_for_test(&f, new_uuid.clone());
+        let show = btrfs_show_pool_text(
+            "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee",
+            &[("braid-disk1", 1), ("braid-disk2", 2)],
+        );
+        let runner = execute_gate_runner(Some(show), new_uuid, false);
+        let fs = MockFs::storage(vec!["/dev/disk/by-id/virtio-disk3".into()]);
+
+        let result = plan.execute(&runner, &fs, &f.replace_params().build());
+
+        match result {
+            Err(ReplaceError::Validation(msg)) => {
+                assert!(
+                    msg.contains("pool fsid changed between planning and execution"),
+                    "expected FSID-drift validation, got: {msg}"
+                );
+            }
+            other => panic!("expected Validation, got: {other:?}"),
+        }
+        assert_eq!(f.inhibitor.acquire_count(), 0);
+        assert!(journal::load_journal(&f.paths).unwrap().is_none());
+        assert!(
+            !runner
+                .requests()
+                .iter()
+                .any(|r| matches!(r, CmdRequest::BtrfsReplaceStart { .. })),
+            "no BtrfsReplaceStart may issue after FSID-drift validation"
+        );
+    }
+
+    // Intent: `ReplacePlan::execute` allows a fresh live-pool re-check whose
+    //   FSID still matches and whose devices do not carry the replacement UUID.
+    // Why it exists: the execute-time gate must be a collision guard, not a
+    //   blanket refusal of normal replace execution.
+    // Scenario: disk3 was planned as a fresh replacement; the fresh pool probe
+    //   still shows only disk1 and disk2, so execution proceeds to the journal
+    //   and then fails at an intentional mocked `btrfs replace start` error.
+    #[test]
+    fn execute_rechecks_live_pool_allows_clean_pool_before_journal() {
+        let f = PoolFixture::two_disk_healthy();
+        let new_uuid = LuksUuid::parse("33333333-3333-3333-3333-333333333333").unwrap();
+        let plan = fresh_luks_execute_plan_for_test(&f, new_uuid.clone());
+        let runner = execute_gate_runner(None, new_uuid, true);
+        let fs = MockFs::storage(vec!["/dev/disk/by-id/virtio-disk3".into()]);
+
+        let result = plan.execute(&runner, &fs, &f.replace_params().build());
+
+        assert!(
+            matches!(result, Err(ReplaceError::Pool(_))),
+            "expected downstream pool failure after clean re-check, got: {result:?}"
+        );
+        assert_eq!(
+            f.inhibitor.acquire_count(),
+            1,
+            "clean re-check should proceed to inhibitor acquisition"
+        );
+        assert!(
+            journal::load_journal(&f.paths).unwrap().is_some(),
+            "clean re-check should proceed through pending-op.json write"
+        );
+        assert!(
+            runner
+                .requests()
+                .iter()
+                .any(|r| matches!(r, CmdRequest::BtrfsReplaceStart { .. })),
+            "clean re-check should proceed to BtrfsReplaceStart"
+        );
     }
 
     #[test]
