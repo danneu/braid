@@ -56,7 +56,7 @@ pub(crate) fn valid_config_json() -> &'static str {
 }
 
 pub(crate) fn config_with_ups_enabled() -> &'static str {
-    r#"{"mount_point":"/mnt/storage","ups":{"name":"ups"}}"#
+    r#"{"mount_point":"/mnt/storage","ups":{"name":"ups"},"systemd_lifecycle":true}"#
 }
 
 pub(crate) fn config_without_ups() -> &'static str {

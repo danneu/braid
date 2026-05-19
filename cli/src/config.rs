@@ -38,7 +38,8 @@ pub struct Ups {
 #[serde(try_from = "RawConfig")]
 pub struct Config {
     mount_point: MountPoint,
-    storage_group: Option<String>,
+    pool_access_group: Option<String>,
+    systemd_lifecycle: bool,
     fan_control: Option<FanControl>,
     ups: Option<Ups>,
 }
@@ -50,7 +51,8 @@ impl Config {
         }
         Ok(Config {
             mount_point,
-            storage_group: None,
+            pool_access_group: None,
+            systemd_lifecycle: false,
             fan_control: None,
             ups: None,
         })
@@ -60,9 +62,16 @@ impl Config {
         &self.mount_point
     }
 
-    /// Optional Unix group that receives write access on the mounted pool root.
-    pub fn storage_group(&self) -> Option<&str> {
-        self.storage_group.as_deref()
+    /// Optional Unix group that receives write access on the mounted pool root
+    /// via `root:<group> 2770`.
+    pub fn pool_access_group(&self) -> Option<&str> {
+        self.pool_access_group.as_deref()
+    }
+
+    /// True when module-generated config makes Rust responsible for
+    /// `braid-online.service` and related systemd lifecycle synchronization.
+    pub fn systemd_lifecycle(&self) -> bool {
+        self.systemd_lifecycle
     }
 
     pub fn fan_control(&self) -> Option<&FanControl> {
@@ -95,10 +104,13 @@ pub fn name_from_mapper(mapper: &str) -> Option<&str> {
 }
 
 #[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
 struct RawConfig {
     mount_point: MountPoint,
     #[serde(default)]
-    storage_group: Option<String>,
+    pool_access_group: Option<String>,
+    #[serde(default)]
+    systemd_lifecycle: bool,
     #[serde(default)]
     fan_control: Option<FanControl>,
     #[serde(default)]
@@ -110,7 +122,8 @@ impl TryFrom<RawConfig> for Config {
 
     fn try_from(raw: RawConfig) -> Result<Self, Self::Error> {
         let mut cfg = Config::new(raw.mount_point)?;
-        cfg.storage_group = raw.storage_group;
+        cfg.pool_access_group = raw.pool_access_group;
+        cfg.systemd_lifecycle = raw.systemd_lifecycle;
         cfg.fan_control = raw.fan_control;
         cfg.ups = raw.ups;
         Ok(cfg)
@@ -151,10 +164,10 @@ mod tests {
 
     #[test]
     fn parses_valid_config() {
-        let raw = r#"{"mount_point":"/mnt/storage","storage_group":"storage"}"#;
+        let raw = r#"{"mount_point":"/mnt/storage","pool_access_group":"storage"}"#;
         let cfg: Config = serde_json::from_str(raw).expect("config should parse");
         assert_eq!(cfg.mount_point().as_str(), "/mnt/storage");
-        assert_eq!(cfg.storage_group(), Some("storage"));
+        assert_eq!(cfg.pool_access_group(), Some("storage"));
     }
 
     #[test]
@@ -264,6 +277,58 @@ mod tests {
         let cfg: Config = serde_json::from_str(raw).expect("config should parse");
         let u = cfg.ups().expect("ups should be Some");
         assert_eq!(u.name, "ups");
+    }
+
+    // Intent: Config deserializes without systemd_lifecycle and defaults it to false.
+    // Why it exists: standalone CLI configs omit module-owned lifecycle
+    // capability and must not run braid-online systemctl calls.
+    // Scenario: a CLI-only install writes only mount_point into config.json.
+    #[test]
+    fn parses_config_without_systemd_lifecycle_defaults_false() {
+        let raw = r#"{"mount_point":"/mnt/storage"}"#;
+        let cfg: Config = serde_json::from_str(raw).expect("config should parse");
+        assert!(!cfg.systemd_lifecycle());
+    }
+
+    // Intent: Config deserializes explicit systemd_lifecycle=true.
+    // Why it exists: modules/braid/cli.nix emits this field to opt Rust
+    // dispatch into braid-online lifecycle ownership.
+    // Scenario: module-managed install runs unlock/add/recover and expects
+    // post-success lifecycle synchronization.
+    #[test]
+    fn parses_config_with_systemd_lifecycle_true() {
+        let raw = r#"{"mount_point":"/mnt/storage","systemd_lifecycle":true}"#;
+        let cfg: Config = serde_json::from_str(raw).expect("config should parse");
+        assert!(cfg.systemd_lifecycle());
+    }
+
+    // Intent: Config rejects non-boolean systemd_lifecycle values.
+    // Why it exists: stringly capability flags would blur whether Rust owns
+    // systemd lifecycle synchronization.
+    // Scenario: operator hand-edits config.json and writes an invalid value.
+    #[test]
+    fn rejects_systemd_lifecycle_non_boolean() {
+        let raw = r#"{"mount_point":"/mnt/storage","systemd_lifecycle":"yes"}"#;
+        let err = serde_json::from_str::<Config>(raw).expect_err("non-boolean flag must fail");
+        assert!(
+            err.to_string().contains("boolean"),
+            "expected boolean error, got: {err}"
+        );
+    }
+
+    // Intent: Config rejects stale top-level field names after the rename.
+    // Why it exists: accepting storage_group would silently skip the intended
+    // pool_access_group setting and hide operator config drift.
+    // Scenario: standalone config.json keeps the old key after an upgrade.
+    #[test]
+    fn rejects_config_with_unknown_top_level_field() {
+        let raw = r#"{"mount_point":"/mnt/storage","storage_group":"storage"}"#;
+        let err = serde_json::from_str::<Config>(raw).expect_err("unknown field must fail");
+        let message = err.to_string();
+        assert!(
+            message.contains("storage_group") || message.contains("unknown field"),
+            "expected unknown-field error, got: {message}"
+        );
     }
 
     // Intent: Config rejects the legacy UPS shape with an `enable` field.

@@ -77,4 +77,4 @@ When an eval-time test (`lib.evalModules` in isolation) breaks because of a new 
 
 Stubbing options (e.g. adding `options.users`) makes the test less isolated and can mask future accidental dependencies on unrelated NixOS top-level options. Disabling the feature that introduced the dependency keeps the test focused.
 
-When fixing eval-time test failures caused by new module dependencies, first check if the dependency comes from a feature the test doesn't need. If so, set that feature's config to its "off" value (e.g. `storageGroup = null`) instead of adding option stubs.
+When fixing eval-time test failures caused by new module dependencies, first check if the dependency comes from a feature the test doesn't need. If so, set that feature's config to its "off" value (e.g. `poolAccessGroup = null`) instead of adding option stubs.

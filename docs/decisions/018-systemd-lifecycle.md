@@ -116,21 +116,25 @@ Started by monitor on error detection. Beeps via PC speaker (if enabled) and/or 
 
 The wrapper (`braid-wrapper.sh`) is a pure exec shim: it sets the module-controlled `PATH` and `exec`s the Rust binary. Synchronization lives in Rust dispatch (`cli/src/main.rs`), which owns the pool lock, `braid-online.service` lifecycle updates, and shutdown stop coordination. See [026-pool-lock-rust-owned.md](026-pool-lock-rust-owned.md).
 
+`modules/braid/cli.nix` emits `systemd_lifecycle = true` for module-managed
+installs. Standalone CLI deployments omit it; those configs still get mount
+permission fixups but do not touch `braid-online.service`.
+
 **On successful `unlock`, `add`, or `recover`:**
-1. Rust dispatch acquires `/run/braid-pool.lock`, loads config and membership, and snapshots `braid-online.service` `ActiveState`.
+1. Rust dispatch acquires `/run/braid-pool.lock`, loads config and membership, and snapshots `braid-online.service` `ActiveState` only when `systemd_lifecycle = true`.
 2. CLI opens LUKS + mounts pool. (`recover` self-mounts when recovering from an interrupted operation.)
 3. While the pool lock is still held, Rust checks `mountpoint -q`.
-4. Rust sets permissions (`root:storageGroup 2770`) if `storageGroup` is configured.
-5. Rust starts `braid-online.service` only when the initial snapshot was `inactive` or `failed`.
+4. Rust sets permissions (`root:poolAccessGroup 2770`) if `poolAccessGroup` is configured.
+5. When `systemd_lifecycle = true`, Rust starts `braid-online.service` only when the initial snapshot was `inactive` or `failed`.
 6. If activation fails: prints WARNING to stderr, exits 0. Pool is mounted and usable; only the shutdown hook is missing.
 
 **On `lock`:**
 1. Plain `braid lock` acquires `/run/braid-stop-coordinator.lock`, then `/run/braid-pool.lock`.
-2. Rust stops `braid-scrub.timer`, `braid-scrub-resume-trigger.service`, then `braid-scrub.service` (timer first prevents re-trigger; trigger before service prevents the trigger from queuing a fresh start of the service being stopped; service last cancels in-flight scrub).
-3. Rust iterates `systemctl show -P BoundBy braid-online.service` and stops each remaining bound consumer (samba, nfs, future). The scrub units already handled in step 2 are skipped. This mirrors the cascade systemd performs on shutdown for user-initiated `braid lock`.
+2. When `systemd_lifecycle = true`, Rust stops `braid-scrub.timer`, `braid-scrub-resume-trigger.service`, then `braid-scrub.service` (timer first prevents re-trigger; trigger before service prevents the trigger from queuing a fresh start of the service being stopped; service last cancels in-flight scrub).
+3. When `systemd_lifecycle = true`, Rust iterates `systemctl show -P BoundBy braid-online.service` and stops each remaining bound consumer (samba, nfs, future). The scrub units already handled in step 2 are skipped. This mirrors the cascade systemd performs on shutdown for user-initiated `braid lock`.
 4. CLI unmounts pool + closes LUKS.
 5. Plain `braid lock` writes `done\n` to `/run/braid-stop-coordinator.lock`.
-6. Rust checks the mount is gone and runs `systemctl stop braid-online.service` synchronously so the command returns only after the lifecycle owner is inactive. The recursive `ExecStop` reentry polls the coordinator, observes `done\n`, and exits 0.
+6. When `systemd_lifecycle = true`, Rust checks the mount is gone and runs `systemctl stop braid-online.service` synchronously so the command returns only after the lifecycle owner is inactive. The recursive `ExecStop` reentry polls the coordinator, observes `done\n`, and exits 0.
 
 **On system shutdown:**
 1. systemd stops `braid-online.service` (if active).

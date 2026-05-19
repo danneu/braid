@@ -59,7 +59,7 @@ When `braid.enable = true`, the module sets up:
 | `braid.enable` | bool | `false` | Enable the braid module |
 | `braid.package` | package or null | `null` | The braid CLI package (required when enabled) |
 | `braid.mountPoint` | path | `/mnt/storage` | Where to mount the btrfs pool |
-| `braid.storageGroup` | string or null | `"storage"` | Group for mount point access. `null` to disable |
+| `braid.poolAccessGroup` | string or null | `"storage"` | Group for mount point access. `null` to disable |
 
 ### Tool overrides
 
@@ -165,7 +165,7 @@ braid = {
   enable = true;
   package = braid.packages.x86_64-linux.default;
   mountPoint = "/mnt/storage";   # default
-  storageGroup = "storage";      # default; null to disable
+  poolAccessGroup = "storage";   # default; null to disable
 
   # Tool version overrides (defaults to nixpkgs versions)
   # packages.cryptsetup = pkgs.cryptsetup;

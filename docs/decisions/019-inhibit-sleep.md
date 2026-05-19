@@ -148,8 +148,9 @@ deciding question below applied to lock work specifically:
   does not schedule a suspend transition mid-shutdown.
 - **Manual stop and user-lock reentry.** `ExecStop=braid lock` also
   fires on a manual `systemctl stop braid-online.service` and on the
-  wrapper's post-lock `systemctl stop braid-online.service` for
-  user-initiated `braid lock` (see
+  Rust dispatch post-lock `mark_offline`
+  (`cli/src/online_state.rs`) for user-initiated `braid lock`, gated
+  on `systemd_lifecycle` (see
   `docs/decisions/018-systemd-lifecycle.md:131` and
   `modules/braid/storage.nix`'s `braid-online` definition). Those
   paths do not enjoy the shutdown-driven guarantee above; their

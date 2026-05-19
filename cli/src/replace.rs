@@ -2286,11 +2286,6 @@ mod tests {
     // Scenario: operator runs --dry-run to preview live replace.
     fn dry_run_live_path_shows_btrfs_replace() {
         let config_json = serde_json::json!({
-            "disks": {
-                "disk1": { "by_id": "/dev/disk/by-id/virtio-disk1" },
-                "disk2": { "by_id": "/dev/disk/by-id/virtio-disk2" },
-                "disk3": { "by_id": "/dev/disk/by-id/virtio-disk3" },
-            },
             "mount_point": "/mnt/storage"
         });
         let _config: crate::config::Config =
@@ -2350,11 +2345,6 @@ mod tests {
     // Scenario: operator runs --dry-run to preview dead-disk replace.
     fn dry_run_missing_path_shows_btrfs_replace() {
         let config_json = serde_json::json!({
-            "disks": {
-                "disk1": { "by_id": "/dev/disk/by-id/virtio-disk1" },
-                "disk2": { "by_id": "/dev/disk/by-id/virtio-disk2" },
-                "disk3": { "by_id": "/dev/disk/by-id/virtio-disk3" },
-            },
             "mount_point": "/mnt/storage"
         });
         let _config: crate::config::Config =

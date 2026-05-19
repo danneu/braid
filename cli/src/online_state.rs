@@ -231,7 +231,7 @@ pub fn snapshot(ops: &dyn OnlineStateOps) -> OnlineSnapshot {
 }
 
 pub fn mark_online(
-    snap: &OnlineSnapshot,
+    snap: Option<&OnlineSnapshot>,
     cfg: &Config,
     ops: &dyn OnlineStateOps,
 ) -> Result<(), OnlineError> {
@@ -247,7 +247,7 @@ pub fn mark_online(
         return Ok(());
     }
 
-    if let Some(group) = cfg.storage_group() {
+    if let Some(group) = cfg.pool_access_group() {
         if let Err(e) = ops.chown(mount_point, "root", group) {
             eprintln!(
                 "braid: WARNING: failed to set ownership on {}: {e}",
@@ -262,31 +262,35 @@ pub fn mark_online(
         }
     }
 
-    match &snap.online_state {
-        UnitActiveState::Inactive | UnitActiveState::Failed => {
-            if ops.systemctl_start(BRAID_ONLINE_UNIT).is_err() {
+    if cfg.systemd_lifecycle()
+        && let Some(snap) = snap
+    {
+        match &snap.online_state {
+            UnitActiveState::Inactive | UnitActiveState::Failed => {
+                if ops.systemctl_start(BRAID_ONLINE_UNIT).is_err() {
+                    eprintln!(
+                        "braid: WARNING: failed to activate braid-online.service -- pool is mounted but shutdown may not lock automatically"
+                    );
+                }
+            }
+            UnitActiveState::Unknown(reason) => {
                 eprintln!(
-                    "braid: WARNING: failed to activate braid-online.service -- pool is mounted but shutdown may not lock automatically"
+                    "braid: WARNING: could not read braid-online.service ActiveState ({reason}) -- pool is mounted but shutdown may not lock automatically"
                 );
             }
+            UnitActiveState::Active
+            | UnitActiveState::Activating
+            | UnitActiveState::Deactivating
+            | UnitActiveState::Reloading
+            | UnitActiveState::Refreshing => {}
         }
-        UnitActiveState::Unknown(reason) => {
-            eprintln!(
-                "braid: WARNING: could not read braid-online.service ActiveState ({reason}) -- pool is mounted but shutdown may not lock automatically"
-            );
-        }
-        UnitActiveState::Active
-        | UnitActiveState::Activating
-        | UnitActiveState::Deactivating
-        | UnitActiveState::Reloading
-        | UnitActiveState::Refreshing => {}
     }
 
     Ok(())
 }
 
-pub fn mark_offline(mount_point: &MountPoint, ops: &dyn OnlineStateOps) -> Result<(), OnlineError> {
-    let path = Path::new(mount_point.as_str());
+pub fn mark_offline(cfg: &Config, ops: &dyn OnlineStateOps) -> Result<(), OnlineError> {
+    let path = Path::new(cfg.mount_point().as_str());
     match ops.is_mountpoint(path) {
         Ok(true) => return Ok(()),
         Ok(false) => {}
@@ -298,7 +302,9 @@ pub fn mark_offline(mount_point: &MountPoint, ops: &dyn OnlineStateOps) -> Resul
         }
     }
 
-    if let Err(e) = ops.systemctl_stop(BRAID_ONLINE_UNIT, false) {
+    if cfg.systemd_lifecycle()
+        && let Err(e) = ops.systemctl_stop(BRAID_ONLINE_UNIT, false)
+    {
         eprintln!("braid: WARNING: failed to deactivate braid-online.service: {e}");
     }
     Ok(())
@@ -386,6 +392,10 @@ mod tests {
     use super::*;
     use crate::cmd::{MockRunner, RawCommandOutput};
 
+    fn cfg(raw: &str) -> Config {
+        serde_json::from_str(raw).expect("config should parse")
+    }
+
     fn out(stdout: &str, exit_status: i32) -> RawCommandOutput {
         RawCommandOutput {
             cmd: "systemctl".into(),
@@ -425,15 +435,64 @@ mod tests {
         );
     }
 
+    // Intent: mark_online skips braid-online.service when lifecycle is disabled.
+    // Why it exists: standalone CLI configs still run mount fixups but do not
+    // own the module-defined online unit.
+    // Scenario: `braid add` succeeds in a CLI-only test VM with no
+    // braid-online.service installed.
     #[test]
-    fn mark_online_starts_only_for_inactive_or_failed() {
-        let cfg = Config::new(MountPoint("/mnt/storage".into())).unwrap();
+    fn mark_online_skips_systemctl_when_lifecycle_disabled() {
+        let cfg = cfg(r#"{"mount_point":"/mnt/storage"}"#);
+        let ops = RecordingOnlineStateOps::new();
+
+        mark_online(
+            Some(&OnlineSnapshot {
+                online_state: UnitActiveState::Inactive,
+            }),
+            &cfg,
+            &ops,
+        )
+        .unwrap();
+
+        let calls = ops.calls();
+        assert!(calls.contains(&"mountpoint".into()));
+        assert!(!calls.contains(&format!("start {BRAID_ONLINE_UNIT}")));
+    }
+
+    // Intent: mark_online keeps pool access permissions independent of lifecycle.
+    // Why it exists: module-generated configs use the same post-mount path for
+    // permissions, and standalone configs may still opt into the JSON field.
+    // Scenario: pool is mounted, pool_access_group is configured, but systemd
+    // lifecycle is absent.
+    #[test]
+    fn mark_online_applies_pool_access_group_without_lifecycle() {
+        let cfg = cfg(r#"{"mount_point":"/mnt/storage","pool_access_group":"storage"}"#);
+        let ops = RecordingOnlineStateOps::new();
+
+        mark_online(
+            Some(&OnlineSnapshot {
+                online_state: UnitActiveState::Inactive,
+            }),
+            &cfg,
+            &ops,
+        )
+        .unwrap();
+
+        let calls = ops.calls();
+        assert!(calls.contains(&"chown".into()));
+        assert!(calls.contains(&"chmod".into()));
+        assert!(!calls.contains(&format!("start {BRAID_ONLINE_UNIT}")));
+    }
+
+    #[test]
+    fn mark_online_starts_when_lifecycle_enabled() {
+        let cfg = cfg(r#"{"mount_point":"/mnt/storage","systemd_lifecycle":true}"#);
         for state in [UnitActiveState::Inactive, UnitActiveState::Failed] {
             let ops = RecordingOnlineStateOps::new();
             mark_online(
-                &OnlineSnapshot {
+                Some(&OnlineSnapshot {
                     online_state: state,
-                },
+                }),
                 &cfg,
                 &ops,
             )
@@ -443,9 +502,9 @@ mod tests {
 
         let ops = RecordingOnlineStateOps::new();
         mark_online(
-            &OnlineSnapshot {
+            Some(&OnlineSnapshot {
                 online_state: UnitActiveState::Deactivating,
-            },
+            }),
             &cfg,
             &ops,
         )
@@ -453,11 +512,45 @@ mod tests {
         assert!(!ops.calls().contains(&format!("start {BRAID_ONLINE_UNIT}")));
     }
 
+    // Intent: mark_online tolerates a missing snapshot even when lifecycle is enabled.
+    // Why it exists: callers gate snapshot collection separately; forgetting one
+    // must not retroactively start braid-online from stale state.
+    // Scenario: future dispatch loads module-managed config but skips the
+    // pre-command ActiveState snapshot.
     #[test]
-    fn mark_offline_uses_synchronous_stop_when_unmounted() {
+    fn mark_online_skips_systemctl_when_snapshot_absent() {
+        let cfg = cfg(r#"{"mount_point":"/mnt/storage","systemd_lifecycle":true}"#);
+        let ops = RecordingOnlineStateOps::new();
+
+        mark_online(None, &cfg, &ops).unwrap();
+
+        assert!(!ops.calls().contains(&format!("start {BRAID_ONLINE_UNIT}")));
+    }
+
+    // Intent: mark_offline skips braid-online.service when lifecycle is disabled.
+    // Why it exists: standalone CLI lock should not spawn systemctl for a
+    // module-owned unit that is absent by design.
+    // Scenario: CLI-only pool is already unmounted after `braid lock`.
+    #[test]
+    fn mark_offline_skips_systemctl_when_lifecycle_disabled() {
+        let cfg = cfg(r#"{"mount_point":"/mnt/storage"}"#);
         let ops = RecordingOnlineStateOps::new();
         ops.set_mounted(false);
-        mark_offline(&MountPoint("/mnt/storage".into()), &ops).unwrap();
+
+        mark_offline(&cfg, &ops).unwrap();
+
+        assert!(
+            !ops.calls()
+                .contains(&format!("stop {BRAID_ONLINE_UNIT} no_block=false"))
+        );
+    }
+
+    #[test]
+    fn mark_offline_stops_when_lifecycle_enabled() {
+        let cfg = cfg(r#"{"mount_point":"/mnt/storage","systemd_lifecycle":true}"#);
+        let ops = RecordingOnlineStateOps::new();
+        ops.set_mounted(false);
+        mark_offline(&cfg, &ops).unwrap();
         assert!(
             ops.calls()
                 .contains(&format!("stop {BRAID_ONLINE_UNIT} no_block=false"))

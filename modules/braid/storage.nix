@@ -37,7 +37,7 @@ in
 {
   config = lib.mkIf cfg.enable {
     # Mount point directory — replaces the old fileSystems entry.
-    # Permissions are set by Rust post-unlock lifecycle fixups (root:storageGroup 2770).
+    # Permissions are set by Rust post-unlock lifecycle fixups (root:poolAccessGroup 2770).
     systemd.tmpfiles.rules = [
       # State directory — pool config, LUKS header backups, alert flag files.
       # The CLI creates this on first write, but the smartd shell hook needs it

@@ -82,9 +82,9 @@ v1 therefore surfaces UPS state only through `braid ups status` and the TUI. Ope
 
 ### `braid-online` becomes safety-critical under UPS
 
-`modules/braid/braid-wrapper.sh` currently warns and exits successfully when `systemctl start braid-online.service` fails after a successful `unlock`/`add`/`recover`. Under `braid.ups.enable = true`, this silent-degradation path is unsafe: the user believes LB will trigger a clean shutdown, but without `braid-online.service` active, its ExecStop does not run and LUKS close is not guaranteed to complete before power dies.
+`mark_online` (`cli/src/online_state.rs`) warns and exits successfully when `systemctl start braid-online.service` fails after a successful `unlock`/`add`/`recover`. Under `braid.ups.enable = true`, this silent-degradation path is unsafe: the user believes LB will trigger a clean shutdown, but without `braid-online.service` active, its ExecStop does not run and LUKS close is not guaranteed to complete before power dies.
 
-`braid doctor` and the TUI flag "pool mounted but `braid-online` inactive" as a high-severity configuration fault whenever `braid.ups.enable = true`. The wrapper's warn-and-continue behavior otherwise remains unchanged; the UPS path adds a new detector, it does not change the underlying unlock sequence.
+`braid doctor` and the TUI flag "pool mounted but `braid-online` inactive" as a high-severity configuration fault whenever `braid.ups.enable = true`. `mark_online`'s warn-and-continue behavior otherwise remains unchanged; the UPS path adds a new detector, it does not change the underlying unlock sequence. Under `systemd_lifecycle = false` (CLI-only), the lifecycle path is skipped entirely; the UPS-safety detector fires only when `systemd_lifecycle = true` and `braid.ups.enable = true`.
 
 ### Upsmon credential lifecycle
 

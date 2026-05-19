@@ -32,10 +32,10 @@ in
       description = "The braid CLI package (unwrapped crane output). When set, wraps and installs as 'braid'.";
     };
 
-    storageGroup = lib.mkOption {
+    poolAccessGroup = lib.mkOption {
       type = lib.types.nullOr lib.types.str;
       default = "storage";
-      description = "Group for mount point access. Sets root:<group> 2770 on the mount root after mount-producing commands (unlock, add). Set to null to disable.";
+      description = "Unix group granted access to the mount root. Sets root:<group> 2770 on the mount root after mount-producing commands (unlock, add). Set to null to disable.";
     };
 
     lockSystemdStopDeadlineSecs = lib.mkOption {
@@ -93,8 +93,8 @@ in
         message = "braid.package must be set when braid.enable = true. The braid-unlock service requires the CLI binary.";
       }
       {
-        assertion = cfg.storageGroup == null || builtins.match "[a-z_][a-z0-9_-]*" cfg.storageGroup != null;
-        message = "braid.storageGroup '${toString cfg.storageGroup}' is not a valid Unix group name.";
+        assertion = cfg.poolAccessGroup == null || builtins.match "[a-z_][a-z0-9_-]*" cfg.poolAccessGroup != null;
+        message = "braid.poolAccessGroup '${toString cfg.poolAccessGroup}' is not a valid Unix group name.";
       }
       {
         assertion = cfg.lockSystemdStopDeadlineSecs < braidOnlineStopTimeoutSecs;
@@ -114,8 +114,8 @@ in
       }
     ];
 
-    users.groups = lib.mkIf (cfg.storageGroup != null) {
-      ${cfg.storageGroup} = { };
+    users.groups = lib.mkIf (cfg.poolAccessGroup != null) {
+      ${cfg.poolAccessGroup} = { };
     };
   };
 }

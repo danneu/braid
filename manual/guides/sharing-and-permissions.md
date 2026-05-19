@@ -6,7 +6,7 @@ How braid manages mount point permissions and how to share the pool over the net
 
 ## Mount point permissions
 
-After every mount-producing command (`unlock`, `add`, `recover`), the braid wrapper sets the mount root to:
+After every mount-producing command (`unlock`, `add`, `recover`), braid sets the mount root to:
 
 ```
 root:storage 2770
@@ -27,21 +27,21 @@ Any user in the `storage` group can read and write files under the mount point. 
 # configuration.nix
 users.users.alice = {
   isNormalUser = true;
-  extraGroups = [ config.braid.storageGroup ];
+  extraGroups = [ config.braid.poolAccessGroup ];
 };
 
 users.users.bob = {
   isNormalUser = true;
-  extraGroups = [ config.braid.storageGroup ];
+  extraGroups = [ config.braid.poolAccessGroup ];
 };
 ```
 
-Using `config.braid.storageGroup` instead of the literal `"storage"` keeps the reference correct if you customize the group name.
+Using `config.braid.poolAccessGroup` instead of the literal `"storage"` keeps the reference correct if you customize the group name.
 
 ## Custom group name
 
 ```nix
-braid.storageGroup = "nas";
+braid.poolAccessGroup = "nas";
 ```
 
 The group is created automatically. All behavior (mount permissions, setgid) works the same with any valid Unix group name.
@@ -49,7 +49,7 @@ The group is created automatically. All behavior (mount permissions, setgid) wor
 ## Disabling the storage group
 
 ```nix
-braid.storageGroup = null;
+braid.poolAccessGroup = null;
 ```
 
 When `null`, braid does not create a group or set permissions on the mount point after unlock. You manage permissions yourself.
@@ -91,7 +91,7 @@ services.samba = {
       path = config.braid.mountPoint;
       browseable = "yes";
       "read only" = "no";
-      "valid users" = "@${config.braid.storageGroup}";
+      "valid users" = "@${config.braid.poolAccessGroup}";
 
       # File permissions for Samba-created files
       "create mask" = "0664";
@@ -126,7 +126,7 @@ services.samba.settings = {
     path = "${config.braid.mountPoint}/photos";
     browseable = "yes";
     "read only" = "no";
-    "valid users" = "@${config.braid.storageGroup}";
+    "valid users" = "@${config.braid.poolAccessGroup}";
     "create mask" = "0664";
     "force create mode" = "0664";
     "directory mask" = "2775";
@@ -137,7 +137,7 @@ services.samba.settings = {
     path = "${config.braid.mountPoint}/media";
     browseable = "yes";
     "read only" = "yes";  # read-only share
-    "valid users" = "@${config.braid.storageGroup}";
+    "valid users" = "@${config.braid.poolAccessGroup}";
   };
 };
 ```
@@ -163,6 +163,6 @@ If you enable `braid.autoSuspend`, active SMB and NFS connections automatically 
 
 ## Related
 
-- [NixOS configuration](nixos-configuration.md) -- `braid.storageGroup` option reference
+- [NixOS configuration](nixos-configuration.md) -- `braid.poolAccessGroup` option reference
 - [Getting started](getting-started.md) -- first-time pool setup
 - [Power management](power-management.md) -- auto-suspend with SMB/NFS awareness

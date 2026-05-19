@@ -981,7 +981,7 @@ where
 {
     if !dry_run {
         let online_ops = RealOnlineStateOps::new(runner);
-        run_lock_pre_steps(&online_ops);
+        run_lock_pre_steps(config, &online_ops);
     }
 
     let plan = plan_lock(runner, fs, config, membership)?;
@@ -992,7 +992,11 @@ where
     plan.execute(runner, fs, sleeper, membership)
 }
 
-fn run_lock_pre_steps(online_ops: &dyn OnlineStateOps) {
+fn run_lock_pre_steps(cfg: &Config, online_ops: &dyn OnlineStateOps) {
+    if !cfg.systemd_lifecycle() {
+        return;
+    }
+
     for unit in [
         "braid-scrub.timer",
         "braid-scrub-resume-trigger.service",
@@ -1089,6 +1093,10 @@ mod tests {
         }
     }
 
+    fn cfg(raw: &str) -> Config {
+        serde_json::from_str(raw).expect("config should parse")
+    }
+
     fn mounted_runner_with_btrfs_show(mapper_aaa: &str, mapper_bbb: &str) -> MockRunner {
         MockRunner::default()
             .with_output(
@@ -1105,6 +1113,118 @@ mod tests {
             )
             .with_mapper_open(mapper_aaa, "/dev/disk/by-id/a", AAA_UUID)
             .with_mapper_open(mapper_bbb, "/dev/disk/by-id/b", BBB_UUID)
+    }
+
+    // Intent: cmd_lock skips module-owned lifecycle pre-steps without the
+    // systemd_lifecycle capability.
+    // Why it exists: standalone CLI installs do not define braid-online or
+    // scrub units, so lock must not spawn systemctl for them.
+    // Scenario: CLI-only host locks an already-unmounted pool.
+    #[test]
+    fn cmd_lock_skips_lifecycle_pre_steps_when_lifecycle_disabled() {
+        let runner = MockRunner::default().with_output(
+            CmdRequest::MountpointCheck {
+                path: MountPoint("/mnt/storage".to_owned()),
+            },
+            lock_err_raw("mountpoint -q /mnt/storage", 1, ""),
+        );
+        let fs = lock_fs(&[]);
+        let config = cfg(r#"{"mount_point":"/mnt/storage"}"#);
+        let membership = lock_test_membership();
+
+        cmd_lock_impl(&runner, &fs, &LockNoopSleeper, &config, &membership, false)
+            .expect("lock should succeed");
+
+        let requests = runner.requests();
+        assert!(
+            !requests.iter().any(|request| matches!(
+                request,
+                CmdRequest::SystemctlStop { unit, .. }
+                    if unit == "braid-scrub.timer"
+                        || unit == "braid-scrub-resume-trigger.service"
+                        || unit == "braid-scrub.service"
+            )),
+            "unexpected scrub stop request: {requests:?}"
+        );
+        assert!(
+            !requests.iter().any(|request| matches!(
+                request,
+                CmdRequest::SystemctlShowBoundBy { unit } if unit == "braid-online.service"
+            )),
+            "unexpected BoundBy request: {requests:?}"
+        );
+    }
+
+    // Intent: cmd_lock runs module-owned lifecycle pre-steps when configured.
+    // Why it exists: module-managed lock must stop scrub and braid-online-bound
+    // consumers before unmounting the pool.
+    // Scenario: NixOS module config emits systemd_lifecycle=true and the pool
+    // is already unmounted.
+    #[test]
+    fn cmd_lock_runs_lifecycle_pre_steps_when_lifecycle_enabled() {
+        let runner = MockRunner::default()
+            .with_output(
+                CmdRequest::SystemctlStop {
+                    unit: "braid-scrub.timer".into(),
+                    no_block: false,
+                },
+                lock_ok_raw("systemctl stop braid-scrub.timer"),
+            )
+            .with_output(
+                CmdRequest::SystemctlStop {
+                    unit: "braid-scrub-resume-trigger.service".into(),
+                    no_block: false,
+                },
+                lock_ok_raw("systemctl stop braid-scrub-resume-trigger.service"),
+            )
+            .with_output(
+                CmdRequest::SystemctlStop {
+                    unit: "braid-scrub.service".into(),
+                    no_block: false,
+                },
+                lock_ok_raw("systemctl stop braid-scrub.service"),
+            )
+            .with_output(
+                CmdRequest::SystemctlShowBoundBy {
+                    unit: "braid-online.service".into(),
+                },
+                lock_ok_raw("systemctl show -P BoundBy braid-online.service"),
+            )
+            .with_output(
+                CmdRequest::MountpointCheck {
+                    path: MountPoint("/mnt/storage".to_owned()),
+                },
+                lock_err_raw("mountpoint -q /mnt/storage", 1, ""),
+            );
+        let fs = lock_fs(&[]);
+        let config = cfg(r#"{"mount_point":"/mnt/storage","systemd_lifecycle":true}"#);
+        let membership = lock_test_membership();
+
+        cmd_lock_impl(&runner, &fs, &LockNoopSleeper, &config, &membership, false)
+            .expect("lock should succeed");
+
+        let requests = runner.requests();
+        for unit in [
+            "braid-scrub.timer",
+            "braid-scrub-resume-trigger.service",
+            "braid-scrub.service",
+        ] {
+            assert!(
+                requests.iter().any(|request| matches!(
+                    request,
+                    CmdRequest::SystemctlStop { unit: requested, no_block: false }
+                        if requested.as_str() == unit
+                )),
+                "missing stop for {unit}: {requests:?}"
+            );
+        }
+        assert!(
+            requests.iter().any(|request| matches!(
+                request,
+                CmdRequest::SystemctlShowBoundBy { unit } if unit == "braid-online.service"
+            )),
+            "missing BoundBy request: {requests:?}"
+        );
     }
 
     fn cryptsetup_status_active_null(mapper: &str) -> RawCommandOutput {

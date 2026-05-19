@@ -406,9 +406,12 @@ fn main() {
             let _pool_guard = (!args.common.dry_run).then(|| acquire_pool_or_exit(&pool_lock));
             let runner = RealRunner;
             let online_ops = RealOnlineStateOps::new(&runner);
-            let online_snapshot = (!args.common.dry_run).then(|| snapshot(&online_ops));
             let online_config =
                 (!args.common.dry_run).then(|| load_config_or_exit(Path::new(&config_path), 1));
+            let online_snapshot = online_config
+                .as_ref()
+                .filter(|cfg| cfg.systemd_lifecycle())
+                .map(|_| snapshot(&online_ops));
             let fs = RealFilesystem;
             let backing_path_resolver = braid_cli::luks::RealBackingPathResolver;
             let enroll_kf = args
@@ -437,8 +440,8 @@ fn main() {
                 print_cli_error(&e.to_string());
                 std::process::exit(1);
             }
-            if let (Some(snap), Some(cfg)) = (online_snapshot.as_ref(), online_config.as_ref()) {
-                let _ = mark_online(snap, cfg, &online_ops);
+            if let Some(cfg) = online_config.as_ref() {
+                let _ = mark_online(online_snapshot.as_ref(), cfg, &online_ops);
             }
         }
         Commands::Remove(args) => {
@@ -574,8 +577,9 @@ fn main() {
             let _pool_guard = (!args.dry_run).then(|| acquire_pool_or_exit(&pool_lock));
             let runner = RealRunner;
             let online_ops = RealOnlineStateOps::new(&runner);
-            let online_snapshot = (!args.dry_run).then(|| snapshot(&online_ops));
             let config = load_config_or_exit(Path::new(&config_path), 1);
+            let online_snapshot =
+                (!args.dry_run && config.systemd_lifecycle()).then(|| snapshot(&online_ops));
             let membership = load_membership_or_exit(&paths, 1);
             let fs = RealFilesystem;
             let backing_path_resolver = braid_cli::luks::RealBackingPathResolver;
@@ -595,8 +599,8 @@ fn main() {
                 },
             ) {
                 Ok(()) => {
-                    if let Some(snap) = online_snapshot.as_ref() {
-                        let _ = mark_online(snap, &config, &online_ops);
+                    if !args.dry_run {
+                        let _ = mark_online(online_snapshot.as_ref(), &config, &online_ops);
                     }
                 }
                 Err(braid_cli::unlock::UnlockError::Mount(
@@ -861,8 +865,9 @@ fn main() {
             let _pool_guard = (!args.dry_run).then(|| acquire_pool_or_exit(&pool_lock));
             let runner = RealRunner;
             let online_ops = RealOnlineStateOps::new(&runner);
-            let online_snapshot = (!args.dry_run).then(|| snapshot(&online_ops));
             let config = load_config_or_exit(Path::new(&config_path), 1);
+            let online_snapshot =
+                (!args.dry_run && config.systemd_lifecycle()).then(|| snapshot(&online_ops));
             let fs = RealFilesystem;
             let by_id_resolver = braid_cli::recover::RealByIdResolver;
             let backing_path_resolver = braid_cli::luks::RealBackingPathResolver;
@@ -884,8 +889,8 @@ fn main() {
                 },
             ) {
                 Ok(()) => {
-                    if let Some(snap) = online_snapshot.as_ref() {
-                        let _ = mark_online(snap, &config, &online_ops);
+                    if !args.dry_run {
+                        let _ = mark_online(online_snapshot.as_ref(), &config, &online_ops);
                     }
                 }
                 Err(braid_cli::recover::RecoverError::Mount(
@@ -1006,7 +1011,7 @@ fn run_plain_lock(
         print_cli_error(&format!("failed to mark lock cleanup done: {e}"));
         std::process::exit(1);
     }
-    let _ = mark_offline(config.mount_point(), &online_ops);
+    let _ = mark_offline(&config, &online_ops);
 }
 
 fn run_systemd_stop_lock(

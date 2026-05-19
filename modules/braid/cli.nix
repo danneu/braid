@@ -13,7 +13,8 @@ let
   configFile = (pkgs.formats.json { }).generate "braid-config.json" (
     {
       mount_point = cfg.mountPoint;
-      storage_group = cfg.storageGroup;
+      pool_access_group = cfg.poolAccessGroup;
+      systemd_lifecycle = true;
     }
     // lib.optionalAttrs cfg.fanControl.enable {
       fan_control = {

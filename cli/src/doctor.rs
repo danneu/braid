@@ -818,8 +818,8 @@ fn read_braid_online_active_state<R: CommandRunner>(
 /// fault.
 ///
 /// Skips with a distinct reason when config is unavailable. Otherwise skips
-/// when UPS is not configured or when the pool is not mounted (no safety
-/// implication then).
+/// when UPS is not configured, module-managed lifecycle is not enabled, or
+/// the pool is not mounted (no safety implication then).
 fn check_braid_online_active_when_mounted<R: CommandRunner>(
     ctx: &mut DoctorContext<'_, R>,
 ) -> CheckResult {
@@ -829,6 +829,12 @@ fn check_braid_online_active_when_mounted<R: CommandRunner>(
     };
     if config.ups().is_none() {
         return CheckResult::skip(name, "skipped (braid.ups not enabled)");
+    }
+    if !config.systemd_lifecycle() {
+        return CheckResult::skip(
+            name,
+            "skipped (systemd_lifecycle not configured -- braid-online is not Rust-managed)",
+        );
     }
     let mount_point = config.mount_point().clone();
     if !probe_mountpoint_is_mounted(ctx.runner, &mount_point) {
@@ -1371,9 +1377,12 @@ mod tests {
         );
     }
 
+    // Intent: extra top-level config fields fail schema validation.
+    // Why it exists: stale or misspelled runtime config keys must surface
+    // instead of falling back to defaults silently.
+    // Scenario: operator keeps an old config.json with a removed `disks` key.
     #[test]
-    fn valid_json_with_extra_fields_parses_ok() {
-        // Config no longer has disks -- extra fields are ignored.
+    fn valid_json_with_extra_fields_fails_schema() {
         let f = write_temp(r#"{"disks":{},"mount_point":"/mnt/storage"}"#);
         let report = run_doctor(
             f.path(),
@@ -1383,7 +1392,10 @@ mod tests {
             human_options(),
         );
         assert_eq!(find_check(&report, "config_file").status, CheckStatus::Ok);
-        assert_eq!(find_check(&report, "config_schema").status, CheckStatus::Ok);
+        assert_eq!(
+            find_check(&report, "config_schema").status,
+            CheckStatus::Fail
+        );
     }
 
     // Intent: empty mount_point fails Config schema validation, with the
@@ -3280,6 +3292,39 @@ mod tests {
             r.message.contains("braid.ups not enabled"),
             "unexpected message: {}",
             r.message
+        );
+    }
+
+    // Intent: check_braid_online_active_when_mounted skips UPS-configured
+    // configs that are not module-managed.
+    // Why it exists: standalone CLI installs may configure UPS reads without
+    // owning braid-online.service, so doctor must not probe that unit.
+    // Scenario: hand-written config.json has ups but omits systemd_lifecycle.
+    #[test]
+    fn braid_online_check_skips_when_lifecycle_disabled() {
+        let runner = MockRunner::default();
+        let (_dir, paths) = isolated_paths();
+        let mut ctx = ups_ctx(
+            &runner,
+            &paths,
+            r#"{"mount_point":"/mnt/storage","ups":{"name":"ups"}}"#,
+        );
+
+        let r = check_braid_online_active_when_mounted(&mut ctx);
+
+        assert_eq!(r.status, CheckStatus::Skip);
+        assert_eq!(
+            r.message,
+            "skipped (systemd_lifecycle not configured -- braid-online is not Rust-managed)"
+        );
+        assert!(
+            !runner.requests().iter().any(|request| matches!(
+                request,
+                CmdRequest::SystemctlShowActiveState { unit }
+                    if unit == "braid-online.service"
+            )),
+            "unexpected braid-online probe: {:?}",
+            runner.requests()
         );
     }
 

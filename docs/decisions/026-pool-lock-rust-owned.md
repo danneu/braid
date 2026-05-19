@@ -56,6 +56,13 @@ Post-success lifecycle work also lives under the Rust-held pool lock:
 - The lock path stops lifecycle-bound scrub units and `BoundBy`
   `braid-online.service` consumers before unmounting.
 
+Systemd lifecycle synchronization is gated by `systemd_lifecycle = true` in
+runtime config. `modules/braid/cli.nix` emits that flag for module-managed
+installs; standalone CLI configs omit it and therefore skip
+`braid-online.service`, scrub-unit, and `BoundBy` systemctl calls. The pool
+lock and `pool_access_group` mount-root permission fixups still run outside
+that gate.
+
 ## Snapshot Rule On `systemctl start`
 
 `mark_online` snapshots `braid-online.service` `ActiveState` at the start of
