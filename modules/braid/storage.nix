@@ -6,6 +6,7 @@
 }:
 let
   cfg = config.braid;
+  inherit (import ./constants.nix) braidOnlineStopTimeoutSecs;
   braidWrapped = import ./wrapper.nix { inherit cfg pkgs lib; };
   cryptsetup = cfg.packages.cryptsetup;
   btrfsProgs = cfg.packages.btrfsProgs;
@@ -36,7 +37,7 @@ in
 {
   config = lib.mkIf cfg.enable {
     # Mount point directory — replaces the old fileSystems entry.
-    # Permissions are set by the braid wrapper post-unlock (root:storageGroup 2770).
+    # Permissions are set by Rust post-unlock lifecycle fixups (root:storageGroup 2770).
     systemd.tmpfiles.rules = [
       # State directory — pool config, LUKS header backups, alert flag files.
       # The CLI creates this on first write, but the smartd shell hook needs it
@@ -122,26 +123,26 @@ in
 
     # Lifecycle owner: "pool is online."
     # ExecStart=/bin/true — the service's purpose is state ownership, not work.
-    # ExecStop=braid lock -- unmounts and closes LUKS on shutdown or manual stop.
-    # The environment marker lets the wrapper skip its own recursive
-    # braid-online stop when reentered from this ExecStop.
-    # Only activated by the wrapper on successful unlock/add (mountpoint -q check).
+    # ExecStop=braid lock --systemd-stop unmounts and closes LUKS on shutdown
+    # or manual stop with a deadline below TimeoutStopSec.
+    # Only activated by Rust post-success lifecycle fixups on successful
+    # unlock/add/recover (mountpoint -q check).
     systemd.services.braid-online = {
       description = "Braid storage pool online";
       # Guard against direct `systemctl start braid-online.service` bypassing
-      # the wrapper. When the condition is not met, systemd skips activation
-      # (unit stays inactive, systemctl returns 0). The wrapper's own
-      # mountpoint -q check (braid-wrapper.sh) is the primary gate; this is
+      # the CLI. When the condition is not met, systemd skips activation
+      # (unit stays inactive, systemctl returns 0). The CLI's mountpoint
+      # check in Rust is the primary gate; this is
       # defense-in-depth. Out-of-band mount/unmount can leave this stale.
       unitConfig.ConditionPathIsMountPoint = cfg.mountPoint;
       serviceConfig = {
         Type = "oneshot";
         RemainAfterExit = true;
         ExecStart = "${pkgs.coreutils}/bin/true";
-        ExecStop = "${pkgs.coreutils}/bin/env BRAID_SYSTEMD_EXECSTOP=1 ${braidWrapped}/bin/braid lock";
+        ExecStop = "${braidWrapped}/bin/braid lock --systemd-stop --deadline-secs ${toString cfg.lockSystemdStopDeadlineSecs}";
         # Raise the stop timeout from the 90s default so a slow braid lock
         # isn't SIGKILL'd mid-operation.
-        TimeoutStopSec = "5min";
+        TimeoutStopSec = "${toString braidOnlineStopTimeoutSecs}s";
       };
     };
 
@@ -171,7 +172,7 @@ in
     };
 
     # Start handle: "bring pool online."
-    # Wants unlock only — braid-online is activated by the wrapper on success.
+    # Wants unlock only -- braid-online is activated by Rust dispatch on success.
     systemd.targets.braid-pool = {
       description = "Braid storage pool online";
       wants = [ "braid-unlock.service" ];

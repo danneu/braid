@@ -1,18 +1,19 @@
 # Test: pool-lock-discover-contention
 #
-# Intent: When another process holds /run/braid-pool.lock, both
-# `braid discover --write` and bare `braid discover` must fail fast before
-# scanning devices or writing pool.json.
+# Intent: When another process holds /run/braid-pool.lock,
+# `braid discover --write` must fail fast before scanning or writing, while
+# bare read-only `braid discover` may proceed and must leave pool.json
+# unchanged.
 #
 # Why it exists: `discover --write` has a scan-to-pool.json-write race window,
-# and this test pins the agreed scope that both `--write` and bare `discover`
-# invocations are serialized by the wrapper lock.
+# and this test pins the agreed scope that only the writing form is serialized
+# by the Rust-owned pool lock.
 #
 # Scenario: Admin holds the pool operation lock with one recovery action, then
 # runs `braid discover --write` or diagnostic `braid discover` from another
-# shell against a host with a discoverable braid-labeled LUKS disk. Both
-# commands should fail at the wrapper lock and leave the existing UUID-keyed
-# pool.json bytes unchanged.
+# shell against a host with a discoverable braid-labeled LUKS disk. The writing
+# command fails at the pool lock; the read-only command may scan but leaves the
+# existing UUID-keyed pool.json bytes unchanged.
 
 import json
 
@@ -31,12 +32,13 @@ with subtest("Precondition: discover writes UUID-keyed pool.json"):
     assert pool["disks"]["11111111-1111-1111-1111-111111111111"]["name"] == "disk1"
 
 with subtest("braid discover fails fast when pool lock is held"):
-    holder_pid = machine.succeed(
+    hold_secs = 8
+    machine.succeed(
         "rm -f /tmp/holder.ready; "
         "nohup flock -x -o /run/braid-pool.lock "
-        "sh -c 'touch /tmp/holder.ready; sleep 60' "
-        ">/dev/null 2>&1 & echo $!"
-    ).strip()
+        f"sh -c 'touch /tmp/holder.ready; sleep {hold_secs}' "
+        ">/dev/null 2>&1 &"
+    )
     machine.wait_until_succeeds("test -e /tmp/holder.ready", timeout=10)
     locks = machine.succeed("cat /proc/locks")
     assert "FLOCK" in locks, "no flock in /proc/locks: " + locks
@@ -50,15 +52,15 @@ with subtest("braid discover fails fast when pool lock is held"):
     assert machine.succeed("cat /var/lib/braid/pool.json") == pool_before
 
     rc, out = machine.execute("timeout 5 braid discover 2>&1")
-    assert rc != 0, "expected discover to fail; out=" + out
     assert rc != 124, "discover hung past 5s cap; out=" + out
-    assert "another braid operation is already in progress" in out, (
-        "expected contention message; out=" + out
+    assert "another braid operation is already in progress" not in out, (
+        "bare discover should not acquire the pool lock; out=" + out
     )
     assert machine.succeed("cat /var/lib/braid/pool.json") == pool_before
 
-    machine.execute(f"kill {holder_pid} 2>/dev/null || true")
-    machine.wait_until_succeeds("flock -n /run/braid-pool.lock true", timeout=10)
+    machine.wait_until_succeeds(
+        "flock -n /run/braid-pool.lock true", timeout=hold_secs + 5
+    )
 
 with subtest("discover reaches CLI after lock release and refuses healthy UUID-keyed pool.json"):
     rc, out = machine.execute("braid discover --write --expect-count 1 2>&1")

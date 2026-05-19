@@ -1,10 +1,17 @@
 use clap::{ArgAction, Args, CommandFactory, Parser, Subcommand, error::ErrorKind};
 use clap_complete::engine::{ArgValueCandidates, CompletionCandidate};
 use std::path::Path;
+use std::time::{Duration, Instant};
 
 use braid_cli::cmd::RealRunner;
 use braid_cli::config::{DEFAULT_CONFIG_PATH, config_read};
 use braid_cli::doctor::{DoctorOptions, cmd_doctor};
+use braid_cli::membership::PoolMembership;
+use braid_cli::online_state::{RealOnlineStateOps, mark_offline, mark_online, snapshot};
+use braid_cli::pool_lock::{
+    AcquirePoolLock, PoolLockError, RealPoolLock, RealStopCoordinator, StopCoordinatorError,
+    StopCoordinatorPollResult,
+};
 use braid_cli::probe::RealFilesystem;
 use braid_cli::progress::{ProgressMode, resolve_progress_output};
 use braid_cli::state_paths::StatePaths;
@@ -130,6 +137,12 @@ struct LockArgs {
     /// Show what would be done without making changes
     #[arg(long)]
     dry_run: bool,
+    /// Hidden: invoked from braid-online.service ExecStop with bounded wait.
+    #[arg(long, hide = true, requires = "deadline_secs")]
+    systemd_stop: bool,
+    /// Hidden: maximum seconds to wait during --systemd-stop.
+    #[arg(long, hide = true, requires = "systemd_stop", value_parser = clap::value_parser!(u64).range(1..))]
+    deadline_secs: Option<u64>,
 }
 
 #[derive(Debug, Args)]
@@ -372,6 +385,8 @@ fn main() {
 
     let config_path = cli.config;
     let paths = StatePaths::production();
+    let pool_lock = RealPoolLock::production();
+    let stop_coordinator = RealStopCoordinator::production();
 
     // Hoisted once: shared by add/remove/remove-missing/replace. Each command's
     // cmd_* function holds the inhibitor only across its irreversible mutation
@@ -388,7 +403,12 @@ fn main() {
                 std::io::IsTerminal::is_terminal(&std::io::stderr()),
                 false,
             );
+            let _pool_guard = (!args.common.dry_run).then(|| acquire_pool_or_exit(&pool_lock));
             let runner = RealRunner;
+            let online_ops = RealOnlineStateOps::new(&runner);
+            let online_snapshot = (!args.common.dry_run).then(|| snapshot(&online_ops));
+            let online_config =
+                (!args.common.dry_run).then(|| load_config_or_exit(Path::new(&config_path), 1));
             let fs = RealFilesystem;
             let backing_path_resolver = braid_cli::luks::RealBackingPathResolver;
             let enroll_kf = args
@@ -417,6 +437,9 @@ fn main() {
                 print_cli_error(&e.to_string());
                 std::process::exit(1);
             }
+            if let (Some(snap), Some(cfg)) = (online_snapshot.as_ref(), online_config.as_ref()) {
+                let _ = mark_online(snap, cfg, &online_ops);
+            }
         }
         Commands::Remove(args) => {
             let progress = resolve_progress_output(
@@ -424,6 +447,7 @@ fn main() {
                 std::io::IsTerminal::is_terminal(&std::io::stderr()),
                 false,
             );
+            let _pool_guard = (!args.common.dry_run).then(|| acquire_pool_or_exit(&pool_lock));
             let runner = RealRunner;
             let fs = RealFilesystem;
             if let Err(e) = braid_cli::remove::cmd_remove(
@@ -450,6 +474,7 @@ fn main() {
                 std::io::IsTerminal::is_terminal(&std::io::stderr()),
                 false,
             );
+            let _pool_guard = (!args.common.dry_run).then(|| acquire_pool_or_exit(&pool_lock));
             let runner = RealRunner;
             let fs = RealFilesystem;
             if let Err(e) = braid_cli::remove_missing::cmd_remove_missing(
@@ -476,6 +501,7 @@ fn main() {
                 std::io::IsTerminal::is_terminal(&std::io::stderr()),
                 false,
             );
+            let _pool_guard = (!args.common.dry_run).then(|| acquire_pool_or_exit(&pool_lock));
             let runner = RealRunner;
             let fs = RealFilesystem;
             let backing_path_resolver = braid_cli::luks::RealBackingPathResolver;
@@ -545,21 +571,12 @@ fn main() {
             }
         }
         Commands::Unlock(args) => {
-            let config = match config_read(Path::new(&config_path)) {
-                Ok(c) => c,
-                Err(e) => {
-                    eprintln!("error: {e}");
-                    std::process::exit(1);
-                }
-            };
-            let membership = match braid_cli::membership::load_membership(&paths) {
-                Ok(m) => m,
-                Err(e) => {
-                    eprintln!("error: {e}");
-                    std::process::exit(1);
-                }
-            };
+            let _pool_guard = (!args.dry_run).then(|| acquire_pool_or_exit(&pool_lock));
             let runner = RealRunner;
+            let online_ops = RealOnlineStateOps::new(&runner);
+            let online_snapshot = (!args.dry_run).then(|| snapshot(&online_ops));
+            let config = load_config_or_exit(Path::new(&config_path), 1);
+            let membership = load_membership_or_exit(&paths, 1);
             let fs = RealFilesystem;
             let backing_path_resolver = braid_cli::luks::RealBackingPathResolver;
             match braid_cli::unlock::cmd_unlock(
@@ -577,7 +594,11 @@ fn main() {
                     backing_path_resolver: &backing_path_resolver,
                 },
             ) {
-                Ok(()) => {}
+                Ok(()) => {
+                    if let Some(snap) = online_snapshot.as_ref() {
+                        let _ = mark_online(snap, &config, &online_ops);
+                    }
+                }
                 Err(braid_cli::unlock::UnlockError::Mount(
                     braid_cli::mount::MountError::DegradedRefused(msg),
                 )) => {
@@ -591,13 +612,8 @@ fn main() {
             }
         }
         Commands::EnrollKeyFile(args) => {
-            let membership = match braid_cli::membership::load_membership(&paths) {
-                Ok(m) => m,
-                Err(e) => {
-                    eprintln!("error: {e}");
-                    std::process::exit(1);
-                }
-            };
+            let _pool_guard = (!args.dry_run).then(|| acquire_pool_or_exit(&pool_lock));
+            let membership = load_membership_or_exit(&paths, 1);
             let runner = RealRunner;
             let fs = RealFilesystem;
             let backing_path_resolver = braid_cli::luks::RealBackingPathResolver;
@@ -621,27 +637,31 @@ fn main() {
             }
         }
         Commands::Lock(args) => {
-            let config = match config_read(Path::new(&config_path)) {
-                Ok(c) => c,
-                Err(e) => {
-                    eprintln!("error: {e}");
+            if args.dry_run {
+                let config = load_config_or_exit(Path::new(&config_path), 1);
+                let membership = load_membership_or_exit(&paths, 1);
+                let runner = RealRunner;
+                let fs = RealFilesystem;
+                if let Err(e) = braid_cli::lock::cmd_lock(&runner, &fs, &config, &membership, true)
+                {
+                    print_cli_error(&e.to_string());
                     std::process::exit(1);
                 }
-            };
-            let membership = match braid_cli::membership::load_membership(&paths) {
-                Ok(m) => m,
-                Err(e) => {
-                    eprintln!("error: {e}");
-                    std::process::exit(1);
-                }
-            };
-            let runner = RealRunner;
-            let fs = RealFilesystem;
-            if let Err(e) =
-                braid_cli::lock::cmd_lock(&runner, &fs, &config, &membership, args.dry_run)
-            {
-                print_cli_error(&e.to_string());
-                std::process::exit(1);
+            } else if args.systemd_stop {
+                run_systemd_stop_lock(
+                    &pool_lock,
+                    &stop_coordinator,
+                    Duration::from_secs(args.deadline_secs.expect("clap requires deadline")),
+                    Path::new(&config_path),
+                    &paths,
+                );
+            } else {
+                run_plain_lock(
+                    &pool_lock,
+                    &stop_coordinator,
+                    Path::new(&config_path),
+                    &paths,
+                );
             }
         }
         Commands::Idle => {
@@ -723,13 +743,15 @@ fn main() {
             }
         }
         Commands::Monitor => {
-            let config = match config_read(Path::new(&config_path)) {
-                Ok(c) => c,
+            let _pool_guard = match pool_lock.acquire() {
+                Ok(guard) => Some(guard),
+                Err(PoolLockError::AlreadyHeld) => std::process::exit(0),
                 Err(e) => {
-                    eprintln!("error: {e}");
+                    handle_pool_lock_error(e);
                     std::process::exit(2);
                 }
             };
+            let config = load_config_or_exit(Path::new(&config_path), 2);
             let runner = RealRunner;
             let fs = RealFilesystem;
             match braid_cli::monitor::cmd_monitor(&runner, &fs, config.mount_point(), &paths) {
@@ -745,13 +767,9 @@ fn main() {
             }
         }
         Commands::Ack => {
-            let config = match config_read(Path::new(&config_path)) {
-                Ok(c) => c,
-                Err(e) => {
-                    eprintln!("error: {e}");
-                    std::process::exit(1);
-                }
-            };
+            let _pool_guard =
+                acquire_pool_with_timeout_or_exit(&pool_lock, Duration::from_secs(10));
+            let config = load_config_or_exit(Path::new(&config_path), 1);
             let runner = RealRunner;
             let fs = RealFilesystem;
             if let Err(e) = braid_cli::ack::cmd_ack(&runner, &fs, config.mount_point(), &paths) {
@@ -771,6 +789,7 @@ fn main() {
             }
         }
         Commands::Discover(args) => {
+            let _pool_guard = args.write.then(|| acquire_pool_or_exit(&pool_lock));
             // Note: the pre-save fail-closed gates for `--write`
             // (pending-op presence + pool.json shape check that refuses
             // `ValidUuidKeyed`; `Corrupt` is the documented rebuild path
@@ -834,19 +853,16 @@ fn main() {
             }
         }
         Commands::Recover(args) => {
-            let config = match config_read(Path::new(&config_path)) {
-                Ok(c) => c,
-                Err(e) => {
-                    print_cli_error(&e.to_string());
-                    std::process::exit(1);
-                }
-            };
             let progress = resolve_progress_output(
                 args.progress,
                 std::io::IsTerminal::is_terminal(&std::io::stderr()),
                 false,
             );
+            let _pool_guard = (!args.dry_run).then(|| acquire_pool_or_exit(&pool_lock));
             let runner = RealRunner;
+            let online_ops = RealOnlineStateOps::new(&runner);
+            let online_snapshot = (!args.dry_run).then(|| snapshot(&online_ops));
+            let config = load_config_or_exit(Path::new(&config_path), 1);
             let fs = RealFilesystem;
             let by_id_resolver = braid_cli::recover::RealByIdResolver;
             let backing_path_resolver = braid_cli::luks::RealBackingPathResolver;
@@ -867,7 +883,11 @@ fn main() {
                     backing_path_resolver: &backing_path_resolver,
                 },
             ) {
-                Ok(()) => {}
+                Ok(()) => {
+                    if let Some(snap) = online_snapshot.as_ref() {
+                        let _ = mark_online(snap, &config, &online_ops);
+                    }
+                }
                 Err(braid_cli::recover::RecoverError::Mount(
                     braid_cli::mount::MountError::DegradedRefused(msg),
                 )) => {
@@ -899,6 +919,147 @@ fn main() {
                 }
             }
         },
+    }
+}
+
+fn acquire_pool_or_exit(pool_lock: &RealPoolLock) -> Box<dyn braid_cli::pool_lock::PoolLockGuard> {
+    match pool_lock.acquire() {
+        Ok(guard) => guard,
+        Err(e) => {
+            handle_pool_lock_error(e);
+            std::process::exit(1);
+        }
+    }
+}
+
+fn acquire_pool_with_timeout_or_exit(
+    pool_lock: &RealPoolLock,
+    timeout: Duration,
+) -> Box<dyn braid_cli::pool_lock::PoolLockGuard> {
+    match pool_lock.acquire_with_timeout(timeout) {
+        Ok(guard) => guard,
+        Err(e) => {
+            handle_pool_lock_error(e);
+            std::process::exit(1);
+        }
+    }
+}
+
+fn handle_pool_lock_error(error: PoolLockError) {
+    match error {
+        PoolLockError::AlreadyHeld | PoolLockError::DeadlineExpired { .. } => {
+            eprintln!("{error}");
+        }
+        PoolLockError::Io(e) => print_cli_error(&e.to_string()),
+    }
+}
+
+fn load_config_or_exit(path: &Path, exit_code: i32) -> braid_cli::config::Config {
+    match config_read(path) {
+        Ok(config) => config,
+        Err(e) => {
+            print_cli_error(&e.to_string());
+            std::process::exit(exit_code);
+        }
+    }
+}
+
+fn load_membership_or_exit(paths: &StatePaths, exit_code: i32) -> PoolMembership {
+    match braid_cli::membership::load_membership(paths) {
+        Ok(membership) => membership,
+        Err(e) => {
+            print_cli_error(&e.to_string());
+            std::process::exit(exit_code);
+        }
+    }
+}
+
+fn run_plain_lock(
+    pool_lock: &RealPoolLock,
+    stop_coordinator: &RealStopCoordinator,
+    config_path: &Path,
+    paths: &StatePaths,
+) {
+    let coordinator_guard = match stop_coordinator.acquire() {
+        Ok(guard) => guard,
+        Err(StopCoordinatorError::Held) => {
+            eprintln!("{}", PoolLockError::AlreadyHeld);
+            std::process::exit(1);
+        }
+        Err(StopCoordinatorError::Io(e)) => {
+            print_cli_error(&e.to_string());
+            std::process::exit(1);
+        }
+    };
+    let _pool_guard = acquire_pool_or_exit(pool_lock);
+    let config = load_config_or_exit(config_path, 1);
+    let membership = load_membership_or_exit(paths, 1);
+    let runner = RealRunner;
+    let fs = RealFilesystem;
+    let online_ops = RealOnlineStateOps::new(&runner);
+
+    if let Err(e) = braid_cli::lock::cmd_lock(&runner, &fs, &config, &membership, false) {
+        print_cli_error(&e.to_string());
+        std::process::exit(1);
+    }
+    if let Err(e) = coordinator_guard.mark_done() {
+        print_cli_error(&format!("failed to mark lock cleanup done: {e}"));
+        std::process::exit(1);
+    }
+    let _ = mark_offline(config.mount_point(), &online_ops);
+}
+
+fn run_systemd_stop_lock(
+    pool_lock: &RealPoolLock,
+    stop_coordinator: &RealStopCoordinator,
+    deadline: Duration,
+    config_path: &Path,
+    paths: &StatePaths,
+) {
+    let start = Instant::now();
+    let _coordinator_guard = match stop_coordinator.acquire() {
+        Ok(guard) => guard,
+        Err(StopCoordinatorError::Held) => {
+            match stop_coordinator.poll_for_done_or_release(deadline) {
+                StopCoordinatorPollResult::Done => return,
+                StopCoordinatorPollResult::Acquired(guard) => guard,
+                StopCoordinatorPollResult::Deadline => {
+                    eprintln!("{}", PoolLockError::DeadlineExpired { waited: deadline });
+                    std::process::exit(1);
+                }
+            }
+        }
+        Err(StopCoordinatorError::Io(e)) => {
+            print_cli_error(&e.to_string());
+            std::process::exit(1);
+        }
+    };
+    let Some(remaining) = deadline.checked_sub(start.elapsed()) else {
+        eprintln!("{}", PoolLockError::DeadlineExpired { waited: deadline });
+        std::process::exit(1);
+    };
+    if remaining.is_zero() {
+        eprintln!("{}", PoolLockError::DeadlineExpired { waited: deadline });
+        std::process::exit(1);
+    }
+    let _pool_guard = match pool_lock.acquire_with_systemd_stop_deadline(remaining) {
+        Ok(guard) => guard,
+        Err(PoolLockError::DeadlineExpired { .. }) => {
+            eprintln!("{}", PoolLockError::DeadlineExpired { waited: deadline });
+            std::process::exit(1);
+        }
+        Err(e) => {
+            handle_pool_lock_error(e);
+            std::process::exit(1);
+        }
+    };
+    let config = load_config_or_exit(config_path, 1);
+    let membership = load_membership_or_exit(paths, 1);
+    let runner = RealRunner;
+    let fs = RealFilesystem;
+    if let Err(e) = braid_cli::lock::cmd_lock(&runner, &fs, &config, &membership, false) {
+        print_cli_error(&e.to_string());
+        std::process::exit(1);
     }
 }
 
@@ -1150,5 +1311,58 @@ mod tests {
                 "wrong error kind for {argv:?}: {err}"
             );
         }
+    }
+
+    #[test]
+    fn lock_plain_parses_without_systemd_stop() {
+        let cli = Cli::try_parse_from(["braid", "lock"]).expect("plain lock parses");
+        let Commands::Lock(args) = cli.command else {
+            panic!("expected lock command");
+        };
+        assert!(!args.dry_run);
+        assert!(!args.systemd_stop);
+        assert_eq!(args.deadline_secs, None);
+    }
+
+    #[test]
+    fn lock_dry_run_parses() {
+        let cli = Cli::try_parse_from(["braid", "lock", "--dry-run"]).expect("lock dry-run parses");
+        let Commands::Lock(args) = cli.command else {
+            panic!("expected lock command");
+        };
+        assert!(args.dry_run);
+    }
+
+    #[test]
+    fn lock_systemd_stop_with_deadline_parses() {
+        let cli =
+            Cli::try_parse_from(["braid", "lock", "--systemd-stop", "--deadline-secs", "270"])
+                .expect("systemd-stop lock parses with deadline");
+        let Commands::Lock(args) = cli.command else {
+            panic!("expected lock command");
+        };
+        assert!(args.systemd_stop);
+        assert_eq!(args.deadline_secs, Some(270));
+    }
+
+    #[test]
+    fn lock_systemd_stop_without_deadline_rejected() {
+        let err = Cli::try_parse_from(["braid", "lock", "--systemd-stop"])
+            .expect_err("systemd-stop requires deadline");
+        assert_eq!(err.kind(), ErrorKind::MissingRequiredArgument);
+    }
+
+    #[test]
+    fn lock_deadline_without_systemd_stop_rejected() {
+        let err = Cli::try_parse_from(["braid", "lock", "--deadline-secs", "270"])
+            .expect_err("deadline requires systemd-stop");
+        assert_eq!(err.kind(), ErrorKind::MissingRequiredArgument);
+    }
+
+    #[test]
+    fn lock_deadline_zero_rejected() {
+        let err = Cli::try_parse_from(["braid", "lock", "--systemd-stop", "--deadline-secs", "0"])
+            .expect_err("deadline must be positive");
+        assert_eq!(err.kind(), ErrorKind::ValueValidation);
     }
 }

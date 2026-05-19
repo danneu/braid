@@ -38,6 +38,7 @@ pub struct Ups {
 #[serde(try_from = "RawConfig")]
 pub struct Config {
     mount_point: MountPoint,
+    storage_group: Option<String>,
     fan_control: Option<FanControl>,
     ups: Option<Ups>,
 }
@@ -49,6 +50,7 @@ impl Config {
         }
         Ok(Config {
             mount_point,
+            storage_group: None,
             fan_control: None,
             ups: None,
         })
@@ -56,6 +58,11 @@ impl Config {
 
     pub fn mount_point(&self) -> &MountPoint {
         &self.mount_point
+    }
+
+    /// Optional Unix group that receives write access on the mounted pool root.
+    pub fn storage_group(&self) -> Option<&str> {
+        self.storage_group.as_deref()
     }
 
     pub fn fan_control(&self) -> Option<&FanControl> {
@@ -91,6 +98,8 @@ pub fn name_from_mapper(mapper: &str) -> Option<&str> {
 struct RawConfig {
     mount_point: MountPoint,
     #[serde(default)]
+    storage_group: Option<String>,
+    #[serde(default)]
     fan_control: Option<FanControl>,
     #[serde(default)]
     ups: Option<Ups>,
@@ -101,6 +110,7 @@ impl TryFrom<RawConfig> for Config {
 
     fn try_from(raw: RawConfig) -> Result<Self, Self::Error> {
         let mut cfg = Config::new(raw.mount_point)?;
+        cfg.storage_group = raw.storage_group;
         cfg.fan_control = raw.fan_control;
         cfg.ups = raw.ups;
         Ok(cfg)
@@ -141,9 +151,10 @@ mod tests {
 
     #[test]
     fn parses_valid_config() {
-        let raw = r#"{"mount_point":"/mnt/storage"}"#;
+        let raw = r#"{"mount_point":"/mnt/storage","storage_group":"storage"}"#;
         let cfg: Config = serde_json::from_str(raw).expect("config should parse");
         assert_eq!(cfg.mount_point().as_str(), "/mnt/storage");
+        assert_eq!(cfg.storage_group(), Some("storage"));
     }
 
     #[test]

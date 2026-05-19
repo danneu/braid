@@ -4,10 +4,10 @@
     cleanly when a long-running consumer holds /mnt/storage busy.
   Why it exists: regression guard for the EBUSY-on-busy-mount class of bug
     (samba on caja, future nfs/syncthing). The user-initiated lock path
-    relies on the wrapper iterating BoundBy braid-online.service before
-    invoking the CLI; the ExecStop path relies on systemd's BindsTo cascade
-    stopping consumers before ExecStop=braid lock fires. Both paths run
-    through braid-wrapper.sh's pre-stop block on reentry, so both are tested.
+    relies on cmd_lock iterating BoundBy braid-online.service through
+    OnlineStateOps::list_bound_by; the ExecStop path relies on systemd's
+    BindsTo cascade stopping consumers before `braid lock --systemd-stop`
+    runs cmd_lock.
   Scenario: pool unlocked with a fake consumer service holding fd 3 on
     /mnt/storage/.consumer-lock (BindsTo+After+wantedBy braid-online.service,
     ConditionPathIsMountPoint=/mnt/storage). Cycle 1 runs `braid lock` and

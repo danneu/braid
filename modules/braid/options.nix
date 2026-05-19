@@ -6,6 +6,7 @@
 }:
 let
   cfg = config.braid;
+  inherit (import ./constants.nix) braidOnlineStopTimeoutSecs;
 in
 {
   options.braid = {
@@ -35,6 +36,15 @@ in
       type = lib.types.nullOr lib.types.str;
       default = "storage";
       description = "Group for mount point access. Sets root:<group> 2770 on the mount root after mount-producing commands (unlock, add). Set to null to disable.";
+    };
+
+    lockSystemdStopDeadlineSecs = lib.mkOption {
+      type = lib.types.ints.positive;
+      default = 270;
+      description = ''
+        Seconds to wait for /run/braid-pool.lock during braid-online.service ExecStop.
+        Must be strictly less than braid-online.service TimeoutStopSec (${toString braidOnlineStopTimeoutSecs} seconds).
+      '';
     };
 
     autoUnlock = {
@@ -85,6 +95,10 @@ in
       {
         assertion = cfg.storageGroup == null || builtins.match "[a-z_][a-z0-9_-]*" cfg.storageGroup != null;
         message = "braid.storageGroup '${toString cfg.storageGroup}' is not a valid Unix group name.";
+      }
+      {
+        assertion = cfg.lockSystemdStopDeadlineSecs < braidOnlineStopTimeoutSecs;
+        message = "braid.lockSystemdStopDeadlineSecs (${toString cfg.lockSystemdStopDeadlineSecs}) must be strictly less than braid-online.service TimeoutStopSec (${toString braidOnlineStopTimeoutSecs}).";
       }
       {
         assertion = cfg.autoUnlock.enable -> lib.hasPrefix "/dev/disk/by-id/" cfg.autoUnlock.keyDevice;

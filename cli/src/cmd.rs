@@ -319,6 +319,19 @@ pub enum CmdRequest {
     SystemctlShowActiveState {
         unit: String,
     },
+    /// `systemctl start <unit>` activates a lifecycle unit.
+    SystemctlStart {
+        unit: String,
+    },
+    /// `systemctl stop [--no-block] <unit>` deactivates a lifecycle unit.
+    SystemctlStop {
+        unit: String,
+        no_block: bool,
+    },
+    /// `systemctl show -P BoundBy <unit>` lists inverse BindsTo consumers.
+    SystemctlShowBoundBy {
+        unit: String,
+    },
     /// `upsc <name>` — NUT status query. Emits `key: value` lines (see
     /// `reference/nut/clients/upsc.c:141`) on stdout; non-zero exit when the
     /// upsd daemon is unreachable or the UPS name is unknown. braid uses
@@ -1105,6 +1118,25 @@ impl CmdRequest {
                     unit.clone(),
                 ],
             },
+            CmdRequest::SystemctlStart { unit } => CmdArgs {
+                program: "systemctl".to_owned(),
+                args: vec!["start".into(), unit.clone()],
+            },
+            CmdRequest::SystemctlStop { unit, no_block } => {
+                let mut args = vec!["stop".into()];
+                if *no_block {
+                    args.push("--no-block".into());
+                }
+                args.push(unit.clone());
+                CmdArgs {
+                    program: "systemctl".to_owned(),
+                    args,
+                }
+            }
+            CmdRequest::SystemctlShowBoundBy { unit } => CmdArgs {
+                program: "systemctl".to_owned(),
+                args: vec!["show".into(), "-P".into(), "BoundBy".into(), unit.clone()],
+            },
             CmdRequest::UpscQuery { name } => CmdArgs {
                 program: "upsc".to_owned(),
                 args: vec![name.clone()],
@@ -1752,6 +1784,36 @@ mod tests {
                 },
                 "systemctl",
                 vec!["show", "-P", "ActiveState", "braid-online.service"],
+            ),
+            (
+                CmdRequest::SystemctlStart {
+                    unit: "braid-online.service".into(),
+                },
+                "systemctl",
+                vec!["start", "braid-online.service"],
+            ),
+            (
+                CmdRequest::SystemctlStop {
+                    unit: "braid-online.service".into(),
+                    no_block: false,
+                },
+                "systemctl",
+                vec!["stop", "braid-online.service"],
+            ),
+            (
+                CmdRequest::SystemctlStop {
+                    unit: "braid-online.service".into(),
+                    no_block: true,
+                },
+                "systemctl",
+                vec!["stop", "--no-block", "braid-online.service"],
+            ),
+            (
+                CmdRequest::SystemctlShowBoundBy {
+                    unit: "braid-online.service".into(),
+                },
+                "systemctl",
+                vec!["show", "-P", "BoundBy", "braid-online.service"],
             ),
             (CmdRequest::SmartctlScan, "smartctl", vec!["--scan"]),
             (

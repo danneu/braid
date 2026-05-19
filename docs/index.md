@@ -58,6 +58,7 @@ Architecture decision records. Each has a status: `Draft`, `Active`, `Superseded
 - [decisions/023-secret-handling.md](decisions/023-secret-handling.md) — **Active.** Required types and disciplines for in-process LUKS secret material: Zeroizing typing, no BufRead in passphrase paths, hard byte caps, subprocess stdin (never argv), drop-before-fsync for generated secrets, redacted Debug, and typed passphrase boundaries.
 - [decisions/024-luks-uuid-identity.md](decisions/024-luks-uuid-identity.md) — **Active.** LUKS UUID is braid's persistent disk identity; disk names and labels are presentation, by-id paths are hardware addresses, and btrfs devid is a restricted fallback.
 - [decisions/025-browse-vs-curated.md](decisions/025-browse-vs-curated.md) — **Active.** `braid tui` owns the interactive UI; Browse is the raw command-output inspector while Data/Scrub are curated first-class UX.
+- [decisions/026-pool-lock-rust-owned.md](decisions/026-pool-lock-rust-owned.md) — **Active.** Rust dispatch owns pool-operation locking, braid-online lifecycle synchronization, and the systemd stop coordinator.
 
 ## tool-behavior/
 

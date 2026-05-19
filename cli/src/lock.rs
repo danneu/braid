@@ -2,6 +2,7 @@ use crate::cmd::{CmdError, CmdRequest, CommandRunner, Step};
 use crate::config::{Config, name_from_mapper};
 use crate::mapper_close::{CloseMapperError, close_mapper_with_retry};
 use crate::membership::{MembershipError, PoolMembership};
+use crate::online_state::{OnlineError, OnlineStateOps, RealOnlineStateOps};
 use crate::parse::{parse_cryptsetup_luks_uuid, parse_cryptsetup_status};
 use crate::preflight;
 use crate::preview::{Preview, PreviewCompleteness, PreviewNote};
@@ -978,12 +979,53 @@ where
     F: Filesystem + ?Sized,
     S: Sleeper,
 {
+    if !dry_run {
+        let online_ops = RealOnlineStateOps::new(runner);
+        run_lock_pre_steps(&online_ops);
+    }
+
     let plan = plan_lock(runner, fs, config, membership)?;
     if dry_run {
         plan.preview().print_colored();
         return Ok(());
     }
     plan.execute(runner, fs, sleeper, membership)
+}
+
+fn run_lock_pre_steps(online_ops: &dyn OnlineStateOps) {
+    for unit in [
+        "braid-scrub.timer",
+        "braid-scrub-resume-trigger.service",
+        "braid-scrub.service",
+    ] {
+        let _ = online_ops.systemctl_stop(unit, false);
+    }
+
+    let Ok(bound_by) = online_ops.list_bound_by("braid-online.service") else {
+        return;
+    };
+    for unit in bound_by {
+        if matches!(
+            unit.as_str(),
+            "braid-scrub.timer" | "braid-scrub.service" | "braid-scrub-resume-trigger.service"
+        ) {
+            continue;
+        }
+        if let Err(e) = online_ops.systemctl_stop(&unit, false) {
+            match e {
+                OnlineError::SystemctlStop { exit_code, .. } => {
+                    eprintln!(
+                        "braid: WARNING: failed to stop {unit} (exit {exit_code}) -- continuing; umount may fail"
+                    );
+                }
+                other => {
+                    eprintln!(
+                        "braid: WARNING: failed to stop {unit} ({other}) -- continuing; umount may fail"
+                    );
+                }
+            }
+        }
+    }
 }
 
 #[cfg(test)]

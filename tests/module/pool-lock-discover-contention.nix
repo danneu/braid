@@ -1,10 +1,11 @@
 # Test: pool-lock-discover-contention
 #
-# What: Verifies the wrapper serializes `braid discover` against the pool
-# operation lock before it can scan devices or write pool.json.
+# What: Verifies `braid discover --write` is serialized against the pool
+# operation lock before it can scan devices or write pool.json, while bare
+# read-only discover does not take the lock.
 #
 # Why: `discover --write` rebuilds pool.json after a multi-device scan. Without
-# wrapper-level serialization, concurrent state writers can both pass the
+# Rust-level serialization, concurrent state writers can both pass the
 # missing-pool.json gate and the later writer can replace the first result.
 { braid }:
 { pkgs, lib, ... }:

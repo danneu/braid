@@ -102,6 +102,7 @@
           pkgs = nixpkgs.legacyPackages.${system};
           # VM tests run Linux — build the binary for the right platform
           linuxSystem = builtins.replaceStrings [ "-darwin" ] [ "-linux" ] system;
+          linuxPkgs = nixpkgs.legacyPackages.${linuxSystem};
           linuxCrane = craneFor linuxSystem;
         in
         {
@@ -683,21 +684,69 @@
               braid = linuxCrane.braid-cli-unwrapped;
             }
           );
+          pool-lock-lock-contention = pkgs.testers.nixosTest (
+            import ./tests/module/pool-lock-lock-contention.nix {
+              braid = linuxCrane.braid-cli-unwrapped;
+            }
+          );
+          pool-lock-enroll-contention = pkgs.testers.nixosTest (
+            import ./tests/module/pool-lock-enroll-contention.nix {
+              braid = linuxCrane.braid-cli-unwrapped;
+            }
+          );
+          pool-lock-precedes-state-read = pkgs.testers.nixosTest (
+            import ./tests/module/pool-lock-precedes-state-read.nix {
+              braid = linuxCrane.braid-cli-unwrapped;
+            }
+          );
           alert-state-lock = pkgs.testers.nixosTest (
             import ./tests/module/alert-state-lock.nix {
               braid = linuxCrane.braid-cli-unwrapped;
             }
           );
-          wrapper-pool-lock-released-after-sigkill = pkgs.testers.nixosTest (
-            import ./tests/module/wrapper-pool-lock-released-after-sigkill.nix {
+          braid-pool-lock-released-after-sigkill = pkgs.testers.nixosTest (
+            import ./tests/module/braid-pool-lock-released-after-sigkill.nix {
               braid = linuxCrane.braid-cli-unwrapped;
             }
           );
-          wrapper-pool-lock-not-inherited = pkgs.testers.nixosTest (
-            import ./tests/module/wrapper-pool-lock-not-inherited.nix {
+          braid-pool-lock-not-inherited = pkgs.testers.nixosTest (
+            import ./tests/module/braid-pool-lock-not-inherited.nix {
               braid = linuxCrane.braid-cli-unwrapped;
             }
           );
+          braid-lock-systemd-stop = pkgs.testers.nixosTest (
+            import ./tests/module/braid-lock-systemd-stop.nix {
+              braid = linuxCrane.braid-cli-unwrapped;
+            }
+          );
+          braid-lock-then-unlock-no-race = pkgs.testers.nixosTest (
+            import ./tests/module/braid-lock-then-unlock-no-race.nix {
+              braid = linuxCrane.braid-cli-unwrapped;
+            }
+          );
+          execstop-cleans-stale-online = pkgs.testers.nixosTest (
+            import ./tests/module/execstop-cleans-stale-online.nix {
+              braid = linuxCrane.braid-cli-unwrapped;
+            }
+          );
+          braid-lock-coordinator-race = pkgs.testers.nixosTest (
+            import ./tests/module/braid-lock-coordinator-race.nix {
+              braid = linuxCrane.braid-cli-unwrapped;
+            }
+          );
+          mark-online-skips-start-while-deactivating = pkgs.testers.nixosTest (
+            import ./tests/module/mark-online-skips-start-while-deactivating.nix {
+              braid = linuxCrane.braid-cli-unwrapped;
+            }
+          );
+          eval-lock-systemd-stop-deadline-ok =
+            import ./tests/eval/lock-systemd-stop-deadline-assertion.nix {
+              inherit pkgs linuxPkgs nixpkgs linuxSystem;
+            };
+          eval-lock-systemd-stop-deadline-fails =
+            import ./tests/eval/lock-systemd-stop-deadline-assertion-fails.nix {
+              inherit pkgs linuxPkgs nixpkgs linuxSystem;
+            };
           ups-preflight-on-battery = pkgs.testers.nixosTest (
             import ./tests/module/ups-preflight-on-battery.nix {
               braid = linuxCrane.braid-cli-unwrapped;

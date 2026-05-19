@@ -6,9 +6,9 @@
 #
 # Why it exists: regression guard for the EBUSY-on-busy-mount class of bug
 #   (samba on caja, future nfs/syncthing). The user-initiated lock path
-#   relies on the wrapper iterating BoundBy braid-online.service; the
-#   ExecStop path relies on systemd's BindsTo cascade. Both paths run
-#   through braid-wrapper.sh's pre-stop block on reentry, so both are tested.
+#   relies on cmd_lock iterating BoundBy braid-online.service through
+#   OnlineStateOps::list_bound_by; the ExecStop path relies on systemd's
+#   BindsTo cascade before cmd_lock runs.
 #
 # Scenario: pool unlocked with a fake consumer service (dummy-pool-consumer)
 #   holding fd 3 on /mnt/storage/.consumer-lock. Cycle 1 runs `braid lock`,
@@ -60,7 +60,7 @@ with subtest("setup: unlock pool and start consumer"):
 
 with subtest("setup: BoundBy lists the consumer"):
     # Behavior-locks the BoundBy property name and shape against systemd
-    # version drift -- the wrapper depends on this.
+    # version drift -- cmd_lock depends on this.
     bound_by = machine.succeed(
         "systemctl show -P BoundBy braid-online.service"
     ).strip()
@@ -72,7 +72,7 @@ with subtest("setup: BoundBy lists the consumer"):
 
 with subtest("cycle 1: braid lock stops consumer and unmounts"):
     machine.succeed("braid lock")
-    # Consumer must be inactive after lock (wrapper's BoundBy loop stopped it).
+    # Consumer must be inactive after lock (cmd_lock's BoundBy pre-step stopped it).
     machine.fail("systemctl is-active {}".format(CONSUMER))
     machine.fail("mountpoint -q /mnt/storage")
     # `cryptsetup status` exits non-zero for inactive mappers; the test
@@ -92,13 +92,12 @@ with subtest("cycle 2: re-unlock and confirm consumer holds the mount again"):
     assert_consumer_holds_mount(machine)
 
 with subtest("cycle 2: systemctl stop braid-online.service unmounts via ExecStop"):
-    # Exercises ExecStop reentry through the wrapper's BoundBy loop:
-    # systemd's BindsTo cascade deactivates the consumer first, then
-    # ExecStop=braid lock runs the wrapper, whose loop sees the consumer
-    # already inactive (no-op stop). The wrapper sees
-    # BRAID_SYSTEMD_EXECSTOP=1 from braid-online's ExecStop and skips its
-    # own recursive braid-online stop, avoiding a deadlock against the
-    # in-progress stop we initiated here.
+    # Exercises ExecStop reentry after systemd's BoundBy cascade:
+    # systemd deactivates the consumer first, then ExecStop runs
+    # `braid lock --systemd-stop`, whose cmd_lock BoundBy pre-step sees
+    # the consumer already inactive (no-op stop). The systemd-stop arm
+    # skips mark_offline, avoiding a recursive stop of the unit we are
+    # already stopping.
     machine.succeed("systemctl stop braid-online.service")
     machine.fail("systemctl is-active {}".format(CONSUMER))
     machine.fail("mountpoint -q /mnt/storage")
