@@ -59,6 +59,7 @@ Architecture decision records. Each has a status: `Draft`, `Active`, `Superseded
 - [decisions/024-luks-uuid-identity.md](decisions/024-luks-uuid-identity.md) — **Active.** LUKS UUID is braid's persistent disk identity; disk names and labels are presentation, by-id paths are hardware addresses, and btrfs devid is a restricted fallback.
 - [decisions/025-browse-vs-curated.md](decisions/025-browse-vs-curated.md) — **Active.** `braid tui` owns the interactive UI; Browse is the raw command-output inspector while Data/Scrub are curated first-class UX.
 - [decisions/026-pool-lock-rust-owned.md](decisions/026-pool-lock-rust-owned.md) — **Active.** Rust dispatch owns pool-operation locking, braid-online lifecycle synchronization, and the systemd stop coordinator.
+- [decisions/027-mkfs-block-group-tree.md](decisions/027-mkfs-block-group-tree.md) — **Active.** `mkfs.btrfs` is pinned to `-O block-group-tree` for new pools so the on-disk feature set does not drift across nixpkgs btrfs-progs defaults.
 
 ## tool-behavior/
 

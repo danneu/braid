@@ -405,6 +405,11 @@
               braid = linuxCrane.braid-cli-unwrapped;
             }
           );
+          braid-module-mkfs-block-group-tree = pkgs.testers.nixosTest (
+            import ./tests/module/mkfs-block-group-tree.nix {
+              braid = linuxCrane.braid-cli-unwrapped;
+            }
+          );
           braid-module-add-locked-pool = pkgs.testers.nixosTest (
             import ./tests/module/add-locked-pool.nix {
               braid = linuxCrane.braid-cli-unwrapped;

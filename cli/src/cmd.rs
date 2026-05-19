@@ -122,9 +122,14 @@ pub enum CmdRequest {
     BtrfsBalanceResume {
         mount_point: MountPoint,
     },
+    /// `mkfs.btrfs -d single -m dup -O block-group-tree <device>` --
+    /// pin `block-group-tree` so new pool features do not drift with the
+    /// nixpkgs btrfs-progs version. Kernel support has existed since 6.1.
     MkfsBtrfs {
         device: String,
     },
+    /// `mkfs.btrfs -d raid1 -m raid1 -O block-group-tree <device>...` --
+    /// raid1 pool bootstrap with the same explicit feature pin as `MkfsBtrfs`.
     MkfsBtrfsRaid1 {
         devices: Vec<String>,
     },
@@ -682,11 +687,20 @@ impl CmdRequest {
                     "single".into(),
                     "-m".into(),
                     "dup".into(),
+                    "-O".into(),
+                    "block-group-tree".into(),
                     device.clone(),
                 ],
             },
             CmdRequest::MkfsBtrfsRaid1 { devices } => {
-                let mut args = vec!["-d".into(), "raid1".into(), "-m".into(), "raid1".into()];
+                let mut args = vec![
+                    "-d".into(),
+                    "raid1".into(),
+                    "-m".into(),
+                    "raid1".into(),
+                    "-O".into(),
+                    "block-group-tree".into(),
+                ];
                 args.extend(devices.iter().cloned());
                 CmdArgs {
                     program: "mkfs.btrfs".to_owned(),
@@ -2501,7 +2515,8 @@ mod tests {
     }
 
     #[test]
-    // Intent: MkfsBtrfsRaid1 generates correct argv with -d raid1 -m raid1 and all devices.
+    // Intent: MkfsBtrfsRaid1 generates correct argv with RAID1 profiles,
+    // explicit block-group-tree, and all devices.
     // Why: incorrect mkfs arguments could create a single-profile filesystem
     // instead of RAID1; -f is intentionally absent so mkfs.btrfs's libblkid
     // signature check remains the final backstop against existing filesystems.
@@ -2522,6 +2537,8 @@ mod tests {
                 "raid1",
                 "-m",
                 "raid1",
+                "-O",
+                "block-group-tree",
                 "/dev/mapper/braid-disk1",
                 "/dev/mapper/braid-disk2",
             ]
@@ -2529,7 +2546,8 @@ mod tests {
     }
 
     #[test]
-    /* Intent: MkfsBtrfs generates correct argv with -d single -m dup.
+    /* Intent: MkfsBtrfs generates correct argv with -d single -m dup and
+     * explicit block-group-tree.
      * Why: implicit profiles make braid's storage intent ambiguous and ignore upstream guidance;
      * -f is intentionally absent so mkfs.btrfs's own signature check remains active.
      * Scenario: single-disk bootstrap creates a new pool with one fresh disk.
@@ -2542,7 +2560,15 @@ mod tests {
         assert_eq!(cmd.program, "mkfs.btrfs");
         assert_eq!(
             cmd.args,
-            vec!["-d", "single", "-m", "dup", "/dev/mapper/braid-disk1"]
+            vec![
+                "-d",
+                "single",
+                "-m",
+                "dup",
+                "-O",
+                "block-group-tree",
+                "/dev/mapper/braid-disk1"
+            ]
         );
     }
 
