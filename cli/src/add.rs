@@ -1362,10 +1362,11 @@ impl AddPlan {
             // Bootstrap post-commit persist: write pool.json after mkfs + mount.
             // Enrich with live metadata (devid) from pool probe, best-effort:
             // if the probe itself fails, warn and save the target membership
-            // unenriched. `enrich_from_pool_state` correlates by LUKS UUID only
-            // and surfaces any foreign UUIDs through `EnrichmentReport`;
-            // downstream consumption of `foreign` lives in doctor/status
-            // (Phase 5), so the report is discarded here. Pinned by
+            // unenriched.
+            // EnrichmentReport.foreign is intentionally discarded here:
+            // braid doctor's foreign_luks_uuid check probes the live pool
+            // on demand and surfaces foreigners persistently, so the
+            // per-command report does not need its own consumer. Pinned by
             // cmd_add_bootstrap_warns_when_post_mount_probe_errors.
             let mut final_membership = journal.target_membership.clone();
             match probe_pool(runner, fs, mount_point) {
@@ -1428,6 +1429,10 @@ impl AddPlan {
                 }
             }
             let mut final_membership = journal.target_membership.clone();
+            // EnrichmentReport.foreign is intentionally discarded here:
+            // braid doctor's foreign_luks_uuid check probes the live pool
+            // on demand and surfaces foreigners persistently, so the
+            // per-command report does not need its own consumer.
             let _ = membership::enrich_from_pool_state(&mut final_membership, &pool_after)?;
             membership::save_membership(&final_membership, params.paths)?;
 

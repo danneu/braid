@@ -148,10 +148,10 @@ pub(crate) use discover::{
 };
 #[allow(unused_imports)]
 pub(crate) use doctor::{
-    DF_MIXED, DF_MIXED_METADATA, DF_RAID1_CLEAN, DfQueryFailureRunner, PoolMissingDevicesRunner,
-    UpscSpawnFailureRunner, beep_ctx, cls, config_with_ups_enabled, config_without_ups,
-    device_usage_healthy, device_usage_with_missing, df_json, df_json_fail, human_options,
-    isolated_paths, mountpoint_fail, mountpoint_ok, parsed_doctor_ctx,
+    DF_MIXED, DF_MIXED_METADATA, DF_RAID1_CLEAN, DfQueryFailureRunner, DoctorMockFs,
+    PoolMissingDevicesRunner, UpscSpawnFailureRunner, beep_ctx, cls, config_with_ups_enabled,
+    config_without_ups, device_usage_healthy, device_usage_with_missing, df_json, df_json_fail,
+    human_options, isolated_paths, mountpoint_fail, mountpoint_ok, parsed_doctor_ctx,
     systemctl_show_active_state_output, ups_ctx, valid_config_json, write_temp,
 };
 pub(crate) use enroll_key_file::{

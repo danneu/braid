@@ -547,11 +547,9 @@ pub enum DiskSpecParseError {
 
 /// Per-call summary of live state observed during `enrich_from_pool_state`.
 /// `foreign` lists every UUID present in the live pool that membership did
-/// NOT admit; doctor and status read this so the operator-facing
-/// `foreign-luks-uuid` check can surface a structured report after the
-/// transient eprintln warning has scrolled off-screen. The value side is
-/// the observed `PoolDevice.mapper` so the structured report points
-/// directly at the dm slot the operator can inspect.
+/// NOT admit. The pure helper `foreign_luks_uuids` exposes the same join
+/// without mutating; `braid doctor`'s `foreign_luks_uuid` check renders it
+/// as Fail when non-empty.
 #[derive(Debug, Default, Clone, PartialEq, Eq)]
 pub struct EnrichmentReport {
     /// Live pool UUIDs that were not admitted into membership, keyed by UUID
@@ -559,25 +557,18 @@ pub struct EnrichmentReport {
     pub foreign: BTreeMap<LuksUuid, MapperName>,
 }
 
-/// Outcome of `refresh_pool_metadata`. The corruption path returns
-/// `Corrupt` (the warning is already on stderr and the sidecar attempt
-/// has happened) so callers downstream of doctor/status can surface
-/// the same structured state without re-reading `pool.json`. The Refreshed
-/// arm carries the `EnrichmentReport` from the inner enrichment, which
-/// `braid doctor`'s `foreign-luks-uuid` check arm consumes.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum RefreshOutcome {
-    /// `pool.json` loaded and enrichment ran. `report.foreign` holds
-    /// every live UUID that membership refused to admit during this call.
-    Refreshed { report: EnrichmentReport },
-    /// `pool.json` failed to load with `MembershipError::Corrupt`. The
-    /// corruption warning and (best-effort) sidecar snapshot have already
-    /// been written; the original `pool.json` is untouched.
-    Corrupt,
-    /// `pool.json` failed to load for a non-Corrupt reason (typically
-    /// `MembershipError::Io` -- file missing or permission denied). The
-    /// warning has been written; no sidecar is produced.
-    LoadFailed,
+/// Read-only foreign-live-device join shared by enrichment and doctor so
+/// diagnostics can report foreign UUIDs without mutating `pool.json` or
+/// emitting transient warnings.
+pub fn foreign_luks_uuids(
+    membership: &PoolMembership,
+    pool: &PoolState,
+) -> BTreeMap<LuksUuid, MapperName> {
+    pool.devices
+        .iter()
+        .filter(|dev| membership.by_uuid(&dev.luks_uuid).is_none())
+        .map(|dev| (dev.luks_uuid.clone(), dev.mapper.clone()))
+        .collect()
 }
 
 /// Update `membership` in place from a freshly probed `PoolState`,
@@ -595,7 +586,14 @@ pub fn enrich_from_pool_state(
     membership: &mut PoolMembership,
     pool: &PoolState,
 ) -> Result<EnrichmentReport, MembershipError> {
-    let mut foreign: BTreeMap<LuksUuid, MapperName> = BTreeMap::new();
+    let foreign = foreign_luks_uuids(membership, pool);
+
+    for (uuid, mapper) in &foreign {
+        eprintln!(
+            "Warning: live LUKS UUID {uuid} observed at mapper {mapper} is not in pool membership; not admitting (run 'braid doctor' for the structured report)",
+        );
+    }
+
     for dev in &pool.devices {
         if let Some(member) = membership.by_uuid_mut(&dev.luks_uuid) {
             // Known UUID: refresh the live devid and stamp the first
@@ -606,147 +604,9 @@ pub fn enrich_from_pool_state(
             if member.added_at.is_none() {
                 member.added_at = Some(crate::util::now_iso());
             }
-        } else {
-            // Foreign UUID: surface via eprintln (transient) and
-            // accumulate into the structured report (persistent).
-            eprintln!(
-                "Warning: live LUKS UUID {uuid} observed at mapper {mapper} is not in pool membership; not admitting (run 'braid doctor' for the structured report)",
-                uuid = dev.luks_uuid,
-                mapper = dev.mapper,
-            );
-            foreign.insert(dev.luks_uuid.clone(), dev.mapper.clone());
         }
     }
     Ok(EnrichmentReport { foreign })
-}
-
-/// Enrich `pool.json` with live-pool metadata. Best-effort: warnings go
-/// to stderr; the original file is not rewritten when load fails.
-/// Returns `RefreshOutcome` so doctor/status callers can route the
-/// `EnrichmentReport.foreign` field into the `foreign-luks-uuid`
-/// check without re-probing membership.
-pub fn refresh_pool_metadata(pool: &PoolState, paths: &StatePaths) -> RefreshOutcome {
-    let mut membership = match load_membership(paths) {
-        Ok(m) => m,
-        Err(MembershipError::Corrupt { path, detail }) => {
-            // Primary corruption warning: the same Display the hard-error
-            // path uses, with a `Warning: ` prefix matching the other two
-            // best-effort warnings in this function.
-            eprintln!(
-                "Warning: pool membership file corrupt at {path}: {detail} -- run 'braid discover --write' to rebuild from existing disks (with all intended pool members attached; see docs/luks-unlock.md)",
-                path = path.display(),
-            );
-            // Best-effort forensic snapshot. Failure is itself warned but
-            // never masks the primary corruption warning.
-            if let Err(sidecar_err) = write_corrupt_sidecar(&path) {
-                eprintln!(
-                    "Warning: failed to write corrupt-sidecar snapshot at {sidecar}: {err}",
-                    sidecar = sidecar_err.target.display(),
-                    err = sidecar_err.source,
-                );
-            }
-            return RefreshOutcome::Corrupt;
-        }
-        Err(e) => {
-            eprintln!("Warning: failed to load membership for metadata refresh: {e}");
-            return RefreshOutcome::LoadFailed;
-        }
-    };
-    let report = match enrich_from_pool_state(&mut membership, pool) {
-        Ok(r) => r,
-        Err(e) => {
-            eprintln!("Warning: failed to enrich pool membership: {e}");
-            return RefreshOutcome::LoadFailed;
-        }
-    };
-    if let Err(e) = save_membership(&membership, paths) {
-        eprintln!("Warning: failed to save enriched membership: {e}");
-    }
-    RefreshOutcome::Refreshed { report }
-}
-
-/// Error from the best-effort corrupt-sidecar copy. Carries the target
-/// path (the `<path>.corrupt-<timestamp>[.N]` chosen by
-/// `write_corrupt_sidecar`) so the warning line names the file the
-/// operator would expect to find.
-#[derive(Debug)]
-struct CorruptSidecarError {
-    target: PathBuf,
-    source: std::io::Error,
-}
-
-/// Copy `pool.json` to a timestamped `pool.json.corrupt-<RFC3339-UTC>`
-/// sidecar adjacent to it. Sub-second collisions append `.1`, `.2`, ...
-/// up to a safety cap. Never overwrites an existing sidecar. The caller
-/// is responsible for logging both success (silent) and failure (warning
-/// line); failures NEVER cancel the primary corruption warning that
-/// runs before this helper.
-fn write_corrupt_sidecar(path: &Path) -> Result<(), CorruptSidecarError> {
-    let raw = std::fs::read(path).map_err(|e| CorruptSidecarError {
-        target: path.to_path_buf(),
-        source: e,
-    })?;
-    let parent = path.parent().unwrap_or_else(|| Path::new("."));
-    let file_name = path
-        .file_name()
-        .and_then(|n| n.to_str())
-        .unwrap_or("pool.json");
-    let ts = format_rfc3339_utc_seconds(std::time::SystemTime::now());
-    let base = format!("{file_name}.corrupt-{ts}");
-    let primary = parent.join(&base);
-    // Choose the first unused suffix to avoid overwriting a prior sidecar.
-    let chosen = pick_unused_sidecar(&primary, parent, &base);
-    std::fs::write(&chosen, &raw).map_err(|e| CorruptSidecarError {
-        target: chosen,
-        source: e,
-    })?;
-    Ok(())
-}
-
-/// Pick the first unused sidecar path under `parent`. Starts with the
-/// bare `<base>` (no suffix), then `<base>.1`, `<base>.2`, ... up to a
-/// safety cap. The cap is high enough that real operator workflows
-/// never reach it (1000 corruption events in the same second is not a
-/// realistic operational mode) and exists only to bound the loop.
-fn pick_unused_sidecar(primary: &Path, parent: &Path, base: &str) -> PathBuf {
-    if !primary.exists() {
-        return primary.to_path_buf();
-    }
-    for n in 1..1000 {
-        let candidate = parent.join(format!("{base}.{n}"));
-        if !candidate.exists() {
-            return candidate;
-        }
-    }
-    // Realistically unreachable; return the last candidate so the
-    // caller's write fails closed with a clear error path rather than
-    // looping forever.
-    parent.join(format!("{base}.999"))
-}
-
-/// Format a `SystemTime` as `YYYY-MM-DDTHH:MM:SSZ` -- RFC3339 UTC with
-/// second precision and a literal `Z` suffix. Pinned by the corruption-
-/// sidecar plan section so operator-facing filenames are stable.
-fn format_rfc3339_utc_seconds(now: std::time::SystemTime) -> String {
-    use time::format_description::well_known::Iso8601;
-    let odt: time::OffsetDateTime = now.into();
-    // The `time` crate's `Iso8601::DEFAULT` includes fractional seconds.
-    // The plan pins second precision with a literal `Z`. Build a custom
-    // format description that matches the example
-    // `2026-05-12T17:42:09Z`.
-    let format = time::format_description::parse("[year]-[month]-[day]T[hour]:[minute]:[second]Z")
-        .expect("static format description must parse");
-    odt.to_offset(time::UtcOffset::UTC)
-        .format(&format)
-        .unwrap_or_else(|_| {
-            // The static format above cannot fail for an OffsetDateTime
-            // constructed from SystemTime; fall back to the well-known
-            // Iso8601 form trimmed to seconds in the unlikely-event arm
-            // so the caller still gets a non-empty timestamp.
-            time::OffsetDateTime::now_utc()
-                .format(&Iso8601::DEFAULT)
-                .unwrap_or_default()
-        })
 }
 
 // ---------------------------------------------------------------------------
@@ -1345,68 +1205,52 @@ mod tests {
         );
     }
 
-    // ----- refresh_pool_metadata corruption sidecar ------------------------
-
     #[test]
-    fn refresh_pool_metadata_corrupt_writes_sidecar_and_leaves_original() {
-        // Intent: when pool.json fails to parse with MembershipError::Corrupt,
-        //   refresh_pool_metadata (a) writes a `pool.json.corrupt-<RFC3339>`
-        //   sidecar byte-for-byte from the original, (b) leaves the original
-        //   pool.json bytes untouched, (c) returns RefreshOutcome::Corrupt.
-        // Why: hand-corrupted pool.json must leave a forensic artifact for
-        //   operators; a regression that skipped the sidecar or rewrote the
-        //   original would erase the only inspection target.
-        let tmp = tempfile::TempDir::new().unwrap();
-        let paths = StatePaths::custom(tmp.path().into());
-        let pool_json = paths.pool_json();
-        // Hand-broken body: a name-keyed top-level "disks" map fails the
-        // LuksUuidMap canonicalizing Deserialize at load.
-        let original_bytes =
-            b"{\"disks\":{\"toshiba\":{\"name\":\"toshiba\",\"by_id\":\"/dev/disk/by-id/ata-X\"}}}";
-        std::fs::write(&pool_json, original_bytes).unwrap();
-        let pool = pool_state_with(vec![]);
-        let outcome = refresh_pool_metadata(&pool, &paths);
+    fn foreign_luks_uuids_lists_unknown_uuids_without_warning() {
+        // Intent: the pure foreign UUID helper reports live pool UUIDs absent
+        //   from membership without mutating the membership snapshot.
+        // Why it exists: doctor depends on this read-only join so every
+        //   diagnostic run can surface foreign devices without re-emitting
+        //   enrichment warnings.
+        // Scenario: a known member and a foreign mapper are both present in
+        //   the live pool snapshot; only the foreign UUID should be returned.
+        let mut m = PoolMembership::empty();
+        let u_known = test_uuid(154);
+        m.insert(
+            u_known.clone(),
+            member("disk1", "/dev/disk/by-id/ata-KNOWN"),
+        )
+        .unwrap();
+        let before = m.clone();
+        let u_foreign = test_uuid(155);
+        let foreign_mapper = MapperName("braid-foreign".into());
+        let pool = pool_state_with(vec![
+            PoolDevice {
+                mapper: MapperName("braid-disk1".into()),
+                luks_uuid: u_known.clone(),
+                devid: 1,
+                underlying: "/dev/vdb".into(),
+            },
+            PoolDevice {
+                mapper: foreign_mapper.clone(),
+                luks_uuid: u_foreign.clone(),
+                devid: 2,
+                underlying: "/dev/vdc".into(),
+            },
+        ]);
+
+        let foreign = foreign_luks_uuids(&m, &pool);
+
         assert!(
-            matches!(outcome, RefreshOutcome::Corrupt),
-            "expected RefreshOutcome::Corrupt, got: {outcome:?}"
+            foreign.get(&u_foreign) == Some(&foreign_mapper),
+            "foreign helper must return the unknown UUID and observed mapper"
         );
-        // Original bytes unchanged.
-        let after = std::fs::read(&pool_json).expect("original pool.json must still exist");
         assert_eq!(
-            after, original_bytes,
-            "original pool.json must be unchanged on the corrupt path"
-        );
-        // Exactly one sidecar matching pool.json.corrupt-*.
-        let parent = pool_json.parent().unwrap();
-        let entries: Vec<_> = std::fs::read_dir(parent)
-            .unwrap()
-            .filter_map(Result::ok)
-            .filter_map(|e| {
-                let name = e.file_name().to_string_lossy().into_owned();
-                if name.starts_with("pool.json.corrupt-") {
-                    Some((name, e.path()))
-                } else {
-                    None
-                }
-            })
-            .collect();
-        assert_eq!(
-            entries.len(),
+            foreign.len(),
             1,
-            "exactly one corrupt-sidecar expected, found: {entries:?}"
+            "known UUIDs must not be returned as foreign"
         );
-        let (sidecar_name, sidecar_path) = &entries[0];
-        // RFC3339 UTC seconds (`Z` suffix) form: pool.json.corrupt-YYYY-MM-DDTHH:MM:SSZ
-        assert!(
-            sidecar_name.starts_with("pool.json.corrupt-") && sidecar_name.ends_with('Z'),
-            "sidecar name must end with `Z` for RFC3339 UTC seconds; got: {sidecar_name}"
-        );
-        let sidecar_bytes =
-            std::fs::read(sidecar_path).expect("sidecar must be readable for byte comparison");
-        assert_eq!(
-            sidecar_bytes, original_bytes,
-            "sidecar contents must match the original byte-for-byte"
-        );
+        assert_eq!(m, before, "pure helper must not mutate membership");
     }
 
     // ----- parse_disk_spec -------------------------------------------------

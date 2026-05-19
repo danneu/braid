@@ -280,6 +280,11 @@
               braid = linuxCrane.braid;
             }
           );
+          braid-doctor-foreign-luks-uuid = pkgs.testers.nixosTest (
+            import ./tests/cli/braid-doctor-foreign-luks-uuid.nix {
+              braid = linuxCrane.braid;
+            }
+          );
           braid-doctor-ups = pkgs.testers.nixosTest (
             import ./tests/module/braid-doctor-ups.nix {
               braid = linuxCrane.braid;

@@ -101,7 +101,7 @@ The NixOS module no longer generates `fileSystems`, LUKS entries, or `btrfs-devi
 
 ## See
 
-- `cli/src/membership.rs` — load/save/validate membership, `DiskMember`, `refresh_pool_metadata`
+- `cli/src/membership.rs` -- load/save/validate membership, `DiskMember`, `PoolMembership`, `enrich_from_pool_state`, `foreign_luks_uuids` (pure helper consumed by `braid doctor`'s `foreign_luks_uuid` check)
 - `cli/src/journal.rs` — pending-operation journal (pre/target membership snapshots)
 - `cli/src/recover.rs` — rebuild membership from live pool state
 - `cli/src/preflight.rs` — `check_no_pending_operation` recovery mode guard

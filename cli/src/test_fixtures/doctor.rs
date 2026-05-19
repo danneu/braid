@@ -12,6 +12,7 @@
 
 use crate::cmd::{CmdError, CmdRequest, CommandRunner, RawCommandOutput};
 use crate::doctor::{DiskState, DoctorContext, DoctorOptions};
+use crate::probe::Filesystem;
 use crate::state_paths::StatePaths;
 use crate::types::MountPoint;
 use std::io::Write;
@@ -92,6 +93,60 @@ pub(crate) fn ups_ctx<'a, R: CommandRunner>(
     config_json: &str,
 ) -> DoctorContext<'a, R> {
     DoctorContext::for_test_parsed(runner, paths, config_json)
+}
+
+// ---------------------------------------------------------------------------
+// Filesystem fixtures
+// ---------------------------------------------------------------------------
+
+/// Strict doctor filesystem mock for live-pool checks that must prove
+/// `probe_pool` reads mountinfo through doctor's injected filesystem.
+pub(crate) struct DoctorMockFs {
+    mountinfo: String,
+}
+
+impl DoctorMockFs {
+    /// Mounted btrfs pool surface with no broader host filesystem access.
+    pub(crate) fn mounted_btrfs_only() -> Self {
+        Self {
+            mountinfo:
+                "36 35 0:32 / /mnt/storage rw,noatime shared:1 - btrfs /dev/mapper/braid-disk1 rw\n"
+                    .into(),
+        }
+    }
+
+    /// Empty host mount table for tests that must stop before live-pool
+    /// probing reads mountinfo.
+    pub(crate) fn empty() -> Self {
+        Self {
+            mountinfo: String::new(),
+        }
+    }
+}
+
+impl Filesystem for DoctorMockFs {
+    fn exists(&self, _path: &str) -> bool {
+        false
+    }
+
+    fn is_block_device(&self, _path: &str) -> bool {
+        false
+    }
+
+    fn read_to_string(&self, path: &str) -> Result<String, std::io::Error> {
+        if path == "/proc/self/mountinfo" {
+            Ok(self.mountinfo.clone())
+        } else {
+            Err(std::io::Error::new(
+                std::io::ErrorKind::NotFound,
+                format!("DoctorMockFs: unexpected path {path}"),
+            ))
+        }
+    }
+
+    fn list_dir(&self, _path: &str) -> Result<Vec<String>, std::io::Error> {
+        Ok(vec![])
+    }
 }
 
 // ---------------------------------------------------------------------------

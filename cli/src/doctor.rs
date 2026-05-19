@@ -24,10 +24,11 @@ use crate::membership;
 use crate::parse::types::{BtrfsBgType, BtrfsDfOutput, BtrfsProfile};
 use crate::parse::{parse_btrfs_df_json, parse_cryptsetup_luks_uuid};
 use crate::preflight;
+use crate::probe::{self, Filesystem, ProbeError, RealFilesystem};
 use crate::state_paths::StatePaths;
 use crate::status::format_bytes;
 use crate::status_tag::{StatusTag, color_enabled_for_stdout, status_line};
-use crate::types::{LuksUuid, MountPoint};
+use crate::types::{LuksUuid, MountPoint, PoolState};
 
 // ---------------------------------------------------------------------------
 // Types
@@ -95,18 +96,19 @@ enum DfSnapshot {
     Ok(BtrfsDfOutput),
 }
 
-/// Per-run state for `braid doctor`: caches mount-probe and df-snapshot
-/// results across checks so the orchestrator avoids re-querying
-/// btrfs/mountpoint, and threads the parsed config plus `&CommandRunner`
-/// borrow that every check needs.
+/// Per-run state for `braid doctor`: caches mountpoint, df, and live-pool
+/// probes across checks so the orchestrator avoids re-querying btrfs, and
+/// threads the parsed config plus runner/filesystem borrows each check needs.
 pub(crate) struct DoctorContext<'a, R: CommandRunner> {
     config_path: PathBuf,
     config_value: Option<serde_json::Value>,
     config: Option<Config>,
     runner: &'a R,
+    fs: &'a dyn Filesystem,
     paths: &'a StatePaths,
     mountpoint_is_mounted: Option<bool>,
     df_snapshot: Option<DfSnapshot>,
+    pool_state: Option<Result<PoolState, ProbeError>>,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -530,6 +532,25 @@ fn ensure_df_snapshot<R: CommandRunner>(ctx: &mut DoctorContext<'_, R>) {
     }
 }
 
+fn ensure_pool_state<R: CommandRunner>(ctx: &mut DoctorContext<'_, R>) {
+    if ctx.pool_state.is_some() {
+        return;
+    }
+
+    let config = match &ctx.config {
+        Some(c) => c,
+        None => return,
+    };
+
+    let mount_point = config.mount_point().to_owned();
+
+    if ensure_mountpoint_is_mounted(ctx) != Some(true) {
+        return;
+    }
+
+    ctx.pool_state = Some(probe::probe_pool(ctx.runner, ctx.fs, &mount_point));
+}
+
 fn check_profile_mismatch<R: CommandRunner>(
     ctx: &mut DoctorContext<'_, R>,
     bg_type: BtrfsBgType,
@@ -631,6 +652,64 @@ fn check_pool_missing_devices<R: CommandRunner>(ctx: &mut DoctorContext<'_, R>) 
             format!("could not probe for missing devices: {e}"),
         ),
     }
+}
+
+fn check_foreign_luks_uuid<R: CommandRunner>(ctx: &mut DoctorContext<'_, R>) -> CheckResult {
+    const NAME: &str = "foreign_luks_uuid";
+    if ctx.config.is_none() {
+        return CheckResult::skip(NAME, "skipped (config not available)");
+    }
+
+    if ensure_mountpoint_is_mounted(ctx) != Some(true) {
+        return CheckResult::skip(NAME, "skipped (pool not mounted)");
+    }
+
+    let membership = match membership::load_membership(ctx.paths) {
+        Ok(m) => m,
+        Err(membership::MembershipError::Io { source, .. })
+            if source.kind() == std::io::ErrorKind::NotFound =>
+        {
+            return CheckResult::skip(NAME, "skipped (no pool membership file)");
+        }
+        Err(e) => {
+            return CheckResult::warn(NAME, format!("could not load pool membership: {e}"));
+        }
+    };
+
+    ensure_pool_state(ctx);
+    let pool = match ctx
+        .pool_state
+        .as_ref()
+        .expect("ensure_pool_state seeds the cache when config is present and mounted")
+    {
+        Ok(pool) => pool,
+        Err(e) => {
+            return CheckResult::warn(NAME, format!("could not probe pool: {e}"));
+        }
+    };
+
+    // Keep this read-only: mutating enrichment would re-emit the transient
+    // per-UUID warning on every doctor run.
+    let foreign = membership::foreign_luks_uuids(&membership, pool);
+
+    if foreign.is_empty() {
+        return CheckResult::ok(NAME, "no foreign LUKS UUIDs in live pool");
+    }
+
+    let n = foreign.len();
+    let entries: Vec<String> = foreign
+        .iter()
+        .map(|(uuid, mapper)| format!("{uuid} at mapper {mapper}"))
+        .collect();
+    CheckResult::fail(
+        NAME,
+        format!(
+            "{n} foreign LUKS UUID{plural} in live pool: {body} -- restore with 'btrfs device remove /dev/mapper/<mapper> {mp}' then 'cryptsetup close <mapper>'",
+            plural = if n == 1 { "" } else { "s" },
+            body = entries.join("; "),
+            mp = ctx.config.as_ref().unwrap().mount_point(),
+        ),
+    )
 }
 
 fn check_data_profile_mismatch<R: CommandRunner>(ctx: &mut DoctorContext<'_, R>) -> CheckResult {
@@ -881,6 +960,7 @@ fn overall_status(checks: &[CheckResult]) -> CheckStatus {
 pub fn run_doctor<R: CommandRunner>(
     config_path: &Path,
     runner: &R,
+    fs: &dyn Filesystem,
     paths: &StatePaths,
     options: DoctorOptions,
 ) -> DoctorReport {
@@ -889,9 +969,11 @@ pub fn run_doctor<R: CommandRunner>(
         config_value: None,
         config: None,
         runner,
+        fs,
         paths,
         mountpoint_is_mounted: None,
         df_snapshot: None,
+        pool_state: None,
     };
 
     let checks = vec![
@@ -900,6 +982,7 @@ pub fn run_doctor<R: CommandRunner>(
         check_config_permissions(&mut ctx),
         check_declared_disks(&mut ctx),
         check_pool_missing_devices(&mut ctx),
+        check_foreign_luks_uuid(&mut ctx),
         check_data_profile_mismatch(&mut ctx),
         check_metadata_profile_mismatch(&mut ctx),
         check_beep_path(&mut ctx, options),
@@ -935,6 +1018,7 @@ pub fn format_doctor_human_with(report: &DoctorReport, color_enabled: bool) -> S
             "config_permissions" => "config perms",
             "declared_disks" => "declared disks",
             "pool_missing_devices" => "missing devs",
+            "foreign_luks_uuid" => "foreign uuids",
             "data_profile_mismatch" => "data profiles",
             "metadata_profile_mismatch" => "meta profiles",
             // The internal identifier `beep_path` stays stable for the JSON
@@ -972,7 +1056,8 @@ pub fn cmd_doctor(
     options: DoctorOptions,
 ) -> Result<(), DoctorError> {
     let runner = RealRunner;
-    let report = run_doctor(config_path, &runner, paths, options);
+    let fs = RealFilesystem;
+    let report = run_doctor(config_path, &runner, &fs, paths, options);
 
     if options.json {
         // serde_json::to_string_pretty won't fail on our types
@@ -1004,8 +1089,20 @@ pub fn cmd_doctor(
 // ---------------------------------------------------------------------------
 
 #[cfg(test)]
+static REAL_FILESYSTEM_FOR_TESTS: RealFilesystem = RealFilesystem;
+
+#[cfg(test)]
 impl<'a, R: CommandRunner> DoctorContext<'a, R> {
     pub(crate) fn for_test_parsed(runner: &'a R, paths: &'a StatePaths, config_json: &str) -> Self {
+        Self::for_test_parsed_with_fs(runner, &REAL_FILESYSTEM_FOR_TESTS, paths, config_json)
+    }
+
+    pub(crate) fn for_test_parsed_with_fs(
+        runner: &'a R,
+        fs: &'a dyn Filesystem,
+        paths: &'a StatePaths,
+        config_json: &str,
+    ) -> Self {
         let value: serde_json::Value =
             serde_json::from_str(config_json).expect("test config JSON parses");
         let config: Config = serde_json::from_value(value.clone()).expect("test config parses");
@@ -1014,9 +1111,11 @@ impl<'a, R: CommandRunner> DoctorContext<'a, R> {
             config_value: Some(value),
             config: Some(config),
             runner,
+            fs,
             paths,
             mountpoint_is_mounted: None,
             df_snapshot: None,
+            pool_state: None,
         }
     }
 
@@ -1026,9 +1125,11 @@ impl<'a, R: CommandRunner> DoctorContext<'a, R> {
             config_value: None,
             config: None,
             runner,
+            fs: &REAL_FILESYSTEM_FOR_TESTS,
             paths,
             mountpoint_is_mounted: None,
             df_snapshot: None,
+            pool_state: None,
         }
     }
 }
@@ -1041,15 +1142,16 @@ impl<'a, R: CommandRunner> DoctorContext<'a, R> {
 mod tests {
     use super::*;
     use crate::cmd::{MockRunner, RawCommandOutput};
+    use crate::state_paths::StatePaths;
     use crate::test_fixtures::{
-        DF_MIXED, DF_MIXED_METADATA, DF_RAID1_CLEAN, DfQueryFailureRunner,
+        DF_MIXED, DF_MIXED_METADATA, DF_RAID1_CLEAN, DfQueryFailureRunner, DoctorMockFs,
         PoolMissingDevicesRunner, UpscSpawnFailureRunner, beep_ctx, cls, config_with_ups_enabled,
         config_without_ups, device_usage_healthy, device_usage_with_missing, df_json, df_json_fail,
-        human_options, is_luks_ok, isolated_paths, luks_dump_text_ok, luks_uuid_ok,
-        mountpoint_fail, mountpoint_ok, parsed_doctor_ctx, systemctl_show_active_state_output,
-        test_uuid, ups_ctx, valid_config_json, write_temp,
+        disk_member_with, human_options, is_luks_ok, isolated_paths, luks_dump_text_ok,
+        luks_uuid_ok, mountpoint_fail, mountpoint_ok, parsed_doctor_ctx,
+        systemctl_show_active_state_output, test_uuid, ups_ctx, valid_config_json, write_temp,
     };
-    use crate::types::MountPoint;
+    use crate::types::{MapperName, MountPoint};
 
     fn find_check<'a>(report: &'a DoctorReport, name: &str) -> &'a CheckResult {
         report
@@ -1057,6 +1159,95 @@ mod tests {
             .iter()
             .find(|c| c.name == name)
             .unwrap_or_else(|| panic!("check '{name}' not found"))
+    }
+
+    fn doctor_btrfs_show(devices: &[(&str, u64)]) -> RawCommandOutput {
+        let mut body = format!(
+            "Label: none  uuid: aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee\n\
+             \tTotal devices {} FS bytes used 1.00GiB\n",
+            devices.len()
+        );
+        for (mapper, devid) in devices {
+            body.push_str(&format!(
+                "\tdevid {devid:>4} size 10.00GiB used 2.00GiB path /dev/mapper/{mapper}\n"
+            ));
+        }
+        RawCommandOutput {
+            cmd: "btrfs filesystem show /mnt/storage".into(),
+            stdout: body,
+            stderr: String::new(),
+            exit_status: 0,
+        }
+    }
+
+    fn doctor_cryptsetup_status_active(mapper: &str, device: &str) -> RawCommandOutput {
+        RawCommandOutput {
+            cmd: format!("cryptsetup status {mapper}"),
+            stdout: format!(
+                "/dev/mapper/{mapper} is active and is in use.\n\
+                 \ttype:    LUKS2\n\
+                 \tcipher:  aes-xts-plain64\n\
+                 \tdevice:  {device}\n\
+                 \tsector size:  512\n"
+            ),
+            stderr: String::new(),
+            exit_status: 0,
+        }
+    }
+
+    fn doctor_cryptsetup_uuid_ok(device: &str, uuid: &LuksUuid) -> RawCommandOutput {
+        RawCommandOutput {
+            cmd: format!("cryptsetup luksUUID {device}"),
+            stdout: format!("{uuid}\n"),
+            stderr: String::new(),
+            exit_status: 0,
+        }
+    }
+
+    fn save_doctor_membership(paths: &StatePaths, entries: &[(u64, &str, &str, Option<u64>)]) {
+        let mut m = membership::PoolMembership::empty();
+        for (seed, name, by_id, devid) in entries {
+            let (uuid, member) = disk_member_with(*seed, name, by_id, *devid, None);
+            m.insert(uuid, member).expect("fixture member inserts");
+        }
+        membership::save_membership(&m, paths).expect("fixture membership saves");
+    }
+
+    fn foreign_luks_uuid_runner(
+        pool_devices: Vec<(&'static str, u64, &'static str, LuksUuid)>,
+    ) -> MockRunner {
+        let mut runner = MockRunner::default();
+        let (mp_req, mp_out) = mountpoint_ok();
+        runner = runner.with_output(mp_req, mp_out);
+
+        let show_devices: Vec<(&str, u64)> = pool_devices
+            .iter()
+            .map(|(mapper, devid, _, _)| (*mapper, *devid))
+            .collect();
+        runner = runner.with_output(
+            CmdRequest::BtrfsFilesystemShow {
+                mount_point: MountPoint("/mnt/storage".to_owned()),
+            },
+            doctor_btrfs_show(&show_devices),
+        );
+
+        for (mapper, _, device, uuid) in pool_devices {
+            runner = runner
+                .with_output(
+                    CmdRequest::CryptsetupStatus {
+                        mapper: MapperName(mapper.to_owned()),
+                    },
+                    doctor_cryptsetup_status_active(mapper, device),
+                )
+                .with_output(
+                    CmdRequest::CryptsetupLuksUuid {
+                        device: device.to_owned(),
+                    },
+                    doctor_cryptsetup_uuid_ok(device, &uuid),
+                );
+        }
+
+        runner
     }
 
     // Intent: a syntactically valid Config parses + schema-validates, and
@@ -1071,8 +1262,14 @@ mod tests {
     fn valid_config_parses_ok_declared_disks_skips() {
         let f = write_temp(valid_config_json());
         let (_dir, paths) = isolated_paths();
-        let report = run_doctor(f.path(), &MockRunner::default(), &paths, human_options());
-        assert_eq!(report.checks.len(), 10);
+        let report = run_doctor(
+            f.path(),
+            &MockRunner::default(),
+            &RealFilesystem,
+            &paths,
+            human_options(),
+        );
+        assert_eq!(report.checks.len(), 11);
         assert_eq!(find_check(&report, "config_file").status, CheckStatus::Ok);
         assert_eq!(find_check(&report, "config_schema").status, CheckStatus::Ok);
         // declared_disks skips since no pool membership file exists in test env
@@ -1096,7 +1293,13 @@ mod tests {
     fn valid_custom_config_skips_permissions() {
         let f = write_temp(valid_config_json());
         let (_dir, paths) = isolated_paths();
-        let report = run_doctor(f.path(), &MockRunner::default(), &paths, human_options());
+        let report = run_doctor(
+            f.path(),
+            &MockRunner::default(),
+            &RealFilesystem,
+            &paths,
+            human_options(),
+        );
 
         assert_eq!(find_check(&report, "config_file").status, CheckStatus::Ok);
         assert_eq!(find_check(&report, "config_schema").status, CheckStatus::Ok);
@@ -1130,6 +1333,7 @@ mod tests {
         let report = run_doctor(
             Path::new("/tmp/nonexistent-braid-doctor-test.json"),
             &MockRunner::default(),
+            &RealFilesystem,
             &isolated_paths().1,
             human_options(),
         );
@@ -1151,6 +1355,7 @@ mod tests {
         let report = run_doctor(
             f.path(),
             &MockRunner::default(),
+            &RealFilesystem,
             &isolated_paths().1,
             human_options(),
         );
@@ -1173,6 +1378,7 @@ mod tests {
         let report = run_doctor(
             f.path(),
             &MockRunner::default(),
+            &RealFilesystem,
             &isolated_paths().1,
             human_options(),
         );
@@ -1194,6 +1400,7 @@ mod tests {
         let report = run_doctor(
             f.path(),
             &MockRunner::default(),
+            &RealFilesystem,
             &isolated_paths().1,
             human_options(),
         );
@@ -1225,6 +1432,7 @@ mod tests {
         let report = run_doctor(
             f.path(),
             &MockRunner::default(),
+            &RealFilesystem,
             &isolated_paths().1,
             human_options(),
         );
@@ -1360,6 +1568,7 @@ mod tests {
         let report = run_doctor(
             f.path(),
             &MockRunner::default(),
+            &RealFilesystem,
             &isolated_paths().1,
             human_options(),
         );
@@ -1380,6 +1589,7 @@ mod tests {
         let report = run_doctor(
             Path::new("/tmp/nonexistent-braid-doctor-test.json"),
             &MockRunner::default(),
+            &RealFilesystem,
             &isolated_paths().1,
             human_options(),
         );
@@ -1480,6 +1690,7 @@ mod tests {
         let report = run_doctor(
             Path::new("/tmp/nonexistent-braid-doctor-test.json"),
             &MockRunner::default(),
+            &RealFilesystem,
             &isolated_paths().1,
             human_options(),
         );
@@ -1493,6 +1704,7 @@ mod tests {
         let report = run_doctor(
             f.path(),
             &MockRunner::default(),
+            &RealFilesystem,
             &isolated_paths().1,
             human_options(),
         );
@@ -1507,7 +1719,13 @@ mod tests {
     fn declared_disks_skips_when_no_membership() {
         let f = write_temp(r#"{"mount_point":"/mnt/storage"}"#);
         let (_dir, paths) = isolated_paths();
-        let report = run_doctor(f.path(), &MockRunner::default(), &paths, human_options());
+        let report = run_doctor(
+            f.path(),
+            &MockRunner::default(),
+            &RealFilesystem,
+            &paths,
+            human_options(),
+        );
         let check = find_check(&report, "declared_disks");
         assert_eq!(check.status, CheckStatus::Skip);
     }
@@ -1518,6 +1736,7 @@ mod tests {
         let report = run_doctor(
             Path::new("/tmp/nonexistent-braid-doctor-test.json"),
             &MockRunner::default(),
+            &RealFilesystem,
             &paths,
             human_options(),
         );
@@ -1541,7 +1760,13 @@ mod tests {
     fn declared_disks_skips_when_no_membership_even_if_config_schema_fails() {
         let f = write_temp(r#"{"mount_point":""}"#);
         let (_dir, paths) = isolated_paths();
-        let report = run_doctor(f.path(), &MockRunner::default(), &paths, human_options());
+        let report = run_doctor(
+            f.path(),
+            &MockRunner::default(),
+            &RealFilesystem,
+            &paths,
+            human_options(),
+        );
         assert_eq!(
             find_check(&report, "config_schema").status,
             CheckStatus::Fail
@@ -1875,6 +2100,7 @@ mod tests {
         let report = run_doctor(
             f.path(),
             &MockRunner::default(),
+            &RealFilesystem,
             &isolated_paths().1,
             human_options(),
         );
@@ -1895,7 +2121,13 @@ mod tests {
             .with_output(mp_req, mp_out)
             .with_output(df_req, df_out);
         let f = write_temp(valid_config_json());
-        let report = run_doctor(f.path(), &runner, &isolated_paths().1, human_options());
+        let report = run_doctor(
+            f.path(),
+            &runner,
+            &RealFilesystem,
+            &isolated_paths().1,
+            human_options(),
+        );
         let check = find_check(&report, "data_profile_mismatch");
         assert_eq!(check.status, CheckStatus::Ok);
         assert!(
@@ -1913,7 +2145,13 @@ mod tests {
             .with_output(mp_req, mp_out)
             .with_output(df_req, df_out);
         let f = write_temp(valid_config_json());
-        let report = run_doctor(f.path(), &runner, &isolated_paths().1, human_options());
+        let report = run_doctor(
+            f.path(),
+            &runner,
+            &RealFilesystem,
+            &isolated_paths().1,
+            human_options(),
+        );
         let check = find_check(&report, "data_profile_mismatch");
         assert_eq!(check.status, CheckStatus::Warn);
         assert!(
@@ -1947,7 +2185,13 @@ mod tests {
             .with_output(df_req, df_out)
             .with_output(du_req, du_out);
         let f = write_temp(valid_config_json());
-        let report = run_doctor(f.path(), &runner, &isolated_paths().1, human_options());
+        let report = run_doctor(
+            f.path(),
+            &runner,
+            &RealFilesystem,
+            &isolated_paths().1,
+            human_options(),
+        );
         let check = find_check(&report, "data_profile_mismatch");
         assert_eq!(check.status, CheckStatus::Warn);
         assert!(check.message.contains("mixed"), "{}", check.message);
@@ -1985,7 +2229,13 @@ mod tests {
             .with_output(df_req, df_out)
             .with_output(du_req, du_out);
         let f = write_temp(valid_config_json());
-        let report = run_doctor(f.path(), &runner, &isolated_paths().1, human_options());
+        let report = run_doctor(
+            f.path(),
+            &runner,
+            &RealFilesystem,
+            &isolated_paths().1,
+            human_options(),
+        );
         let check = find_check(&report, "data_profile_mismatch");
         assert_eq!(check.status, CheckStatus::Warn);
         assert!(check.message.contains("mixed"), "{}", check.message);
@@ -2021,7 +2271,13 @@ mod tests {
             .with_output(mp_req, mp_out)
             .with_output(df_req, df_out);
         let f = write_temp(valid_config_json());
-        let report = run_doctor(f.path(), &runner, &isolated_paths().1, human_options());
+        let report = run_doctor(
+            f.path(),
+            &runner,
+            &RealFilesystem,
+            &isolated_paths().1,
+            human_options(),
+        );
         let check = find_check(&report, "data_profile_mismatch");
         assert_eq!(check.status, CheckStatus::Ok);
     }
@@ -2031,6 +2287,7 @@ mod tests {
         let report = run_doctor(
             Path::new("/tmp/nonexistent-braid-doctor-test.json"),
             &MockRunner::default(),
+            &RealFilesystem,
             &isolated_paths().1,
             human_options(),
         );
@@ -2048,7 +2305,13 @@ mod tests {
         let (mp_req, mp_out) = mountpoint_fail();
         let runner = MockRunner::default().with_output(mp_req, mp_out);
         let f = write_temp(valid_config_json());
-        let report = run_doctor(f.path(), &runner, &isolated_paths().1, human_options());
+        let report = run_doctor(
+            f.path(),
+            &runner,
+            &RealFilesystem,
+            &isolated_paths().1,
+            human_options(),
+        );
         let check = find_check(&report, "data_profile_mismatch");
         assert_eq!(check.status, CheckStatus::Skip);
         assert!(check.message.contains("not mounted"), "{}", check.message);
@@ -2062,7 +2325,13 @@ mod tests {
             .with_output(mp_req, mp_out)
             .with_output(df_req, df_out);
         let f = write_temp(valid_config_json());
-        let report = run_doctor(f.path(), &runner, &isolated_paths().1, human_options());
+        let report = run_doctor(
+            f.path(),
+            &runner,
+            &RealFilesystem,
+            &isolated_paths().1,
+            human_options(),
+        );
         let check = find_check(&report, "data_profile_mismatch");
         assert_eq!(check.status, CheckStatus::Warn);
         assert!(
@@ -2083,7 +2352,13 @@ mod tests {
     fn profile_checks_warn_when_df_query_errors() {
         let runner = DfQueryFailureRunner;
         let f = write_temp(valid_config_json());
-        let report = run_doctor(f.path(), &runner, &isolated_paths().1, human_options());
+        let report = run_doctor(
+            f.path(),
+            &runner,
+            &RealFilesystem,
+            &isolated_paths().1,
+            human_options(),
+        );
 
         let data = find_check(&report, "data_profile_mismatch");
         assert_eq!(data.status, CheckStatus::Warn);
@@ -2118,7 +2393,13 @@ mod tests {
             .with_output(mp_req, mp_out)
             .with_output(df_req, df_out);
         let f = write_temp(valid_config_json());
-        let report = run_doctor(f.path(), &runner, &isolated_paths().1, human_options());
+        let report = run_doctor(
+            f.path(),
+            &runner,
+            &RealFilesystem,
+            &isolated_paths().1,
+            human_options(),
+        );
         let check = find_check(&report, "data_profile_mismatch");
         assert_eq!(check.status, CheckStatus::Warn);
         assert!(
@@ -2142,7 +2423,13 @@ mod tests {
             .with_output(mp_req, mp_out)
             .with_output(df_req, df_out);
         let f = write_temp(valid_config_json());
-        let report = run_doctor(f.path(), &runner, &isolated_paths().1, human_options());
+        let report = run_doctor(
+            f.path(),
+            &runner,
+            &RealFilesystem,
+            &isolated_paths().1,
+            human_options(),
+        );
 
         let data = find_check(&report, "data_profile_mismatch");
         assert_eq!(data.status, CheckStatus::Warn);
@@ -2176,7 +2463,13 @@ mod tests {
             .with_output(mp_req, mp_out)
             .with_output(df_req, df_out);
         let f = write_temp(valid_config_json());
-        let report = run_doctor(f.path(), &runner, &isolated_paths().1, human_options());
+        let report = run_doctor(
+            f.path(),
+            &runner,
+            &RealFilesystem,
+            &isolated_paths().1,
+            human_options(),
+        );
         let check = find_check(&report, "metadata_profile_mismatch");
         assert_eq!(check.status, CheckStatus::Ok);
         assert!(
@@ -2199,7 +2492,13 @@ mod tests {
             .with_output(mp_req, mp_out)
             .with_output(df_req, df_out);
         let f = write_temp(valid_config_json());
-        let report = run_doctor(f.path(), &runner, &isolated_paths().1, human_options());
+        let report = run_doctor(
+            f.path(),
+            &runner,
+            &RealFilesystem,
+            &isolated_paths().1,
+            human_options(),
+        );
         let check = find_check(&report, "metadata_profile_mismatch");
         assert_eq!(check.status, CheckStatus::Warn);
         assert!(
@@ -2230,7 +2529,13 @@ mod tests {
             .with_output(df_req, df_out)
             .with_output(du_req, du_out);
         let f = write_temp(valid_config_json());
-        let report = run_doctor(f.path(), &runner, &isolated_paths().1, human_options());
+        let report = run_doctor(
+            f.path(),
+            &runner,
+            &RealFilesystem,
+            &isolated_paths().1,
+            human_options(),
+        );
         let check = find_check(&report, "metadata_profile_mismatch");
         assert_eq!(check.status, CheckStatus::Warn);
         assert!(check.message.contains("mixed"), "{}", check.message);
@@ -2260,6 +2565,7 @@ mod tests {
         let report = run_doctor(
             Path::new("/tmp/nonexistent-braid-doctor-test.json"),
             &MockRunner::default(),
+            &RealFilesystem,
             &isolated_paths().1,
             human_options(),
         );
@@ -2280,7 +2586,13 @@ mod tests {
         let (mp_req, mp_out) = mountpoint_fail();
         let runner = MockRunner::default().with_output(mp_req, mp_out);
         let f = write_temp(valid_config_json());
-        let report = run_doctor(f.path(), &runner, &isolated_paths().1, human_options());
+        let report = run_doctor(
+            f.path(),
+            &runner,
+            &RealFilesystem,
+            &isolated_paths().1,
+            human_options(),
+        );
         let check = find_check(&report, "metadata_profile_mismatch");
         assert_eq!(check.status, CheckStatus::Skip);
         assert!(check.message.contains("not mounted"), "{}", check.message);
@@ -2297,7 +2609,13 @@ mod tests {
             .with_output(mp_req, mp_out)
             .with_output(df_req, df_out);
         let f = write_temp(valid_config_json());
-        let report = run_doctor(f.path(), &runner, &isolated_paths().1, human_options());
+        let report = run_doctor(
+            f.path(),
+            &runner,
+            &RealFilesystem,
+            &isolated_paths().1,
+            human_options(),
+        );
         let human = format_doctor_human(&report);
         assert!(
             human.contains("meta profiles"),
@@ -2320,7 +2638,13 @@ mod tests {
             .with_output(df_req, df_out)
             .with_output(du_req, du_out);
         let f = write_temp(valid_config_json());
-        let report = run_doctor(f.path(), &runner, &isolated_paths().1, human_options());
+        let report = run_doctor(
+            f.path(),
+            &runner,
+            &RealFilesystem,
+            &isolated_paths().1,
+            human_options(),
+        );
         let check = find_check(&report, "pool_missing_devices");
         assert_eq!(check.status, CheckStatus::Ok);
         assert!(check.message.contains("no missing"), "{}", check.message);
@@ -2378,7 +2702,13 @@ mod tests {
             .with_output(df_req, df_out)
             .with_output(du_req, du_out);
         let f = write_temp(valid_config_json());
-        let report = run_doctor(f.path(), &runner, &isolated_paths().1, human_options());
+        let report = run_doctor(
+            f.path(),
+            &runner,
+            &RealFilesystem,
+            &isolated_paths().1,
+            human_options(),
+        );
         let check = find_check(&report, "pool_missing_devices");
         assert_eq!(check.status, CheckStatus::Warn);
         assert!(
@@ -2411,9 +2741,131 @@ mod tests {
         let (mp_req, mp_out) = mountpoint_fail();
         let runner = MockRunner::default().with_output(mp_req, mp_out);
         let f = write_temp(valid_config_json());
-        let report = run_doctor(f.path(), &runner, &isolated_paths().1, human_options());
+        let report = run_doctor(
+            f.path(),
+            &runner,
+            &RealFilesystem,
+            &isolated_paths().1,
+            human_options(),
+        );
         let check = find_check(&report, "pool_missing_devices");
         assert_eq!(check.status, CheckStatus::Skip);
+    }
+
+    // Intent: foreign_luks_uuid fails when the mounted btrfs pool contains a
+    //   live LUKS UUID absent from pool.json membership.
+    // Why it exists: status points operators at doctor for this diagnosis, so
+    //   doctor must persistently surface the foreign live mapper.
+    // Scenario: an operator force-adds an independently formatted LUKS mapper
+    //   into the live pool outside braid.
+    #[test]
+    fn check_foreign_luks_uuid_fails_when_pool_has_unknown_uuid() {
+        let (_dir, paths) = isolated_paths();
+        save_doctor_membership(
+            &paths,
+            &[(170, "disk1", "/dev/disk/by-id/virtio-disk1", Some(1))],
+        );
+        let known_uuid = test_uuid(170);
+        let foreign_uuid = test_uuid(171);
+        let runner = foreign_luks_uuid_runner(vec![
+            ("braid-disk1", 1, "/dev/vdb", known_uuid),
+            ("braid-stranger", 2, "/dev/vdc", foreign_uuid.clone()),
+        ]);
+        let fs = DoctorMockFs::mounted_btrfs_only();
+        let f = write_temp(valid_config_json());
+
+        let report = run_doctor(f.path(), &runner, &fs, &paths, human_options());
+
+        let check = find_check(&report, "foreign_luks_uuid");
+        assert_eq!(check.status, CheckStatus::Fail);
+        assert_eq!(report.status, CheckStatus::Fail);
+        for needle in ["foreign LUKS UUID", foreign_uuid.as_str(), "braid-stranger"] {
+            assert!(
+                check.message.contains(needle),
+                "missing {needle:?} in: {}",
+                check.message
+            );
+        }
+        let remove_pos = check
+            .message
+            .find("btrfs device remove")
+            .expect("message must name btrfs removal first");
+        let close_pos = check
+            .message
+            .find("cryptsetup close")
+            .expect("message must name cryptsetup close");
+        assert!(
+            remove_pos < close_pos,
+            "remediation must remove from btrfs before closing mapper: {}",
+            check.message
+        );
+    }
+
+    // Intent: foreign_luks_uuid reports Ok when every live pool UUID is
+    //   admitted by pool.json membership.
+    // Why it exists: a healthy mounted pool must not be flagged just because
+    //   doctor probes the live btrfs topology.
+    // Scenario: a normal one-disk pool is mounted and pool.json contains that
+    //   member's LUKS UUID.
+    #[test]
+    fn check_foreign_luks_uuid_ok_when_membership_admits_all_uuids() {
+        let (_dir, paths) = isolated_paths();
+        save_doctor_membership(
+            &paths,
+            &[(172, "disk1", "/dev/disk/by-id/virtio-disk1", Some(1))],
+        );
+        let known_uuid = test_uuid(172);
+        let runner = foreign_luks_uuid_runner(vec![("braid-disk1", 1, "/dev/vdb", known_uuid)]);
+        let fs = DoctorMockFs::mounted_btrfs_only();
+        let f = write_temp(valid_config_json());
+
+        let report = run_doctor(f.path(), &runner, &fs, &paths, human_options());
+
+        let check = find_check(&report, "foreign_luks_uuid");
+        assert_eq!(check.status, CheckStatus::Ok);
+        assert!(
+            check.message.contains("no foreign LUKS UUIDs"),
+            "unexpected message: {}",
+            check.message
+        );
+    }
+
+    // Intent: foreign_luks_uuid skips before probing when the pool is not
+    //   mounted.
+    // Why it exists: there is no live PoolState to compare while the NAS pool
+    //   is locked or offline.
+    // Scenario: an operator runs doctor before `braid unlock`.
+    #[test]
+    fn check_foreign_luks_uuid_skips_when_pool_not_mounted() {
+        let (mp_req, mp_out) = mountpoint_fail();
+        let runner = MockRunner::default().with_output(mp_req, mp_out);
+        let fs = DoctorMockFs::empty();
+        let f = write_temp(valid_config_json());
+
+        let report = run_doctor(f.path(), &runner, &fs, &isolated_paths().1, human_options());
+
+        let check = find_check(&report, "foreign_luks_uuid");
+        assert_eq!(check.status, CheckStatus::Skip);
+        assert_eq!(check.message, "skipped (pool not mounted)");
+    }
+
+    // Intent: foreign_luks_uuid skips when pool.json has not been created.
+    // Why it exists: first-time setup should not warn about foreign UUIDs until
+    //   braid has authoritative membership to compare against.
+    // Scenario: the mountpoint is present but no braid add/discover write has
+    //   created /var/lib/braid/pool.json yet.
+    #[test]
+    fn check_foreign_luks_uuid_skips_when_membership_missing() {
+        let (mp_req, mp_out) = mountpoint_ok();
+        let runner = MockRunner::default().with_output(mp_req, mp_out);
+        let fs = DoctorMockFs::mounted_btrfs_only();
+        let f = write_temp(valid_config_json());
+
+        let report = run_doctor(f.path(), &runner, &fs, &isolated_paths().1, human_options());
+
+        let check = find_check(&report, "foreign_luks_uuid");
+        assert_eq!(check.status, CheckStatus::Skip);
+        assert_eq!(check.message, "skipped (no pool membership file)");
     }
 
     // Intent: human format includes the "missing devs" label.
@@ -2429,7 +2881,13 @@ mod tests {
             .with_output(df_req, df_out)
             .with_output(du_req, du_out);
         let f = write_temp(valid_config_json());
-        let report = run_doctor(f.path(), &runner, &isolated_paths().1, human_options());
+        let report = run_doctor(
+            f.path(),
+            &runner,
+            &RealFilesystem,
+            &isolated_paths().1,
+            human_options(),
+        );
         let human = format_doctor_human(&report);
         assert!(
             human.contains("missing devs"),

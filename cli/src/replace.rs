@@ -839,9 +839,10 @@ impl ReplacePlan {
         let mut target_membership = target_membership;
         match probe_pool(runner, fs, config.mount_point()) {
             Ok(pool_after) => {
-                // Discard `EnrichmentReport.foreign` for now; doctor/status
-                // wiring is Phase 5. The function is fail-closed on
-                // foreign-UUID admission (no insert), so the discard is safe.
+                // EnrichmentReport.foreign is intentionally discarded here:
+                // braid doctor's foreign_luks_uuid check probes the live pool
+                // on demand and surfaces foreigners persistently, so the
+                // per-command report does not need its own consumer.
                 let _ = membership::enrich_from_pool_state(&mut target_membership, &pool_after)?;
             }
             Err(e) => crate::status_tag::emit_status(&format!(
