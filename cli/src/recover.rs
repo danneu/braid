@@ -3290,6 +3290,22 @@ where
         prior.as_ref(),
         by_id_resolver,
     )?;
+    let pre_names: std::collections::BTreeSet<_> = journal
+        .pre_membership
+        .names()
+        .map(|n| n.as_str().to_owned())
+        .collect();
+    let target_names: std::collections::BTreeSet<_> = journal
+        .target_membership
+        .names()
+        .map(|n| n.as_str().to_owned())
+        .collect();
+    let recovered_names: std::collections::BTreeSet<_> =
+        recovered.names().map(|n| n.as_str().to_owned()).collect();
+    eprintln!(
+        "note: {}",
+        recovery_guidance(&journal.op, &pre_names, &target_names, &recovered_names)
+    );
     membership::save_membership(&recovered, params.paths)?;
     eprintln!("pool.json written from committed replace membership.");
 
