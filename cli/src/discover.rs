@@ -166,20 +166,12 @@ pub fn drain_warnings<W: std::io::Write>(
 #[derive(Debug, thiserror::Error)]
 pub enum DiscoverWriteError {
     /// `pending-op.json` exists at the journal path -- the discover
-    /// `--write` cutover precondition fails closed instead of
-    /// overwriting `pool.json` mid-recovery (see
-    /// `docs/luks-unlock.md`).
+    /// `--write` precondition fails closed instead of overwriting
+    /// `pool.json` mid-recovery (see `docs/luks-unlock.md`).
     #[error(
         "discover refusing to write pool.json: pending-op.json exists at {path} -- run 'braid recover' first (see docs/luks-unlock.md)"
     )]
     PendingOpExists { path: String },
-    /// Existing `pool.json` on disk is in the old name-keyed shape.
-    /// The cutover runbook tells the operator to move it aside; the
-    /// gate enforces that instead of silently overwriting it.
-    #[error(
-        "discover refusing to write pool.json: existing file at {path} is not in UUID-keyed format -- back it up and move it aside before retrying (see docs/luks-unlock.md)"
-    )]
-    NameKeyedPoolJson { path: String },
     /// Existing `pool.json` on disk is already a healthy UUID-keyed
     /// membership. `discover --write` would clobber persisted
     /// `DiskMember.devid` bindings, which are decision 024's authorized
@@ -203,7 +195,7 @@ pub enum DiscoverWriteError {
     },
     /// `--expect-count <N>` was set and discovery produced a member
     /// count other than `N`. Catches partial-attach and unintended
-    /// extra-disk hazards during the cutover runbook.
+    /// extra-disk hazards during rebuilds.
     #[error(
         "discover refusing to write pool.json: expected exactly {expected} members, found {actual} -- check that all intended pool members are attached and readable, and that no unrelated braid-labeled disks are attached, then retry"
     )]
@@ -232,19 +224,17 @@ pub fn discover_pool_members<R: CommandRunner>(runner: &R) -> DiscoverScan {
 
 /// Classifies an existing pool.json by shape for discover's gating.
 /// A valid UUID-keyed file is only recognized by a successful
-/// `PoolMembership` load; everything else that is neither missing nor
-/// legacy name-keyed is treated as corrupt.
+/// `PoolMembership` load; everything else that is not missing is
+/// treated as corrupt.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum PoolJsonShape {
     Missing,
-    LegacyNameKeyed,
     ValidUuidKeyed,
     Corrupt,
 }
 
-/// Classifies pool.json through the canonical loader before falling
-/// back to the legacy-shape sniff required by read-only migration
-/// previews.
+/// Classifies pool.json through the canonical loader before routing
+/// loader failures into the generic corrupt-state rebuild path.
 pub fn classify_pool_json(path: &Path) -> PoolJsonShape {
     match crate::membership::load_membership_from(path) {
         Ok(_) => PoolJsonShape::ValidUuidKeyed,
@@ -253,32 +243,8 @@ pub fn classify_pool_json(path: &Path) -> PoolJsonShape {
         {
             PoolJsonShape::Missing
         }
-        Err(_) => {
-            if is_legacy_name_keyed_shape(path) {
-                PoolJsonShape::LegacyNameKeyed
-            } else {
-                PoolJsonShape::Corrupt
-            }
-        }
+        Err(_) => PoolJsonShape::Corrupt,
     }
-}
-
-/// Last-resort sniff for the pre-LUKS-UUID name-keyed shape. The
-/// canonical loader intentionally fails closed on legacy keys, but
-/// discover preview needs this narrow positive identification.
-fn is_legacy_name_keyed_shape(path: &Path) -> bool {
-    let Ok(raw) = std::fs::read_to_string(path) else {
-        return false;
-    };
-    let Ok(value) = serde_json::from_str::<serde_json::Value>(&raw) else {
-        return false;
-    };
-
-    let Some(disks) = value.get("disks").and_then(|v| v.as_object()) else {
-        return false;
-    };
-
-    disks.keys().any(|key| LuksUuid::parse(key).is_err())
 }
 
 /// Build a `LabelCollision` error from two colliding by-id paths.
@@ -572,15 +538,13 @@ fn discover_from_dir_inner<R: CommandRunner>(
 }
 
 /// Apply discover's `--write` pre-save fail-closed gates and persist
-/// the discovered membership. The four gates pinned in the plan must
+/// the discovered membership. The three gates pinned in the plan must
 /// fire BEFORE any `save_membership` call:
 /// 1. `pending-op.json` must not exist (covered by `PendingOpExists`).
-/// 2. Existing `pool.json` must not be in the legacy name-keyed shape
-///    (covered by `NameKeyedPoolJson`).
-/// 3. Existing `pool.json` must not be a healthy UUID-keyed membership
+/// 2. Existing `pool.json` must not be a healthy UUID-keyed membership
 ///    (covered by `ValidUuidKeyed`). `Corrupt` is intentionally allowed
 ///    -- it is the documented rebuild remediation per decision 017.
-/// 4. When `pool.json` is `Corrupt`, the forensic snapshot to
+/// 3. When `pool.json` is `Corrupt`, the forensic snapshot to
 ///    `pool.json.corrupt-<RFC3339-UTC>` must succeed before rebuild
 ///    proceeds (covered by `CorruptSidecarFailed`). The sidecar is
 ///    written after `expected_count` validates, so a count-mismatch
@@ -588,8 +552,9 @@ fn discover_from_dir_inner<R: CommandRunner>(
 ///    going to be overwritten.
 ///
 /// When `expected_count` is set, the gate refuses if the produced
-/// membership count is not exactly `expected_count` (cutover
-/// partial-attach and unintended-extra-disk guard).
+/// membership count is not exactly `expected_count`, catching a
+/// momentarily detached disk or stray braid-labeled disk during any
+/// `discover --write` rebuild.
 ///
 /// On success returns the saved `PoolMembership`. The accepting CLI
 /// arm at `main.rs:707` consumes both `warnings` (printed before this
@@ -608,11 +573,6 @@ pub fn write_discovered_membership(
 
     let pool_json_path = paths.pool_json();
     let needs_corrupt_sidecar = match classify_pool_json(&pool_json_path) {
-        PoolJsonShape::LegacyNameKeyed => {
-            return Err(DiscoverWriteError::NameKeyedPoolJson {
-                path: pool_json_path.display().to_string(),
-            });
-        }
         PoolJsonShape::ValidUuidKeyed => {
             return Err(DiscoverWriteError::ValidUuidKeyed {
                 path: pool_json_path.display().to_string(),
@@ -1795,7 +1755,7 @@ mod tests {
 
     /// Intent: write_discovered_membership refuses when pending-op.json
     /// exists; no save_membership call happens; pool.json is untouched.
-    /// Why: the cutover precondition gate from plan 2849-2887.
+    /// Why: the write precondition gate from plan 2849-2887.
     /// Scenario: seed 804.
     #[test]
     fn discover_write_refuses_when_pending_op_exists() {
@@ -1823,31 +1783,45 @@ mod tests {
         );
     }
 
-    /// Intent: write_discovered_membership refuses when on-disk
-    /// pool.json is in old name-keyed shape; no save happens; the
-    /// existing file is byte-for-byte unchanged.
-    /// Why: the cutover schema-sniff gate from plan 2888-2920.
-    /// Scenario: seed 805 -- operator forgot step 4 of the runbook.
+    /// Intent: write_discovered_membership treats a non-UUID-keyed
+    /// pool.json as corrupt, rebuilds it, and preserves the original
+    /// bytes in an adjacent sidecar.
+    /// Why: all non-current membership shapes should use the generic
+    /// corrupt rebuild path instead of a special refusal.
+    /// Scenario: an obsolete state file is still present when the operator
+    /// runs discover --write with all intended pool members attached.
     #[test]
-    fn discover_write_refuses_when_pool_json_is_name_keyed() {
+    fn discover_write_rebuilds_and_snapshots_when_pool_json_has_non_uuid_keys() {
         let root = tempfile::tempdir().unwrap();
         let paths = StatePaths::custom(root.path().to_path_buf());
-        // Synthetic old-shape pool.json: top-level keys are disk names,
-        // not UUIDs.
-        let stale = r#"{"disks":{"toshiba1":{"by_id":"/dev/disk/by-id/ata-X"}}}"#;
+        let stale = r#"{"disks":{"toshiba1":{"by_id":"/dev/disk/by-id/ata-X","devid":1}}}"#;
         std::fs::write(paths.pool_json(), stale).unwrap();
+        let pool_json_pre = std::fs::read(paths.pool_json()).unwrap();
 
-        let err = write_discovered_membership(PoolMembership::empty(), &paths, None)
-            .expect_err("must refuse with NameKeyedPoolJson");
-        let msg = err.to_string();
-        assert!(
-            msg.contains("is not in UUID-keyed format -- back it up and move it aside"),
-            "got: {msg}"
-        );
-        let pool_json_post = std::fs::read_to_string(paths.pool_json()).unwrap();
         assert_eq!(
-            pool_json_post, stale,
-            "name-keyed pool.json must be byte-for-byte unchanged after refusal"
+            classify_pool_json(&paths.pool_json()),
+            PoolJsonShape::Corrupt
+        );
+
+        let saved = write_discovered_membership(discovered_members(&["disk1"]), &paths, None)
+            .expect("expected non-UUID-keyed pool.json to be rebuilt");
+        assert_eq!(saved.len(), 1);
+        assert_eq!(
+            classify_pool_json(&paths.pool_json()),
+            PoolJsonShape::ValidUuidKeyed
+        );
+
+        let sidecars = corrupt_sidecars(root.path());
+        assert_eq!(sidecars.len(), 1, "expected exactly one sidecar");
+        assert!(
+            is_pool_json_corrupt_rfc3339_sidecar(&sidecars[0]),
+            "sidecar name should be pool.json.corrupt-<YYYY-MM-DDTHH:MM:SSZ>: {:?}",
+            sidecars[0]
+        );
+        assert_eq!(
+            std::fs::read(&sidecars[0]).unwrap(),
+            pool_json_pre,
+            "sidecar must preserve the original bytes"
         );
     }
 
@@ -2055,24 +2029,6 @@ mod tests {
         );
     }
 
-    // Intent: pre-LUKS-UUID name-keyed pool.json classifies as legacy.
-    // Why it exists: read-only discover must preserve the migration
-    //   preview and hint for old state files.
-    // Scenario: an operator previews discover before moving the legacy
-    //   pool.json aside.
-    #[test]
-    fn classify_pool_json_returns_legacy_name_keyed_for_name_keyed_shape() {
-        let root = tempfile::tempdir().unwrap();
-        let paths = StatePaths::custom(root.path().to_path_buf());
-        let stale = r#"{"disks":{"toshiba1":{"by_id":"/dev/disk/by-id/ata-X"}}}"#;
-        std::fs::write(paths.pool_json(), stale).unwrap();
-
-        assert_eq!(
-            classify_pool_json(&paths.pool_json()),
-            PoolJsonShape::LegacyNameKeyed
-        );
-    }
-
     // Intent: loadable UUID-keyed pool.json classifies as ValidUuidKeyed.
     // Why it exists: the "use braid add" refusal is correct only when
     //   the canonical membership loader accepts the file.
@@ -2205,8 +2161,8 @@ mod tests {
     /// Intent: write_discovered_membership refuses when
     /// --expect-count exceeds the produced membership size and does
     /// not call save_membership.
-    /// Why: the cutover exact-count guard must catch partial attach.
-    /// Scenario: runbook step with a momentarily detached disk.
+    /// Why: the exact-count guard must catch partial attach.
+    /// Scenario: rebuild with a momentarily detached disk.
     #[test]
     fn discover_write_refuses_when_count_mismatches_below() {
         let root = tempfile::tempdir().unwrap();
@@ -2243,9 +2199,9 @@ mod tests {
     /// Intent: write_discovered_membership refuses when
     /// --expect-count is lower than the produced membership size and
     /// does not call save_membership.
-    /// Why: the cutover exact-count guard must catch unrelated
+    /// Why: the exact-count guard must catch unrelated
     /// braid-labeled disks that would otherwise be admitted.
-    /// Scenario: runbook step with an extra recovery disk attached.
+    /// Scenario: rebuild with an extra recovery disk attached.
     #[test]
     fn discover_write_refuses_when_count_mismatches_above() {
         let root = tempfile::tempdir().unwrap();

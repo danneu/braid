@@ -288,11 +288,11 @@ struct DiscoverArgs {
     #[arg(long)]
     write: bool,
     /// Fail closed unless discovery produces exactly N members.
-    /// Used by the LUKS-UUID-as-identity cutover runbook (see
-    /// docs/luks-unlock.md): pre-record the expected count from the
-    /// existing pool.json, then pass it here so a momentarily detached
-    /// disk (loose cable, USB power glitch, udev race) or extra
-    /// braid-labeled disk cannot silently produce the wrong pool.json.
+    /// Use as a guard for any discover --write rebuild where the
+    /// expected member count is known ahead of time, so a momentarily
+    /// detached disk (loose cable, USB power glitch, udev race) or
+    /// extra braid-labeled disk cannot silently produce the wrong
+    /// pool.json.
     /// Only honored alongside --write.
     #[arg(long = "expect-count", value_name = "N")]
     expect_count: Option<usize>,
@@ -773,27 +773,16 @@ fn main() {
         Commands::Discover(args) => {
             // Note: the pre-save fail-closed gates for `--write`
             // (pending-op presence + pool.json shape check that refuses
-            // both `LegacyNameKeyed` and `ValidUuidKeyed`; `Corrupt` is
-            // the documented rebuild path per decision 017) live inside
+            // `ValidUuidKeyed`; `Corrupt` is the documented rebuild path
+            // per decision 017) live inside
             // `discover::write_discovered_membership`. The bare read-only
-            // path reuses the shape classifier so operators can preview
-            // legacy cutovers before moving the old state file aside.
+            // path reuses the shape classifier so corrupt or unreadable
+            // state fails closed with rebuild guidance.
             let pool_json = paths.pool_json();
             let shape = braid_cli::discover::classify_pool_json(&pool_json);
             if !args.write {
                 match shape {
-                    braid_cli::discover::PoolJsonShape::Missing
-                    | braid_cli::discover::PoolJsonShape::LegacyNameKeyed => {
-                        if matches!(shape, braid_cli::discover::PoolJsonShape::LegacyNameKeyed) {
-                            eprintln!(
-                                "note: legacy name-keyed pool.json detected at {} -- \
-                                 this is the pre-migration shape. Run 'braid discover \
-                                 --write --expect-count N' after moving it aside (see \
-                                 docs/luks-unlock.md).",
-                                pool_json.display()
-                            );
-                        }
-                    }
+                    braid_cli::discover::PoolJsonShape::Missing => {}
                     braid_cli::discover::PoolJsonShape::ValidUuidKeyed => {
                         print_cli_error(&format!(
                             "pool.json already exists at {} -- use 'braid add' to add disks",

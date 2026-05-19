@@ -21,15 +21,14 @@ use thiserror::Error;
 // MembershipError
 // ---------------------------------------------------------------------------
 
-/// Errors raised by the membership module. The variant inventory is pinned
-/// by the LUKS-UUID-identity migration plan: every error path that bubbles
-/// up to `Display` lands in exactly one of these five shapes so operator
-/// remediation wording is enumerable.
+/// Errors raised by the membership module. The variant inventory is pinned:
+/// every error path that bubbles up to `Display` lands in exactly one of
+/// these five shapes so operator remediation wording is enumerable.
 #[derive(Debug, Error)]
 pub enum MembershipError {
     /// `pool.json` exists but cannot be parsed -- bad UUID key, stale
     /// value-side field, unknown top-level key, etc. The display string is
-    /// pinned so the cutover and recovery docs can quote it verbatim.
+    /// pinned so the recovery docs can quote it verbatim.
     #[error(
         "pool membership file corrupt at {path}: {detail} -- run 'braid discover --write' to rebuild from existing disks (with all intended pool members attached; see docs/luks-unlock.md)"
     )]
@@ -1020,9 +1019,9 @@ mod tests {
     // ----- Load-time enforcement -------------------------------------------
 
     #[test]
-    fn load_membership_rejects_old_name_keyed_format() {
-        // Intent: a pool.json with disk-name top-level keys fails to load
-        //   with the pinned Corrupt remediation suffix.
+    fn load_membership_rejects_non_uuid_top_level_keys() {
+        // Intent: a pool.json with non-UUID top-level disk keys fails to
+        //   load with the pinned Corrupt remediation suffix.
         let tmp = tempfile::TempDir::new().unwrap();
         let path = tmp.path().join("pool.json");
         std::fs::write(

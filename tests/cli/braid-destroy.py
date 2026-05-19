@@ -3,10 +3,9 @@
 # What: Exercises scripts/braid-destroy.sh end-to-end. Happy path builds a
 # 2-disk RAID1 pool, runs the script, and confirms the pool is unmounted,
 # mappers closed, LUKS headers wiped, and /var/lib/braid gone. Three
-# negative paths each point pool.json at a shape the shell validator must
-# reject (old name-keyed shape, missing name, empty by_id, empty .disks,
-# missing file), and confirm the script aborts before running braid lock
-# or rm -rf.
+# negative paths each point pool.json at a shape the shell validator must reject
+# (non-UUID-keyed shape, missing name, empty by_id, empty .disks, missing file),
+# and confirm the script aborts before running braid lock or rm -rf.
 #
 # Why: After commit 74feca5, braid-destroy.sh silently no-op'd the wipe
 # loop and left LUKS signatures on every disk while still deleting local
@@ -88,9 +87,9 @@ with subtest("happy path: destroys live pool"):
     machine.fail("test -e /dev/mapper/braid-disk2")
 
 
-# --- Scenario 2: old name-keyed pool.json rejects before braid lock runs ---
+# --- Scenario 2: non-UUID-keyed pool.json rejects before braid lock runs ---
 
-with subtest("old name-keyed pool.json rejects before lock"):
+with subtest("non-UUID-keyed pool.json rejects before lock"):
     build_pool()
     write_pool_json(
         '{"disks":{"disk1":{"name":"disk1","by_id":"/dev/disk/by-id/virtio-disk1"}}}'

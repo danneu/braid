@@ -10,7 +10,7 @@ Scans `/dev/disk/by-id/` for LUKS devices with `braid-*` labels, reads their LUK
 - You're migrating disks to a new machine and need to rebuild pool state.
 - You want to verify which braid-labeled LUKS devices the system can see.
 
-The normal path for adding disks is `braid add`. Use `discover` when `pool.json` is missing or corrupt, or to migrate the legacy name-keyed shape -- see the runbook in `docs/luks-unlock.md`.
+The normal path for adding disks is `braid add`. Use `discover` when `pool.json` is missing or corrupt.
 
 ## Basic example
 
@@ -36,8 +36,8 @@ Write the discovered membership to pool.json:
 sudo braid discover --write
 ```
 
-During a cutover from an old state file, fail closed if the discovered member
-count is not exactly the expected count:
+If you can name the expected member count ahead of time, pass it as a
+fail-closed guard against a detached disk or stray braid-labeled disk:
 
 ```
 sudo braid discover --write --expect-count 3
@@ -53,7 +53,7 @@ sudo braid discover --write --expect-count 3
 ## What happens under the hood
 
 1. Checks for a pending operation journal (refuses if one exists).
-2. Refuses on a healthy UUID-keyed `pool.json` (bare and `--write`). Refuses on a legacy name-keyed `pool.json` for `--write`; bare `discover` prints a migration hint and continues as a preview. A corrupt or off-schema `pool.json` is the documented rebuild path: bare `discover` prints the rebuild remediation, and `discover --write` writes a forensic `pool.json.corrupt-<RFC3339-UTC>` snapshot adjacent to the new file, then rebuilds. If the snapshot cannot be written (full disk, read-only state directory), `discover --write` refuses rather than destroy the corrupt original.
+2. Refuses on a healthy UUID-keyed `pool.json` (bare and `--write`). A corrupt or off-schema `pool.json` is the documented rebuild path: bare `discover` prints the rebuild remediation, and `discover --write` writes a forensic `pool.json.corrupt-<RFC3339-UTC>` snapshot adjacent to the new file, then rebuilds. If the snapshot cannot be written (full disk, read-only state directory), `discover --write` refuses rather than destroy the corrupt original.
 3. Reads all entries in `/dev/disk/by-id/`, skipping partition entries (e.g., `ata-TOSHIBA-part1`).
 4. Resolves each by-id symlink to its canonical kernel device. Skips with a `cannot canonicalize` warning when the symlink is dangling (e.g., udev didn't clean up after a disk removal).
 5. For each entry, runs `cryptsetup isLuks` to check if it's a LUKS device.
@@ -67,7 +67,7 @@ sudo braid discover --write --expect-count 3
 
 ## Safety checks
 
-- Refuses any operation on a healthy UUID-keyed `pool.json`. Corrupt or off-schema files are allowed for `--write` rebuild only; the original is copied to `pool.json.corrupt-<RFC3339-UTC>` before overwrite, and `--write` refuses if that snapshot cannot be written (full disk, read-only state directory). (Run with all intended pool members attached; see `docs/luks-unlock.md`.) Legacy name-keyed files are allowed only for read-only preview.
+- Refuses any operation on a healthy UUID-keyed `pool.json`. Corrupt or off-schema files are allowed for `--write` rebuild only; the original is copied to `pool.json.corrupt-<RFC3339-UTC>` before overwrite, and `--write` refuses if that snapshot cannot be written (full disk, read-only state directory). Run with all intended pool members attached; see `docs/luks-unlock.md`.
 - Refuses if a pending operation journal (`pending-op.json`) exists -- run `braid recover` to reconcile.
 - Refuses if another braid operation is in progress (`/run/braid-pool.lock` is held by another wrapper) -- retry once it finishes.
 - With `--expect-count`, refuses to write if the discovered member count is not exactly the requested count.

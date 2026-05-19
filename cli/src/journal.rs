@@ -795,11 +795,10 @@ mod tests {
     // deny_unknown_fields + Parse error remediation
     // -------------------------------------------------------------------
 
-    /// Old name-keyed journal shape (a `targets` map with disk-name string
-    /// keys) returns `JournalError::Parse` whose Display contains the
-    /// pinned remediation phrase verbatim.
+    /// Non-UUID-keyed journal targets return `JournalError::Parse`
+    /// whose Display contains the pinned remediation phrase verbatim.
     #[test]
-    fn old_name_keyed_targets_fails_parse_with_remediation_phrase() {
+    fn non_uuid_keyed_targets_fails_parse_with_remediation_phrase() {
         let tmp = tempfile::TempDir::new().unwrap();
         let paths = StatePaths::custom(tmp.path().into());
         // A targets map keyed by disk name, not UUID. LuksUuidMap's

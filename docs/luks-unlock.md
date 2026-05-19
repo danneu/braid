@@ -158,16 +158,10 @@ The snapshot is a hard precondition for the rebuild: if it cannot be written
 `failed to snapshot existing corrupt file to ...` so the corrupt original is
 not destroyed; free disk space or fix permissions and retry. The sidecar is
 safe to remove once you have manually copied any still-relevant prior-binding
-bytes (e.g. `devid` for a `null_underlying` member). During a single-user
-cutover, pass `--expect-count` with the member count from the old file so a
-temporarily detached disk cannot silently produce a smaller membership and an
-unrelated braid-labeled disk cannot be silently admitted.
-
-For a **legacy name-keyed** `pool.json` (pre-UUID-identity migration),
-`discover --write` refuses with an explicit move-aside message. Back up the
-file and move it aside with
-`mv /var/lib/braid/pool.json /var/lib/braid/pool.json.legacy` before running
-`braid discover --write`.
+bytes (e.g. `devid` for a `null_underlying` member). If you know the expected
+member count ahead of time, pass
+`--expect-count <N>` to fail closed against a temporarily detached disk or an
+unrelated braid-labeled disk being silently admitted.
 
 For a **healthy UUID-keyed** `pool.json`, do not run `discover --write` at all
 -- use `braid add` / `braid remove` / `braid replace` to mutate membership.

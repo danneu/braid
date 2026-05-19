@@ -71,9 +71,8 @@ one.
 
 ## Concrete Improvements
 
-- **Membership shape is simpler.** The old model had a name-keyed map plus
-  value-side fields that could be mistaken for identity. The new model has one
-  identity axis: UUID keys map to name/by-id/devid metadata.
+- **Membership shape is simpler.** Membership has one identity axis: UUID keys
+  map to name/by-id/devid metadata.
 - **Formatting is crash-replayable.** Fresh `add` and `replace` paths generate
   the UUID before mutation, journal it, and pass it to cryptsetup. Recovery can
   tell whether it is seeing the exact LUKS container that the interrupted plan
@@ -161,9 +160,9 @@ one.
 
 ## Tests That Enforce This
 
-- `cli/src/membership.rs` unit tests pin UUID-keyed `pool.json`, reject old
-  name-keyed maps, reject stale value-side `luks_uuid`, and enforce duplicate
-  checks across UUID, name, by-id, and devid axes.
+- `cli/src/membership.rs` unit tests pin UUID-keyed `pool.json`, reject stale
+  value-side `luks_uuid`, and enforce duplicate checks across UUID, name,
+  by-id, and devid axes.
 - `cli/src/types.rs` and `cli/src/cmd.rs` unit tests reject user-supplied
   `--uuid`/`--label` extras and pin the structured
   `cryptsetup luksFormat --uuid <uuid> --label <label>` argv order.
@@ -215,9 +214,6 @@ one.
 
 ## Consequences
 
-- Old name-keyed `pool.json` and old journal shapes are rejected rather than
-  migrated. Braid is unreleased, so operators cut over by rebuilding membership
-  with `braid discover --write`.
 - `pool.json` key order is UUID order, not disk-name order. Display surfaces
   that need stable operator ordering must sort by `DiskName`.
 - Recovery trusts journaled UUID-keyed membership snapshots for phase-specific

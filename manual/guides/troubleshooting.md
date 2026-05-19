@@ -34,10 +34,18 @@ sudo braid unlock
 
 `discover` scans `/dev/disk/by-id/` for LUKS devices with `braid-*` labels and reconstructs the membership file. See [Recovery scenarios](recovery-scenarios.md) for details.
 
-**Note:** Bare `discover` previews when the existing pool.json is the legacy name-keyed shape. If pool.json exists in the new UUID-keyed shape, or any shape discover cannot identify, remove it first:
+**Note:** If `pool.json` is corrupt or unreadable, run `braid discover --write`
+directly. The rebuild path automatically preserves the original bytes at
+`pool.json.corrupt-<RFC3339-UTC>` before overwriting the file; do not remove it
+first.
+
+If `pool.json` is healthy and UUID-keyed, `discover --write` refuses on
+purpose. Use `braid add` / `braid remove` / `braid replace` for normal
+membership changes. If you have deliberately decided to re-discover instead,
+move the file aside before running `discover --write`:
 
 ```sh
-sudo rm /var/lib/braid/pool.json
+sudo mv /var/lib/braid/pool.json /var/lib/braid/pool.json.manual-backup
 sudo braid discover --write
 ```
 

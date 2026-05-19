@@ -54,11 +54,11 @@ sudo braid discover --write
 
 This creates `/var/lib/braid/pool.json`.
 
-During a single-user cutover from an old state file, record the old member
-count first and pass it as a fail-closed guard:
+If you can name the expected member count ahead of time, record it from your
+own records or prior `braid status` output and pass it as a fail-closed guard:
 
 ```sh
-EXPECTED=$(jq '.disks | length' /var/lib/braid/pool.json.old)
+EXPECTED=3
 sudo braid discover --write --expect-count="$EXPECTED"
 ```
 
@@ -70,7 +70,7 @@ sudo braid unlock
 
 ### Notes
 
-- Bare `discover` previews when the existing `pool.json` is the legacy name-keyed shape. For a healthy UUID-keyed `pool.json`, `discover --write` refuses -- use `braid add` / `braid remove` / `braid replace` to mutate membership instead.
+- For a healthy UUID-keyed `pool.json`, `discover --write` refuses -- use `braid add` / `braid remove` / `braid replace` to mutate membership instead.
 - For a corrupt or off-schema existing `pool.json`, `discover --write` rebuilds in place; no manual remove step is needed. The original bytes are preserved at `pool.json.corrupt-<RFC3339-UTC>` adjacent to the new file in case manual forensic recovery is needed (e.g. extracting a `devid` for a `null_underlying` member). The snapshot is a hard precondition: if it cannot be written (full disk, read-only state directory), `discover --write` refuses rather than destroy the corrupt original; free disk space or fix permissions and retry.
 - `discover` refuses to run if pending-op.json exists. Use `braid recover` instead.
 - `discover` only finds LUKS2 devices. LUKS1 devices with braid labels are skipped with a warning.
