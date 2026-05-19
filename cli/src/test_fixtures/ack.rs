@@ -33,6 +33,27 @@ impl CommandRunner for AckPanicRunner {
     }
 }
 
+/// No-filesystem-access sentinel for ack branches that must run before probe.
+pub(crate) struct AckPanicFilesystem;
+
+impl Filesystem for AckPanicFilesystem {
+    fn exists(&self, path: &str) -> bool {
+        panic!("sentinel-only retry must not touch the filesystem; got exists({path})");
+    }
+
+    fn is_block_device(&self, path: &str) -> bool {
+        panic!("sentinel-only retry must not touch the filesystem; got is_block_device({path})");
+    }
+
+    fn read_to_string(&self, path: &str) -> Result<String, std::io::Error> {
+        panic!("sentinel-only retry must not touch the filesystem; got read_to_string({path})");
+    }
+
+    fn list_dir(&self, path: &str) -> Result<Vec<String>, std::io::Error> {
+        panic!("sentinel-only retry must not touch the filesystem; got list_dir({path})");
+    }
+}
+
 struct AckMountinfoFs {
     mountinfo: &'static str,
 }

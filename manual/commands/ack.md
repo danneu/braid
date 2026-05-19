@@ -40,6 +40,8 @@ no active alerts
 5. Removes the alert latch file (`alert-latch.json`).
 6. Removes the corrupt-latch sidecar (`alert-latch.json.corrupt`) if present.
 
+On a cleanup I/O error, ack preserves retry state so the next `braid ack` resumes cleanup after the I/O fault is fixed.
+
 If the pool is offline but alerts exist (e.g., a latched smartd alert), ack still clears the latch and flag without snapshotting device stats. Offline means there is no mount at the configured mount point. If that path is occupied by a non-btrfs filesystem, `braid ack` returns a probe error naming the fstype and preserves `alert-latch.json`, `smartd-alert`, and `acked-stats.json`.
 
 ## Flags

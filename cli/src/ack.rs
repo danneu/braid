@@ -23,14 +23,15 @@ fn cmd_ack_impl<R: CommandRunner, F: Filesystem + ?Sized>(
     paths: &StatePaths,
     stop_beeper: &dyn Fn(),
 ) -> Result<(), AckError> {
-    // Snapshot the gating inputs (alert latch + smartd flag) before probing
-    // the pool. Both feed the "is there an alert?" decision and the
-    // snapshot-scoped cleanup decision. probe_pool_alerts still has per-disk
-    // shell-outs, so the asynchronous smartd hook can fire during it; reading
-    // smartd after the probe would let a hook firing during the probe either
-    // flip an empty-latch gate or get swallowed by cleanup. An
-    // unreadable latch counts as active for gating so the user can clear a
-    // corrupt file even with the pool offline.
+    // Snapshot the gating inputs (alert latch + smartd flag + cleanup-pending
+    // sentinel) before probing the pool. They feed the "is there an alert?"
+    // decision, the cleanup-only retry branch, and the snapshot-scoped cleanup
+    // decision. probe_pool_alerts still has per-disk shell-outs, so the
+    // asynchronous smartd hook can fire during it; reading smartd after the
+    // probe would let a hook firing during the probe either flip an
+    // empty-latch gate or get swallowed by cleanup. An unreadable latch counts
+    // as active for gating so the user can clear a corrupt file even with the
+    // pool offline.
     let (latch_state, latch_corrupt) = match alert::load_alert_latch(paths) {
         Ok(Some(s)) => (Some(s), false),
         Ok(None) => (None, false),
@@ -44,8 +45,17 @@ fn cmd_ack_impl<R: CommandRunner, F: Filesystem + ?Sized>(
         .map(|s| s.causes.as_slice())
         .unwrap_or(&[]);
     let smartd_active = alert::smartd_alert_active(paths);
+    let cleanup_pending = alert::alert_cleanup_pending(paths);
     let latch_had_smartd = causes.iter().any(|c| matches!(c, AlertCause::SmartdAlert));
     let remove_smartd = smartd_active || latch_had_smartd;
+
+    if cleanup_pending && causes.is_empty() && !smartd_active && !latch_corrupt {
+        if let Err(e) = cleanup_alert_files_and_beeper(paths, stop_beeper, false) {
+            return Err(AckError::CleanupFailed(e));
+        }
+        println!("acknowledged current alerts");
+        return Ok(());
+    }
 
     // 2. Check if pool is mounted
     let pool = match probe_pool_alerts(runner, fs, mount_point) {
@@ -177,6 +187,14 @@ fn ack_offline(
 /// latch carried a `SmartdAlert` cause. A flag that arrives after a snapshot
 /// with neither condition is left for the next monitor cycle.
 ///
+/// Cleanup marks `alert-cleanup-pending` after `stop_beeper` and before any
+/// destructive removal. The removals then run in smartd-flag, latch,
+/// corrupt-sidecar order so ADR 014's forensic sidecar is the last destructive
+/// step. The marker is cleared only after every removal succeeds. If marker
+/// creation itself fails, no destructive removal has run and the original entry
+/// signals still drive retry; if a later step fails, the marker remains to
+/// drive the cleanup-only retry branch in `cmd_ack_impl`.
+///
 /// The `stop_beeper` parameter is the injected `&dyn Fn()` from
 /// `cmd_ack_impl`; callers must forward their own hook so tests can record
 /// beeper invocations.
@@ -186,11 +204,13 @@ fn cleanup_alert_files_and_beeper(
     remove_smartd: bool,
 ) -> Result<(), std::io::Error> {
     stop_beeper();
+    alert::mark_alert_cleanup_pending(paths)?;
     if remove_smartd {
         alert::remove_smartd_alert_flag(paths)?;
     }
     alert::remove_alert_latch(paths)?;
     alert::remove_alert_latch_corrupt(paths)?;
+    alert::clear_alert_cleanup_pending(paths)?;
     Ok(())
 }
 
@@ -252,11 +272,16 @@ pub enum AckError {
     #[error("I/O error: {0}")]
     Io(#[from] std::io::Error),
     /// Cleanup of latch + smartd-alert + corrupt-latch files failed after the
-    /// best-effort beeper stop hook had already run and ack had already
-    /// started persisting state: after `save_acked_stats` in the mounted path,
-    /// after offline missing-device ack state was persisted, or after one
-    /// cleanup file was already removed. Re-running `braid ack` after fixing
-    /// the I/O issue is idempotent.
+    /// best-effort beeper stop hook had already been attempted and ack had
+    /// already started persisting state: after `save_acked_stats` in the
+    /// mounted path, after offline missing-device ack state was persisted, or
+    /// after one cleanup file was already removed. Retry still has a signal:
+    /// if `mark_alert_cleanup_pending` failed, no destructive removal has run
+    /// and the original entry signals drive the regular ack path; if it
+    /// succeeded and a later step failed, the `alert-cleanup-pending` sentinel
+    /// drives the hoisted cleanup-only retry before probing or re-baselining.
+    /// Re-running `braid ack` after fixing the I/O issue is idempotent because
+    /// every cleanup removal is NotFound-tolerant.
     #[error(
         "alert state cleanup failed -- some files may be in a partial state; \
          fix the I/O error and re-run `braid ack`: {0}"
@@ -269,7 +294,7 @@ mod tests {
     use super::*;
     use crate::alert::{AckedDeviceCounters, AckedDisk, AckedStats, load_acked_stats};
     use crate::test_fixtures::{
-        AckPanicRunner, ack_fs_btrfs, ack_fs_ext4, ack_fs_not_mounted,
+        AckPanicFilesystem, AckPanicRunner, ack_fs_btrfs, ack_fs_ext4, ack_fs_not_mounted,
         ack_mounted_fs_that_touches_smartd, ack_mounted_probe_runner,
         ack_mounted_probe_runner_with_device_stats, ack_mp, ack_offline_fs_that_touches_smartd,
         ack_write_latch, isolated_paths,
@@ -651,7 +676,8 @@ mod tests {
      * error surfaces as "I/O error: <kind>" with no hint that re-running ack
      * will eventually clear the latch. Without the ordering pin, a failure
      * after latch removal can leave a retry behind the no-op gate with an
-     * unreached beeper-stop hook.
+     * unreached beeper-stop hook; the cleanup-pending sentinel now preserves
+     * the retry signal while the beeper-stop hook remains first.
      * Scenario: a directory sits at the corrupt-latch sidecar path (manual
      * tampering, leftover from a previous bug, or permission drift), so
      * remove_file fails with EISDIR/EPERM. The latch carried
@@ -698,6 +724,10 @@ mod tests {
         assert!(
             paths.alert_latch_corrupt().exists(),
             "cleanup poison directory must remain and prove where cleanup failed"
+        );
+        assert!(
+            paths.alert_cleanup_pending().is_file(),
+            "cleanup-pending sentinel must remain so retry re-enters cleanup"
         );
         assert_eq!(
             beeper_calls.get(),
@@ -748,10 +778,369 @@ mod tests {
             paths.smartd_alert().exists(),
             "cleanup poison directory must remain and prove where cleanup failed"
         );
+        assert!(
+            paths.alert_cleanup_pending().is_file(),
+            "cleanup-pending sentinel must remain after mark succeeds"
+        );
         assert_eq!(
             beeper_calls.get(),
             1,
             "stop_beeper must fire before the first cleanup remove_* fails"
+        );
+    }
+
+    // Intent: After cleanup_alert_files_and_beeper fails at
+    //   remove_alert_latch_corrupt, the alert-cleanup-pending sentinel remains
+    //   on disk, so the retry re-enters cleanup, re-invokes the stop hook, and
+    //   completes cleanup.
+    // Why it exists: c889f9c made stop_beeper run first but did not change the
+    //   removal order. The retry on a poisoned corrupt sidecar still hit the
+    //   mounted no-op gate because the latch JSON had already been removed.
+    //   The sentinel preserves the retry signal without moving the corrupt
+    //   sidecar's destructive step, which would break ADR 014's forensic
+    //   guarantee.
+    // Scenario: monitor latched BtrfsDeviceErrors{devid:1}. A directory sits
+    //   at alert-latch.json.corrupt. `braid ack` returns CleanupFailed.
+    //   Operator removes the directory and re-runs `braid ack`.
+    #[test]
+    fn cmd_ack_mounted_retry_after_cleanup_failed_completes_recovery() {
+        let (_dir, paths) = isolated_paths();
+        ack_write_latch(&paths, vec![AlertCause::BtrfsDeviceErrors { devid: 1 }]);
+        std::fs::create_dir(paths.alert_latch_corrupt()).unwrap();
+
+        let runner = ack_mounted_probe_runner_with_device_stats();
+        let beeper_calls_first = std::cell::Cell::new(0u32);
+        let beeper_first = || beeper_calls_first.set(beeper_calls_first.get() + 1);
+
+        let err = cmd_ack_impl(&runner, &ack_fs_btrfs(), &ack_mp(), &paths, &beeper_first)
+            .expect_err("first call must fail on the poisoned corrupt sidecar");
+        assert!(matches!(err, AckError::CleanupFailed(_)));
+        assert_eq!(
+            beeper_calls_first.get(),
+            1,
+            "stop hook must be invoked on the failing first call"
+        );
+        assert!(
+            paths.alert_cleanup_pending().is_file(),
+            "sentinel must remain on disk so retry re-enters cleanup"
+        );
+        assert!(paths.alert_latch_corrupt().exists(), "poison still wedged");
+
+        std::fs::remove_dir(paths.alert_latch_corrupt()).unwrap();
+
+        let beeper_calls_retry = std::cell::Cell::new(0u32);
+        let beeper_retry = || beeper_calls_retry.set(beeper_calls_retry.get() + 1);
+
+        let result = cmd_ack_impl(&runner, &ack_fs_btrfs(), &ack_mp(), &paths, &beeper_retry);
+        assert!(
+            result.is_ok(),
+            "retry must succeed after operator clears poison"
+        );
+        assert_eq!(
+            beeper_calls_retry.get(),
+            1,
+            "retry must re-invoke the stop hook"
+        );
+        assert!(
+            !paths.alert_cleanup_pending().exists(),
+            "retry must clear the sentinel"
+        );
+        assert!(!paths.alert_latch_corrupt().exists());
+    }
+
+    // Intent: After offline ack fails at the corrupt-sidecar removal, the
+    //   alert-cleanup-pending sentinel remains on disk and the latch has been
+    //   removed. The retry takes the hoisted cleanup-only branch before
+    //   probe_pool_alerts, re-invokes the stop hook, and completes cleanup.
+    // Why it exists: without the hoisted branch, this retry would land in
+    //   ack_offline's has_alert == false arm and return PoolNotMounted right
+    //   after the user followed the CleanupFailed recovery instruction.
+    // Scenario: pool offline, monitor latched MissingDevice{devid:1}. A
+    //   directory sits at alert-latch.json.corrupt. Operator runs `braid ack`,
+    //   gets CleanupFailed, removes the poison, and re-runs `braid ack`.
+    #[test]
+    fn ack_offline_retry_after_cleanup_failed_completes_recovery() {
+        let (_dir, paths) = isolated_paths();
+        ack_write_latch(&paths, vec![AlertCause::MissingDevice { devid: 1 }]);
+        std::fs::create_dir(paths.alert_latch_corrupt()).unwrap();
+
+        let beeper_calls_first = std::cell::Cell::new(0u32);
+        let beeper_first = || beeper_calls_first.set(beeper_calls_first.get() + 1);
+
+        let err = cmd_ack_impl(
+            &AckPanicRunner,
+            &ack_fs_not_mounted(),
+            &ack_mp(),
+            &paths,
+            &beeper_first,
+        )
+        .expect_err("first call must fail");
+        assert!(matches!(err, AckError::CleanupFailed(_)));
+        assert_eq!(
+            beeper_calls_first.get(),
+            1,
+            "stop hook must fire on the failing first call"
+        );
+        assert!(
+            paths.alert_cleanup_pending().is_file(),
+            "sentinel preserved on cleanup failure"
+        );
+        assert!(paths.alert_latch_corrupt().exists());
+
+        std::fs::remove_dir(paths.alert_latch_corrupt()).unwrap();
+
+        let beeper_calls_retry = std::cell::Cell::new(0u32);
+        let beeper_retry = || beeper_calls_retry.set(beeper_calls_retry.get() + 1);
+
+        let result = cmd_ack_impl(
+            &AckPanicRunner,
+            &ack_fs_not_mounted(),
+            &ack_mp(),
+            &paths,
+            &beeper_retry,
+        );
+        assert!(
+            result.is_ok(),
+            "offline retry must succeed after operator clears poison"
+        );
+        assert_eq!(
+            beeper_calls_retry.get(),
+            1,
+            "retry must re-invoke the stop hook"
+        );
+        assert!(
+            !paths.alert_cleanup_pending().exists(),
+            "retry must clear the sentinel"
+        );
+        assert!(!paths.alert_latch_corrupt().exists());
+        let acked = load_acked_stats(&paths);
+        assert!(acked.0.get("1").unwrap().missing_acked);
+    }
+
+    // Intent: When the entry alert signal is a smartd flag and no latch JSON
+    //   exists, a cleanup failure at remove_alert_latch_corrupt leaves the
+    //   sentinel on disk, so the retry re-enters cleanup even though smartd
+    //   was already removed during the first attempt.
+    // Why it exists: latch-backed retry tests still pass if a future refactor
+    //   narrows the sentinel to latch-present cases. This pins the smartd-only
+    //   path where neither a latch nor an active smartd flag survives the
+    //   first call's cleanup.
+    // Scenario: smartd hook fired but monitor has not run yet, so there is no
+    //   latch JSON. A directory sits at alert-latch.json.corrupt. Operator
+    //   clears that directory and re-runs `braid ack`.
+    #[test]
+    fn cmd_ack_mounted_smartd_only_retry_after_cleanup_failed_completes_recovery() {
+        let (_dir, paths) = isolated_paths();
+        std::fs::write(paths.smartd_alert(), b"").unwrap();
+        std::fs::create_dir(paths.alert_latch_corrupt()).unwrap();
+
+        let runner = ack_mounted_probe_runner_with_device_stats();
+        let beeper_calls_first = std::cell::Cell::new(0u32);
+        let beeper_first = || beeper_calls_first.set(beeper_calls_first.get() + 1);
+
+        let err = cmd_ack_impl(&runner, &ack_fs_btrfs(), &ack_mp(), &paths, &beeper_first)
+            .expect_err("first call must fail on the poisoned corrupt sidecar");
+        assert!(matches!(err, AckError::CleanupFailed(_)));
+        assert_eq!(
+            beeper_calls_first.get(),
+            1,
+            "stop hook must be invoked on the failing first call"
+        );
+        assert!(
+            !paths.smartd_alert().exists(),
+            "smartd flag was removed before the corrupt-sidecar step failed"
+        );
+        assert!(
+            paths.alert_cleanup_pending().is_file(),
+            "sentinel preserved on cleanup failure"
+        );
+        assert!(paths.alert_latch_corrupt().exists(), "poison still wedged");
+
+        std::fs::remove_dir(paths.alert_latch_corrupt()).unwrap();
+
+        let beeper_calls_retry = std::cell::Cell::new(0u32);
+        let beeper_retry = || beeper_calls_retry.set(beeper_calls_retry.get() + 1);
+
+        let result = cmd_ack_impl(&runner, &ack_fs_btrfs(), &ack_mp(), &paths, &beeper_retry);
+        assert!(
+            result.is_ok(),
+            "retry must succeed after operator clears poison"
+        );
+        assert_eq!(
+            beeper_calls_retry.get(),
+            1,
+            "retry must re-invoke the stop hook"
+        );
+        assert!(
+            !paths.alert_cleanup_pending().exists(),
+            "retry must clear the sentinel"
+        );
+        assert!(!paths.alert_latch_corrupt().exists());
+    }
+
+    // Intent: When the retry's only entry signal is the cleanup-pending
+    //   sentinel, cmd_ack_impl takes the hoisted sentinel-only branch before
+    //   probe_pool_alerts. The retry issues zero runner requests and does not
+    //   rewrite acked-stats.json.
+    // Why it exists: a sentinel-aware gate below probe_pool_alerts would
+    //   re-wedge cleanup on probe failure and could re-baseline new counters
+    //   that arrived after the failed first ack. The retry is finishing the
+    //   previous ack, not starting a new one.
+    // Scenario: a mounted ack saves a baseline, then cleanup fails at the
+    //   corrupt sidecar. Operator removes the directory; retry must complete
+    //   cleanup without re-querying btrfs.
+    #[test]
+    fn cmd_ack_mounted_sentinel_only_retry_does_not_query_btrfs_or_rewrite_baseline() {
+        let (_dir, paths) = isolated_paths();
+        ack_write_latch(&paths, vec![AlertCause::BtrfsDeviceErrors { devid: 1 }]);
+        std::fs::create_dir(paths.alert_latch_corrupt()).unwrap();
+
+        let runner = ack_mounted_probe_runner_with_device_stats();
+        let beeper_calls_first = std::cell::Cell::new(0u32);
+        let beeper_first = || beeper_calls_first.set(beeper_calls_first.get() + 1);
+
+        let err = cmd_ack_impl(&runner, &ack_fs_btrfs(), &ack_mp(), &paths, &beeper_first)
+            .expect_err("first call must fail on the poisoned corrupt sidecar");
+        assert!(matches!(err, AckError::CleanupFailed(_)));
+        let baseline_after_first = std::fs::read(paths.acked_stats_json()).unwrap();
+        let requests_after_first = runner.requests().len();
+
+        std::fs::remove_dir(paths.alert_latch_corrupt()).unwrap();
+
+        let beeper_calls_retry = std::cell::Cell::new(0u32);
+        let beeper_retry = || beeper_calls_retry.set(beeper_calls_retry.get() + 1);
+
+        let result = cmd_ack_impl(
+            &runner,
+            &AckPanicFilesystem,
+            &ack_mp(),
+            &paths,
+            &beeper_retry,
+        );
+        assert!(result.is_ok(), "retry must succeed without probing");
+
+        let retry_requests: Vec<_> = runner
+            .requests()
+            .into_iter()
+            .skip(requests_after_first)
+            .collect();
+        assert!(
+            retry_requests.is_empty(),
+            "sentinel-only retry must issue zero runner requests; got {retry_requests:?}"
+        );
+        let baseline_after_retry = std::fs::read(paths.acked_stats_json()).unwrap();
+        assert_eq!(
+            baseline_after_first, baseline_after_retry,
+            "sentinel-only retry must not rewrite acked-stats.json"
+        );
+        assert!(
+            !paths.alert_cleanup_pending().exists(),
+            "retry must clear the sentinel"
+        );
+        assert!(!paths.alert_latch_corrupt().exists());
+    }
+
+    // Intent: When mark_alert_cleanup_pending itself fails, cleanup
+    //   short-circuits before any destructive removal runs. CleanupFailed is
+    //   returned, every entry alert signal is byte-identical to entry, and the
+    //   retry observes the original entry snapshot to re-enter cleanup.
+    // Why it exists: the cleanup-pending sentinel is itself a file ack writes,
+    //   so it can be poisoned like other alert-state paths. Any destructive
+    //   removal before marker creation would destroy alert state before retry
+    //   had a chance to record cleanup-pending.
+    // Scenario: a directory sits at alert-cleanup-pending. Latch carries
+    //   BtrfsDeviceErrors{devid:1}. After the operator removes the poison
+    //   directory, retry completes cleanly.
+    #[test]
+    fn cmd_ack_mounted_retry_after_poisoned_sentinel_completes_recovery() {
+        let (_dir, paths) = isolated_paths();
+        ack_write_latch(&paths, vec![AlertCause::BtrfsDeviceErrors { devid: 1 }]);
+        std::fs::create_dir(paths.alert_cleanup_pending()).unwrap();
+        let original_latch_bytes = std::fs::read(paths.alert_latch_json()).unwrap();
+
+        let runner = ack_mounted_probe_runner_with_device_stats();
+        let beeper_calls_first = std::cell::Cell::new(0u32);
+        let beeper_first = || beeper_calls_first.set(beeper_calls_first.get() + 1);
+
+        let err = cmd_ack_impl(&runner, &ack_fs_btrfs(), &ack_mp(), &paths, &beeper_first)
+            .expect_err("marker creation must fail on the poisoned sentinel path");
+        assert!(matches!(err, AckError::CleanupFailed(_)));
+        assert_eq!(
+            beeper_calls_first.get(),
+            1,
+            "stop hook must fire before marker creation"
+        );
+        assert_eq!(
+            std::fs::read(paths.alert_latch_json()).unwrap(),
+            original_latch_bytes,
+            "latch JSON must be preserved because no destructive removal ran"
+        );
+        assert!(
+            paths.alert_cleanup_pending().exists(),
+            "poison sentinel directory still wedged"
+        );
+        assert!(
+            !alert::alert_cleanup_pending(&paths),
+            "directory-form sentinel must not be treated as cleanup-pending"
+        );
+        assert!(
+            paths.acked_stats_json().exists(),
+            "save_acked_stats ran before cleanup"
+        );
+
+        std::fs::remove_dir(paths.alert_cleanup_pending()).unwrap();
+
+        let beeper_calls_retry = std::cell::Cell::new(0u32);
+        let beeper_retry = || beeper_calls_retry.set(beeper_calls_retry.get() + 1);
+        let result = cmd_ack_impl(&runner, &ack_fs_btrfs(), &ack_mp(), &paths, &beeper_retry);
+        assert!(
+            result.is_ok(),
+            "retry must succeed after operator clears the sentinel poison"
+        );
+        assert_eq!(
+            beeper_calls_retry.get(),
+            1,
+            "retry must re-invoke the stop hook"
+        );
+        assert!(!paths.alert_cleanup_pending().exists());
+        assert!(!paths.alert_latch_json().exists());
+    }
+
+    // Intent: When ack cleanup fails before reaching remove_alert_latch_corrupt,
+    //   the corrupt sidecar's bytes are unchanged. Pins ADR 014's forensic
+    //   guarantee at the unit level for the cleanup-failure path.
+    // Why it exists: the cleanup-pending sentinel design keeps
+    //   alert-latch.json.corrupt as the last destructive step so its bytes
+    //   survive partial cleanup.
+    // Scenario: a prior monitor cycle quarantined a corrupt latch. The current
+    //   cycle latched SmartdAlert, but the smartd flag path is a poison
+    //   directory. ack fails at remove_smartd_alert_flag and must leave the
+    //   corrupt sidecar untouched.
+    #[test]
+    fn cmd_ack_preserves_corrupt_sidecar_bytes_through_cleanup_failure() {
+        let (_dir, paths) = isolated_paths();
+        let forensic_bytes: &[u8] = b"first corruption forensic data";
+        std::fs::write(paths.alert_latch_corrupt(), forensic_bytes).unwrap();
+        ack_write_latch(&paths, vec![AlertCause::SmartdAlert]);
+        std::fs::create_dir(paths.smartd_alert()).unwrap();
+
+        let runner = ack_mounted_probe_runner_with_device_stats();
+        let beeper_calls = std::cell::Cell::new(0u32);
+        let beeper = || beeper_calls.set(beeper_calls.get() + 1);
+
+        let err = cmd_ack_impl(&runner, &ack_fs_btrfs(), &ack_mp(), &paths, &beeper)
+            .expect_err("smartd cleanup failure must propagate");
+        assert!(matches!(err, AckError::CleanupFailed(_)));
+        assert_eq!(beeper_calls.get(), 1);
+
+        let preserved = std::fs::read(paths.alert_latch_corrupt()).unwrap();
+        assert_eq!(
+            preserved, forensic_bytes,
+            "corrupt sidecar bytes must survive cleanup failure"
+        );
+        assert!(
+            paths.alert_cleanup_pending().is_file(),
+            "sentinel must be on disk after mark succeeds"
         );
     }
 
@@ -968,6 +1357,8 @@ mod tests {
      * silently fall back to AckError::Io and the mounted test would still
      * pass. The beeper assertion independently pins that the offline path's
      * cleanup reaches stop_beeper before a later remove_* can short-circuit.
+     * The cleanup-pending sentinel is the retry signal after the latch is
+     * already removed.
      * Scenario: pool offline, latch contains MissingDevice{devid:1}, and a
      * directory sits at the corrupt-latch sidecar path so remove_file fails
      * with EISDIR/EPERM.
@@ -1016,6 +1407,10 @@ mod tests {
         assert!(
             paths.alert_latch_corrupt().exists(),
             "cleanup poison directory must remain and prove where cleanup failed"
+        );
+        assert!(
+            paths.alert_cleanup_pending().is_file(),
+            "cleanup-pending sentinel must remain so offline retry can resume"
         );
         assert_eq!(
             beeper_calls.get(),

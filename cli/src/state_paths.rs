@@ -40,6 +40,11 @@ impl StatePaths {
         self.root.join("alert-latch.json.corrupt")
     }
 
+    /// Explicit retry marker for ack cleanup after the latch signal is gone.
+    pub fn alert_cleanup_pending(&self) -> PathBuf {
+        self.root.join("alert-cleanup-pending")
+    }
+
     pub fn luks_headers_dir(&self) -> PathBuf {
         self.root.join("luks-headers")
     }
@@ -70,6 +75,10 @@ mod tests {
             PathBuf::from("/var/lib/braid/alert-latch.json.corrupt")
         );
         assert_eq!(
+            p.alert_cleanup_pending(),
+            PathBuf::from("/var/lib/braid/alert-cleanup-pending")
+        );
+        assert_eq!(
             p.luks_headers_dir(),
             PathBuf::from("/var/lib/braid/luks-headers")
         );
@@ -82,6 +91,10 @@ mod tests {
         assert_eq!(
             p.alert_latch_corrupt(),
             PathBuf::from("/tmp/test-braid/alert-latch.json.corrupt")
+        );
+        assert_eq!(
+            p.alert_cleanup_pending(),
+            PathBuf::from("/tmp/test-braid/alert-cleanup-pending")
         );
         assert_eq!(
             p.luks_headers_dir(),

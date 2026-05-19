@@ -515,12 +515,14 @@ pub fn cmd_status<R: CommandRunner, F: Filesystem>(
 // ---------------------------------------------------------------------------
 
 /// Read alert state from the latch file + smartd flag. Status reads the latch
-/// instead of recomputing live alert state — the latch is the single source of
+/// instead of recomputing live alert state -- the latch is the single source of
 /// truth. Recomputing would cause the alert to disappear when a condition
 /// resolves, contradicting the "latched until ack" model. The smartd flag is
-/// checked as a bridge for between-cycle fires.
+/// checked as a bridge for between-cycle fires. The cleanup-pending sentinel is
+/// also surfaced so interrupted ack cleanup remains visible to status and TUI.
 pub(crate) fn resolve_alert_state(paths: &StatePaths) -> AlertState {
     let smartd_active = alert::smartd_alert_active(paths);
+    let cleanup_pending = alert::alert_cleanup_pending(paths);
 
     let latch = match alert::load_alert_latch(paths) {
         Ok(opt) => opt,
@@ -531,6 +533,11 @@ pub(crate) fn resolve_alert_state(paths: &StatePaths) -> AlertState {
             let mut causes = vec![AlertCause::ComputationError {
                 detail: format!("alert latch unreadable -- {e}"),
             }];
+            if cleanup_pending {
+                causes.push(AlertCause::ComputationError {
+                    detail: "ack cleanup pending -- re-run `braid ack` to resume".to_owned(),
+                });
+            }
             if smartd_active {
                 causes.push(AlertCause::SmartdAlert);
             }
@@ -546,6 +553,11 @@ pub(crate) fn resolve_alert_state(paths: &StatePaths) -> AlertState {
             .any(|c| matches!(c, AlertCause::SmartdAlert))
     {
         state.causes.push(AlertCause::SmartdAlert);
+    }
+    if cleanup_pending {
+        state.causes.push(AlertCause::ComputationError {
+            detail: "ack cleanup pending -- re-run `braid ack` to resume".to_owned(),
+        });
     }
     state
 }
@@ -4520,6 +4532,39 @@ mod tests {
             ),
             "expected exactly one ComputationError cause, got {:?}",
             state.causes
+        );
+    }
+
+    // Intent: resolve_alert_state surfaces a cleanup-pending sentinel as an
+    //   active ComputationError even when no latch or smartd flag exists.
+    // Why it exists: ack cleanup can fail after removing alert-latch.json, so
+    //   status must still show that `braid ack` has cleanup work to resume.
+    // Scenario: `braid ack` marked cleanup-pending, removed the latch, then hit
+    //   an I/O error before clearing the marker. Operator runs `braid status`.
+    #[test]
+    fn resolve_alert_state_surfaces_cleanup_pending_as_computation_error() {
+        let (_tmp, paths) = isolated_paths();
+        std::fs::write(paths.alert_cleanup_pending(), b"").unwrap();
+
+        let state = resolve_alert_state(&paths);
+
+        assert!(
+            state.active(),
+            "cleanup-pending must surface as active alert"
+        );
+        let [AlertCause::ComputationError { detail }] = state.causes.as_slice() else {
+            panic!(
+                "expected exactly one ComputationError cause, got {:?}",
+                state.causes
+            );
+        };
+        assert!(
+            detail.contains("ack cleanup pending"),
+            "detail must name cleanup-pending state, got: {detail}"
+        );
+        assert!(
+            detail.contains("braid ack"),
+            "detail must point at ack recovery, got: {detail}"
         );
     }
 }

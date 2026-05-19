@@ -386,6 +386,55 @@ pub fn remove_alert_latch_corrupt(paths: &StatePaths) -> Result<(), std::io::Err
     }
 }
 
+/// Check if ack left a regular cleanup-pending sentinel on disk.
+///
+/// Non-regular inodes are not treated as pending state: cleanup will still
+/// attempt to mark the sentinel and surface the underlying I/O error.
+pub fn alert_cleanup_pending(paths: &StatePaths) -> bool {
+    paths
+        .alert_cleanup_pending()
+        .metadata()
+        .map(|m| m.is_file())
+        .unwrap_or(false)
+}
+
+/// Mark that ack cleanup has started but not yet completed.
+///
+/// Existing regular sentinels are accepted without reopening for write so a
+/// marker that already drives retry is not re-wedged by later permission drift.
+pub fn mark_alert_cleanup_pending(paths: &StatePaths) -> Result<(), std::io::Error> {
+    let path = paths.alert_cleanup_pending();
+    if path.is_file() {
+        return Ok(());
+    }
+    match path.symlink_metadata() {
+        Ok(_) => {
+            return Err(std::io::Error::other(format!(
+                "alert cleanup pending path is not a regular file: {}",
+                path.display()
+            )));
+        }
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+        Err(e) => return Err(e),
+    }
+
+    std::fs::OpenOptions::new()
+        .create(true)
+        .write(true)
+        .truncate(false)
+        .open(path)
+        .map(|_| ())
+}
+
+/// Clear the cleanup-pending sentinel. Absence already means no pending work.
+pub fn clear_alert_cleanup_pending(paths: &StatePaths) -> Result<(), std::io::Error> {
+    match std::fs::remove_file(paths.alert_cleanup_pending()) {
+        Ok(()) => Ok(()),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(e) => Err(e),
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Latch merging
 // ---------------------------------------------------------------------------
@@ -780,6 +829,122 @@ mod tests {
             smartd_alert_active(&paths),
             "symlink resolving to a regular file must be true"
         );
+    }
+
+    // Intent: mark_alert_cleanup_pending creates a regular sentinel file when
+    //   none exists.
+    // Why it exists: ack cleanup relies on this file as the retry signal after
+    //   any later cleanup step fails.
+    // Scenario: cleanup starts after a mounted or offline ack has persisted
+    //   its ack state, and no previous cleanup attempt left a marker.
+    #[test]
+    fn mark_alert_cleanup_pending_creates_file_when_absent() {
+        let dir = tempfile::tempdir().unwrap();
+        let paths = StatePaths::custom(dir.path().to_path_buf());
+
+        mark_alert_cleanup_pending(&paths).unwrap();
+
+        assert!(
+            paths.alert_cleanup_pending().is_file(),
+            "cleanup marker must be a regular file"
+        );
+    }
+
+    // Intent: mark_alert_cleanup_pending is idempotent when the sentinel is
+    //   already a regular file.
+    // Why it exists: retry cleanup calls mark again before sweeping leftover
+    //   alert files; an existing marker must keep its role as the retry signal.
+    // Scenario: the first ack failed after marker creation, leaving the marker
+    //   on disk. The next ack resumes cleanup and reaches mark again.
+    #[test]
+    fn mark_alert_cleanup_pending_is_idempotent_for_existing_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let paths = StatePaths::custom(dir.path().to_path_buf());
+        std::fs::write(paths.alert_cleanup_pending(), b"already pending").unwrap();
+
+        mark_alert_cleanup_pending(&paths).unwrap();
+
+        let bytes = std::fs::read(paths.alert_cleanup_pending()).unwrap();
+        assert_eq!(
+            bytes, b"already pending",
+            "existing sentinel bytes must not be truncated"
+        );
+    }
+
+    // Intent: mark_alert_cleanup_pending does not reopen an existing regular
+    //   sentinel for write, even when that file is read-only.
+    // Why it exists: the marker may already be the only retry signal after a
+    //   prior cleanup failure; permission drift on that file must not re-wedge
+    //   the next cleanup attempt before removals can resume.
+    // Scenario: cleanup failed after marker creation, then the marker's mode
+    //   drifted to read-only before the operator reran `braid ack`.
+    #[cfg(unix)]
+    #[test]
+    fn mark_alert_cleanup_pending_existing_read_only_file_does_not_require_write_permission() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let dir = tempfile::tempdir().unwrap();
+        let paths = StatePaths::custom(dir.path().to_path_buf());
+        std::fs::write(paths.alert_cleanup_pending(), b"already pending").unwrap();
+        std::fs::set_permissions(
+            paths.alert_cleanup_pending(),
+            std::fs::Permissions::from_mode(0o400),
+        )
+        .unwrap();
+
+        mark_alert_cleanup_pending(&paths).unwrap();
+
+        let bytes = std::fs::read(paths.alert_cleanup_pending()).unwrap();
+        assert_eq!(
+            bytes, b"already pending",
+            "read-only existing sentinel must stay untouched"
+        );
+        std::fs::set_permissions(
+            paths.alert_cleanup_pending(),
+            std::fs::Permissions::from_mode(0o600),
+        )
+        .unwrap();
+    }
+
+    // Intent: alert_cleanup_pending treats only a regular file sentinel as
+    //   pending cleanup state.
+    // Why it exists: a poison directory at the marker path should not satisfy
+    //   the ack retry gate; cleanup must try mark_alert_cleanup_pending and
+    //   surface the I/O error instead.
+    // Scenario: manual operator error or a previous bug leaves a directory at
+    //   /var/lib/braid/alert-cleanup-pending.
+    #[cfg(unix)]
+    #[test]
+    fn alert_cleanup_pending_requires_regular_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let paths = StatePaths::custom(dir.path().to_path_buf());
+
+        assert!(
+            !alert_cleanup_pending(&paths),
+            "absent marker must not count as pending"
+        );
+
+        std::fs::create_dir(paths.alert_cleanup_pending()).unwrap();
+
+        assert!(
+            !alert_cleanup_pending(&paths),
+            "directory marker must not count as pending"
+        );
+    }
+
+    // Intent: clear_alert_cleanup_pending succeeds when the sentinel is
+    //   already absent.
+    // Why it exists: retry cleanup uses NotFound-tolerant removals throughout
+    //   so partial prior cleanup can converge after the original I/O fault is
+    //   fixed.
+    // Scenario: cleanup reaches the final clear step after a prior manual
+    //   operator removal, or after a retry where the marker was already gone.
+    #[test]
+    fn clear_alert_cleanup_pending_is_not_found_tolerant() {
+        let dir = tempfile::tempdir().unwrap();
+        let paths = StatePaths::custom(dir.path().to_path_buf());
+
+        clear_alert_cleanup_pending(&paths).unwrap();
     }
 
     // Intent: A hard_link I/O failure during quarantine is folded into the
