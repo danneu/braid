@@ -11,6 +11,7 @@ use crate::progress::{RealSleeper, Sleeper};
 use crate::status_tag::{StatusTag, color_enabled_for_stderr, status_line};
 use crate::types::{DiskName, LuksUuid, MapperName, MountPoint, PoolState, format_uuid_list};
 use std::collections::HashSet;
+use std::io::Write;
 
 #[derive(Debug, thiserror::Error)]
 pub enum LockError {
@@ -981,7 +982,7 @@ where
 {
     if !dry_run {
         let online_ops = RealOnlineStateOps::new(runner);
-        run_lock_pre_steps(config, &online_ops);
+        run_lock_pre_steps(config, &online_ops, &mut std::io::stderr());
     }
 
     let plan = plan_lock(runner, fs, config, membership)?;
@@ -992,7 +993,7 @@ where
     plan.execute(runner, fs, sleeper, membership)
 }
 
-fn run_lock_pre_steps(cfg: &Config, online_ops: &dyn OnlineStateOps) {
+fn run_lock_pre_steps(cfg: &Config, online_ops: &dyn OnlineStateOps, out: &mut dyn Write) {
     if !cfg.systemd_lifecycle() {
         return;
     }
@@ -1002,7 +1003,7 @@ fn run_lock_pre_steps(cfg: &Config, online_ops: &dyn OnlineStateOps) {
         "braid-scrub-resume-trigger.service",
         "braid-scrub.service",
     ] {
-        let _ = online_ops.systemctl_stop(unit, false);
+        stop_unit_silent(online_ops, unit);
     }
 
     let Ok(bound_by) = online_ops.list_bound_by("braid-online.service") else {
@@ -1015,18 +1016,34 @@ fn run_lock_pre_steps(cfg: &Config, online_ops: &dyn OnlineStateOps) {
         ) {
             continue;
         }
-        if let Err(e) = online_ops.systemctl_stop(&unit, false) {
-            match e {
-                OnlineError::SystemctlStop { exit_code, .. } => {
-                    eprintln!(
-                        "braid: WARNING: failed to stop {unit} (exit {exit_code}) -- continuing; umount may fail"
-                    );
-                }
-                other => {
-                    eprintln!(
-                        "braid: WARNING: failed to stop {unit} ({other}) -- continuing; umount may fail"
-                    );
-                }
+        stop_unit_warn_on_error(online_ops, out, &unit);
+    }
+}
+
+/// Swallow scrub stop failures because autoScrub-disabled configs do not
+/// define these units, and lock should not warn on every such host.
+fn stop_unit_silent(online_ops: &dyn OnlineStateOps, unit: &str) {
+    let _ = online_ops.systemctl_stop(unit, false);
+}
+
+/// Warn when user-declared BoundBy consumers fail to stop so operators know
+/// the following umount may still be blocked by services like SMB or NFS.
+fn stop_unit_warn_on_error(online_ops: &dyn OnlineStateOps, out: &mut dyn Write, unit: &str) {
+    if let Err(e) = online_ops.systemctl_stop(unit, false) {
+        match e {
+            OnlineError::SystemctlStop { exit_code, .. } => {
+                writeln!(
+                    out,
+                    "braid: WARNING: failed to stop {unit} (exit {exit_code}) -- continuing; umount may fail"
+                )
+                .ok();
+            }
+            other => {
+                writeln!(
+                    out,
+                    "braid: WARNING: failed to stop {unit} ({other}) -- continuing; umount may fail"
+                )
+                .ok();
             }
         }
     }
@@ -1037,6 +1054,7 @@ mod tests {
     use super::*;
     use crate::cmd::{MockRunner, RawCommandOutput};
     use crate::mapper_close::{CLOSE_RETRY_ATTEMPTS, CLOSE_RETRY_DELAY};
+    use crate::online_state::{RecordingOnlineStateOps, StagedOnlineFailure};
     use crate::test_fixtures::{
         LockNoopSleeper, LockRecordingRunner, disk_member, lock_count_forget_steps, lock_err_raw,
         lock_forget_step_devices, lock_fs, lock_mounted_runner, lock_ok_raw, lock_test_config,
@@ -1095,6 +1113,10 @@ mod tests {
 
     fn cfg(raw: &str) -> Config {
         serde_json::from_str(raw).expect("config should parse")
+    }
+
+    fn lifecycle_config() -> Config {
+        cfg(r#"{"mount_point":"/mnt/storage","systemd_lifecycle":true}"#)
     }
 
     fn mounted_runner_with_btrfs_show(mapper_aaa: &str, mapper_bbb: &str) -> MockRunner {
@@ -1224,6 +1246,199 @@ mod tests {
                 CmdRequest::SystemctlShowBoundBy { unit } if unit == "braid-online.service"
             )),
             "missing BoundBy request: {requests:?}"
+        );
+    }
+
+    // Intent: run_lock_pre_steps skips scrub units returned from BoundBy.
+    // Why it exists: scrub units are stopped silently in a separate phase, and
+    // the consumer-warning path must not revisit them.
+    // Scenario: braid-online.service has scrub units plus SMB/NFS consumers
+    // bound to it while lock prepares to unmount the pool.
+    #[test]
+    fn bound_by_pre_step_skips_three_scrub_units() {
+        let config = lifecycle_config();
+        let ops = RecordingOnlineStateOps::new();
+        ops.set_bound_by_ok(vec![
+            "braid-scrub.timer".into(),
+            "braid-scrub.service".into(),
+            "braid-scrub-resume-trigger.service".into(),
+            "smbd.service".into(),
+            "nfs-server.service".into(),
+        ]);
+        let mut out = Vec::new();
+
+        run_lock_pre_steps(&config, &ops, &mut out);
+
+        assert_eq!(
+            ops.calls(),
+            vec![
+                "stop braid-scrub.timer no_block=false",
+                "stop braid-scrub-resume-trigger.service no_block=false",
+                "stop braid-scrub.service no_block=false",
+                "list_bound_by braid-online.service",
+                "stop smbd.service no_block=false",
+                "stop nfs-server.service no_block=false",
+            ]
+        );
+        assert_eq!(String::from_utf8(out).unwrap(), "");
+    }
+
+    // Intent: run_lock_pre_steps warns byte-exactly on nonzero consumer stops.
+    // Why it exists: operators need the exit-code form when a BoundBy consumer
+    // blocks shutdown or unmount cleanup.
+    // Scenario: smbd.service is bound to braid-online.service but systemctl
+    // stop returns a nonzero status during lock.
+    #[test]
+    fn bound_by_pre_step_warns_on_nonzero_stop() {
+        let config = lifecycle_config();
+        let ops = RecordingOnlineStateOps::new();
+        ops.set_bound_by_ok(vec!["smbd.service".into()]);
+        ops.set_systemctl_stop_err(
+            "smbd.service",
+            StagedOnlineFailure::SystemctlStop {
+                unit: "smbd.service".into(),
+                exit_code: 5,
+                stderr: "stop failed".into(),
+            },
+        );
+        let mut out = Vec::new();
+
+        run_lock_pre_steps(&config, &ops, &mut out);
+
+        assert_eq!(
+            String::from_utf8(out).unwrap(),
+            "braid: WARNING: failed to stop smbd.service (exit 5) -- continuing; umount may fail\n"
+        );
+        assert_eq!(
+            ops.calls(),
+            vec![
+                "stop braid-scrub.timer no_block=false",
+                "stop braid-scrub-resume-trigger.service no_block=false",
+                "stop braid-scrub.service no_block=false",
+                "list_bound_by braid-online.service",
+                "stop smbd.service no_block=false",
+            ]
+        );
+    }
+
+    // Intent: run_lock_pre_steps warns byte-exactly for generic stop errors.
+    // Why it exists: the Display form preserves command spawn failure detail
+    // rather than collapsing every failure into an exit-code message.
+    // Scenario: smbd.service is bound to braid-online.service but spawning
+    // systemctl fails before an exit status exists.
+    #[test]
+    fn bound_by_pre_step_warns_on_spawn_error() {
+        let config = lifecycle_config();
+        let ops = RecordingOnlineStateOps::new();
+        ops.set_bound_by_ok(vec!["smbd.service".into()]);
+        ops.set_systemctl_stop_err("smbd.service", StagedOnlineFailure::Spawn("boom".into()));
+        let mut out = Vec::new();
+
+        run_lock_pre_steps(&config, &ops, &mut out);
+
+        assert_eq!(
+            String::from_utf8(out).unwrap(),
+            "braid: WARNING: failed to stop smbd.service (command failed: boom) -- continuing; umount may fail\n"
+        );
+        assert_eq!(
+            ops.calls(),
+            vec![
+                "stop braid-scrub.timer no_block=false",
+                "stop braid-scrub-resume-trigger.service no_block=false",
+                "stop braid-scrub.service no_block=false",
+                "list_bound_by braid-online.service",
+                "stop smbd.service no_block=false",
+            ]
+        );
+    }
+
+    // Intent: run_lock_pre_steps silently returns when BoundBy lookup fails.
+    // Why it exists: the old wrapper treated systemctl show BoundBy failure
+    // as best-effort and did not warn during lock.
+    // Scenario: systemctl cannot read braid-online.service BoundBy while lock
+    // still needs to continue toward unmount and mapper close.
+    #[test]
+    fn bound_by_pre_step_silently_continues_when_list_bound_by_errs() {
+        let config = lifecycle_config();
+        let ops = RecordingOnlineStateOps::new();
+        ops.set_bound_by_err(StagedOnlineFailure::SystemctlShow {
+            unit: "braid-online.service".into(),
+            exit_code: 1,
+            stderr: String::new(),
+        });
+        let mut out = Vec::new();
+
+        run_lock_pre_steps(&config, &ops, &mut out);
+
+        assert_eq!(
+            ops.calls(),
+            vec![
+                "stop braid-scrub.timer no_block=false",
+                "stop braid-scrub-resume-trigger.service no_block=false",
+                "stop braid-scrub.service no_block=false",
+                "list_bound_by braid-online.service",
+            ]
+        );
+        assert_eq!(String::from_utf8(out).unwrap(), "");
+    }
+
+    // Intent: run_lock_pre_steps treats an empty BoundBy property as success.
+    // Why it exists: empty output means no consumers, distinct from a failed
+    // systemctl lookup, and should leave no warning text behind.
+    // Scenario: braid-online.service has no BindsTo consumers when lock starts.
+    #[test]
+    fn bound_by_pre_step_handles_empty_bound_by_property() {
+        let config = lifecycle_config();
+        let ops = RecordingOnlineStateOps::new();
+        ops.set_bound_by_ok(Vec::new());
+        let mut out = Vec::new();
+
+        run_lock_pre_steps(&config, &ops, &mut out);
+
+        assert_eq!(
+            ops.calls(),
+            vec![
+                "stop braid-scrub.timer no_block=false",
+                "stop braid-scrub-resume-trigger.service no_block=false",
+                "stop braid-scrub.service no_block=false",
+                "list_bound_by braid-online.service",
+            ]
+        );
+        assert_eq!(String::from_utf8(out).unwrap(), "");
+    }
+
+    // Intent: run_lock_pre_steps swallows missing scrub-unit stop failures.
+    // Why it exists: autoScrub-disabled module configs may not define scrub
+    // units, while BoundBy consumers still need the warning helper.
+    // Scenario: braid-scrub.timer is absent, but smbd.service is bound to
+    // braid-online.service and still needs to be stopped before unmount.
+    #[test]
+    fn scrub_stop_pre_step_swallows_missing_unit() {
+        let config = lifecycle_config();
+        let ops = RecordingOnlineStateOps::new();
+        ops.set_systemctl_stop_err(
+            "braid-scrub.timer",
+            StagedOnlineFailure::SystemctlStop {
+                unit: "braid-scrub.timer".into(),
+                exit_code: 5,
+                stderr: "Unit braid-scrub.timer not loaded.".into(),
+            },
+        );
+        ops.set_bound_by_ok(vec!["smbd.service".into()]);
+        let mut out = Vec::new();
+
+        run_lock_pre_steps(&config, &ops, &mut out);
+
+        assert_eq!(String::from_utf8(out).unwrap(), "");
+        assert_eq!(
+            ops.calls(),
+            vec![
+                "stop braid-scrub.timer no_block=false",
+                "stop braid-scrub-resume-trigger.service no_block=false",
+                "stop braid-scrub.service no_block=false",
+                "list_bound_by braid-online.service",
+                "stop smbd.service no_block=false",
+            ]
         );
     }
 

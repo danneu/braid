@@ -8,6 +8,8 @@ use crate::cmd::{CmdError, CmdRequest, CommandRunner};
 use crate::config::Config;
 use crate::types::MountPoint;
 use nix::unistd::{Group, User, chown};
+#[cfg(test)]
+use std::collections::HashMap;
 use std::fs;
 use std::os::unix::fs::PermissionsExt;
 use std::path::Path;
@@ -311,11 +313,57 @@ pub fn mark_offline(cfg: &Config, ops: &dyn OnlineStateOps) -> Result<(), Online
 }
 
 #[cfg(test)]
+#[derive(Debug, Clone)]
+pub enum StagedOnlineFailure {
+    Spawn(String),
+    SystemctlShow {
+        unit: String,
+        exit_code: i32,
+        stderr: String,
+    },
+    SystemctlStop {
+        unit: String,
+        exit_code: i32,
+        stderr: String,
+    },
+}
+
+#[cfg(test)]
+impl StagedOnlineFailure {
+    fn into_online_error(self) -> OnlineError {
+        match self {
+            Self::Spawn(msg) => OnlineError::Spawn {
+                source: CmdError::Failed(msg),
+            },
+            Self::SystemctlShow {
+                unit,
+                exit_code,
+                stderr,
+            } => OnlineError::SystemctlShow {
+                unit,
+                exit_code,
+                stderr,
+            },
+            Self::SystemctlStop {
+                unit,
+                exit_code,
+                stderr,
+            } => OnlineError::SystemctlStop {
+                unit,
+                exit_code,
+                stderr,
+            },
+        }
+    }
+}
+
+#[cfg(test)]
 pub struct RecordingOnlineStateOps {
     state: std::cell::RefCell<Result<UnitActiveState, String>>,
     mounted: std::cell::Cell<bool>,
     calls: std::cell::RefCell<Vec<String>>,
-    bound_by: std::cell::RefCell<Result<Vec<String>, String>>,
+    bound_by: std::cell::RefCell<Result<Vec<String>, StagedOnlineFailure>>,
+    systemctl_stop_errs: std::cell::RefCell<HashMap<String, StagedOnlineFailure>>,
 }
 
 #[cfg(test)]
@@ -326,6 +374,7 @@ impl RecordingOnlineStateOps {
             mounted: std::cell::Cell::new(true),
             calls: std::cell::RefCell::new(Vec::new()),
             bound_by: std::cell::RefCell::new(Ok(Vec::new())),
+            systemctl_stop_errs: std::cell::RefCell::new(HashMap::new()),
         }
     }
 
@@ -339,6 +388,20 @@ impl RecordingOnlineStateOps {
 
     pub fn set_mounted(&self, mounted: bool) {
         self.mounted.set(mounted);
+    }
+
+    pub fn set_bound_by_ok(&self, units: Vec<String>) {
+        *self.bound_by.borrow_mut() = Ok(units);
+    }
+
+    pub fn set_bound_by_err(&self, failure: StagedOnlineFailure) {
+        *self.bound_by.borrow_mut() = Err(failure);
+    }
+
+    pub fn set_systemctl_stop_err(&self, unit: &str, failure: StagedOnlineFailure) {
+        self.systemctl_stop_errs
+            .borrow_mut()
+            .insert(unit.to_owned(), failure);
     }
 }
 
@@ -374,16 +437,20 @@ impl OnlineStateOps for RecordingOnlineStateOps {
         self.calls
             .borrow_mut()
             .push(format!("stop {unit} no_block={no_block}"));
-        Ok(())
+        match self.systemctl_stop_errs.borrow().get(unit).cloned() {
+            Some(failure) => Err(failure.into_online_error()),
+            None => Ok(()),
+        }
     }
 
-    fn list_bound_by(&self, _unit: &str) -> Result<Vec<String>, OnlineError> {
+    fn list_bound_by(&self, unit: &str) -> Result<Vec<String>, OnlineError> {
+        self.calls
+            .borrow_mut()
+            .push(format!("list_bound_by {unit}"));
         self.bound_by
             .borrow()
             .clone()
-            .map_err(|s| OnlineError::Spawn {
-                source: CmdError::Failed(s),
-            })
+            .map_err(StagedOnlineFailure::into_online_error)
     }
 }
 
