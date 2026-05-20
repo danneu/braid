@@ -1,12 +1,13 @@
 # Test: alert-state-lock
 #
-# What: Verifies that every alert-state mutator acquires the wrapper's
-# /run/braid-pool.lock before it can mutate alert-latch.json or
+# What: Verifies that every alert-state mutator acquires the Rust-owned
+# `/run/braid-pool.lock` before it can mutate alert-latch.json or
 # acked-stats.json.
 #
 # Why: monitor, ack, add, remove, and remove-missing all touch alert
-# state. The wrapper lock is the serialization boundary that prevents
+# state. The pool lock is the serialization boundary that prevents
 # stale read-modify-write cycles from resurrecting acknowledged alerts.
+# See docs/decisions/026-pool-lock-rust-owned.md.
 { braid }:
 { pkgs, ... }:
 {

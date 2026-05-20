@@ -1,6 +1,6 @@
 # Test: pool-lock-contention
 #
-# Intent: When another process holds /run/braid-pool.lock, the wrapper
+# Intent: When another process holds /run/braid-pool.lock, Rust dispatch
 # must fail fast (exit 1) with a clear "another braid operation is
 # already in progress" message — never hang.
 #
@@ -8,6 +8,7 @@
 # long-running `braid add` balance) would silently hang any concurrent
 # `braid unlock` invocation forever, with no feedback. A blocking-flock
 # regression must fail this test, not silently pass it.
+# See docs/decisions/026-pool-lock-rust-owned.md.
 #
 # Scenario: Admin starts `braid add` in one shell (modeled here as a
 # background flock holder), then opens a second shell and runs
@@ -57,7 +58,7 @@ with subtest("braid unlock fails fast when pool lock is held"):
 
     # Wall-clock cap of 5s — non-blocking flock should fail in well
     # under a second. The cap exists so the test fails (not hangs) if
-    # the wrapper regresses to blocking flock.
+    # Rust dispatch regresses to blocking flock.
     rc, out = machine.execute(
         f"timeout 5 sh -c 'printf %s\\n {pq} | "
         f"braid unlock --passphrase-stdin' 2>&1"
@@ -69,8 +70,8 @@ with subtest("braid unlock fails fast when pool lock is held"):
 
     assert rc != 0, "expected unlock to fail, got rc=0; out={}".format(out)
     assert rc != 124, (
-        "unlock hung past 5s wall-clock cap — wrapper regressed to "
-        "blocking flock; out={}".format(out)
+        "unlock hung past 5s wall-clock cap -- Rust dispatch "
+        "regressed to blocking flock; out={}".format(out)
     )
     assert "another braid operation is already in progress" in out, (
         "expected contention message; out={}".format(out)

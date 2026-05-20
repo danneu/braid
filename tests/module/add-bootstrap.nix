@@ -2,12 +2,12 @@
 #
 # What: Enables the braid module with a single raw disk (no initrd fixture).
 # The test script runs `braid add` to bootstrap the pool from scratch, then
-# verifies that the wrapper sets mount point permissions to root:storage 2770.
+# verifies that Rust dispatch sets mount point permissions to root:storage 2770.
 #
 # Why: braid add mounts from the Rust CLI, not through a systemd service.
-# The wrapper-based permission fixup must cover this path. Without this test,
-# a regression in the wrapper would silently leave the mount root as
-# root:root 0755, blocking non-root access.
+# The Rust-side `mark_online` permission fixup via `pool_access_group` must
+# cover this path. Without this test, a regression in Rust dispatch would
+# silently leave the mount root as root:root 0755, blocking non-root access.
 #
 # Dependencies: braid-module-single-disk (module loads correctly),
 # hello-world (VM infra).

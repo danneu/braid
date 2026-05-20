@@ -205,7 +205,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn already_held_display_is_wrapper_compatible_verbatim() {
+    fn already_held_display_matches_pinned_contention_string() {
         assert_eq!(
             PoolLockError::AlreadyHeld.to_string(),
             "braid: another braid operation is already in progress (pool lock /run/braid-pool.lock is held); retry once it finishes"

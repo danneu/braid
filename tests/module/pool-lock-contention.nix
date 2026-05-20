@@ -1,12 +1,13 @@
 # Test: pool-lock-contention
 #
-# What: Verifies the wrapper's flock acquisition is non-blocking and
+# What: Verifies Rust dispatch's pool-lock acquisition is non-blocking and
 # fails fast when another process holds /run/braid-pool.lock.
 #
 # Why: Without -n on the flock call, a wedged holder would silently
 # hang any concurrent `braid unlock` invocation forever. This test
-# guards the failure layer — it must fail if the wrapper regresses
+# guards the failure layer -- it must fail if dispatch regresses
 # to a blocking flock.
+# See docs/decisions/026-pool-lock-rust-owned.md.
 { braid }:
 { pkgs, lib, ... }:
 let

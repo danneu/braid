@@ -1,12 +1,13 @@
 # Test: systemd-lifecycle
 #
-# What: Verifies the systemd state machine — braid-pool.target as entry
-# point, braid-online.service as lifecycle owner, and CLI wrapper
+# What: Verifies the systemd state machine -- braid-pool.target as entry
+# point, braid-online.service as lifecycle owner, and Rust dispatch
 # synchronization with service activation state.
 #
 # Why: Existing tests cover CLI behavior and auto-unlock but don't directly
-# verify systemd unit state transitions. A broken wrapper or misconfigured
-# dependency could silently break automatic locking on shutdown.
+# verify systemd unit state transitions. A dispatch regression or
+# misconfigured dependency could silently break automatic locking on shutdown.
+# See docs/decisions/026-pool-lock-rust-owned.md.
 { braid }:
 { pkgs, lib, ... }:
 let

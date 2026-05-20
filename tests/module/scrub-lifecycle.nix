@@ -13,7 +13,7 @@
 #   catchup:     real scrub service, seeded overdue stamp -> Persistent triggers
 #                immediate scrub on unlock.
 #   cancel:      fake long-running scrub (holds mount busy via open FD), lock
-#                while scrub runs -> wrapper stops timer+service, CLI unmounts.
+#                while scrub runs -> Rust dispatch stops timer+service, CLI unmounts.
 #   resume:      real scrub service on dm-delay-backed disks, cancel mid-scrub,
 #                unlock with trigger masked, then resume via the pool-online trigger.
 #   concurrency: dm-delay-backed pool with saved scrub progress + overdue timer

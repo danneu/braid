@@ -1,12 +1,13 @@
 # Test: pool-lock-replace-contention
 #
-# What: Verifies that `braid replace` takes the wrapper pool lock before
+# What: Verifies that `braid replace` takes the Rust-owned pool lock before
 # it can read pool state or write pending-op.json.
 #
 # Why: `replace` has the same preflight-to-journal race shape as
-# remove/remove-missing. Without wrapper-level serialization, concurrent
+# remove/remove-missing. Without Rust-level serialization, concurrent
 # replace attempts can clobber pending-op.json.tmp before btrfs rejects
 # the second kernel replace.
+# See docs/decisions/026-pool-lock-rust-owned.md.
 { braid }:
 { pkgs, lib, ... }:
 {

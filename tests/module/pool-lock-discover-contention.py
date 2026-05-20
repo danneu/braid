@@ -66,7 +66,7 @@ with subtest("discover reaches CLI after lock release and refuses healthy UUID-k
     rc, out = machine.execute("braid discover --write --expect-count 1 2>&1")
     assert rc != 0, "expected ValidUuidKeyed refusal; out=" + out
     assert "another braid operation is already in progress" not in out, (
-        "wrapper lock check must not fire after release; out=" + out
+        "pool lock check must not fire after release; out=" + out
     )
     assert "is already a healthy UUID-keyed membership" in out, (
         "expected ValidUuidKeyed refusal at the gate; out=" + out

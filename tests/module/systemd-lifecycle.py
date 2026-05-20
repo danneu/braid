@@ -1,16 +1,18 @@
 # Test: systemd-lifecycle
 #
-# Intent: Verify the systemd state machine that manages pool lifecycle —
+# Intent: Verify the systemd state machine that manages pool lifecycle --
 # braid-pool.target as entry point, braid-online.service as lifecycle owner,
-# and the CLI wrapper synchronization between braid unlock/lock/add and
+# and Rust dispatch synchronization between braid unlock/lock/add and
 # braid-online.service activation state.
 #
-# Why it exists: The lifecycle model has three moving parts (target, services,
-# wrapper script) that must stay synchronized. Existing tests cover CLI
-# behavior (unlock, lock) and auto-unlock, but don't directly verify systemd
-# unit state transitions. A broken wrapper or misconfigured dependency could
-# leave braid-online.service out of sync with actual pool state, causing
-# silent failure of automatic locking on shutdown.
+# Why it exists: The lifecycle model's systemd side has two moving parts
+# (target, services) that must stay synchronized, while Rust dispatch owns
+# post-command online-state transitions and pool-lock serialization. Existing
+# tests cover CLI behavior (unlock, lock) and auto-unlock, but don't directly
+# verify systemd unit state transitions. A broken dependency or dispatch
+# regression could leave braid-online.service out of sync with actual pool
+# state, causing silent failure of automatic locking on shutdown.
+# See docs/decisions/026-pool-lock-rust-owned.md.
 #
 # Scenario: 2-disk RAID1 pool pre-created by initrd fixture (disk1, disk2),
 # plus spare disks (disk3 for the add test, disk4+disk5 for the concurrent-add
@@ -18,12 +20,12 @@
 # (1) systemctl start braid-pool.target brings pool online and activates
 #     braid-online.service,
 # (2) systemctl stop braid-online.service unmounts pool and closes LUKS,
-# (3) braid unlock/lock via CLI wrapper correctly activates/deactivates
+# (3) braid unlock/lock via Rust dispatch correctly activates/deactivates
 #     braid-online.service,
-# (4) braid add via CLI wrapper activates braid-online.service,
-# (5) wrapper prints warning but still succeeds when braid-online.service
+# (4) braid add via Rust dispatch activates braid-online.service,
+# (5) Rust dispatch prints warning but still succeeds when braid-online.service
 #     cannot be activated,
-# (6) two concurrent braid add invocations: the wrapper's non-blocking
+# (6) two concurrent braid add invocations: the Rust-owned non-blocking
 #     flock lets exactly one complete and rejects the other with the
 #     contention error, leaving pool.json corruption-free,
 # (7) actual VM shutdown/reboot runs ExecStop=braid lock to completion.
@@ -88,7 +90,7 @@ with subtest("braid-pool.target brings pool online"):
 
 with subtest("Stopping braid-online.service locks pool"):
     # ExecStop runs `braid lock` which unmounts and closes LUKS.
-    # The wrapper's post-lock `systemctl stop braid-online` is a no-op
+    # The post-lock `systemctl stop braid-online` from `mark_offline` is a no-op
     # because the service is already deactivating — harmless.
     machine.succeed("systemctl stop braid-online.service")
 
@@ -116,7 +118,7 @@ with subtest("braid-pool.target re-unlock after lock"):
     machine.fail("systemctl is-active braid-online.service")
     machine.fail("mountpoint -q /mnt/storage")
 
-# --- Subtest 5: CLI wrapper synchronization (unlock) ---
+# --- Subtest 5: CLI dispatch synchronization (unlock) ---
 
 with subtest("braid unlock activates braid-online.service"):
     machine.succeed(f"printf '%s\\n' {pq} | braid unlock --passphrase-stdin")
@@ -124,7 +126,7 @@ with subtest("braid unlock activates braid-online.service"):
     machine.succeed("systemctl is-active braid-online.service")
     machine.succeed("mountpoint -q /mnt/storage")
 
-# --- Subtest 5: CLI wrapper synchronization (lock) ---
+# --- Subtest 5: CLI dispatch synchronization (lock) ---
 
 with subtest("braid lock deactivates braid-online.service"):
     machine.succeed("braid lock")
@@ -138,7 +140,7 @@ with subtest("braid lock deactivates braid-online.service"):
 
 with subtest("Concurrent unlocks: one wins, the other fast-fails or sees mounted"):
     # Intent: Two concurrent `braid unlock` invocations must not race
-    # into cryptsetup open on the same devices. The wrapper's
+    # into cryptsetup open on the same devices. The Rust-owned
     # non-blocking flock on /run/braid-pool.lock enforces mutual
     # exclusion — exactly one process unlocks the pool. The loser
     # either fast-fails on contention (lost the flock race) or, if it
@@ -214,7 +216,7 @@ with subtest("Concurrent unlocks: one wins, the other fast-fails or sees mounted
 
 with subtest("braid add activates braid-online.service"):
     # Pool is offline from subtest 5. Manually open existing LUKS mappers
-    # and mount pool, bypassing the wrapper so braid-online stays inactive.
+    # and mount pool, bypassing Rust dispatch so `mark_online` does not run.
     # This isolates the `add` activation path from the `unlock` path.
     machine.succeed(
         f"printf '%s\\n' {pq} | cryptsetup open /dev/disk/by-id/virtio-disk1 braid-disk1"
@@ -227,11 +229,11 @@ with subtest("braid add activates braid-online.service"):
     )
     machine.succeed("mount /dev/mapper/braid-disk1 /mnt/storage")
 
-    # Pool is mounted but braid-online is still inactive (wrapper didn't run).
+    # Pool is mounted but braid-online is still inactive (`mark_online` did not run).
     machine.succeed("mountpoint -q /mnt/storage")
     machine.fail("systemctl is-active braid-online.service")
 
-    # Add a 3rd disk through the wrapper — this must activate braid-online.
+    # Add a 3rd disk through Rust dispatch -- `mark_online` must activate braid-online.
     machine.succeed(
         f"printf '%s\\n' {pq} | "
         f"braid add --luks-format-arg=--pbkdf --luks-format-arg=pbkdf2 --luks-format-arg=--pbkdf-force-iterations --luks-format-arg=1000 disk3=/dev/disk/by-id/virtio-disk3 --passphrase-stdin --yes"
@@ -244,12 +246,12 @@ with subtest("braid add activates braid-online.service"):
     machine.succeed("braid lock")
     machine.fail("systemctl is-active braid-online.service")
 
-# --- Subtest 7: Negative path — wrapper activation failure ---
+# --- Subtest 7: Negative path -- braid-online activation failure ---
 
-with subtest("Wrapper warns but succeeds when braid-online.service fails"):
+with subtest("Rust dispatch warns but succeeds when braid-online.service fails"):
     # Override ExecStart with /bin/false via a runtime drop-in so that
     # `systemctl start braid-online.service` fails.  This triggers the
-    # wrapper's WARNING code path.  (systemctl mask does not work reliably
+    # Rust dispatch's WARNING code path.  (systemctl mask does not work reliably
     # on NixOS-managed units whose symlinks live in /etc/systemd/system/.)
     machine.succeed(
         "mkdir -p /run/systemd/system/braid-online.service.d && "
@@ -274,7 +276,7 @@ with subtest("Wrapper warns but succeeds when braid-online.service fails"):
     )
     exit_code = int(machine.succeed("cat /tmp/unlock-exit").strip())
     output = machine.succeed("cat /tmp/unlock-out")
-    print(f"Wrapper output:\n{output}")
+    print(f"Unlock output:\n{output}")
     assert exit_code == 0, f"Expected exit 0, got {exit_code}: {output}"
 
     # Pool must still be mounted and usable despite the warning.
@@ -301,7 +303,7 @@ with subtest("braid recover activates braid-online.service"):
     # The pool now has 3 disks (after subtest 6 added disk3). Use a
     # PostAddBalanceRaid1 journal whose membership already matches the live
     # pool so recover only mounts, reconciles pool.json, and clears recovery
-    # mode through the wrapper.
+    # mode through Rust dispatch.
     pool_json_raw = machine.succeed("cat /var/lib/braid/pool.json")
     pool_membership = json.loads(pool_json_raw)
     journal = {
@@ -321,7 +323,7 @@ with subtest("braid recover activates braid-online.service"):
         f"JOURNAL_EOF"
     )
 
-    # Recover through the wrapper — should mount and activate braid-online.
+    # Recover through Rust dispatch -- should mount and activate braid-online.
     machine.succeed(
         f"printf '%s\\n' {pq} | braid recover --passphrase-stdin"
     )
@@ -337,7 +339,7 @@ with subtest("braid recover activates braid-online.service"):
 # --- Subtest 9: Concurrent adds reject the loser cleanly ---
 
 with subtest("Concurrent adds reject the loser cleanly"):
-    # Intent: When two `braid add` invocations race, the wrapper's
+    # Intent: When two `braid add` invocations race, the Rust-owned
     # non-blocking flock must let exactly one win. The loser fails
     # fast with the contention message; pool.json reflects only the
     # winner's disk, btrfs sees only the winner's device, and no
@@ -419,7 +421,7 @@ with subtest("Concurrent adds reject the loser cleanly"):
         "Expected 4 btrfs devices, got {}:\n{}".format(devid_count, fi_show)
     )
 
-    # The wrapper's flock check fires BEFORE the CLI writes its
+    # Rust dispatch acquires the pool lock BEFORE it writes the
     # journal, so the rejected attempt must leave no pending-op.json.
     machine.fail("test -f /var/lib/braid/pending-op.json")
 

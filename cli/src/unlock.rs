@@ -132,7 +132,7 @@ impl UnlockPlan {
 
         // Enrich pool.json with live metadata (devid, added_at) -- best-effort.
         // The in-memory membership clone is authoritative here because the
-        // wrapper holds the pool flock for the lifetime of unlock.
+        // Rust dispatch holds the pool flock for the lifetime of unlock.
         // Three outcomes are tolerated and leave membership data unenriched:
         //   * `Ok(PoolState { mounted: false, devices: vec![], ... })` -- a
         //     mountinfo race after a successful mount; enrich_from_pool_state

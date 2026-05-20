@@ -3,7 +3,7 @@
 # Intent: Verify the key behaviors of lifecycle-bound scrub: (1) Persistent
 #   catch-up fires immediately after pool unlock when the timer stamp is overdue,
 #   (2) braid lock succeeds while the scrub service is actively holding the
-#   mount busy, because the wrapper stops the timer and service first, (3) the
+#   mount busy, because Rust dispatch stops the timer and service first, (3) the
 #   pool-online trigger resumes a previously cancelled scrub, and (4) an
 #   overdue timer fire and a resumable pool-online state both target
 #   braid-scrub.service. systemd coalesces overlapping start jobs into one run;
@@ -18,7 +18,7 @@
 # Scenario: Four nodes, each with a 2-disk RAID1 pool.
 #   catchup:     real scrub service, seeded overdue stamp, unlock triggers catch-up.
 #   cancel:      fake long-running scrub (holds mount busy), lock succeeds because
-#                wrapper stops timer+service before CLI unmounts.
+#                Rust dispatch stops timer+service before CLI unmounts.
 #   resume:      real scrub on dm-delay-backed disks, cancel mid-scrub, then
 #                resume via the pool-online trigger on next unlock.
 #   concurrency: dm-delay-backed pool with saved scrub progress + overdue timer
@@ -254,7 +254,7 @@ with subtest("cancel: btrfs upstream contract -- `btrfs scrub cancel` on no-scru
 
 with subtest("cancel: lock succeeds while scrub holds mount busy"):
     # Lock while scrub service is actively holding the mount.
-    # The wrapper must stop the timer and service before CLI attempts unmount.
+    # Rust dispatch must stop the timer and service before it attempts unmount.
     cancel.succeed("braid lock")
     cancel.fail("mountpoint -q /mnt/storage")
     cancel.fail("test -e /dev/mapper/braid-disk1")
