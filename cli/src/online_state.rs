@@ -24,6 +24,7 @@ pub enum UnitActiveState {
     Deactivating,
     Inactive,
     Failed,
+    Maintenance,
     Reloading,
     Refreshing,
     Unknown(String),
@@ -37,9 +38,26 @@ impl UnitActiveState {
             "deactivating" => Self::Deactivating,
             "inactive" => Self::Inactive,
             "failed" => Self::Failed,
+            "maintenance" => Self::Maintenance,
             "reloading" => Self::Reloading,
             "refreshing" => Self::Refreshing,
             other => Self::Unknown(other.to_owned()),
+        }
+    }
+
+    /// Canonical systemd word for known variants; the captured reason text for
+    /// `Unknown` so parser and user-facing diagnostics render from one mapping.
+    pub fn systemd_word(&self) -> &str {
+        match self {
+            Self::Active => "active",
+            Self::Activating => "activating",
+            Self::Deactivating => "deactivating",
+            Self::Inactive => "inactive",
+            Self::Failed => "failed",
+            Self::Maintenance => "maintenance",
+            Self::Reloading => "reloading",
+            Self::Refreshing => "refreshing",
+            Self::Unknown(reason) => reason.as_str(),
         }
     }
 }
@@ -283,6 +301,7 @@ pub fn mark_online(
             UnitActiveState::Active
             | UnitActiveState::Activating
             | UnitActiveState::Deactivating
+            | UnitActiveState::Maintenance
             | UnitActiveState::Reloading
             | UnitActiveState::Refreshing => {}
         }
@@ -607,6 +626,17 @@ mod tests {
         mark_online(
             Some(&OnlineSnapshot {
                 online_state: UnitActiveState::Deactivating,
+            }),
+            &cfg,
+            &ops,
+        )
+        .unwrap();
+        assert!(!ops.calls().contains(&format!("start {BRAID_ONLINE_UNIT}")));
+
+        let ops = RecordingOnlineStateOps::new();
+        mark_online(
+            Some(&OnlineSnapshot {
+                online_state: UnitActiveState::Maintenance,
             }),
             &cfg,
             &ops,

@@ -21,6 +21,7 @@ use crate::cmd::{CmdRequest, CommandRunner, RealRunner};
 use crate::config::{Config, DEFAULT_CONFIG_PATH};
 use crate::luks;
 use crate::membership;
+use crate::online_state::{BRAID_ONLINE_UNIT, OnlineStateOps, RealOnlineStateOps, UnitActiveState};
 use crate::parse::smartctl::selftest_age_hours;
 use crate::parse::types::{BtrfsBgType, BtrfsDfOutput, BtrfsProfile, SelftestSummary};
 use crate::parse::{parse_btrfs_df_json, parse_cryptsetup_luks_uuid, parse_smartctl_selftest_log};
@@ -174,13 +175,6 @@ pub(crate) struct DoctorContext<'a, R: CommandRunner> {
 pub struct DoctorOptions {
     pub json: bool,
     pub beep: bool,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum BraidOnlineActiveState {
-    OkSettled,
-    Activating,
-    Fail,
 }
 
 // ---------------------------------------------------------------------------
@@ -1002,23 +996,6 @@ fn check_ups_daemon_up<R: CommandRunner>(ctx: &mut DoctorContext<'_, R>) -> Chec
     }
 }
 
-fn classify_braid_online_active_state(state: &str) -> BraidOnlineActiveState {
-    match state {
-        "active" | "reloading" | "refreshing" => BraidOnlineActiveState::OkSettled,
-        "activating" => BraidOnlineActiveState::Activating,
-        _ => BraidOnlineActiveState::Fail,
-    }
-}
-
-fn read_braid_online_active_state<R: CommandRunner>(
-    runner: &R,
-) -> Result<String, crate::cmd::CmdError> {
-    let raw = runner.run(&CmdRequest::SystemctlShowActiveState {
-        unit: "braid-online.service".into(),
-    })?;
-    Ok(raw.stdout.trim().to_owned())
-}
-
 /// UPS doctor check: report braid-online.service state while the pool is
 /// mounted under UPS.
 ///
@@ -1056,24 +1033,44 @@ fn check_braid_online_active_when_mounted<R: CommandRunner>(
             "skipped (pool not mounted -- braid-online only matters while online)",
         );
     }
-    let state = match read_braid_online_active_state(ctx.runner) {
-        Ok(state) => state,
-        Err(e) => {
-            return CheckResult::fail(name, format!("systemctl spawn failed: {e}"));
-        }
-    };
-    match classify_braid_online_active_state(&state) {
-        BraidOnlineActiveState::OkSettled => {
-            CheckResult::ok(name, format!("braid-online.service is {state}"))
-        }
-        BraidOnlineActiveState::Activating => CheckResult::warn(
+    let outcome = RealOnlineStateOps::new(ctx.runner).unit_active_state(BRAID_ONLINE_UNIT);
+    match outcome {
+        Ok(
+            state @ (UnitActiveState::Active
+            | UnitActiveState::Reloading
+            | UnitActiveState::Refreshing),
+        ) => CheckResult::ok(
+            name,
+            format!("braid-online.service is {}", state.systemd_word()),
+        ),
+        Ok(UnitActiveState::Activating) => CheckResult::warn(
             name,
             "braid-online.service is activating -- UPS shutdown hook is not confirmed yet; re-run braid doctor shortly",
         ),
-        BraidOnlineActiveState::Fail => CheckResult::fail(
+        Ok(
+            state @ (UnitActiveState::Deactivating
+            | UnitActiveState::Inactive
+            | UnitActiveState::Failed
+            | UnitActiveState::Maintenance),
+        ) => CheckResult::fail(
             name,
             format!(
-                "braid-online.service is {state} -- UPS shutdown will not unmount the pool. \
+                "braid-online.service is {} -- UPS shutdown will not unmount the pool. \
+                 Run `systemctl start braid-online.service` or re-run `braid unlock`.",
+                state.systemd_word()
+            ),
+        ),
+        Ok(UnitActiveState::Unknown(reason)) => CheckResult::fail(
+            name,
+            format!(
+                "braid-online.service ActiveState unrecognised ({reason}) -- UPS shutdown will not unmount the pool. \
+                 Run `systemctl start braid-online.service` or re-run `braid unlock`."
+            ),
+        ),
+        Err(e) => CheckResult::fail(
+            name,
+            format!(
+                "braid-online.service ActiveState read failed: {e} -- UPS shutdown will not unmount the pool. \
                  Run `systemctl start braid-online.service` or re-run `braid unlock`."
             ),
         ),
@@ -4448,7 +4445,14 @@ mod tests {
      */
     #[test]
     fn braid_online_check_fails_for_unsafe_systemctl_states() {
-        for status in ["deactivating", "failed", "unknown", "", "bogus"] {
+        for status in [
+            "deactivating",
+            "failed",
+            "maintenance",
+            "unknown",
+            "",
+            "bogus",
+        ] {
             let runner = MockRunner::default()
                 .with_output(
                     CmdRequest::MountpointCheck {
@@ -4476,6 +4480,13 @@ mod tests {
             if !status.is_empty() {
                 assert!(r.message.contains(status), "{}", r.message);
             }
+            if status == "maintenance" {
+                assert!(
+                    r.message.contains("braid-online.service is maintenance"),
+                    "expected known-state Fail wording, got: {}",
+                    r.message
+                );
+            }
             assert!(r.message.contains("UPS shutdown"), "{}", r.message);
             assert!(
                 r.message.contains("systemctl start braid-online.service"),
@@ -4484,6 +4495,57 @@ mod tests {
             );
             assert!(r.message.contains("braid unlock"), "{}", r.message);
         }
+    }
+
+    // Intent: check_braid_online_active_when_mounted reports a diagnostic
+    // Fail when systemctl show exits non-zero.
+    // Why it exists: ignoring the exit status used to collapse an absent or
+    // masked unit into an empty ActiveState message with no operator clue.
+    // Scenario: braid-online.service is not loaded on a UPS-enabled host while
+    // the pool is mounted.
+    #[test]
+    fn braid_online_check_fails_with_systemctl_show_error() {
+        let runner = MockRunner::default()
+            .with_output(
+                CmdRequest::MountpointCheck {
+                    path: MountPoint("/mnt/storage".into()),
+                },
+                RawCommandOutput {
+                    cmd: "mountpoint".into(),
+                    stdout: String::new(),
+                    stderr: String::new(),
+                    exit_status: 0,
+                },
+            )
+            .with_output(
+                CmdRequest::SystemctlShowActiveState {
+                    unit: "braid-online.service".into(),
+                },
+                RawCommandOutput {
+                    cmd: "systemctl show -P ActiveState braid-online.service".into(),
+                    stdout: String::new(),
+                    stderr: "Unit braid-online.service not loaded.".into(),
+                    exit_status: 4,
+                },
+            );
+        let (_dir, paths) = isolated_paths();
+        let mut ctx = ups_ctx(&runner, &paths, config_with_ups_enabled());
+
+        let r = check_braid_online_active_when_mounted(&mut ctx);
+
+        assert_eq!(r.status, CheckStatus::Fail, "got: {r:?}");
+        assert!(r.message.contains("braid-online.service"), "{}", r.message);
+        assert!(
+            r.message.contains("UPS shutdown will not unmount the pool"),
+            "{}",
+            r.message
+        );
+        assert!(r.message.contains("exit 4"), "{}", r.message);
+        assert!(
+            r.message.contains("Unit braid-online.service not loaded."),
+            "{}",
+            r.message
+        );
     }
 
     // Intent: check_braid_online_active_when_mounted skips when pool
