@@ -142,6 +142,28 @@ services.samba.settings = {
 };
 ```
 
+### Binding shares to the pool lifecycle
+
+By default, `samba-smbd.service` (the systemd unit NixOS creates from `services.samba.enable`) keeps running after `braid lock`. If a client is mid-transfer when you lock, `umount` blocks until the file handle is released. Wire the share into the pool lifecycle so systemd starts `samba-smbd` after `braid unlock` and stops it again before `braid lock` runs `umount`:
+
+```nix
+systemd.services.samba-smbd = {
+  wantedBy = [ "braid-online.service" ];
+  bindsTo = [ "braid-online.service" ];
+  after = [ "braid-online.service" ];
+};
+```
+
+All three fields are load-bearing and do different jobs:
+
+- `wantedBy` -- `samba-smbd` starts when `braid-online.service` starts (i.e. after `braid unlock`).
+- `bindsTo` -- `samba-smbd` stops if `braid-online.service` stops or goes inactive (i.e. before `braid lock` runs `umount`).
+- `after` -- ordering only, ensures `samba-smbd` is started/stopped on the correct side of `braid-online.service`.
+
+`braid lock` walks `systemctl show -P BoundBy braid-online.service` (the reverse of `BindsTo=`) and stops every consumer this way before unmount. This is the same pattern braid's own scrub timer uses (see `modules/braid/storage.nix`).
+
+`braid doctor` also picks up active SMB connections as auto-suspend inhibitors -- see [Power management](power-management.md).
+
 ## NFS
 
 The same approach works for NFS. Export the braid mount point and control access at the network level:
@@ -156,6 +178,8 @@ services.nfs.server = {
 ```
 
 Adjust the subnet and options for your network. See `exports(5)` for the full option reference.
+
+The same `wantedBy` + `bindsTo` + `after` triad on `braid-online.service` (see "Binding shares to the pool lifecycle" under Samba above) applies to `nfs-server.service` if you want NFS to stop before `braid lock` runs `umount` and start again after `braid unlock`.
 
 ## Auto-suspend integration
 
