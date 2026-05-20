@@ -689,6 +689,11 @@
               braid = linuxCrane.braid-cli-unwrapped;
             }
           );
+          pool-lock-readonly-bypass = pkgs.testers.nixosTest (
+            import ./tests/module/pool-lock-readonly-bypass.nix {
+              braid = linuxCrane.braid-cli-unwrapped;
+            }
+          );
           pool-lock-lock-contention = pkgs.testers.nixosTest (
             import ./tests/module/pool-lock-lock-contention.nix {
               braid = linuxCrane.braid-cli-unwrapped;
