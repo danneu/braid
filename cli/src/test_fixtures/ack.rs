@@ -220,6 +220,43 @@ fn btrfs_device_stats_healthy() -> RawCommandOutput {
     )
 }
 
+fn btrfs_device_stats_with_stale_devid() -> RawCommandOutput {
+    mock_ok(
+        "btrfs --format json device stats /mnt/storage",
+        r#"{
+            "device-stats": [
+                {
+                    "device": "/dev/mapper/braid-disk1",
+                    "devid": 1,
+                    "write_io_errs": 0,
+                    "read_io_errs": 0,
+                    "flush_io_errs": 0,
+                    "corruption_errs": 0,
+                    "generation_errs": 0
+                },
+                {
+                    "device": "/dev/mapper/braid-disk3",
+                    "devid": 3,
+                    "write_io_errs": 0,
+                    "read_io_errs": 0,
+                    "flush_io_errs": 0,
+                    "corruption_errs": 0,
+                    "generation_errs": 0
+                },
+                {
+                    "device": "/dev/mapper/braid-stale",
+                    "devid": 99,
+                    "write_io_errs": 0,
+                    "read_io_errs": 3,
+                    "flush_io_errs": 0,
+                    "corruption_errs": 1,
+                    "generation_errs": 0
+                }
+            ]
+        }"#,
+    )
+}
+
 /// Mounted probe runner that intentionally omits `BtrfsDeviceStatsJson`.
 pub(crate) fn ack_mounted_probe_runner() -> MockRunner {
     MockRunner::default()
@@ -250,5 +287,15 @@ pub(crate) fn ack_mounted_probe_runner_with_device_stats() -> MockRunner {
             mount_point: ack_mp(),
         },
         btrfs_device_stats_healthy(),
+    )
+}
+
+/// Mounted probe runner plus stats containing an unrecognized stale devid.
+pub(crate) fn ack_mounted_probe_runner_with_stale_devid_stats() -> MockRunner {
+    ack_mounted_probe_runner().with_output(
+        CmdRequest::BtrfsDeviceStatsJson {
+            mount_point: ack_mp(),
+        },
+        btrfs_device_stats_with_stale_devid(),
     )
 }

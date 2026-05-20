@@ -60,6 +60,15 @@ const STATS_WITH_STALE_MAPPER: &str = r#"{
     ]
 }"#;
 
+const STATS_WITH_STALE_MAPPER_ERRORS: &str = r#"{
+    "__header": {"version": "1"},
+    "device-stats": [
+        {"device": "/dev/mapper/braid-vdb", "devid": 1, "write_io_errs": 0, "read_io_errs": 0, "flush_io_errs": 0, "corruption_errs": 0, "generation_errs": 0},
+        {"device": "/dev/mapper/braid-vdc", "devid": 2, "write_io_errs": 0, "read_io_errs": 0, "flush_io_errs": 0, "corruption_errs": 0, "generation_errs": 0},
+        {"device": "/dev/mapper/braid-stale", "devid": 99, "write_io_errs": 0, "read_io_errs": 3, "flush_io_errs": 0, "corruption_errs": 1, "generation_errs": 0}
+    ]
+}"#;
+
 const BTRFS_SHOW_PRESENT_NULL_MISSING: &str = "Label: none  uuid: de2b8517-f972-45fc-b121-3e160c8ea432\n\
     \tTotal devices 3 FS bytes used 16.17MiB\n\
     \tdevid    1 size 1008.00MiB used 209.50MiB path /dev/mapper/braid-vdb\n\
@@ -99,6 +108,14 @@ impl MonitorTestRunner {
     pub(crate) fn with_stale_mapper_stats() -> Self {
         Self {
             stats_payload: STATS_WITH_STALE_MAPPER.to_owned(),
+            override_op: Mutex::new(None),
+        }
+    }
+
+    /// Healthy runner variant whose stats include a stale non-zero row.
+    pub(crate) fn with_stale_mapper_errors() -> Self {
+        Self {
+            stats_payload: STATS_WITH_STALE_MAPPER_ERRORS.to_owned(),
             override_op: Mutex::new(None),
         }
     }

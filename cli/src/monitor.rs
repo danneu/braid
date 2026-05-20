@@ -90,8 +90,9 @@ pub fn cmd_monitor<R: CommandRunner, F: Filesystem + ?Sized>(
         let mut acked = alert::load_acked_stats_fallible(paths)
             .map_err(|e| format!("acked-stats unreadable -- {e}"))?;
 
-        // 4. Compute alert-local missing devids: btrfs MISSING ∪ null-underlying
+        // 4. Compute alert-local membership views.
         let alert_missing_devids = pool.alert_missing_devids();
+        let recognized_devids = pool.recognized_devids();
 
         // 5. Check smartd alert flag
         let smartd_active = alert::smartd_alert_active(paths);
@@ -99,12 +100,7 @@ pub fn cmd_monitor<R: CommandRunner, F: Filesystem + ?Sized>(
         // 6. Reconcile stale ack state: prune orphan devids and self-heal
         //    missing_acked for devices that are present again.
         let present_devids: BTreeSet<u64> = pool.present_devids.iter().copied().collect();
-        let still_relevant_devids: BTreeSet<u64> = present_devids
-            .iter()
-            .copied()
-            .chain(pool.null_underlying.iter().map(|d| d.devid))
-            .chain(pool.missing_devids.iter().copied())
-            .collect();
+        let still_relevant_devids: BTreeSet<u64> = recognized_devids.iter().copied().collect();
         let ack_changed =
             alert::reconcile_acked_stats(&mut acked, &still_relevant_devids, &present_devids);
         if ack_changed && let Err(e) = save_acked_stats(&acked, paths) {
@@ -113,8 +109,14 @@ pub fn cmd_monitor<R: CommandRunner, F: Filesystem + ?Sized>(
 
         // 7. Compute live alert state. Identity is the devid carried on each
         //    stats row by btrfs -- no path-to-devid map needed.
-        let live_causes =
-            compute_alert_state(&device_stats, &acked, &alert_missing_devids, smartd_active).causes;
+        let live_causes = compute_alert_state(
+            &device_stats,
+            &acked,
+            &recognized_devids,
+            &alert_missing_devids,
+            smartd_active,
+        )
+        .causes;
 
         Ok(Some(live_causes))
     })();
@@ -283,6 +285,52 @@ mod tests {
         assert!(
             !paths.alert_latch_json().exists(),
             "no alert latch must be written for a benign stale row"
+        );
+    }
+
+    // Intent: a stats row whose devid is not in the pool's recognized set must
+    //   not latch a BtrfsDeviceErrors cause even when it carries non-zero
+    //   counters, and a follow-up monitor cycle must remain Ok -- no
+    //   ack-induced loop.
+    // Why it exists: the prior fix
+    //   (stale_mapper_row_no_longer_latches_computation_error) only covered
+    //   zero-counter stale rows. A non-zero counter row used to flow into
+    //   compute_alert_state, latch BtrfsDeviceErrors { devid: stale }, and --
+    //   once the operator ran braid ack -- snapshot_current would write an
+    //   acked entry that the very next monitor cycle's reconcile_acked_stats
+    //   would prune, re-firing the alert forever. Both passes must agree on
+    //   which devids matter.
+    // Scenario: btrfs device stats reports two healthy rows for devid 1 and 2
+    //   plus a stale /dev/mapper/braid-stale row at devid 99 with non-zero
+    //   read_io_errs / corruption_errs. Probe sees only devid 1 and 2 as
+    //   present. monitor must return Ok and write no alert latch; a second
+    //   monitor cycle on the same state must also return Ok.
+    #[test]
+    fn stale_mapper_row_with_errors_does_not_latch_or_loop() {
+        let (_dir, paths) = isolated_paths();
+        let runner = MonitorTestRunner::with_stale_mapper_errors();
+
+        let first = cmd_monitor(&runner, &monitor_fs_btrfs(), &monitor_mp(), &paths);
+        assert_eq!(
+            first,
+            MonitorResult::Ok,
+            "non-zero counters on an unrecognized devid must not latch an alert"
+        );
+        assert!(
+            !paths.alert_latch_json().exists(),
+            "no alert latch must be written for a stale-devid row"
+        );
+
+        let runner2 = MonitorTestRunner::with_stale_mapper_errors();
+        let second = cmd_monitor(&runner2, &monitor_fs_btrfs(), &monitor_mp(), &paths);
+        assert_eq!(
+            second,
+            MonitorResult::Ok,
+            "second cycle must remain Ok -- no reconcile/compute oscillation"
+        );
+        assert!(
+            !paths.alert_latch_json().exists(),
+            "no alert latch must appear on the second cycle either"
         );
     }
 

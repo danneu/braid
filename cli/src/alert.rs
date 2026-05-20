@@ -93,22 +93,28 @@ pub fn save_acked_stats_at(path: &Path, stats: &AckedStats) -> Result<(), std::i
 // ---------------------------------------------------------------------------
 
 /// Compute alert state from current btrfs stats, acked baselines, and the
-/// alert-local missing devids set.
+/// alert-local recognized and missing devid sets.
 ///
 /// Identity is `dev.devid` (btrfs supplies it on every stats row). The
 /// `<missing disk>` sentinel is skipped here even though its devid is
-/// available -- those rows always carry zero counters and `MissingDevice`
-/// causes are generated independently from `missing_devids`.
+/// available, and rows outside `recognized_devids` are ignored as stale
+/// identities. `MissingDevice` causes are generated independently from
+/// `missing_devids`.
 pub fn compute_alert_state(
     current_stats: &BtrfsDeviceStatsOutput,
     acked: &AckedStats,
+    recognized_devids: &[u64],
     missing_devids: &[u64],
     smartd_alert_active: bool,
 ) -> AlertState {
     let mut causes = Vec::new();
+    let recognized: BTreeSet<u64> = recognized_devids.iter().copied().collect();
 
     for dev in &current_stats.devices {
         if matches!(dev.target, DeviceStatsTarget::MissingDisk) {
+            continue;
+        }
+        if !recognized.contains(&dev.devid) {
             continue;
         }
         let devid = dev.devid;
@@ -160,15 +166,20 @@ fn has_new_errors(current: &DeviceErrorStats, acked: Option<&AckedDeviceCounters
 
 pub fn snapshot_current(
     current_stats: &BtrfsDeviceStatsOutput,
+    recognized_devids: &[u64],
     missing_devids: &[u64],
 ) -> AckedStats {
     let mut map = BTreeMap::new();
+    let recognized: BTreeSet<u64> = recognized_devids.iter().copied().collect();
 
     for dev in &current_stats.devices {
         // Skip <missing disk> sentinel rows: their devid is available but the
         // row carries zero counters and is already represented in
         // missing_devids below.
         if matches!(dev.target, DeviceStatsTarget::MissingDisk) {
+            continue;
+        }
+        if !recognized.contains(&dev.devid) {
             continue;
         }
         let key = dev.devid.to_string();
@@ -995,7 +1006,7 @@ mod tests {
     fn no_alert_when_all_zero() {
         let stats = make_stats(vec![zero_device("/dev/mapper/braid-vda", 1)]);
         let acked = AckedStats::default();
-        let alert = compute_alert_state(&stats, &acked, &[], false);
+        let alert = compute_alert_state(&stats, &acked, &[1], &[], false);
         assert!(!alert.active());
         assert!(alert.causes.is_empty());
     }
@@ -1007,7 +1018,7 @@ mod tests {
         dev.corruption_errs = 1;
         let stats = make_stats(vec![dev]);
         let acked = AckedStats::default();
-        let alert = compute_alert_state(&stats, &acked, &[], false);
+        let alert = compute_alert_state(&stats, &acked, &[1], &[], false);
         assert!(alert.active());
         assert_eq!(alert.causes.len(), 1);
         assert_eq!(alert.causes[0], AlertCause::BtrfsDeviceErrors { devid: 1 });
@@ -1017,7 +1028,7 @@ mod tests {
     fn alert_on_missing_device() {
         let stats = make_stats(vec![zero_device("/dev/mapper/braid-vda", 1)]);
         let acked = AckedStats::default();
-        let alert = compute_alert_state(&stats, &acked, &[2], false);
+        let alert = compute_alert_state(&stats, &acked, &[1, 2], &[2], false);
         assert!(alert.active());
         assert_eq!(alert.causes.len(), 1);
         assert_eq!(alert.causes[0], AlertCause::MissingDevice { devid: 2 });
@@ -1027,7 +1038,7 @@ mod tests {
     fn alert_on_smartd() {
         let stats = make_stats(vec![zero_device("/dev/mapper/braid-vda", 1)]);
         let acked = AckedStats::default();
-        let alert = compute_alert_state(&stats, &acked, &[], true);
+        let alert = compute_alert_state(&stats, &acked, &[1], &[], true);
         assert!(alert.active());
         assert_eq!(alert.causes.len(), 1);
         assert_eq!(alert.causes[0], AlertCause::SmartdAlert);
@@ -1051,7 +1062,7 @@ mod tests {
             },
         );
         let acked = AckedStats(acked_map);
-        let alert = compute_alert_state(&stats, &acked, &[], false);
+        let alert = compute_alert_state(&stats, &acked, &[1], &[], false);
         assert!(!alert.active());
     }
 
@@ -1075,7 +1086,7 @@ mod tests {
             },
         );
         let acked = AckedStats(acked_map);
-        let alert = compute_alert_state(&stats, &acked, &[], false);
+        let alert = compute_alert_state(&stats, &acked, &[1], &[], false);
         assert!(alert.active(), "counter reset should trigger alert");
     }
 
@@ -1091,7 +1102,7 @@ mod tests {
             },
         );
         let acked = AckedStats(acked_map);
-        let alert = compute_alert_state(&stats, &acked, &[2], false);
+        let alert = compute_alert_state(&stats, &acked, &[1, 2], &[2], false);
         assert!(!alert.active(), "acked missing should not trigger alert");
     }
 
@@ -1101,7 +1112,7 @@ mod tests {
         dev.write_io_errs = 1;
         let stats = make_stats(vec![dev]);
         let acked = AckedStats::default();
-        let alert = compute_alert_state(&stats, &acked, &[2], true);
+        let alert = compute_alert_state(&stats, &acked, &[1, 2], &[2], true);
         assert!(alert.active());
         assert_eq!(alert.causes.len(), 3);
     }
@@ -1112,7 +1123,7 @@ mod tests {
         dev.read_io_errs = 3;
         dev.corruption_errs = 1;
         let stats = make_stats(vec![dev]);
-        let snapshot = snapshot_current(&stats, &[2]);
+        let snapshot = snapshot_current(&stats, &[1, 2], &[2]);
 
         let disk1 = snapshot.0.get("1").unwrap();
         assert!(!disk1.missing_acked);
@@ -1139,7 +1150,7 @@ mod tests {
         dev.generation_errs = 7;
         let stats = make_stats(vec![dev]);
 
-        let snapshot = snapshot_current(&stats, &[2]);
+        let snapshot = snapshot_current(&stats, &[2], &[2]);
 
         let disk2 = snapshot.0.get("2").unwrap();
         assert!(disk2.missing_acked);
@@ -1168,7 +1179,7 @@ mod tests {
             },
         );
         let acked = AckedStats(acked_map);
-        let alert = compute_alert_state(&stats, &acked, &[], false);
+        let alert = compute_alert_state(&stats, &acked, &[1], &[], false);
         assert!(
             alert.active(),
             "new errors above acked baseline should trigger alert"
@@ -1176,22 +1187,39 @@ mod tests {
     }
 
     /*
-     * Intent: a stats row whose path doesn't match any pool member but whose
-     * devid is unknown produces no BtrfsDeviceErrors cause when its counters
-     * are zero. This is the positive replacement for the deleted
-     * `unmapped_device_is_error_in_alert` test.
+     * Intent: a recognized stats row with no acked baseline produces no
+     * BtrfsDeviceErrors cause when its counters are zero. This is the
+     * positive replacement for the deleted `unmapped_device_is_error_in_alert`
+     * test.
      *
      * Why it exists: with devid as the btrfs stats row key, an "orphan" path
-     * is no longer a fail-closed condition. The row simply has no acked
-     * baseline (acked.0.get("99") is None) and zero counters, so
-     * has_new_errors returns false. The alert pipeline must not treat
-     * unknown-devid rows as a structural error.
+     * is no longer a fail-closed condition. A recognized row can still have no
+     * acked baseline (acked.0.get("99") is None) and zero counters, so
+     * has_new_errors returns false.
      */
     #[test]
     fn unknown_devid_zero_counters_does_not_alert() {
         let stats = make_stats(vec![zero_device("/dev/mapper/braid-stale", 99)]);
         let acked = AckedStats::default();
-        let alert = compute_alert_state(&stats, &acked, &[], false);
+        let alert = compute_alert_state(&stats, &acked, &[99], &[], false);
+        assert!(!alert.active());
+        assert!(alert.causes.is_empty());
+    }
+
+    // Intent: an unrecognized stats row cannot emit BtrfsDeviceErrors, even
+    //   when its counters are non-zero.
+    // Why it exists: stale btrfs stats rows outside the current pool
+    //   membership used to latch alerts that ack/reconcile could never clear.
+    // Scenario: a lingering devid 99 row carries read and corruption errors,
+    //   while the current probe recognizes no such devid.
+    #[test]
+    fn unrecognized_devid_with_errors_does_not_alert() {
+        let mut dev = zero_device("/dev/mapper/braid-stale", 99);
+        dev.read_io_errs = 3;
+        dev.corruption_errs = 1;
+        let stats = make_stats(vec![dev]);
+        let acked = AckedStats::default();
+        let alert = compute_alert_state(&stats, &acked, &[], &[], false);
         assert!(!alert.active());
         assert!(alert.causes.is_empty());
     }
@@ -1206,7 +1234,7 @@ mod tests {
             zero_missing_device(2),
         ]);
         let acked = AckedStats::default();
-        let alert = compute_alert_state(&stats, &acked, &[2], false);
+        let alert = compute_alert_state(&stats, &acked, &[1, 2], &[2], false);
         assert!(alert.active());
         assert_eq!(alert.causes.len(), 1);
         assert_eq!(alert.causes[0], AlertCause::MissingDevice { devid: 2 });
@@ -1218,7 +1246,7 @@ mod tests {
             zero_device("/dev/mapper/braid-vda", 1),
             zero_missing_device(2),
         ]);
-        let snapshot = snapshot_current(&stats, &[2]);
+        let snapshot = snapshot_current(&stats, &[1, 2], &[2]);
         // Present device is snapshotted normally
         assert!(snapshot.0.contains_key("1"));
         // Missing device comes from missing_devids, not the sentinel row
@@ -1584,7 +1612,8 @@ mod tests {
         let acked = AckedStats::default();
         // Alert-local missing devids includes the null-underlying device's devid
         let alert_missing = vec![2u64];
-        let alert = compute_alert_state(&stats, &acked, &alert_missing, false);
+        let recognized = vec![1u64, 2];
+        let alert = compute_alert_state(&stats, &acked, &recognized, &alert_missing, false);
         assert!(alert.active());
         assert_eq!(alert.causes.len(), 1);
         assert_eq!(alert.causes[0], AlertCause::MissingDevice { devid: 2 });

@@ -280,6 +280,19 @@ impl AlertPoolState {
             .into_iter()
             .collect()
     }
+
+    /// Devids the alert pipeline treats as known pool members for one probe:
+    /// present, null-underlying, or btrfs-MISSING.
+    pub fn recognized_devids(&self) -> Vec<u64> {
+        self.present_devids
+            .iter()
+            .copied()
+            .chain(self.null_underlying.iter().map(|d| d.devid))
+            .chain(self.missing_devids.iter().copied())
+            .collect::<BTreeSet<u64>>()
+            .into_iter()
+            .collect()
+    }
 }
 
 /// Narrowed alert-pipeline probe for `cmd_ack` and `cmd_monitor`. Preserves
@@ -2132,6 +2145,33 @@ mod tests {
         };
 
         assert_eq!(state.alert_missing_devids(), vec![2, 3, 4]);
+    }
+
+    // Intent: AlertPoolState::recognized_devids returns the alert-pipeline
+    //   union of present, btrfs-MISSING, and null-underlying devids.
+    // Why it exists: monitor and ack must filter stats rows against the same
+    //   sorted, deduped membership set instead of rebuilding it separately.
+    // Scenario: one devid is present, one is both MISSING and null-backed, and
+    //   another exists only as null-backed.
+    #[test]
+    fn probe_pool_alerts_recognized_devids_method() {
+        let state = AlertPoolState {
+            mounted: true,
+            present_devids: vec![4, 1],
+            missing_devids: vec![4, 2],
+            null_underlying: vec![
+                NullUnderlyingDevice {
+                    mapper: MapperName("braid-two".into()),
+                    devid: 2,
+                },
+                NullUnderlyingDevice {
+                    mapper: MapperName("braid-three".into()),
+                    devid: 3,
+                },
+            ],
+        };
+
+        assert_eq!(state.recognized_devids(), vec![1, 2, 3, 4]);
     }
 
     // -- probe_fsid tests --

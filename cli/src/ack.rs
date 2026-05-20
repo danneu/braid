@@ -85,12 +85,13 @@ fn cmd_ack_impl<R: CommandRunner, F: Filesystem + ?Sized>(
     })?;
     let device_stats = parse_btrfs_device_stats(&stats_raw)?;
 
-    // 4. Compute alert-local missing devids: btrfs MISSING ∪ null-underlying
+    // 4. Compute alert-local membership views.
     let alert_missing_devids = pool.alert_missing_devids();
+    let recognized_devids = pool.recognized_devids();
 
     // 5. Snapshot current state. Identity is the devid carried on each
     //    stats row by btrfs -- no path-to-devid map needed.
-    let new_acked = snapshot_current(&device_stats, &alert_missing_devids);
+    let new_acked = snapshot_current(&device_stats, &recognized_devids, &alert_missing_devids);
     save_acked_stats(&new_acked, paths)?;
 
     if let Err(e) = cleanup_alert_files_and_beeper(paths, stop_beeper, remove_smartd) {
@@ -296,8 +297,9 @@ mod tests {
     use crate::test_fixtures::{
         AckPanicFilesystem, AckPanicRunner, ack_fs_btrfs, ack_fs_ext4, ack_fs_not_mounted,
         ack_mounted_fs_that_touches_smartd, ack_mounted_probe_runner,
-        ack_mounted_probe_runner_with_device_stats, ack_mp, ack_offline_fs_that_touches_smartd,
-        ack_write_latch, isolated_paths,
+        ack_mounted_probe_runner_with_device_stats,
+        ack_mounted_probe_runner_with_stale_devid_stats, ack_mp,
+        ack_offline_fs_that_touches_smartd, ack_write_latch, isolated_paths,
     };
     use std::collections::BTreeMap;
     #[cfg(unix)]
@@ -376,6 +378,45 @@ mod tests {
             beeper_calls.get(),
             1,
             "stop_beeper must fire once on mounted corrupt-latch ack"
+        );
+    }
+
+    // Intent: cmd_ack must not persist an acked entry for a btrfs device-stats
+    //   row whose devid is outside the pool's recognized set, even when that
+    //   row carries non-zero counters. After ack, acked-stats.json contains
+    //   only the recognized devids' baselines.
+    // Why it exists: snapshot_current used to walk every stats row, so an
+    //   unrecognized devid 99 would land in acked-stats.json. The very next
+    //   monitor cycle would prune devid 99 via reconcile_acked_stats and
+    //   compute_alert_state would re-latch BtrfsDeviceErrors { devid: 99 } --
+    //   the loop the operator could never escape. Filtering snapshot_current
+    //   by recognized_devids closes that half of the loop; this test pins it
+    //   directly so an implementation that only filters compute_alert_state
+    //   cannot pass.
+    // Scenario: a MissingDevice alert is already latched. btrfs filesystem
+    //   show reports devids 1 and 3 as the pool. btrfs device stats reports
+    //   rows for devids 1, 3, and a stale /dev/mapper/braid-stale at devid 99
+    //   with non-zero counters. The operator runs braid ack. ack must succeed
+    //   and acked-stats.json must contain keys "1" and "3" but not "99".
+    #[test]
+    fn cmd_ack_does_not_persist_unrecognized_devid_in_acked_stats() {
+        let (_dir, paths) = isolated_paths();
+        ack_write_latch(&paths, vec![AlertCause::MissingDevice { devid: 7 }]);
+        let runner = ack_mounted_probe_runner_with_stale_devid_stats();
+        let beeper = || {};
+
+        let result = cmd_ack_impl(&runner, &ack_fs_btrfs(), &ack_mp(), &paths, &beeper);
+        assert!(result.is_ok(), "ack must succeed, got {result:?}");
+
+        let acked = load_acked_stats(&paths);
+        let keys: Vec<&str> = acked.0.keys().map(String::as_str).collect();
+        assert!(
+            keys.contains(&"1") && keys.contains(&"3"),
+            "recognized devid baselines must be persisted, got {keys:?}"
+        );
+        assert!(
+            !keys.contains(&"99"),
+            "unrecognized devid must not be persisted, got {keys:?}"
         );
     }
 

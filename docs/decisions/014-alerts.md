@@ -52,7 +52,9 @@ A flag that exists at cleanup time when the snapshot saw neither active smartd s
 
 ### Ack state keyed by btrfs devid
 
-devid is btrfs-native -- no membership cross-reference is needed for alert counter baselines. The parser captures missing device devids from MISSING sentinel lines.
+Acked baselines are keyed by btrfs devid (`acked-stats.json` maps stringified devid to baseline) -- no path or LUKS UUID mapping is required to associate a stats row with its baseline. The parser captures missing device devids from MISSING sentinel lines.
+
+Membership cross-reference is performed at the alert-pipeline boundary, not at the baseline-keying level. `AlertPoolState::recognized_devids` ([cli/src/probe.rs](../../cli/src/probe.rs)) returns the union of `present_devids`, `null_underlying`, and `missing_devids` for the current cycle. Both `compute_alert_state` and `snapshot_current` filter `btrfs device stats` rows against that set before emitting causes or writing baselines. A stats row whose devid is outside the recognized set is treated as transient/stale identity: it cannot latch `BtrfsDeviceErrors`, and `braid ack` does not persist a baseline for it, which prevents a loop on the next monitor cycle's `reconcile_acked_stats` prune.
 
 ### Ack state separate from pool.json
 
