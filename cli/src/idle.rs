@@ -115,7 +115,7 @@ mod tests {
     use crate::test_fixtures::{
         IDLE_FSID, IDLE_FSID_OTHER, IdleMockFs, assert_idle_busy_unknown_prefix, idle_mp,
         idle_ready_for_sysfs_check, idle_runner_with_scrub_finished, idle_scrub_running,
-        scrub_status_unknown,
+        scrub_status_aborted, scrub_status_interrupted, scrub_status_never, scrub_status_unknown,
     };
     use std::io::ErrorKind;
 
@@ -136,6 +136,65 @@ mod tests {
     #[test]
     fn idle_when_all_ops_quiet() {
         let runner = idle_runner_with_scrub_finished();
+        let fs = IdleMockFs::with_exclop("none");
+
+        let result = cmd_idle(&runner, &fs, &idle_mp());
+        assert_eq!(result, IdleResult::Idle);
+    }
+
+    // Intent: ScrubState::Never through cmd_idle yields Idle.
+    // Why it exists: Pins the cmd_idle wiring from the parser-side
+    //   ScrubState variant to IdleResult::Idle. The match in cmd_idle
+    //   groups Never/Finished/Aborted/Interrupted into a single arm;
+    //   the parser tests only prove ScrubState classification, not
+    //   this wiring. A refactor that moves a variant into the Unknown
+    //   arm compiles cleanly and parser tests stay green, but
+    //   autosuspend silently stops working.
+    // Scenario: Freshly-created pool that has never been scrubbed.
+    #[test]
+    fn idle_when_scrub_never() {
+        let (scrub_req, scrub_out) = scrub_status_never();
+        let runner = MockRunner::default().with_output(scrub_req, scrub_out);
+        let fs = IdleMockFs::with_exclop("none");
+
+        let result = cmd_idle(&runner, &fs, &idle_mp());
+        assert_eq!(result, IdleResult::Idle);
+    }
+
+    // Intent: ScrubState::Aborted through cmd_idle yields Idle.
+    // Why it exists: Pins the cmd_idle wiring from the parser-side
+    //   ScrubState variant to IdleResult::Idle. The match in cmd_idle
+    //   groups Never/Finished/Aborted/Interrupted into a single arm;
+    //   the parser tests only prove ScrubState classification, not
+    //   this wiring. A refactor that moves a variant into the Unknown
+    //   arm compiles cleanly and parser tests stay green, but
+    //   autosuspend silently stops working.
+    // Scenario: `braid lock` cancelled a scrub, leaving resumable progress
+    //   on disk, and sysfs is quiet.
+    #[test]
+    fn idle_when_scrub_aborted() {
+        let (scrub_req, scrub_out) = scrub_status_aborted();
+        let runner = MockRunner::default().with_output(scrub_req, scrub_out);
+        let fs = IdleMockFs::with_exclop("none");
+
+        let result = cmd_idle(&runner, &fs, &idle_mp());
+        assert_eq!(result, IdleResult::Idle);
+    }
+
+    // Intent: ScrubState::Interrupted through cmd_idle yields Idle.
+    // Why it exists: Pins the cmd_idle wiring from the parser-side
+    //   ScrubState variant to IdleResult::Idle. The match in cmd_idle
+    //   groups Never/Finished/Aborted/Interrupted into a single arm;
+    //   the parser tests only prove ScrubState classification, not
+    //   this wiring. A refactor that moves a variant into the Unknown
+    //   arm compiles cleanly and parser tests stay green, but
+    //   autosuspend silently stops working.
+    // Scenario: Userspace scrub process died before completing, and sysfs
+    //   is quiet.
+    #[test]
+    fn idle_when_scrub_interrupted() {
+        let (scrub_req, scrub_out) = scrub_status_interrupted();
+        let runner = MockRunner::default().with_output(scrub_req, scrub_out);
         let fs = IdleMockFs::with_exclop("none");
 
         let result = cmd_idle(&runner, &fs, &idle_mp());
