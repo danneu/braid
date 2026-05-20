@@ -4403,7 +4403,7 @@ mod tests {
      * Why it exists: activating is not safe enough for Ok because systemd
      * has not yet guaranteed ExecStop, but it is plausibly transient and
      * should not be escalated to Fail.
-     * Scenario: the wrapper has just started braid-online.service and
+     * Scenario: `mark_online` has just started braid-online.service and
      * `braid doctor` runs before systemd has finished the transition.
      */
     #[test]

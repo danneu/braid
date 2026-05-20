@@ -77,7 +77,7 @@ A sleep inhibitor is held during the removal and the subsequent soft balance (if
 - Refuses if surviving disks lack space to absorb the missing device's allocations (ENOSPC pre-flight), when more than 1 surviving device exists
 - Refuses on a 2-disk RAID1 pool with one disk missing -- the kernel refuses to drop a RAID1 pool below two devices. Use `braid replace --old <missing-name> --new <new-name>=/dev/disk/by-id/<...> --missing-id <devid>` to repair the dead disk, or `braid add` first and then re-run.
 - Refuses if a pending operation journal (`pending-op.json`) exists -- run `braid recover` to reconcile.
-- Refuses if another braid operation is in progress (`/run/braid-pool.lock` is held by another wrapper) -- retry once it finishes.
+- Refuses if another braid operation is in progress (pool lock `/run/braid-pool.lock` is held) -- retry once it finishes.
 - Refuses if a btrfs exclusive operation is already running
 
 ## Related commands

@@ -83,7 +83,7 @@ The exit code is **2** when a degraded mount is refused (vs. **1** for other err
 ## Safety checks / refusal cases
 
 - Refuses if a pending operation journal (`pending-op.json`) exists -- run `braid recover` to reconcile.
-- Refuses if another braid operation is in progress (`/run/braid-pool.lock` is held by another wrapper) -- retry once it finishes.
+- Refuses if another braid operation is in progress (pool lock `/run/braid-pool.lock` is held) -- retry once it finishes.
 - Refuses to mount degraded without explicit `--allow-degraded`
 - If a disk rejects the passphrase after another disk accepted it, the error names both disks (indicates someone changed a disk's passphrase outside braid)
 - Does not prompt for a passphrase if all mappers are already open (idempotent re-run)

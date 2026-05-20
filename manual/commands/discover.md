@@ -69,7 +69,7 @@ sudo braid discover --write --expect-count 3
 
 - Refuses any operation on a healthy UUID-keyed `pool.json`. Corrupt or off-schema files are allowed for `--write` rebuild only; the original is copied to `pool.json.corrupt-<RFC3339-UTC>` before overwrite, and `--write` refuses if that snapshot cannot be written (full disk, read-only state directory). Run with all intended pool members attached; see `docs/luks-unlock.md`.
 - Refuses if a pending operation journal (`pending-op.json`) exists -- run `braid recover` to reconcile.
-- Refuses if another braid operation is in progress (`/run/braid-pool.lock` is held by another wrapper) -- retry once it finishes.
+- Refuses if another braid operation is in progress (pool lock `/run/braid-pool.lock` is held) -- retry once it finishes.
 - With `--expect-count`, refuses to write if the discovered member count is not exactly the requested count.
 - Without `--write`, makes no changes at all -- read-only scan.
 - Dangling `/dev/disk/by-id/` symlinks are skipped with a warning -- a diagnostic operators need when udev leaves a stale alias behind after a disk swap.

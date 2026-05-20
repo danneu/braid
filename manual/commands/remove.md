@@ -60,7 +60,7 @@ A sleep inhibitor is held during data migration and cleanup.
 - Refuses if remaining disks lack space to absorb the removed disk's data (ENOSPC pre-flight)
 - Warns when removal leaves a single disk (no RAID1 redundancy)
 - Refuses if a pending operation journal (`pending-op.json`) exists -- run `braid recover` to reconcile.
-- Refuses if another braid operation is in progress (`/run/braid-pool.lock` is held by another wrapper) -- retry once it finishes.
+- Refuses if another braid operation is in progress (pool lock `/run/braid-pool.lock` is held) -- retry once it finishes.
 - Refuses if a btrfs exclusive operation is already running
 
 ## Related commands
