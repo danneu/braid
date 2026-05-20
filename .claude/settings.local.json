@@ -33,7 +33,15 @@
       "Bash(just --list)",
       "Bash(cargo fmt *)",
       "Edit(/command-findings/**)",
-      "Bash(mkdir *)"
+      "Bash(mkdir *)",
+      "Bash(git add *)",
+      "Skill(revise-plan)",
+      "Bash(git ls-remote *)",
+      "Bash(gh release *)",
+      "Bash(cargo tree *)",
+      "Bash(nix --version)",
+      "Bash(awk:*)",
+      "Bash(cargo build:*)"
     ]
   },
   "plansDirectory": "./plans/wip",
