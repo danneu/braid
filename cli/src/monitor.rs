@@ -103,8 +103,9 @@ pub fn cmd_monitor<R: CommandRunner, F: Filesystem + ?Sized>(
         let still_relevant_devids: BTreeSet<u64> = recognized_devids.iter().copied().collect();
         let ack_changed =
             alert::reconcile_acked_stats(&mut acked, &still_relevant_devids, &present_devids);
-        if ack_changed && let Err(e) = save_acked_stats(&acked, paths) {
-            eprintln!("Warning: failed to update acked stats: {e}");
+        if ack_changed {
+            save_acked_stats(&acked, paths)
+                .map_err(|e| format!("acked-stats unwritable -- {e}"))?;
         }
 
         // 7. Compute live alert state. Identity is the devid carried on each
@@ -249,6 +250,67 @@ mod tests {
             reloaded.0.get("3"),
             Some(&disk3),
             "btrfs MISSING ack must be preserved"
+        );
+    }
+
+    // Intent: cmd_monitor surfaces an acked-stats save failure as one
+    //   ComputationError after reconcile mutates stale ack state.
+    // Why it exists: a failed reconcile write leaves monitor's persisted
+    //   ack baseline indeterminate; returning Ok would turn a persistent
+    //   state-directory write fault into a journald-only warning.
+    // Scenario: monitor prunes an orphan devid from acked-stats.json, but the
+    //   state directory becomes read-only before the reconciled file can be
+    //   saved.
+    #[cfg(unix)]
+    #[test]
+    fn save_acked_stats_failure_latches_computation_error() {
+        use std::os::unix::fs::PermissionsExt;
+
+        struct RestorePerms {
+            path: std::path::PathBuf,
+            perms: std::fs::Permissions,
+        }
+
+        impl Drop for RestorePerms {
+            fn drop(&mut self) {
+                let _ = std::fs::set_permissions(&self.path, self.perms.clone());
+            }
+        }
+
+        let (_dir, paths) = isolated_paths();
+        save_acked_stats(
+            &alert::AckedStats(BTreeMap::from([("99".to_owned(), acked_disk(false, 99))])),
+            &paths,
+        )
+        .unwrap();
+
+        let state_dir = paths
+            .acked_stats_json()
+            .parent()
+            .expect("acked-stats path has state directory")
+            .to_path_buf();
+        let original_perms = std::fs::metadata(&state_dir).unwrap().permissions();
+        let _restore = RestorePerms {
+            path: state_dir.clone(),
+            perms: original_perms,
+        };
+        std::fs::set_permissions(&state_dir, std::fs::Permissions::from_mode(0o500)).unwrap();
+
+        let result = cmd_monitor(
+            &MonitorReconcileRunner,
+            &monitor_fs_btrfs(),
+            &monitor_mp(),
+            &paths,
+        );
+
+        let detail = assert_monitor_single_computation_error(&result);
+        assert!(
+            detail.contains("acked-stats"),
+            "detail should name acked-stats failure, got {detail}"
+        );
+        assert!(
+            detail.contains("unwritable"),
+            "detail should name unwritable acked-stats, got {detail}"
         );
     }
 
