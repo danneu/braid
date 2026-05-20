@@ -142,9 +142,12 @@ pub fn confirm_yes_from<R: Read + ?Sized>(reader: &mut R) -> Result<(), String> 
 
 /// Interactive confirmation: read "yes" from stdin.
 pub fn confirm_yes() -> Result<(), String> {
-    use std::os::unix::io::FromRawFd;
-    let mut stdin_file = std::mem::ManuallyDrop::new(unsafe { std::fs::File::from_raw_fd(0) });
-    confirm_yes_from(&mut *stdin_file)
+    // dup so we hand a plain File to confirm_yes_from -- std::io::stdin()
+    // would re-engage Stdin's line buffer and pre-drain bytes the next
+    // --passphrase-stdin reader needs.
+    let stdin_fd = nix::unistd::dup(std::io::stdin()).map_err(|e| format!("dup stdin: {e}"))?;
+    let mut stdin_file = std::fs::File::from(stdin_fd);
+    confirm_yes_from(&mut stdin_file)
 }
 
 // ---------------------------------------------------------------------------

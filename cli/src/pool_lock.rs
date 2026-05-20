@@ -11,7 +11,7 @@ use nix::fcntl::{FlockArg, OFlag, flock, open};
 use nix::sys::stat::Mode;
 use std::fs::File;
 use std::io;
-use std::os::fd::{AsRawFd, FromRawFd};
+use std::os::fd::AsRawFd;
 use std::path::{Path, PathBuf};
 use std::thread;
 use std::time::{Duration, Instant};
@@ -285,8 +285,7 @@ fn open_lock_file(path: &Path) -> io::Result<File> {
         Mode::from_bits_truncate(0o600),
     )
     .map_err(io_from_errno)?;
-    // SAFETY: `open` returned a fresh owned fd, and File becomes its sole owner.
-    Ok(unsafe { File::from_raw_fd(fd) })
+    Ok(File::from(fd))
 }
 
 fn would_block(errno: Errno) -> bool {

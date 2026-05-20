@@ -1,7 +1,6 @@
 #![cfg(unix)]
 
 use std::fs::File;
-use std::os::fd::AsRawFd;
 use std::path::Path;
 use std::process::Command;
 use std::time::{Duration, Instant};
@@ -31,14 +30,7 @@ fn maybe_run_probe() {
 }
 
 fn detach_session() {
-    // SAFETY: setsid() takes no arguments and is safe to call from a fresh
-    // child process that is not already a session leader.
-    let rc = unsafe { libc::setsid() };
-    assert!(
-        rc != -1,
-        "setsid failed: {}",
-        std::io::Error::last_os_error()
-    );
+    nix::unistd::setsid().expect("setsid");
 }
 
 fn redirect_stdio_to_dev_null() {
@@ -48,11 +40,8 @@ fn redirect_stdio_to_dev_null() {
         .open("/dev/null")
         .expect("open /dev/null");
 
-    // SAFETY: dup2 onto STDIN_FILENO/STDOUT_FILENO is safe; both are valid fds.
-    unsafe {
-        assert!(libc::dup2(null.as_raw_fd(), libc::STDIN_FILENO) != -1);
-        assert!(libc::dup2(null.as_raw_fd(), libc::STDOUT_FILENO) != -1);
-    }
+    nix::unistd::dup2_stdin(&null).expect("dup2 stdin");
+    nix::unistd::dup2_stdout(&null).expect("dup2 stdout");
 }
 
 fn run_child_probe(probe: &str, parent_test_name: &str) {

@@ -28,14 +28,14 @@ use std::process::{Child, Command, Stdio};
 /// always torn down as a unit instead of leaving the descendants as
 /// orphans reparented to init.
 fn kill_pgroup_and_reap(child: &mut Child) {
-    // SAFETY: `libc::kill(-pgid, SIGKILL)` is the documented kernel
-    // interface for signalling an entire process group. The pgid equals
-    // the direct child's pid because we spawned with `process_group(0)`.
-    // The pid is still valid in the kernel until we `wait()` on the
-    // direct child below, so there is no pid-reuse window here.
-    unsafe {
-        libc::kill(-(child.id() as libc::pid_t), libc::SIGKILL);
-    }
+    // pgid equals the direct child's pid (spawned with `process_group(0)`),
+    // and that pid stays valid in the kernel until we wait() below, so
+    // there is no pid-reuse window. killpg fans the signal out to the
+    // entire process group. Best-effort: the child may have already exited.
+    let _ = nix::sys::signal::killpg(
+        nix::unistd::Pid::from_raw(child.id() as libc::pid_t),
+        nix::sys::signal::Signal::SIGKILL,
+    );
     let _ = child.wait();
 }
 
@@ -101,7 +101,7 @@ impl AcquireSleepInhibitor for RecordingInhibitor {
 /// Spawns `systemd-inhibit` (which itself supervises a `sh + sleep` child
 /// to keep the inhibitor open) in its own process group. The lock is held
 /// for as long as the guard is alive. `Drop` SIGKILLs the entire process
-/// group via `kill(-pgid, ...)` and reaps the direct child, so the
+/// group via `killpg` and reaps the direct child, so the
 /// supervised `sh`/`sleep` is torn down with the parent instead of leaking
 /// as an orphan reparented to init. logind releases the inhibitor as soon
 /// as the holding process exits.

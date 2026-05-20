@@ -2,7 +2,6 @@
 
 use std::fs::File;
 use std::io::{Read, Write};
-use std::os::unix::io::{AsRawFd, FromRawFd, RawFd};
 use std::process::Command;
 use std::time::{Duration, Instant};
 
@@ -56,53 +55,36 @@ fn run_child_probe(probe: &str, parent_test_name: &str, timeout_message: &str) {
 }
 
 fn open_pty_pair() -> (File, File) {
-    let mut master = -1;
-    let mut slave = -1;
-    let rc = unsafe {
-        libc::openpty(
-            &mut master,
-            &mut slave,
-            std::ptr::null_mut(),
-            std::ptr::null_mut(),
-            std::ptr::null_mut(),
-        )
-    };
-    assert_eq!(rc, 0, "openpty failed: {}", std::io::Error::last_os_error());
-    unsafe { (File::from_raw_fd(master), File::from_raw_fd(slave)) }
+    let r = nix::pty::openpty(None, None).expect("openpty failed");
+    (File::from(r.master), File::from(r.slave))
 }
 
-fn tcgetattr(fd: RawFd) -> Result<libc::termios, String> {
-    let mut termios = std::mem::MaybeUninit::<libc::termios>::zeroed();
-    let rc = unsafe { libc::tcgetattr(fd, termios.as_mut_ptr()) };
-    if rc == -1 {
-        Err(format!(
-            "tcgetattr failed: {}",
-            std::io::Error::last_os_error()
-        ))
-    } else {
-        Ok(unsafe { termios.assume_init() })
-    }
+fn tcgetattr(fd: &File) -> Result<nix::sys::termios::Termios, String> {
+    nix::sys::termios::tcgetattr(fd).map_err(|e| format!("tcgetattr failed: {e}"))
 }
 
-fn termios_bytes(termios: &libc::termios) -> &[u8] {
-    unsafe {
-        std::slice::from_raw_parts(
-            (termios as *const libc::termios).cast::<u8>(),
-            std::mem::size_of::<libc::termios>(),
-        )
-    }
-}
-
-fn assert_termios_eq(expected: &libc::termios, actual: &libc::termios) {
-    assert_eq!(termios_bytes(expected), termios_bytes(actual));
+fn assert_termios_public_eq(
+    before: &nix::sys::termios::Termios,
+    after: &nix::sys::termios::Termios,
+) {
+    assert_eq!(before.input_flags, after.input_flags, "input_flags");
+    assert_eq!(before.output_flags, after.output_flags, "output_flags");
+    assert_eq!(before.control_flags, after.control_flags, "control_flags");
+    assert_eq!(before.local_flags, after.local_flags, "local_flags");
+    assert_eq!(before.control_chars, after.control_chars, "control_chars");
+    #[cfg(any(target_os = "linux", target_os = "android", target_os = "haiku"))]
+    assert_eq!(
+        before.line_discipline, after.line_discipline,
+        "line_discipline"
+    );
 }
 
 fn probe_pty_integration() -> Result<(), String> {
-    let (mut master_file, mut slave_file) = open_pty_pair();
-    let before = tcgetattr(slave_file.as_raw_fd())?;
+    let (mut master_file, slave_file) = open_pty_pair();
+    let before = tcgetattr(&slave_file)?;
 
     let got = std::thread::scope(|scope| {
-        let reader = scope.spawn(|| braid_cli::luks::read_tty_from_file(&mut slave_file, PROMPT));
+        let reader = scope.spawn(|| braid_cli::luks::read_tty_from_file(&slave_file, PROMPT));
 
         let mut prompt = vec![0; PROMPT.len()];
         master_file
@@ -120,19 +102,19 @@ fn probe_pty_integration() -> Result<(), String> {
     })?;
     assert_eq!(got.expose_secret(), "hunter2");
 
-    let after = tcgetattr(slave_file.as_raw_fd())?;
-    assert_termios_eq(&before, &after);
+    let after = tcgetattr(&slave_file)?;
+    assert_termios_public_eq(&before, &after);
     Ok(())
 }
 
 fn probe_deadlock_immunity() -> Result<(), String> {
     let _stdin_guard = std::io::stdin().lock();
-    let (mut master_file, mut slave_file) = open_pty_pair();
+    let (mut master_file, slave_file) = open_pty_pair();
     master_file
         .write_all(b"x\n")
         .map_err(|e| format!("failed to write passphrase to pty master: {e}"))?;
     let got =
-        braid_cli::luks::read_tty_from_file(&mut slave_file, PROMPT).map_err(|e| e.to_string())?;
+        braid_cli::luks::read_tty_from_file(&slave_file, PROMPT).map_err(|e| e.to_string())?;
     assert_eq!(got.expose_secret(), "x");
     Ok(())
 }

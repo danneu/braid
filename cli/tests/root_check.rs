@@ -1,8 +1,7 @@
 use std::process::Command;
 
 fn is_root() -> bool {
-    // SAFETY: geteuid() is a trivial syscall with no arguments, always safe to call.
-    (unsafe { libc::geteuid() }) == 0
+    nix::unistd::geteuid().is_root()
 }
 
 fn braid() -> Command {

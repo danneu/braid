@@ -377,8 +377,7 @@ fn main() {
         _ => true,
     };
 
-    // SAFETY: geteuid() is a trivial syscall with no arguments, always safe to call.
-    if needs_root && unsafe { libc::geteuid() } != 0 {
+    if needs_root && !nix::unistd::geteuid().is_root() {
         eprintln!("error: braid must be run as root (try: sudo braid ...)");
         std::process::exit(1);
     }

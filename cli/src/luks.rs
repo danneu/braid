@@ -9,9 +9,10 @@ use crate::state_paths::StatePaths;
 use crate::types::{
     ByIdPath, DiskName, LuksFormatExtraOpts, LuksLabel, LuksUuid, MapperName, PoolDevice,
 };
+use nix::sys::termios::{LocalFlags, SetArg, Termios};
 use std::io::{Read, Write};
+use std::os::fd::{AsFd, BorrowedFd};
 use std::os::unix::fs::PermissionsExt;
-use std::os::unix::io::{AsRawFd, RawFd};
 use std::path::{Path, PathBuf};
 use zeroize::Zeroizing;
 
@@ -158,12 +159,12 @@ pub trait PassphraseReader {
     fn read_tty(&self, label: &str) -> Result<Passphrase, LuksError>;
 }
 
-/// Production TTY reader backed by /dev/tty and libc termios.
+/// Production TTY reader backed by /dev/tty and nix termios wrappers.
 pub struct RealTty;
 
 impl PassphraseReader for RealTty {
     fn read_tty(&self, label: &str) -> Result<Passphrase, LuksError> {
-        let mut tty = std::fs::OpenOptions::new()
+        let tty = std::fs::OpenOptions::new()
             .read(true)
             .write(true)
             .open("/dev/tty")
@@ -174,65 +175,47 @@ impl PassphraseReader for RealTty {
                         .into(),
                 )
             })?;
-        read_tty_from_file(&mut tty, label)
+        read_tty_from_file(&tty, label)
     }
 }
 
 #[doc(hidden)]
-pub fn read_tty_from_file(tty: &mut std::fs::File, label: &str) -> Result<Passphrase, LuksError> {
-    let fd = tty.as_raw_fd();
-    let orig = tcgetattr(fd)?;
-    let mut modified = orig;
-    modified.c_lflag &= !libc::ECHO;
-    modified.c_lflag |= libc::ECHONL;
+pub fn read_tty_from_file(mut tty: &std::fs::File, label: &str) -> Result<Passphrase, LuksError> {
+    let fd = tty.as_fd();
+    let orig = nix::sys::termios::tcgetattr(fd).map_err(std::io::Error::from)?;
+    let mut modified = orig.clone();
+    modified.local_flags.remove(LocalFlags::ECHO);
+    modified.local_flags.insert(LocalFlags::ECHONL);
 
     let _guard = TermiosGuard::install(fd, modified, orig)?;
     tty.write_all(label.as_bytes())?;
     tty.flush()?;
 
-    let raw = read_line_into_zeroizing(tty, "terminal")?;
+    let raw = read_line_into_zeroizing(&mut tty, "terminal")?;
     finalize_passphrase_bytes(&raw, "terminal")
 }
 
-fn tcgetattr(fd: RawFd) -> std::io::Result<libc::termios> {
-    let mut termios = std::mem::MaybeUninit::<libc::termios>::zeroed();
-    let rc = unsafe { libc::tcgetattr(fd, termios.as_mut_ptr()) };
-    if rc == -1 {
-        Err(std::io::Error::last_os_error())
-    } else {
-        Ok(unsafe { termios.assume_init() })
-    }
-}
-
-fn tcsetattr_now(fd: RawFd, termios: &libc::termios) -> std::io::Result<()> {
-    let rc = unsafe { libc::tcsetattr(fd, libc::TCSANOW, termios) };
-    if rc == -1 {
-        Err(std::io::Error::last_os_error())
-    } else {
-        Ok(())
-    }
-}
-
 // Restores only on normal returns and Rust unwinds; process signals skip Drop.
-struct TermiosGuard {
-    fd: RawFd,
-    orig: libc::termios,
+struct TermiosGuard<'a> {
+    fd: BorrowedFd<'a>,
+    orig: Termios,
 }
 
-impl TermiosGuard {
+impl<'a> TermiosGuard<'a> {
     fn install(
-        fd: RawFd,
-        modified: libc::termios,
-        orig: libc::termios,
-    ) -> std::io::Result<TermiosGuard> {
-        tcsetattr_now(fd, &modified)?;
+        fd: BorrowedFd<'a>,
+        modified: Termios,
+        orig: Termios,
+    ) -> std::io::Result<TermiosGuard<'a>> {
+        nix::sys::termios::tcsetattr(fd, SetArg::TCSANOW, &modified)
+            .map_err(std::io::Error::from)?;
         Ok(TermiosGuard { fd, orig })
     }
 }
 
-impl Drop for TermiosGuard {
+impl Drop for TermiosGuard<'_> {
     fn drop(&mut self) {
-        let _ = tcsetattr_now(self.fd, &self.orig);
+        let _ = nix::sys::termios::tcsetattr(self.fd, SetArg::TCSANOW, &self.orig);
     }
 }
 
@@ -297,13 +280,17 @@ pub fn read_passphrase_with(
     tty: &dyn PassphraseReader,
 ) -> Result<Passphrase, LuksError> {
     if passphrase_file.is_none() && passphrase_stdin {
-        use std::os::unix::io::FromRawFd;
-        let mut stdin = std::mem::ManuallyDrop::new(unsafe { std::fs::File::from_raw_fd(0) });
+        // dup so we can hand a plain File to read_passphrase_with_readers --
+        // std::io::stdin() would re-engage Stdin's line buffer and global
+        // mutex, breaking the byte-at-a-time read contract the passphrase
+        // reader relies on.
+        let stdin_fd = nix::unistd::dup(std::io::stdin()).map_err(std::io::Error::from)?;
+        let mut stdin = std::fs::File::from(stdin_fd);
         return read_passphrase_with_readers(
             passphrase_file,
             passphrase_stdin,
             confirm_new,
-            &mut *stdin,
+            &mut stdin,
             tty,
         );
     }
@@ -1139,7 +1126,7 @@ mod tests {
     use crate::cmd::{CmdRequest, MockRunner, RawCommandOutput};
     use crate::test_fixtures::MockBackingPathResolver;
     use crate::types::ByIdPath;
-    use std::os::unix::io::{AsRawFd, FromRawFd, RawFd};
+    use std::os::fd::AsFd;
 
     fn zpass(s: &str) -> Passphrase {
         Passphrase::from_zeroizing(Zeroizing::new(String::from(s)))
@@ -1388,45 +1375,25 @@ mod tests {
     }
 
     fn open_pty_pair() -> (std::fs::File, std::fs::File) {
-        let mut master = -1;
-        let mut slave = -1;
-        let rc = unsafe {
-            libc::openpty(
-                &mut master,
-                &mut slave,
-                std::ptr::null_mut(),
-                std::ptr::null_mut(),
-                std::ptr::null_mut(),
-            )
-        };
-        assert_eq!(rc, 0, "openpty failed: {}", std::io::Error::last_os_error());
-        unsafe {
-            (
-                std::fs::File::from_raw_fd(master),
-                std::fs::File::from_raw_fd(slave),
-            )
-        }
+        let r = nix::pty::openpty(None, None).expect("openpty failed");
+        (std::fs::File::from(r.master), std::fs::File::from(r.slave))
     }
 
-    fn flip_echo(termios: &mut libc::termios) {
-        if termios.c_lflag & libc::ECHO == 0 {
-            termios.c_lflag |= libc::ECHO;
-        } else {
-            termios.c_lflag &= !libc::ECHO;
-        }
+    fn flip_echo(termios: &mut Termios) {
+        termios.local_flags.toggle(LocalFlags::ECHO);
     }
 
-    fn termios_bytes(termios: &libc::termios) -> &[u8] {
-        unsafe {
-            std::slice::from_raw_parts(
-                (termios as *const libc::termios).cast::<u8>(),
-                std::mem::size_of::<libc::termios>(),
-            )
-        }
-    }
-
-    fn assert_termios_eq(expected: &libc::termios, actual: &libc::termios) {
-        assert_eq!(termios_bytes(expected), termios_bytes(actual));
+    fn assert_termios_public_eq(before: &Termios, after: &Termios) {
+        assert_eq!(before.input_flags, after.input_flags, "input_flags");
+        assert_eq!(before.output_flags, after.output_flags, "output_flags");
+        assert_eq!(before.control_flags, after.control_flags, "control_flags");
+        assert_eq!(before.local_flags, after.local_flags, "local_flags");
+        assert_eq!(before.control_chars, after.control_chars, "control_chars");
+        #[cfg(any(target_os = "linux", target_os = "android", target_os = "haiku"))]
+        assert_eq!(
+            before.line_discipline, after.line_discipline,
+            "line_discipline"
+        );
     }
 
     /*
@@ -1439,19 +1406,19 @@ mod tests {
     #[test]
     fn termios_guard_restores_on_drop() {
         let (_master, slave) = open_pty_pair();
-        let fd = slave.as_raw_fd();
-        let before = tcgetattr(fd).unwrap();
-        let mut modified = before;
+        let fd = slave.as_fd();
+        let before = nix::sys::termios::tcgetattr(fd).unwrap();
+        let mut modified = before.clone();
         flip_echo(&mut modified);
 
         {
-            let _guard = TermiosGuard::install(fd, modified, before).unwrap();
-            let during = tcgetattr(fd).unwrap();
-            assert_termios_eq(&modified, &during);
+            let _guard = TermiosGuard::install(fd, modified.clone(), before.clone()).unwrap();
+            let during = nix::sys::termios::tcgetattr(fd).unwrap();
+            assert_eq!(modified.local_flags, during.local_flags);
         }
 
-        let after = tcgetattr(fd).unwrap();
-        assert_termios_eq(&before, &after);
+        let after = nix::sys::termios::tcgetattr(fd).unwrap();
+        assert_termios_public_eq(&before, &after);
     }
 
     /*
@@ -1464,8 +1431,8 @@ mod tests {
      */
     #[test]
     fn termios_guard_restores_on_question_mark_return() {
-        fn install_then_fail(fd: RawFd, before: libc::termios) -> std::io::Result<()> {
-            let mut modified = before;
+        fn install_then_fail(fd: BorrowedFd<'_>, before: Termios) -> std::io::Result<()> {
+            let mut modified = before.clone();
             flip_echo(&mut modified);
             let _guard = TermiosGuard::install(fd, modified, before)?;
             Err(std::io::Error::other("forced early return"))?;
@@ -1473,14 +1440,14 @@ mod tests {
         }
 
         let (_master, slave) = open_pty_pair();
-        let fd = slave.as_raw_fd();
-        let before = tcgetattr(fd).unwrap();
+        let fd = slave.as_fd();
+        let before = nix::sys::termios::tcgetattr(fd).unwrap();
 
-        let err = install_then_fail(fd, before).unwrap_err();
+        let err = install_then_fail(fd, before.clone()).unwrap_err();
         assert_eq!(err.kind(), std::io::ErrorKind::Other);
 
-        let after = tcgetattr(fd).unwrap();
-        assert_termios_eq(&before, &after);
+        let after = nix::sys::termios::tcgetattr(fd).unwrap();
+        assert_termios_public_eq(&before, &after);
     }
 
     /*
