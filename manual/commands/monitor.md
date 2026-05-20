@@ -26,7 +26,7 @@ sudo braid monitor; echo $?
 | --- | --- |
 | **0** | Healthy, or pool is offline (nothing to check) |
 | **1** | Alert active -- one or more problems detected |
-| **2** | Pre-monitor setup error -- config unreadable |
+| **2** | Pre-monitor setup error (e.g. pool-lock I/O, config load failure) |
 
 ## What triggers an alert (exit 1)
 

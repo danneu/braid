@@ -69,7 +69,7 @@ Checks state and returns an exit code. Does not start/stop services. The systemd
 Exit codes:
 - **0** -- ok or pool offline with no active alerts
 - **1** -- alert active (disk health issue OR indeterminate state latched as `ComputationError` -- e.g. probe failure, parse failure, unmapped device)
-- **2** -- pre-monitor setup failure (config unreadable). Reserved for "could not even attempt to detect"; never emitted by `cmd_monitor` itself.
+- **2** -- pre-`cmd_monitor` setup failure (e.g. pool-lock I/O, config load failure). Reserved for "could not even attempt to detect"; never emitted by `cmd_monitor` itself.
 
 Fail closed: any failure inside `cmd_monitor` that leaves pool state indeterminate latches a `ComputationError` cause and reports exit 1, so the systemd wrapper starts the beeper. Exit 2 means the monitor never ran -- a beep would be meaningless because there is no `AlertState` to report.
 

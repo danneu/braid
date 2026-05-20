@@ -92,7 +92,7 @@ Periodic oneshot (default: every 5 minutes). Pure detector — checks `btrfs dev
 
 - `ConditionPathIsMountPoint` — skipped cleanly when pool is not mounted (no dependency-failure noise from timer). No `After` or `BindsTo` on `mnt-storage.mount` — those directives force systemd to load the unit, which doesn't exist before the first unlock.
 - Exit code 1 from `braid monitor` → starts `braid-alert.service`.
-- `braid monitor` exits 0 on operational errors after logging them, so health-polling failures do not directly start alert notification.
+- `braid monitor` fails closed: probe/parse/stats/mountinfo failures, `acked-stats.json` baseline read/parse failures, and alert-latch read/quarantine failures latch `AlertCause::ComputationError` and exit 1, so the wrapper above starts the beeper. Exit 0 is reserved for healthy, pool-offline, and pool-lock-contended cycles; exit 2 is reserved for pre-`cmd_monitor` setup failures (e.g. pool-lock I/O, config load failure) and is never emitted by `cmd_monitor` itself. See [ADR 014 fail-closed contract](014-alerts.md#braid-monitor-is-a-pure-detector) for the cause taxonomy.
 
 ### braid-scrub.timer + scrub service + resume trigger -- lifecycle-bound scrub
 

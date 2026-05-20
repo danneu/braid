@@ -67,7 +67,7 @@ enum Commands {
     /// resume saved work or start a fresh scrub when nothing is resumable.
     #[command(hide = true)]
     ScrubResumeOrStart(ScrubMountArgs),
-    /// Check disk health: exit 0 = ok/offline, exit 1 = alert (incl. probe/compute failure latched as ComputationError), exit 2 = setup error (config)
+    /// Check disk health: exit 0 = ok/offline, exit 1 = alert (incl. probe/compute failure latched as ComputationError), exit 2 = setup error (e.g. pool-lock I/O, config load)
     Monitor,
     /// Acknowledge current alerts and silence notifications
     Ack,
