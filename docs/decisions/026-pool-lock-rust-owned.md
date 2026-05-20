@@ -49,9 +49,13 @@ The module option `braid.lockSystemdStopDeadlineSecs` controls `<n>`. Its
 default is 270 seconds, and the module asserts that it is strictly below
 `braid-online.service` `TimeoutStopSec` (300 seconds).
 
-Post-success lifecycle work also lives under the Rust-held pool lock:
+Lifecycle work also lives under the Rust-held pool lock:
 
-- `unlock`, `add`, and `recover` call `mark_online` after a successful mount.
+- After every `unlock`, `add`, and `recover` attempt, success or failure,
+  dispatch runs `mark_online` as a finalizer. The `is_mountpoint` gate inside
+  `mark_online` short-circuits when the operation failed before mounting; the
+  bootstrap-add and recover cases where the mount succeeded but a later step
+  returned `Err` are exactly where this finalizer matters.
 - Plain `braid lock` calls `mark_offline` after successful unmount/close.
 - The lock path stops lifecycle-bound scrub units and `BoundBy`
   `braid-online.service` consumers before unmounting.
@@ -78,6 +82,23 @@ from being queued in that state.
 
 Unknown snapshot results warn instead of starting. The pool remains mounted and
 usable, but automatic shutdown cleanup may be missing.
+
+## Bootstrap-Journal Membership Fallback
+
+Lock-side dispatch normally loads mapper identity from `pool.json`. If
+`pool.json` is absent, it falls back to `pending-op.json` only when the journal
+is structurally a bootstrap add: `OpKind::Add` with empty `pre_membership`.
+That journal's `target_membership` is the authoritative set of disks that
+bootstrap add intended to open and mount.
+
+This closes the second half of the failed-bootstrap-add lifecycle hole. A
+bootstrap add can mount the pool and then fail before `save_membership` writes
+the first `pool.json`; if shutdown follows, `braid-online.service` ExecStop
+still needs enough membership to unmount and close the LUKS mappers.
+
+Other journal kinds are intentionally out of scope. `Remove`, `RemoveMissing`,
+`Replace`, and live-pool `Add` require `pool.json` as a precondition and should
+be resolved through `braid recover`, not guessed by `braid lock`.
 
 ## Stop Coordinator + Done Protocol
 

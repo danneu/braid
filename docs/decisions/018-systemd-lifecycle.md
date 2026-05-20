@@ -120,13 +120,14 @@ The wrapper (`braid-wrapper.sh`) is a pure exec shim: it sets the module-control
 installs. Standalone CLI deployments omit it; those configs still get mount
 permission fixups but do not touch `braid-online.service`.
 
-**On successful `unlock`, `add`, or `recover`:**
+**After every `unlock`, `add`, or `recover` attempt:**
 1. Rust dispatch acquires `/run/braid-pool.lock`, loads config and membership, and snapshots `braid-online.service` `ActiveState` only when `systemd_lifecycle = true`.
-2. CLI opens LUKS + mounts pool. (`recover` self-mounts when recovering from an interrupted operation.)
-3. While the pool lock is still held, Rust checks `mountpoint -q`.
-4. Rust sets permissions (`root:poolAccessGroup 2770`) if `poolAccessGroup` is configured.
-5. When `systemd_lifecycle = true`, Rust starts `braid-online.service` only when the initial snapshot was `inactive` or `failed`.
-6. If activation fails: prints WARNING to stderr, exits 0. Pool is mounted and usable; only the shutdown hook is missing.
+2. CLI opens LUKS + mounts pool when the command reaches its mount step. (`recover` self-mounts when recovering from an interrupted operation.)
+3. Before dispatch returns, success or failure, Rust runs `mark_online` while the pool lock is still held.
+4. `mark_online` checks `mountpoint -q`; pre-mount failures short-circuit here.
+5. Rust sets permissions (`root:poolAccessGroup 2770`) if `poolAccessGroup` is configured.
+6. When `systemd_lifecycle = true`, Rust starts `braid-online.service` only when the initial snapshot was `inactive` or `failed`.
+7. If activation fails: prints WARNING to stderr, then preserves the command's original exit result. Pool is mounted and usable; only the shutdown hook is missing.
 
 **On `lock`:**
 1. Plain `braid lock` acquires `/run/braid-stop-coordinator.lock`, then `/run/braid-pool.lock`.
@@ -138,8 +139,10 @@ permission fixups but do not touch `braid-online.service`.
 
 **On system shutdown:**
 1. systemd stops `braid-online.service` (if active).
-2. `ExecStop = braid lock --systemd-stop --deadline-secs <n>` waits for an in-flight plain `braid lock` to finish through the stop coordinator, or waits for the pool lock up to the configured deadline, then unmounts and closes LUKS.
-3. Drives are safe to power off.
+2. `ExecStop = braid lock --systemd-stop --deadline-secs <n>` waits for an in-flight plain `braid lock` to finish through the stop coordinator, or waits for the pool lock up to the configured deadline.
+3. Lock dispatch loads membership from `pool.json`; if `pool.json` is absent and `pending-op.json` is a bootstrap-add journal (`OpKind::Add` with empty `pre_membership`), it uses the journal's `target_membership`.
+4. CLI unmounts and closes LUKS.
+5. Drives are safe to power off.
 
 ## Pool lock mutual exclusion
 

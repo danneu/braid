@@ -734,6 +734,11 @@
               braid = linuxCrane.braid-cli-unwrapped;
             }
           );
+          post-mount-failure-marks-online = pkgs.testers.nixosTest (
+            import ./tests/module/post-mount-failure-marks-online.nix {
+              braid = linuxCrane.braid-cli-unwrapped;
+            }
+          );
           braid-lock-coordinator-race = pkgs.testers.nixosTest (
             import ./tests/module/braid-lock-coordinator-race.nix {
               braid = linuxCrane.braid-cli-unwrapped;

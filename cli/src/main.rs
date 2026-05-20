@@ -7,7 +7,7 @@ use braid_cli::cmd::RealRunner;
 use braid_cli::config::{DEFAULT_CONFIG_PATH, config_read};
 use braid_cli::doctor::{DoctorOptions, cmd_doctor};
 use braid_cli::membership::PoolMembership;
-use braid_cli::online_state::{RealOnlineStateOps, mark_online, snapshot};
+use braid_cli::online_state::{RealOnlineStateOps, run_with_online_marker, snapshot};
 use braid_cli::pool_lock::{
     AcquirePoolLock, PoolLockError, RealPoolLock, RealStopCoordinator, StopCoordinatorError,
     StopCoordinatorPollResult,
@@ -417,30 +417,34 @@ fn main() {
                 .enroll_key_file
                 .as_ref()
                 .map(|dir| dir.join(braid_cli::luks::KEYFILE_NAME));
-            if let Err(e) = braid_cli::add::cmd_add(
-                &runner,
-                &fs,
-                &braid_cli::add::AddParams {
-                    config_path: Path::new(&config_path),
-                    disk_specs: &args.disks,
-                    dry_run: args.common.dry_run,
-                    yes: args.common.yes,
-                    passphrase_stdin: args.passphrase.passphrase_stdin,
-                    passphrase_file: args.passphrase.passphrase_file.as_deref(),
-                    enroll_key_file: enroll_kf.as_deref(),
-                    luks_format_extra_opts: &args.luks_format.luks_format_extra_opts,
-                    progress,
-                    paths: &paths,
-                    sleep_inhibitor: &sleep_inhibitor,
-                    passphrase_reader: &braid_cli::luks::RealTty,
-                    backing_path_resolver: &backing_path_resolver,
+            if let Err(e) = run_with_online_marker(
+                online_snapshot.as_ref(),
+                online_config.as_ref(),
+                &online_ops,
+                || {
+                    braid_cli::add::cmd_add(
+                        &runner,
+                        &fs,
+                        &braid_cli::add::AddParams {
+                            config_path: Path::new(&config_path),
+                            disk_specs: &args.disks,
+                            dry_run: args.common.dry_run,
+                            yes: args.common.yes,
+                            passphrase_stdin: args.passphrase.passphrase_stdin,
+                            passphrase_file: args.passphrase.passphrase_file.as_deref(),
+                            enroll_key_file: enroll_kf.as_deref(),
+                            luks_format_extra_opts: &args.luks_format.luks_format_extra_opts,
+                            progress,
+                            paths: &paths,
+                            sleep_inhibitor: &sleep_inhibitor,
+                            passphrase_reader: &braid_cli::luks::RealTty,
+                            backing_path_resolver: &backing_path_resolver,
+                        },
+                    )
                 },
             ) {
                 print_cli_error(&e.to_string());
                 std::process::exit(1);
-            }
-            if let Some(cfg) = online_config.as_ref() {
-                let _ = mark_online(online_snapshot.as_ref(), cfg, &online_ops);
             }
         }
         Commands::Remove(args) => {
@@ -582,26 +586,29 @@ fn main() {
             let membership = load_membership_or_exit(&paths, 1);
             let fs = RealFilesystem;
             let backing_path_resolver = braid_cli::luks::RealBackingPathResolver;
-            match braid_cli::unlock::cmd_unlock(
-                &runner,
-                &fs,
-                &braid_cli::unlock::UnlockParams {
-                    config: &config,
-                    membership: &membership,
-                    paths: &paths,
-                    passphrase_stdin: args.passphrase.passphrase_stdin,
-                    passphrase_file: args.passphrase.passphrase_file.as_deref(),
-                    key_file: args.key_file.as_deref(),
-                    allow_degraded: args.allow_degraded,
-                    dry_run: args.dry_run,
-                    backing_path_resolver: &backing_path_resolver,
+            match run_with_online_marker(
+                online_snapshot.as_ref(),
+                (!args.dry_run).then_some(&config),
+                &online_ops,
+                || {
+                    braid_cli::unlock::cmd_unlock(
+                        &runner,
+                        &fs,
+                        &braid_cli::unlock::UnlockParams {
+                            config: &config,
+                            membership: &membership,
+                            paths: &paths,
+                            passphrase_stdin: args.passphrase.passphrase_stdin,
+                            passphrase_file: args.passphrase.passphrase_file.as_deref(),
+                            key_file: args.key_file.as_deref(),
+                            allow_degraded: args.allow_degraded,
+                            dry_run: args.dry_run,
+                            backing_path_resolver: &backing_path_resolver,
+                        },
+                    )
                 },
             ) {
-                Ok(()) => {
-                    if !args.dry_run {
-                        let _ = mark_online(online_snapshot.as_ref(), &config, &online_ops);
-                    }
-                }
+                Ok(()) => {}
                 Err(braid_cli::unlock::UnlockError::Mount(
                     braid_cli::mount::MountError::DegradedRefused(msg),
                 )) => {
@@ -870,28 +877,31 @@ fn main() {
             let fs = RealFilesystem;
             let by_id_resolver = braid_cli::recover::RealByIdResolver;
             let backing_path_resolver = braid_cli::luks::RealBackingPathResolver;
-            match braid_cli::recover::cmd_recover(
-                &runner,
-                &fs,
-                &by_id_resolver,
-                &braid_cli::recover::RecoverParams {
-                    config: &config,
-                    paths: &paths,
-                    passphrase_stdin: args.passphrase.passphrase_stdin,
-                    passphrase_file: args.passphrase.passphrase_file.as_deref(),
-                    allow_degraded: args.allow_degraded,
-                    dry_run: args.dry_run,
-                    progress,
-                    sleep_inhibitor: &sleep_inhibitor,
-                    sleeper: &braid_cli::progress::RealSleeper,
-                    backing_path_resolver: &backing_path_resolver,
+            match run_with_online_marker(
+                online_snapshot.as_ref(),
+                (!args.dry_run).then_some(&config),
+                &online_ops,
+                || {
+                    braid_cli::recover::cmd_recover(
+                        &runner,
+                        &fs,
+                        &by_id_resolver,
+                        &braid_cli::recover::RecoverParams {
+                            config: &config,
+                            paths: &paths,
+                            passphrase_stdin: args.passphrase.passphrase_stdin,
+                            passphrase_file: args.passphrase.passphrase_file.as_deref(),
+                            allow_degraded: args.allow_degraded,
+                            dry_run: args.dry_run,
+                            progress,
+                            sleep_inhibitor: &sleep_inhibitor,
+                            sleeper: &braid_cli::progress::RealSleeper,
+                            backing_path_resolver: &backing_path_resolver,
+                        },
+                    )
                 },
             ) {
-                Ok(()) => {
-                    if !args.dry_run {
-                        let _ = mark_online(online_snapshot.as_ref(), &config, &online_ops);
-                    }
-                }
+                Ok(()) => {}
                 Err(braid_cli::recover::RecoverError::Mount(
                     braid_cli::mount::MountError::DegradedRefused(msg),
                 )) => {
@@ -978,6 +988,61 @@ fn load_membership_or_exit(paths: &StatePaths, exit_code: i32) -> PoolMembership
     }
 }
 
+/// Typed lock-side membership loading failures so dispatch preserves the
+/// remediation text owned by membership and journal modules.
+#[derive(Debug, thiserror::Error)]
+pub(crate) enum LoadForLockError {
+    #[error(transparent)]
+    Membership(#[from] braid_cli::membership::MembershipError),
+    /// Corrupt or unreadable pending-op.json must keep JournalError's
+    /// operator remediation instead of collapsing into missing state.
+    #[error(transparent)]
+    Journal(#[from] braid_cli::journal::JournalError),
+    /// Neither pool.json nor a bootstrap-add journal can identify the set of
+    /// mappers `braid lock` should close.
+    #[error(
+        "no pool membership available -- pool.json missing and no bootstrap-add journal present"
+    )]
+    NoMembershipAvailable,
+}
+
+/// Load the mapper identity set for lock and recover bootstrap-add interrupts
+/// where the pool mounted before pool.json was first written.
+fn load_membership_for_lock(paths: &StatePaths) -> Result<PoolMembership, LoadForLockError> {
+    match braid_cli::membership::load_membership(paths) {
+        Ok(membership) => Ok(membership),
+        Err(braid_cli::membership::MembershipError::Io { source, .. })
+            if source.kind() == std::io::ErrorKind::NotFound =>
+        {
+            match braid_cli::journal::load_journal(paths)? {
+                Some(journal)
+                    if matches!(&journal.op, braid_cli::journal::OpKind::Add { .. })
+                        && journal.pre_membership.is_empty() =>
+                {
+                    eprintln!(
+                        "braid: pool.json absent; recovering membership from interrupted bootstrap-add journal for shutdown cleanup"
+                    );
+                    Ok(journal.target_membership)
+                }
+                _ => Err(LoadForLockError::NoMembershipAvailable),
+            }
+        }
+        Err(e) => Err(e.into()),
+    }
+}
+
+/// Exit wrapper for lock dispatch so plain lock and ExecStop render identical
+/// loader failures while still sharing the typed fallback logic.
+fn load_membership_for_lock_or_exit(paths: &StatePaths, exit_code: i32) -> PoolMembership {
+    match load_membership_for_lock(paths) {
+        Ok(membership) => membership,
+        Err(e) => {
+            print_cli_error(&e.to_string());
+            std::process::exit(exit_code);
+        }
+    }
+}
+
 fn run_plain_lock(
     pool_lock: &RealPoolLock,
     stop_coordinator: &RealStopCoordinator,
@@ -997,7 +1062,7 @@ fn run_plain_lock(
     };
     let _pool_guard = acquire_pool_or_exit(pool_lock);
     let config = load_config_or_exit(config_path, 1);
-    let membership = load_membership_or_exit(paths, 1);
+    let membership = load_membership_for_lock_or_exit(paths, 1);
     let runner = RealRunner;
     let fs = RealFilesystem;
     let online_ops = RealOnlineStateOps::new(&runner);
@@ -1060,7 +1125,7 @@ fn run_systemd_stop_lock(
         }
     };
     let config = load_config_or_exit(config_path, 1);
-    let membership = load_membership_or_exit(paths, 1);
+    let membership = load_membership_for_lock_or_exit(paths, 1);
     let runner = RealRunner;
     let fs = RealFilesystem;
     if let Err(e) = braid_cli::lock::cmd_lock(&runner, &fs, &config, &membership, false) {
@@ -1093,6 +1158,10 @@ fn disk_name_candidates() -> Vec<CompletionCandidate> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use braid_cli::journal::{self, AddPhase, Journal, JournalError, OpKind};
+    use braid_cli::membership::{self, DiskMember, LuksUuidMap, MembershipError};
+    use braid_cli::types::{ByIdPath, DiskName, LuksUuid};
+    use tempfile::TempDir;
 
     fn expected_luks_format_args() -> Vec<String> {
         [
@@ -1106,6 +1175,194 @@ mod tests {
         .into_iter()
         .map(str::to_owned)
         .collect()
+    }
+
+    fn isolated_paths() -> (TempDir, StatePaths) {
+        let dir = tempfile::tempdir().unwrap();
+        let paths = StatePaths::custom(dir.path().to_owned());
+        (dir, paths)
+    }
+
+    fn test_uuid(seed: u64) -> LuksUuid {
+        LuksUuid::parse(&format!("00000000-0000-0000-0000-{:012x}", seed)).unwrap()
+    }
+
+    fn disk_name(raw: &str) -> DiskName {
+        DiskName::parse(raw).unwrap()
+    }
+
+    fn by_id(raw: &str) -> ByIdPath {
+        ByIdPath::parse(raw).unwrap()
+    }
+
+    fn member(name: &str, by_id_path: &str) -> DiskMember {
+        DiskMember::new(disk_name(name), by_id(by_id_path))
+    }
+
+    fn pool_membership(entries: &[(u64, &str, &str)]) -> PoolMembership {
+        let mut membership = PoolMembership::empty();
+        for (seed, name, by_id_path) in entries {
+            membership
+                .insert(test_uuid(*seed), member(name, by_id_path))
+                .unwrap();
+        }
+        membership
+    }
+
+    fn membership_names(membership: &PoolMembership) -> Vec<String> {
+        membership
+            .iter_by_name()
+            .into_iter()
+            .map(|(_, member)| member.name.as_str().to_owned())
+            .collect()
+    }
+
+    fn add_journal(pre: PoolMembership, target: PoolMembership) -> Journal {
+        Journal {
+            started_at: "2026-01-01T00:00:00Z".into(),
+            op: OpKind::Add {
+                phase: AddPhase::PoolMutation,
+                targets: LuksUuidMap::new(),
+            },
+            pre_membership: pre,
+            target_membership: target,
+        }
+    }
+
+    fn remove_journal() -> Journal {
+        Journal {
+            started_at: "2026-01-01T00:00:00Z".into(),
+            op: OpKind::Remove {
+                luks_uuid: test_uuid(900),
+                name: disk_name("disk1"),
+            },
+            pre_membership: PoolMembership::empty(),
+            target_membership: PoolMembership::empty(),
+        }
+    }
+
+    // Intent: lock prefers the authoritative pool.json membership when it
+    // exists.
+    // Why it exists: the journal fallback is only for missing pool.json, not a
+    // replacement for normal lock identity.
+    // Scenario: a two-disk pool has pool.json and no pending operation.
+    #[test]
+    fn load_membership_for_lock_uses_pool_json_when_present() {
+        let (_tmp, paths) = isolated_paths();
+        let expected = pool_membership(&[
+            (100, "disk1", "/dev/disk/by-id/virtio-disk1"),
+            (101, "disk2", "/dev/disk/by-id/virtio-disk2"),
+        ]);
+        membership::save_membership(&expected, &paths).unwrap();
+
+        let loaded = load_membership_for_lock(&paths).unwrap();
+
+        assert_eq!(loaded, expected);
+    }
+
+    // Intent: lock can recover mapper identity from an interrupted bootstrap
+    // add journal when pool.json was never written.
+    // Why it exists: ExecStop must still close mappers after bootstrap add
+    // mounts and then fails before save_membership.
+    // Scenario: no pool.json exists, pending-op.json is an Add journal whose
+    // pre_membership is empty and target_membership names the mounted disk.
+    #[test]
+    fn load_membership_for_lock_falls_back_to_bootstrap_journal() {
+        let (_tmp, paths) = isolated_paths();
+        let target = pool_membership(&[(100, "disk1", "/dev/disk/by-id/virtio-disk1")]);
+        journal::write_journal(&paths, &add_journal(PoolMembership::empty(), target)).unwrap();
+
+        let loaded = load_membership_for_lock(&paths).unwrap();
+
+        assert_eq!(membership_names(&loaded), vec!["disk1"]);
+    }
+
+    // Intent: lock rejects pending operation journals that do not structurally
+    // identify a bootstrap add.
+    // Why it exists: live-pool mutations require pool.json and should go
+    // through recovery rather than lock guessing at membership.
+    // Scenario: pool.json is missing while pending-op.json records a remove
+    // operation.
+    #[test]
+    fn load_membership_for_lock_rejects_non_bootstrap_journal() {
+        let (_tmp, paths) = isolated_paths();
+        journal::write_journal(&paths, &remove_journal()).unwrap();
+
+        let err = load_membership_for_lock(&paths).unwrap_err();
+
+        assert!(matches!(err, LoadForLockError::NoMembershipAvailable));
+    }
+
+    // Intent: lock fails clearly when no membership source exists.
+    // Why it exists: no pool.json and no journal leaves no authoritative set
+    // of mappers to close.
+    // Scenario: an empty state directory reaches lock dispatch.
+    #[test]
+    fn load_membership_for_lock_rejects_when_no_pool_json_no_journal() {
+        let (_tmp, paths) = isolated_paths();
+
+        let err = load_membership_for_lock(&paths).unwrap_err();
+
+        assert!(matches!(err, LoadForLockError::NoMembershipAvailable));
+    }
+
+    // Intent: corrupt pool.json does not trigger the journal fallback.
+    // Why it exists: a present-but-corrupt membership file needs the existing
+    // discover rebuild remediation, not silent replacement from a journal.
+    // Scenario: pool.json exists with invalid JSON and pending-op.json is
+    // absent.
+    #[test]
+    fn load_membership_for_lock_propagates_corrupt_pool_json() {
+        let (_tmp, paths) = isolated_paths();
+        std::fs::write(paths.pool_json(), "not json").unwrap();
+
+        let err = load_membership_for_lock(&paths).unwrap_err();
+
+        assert!(matches!(
+            err,
+            LoadForLockError::Membership(MembershipError::Corrupt { .. })
+        ));
+    }
+
+    // Intent: corrupt pending-op.json preserves JournalError::Parse
+    // remediation on the lock path.
+    // Why it exists: operators need the pinned manual-reconciliation text
+    // instead of a generic missing-membership message.
+    // Scenario: pool.json is missing and pending-op.json contains invalid
+    // JSON.
+    #[test]
+    fn load_membership_for_lock_surfaces_corrupt_journal() {
+        let (_tmp, paths) = isolated_paths();
+        std::fs::write(paths.pending_op_json(), "not json").unwrap();
+
+        let err = load_membership_for_lock(&paths).unwrap_err();
+
+        assert!(matches!(
+            err,
+            LoadForLockError::Journal(JournalError::Parse { .. })
+        ));
+        assert!(
+            err.to_string()
+                .contains("Remove /var/lib/braid/pending-op.json after manual reconciliation")
+        );
+    }
+
+    // Intent: unreadable pending-op.json is distinguished from absent
+    // pending-op.json.
+    // Why it exists: lock should surface journal I/O failures with their path
+    // and source instead of treating them as no journal.
+    // Scenario: pool.json is missing and pending-op.json is a directory.
+    #[test]
+    fn load_membership_for_lock_surfaces_journal_io_error() {
+        let (_tmp, paths) = isolated_paths();
+        std::fs::create_dir(paths.pending_op_json()).unwrap();
+
+        let err = load_membership_for_lock(&paths).unwrap_err();
+
+        assert!(matches!(
+            err,
+            LoadForLockError::Journal(JournalError::Io { .. })
+        ));
     }
 
     #[test]

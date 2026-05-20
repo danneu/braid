@@ -291,6 +291,21 @@ pub fn mark_online(
     Ok(())
 }
 
+/// Shared online-side finalizer so dispatch cannot skip lifecycle
+/// reconciliation after post-mount command failures.
+pub fn run_with_online_marker<E>(
+    snap: Option<&OnlineSnapshot>,
+    cfg: Option<&Config>,
+    ops: &dyn OnlineStateOps,
+    op: impl FnOnce() -> Result<(), E>,
+) -> Result<(), E> {
+    let result = op();
+    if let Some(cfg) = cfg {
+        let _ = mark_online(snap, cfg, ops);
+    }
+    result
+}
+
 pub fn mark_offline(cfg: &Config, ops: &dyn OnlineStateOps) -> Result<(), OnlineError> {
     let path = Path::new(cfg.mount_point().as_str());
     match ops.is_mountpoint(path) {
@@ -613,6 +628,89 @@ mod tests {
         mark_online(None, &cfg, &ops).unwrap();
 
         assert!(!ops.calls().contains(&format!("start {BRAID_ONLINE_UNIT}")));
+    }
+
+    // Intent: the online finalizer starts braid-online.service even when the
+    // wrapped operation returns an error after mounting.
+    // Why it exists: bootstrap add and recover can mount successfully, then
+    // fail during post-mount persistence or cleanup.
+    // Scenario: a post-mount command error returns to dispatch while the pool
+    // is mounted and braid-online.service was inactive at command start.
+    #[test]
+    fn run_with_online_marker_calls_mark_online_on_err() {
+        let cfg = cfg(r#"{"mount_point":"/mnt/storage","systemd_lifecycle":true}"#);
+        let ops = RecordingOnlineStateOps::new();
+        let snap = OnlineSnapshot {
+            online_state: UnitActiveState::Inactive,
+        };
+
+        let result = run_with_online_marker(Some(&snap), Some(&cfg), &ops, || {
+            Err::<(), _>("post-mount failure")
+        });
+
+        assert_eq!(result, Err("post-mount failure"));
+        assert!(ops.calls().contains(&format!("start {BRAID_ONLINE_UNIT}")));
+    }
+
+    // Intent: the online finalizer preserves the success path.
+    // Why it exists: routing dispatch through the shared helper must not lose
+    // the existing successful mount lifecycle update.
+    // Scenario: a pool-touching command succeeds after mounting while
+    // braid-online.service was inactive at command start.
+    #[test]
+    fn run_with_online_marker_calls_mark_online_on_ok() {
+        let cfg = cfg(r#"{"mount_point":"/mnt/storage","systemd_lifecycle":true}"#);
+        let ops = RecordingOnlineStateOps::new();
+        let snap = OnlineSnapshot {
+            online_state: UnitActiveState::Inactive,
+        };
+
+        let result =
+            run_with_online_marker(Some(&snap), Some(&cfg), &ops, || Ok::<(), &'static str>(()));
+
+        assert_eq!(result, Ok(()));
+        assert!(ops.calls().contains(&format!("start {BRAID_ONLINE_UNIT}")));
+    }
+
+    // Intent: the online finalizer relies on mark_online's mountpoint gate on
+    // failure paths.
+    // Why it exists: pre-mount command errors must not activate
+    // braid-online.service for an offline pool.
+    // Scenario: planning or credential verification fails before anything is
+    // mounted, then dispatch still runs the finalizer.
+    #[test]
+    fn run_with_online_marker_skips_when_mountpoint_false() {
+        let cfg = cfg(r#"{"mount_point":"/mnt/storage","systemd_lifecycle":true}"#);
+        let ops = RecordingOnlineStateOps::new();
+        ops.set_mounted(false);
+        let snap = OnlineSnapshot {
+            online_state: UnitActiveState::Inactive,
+        };
+
+        let result =
+            run_with_online_marker(Some(&snap), Some(&cfg), &ops, || Err::<(), _>("pre-mount"));
+
+        assert_eq!(result, Err("pre-mount"));
+        assert!(!ops.calls().contains(&format!("start {BRAID_ONLINE_UNIT}")));
+    }
+
+    // Intent: dry-run dispatch bypasses online lifecycle reconciliation.
+    // Why it exists: dry-run commands may share command plumbing but must not
+    // probe mountpoints or touch systemd state.
+    // Scenario: dispatch passes no config to the finalizer for a dry-run
+    // command that returns an error.
+    #[test]
+    fn run_with_online_marker_skips_when_config_none() {
+        let ops = RecordingOnlineStateOps::new();
+        let snap = OnlineSnapshot {
+            online_state: UnitActiveState::Inactive,
+        };
+
+        let result =
+            run_with_online_marker(Some(&snap), None, &ops, || Err::<(), _>("dry-run failure"));
+
+        assert_eq!(result, Err("dry-run failure"));
+        assert!(ops.calls().is_empty());
     }
 
     // Intent: mark_offline skips braid-online.service when lifecycle is disabled.
