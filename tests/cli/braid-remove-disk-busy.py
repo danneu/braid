@@ -6,11 +6,12 @@
 #   mapper remains open afterward.
 #
 # Why it exists:
-#   pool.rs intentionally treats `cryptsetup close` as best-effort: it warns
-#   to stderr and exits 0. The happy-path (clean close) is covered by
-#   braid-remove-disk. This test ensures the warning IS emitted and that the
-#   contract (exit 0, mapper still open, btrfs device removed) holds when the
-#   close fails.
+#   mapper_close::close_mapper_best_effort, invoked from RemovePlan::execute
+#   in cli/src/remove.rs, intentionally treats `cryptsetup close` as
+#   best-effort: it warns to stderr and exits 0. The happy-path (clean close)
+#   is covered by braid-remove-disk. This test ensures the warning IS emitted
+#   and that the contract (exit 0, mapper still open, btrfs device removed)
+#   holds when the close fails.
 #
 # Scenario:
 #   A 3-disk RAID1 pool is built. A loop device is set up over

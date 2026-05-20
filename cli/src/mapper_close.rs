@@ -132,9 +132,9 @@ mod tests {
             .count()
     }
 
-    fn run_best_effort(runner: &MockRunner) -> bool {
+    fn run_best_effort(runner: &MockRunner) -> (bool, String) {
         let mut closed = false;
-        crate::status_tag::testing::capture_with_color(false, || {
+        let captured = crate::status_tag::testing::capture_with_color(false, || {
             closed = close_mapper_best_effort(
                 runner,
                 &NoopSleeper,
@@ -143,7 +143,7 @@ mod tests {
                 false,
             );
         });
-        closed
+        (closed, captured)
     }
 
     // Intent: best-effort mapper close reports success after one successful
@@ -156,7 +156,7 @@ mod tests {
     fn close_mapper_best_effort_returns_true_on_success() {
         let runner = MockRunner::default().with_output(close_request(), close_output(0, ""));
 
-        let closed = run_best_effort(&runner);
+        let (closed, _) = run_best_effort(&runner);
 
         assert!(closed);
         assert_eq!(close_request_count(&runner), 1);
@@ -175,10 +175,18 @@ mod tests {
             vec![close_output(5, "device is busy"), close_output(0, "")],
         );
 
-        let closed = run_best_effort(&runner);
+        let (closed, captured) = run_best_effort(&runner);
 
         assert!(closed);
         assert_eq!(close_request_count(&runner), 2);
+        let wait = "[wait] disk disk2: locking...";
+        let ok = "[ok]   disk disk2: locked";
+        assert!(captured.contains(wait), "missing wait row: {captured:?}");
+        assert!(captured.contains(ok), "missing ok row: {captured:?}");
+        assert!(
+            captured.find(wait) < captured.find(ok),
+            "wait must precede ok, got: {captured:?}"
+        );
     }
 
     // Intent: best-effort mapper close exhausts the busy retry budget before
@@ -198,7 +206,7 @@ mod tests {
             ],
         );
 
-        let closed = run_best_effort(&runner);
+        let (closed, _) = run_best_effort(&runner);
 
         assert!(!closed);
         assert_eq!(close_request_count(&runner), 3);
@@ -213,9 +221,17 @@ mod tests {
         let runner =
             MockRunner::default().with_output(close_request(), close_output(4, "device not found"));
 
-        let closed = run_best_effort(&runner);
+        let (closed, captured) = run_best_effort(&runner);
 
         assert!(!closed);
         assert_eq!(close_request_count(&runner), 1);
+        let wait = "[wait] disk disk2: locking...";
+        let warn = "[warn] disk disk2: lock failed (cryptsetup close braid-disk2 failed (exit 4): device not found)";
+        assert!(captured.contains(wait), "missing wait row: {captured:?}");
+        assert!(captured.contains(warn), "missing warn row: {captured:?}");
+        assert!(
+            captured.find(wait) < captured.find(warn),
+            "wait must precede warn, got: {captured:?}"
+        );
     }
 }

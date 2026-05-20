@@ -1,8 +1,7 @@
 use crate::cmd::{CmdError, CmdRequest, CommandRunner, RawCommandOutput};
-use crate::mapper_close::close_mapper_best_effort;
 use crate::probe::{Filesystem, probe_pool};
 use crate::progress::{
-    self, ProgressOutput, Sleeper, run_device_remove_with_progress, run_replace_with_progress,
+    self, ProgressOutput, run_device_remove_with_progress, run_replace_with_progress,
     run_with_progress,
 };
 use crate::status_tag::{StatusTag, color_enabled_for_stderr, status_line};
@@ -574,84 +573,6 @@ pub fn pool_resize_device<R: CommandRunner + Sync>(
     Ok(())
 }
 
-/// Shared helper: evict a live (present) device from the pool.
-///
-/// 1. If `needs_balance` is true, balances RAID1 -> single first
-///    (only safe when the planner promised a 2->1 transition).
-/// 2. Removes the target device from the pool.
-/// 3. Closes the LUKS mapper (best-effort; warns on failure).
-///
-/// Caller is responsible for upstream topology validation (see
-/// `validate_pool_topology`, which the caller invokes pre-journal AND
-/// post-journal). This helper assumes the typed work plan is consistent
-/// with the live pool and executes it. Drift in the residual microsecond
-/// window between the post-journal validation and the actual btrfs
-/// command surfaces as a btrfs command failure (e.g.
-/// `pool_balance_single` or `pool_remove_device` returning
-/// `PoolError::Failed`) and preserves the journal for `braid recover`
-/// to reconcile.
-#[allow(clippy::doc_overindented_list_items)]
-pub fn evict_present_device<R, S>(
-    runner: &R,
-    sleeper: &S,
-    mapper: &MapperName,
-    mount_point: &MountPoint,
-    needs_balance: bool,
-    progress: ProgressOutput,
-) -> Result<(), PoolError>
-where
-    R: CommandRunner + Sync,
-    S: Sleeper + ?Sized,
-{
-    let device_path = format!("/dev/mapper/{mapper}");
-    let color_enabled = color_enabled_for_stderr();
-    if needs_balance {
-        eprint!(
-            "{}",
-            status_line(
-                StatusTag::Wait,
-                color_enabled,
-                "pool: balancing RAID1 to single profile...",
-            )
-        );
-        pool_balance_single(runner, mount_point, progress)?;
-        eprint!(
-            "{}",
-            status_line(
-                StatusTag::Ok,
-                color_enabled,
-                "pool: balanced to single profile",
-            )
-        );
-    }
-
-    eprint!(
-        "{}",
-        status_line(
-            StatusTag::Wait,
-            color_enabled,
-            &format!("pool: removing {mapper}..."),
-        )
-    );
-    pool_remove_device(runner, &device_path, mount_point, progress)?;
-    eprint!(
-        "{}",
-        status_line(
-            StatusTag::Ok,
-            color_enabled,
-            &format!("pool: {mapper} removed"),
-        )
-    );
-
-    let close_label = mapper
-        .as_str()
-        .strip_prefix("braid-")
-        .unwrap_or(mapper.as_str());
-    close_mapper_best_effort(runner, sleeper, mapper, close_label, color_enabled);
-
-    Ok(())
-}
-
 /// Bootstrap the pool: mkfs.btrfs, then mount.
 pub fn pool_bootstrap_mount<R: CommandRunner + Sync>(
     runner: &R,
@@ -727,7 +648,7 @@ mod tests {
     use crate::config::mapper_name;
     use crate::progress::{self, ProgressOutput};
     use crate::types::DiskName;
-    use std::sync::atomic::{AtomicU32, AtomicUsize, Ordering};
+    use std::sync::atomic::{AtomicUsize, Ordering};
     use std::sync::{Arc, Condvar, Mutex};
     use std::time::Duration;
 
@@ -1722,152 +1643,6 @@ mod tests {
         assert!(
             !err.contains("hint:"),
             "unrelated failure must not include scrub hint: {err}"
-        );
-    }
-
-    /// Custom runner for the trimmed `evict_present_device` test. The
-    /// helper no longer probes the pool, so we only need to mock the
-    /// mutating commands -- BtrfsDeviceRemove and CryptsetupClose.
-    /// Mutating commands are recorded so the test can assert sequencing.
-    #[derive(Clone)]
-    struct EvictRunner {
-        close_exit: i32,
-        close_busy_then_success: bool,
-        close_attempts: Arc<AtomicU32>,
-        invocations: Arc<Mutex<Vec<&'static str>>>,
-    }
-
-    impl Default for EvictRunner {
-        fn default() -> Self {
-            Self {
-                close_exit: 0,
-                close_busy_then_success: false,
-                close_attempts: Arc::new(AtomicU32::new(0)),
-                invocations: Arc::new(Mutex::new(Vec::new())),
-            }
-        }
-    }
-
-    impl EvictRunner {
-        fn record(&self, tag: &'static str) {
-            self.invocations.lock().unwrap().push(tag);
-        }
-    }
-
-    impl CommandRunner for EvictRunner {
-        fn run(&self, request: &CmdRequest) -> Result<RawCommandOutput, CmdError> {
-            match request {
-                CmdRequest::BtrfsDeviceRemove { .. } => {
-                    self.record("BtrfsDeviceRemove");
-                    Ok(ok_raw())
-                }
-                CmdRequest::CryptsetupClose { .. } => {
-                    self.record("CryptsetupClose");
-                    let attempt = self.close_attempts.fetch_add(1, Ordering::SeqCst) + 1;
-                    let exit_status = if self.close_busy_then_success && attempt == 1 {
-                        5
-                    } else if self.close_busy_then_success {
-                        0
-                    } else {
-                        self.close_exit
-                    };
-                    Ok(RawCommandOutput {
-                        cmd: String::new(),
-                        stdout: String::new(),
-                        stderr: match exit_status {
-                            0 => String::new(),
-                            4 => "device does not exist".into(),
-                            _ => "device is busy".into(),
-                        },
-                        exit_status,
-                    })
-                }
-                _ => Err(CmdError::MissingMock),
-            }
-        }
-
-        fn run_with_stdin(
-            &self,
-            request: &CmdRequest,
-            _stdin: &[u8],
-        ) -> Result<RawCommandOutput, CmdError> {
-            self.run(request)
-        }
-    }
-
-    // Intent: pool::evict_present_device's trailing best-effort LUKS close
-    // closes its [wait] row with [warn] when cryptsetup returns non-zero.
-    // Why it exists: Principle 13 forbids dangling [wait] rows; a best-effort
-    // close that exits the command 0 must still announce the failure on the
-    // same subject so the wait window is closed for the operator.
-    // Scenario: a 3-disk pool evicts one mapper; pool_remove_device succeeds
-    // but cryptsetup close returns ENODEV.
-    #[test]
-    fn evict_present_device_close_failure_emits_warn_row() {
-        let runner = EvictRunner {
-            close_exit: 4,
-            ..EvictRunner::default()
-        };
-        let captured = crate::status_tag::testing::capture_with_color(false, || {
-            // 3-disk fixture -> remaining == 2 -> no balance needed.
-            let result = evict_present_device(
-                &runner,
-                &progress::NoopSleeper,
-                &MapperName("braid-disk2".into()),
-                &mp(),
-                false,
-                ProgressOutput::Off,
-            );
-            assert!(result.is_ok(), "evict should still return Ok: {result:?}");
-        });
-        let wait = "[wait] disk disk2: locking...";
-        let warn = "[warn] disk disk2: lock failed (cryptsetup close braid-disk2 failed (exit 4): device does not exist)";
-        assert!(captured.contains(wait), "missing wait row: {captured:?}");
-        assert!(captured.contains(warn), "missing warn row: {captured:?}");
-        assert!(
-            captured.find(wait) < captured.find(warn),
-            "wait must precede warn, got: {captured:?}"
-        );
-    }
-
-    // Intent: pool::evict_present_device routes its best-effort LUKS close
-    // through the retry helper when cryptsetup reports the mapper busy.
-    // Why it exists: a later refactor must not regress the remove path back to
-    // a single-shot close that leaks the old mapper on transient EBUSY.
-    // Scenario: btrfs removes disk2 from a 3-disk pool, the first close sees a
-    // short-lived holder, and the second close succeeds.
-    #[test]
-    fn evict_present_device_retries_on_busy_then_succeeds() {
-        let runner = EvictRunner {
-            close_busy_then_success: true,
-            ..EvictRunner::default()
-        };
-        let captured = crate::status_tag::testing::capture_with_color(false, || {
-            let result = evict_present_device(
-                &runner,
-                &progress::NoopSleeper,
-                &MapperName("braid-disk2".into()),
-                &mp(),
-                false,
-                ProgressOutput::Off,
-            );
-            assert!(
-                result.is_ok(),
-                "evict should succeed after retry: {result:?}"
-            );
-        });
-
-        let close_count = runner
-            .invocations
-            .lock()
-            .unwrap()
-            .iter()
-            .filter(|tag| **tag == "CryptsetupClose")
-            .count();
-        assert_eq!(close_count, 2);
-        assert!(
-            captured.contains("[ok]   disk disk2: locked"),
-            "missing terminal ok row after retry: {captured:?}"
         );
     }
 

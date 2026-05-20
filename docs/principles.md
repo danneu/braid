@@ -90,7 +90,7 @@ A `[wait]` row is closed by one of:
 - a same-subject `[fail]` row on a known failure path (e.g.
   `lock.rs`'s umount failure),
 - a same-subject `[warn]` row on a non-fatal best-effort failure
-  (e.g. `pool::evict_present_device`'s trailing LUKS close, or
+  (e.g. `mapper_close::close_mapper_best_effort`'s LUKS close, or
   `wait_for_kernel_replace_to_finish`'s status-poll error — the
   command continues despite the failure, and the warn row tells
   the user the wait window is closed without success),

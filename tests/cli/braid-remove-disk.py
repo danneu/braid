@@ -166,9 +166,11 @@ with subtest("Redundancy-reducing remove with --yes succeeds"):
     assert rm2_err.find(rm_wait) < rm2_err.find(rm_ok), (
         f"remove wait must precede remove ok, got: {rm2_err!r}"
     )
-    # Principle 13: pool::evict_present_device closes the LUKS mapper after
-    # the device-remove succeeds. Pin the [wait]/[ok] pair on the disk-name
-    # body (mapper prefix stripped) for cross-command consistency with lock.
+    # Principle 13: braid remove closes the LUKS mapper after the device-remove
+    # succeeds (see the close_mapper_best_effort call inside
+    # RemovePlan::execute in cli/src/remove.rs). Pin the [wait]/[ok] pair on
+    # the disk-name body (mapper prefix stripped) for cross-command consistency
+    # with lock.
     close_wait = "[wait] disk disk2: locking..."
     close_ok = "[ok]   disk disk2: locked"
     assert close_wait in rm2_err and close_ok in rm2_err, (

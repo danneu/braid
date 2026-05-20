@@ -14946,8 +14946,8 @@ mod tests {
      * Why it exists: build_membership_from_live_pool walks pool.devices
      * only, so without the OpKind::Remove guard, recover would persist a
      * pool.json that excluded the target and clear the journal -- the
-     * Layer-2 reproduction of the same phantom-success class that Layer 1
-     * (evict_present_device fail-closed) addresses at the helper boundary.
+     * recover-layer reproduction of the same phantom-success class that
+     * RemovePlan::execute fail-closes at the helper boundary.
      * Scenario: a 2-disk pool started `braid remove disk2`. Disk2's
      * underlying device hot-unplugged before/during the eviction, so
      * btrfs still tracks it (mapper visible in `filesystem show`) but

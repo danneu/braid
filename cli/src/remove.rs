@@ -382,12 +382,11 @@ impl RemovePlan {
             RemoveError::Validation(format!("{detail}. {suffix}"))
         })?;
 
-        // Execute -- inlined so the close has a UUID-probe gate (the
-        // defense-in-depth double-drift probe specified in the plan's
-        // "Double-drift defense-in-depth UUID probe" section). Original
-        // `evict_present_device` did balance + remove + close as one
-        // call; we keep balance + remove inline and gate the close on a
-        // probe of the journaled identity.
+        // Execute. The trailing close is gated on the
+        // `probe_observed_mapper_uuid` check below -- a defense-in-depth
+        // re-probe of the journaled identity at the observed mapper, so
+        // we don't tear down a foreign dm slot an operator opened under
+        // the same mapper between plan and execute.
         let color_enabled = color_enabled_for_stderr();
         let mapper_str = work_plan.target_mapper.as_str();
         if work_plan.remaining == 1 {
@@ -2496,9 +2495,8 @@ mod tests {
      * message would mislead the user because no journal exists -- recover
      * would fail with "no pending operation journal found".
      *
-     * Why: replaces the old helper-level
-     * `evict_present_device_target_null_underlying_classifies_hot_unplug`
-     * at the seam where the rich UX is now actually emitted.
+     * Why: this is the pre-journal clean-failure path, so it must not
+     * preserve or reference recovery state.
      *
      * Scenario: between plan_remove and the pre-journal probe, the target
      * disk was hot-unplugged -- cryptsetup reports `device: (null)`.

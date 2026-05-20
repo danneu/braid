@@ -15,7 +15,7 @@
 #
 # Topology choice — 2 disks, removing one:
 #   In a 2-disk RAID1 pool, removing one disk leaves only 1 device,
-#   which forces cli/src/pool.rs::evict_present_device to run
+#   which makes RemovePlan::execute in cli/src/remove.rs run
 #   pool_balance_single() *before* btrfs device remove. That pre-balance
 #   is the long, reliably observable phase. The 3→2 path was tried
 #   first and removed: in that topology pool_balance_single is skipped
