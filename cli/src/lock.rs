@@ -512,7 +512,6 @@ impl LockPlan {
         runner: &R,
         fs: &F,
         sleeper: &S,
-        _membership: &PoolMembership,
     ) -> Result<(), LockError>
     where
         R: CommandRunner,
@@ -1057,7 +1056,7 @@ where
         plan.preview().print_colored();
         return Ok(());
     }
-    plan.execute(runner, fs, sleeper, membership)
+    plan.execute(runner, fs, sleeper)
 }
 
 fn run_lock_pre_steps(cfg: &Config, online_ops: &dyn OnlineStateOps, out: &mut dyn Write) {
@@ -1724,7 +1723,7 @@ mod tests {
 
         let execute_fs = lock_fs(&["/dev/mapper/braid-aaa"]);
         let recording = LockRecordingRunner::new(runner);
-        plan.execute(&recording, &execute_fs, &LockNoopSleeper, &membership)
+        plan.execute(&recording, &execute_fs, &LockNoopSleeper)
             .expect("execute should succeed without closing the unplanned mapper");
 
         assert!(
