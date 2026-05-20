@@ -135,26 +135,47 @@ impl RealStopCoordinator {
         Self { path: path.into() }
     }
 
-    pub fn acquire(&self) -> Result<StopCoordinatorGuard, StopCoordinatorError> {
+    /// Opens and locks the coordinator without touching content so polling can
+    /// preserve the predecessor's marker while fresh transitions still truncate.
+    fn open_and_lock(&self) -> Result<File, StopCoordinatorError> {
         let file = open_lock_file(&self.path)?;
         match flock(file.as_raw_fd(), FlockArg::LockExclusiveNonblock) {
-            Ok(()) => {
-                file.set_len(0).map_err(StopCoordinatorError::Io)?;
-                Ok(StopCoordinatorGuard { file })
-            }
+            Ok(()) => Ok(file),
             Err(e) if would_block(e) => Err(StopCoordinatorError::Held),
             Err(e) => Err(StopCoordinatorError::Io(io_from_errno(e))),
         }
     }
 
+    pub fn acquire(&self) -> Result<StopCoordinatorGuard, StopCoordinatorError> {
+        let file = self.open_and_lock()?;
+        file.set_len(0).map_err(StopCoordinatorError::Io)?;
+        Ok(StopCoordinatorGuard { file })
+    }
+
     pub fn poll_for_done_or_release(&self, deadline: Duration) -> StopCoordinatorPollResult {
+        self.poll_for_done_or_release_inner(deadline, || {})
+    }
+
+    /// Test seam for the TOCTOU window between pre-read and flock acquisition.
+    fn poll_for_done_or_release_inner<F: FnMut()>(
+        &self,
+        deadline: Duration,
+        mut after_pre_read: F,
+    ) -> StopCoordinatorPollResult {
         let start = Instant::now();
         loop {
             if std::fs::read(&self.path).is_ok_and(|bytes| bytes == DONE_MARKER) {
                 return StopCoordinatorPollResult::Done;
             }
-            match self.acquire() {
-                Ok(guard) => return StopCoordinatorPollResult::Acquired(guard),
+            after_pre_read();
+            match self.open_and_lock() {
+                Ok(file) => {
+                    if std::fs::read(&self.path).is_ok_and(|bytes| bytes == DONE_MARKER) {
+                        drop(file);
+                        return StopCoordinatorPollResult::Done;
+                    }
+                    return StopCoordinatorPollResult::Acquired(StopCoordinatorGuard { file });
+                }
                 Err(StopCoordinatorError::Held) if start.elapsed() < deadline => {
                     thread::sleep(STOP_COORDINATOR_POLL_INTERVAL);
                 }
@@ -278,6 +299,72 @@ mod tests {
         let coord = RealStopCoordinator::new(&path);
         let _guard = coord.acquire().unwrap();
         assert_eq!(std::fs::read(&path).unwrap(), b"");
+    }
+
+    // Intent: open_and_lock takes the flock without touching file content.
+    // Why it exists: poll_for_done_or_release depends on the post-acquire
+    // re-read to disambiguate "predecessor died after mark_done" from
+    // "predecessor died before mark_done". A refactor that re-introduces
+    // truncate-on-acquire into this helper would silently reintroduce the
+    // redundant-cmd_lock race. acquire() truncates only because it is reserved
+    // for fresh-transition callers where pre-existing content is stale.
+    // Scenario: a prior session wrote done\n then exited; this session's poll
+    // path calls open_and_lock as part of disambiguating predecessor state.
+    #[test]
+    fn open_and_lock_preserves_pre_seeded_done() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("coord.lock");
+        std::fs::write(&path, DONE_MARKER).unwrap();
+        let coord = RealStopCoordinator::new(&path);
+        let file = coord
+            .open_and_lock()
+            .expect("flock should succeed on fresh file");
+        drop(file);
+        assert_eq!(std::fs::read(&path).unwrap(), DONE_MARKER);
+    }
+
+    // Intent: poll_for_done_or_release returns Done and preserves the on-disk
+    // done\n marker when the predecessor wrote done\n and died in the window
+    // between the poller's pre-read and the poller's flock attempt.
+    // Why it exists: this is the specific TOCTOU race the fix closes. The
+    // pre-read short-circuit cannot see the marker because the predecessor has
+    // not written it yet at pre-read time; the bug is whether the post-acquire
+    // branch re-reads and observes the marker that the predecessor wrote in
+    // between. A regression that re-introduced truncate-on-acquire would
+    // silently wipe the marker on the post-acquire branch and reduce this
+    // test's expected Done to Acquired.
+    // Scenario: plain `braid lock` is in cmd_lock at the moment the reentry's
+    // first poll iteration fires. Plain finishes cmd_lock, writes done\n via
+    // mark_done, and is then SIGKILL'd inside mark_offline before its
+    // coordinator guard drops naturally. The kernel releases the flock on
+    // process death. The reentry's next open_and_lock wins the flock and must
+    // observe the surviving done\n on the post-acquire re-read.
+    #[test]
+    fn poll_for_done_or_release_returns_done_when_predecessor_marks_done_and_dies_between_pre_read_and_acquire()
+     {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("coord.lock");
+        let coord = RealStopCoordinator::new(&path);
+
+        let predecessor = coord.acquire().expect("predecessor wins flock");
+        let predecessor_cell = std::cell::Cell::new(Some(predecessor));
+
+        let result = coord.poll_for_done_or_release_inner(Duration::from_millis(100), || {
+            if let Some(p) = predecessor_cell.take() {
+                p.mark_done().expect("mark_done writes DONE_MARKER");
+                drop(p);
+            }
+        });
+
+        assert!(
+            matches!(result, StopCoordinatorPollResult::Done),
+            "expected Done after predecessor wrote done\\n and died in the TOCTOU window"
+        );
+        assert_eq!(
+            std::fs::read(&path).unwrap(),
+            DONE_MARKER,
+            "post-acquire branch must preserve the on-disk done\\n marker"
+        );
     }
 
     #[test]
