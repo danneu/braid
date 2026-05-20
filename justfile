@@ -195,10 +195,11 @@ cachix:
 test-hw *args:
     sudo python3 tests/hw/runner.py {{args}}
 
-# Fetch/refresh reference source repos + btrfs docs at nixpkgs-pinned versions
-# Fetch reference source/docs at versions pinned in flake.lock
+# Fetch/refresh reference source repos + btrfs docs at pinned versions
+# Fetch reference source/docs at versions pinned in flake.lock or Cargo.lock
 # Usage: just fetch-references              (fetch all resources)
 #        just fetch-references linux        (fetch only linux kernel)
+#        just fetch-references nix-crate    (fetch only nix Rust crate)
 #        just fetch-references --list       (list available resources)
 fetch-references +ARGS="":
     python3 scripts/fetch-references.py {{ARGS}}

@@ -104,7 +104,7 @@ nix eval --raw nixpkgs#smartmontools.version
 
 ### 3. Update vendored reference source
 
-`reference/` contains shallow clones of upstream repos used for code-level reference (parser behavior, output formats, config schemas). After a flake update, refresh them to match the new versions:
+`reference/` contains upstream source used for code-level reference (parser behavior, output formats, config schemas). Most entries track `flake.lock` through nixpkgs-pinned tools; `nix-crate` tracks `Cargo.lock`. After a flake update, refresh the nixpkgs-pinned entries to match the new versions:
 
 ```bash
 just fetch-references
@@ -119,4 +119,12 @@ just capture-all-fixtures
 just test-rust
 just test-parsers
 just test-vm
+```
+
+### 5. Update vendored crate sources
+
+After any change that touches the `nix` line in `cli/Cargo.toml`, or any `cargo update`-driven bump to the `nix` package in `Cargo.lock`, refresh the crate source:
+
+```bash
+just fetch-references nix-crate
 ```

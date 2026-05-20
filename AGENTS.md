@@ -66,7 +66,7 @@ Before modifying dry-run, preview, or mutating command planning/execution, read 
 
 ### Reference source
 
-Before searching the web for tool behavior, consult local resources first. `reference/` contains shallow clones of upstream repos at the versions pinned in nixpkgs. Refresh with `just fetch-references`.
+Before searching the web for tool behavior, consult local resources first. `reference/` contains shallow clones of upstream repos at the versions pinned in nixpkgs, plus Rust crate sources pinned in `Cargo.lock`. Refresh with `just fetch-references`.
 
 **When to look:** Any time you're implementing, modifying, or debugging code that interacts with these tools — especially parsers. Read the relevant source before making assumptions about output format or behavior.
 
@@ -102,6 +102,10 @@ Before searching the web for tool behavior, consult local resources first. `refe
   - **Source:** [`reference/coreutils/src/`](reference/coreutils/src/) — one C file per utility (e.g. `src/timeout.c`, `src/realpath.c`, `src/stat.c`, `src/chmod.c`, `src/chown.c`, `src/head.c`, `src/base64.c`). Read these to confirm what each helper actually guarantees -- e.g. `timeout(1)` exit-code semantics and signal forwarding live in `src/timeout.c`, not in any manpage.
   - **Docs:** [`reference/coreutils/doc/coreutils.texi`](reference/coreutils/doc/coreutils.texi) — the canonical reference manual (per-utility sections inside one big Texinfo file). Per-utility manpage stubs live in [`reference/coreutils/man/`](reference/coreutils/man/) as `*.x` (e.g. `man/timeout.x`); these are short prologues that get merged with `--help` output by `help2man` at build time, so the full prose is in `coreutils.texi`.
   - **Use for:** Any time braid code or a plan reasons about a Coreutils helper's behavior beyond the obvious — exit codes, signal handling, race windows, `--help` text, edge cases. Especially `timeout(1)`: `timeout` cannot bound an uninterruptible kernel wait, and the proof is in `src/timeout.c`'s use of `kill()` against a userspace child.
+- **nix (Rust crate)** -- [nix-rust/nix](https://github.com/nix-rust/nix)
+  - **Source:** [`reference/nix-crate/src/`](reference/nix-crate/src/) -- Rust crate at the version pinned in `Cargo.lock`, not `flake.lock`. `unistd.rs` (User/Group/chown/exec helpers, fd ownership types), `fcntl.rs` (`open`, `flock`, `OFlag`), `errno.rs` (`Errno`), `sys/stat.rs` (`Mode`), `sys/signal.rs` (sigaction, signal handlers), `sys/termios.rs` (termios constants, terminal flags).
+  - **Docs:** No separate docs dir -- rustdoc is inline as `///` doc comments on each item. [`reference/nix-crate/Cargo.toml`](reference/nix-crate/Cargo.toml) declares the feature gates (braid currently enables `fs`, `user`, `term`, and `signal`); consult it before reaching for a `nix` API to confirm which feature it lives under.
+  - **Use for:** Touching any `nix::` API, checking feature gates, understanding fd-ownership types, signal-safe helpers, or termios constants. Refresh after any change to the `nix` line in `cli/Cargo.toml` or any `cargo update`-driven bump in `Cargo.lock`.
 
 ### btrfs docs
 
