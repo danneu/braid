@@ -31,10 +31,13 @@ pre-lock state read later, which would violate the stale-state invariant.
 
 ## Decision
 
-Rust dispatch (`cli/src/main.rs`) owns pool-operation locking. For every
-non-dry-run command covered by [Principle 12](../principles.md#12-one-pool-operation-at-a-time),
-dispatch acquires `/run/braid-pool.lock` before loading config, loading
-membership, probing pool state, prompting, or writing journals.
+Rust dispatch (`cli/src/main.rs`) owns pool-operation locking. The
+`lock_policy` function in `cli/src/main.rs` is the single source of truth for
+mapping `Commands` variants to lock acquisition disciplines. Its wildcard-free
+exhaustive match makes every new subcommand choose a discipline at compile
+time. For commands whose policy acquires the pool lock, dispatch acquires
+`/run/braid-pool.lock` before loading config, loading membership, probing pool
+state, prompting, or writing journals.
 
 The shell wrapper is a pure exec shim. It only sets the module-controlled
 `PATH` and execs the packaged Rust binary.
@@ -126,8 +129,8 @@ behind itself.
 
 ## Consequences
 
-- There is a single source of truth for the locked-command list and the
-  contention line: Rust dispatch.
+- There is a single source of truth for the locked-command list and acquisition
+  discipline: `lock_policy` in Rust dispatch.
 - The wrapper cannot drift from Rust command semantics because it no longer
   interprets subcommands.
 - Lock acquisition is the first real execution boundary for covered commands.

@@ -23,26 +23,6 @@ const POOL_POLL_INTERVAL: Duration = Duration::from_millis(250);
 const STOP_COORDINATOR_POLL_INTERVAL: Duration = Duration::from_millis(100);
 const DONE_MARKER: &[u8] = b"done\n";
 
-/// Marker trait for pool-lock guards so production and tests can choose
-/// different concrete guard types while dispatch owns the drop boundary.
-pub trait PoolLockGuard {}
-impl<T> PoolLockGuard for T {}
-
-/// Acquire the global pool-operation lock with command-specific wait policy.
-pub trait AcquirePoolLock {
-    fn acquire(&self) -> Result<Box<dyn PoolLockGuard>, PoolLockError>;
-
-    fn acquire_with_timeout(
-        &self,
-        timeout: Duration,
-    ) -> Result<Box<dyn PoolLockGuard>, PoolLockError>;
-
-    fn acquire_with_systemd_stop_deadline(
-        &self,
-        deadline: Duration,
-    ) -> Result<Box<dyn PoolLockGuard>, PoolLockError>;
-}
-
 #[derive(Debug, Error)]
 pub enum PoolLockError {
     #[error(
@@ -67,6 +47,30 @@ impl RealPoolLock {
 
     pub fn new(path: impl Into<PathBuf>) -> Self {
         Self { path: path.into() }
+    }
+
+    /// Non-blocking acquisition shared by fail-fast user operations and
+    /// timer-driven monitor cycles.
+    pub fn acquire(&self) -> Result<RealPoolLockGuard, PoolLockError> {
+        self.try_acquire()
+    }
+
+    /// Bounded user-operation wait for cases where short monitor contention is
+    /// expected and retrying immediately would be noisy.
+    pub fn acquire_with_timeout(
+        &self,
+        timeout: Duration,
+    ) -> Result<RealPoolLockGuard, PoolLockError> {
+        self.poll_acquire(timeout, |_| PoolLockError::AlreadyHeld)
+    }
+
+    /// Deadline-aware shutdown wait so ExecStop fails before systemd's outer
+    /// timeout can kill cleanup mid-operation.
+    pub fn acquire_with_systemd_stop_deadline(
+        &self,
+        deadline: Duration,
+    ) -> Result<RealPoolLockGuard, PoolLockError> {
+        self.poll_acquire(deadline, |waited| PoolLockError::DeadlineExpired { waited })
     }
 
     fn try_acquire(&self) -> Result<RealPoolLockGuard, PoolLockError> {
@@ -97,109 +101,9 @@ impl RealPoolLock {
     }
 }
 
-impl AcquirePoolLock for RealPoolLock {
-    fn acquire(&self) -> Result<Box<dyn PoolLockGuard>, PoolLockError> {
-        Ok(Box::new(self.try_acquire()?))
-    }
-
-    fn acquire_with_timeout(
-        &self,
-        timeout: Duration,
-    ) -> Result<Box<dyn PoolLockGuard>, PoolLockError> {
-        Ok(Box::new(
-            self.poll_acquire(timeout, |_| PoolLockError::AlreadyHeld)?,
-        ))
-    }
-
-    fn acquire_with_systemd_stop_deadline(
-        &self,
-        deadline: Duration,
-    ) -> Result<Box<dyn PoolLockGuard>, PoolLockError> {
-        Ok(Box::new(self.poll_acquire(deadline, |waited| {
-            PoolLockError::DeadlineExpired { waited }
-        })?))
-    }
-}
-
 /// Owns the open file description that carries the kernel flock.
 pub struct RealPoolLockGuard {
     _file: File,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum RecordedPoolLockMode {
-    NonBlocking,
-    Timeout(Duration),
-    SystemdStopDeadline(Duration),
-}
-
-/// Test seam that records which acquisition policy dispatch selected.
-#[cfg(test)]
-#[derive(Default)]
-pub struct RecordingPoolLock {
-    calls: std::sync::Mutex<Vec<RecordedPoolLockMode>>,
-    already_held: std::sync::atomic::AtomicBool,
-}
-
-#[cfg(test)]
-impl RecordingPoolLock {
-    pub fn new() -> Self {
-        Self::default()
-    }
-
-    pub fn set_already_held(&self, held: bool) {
-        self.already_held
-            .store(held, std::sync::atomic::Ordering::SeqCst);
-    }
-
-    pub fn calls(&self) -> Vec<RecordedPoolLockMode> {
-        self.calls.lock().expect("recording lock poisoned").clone()
-    }
-}
-
-#[cfg(test)]
-impl AcquirePoolLock for RecordingPoolLock {
-    fn acquire(&self) -> Result<Box<dyn PoolLockGuard>, PoolLockError> {
-        self.calls
-            .lock()
-            .expect("recording lock poisoned")
-            .push(RecordedPoolLockMode::NonBlocking);
-        if self.already_held.load(std::sync::atomic::Ordering::SeqCst) {
-            Err(PoolLockError::AlreadyHeld)
-        } else {
-            Ok(Box::new(()))
-        }
-    }
-
-    fn acquire_with_timeout(
-        &self,
-        timeout: Duration,
-    ) -> Result<Box<dyn PoolLockGuard>, PoolLockError> {
-        self.calls
-            .lock()
-            .expect("recording lock poisoned")
-            .push(RecordedPoolLockMode::Timeout(timeout));
-        if self.already_held.load(std::sync::atomic::Ordering::SeqCst) {
-            Err(PoolLockError::AlreadyHeld)
-        } else {
-            Ok(Box::new(()))
-        }
-    }
-
-    fn acquire_with_systemd_stop_deadline(
-        &self,
-        deadline: Duration,
-    ) -> Result<Box<dyn PoolLockGuard>, PoolLockError> {
-        self.calls
-            .lock()
-            .expect("recording lock poisoned")
-            .push(RecordedPoolLockMode::SystemdStopDeadline(deadline));
-        if self.already_held.load(std::sync::atomic::Ordering::SeqCst) {
-            Err(PoolLockError::DeadlineExpired { waited: deadline })
-        } else {
-            Ok(Box::new(()))
-        }
-    }
 }
 
 #[derive(Debug, Error)]

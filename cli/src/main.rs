@@ -9,7 +9,7 @@ use braid_cli::doctor::{DoctorOptions, cmd_doctor};
 use braid_cli::membership::PoolMembership;
 use braid_cli::online_state::{RealOnlineStateOps, run_with_online_marker, snapshot};
 use braid_cli::pool_lock::{
-    AcquirePoolLock, PoolLockError, RealPoolLock, RealStopCoordinator, StopCoordinatorError,
+    PoolLockError, RealPoolLock, RealPoolLockGuard, RealStopCoordinator, StopCoordinatorError,
     StopCoordinatorPollResult,
 };
 use braid_cli::probe::RealFilesystem;
@@ -81,6 +81,106 @@ enum Commands {
     Ups(UpsArgs),
     /// Print this message or the help of the given commands
     Help(HelpArgs),
+}
+
+/// Command-level pool-lock discipline, kept beside `Commands` so adding a
+/// subcommand forces an explicit stale-state decision.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum LockPolicy {
+    None,
+    NonBlocking,
+    Timeout(Duration),
+    MonitorSilent,
+    LockPlain,
+    LockSystemdStop(Duration),
+}
+
+/// Exhaustive owner of the Commands-to-lock mapping that Principle 12 relies
+/// on for acquiring before any state read.
+fn lock_policy(command: &Commands) -> LockPolicy {
+    use Commands::*;
+    use LockPolicy::*;
+
+    match command {
+        Add(args) => {
+            if args.common.dry_run {
+                None
+            } else {
+                NonBlocking
+            }
+        }
+        Remove(args) => {
+            if args.common.dry_run {
+                None
+            } else {
+                NonBlocking
+            }
+        }
+        RemoveMissing(args) => {
+            if args.common.dry_run {
+                None
+            } else {
+                NonBlocking
+            }
+        }
+        Replace(args) => {
+            if args.common.dry_run {
+                None
+            } else {
+                NonBlocking
+            }
+        }
+        Unlock(args) => {
+            if args.dry_run {
+                None
+            } else {
+                NonBlocking
+            }
+        }
+        EnrollKeyFile(args) => {
+            if args.dry_run {
+                None
+            } else {
+                NonBlocking
+            }
+        }
+        Recover(args) => {
+            if args.dry_run {
+                None
+            } else {
+                NonBlocking
+            }
+        }
+        Discover(args) => {
+            if args.write {
+                NonBlocking
+            } else {
+                None
+            }
+        }
+        Ack => Timeout(Duration::from_secs(10)),
+        Monitor => MonitorSilent,
+        Lock(args) => {
+            if args.dry_run {
+                None
+            } else if args.systemd_stop {
+                LockSystemdStop(Duration::from_secs(
+                    args.deadline_secs.expect("clap requires deadline"),
+                ))
+            } else {
+                LockPlain
+            }
+        }
+        Status(_)
+        | Doctor(_)
+        | Idle
+        | ScrubCancel(_)
+        | ScrubNeedsResume(_)
+        | ScrubResumeOrStart(_)
+        | Tui(_)
+        | Ups(_)
+        | Help(_) => None,
+    }
 }
 
 /// Explicit help subcommand so braid owns the rendered wording while still
@@ -386,6 +486,7 @@ fn main() {
     let paths = StatePaths::production();
     let pool_lock = RealPoolLock::production();
     let stop_coordinator = RealStopCoordinator::production();
+    let _pool_guard = acquire_per_policy(&pool_lock, lock_policy(&cli.command));
 
     // Hoisted once: shared by add/remove/remove-missing/replace. Each command's
     // cmd_* function holds the inhibitor only across its irreversible mutation
@@ -402,7 +503,6 @@ fn main() {
                 std::io::IsTerminal::is_terminal(&std::io::stderr()),
                 false,
             );
-            let _pool_guard = (!args.common.dry_run).then(|| acquire_pool_or_exit(&pool_lock));
             let runner = RealRunner;
             let online_ops = RealOnlineStateOps::new(&runner);
             let online_config =
@@ -453,7 +553,6 @@ fn main() {
                 std::io::IsTerminal::is_terminal(&std::io::stderr()),
                 false,
             );
-            let _pool_guard = (!args.common.dry_run).then(|| acquire_pool_or_exit(&pool_lock));
             let runner = RealRunner;
             let fs = RealFilesystem;
             if let Err(e) = braid_cli::remove::cmd_remove(
@@ -480,7 +579,6 @@ fn main() {
                 std::io::IsTerminal::is_terminal(&std::io::stderr()),
                 false,
             );
-            let _pool_guard = (!args.common.dry_run).then(|| acquire_pool_or_exit(&pool_lock));
             let runner = RealRunner;
             let fs = RealFilesystem;
             if let Err(e) = braid_cli::remove_missing::cmd_remove_missing(
@@ -507,7 +605,6 @@ fn main() {
                 std::io::IsTerminal::is_terminal(&std::io::stderr()),
                 false,
             );
-            let _pool_guard = (!args.common.dry_run).then(|| acquire_pool_or_exit(&pool_lock));
             let runner = RealRunner;
             let fs = RealFilesystem;
             let backing_path_resolver = braid_cli::luks::RealBackingPathResolver;
@@ -577,7 +674,6 @@ fn main() {
             }
         }
         Commands::Unlock(args) => {
-            let _pool_guard = (!args.dry_run).then(|| acquire_pool_or_exit(&pool_lock));
             let runner = RealRunner;
             let online_ops = RealOnlineStateOps::new(&runner);
             let config = load_config_or_exit(Path::new(&config_path), 1);
@@ -622,7 +718,6 @@ fn main() {
             }
         }
         Commands::EnrollKeyFile(args) => {
-            let _pool_guard = (!args.dry_run).then(|| acquire_pool_or_exit(&pool_lock));
             let membership = load_membership_or_exit(&paths, 1);
             let runner = RealRunner;
             let fs = RealFilesystem;
@@ -753,14 +848,6 @@ fn main() {
             }
         }
         Commands::Monitor => {
-            let _pool_guard = match pool_lock.acquire() {
-                Ok(guard) => Some(guard),
-                Err(PoolLockError::AlreadyHeld) => std::process::exit(0),
-                Err(e) => {
-                    handle_pool_lock_error(e);
-                    std::process::exit(2);
-                }
-            };
             let config = load_config_or_exit(Path::new(&config_path), 2);
             let runner = RealRunner;
             let fs = RealFilesystem;
@@ -777,8 +864,6 @@ fn main() {
             }
         }
         Commands::Ack => {
-            let _pool_guard =
-                acquire_pool_with_timeout_or_exit(&pool_lock, Duration::from_secs(10));
             let config = load_config_or_exit(Path::new(&config_path), 1);
             let runner = RealRunner;
             let fs = RealFilesystem;
@@ -799,7 +884,6 @@ fn main() {
             }
         }
         Commands::Discover(args) => {
-            let _pool_guard = args.write.then(|| acquire_pool_or_exit(&pool_lock));
             // Note: the pre-save fail-closed gates for `--write`
             // (pending-op presence + pool.json shape check that refuses
             // `ValidUuidKeyed`; `Corrupt` is the documented rebuild path
@@ -868,7 +952,6 @@ fn main() {
                 std::io::IsTerminal::is_terminal(&std::io::stderr()),
                 false,
             );
-            let _pool_guard = (!args.dry_run).then(|| acquire_pool_or_exit(&pool_lock));
             let runner = RealRunner;
             let online_ops = RealOnlineStateOps::new(&runner);
             let config = load_config_or_exit(Path::new(&config_path), 1);
@@ -936,7 +1019,25 @@ fn main() {
     }
 }
 
-fn acquire_pool_or_exit(pool_lock: &RealPoolLock) -> Box<dyn braid_cli::pool_lock::PoolLockGuard> {
+/// Applies the top-level policy table while leaving lock's stop-coordinator
+/// variants to the helpers that must acquire both locks in order.
+fn acquire_per_policy(pool_lock: &RealPoolLock, policy: LockPolicy) -> Option<RealPoolLockGuard> {
+    match policy {
+        LockPolicy::None | LockPolicy::LockPlain | LockPolicy::LockSystemdStop(_) => None,
+        LockPolicy::NonBlocking => Some(acquire_pool_or_exit(pool_lock)),
+        LockPolicy::Timeout(timeout) => Some(acquire_pool_with_timeout_or_exit(pool_lock, timeout)),
+        LockPolicy::MonitorSilent => match pool_lock.acquire() {
+            Ok(guard) => Some(guard),
+            Err(PoolLockError::AlreadyHeld) => std::process::exit(0),
+            Err(e) => {
+                handle_pool_lock_error(e);
+                std::process::exit(2);
+            }
+        },
+    }
+}
+
+fn acquire_pool_or_exit(pool_lock: &RealPoolLock) -> RealPoolLockGuard {
     match pool_lock.acquire() {
         Ok(guard) => guard,
         Err(e) => {
@@ -949,7 +1050,7 @@ fn acquire_pool_or_exit(pool_lock: &RealPoolLock) -> Box<dyn braid_cli::pool_loc
 fn acquire_pool_with_timeout_or_exit(
     pool_lock: &RealPoolLock,
     timeout: Duration,
-) -> Box<dyn braid_cli::pool_lock::PoolLockGuard> {
+) -> RealPoolLockGuard {
     match pool_lock.acquire_with_timeout(timeout) {
         Ok(guard) => guard,
         Err(e) => {
@@ -1209,6 +1310,12 @@ mod tests {
         membership
     }
 
+    fn parsed_lock_policy(argv: &[&str]) -> LockPolicy {
+        let cli = Cli::try_parse_from(argv.iter().copied())
+            .expect(&format!("argv should parse for lock policy: {argv:?}"));
+        lock_policy(&cli.command)
+    }
+
     fn membership_names(membership: &PoolMembership) -> Vec<String> {
         membership
             .iter_by_name()
@@ -1238,6 +1345,97 @@ mod tests {
             },
             pre_membership: PoolMembership::empty(),
             target_membership: PoolMembership::empty(),
+        }
+    }
+
+    // Intent: every command variant and lock-affecting flag branch has a
+    // pinned dispatch lock policy.
+    // Why it exists: the policy table is now the single source of truth, so
+    // incorrect classifications must fail in Rust tests instead of only in VM
+    // coverage.
+    // Scenario: a future edit changes a dry-run, --write, or --systemd-stop
+    // branch and accidentally moves a command into the wrong locking class.
+    #[test]
+    fn lock_policy_classifies_every_command_and_branch() {
+        use LockPolicy::*;
+
+        let cases: Vec<(Vec<&str>, LockPolicy)> = vec![
+            (vec!["braid", "add", "disk1=/dev/disk/by-id/x"], NonBlocking),
+            (
+                vec!["braid", "add", "disk1=/dev/disk/by-id/x", "--dry-run"],
+                None,
+            ),
+            (vec!["braid", "remove", "disk1"], NonBlocking),
+            (vec!["braid", "remove", "disk1", "--dry-run"], None),
+            (
+                vec!["braid", "remove-missing", "--missing-id", "1"],
+                NonBlocking,
+            ),
+            (
+                vec!["braid", "remove-missing", "--missing-id", "1", "--dry-run"],
+                None,
+            ),
+            (
+                vec![
+                    "braid",
+                    "replace",
+                    "--old",
+                    "disk1",
+                    "--new",
+                    "disk2=/dev/disk/by-id/x",
+                ],
+                NonBlocking,
+            ),
+            (
+                vec![
+                    "braid",
+                    "replace",
+                    "--old",
+                    "disk1",
+                    "--new",
+                    "disk2=/dev/disk/by-id/x",
+                    "--dry-run",
+                ],
+                None,
+            ),
+            (vec!["braid", "unlock"], NonBlocking),
+            (vec!["braid", "unlock", "--dry-run"], None),
+            (vec!["braid", "enroll", "/mnt/usb"], NonBlocking),
+            (vec!["braid", "enroll", "/mnt/usb", "--dry-run"], None),
+            (vec!["braid", "recover"], NonBlocking),
+            (vec!["braid", "recover", "--dry-run"], None),
+            (vec!["braid", "discover", "--write"], NonBlocking),
+            (vec!["braid", "discover"], None),
+            (vec!["braid", "lock", "--dry-run"], None),
+            (vec!["braid", "lock"], LockPlain),
+            (
+                vec!["braid", "lock", "--systemd-stop", "--deadline-secs", "270"],
+                LockSystemdStop(Duration::from_secs(270)),
+            ),
+            (vec!["braid", "ack"], Timeout(Duration::from_secs(10))),
+            (vec!["braid", "monitor"], MonitorSilent),
+            (vec!["braid", "status"], None),
+            (vec!["braid", "doctor"], None),
+            (vec!["braid", "idle"], None),
+            (
+                vec!["braid", "scrub-cancel", "--mount", "/mnt/storage"],
+                None,
+            ),
+            (
+                vec!["braid", "scrub-needs-resume", "--mount", "/mnt/storage"],
+                None,
+            ),
+            (
+                vec!["braid", "scrub-resume-or-start", "--mount", "/mnt/storage"],
+                None,
+            ),
+            (vec!["braid", "tui"], None),
+            (vec!["braid", "ups", "status"], None),
+            (vec!["braid", "help", "status"], None),
+        ];
+
+        for (argv, expected) in cases {
+            assert_eq!(parsed_lock_policy(&argv), expected, "argv: {argv:?}");
         }
     }
 
