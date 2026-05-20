@@ -2411,6 +2411,72 @@ mod tests {
         assert!(!plan.cleanup_uncertain);
     }
 
+    // Intent: non-dry-run lock with empty membership still closes every
+    // observed braid-prefixed mapper whose backing LUKS UUID can be read.
+    // Why it exists: lock dispatch may intentionally fall back to empty
+    // membership when pool.json is missing or corrupt during recovery.
+    // Scenario: the pool is unmounted, `/dev/mapper/braid-aaa` and
+    // `/dev/mapper/braid-bbb` are open, and pool.json contributes no members.
+    #[test]
+    fn cmd_lock_with_empty_membership_closes_observed_orphan_mappers() {
+        let runner = with_orphan_mapper(
+            with_orphan_mapper(
+                MockRunner::default().with_output(
+                    CmdRequest::MountpointCheck {
+                        path: MountPoint("/mnt/storage".to_owned()),
+                    },
+                    lock_err_raw("mountpoint -q /mnt/storage", 1, ""),
+                ),
+                "braid-aaa",
+            ),
+            "braid-bbb",
+        )
+        .with_output(
+            CmdRequest::CryptsetupClose {
+                mapper: MapperName("braid-aaa".into()),
+            },
+            lock_ok_raw("cryptsetup close braid-aaa"),
+        )
+        .with_output(
+            CmdRequest::CryptsetupClose {
+                mapper: MapperName("braid-bbb".into()),
+            },
+            lock_ok_raw("cryptsetup close braid-bbb"),
+        );
+        let fs = lock_fs(&["/dev/mapper/braid-aaa", "/dev/mapper/braid-bbb"]);
+        let config = lock_test_config();
+        let membership = PoolMembership::empty();
+
+        let plan = plan_lock(&runner, &fs, &config, &membership)
+            .expect("empty membership should still produce a close plan");
+        assert!(member_summaries(&plan.close_set).is_empty());
+        assert_eq!(
+            orphan_summaries(&plan.close_set),
+            vec![
+                ("braid-aaa".to_owned(), "aaa".to_owned()),
+                ("braid-bbb".to_owned(), "bbb".to_owned())
+            ],
+        );
+        assert!(plan.members_known_closed.is_empty());
+
+        let recording = LockRecordingRunner::new(runner.clone());
+        cmd_lock_impl(
+            &recording,
+            &fs,
+            &LockNoopSleeper,
+            &config,
+            &membership,
+            false,
+        )
+        .expect("lock should close UUID-verified orphan mappers");
+
+        assert_eq!(
+            recording.close_calls(),
+            vec!["braid-aaa".to_owned(), "braid-bbb".to_owned()]
+        );
+        assert!(recording.forget_calls().is_empty());
+    }
+
     // Intent: unmounted lock closes a UUID-verified member mapper even
     // when the observed mapper name has drifted.
     // Why it exists: the unmounted fallback has no btrfs pool.devices

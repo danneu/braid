@@ -140,7 +140,7 @@ permission fixups but do not touch `braid-online.service`.
 **On system shutdown:**
 1. systemd stops `braid-online.service` (if active).
 2. `ExecStop = braid lock --systemd-stop --deadline-secs <n>` waits for an in-flight plain `braid lock` to finish through the stop coordinator, or waits for the pool lock up to the configured deadline.
-3. Lock dispatch loads membership from `pool.json`; if `pool.json` is absent and `pending-op.json` is a bootstrap-add journal (`OpKind::Add` with empty `pre_membership`), it uses the journal's `target_membership`.
+3. Lock dispatch loads membership from `pool.json`; if `pool.json` is absent or corrupt, it warns and proceeds with empty membership because mapper cleanup still requires per-candidate LUKS UUID verification.
 4. CLI unmounts and closes LUKS.
 5. Drives are safe to power off.
 

@@ -3,7 +3,7 @@
 # Intent: a bootstrap `braid add` whose mount succeeds but whose
 #   post-mount cleanup step fails must (a) leave braid-online.service
 #   active, and (b) leave the pool recoverable via systemctl stop
-#   braid-online.service driven by the bootstrap-add journal.
+#   braid-online.service even before pool.json is written.
 # Why it exists: a previous bug left the pool mounted while
 #   braid-online.service stayed inactive when cmd_add returned Err
 #   post-mount; even after activating the service, ExecStop could
@@ -16,7 +16,8 @@
 #   exists). Assert (1) the add exits non-zero, (2) the pool is mounted,
 #   (3) braid-online.service is active, (4) pool.json does not exist,
 #   (5) pending-op.json exists and is a bootstrap-add journal, (6)
-#   `systemctl stop braid-online.service` unmounts /mnt/storage and
+#   `systemctl stop braid-online.service` tolerates missing pool.json,
+#   unmounts /mnt/storage, and
 #   closes the LUKS mapper.
 
 import json
@@ -61,7 +62,7 @@ with subtest("Bootstrap journal is available for lock cleanup"):
     target_members = list(journal["target_membership"]["disks"].values())
     assert [member["name"] for member in target_members] == ["disk1"], journal
 
-with subtest("ExecStop locks pool using journal fallback"):
+with subtest("ExecStop locks pool without pool.json"):
     machine.succeed("systemctl stop braid-online.service")
     machine.fail("mountpoint -q /mnt/storage")
     machine.fail("ls /dev/mapper/braid-* 2>/dev/null")

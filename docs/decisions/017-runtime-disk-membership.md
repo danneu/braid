@@ -63,7 +63,8 @@ When `pending-op.json` exists, braid enters recovery mode. All commands except `
 
 - `pool.json` is authoritative. `unlock` requires it.
 - `unlock` enriches `pool.json` metadata (`devid`, `added_at`, and current by-id observations where appropriate) after mount via live btrfs state, but never changes membership (disk set).
-- If `pool.json` is missing or corrupt, `unlock` fails with a clear error directing the user to `braid add` or `braid discover --write`.
+- If `pool.json` is missing or corrupt, `unlock` and the mutating membership commands fail with a clear error directing the user to `braid add` or `braid discover --write`.
+- Non-dry-run `braid lock` (the user-facing command and the `braid-online.service` ExecStop reentry) tolerates a missing or corrupt `pool.json`: it warns and proceeds with empty membership. The per-candidate `cryptsetup luksUUID` probe in `build_close_sets_*` (`cli/src/lock.rs`) is the fail-closed guard, so cleanup remains complete and correct. `braid lock --dry-run` still requires a loadable `pool.json` to render its preview and exits with the standard load error otherwise.
 - If `pool.json` is readable but stale (a member fails to probe), `unlock` warns and proceeds with the members it can probe. It never rewrites `pool.json`.
 - If a member's UUID key doesn't match the probed device's LUKS UUID, `unlock` fatally errors. This catches swapped, reformatted, or corrupted drives before any LUKS open or mount is attempted.
 - Only these commands write `pool.json` membership: `add`, `remove`, `replace`, `remove-missing`, `discover --write`, `recover`.

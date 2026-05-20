@@ -1,8 +1,7 @@
 # Test: post-mount-failure-marks-online
 #
 # What: Bootstrap add failures after mount still activate braid-online.service,
-# and ExecStop can lock the pool from the bootstrap journal when pool.json is
-# absent.
+# and ExecStop can lock the pool when pool.json is absent.
 #
 # Why: A post-mount error must not leave the pool mounted without the lifecycle
 # owner, and shutdown cleanup must not depend on pool.json existing in the

@@ -6,7 +6,7 @@ use std::time::{Duration, Instant};
 use braid_cli::cmd::RealRunner;
 use braid_cli::config::{DEFAULT_CONFIG_PATH, config_read};
 use braid_cli::doctor::{DoctorOptions, cmd_doctor};
-use braid_cli::membership::PoolMembership;
+use braid_cli::membership::{MembershipError, PoolMembership};
 use braid_cli::online_state::{RealOnlineStateOps, run_with_online_marker, snapshot};
 use braid_cli::pool_lock::{
     PoolLockError, RealPoolLock, RealPoolLockGuard, RealStopCoordinator, StopCoordinatorError,
@@ -1089,57 +1089,41 @@ fn load_membership_or_exit(paths: &StatePaths, exit_code: i32) -> PoolMembership
     }
 }
 
-/// Typed lock-side membership loading failures so dispatch preserves the
-/// remediation text owned by membership and journal modules.
-#[derive(Debug, thiserror::Error)]
-pub(crate) enum LoadForLockError {
-    #[error(transparent)]
-    Membership(#[from] braid_cli::membership::MembershipError),
-    /// Corrupt or unreadable pending-op.json must keep JournalError's
-    /// operator remediation instead of collapsing into missing state.
-    #[error(transparent)]
-    Journal(#[from] braid_cli::journal::JournalError),
-    /// Neither pool.json nor a bootstrap-add journal can identify the set of
-    /// mappers `braid lock` should close.
-    #[error(
-        "no pool membership available -- pool.json missing and no bootstrap-add journal present"
-    )]
-    NoMembershipAvailable,
-}
+/// Lenient pool.json loader for `lock` paths only. `lock` is the only
+/// command for which pool.json is non-authoritative: per-candidate
+/// `cryptsetup luksUUID` probes in `cli/src/lock.rs` remain the fail-closed
+/// guard, so empty membership still produces a correct teardown.
+fn load_membership_for_lock(paths: &StatePaths) -> PoolMembership {
+    const EMPTY_MEMBERSHIP_WARN_SUFFIX: &str = " -- proceeding with empty membership; every observed braid-* mapper will be verified by LUKS UUID before close";
 
-/// Load the mapper identity set for lock and recover bootstrap-add interrupts
-/// where the pool mounted before pool.json was first written.
-fn load_membership_for_lock(paths: &StatePaths) -> Result<PoolMembership, LoadForLockError> {
     match braid_cli::membership::load_membership(paths) {
-        Ok(membership) => Ok(membership),
-        Err(braid_cli::membership::MembershipError::Io { source, .. })
-            if source.kind() == std::io::ErrorKind::NotFound =>
-        {
-            match braid_cli::journal::load_journal(paths)? {
-                Some(journal)
-                    if matches!(&journal.op, braid_cli::journal::OpKind::Add { .. })
-                        && journal.pre_membership.is_empty() =>
-                {
-                    eprintln!(
-                        "braid: pool.json absent; recovering membership from interrupted bootstrap-add journal for shutdown cleanup"
-                    );
-                    Ok(journal.target_membership)
-                }
-                _ => Err(LoadForLockError::NoMembershipAvailable),
-            }
-        }
-        Err(e) => Err(e.into()),
-    }
-}
-
-/// Exit wrapper for lock dispatch so plain lock and ExecStop render identical
-/// loader failures while still sharing the typed fallback logic.
-fn load_membership_for_lock_or_exit(paths: &StatePaths, exit_code: i32) -> PoolMembership {
-    match load_membership_for_lock(paths) {
         Ok(membership) => membership,
         Err(e) => {
-            print_cli_error(&e.to_string());
-            std::process::exit(exit_code);
+            match e {
+                MembershipError::Io { path, source } => eprintln!(
+                    "warn: pool.json unreadable at {}: {source}{EMPTY_MEMBERSHIP_WARN_SUFFIX}",
+                    path.display(),
+                ),
+                MembershipError::Corrupt { path, detail } => eprintln!(
+                    "warn: pool.json corrupt at {}: {detail}{EMPTY_MEMBERSHIP_WARN_SUFFIX}",
+                    path.display(),
+                ),
+                MembershipError::Conflict(msg) => {
+                    eprintln!("warn: pool.json conflict: {msg}{EMPTY_MEMBERSHIP_WARN_SUFFIX}");
+                }
+                MembershipError::DuplicateDevid { devid, members } => {
+                    let members = members
+                        .iter()
+                        .map(ToString::to_string)
+                        .collect::<Vec<_>>()
+                        .join(", ");
+                    eprintln!(
+                        "warn: pool.json duplicate devid {devid} across members {members}{EMPTY_MEMBERSHIP_WARN_SUFFIX}"
+                    );
+                }
+                MembershipError::Save { .. } => unreachable!("load_membership cannot return Save"),
+            }
+            PoolMembership::empty()
         }
     }
 }
@@ -1163,7 +1147,7 @@ fn run_plain_lock(
     };
     let _pool_guard = acquire_pool_or_exit(pool_lock);
     let config = load_config_or_exit(config_path, 1);
-    let membership = load_membership_for_lock_or_exit(paths, 1);
+    let membership = load_membership_for_lock(paths);
     let runner = RealRunner;
     let fs = RealFilesystem;
     let online_ops = RealOnlineStateOps::new(&runner);
@@ -1226,7 +1210,7 @@ fn run_systemd_stop_lock(
         }
     };
     let config = load_config_or_exit(config_path, 1);
-    let membership = load_membership_for_lock_or_exit(paths, 1);
+    let membership = load_membership_for_lock(paths);
     let runner = RealRunner;
     let fs = RealFilesystem;
     if let Err(e) = braid_cli::lock::cmd_lock(&runner, &fs, &config, &membership, false) {
@@ -1259,8 +1243,7 @@ fn disk_name_candidates() -> Vec<CompletionCandidate> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use braid_cli::journal::{self, AddPhase, Journal, JournalError, OpKind};
-    use braid_cli::membership::{self, DiskMember, LuksUuidMap, MembershipError};
+    use braid_cli::membership::{self, DiskMember};
     use braid_cli::types::{ByIdPath, DiskName, LuksUuid};
     use tempfile::TempDir;
 
@@ -1314,38 +1297,6 @@ mod tests {
         let cli = Cli::try_parse_from(argv.iter().copied())
             .expect(&format!("argv should parse for lock policy: {argv:?}"));
         lock_policy(&cli.command)
-    }
-
-    fn membership_names(membership: &PoolMembership) -> Vec<String> {
-        membership
-            .iter_by_name()
-            .into_iter()
-            .map(|(_, member)| member.name.as_str().to_owned())
-            .collect()
-    }
-
-    fn add_journal(pre: PoolMembership, target: PoolMembership) -> Journal {
-        Journal {
-            started_at: "2026-01-01T00:00:00Z".into(),
-            op: OpKind::Add {
-                phase: AddPhase::PoolMutation,
-                targets: LuksUuidMap::new(),
-            },
-            pre_membership: pre,
-            target_membership: target,
-        }
-    }
-
-    fn remove_journal() -> Journal {
-        Journal {
-            started_at: "2026-01-01T00:00:00Z".into(),
-            op: OpKind::Remove {
-                luks_uuid: test_uuid(900),
-                name: disk_name("disk1"),
-            },
-            pre_membership: PoolMembership::empty(),
-            target_membership: PoolMembership::empty(),
-        }
     }
 
     // Intent: every command variant and lock-affecting flag branch has a
@@ -1441,8 +1392,8 @@ mod tests {
 
     // Intent: lock prefers the authoritative pool.json membership when it
     // exists.
-    // Why it exists: the journal fallback is only for missing pool.json, not a
-    // replacement for normal lock identity.
+    // Why it exists: the empty-membership fallback is only for load failures,
+    // not a replacement for normal lock identity.
     // Scenario: a two-disk pool has pool.json and no pending operation.
     #[test]
     fn load_membership_for_lock_uses_pool_json_when_present() {
@@ -1453,114 +1404,55 @@ mod tests {
         ]);
         membership::save_membership(&expected, &paths).unwrap();
 
-        let loaded = load_membership_for_lock(&paths).unwrap();
+        let loaded = load_membership_for_lock(&paths);
 
         assert_eq!(loaded, expected);
     }
 
-    // Intent: lock can recover mapper identity from an interrupted bootstrap
-    // add journal when pool.json was never written.
-    // Why it exists: ExecStop must still close mappers after bootstrap add
-    // mounts and then fails before save_membership.
-    // Scenario: no pool.json exists, pending-op.json is an Add journal whose
-    // pre_membership is empty and target_membership names the mounted disk.
-    #[test]
-    fn load_membership_for_lock_falls_back_to_bootstrap_journal() {
-        let (_tmp, paths) = isolated_paths();
-        let target = pool_membership(&[(100, "disk1", "/dev/disk/by-id/virtio-disk1")]);
-        journal::write_journal(&paths, &add_journal(PoolMembership::empty(), target)).unwrap();
-
-        let loaded = load_membership_for_lock(&paths).unwrap();
-
-        assert_eq!(membership_names(&loaded), vec!["disk1"]);
-    }
-
-    // Intent: lock rejects pending operation journals that do not structurally
-    // identify a bootstrap add.
-    // Why it exists: live-pool mutations require pool.json and should go
-    // through recovery rather than lock guessing at membership.
-    // Scenario: pool.json is missing while pending-op.json records a remove
-    // operation.
-    #[test]
-    fn load_membership_for_lock_rejects_non_bootstrap_journal() {
-        let (_tmp, paths) = isolated_paths();
-        journal::write_journal(&paths, &remove_journal()).unwrap();
-
-        let err = load_membership_for_lock(&paths).unwrap_err();
-
-        assert!(matches!(err, LoadForLockError::NoMembershipAvailable));
-    }
-
-    // Intent: lock fails clearly when no membership source exists.
-    // Why it exists: no pool.json and no journal leaves no authoritative set
-    // of mappers to close.
+    // Intent: lock returns empty membership when pool.json is unreadable.
+    // Why it exists: cleanup must still run when recovery work has moved or
+    // deleted pool.json before shutdown.
     // Scenario: an empty state directory reaches lock dispatch.
     #[test]
-    fn load_membership_for_lock_rejects_when_no_pool_json_no_journal() {
+    fn load_membership_for_lock_returns_empty_on_missing_pool_json() {
         let (_tmp, paths) = isolated_paths();
 
-        let err = load_membership_for_lock(&paths).unwrap_err();
+        let loaded = load_membership_for_lock(&paths);
 
-        assert!(matches!(err, LoadForLockError::NoMembershipAvailable));
+        assert!(loaded.is_empty());
     }
 
-    // Intent: corrupt pool.json does not trigger the journal fallback.
-    // Why it exists: a present-but-corrupt membership file needs the existing
-    // discover rebuild remediation, not silent replacement from a journal.
-    // Scenario: pool.json exists with invalid JSON and pending-op.json is
-    // absent.
+    // Intent: lock returns empty membership when pool.json is corrupt.
+    // Why it exists: shutdown cleanup should not be blocked by state-file
+    // repair work that has not completed yet.
+    // Scenario: pool.json exists with invalid JSON and lock dispatch loads it.
     #[test]
-    fn load_membership_for_lock_propagates_corrupt_pool_json() {
+    fn load_membership_for_lock_returns_empty_on_corrupt_pool_json() {
         let (_tmp, paths) = isolated_paths();
-        std::fs::write(paths.pool_json(), "not json").unwrap();
+        std::fs::write(paths.pool_json(), "{not valid json}").unwrap();
 
-        let err = load_membership_for_lock(&paths).unwrap_err();
+        let loaded = load_membership_for_lock(&paths);
 
-        assert!(matches!(
-            err,
-            LoadForLockError::Membership(MembershipError::Corrupt { .. })
-        ));
+        assert!(loaded.is_empty());
     }
 
-    // Intent: corrupt pending-op.json preserves JournalError::Parse
-    // remediation on the lock path.
-    // Why it exists: operators need the pinned manual-reconciliation text
-    // instead of a generic missing-membership message.
-    // Scenario: pool.json is missing and pending-op.json contains invalid
-    // JSON.
+    // Intent: lock returns empty membership when pool.json has conflicting
+    // value-side identity.
+    // Why it exists: all membership load failures share the same teardown
+    // behavior; warning wording differs, but cleanup still proceeds.
+    // Scenario: two UUID-keyed entries carry the same disk name.
     #[test]
-    fn load_membership_for_lock_surfaces_corrupt_journal() {
+    fn load_membership_for_lock_returns_empty_on_conflicting_pool_json() {
         let (_tmp, paths) = isolated_paths();
-        std::fs::write(paths.pending_op_json(), "not json").unwrap();
+        std::fs::write(
+            paths.pool_json(),
+            r#"{"disks":{"11111111-1111-1111-1111-111111111111":{"name":"disk1","by_id":"/dev/disk/by-id/virtio-disk1"},"22222222-2222-2222-2222-222222222222":{"name":"disk1","by_id":"/dev/disk/by-id/virtio-disk2"}}}"#,
+        )
+        .unwrap();
 
-        let err = load_membership_for_lock(&paths).unwrap_err();
+        let loaded = load_membership_for_lock(&paths);
 
-        assert!(matches!(
-            err,
-            LoadForLockError::Journal(JournalError::Parse { .. })
-        ));
-        assert!(
-            err.to_string()
-                .contains("Remove /var/lib/braid/pending-op.json after manual reconciliation")
-        );
-    }
-
-    // Intent: unreadable pending-op.json is distinguished from absent
-    // pending-op.json.
-    // Why it exists: lock should surface journal I/O failures with their path
-    // and source instead of treating them as no journal.
-    // Scenario: pool.json is missing and pending-op.json is a directory.
-    #[test]
-    fn load_membership_for_lock_surfaces_journal_io_error() {
-        let (_tmp, paths) = isolated_paths();
-        std::fs::create_dir(paths.pending_op_json()).unwrap();
-
-        let err = load_membership_for_lock(&paths).unwrap_err();
-
-        assert!(matches!(
-            err,
-            LoadForLockError::Journal(JournalError::Io { .. })
-        ));
+        assert!(loaded.is_empty());
     }
 
     #[test]

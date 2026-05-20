@@ -739,6 +739,11 @@
               braid = linuxCrane.braid-cli-unwrapped;
             }
           );
+          lock-tolerates-missing-pool-json = pkgs.testers.nixosTest (
+            import ./tests/module/lock-tolerates-missing-pool-json.nix {
+              braid = linuxCrane.braid-cli-unwrapped;
+            }
+          );
           post-mount-failure-marks-online = pkgs.testers.nixosTest (
             import ./tests/module/post-mount-failure-marks-online.nix {
               braid = linuxCrane.braid-cli-unwrapped;
