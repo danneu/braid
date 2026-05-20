@@ -26,7 +26,16 @@ Output:
 [ok]   missing devs    no missing devices
 [ok]   data profiles   data profile: RAID1
 [ok]   meta profiles   metadata profile: RAID1
+[ok]   smart selftest disk1  passed ~2 days ago
+[ok]   smart selftest disk2  passed ~12 days ago
+[ok]   smart selftest disk3  passed ~30 days ago
 [skip] alert beep      skipped (pass --beep to play the audible alert test beep)
+```
+
+The SMART self-test check emits one row per pool drive. If a drive has no recent completed self-test, the row includes a paste-ready smartctl command:
+
+```
+[warn] smart selftest disk2  no completed SMART self-test recorded -- run: smartctl -t short /dev/disk/by-id/...
 ```
 
 To test the real alert sound:
@@ -41,7 +50,7 @@ sudo braid doctor --beep
 sudo braid doctor --json
 ```
 
-Prints a JSON object with `status` (one of `ok`, `warn`, `fail`, `skip`) and a `checks` array. Each check has `name`, `status`, and `message`.
+Prints a JSON object with `status` (one of `ok`, `warn`, `fail`, `skip`) and a `checks` array. Each check has `name`, `status`, and `message`. Per-drive checks also include `subject`.
 
 Note: `--json` mode skips the alert beep test even when combined with `--beep` (no audible side effects in machine-readable output). The check still appears in the report as `skip`.
 
@@ -56,6 +65,7 @@ Note: `--json` mode skips the alert beep test even when combined with `--beep` (
 | `pool_missing_devices` | No btrfs missing devices in the live pool |
 | `data_profile_mismatch` | Data block groups all use the same RAID profile |
 | `metadata_profile_mismatch` | Metadata block groups all use the same RAID profile |
+| `smart_self_test` | One result per pool drive: runs `smartctl --json -A -l selftest <by-id>` against each, then reports `Fail` on an active SMART self-test failure, `Warn` if no completed test in the last 90 powered-on days (or never), `Ok` otherwise, or `Skip` for NVMe/SCSI/unsupported drives. In `--json`, every per-drive result carries `name: "smart_self_test"` and a `subject` field naming the pool member; if pool membership cannot be enumerated, a single `Skip` result with `name: "smart_self_test"` is emitted and the `subject` field is omitted. Scripts should check whether `subject` is present before keying on it. |
 | `beep_path` | PC speaker alert beep is configured; with `--beep`, the alert beep command succeeds |
 | `ups_daemon` | With UPS enabled, `upsc` is available and can query the UPS daemon; missing or spawn-failed `upsc` is a failure, daemon unreachable/non-zero `upsc` is a warning |
 | `braid_online_active` | With UPS enabled and the pool mounted, `braid-online.service` is active so shutdown unmounts the pool |
@@ -77,10 +87,11 @@ Note: `--json` mode skips the alert beep test even when combined with `--beep` (
 1. Reads and validates `/etc/braid/config.json`.
 2. Loads UUID-keyed `pool.json` and probes each declared disk via `cryptsetup isLuks`, `cryptsetup luksDump`, and `cryptsetup luksUUID`.
 3. If the pool is mounted, queries `btrfs filesystem df` to check RAID profile consistency and probes for missing devices.
-4. If the braid monitor NixOS module is configured, reports the alert beep check as skipped by default.
-5. With `--beep` and without `--json`, plays a short test beep through the canonical beep wrapper.
-6. If UPS support is enabled, checks `upsc` and the mounted-pool `braid-online.service` shutdown hook.
-7. Aggregates results and prints a summary.
+4. For each declared disk, runs `smartctl --json -A -l selftest <by-id>` and parses the self-test log to detect active failures and report the age of the most recent passing entry.
+5. If the braid monitor NixOS module is configured, reports the alert beep check as skipped by default.
+6. With `--beep` and without `--json`, plays a short test beep through the canonical beep wrapper.
+7. If UPS support is enabled, checks `upsc` and the mounted-pool `braid-online.service` shutdown hook.
+8. Aggregates results and prints a summary.
 
 ## Related commands
 

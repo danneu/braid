@@ -1,0 +1,14 @@
+{
+  "device": {
+    "protocol": "ATA"
+  },
+  "power_on_time": {
+    "hours": 5000
+  },
+  "ata_smart_self_test_log": {
+    "standard": {
+      "revision": 1,
+      "count": 0
+    }
+  }
+}

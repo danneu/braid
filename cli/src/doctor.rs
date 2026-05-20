@@ -21,8 +21,9 @@ use crate::cmd::{CmdRequest, CommandRunner, RealRunner};
 use crate::config::{Config, DEFAULT_CONFIG_PATH};
 use crate::luks;
 use crate::membership;
-use crate::parse::types::{BtrfsBgType, BtrfsDfOutput, BtrfsProfile};
-use crate::parse::{parse_btrfs_df_json, parse_cryptsetup_luks_uuid};
+use crate::parse::smartctl::selftest_age_hours;
+use crate::parse::types::{BtrfsBgType, BtrfsDfOutput, BtrfsProfile, SelftestSummary};
+use crate::parse::{parse_btrfs_df_json, parse_cryptsetup_luks_uuid, parse_smartctl_selftest_log};
 use crate::preflight;
 use crate::probe::{self, Filesystem, ProbeError, RealFilesystem};
 use crate::state_paths::StatePaths;
@@ -43,11 +44,13 @@ pub enum CheckStatus {
     Skip,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct CheckResult {
     pub name: String,
     pub status: CheckStatus,
     pub message: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub subject: Option<String>,
 }
 
 impl CheckResult {
@@ -56,6 +59,7 @@ impl CheckResult {
             name: name.into(),
             status: CheckStatus::Ok,
             message: message.into(),
+            subject: None,
         }
     }
 
@@ -64,6 +68,7 @@ impl CheckResult {
             name: name.into(),
             status: CheckStatus::Warn,
             message: message.into(),
+            subject: None,
         }
     }
 
@@ -72,6 +77,7 @@ impl CheckResult {
             name: name.into(),
             status: CheckStatus::Fail,
             message: message.into(),
+            subject: None,
         }
     }
 
@@ -80,6 +86,59 @@ impl CheckResult {
             name: name.into(),
             status: CheckStatus::Skip,
             message: message.into(),
+            subject: None,
+        }
+    }
+
+    fn ok_for(
+        name: impl Into<String>,
+        subject: impl Into<String>,
+        message: impl Into<String>,
+    ) -> Self {
+        Self {
+            name: name.into(),
+            status: CheckStatus::Ok,
+            message: message.into(),
+            subject: Some(subject.into()),
+        }
+    }
+
+    fn warn_for(
+        name: impl Into<String>,
+        subject: impl Into<String>,
+        message: impl Into<String>,
+    ) -> Self {
+        Self {
+            name: name.into(),
+            status: CheckStatus::Warn,
+            message: message.into(),
+            subject: Some(subject.into()),
+        }
+    }
+
+    fn fail_for(
+        name: impl Into<String>,
+        subject: impl Into<String>,
+        message: impl Into<String>,
+    ) -> Self {
+        Self {
+            name: name.into(),
+            status: CheckStatus::Fail,
+            message: message.into(),
+            subject: Some(subject.into()),
+        }
+    }
+
+    fn skip_for(
+        name: impl Into<String>,
+        subject: impl Into<String>,
+        message: impl Into<String>,
+    ) -> Self {
+        Self {
+            name: name.into(),
+            status: CheckStatus::Skip,
+            message: message.into(),
+            subject: Some(subject.into()),
         }
     }
 }
@@ -727,6 +786,160 @@ fn check_metadata_profile_mismatch<R: CommandRunner>(
     )
 }
 
+/// SMART self-test staleness threshold in powered-on hours.
+/// 90 days at 24 h/day. Matches the manual's "90 powered-on days" wording
+/// and the doctor decision matrix.
+const STALE_SELFTEST_THRESHOLD_HOURS: u64 = 90 * 24;
+
+/// User-facing age phrase for SMART self-test messages.
+/// Truncates to whole days and pluralises grammatically; the leading `~`
+/// carries the powered-on-hour imprecision.
+fn approx_days_phrase(age_hours: u64) -> String {
+    let days = age_hours / 24;
+    if days == 1 {
+        "~1 day".to_owned()
+    } else {
+        format!("~{days} days")
+    }
+}
+
+fn smart_selftest_hint(by_id: &str) -> String {
+    format!("run: smartctl -t short {by_id}  (or -t long for full-surface scan, takes hours)")
+}
+
+fn summarize_smart_selftest(subject: &str, by_id: &str, summary: SelftestSummary) -> CheckResult {
+    const NAME: &str = "smart_self_test";
+
+    if summary.command_error {
+        return CheckResult::skip_for(
+            NAME,
+            subject,
+            "SMART self-test status unavailable (smartctl command failed)",
+        );
+    }
+
+    if summary.parse_failure {
+        return CheckResult::skip_for(
+            NAME,
+            subject,
+            "SMART self-test status unavailable (smartctl JSON output not parseable)",
+        );
+    }
+
+    if let Some(protocol) = summary.unsupported_protocol {
+        return CheckResult::skip_for(
+            NAME,
+            subject,
+            format!(
+                "SMART self-test status unavailable ({protocol} self-test log not checked in v1)"
+            ),
+        );
+    }
+
+    if summary.active_errors > 0 {
+        return match summary.last_failure {
+            Some(failure) => CheckResult::fail_for(
+                NAME,
+                subject,
+                format!(
+                    "SMART self-test FAILED at lifetime hour {} ({}) -- investigate before further use",
+                    failure.lifetime_hours, failure.kind
+                ),
+            ),
+            None => CheckResult::fail_for(
+                NAME,
+                subject,
+                format!(
+                    "SMART self-test log reports {} active failure(s) but no failure entry was parsed -- run smartctl manually: smartctl -l selftest {by_id}",
+                    summary.active_errors
+                ),
+            ),
+        };
+    }
+
+    let Some(power_on_hours) = summary.power_on_hours else {
+        return CheckResult::skip_for(
+            NAME,
+            subject,
+            "SMART self-test status unavailable (power_on_time.hours missing -- can't measure age)",
+        );
+    };
+
+    let Some(last_passing) = summary.last_passing else {
+        return CheckResult::warn_for(
+            NAME,
+            subject,
+            format!(
+                "no completed SMART self-test recorded -- {}",
+                smart_selftest_hint(by_id)
+            ),
+        );
+    };
+
+    let age_hours = selftest_age_hours(power_on_hours, last_passing.lifetime_hours);
+    let age_phrase = approx_days_phrase(age_hours);
+    if age_hours <= STALE_SELFTEST_THRESHOLD_HOURS {
+        CheckResult::ok_for(NAME, subject, format!("passed {age_phrase} ago"))
+    } else {
+        CheckResult::warn_for(
+            NAME,
+            subject,
+            format!(
+                "no SMART self-test in {age_phrase} -- {}",
+                smart_selftest_hint(by_id)
+            ),
+        )
+    }
+}
+
+/// Per-drive SMART self-test doctor rows.
+/// Emits one stable-name row per pool member so machine consumers key on
+/// `name + subject`; emits one unscoped Skip only when membership cannot be
+/// enumerated.
+fn check_smart_selftests<R: CommandRunner>(ctx: &mut DoctorContext<'_, R>) -> Vec<CheckResult> {
+    const NAME: &str = "smart_self_test";
+    let membership = match membership::load_membership(ctx.paths) {
+        Ok(membership) => membership,
+        Err(e) => {
+            return vec![CheckResult::skip(
+                NAME,
+                format!("pool membership not enumerable ({e})"),
+            )];
+        }
+    };
+
+    if membership.is_empty() {
+        return vec![CheckResult::skip(NAME, "no pool members declared")];
+    }
+
+    let mut checks = Vec::new();
+    for (_, member) in membership.iter_by_name() {
+        let subject = member.name.as_str();
+        let by_id = member.by_id.as_str();
+        let raw = match ctx.runner.run(&CmdRequest::SmartctlSelftestLogJson {
+            device: by_id.to_owned(),
+        }) {
+            Ok(raw) => raw,
+            Err(e) => {
+                checks.push(CheckResult::skip_for(
+                    NAME,
+                    subject,
+                    format!(
+                        "SMART self-test status unavailable (smartctl command failed to run: {e})"
+                    ),
+                ));
+                continue;
+            }
+        };
+        checks.push(summarize_smart_selftest(
+            subject,
+            by_id,
+            parse_smartctl_selftest_log(&raw),
+        ));
+    }
+    checks
+}
+
 /// Doctor check for the PC speaker alert path.
 ///
 /// By default, validates the notifier config without playing sound. Passing
@@ -982,7 +1195,7 @@ pub fn run_doctor<R: CommandRunner>(
         pool_state: None,
     };
 
-    let checks = vec![
+    let mut checks = vec![
         check_config_file(&mut ctx),
         check_config_schema(&mut ctx),
         check_config_permissions(&mut ctx),
@@ -991,10 +1204,11 @@ pub fn run_doctor<R: CommandRunner>(
         check_foreign_luks_uuid(&mut ctx),
         check_data_profile_mismatch(&mut ctx),
         check_metadata_profile_mismatch(&mut ctx),
-        check_beep_path(&mut ctx, options),
-        check_ups_daemon_up(&mut ctx),
-        check_braid_online_active_when_mounted(&mut ctx),
     ];
+    checks.extend(check_smart_selftests(&mut ctx));
+    checks.push(check_beep_path(&mut ctx, options));
+    checks.push(check_ups_daemon_up(&mut ctx));
+    checks.push(check_braid_online_active_when_mounted(&mut ctx));
 
     let status = overall_status(&checks);
 
@@ -1027,6 +1241,7 @@ pub fn format_doctor_human_with(report: &DoctorReport, color_enabled: bool) -> S
             "foreign_luks_uuid" => "foreign uuids",
             "data_profile_mismatch" => "data profiles",
             "metadata_profile_mismatch" => "meta profiles",
+            "smart_self_test" => "smart selftest",
             // The internal identifier `beep_path` stays stable for the JSON
             // schema; the human label reflects the product framing — what
             // the operator hears, not what the code does.
@@ -1035,10 +1250,14 @@ pub fn format_doctor_human_with(report: &DoctorReport, color_enabled: bool) -> S
             "braid_online_active" => "braid-online",
             other => other,
         };
+        let display_label = match c.subject.as_deref() {
+            Some(subject) => format!("{label} {subject}"),
+            None => label.to_owned(),
+        };
         out.push_str(&status_line(
             tag,
             color_enabled,
-            &format!("{label:<14}  {}", c.message),
+            &format!("{display_label:<14}  {}", c.message),
         ));
     }
     out
@@ -1147,15 +1366,16 @@ impl<'a, R: CommandRunner> DoctorContext<'a, R> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::cmd::{MockRunner, RawCommandOutput};
+    use crate::cmd::{CmdError, MockRunner, RawCommandOutput};
     use crate::state_paths::StatePaths;
     use crate::test_fixtures::{
         DF_MIXED, DF_MIXED_METADATA, DF_RAID1_CLEAN, DfQueryFailureRunner, DoctorMockFs,
         PoolMissingDevicesRunner, UpscSpawnFailureRunner, beep_ctx, cls, config_with_ups_enabled,
         config_without_ups, device_usage_healthy, device_usage_with_missing, df_json, df_json_fail,
         disk_member_with, human_options, is_luks_ok, isolated_paths, luks_dump_text_ok,
-        luks_uuid_ok, mountpoint_fail, mountpoint_ok, parsed_doctor_ctx,
-        systemctl_show_active_state_output, test_uuid, ups_ctx, valid_config_json, write_temp,
+        luks_uuid_ok, mountpoint_fail, mountpoint_ok, parsed_doctor_ctx, smart_selftest_runner_for,
+        smartctl_selftest_json, systemctl_show_active_state_output, test_uuid, ups_ctx,
+        valid_config_json, write_temp,
     };
     use crate::types::{MapperName, MountPoint};
 
@@ -1208,6 +1428,59 @@ mod tests {
             stderr: String::new(),
             exit_status: 0,
         }
+    }
+
+    fn doctor_smartctl_selftest_json(
+        stdout: impl Into<String>,
+        exit_status: i32,
+    ) -> RawCommandOutput {
+        RawCommandOutput {
+            cmd: "smartctl --json -A -l selftest /dev/disk/by-id/disk1".into(),
+            stdout: stdout.into(),
+            stderr: String::new(),
+            exit_status,
+        }
+    }
+
+    fn selftest_results_for(runner: &impl CommandRunner, paths: &StatePaths) -> Vec<CheckResult> {
+        let mut ctx = parsed_doctor_ctx(runner, paths);
+        check_smart_selftests(&mut ctx)
+    }
+
+    fn single_selftest_results(
+        stdout: impl Into<String>,
+        exit_status: i32,
+    ) -> (tempfile::TempDir, StatePaths, MockRunner, Vec<CheckResult>) {
+        let (dir, paths) = isolated_paths();
+        save_doctor_membership(&paths, &[(1, "disk1", "/dev/disk/by-id/disk1", Some(1))]);
+        let runner = MockRunner::default().with_output(
+            CmdRequest::SmartctlSelftestLogJson {
+                device: "/dev/disk/by-id/disk1".to_owned(),
+            },
+            doctor_smartctl_selftest_json(stdout, exit_status),
+        );
+        let results = selftest_results_for(&runner, &paths);
+        (dir, paths, runner, results)
+    }
+
+    fn single_selftest_fixture_results(
+        fixture: &str,
+        exit_status: i32,
+    ) -> (tempfile::TempDir, StatePaths, MockRunner, Vec<CheckResult>) {
+        let (_, output) = smartctl_selftest_json("/dev/disk/by-id/disk1", fixture, exit_status);
+        single_selftest_results(output.stdout, output.exit_status)
+    }
+
+    fn by_subject<'a>(results: &'a [CheckResult], subject: &str) -> &'a CheckResult {
+        results
+            .iter()
+            .find(|r| r.subject.as_deref() == Some(subject))
+            .unwrap_or_else(|| panic!("no result for subject {subject}"))
+    }
+
+    fn only_result(results: &[CheckResult]) -> &CheckResult {
+        assert_eq!(results.len(), 1, "expected one result: {results:?}");
+        &results[0]
     }
 
     fn save_doctor_membership(paths: &StatePaths, entries: &[(u64, &str, &str, Option<u64>)]) {
@@ -1275,9 +1548,12 @@ mod tests {
             &paths,
             human_options(),
         );
-        assert_eq!(report.checks.len(), 11);
+        assert_eq!(report.checks.len(), 12);
         assert_eq!(find_check(&report, "config_file").status, CheckStatus::Ok);
         assert_eq!(find_check(&report, "config_schema").status, CheckStatus::Ok);
+        let selftest = find_check(&report, "smart_self_test");
+        assert_eq!(selftest.status, CheckStatus::Skip);
+        assert_eq!(selftest.subject, None);
         // declared_disks skips since no pool membership file exists in test env
         assert_eq!(
             find_check(&report, "declared_disks").status,
@@ -1286,6 +1562,543 @@ mod tests {
         // beep_path is intentionally not asserted here: it depends on real host
         // state (/etc/braid/notifier-config.json). Deterministic coverage
         // lives in the check_beep_path_inner tests.
+    }
+
+    // Intent: a recent completed self-test produces one per-drive Ok row.
+    // Why it exists: doctor is the user-facing surface for stale self-test
+    //   logs, so the fresh path must be quiet and scoped to the member name.
+    // Scenario: disk1 completed a short test roughly two powered-on days ago.
+    #[test]
+    fn check_smart_selftest_recent_pass() {
+        let (_dir, _paths, _runner, results) =
+            single_selftest_fixture_results("smartctl-selftest-ata-recent-pass.json", 0);
+        let r = only_result(&results);
+        assert_eq!(r.name, "smart_self_test");
+        assert_eq!(r.subject.as_deref(), Some("disk1"));
+        assert_eq!(r.status, CheckStatus::Ok);
+        assert!(r.message.contains("passed ~2 days ago"), "{}", r.message);
+    }
+
+    // Intent: bit-7 smartctl exits remain a Fail, not a command-error Skip.
+    // Why it exists: bit 7 is smartctl's active self-test error signal.
+    // Scenario: smartctl exits 128 with a failed extended-test JSON body.
+    #[test]
+    fn check_smart_selftest_active_failure_exit_128() {
+        let (_dir, _paths, _runner, results) =
+            single_selftest_fixture_results("smartctl-selftest-ata-active-failure.json", 128);
+        let r = only_result(&results);
+        assert_eq!(r.subject.as_deref(), Some("disk1"));
+        assert_eq!(r.status, CheckStatus::Fail);
+        assert!(r.message.contains("FAILED"), "{}", r.message);
+    }
+
+    // Intent: superseded failures do not fail doctor.
+    // Why it exists: smartctl already reports active vs outdated failures, and
+    //   braid should consume that contract directly.
+    // Scenario: an old failed short test is followed by a passing extended test.
+    #[test]
+    fn check_smart_selftest_outdated_failure_not_fail() {
+        let (_dir, _paths, _runner, results) =
+            single_selftest_fixture_results("smartctl-selftest-ata-failure-outdated.json", 0);
+        let r = only_result(&results);
+        assert_eq!(r.status, CheckStatus::Ok);
+        assert!(!r.message.contains("FAILED"), "{}", r.message);
+    }
+
+    // Intent: a newer passing short test does not clear a failed extended test.
+    // Why it exists: failure supersession is smartctl-specific and must not be
+    //   re-derived from "latest passing entry" alone.
+    // Scenario: disk1 has a passing short entry newer than an active failed
+    //   extended entry.
+    #[test]
+    fn check_smart_selftest_passing_short_does_not_clear_extended_failure() {
+        let (_dir, _paths, _runner, results) = single_selftest_fixture_results(
+            "smartctl-selftest-ata-short-pass-does-not-supersede.json",
+            128,
+        );
+        let r = only_result(&results);
+        assert_eq!(r.status, CheckStatus::Fail);
+        assert!(r.message.contains("FAILED"), "{}", r.message);
+    }
+
+    // Intent: smartctl spawn failures degrade to a scoped Skip row.
+    // Why it exists: missing smartctl should not panic or hide the drive row.
+    // Scenario: the runner cannot spawn smartctl for disk1.
+    #[test]
+    fn check_smart_selftest_runner_spawn_failure_skips() {
+        let (dir, paths) = isolated_paths();
+        save_doctor_membership(&paths, &[(1, "disk1", "/dev/disk/by-id/disk1", Some(1))]);
+        let runner = MockRunner::default().with_handler(|request| match request {
+            CmdRequest::SmartctlSelftestLogJson { .. } => {
+                Some(Err(CmdError::Failed("smartctl: not found".into())))
+            }
+            _ => None,
+        });
+        let results = selftest_results_for(&runner, &paths);
+        drop(dir);
+        let r = only_result(&results);
+        assert_eq!(r.name, "smart_self_test");
+        assert_eq!(r.subject.as_deref(), Some("disk1"));
+        assert_eq!(r.status, CheckStatus::Skip);
+        assert!(r.message.contains("smartctl: not found"), "{}", r.message);
+    }
+
+    // Intent: bits 0-2 produce command-error Skip rows.
+    // Why it exists: device-open or SMART-command failures make JSON unsafe to
+    //   trust for self-test classification.
+    // Scenario: smartctl exits with bit 1 and no stdout.
+    #[test]
+    fn check_smart_selftest_smartctl_errors_bit_0_2_empty_stdout() {
+        let (_dir, _paths, _runner, results) = single_selftest_results("", 2);
+        let r = only_result(&results);
+        assert_eq!(r.status, CheckStatus::Skip);
+        assert_eq!(
+            r.message,
+            "SMART self-test status unavailable (smartctl command failed)"
+        );
+    }
+
+    // Intent: command-error bits win over parseable stdout.
+    // Why it exists: a partial JSON body must not bypass the bits 0-2 guard.
+    // Scenario: smartctl exits with bit 2 and still prints valid ATA JSON.
+    #[test]
+    fn check_smart_selftest_command_error_with_nonempty_stdout() {
+        let (_dir, _paths, _runner, results) =
+            single_selftest_fixture_results("smartctl-selftest-ata-command-error.json", 4);
+        let r = only_result(&results);
+        assert_eq!(r.status, CheckStatus::Skip);
+        assert_eq!(
+            r.message,
+            "SMART self-test status unavailable (smartctl command failed)"
+        );
+    }
+
+    // Intent: bad smartctl JSON becomes a parse-failure Skip.
+    // Why it exists: operator output should distinguish corrupt output from
+    //   unsupported protocols or active drive failures.
+    // Scenario: smartctl exits 0 but stdout is not JSON.
+    #[test]
+    fn check_smart_selftest_parse_failure_skips() {
+        let (_dir, _paths, _runner, results) = single_selftest_results("not json", 0);
+        let r = only_result(&results);
+        assert_eq!(r.status, CheckStatus::Skip);
+        assert_eq!(
+            r.message,
+            "SMART self-test status unavailable (smartctl JSON output not parseable)"
+        );
+    }
+
+    // Intent: missing power-on hours skips age-based classification.
+    // Why it exists: without attribute 9, doctor cannot determine staleness.
+    // Scenario: ATA self-test rows are present but `power_on_time` is absent.
+    #[test]
+    fn check_smart_selftest_missing_power_on_time_skips() {
+        let json = r#"{
+            "device": {"protocol": "ATA"},
+            "ata_smart_self_test_log": {
+                "standard": {
+                    "count": 1,
+                    "error_count_total": 0,
+                    "error_count_outdated": 0,
+                    "table": [
+                        {
+                            "type": {"value": 1, "string": "Short"},
+                            "status": {"value": 0, "string": "Completed without error"},
+                            "lifetime_hours": 4990
+                        }
+                    ]
+                }
+            }
+        }"#;
+        let (_dir, _paths, _runner, results) = single_selftest_results(json, 0);
+        let r = only_result(&results);
+        assert_eq!(r.status, CheckStatus::Skip);
+        assert!(
+            r.message.contains("power_on_time.hours missing"),
+            "{}",
+            r.message
+        );
+    }
+
+    // Intent: active failures are reported before the missing-POH gate.
+    // Why it exists: failure counters do not depend on power-on-hour age math.
+    // Scenario: an active failed extended test is present, but attribute 9 is
+    //   missing from smartctl JSON.
+    #[test]
+    fn check_smart_selftest_active_failure_without_poh_still_fails() {
+        let json = r#"{
+            "device": {"protocol": "ATA"},
+            "ata_smart_self_test_log": {
+                "standard": {
+                    "count": 1,
+                    "error_count_total": 1,
+                    "error_count_outdated": 0,
+                    "table": [
+                        {
+                            "type": {"value": 2, "string": "Extended"},
+                            "status": {"value": 80, "string": "Completed: electrical failure"},
+                            "lifetime_hours": 4900
+                        }
+                    ]
+                }
+            }
+        }"#;
+        let (_dir, _paths, _runner, results) = single_selftest_results(json, 128);
+        let r = only_result(&results);
+        assert_eq!(r.status, CheckStatus::Fail);
+        assert!(r.message.contains("FAILED"), "{}", r.message);
+    }
+
+    // Intent: fatal/unknown ATA status codes produce Fail rows.
+    // Why it exists: smartctl omits `status.passed` for status 0x3, so
+    //   classification must use `status.value`.
+    // Scenario: disk1 has one fatal-or-unknown extended self-test entry.
+    #[test]
+    fn check_smart_selftest_fatal_or_unknown() {
+        let (_dir, _paths, _runner, results) =
+            single_selftest_fixture_results("smartctl-selftest-ata-fatal-or-unknown.json", 128);
+        let r = only_result(&results);
+        assert_eq!(r.status, CheckStatus::Fail);
+        assert!(r.message.contains("FAILED"), "{}", r.message);
+    }
+
+    // Intent: aborted-only logs warn with the "never" message.
+    // Why it exists: non-empty logs still may contain no completed passing
+    //   self-test.
+    // Scenario: disk1 has only aborted/interrupted self-test rows.
+    #[test]
+    fn check_smart_selftest_aborted_only_warns_never() {
+        let (_dir, _paths, _runner, results) =
+            single_selftest_fixture_results("smartctl-selftest-ata-aborted-only.json", 0);
+        let r = only_result(&results);
+        assert_eq!(r.status, CheckStatus::Warn);
+        assert!(
+            r.message.contains("no completed SMART self-test recorded"),
+            "{}",
+            r.message
+        );
+        assert!(!r.message.contains('~'), "{}", r.message);
+    }
+
+    // Intent: truly empty logs warn with the "never" message.
+    // Why it exists: smartctl's empty-log shape omits the table entirely.
+    // Scenario: a drive has never recorded a self-test.
+    #[test]
+    fn check_smart_selftest_empty_log_warns_never() {
+        let (_dir, _paths, _runner, results) =
+            single_selftest_fixture_results("smartctl-selftest-ata-empty.json", 0);
+        let r = only_result(&results);
+        assert_eq!(r.status, CheckStatus::Warn);
+        assert!(r.message.contains("no completed SMART self-test recorded"));
+    }
+
+    // Intent: stale passing self-tests warn with an age and paste-ready hint.
+    // Why it exists: the new check's primary purpose is to surface stale logs
+    //   without scheduling tests itself.
+    // Scenario: disk1's newest passing test is 3000 powered-on hours old.
+    #[test]
+    fn check_smart_selftest_stale_warns_with_age() {
+        let (_dir, _paths, _runner, results) =
+            single_selftest_fixture_results("smartctl-selftest-ata-stale.json", 0);
+        let r = only_result(&results);
+        assert_eq!(r.status, CheckStatus::Warn);
+        assert!(r.message.contains("~125 days"), "{}", r.message);
+        assert!(
+            r.message.contains("run: smartctl -t short"),
+            "{}",
+            r.message
+        );
+    }
+
+    // Intent: the singular-day boundary renders without a trailing `s`.
+    // Why it exists: doctor output has pinned singular/plural wording for
+    //   operator-facing counts.
+    // Scenario: the last passing entry is exactly 24 powered-on hours old.
+    #[test]
+    fn check_smart_selftest_ok_uses_singular_day_at_boundary() {
+        let json = r#"{
+            "device": {"protocol": "ATA"},
+            "power_on_time": {"hours": 5000},
+            "ata_smart_self_test_log": {
+                "standard": {
+                    "count": 1,
+                    "error_count_total": 0,
+                    "error_count_outdated": 0,
+                    "table": [
+                        {
+                            "type": {"value": 1, "string": "Short"},
+                            "status": {"value": 0, "string": "Completed without error"},
+                            "lifetime_hours": 4976
+                        }
+                    ]
+                }
+            }
+        }"#;
+        let (_dir, _paths, _runner, results) = single_selftest_results(json, 0);
+        let r = only_result(&results);
+        assert_eq!(r.status, CheckStatus::Ok);
+        assert!(r.message.contains("passed ~1 day ago"), "{}", r.message);
+    }
+
+    // Intent: age phrases truncate powered-on hours to whole days.
+    // Why it exists: both Ok and stale-Warn branches share this formatter.
+    // Scenario: boundary values around 0, 1, 2, and 90 days.
+    #[test]
+    fn approx_days_phrase_pluralisation() {
+        assert_eq!(approx_days_phrase(0), "~0 days");
+        assert_eq!(approx_days_phrase(23), "~0 days");
+        assert_eq!(approx_days_phrase(24), "~1 day");
+        assert_eq!(approx_days_phrase(47), "~1 day");
+        assert_eq!(approx_days_phrase(48), "~2 days");
+        assert_eq!(
+            approx_days_phrase(STALE_SELFTEST_THRESHOLD_HOURS),
+            "~90 days"
+        );
+    }
+
+    // Intent: NVMe drives Skip with the protocol named.
+    // Why it exists: NVMe self-test logs are out of v1 scope and have a
+    //   different schema from ATA.
+    // Scenario: smartctl reports `device.protocol = "NVMe"`.
+    #[test]
+    fn check_smart_selftest_nvme_skips_with_protocol_reason() {
+        let (_dir, _paths, _runner, results) =
+            single_selftest_fixture_results("smartctl-selftest-nvme-unsupported.json", 0);
+        let r = only_result(&results);
+        assert_eq!(r.status, CheckStatus::Skip);
+        assert!(r.message.contains("NVMe"), "{}", r.message);
+    }
+
+    // Intent: non-ATA or missing protocols Skip with deterministic reasons.
+    // Why it exists: self-test classification must not default missing
+    //   protocol to SATA the way health parsing does.
+    // Scenario: smartctl reports SCSI or omits protocol entirely.
+    #[test]
+    fn check_smart_selftest_scsi_or_missing_protocol_skips() {
+        for (json, expected) in [
+            (r#"{"device":{"protocol":"SCSI"}}"#, "SCSI"),
+            (r#"{"device":{}}"#, "unknown"),
+        ] {
+            let (_dir, _paths, _runner, results) = single_selftest_results(json, 0);
+            let r = only_result(&results);
+            assert_eq!(r.status, CheckStatus::Skip);
+            assert!(r.message.contains(expected), "{}", r.message);
+        }
+    }
+
+    // Intent: active-error counters without a parsed failure use the fallback
+    //   Fail message.
+    // Why it exists: parser drift should still surface a high-severity result
+    //   if smartctl's counters report active failures.
+    // Scenario: counters report one active error but the table contains only
+    //   an aborted entry.
+    #[test]
+    fn check_smart_selftest_active_errors_fallback_message() {
+        let json = r#"{
+            "device": {"protocol": "ATA"},
+            "power_on_time": {"hours": 5000},
+            "ata_smart_self_test_log": {
+                "standard": {
+                    "count": 1,
+                    "error_count_total": 1,
+                    "error_count_outdated": 0,
+                    "table": [
+                        {
+                            "type": {"value": 1, "string": "Short"},
+                            "status": {"value": 16, "string": "Aborted by host"},
+                            "lifetime_hours": 4990
+                        }
+                    ]
+                }
+            }
+        }"#;
+        let (_dir, _paths, _runner, results) = single_selftest_results(json, 128);
+        let r = only_result(&results);
+        assert_eq!(r.status, CheckStatus::Fail);
+        assert!(
+            r.message
+                .contains("reports 1 active failure(s) but no failure entry was parsed"),
+            "{}",
+            r.message
+        );
+    }
+
+    // Intent: the check emits one stable-name row per member.
+    // Why it exists: dynamic names like `smart_self_test_disk1` would break
+    //   machine consumers.
+    // Scenario: a three-drive pool has recent passing self-test fixtures for
+    //   every member.
+    #[test]
+    fn check_smart_selftest_emits_one_result_per_drive() {
+        let (dir, paths) = isolated_paths();
+        save_doctor_membership(
+            &paths,
+            &[
+                (1, "disk1", "/dev/disk/by-id/disk1", Some(1)),
+                (2, "disk2", "/dev/disk/by-id/disk2", Some(2)),
+                (3, "disk3", "/dev/disk/by-id/disk3", Some(3)),
+            ],
+        );
+        let runner = smart_selftest_runner_for(&[
+            (
+                "/dev/disk/by-id/disk1",
+                "smartctl-selftest-ata-recent-pass.json",
+                0,
+            ),
+            (
+                "/dev/disk/by-id/disk2",
+                "smartctl-selftest-ata-recent-pass.json",
+                0,
+            ),
+            (
+                "/dev/disk/by-id/disk3",
+                "smartctl-selftest-ata-recent-pass.json",
+                0,
+            ),
+        ]);
+        let results = selftest_results_for(&runner, &paths);
+        drop(dir);
+        assert_eq!(results.len(), 3);
+        assert!(results.iter().all(|r| r.name == "smart_self_test"));
+        let subjects: Vec<&str> = results
+            .iter()
+            .map(|r| r.subject.as_deref().expect("per-drive subject"))
+            .collect();
+        assert_eq!(subjects, vec!["disk1", "disk2", "disk3"]);
+    }
+
+    // Intent: per-drive SMART rows preserve membership display order.
+    // Why it exists: doctor output should be stable across runs regardless of
+    //   UUID ordering in pool.json.
+    // Scenario: pool membership is inserted out of display order.
+    #[test]
+    fn check_smart_selftest_preserves_membership_order() {
+        let (dir, paths) = isolated_paths();
+        save_doctor_membership(
+            &paths,
+            &[
+                (3, "zeta", "/dev/disk/by-id/zeta", Some(3)),
+                (1, "alpha", "/dev/disk/by-id/alpha", Some(1)),
+                (2, "middle", "/dev/disk/by-id/middle", Some(2)),
+            ],
+        );
+        let runner = smart_selftest_runner_for(&[
+            (
+                "/dev/disk/by-id/zeta",
+                "smartctl-selftest-ata-recent-pass.json",
+                0,
+            ),
+            (
+                "/dev/disk/by-id/alpha",
+                "smartctl-selftest-ata-recent-pass.json",
+                0,
+            ),
+            (
+                "/dev/disk/by-id/middle",
+                "smartctl-selftest-ata-recent-pass.json",
+                0,
+            ),
+        ]);
+        let results = selftest_results_for(&runner, &paths);
+        drop(dir);
+        let subjects: Vec<&str> = results
+            .iter()
+            .map(|r| r.subject.as_deref().unwrap())
+            .collect();
+        assert_eq!(subjects, vec!["alpha", "middle", "zeta"]);
+    }
+
+    // Intent: mixed per-drive statuses stay isolated to their own rows.
+    // Why it exists: one stale or failed drive must not pollute another
+    //   drive's message body.
+    // Scenario: disk1 is fresh, disk2 is stale, and disk3 has an active
+    //   self-test failure.
+    #[test]
+    fn check_smart_selftest_mixed_statuses_one_per_drive() {
+        let (dir, paths) = isolated_paths();
+        save_doctor_membership(
+            &paths,
+            &[
+                (1, "disk1", "/dev/disk/by-id/disk1", Some(1)),
+                (2, "disk2", "/dev/disk/by-id/disk2", Some(2)),
+                (3, "disk3", "/dev/disk/by-id/disk3", Some(3)),
+            ],
+        );
+        let runner = smart_selftest_runner_for(&[
+            (
+                "/dev/disk/by-id/disk1",
+                "smartctl-selftest-ata-recent-pass.json",
+                0,
+            ),
+            (
+                "/dev/disk/by-id/disk2",
+                "smartctl-selftest-ata-stale.json",
+                0,
+            ),
+            (
+                "/dev/disk/by-id/disk3",
+                "smartctl-selftest-ata-active-failure.json",
+                128,
+            ),
+        ]);
+        let results = selftest_results_for(&runner, &paths);
+        drop(dir);
+        assert_eq!(by_subject(&results, "disk1").status, CheckStatus::Ok);
+        assert_eq!(by_subject(&results, "disk2").status, CheckStatus::Warn);
+        assert_eq!(by_subject(&results, "disk3").status, CheckStatus::Fail);
+        assert!(!by_subject(&results, "disk1").message.contains("FAILED"));
+    }
+
+    // Intent: membership load errors emit the only unscoped self-test row.
+    // Why it exists: without membership there is no stable disk subject to
+    //   attach to the result.
+    // Scenario: pool.json is absent.
+    #[test]
+    fn check_smart_selftest_membership_load_error_emits_unscoped_skip() {
+        let (dir, paths) = isolated_paths();
+        let runner = MockRunner::default();
+        let results = selftest_results_for(&runner, &paths);
+        drop(dir);
+        let r = only_result(&results);
+        assert_eq!(r.name, "smart_self_test");
+        assert_eq!(r.subject, None);
+        assert_eq!(r.status, CheckStatus::Skip);
+        assert!(
+            r.message.contains("pool membership not enumerable"),
+            "{}",
+            r.message
+        );
+    }
+
+    // Intent: empty membership emits one unscoped Skip row.
+    // Why it exists: an empty pool.json is enumerable but has no per-drive
+    //   subjects.
+    // Scenario: pool membership parses with zero disks.
+    #[test]
+    fn check_smart_selftest_no_members_emits_unscoped_skip() {
+        let (dir, paths) = isolated_paths();
+        membership::save_membership(&membership::PoolMembership::empty(), &paths)
+            .expect("empty membership saves");
+        let runner = MockRunner::default();
+        let results = selftest_results_for(&runner, &paths);
+        drop(dir);
+        let r = only_result(&results);
+        assert_eq!(r.name, "smart_self_test");
+        assert_eq!(r.subject, None);
+        assert_eq!(r.status, CheckStatus::Skip);
+        assert_eq!(r.message, "no pool members declared");
+    }
+
+    // Intent: warning hints include the literal by-id path.
+    // Why it exists: the operator should be able to paste the suggested
+    //   smartctl command without replacing placeholders.
+    // Scenario: disk1 has no completed self-test.
+    #[test]
+    fn check_smart_selftest_message_contains_by_id_path() {
+        let (_dir, _paths, _runner, results) =
+            single_selftest_fixture_results("smartctl-selftest-ata-empty.json", 0);
+        let r = only_result(&results);
+        assert!(r.message.contains("/dev/disk/by-id/disk1"), "{}", r.message);
     }
 
     /* Intent: valid custom config files skip canonical permission enforcement.
@@ -1502,11 +2315,13 @@ mod tests {
                 name: "a".into(),
                 status: CheckStatus::Ok,
                 message: "".into(),
+                subject: None,
             },
             CheckResult {
                 name: "b".into(),
                 status: CheckStatus::Warn,
                 message: "".into(),
+                subject: None,
             },
         ];
         assert_eq!(overall_status(&checks), CheckStatus::Warn);
@@ -1516,11 +2331,13 @@ mod tests {
                 name: "a".into(),
                 status: CheckStatus::Warn,
                 message: "".into(),
+                subject: None,
             },
             CheckResult {
                 name: "b".into(),
                 status: CheckStatus::Fail,
                 message: "".into(),
+                subject: None,
             },
         ];
         assert_eq!(overall_status(&checks), CheckStatus::Fail);
@@ -1533,11 +2350,13 @@ mod tests {
                 name: "a".into(),
                 status: CheckStatus::Ok,
                 message: "".into(),
+                subject: None,
             },
             CheckResult {
                 name: "b".into(),
                 status: CheckStatus::Skip,
                 message: "".into(),
+                subject: None,
             },
         ];
         assert_eq!(overall_status(&checks), CheckStatus::Ok);
@@ -1547,11 +2366,13 @@ mod tests {
                 name: "a".into(),
                 status: CheckStatus::Skip,
                 message: "".into(),
+                subject: None,
             },
             CheckResult {
                 name: "b".into(),
                 status: CheckStatus::Skip,
                 message: "".into(),
+                subject: None,
             },
         ];
         assert_eq!(overall_status(&checks), CheckStatus::Ok);
@@ -1565,6 +2386,7 @@ mod tests {
                 name: "test".into(),
                 status: CheckStatus::Fail,
                 message: "msg".into(),
+                subject: None,
             }],
         };
         let json = serde_json::to_string(&report).unwrap();
@@ -1572,6 +2394,64 @@ mod tests {
         assert!(json.contains(r#""status":"fail""#), "check: {json}");
         assert!(!json.contains("Ok"));
         assert!(!json.contains("Fail"));
+    }
+
+    // Intent: `subject: None` is omitted from JSON.
+    // Why it exists: adding per-drive subjects must not add `"subject": null`
+    //   noise to every existing doctor check.
+    // Scenario: an existing unscoped check serializes after the schema change.
+    #[test]
+    fn json_serialization_subject_none_omits_field() {
+        let check = CheckResult {
+            name: "config_file".into(),
+            status: CheckStatus::Ok,
+            message: "ok".into(),
+            subject: None,
+        };
+        let json = serde_json::to_string(&check).unwrap();
+        assert!(!json.contains("subject"), "{json}");
+    }
+
+    // Intent: `subject: Some` is visible in JSON.
+    // Why it exists: per-drive SMART self-test rows need a stable disk
+    //   identity without dynamic check names.
+    // Scenario: a smart self-test row is serialized for disk1.
+    #[test]
+    fn json_serialization_subject_some_emits_field() {
+        let check = CheckResult {
+            name: "smart_self_test".into(),
+            status: CheckStatus::Ok,
+            message: "passed ~2 days ago".into(),
+            subject: Some("disk1".into()),
+        };
+        let json = serde_json::to_string(&check).unwrap();
+        assert!(json.contains(r#""subject":"disk1""#), "{json}");
+    }
+
+    // Intent: missing and present subjects both round-trip through JSON.
+    // Why it exists: `#[serde(default)]` is required so old JSON rows without
+    //   `subject` still deserialize.
+    // Scenario: one unscoped check and one per-drive check are round-tripped.
+    #[test]
+    fn json_roundtrip_preserves_subject() {
+        for check in [
+            CheckResult {
+                name: "config_file".into(),
+                status: CheckStatus::Ok,
+                message: "ok".into(),
+                subject: None,
+            },
+            CheckResult {
+                name: "smart_self_test".into(),
+                status: CheckStatus::Warn,
+                message: "stale".into(),
+                subject: Some("disk1".into()),
+            },
+        ] {
+            let json = serde_json::to_string(&check).unwrap();
+            let decoded: CheckResult = serde_json::from_str(&json).unwrap();
+            assert_eq!(decoded, check);
+        }
     }
 
     #[test]
@@ -1626,21 +2506,25 @@ mod tests {
                     name: "config_file".into(),
                     status: CheckStatus::Ok,
                     message: "present".into(),
+                    subject: None,
                 },
                 CheckResult {
                     name: "config_permissions".into(),
                     status: CheckStatus::Warn,
                     message: "world-writable".into(),
+                    subject: None,
                 },
                 CheckResult {
                     name: "declared_disks".into(),
                     status: CheckStatus::Fail,
                     message: "missing disk1".into(),
+                    subject: None,
                 },
                 CheckResult {
                     name: "pool_missing_devices".into(),
                     status: CheckStatus::Skip,
                     message: "pool offline".into(),
+                    subject: None,
                 },
             ],
         };
@@ -1652,6 +2536,47 @@ mod tests {
 \x1b[90m[skip]\x1b[0m missing devs    pool offline
 ";
         assert_eq!(human, expected);
+    }
+
+    // Intent: subject-bearing rows render label and subject together.
+    // Why it exists: human output should show the disk next to the stable
+    //   `smart selftest` label while JSON keeps the disk in `subject`.
+    // Scenario: one Ok SMART self-test row for disk1 is rendered.
+    #[test]
+    fn format_subject_rendered_after_label() {
+        let report = DoctorReport {
+            status: CheckStatus::Ok,
+            checks: vec![CheckResult {
+                name: "smart_self_test".into(),
+                status: CheckStatus::Ok,
+                message: "passed ~2 days ago".into(),
+                subject: Some("disk1".into()),
+            }],
+        };
+        let human = format_doctor_human_with(&report, false);
+        assert!(
+            human.contains("smart selftest disk1  passed ~2 days ago"),
+            "{human}"
+        );
+    }
+
+    // Intent: unscoped rows keep the existing human formatter shape.
+    // Why it exists: adding subject support must not reflow established doctor
+    //   lines that do not set `subject`.
+    // Scenario: a config_file row renders byte-identically to the legacy shape.
+    #[test]
+    fn format_subject_none_renders_existing_shape() {
+        let report = DoctorReport {
+            status: CheckStatus::Ok,
+            checks: vec![CheckResult {
+                name: "config_file".into(),
+                status: CheckStatus::Ok,
+                message: "present".into(),
+                subject: None,
+            }],
+        };
+        let human = format_doctor_human_with(&report, false);
+        assert_eq!(human, "[ok]   config file     present\n");
     }
 
     /* Intent: raw canonical permission inspection reports unsafe write bits.

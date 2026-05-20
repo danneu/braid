@@ -1,5 +1,5 @@
 use crate::cmd::RawCommandOutput;
-use crate::parse::types::{SmartHealth, SmartProbe};
+use crate::parse::types::{SelftestEntry, SelftestKind, SelftestSummary, SmartHealth, SmartProbe};
 use serde::Deserialize;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -20,6 +20,10 @@ struct RawSmartctlOutput {
     ata_smart_attributes: Option<RawAtaSmartAttributes>,
     #[serde(default)]
     temperature: Option<RawTemperature>,
+    #[serde(default)]
+    power_on_time: Option<RawPowerOnTime>,
+    #[serde(default)]
+    ata_smart_self_test_log: Option<RawAtaSelfTestLog>,
 }
 
 #[derive(Deserialize)]
@@ -73,6 +77,65 @@ struct RawTemperature {
     current: Option<i32>,
 }
 
+#[derive(Deserialize)]
+struct RawPowerOnTime {
+    #[serde(default)]
+    hours: Option<u64>,
+}
+
+#[derive(Deserialize)]
+struct RawAtaSelfTestLog {
+    #[serde(default)]
+    standard: Option<RawAtaSelfTestStandard>,
+}
+
+#[derive(Deserialize, Default)]
+struct RawAtaSelfTestStandard {
+    #[serde(default, rename = "count")]
+    _count: u32,
+    #[serde(default)]
+    table: Vec<RawAtaSelfTestEntry>,
+    #[serde(default)]
+    error_count_total: u32,
+    #[serde(default)]
+    error_count_outdated: u32,
+}
+
+#[derive(Deserialize)]
+struct RawAtaSelfTestEntry {
+    #[serde(default, rename = "type")]
+    kind: RawSelfTestType,
+    #[serde(default)]
+    status: RawSelfTestStatus,
+    #[serde(default)]
+    lifetime_hours: u32,
+}
+
+#[derive(Deserialize, Default)]
+struct RawSelfTestType {
+    #[serde(default)]
+    value: Option<u8>,
+    #[serde(default)]
+    string: String,
+}
+
+#[derive(Deserialize, Default)]
+struct RawSelfTestStatus {
+    #[serde(default)]
+    value: Option<u8>,
+    #[serde(default)]
+    string: String,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum SelftestStatusClass {
+    Passed,
+    Aborted,
+    Failed,
+    InProgress,
+    Unknown,
+}
+
 pub fn parse_smartctl(raw: &RawCommandOutput) -> SmartProbe {
     if raw.exit_status != 0 && raw.exit_status & 0x07 != 0 {
         // Bits 0-2 indicate command-line/device errors (not SMART failures)
@@ -103,6 +166,135 @@ pub fn parse_smartctl(raw: &RawCommandOutput) -> SmartProbe {
 
     let health = classify_health(&parsed);
     SmartProbe { health, celsius }
+}
+
+/// Parse SMART self-test logs with stricter command-error handling than
+/// `parse_smartctl`.
+///
+/// Health parsing can safely fall back to `Unknown` on partial JSON. Self-test
+/// classification drives Fail/Warn decisions, so bits 0-2 short-circuit before
+/// JSON interpretation and bit 7 still parses as the active-failure path.
+pub fn parse_smartctl_selftest_log(raw: &RawCommandOutput) -> SelftestSummary {
+    if raw.exit_status & 0x07 != 0 {
+        return SelftestSummary {
+            command_error: true,
+            ..SelftestSummary::default()
+        };
+    }
+
+    let parsed: RawSmartctlOutput = match serde_json::from_str(&raw.stdout) {
+        Ok(v) => v,
+        Err(_) => {
+            return SelftestSummary {
+                parse_failure: true,
+                ..SelftestSummary::default()
+            };
+        }
+    };
+
+    let protocol = parsed.device.as_ref().and_then(|d| d.protocol.as_deref());
+    match protocol {
+        Some(p) if p.eq_ignore_ascii_case("ata") || p.eq_ignore_ascii_case("sata") => {}
+        Some(p) => {
+            return SelftestSummary {
+                unsupported_protocol: Some(p.to_owned()),
+                ..SelftestSummary::default()
+            };
+        }
+        None => {
+            return SelftestSummary {
+                unsupported_protocol: Some("unknown".to_owned()),
+                ..SelftestSummary::default()
+            };
+        }
+    }
+
+    let power_on_hours = parsed.power_on_time.and_then(|p| p.hours);
+    let standard = parsed
+        .ata_smart_self_test_log
+        .and_then(|log| log.standard)
+        .unwrap_or_default();
+    let active_errors = standard
+        .error_count_total
+        .saturating_sub(standard.error_count_outdated);
+
+    let mut last_passing = None;
+    let mut last_failure = None;
+
+    for entry in standard.table {
+        match classify_selftest_status(entry.status.value) {
+            SelftestStatusClass::Passed if last_passing.is_none() => {
+                last_passing = Some(selftest_entry(entry));
+            }
+            SelftestStatusClass::Failed if last_failure.is_none() => {
+                last_failure = Some(selftest_entry(entry));
+            }
+            SelftestStatusClass::Passed
+            | SelftestStatusClass::Failed
+            | SelftestStatusClass::Aborted
+            | SelftestStatusClass::InProgress
+            | SelftestStatusClass::Unknown => {}
+        }
+
+        if last_passing.is_some() && last_failure.is_some() {
+            break;
+        }
+    }
+
+    SelftestSummary {
+        command_error: false,
+        parse_failure: false,
+        unsupported_protocol: None,
+        power_on_hours,
+        active_errors,
+        last_passing,
+        last_failure,
+    }
+}
+
+/// Age in powered-on hours, wrap-aware for ATA self-test entries.
+/// ATA `lifetime_hours` in the self-test log wraps at 2^16 while
+/// `power_on_hours` from attribute 9 does not, so both values are masked into
+/// the same 16-bit window before subtraction.
+pub(crate) fn selftest_age_hours(power_on_hours: u64, entry_lifetime_hours: u32) -> u64 {
+    let poh_mod = power_on_hours % 65536;
+    let entry_mod = (entry_lifetime_hours as u64) % 65536;
+    (poh_mod + 65536 - entry_mod) % 65536
+}
+
+fn selftest_entry(raw: RawAtaSelfTestEntry) -> SelftestEntry {
+    SelftestEntry {
+        kind: selftest_kind(raw.kind.value, &raw.kind.string),
+        lifetime_hours: raw.lifetime_hours,
+        status_value: raw.status.value.unwrap_or(0),
+        status_string: raw.status.string,
+    }
+}
+
+fn selftest_kind(value: Option<u8>, label: &str) -> SelftestKind {
+    match value {
+        Some(0) => SelftestKind::Offline,
+        Some(1) => SelftestKind::Short,
+        Some(2) => SelftestKind::Extended,
+        Some(3) => SelftestKind::Conveyance,
+        Some(4) => SelftestKind::Selective,
+        _ if label.eq_ignore_ascii_case("short") => SelftestKind::Short,
+        _ if label.eq_ignore_ascii_case("extended") => SelftestKind::Extended,
+        _ if label.eq_ignore_ascii_case("conveyance") => SelftestKind::Conveyance,
+        _ if label.eq_ignore_ascii_case("selective") => SelftestKind::Selective,
+        _ if label.eq_ignore_ascii_case("offline") => SelftestKind::Offline,
+        _ => SelftestKind::Other(label.to_owned()),
+    }
+}
+
+fn classify_selftest_status(value: Option<u8>) -> SelftestStatusClass {
+    match value.map(|v| v >> 4) {
+        Some(0x0) => SelftestStatusClass::Passed,
+        Some(0x1 | 0x2) => SelftestStatusClass::Aborted,
+        Some(0x3..=0x8) => SelftestStatusClass::Failed,
+        Some(0xf) => SelftestStatusClass::InProgress,
+        _ => SelftestStatusClass::Unknown,
+    }
 }
 
 fn classify_health(parsed: &RawSmartctlOutput) -> SmartHealth {
@@ -185,7 +377,20 @@ mod tests {
         }
     }
 
+    fn raw_with_status(stdout: &str, exit_status: i32) -> RawCommandOutput {
+        RawCommandOutput {
+            cmd: "smartctl".into(),
+            stdout: stdout.into(),
+            stderr: String::new(),
+            exit_status,
+        }
+    }
+
     const FIXTURE_DIR: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/tests/fixtures/nixos-25.11");
+
+    fn fixture(name: &str) -> String {
+        std::fs::read_to_string(format!("{FIXTURE_DIR}/{name}")).expect("selftest fixture reads")
+    }
 
     #[test]
     fn nvme_fixture_healthy() {
@@ -442,5 +647,311 @@ mod tests {
         let probe = parse_smartctl(&raw(json));
         assert_eq!(probe.health, SmartHealth::Unknown);
         assert_eq!(probe.celsius, Some(42));
+    }
+
+    // Intent: parse the happy-path ATA self-test JSON shape.
+    // Why it exists: doctor depends on the most recent passing entry and
+    //   active-error counters rather than raw smartctl JSON.
+    // Scenario: a drive completed a short self-test roughly two powered-on
+    //   days ago.
+    #[test]
+    fn selftest_recent_pass_parsed() {
+        let summary =
+            parse_smartctl_selftest_log(&raw(&fixture("smartctl-selftest-ata-recent-pass.json")));
+        assert_eq!(summary.active_errors, 0);
+        assert_eq!(summary.power_on_hours, Some(5000));
+        let entry = summary.last_passing.expect("passing entry");
+        assert_eq!(entry.lifetime_hours, 4950);
+        assert_eq!(entry.kind, SelftestKind::Short);
+        assert_eq!(summary.last_failure, None);
+    }
+
+    // Intent: smartctl's bit-7 exit status still parses as a self-test
+    //   failure report.
+    // Why it exists: bit 7 means the self-test log contains active errors;
+    //   treating all non-zero exits as command errors would hide failures.
+    // Scenario: smartctl exits 128 while returning a valid failed extended
+    //   self-test row.
+    #[test]
+    fn selftest_active_failure_with_exit_128() {
+        let content = fixture("smartctl-selftest-ata-active-failure.json");
+        let summary = parse_smartctl_selftest_log(&raw_with_status(&content, 128));
+        assert!(!summary.command_error);
+        assert_eq!(summary.active_errors, 1);
+        let failure = summary.last_failure.expect("failure entry");
+        assert_eq!(failure.kind, SelftestKind::Extended);
+        assert_eq!(failure.status_value, 80);
+    }
+
+    // Intent: command-error bits short-circuit even with parseable stdout.
+    // Why it exists: bits 0-2 mean smartctl could not safely query the device;
+    //   reading partial JSON could misclassify the drive.
+    // Scenario: smartctl exits with bit 2 set but still prints a JSON body.
+    #[test]
+    fn selftest_command_error_bit_2_does_not_parse() {
+        let content = fixture("smartctl-selftest-ata-command-error.json");
+        let summary = parse_smartctl_selftest_log(&raw_with_status(&content, 4));
+        assert!(summary.command_error);
+        assert_eq!(summary.active_errors, 0);
+        assert_eq!(summary.last_passing, None);
+        assert_eq!(summary.last_failure, None);
+        assert_eq!(summary.power_on_hours, None);
+    }
+
+    // Intent: classify ATA status 0x3 as a failure without relying on
+    //   `status.passed`.
+    // Why it exists: smartctl omits `passed` for fatal/unknown errors, but
+    //   those entries still count toward active self-test errors.
+    // Scenario: the table contains a fatal-or-unknown extended entry.
+    #[test]
+    fn selftest_fatal_or_unknown_classified_as_failed() {
+        let summary = parse_smartctl_selftest_log(&raw(&fixture(
+            "smartctl-selftest-ata-fatal-or-unknown.json",
+        )));
+        assert_eq!(summary.active_errors, 1);
+        assert_eq!(summary.last_failure.expect("failure").status_value, 48);
+    }
+
+    // Intent: aborted entries are neither passing nor failing entries.
+    // Why it exists: aborted/interrupted rows should drive the "never" path,
+    //   not a false Ok or Fail.
+    // Scenario: a drive has only aborted or interrupted self-test rows.
+    #[test]
+    fn selftest_aborted_not_failed() {
+        let summary =
+            parse_smartctl_selftest_log(&raw(&fixture("smartctl-selftest-ata-aborted-only.json")));
+        assert_eq!(summary.active_errors, 0);
+        assert_eq!(summary.last_passing, None);
+        assert_eq!(summary.last_failure, None);
+    }
+
+    // Intent: smartctl outdated counters clear old failures.
+    // Why it exists: a failed self-test superseded by a newer passing extended
+    //   test must not remain active.
+    // Scenario: `error_count_total == error_count_outdated == 1`.
+    #[test]
+    fn selftest_outdated_failure_not_active() {
+        let summary = parse_smartctl_selftest_log(&raw(&fixture(
+            "smartctl-selftest-ata-failure-outdated.json",
+        )));
+        assert_eq!(summary.active_errors, 0);
+        assert!(summary.last_failure.is_some());
+        assert!(summary.last_passing.is_some());
+    }
+
+    // Intent: a passing short test does not supersede a prior failed extended
+    //   test.
+    // Why it exists: smartctl's active-error counters encode this distinction;
+    //   braid must not infer supersession from recency alone.
+    // Scenario: the newest row passes short, but the active-error counter
+    //   still reports the older extended failure.
+    #[test]
+    fn selftest_short_pass_does_not_supersede_failure() {
+        let summary = parse_smartctl_selftest_log(&raw(&fixture(
+            "smartctl-selftest-ata-short-pass-does-not-supersede.json",
+        )));
+        assert_eq!(summary.active_errors, 1);
+        assert!(summary.last_passing.is_some());
+        assert!(summary.last_failure.is_some());
+    }
+
+    // Intent: smartctl's real empty-log shape parses without synthetic fields.
+    // Why it exists: empty logs omit `table` and error counters, so serde
+    //   defaults are part of the parser contract.
+    // Scenario: a drive has never logged a completed SMART self-test.
+    #[test]
+    fn selftest_empty_log_real_shape() {
+        let summary =
+            parse_smartctl_selftest_log(&raw(&fixture("smartctl-selftest-ata-empty.json")));
+        assert!(!summary.parse_failure);
+        assert_eq!(summary.active_errors, 0);
+        assert_eq!(summary.last_passing, None);
+        assert_eq!(summary.last_failure, None);
+    }
+
+    // Intent: a non-empty log can still have no completed passing entry.
+    // Why it exists: doctor must render the "never" warning for rows that are
+    //   only aborted or interrupted.
+    // Scenario: the self-test table has entries, but none classify as Passed.
+    #[test]
+    fn selftest_aborted_only_no_passing() {
+        let summary =
+            parse_smartctl_selftest_log(&raw(&fixture("smartctl-selftest-ata-aborted-only.json")));
+        assert_eq!(summary.last_passing, None);
+        assert_eq!(summary.last_failure, None);
+        assert_eq!(summary.active_errors, 0);
+    }
+
+    // Intent: NVMe is explicitly skipped by the ATA self-test parser.
+    // Why it exists: NVMe self-test logs have a different JSON schema and
+    //   must not look like an ATA drive with no tests.
+    // Scenario: smartctl reports `device.protocol = "NVMe"`.
+    #[test]
+    fn selftest_nvme_unsupported_protocol() {
+        let summary =
+            parse_smartctl_selftest_log(&raw(&fixture("smartctl-selftest-nvme-unsupported.json")));
+        assert_eq!(summary.unsupported_protocol.as_deref(), Some("NVMe"));
+        assert_eq!(summary.power_on_hours, None);
+        assert_eq!(summary.last_passing, None);
+    }
+
+    // Intent: unsupported protocol handling preserves the raw protocol.
+    // Why it exists: doctor messages should name SCSI or another observed
+    //   protocol, not collapse every non-ATA drive into NVMe.
+    // Scenario: smartctl reports a SCSI device.
+    #[test]
+    fn selftest_scsi_unsupported_protocol() {
+        let json = r#"{"device":{"protocol":"SCSI"}}"#;
+        let summary = parse_smartctl_selftest_log(&raw(json));
+        assert_eq!(summary.unsupported_protocol.as_deref(), Some("SCSI"));
+    }
+
+    // Intent: missing protocol is not treated as SATA for self-test parsing.
+    // Why it exists: the self-test log schema is brittle enough that absent
+    //   protocol should Skip with a deterministic reason.
+    // Scenario: smartctl JSON either omits `device` entirely or includes it
+    //   without `protocol`.
+    #[test]
+    fn selftest_missing_protocol_unsupported() {
+        for json in [r#"{}"#, r#"{"device":{}}"#] {
+            let summary = parse_smartctl_selftest_log(&raw(json));
+            assert_eq!(summary.unsupported_protocol.as_deref(), Some("unknown"));
+        }
+    }
+
+    // Intent: malformed active-error counters clamp instead of wrapping.
+    // Why it exists: `outdated > total` is malformed but must not become a huge
+    //   active-error count in release or a debug panic.
+    // Scenario: JSON reports one total error and five outdated errors.
+    #[test]
+    fn selftest_malformed_outdated_exceeds_total() {
+        let json = r#"{
+            "device": {"protocol": "ATA"},
+            "power_on_time": {"hours": 5000},
+            "ata_smart_self_test_log": {
+                "standard": {
+                    "count": 0,
+                    "error_count_total": 1,
+                    "error_count_outdated": 5
+                }
+            }
+        }"#;
+        let summary = parse_smartctl_selftest_log(&raw(json));
+        assert_eq!(summary.active_errors, 0);
+    }
+
+    // Intent: active-error counters survive even if no failure entry is parsed.
+    // Why it exists: doctor has a fallback Fail message for parser drift or
+    //   malformed-but-parseable logs.
+    // Scenario: counters report one active error but the table contains only
+    //   aborted rows.
+    #[test]
+    fn selftest_active_errors_without_failure_entry() {
+        let json = r#"{
+            "device": {"protocol": "ATA"},
+            "power_on_time": {"hours": 5000},
+            "ata_smart_self_test_log": {
+                "standard": {
+                    "count": 1,
+                    "error_count_total": 1,
+                    "error_count_outdated": 0,
+                    "table": [
+                        {
+                            "type": {"value": 1, "string": "Short"},
+                            "status": {"value": 16, "string": "Aborted by host"},
+                            "lifetime_hours": 4990
+                        }
+                    ]
+                }
+            }
+        }"#;
+        let summary = parse_smartctl_selftest_log(&raw(json));
+        assert_eq!(summary.active_errors, 1);
+        assert_eq!(summary.last_failure, None);
+    }
+
+    // Intent: missing `power_on_time.hours` is represented distinctly.
+    // Why it exists: doctor can still Fail active self-test errors without POH,
+    //   but must Skip age-based branches when POH is absent.
+    // Scenario: ATA self-test table is present but attribute 9 is not emitted.
+    #[test]
+    fn selftest_no_power_on_time() {
+        let json = r#"{
+            "device": {"protocol": "ATA"},
+            "ata_smart_self_test_log": {
+                "standard": {
+                    "count": 1,
+                    "error_count_total": 0,
+                    "error_count_outdated": 0,
+                    "table": [
+                        {
+                            "type": {"value": 1, "string": "Short"},
+                            "status": {"value": 0, "string": "Completed without error"},
+                            "lifetime_hours": 4990
+                        }
+                    ]
+                }
+            }
+        }"#;
+        let summary = parse_smartctl_selftest_log(&raw(json));
+        assert_eq!(summary.power_on_hours, None);
+        assert!(summary.last_passing.is_some());
+    }
+
+    // Intent: bad JSON is a parse failure, not an unsupported protocol.
+    // Why it exists: doctor messages need to distinguish corrupt smartctl
+    //   output from non-ATA devices.
+    // Scenario: smartctl exits 0 but stdout is not JSON.
+    #[test]
+    fn selftest_bad_json() {
+        let summary = parse_smartctl_selftest_log(&raw("not json"));
+        assert!(summary.parse_failure);
+        assert_eq!(summary.unsupported_protocol, None);
+    }
+
+    // Intent: ATA self-test lifetime-hour age is wrap-aware.
+    // Why it exists: self-test entries wrap at 16 bits while attribute-9
+    //   power-on hours does not.
+    // Scenario: current POH has crossed one wrap window and the entry is from
+    //   the current 16-bit window.
+    #[test]
+    fn selftest_age_wraps() {
+        assert_eq!(selftest_age_hours(70000, 3964), 500);
+        assert_eq!(selftest_age_hours(70000, 4464), 0);
+        assert_eq!(selftest_age_hours(131073, 1), 0);
+    }
+
+    // Intent: the parser trusts smartctl's reverse-chronological table order.
+    // Why it exists: ATA lifetime hours can wrap, so sorting by lifetime hour
+    //   would pick the wrong "last" row after enough runtime.
+    // Scenario: the first passing row has a lower lifetime hour than a later
+    //   passing row.
+    #[test]
+    fn selftest_table_is_reverse_chronological() {
+        let json = r#"{
+            "device": {"protocol": "ATA"},
+            "power_on_time": {"hours": 70000},
+            "ata_smart_self_test_log": {
+                "standard": {
+                    "count": 2,
+                    "error_count_total": 0,
+                    "error_count_outdated": 0,
+                    "table": [
+                        {
+                            "type": {"value": 1, "string": "Short"},
+                            "status": {"value": 0, "string": "Completed without error"},
+                            "lifetime_hours": 100
+                        },
+                        {
+                            "type": {"value": 1, "string": "Short"},
+                            "status": {"value": 0, "string": "Completed without error"},
+                            "lifetime_hours": 65000
+                        }
+                    ]
+                }
+            }
+        }"#;
+        let summary = parse_smartctl_selftest_log(&raw(json));
+        assert_eq!(summary.last_passing.expect("passing").lifetime_hours, 100);
     }
 }

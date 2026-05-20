@@ -12,6 +12,30 @@
 import json
 import shlex
 
+def assert_smart_selftest_shape(report, declared_members=None):
+    selftest_rows = [c for c in report["checks"] if c["name"] == "smart_self_test"]
+    assert len(selftest_rows) >= 1, f"missing smart_self_test row: {report['checks']}"
+    if len(selftest_rows) == 1 and "subject" not in selftest_rows[0]:
+        row = selftest_rows[0]
+        assert row["status"] == "skip", f"unscoped smart_self_test: {row}"
+        assert (
+            "pool membership" in row["message"] or "no pool members" in row["message"]
+        ), f"unscoped smart_self_test message: {row['message']}"
+        return
+
+    subjects = []
+    for row in selftest_rows:
+        assert row["name"] == "smart_self_test", f"smart_self_test row: {row}"
+        assert "subject" in row, f"per-drive row missing subject: {row}"
+        assert row["subject"], f"empty subject: {row}"
+        subjects.append(row["subject"])
+
+    assert len(subjects) == len(set(subjects)), f"duplicate selftest subjects: {subjects}"
+    if declared_members is not None:
+        assert set(subjects) == set(declared_members), (
+            f"subjects {subjects} != declared {declared_members}"
+        )
+
 start_all()
 machine.wait_for_unit("multi-user.target")
 
@@ -43,6 +67,7 @@ with subtest("Valid config — JSON output"):
     assert "monitor not configured" in checks["beep_path"]["message"], (
         f"beep_path message: {checks['beep_path']['message']}"
     )
+    assert_smart_selftest_shape(report)
 
 # --- Permissions checks ---
 
@@ -197,6 +222,7 @@ with subtest("Data profile mismatch — clean RAID1 is ok"):
     assert "RAID1" in checks["metadata_profile_mismatch"]["message"], (
         f"Expected RAID1 in message: {checks['metadata_profile_mismatch']['message']}"
     )
+    assert_smart_selftest_shape(report, declared_members={"disk1", "disk2"})
 
 # Create mixed state: convert one block group to single
 with subtest("Create mixed data profiles"):

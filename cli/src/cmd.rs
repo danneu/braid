@@ -303,6 +303,9 @@ pub enum CmdRequest {
     SmartctlSelftestLog {
         device: String,
     },
+    SmartctlSelftestLogJson {
+        device: String,
+    },
     SmartctlErrorLog {
         device: String,
     },
@@ -1095,6 +1098,16 @@ impl CmdRequest {
                 program: "smartctl".to_owned(),
                 args: vec!["-l".into(), "selftest".into(), device.clone()],
             },
+            CmdRequest::SmartctlSelftestLogJson { device } => CmdArgs {
+                program: "smartctl".to_owned(),
+                args: vec![
+                    "--json".into(),
+                    "-A".into(),
+                    "-l".into(),
+                    "selftest".into(),
+                    device.clone(),
+                ],
+            },
             CmdRequest::SmartctlErrorLog { device } => CmdArgs {
                 program: "smartctl".to_owned(),
                 args: vec!["-l".into(), "error".into(), device.clone()],
@@ -1857,6 +1870,13 @@ mod tests {
                 },
                 "smartctl",
                 vec!["-l", "selftest", "/dev/disk/by-id/disk1"],
+            ),
+            (
+                CmdRequest::SmartctlSelftestLogJson {
+                    device: "/dev/disk/by-id/disk1".into(),
+                },
+                "smartctl",
+                vec!["--json", "-A", "-l", "selftest", "/dev/disk/by-id/disk1"],
             ),
             (
                 CmdRequest::SmartctlErrorLog {

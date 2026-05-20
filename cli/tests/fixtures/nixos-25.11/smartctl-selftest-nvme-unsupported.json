@@ -1,0 +1,8 @@
+{
+  "device": {
+    "protocol": "NVMe"
+  },
+  "power_on_time": {
+    "hours": 5000
+  }
+}

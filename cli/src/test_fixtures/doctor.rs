@@ -10,7 +10,7 @@
 //! constructors" section there); doctor.rs holds the private fields, so this
 //! module cannot field-literal-construct it directly.
 
-use crate::cmd::{CmdError, CmdRequest, CommandRunner, RawCommandOutput};
+use crate::cmd::{CmdError, CmdRequest, CommandRunner, MockRunner, RawCommandOutput};
 use crate::doctor::{DiskState, DoctorContext, DoctorOptions};
 use crate::probe::Filesystem;
 use crate::state_paths::StatePaths;
@@ -276,6 +276,37 @@ pub(crate) fn systemctl_show_active_state_output(state: &str) -> RawCommandOutpu
         stderr: String::new(),
         exit_status: 0,
     }
+}
+
+pub(crate) fn smartctl_selftest_json(
+    device: &str,
+    fixture_name: &str,
+    exit_status: i32,
+) -> (CmdRequest, RawCommandOutput) {
+    let dir = concat!(env!("CARGO_MANIFEST_DIR"), "/tests/fixtures/nixos-25.11");
+    let stdout =
+        std::fs::read_to_string(format!("{dir}/{fixture_name}")).expect("selftest fixture reads");
+    (
+        CmdRequest::SmartctlSelftestLogJson {
+            device: device.to_owned(),
+        },
+        RawCommandOutput {
+            cmd: format!("smartctl --json -A -l selftest {device}"),
+            stdout,
+            stderr: String::new(),
+            exit_status,
+        },
+    )
+}
+
+pub(crate) fn smart_selftest_runner_for(devices: &[(&str, &str, i32)]) -> MockRunner {
+    devices.iter().fold(
+        MockRunner::default(),
+        |runner, (device, fixture, exit_status)| {
+            let (request, output) = smartctl_selftest_json(device, fixture, *exit_status);
+            runner.with_output(request, output)
+        },
+    )
 }
 
 // ---------------------------------------------------------------------------

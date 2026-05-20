@@ -1,0 +1,40 @@
+{
+  "device": {
+    "protocol": "ATA"
+  },
+  "power_on_time": {
+    "hours": 5000
+  },
+  "ata_smart_self_test_log": {
+    "standard": {
+      "revision": 1,
+      "count": 2,
+      "error_count_total": 0,
+      "error_count_outdated": 0,
+      "table": [
+        {
+          "type": {
+            "value": 1,
+            "string": "Short"
+          },
+          "status": {
+            "value": 16,
+            "string": "Aborted by host"
+          },
+          "lifetime_hours": 4990
+        },
+        {
+          "type": {
+            "value": 2,
+            "string": "Extended"
+          },
+          "status": {
+            "value": 32,
+            "string": "Interrupted"
+          },
+          "lifetime_hours": 4980
+        }
+      ]
+    }
+  }
+}

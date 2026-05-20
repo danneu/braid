@@ -14,6 +14,11 @@
 //! - Parser module unit tests use stable fixtures only.
 //! - Synthetic scenarios (variant happy-paths, negative/malformed inputs) must
 //!   be inline string literals in tests.
+//! - Exception: smartctl self-test log fixtures (`smartctl-selftest-*.json`) are
+//!   hand-authored under `tests/fixtures/nixos-25.11/` because the NixOS VM
+//!   toolchain cannot produce useful self-test logs on virtio disks. They are
+//!   parser-critical contracts and follow the same review-on-bump obligation as
+//!   captured fixtures (see `AGENTS.md` Parser Compatibility).
 //! - Compatibility aliases are out of contract unless explicitly documented.
 //!
 pub mod btrfs_balance_status;
@@ -100,6 +105,6 @@ pub use cryptsetup_luks_uuid::{
 pub use cryptsetup_luks_version::parse_cryptsetup_luks_version;
 pub use cryptsetup_status::parse_cryptsetup_status;
 pub use lsblk::parse_lsblk_json;
-pub use smartctl::parse_smartctl;
+pub use smartctl::{parse_smartctl, parse_smartctl_selftest_log};
 pub use systemctl_list_units::{SystemdUnitRow, parse_systemctl_list_units_json};
 pub use upsc::parse_upsc;

@@ -391,6 +391,54 @@ pub struct SmartProbe {
     pub celsius: Option<i16>,
 }
 
+/// Parsed SMART self-test log summary for doctor classification.
+///
+/// Carries parser gate flags separately from ATA fields so doctor can preserve
+/// smartctl's command-error vs active-self-test-failure distinction.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct SelftestSummary {
+    pub command_error: bool,
+    pub parse_failure: bool,
+    pub unsupported_protocol: Option<String>,
+    pub power_on_hours: Option<u64>,
+    pub active_errors: u32,
+    pub last_passing: Option<SelftestEntry>,
+    pub last_failure: Option<SelftestEntry>,
+}
+
+/// SMART self-test entry selected from the reverse-chronological log table.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SelftestEntry {
+    pub kind: SelftestKind,
+    pub lifetime_hours: u32,
+    pub status_value: u8,
+    pub status_string: String,
+}
+
+/// SMART self-test operation type normalized from smartctl's numeric code.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum SelftestKind {
+    Short,
+    Extended,
+    Conveyance,
+    Selective,
+    Offline,
+    Other(String),
+}
+
+impl std::fmt::Display for SelftestKind {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Short => f.write_str("short"),
+            Self::Extended => f.write_str("extended"),
+            Self::Conveyance => f.write_str("conveyance"),
+            Self::Selective => f.write_str("selective"),
+            Self::Offline => f.write_str("offline"),
+            Self::Other(s) => f.write_str(s),
+        }
+    }
+}
+
 /// btrfs replace status
 #[derive(Debug, Clone, PartialEq)]
 pub enum ReplaceState {

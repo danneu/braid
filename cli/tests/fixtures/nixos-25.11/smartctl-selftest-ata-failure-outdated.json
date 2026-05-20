@@ -1,0 +1,42 @@
+{
+  "device": {
+    "protocol": "ATA"
+  },
+  "power_on_time": {
+    "hours": 5000
+  },
+  "ata_smart_self_test_log": {
+    "standard": {
+      "revision": 1,
+      "count": 2,
+      "error_count_total": 1,
+      "error_count_outdated": 1,
+      "table": [
+        {
+          "type": {
+            "value": 2,
+            "string": "Extended"
+          },
+          "status": {
+            "value": 0,
+            "string": "Completed without error",
+            "passed": true
+          },
+          "lifetime_hours": 4950
+        },
+        {
+          "type": {
+            "value": 1,
+            "string": "Short"
+          },
+          "status": {
+            "value": 80,
+            "string": "Completed: electrical failure",
+            "passed": false
+          },
+          "lifetime_hours": 4000
+        }
+      ]
+    }
+  }
+}
