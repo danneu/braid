@@ -2,8 +2,9 @@ use crate::cmd::{CmdError, CmdRequest, CommandRunner, Step};
 use crate::config::{Config, name_from_mapper};
 use crate::mapper_close::{CloseMapperError, close_mapper_with_retry};
 use crate::membership::{MembershipError, PoolMembership};
-use crate::online_state::{OnlineError, OnlineStateOps, RealOnlineStateOps};
+use crate::online_state::{OnlineError, OnlineStateOps, RealOnlineStateOps, mark_offline};
 use crate::parse::{parse_cryptsetup_luks_uuid, parse_cryptsetup_status};
+use crate::pool_lock::StopCoordinatorGuard;
 use crate::preflight;
 use crate::preview::{Preview, PreviewCompleteness, PreviewNote};
 use crate::probe::{Filesystem, ProbeError, probe_fsid, probe_pool};
@@ -11,7 +12,7 @@ use crate::progress::{RealSleeper, Sleeper};
 use crate::status_tag::{StatusTag, color_enabled_for_stderr, status_line};
 use crate::types::{DiskName, LuksUuid, MapperName, MountPoint, PoolState, format_uuid_list};
 use std::collections::HashSet;
-use std::io::Write;
+use std::io::{self, Write};
 
 #[derive(Debug, thiserror::Error)]
 pub enum LockError {
@@ -29,6 +30,23 @@ impl From<CloseMapperError> for LockError {
             CloseMapperError::Cmd(e) => LockError::Cmd(e),
             CloseMapperError::Failed(msg) => LockError::Failed(msg),
             CloseMapperError::DeviceBusy(msg) => LockError::DeviceBusy(msg),
+        }
+    }
+}
+
+/// Plain-lock orchestration preserves `cmd_lock`'s typed failure while
+/// distinguishing it from the coordinator marker write path.
+#[derive(Debug)]
+pub enum LockOrchestrateError {
+    CmdLock(LockError),
+    MarkDone(io::Error),
+}
+
+impl std::fmt::Display for LockOrchestrateError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::CmdLock(e) => write!(f, "{e}"),
+            Self::MarkDone(e) => write!(f, "failed to mark lock cleanup done: {e}"),
         }
     }
 }
@@ -967,6 +985,55 @@ pub fn cmd_lock<R: CommandRunner, F: Filesystem + ?Sized>(
     cmd_lock_impl(runner, fs, &RealSleeper, config, membership, dry_run)
 }
 
+/// Plain-lock ordering invariant: run `cmd_lock` first, write `done\n`
+/// second, and deactivate `braid-online.service` last so ExecStop reentry
+/// never observes completion before lock cleanup actually succeeded.
+pub fn cmd_lock_orchestrate<R, F, O>(
+    runner: &R,
+    fs: &F,
+    online_ops: &O,
+    config: &Config,
+    membership: &PoolMembership,
+    coordinator_guard: &StopCoordinatorGuard,
+) -> Result<(), LockOrchestrateError>
+where
+    R: CommandRunner,
+    F: Filesystem + ?Sized,
+    O: OnlineStateOps,
+{
+    cmd_lock_orchestrate_impl(
+        runner,
+        fs,
+        online_ops,
+        config,
+        membership,
+        |runner, fs, config, membership, dry_run| cmd_lock(runner, fs, config, membership, dry_run),
+        || coordinator_guard.mark_done(),
+    )
+}
+
+fn cmd_lock_orchestrate_impl<R, F, O, CL, MD>(
+    runner: &R,
+    fs: &F,
+    online_ops: &O,
+    config: &Config,
+    membership: &PoolMembership,
+    cmd_lock_fn: CL,
+    mark_done_fn: MD,
+) -> Result<(), LockOrchestrateError>
+where
+    R: CommandRunner,
+    F: Filesystem + ?Sized,
+    O: OnlineStateOps,
+    CL: FnOnce(&R, &F, &Config, &PoolMembership, bool) -> Result<(), LockError>,
+    MD: FnOnce() -> io::Result<()>,
+{
+    cmd_lock_fn(runner, fs, config, membership, false).map_err(LockOrchestrateError::CmdLock)?;
+    mark_done_fn().map_err(LockOrchestrateError::MarkDone)?;
+    let _ = mark_offline(config, online_ops);
+    Ok(())
+}
+
 fn cmd_lock_impl<R, F, S>(
     runner: &R,
     fs: &F,
@@ -1054,7 +1121,8 @@ mod tests {
     use super::*;
     use crate::cmd::{MockRunner, RawCommandOutput};
     use crate::mapper_close::{CLOSE_RETRY_ATTEMPTS, CLOSE_RETRY_DELAY};
-    use crate::online_state::{RecordingOnlineStateOps, StagedOnlineFailure};
+    use crate::online_state::{BRAID_ONLINE_UNIT, RecordingOnlineStateOps, StagedOnlineFailure};
+    use crate::pool_lock::RealStopCoordinator;
     use crate::test_fixtures::{
         LockNoopSleeper, LockRecordingRunner, disk_member, lock_count_forget_steps, lock_err_raw,
         lock_forget_step_devices, lock_fs, lock_mounted_runner, lock_ok_raw, lock_test_config,
@@ -1117,6 +1185,126 @@ mod tests {
 
     fn lifecycle_config() -> Config {
         cfg(r#"{"mount_point":"/mnt/storage","systemd_lifecycle":true}"#)
+    }
+
+    fn offline_lifecycle_ops() -> RecordingOnlineStateOps {
+        let ops = RecordingOnlineStateOps::new();
+        ops.set_mounted(false);
+        ops
+    }
+
+    fn stop_online_call() -> String {
+        format!("stop {BRAID_ONLINE_UNIT} no_block=false")
+    }
+
+    // Intent: cmd_lock_orchestrate must not advance after cmd_lock fails.
+    // Why it exists: ExecStop reentry treats `done\n` as authoritative, so a
+    // failed lock must not write that marker or deactivate braid-online.service.
+    // Scenario: plain `braid lock` fails while the pool is still online and a
+    // concurrent ExecStop path is waiting on the coordinator file.
+    #[test]
+    fn cmd_lock_failure_does_not_write_done_or_stop_online() {
+        let tmp = tempfile::tempdir().unwrap();
+        let coord_path = tmp.path().join("coord");
+        let coordinator = RealStopCoordinator::new(coord_path.clone());
+        let _coordinator_guard = coordinator.acquire().unwrap();
+        let runner = MockRunner::default();
+        let fs = lock_fs(&[]);
+        let ops = offline_lifecycle_ops();
+        let config = lifecycle_config();
+        let membership = lock_test_membership();
+
+        let result = cmd_lock_orchestrate_impl(
+            &runner,
+            &fs,
+            &ops,
+            &config,
+            &membership,
+            |_runner, _fs, _config, _membership, _dry_run| {
+                Err(LockError::Failed("synthetic lock failure".into()))
+            },
+            || -> io::Result<()> { panic!("mark_done must not be called after cmd_lock fails") },
+        );
+
+        assert!(matches!(result, Err(LockOrchestrateError::CmdLock(_))));
+        assert!(!ops.calls().contains(&stop_online_call()));
+        assert!(ops.coord_snapshots().is_empty());
+        assert!(std::fs::read(coord_path).unwrap().is_empty());
+    }
+
+    // Intent: cmd_lock_orchestrate writes `done\n` before mark_offline runs.
+    // Why it exists: ExecStop reentry must never observe braid-online.service
+    // stopping before the coordinator marker proves plain lock cleanup is done.
+    // Scenario: plain `braid lock` succeeds and then deactivates the module's
+    // online unit for the now-offline pool.
+    #[test]
+    fn cmd_lock_success_writes_done_then_calls_mark_offline_in_order() {
+        let tmp = tempfile::tempdir().unwrap();
+        let coord_path = tmp.path().join("coord");
+        let coordinator = RealStopCoordinator::new(coord_path.clone());
+        let coordinator_guard = coordinator.acquire().unwrap();
+        let runner = MockRunner::default();
+        let fs = lock_fs(&[]);
+        let ops = RecordingOnlineStateOps::new().with_coord_file(coord_path.clone());
+        ops.set_mounted(false);
+        let config = lifecycle_config();
+        let membership = lock_test_membership();
+
+        let result = cmd_lock_orchestrate_impl(
+            &runner,
+            &fs,
+            &ops,
+            &config,
+            &membership,
+            |_runner, _fs, _config, _membership, _dry_run| Ok(()),
+            || coordinator_guard.mark_done(),
+        );
+
+        assert!(result.is_ok());
+        let calls = ops.calls();
+        assert_eq!(
+            calls
+                .iter()
+                .filter(|call| *call == &stop_online_call())
+                .count(),
+            1,
+            "expected exactly one braid-online stop call, got {calls:?}"
+        );
+        assert_eq!(ops.coord_snapshots(), vec![b"done\n".to_vec()]);
+        assert_eq!(std::fs::read(coord_path).unwrap(), b"done\n");
+    }
+
+    // Intent: cmd_lock_orchestrate must not advance after mark_done fails.
+    // Why it exists: stopping braid-online.service without a completed marker
+    // can make systemd believe an online pool is inactive.
+    // Scenario: plain `braid lock` finishes lock cleanup but cannot write the
+    // stop-coordinator done marker due to an I/O error.
+    #[test]
+    fn mark_done_failure_does_not_call_mark_offline() {
+        let runner = MockRunner::default();
+        let fs = lock_fs(&[]);
+        let ops = offline_lifecycle_ops();
+        let config = lifecycle_config();
+        let membership = lock_test_membership();
+
+        let result = cmd_lock_orchestrate_impl(
+            &runner,
+            &fs,
+            &ops,
+            &config,
+            &membership,
+            |_runner, _fs, _config, _membership, _dry_run| Ok(()),
+            || {
+                Err(io::Error::new(
+                    io::ErrorKind::Other,
+                    "synthetic mark_done failure",
+                ))
+            },
+        );
+
+        assert!(matches!(result, Err(LockOrchestrateError::MarkDone(_))));
+        assert!(!ops.calls().contains(&stop_online_call()));
+        assert!(ops.coord_snapshots().is_empty());
     }
 
     fn mounted_runner_with_btrfs_show(mapper_aaa: &str, mapper_bbb: &str) -> MockRunner {

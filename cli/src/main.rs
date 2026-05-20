@@ -7,7 +7,7 @@ use braid_cli::cmd::RealRunner;
 use braid_cli::config::{DEFAULT_CONFIG_PATH, config_read};
 use braid_cli::doctor::{DoctorOptions, cmd_doctor};
 use braid_cli::membership::PoolMembership;
-use braid_cli::online_state::{RealOnlineStateOps, mark_offline, mark_online, snapshot};
+use braid_cli::online_state::{RealOnlineStateOps, mark_online, snapshot};
 use braid_cli::pool_lock::{
     AcquirePoolLock, PoolLockError, RealPoolLock, RealStopCoordinator, StopCoordinatorError,
     StopCoordinatorPollResult,
@@ -1002,15 +1002,17 @@ fn run_plain_lock(
     let fs = RealFilesystem;
     let online_ops = RealOnlineStateOps::new(&runner);
 
-    if let Err(e) = braid_cli::lock::cmd_lock(&runner, &fs, &config, &membership, false) {
+    if let Err(e) = braid_cli::lock::cmd_lock_orchestrate(
+        &runner,
+        &fs,
+        &online_ops,
+        &config,
+        &membership,
+        &coordinator_guard,
+    ) {
         print_cli_error(&e.to_string());
         std::process::exit(1);
     }
-    if let Err(e) = coordinator_guard.mark_done() {
-        print_cli_error(&format!("failed to mark lock cleanup done: {e}"));
-        std::process::exit(1);
-    }
-    let _ = mark_offline(&config, &online_ops);
 }
 
 fn run_systemd_stop_lock(

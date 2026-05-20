@@ -364,6 +364,8 @@ pub struct RecordingOnlineStateOps {
     calls: std::cell::RefCell<Vec<String>>,
     bound_by: std::cell::RefCell<Result<Vec<String>, StagedOnlineFailure>>,
     systemctl_stop_errs: std::cell::RefCell<HashMap<String, StagedOnlineFailure>>,
+    coord_file_path: Option<std::path::PathBuf>,
+    coord_snapshots: std::cell::RefCell<Vec<Vec<u8>>>,
 }
 
 #[cfg(test)]
@@ -375,11 +377,24 @@ impl RecordingOnlineStateOps {
             calls: std::cell::RefCell::new(Vec::new()),
             bound_by: std::cell::RefCell::new(Ok(Vec::new())),
             systemctl_stop_errs: std::cell::RefCell::new(HashMap::new()),
+            coord_file_path: None,
+            coord_snapshots: std::cell::RefCell::new(Vec::new()),
         }
+    }
+
+    /// Opt-in instrumentation for plain-lock orchestration tests; snapshots the
+    /// coordinator marker file on every `braid-online.service` stop.
+    pub fn with_coord_file(mut self, path: std::path::PathBuf) -> Self {
+        self.coord_file_path = Some(path);
+        self
     }
 
     pub fn calls(&self) -> Vec<String> {
         self.calls.borrow().clone()
+    }
+
+    pub fn coord_snapshots(&self) -> Vec<Vec<u8>> {
+        self.coord_snapshots.borrow().clone()
     }
 
     pub fn set_state(&self, state: UnitActiveState) {
@@ -437,6 +452,12 @@ impl OnlineStateOps for RecordingOnlineStateOps {
         self.calls
             .borrow_mut()
             .push(format!("stop {unit} no_block={no_block}"));
+        if unit == BRAID_ONLINE_UNIT
+            && let Some(path) = &self.coord_file_path
+        {
+            let bytes = fs::read(path).unwrap_or_default();
+            self.coord_snapshots.borrow_mut().push(bytes);
+        }
         match self.systemctl_stop_errs.borrow().get(unit).cloned() {
             Some(failure) => Err(failure.into_online_error()),
             None => Ok(()),
