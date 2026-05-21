@@ -45,7 +45,7 @@ _build-checks flake_attr *args:
         flags=()
         if $rebuild; then flags+=(--rebuild); fi
         # --no-link: tests run for side effects only; suppress result/result-N symlinks (one per check) that would otherwise pile up in the repo root.
-        nix build --no-link "${installables[@]}" "${flags[@]}" --max-jobs 8 "${build_dir[@]}" $nix_override $keep_going $verbose || rc=$?
+        nix build --no-link "${installables[@]}" "${flags[@]}" --max-jobs 7 "${build_dir[@]}" $nix_override $keep_going $verbose || rc=$?
     else
         installables=()
         for t in "${tests[@]}"; do
@@ -54,7 +54,7 @@ _build-checks flake_attr *args:
         flags=()
         if $rebuild; then flags+=(--rebuild); fi
         # --no-link: tests run for side effects only; suppress result/result-N symlinks (one per check) that would otherwise pile up in the repo root.
-        nix build --no-link "${installables[@]}" "${flags[@]}" --max-jobs 8 "${build_dir[@]}" $nix_override $keep_going $verbose || rc=$?
+        nix build --no-link "${installables[@]}" "${flags[@]}" --max-jobs 7 "${build_dir[@]}" $nix_override $keep_going $verbose || rc=$?
     fi
     if [ $rc -eq 0 ]; then
         printf '\033]777;notify;braid;tests passed\033\\'
