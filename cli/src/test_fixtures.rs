@@ -140,7 +140,7 @@ pub(crate) use ack::{
     AckPanicFilesystem, AckPanicRunner, ack_fs_btrfs, ack_fs_ext4, ack_fs_not_mounted,
     ack_mounted_fs_that_touches_smartd, ack_mounted_probe_runner,
     ack_mounted_probe_runner_with_device_stats, ack_mounted_probe_runner_with_stale_devid_stats,
-    ack_mp, ack_offline_fs_that_touches_smartd, ack_write_latch,
+    ack_mp, ack_noop_beeper, ack_offline_fs_that_touches_smartd, ack_write_latch,
 };
 #[allow(unused_imports)]
 pub(crate) use discover::{

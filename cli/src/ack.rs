@@ -7,6 +7,10 @@ use crate::probe::{Filesystem, ProbeError, probe_pool_alerts};
 use crate::state_paths::StatePaths;
 use crate::types::MountPoint;
 
+/// Production entry point that wires ack cleanup to the real beeper stop hook.
+///
+/// Tests call `cmd_ack_impl` directly with explicit hooks so they never shell
+/// out to host systemd while still exercising the same ack logic.
 pub fn cmd_ack<R: CommandRunner, F: Filesystem + ?Sized>(
     runner: &R,
     fs: &F,
@@ -16,6 +20,9 @@ pub fn cmd_ack<R: CommandRunner, F: Filesystem + ?Sized>(
     cmd_ack_impl(runner, fs, mount_point, paths, &stop_beeper)
 }
 
+/// Injectable-hook variant used by tests to observe beeper cleanup ordering.
+///
+/// Production goes through `cmd_ack`, which supplies the real systemd hook.
 fn cmd_ack_impl<R: CommandRunner, F: Filesystem + ?Sized>(
     runner: &R,
     fs: &F,
@@ -211,7 +218,6 @@ fn cleanup_alert_files_and_beeper(
     Ok(())
 }
 
-#[cfg(not(test))]
 fn stop_beeper() {
     let result = std::process::Command::new("systemctl")
         .args(["stop", "braid-alert.service"])
@@ -247,12 +253,6 @@ fn format_systemctl_stop_failure(output: &std::process::Output) -> Option<String
         ))
     }
 }
-
-// Unit tests exercise cmd_ack end-to-end; without this gate they would shell
-// out to a real `systemctl` on the host running `cargo test`. Keep the
-// production behavior behind cfg(not(test)) and make the test build a no-op.
-#[cfg(test)]
-fn stop_beeper() {}
 
 #[derive(Debug, thiserror::Error)]
 pub enum AckError {
@@ -294,7 +294,7 @@ mod tests {
         AckPanicFilesystem, AckPanicRunner, ack_fs_btrfs, ack_fs_ext4, ack_fs_not_mounted,
         ack_mounted_fs_that_touches_smartd, ack_mounted_probe_runner,
         ack_mounted_probe_runner_with_device_stats,
-        ack_mounted_probe_runner_with_stale_devid_stats, ack_mp,
+        ack_mounted_probe_runner_with_stale_devid_stats, ack_mp, ack_noop_beeper,
         ack_offline_fs_that_touches_smartd, ack_write_latch, isolated_paths,
     };
     use std::collections::BTreeMap;
@@ -318,7 +318,13 @@ mod tests {
         let (_dir, paths) = isolated_paths();
         let runner = ack_mounted_probe_runner();
 
-        let result = cmd_ack(&runner, &ack_fs_btrfs(), &ack_mp(), &paths);
+        let result = cmd_ack_impl(
+            &runner,
+            &ack_fs_btrfs(),
+            &ack_mp(),
+            &paths,
+            &ack_noop_beeper,
+        );
 
         assert!(result.is_ok(), "no-op ack should succeed, got {result:?}");
         assert!(
@@ -473,7 +479,7 @@ mod tests {
         let (_dir, paths) = isolated_paths();
         let fs = ack_offline_fs_that_touches_smartd(&paths);
 
-        let result = cmd_ack(&AckPanicRunner, &fs, &ack_mp(), &paths);
+        let result = cmd_ack_impl(&AckPanicRunner, &fs, &ack_mp(), &paths, &ack_noop_beeper);
 
         assert!(
             matches!(result, Err(AckError::PoolNotMounted)),
@@ -506,7 +512,7 @@ mod tests {
         let fs = ack_mounted_fs_that_touches_smartd(&paths);
         let runner = ack_mounted_probe_runner();
 
-        let result = cmd_ack(&runner, &fs, &ack_mp(), &paths);
+        let result = cmd_ack_impl(&runner, &fs, &ack_mp(), &paths, &ack_noop_beeper);
 
         assert!(
             result.is_ok(),
@@ -543,7 +549,7 @@ mod tests {
         let fs = ack_mounted_fs_that_touches_smartd(&paths);
         let runner = ack_mounted_probe_runner_with_device_stats();
 
-        let result = cmd_ack(&runner, &fs, &ack_mp(), &paths);
+        let result = cmd_ack_impl(&runner, &fs, &ack_mp(), &paths, &ack_noop_beeper);
 
         assert!(
             result.is_ok(),
@@ -573,7 +579,7 @@ mod tests {
         ack_write_latch(&paths, vec![AlertCause::MissingDevice { devid: 2 }]);
         let fs = ack_offline_fs_that_touches_smartd(&paths);
 
-        let result = cmd_ack(&AckPanicRunner, &fs, &ack_mp(), &paths);
+        let result = cmd_ack_impl(&AckPanicRunner, &fs, &ack_mp(), &paths, &ack_noop_beeper);
 
         assert!(
             result.is_ok(),
@@ -603,7 +609,7 @@ mod tests {
         ack_write_latch(&paths, vec![AlertCause::SmartdAlert]);
         let fs = ack_offline_fs_that_touches_smartd(&paths);
 
-        let result = cmd_ack(&AckPanicRunner, &fs, &ack_mp(), &paths);
+        let result = cmd_ack_impl(&AckPanicRunner, &fs, &ack_mp(), &paths, &ack_noop_beeper);
 
         assert!(
             result.is_ok(),
@@ -631,7 +637,7 @@ mod tests {
         let fs = ack_mounted_fs_that_touches_smartd(&paths);
         let runner = ack_mounted_probe_runner_with_device_stats();
 
-        let result = cmd_ack(&runner, &fs, &ack_mp(), &paths);
+        let result = cmd_ack_impl(&runner, &fs, &ack_mp(), &paths, &ack_noop_beeper);
 
         assert!(
             result.is_ok(),
@@ -1243,8 +1249,14 @@ mod tests {
         let original_latch_bytes = std::fs::read(paths.alert_latch_json()).unwrap();
         std::fs::write(paths.smartd_alert(), b"").unwrap();
 
-        let err = cmd_ack(&AckPanicRunner, &ack_fs_ext4(), &ack_mp(), &paths)
-            .expect_err("must refuse -- mount is not btrfs");
+        let err = cmd_ack_impl(
+            &AckPanicRunner,
+            &ack_fs_ext4(),
+            &ack_mp(),
+            &paths,
+            &ack_noop_beeper,
+        )
+        .expect_err("must refuse -- mount is not btrfs");
 
         match &err {
             AckError::Probe(ProbeError::NotBtrfs { fstype, .. }) => {
@@ -1287,8 +1299,14 @@ mod tests {
     fn cmd_ack_with_foreign_fstype_and_no_alerts_returns_probe_error() {
         let (_dir, paths) = isolated_paths();
 
-        let err = cmd_ack(&AckPanicRunner, &ack_fs_ext4(), &ack_mp(), &paths)
-            .expect_err("must refuse -- mount is not btrfs");
+        let err = cmd_ack_impl(
+            &AckPanicRunner,
+            &ack_fs_ext4(),
+            &ack_mp(),
+            &paths,
+            &ack_noop_beeper,
+        )
+        .expect_err("must refuse -- mount is not btrfs");
 
         match &err {
             AckError::Probe(ProbeError::NotBtrfs { fstype, .. }) => {
@@ -1331,8 +1349,14 @@ mod tests {
         std::fs::write(paths.alert_latch_json(), b"not json").unwrap();
         let original_latch_bytes = std::fs::read(paths.alert_latch_json()).unwrap();
 
-        let err = cmd_ack(&AckPanicRunner, &ack_fs_ext4(), &ack_mp(), &paths)
-            .expect_err("must refuse -- mount is not btrfs");
+        let err = cmd_ack_impl(
+            &AckPanicRunner,
+            &ack_fs_ext4(),
+            &ack_mp(),
+            &paths,
+            &ack_noop_beeper,
+        )
+        .expect_err("must refuse -- mount is not btrfs");
 
         assert!(
             matches!(err, AckError::Probe(ProbeError::NotBtrfs { .. })),
@@ -1528,7 +1552,13 @@ mod tests {
         let original_latch_bytes = std::fs::read(paths.alert_latch_json()).unwrap();
         assert!(!paths.acked_stats_json().exists());
 
-        let result = cmd_ack(&AckPanicRunner, &ack_fs_not_mounted(), &ack_mp(), &paths);
+        let result = cmd_ack_impl(
+            &AckPanicRunner,
+            &ack_fs_not_mounted(),
+            &ack_mp(),
+            &paths,
+            &ack_noop_beeper,
+        );
         assert!(
             matches!(result, Err(AckError::OfflineBtrfsErrorsRefused)),
             "expected OfflineBtrfsErrorsRefused, got {result:?}"
@@ -1574,7 +1604,14 @@ mod tests {
 
         ack_write_latch(&paths, vec![AlertCause::MissingDevice { devid: 1 }]);
 
-        cmd_ack(&AckPanicRunner, &ack_fs_not_mounted(), &ack_mp(), &paths).unwrap();
+        cmd_ack_impl(
+            &AckPanicRunner,
+            &ack_fs_not_mounted(),
+            &ack_mp(),
+            &paths,
+            &ack_noop_beeper,
+        )
+        .unwrap();
 
         let acked = load_acked_stats(&paths);
         let entry = acked.0.get("1").unwrap();
@@ -1653,7 +1690,13 @@ mod tests {
 
         ack_write_latch(&paths, vec![AlertCause::MissingDevice { devid: 1 }]);
 
-        let result = cmd_ack(&AckPanicRunner, &ack_fs_not_mounted(), &ack_mp(), &paths);
+        let result = cmd_ack_impl(
+            &AckPanicRunner,
+            &ack_fs_not_mounted(),
+            &ack_mp(),
+            &paths,
+            &ack_noop_beeper,
+        );
         assert!(
             matches!(result, Err(AckError::Io(_))),
             "expected AckError::Io, got {result:?}"
@@ -1691,7 +1734,14 @@ mod tests {
         ack_write_latch(&paths, vec![AlertCause::SmartdAlert]);
         std::fs::write(paths.smartd_alert(), b"").unwrap();
 
-        cmd_ack(&AckPanicRunner, &ack_fs_not_mounted(), &ack_mp(), &paths).unwrap();
+        cmd_ack_impl(
+            &AckPanicRunner,
+            &ack_fs_not_mounted(),
+            &ack_mp(),
+            &paths,
+            &ack_noop_beeper,
+        )
+        .unwrap();
 
         assert!(!paths.smartd_alert().exists());
         assert!(!paths.alert_latch_json().exists());
@@ -1729,7 +1779,14 @@ mod tests {
             }],
         );
 
-        cmd_ack(&AckPanicRunner, &ack_fs_not_mounted(), &ack_mp(), &paths).unwrap();
+        cmd_ack_impl(
+            &AckPanicRunner,
+            &ack_fs_not_mounted(),
+            &ack_mp(),
+            &paths,
+            &ack_noop_beeper,
+        )
+        .unwrap();
 
         assert!(!paths.alert_latch_json().exists());
         let after_bytes = std::fs::read(paths.acked_stats_json()).unwrap();

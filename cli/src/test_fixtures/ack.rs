@@ -130,6 +130,9 @@ pub(crate) fn ack_mp() -> MountPoint {
     MountPoint("/mnt/storage".to_owned())
 }
 
+/// Explicit no-op beeper hook for ack tests that only care about ack logic.
+pub(crate) fn ack_noop_beeper() {}
+
 /// Ack-specific alert latch writer for tests that compose alert causes.
 pub(crate) fn ack_write_latch(paths: &StatePaths, causes: Vec<AlertCause>) {
     let state = AlertState { causes };
