@@ -657,13 +657,7 @@ fn main() {
             }
         }
         Commands::Status(args) => {
-            let config = match config_read(Path::new(&config_path)) {
-                Ok(c) => c,
-                Err(e) => {
-                    eprintln!("error: {e}");
-                    std::process::exit(1);
-                }
-            };
+            let config = load_config_or_exit(Path::new(&config_path), 1);
             let runner = RealRunner;
             let fs = RealFilesystem;
             let backing_path_resolver = braid_cli::luks::RealBackingPathResolver;
@@ -789,13 +783,7 @@ fn main() {
             }
         }
         Commands::Idle => {
-            let config = match config_read(Path::new(&config_path)) {
-                Ok(c) => c,
-                Err(e) => {
-                    eprintln!("error: {e}");
-                    std::process::exit(2);
-                }
-            };
+            let config = load_config_or_exit(Path::new(&config_path), 2);
             let runner = RealRunner;
             let fs = braid_cli::probe::RealFilesystem;
             match braid_cli::idle::cmd_idle(&runner, &fs, config.mount_point()) {
