@@ -46,6 +46,7 @@
             pkgs.util-linux
             pkgs.systemd
             pkgs.smartmontools
+            pkgs.nut
           ];
           braid = pkgs.runCommand "braid" { nativeBuildInputs = [ pkgs.makeWrapper ]; } ''
             mkdir -p $out/bin
@@ -394,6 +395,7 @@
           tool-versions = pkgs.testers.nixosTest (
             import ./tests/cli/tool-versions.nix {
               braid-cli-unwrapped = linuxCrane.braid-cli-unwrapped;
+              braidWrappedPackage = linuxCrane.braid;
             }
           );
           capture-tool-fixtures = pkgs.testers.nixosTest (import ./tests/capture-tool-fixtures.nix);
@@ -939,6 +941,7 @@
               cryptsetup = lib.mkDefault braidPkgs.cryptsetup;
               btrfsProgs = lib.mkDefault braidPkgs.btrfs-progs;
               utilLinux = lib.mkDefault braidPkgs.util-linux;
+              nut = lib.mkDefault braidPkgs.nut;
               smartmontools = lib.mkDefault braidPkgs.smartmontools;
             };
           };

@@ -108,10 +108,29 @@ assert err == "", (
 # stdout-only contract: --json must not print a redundant human error to
 # stderr.
 braid_wrapped_path = machine.succeed("readlink -f $(command -v braid)").strip()
-wrapper_source = machine.succeed(f"cat {braid_wrapped_path}")
-m = re.search(r'(/nix/store/[^"\s]+/bin/braid)(?!\-)', wrapper_source)
-assert m, f"could not locate unwrapped braid in wrapper:\n{wrapper_source}"
-unwrapped_braid = m.group(1)
+
+
+def unwrap_braid(path):
+    source = machine.succeed(f"cat {path}")
+    matches = re.findall(r'(/nix/store/[^"\s]+/bin/braid)(?!\-)', source)
+    for target in matches:
+        if "-braid-cli-" in target:
+            return target
+    assert matches, f"could not locate wrapped braid target in wrapper:\n{source}"
+    nested_source = machine.succeed(f"cat {matches[0]}")
+    nested_matches = re.findall(r'(/nix/store/[^"\s]+/bin/braid)(?!\-)', nested_source)
+    for target in nested_matches:
+        if "-braid-cli-" in target:
+            return target
+    assert False, (
+        "could not locate unwrapped braid-cli target in wrappers:\n"
+        + source
+        + "\n--- nested wrapper ---\n"
+        + nested_source
+    )
+
+
+unwrapped_braid = unwrap_braid(braid_wrapped_path)
 
 exit_code = machine.execute(
     f"PATH=/nonexistent {unwrapped_braid} ups status --json "
@@ -127,11 +146,36 @@ assert parsed_if.get("error") == "invocation_failed", (
     f"expected error=invocation_failed, got {parsed_if}"
 )
 detail_if = parsed_if.get("detail", "")
-assert isinstance(detail_if, str) and "invocation failed" in detail_if, (
-    f"expected detail to contain 'invocation failed', got {parsed_if}"
+assert isinstance(detail_if, str) and detail_if.startswith("command failed: upsc "), (
+    f"expected detail to start with 'command failed: upsc ', got {parsed_if}"
+)
+assert "invocation failed" not in detail_if, (
+    f"legacy invocation prefix leaked into detail, got {parsed_if}"
 )
 assert err_if == "", (
     f"expected empty stderr in --json invocation-failed, got: {err_if!r}"
+)
+
+exit_code = machine.execute(
+    f"PATH=/nonexistent {unwrapped_braid} ups status "
+    ">/tmp/ups_if_human.out 2>/tmp/ups_if_human.err"
+)[0]
+assert exit_code != 0, (
+    "braid ups status must exit non-zero on human invocation failure; got 0"
+)
+out_if_human = machine.succeed("cat /tmp/ups_if_human.out")
+err_if_human = machine.succeed("cat /tmp/ups_if_human.err")
+assert out_if_human == "", (
+    f"expected empty stdout in human invocation-failed, got: {out_if_human!r}"
+)
+assert err_if_human.startswith("error: upsc invocation failed:"), (
+    f"expected human invocation failure prefix, got: {err_if_human!r}"
+)
+assert "-- is pkgs.nut on PATH?" in err_if_human, (
+    f"expected PATH hint in human invocation failure, got: {err_if_human!r}"
+)
+assert "upsc query failed" not in err_if_human, (
+    f"query-failed wording leaked into human invocation failure: {err_if_human!r}"
 )
 
 # --- Not-enabled branch ---

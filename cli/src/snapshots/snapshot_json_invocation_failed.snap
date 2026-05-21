@@ -4,5 +4,5 @@ expression: "&payload"
 ---
 {
   "error": "invocation_failed",
-  "detail": "invocation failed: upsc: No such file or directory"
+  "detail": "command failed: upsc ups: No such file or directory"
 }

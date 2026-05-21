@@ -8,7 +8,10 @@
 # drift and PATH leaks where ambient binaries could bypass the pinned toolchain.
 #
 # Dependencies: braid module (options.nix, cli.nix) must wire cfg.packages correctly.
-{ braid-cli-unwrapped }:
+{
+  braid-cli-unwrapped,
+  braidWrappedPackage,
+}:
 {
   name = "tool-versions";
 
@@ -23,15 +26,19 @@
         pkgs.btrfs-progs
         pkgs.cryptsetup
         pkgs.util-linux
+        pkgs.nut
         pkgs.jq
         pkgs.coreutils
       ];
+
+      environment.etc."braid/top-level-braid-path".text = "${braidWrappedPackage}/bin/braid\n";
 
       # Nix-evaluated expected versions — single source of truth
       environment.etc."braid/expected-versions.json".text = builtins.toJSON {
         btrfsProgs = pkgs.btrfs-progs.version;
         cryptsetup = pkgs.cryptsetup.version;
         utilLinux = pkgs.util-linux.version;
+        nut = pkgs.nut.version;
       };
     };
 
