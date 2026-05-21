@@ -267,6 +267,46 @@ mod tests {
         assert!(matches!(err, PoolLockError::AlreadyHeld));
     }
 
+    // Intent: acquire_with_timeout returns Ok when the holder releases
+    // mid-poll, exercising poll_acquire's sleep-then-retry branch -- not only
+    // the uncontested fast path or the expiry path.
+    // Why it exists: protects the positive-shape gate for `braid ack`'s
+    // bounded wait. A regression in poll_acquire -- an off-by-one on
+    // `start.elapsed() < timeout`, exit-on-first AlreadyHeld, or a change that
+    // turns the polled LockExclusiveNonblock into a one-shot try -- would
+    // silently make ack refuse to wait out a short concurrent operation while
+    // existing Rust unit and VM tests still passed.
+    // Scenario: `braid ack` runs while a concurrent monitor cycle briefly
+    // holds the pool lock; ack should observe the release within its bounded
+    // wait window and proceed.
+    #[test]
+    fn acquire_with_timeout_polls_then_succeeds_after_holder_release() {
+        let dir = tempfile::tempdir().unwrap();
+        let lock = RealPoolLock::new(dir.path().join("pool.lock"));
+
+        let holder = lock.try_acquire().expect("initial holder acquire");
+        let releaser = thread::spawn(move || {
+            thread::sleep(Duration::from_millis(100));
+            drop(holder);
+        });
+
+        let start = Instant::now();
+        let result = lock.acquire_with_timeout(Duration::from_secs(2));
+        let elapsed = start.elapsed();
+        releaser.join().expect("releaser panicked");
+
+        assert!(
+            result.is_ok(),
+            "expected Ok after holder release; got {:?}",
+            result.err()
+        );
+        assert!(
+            elapsed >= POOL_POLL_INTERVAL,
+            "main thread did not exercise the retry path; elapsed={:?}",
+            elapsed
+        );
+    }
+
     #[test]
     fn acquire_with_systemd_stop_deadline_returns_deadline_expired_on_expiry() {
         let dir = tempfile::tempdir().unwrap();
@@ -277,6 +317,47 @@ mod tests {
             Err(err) => err,
         };
         assert!(matches!(err, PoolLockError::DeadlineExpired { .. }));
+    }
+
+    // Intent: acquire_with_systemd_stop_deadline returns Ok when the holder
+    // releases mid-poll, exercising poll_acquire's sleep-then-retry branch --
+    // not only the uncontested fast path or the expiry path.
+    // Why it exists: protects the positive-shape gate for `braid lock
+    // --systemd-stop`'s shutdown wait. A regression in poll_acquire -- an
+    // off-by-one on `start.elapsed() < timeout`, exit-on-first AlreadyHeld, or
+    // a change that turns the polled LockExclusiveNonblock into a one-shot
+    // try -- would silently make the systemd stop path refuse to wait out a
+    // short concurrent operation while existing Rust unit and VM tests still
+    // passed.
+    // Scenario: `braid lock --systemd-stop` runs while a concurrent mutator
+    // briefly holds the pool lock during shutdown; the stop path should
+    // observe the release within its deadline and proceed.
+    #[test]
+    fn acquire_with_systemd_stop_deadline_polls_then_succeeds_after_holder_release() {
+        let dir = tempfile::tempdir().unwrap();
+        let lock = RealPoolLock::new(dir.path().join("pool.lock"));
+
+        let holder = lock.try_acquire().expect("initial holder acquire");
+        let releaser = thread::spawn(move || {
+            thread::sleep(Duration::from_millis(100));
+            drop(holder);
+        });
+
+        let start = Instant::now();
+        let result = lock.acquire_with_systemd_stop_deadline(Duration::from_secs(2));
+        let elapsed = start.elapsed();
+        releaser.join().expect("releaser panicked");
+
+        assert!(
+            result.is_ok(),
+            "expected Ok after holder release; got {:?}",
+            result.err()
+        );
+        assert!(
+            elapsed >= POOL_POLL_INTERVAL,
+            "main thread did not exercise the retry path; elapsed={:?}",
+            elapsed
+        );
     }
 
     #[test]
