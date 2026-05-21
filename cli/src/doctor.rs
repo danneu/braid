@@ -26,7 +26,6 @@ use crate::online_state::{BRAID_ONLINE_UNIT, OnlineStateOps, RealOnlineStateOps,
 use crate::parse::smartctl::selftest_age_hours;
 use crate::parse::types::{BtrfsBgType, BtrfsDfOutput, BtrfsProfile, SelftestSummary};
 use crate::parse::{parse_btrfs_df_json, parse_cryptsetup_luks_uuid, parse_smartctl_selftest_log};
-use crate::preflight;
 use crate::probe::{self, Filesystem, ProbeError, RealFilesystem};
 use crate::state_paths::StatePaths;
 use crate::status::format_bytes;
@@ -665,8 +664,13 @@ fn check_profile_mismatch<R: CommandRunner>(
                         format_bytes(entry.bg_total),
                     ));
                 }
-                let suggestion = match preflight::probe_missing_devids(ctx.runner, &mount_point) {
-                    Ok(missing) if !missing.is_empty() => {
+                ensure_pool_state(ctx);
+                let suggestion = match ctx
+                    .pool_state
+                    .as_ref()
+                    .expect("ensure_pool_state seeds the cache when config is present and mounted")
+                {
+                    Ok(pool) if !pool.missing_devids.is_empty() => {
                         "pool is degraded -- replace missing device(s) first, then rebalance"
                             .to_owned()
                     }
@@ -695,21 +699,25 @@ fn check_pool_missing_devices<R: CommandRunner>(ctx: &mut DoctorContext<'_, R>) 
         return CheckResult::skip("pool_missing_devices", "skipped (pool not mounted)");
     }
 
-    let mount_point = ctx.config.as_ref().unwrap().mount_point().clone();
-
-    match preflight::probe_missing_devids(ctx.runner, &mount_point) {
-        Ok(missing) if missing.is_empty() => {
+    ensure_pool_state(ctx);
+    match ctx
+        .pool_state
+        .as_ref()
+        .expect("ensure_pool_state seeds the cache when config is present and mounted")
+    {
+        Ok(pool) if pool.missing_devids.is_empty() => {
             CheckResult::ok("pool_missing_devices", "no missing devices")
         }
-        Ok(missing) => {
-            let devids: Vec<String> = missing.iter().map(|d| d.to_string()).collect();
+        Ok(pool) => {
+            let devids: Vec<String> = pool.missing_devids.iter().map(|d| d.to_string()).collect();
+            let n = pool.missing_devids.len();
             CheckResult::warn(
                 "pool_missing_devices",
                 format!(
                     "pool has {} missing device{} (devid{}: {}); replace with: braid replace --old <disk> --new <disk> --missing-id <devid>",
-                    missing.len(),
-                    if missing.len() == 1 { "" } else { "s" },
-                    if missing.len() == 1 { "" } else { "s" },
+                    n,
+                    if n == 1 { "" } else { "s" },
+                    if n == 1 { "" } else { "s" },
                     devids.join(", "),
                 ),
             )
@@ -1386,13 +1394,12 @@ mod tests {
     use crate::test_fixtures::{
         DF_MIXED, DF_MIXED_METADATA, DF_RAID1_CLEAN, DfQueryFailureRunner, DoctorMockFs,
         PoolMissingDevicesRunner, UpscSpawnFailureRunner, beep_ctx, cls, config_with_ups_enabled,
-        config_without_ups, device_usage_healthy, device_usage_with_missing, df_json, df_json_fail,
-        disk_member_with, human_options, is_luks_ok, isolated_paths, luks_dump_text_ok,
-        luks_uuid_ok, mountpoint_fail, mountpoint_ok, parsed_doctor_ctx, smart_selftest_runner_for,
-        smartctl_selftest_json, systemctl_show_active_state_output, test_uuid, ups_ctx,
-        valid_config_json, write_temp,
+        config_without_ups, df_json, df_json_fail, disk_member_with, human_options, is_luks_ok,
+        isolated_paths, luks_dump_text_ok, luks_uuid_ok, mountpoint_fail, mountpoint_ok,
+        parsed_doctor_ctx, pool_state_runner, smart_selftest_runner_for, smartctl_selftest_json,
+        systemctl_show_active_state_output, test_uuid, ups_ctx, valid_config_json, write_temp,
     };
-    use crate::types::{MapperName, MountPoint};
+    use crate::types::MountPoint;
 
     fn find_check<'a>(report: &'a DoctorReport, name: &str) -> &'a CheckResult {
         report
@@ -1400,49 +1407,6 @@ mod tests {
             .iter()
             .find(|c| c.name == name)
             .unwrap_or_else(|| panic!("check '{name}' not found"))
-    }
-
-    fn doctor_btrfs_show(devices: &[(&str, u64)]) -> RawCommandOutput {
-        let mut body = format!(
-            "Label: none  uuid: aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee\n\
-             \tTotal devices {} FS bytes used 1.00GiB\n",
-            devices.len()
-        );
-        for (mapper, devid) in devices {
-            body.push_str(&format!(
-                "\tdevid {devid:>4} size 10.00GiB used 2.00GiB path /dev/mapper/{mapper}\n"
-            ));
-        }
-        RawCommandOutput {
-            cmd: "btrfs filesystem show /mnt/storage".into(),
-            stdout: body,
-            stderr: String::new(),
-            exit_status: 0,
-        }
-    }
-
-    fn doctor_cryptsetup_status_active(mapper: &str, device: &str) -> RawCommandOutput {
-        RawCommandOutput {
-            cmd: format!("cryptsetup status {mapper}"),
-            stdout: format!(
-                "/dev/mapper/{mapper} is active and is in use.\n\
-                 \ttype:    LUKS2\n\
-                 \tcipher:  aes-xts-plain64\n\
-                 \tdevice:  {device}\n\
-                 \tsector size:  512\n"
-            ),
-            stderr: String::new(),
-            exit_status: 0,
-        }
-    }
-
-    fn doctor_cryptsetup_uuid_ok(device: &str, uuid: &LuksUuid) -> RawCommandOutput {
-        RawCommandOutput {
-            cmd: format!("cryptsetup luksUUID {device}"),
-            stdout: format!("{uuid}\n"),
-            stderr: String::new(),
-            exit_status: 0,
-        }
     }
 
     fn doctor_smartctl_selftest_json(
@@ -1505,43 +1469,6 @@ mod tests {
             m.insert(uuid, member).expect("fixture member inserts");
         }
         membership::save_membership(&m, paths).expect("fixture membership saves");
-    }
-
-    fn foreign_luks_uuid_runner(
-        pool_devices: Vec<(&'static str, u64, &'static str, LuksUuid)>,
-    ) -> MockRunner {
-        let mut runner = MockRunner::default();
-        let (mp_req, mp_out) = mountpoint_ok();
-        runner = runner.with_output(mp_req, mp_out);
-
-        let show_devices: Vec<(&str, u64)> = pool_devices
-            .iter()
-            .map(|(mapper, devid, _, _)| (*mapper, *devid))
-            .collect();
-        runner = runner.with_output(
-            CmdRequest::BtrfsFilesystemShow {
-                mount_point: MountPoint("/mnt/storage".to_owned()),
-            },
-            doctor_btrfs_show(&show_devices),
-        );
-
-        for (mapper, _, device, uuid) in pool_devices {
-            runner = runner
-                .with_output(
-                    CmdRequest::CryptsetupStatus {
-                        mapper: MapperName(mapper.to_owned()),
-                    },
-                    doctor_cryptsetup_status_active(mapper, device),
-                )
-                .with_output(
-                    CmdRequest::CryptsetupLuksUuid {
-                        device: device.to_owned(),
-                    },
-                    doctor_cryptsetup_uuid_ok(device, &uuid),
-                );
-        }
-
-        runner
     }
 
     // Intent: a syntactically valid Config parses + schema-validates, and
@@ -3211,21 +3138,12 @@ mod tests {
     //   to replace before balancing.
     #[test]
     fn data_profile_mismatch_recommends_replace_when_degraded() {
-        let (mp_req, mp_out) = mountpoint_ok();
         let (df_req, df_out) = df_json(DF_MIXED);
-        let (du_req, du_out) = device_usage_with_missing();
-        let runner = MockRunner::default()
-            .with_output(mp_req, mp_out)
-            .with_output(df_req, df_out)
-            .with_output(du_req, du_out);
+        let runner = pool_state_runner(vec![("braid-disk1", 1, "/dev/vdb", test_uuid(1))], &[2])
+            .with_output(df_req, df_out);
+        let fs = DoctorMockFs::mounted_btrfs_only();
         let f = write_temp(valid_config_json());
-        let report = run_doctor(
-            f.path(),
-            &runner,
-            &RealFilesystem,
-            &isolated_paths().1,
-            human_options(),
-        );
+        let report = run_doctor(f.path(), &runner, &fs, &isolated_paths().1, human_options());
         let check = find_check(&report, "data_profile_mismatch");
         assert_eq!(check.status, CheckStatus::Warn);
         assert!(check.message.contains("mixed"), "{}", check.message);
@@ -3250,26 +3168,17 @@ mod tests {
     // Why it exists: pins the Ok(empty) probe branch. Without this, the new
     //   routing logic could regress into always emitting the degraded message,
     //   and the existing `data_profile_mixed_warns` would not catch it because
-    //   that test exercises the Err fallback by leaving BtrfsDeviceUsageRaw unmocked.
+    //   that test exercises the Err fallback by leaving BtrfsFilesystemShow unmocked.
     // Scenario: operator interrupted a balance midway; mixed profiles exist but
     //   all members are present. doctor should still recommend the balance.
     #[test]
     fn data_profile_mismatch_recommends_balance_when_healthy() {
-        let (mp_req, mp_out) = mountpoint_ok();
         let (df_req, df_out) = df_json(DF_MIXED);
-        let (du_req, du_out) = device_usage_healthy();
-        let runner = MockRunner::default()
-            .with_output(mp_req, mp_out)
-            .with_output(df_req, df_out)
-            .with_output(du_req, du_out);
+        let runner = pool_state_runner(vec![("braid-disk1", 1, "/dev/vdb", test_uuid(1))], &[])
+            .with_output(df_req, df_out);
+        let fs = DoctorMockFs::mounted_btrfs_only();
         let f = write_temp(valid_config_json());
-        let report = run_doctor(
-            f.path(),
-            &runner,
-            &RealFilesystem,
-            &isolated_paths().1,
-            human_options(),
-        );
+        let report = run_doctor(f.path(), &runner, &fs, &isolated_paths().1, human_options());
         let check = find_check(&report, "data_profile_mismatch");
         assert_eq!(check.status, CheckStatus::Warn);
         assert!(check.message.contains("mixed"), "{}", check.message);
@@ -3555,21 +3464,12 @@ mod tests {
     //   to replace before balancing.
     #[test]
     fn metadata_profile_mismatch_recommends_replace_when_degraded() {
-        let (mp_req, mp_out) = mountpoint_ok();
         let (df_req, df_out) = df_json(DF_MIXED_METADATA);
-        let (du_req, du_out) = device_usage_with_missing();
-        let runner = MockRunner::default()
-            .with_output(mp_req, mp_out)
-            .with_output(df_req, df_out)
-            .with_output(du_req, du_out);
+        let runner = pool_state_runner(vec![("braid-disk1", 1, "/dev/vdb", test_uuid(1))], &[2])
+            .with_output(df_req, df_out);
+        let fs = DoctorMockFs::mounted_btrfs_only();
         let f = write_temp(valid_config_json());
-        let report = run_doctor(
-            f.path(),
-            &runner,
-            &RealFilesystem,
-            &isolated_paths().1,
-            human_options(),
-        );
+        let report = run_doctor(f.path(), &runner, &fs, &isolated_paths().1, human_options());
         let check = find_check(&report, "metadata_profile_mismatch");
         assert_eq!(check.status, CheckStatus::Warn);
         assert!(check.message.contains("mixed"), "{}", check.message);
@@ -3664,30 +3564,20 @@ mod tests {
     // Scenario: healthy 1-disk pool, all present.
     #[test]
     fn pool_missing_devices_ok_when_healthy() {
-        let (mp_req, mp_out) = mountpoint_ok();
-        let (df_req, df_out) = df_json(DF_RAID1_CLEAN);
-        let (du_req, du_out) = device_usage_healthy();
-        let runner = MockRunner::default()
-            .with_output(mp_req, mp_out)
-            .with_output(df_req, df_out)
-            .with_output(du_req, du_out);
+        let runner = pool_state_runner(vec![("braid-disk1", 1, "/dev/vdb", test_uuid(1))], &[]);
+        let fs = DoctorMockFs::mounted_btrfs_only();
         let f = write_temp(valid_config_json());
-        let report = run_doctor(
-            f.path(),
-            &runner,
-            &RealFilesystem,
-            &isolated_paths().1,
-            human_options(),
-        );
+        let report = run_doctor(f.path(), &runner, &fs, &isolated_paths().1, human_options());
         let check = find_check(&report, "pool_missing_devices");
         assert_eq!(check.status, CheckStatus::Ok);
         assert!(check.message.contains("no missing"), "{}", check.message);
     }
 
     /* Intent: pool_missing_devices can run without querying `btrfs filesystem df`.
-     * Why it exists: missing-device detection only needs the mountpoint state and
-     * `btrfs device usage`; tying it to df makes an unrelated parser or command
-     * failure hide the more specific device probe.
+     * Why it exists: missing-device detection now reads `pool_state.missing_devids`
+     * (sourced from `BtrfsFilesystemShow` via `probe::probe_pool`); tying the
+     * check to df would make an unrelated parser or command failure hide the
+     * more specific live-pool probe.
      * Scenario: the pool is mounted and healthy, while the df command would fail
      * if this check accidentally requested it.
      */
@@ -3695,7 +3585,9 @@ mod tests {
     fn pool_missing_devices_does_not_require_filesystem_df() {
         let runner = PoolMissingDevicesRunner::default();
         let (_dir, paths) = isolated_paths();
-        let mut ctx = parsed_doctor_ctx(&runner, &paths);
+        let fs = DoctorMockFs::mounted_btrfs_only();
+        let mut ctx =
+            DoctorContext::for_test_parsed_with_fs(&runner, &fs, &paths, valid_config_json());
 
         let check = check_pool_missing_devices(&mut ctx);
 
@@ -3712,8 +3604,8 @@ mod tests {
         assert!(
             calls
                 .iter()
-                .any(|c| matches!(c, CmdRequest::BtrfsDeviceUsageRaw { .. })),
-            "expected device usage probe, got: {calls:?}"
+                .any(|c| matches!(c, CmdRequest::BtrfsFilesystemShow { .. })),
+            "expected btrfs filesystem show probe, got: {calls:?}"
         );
         assert!(
             !calls
@@ -3728,21 +3620,10 @@ mod tests {
     // Scenario: one drive died in a 2-disk NAS.
     #[test]
     fn pool_missing_devices_warns_with_replace_recommendation() {
-        let (mp_req, mp_out) = mountpoint_ok();
-        let (df_req, df_out) = df_json(DF_RAID1_CLEAN);
-        let (du_req, du_out) = device_usage_with_missing();
-        let runner = MockRunner::default()
-            .with_output(mp_req, mp_out)
-            .with_output(df_req, df_out)
-            .with_output(du_req, du_out);
+        let runner = pool_state_runner(vec![("braid-disk1", 1, "/dev/vdb", test_uuid(1))], &[2]);
+        let fs = DoctorMockFs::mounted_btrfs_only();
         let f = write_temp(valid_config_json());
-        let report = run_doctor(
-            f.path(),
-            &runner,
-            &RealFilesystem,
-            &isolated_paths().1,
-            human_options(),
-        );
+        let report = run_doctor(f.path(), &runner, &fs, &isolated_paths().1, human_options());
         let check = find_check(&report, "pool_missing_devices");
         assert_eq!(check.status, CheckStatus::Warn);
         assert!(
@@ -3801,10 +3682,13 @@ mod tests {
         );
         let known_uuid = test_uuid(170);
         let foreign_uuid = test_uuid(171);
-        let runner = foreign_luks_uuid_runner(vec![
-            ("braid-disk1", 1, "/dev/vdb", known_uuid),
-            ("braid-stranger", 2, "/dev/vdc", foreign_uuid.clone()),
-        ]);
+        let runner = pool_state_runner(
+            vec![
+                ("braid-disk1", 1, "/dev/vdb", known_uuid),
+                ("braid-stranger", 2, "/dev/vdc", foreign_uuid.clone()),
+            ],
+            &[],
+        );
         let fs = DoctorMockFs::mounted_btrfs_only();
         let f = write_temp(valid_config_json());
 
@@ -3849,7 +3733,7 @@ mod tests {
             &[(172, "disk1", "/dev/disk/by-id/virtio-disk1", Some(1))],
         );
         let known_uuid = test_uuid(172);
-        let runner = foreign_luks_uuid_runner(vec![("braid-disk1", 1, "/dev/vdb", known_uuid)]);
+        let runner = pool_state_runner(vec![("braid-disk1", 1, "/dev/vdb", known_uuid)], &[]);
         let fs = DoctorMockFs::mounted_btrfs_only();
         let f = write_temp(valid_config_json());
 
@@ -3955,21 +3839,10 @@ mod tests {
     // Scenario: operator reads braid doctor output.
     #[test]
     fn human_format_contains_missing_devs_label() {
-        let (mp_req, mp_out) = mountpoint_ok();
-        let (df_req, df_out) = df_json(DF_RAID1_CLEAN);
-        let (du_req, du_out) = device_usage_healthy();
-        let runner = MockRunner::default()
-            .with_output(mp_req, mp_out)
-            .with_output(df_req, df_out)
-            .with_output(du_req, du_out);
+        let runner = pool_state_runner(vec![("braid-disk1", 1, "/dev/vdb", test_uuid(1))], &[]);
+        let fs = DoctorMockFs::mounted_btrfs_only();
         let f = write_temp(valid_config_json());
-        let report = run_doctor(
-            f.path(),
-            &runner,
-            &RealFilesystem,
-            &isolated_paths().1,
-            human_options(),
-        );
+        let report = run_doctor(f.path(), &runner, &fs, &isolated_paths().1, human_options());
         let human = format_doctor_human(&report);
         assert!(
             human.contains("missing devs"),

@@ -57,7 +57,7 @@ The dry-run preview itself stays on stdout. Side-effect-free probes that neverth
 
 - `--old` accepts both live (present in pool) and dead/missing disks.
 - Both paths use `btrfs replace start` — the sole replacement primitive. Live disks replace in-place; missing disks are rebuilt from RAID redundancy by devid.
-- `--missing-id` is only valid when `--old` is dead/missing. Rejected with live `--old`. Validated against actual missing devids via `probe_missing_devids()`.
+- `--missing-id` is only valid when `--old` is dead/missing. Rejected with live `--old`. Validated against `PoolState::missing_devids` (live btrfs state via `probe::probe_pool`).
 - When exactly one device is missing, the devid is auto-resolved. Multiple missing devices require explicit `--missing-id`.
 - Mixed state (live `--old` + pool has missing devices) is rejected — operator must repair the missing device first with `braid replace --missing-id <devid>`. `braid remove-missing` is only for intentional cleanup (forgetting stale entries without rebuilding data).
 - No replacement path uses `btrfs device add`. Missing-path replace may run a post-commit soft RAID1 balance only when it clears the last missing device.

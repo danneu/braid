@@ -14,7 +14,7 @@ use crate::cmd::{CmdError, CmdRequest, CommandRunner, MockRunner, RawCommandOutp
 use crate::doctor::{DiskState, DoctorContext, DoctorOptions};
 use crate::probe::Filesystem;
 use crate::state_paths::StatePaths;
-use crate::types::MountPoint;
+use crate::types::{LuksUuid, MapperName, MountPoint};
 use std::io::Write;
 use std::sync::Mutex;
 use tempfile::{NamedTempFile, TempDir};
@@ -212,54 +212,103 @@ pub(crate) fn df_json_fail() -> (CmdRequest, RawCommandOutput) {
     )
 }
 
-pub(crate) fn device_usage_healthy() -> (CmdRequest, RawCommandOutput) {
-    (
-        CmdRequest::BtrfsDeviceUsageRaw {
-            mount_point: MountPoint("/mnt/storage".to_owned()),
-        },
-        RawCommandOutput {
-            cmd: "btrfs device usage --raw /mnt/storage".into(),
-            stdout: "\
-/dev/mapper/braid-toshiba, ID: 1
-   Device size:           520093696
-   Device slack:                  0
-   Data,RAID1:            469762048
-   Unallocated:            50331648
-
-"
-            .into(),
-            stderr: String::new(),
-            exit_status: 0,
-        },
-    )
+/// `btrfs filesystem show` mock that feeds `probe::probe_pool`. Both present
+/// devices and `MISSING` sentinels are formatted via `parse_btrfs_filesystem_show`'s
+/// expected layout so doctor's `pool_state.missing_devids` is populated end-to-end.
+pub(crate) fn doctor_btrfs_show(
+    devices: &[(&str, u64)],
+    missing_devids: &[u64],
+) -> RawCommandOutput {
+    let total = devices.len() + missing_devids.len();
+    let mut body = format!(
+        "Label: none  uuid: aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee\n\
+         \tTotal devices {total} FS bytes used 1.00GiB\n"
+    );
+    for (mapper, devid) in devices {
+        body.push_str(&format!(
+            "\tdevid {devid:>4} size 10.00GiB used 2.00GiB path /dev/mapper/{mapper}\n"
+        ));
+    }
+    for devid in missing_devids {
+        body.push_str(&format!("\tdevid {devid:>4} size 0 used 0 path MISSING\n"));
+    }
+    RawCommandOutput {
+        cmd: "btrfs filesystem show /mnt/storage".into(),
+        stdout: body,
+        stderr: String::new(),
+        exit_status: 0,
+    }
 }
 
-pub(crate) fn device_usage_with_missing() -> (CmdRequest, RawCommandOutput) {
-    (
-        CmdRequest::BtrfsDeviceUsageRaw {
+/// `cryptsetup status` mock for an active LUKS mapper. Pairs with
+/// `doctor_btrfs_show` so `probe::probe_pool` can walk each present mapper
+/// down to its backing block device.
+pub(crate) fn doctor_cryptsetup_status_active(mapper: &str, device: &str) -> RawCommandOutput {
+    RawCommandOutput {
+        cmd: format!("cryptsetup status {mapper}"),
+        stdout: format!(
+            "/dev/mapper/{mapper} is active and is in use.\n\
+             \ttype:    LUKS2\n\
+             \tcipher:  aes-xts-plain64\n\
+             \tdevice:  {device}\n\
+             \tsector size:  512\n"
+        ),
+        stderr: String::new(),
+        exit_status: 0,
+    }
+}
+
+/// `cryptsetup luksUUID` mock. Completes the `probe_pool` chain so doctor
+/// observes a concrete `LuksUuid` per device.
+pub(crate) fn doctor_cryptsetup_uuid_ok(device: &str, uuid: &LuksUuid) -> RawCommandOutput {
+    RawCommandOutput {
+        cmd: format!("cryptsetup luksUUID {device}"),
+        stdout: format!("{uuid}\n"),
+        stderr: String::new(),
+        exit_status: 0,
+    }
+}
+
+/// Build a `MockRunner` that drives `ensure_pool_state` end-to-end:
+/// mountpoint ok, `BtrfsFilesystemShow` (with optional MISSING sentinels),
+/// per-mapper cryptsetup status, and per-device cryptsetup luksUUID. Shared
+/// across every doctor check that reads `ctx.pool_state.missing_devids`.
+pub(crate) fn pool_state_runner(
+    pool_devices: Vec<(&'static str, u64, &'static str, LuksUuid)>,
+    missing_devids: &[u64],
+) -> MockRunner {
+    let mut runner = MockRunner::default();
+    let (mp_req, mp_out) = mountpoint_ok();
+    runner = runner.with_output(mp_req, mp_out);
+
+    let show_devices: Vec<(&str, u64)> = pool_devices
+        .iter()
+        .map(|(mapper, devid, _, _)| (*mapper, *devid))
+        .collect();
+    runner = runner.with_output(
+        CmdRequest::BtrfsFilesystemShow {
             mount_point: MountPoint("/mnt/storage".to_owned()),
         },
-        RawCommandOutput {
-            cmd: "btrfs device usage --raw /mnt/storage".into(),
-            stdout: "\
-/dev/mapper/braid-toshiba, ID: 1
-   Device size:           520093696
-   Device slack:                  0
-   Data,RAID1:            469762048
-   Unallocated:            50331648
+        doctor_btrfs_show(&show_devices, missing_devids),
+    );
 
-<missing disk>, ID: 2
-   Device size:                  0
-   Device slack:                  0
-   Data,RAID1:            469762048
-   Unallocated:                  0
+    for (mapper, _, device, uuid) in pool_devices {
+        runner = runner
+            .with_output(
+                CmdRequest::CryptsetupStatus {
+                    mapper: MapperName(mapper.to_owned()),
+                },
+                doctor_cryptsetup_status_active(mapper, device),
+            )
+            .with_output(
+                CmdRequest::CryptsetupLuksUuid {
+                    device: device.to_owned(),
+                },
+                doctor_cryptsetup_uuid_ok(device, &uuid),
+            );
+    }
 
-"
-            .into(),
-            stderr: String::new(),
-            exit_status: 0,
-        },
-    )
+    runner
 }
 
 /// Bare `RawCommandOutput` (not paired with a request) because braid-online
@@ -378,9 +427,12 @@ impl CommandRunner for DfQueryFailureRunner {
     }
 }
 
-/// Mountpoint Ok, device usage healthy, `BtrfsFilesystemDfJson` panics.
-/// Pins the invariant that `check_pool_missing_devices` is decoupled from
-/// df. Records every call so the test can assert the expected probe set.
+/// Mountpoint Ok + `probe_pool` chain (`BtrfsFilesystemShow` + per-mapper
+/// `CryptsetupStatus` + per-device `CryptsetupLuksUuid`) for one healthy
+/// member, with `BtrfsFilesystemDfJson` panicking. Pins the invariant that
+/// `check_pool_missing_devices` is decoupled from df even though it now
+/// shares `ctx.pool_state` with `check_foreign_luks_uuid`. Records every
+/// call so the test can assert the expected probe set.
 #[derive(Default)]
 pub(crate) struct PoolMissingDevicesRunner {
     pub(crate) calls: Mutex<Vec<CmdRequest>>,
@@ -394,9 +446,15 @@ impl CommandRunner for PoolMissingDevicesRunner {
             CmdRequest::MountpointCheck { path } if path.0 == "/mnt/storage" => {
                 Ok(mountpoint_ok().1)
             }
-            CmdRequest::BtrfsDeviceUsageRaw { mount_point } if mount_point.0 == "/mnt/storage" => {
-                Ok(device_usage_healthy().1)
+            CmdRequest::BtrfsFilesystemShow { mount_point } if mount_point.0 == "/mnt/storage" => {
+                Ok(doctor_btrfs_show(&[("braid-disk1", 1)], &[]))
             }
+            CmdRequest::CryptsetupStatus { mapper } if mapper.0 == "braid-disk1" => {
+                Ok(doctor_cryptsetup_status_active("braid-disk1", "/dev/vdb"))
+            }
+            CmdRequest::CryptsetupLuksUuid { device } if device == "/dev/vdb" => Ok(
+                doctor_cryptsetup_uuid_ok("/dev/vdb", &crate::test_fixtures::test_uuid(1)),
+            ),
             CmdRequest::BtrfsFilesystemDfJson { .. } => {
                 panic!("pool_missing_devices must not query filesystem df")
             }

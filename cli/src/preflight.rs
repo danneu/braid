@@ -1,10 +1,9 @@
 use std::fmt;
 
-use crate::cmd::{CmdRequest, CommandRunner};
+use crate::cmd::CommandRunner;
 use crate::journal;
 use crate::membership::PoolMembership;
 use crate::mount_check::{self, mount_entry_at_via_fs};
-use crate::parse::parse_btrfs_device_usage;
 use crate::parse::types::{BtrfsBgType, BtrfsDeviceUsageEntry, BtrfsDfOutput};
 use crate::preview::PreviewNote;
 use crate::probe::Filesystem;
@@ -293,29 +292,6 @@ pub fn check_no_missing_devices(missing_count: u64, action: &str) -> Result<(), 
     } else {
         Ok(())
     }
-}
-
-/// Return the set of devids that are missing (device_size == 0 in btrfs
-/// device usage output). Used to validate --missing-id arguments.
-pub fn probe_missing_devids<R: CommandRunner>(
-    runner: &R,
-    mount_point: &MountPoint,
-) -> Result<Vec<u64>, String> {
-    let raw = runner
-        .run(&CmdRequest::BtrfsDeviceUsageRaw {
-            mount_point: mount_point.clone(),
-        })
-        .map_err(|e| format!("failed to probe device usage: {e}"))?;
-
-    let usage =
-        parse_btrfs_device_usage(&raw).map_err(|e| format!("failed to parse device usage: {e}"))?;
-
-    Ok(usage
-        .devices
-        .iter()
-        .filter(|d| d.device_size == 0)
-        .map(|d| d.devid)
-        .collect())
 }
 
 /// Check that remaining devices have enough RAID1-aware space to absorb the
@@ -852,76 +828,6 @@ mod tests {
             err.contains("1 missing device."),
             "expected singular in: {err}"
         );
-    }
-
-    #[test]
-    // Intent: probe_missing_devids returns devids of missing devices.
-    // Why: Used to validate --missing-id arguments against actual missing devids.
-    // Scenario: 3-disk pool with one missing device (devid 3).
-    fn probe_missing_devids_returns_missing() {
-        let runner = MockRunner::default().with_output(
-            CmdRequest::BtrfsDeviceUsageRaw { mount_point: mp() },
-            RawCommandOutput {
-                cmd: "btrfs device usage --raw /mnt/storage".into(),
-                stdout: "\
-/dev/mapper/braid-disk1, ID: 1
-   Device size:           520093696
-   Device slack:                  0
-   Data,RAID1:            469762048
-   Unallocated:            50331648
-
-/dev/mapper/braid-disk2, ID: 2
-   Device size:           520093696
-   Device slack:                  0
-   Data,RAID1:            469762048
-   Unallocated:            50331648
-
-<missing disk>, ID: 3
-   Device size:                  0
-   Device slack:                  0
-   Data,RAID1:           2147483648
-   Unallocated:                  0
-
-"
-                .into(),
-                stderr: String::new(),
-                exit_status: 0,
-            },
-        );
-        let missing = probe_missing_devids(&runner, &mp()).unwrap();
-        assert_eq!(missing, vec![3]);
-    }
-
-    #[test]
-    // Intent: probe_missing_devids returns empty when no devices are missing.
-    // Why: Confirms healthy pools report no missing devids.
-    // Scenario: Normal 2-disk pool, all present.
-    fn probe_missing_devids_returns_empty_when_healthy() {
-        let runner = MockRunner::default().with_output(
-            CmdRequest::BtrfsDeviceUsageRaw { mount_point: mp() },
-            RawCommandOutput {
-                cmd: "btrfs device usage --raw /mnt/storage".into(),
-                stdout: "\
-/dev/mapper/braid-disk1, ID: 1
-   Device size:           520093696
-   Device slack:                  0
-   Data,RAID1:            469762048
-   Unallocated:            50331648
-
-/dev/mapper/braid-disk2, ID: 2
-   Device size:           520093696
-   Device slack:                  0
-   Data,RAID1:            469762048
-   Unallocated:            50331648
-
-"
-                .into(),
-                stderr: String::new(),
-                exit_status: 0,
-            },
-        );
-        let missing = probe_missing_devids(&runner, &mp()).unwrap();
-        assert!(missing.is_empty());
     }
 
     // --- check_raid1_relocation_space tests ---
