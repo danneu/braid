@@ -133,6 +133,10 @@ with subtest("Test 1: enroll keyfile into all pool disks"):
         assert t1_err.find(enrolling_wait) < t1_err.find(enrolled_ok), (
             f"enrolling wait must precede enrolled ok for {name}, got: {t1_err!r}"
         )
+    assert "done: 2 enrolled, 0 already had keyfile" in t1_err, (
+        f"expected 'done: 2 enrolled, 0 already had keyfile' summary "
+        f"on mutation path, got: {t1_err!r}"
+    )
 
     # Verify slot 1 is occupied on both disks
     for dev in ["virtio-disk1", "virtio-disk2"]:
@@ -219,6 +223,10 @@ with subtest("Test 3: re-enroll is idempotent"):
             f"[ok]   keyfile: already enrolled on {name}",
             f"idempotent re-enroll for {name}",
         )
+    assert "done: 0 enrolled, 2 already had keyfile" in t3_err, (
+        f"expected 'done: 0 enrolled, 2 already had keyfile' summary "
+        f"on fully-idempotent re-enroll, got: {t3_err!r}"
+    )
 
 # --- Test 4: Passphrase still works after keyfile enrollment ---
 
