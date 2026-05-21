@@ -1,6 +1,6 @@
 use crate::alert;
 use crate::cmd::{CmdRequest, CommandRunner, Step};
-use crate::config::config_read;
+use crate::config::Config;
 use crate::confirm;
 use crate::inhibit::AcquireSleepInhibitor;
 use crate::journal;
@@ -19,7 +19,6 @@ use crate::state_paths::StatePaths;
 use crate::status_tag::{StatusTag, color_enabled_for_stderr, status_line};
 use crate::types::*;
 use std::collections::BTreeMap;
-use std::path::Path;
 
 #[derive(Debug, thiserror::Error)]
 pub enum RemoveError {
@@ -40,8 +39,6 @@ pub enum RemoveError {
     Probe(#[from] ProbeError),
     #[error("pool error: {0}")]
     Pool(#[from] crate::pool::PoolError),
-    #[error("config error: {0}")]
-    Config(#[from] crate::config::ConfigError),
 }
 
 /// Classify a `save_membership` failure that occurs *after* the irreversible
@@ -87,7 +84,7 @@ fn resolve_target_in_membership(
 }
 
 pub struct RemoveParams<'a> {
-    pub config_path: &'a Path,
+    pub config: &'a Config,
     pub name: &'a str,
     pub dry_run: bool,
     pub yes: bool,
@@ -465,14 +462,13 @@ impl RemovePlan {
     }
 }
 
-/// Plan a `braid remove` run. Owns everything above today's `--dry-run`
-/// gate: pending-op preflight, config read, pool probe / mounted
+/// Plan a `braid remove` run after dispatch has already checked for a pending
+/// operation and loaded config under the pool lock. Owns pool probe / mounted
 /// validation, mutation preflight, UPS preflight, target device lookup,
-/// missing-device guard, work-plan construction, and the
-/// eviction-space preflight. On success, accumulated notes move into
-/// `plan.notes`; on post-preflight failure, accumulated notes stay on
-/// `PlanFailure::notes` so `cmd_remove` can render them before returning
-/// the error.
+/// missing-device guard, work-plan construction, and the eviction-space
+/// preflight. On success, accumulated notes move into `plan.notes`; on
+/// post-preflight failure, accumulated notes stay on `PlanFailure::notes` so
+/// `cmd_remove` can render them before returning the error.
 pub fn plan_remove<R: CommandRunner + Sync, F: Filesystem + ?Sized>(
     runner: &R,
     fs: &F,
@@ -482,14 +478,7 @@ pub fn plan_remove<R: CommandRunner + Sync, F: Filesystem + ?Sized>(
     // preserve preflight diagnostics on `PlanFailure::notes`.
     let mut notes: Vec<PreviewNote> = Vec::new();
 
-    if let Err(msg) = preflight::check_no_pending_operation(params.paths) {
-        return Err(PlanFailure::empty(RemoveError::Validation(msg)));
-    }
-
-    let config = match config_read(params.config_path) {
-        Ok(c) => c,
-        Err(e) => return Err(PlanFailure::empty(e.into())),
-    };
+    let config = params.config;
 
     let pool = match probe_pool(runner, fs, config.mount_point()) {
         Ok(p) => p,
@@ -2322,7 +2311,7 @@ mod tests {
      * the command fails, zero mutation commands run (critically, no
      * `btrfs balance ... -f`), the journal survives for `braid recover`,
      * and the error points to recover (not to re-run remove, which would
-     * be blocked by check_no_pending_operation).
+     * be blocked by the dispatch-level pending-operation preflight).
      *
      * Why: pins the post-journal safety gate. BtrfsBalanceSingle ships -f
      * (cli/src/cmd.rs), which skips btrfs-progs' missing-device timeout

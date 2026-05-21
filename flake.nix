@@ -711,6 +711,11 @@
               braid = linuxCrane.braid-cli-unwrapped;
             }
           );
+          mutating-config-preflight-order = pkgs.testers.nixosTest (
+            import ./tests/module/mutating-config-preflight-order.nix {
+              braid = linuxCrane.braid-cli-unwrapped;
+            }
+          );
           pool-lock-dry-run-bypass = pkgs.testers.nixosTest (
             import ./tests/module/pool-lock-dry-run-bypass.nix {
               braid = linuxCrane.braid-cli-unwrapped;

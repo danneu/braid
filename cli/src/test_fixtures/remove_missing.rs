@@ -8,12 +8,12 @@
 
 use super::shared::{PoolFixture, disk_member_with, mock_ok};
 use crate::cmd::{CmdRequest, MockRunner};
+use crate::config::Config;
 use crate::inhibit::RecordingInhibitor;
 use crate::membership::{self, PoolMembership};
 use crate::progress::{self, ProgressOutput};
 use crate::remove_missing::RemoveMissingParams;
 use crate::state_paths::StatePaths;
-use std::path::Path;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 
@@ -180,7 +180,6 @@ impl PoolFixture {
             _state_tmp: base.state_tmp,
             paths: base.paths,
             _config_tmp: base.config_tmp,
-            config_path: base.config_path,
             config: base.config,
             pass_path: base.pass_path,
             inhibitor: RecordingInhibitor::new(),
@@ -209,7 +208,6 @@ impl PoolFixture {
             _state_tmp: base.state_tmp,
             paths: base.paths,
             _config_tmp: base.config_tmp,
-            config_path: base.config_path,
             config: base.config,
             pass_path: base.pass_path,
             inhibitor: RecordingInhibitor::new(),
@@ -221,7 +219,7 @@ impl PoolFixture {
     /// dry_run=false, progress=Off, sleeper=NoopSleeper.
     pub(crate) fn remove_missing_params(&self) -> RemoveMissingParamsBuilder<'_> {
         RemoveMissingParamsBuilder {
-            config_path: &self.config_path,
+            config: &self.config,
             missing_id: 3,
             dry_run: false,
             yes: true,
@@ -238,7 +236,7 @@ impl PoolFixture {
 /// inhibitor; tests only override the command intent (`missing_id`,
 /// dry-run, yes, progress, sleeper).
 pub(crate) struct RemoveMissingParamsBuilder<'a> {
-    config_path: &'a Path,
+    config: &'a Config,
     missing_id: u64,
     dry_run: bool,
     yes: bool,
@@ -277,7 +275,7 @@ impl<'a> RemoveMissingParamsBuilder<'a> {
 
     pub(crate) fn build(self) -> RemoveMissingParams<'a> {
         RemoveMissingParams {
-            config_path: self.config_path,
+            config: self.config,
             missing_id: self.missing_id,
             dry_run: self.dry_run,
             yes: self.yes,

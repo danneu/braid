@@ -1,5 +1,5 @@
 use crate::cmd::{CmdRequest, CommandRunner, Step};
-use crate::config::{Config, config_read, luks_label_for, mapper_name, name_from_mapper};
+use crate::config::{Config, luks_label_for, mapper_name, name_from_mapper};
 use crate::confirm;
 use crate::credential_verify::{
     Credential, CredentialVerifyError, CredentialVerifyTarget, verify_credential_for_targets,
@@ -138,8 +138,6 @@ pub enum ReplaceError {
     Luks(#[from] crate::luks::LuksError),
     #[error("pool error: {0}")]
     Pool(#[from] crate::pool::PoolError),
-    #[error("config error: {0}")]
-    Config(#[from] crate::config::ConfigError),
     #[error("command error: {0}")]
     Cmd(#[from] crate::cmd::CmdError),
     #[error("parse error: {0}")]
@@ -149,7 +147,7 @@ pub enum ReplaceError {
 }
 
 pub struct ReplaceParams<'a> {
-    pub config_path: &'a Path,
+    pub config: &'a Config,
     pub old_name: &'a str,
     pub new_name: &'a str,
     pub missing_id: Option<u64>,
@@ -1141,14 +1139,14 @@ mod replace_stderr_capture {
     }
 }
 
-/// Plan a `braid replace` run. Owns everything above today's `--dry-run`
-/// gate: pending-op preflight, config read, `--new` spec parsing,
-/// `--old == --new` guard, keyfile path validation, `probe_pool` + mounted
-/// validation, mutation/UPS preflight, replace-source resolution,
-/// membership load + `build_replacement_membership`, new-disk probe, and
-/// step compilation. On success, accumulated notes move into `plan.notes`;
-/// on post-preflight failure, accumulated notes stay on `PlanFailure::notes`
-/// so `cmd_replace` can render them before returning the error.
+/// Plan a `braid replace` run after dispatch has already checked for a
+/// pending operation and loaded config under the pool lock. Owns `--new` spec
+/// parsing, `--old == --new` guard, keyfile path validation, `probe_pool` +
+/// mounted validation, mutation/UPS preflight, replace-source resolution,
+/// membership load + `build_replacement_membership`, new-disk probe, and step
+/// compilation. On success, accumulated notes move into `plan.notes`; on
+/// post-preflight failure, accumulated notes stay on `PlanFailure::notes` so
+/// `cmd_replace` can render them before returning the error.
 ///
 /// Does not read or verify the passphrase or acquire the sleep
 /// inhibitor -- those happen inside `ReplacePlan::execute` so
@@ -1162,14 +1160,7 @@ pub fn plan_replace<R: CommandRunner + Sync, F: Filesystem + ?Sized>(
     // preserve preflight diagnostics on `PlanFailure::notes`.
     let mut notes: Vec<PreviewNote> = Vec::new();
 
-    if let Err(msg) = preflight::check_no_pending_operation(params.paths) {
-        return Err(PlanFailure::empty(ReplaceError::Validation(msg)));
-    }
-
-    let config = match config_read(params.config_path) {
-        Ok(c) => c,
-        Err(e) => return Err(PlanFailure::empty(e.into())),
-    };
+    let config = params.config;
 
     // Validate `--luks-format-arg` at the CLI boundary BEFORE any
     // probing, journal write, or `cryptsetup luksFormat`. A managed
@@ -1410,7 +1401,7 @@ pub fn plan_replace<R: CommandRunner + Sync, F: Filesystem + ?Sized>(
     }
 
     let work_plan = build_replace_work_plan(ReplaceWorkPlanInput {
-        config,
+        config: config.clone(),
         old_uuid,
         old_name: old_member.name.clone(),
         new_uuid,
@@ -1946,6 +1937,10 @@ mod tests {
 
     fn mp() -> MountPoint {
         MountPoint("/mnt/storage".into())
+    }
+
+    fn test_config() -> Config {
+        Config::new(mp()).unwrap()
     }
 
     struct PanicRunner;
@@ -5024,19 +5019,12 @@ mod tests {
     fn plan_replace_old_equals_new_aborts_before_any_probe() {
         let state_tmp = tempfile::tempdir().unwrap();
         let paths = StatePaths::custom(state_tmp.path().into());
-        let config_tmp = tempfile::tempdir().unwrap();
-        let config_path = config_tmp.path().join("config.json");
-        std::fs::write(
-            &config_path,
-            serde_json::to_vec(&serde_json::json!({ "mount_point": "/mnt/storage" })).unwrap(),
-        )
-        .unwrap();
         let inhibitor = crate::inhibit::RecordingInhibitor::new();
         let failure = match plan_replace(
             &PanicRunner,
             &PanicFilesystem,
             &ReplaceParams {
-                config_path: &config_path,
+                config: &test_config(),
                 old_name: "disk2",
                 new_name: "disk2=/dev/disk/by-id/virtio-disk2",
                 missing_id: None,
@@ -5086,12 +5074,6 @@ mod tests {
         let state_tmp = tempfile::tempdir().unwrap();
         let paths = StatePaths::custom(state_tmp.path().into());
         let config_tmp = tempfile::tempdir().unwrap();
-        let config_path = config_tmp.path().join("config.json");
-        std::fs::write(
-            &config_path,
-            serde_json::to_vec(&serde_json::json!({ "mount_point": "/mnt/storage" })).unwrap(),
-        )
-        .unwrap();
         let kf_path = config_tmp.path().join("does-not-exist").join("braid.key");
         let inhibitor = crate::inhibit::RecordingInhibitor::new();
 
@@ -5099,7 +5081,7 @@ mod tests {
             &PanicRunner,
             &PanicFilesystem,
             &ReplaceParams {
-                config_path: &config_path,
+                config: &test_config(),
                 old_name: "disk2",
                 new_name: "disk3=/dev/disk/by-id/virtio-disk3",
                 missing_id: None,
@@ -5148,12 +5130,6 @@ mod tests {
         let state_tmp = tempfile::tempdir().unwrap();
         let paths = StatePaths::custom(state_tmp.path().into());
         let config_tmp = tempfile::tempdir().unwrap();
-        let config_path = config_tmp.path().join("config.json");
-        std::fs::write(
-            &config_path,
-            serde_json::to_vec(&serde_json::json!({ "mount_point": "/mnt/storage" })).unwrap(),
-        )
-        .unwrap();
         let kf_path = config_tmp.path().join("braid.key");
         std::fs::create_dir(&kf_path).unwrap();
         let inhibitor = crate::inhibit::RecordingInhibitor::new();
@@ -5162,7 +5138,7 @@ mod tests {
             &PanicRunner,
             &PanicFilesystem,
             &ReplaceParams {
-                config_path: &config_path,
+                config: &test_config(),
                 old_name: "disk2",
                 new_name: "disk3=/dev/disk/by-id/virtio-disk3",
                 missing_id: None,
@@ -6244,20 +6220,13 @@ mod tests {
         ] {
             let state_tmp = tempfile::tempdir().unwrap();
             let paths = StatePaths::custom(state_tmp.path().into());
-            let config_tmp = tempfile::tempdir().unwrap();
-            let config_path = config_tmp.path().join("config.json");
-            std::fs::write(
-                &config_path,
-                serde_json::to_vec(&serde_json::json!({ "mount_point": "/mnt/storage" })).unwrap(),
-            )
-            .unwrap();
             let inhibitor = crate::inhibit::RecordingInhibitor::new();
             let bad = vec![token.to_owned()];
             let result = plan_replace(
                 &PanicRunner,
                 &PanicFilesystem,
                 &ReplaceParams {
-                    config_path: &config_path,
+                    config: &test_config(),
                     old_name: "disk2",
                     new_name: "disk3=/dev/disk/by-id/virtio-disk3",
                     missing_id: None,

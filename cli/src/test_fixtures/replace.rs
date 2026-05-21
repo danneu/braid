@@ -3,6 +3,7 @@
 
 use super::shared::{PoolFixture, mock_ok, mock_virtio_offset_backing_path_resolver};
 use crate::cmd::{CmdError, CmdRequest, MockRunner, RawCommandOutput};
+use crate::config::Config;
 use crate::inhibit::RecordingInhibitor;
 use crate::membership::{self, PoolMembership};
 use crate::progress::{self, ProgressOutput};
@@ -275,7 +276,6 @@ impl PoolFixture {
             _state_tmp: base.state_tmp,
             paths: base.paths,
             _config_tmp: base.config_tmp,
-            config_path: base.config_path,
             config: base.config,
             pass_path: base.pass_path,
             inhibitor: RecordingInhibitor::new(),
@@ -297,7 +297,7 @@ impl PoolFixture {
             enroll_key_file: None,
             luks_format_extra_opts: &[],
             progress: ProgressOutput::Off,
-            config_path: &self.config_path,
+            config: &self.config,
             paths: &self.paths,
             inhibitor: &self.inhibitor,
             backing_path_resolver: mock_virtio_offset_backing_path_resolver(),
@@ -322,7 +322,7 @@ pub(crate) struct ReplaceParamsBuilder<'a> {
     enroll_key_file: Option<&'a Path>,
     luks_format_extra_opts: &'a [String],
     progress: ProgressOutput,
-    config_path: &'a Path,
+    config: &'a Config,
     paths: &'a StatePaths,
     inhibitor: &'a RecordingInhibitor,
     backing_path_resolver: &'a dyn crate::luks::BackingPathResolver,
@@ -373,7 +373,7 @@ impl<'a> ReplaceParamsBuilder<'a> {
     }
     pub(crate) fn build(self) -> ReplaceParams<'a> {
         ReplaceParams {
-            config_path: self.config_path,
+            config: self.config,
             old_name: self.old_name,
             new_name: self.new_name,
             missing_id: self.missing_id,

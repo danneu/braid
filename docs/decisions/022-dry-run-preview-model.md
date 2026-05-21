@@ -27,11 +27,17 @@ not the plan.
 
 ## Decision
 
-For migrated mutating commands, `plan_*()` owns everything above the dry-run
-gate: config/state loading, preflight checks, live probes, accumulated preview
-notes, and construction of a typed work plan. The command wrapper calls the
-planner first. On `--dry-run`, it prints `plan.preview()` to stdout. On a real
-run, it passes the same plan to `execute()`.
+For migrated mutating commands, dispatch owns the read-side fences that must
+run under the pool lock before the planner starts: pending-operation preflight
+and config loading. The pending-operation preflight must run before config load
+so a recovery journal is never hidden behind a config parse error. The planner
+then owns pool state loading, live probes, accumulated preview notes, and
+construction of a typed work plan. This split finishes the Rust-owned pool-lock
+migration: the lock boundary and the config/journal reads it protects now live
+above `plan_*()`, while dry-run and real execution still share the same typed
+plan. The command wrapper calls the planner first. On `--dry-run`, it prints
+`plan.preview()` to stdout. On a real run, it passes the same plan to
+`execute()`.
 
 A successful command plan carries:
 

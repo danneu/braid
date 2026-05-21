@@ -1,6 +1,6 @@
 use crate::alert;
 use crate::cmd::{CmdError, CmdRequest, CommandRunner, Step};
-use crate::config::{Config, config_read, luks_label_for, mapper_name, name_from_mapper};
+use crate::config::{Config, luks_label_for, mapper_name, name_from_mapper};
 use crate::confirm;
 use crate::credential_verify::{
     Credential, CredentialVerifyError, CredentialVerifyTarget, verify_credential_for_targets,
@@ -91,8 +91,6 @@ pub enum AddError {
     Luks(#[from] crate::luks::LuksError),
     #[error("pool error: {0}")]
     Pool(#[from] crate::pool::PoolError),
-    #[error("config error: {0}")]
-    Config(#[from] crate::config::ConfigError),
     #[error("command error: {0}")]
     Cmd(#[from] crate::cmd::CmdError),
     #[error("parse error: {0}")]
@@ -806,7 +804,7 @@ fn forced_returned_device_add_step(
 /// refused before any probing, journal write, or `CryptsetupLuksFormat`.
 /// The same vector flows through `replace`'s symmetric path.
 pub struct AddParams<'a> {
-    pub config_path: &'a Path,
+    pub config: &'a Config,
     pub disk_specs: &'a [String],
     pub dry_run: bool,
     pub yes: bool,
@@ -1472,14 +1470,15 @@ impl AddPlan {
     }
 }
 
-/// Plan a `braid add` run. Owns everything above today's `--dry-run` gate:
-/// pending-op preflight, config read, disk-spec parsing, duplicate-name /
-/// duplicate-by-id validation, keyfile path validation, membership load,
-/// conflict validation, per-disk probe, pool probe, mutation preflight, UPS
-/// preflight, the missing-devices warning, the keyfile-asymmetry warning,
-/// and the semantic add work planner. On success, every accumulated note lives
-/// on `plan.notes`; on failure after note accumulation, notes survive on
-/// `PlanFailure::notes` so `cmd_add` can render them to stderr before the error.
+/// Plan a `braid add` run after dispatch has already checked for a pending
+/// operation and loaded config under the pool lock. Owns disk-spec parsing,
+/// duplicate-name / duplicate-by-id validation, keyfile path validation,
+/// membership load, conflict validation, pool probe, mutation preflight,
+/// per-disk probe, UPS preflight, the missing-devices warning, the keyfile-asymmetry
+/// warning, and the semantic add work planner. On success, every accumulated
+/// note lives on `plan.notes`; on failure after note accumulation, notes
+/// survive on `PlanFailure::notes` so `cmd_add` can render them to stderr
+/// before the error.
 // CLI planning path -- preserving preview notes with the full typed error keeps
 // diagnostics local to `cmd_add`; boxing only this branch would churn callers.
 #[allow(clippy::result_large_err)]
@@ -1493,14 +1492,7 @@ pub fn plan_add<R: CommandRunner + Sync, F: Filesystem + ?Sized>(
     // the Err branch and move into `plan.notes` on the Ok branch.
     let mut notes: Vec<PreviewNote> = Vec::new();
 
-    if let Err(msg) = preflight::check_no_pending_operation(params.paths) {
-        return Err(PlanFailure::empty(AddError::Validation(msg)));
-    }
-
-    let config = match config_read(params.config_path) {
-        Ok(c) => c,
-        Err(e) => return Err(PlanFailure::empty(e.into())),
-    };
+    let config = params.config;
 
     // Validate `--luks-format-arg` at the CLI boundary BEFORE any
     // probing, journal write, or `cryptsetup luksFormat`. A managed
@@ -1615,33 +1607,10 @@ pub fn plan_add<R: CommandRunner + Sync, F: Filesystem + ?Sized>(
         }
     }
 
-    // Probe all disks, then refine to the present-only shape consumed by
-    // downstream builders.
-    let probed: Vec<ConfigDisk> = match names
-        .iter()
-        .zip(by_ids.iter())
-        .map(|(name, by_id)| {
-            probe_config_disk(runner, fs, name, by_id, params.backing_path_resolver)
-        })
-        .collect::<Result<Vec<_>, _>>()
-    {
-        Ok(v) => v,
-        Err(e) => return Err(PlanFailure::empty(e.into())),
-    };
-
-    let probed: Vec<PresentConfigDisk> = probed
-        .into_iter()
-        .map(|p| {
-            PresentConfigDisk::try_from(p).map_err(|orig| {
-                PlanFailure::empty(AddError::Validation(format!(
-                    "disk '{}' ({}) is not present. Is it plugged in?",
-                    orig.name, orig.by_id_path
-                )))
-            })
-        })
-        .collect::<Result<_, _>>()?;
-
-    // Probe pool + preflight (once)
+    // Probe pool + preflight before per-disk LUKS probing so a short live
+    // exclusive op is observed close to command entry. The btrfs operations
+    // use --enqueue, but the operator-visible wait note is still part of the
+    // preview contract.
     let pool = match probe_pool(runner, fs, config.mount_point()) {
         Ok(p) => p,
         Err(ProbeError::NotBtrfs { fstype, .. }) => {
@@ -1667,6 +1636,47 @@ pub fn plan_add<R: CommandRunner + Sync, F: Filesystem + ?Sized>(
             Err(msg) => return Err(PlanFailure::empty(AddError::Validation(msg))),
         }
     }
+
+    // Probe all disks, then refine to the present-only shape consumed by
+    // downstream builders.
+    let probed: Vec<ConfigDisk> = match names
+        .iter()
+        .zip(by_ids.iter())
+        .map(|(name, by_id)| {
+            probe_config_disk(runner, fs, name, by_id, params.backing_path_resolver)
+        })
+        .collect::<Result<Vec<_>, _>>()
+    {
+        Ok(v) => v,
+        Err(e) => {
+            let error = e.into();
+            return Err(if notes.is_empty() {
+                PlanFailure::empty(error)
+            } else {
+                PlanFailure::with_notes(notes, error)
+            });
+        }
+    };
+
+    let mut present_probed = Vec::with_capacity(probed.len());
+    for probed_disk in probed {
+        match PresentConfigDisk::try_from(probed_disk) {
+            Ok(p) => present_probed.push(p),
+            Err(orig) => {
+                let error = AddError::Validation(format!(
+                    "disk '{}' ({}) is not present. Is it plugged in?",
+                    orig.name, orig.by_id_path
+                ));
+                return Err(if notes.is_empty() {
+                    PlanFailure::empty(error)
+                } else {
+                    PlanFailure::with_notes(notes, error)
+                });
+            }
+        }
+    }
+    let probed: Vec<PresentConfigDisk> = present_probed;
+
     if let Err(msg) =
         preflight::check_ups_not_on_battery(runner, config.ups().map(|u| u.name.as_str()), "add")
     {
@@ -1739,7 +1749,7 @@ pub fn plan_add<R: CommandRunner + Sync, F: Filesystem + ?Sized>(
     let plan = AddPlan {
         notes,
         work_plan,
-        config,
+        config: config.clone(),
         parsed,
         names,
         by_ids,
@@ -2268,6 +2278,15 @@ mod tests {
         (tmp, paths)
     }
 
+    fn test_config() -> Config {
+        Config::new(MountPoint("/mnt/storage".into())).unwrap()
+    }
+
+    fn read_test_config(path: &Path) -> Config {
+        let bytes = std::fs::read(path).expect("test config should load");
+        serde_json::from_slice(&bytes).expect("test config should parse")
+    }
+
     fn passphrase(s: &str) -> Passphrase {
         Passphrase::from_zeroizing(zeroize::Zeroizing::new(s.to_owned()))
     }
@@ -2384,7 +2403,7 @@ mod tests {
             &runner,
             &fs,
             &AddParams {
-                config_path: &config_path,
+                config: &read_test_config(&config_path),
                 disk_specs: &[
                     "d1=/dev/disk/by-id/ata-D1".into(),
                     "d1=/dev/disk/by-id/ata-D1".into(),
@@ -2967,7 +2986,7 @@ mod tests {
                 &runner,
                 &fs,
                 &AddParams {
-                    config_path: Path::new("/dev/null"),
+                    config: &test_config(),
                     disk_specs: &[],
                     dry_run: false,
                     yes: true,
@@ -3041,7 +3060,7 @@ mod tests {
                 &runner,
                 &fs,
                 &AddParams {
-                    config_path: Path::new("/dev/null"),
+                    config: &test_config(),
                     disk_specs: &[],
                     dry_run: false,
                     yes: true,
@@ -3125,7 +3144,7 @@ mod tests {
                 &runner,
                 &fs,
                 &AddParams {
-                    config_path: Path::new("/dev/null"),
+                    config: &test_config(),
                     disk_specs: &[],
                     dry_run: false,
                     yes: true,
@@ -3186,7 +3205,7 @@ mod tests {
                 &runner,
                 &fs,
                 &AddParams {
-                    config_path: Path::new("/dev/null"),
+                    config: &test_config(),
                     disk_specs: &[],
                     dry_run: false,
                     yes: true,
@@ -3252,7 +3271,7 @@ mod tests {
                 &runner,
                 &fs,
                 &AddParams {
-                    config_path: Path::new("/dev/null"),
+                    config: &test_config(),
                     disk_specs: &[],
                     dry_run: false,
                     yes: true,
@@ -3327,7 +3346,7 @@ mod tests {
                 &runner,
                 &fs,
                 &AddParams {
-                    config_path: Path::new("/dev/null"),
+                    config: &test_config(),
                     disk_specs: &[],
                     dry_run: false,
                     yes: true,
@@ -3691,7 +3710,7 @@ mod tests {
             &runner,
             &AddMockFs(vec![]),
             &AddParams {
-                config_path: Path::new("/dev/null"),
+                config: &test_config(),
                 disk_specs: &[],
                 dry_run: false,
                 yes: true,
@@ -4413,7 +4432,7 @@ mod tests {
                 &runner,
                 &fs,
                 &AddParams {
-                    config_path: Path::new("/dev/null"),
+                    config: &test_config(),
                     disk_specs: &[],
                     dry_run: false,
                     yes: true,
@@ -5142,7 +5161,7 @@ mod tests {
             &runner,
             &fs,
             &AddParams {
-                config_path: &config_path,
+                config: &read_test_config(&config_path),
                 disk_specs: &["disk2=/dev/disk/by-id/virtio-disk2".into()],
                 dry_run: false,
                 yes: true,
@@ -5196,7 +5215,7 @@ mod tests {
             &runner,
             &fs,
             &AddParams {
-                config_path: &config_path,
+                config: &read_test_config(&config_path),
                 disk_specs: &["disk2=/dev/disk/by-id/virtio-disk2".into()],
                 dry_run: false,
                 yes: true,
@@ -5266,7 +5285,7 @@ mod tests {
             &runner,
             &fs,
             &AddParams {
-                config_path: &config_path,
+                config: &read_test_config(&config_path),
                 disk_specs: &["disk1=/dev/disk/by-id/virtio-disk1".into()],
                 dry_run: false,
                 yes: true,
@@ -5310,7 +5329,7 @@ mod tests {
                 &runner,
                 &fs,
                 &AddParams {
-                    config_path: &config_path,
+                    config: &read_test_config(&config_path),
                     disk_specs: &["disk1=/dev/disk/by-id/virtio-disk1".into()],
                     dry_run: false,
                     yes: true,
@@ -5373,7 +5392,7 @@ mod tests {
             &runner,
             &fs,
             &AddParams {
-                config_path: &config_path,
+                config: &read_test_config(&config_path),
                 disk_specs: &["disk1=/dev/disk/by-id/virtio-disk1".into()],
                 dry_run: false,
                 yes: true,
@@ -5442,7 +5461,7 @@ mod tests {
             &runner,
             &fs,
             &AddParams {
-                config_path: &config_path,
+                config: &read_test_config(&config_path),
                 disk_specs: &[
                     "disk2=/dev/disk/by-id/virtio-disk2".into(),
                     "disk3=/dev/disk/by-id/virtio-disk3".into(),
@@ -5507,7 +5526,7 @@ mod tests {
             &runner,
             &fs,
             &AddParams {
-                config_path: &config_path,
+                config: &read_test_config(&config_path),
                 disk_specs: &[
                     "disk2=/dev/disk/by-id/virtio-disk2".into(),
                     "disk3=/dev/disk/by-id/virtio-disk3".into(),
@@ -5596,7 +5615,7 @@ mod tests {
             &runner,
             &fs,
             &AddParams {
-                config_path: &config_path,
+                config: &read_test_config(&config_path),
                 disk_specs: &["disk2=/dev/disk/by-id/virtio-disk2".into()],
                 dry_run: false,
                 yes: true,
@@ -5650,7 +5669,7 @@ mod tests {
             &runner,
             &fs,
             &AddParams {
-                config_path: &config_path,
+                config: &read_test_config(&config_path),
                 disk_specs: &["disk1=/dev/disk/by-id/virtio-disk1".into()],
                 dry_run: false,
                 yes: true,
@@ -5713,7 +5732,7 @@ mod tests {
                 &runner,
                 &fs,
                 &AddParams {
-                    config_path: &config_path,
+                    config: &read_test_config(&config_path),
                     disk_specs: &["disk2=/dev/disk/by-id/virtio-disk2".into()],
                     dry_run: false,
                     yes: true,
@@ -5770,7 +5789,7 @@ mod tests {
             &runner,
             &fs,
             &AddParams {
-                config_path: &config_path,
+                config: &read_test_config(&config_path),
                 disk_specs: &["disk2=/dev/disk/by-id/virtio-disk2".into()],
                 dry_run: false,
                 yes: true,
@@ -5828,7 +5847,7 @@ mod tests {
             &runner,
             &fs,
             &AddParams {
-                config_path: &config_path,
+                config: &read_test_config(&config_path),
                 disk_specs: &["disk2=/dev/disk/by-id/virtio-disk2".into()],
                 dry_run: false,
                 yes: true,
@@ -5891,7 +5910,7 @@ mod tests {
             &runner,
             &fs,
             &AddParams {
-                config_path: &config_path,
+                config: &read_test_config(&config_path),
                 disk_specs: &["disk2=/dev/disk/by-id/virtio-disk2".into()],
                 dry_run: false,
                 yes: true,
@@ -5979,7 +5998,7 @@ mod tests {
             &runner,
             &fs,
             &AddParams {
-                config_path: &config_path,
+                config: &read_test_config(&config_path),
                 disk_specs: &["disk2=/dev/disk/by-id/virtio-disk2".into()],
                 dry_run: false,
                 yes: true,
@@ -6042,7 +6061,7 @@ mod tests {
                 &runner,
                 &fs,
                 &AddParams {
-                    config_path: &config_path,
+                    config: &read_test_config(&config_path),
                     disk_specs: &["disk2=/dev/disk/by-id/virtio-disk2".into()],
                     dry_run: false,
                     yes: true,
@@ -6136,7 +6155,7 @@ mod tests {
             &runner,
             &fs,
             &AddParams {
-                config_path: &config_path,
+                config: &read_test_config(&config_path),
                 disk_specs: &[
                     "d1=/dev/disk/by-id/virtio-disk2".into(),
                     "d2=/dev/disk/by-id/virtio-disk2".into(),
@@ -6231,7 +6250,7 @@ mod tests {
             &runner,
             &fs,
             &AddParams {
-                config_path: &config_path,
+                config: &read_test_config(&config_path),
                 disk_specs: &["disk2=/dev/disk/by-id/virtio-disk2".into()],
                 dry_run: false,
                 yes: true,
@@ -6332,7 +6351,7 @@ mod tests {
             &runner,
             &fs,
             &AddParams {
-                config_path: &config_path,
+                config: &read_test_config(&config_path),
                 disk_specs: &["disk1=/dev/disk/by-id/virtio-disk1".into()],
                 dry_run: false,
                 yes: true,
@@ -6428,7 +6447,7 @@ mod tests {
             &runner,
             &fs,
             &AddParams {
-                config_path: &config_path,
+                config: &read_test_config(&config_path),
                 disk_specs: &[
                     "disk1=/dev/disk/by-id/virtio-disk1".into(),
                     "disk2=/dev/disk/by-id/virtio-disk2".into(),
@@ -7174,7 +7193,7 @@ mod tests {
             &PanicRunner,
             &PanicFilesystem,
             &AddParams {
-                config_path: &config_path,
+                config: &read_test_config(&config_path),
                 disk_specs: &["disk1=/dev/disk/by-id/virtio-disk1".into()],
                 dry_run: true,
                 yes: true,
@@ -7226,7 +7245,7 @@ mod tests {
             &PanicRunner,
             &PanicFilesystem,
             &AddParams {
-                config_path: &config_path,
+                config: &read_test_config(&config_path),
                 disk_specs: &["disk1=/dev/disk/by-id/virtio-disk1".into()],
                 dry_run: true,
                 yes: true,
@@ -7289,7 +7308,7 @@ mod tests {
             &runner,
             &fs,
             &AddParams {
-                config_path: &config_path,
+                config: &read_test_config(&config_path),
                 disk_specs: &["disk1=/dev/disk/by-id/virtio-disk1".into()],
                 dry_run: false,
                 yes: true,
@@ -7359,7 +7378,7 @@ mod tests {
             &runner,
             &fs,
             &AddParams {
-                config_path: &config_path,
+                config: &read_test_config(&config_path),
                 disk_specs: &["disk1=/dev/disk/by-id/virtio-disk1".into()],
                 dry_run: false,
                 yes: true,
@@ -7408,7 +7427,7 @@ mod tests {
             &runner,
             &fs,
             &AddParams {
-                config_path: &config_path,
+                config: &read_test_config(&config_path),
                 disk_specs: &["disk1=/dev/disk/by-id/virtio-disk1".into()],
                 dry_run: false,
                 yes: true,
@@ -7477,7 +7496,7 @@ mod tests {
             &runner,
             &fs,
             &AddParams {
-                config_path: &config_path,
+                config: &read_test_config(&config_path),
                 disk_specs: &["disk1=/dev/disk/by-id/virtio-disk1".into()],
                 dry_run: false,
                 yes: true,
@@ -7549,7 +7568,7 @@ mod tests {
             &runner,
             &fs,
             &AddParams {
-                config_path: &config_path,
+                config: &read_test_config(&config_path),
                 disk_specs: &["disk2=/dev/disk/by-id/virtio-disk2".into()],
                 dry_run: false,
                 yes: true,
@@ -7627,7 +7646,7 @@ mod tests {
             &runner,
             &fs,
             &AddParams {
-                config_path: &config_path,
+                config: &read_test_config(&config_path),
                 disk_specs: &["disk2=/dev/disk/by-id/virtio-disk2".into()],
                 dry_run: false,
                 yes: true,
@@ -7684,7 +7703,7 @@ mod tests {
             &runner,
             &fs,
             &AddParams {
-                config_path: &config_path,
+                config: &read_test_config(&config_path),
                 disk_specs: &[
                     "disk1=/dev/disk/by-id/virtio-disk1".into(),
                     "disk2=/dev/disk/by-id/virtio-disk2".into(),
@@ -7921,18 +7940,19 @@ mod tests {
         _state_tmp: tempfile::TempDir,
         paths: StatePaths,
         _tmp: tempfile::TempDir,
-        config_path: std::path::PathBuf,
+        config: Config,
         pass_path: std::path::PathBuf,
         inhibitor: crate::inhibit::RecordingInhibitor,
     }
 
     fn plan_add_fixture() -> PlanAddFixture {
         let (state_tmp, paths, tmp, config_path, pass_path) = add_test_setup();
+        let config = read_test_config(&config_path);
         PlanAddFixture {
             _state_tmp: state_tmp,
             paths,
             _tmp: tmp,
-            config_path,
+            config,
             pass_path,
             inhibitor: crate::inhibit::RecordingInhibitor::new(),
         }
@@ -7940,8 +7960,17 @@ mod tests {
 
     impl PlanAddFixture {
         fn params<'a>(&'a self, disk_specs: &'a [String], dry_run: bool) -> AddParams<'a> {
+            self.params_with_config(disk_specs, dry_run, &self.config)
+        }
+
+        fn params_with_config<'a>(
+            &'a self,
+            disk_specs: &'a [String],
+            dry_run: bool,
+            config: &'a Config,
+        ) -> AddParams<'a> {
             AddParams {
-                config_path: &self.config_path,
+                config,
                 disk_specs,
                 dry_run,
                 yes: true,
@@ -8260,7 +8289,7 @@ mod tests {
             &runner,
             &fs,
             &AddParams {
-                config_path: &config_path,
+                config: &read_test_config(&config_path),
                 disk_specs: &disk_specs,
                 dry_run: true,
                 yes: true,
@@ -8329,7 +8358,7 @@ mod tests {
             &runner,
             &fs,
             &AddParams {
-                config_path: &config_path,
+                config: &read_test_config(&config_path),
                 disk_specs: &disk_specs,
                 dry_run: true,
                 yes: true,
@@ -8663,19 +8692,16 @@ mod tests {
             inner: AddPlanTestRunner::new(),
         };
 
-        // Build a config.json with a UPS named "ups".
+        // Build a config with a UPS named "ups".
         let config_json = serde_json::json!({
             "mount_point": "/mnt/storage",
             "ups": { "name": "ups" },
         });
-        std::fs::write(
-            &fixture.config_path,
-            serde_json::to_vec(&config_json).unwrap(),
-        )
-        .unwrap();
+        let config = serde_json::from_value(config_json).expect("valid UPS test config");
 
         let disk_specs = ["disk2=/dev/disk/by-id/virtio-disk2".to_string()];
-        let failure = match plan_add(&runner, &fs, &fixture.params(&disk_specs, true)) {
+        let params = fixture.params_with_config(&disk_specs, true, &config);
+        let failure = match plan_add(&runner, &fs, &params) {
             Ok(_) => panic!("expected Err(Validation), got Ok(_)"),
             Err(failure) => failure,
         };
@@ -8736,57 +8762,6 @@ mod tests {
             failure.notes.is_empty(),
             "absent add rejection must preserve the empty-notes contract: {:?}",
             failure.notes,
-        );
-    }
-
-    /* Intent: when both pending-op.json and a locked pool with non-empty
-     *   membership are present, plan_add returns the pending-op error,
-     *   not the locked-pool error.
-     *
-     * Why it exists: pins the ordering claim that
-     *   `check_no_pending_operation` runs before
-     *   `check_pool_unlocked_if_membership_exists` in plan_add. Without
-     *   this test, a future refactor could swap the order and hide the
-     *   more-urgent pending-op signal behind the locked-pool refusal --
-     *   the operator would see "run `braid unlock`" when the real issue
-     *   is an interrupted operation that needs `braid recover`. The test
-     *   distinguishes the two plausible orderings at the seam.
-     *
-     * Scenario: a previous add was interrupted (pending-op.json exists)
-     *   and the pool is locked with disk1 in membership. Operator runs
-     *   `braid add disk2=...`. The pending-op error must surface.
-     */
-    #[test]
-    fn plan_add_pending_op_wins_over_locked_pool_refusal() {
-        let fixture = plan_add_fixture();
-
-        // Seed pending-op.json. add_test_setup pre-seeded pool.json with
-        // disk1, so both the pending-op condition and the locked-pool
-        // condition are simultaneously true.
-        std::fs::write(
-            fixture.paths.pending_op_json(),
-            r#"{"started_at":"2024-01-01T00:00:00Z","op":{"op":"Add","phase":"PoolMutation","targets":{}},"pre_membership":{"disks":{}},"target_membership":{"disks":{}}}"#,
-        )
-        .unwrap();
-
-        // Runner is unused: pending-op short-circuits at the top of
-        // plan_add, before any disk probe or pool probe.
-        let runner = MockRunner::default();
-        let fs = AddMockFs(vec!["/dev/disk/by-id/virtio-disk2".into()]);
-
-        let disk_specs = ["disk2=/dev/disk/by-id/virtio-disk2".to_string()];
-        let failure = match plan_add(&runner, &fs, &fixture.params(&disk_specs, true)) {
-            Ok(_) => panic!("plan_add must fail when pending-op.json is present"),
-            Err(failure) => failure,
-        };
-        let err = failure.error.to_string();
-        assert!(
-            err.contains("interrupted operation detected"),
-            "pending-op error must win over locked-pool refusal, got: {err}"
-        );
-        assert!(
-            !err.contains("not unlocked"),
-            "locked-pool error must NOT preempt the pending-op error, got: {err}"
         );
     }
 
@@ -9323,7 +9298,7 @@ mod tests {
                 &recording,
                 &fs,
                 &AddParams {
-                    config_path: &config_path,
+                    config: &read_test_config(&config_path),
                     disk_specs: &["disk1=/dev/disk/by-id/virtio-disk1".into()],
                     dry_run: false,
                     yes: true,
@@ -9396,7 +9371,7 @@ mod tests {
             &recording,
             &fs,
             &AddParams {
-                config_path: &config_path,
+                config: &read_test_config(&config_path),
                 disk_specs: &["disk2=/dev/disk/by-id/virtio-disk2".into()],
                 dry_run: false,
                 yes: true,

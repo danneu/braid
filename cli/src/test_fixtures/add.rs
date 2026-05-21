@@ -6,6 +6,7 @@
 use super::shared::{PoolFixture, mock_ok, mock_virtio_offset_backing_path_resolver};
 use crate::add::AddParams;
 use crate::cmd::{CmdRequest, MockRunner, RawCommandOutput};
+use crate::config::Config;
 use crate::inhibit::RecordingInhibitor;
 use crate::luks::{PassphraseReader, RealTty};
 use crate::membership::{self, DiskMember, PoolMembership};
@@ -45,7 +46,6 @@ impl PoolFixture {
             _state_tmp: base.state_tmp,
             paths: base.paths,
             _config_tmp: base.config_tmp,
-            config_path: base.config_path,
             config: base.config,
             pass_path: base.pass_path,
             inhibitor: RecordingInhibitor::new(),
@@ -61,7 +61,7 @@ impl PoolFixture {
     #[allow(dead_code)]
     pub(crate) fn add_params<'a>(&'a self, disk_specs: &'a [String]) -> AddParamsBuilder<'a> {
         AddParamsBuilder {
-            config_path: &self.config_path,
+            config: &self.config,
             disk_specs,
             dry_run: false,
             yes: true,
@@ -90,7 +90,7 @@ impl PoolFixture {
 /// `AddParams::disk_specs: &'a [String]` shape exactly.
 #[allow(dead_code)]
 pub(crate) struct AddParamsBuilder<'a> {
-    config_path: &'a Path,
+    config: &'a Config,
     disk_specs: &'a [String],
     dry_run: bool,
     yes: bool,
@@ -148,7 +148,7 @@ impl<'a> AddParamsBuilder<'a> {
     }
     pub(crate) fn build(self) -> AddParams<'a> {
         AddParams {
-            config_path: self.config_path,
+            config: self.config,
             disk_specs: self.disk_specs,
             dry_run: self.dry_run,
             yes: self.yes,

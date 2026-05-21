@@ -3,14 +3,13 @@
 
 use super::shared::{PoolFixture, disk_member_with, mock_ok};
 use crate::cmd::{CmdRequest, MockRunner};
-use crate::config::mapper_name;
+use crate::config::{Config, mapper_name};
 use crate::inhibit::RecordingInhibitor;
 use crate::membership::{self, PoolMembership};
 use crate::progress::{self, ProgressOutput};
 use crate::remove::RemoveParams;
 use crate::state_paths::StatePaths;
 use crate::types::{DiskName, LuksUuid, PoolDevice};
-use std::path::Path;
 
 const TWO_DISK_SHOW: &str = "Label: none  uuid: cc86845b-aec3-408e-bef5-553affc1f2b1\n\
      \tTotal devices 2 FS bytes used 16.17MiB\n\
@@ -95,7 +94,6 @@ impl PoolFixture {
             _state_tmp: base.state_tmp,
             paths: base.paths,
             _config_tmp: base.config_tmp,
-            config_path: base.config_path,
             config: base.config,
             pass_path: base.pass_path,
             inhibitor: RecordingInhibitor::new(),
@@ -106,7 +104,7 @@ impl PoolFixture {
     /// migrated tests: remove disk2, yes=true, dry_run=false, progress=Off.
     pub(crate) fn remove_params(&self) -> RemoveParamsBuilder<'_> {
         RemoveParamsBuilder {
-            config_path: &self.config_path,
+            config: &self.config,
             name: "disk2",
             dry_run: false,
             yes: true,
@@ -203,7 +201,7 @@ impl RemovalPool {
 /// The fixture owns the temp config/state paths and inhibitor; tests only
 /// override the command intent (`name`, dry-run, yes, progress).
 pub(crate) struct RemoveParamsBuilder<'a> {
-    config_path: &'a Path,
+    config: &'a Config,
     name: &'a str,
     dry_run: bool,
     yes: bool,
@@ -237,7 +235,7 @@ impl<'a> RemoveParamsBuilder<'a> {
 
     pub(crate) fn build(self) -> RemoveParams<'a> {
         RemoveParams {
-            config_path: self.config_path,
+            config: self.config,
             name: self.name,
             dry_run: self.dry_run,
             yes: self.yes,

@@ -12,6 +12,7 @@ use braid_cli::pool_lock::{
     PoolLockError, RealPoolLock, RealPoolLockGuard, RealStopCoordinator, StopCoordinatorError,
     StopCoordinatorPollResult,
 };
+use braid_cli::preflight;
 use braid_cli::probe::RealFilesystem;
 use braid_cli::progress::{ProgressMode, resolve_progress_output};
 use braid_cli::state_paths::StatePaths;
@@ -503,14 +504,15 @@ fn main() {
                 std::io::IsTerminal::is_terminal(&std::io::stderr()),
                 false,
             );
+            if let Err(msg) = preflight::check_no_pending_operation(&paths) {
+                print_cli_error(&msg);
+                std::process::exit(1);
+            }
+            let config = load_config_for_cmd_or_exit(Path::new(&config_path), 1);
             let runner = RealRunner;
             let online_ops = RealOnlineStateOps::new(&runner);
-            let online_config =
-                (!args.common.dry_run).then(|| load_config_or_exit(Path::new(&config_path), 1));
-            let online_snapshot = online_config
-                .as_ref()
-                .filter(|cfg| cfg.systemd_lifecycle())
-                .map(|_| snapshot(&online_ops));
+            let online_snapshot =
+                (!args.common.dry_run && config.systemd_lifecycle()).then(|| snapshot(&online_ops));
             let fs = RealFilesystem;
             let backing_path_resolver = braid_cli::luks::RealBackingPathResolver;
             let enroll_kf = args
@@ -519,14 +521,14 @@ fn main() {
                 .map(|dir| dir.join(braid_cli::luks::KEYFILE_NAME));
             if let Err(e) = run_with_online_marker(
                 online_snapshot.as_ref(),
-                online_config.as_ref(),
+                (!args.common.dry_run).then_some(&config),
                 &online_ops,
                 || {
                     braid_cli::add::cmd_add(
                         &runner,
                         &fs,
                         &braid_cli::add::AddParams {
-                            config_path: Path::new(&config_path),
+                            config: &config,
                             disk_specs: &args.disks,
                             dry_run: args.common.dry_run,
                             yes: args.common.yes,
@@ -553,13 +555,18 @@ fn main() {
                 std::io::IsTerminal::is_terminal(&std::io::stderr()),
                 false,
             );
+            if let Err(msg) = preflight::check_no_pending_operation(&paths) {
+                print_cli_error(&msg);
+                std::process::exit(1);
+            }
+            let config = load_config_for_cmd_or_exit(Path::new(&config_path), 1);
             let runner = RealRunner;
             let fs = RealFilesystem;
             if let Err(e) = braid_cli::remove::cmd_remove(
                 &runner,
                 &fs,
                 &braid_cli::remove::RemoveParams {
-                    config_path: Path::new(&config_path),
+                    config: &config,
                     name: &args.disk,
                     dry_run: args.common.dry_run,
                     yes: args.common.yes,
@@ -579,13 +586,18 @@ fn main() {
                 std::io::IsTerminal::is_terminal(&std::io::stderr()),
                 false,
             );
+            if let Err(msg) = preflight::check_no_pending_operation(&paths) {
+                print_cli_error(&msg);
+                std::process::exit(1);
+            }
+            let config = load_config_for_cmd_or_exit(Path::new(&config_path), 1);
             let runner = RealRunner;
             let fs = RealFilesystem;
             if let Err(e) = braid_cli::remove_missing::cmd_remove_missing(
                 &runner,
                 &fs,
                 &braid_cli::remove_missing::RemoveMissingParams {
-                    config_path: Path::new(&config_path),
+                    config: &config,
                     missing_id: args.missing_id,
                     dry_run: args.common.dry_run,
                     yes: args.common.yes,
@@ -605,6 +617,11 @@ fn main() {
                 std::io::IsTerminal::is_terminal(&std::io::stderr()),
                 false,
             );
+            if let Err(msg) = preflight::check_no_pending_operation(&paths) {
+                print_cli_error(&msg);
+                std::process::exit(1);
+            }
+            let config = load_config_for_cmd_or_exit(Path::new(&config_path), 1);
             let runner = RealRunner;
             let fs = RealFilesystem;
             let backing_path_resolver = braid_cli::luks::RealBackingPathResolver;
@@ -616,7 +633,7 @@ fn main() {
                 &runner,
                 &fs,
                 &braid_cli::replace::ReplaceParams {
-                    config_path: Path::new(&config_path),
+                    config: &config,
                     old_name: &args.old,
                     new_name: &args.new,
                     missing_id: args.missing_id,
@@ -1074,6 +1091,18 @@ fn load_config_or_exit(path: &Path, exit_code: i32) -> braid_cli::config::Config
         Ok(config) => config,
         Err(e) => {
             print_cli_error(&e.to_string());
+            std::process::exit(exit_code);
+        }
+    }
+}
+
+/// Command-wrapper config loader for mutating dispatch arms whose historical
+/// error type rendered config failures with a `config error:` prefix.
+fn load_config_for_cmd_or_exit(path: &Path, exit_code: i32) -> braid_cli::config::Config {
+    match config_read(path) {
+        Ok(config) => config,
+        Err(e) => {
+            print_cli_error(&format!("config error: {e}"));
             std::process::exit(exit_code);
         }
     }
