@@ -3292,6 +3292,60 @@ mod tests {
         );
     }
 
+    // Intent: dry-run enroll is also blocked when a pending-operation
+    //   journal exists, just like a real run.
+    // Why it exists: dry-run is a faithful preview of the real run.
+    //   A regression that gated `check_no_pending_operation` behind
+    //   `if !dry_run` would let `braid enroll DIR --dry-run` produce a
+    //   preview against possibly-stale pool.json membership that the
+    //   real run would refuse -- violating the dry-run-as-faithful-preview
+    //   invariant. The sibling test
+    //   `cmd_enroll_blocked_in_recovery_mode` pins the real-run path;
+    //   this one pins the dry-run path.
+    // Scenario: an add was interrupted; pending-op.json exists. User
+    //   runs `braid enroll --dry-run` to see what would happen before
+    //   deciding whether to recover.
+    #[test]
+    fn cmd_enroll_dry_run_blocked_in_recovery_mode() {
+        let (tmp, paths) = isolated_paths();
+
+        let journal = crate::journal::build_journal(
+            crate::membership::PoolMembership::empty(),
+            crate::membership::PoolMembership::empty(),
+            crate::journal::OpKind::Add {
+                phase: crate::journal::AddPhase::PoolMutation,
+                targets: crate::membership::LuksUuidMap::new(),
+            },
+        );
+        crate::journal::write_journal(&paths, &journal).unwrap();
+
+        let runner = MockRunner::default();
+        let fs = enroll_fs(&[]);
+        let membership = enroll_make_membership(&[("d1", "/dev/disk/by-id/d1")]);
+        let kf = tmp.path().join("braid.key");
+
+        let err = cmd_enroll_key_file(
+            &runner,
+            &fs,
+            &EnrollKeyFileParams {
+                membership: &membership,
+                key_file_path: &kf,
+                generate: false,
+                passphrase_stdin: false,
+                passphrase_file: None,
+                dry_run: true,
+                paths: &paths,
+                backing_path_resolver: crate::test_fixtures::mock_virtio_backing_path_resolver(),
+            },
+        )
+        .unwrap_err();
+
+        assert!(
+            err.to_string().contains("interrupted operation"),
+            "expected 'interrupted operation' in: {err}"
+        );
+    }
+
     // Intent: standalone `braid enroll` never writes the pending-op
     //   journal, so an interrupted apply phase cannot strand the user
     //   in recovery mode.
