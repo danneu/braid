@@ -89,6 +89,8 @@ Each piece of the block is load-bearing:
 4. If sysfs reports a busy operation or the sysfs probe fails, returns immediately before probing scrub
 5. Probes scrub status via `btrfs scrub status` only after the sysfs scan is clean (scrub is not in the kernel exclusive-operation set, so sysfs cannot detect it)
 
+When the host has more than one btrfs filesystem (e.g. a btrfs root in addition to the pool), an exclusive op on any of them keeps the system awake while the pool is mounted, and the `busy:` line above may name an op on the non-pool fs. This is intentionally conservative -- see [ADR 016: Auto-Suspend](https://github.com/danneu/braid/blob/master/docs/decisions/016-auto-suspend.md).
+
 ## Related commands
 
 - [braid status](status.md) -- detailed pool state including operation progress

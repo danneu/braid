@@ -537,25 +537,31 @@ mod tests {
         assert!(runner.requests().is_empty(), "{:?}", runner.requests());
     }
 
-    /* Intent: when the host has multiple btrfs filesystems, ANY busy
-     *   fsid blocks suspend -- not just the one the pool maps to.
+    /* Intent: when the host has multiple btrfs filesystems, a busy
+     *   non-pool fsid blocks suspend even when the pool fsid is idle.
      * Why: `cmd_idle` no longer does mount->fsid resolution. The trade
      *   is conservative-by-design: a busy non-pool btrfs (e.g. root)
      *   keeps the system awake. A future "scope to pool fsid" change
-     *   would defeat this protection silently; this test pins it.
-     * Scenario: NixOS host with btrfs root and a braid pool; root is
-     *   idle, pool is mid-balance. autosuspend must see Busy.
+     *   would read only IDLE_FSID, see `none`, and silently return
+     *   Idle -- defeating the host-wide rule. Pinning the busy state
+     *   on IDLE_FSID_OTHER (and the idle state on IDLE_FSID) makes
+     *   that regression fail this test.
+     * Scenario: NixOS host with btrfs root and a braid pool; the pool
+     *   is idle, root is mid-balance. autosuspend must see Busy and
+     *   the `busy:` line names the non-pool op.
      */
     #[test]
     fn idle_any_busy_blocks_suspend_multi_btrfs() {
         let runner = idle_runner_with_scrub_finished();
-        // First entry is `none`, second is `balance`. The helper iterates
-        // entries in returned order, so the loop must continue past the
-        // first and report Busy on the second.
+        // Pool fsid (IDLE_FSID) is idle; non-pool fsid (IDLE_FSID_OTHER)
+        // is balancing. List order puts the pool first so the loop must
+        // continue past it to find Busy on the second entry. A future
+        // change that scoped reads to only the pool fsid would read
+        // IDLE_FSID, see `none`, and return Idle -- failing this test.
         let fs = IdleMockFs::mounted_btrfs_only()
-            .seed_btrfs_listing(&[IDLE_FSID_OTHER, IDLE_FSID])
-            .seed_exclop(IDLE_FSID_OTHER, "none")
-            .seed_exclop(IDLE_FSID, "balance");
+            .seed_btrfs_listing(&[IDLE_FSID, IDLE_FSID_OTHER])
+            .seed_exclop(IDLE_FSID, "none")
+            .seed_exclop(IDLE_FSID_OTHER, "balance");
 
         let result = cmd_idle(&runner, &fs, &idle_mp());
         assert_eq!(
