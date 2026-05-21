@@ -188,6 +188,8 @@ Conventions).
 
 **Test verbosity:** Run tests without `-v` by default. Only add `-v` to a specific failing test when the non-verbose output doesn't explain the failure. Never run `just test-vm -v` (all tests verbose) — it produces too much output to be useful.
 
+**Test scope:** Default to focused runs (`just test-vm test1 test2`) -- the full suite takes 20-30 minutes. Only run the unscoped `just test-vm` for changes with broad blast radius (systemd lifecycle, pool lock, mount/unmount, module-wide refactors) or right before handing work back to the user on a substantial change. For small, localized changes, run only the tests that exercise the touched code path.
+
 ## Test Conventions
 
 Every individual test starts with a `//` line-comment preamble with three labeled sections:
