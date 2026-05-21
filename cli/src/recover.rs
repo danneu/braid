@@ -1,10 +1,10 @@
 use crate::add::find_added_device_by_uuid;
 use crate::alert;
+use crate::by_id::{ByIdResolver, by_id_priority, is_partition_entry};
 use crate::cmd::{CmdRequest, CommandRunner, Step};
 use crate::config::{self, Config};
 use crate::credential::{self, OpenCredential};
 use crate::credential_verify::{Credential, CredentialVerifyTarget, verify_credential_for_targets};
-use crate::discover;
 use crate::inhibit::AcquireSleepInhibitor;
 use crate::journal::{self, Journal};
 use crate::luks::{self, BackingPathResolver, VerifyOutcome};
@@ -100,42 +100,10 @@ impl RecoverPassphrase<'_> {
     }
 }
 
-/// Resolve `/dev/disk/by-id/` symlinks for a live LUKS UUID during recovery.
-///
-/// Narrow recovery-local abstraction so the production code path can read symlinks
-/// without widening the shared `probe::Filesystem` trait (which has 14 mock impls).
-/// `RealByIdResolver` is the production implementation; tests inject their own.
-pub trait ByIdResolver {
-    /// List filenames under `/dev/disk/by-id/`. Returns an empty vec if the
-    /// directory does not exist (mirrors `Filesystem::list_dir` semantics).
-    fn list_by_id_entries(&self) -> Result<Vec<String>, std::io::Error>;
-
-    /// Canonicalize `path` (resolve all symlinks to an absolute path).
-    fn canonicalize(&self, path: &str) -> Result<String, std::io::Error>;
-}
-
-pub struct RealByIdResolver;
-
-impl ByIdResolver for RealByIdResolver {
-    fn list_by_id_entries(&self) -> Result<Vec<String>, std::io::Error> {
-        match std::fs::read_dir("/dev/disk/by-id") {
-            Ok(entries) => entries
-                .map(|e| e.map(|e| e.file_name().to_string_lossy().into_owned()))
-                .collect(),
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(Vec::new()),
-            Err(e) => Err(e),
-        }
-    }
-
-    fn canonicalize(&self, path: &str) -> Result<String, std::io::Error> {
-        std::fs::canonicalize(path).map(|p| p.to_string_lossy().into_owned())
-    }
-}
-
 /// Find the `/dev/disk/by-id/` symlink whose canonical target matches `underlying`.
 ///
 /// `underlying` is a live pool device's backing kernel path (from `cryptsetup status`).
-/// We pick the highest-priority match by `discover::by_id_priority` so the recorded
+/// We pick the highest-priority match by `by_id::by_id_priority` so the recorded
 /// `by_id` is the most stable identifier the kernel exposes for this device.
 ///
 /// Hard-fails if no by-id symlink resolves to `underlying` — recovery refuses to
@@ -160,7 +128,7 @@ fn resolve_by_id_for_underlying(
     // (priority, filename, full_path) for every by-id entry that resolves to `target`.
     let mut matches: Vec<(u8, String, String)> = Vec::new();
     for name in entries {
-        if discover::is_partition_entry(&name) {
+        if is_partition_entry(&name) {
             continue;
         }
         let full = format!("{by_id_dir}/{name}");
@@ -169,7 +137,7 @@ fn resolve_by_id_for_underlying(
             continue;
         };
         if resolved == target {
-            matches.push((discover::by_id_priority(&name), name, full));
+            matches.push((by_id_priority(&name), name, full));
         }
     }
 
@@ -3772,6 +3740,7 @@ fn mount_membership_for_recover<'a>(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::by_id::test_helpers::{MockByIdResolver, resolver_for};
     use crate::cmd::{CmdError, CmdRequest, CommandRunner, MockRunner, RawCommandOutput};
     use crate::journal::{self, OpKind};
     use crate::luks::ScriptedPassphraseReader;
@@ -3912,63 +3881,6 @@ mod tests {
             stderr: format!("/dev/mapper/{mapper} is inactive.\n"),
             exit_status: 4,
         }
-    }
-
-    /// Test resolver for `ByIdResolver`. `entries` is what `list_by_id_entries`
-    /// returns; `canonicalize_results` is the symlink → canonical-path map used
-    /// by `canonicalize`. Unmocked paths return `NotFound`.
-    #[derive(Default)]
-    struct MockByIdResolver {
-        entries: Vec<String>,
-        canonicalize_results: BTreeMap<String, String>,
-    }
-
-    impl MockByIdResolver {
-        fn with_entries<I, S>(mut self, entries: I) -> Self
-        where
-            I: IntoIterator<Item = S>,
-            S: Into<String>,
-        {
-            self.entries = entries.into_iter().map(Into::into).collect();
-            self
-        }
-
-        fn with_canonical(mut self, path: &str, target: &str) -> Self {
-            self.canonicalize_results
-                .insert(path.to_string(), target.to_string());
-            self
-        }
-    }
-
-    impl ByIdResolver for MockByIdResolver {
-        fn list_by_id_entries(&self) -> Result<Vec<String>, std::io::Error> {
-            Ok(self.entries.clone())
-        }
-
-        fn canonicalize(&self, path: &str) -> Result<String, std::io::Error> {
-            self.canonicalize_results.get(path).cloned().ok_or_else(|| {
-                std::io::Error::new(std::io::ErrorKind::NotFound, format!("mock: {path}"))
-            })
-        }
-    }
-
-    /// Build a `MockByIdResolver` from `(underlying, by_id_filename)` pairs.
-    /// For each pair, the by-id entry is registered and both the entry and the
-    /// underlying canonicalize to the underlying path. Use this for success-path
-    /// tests where the resolver should find a matching entry per pool device.
-    fn resolver_for(mappings: &[(&str, &str)]) -> MockByIdResolver {
-        let mut resolver = MockByIdResolver::default();
-        for (underlying, filename) in mappings {
-            resolver.entries.push((*filename).to_string());
-            resolver.canonicalize_results.insert(
-                format!("/dev/disk/by-id/{filename}"),
-                (*underlying).to_string(),
-            );
-            resolver
-                .canonicalize_results
-                .insert((*underlying).to_string(), (*underlying).to_string());
-        }
-        resolver
     }
 
     fn ok_raw(cmd: &str, stdout: &str) -> RawCommandOutput {
@@ -13728,7 +13640,7 @@ mod tests {
 
     /// Intent: When several /dev/disk/by-id/ symlinks resolve to the same live
     /// device (the normal case for any SATA drive), the resolver must pick the
-    /// most stable identifier per `discover::by_id_priority`.
+    /// most stable identifier per `by_id::by_id_priority`.
     ///
     /// Why: SATA drives normally expose wwn-, ata-, and scsi- aliases pointing
     /// at the same kernel device. We want pool.json to record the wwn (most

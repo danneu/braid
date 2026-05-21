@@ -1,5 +1,6 @@
 pub mod ack;
 pub mod add;
+pub mod by_id;
 pub mod alert;
 pub mod cmd;
 pub mod config;

@@ -976,7 +976,7 @@ fn main() {
             let online_snapshot =
                 (!args.dry_run && config.systemd_lifecycle()).then(|| snapshot(&online_ops));
             let fs = RealFilesystem;
-            let by_id_resolver = braid_cli::recover::RealByIdResolver;
+            let by_id_resolver = braid_cli::by_id::RealByIdResolver;
             let backing_path_resolver = braid_cli::luks::RealBackingPathResolver;
             match run_with_online_marker(
                 online_snapshot.as_ref(),
