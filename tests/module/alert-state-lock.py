@@ -133,6 +133,29 @@ def stop_lock_holder(holder_pid):
     machine.execute("rm -f /tmp/holder.ready")
 
 
+def start_lock_holder_until_release(release_path="/tmp/holder.release"):
+    machine.succeed(f"rm -f /tmp/holder.ready {quote(release_path)}")
+    holder_pid = machine.succeed(
+        "nohup sh -c 'exec 9>/run/braid-pool.lock; "
+        "flock -x 9; touch /tmp/holder.ready; "
+        f"while [ ! -e {quote(release_path)} ]; do sleep 0.1; done' "
+        ">/dev/null 2>&1 & echo $!"
+    ).strip()
+    machine.wait_until_succeeds("test -e /tmp/holder.ready", timeout=10)
+    locks = machine.succeed("cat /proc/locks")
+    assert "FLOCK" in locks, (
+        "no flock in /proc/locks after holder readiness signal:\n"
+        f"{locks}"
+    )
+    return holder_pid
+
+
+def release_lock_holder(holder_pid, release_path="/tmp/holder.release"):
+    machine.succeed(f"touch {quote(release_path)}")
+    machine.execute(f"kill {quote(holder_pid)} 2>/dev/null || true")
+    machine.execute(f"rm -f /tmp/holder.ready {quote(release_path)}")
+
+
 def get_pool_devid(name):
     pool = json.loads(machine.succeed("cat /var/lib/braid/pool.json"))
     entry = member(pool, name)
@@ -250,6 +273,85 @@ with subtest("ack waits then fails without mutating alert state"):
     )
 
     machine.succeed("braid ack")
+    machine.fail("systemctl is-active --quiet braid-alert.service")
+
+
+# Intent: ack waits while the pool lock is held, observes the holder's
+# release mid-wait, re-acquires the lock within one poll interval, then
+# clears the latch and stops the alert unit normally.
+# Why it exists: protects the positive bounded-wait path at the VM
+# seam. The existing ack contention subtest only covers the
+# held-forever expiry path; its trailing `braid ack` runs after the
+# holder is already stopped, so a regression in poll_acquire's retry
+# shape -- e.g. a loop that sleeps the full timeout before its single
+# re-attempt -- would still pass that subtest (elapsed ~10 s, rc=1)
+# and still pass the post-release `braid ack` (lock is free). Mirrors
+# `acquire_with_timeout_polls_then_succeeds_after_holder_release` in
+# cli/src/pool_lock.rs at the integration seam.
+# Scenario: a concurrent braid operation is holding the pool lock when
+# the user runs `braid ack`. ack enters its bounded wait, and when the
+# concurrent operation finishes ack should re-acquire promptly and
+# ack normally -- not wait out the full 10 s timeout.
+with subtest("ack re-acquires promptly when holder releases mid-wait"):
+    write_missing_latch(1)
+    write_acked_stats({"1": acked_disk(False, 23)})
+    machine.succeed("systemctl start braid-alert.service")
+    machine.succeed(
+        "rm -f /tmp/ack.started /tmp/ack.done /tmp/ack.rc /tmp/ack.out"
+    )
+
+    holder_pid = start_lock_holder_until_release()
+    try:
+        # `touch /tmp/ack.started` lives in the wrapper immediately
+        # before `braid ack` so we can synchronize on the wrapper
+        # actually reaching the invocation point, rather than on the
+        # shell having been backgrounded. Without this, a slow or
+        # paused VM could let the test release the holder before
+        # ack ever entered the lock path -- the test would then pass
+        # without exercising mid-wait re-acquire.
+        machine.succeed(
+            "nohup sh -c "
+            "'touch /tmp/ack.started; "
+            "braid ack >/tmp/ack.out 2>&1; echo $? >/tmp/ack.rc; "
+            "touch /tmp/ack.done' "
+            ">/dev/null 2>&1 &"
+        )
+        machine.wait_until_succeeds(
+            "test -e /tmp/ack.started", timeout=10
+        )
+        # Sentinel proves the wrapper reached `braid ack`. Give the
+        # process a brief window to parse argv, clear the root gate,
+        # and reach acquire_with_timeout, then prove it is blocked on
+        # the held lock -- no timing assertion involved. Config load
+        # for `Commands::Ack` happens *after* the lock is acquired
+        # (cli/src/main.rs:489 takes the pool lock at dispatch before
+        # the match arm runs), per ADR 026, so it is not part of the
+        # pre-acquire startup gap.
+        time.sleep(2)
+        rc, _ = machine.execute("test -e /tmp/ack.done")
+        assert rc != 0, "ack completed while pool lock was still held"
+
+        # Release the holder and measure how long ack takes to finish.
+        # Bounded: one poll interval (~250 ms) plus ack's own work.
+        release_start = time.monotonic()
+        machine.succeed("touch /tmp/holder.release")
+        machine.wait_until_succeeds("test -e /tmp/ack.done", timeout=5)
+        release_to_done = time.monotonic() - release_start
+    finally:
+        release_lock_holder(holder_pid)
+
+    ack_rc = int(machine.succeed("cat /tmp/ack.rc").strip())
+    ack_out = machine.succeed("cat /tmp/ack.out")
+
+    assert ack_rc == 0, (
+        f"expected ack success after holder release, got rc={ack_rc}; "
+        f"out={ack_out}"
+    )
+    assert release_to_done <= 5, (
+        f"ack did not re-acquire promptly after release; "
+        f"release_to_done={release_to_done:.2f}s; out={ack_out}"
+    )
+    machine.fail(f"test -e {quote(alert_latch_path)}")
     machine.fail("systemctl is-active --quiet braid-alert.service")
 
 
