@@ -496,20 +496,38 @@ fn summarize_declared_disks(classifications: &[(String, String, DiskState)]) -> 
     }
 }
 
-fn check_declared_disks<R: CommandRunner>(ctx: &mut DoctorContext<'_, R>) -> CheckResult {
-    let pool_membership = match membership::load_membership(ctx.paths) {
-        Ok(m) => m,
+/// Shared membership gate for doctor checks that need authoritative pool members.
+/// Keeps missing, corrupt, and empty pool.json handling consistent across
+/// independently rendered checks.
+fn load_membership_or_check_result<R: CommandRunner>(
+    ctx: &DoctorContext<'_, R>,
+    check_name: &'static str,
+) -> Result<membership::PoolMembership, CheckResult> {
+    match membership::load_membership(ctx.paths) {
+        Ok(m) if m.is_empty() => Err(CheckResult::skip(
+            check_name,
+            "skipped (no pool members declared)",
+        )),
+        Ok(m) => Ok(m),
         Err(membership::MembershipError::Io { source, .. })
             if source.kind() == std::io::ErrorKind::NotFound =>
         {
-            return CheckResult::skip("declared_disks", "skipped (no pool membership file)");
+            Err(CheckResult::skip(
+                check_name,
+                "skipped (no pool membership file)",
+            ))
         }
-        Err(e) => {
-            return CheckResult::warn(
-                "declared_disks",
-                format!("could not load pool membership: {e}"),
-            );
-        }
+        Err(e) => Err(CheckResult::warn(
+            check_name,
+            format!("could not load pool membership: {e}"),
+        )),
+    }
+}
+
+fn check_declared_disks<R: CommandRunner>(ctx: &mut DoctorContext<'_, R>) -> CheckResult {
+    let pool_membership = match load_membership_or_check_result(ctx, "declared_disks") {
+        Ok(m) => m,
+        Err(cr) => return cr,
     };
 
     let members = pool_membership.iter_by_name();
@@ -717,16 +735,9 @@ fn check_foreign_luks_uuid<R: CommandRunner>(ctx: &mut DoctorContext<'_, R>) -> 
         return CheckResult::skip(NAME, "skipped (pool not mounted)");
     }
 
-    let membership = match membership::load_membership(ctx.paths) {
+    let membership = match load_membership_or_check_result(ctx, NAME) {
         Ok(m) => m,
-        Err(membership::MembershipError::Io { source, .. })
-            if source.kind() == std::io::ErrorKind::NotFound =>
-        {
-            return CheckResult::skip(NAME, "skipped (no pool membership file)");
-        }
-        Err(e) => {
-            return CheckResult::warn(NAME, format!("could not load pool membership: {e}"));
-        }
+        Err(cr) => return cr,
     };
 
     ensure_pool_state(ctx);
@@ -888,23 +899,14 @@ fn summarize_smart_selftest(subject: &str, by_id: &str, summary: SelftestSummary
 
 /// Per-drive SMART self-test doctor rows.
 /// Emits one stable-name row per pool member so machine consumers key on
-/// `name + subject`; emits one unscoped Skip only when membership cannot be
-/// enumerated.
+/// `name + subject`; emits one unscoped fallback row when pool membership
+/// cannot provide any members to inspect.
 fn check_smart_selftests<R: CommandRunner>(ctx: &mut DoctorContext<'_, R>) -> Vec<CheckResult> {
     const NAME: &str = "smart_self_test";
-    let membership = match membership::load_membership(ctx.paths) {
+    let membership = match load_membership_or_check_result(ctx, NAME) {
         Ok(membership) => membership,
-        Err(e) => {
-            return vec![CheckResult::skip(
-                NAME,
-                format!("pool membership not enumerable ({e})"),
-            )];
-        }
+        Err(cr) => return vec![cr],
     };
-
-    if membership.is_empty() {
-        return vec![CheckResult::skip(NAME, "no pool members declared")];
-    }
 
     let mut checks = Vec::new();
     for (_, member) in membership.iter_by_name() {
@@ -2076,8 +2078,26 @@ mod tests {
         assert_eq!(r.name, "smart_self_test");
         assert_eq!(r.subject, None);
         assert_eq!(r.status, CheckStatus::Skip);
+        assert_eq!(r.message, "skipped (no pool membership file)");
+    }
+
+    // Intent: corrupt membership emits the only unscoped self-test row as Warn.
+    // Why it exists: corrupt pool.json is an operator problem, not an absent
+    //   pool-membership setup state.
+    // Scenario: pool.json exists but does not satisfy the PoolMembership schema.
+    #[test]
+    fn smart_selftest_warns_on_corrupt_membership() {
+        let (dir, paths) = isolated_paths();
+        std::fs::write(paths.pool_json(), "{}").expect("corrupt membership writes");
+        let runner = MockRunner::default();
+        let results = selftest_results_for(&runner, &paths);
+        drop(dir);
+        let r = only_result(&results);
+        assert_eq!(r.name, "smart_self_test");
+        assert_eq!(r.subject, None);
+        assert_eq!(r.status, CheckStatus::Warn);
         assert!(
-            r.message.contains("pool membership not enumerable"),
+            r.message.contains("could not load pool membership"),
             "{}",
             r.message
         );
@@ -2099,7 +2119,7 @@ mod tests {
         assert_eq!(r.name, "smart_self_test");
         assert_eq!(r.subject, None);
         assert_eq!(r.status, CheckStatus::Skip);
-        assert_eq!(r.message, "no pool members declared");
+        assert_eq!(r.message, "skipped (no pool members declared)");
     }
 
     // Intent: warning hints include the literal by-id path.
@@ -2680,6 +2700,28 @@ mod tests {
         assert_eq!(check.status, CheckStatus::Skip);
     }
 
+    // Intent: declared_disks treats an empty pool.json as no declared members.
+    // Why it exists: an empty membership must not render as "all 0 declared
+    //   disks present".
+    // Scenario: pool.json parses successfully but has no disk entries.
+    #[test]
+    fn declared_disks_skips_when_membership_is_empty() {
+        let f = write_temp(valid_config_json());
+        let (_dir, paths) = isolated_paths();
+        membership::save_membership(&membership::PoolMembership::empty(), &paths)
+            .expect("empty membership saves");
+        let report = run_doctor(
+            f.path(),
+            &MockRunner::default(),
+            &RealFilesystem,
+            &paths,
+            human_options(),
+        );
+        let check = find_check(&report, "declared_disks");
+        assert_eq!(check.status, CheckStatus::Skip);
+        assert_eq!(check.message, "skipped (no pool members declared)");
+    }
+
     #[test]
     fn declared_disks_skip_when_no_config() {
         let (_dir, paths) = isolated_paths();
@@ -2724,6 +2766,32 @@ mod tests {
         let check = find_check(&report, "declared_disks");
         assert_eq!(check.status, CheckStatus::Skip);
         assert_eq!(check.message, "skipped (no pool membership file)");
+    }
+
+    // Intent: declared_disks warns when pool.json exists but is corrupt.
+    // Why it exists: corrupt authoritative membership is diagnosable operator
+    //   state, not a first-run missing-membership condition.
+    // Scenario: an operator or interrupted write leaves pool.json as valid JSON
+    //   that does not match the PoolMembership schema.
+    #[test]
+    fn declared_disks_warns_on_corrupt_membership() {
+        let f = write_temp(valid_config_json());
+        let (_dir, paths) = isolated_paths();
+        std::fs::write(paths.pool_json(), "{}").expect("corrupt membership writes");
+        let report = run_doctor(
+            f.path(),
+            &MockRunner::default(),
+            &RealFilesystem,
+            &paths,
+            human_options(),
+        );
+        let check = find_check(&report, "declared_disks");
+        assert_eq!(check.status, CheckStatus::Warn);
+        assert!(
+            check.message.contains("could not load pool membership"),
+            "{}",
+            check.message
+        );
     }
 
     // --- summarize_declared_disks: pure rendering tests ---
@@ -3816,6 +3884,54 @@ mod tests {
         let check = find_check(&report, "foreign_luks_uuid");
         assert_eq!(check.status, CheckStatus::Skip);
         assert_eq!(check.message, "skipped (no pool membership file)");
+    }
+
+    // Intent: foreign_luks_uuid treats an empty pool.json as no declared
+    //   members instead of classifying all live pool UUIDs as foreign.
+    // Why it exists: an empty membership should be a setup-state Skip, not a
+    //   spurious foreign-UUID failure.
+    // Scenario: the pool is mounted and pool.json parses with zero disks.
+    #[test]
+    fn foreign_luks_uuid_skips_when_membership_is_empty() {
+        let (_dir, paths) = isolated_paths();
+        membership::save_membership(&membership::PoolMembership::empty(), &paths)
+            .expect("empty membership saves");
+        let (mp_req, mp_out) = mountpoint_ok();
+        let runner = MockRunner::default().with_output(mp_req, mp_out);
+        let fs = DoctorMockFs::mounted_btrfs_only();
+        let f = write_temp(valid_config_json());
+
+        let report = run_doctor(f.path(), &runner, &fs, &paths, human_options());
+
+        let check = find_check(&report, "foreign_luks_uuid");
+        assert_eq!(check.status, CheckStatus::Skip);
+        assert_eq!(check.message, "skipped (no pool members declared)");
+    }
+
+    // Intent: foreign_luks_uuid warns on corrupt pool.json only after the pool
+    //   is confirmed mounted.
+    // Why it exists: corrupt membership is actionable only when this mounted
+    //   topology check can otherwise run.
+    // Scenario: the pool is mounted but pool.json does not match the
+    //   PoolMembership schema.
+    #[test]
+    fn foreign_luks_uuid_warns_on_corrupt_membership() {
+        let (_dir, paths) = isolated_paths();
+        std::fs::write(paths.pool_json(), "{}").expect("corrupt membership writes");
+        let (mp_req, mp_out) = mountpoint_ok();
+        let runner = MockRunner::default().with_output(mp_req, mp_out);
+        let fs = DoctorMockFs::mounted_btrfs_only();
+        let f = write_temp(valid_config_json());
+
+        let report = run_doctor(f.path(), &runner, &fs, &paths, human_options());
+
+        let check = find_check(&report, "foreign_luks_uuid");
+        assert_eq!(check.status, CheckStatus::Warn);
+        assert!(
+            check.message.contains("could not load pool membership"),
+            "{}",
+            check.message
+        );
     }
 
     // Intent: human format includes the "missing devs" label.
