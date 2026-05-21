@@ -516,18 +516,12 @@ fn discover_from_dir_inner<R: CommandRunner>(
     for (name, cand) in members {
         let member = DiskMember::new(name, cand.by_id);
         membership.insert(cand.luks_uuid, member).map_err(|e| {
-            // Discover is the only writer of fresh membership here, so
-            // a Conflict at this point indicates a logic bug rather
-            // than user-facing state corruption. Surface the message
-            // through DiscoverError::Cmd's escape hatch is wrong; use
-            // an explicit panic-equivalent by mapping to a synthetic
-            // DiscoverError::LabelCollision is also wrong. The
-            // pragmatic answer: bubble it through a generic
-            // `DiscoverError::ReadDir`-like surface would also be
-            // wrong. Stay strict here: log the error and treat as
-            // ReadDir error wrapping the I/O-shaped MembershipError
-            // body. In practice, the prior DuplicateUuid pass + the
-            // four-axis pre-checks make this branch unreachable.
+            // Unreachable: insert's four axes are all pre-satisfied here. Axis 1
+            // (UUID) by the seen_uuids pre-pass above; axis 2 (name) by members
+            // being keyed on DiskName; axis 3 (by-id) by read_dir yielding unique
+            // directory entries; axis 4 (devid) by DiskMember::new starting with
+            // devid: None. Wrap defensively so any future regression surfaces the
+            // MembershipError text verbatim.
             DiscoverError::ReadDir(std::io::Error::other(format!(
                 "membership insert failed after discover pre-checks: {e}"
             )))
