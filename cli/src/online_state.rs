@@ -335,6 +335,8 @@ pub fn run_with_online_marker<E>(
 /// Plain lock finalizer: stop does not use the online snapshot gate.
 /// It relies on `/run/braid-stop-coordinator.lock` and the `done\n` protocol from
 /// docs/decisions/026-pool-lock-rust-owned.md instead.
+/// An unknown mountpoint state is treated as still-mounted -- mirrors
+/// `mark_online`'s fail-safe and skips the synchronous stop.
 pub fn mark_offline(cfg: &Config, ops: &dyn OnlineStateOps) -> Result<(), OnlineError> {
     let path = Path::new(cfg.mount_point().as_str());
     match ops.is_mountpoint(path) {
@@ -345,6 +347,7 @@ pub fn mark_offline(cfg: &Config, ops: &dyn OnlineStateOps) -> Result<(), Online
                 "braid: WARNING: failed to check mountpoint {}: {e}",
                 path.display()
             );
+            return Ok(());
         }
     }
 
@@ -404,7 +407,7 @@ impl StagedOnlineFailure {
 #[cfg(test)]
 pub struct RecordingOnlineStateOps {
     state: std::cell::RefCell<Result<UnitActiveState, String>>,
-    mounted: std::cell::Cell<bool>,
+    mounted: std::cell::RefCell<Result<bool, StagedOnlineFailure>>,
     calls: std::cell::RefCell<Vec<String>>,
     bound_by: std::cell::RefCell<Result<Vec<String>, StagedOnlineFailure>>,
     systemctl_stop_errs: std::cell::RefCell<HashMap<String, StagedOnlineFailure>>,
@@ -417,7 +420,7 @@ impl RecordingOnlineStateOps {
     pub fn new() -> Self {
         Self {
             state: std::cell::RefCell::new(Ok(UnitActiveState::Inactive)),
-            mounted: std::cell::Cell::new(true),
+            mounted: std::cell::RefCell::new(Ok(true)),
             calls: std::cell::RefCell::new(Vec::new()),
             bound_by: std::cell::RefCell::new(Ok(Vec::new())),
             systemctl_stop_errs: std::cell::RefCell::new(HashMap::new()),
@@ -446,7 +449,11 @@ impl RecordingOnlineStateOps {
     }
 
     pub fn set_mounted(&self, mounted: bool) {
-        self.mounted.set(mounted);
+        *self.mounted.borrow_mut() = Ok(mounted);
+    }
+
+    pub fn set_mountpoint_err(&self, failure: StagedOnlineFailure) {
+        *self.mounted.borrow_mut() = Err(failure);
     }
 
     pub fn set_bound_by_ok(&self, units: Vec<String>) {
@@ -474,7 +481,10 @@ impl OnlineStateOps for RecordingOnlineStateOps {
 
     fn is_mountpoint(&self, _path: &Path) -> Result<bool, OnlineError> {
         self.calls.borrow_mut().push("mountpoint".into());
-        Ok(self.mounted.get())
+        self.mounted
+            .borrow()
+            .clone()
+            .map_err(StagedOnlineFailure::into_online_error)
     }
 
     fn chown(&self, _path: &Path, _owner: &str, _group: &str) -> Result<(), OnlineError> {
@@ -875,6 +885,32 @@ mod tests {
         assert!(
             ops.calls()
                 .contains(&format!("stop {BRAID_ONLINE_UNIT} no_block=false"))
+        );
+    }
+
+    // Intent: mark_offline must not stop braid-online.service when the
+    // mountpoint check itself fails.
+    // Why it exists: cmd_lock_orchestrate writes `done\n` to the stop
+    // coordinator before mark_offline; ExecStop reentry would treat that
+    // marker as authoritative and exit 0, so a stop transition over an
+    // unknown mount state could leave the unit inactive over a live pool.
+    // Scenario: cmd_lock succeeded and the done marker is set, then the
+    // mountpoint check returns a Spawn error mid-shutdown.
+    #[test]
+    fn mark_offline_skips_systemctl_when_mountpoint_check_fails() {
+        let cfg = cfg(r#"{"mount_point":"/mnt/storage","systemd_lifecycle":true}"#);
+        let ops = RecordingOnlineStateOps::new();
+        ops.set_mountpoint_err(StagedOnlineFailure::Spawn(
+            "mountpoint spawn failure".into(),
+        ));
+
+        mark_offline(&cfg, &ops).unwrap();
+
+        assert!(
+            !ops.calls()
+                .contains(&format!("stop {BRAID_ONLINE_UNIT} no_block=false")),
+            "expected no systemctl stop after mountpoint check failure, got {:?}",
+            ops.calls(),
         );
     }
 }

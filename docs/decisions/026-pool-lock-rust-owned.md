@@ -127,6 +127,16 @@ invocations should return only after `braid-online.service` is inactive, while
 recursive `ExecStop` has a deterministic poll-out path instead of queuing
 behind itself.
 
+Between writing `done\n` and stopping `braid-online.service`, `mark_offline`
+re-checks `mountpoint -q` and treats a check failure (e.g. `OnlineError::Spawn`
+mid-shutdown) as still-mounted: it warns and skips the stop, leaving
+`braid-online.service` active. The operator can re-run `braid lock` or
+`systemctl stop braid-online.service` to recover. This mirrors the
+"unknown snapshot results warn instead of starting" rule from the
+[Snapshot Rule On `systemctl start`](#snapshot-rule-on-systemctl-start)
+section: when state is unknown, the fail-safe direction is to leave the
+lifecycle owner active rather than deactivate over a possibly live pool.
+
 ## Consequences
 
 - There is a single source of truth for the locked-command list and acquisition
