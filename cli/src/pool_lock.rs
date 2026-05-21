@@ -4,14 +4,11 @@
 //! probes, prompts, journals, and lifecycle fixups all sit inside the same
 //! serialized critical section.
 
-#![allow(deprecated)] // This module deliberately uses BSD flock(2) via nix.
-
 use nix::errno::Errno;
-use nix::fcntl::{FlockArg, OFlag, flock, open};
+use nix::fcntl::{Flock, FlockArg, OFlag, open};
 use nix::sys::stat::Mode;
 use std::fs::File;
 use std::io;
-use std::os::fd::AsRawFd;
 use std::path::{Path, PathBuf};
 use std::thread;
 use std::time::{Duration, Instant};
@@ -75,10 +72,10 @@ impl RealPoolLock {
 
     fn try_acquire(&self) -> Result<RealPoolLockGuard, PoolLockError> {
         let file = open_lock_file(&self.path)?;
-        match flock(file.as_raw_fd(), FlockArg::LockExclusiveNonblock) {
-            Ok(()) => Ok(RealPoolLockGuard { _file: file }),
-            Err(e) if would_block(e) => Err(PoolLockError::AlreadyHeld),
-            Err(e) => Err(PoolLockError::Io(io_from_errno(e))),
+        match Flock::lock(file, FlockArg::LockExclusiveNonblock) {
+            Ok(lock) => Ok(RealPoolLockGuard { _lock: lock }),
+            Err((_, e)) if would_block(e) => Err(PoolLockError::AlreadyHeld),
+            Err((_, e)) => Err(PoolLockError::Io(io_from_errno(e))),
         }
     }
 
@@ -103,7 +100,7 @@ impl RealPoolLock {
 
 /// Owns the open file description that carries the kernel flock.
 pub struct RealPoolLockGuard {
-    _file: File,
+    _lock: Flock<File>,
 }
 
 #[derive(Debug, Error)]
@@ -137,19 +134,19 @@ impl RealStopCoordinator {
 
     /// Opens and locks the coordinator without touching content so polling can
     /// preserve the predecessor's marker while fresh transitions still truncate.
-    fn open_and_lock(&self) -> Result<File, StopCoordinatorError> {
+    fn open_and_lock(&self) -> Result<Flock<File>, StopCoordinatorError> {
         let file = open_lock_file(&self.path)?;
-        match flock(file.as_raw_fd(), FlockArg::LockExclusiveNonblock) {
-            Ok(()) => Ok(file),
-            Err(e) if would_block(e) => Err(StopCoordinatorError::Held),
-            Err(e) => Err(StopCoordinatorError::Io(io_from_errno(e))),
+        match Flock::lock(file, FlockArg::LockExclusiveNonblock) {
+            Ok(lock) => Ok(lock),
+            Err((_, e)) if would_block(e) => Err(StopCoordinatorError::Held),
+            Err((_, e)) => Err(StopCoordinatorError::Io(io_from_errno(e))),
         }
     }
 
     pub fn acquire(&self) -> Result<StopCoordinatorGuard, StopCoordinatorError> {
-        let file = self.open_and_lock()?;
-        file.set_len(0).map_err(StopCoordinatorError::Io)?;
-        Ok(StopCoordinatorGuard { file })
+        let lock = self.open_and_lock()?;
+        lock.set_len(0).map_err(StopCoordinatorError::Io)?;
+        Ok(StopCoordinatorGuard { lock })
     }
 
     pub fn poll_for_done_or_release(&self, deadline: Duration) -> StopCoordinatorPollResult {
@@ -169,12 +166,12 @@ impl RealStopCoordinator {
             }
             after_pre_read();
             match self.open_and_lock() {
-                Ok(file) => {
+                Ok(lock) => {
                     if std::fs::read(&self.path).is_ok_and(|bytes| bytes == DONE_MARKER) {
-                        drop(file);
+                        drop(lock);
                         return StopCoordinatorPollResult::Done;
                     }
-                    return StopCoordinatorPollResult::Acquired(StopCoordinatorGuard { file });
+                    return StopCoordinatorPollResult::Acquired(StopCoordinatorGuard { lock });
                 }
                 Err(StopCoordinatorError::Held) if start.elapsed() < deadline => {
                     thread::sleep(STOP_COORDINATOR_POLL_INTERVAL);
@@ -191,15 +188,15 @@ impl RealStopCoordinator {
 
 /// Held coordinator lock plus the `done\n` marker writer.
 pub struct StopCoordinatorGuard {
-    file: File,
+    lock: Flock<File>,
 }
 
 impl StopCoordinatorGuard {
     pub fn mark_done(&self) -> io::Result<()> {
         use std::os::unix::fs::FileExt;
 
-        self.file.set_len(0)?;
-        self.file.write_all_at(DONE_MARKER, 0)
+        self.lock.set_len(0)?;
+        self.lock.write_all_at(DONE_MARKER, 0)
     }
 }
 
