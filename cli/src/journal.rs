@@ -7,6 +7,8 @@ use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
 use thiserror::Error;
 
+const PENDING_OP_MANUAL_REMEDIATION: &str = "Remove /var/lib/braid/pending-op.json after manual reconciliation (see docs/luks-unlock.md) and re-run.";
+
 /// A pending-operation journal records the full context of a mutation in progress.
 /// When this file exists, braid enters recovery mode: only `status`, `recover`,
 /// and `lock` are permitted. All other commands hard-fail. The two embedded
@@ -250,6 +252,20 @@ pub fn load_journal(paths: &StatePaths) -> Result<Option<Journal>, JournalError>
         detail: e.to_string(),
     })?;
     Ok(Some(journal))
+}
+
+/// Status-facing recovery-mode advisory so read-only triage surfaces an owed
+/// `recover` without making status depend on recovery execution.
+pub fn pending_op_advisories(paths: &StatePaths) -> Vec<String> {
+    match load_journal(paths) {
+        Ok(Some(journal)) => vec![format!(
+            "interrupted operation detected (pending-op.json exists, started {}) -- run 'braid recover' to reconcile",
+            journal.started_at
+        )],
+        Ok(None) => vec![],
+        Err(e @ JournalError::Parse { .. }) => vec![e.to_string()],
+        Err(e) => vec![format!("{e}. {PENDING_OP_MANUAL_REMEDIATION}")],
+    }
 }
 
 /// Durably delete the journal file. Fsyncs the parent directory after
@@ -602,6 +618,80 @@ mod tests {
         let tmp = tempfile::TempDir::new().unwrap();
         let paths = StatePaths::custom(tmp.path().into());
         assert!(load_journal(&paths).unwrap().is_none());
+    }
+
+    // Intent: pending-op status advisories stay quiet when no recovery journal exists.
+    // Why it exists: `braid status` must not show recovery guidance for the normal idle state.
+    // Scenario: operator checks an offline or healthy pool with no interrupted mutation in progress.
+    #[test]
+    fn pending_op_advisories_empty_when_absent() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let paths = StatePaths::custom(tmp.path().into());
+
+        assert!(pending_op_advisories(&paths).is_empty());
+    }
+
+    // Intent: a valid pending-op journal produces one status advisory with the journal timestamp.
+    // Why it exists: `braid status` is the recovery-mode triage command and must point operators to `braid recover`.
+    // Scenario: a mutation wrote `pending-op.json` and then stopped before reconciliation completed.
+    #[test]
+    fn pending_op_advisories_present_includes_started_at() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let paths = StatePaths::custom(tmp.path().into());
+        let started_at = "2026-05-20T10:30:00Z";
+        let journal = Journal {
+            started_at: started_at.to_owned(),
+            op: OpKind::Remove {
+                luks_uuid: test_uuid(291),
+                name: DiskName::parse("disk1").unwrap(),
+            },
+            pre_membership: sample_membership(),
+            target_membership: PoolMembership::empty(),
+        };
+        write_journal(&paths, &journal).unwrap();
+
+        let advisories = pending_op_advisories(&paths);
+
+        assert_eq!(advisories.len(), 1);
+        assert!(advisories[0].contains("interrupted operation detected"));
+        assert!(advisories[0].contains(started_at));
+        assert!(advisories[0].contains("braid recover"));
+    }
+
+    // Intent: an unparseable pending-op journal produces the canonical manual remediation phrase.
+    // Why it exists: `braid recover` also loads the journal, so pointing there would create a recover/status loop.
+    // Scenario: an operator or disk fault leaves `pending-op.json` present but not valid JSON.
+    #[test]
+    fn pending_op_advisories_unparseable_uses_canonical_remediation() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let paths = StatePaths::custom(tmp.path().into());
+        std::fs::write(paths.pending_op_json(), "not json").unwrap();
+
+        let advisories = pending_op_advisories(&paths);
+
+        assert_eq!(advisories.len(), 1);
+        assert!(advisories[0].contains(
+            "Remove /var/lib/braid/pending-op.json after manual reconciliation (see docs/luks-unlock.md) and re-run."
+        ));
+        assert!(!advisories[0].contains("braid recover"));
+    }
+
+    // Intent: pending-op read failures also produce the canonical manual remediation phrase.
+    // Why it exists: non-parse load failures cannot be reconciled by `braid recover` either.
+    // Scenario: `pending-op.json` is present as an unreadable filesystem object instead of a readable file.
+    #[test]
+    fn pending_op_advisories_io_error_uses_canonical_remediation() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let paths = StatePaths::custom(tmp.path().into());
+        std::fs::create_dir(paths.pending_op_json()).unwrap();
+
+        let advisories = pending_op_advisories(&paths);
+
+        assert_eq!(advisories.len(), 1);
+        assert!(advisories[0].contains(
+            "Remove /var/lib/braid/pending-op.json after manual reconciliation (see docs/luks-unlock.md) and re-run."
+        ));
+        assert!(!advisories[0].contains("braid recover"));
     }
 
     #[test]

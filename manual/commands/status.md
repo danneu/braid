@@ -160,6 +160,29 @@ Unmount the foreign filesystem before retrying `braid unlock` --
 otherwise `unlock` reports "pool already mounted" because something is
 in fact mounted at that path.
 
+**Pending recovery journal.** When `/var/lib/braid/pending-op.json`
+exists, an interrupted `add` / `remove` / `remove-missing` / `replace`
+is owed. `braid status` prints the advisory whether or not the pool is
+mounted:
+
+```
+warning: interrupted operation detected (pending-op.json exists, started 2026-05-20T10:30:00Z) -- run 'braid recover' to reconcile
+```
+
+Run `sudo braid recover` to reconcile from live pool state; do not
+remove `pending-op.json` by hand except under the conditions documented
+in [Pending-op file corruption](../guides/recovery-scenarios.md#pending-op-file-corruption).
+If the journal is unreadable, the advisory carries the canonical
+manual-reconciliation phrase instead -- because `braid recover` cannot
+load an unparseable journal either:
+
+```
+warning: failed to parse pending-op.json: <detail>. Remove /var/lib/braid/pending-op.json after manual reconciliation (see docs/luks-unlock.md) and re-run.
+```
+
+See [Unparseable state-file reconciliation](../../docs/luks-unlock.md#unparseable-state-file-reconciliation)
+for the safe-to-remove conditions.
+
 **Pending LUKS header backups.** When a header-mutating operation
 (`braid add`, `braid replace`, `braid enroll`) writes a local LUKS
 header backup to `/var/lib/braid/luks-headers/<disk>.luksheader`,

@@ -6,6 +6,7 @@ use crate::alert::{self, AlertCause, AlertState};
 use crate::cmd::{CmdError, CmdRequest, CommandRunner, LsblkFieldKind};
 use crate::config::{Config, mapper_name};
 use crate::confirm::get_lsblk_field;
+use crate::journal;
 use crate::luks::{self, BackingPathResolver};
 use crate::membership::{self, PoolMembership};
 use crate::parse::types::BalanceState;
@@ -380,6 +381,18 @@ fn not_mounted_status(config: &Config, paths: &StatePaths, advisories: Vec<Strin
     }
 }
 
+/// Central advisory ordering point so every status return path reports
+/// recovery-mode state with the same severity order.
+fn assemble_advisories(paths: &StatePaths, foreign_fstype: Option<String>) -> Vec<String> {
+    let mut advisories = Vec::new();
+    if let Some(foreign_fstype) = foreign_fstype {
+        advisories.push(foreign_fstype);
+    }
+    advisories.extend(journal::pending_op_advisories(paths));
+    advisories.extend(luks::header_backup_advisories(paths));
+    advisories
+}
+
 fn build_status<R: CommandRunner, F: Filesystem>(
     runner: &R,
     fs: &F,
@@ -387,17 +400,16 @@ fn build_status<R: CommandRunner, F: Filesystem>(
     paths: &StatePaths,
     backing_path_resolver: &dyn BackingPathResolver,
 ) -> Result<BuiltStatus, StatusError> {
-    let mut advisories = luks::header_backup_advisories(paths);
-
     let pool = match probe_pool(runner, fs, config.mount_point()) {
         Ok(p) => p,
         Err(e @ ProbeError::NotBtrfs { .. }) => {
-            advisories.push(e.to_string());
+            let advisories = assemble_advisories(paths, Some(e.to_string()));
             return Ok(not_mounted_status(config, paths, advisories));
         }
         Err(e) => return Err(e.into()),
     };
 
+    let advisories = assemble_advisories(paths, None);
     if !pool.mounted {
         return Ok(not_mounted_status(config, paths, advisories));
     }
@@ -1233,6 +1245,20 @@ mod tests {
         }
         membership
     }
+
+    fn write_pending_remove_journal(paths: &StatePaths) {
+        let journal = crate::journal::Journal {
+            started_at: "2026-05-20T10:30:00Z".to_owned(),
+            op: crate::journal::OpKind::Remove {
+                luks_uuid: test_uuid(961),
+                name: DiskName::parse("disk1").unwrap(),
+            },
+            pre_membership: PoolMembership::empty(),
+            target_membership: PoolMembership::empty(),
+        };
+        crate::journal::write_journal(paths, &journal).unwrap();
+    }
+
     // =======================================================================
     // Schema envelope tests
     // =======================================================================
@@ -2803,6 +2829,91 @@ mod tests {
             built.report.advisories,
             vec!["/mnt/storage is mounted but fstype is ext4, not btrfs"],
         );
+        assert!(built.mounted_extras.is_none());
+    }
+
+    // Intent: mounted-pool status surfaces a valid pending-op journal as a recovery advisory.
+    // Why it exists: a stranded journal can coexist with a mounted pool after partial recovery or manual mounting.
+    // Scenario: operator runs `braid status` on an online pool and needs to see that `braid recover` is still owed.
+    #[test]
+    fn build_status_surfaces_pending_op_advisory_when_mounted() {
+        let runner = status_runner_healthy_3disk_verbose(status_runner_healthy_3disk_base());
+        let fs = status_fs_three_disk();
+        let config = status_config();
+        let (_tmp, paths) = isolated_paths();
+        write_pending_remove_journal(&paths);
+
+        let built = build_status(
+            &runner,
+            &fs,
+            &config,
+            &paths,
+            crate::test_fixtures::mock_virtio_backing_path_resolver(),
+        )
+        .expect("build_status should succeed for mounted pool with pending op");
+
+        assert!(built.report.advisories.iter().any(|advisory| {
+            advisory.starts_with("interrupted operation detected (pending-op.json exists, started ")
+        }));
+    }
+
+    // Intent: offline-pool status surfaces a valid pending-op journal as a recovery advisory.
+    // Why it exists: recovery triage starts from `braid status` even when the pool is not currently mounted.
+    // Scenario: NAS boots with the pool offline after an interrupted mutation and the operator checks status first.
+    #[test]
+    fn build_status_surfaces_pending_op_advisory_when_not_mounted() {
+        let runner = MockRunner::default();
+        let fs = status_fs_not_mounted(&[]);
+        let config = status_config();
+        let (_tmp, paths) = isolated_paths();
+        write_pending_remove_journal(&paths);
+
+        let built = build_status(
+            &runner,
+            &fs,
+            &config,
+            &paths,
+            crate::test_fixtures::mock_virtio_backing_path_resolver(),
+        )
+        .expect("build_status should succeed for not-mounted pool with pending op");
+
+        assert_eq!(built.report.status, StatusCode::NotMounted);
+        assert!(built.report.advisories.iter().any(|advisory| {
+            advisory.starts_with("interrupted operation detected (pending-op.json exists, started ")
+        }));
+        assert!(built.mounted_extras.is_none());
+    }
+
+    // Intent: status orders a foreign-fstype obstruction before a pending-op advisory.
+    // Why it exists: the most urgent mount-point obstruction must stay first while recovery-mode state remains visible.
+    // Scenario: an `ext4` filesystem is mounted at the braid mount point while `pending-op.json` is still present.
+    #[test]
+    fn build_status_orders_foreign_fstype_before_pending_op_advisory() {
+        let runner = MockRunner::default();
+        let fs = status_fs_ext4(&[]);
+        let config = status_config();
+        let (_tmp, paths) = isolated_paths();
+        write_pending_remove_journal(&paths);
+
+        let built = build_status(
+            &runner,
+            &fs,
+            &config,
+            &paths,
+            crate::test_fixtures::mock_virtio_backing_path_resolver(),
+        )
+        .expect("build_status should succeed for foreign-fstype mount with pending op");
+
+        assert_eq!(built.report.status, StatusCode::NotMounted);
+        assert_eq!(
+            built.report.advisories[0],
+            "/mnt/storage is mounted but fstype is ext4, not btrfs",
+        );
+        assert!(
+            built.report.advisories[1]
+                .starts_with("interrupted operation detected (pending-op.json exists, started ",)
+        );
+        assert_eq!(built.report.advisories.len(), 2);
         assert!(built.mounted_extras.is_none());
     }
 
