@@ -186,6 +186,21 @@ def add_cmd(key):
         f"braid add --luks-format-arg=--pbkdf --luks-format-arg=pbkdf2 --luks-format-arg=--pbkdf-force-iterations --luks-format-arg=1000 {key}=/dev/disk/by-id/virtio-{key} --passphrase-stdin --yes"
     )
 
+# Intent: lock the pinned util-linux mountpoint exit-code behavior.
+# Why it exists: this is the behavior lock for the exit-code classifier in
+# cli/src/online_state.rs; a nixpkgs bump that changed mountpoint(1)'s exit
+# codes would silently misclassify production state while mocked tests passed.
+# Scenario: the configured mount path exists but the pool is still locked, and
+# a bad invocation models a probe error rather than "not mounted".
+with subtest("mountpoint exit-code behavior lock"):
+    machine.succeed("mkdir -p /mnt/storage")
+    status, _ = machine.execute("mountpoint -q /mnt/storage")
+    assert status == 32, (
+        "mountpoint -q /mnt/storage exit=" + str(status) + ", expected 32"
+    )
+    status, _ = machine.execute("mountpoint -q")
+    assert status == 1, "mountpoint -q exit=" + str(status) + ", expected 1"
+
 with subtest("Data profile mismatch — skip when pool not mounted"):
     raw = machine.succeed("braid doctor --json")
     print(f"Pool not mounted JSON:\n{raw}")

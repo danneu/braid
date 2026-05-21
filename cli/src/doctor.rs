@@ -31,7 +31,7 @@ use crate::probe::{self, Filesystem, ProbeError, RealFilesystem};
 use crate::state_paths::StatePaths;
 use crate::status::format_bytes;
 use crate::status_tag::{StatusTag, color_enabled_for_stdout, status_line};
-use crate::types::{LuksUuid, MountPoint, PoolState};
+use crate::types::{LuksUuid, PoolState};
 
 // ---------------------------------------------------------------------------
 // Types
@@ -165,6 +165,7 @@ pub(crate) struct DoctorContext<'a, R: CommandRunner> {
     config_value: Option<serde_json::Value>,
     config: Option<Config>,
     runner: &'a R,
+    online_ops: RealOnlineStateOps<'a>,
     fs: &'a dyn Filesystem,
     paths: &'a StatePaths,
     mountpoint_is_mounted: Option<bool>,
@@ -544,15 +545,6 @@ fn check_declared_disks<R: CommandRunner>(ctx: &mut DoctorContext<'_, R>) -> Che
     summarize_declared_disks(&classifications)
 }
 
-fn probe_mountpoint_is_mounted<R: CommandRunner>(runner: &R, mount_point: &MountPoint) -> bool {
-    matches!(
-        runner.run(&CmdRequest::MountpointCheck {
-            path: mount_point.clone(),
-        }),
-        Ok(out) if out.exit_status == 0
-    )
-}
-
 fn ensure_mountpoint_is_mounted<R: CommandRunner>(ctx: &mut DoctorContext<'_, R>) -> Option<bool> {
     let config = match &ctx.config {
         Some(c) => c,
@@ -564,7 +556,10 @@ fn ensure_mountpoint_is_mounted<R: CommandRunner>(ctx: &mut DoctorContext<'_, R>
     }
 
     let mount_point = config.mount_point().to_owned();
-    let is_mounted = probe_mountpoint_is_mounted(ctx.runner, &mount_point);
+    let is_mounted = ctx
+        .online_ops
+        .is_mountpoint(Path::new(mount_point.as_str()))
+        .unwrap_or(false);
     ctx.mountpoint_is_mounted = Some(is_mounted);
     Some(is_mounted)
 }
@@ -1012,7 +1007,9 @@ fn check_ups_daemon_up<R: CommandRunner>(ctx: &mut DoctorContext<'_, R>) -> Chec
 ///
 /// Skips with a distinct reason when config is unavailable. Otherwise skips
 /// when UPS is not configured, module-managed lifecycle is not enabled, or
-/// the pool is not mounted (no safety implication then).
+/// the pool is not mounted (no safety implication then). Mountpoint and
+/// ActiveState probes both use the shared `OnlineStateOps` seam that dispatch
+/// uses for `mark_online` and `mark_offline`.
 fn check_braid_online_active_when_mounted<R: CommandRunner>(
     ctx: &mut DoctorContext<'_, R>,
 ) -> CheckResult {
@@ -1030,13 +1027,28 @@ fn check_braid_online_active_when_mounted<R: CommandRunner>(
         );
     }
     let mount_point = config.mount_point().clone();
-    if !probe_mountpoint_is_mounted(ctx.runner, &mount_point) {
-        return CheckResult::skip(
-            name,
-            "skipped (pool not mounted -- braid-online only matters while online)",
-        );
+    match ctx
+        .online_ops
+        .is_mountpoint(Path::new(mount_point.as_str()))
+    {
+        Ok(true) => {}
+        Ok(false) => {
+            return CheckResult::skip(
+                name,
+                "skipped (pool not mounted -- braid-online only matters while online)",
+            );
+        }
+        Err(e) => {
+            return CheckResult::fail(
+                name,
+                format!(
+                    "mountpoint probe for {} failed: {e} -- cannot confirm UPS shutdown safety. Re-run `braid doctor`.",
+                    mount_point.as_str()
+                ),
+            );
+        }
     }
-    let outcome = RealOnlineStateOps::new(ctx.runner).unit_active_state(BRAID_ONLINE_UNIT);
+    let outcome = ctx.online_ops.unit_active_state(BRAID_ONLINE_UNIT);
     match outcome {
         Ok(
             state @ (UnitActiveState::Active
@@ -1188,6 +1200,7 @@ pub fn run_doctor<R: CommandRunner>(
         config_value: None,
         config: None,
         runner,
+        online_ops: RealOnlineStateOps::new(runner),
         fs,
         paths,
         mountpoint_is_mounted: None,
@@ -1336,6 +1349,7 @@ impl<'a, R: CommandRunner> DoctorContext<'a, R> {
             config_value: Some(value),
             config: Some(config),
             runner,
+            online_ops: RealOnlineStateOps::new(runner),
             fs,
             paths,
             mountpoint_is_mounted: None,
@@ -1350,6 +1364,7 @@ impl<'a, R: CommandRunner> DoctorContext<'a, R> {
             config_value: None,
             config: None,
             runner,
+            online_ops: RealOnlineStateOps::new(runner),
             fs: &REAL_FILESYSTEM_FOR_TESTS,
             paths,
             mountpoint_is_mounted: None,
@@ -4713,6 +4728,52 @@ mod tests {
         );
     }
 
+    // Intent: check_braid_online_active_when_mounted fails when the mountpoint
+    // probe itself errors.
+    // Why it exists: per ADR 020, a mounted pool without braid-online active is
+    // the highest-severity doctor finding, so an indeterminate mount probe must
+    // not silently downgrade the UPS shutdown safety check to Skip.
+    // Scenario: `mountpoint(1)` returns exit 1, such as permission denied while
+    // resolving the path, and doctor cannot prove whether the pool is online.
+    #[test]
+    fn braid_online_check_fails_on_mountpoint_probe_error() {
+        let runner = MockRunner::default().with_output(
+            CmdRequest::MountpointCheck {
+                path: MountPoint("/mnt/storage".into()),
+            },
+            RawCommandOutput {
+                cmd: "mountpoint".into(),
+                stdout: String::new(),
+                stderr: "permission denied".into(),
+                exit_status: 1,
+            },
+        );
+        let (_dir, paths) = isolated_paths();
+        let mut ctx = ups_ctx(&runner, &paths, config_with_ups_enabled());
+
+        let r = check_braid_online_active_when_mounted(&mut ctx);
+
+        assert_eq!(r.status, CheckStatus::Fail, "got: {r:?}");
+        assert!(
+            r.message.contains("mountpoint probe"),
+            "unexpected message: {}",
+            r.message
+        );
+        assert!(
+            r.message.contains("UPS shutdown"),
+            "unexpected message: {}",
+            r.message
+        );
+        assert!(
+            !runner
+                .requests()
+                .iter()
+                .any(|request| matches!(request, CmdRequest::SystemctlShowActiveState { .. })),
+            "systemd state should not be queried after mountpoint probe error: {:?}",
+            runner.requests()
+        );
+    }
+
     // Intent: check_braid_online_active_when_mounted skips when pool
     // is not mounted.
     // Why: braid-online only matters while the pool is online; a
@@ -4729,7 +4790,7 @@ mod tests {
                 cmd: "mountpoint".into(),
                 stdout: String::new(),
                 stderr: "not a mountpoint".into(),
-                exit_status: 1,
+                exit_status: 32,
             },
         );
         let (_dir, paths) = isolated_paths();

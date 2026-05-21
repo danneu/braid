@@ -179,7 +179,7 @@ pub(crate) fn mountpoint_fail() -> (CmdRequest, RawCommandOutput) {
             cmd: "mountpoint -q /mnt/storage".into(),
             stdout: String::new(),
             stderr: "/mnt/storage is not a mountpoint\n".into(),
-            exit_status: 1,
+            exit_status: 32,
         },
     )
 }

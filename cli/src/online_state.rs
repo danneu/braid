@@ -153,7 +153,7 @@ impl OnlineStateOps for RealOnlineStateOps<'_> {
             .map_err(|source| OnlineError::Spawn { source })?;
         match output.exit_status {
             0 => Ok(true),
-            1 => Ok(false),
+            32 => Ok(false),
             code => Err(OnlineError::Mountpoint {
                 path: path.display().to_string(),
                 exit_code: code,
@@ -535,6 +535,101 @@ mod tests {
             stderr: String::new(),
             exit_status,
         }
+    }
+
+    fn mountpoint_out(exit_status: i32, stderr: &str) -> RawCommandOutput {
+        RawCommandOutput {
+            cmd: "mountpoint -q /mnt/storage".into(),
+            stdout: String::new(),
+            stderr: stderr.into(),
+            exit_status,
+        }
+    }
+
+    // Intent: RealOnlineStateOps maps mountpoint exit 0 to mounted.
+    // Why it exists: the util-linux mountpoint exit-code contract is
+    // load-bearing for both UPS shutdown safety and cached-path skip messages;
+    // regressing it would silently corrupt diagnostics.
+    // Scenario: `mountpoint -q /mnt/storage` confirms the pool is mounted.
+    #[test]
+    fn real_ops_mountpoint_exit_zero_is_mounted() {
+        let runner = MockRunner::default().with_output(
+            CmdRequest::MountpointCheck {
+                path: MountPoint("/mnt/storage".into()),
+            },
+            mountpoint_out(0, ""),
+        );
+        let ops = RealOnlineStateOps::new(&runner);
+
+        assert!(ops.is_mountpoint(Path::new("/mnt/storage")).unwrap());
+    }
+
+    // Intent: RealOnlineStateOps maps mountpoint exit 32 to not mounted.
+    // Why it exists: the util-linux mountpoint exit-code contract is
+    // load-bearing for both UPS shutdown safety and cached-path skip messages;
+    // regressing it would silently corrupt diagnostics.
+    // Scenario: `mountpoint -q /mnt/storage` sees an existing directory that
+    // is not a mountpoint.
+    #[test]
+    fn real_ops_mountpoint_exit_32_is_not_mounted() {
+        let runner = MockRunner::default().with_output(
+            CmdRequest::MountpointCheck {
+                path: MountPoint("/mnt/storage".into()),
+            },
+            mountpoint_out(32, "/mnt/storage is not a mountpoint\n"),
+        );
+        let ops = RealOnlineStateOps::new(&runner);
+
+        assert!(!ops.is_mountpoint(Path::new("/mnt/storage")).unwrap());
+    }
+
+    // Intent: RealOnlineStateOps treats mountpoint exit 1 as a probe error.
+    // Why it exists: the util-linux mountpoint exit-code contract is
+    // load-bearing for both UPS shutdown safety and cached-path skip messages;
+    // regressing it would silently corrupt diagnostics.
+    // Scenario: `mountpoint -q` is invoked incorrectly or cannot stat the path.
+    #[test]
+    fn real_ops_mountpoint_exit_one_is_error() {
+        let runner = MockRunner::default().with_output(
+            CmdRequest::MountpointCheck {
+                path: MountPoint("/mnt/storage".into()),
+            },
+            mountpoint_out(1, "bad usage\n"),
+        );
+        let ops = RealOnlineStateOps::new(&runner);
+
+        let err = ops
+            .is_mountpoint(Path::new("/mnt/storage"))
+            .expect_err("exit 1 should be classified as a probe error");
+        assert!(
+            matches!(err, OnlineError::Mountpoint { exit_code: 1, .. }),
+            "got: {err:?}"
+        );
+    }
+
+    // Intent: RealOnlineStateOps treats unexpected mountpoint exits as probe errors.
+    // Why it exists: the util-linux mountpoint exit-code contract is
+    // load-bearing for both UPS shutdown safety and cached-path skip messages;
+    // regressing it would silently corrupt diagnostics.
+    // Scenario: a future or wrapper-specific `mountpoint(1)` failure exits with
+    // a non-contract code that must not be mistaken for "not mounted".
+    #[test]
+    fn real_ops_mountpoint_other_exit_is_error() {
+        let runner = MockRunner::default().with_output(
+            CmdRequest::MountpointCheck {
+                path: MountPoint("/mnt/storage".into()),
+            },
+            mountpoint_out(2, "unexpected failure\n"),
+        );
+        let ops = RealOnlineStateOps::new(&runner);
+
+        let err = ops
+            .is_mountpoint(Path::new("/mnt/storage"))
+            .expect_err("unexpected exit should be classified as a probe error");
+        assert!(
+            matches!(err, OnlineError::Mountpoint { exit_code: 2, .. }),
+            "got: {err:?}"
+        );
     }
 
     #[test]
