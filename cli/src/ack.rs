@@ -1147,6 +1147,49 @@ mod tests {
         assert!(!paths.alert_latch_json().exists());
     }
 
+    // Intent: ack does not quarantine a corrupt alert-latch.json. The
+    //   no-quarantine invariant is the monitor/ack asymmetry: monitor moves
+    //   corrupt bytes to alert-latch.json.corrupt because it rewrites the
+    //   latch, while ack deletes the latch outright in cleanup.
+    // Why it exists: a symmetry edit could swap load_alert_latch for
+    //   load_alert_latch_or_quarantine in cmd_ack_impl. On the success path,
+    //   the sidecar would be created by quarantine and then deleted by
+    //   remove_alert_latch_corrupt during cleanup, so a sidecar-absence
+    //   assertion at the end of a successful ack proves nothing. Forcing
+    //   cleanup to fail at mark_alert_cleanup_pending stops execution before
+    //   destructive removal, so any sidecar created by quarantine persists.
+    // Scenario: corrupt latch on disk; the alert-cleanup-pending path is a
+    //   directory. ack must return CleanupFailed, preserve the original corrupt
+    //   latch bytes verbatim, and not create a .corrupt sidecar.
+    #[test]
+    fn cmd_ack_mounted_corrupt_latch_does_not_quarantine_when_cleanup_fails() {
+        let (_dir, paths) = isolated_paths();
+        let original_bytes: &[u8] = b"not json";
+        std::fs::write(paths.alert_latch_json(), original_bytes).unwrap();
+        std::fs::create_dir(paths.alert_cleanup_pending()).unwrap();
+
+        let runner = ack_mounted_probe_runner_with_device_stats();
+        let beeper_calls = std::cell::Cell::new(0u32);
+        let beeper = || beeper_calls.set(beeper_calls.get() + 1);
+
+        let err = cmd_ack_impl(&runner, &ack_fs_btrfs(), &ack_mp(), &paths, &beeper)
+            .expect_err("marker creation must fail on the poisoned sentinel path");
+        assert!(
+            matches!(err, AckError::CleanupFailed(_)),
+            "expected AckError::CleanupFailed, got {err:?}"
+        );
+
+        assert_eq!(
+            std::fs::read(paths.alert_latch_json()).unwrap(),
+            original_bytes,
+            "corrupt latch bytes must remain untouched because no destructive removal ran"
+        );
+        assert!(
+            !paths.alert_latch_corrupt().exists(),
+            "ack must not quarantine -- monitor is the only path that creates the sidecar"
+        );
+    }
+
     // Intent: When ack cleanup fails before reaching remove_alert_latch_corrupt,
     //   the corrupt sidecar's bytes are unchanged. Pins ADR 014's forensic
     //   guarantee at the unit level for the cleanup-failure path.
