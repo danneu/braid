@@ -892,9 +892,8 @@ fn main() {
             // path reuses the shape classifier so corrupt or unreadable
             // state fails closed with rebuild guidance.
             let pool_json = paths.pool_json();
-            let shape = braid_cli::discover::classify_pool_json(&pool_json);
             if !args.write {
-                match shape {
+                match braid_cli::discover::classify_pool_json(&pool_json) {
                     braid_cli::discover::PoolJsonShape::Missing => {}
                     braid_cli::discover::PoolJsonShape::ValidUuidKeyed => {
                         print_cli_error(&format!(
