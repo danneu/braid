@@ -487,6 +487,8 @@ fn main() {
     let paths = StatePaths::production();
     let pool_lock = RealPoolLock::production();
     let stop_coordinator = RealStopCoordinator::production();
+    // Snapshot-rule ordering: Add/Unlock/Recover snapshot online state inside this lock window;
+    // see docs/decisions/026-pool-lock-rust-owned.md.
     let _pool_guard = acquire_per_policy(&pool_lock, lock_policy(&cli.command));
 
     // Hoisted once: shared by add/remove/remove-missing/replace. Each command's
