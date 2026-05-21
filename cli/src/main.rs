@@ -908,26 +908,13 @@ fn main() {
             // `ValidUuidKeyed`; `Corrupt` is the documented rebuild path
             // per decision 017) live inside
             // `discover::write_discovered_membership`. The bare read-only
-            // path reuses the shape classifier so corrupt or unreadable
-            // state fails closed with rebuild guidance.
+            // path uses the matching helper so corrupt or unreadable state
+            // fails closed with rebuild guidance.
             let pool_json = paths.pool_json();
             if !args.write {
-                match braid_cli::discover::classify_pool_json(&pool_json) {
-                    braid_cli::discover::PoolJsonShape::Missing => {}
-                    braid_cli::discover::PoolJsonShape::ValidUuidKeyed => {
-                        print_cli_error(&format!(
-                            "pool.json already exists at {} -- use 'braid add' to add disks",
-                            pool_json.display()
-                        ));
-                        std::process::exit(1);
-                    }
-                    braid_cli::discover::PoolJsonShape::Corrupt => {
-                        print_cli_error(&format!(
-                            "pool.json at {} is corrupt or unreadable -- run 'braid discover --write' to rebuild from existing disks (with all intended pool members attached; see docs/luks-unlock.md)",
-                            pool_json.display()
-                        ));
-                        std::process::exit(1);
-                    }
+                if let Err(e) = braid_cli::discover::check_pool_json_for_bare_discover(&pool_json) {
+                    print_cli_error(&e.to_string());
+                    std::process::exit(1);
                 }
             }
             let runner = RealRunner;

@@ -213,6 +213,19 @@ pub enum DiscoverWriteError {
     Discover(#[from] DiscoverError),
 }
 
+/// Bare `braid discover` (no --write) preflight refusals. Mirrors
+/// `DiscoverWriteError` so both gating paths have a single thiserror
+/// surface and matching unit-test coverage in this module.
+#[derive(Debug, thiserror::Error)]
+pub enum BareDiscoverError {
+    #[error("pool.json already exists at {path} -- use 'braid add' to add disks")]
+    ValidUuidKeyed { path: String },
+    #[error(
+        "pool.json at {path} is corrupt or unreadable -- run 'braid discover --write' to rebuild from existing disks (with all intended pool members attached; see docs/luks-unlock.md)"
+    )]
+    Corrupt { path: String },
+}
+
 /// Scan /dev/disk/by-id/ for LUKS devices with `braid-<name>` labels.
 /// Returns a report so callers can print warnings on success or error.
 pub fn discover_pool_members<R: CommandRunner>(runner: &R) -> DiscoverScan {
@@ -526,6 +539,20 @@ fn discover_from_dir_inner<R: CommandRunner>(
     }
 
     Ok(membership)
+}
+
+/// Centralizes bare `braid discover` state-file gating so CLI dispatch
+/// and wording-pinning unit tests share one refusal-message surface.
+pub fn check_pool_json_for_bare_discover(path: &Path) -> Result<(), BareDiscoverError> {
+    match classify_pool_json(path) {
+        PoolJsonShape::Missing => Ok(()),
+        PoolJsonShape::ValidUuidKeyed => Err(BareDiscoverError::ValidUuidKeyed {
+            path: path.display().to_string(),
+        }),
+        PoolJsonShape::Corrupt => Err(BareDiscoverError::Corrupt {
+            path: path.display().to_string(),
+        }),
+    }
 }
 
 /// Apply discover's `--write` pre-save fail-closed gates and persist
@@ -1671,6 +1698,86 @@ mod tests {
             matches!(err, DiscoverError::LabelCollision { .. }),
             "expected LabelCollision before DuplicateUuid, got: {err:?}"
         );
+    }
+
+    // Intent: bare `braid discover` refuses a healthy UUID-keyed
+    //   pool.json with the byte-exact `use 'braid add'` remediation.
+    // Why it exists: every byte of the refusal is operator-facing
+    //   contract; this is the cheap regression net for wording drift
+    //   that decision 017 leaves to code-level pinning.
+    // Scenario: an operator who knows their pool.json is fine
+    //   reflexively runs `braid discover` to "refresh" and expects to
+    //   be told to use `braid add` instead.
+    #[test]
+    fn check_pool_json_for_bare_discover_refuses_valid_uuid_keyed() {
+        let root = tempfile::tempdir().unwrap();
+        let paths = StatePaths::custom(root.path().to_path_buf());
+        let mut members = PoolMembership::empty();
+        members
+            .insert(
+                LuksUuid::parse("aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee").unwrap(),
+                member("disk1", "/dev/disk/by-id/ata-X"),
+            )
+            .unwrap();
+        save_membership(&members, &paths).unwrap();
+
+        let err = check_pool_json_for_bare_discover(&paths.pool_json())
+            .expect_err("must refuse with ValidUuidKeyed");
+
+        assert!(
+            matches!(&err, BareDiscoverError::ValidUuidKeyed { .. }),
+            "expected ValidUuidKeyed, got: {err:?}"
+        );
+        assert_eq!(
+            err.to_string(),
+            format!(
+                "pool.json already exists at {} -- use 'braid add' to add disks",
+                paths.pool_json().display()
+            )
+        );
+    }
+
+    // Intent: corrupt pool.json surfaces the byte-exact rebuild
+    //   remediation through the bare path.
+    // Why it exists: the same wording-drift net as the ValidUuidKeyed
+    //   test, applied to the Corrupt sibling gate so the asymmetry does
+    //   not shift by one slot.
+    // Scenario: power loss truncates pool.json to non-JSON bytes; the
+    //   operator runs bare `braid discover` and must be directed at
+    //   `braid discover --write`.
+    #[test]
+    fn check_pool_json_for_bare_discover_refuses_corrupt() {
+        let root = tempfile::tempdir().unwrap();
+        let paths = StatePaths::custom(root.path().to_path_buf());
+        std::fs::write(paths.pool_json(), "not-json").unwrap();
+
+        let err = check_pool_json_for_bare_discover(&paths.pool_json())
+            .expect_err("must refuse with Corrupt");
+
+        assert!(
+            matches!(&err, BareDiscoverError::Corrupt { .. }),
+            "expected Corrupt, got: {err:?}"
+        );
+        assert_eq!(
+            err.to_string(),
+            format!(
+                "pool.json at {} is corrupt or unreadable -- run 'braid discover --write' to rebuild from existing disks (with all intended pool members attached; see docs/luks-unlock.md)",
+                paths.pool_json().display()
+            )
+        );
+    }
+
+    // Intent: absent pool.json is not a refusal.
+    // Why it exists: pins the Missing -> Ok(()) arm so the gate cannot
+    //   silently flip to fail-closed-by-default and break first boot.
+    // Scenario: a freshly installed NAS runs `braid discover` for the
+    //   first time with no prior state file.
+    #[test]
+    fn check_pool_json_for_bare_discover_passes_when_missing() {
+        let root = tempfile::tempdir().unwrap();
+        let paths = StatePaths::custom(root.path().to_path_buf());
+
+        assert!(check_pool_json_for_bare_discover(&paths.pool_json()).is_ok());
     }
 
     /// Intent: write_discovered_membership refuses when pending-op.json
