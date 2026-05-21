@@ -11,7 +11,6 @@ use crate::types::{LuksUuid, MountPoint};
 
 use std::time::Duration;
 
-pub const PROBE_INTERVAL: Duration = Duration::from_secs(5);
 pub const FAN_PROBE_INTERVAL: Duration = Duration::from_secs(5);
 pub const UPS_PROBE_INTERVAL: Duration = Duration::from_secs(5);
 
@@ -25,10 +24,6 @@ pub enum Effect {
         /// visible LUKS UUID.
         disk_devid: HashMap<String, u64>,
         paths: StatePaths,
-    },
-    ScheduleProbe {
-        mount_point: MountPoint,
-        delay: Duration,
     },
     ProbeFan {
         sysfs_root: PathBuf,
@@ -82,13 +77,6 @@ pub fn execute_effect(effect: Effect, cmd_tx: &mpsc::Sender<Event>) {
                 );
                 let elapsed = start.elapsed();
                 let _ = tx.send(Event::PoolProbeFinished(result, elapsed));
-            });
-        }
-        Effect::ScheduleProbe { mount_point, delay } => {
-            let tx = cmd_tx.clone();
-            thread::spawn(move || {
-                thread::sleep(delay);
-                let _ = tx.send(Event::PollRefresh { mount_point });
             });
         }
         Effect::ProbeFan {

@@ -11,7 +11,6 @@ use crate::tui::app::Message;
 use crate::tui::keymap;
 use crate::tui::keymap::KeyContext;
 use crate::tui::model::{DiskLuksState, FanSnapshot, PoolState, UpsSnapshot};
-use crate::types::MountPoint;
 
 // Single large variant by design; probe results are rare, and boxing added an extra allocation/deref without a measured benefit -- revisit if profiling shows enum size matters.
 #[allow(clippy::large_enum_variant)]
@@ -21,9 +20,6 @@ pub enum Event {
         Result<(HashMap<String, DiskLuksState>, Option<PoolState>), String>,
         Duration,
     ),
-    PollRefresh {
-        mount_point: MountPoint,
-    },
     FanProbeFinished(FanSnapshot),
     PollFanRefresh,
     UpsProbeFinished(UpsSnapshot),
@@ -46,7 +42,6 @@ impl Event {
             Event::PoolProbeFinished(result, elapsed) => {
                 Some(Message::PoolProbeFinished(result, elapsed))
             }
-            Event::PollRefresh { .. } => Some(Message::RefreshPool),
             Event::FanProbeFinished(snapshot) => Some(Message::FanProbeFinished(snapshot)),
             Event::PollFanRefresh => Some(Message::RefreshFan),
             Event::UpsProbeFinished(snapshot) => Some(Message::UpsProbeFinished(snapshot)),

@@ -262,11 +262,6 @@ pub fn update(model: &mut Model, msg: Message) -> Vec<Effect> {
             if model.tab == Tab::Browse {
                 return browse_load_if_active(model);
             }
-            // TODO: re-enable auto-polling
-            // vec![Effect::ScheduleProbe {
-            //     mount_point: model.mount_point.clone(),
-            //     delay: PROBE_INTERVAL,
-            // }]
             vec![]
         }
         Message::FanProbeFinished(snapshot) => {
@@ -364,9 +359,6 @@ mod tests {
     }
     fn is_schedule_fan(e: &Effect) -> bool {
         matches!(e, Effect::ScheduleFanProbe { .. })
-    }
-    fn is_schedule_pool(e: &Effect) -> bool {
-        matches!(e, Effect::ScheduleProbe { .. })
     }
     fn is_probe_ups(e: &Effect) -> bool {
         matches!(e, Effect::ProbeUps { .. })
@@ -838,7 +830,6 @@ mod tests {
         assert_eq!(effects.len(), 1);
         assert!(is_schedule_fan(&effects[0]));
         assert!(!effects.iter().any(is_probe_pool));
-        assert!(!effects.iter().any(is_schedule_pool));
     }
 
     // Intent: manual `r` must not double-arm the fan scheduler when a
@@ -916,9 +907,11 @@ mod tests {
     // Intent: PoolProbeFinished must NOT auto-reschedule pool probes.
     // Why: the pool probe is heavy (smartctl -H -A per disk, btrfs
     //      commands). Auto-rescheduling would wake sleeping drives and
-    //      interfere with HDD spindown. This test locks in the
-    //      manual-only contract so a future contributor doesn't
-    //      uncomment the TODO without understanding the trade-off.
+    //      contradict the HDD spindown posture from
+    //      docs/decisions/015-hdd-defaults.md and the anti-wake stance in
+    //      docs/decisions/016-auto-suspend.md. This test locks in the
+    //      manual-only contract; reintroducing a scheduler here needs to
+    //      revisit those decision docs first.
     // Scenario: any pool probe completion.
     #[test]
     fn pool_probe_finished_returns_no_effects() {
@@ -1096,7 +1089,6 @@ mod tests {
         assert_eq!(effects.len(), 1);
         assert!(is_schedule_ups(&effects[0]));
         assert!(!effects.iter().any(is_probe_pool));
-        assert!(!effects.iter().any(is_schedule_pool));
     }
 
     // Intent: manual `r` must not double-arm the UPS scheduler when a
