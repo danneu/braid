@@ -12,7 +12,10 @@ pub enum ConfigBuildError {
     EmptyMountPoint,
 }
 
+/// braid-owned config schema written by `modules/braid/cli.nix`; nested under
+/// `RawConfig` whose `deny_unknown_fields` does not propagate.
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct Pwm {
     pub platform_device: String,
     pub number: u8,
@@ -20,7 +23,10 @@ pub struct Pwm {
     pub max_stop: u8,
 }
 
+/// braid-owned fan-control schema written by `modules/braid/cli.nix`; nested
+/// config structs must enforce their own unknown-field rejection.
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct FanControl {
     pub pwm: Pwm,
     pub min_temp: u8,
@@ -382,6 +388,66 @@ mod tests {
                 || err.to_string().contains("min_start")
                 || err.to_string().contains("max_stop"),
             "expected missing-field error, got: {err}"
+        );
+    }
+
+    // Intent: unknown keys inside fan_control fail to deserialize.
+    // Why it exists: RawConfig's deny_unknown_fields does not propagate into
+    //   nested structs, so this pins the fan-control boundary explicitly.
+    // Scenario: a future modules/braid/cli.nix adds a fan_control key against
+    //   a CLI binary that predates the addition.
+    #[test]
+    fn rejects_unknown_field_in_fan_control() {
+        let raw = r#"{
+            "mount_point": "/mnt/storage",
+            "fan_control": {
+                "pwm": {
+                    "platform_device": "f71882fg.656",
+                    "number": 1,
+                    "min_start": 20,
+                    "max_stop": 10
+                },
+                "min_temp": 30,
+                "max_temp": 40,
+                "min_fan_speed_percent": 20,
+                "future_key": 1
+            }
+        }"#;
+        let err = serde_json::from_str::<Config>(raw).expect_err("unknown key must fail");
+        let message = err.to_string();
+        assert!(
+            message.contains("future_key") || message.contains("unknown field"),
+            "expected unknown-field error, got: {message}"
+        );
+    }
+
+    // Intent: unknown keys inside the nested pwm object fail to deserialize.
+    // Why it exists: RawConfig's deny_unknown_fields does not propagate into
+    //   nested structs, so this pins the pwm boundary explicitly.
+    // Scenario: a future modules/braid/cli.nix adds a pwm key against a CLI
+    //   binary that predates the addition.
+    #[test]
+    fn rejects_unknown_field_in_pwm() {
+        let raw = r#"{
+            "mount_point": "/mnt/storage",
+            "fan_control": {
+                "pwm": {
+                    "platform_device": "f71882fg.656",
+                    "number": 1,
+                    "min_start": 20,
+                    "max_stop": 10,
+                    "future_key": 1
+                },
+                "min_temp": 30,
+                "max_temp": 40,
+                "min_fan_speed_percent": 20
+            }
+        }"#;
+        let err = serde_json::from_str::<Config>(raw).expect_err("unknown key must fail");
+        let message = err.to_string();
+        assert!(
+            message.contains("future_key") || message.contains("unknown field"),
+            "expected unknown-field error, got: {message}"
         );
     }
 }

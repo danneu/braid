@@ -10,9 +10,10 @@ const NOTIFIER_CONFIG_PATH: &str = "/etc/braid/notifier-config.json";
 
 /// Schema of `/etc/braid/notifier-config.json`. Tracked in lockstep with the
 /// `builtins.toJSON` writer in `modules/braid/monitor.nix`. A schema change
-/// must update both sides — deserialize errors here are loud (Fail), so a
-/// stale parser cannot silently degrade.
+/// must update both sides -- deserialize errors here (including unknown
+/// fields) are loud (Fail), so a stale parser cannot silently degrade.
 #[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
 struct NotifierConfig {
     beep_probe_path: Option<String>,
 }
@@ -4007,6 +4008,38 @@ mod tests {
     #[test]
     fn beep_path_fail_on_malformed_config() {
         let f = write_temp("not json {");
+        let (_dir, paths) = isolated_paths();
+        let runner = MockRunner::default();
+        let mut ctx = beep_ctx(&runner, &paths);
+        let result = check_beep_path_inner(
+            &mut ctx,
+            f.path(),
+            DoctorOptions {
+                json: false,
+                beep: false,
+            },
+        );
+        assert_eq!(result.status, CheckStatus::Fail);
+        assert!(
+            result.message.contains("malformed"),
+            "unexpected: {}",
+            result.message
+        );
+    }
+
+    // Intent: unknown fields in notifier-config.json produce Fail through the
+    //   existing malformed-config arm, not silent Skip or Ok.
+    // Why it exists: NotifierConfig promises stale parsers cannot silently
+    //   degrade. Without this test, dropping deny_unknown_fields would only
+    //   surface after the module side added a field and production skew
+    //   already existed.
+    // Scenario: a future modules/braid/monitor.nix adds a webhook_url field to
+    //   notifier-config.json against a CLI binary that predates the addition.
+    #[test]
+    fn beep_path_fail_on_unknown_field() {
+        let f = write_temp(
+            r#"{"beep_probe_path":"/run/current-system/sw/bin/beep","webhook_url":"https://example.invalid"}"#,
+        );
         let (_dir, paths) = isolated_paths();
         let runner = MockRunner::default();
         let mut ctx = beep_ctx(&runner, &paths);
