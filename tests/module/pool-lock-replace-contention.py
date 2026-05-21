@@ -4,9 +4,8 @@
 # replace` must fail fast before it can write pending-op.json.
 #
 # Why it exists: `replace` has a race window from preflight
-# `check_no_pending_operation` (cli/src/replace.rs:877) to journal write
-# (cli/src/replace.rs:476), and state_io::atomic_write uses the
-# deterministic .pending-op.json.tmp path (cli/src/state_io.rs:62). A
+# `check_no_pending_operation` to journal write, and state_io::atomic_write
+# uses the deterministic .pending-op.json.tmp path. A
 # concurrent replace that reaches that write can clobber another
 # operation's journal before btrfs rejects the second kernel replace.
 #

@@ -4,7 +4,7 @@
 # matches the UUID stored in pool.json (swapped, reformatted, or corrupted drive).
 #
 # Why: Silent wrong-data mount is the highest-blast-radius failure mode. The UUID
-# check in cli/src/mount.rs:81-91 is the guard. This test exercises the real
+# check in `plan_open_pool` is the guard. This test exercises the real
 # cryptsetup luksUUID probe → comparison → fatal error pipeline end-to-end.
 { braid }:
 {

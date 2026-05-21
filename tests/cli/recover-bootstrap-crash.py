@@ -3,8 +3,9 @@
 # Intent: Verify `braid recover` detects a bootstrap crash and prints
 #   actionable escape instructions instead of a cryptic mount error.
 #
-# Why it exists: recover.rs:62-110 has special handling for bootstrap crashes
-#   (empty pre_membership + MountFailed + NoBtrfs probe on target disks).
+# Why it exists: `execute_recover_initial_open` has special handling for
+#   bootstrap crashes (empty pre_membership + MountFailed + NoBtrfs probe
+#   on target disks).
 #   This path is covered by 4 Rust unit tests with mocked runners, but no VM
 #   test exercises it end-to-end against real LUKS + btrfs filesystem show.
 #   A regression here would leave first-time users stranded with an opaque

@@ -407,7 +407,7 @@ mod tests {
     //   otherwise-healthy pool -- a fail-open hole in the indeterminate-
     //   state contract pinned by ADR 014:74. The byte-identity assertion
     //   also pins that monitor must not silently rewrite corrupt files
-    //   (mirrors ack.rs:1018-1022).
+    //   (mirrors ack's sentinel-only retry no-rewrite guard).
     // Scenario: acked-stats.json was hand-edited to invalid JSON; the
     //   pool is mounted and healthy, btrfs device stats reports zero
     //   counters on both members. cmd_monitor must surface the
@@ -519,7 +519,7 @@ mod tests {
      * latched to disk.
      *
      * Note: braid's CommandRunner returns non-zero process exits as
-     * Ok(RawCommandOutput) (cli/src/cmd.rs:841-858); only spawn/signal
+     * Ok(RawCommandOutput) via `output_to_raw`; only spawn/signal
      * failures yield Err(CmdError::Failed). So the cmd-failure case must
      * construct Err(...) directly -- a non-zero exit payload would slip
      * into parse_btrfs_device_stats and accidentally exercise the parse

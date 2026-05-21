@@ -14148,7 +14148,7 @@ mod tests {
     ///
     /// Why it exists: This closes the GAP B identified in the Pre-M11 audit.
     /// The original replace command runs `pool_resize_device` immediately
-    /// after `pool_replace_device` (`cli/src/replace.rs:327` / `:359`); a
+    /// after `pool_replace_device`; a
     /// forced shutdown landing between those two calls would leave the new
     /// disk under-sized and `recover` previously had no replay logic for it.
     /// The live VM matrix (M3) needs this fix to reliably assert "final
@@ -14454,7 +14454,7 @@ mod tests {
     ///
     /// Why it exists: This closes the GAP A identified in the Pre-M11 audit
     /// for all four mutation classes. braid mounts with `skip_balance`
-    /// (`cli/src/cmd.rs:271-283`) so the kernel does NOT auto-resume a paused
+    /// via `base_mount_options` so the kernel does NOT auto-resume a paused
     /// balance, and the previous `emit_paused_balance_warning` only printed
     /// a hint, leaving the pool unprotected. The VM matrix tests M5 (RemoveMissing
     /// soft balance) and M6 (post-add RAID1 balance) explicitly trigger this
@@ -14602,7 +14602,7 @@ mod tests {
     ///
     /// Why it exists: `braid remove` is the only mutation whose pre-mutation
     /// phase issues a balance (the RAID1 -> single conversion in the 2->1
-    /// case in `cli/src/pool.rs:310`). A shutdown landing during that
+    /// case via `pool_balance_single`). A shutdown landing during that
     /// pre-balance leaves the kernel with a paused convert-to-single balance
     /// against a still-2-disk pool. If `replay_post_mutation` resumed it
     /// unconditionally, recover would finish the conversion to single

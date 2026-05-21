@@ -410,8 +410,8 @@ pub fn pool_balance_raid1_soft<R: CommandRunner + Sync>(
 /// Resume a paused btrfs balance using the convert filters the kernel
 /// persisted in the chunk tree's `BALANCE_ITEM`. Used by `cmd_recover` to
 /// drain a balance that a forced shutdown left paused (`skip_balance` mount
-/// option prevents kernel auto-resume on the post-crash mount, see
-/// `cli/src/cmd.rs:271-283`). Caller must verify the balance is paused before
+/// option prevents kernel auto-resume on the post-crash mount via
+/// `base_mount_options`). Caller must verify the balance is paused before
 /// calling -- this function does not check.
 pub fn pool_balance_resume<R: CommandRunner + Sync>(
     runner: &R,

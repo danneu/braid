@@ -1533,8 +1533,8 @@ mod tests {
     // Why: previously wrapped as RemoveError::Validation, which reads like a
     //   pre-flight rejection. A regression inside map_membership_persist_failure
     //   that returns the wrong variant or wrong remediation text fails this
-    //   test -- the production callsite at remove.rs:208 passes this same
-    //   helper to .map_err, so the test binds to the real mapping.
+    //   test -- the production post-commit save_membership call passes this
+    //   same helper to .map_err, so the test binds to the real mapping.
     //
     // Scenario: `braid remove` succeeds at the btrfs layer, but the atomic
     //   write of pool.json fails (disk full in /var/lib/braid, stale NFS
@@ -2562,7 +2562,7 @@ mod tests {
 
     /* Intent: post-journal target hot-unplug surfaces the journal-bearing
      * remediation -- mentions `braid recover` and preserves the journal
-     * for it. Mirrors the legacy in-helper wording (pool.rs:373-388)
+     * for it. Mirrors the legacy in-helper wording in `device_remove_error`,
      * which is what the existing operator muscle-memory expects.
      *
      * Why: complements the pre-journal hot-unplug regression so callers
@@ -2770,7 +2770,7 @@ mod tests {
     //   mapper_name(&name)) so the post-commit CryptsetupClose still targets
     //   the right dm slot under benign mapper drift.
     //
-    // Why: the close in pool.rs:642 consumes target_mapper byte-for-byte;
+    // Why: the post-commit close consumes target_mapper byte-for-byte;
     //   reconstructing it from the disk name re-opens the same drift hazard
     //   the lock.rs migration closes.
     //

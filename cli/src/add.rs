@@ -5481,8 +5481,8 @@ mod tests {
     //   the work the loop interrupted.
     //
     // Why it exists: ADR-017 makes target_membership a write-once,
-    //   before-the-irreversible-loop snapshot; the live-pool add loop at
-    //   cli/src/add.rs:1273-1297 never touches the journal mid-loop. A
+    //   before-the-irreversible-loop snapshot; the live-pool add loop in
+    //   `AddPlan::execute` never touches the journal mid-loop. A
     //   future refactor that pruned journaled targets to "match recovery
     //   to live state" on partial failure would silently change what
     //   recover replays without breaking any existing test.
@@ -8081,9 +8081,9 @@ mod tests {
      * notes in the canonical order: missing-devices FIRST, keyfile
      * SECOND.
      * Why it exists: the real-run execute path replays plan.notes in
-     * insertion order to preserve today's eprintln! sequence (missing
-     * first at add.rs:348, keyfile second at :365). Swapping the two
-     * would change the stderr order a user sees.
+     * insertion order to preserve today's eprintln! sequence
+     * (missing-devices warning first, keyfile-asymmetry warning second).
+     * Swapping them would change the stderr order a user sees.
      * Scenario: 1 real + 1 MISSING, existing pool has keyslot-1, operator
      * adds a fresh disk2 without --enroll.
      */

@@ -5,8 +5,8 @@
 #   exist. The btrfs pool must not be touched.
 #
 # Why it exists:
-#   remove.rs:162-164 handles MembershipError::NotFound as a warning and
-#   continues to btrfs device eviction. This allows the pool to be mutated
+#   `plan_remove` must not treat MembershipError::NotFound as a warning and
+#   continue to btrfs device eviction. That allows the pool to be mutated
 #   while pool.json stays absent, creating exactly the state divergence the
 #   membership system is meant to prevent.
 #

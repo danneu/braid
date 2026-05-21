@@ -985,7 +985,7 @@ fn verify_replace_execute_live_pool_uuid<R: CommandRunner, F: Filesystem + ?Size
 /// into a foreign LUKS volume by the subsequent `btrfs replace start`.
 /// Mismatch and probe failure both abort with
 /// `ReplaceError::NewTargetUuidMismatchAtOpen`; the wording mirrors the
-/// `finish_uncommitted_replace_recovery` `:2697` recovery arm so
+/// `finish_uncommitted_replace_recovery` recovery arm so
 /// operator remediation reads identically across planning, execution,
 /// and recovery boundaries.
 fn probe_existing_luks_new_target_uuid<R: CommandRunner>(
@@ -3328,7 +3328,7 @@ mod tests {
     //   Validation error, on the reversible side of the inhibitor/journal
     //   seam.
     //
-    // Why it exists: the old==new guard at replace.rs:94-98 is a
+    // Why it exists: the `--old == --new` guard in `plan_replace` is a
     //   user-visible CLI contract (operator typo protection). It fires
     //   before probe_config_disk's mapper-conflict detection would
     //   otherwise surface the same bug as a confusing MapperConflict
@@ -3677,8 +3677,7 @@ mod tests {
     // Scenario: pool has 1 live disk (disk1, devid 1) and 1 missing
     //   (devid 2). pool.json only records disk1. Operator runs
     //   `braid replace --old disk2 --missing-id 2 --new disk3=...`. The guard
-    //   must fire before the inhibitor seam at the "reversible preflight
-    //   before inhibitor" boundary (cli/src/replace.rs:224-229).
+    //   must fire at the "reversible preflight before inhibitor" boundary.
     fn cmd_replace_missing_path_rejects_old_name_absent_from_membership() {
         // pool.json records only disk1 -- the typo scenario where btrfs
         // reports devid 2 missing but the operator's --old name does not
@@ -6011,8 +6010,8 @@ mod tests {
     //   OwnershipError::Conflict to NewTargetUuidMismatchAtOpen on the
     //   mapper_open=true path, with no replace mutation issued.
     // Why: pins the only untested arm of the 4-arm OwnershipError ->
-    //   ReplaceError map at replace.rs:1015-1041; a refactor that
-    //   collapses Conflict into Validation or BackingPathMismatch would
+    //   ReplaceError map in `verify_existing_luks_open_mapper_target`;
+    //   collapsing Conflict into Validation or BackingPathMismatch would
     //   otherwise pass.
     // Scenario: /dev/disk/by-id/Y and the live backing /dev/vdf both
     //   canonicalize to /dev/vdf (path check passes), but

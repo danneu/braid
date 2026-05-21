@@ -279,9 +279,9 @@ with subtest("Journal cleared after recover"):
 
 with subtest("No orphaned LUKS mappers"):
     # disk2's mapper must not survive the replace. The recover code does
-    # not explicitly close the source mapper (replace.rs:329-343 is
-    # best-effort and runs only on the original command), so this asserts
-    # that EITHER the kernel never created a stable braid-disk2 mapper
+    # not explicitly close the source mapper (the replace path's source
+    # close is best-effort and runs only on the original command), so this
+    # asserts that EITHER the kernel never created a stable braid-disk2 mapper
     # entry, OR a subsequent reboot path closed it. Recovery completes
     # the replace; the mapper is allowed to be present (harmless), but
     # a follow-up `braid lock`/`braid unlock` must not surface it.

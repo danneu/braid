@@ -6,8 +6,8 @@
 #   data must be intact, and pool.json must not contain the new disk.
 #
 # Why it exists:
-#   If save_membership runs before passphrase verification (add.rs:298 vs
-#   add.rs:323), a failed add leaves pool.json claiming a disk that was
+#   If save_membership runs before verify_passphrase, a failed add leaves
+#   pool.json claiming a disk that was
 #   never formatted or added to btrfs. The next `braid unlock` would then
 #   target the wrong mapper set, potentially degrading the pool.
 #

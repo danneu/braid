@@ -111,7 +111,7 @@ with subtest("Start scrub in background"):
 
 # --- Phase 4: Fire braid-shape btrfs replace start, expect rejection ---
 #
-# Use the exact argv shape braid emits (see cli/src/cmd.rs:620-643):
+# Use the exact argv shape braid emits via `CmdRequest::BtrfsReplaceStart`:
 #   btrfs replace start --enqueue -r -f -B <devid> <target> <mount_point>
 # The `-B` flag is load-bearing for this test: without it, `daemon(0, 0)`
 # detaches before the START ioctl runs and the shell never sees the

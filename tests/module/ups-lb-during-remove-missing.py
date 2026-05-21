@@ -190,8 +190,8 @@ with subtest("Add disk3 as the replacement (raw, no auto-balance)"):
 
 with subtest("Seed pool.json with all three disks (incl. devids)"):
     # braid remove-missing resolves --missing-id back to a membership
-    # name by matching `devid` on each disk entry
-    # (cli/src/remove_missing.rs:30-58). Seed the captured devids for
+    # name by matching `devid` on each disk entry via
+    # `resolve_removal_target`. Seed the captured devids for
     # disk1 + disk2 so that resolution succeeds. disk3's devid does
     # not need to be present; recover writes it from the live probe.
     pool_json = {

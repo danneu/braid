@@ -192,9 +192,8 @@ pub(crate) fn enroll_test_keyfile_fail(
 /// Takes the per-test target dir (e.g. `/mnt/usb`), not the canonical
 /// `/mnt/storage` that `doctor::mountpoint_ok` hardcodes -- so doctor's
 /// helper is not a drop-in. The direct collision with the
-/// already-exported `mountpoint_ok` from `doctor` at
-/// `test_fixtures.rs:61` is the load-bearing reason for the `enroll_`
-/// prefix on this name.
+/// already-exported `test_fixtures::mountpoint_ok` from `doctor` is the
+/// load-bearing reason for the `enroll_` prefix on this name.
 pub(crate) fn enroll_mountpoint_ok(dir: &Path) -> (CmdRequest, RawCommandOutput) {
     let dir = dir.display().to_string();
     (

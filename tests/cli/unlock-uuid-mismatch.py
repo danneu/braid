@@ -6,7 +6,7 @@
 # Why it exists: A swapped, reformatted, or corrupted drive could silently mount
 # wrong data if the UUID check fails. This is the highest-blast-radius failure
 # mode — the user gets no error, but their pool contains data from a different
-# drive. The check (cli/src/mount.rs:81-91) is unit-tested, but this test
+# drive. The check in `plan_open_pool` is unit-tested, but this test
 # exercises the real cryptsetup luksUUID probe → comparison → fatal error
 # pipeline end-to-end.
 #

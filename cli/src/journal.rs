@@ -106,8 +106,8 @@ pub enum ReplaceJournalSource {
     Live {
         old_devid: u64,
         /// Pattern #1: the observed mapper for the post-commit
-        /// `close_mapper_best_effort` call (`replace.rs:707` and the
-        /// recovery mirror at `recover.rs:2935`). Journaled at plan time
+        /// `close_mapper_best_effort` call and the recovery mirror in
+        /// `finish_uncommitted_replace_recovery`. Journaled at plan time
         /// so a drifted mapper between plan and post-commit close still
         /// targets the right dm slot. Identity decisions read `old_uuid`
         /// at the op level; this field is consulted only for the close.

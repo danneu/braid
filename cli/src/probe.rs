@@ -886,7 +886,7 @@ mod tests {
      *   probe must surface ProbeError::MapperConflict instead of
      *   reporting mapper_open=true.
      * Why it exists: this is the failure-layer test for the
-     *   path-existence regression (probe.rs:132 -> fs.exists only).
+     *   path-existence regression in `probe_mapper_open`.
      *   Reverting probe_mapper_open back to fs.exists makes this test
      *   fail (mapper_open would become true), per
      *   feedback_test_at_failure_layer.md. Parser canaries cannot catch

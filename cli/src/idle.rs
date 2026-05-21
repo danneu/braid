@@ -642,8 +642,7 @@ mod tests {
      *   with "no busy entries found" and reintroduce the fail-open seam
      *   the autosuspend gate exists to prevent. NotFound is excluded
      *   here because RealFilesystem::list_dir folds NotFound into
-     *   Ok(vec![]) (probe.rs:47), which the empty-listing test above
-     *   covers separately.
+     *   Ok(vec![]), which the empty-listing test above covers separately.
      * Scenario: sysfs is mounted but `/sys/fs/btrfs` is unreadable
      *   under our credentials.
      */

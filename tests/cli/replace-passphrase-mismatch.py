@@ -10,8 +10,8 @@
 # - What risk/regression this protects against.
 #   - If passphrase verification happened after LUKS format, the new disk
 #     would be encrypted with a mismatched passphrase, creating an
-#     inaccessible disk. The `verify_passphrase` check at replace.rs:176
-#     must fire before `luks_format`.
+#     inaccessible disk. The `verify_passphrase` check must fire before
+#     `luks_format`.
 #
 # Scenario:
 # - Real-world situation this models.

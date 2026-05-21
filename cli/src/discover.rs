@@ -556,9 +556,9 @@ fn discover_from_dir_inner<R: CommandRunner>(
 /// momentarily detached disk or stray braid-labeled disk during any
 /// `discover --write` rebuild.
 ///
-/// On success returns the saved `PoolMembership`. The accepting CLI
-/// arm at `main.rs:707` consumes both `warnings` (printed before this
-/// call) and the saved membership.
+/// On success returns the saved `PoolMembership`. The accepting
+/// `Commands::Discover` CLI arm consumes both `warnings` (printed before
+/// this call) and the saved membership.
 pub fn write_discovered_membership(
     members: PoolMembership,
     paths: &StatePaths,

@@ -46,7 +46,7 @@ use zeroize::Zeroizing;
 /// `plan_open_pool_inner` checks pool mountedness via
 /// `runner.run(MountpointCheck)`, never via `fs.read_to_string`. The only
 /// `Filesystem` method called on the mount-test call graph is
-/// `fs.exists` (probe.rs:125, mount.rs:690).
+/// `fs.exists` through `probe_config_disk` and `close_opened_mappers`.
 pub(crate) fn mount_fs(paths: &[&str]) -> shared::MockFs {
     shared::MockFs::unmounted(paths.iter().map(|p| (*p).to_string()).collect())
 }
@@ -270,7 +270,7 @@ pub(crate) fn arbitrary_fallback() -> MountError {
 /// Per-test verify-outcome overrides chain on top via
 /// `.with_output_stdin(req, bytes, output)` for the same `CmdRequest` --
 /// `MockRunner::with_output_stdin` overwrites both `outputs` and
-/// `stdin_expectations` (cmd.rs:1004-1014), pinned by the regression test
+/// `stdin_expectations`, pinned by the regression test
 /// `mock_runner_with_output_stdin_override_after_base_wins` in cmd.rs.
 pub(crate) fn base_two_disk_runner() -> MockRunner {
     let (uuid1_req, uuid1_out) = luks_uuid_ok(

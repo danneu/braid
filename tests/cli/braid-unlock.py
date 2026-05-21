@@ -520,7 +520,7 @@ with subtest("Test 7: uninitialized disk detected — degraded-refused enumerate
     assert "braid unlock --allow-degraded" in output, \
         f"Expected --allow-degraded hint, got: {output}"
 
-    # The renamed status line at mount.rs:88 must use the new vocabulary,
+    # The renamed status line in `plan_open_pool` must use the new vocabulary,
     # never the old "LUKS header damaged" wording.
     assert "LUKS header damaged" not in output, \
         f"Old 'LUKS header damaged' string must not appear after rename: {output}"

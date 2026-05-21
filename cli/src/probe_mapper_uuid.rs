@@ -11,10 +11,10 @@
 //! Today the same helper exists inline in `remove.rs` and `replace.rs`;
 //! Phase 4 of the LUKS-UUID-as-identity migration lifts the body here
 //! so the two existing callers and the upcoming recovery-side callers
-//! (`recover.rs:2935`, addressed in Phase 4b) share a single source of
-//! truth. The helper is logger-coupled by design -- every failure path
-//! emits the operator-facing Warning text and returns `false` so the
-//! caller proceeds to skip the close. Phase 4b will reuse this body.
+//! (`finish_uncommitted_replace_recovery`, addressed in Phase 4b) share a
+//! single source of truth. The helper is logger-coupled by design -- every
+//! failure path emits the operator-facing Warning text and returns `false`
+//! so the caller proceeds to skip the close. Phase 4b will reuse this body.
 
 use crate::cmd::{CmdRequest, CommandRunner};
 use crate::parse::{parse_cryptsetup_luks_uuid, parse_cryptsetup_status};
