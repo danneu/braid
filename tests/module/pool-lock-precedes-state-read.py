@@ -61,7 +61,6 @@ with subtest("fail-fast mutators acquire before broken config"):
         "remove": "braid --config /nonexistent/braid.json remove disk1 --yes",
         "remove-missing": "braid --config /nonexistent/braid.json remove-missing --missing-id 1 --yes",
         "replace": "printf x | braid --config /nonexistent/braid.json replace --old disk1 --new disk2=/dev/disk/by-id/virtio-disk2 --passphrase-stdin --yes",
-        "enroll": "printf x | braid --config /nonexistent/braid.json enroll /nonexistent/keydir --passphrase-stdin",
         "lock": "braid --config /nonexistent/braid.json lock",
     }
     for name, command in cases.items():
@@ -81,6 +80,28 @@ with subtest("discover --write acquires before pending-op and probe reads"):
     )
     assert "no braid-labeled LUKS devices found" not in out, (
         "discover probed devices before acquiring lock; out=" + out
+    )
+
+with subtest("enroll acquires before membership read"):
+    machine.succeed("mkdir -p /var/lib/braid")
+    machine.succeed("printf 'not valid json' > /var/lib/braid/pool.json")
+    rc, out = with_holder(
+        "printf x | braid --config /nonexistent/braid.json enroll /nonexistent/keydir --passphrase-stdin"
+    )
+    machine.succeed("rm -f /var/lib/braid/pool.json")
+    assert rc != 0, "enroll should fail under contention; out=" + out
+    assert rc != 124, "enroll hung past contention; out=" + out
+    assert "pool membership file corrupt at" not in out, (
+        "enroll read membership before acquiring lock; out=" + out
+    )
+    assert "failed to read pool membership file at" not in out, (
+        "enroll read membership before acquiring lock; out=" + out
+    )
+    assert "failed to read config file" not in out, (
+        "enroll read config before acquiring lock; out=" + out
+    )
+    assert "another braid operation is already in progress" in out, (
+        "expected contention message; out=" + out
     )
 
 with subtest("ack waits then reports contention before broken config"):
