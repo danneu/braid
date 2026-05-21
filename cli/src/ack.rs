@@ -32,18 +32,14 @@ fn cmd_ack_impl<R: CommandRunner, F: Filesystem + ?Sized>(
     // empty-latch gate or get swallowed by cleanup. An unreadable latch counts
     // as active for gating so the user can clear a corrupt file even with the
     // pool offline.
-    let (latch_state, latch_corrupt) = match alert::load_alert_latch(paths) {
-        Ok(Some(s)) => (Some(s), false),
-        Ok(None) => (None, false),
+    let (causes, latch_corrupt) = match alert::load_alert_latch(paths) {
+        Ok(Some(s)) => (s.causes, false),
+        Ok(None) => (Vec::new(), false),
         Err(e) => {
             eprintln!("warning: alert latch unreadable -- treating as active for ack gating: {e}");
-            (None, true)
+            (Vec::new(), true)
         }
     };
-    let causes: &[AlertCause] = latch_state
-        .as_ref()
-        .map(|s| s.causes.as_slice())
-        .unwrap_or(&[]);
     let smartd_active = alert::smartd_alert_active(paths);
     let cleanup_pending = alert::alert_cleanup_pending(paths);
     let latch_had_smartd = causes.iter().any(|c| matches!(c, AlertCause::SmartdAlert));
@@ -65,7 +61,7 @@ fn cmd_ack_impl<R: CommandRunner, F: Filesystem + ?Sized>(
 
     if !pool.mounted {
         return ack_offline(
-            causes,
+            &causes,
             latch_corrupt,
             smartd_active,
             remove_smartd,
