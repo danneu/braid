@@ -1545,7 +1545,23 @@ mod tests {
             &paths,
             human_options(),
         );
-        assert_eq!(report.checks.len(), 12);
+        let mut actual_names: Vec<&str> = report.checks.iter().map(|c| c.name.as_str()).collect();
+        actual_names.sort();
+        let expected_names: Vec<&str> = vec![
+            "beep_path",
+            "braid_online_active",
+            "config_file",
+            "config_permissions",
+            "config_schema",
+            "data_profile_mismatch",
+            "declared_disks",
+            "foreign_luks_uuid",
+            "metadata_profile_mismatch",
+            "pool_missing_devices",
+            "smart_self_test",
+            "ups_daemon",
+        ];
+        assert_eq!(actual_names, expected_names);
         assert_eq!(find_check(&report, "config_file").status, CheckStatus::Ok);
         assert_eq!(find_check(&report, "config_schema").status, CheckStatus::Ok);
         let selftest = find_check(&report, "smart_self_test");
