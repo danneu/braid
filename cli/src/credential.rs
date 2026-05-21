@@ -39,9 +39,12 @@ impl std::fmt::Debug for OpenCredential {
 ///
 /// - `cmd_unlock` skips this call entirely when `plan.to_unlock` is empty
 ///   (the no-prompt-when-all-mappers-open UX rule).
-/// - `cmd_recover` calls this whenever the pool is not yet mounted, even
-///   if the initial plan's `to_unlock` is empty, because the post-mount
-///   relock cycle will close every mapper and need to reopen them.
+/// - `cmd_recover` calls this eagerly only for `Replace::PoolMutation` (the
+///   relock cycle closes every mapper and must reopen with the same
+///   credential); other op kinds defer to the existing seams -- the inline
+///   resolve in the unlock-and-mount branch for the bootstrap case, and the
+///   lazy `recover_passphrase` helper for closed-mapper / replay-verify cases
+///   discovered after mount.
 ///
 /// Resolution order: `key_file` (if provided) -> passphrase
 /// (file/stdin/TTY).

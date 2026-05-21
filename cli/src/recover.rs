@@ -923,11 +923,13 @@ fn execute_recover_initial_open<R: CommandRunner + Sync, F: Filesystem + ?Sized>
         return Ok(());
     };
 
-    // Recover-specific gate: resolve a credential whenever we have an
-    // initial mount plan. This is eager on purpose -- even if every mapper
-    // is already open, a replace remount cycle closes every mapper and must
-    // reopen them with the same credential.
-    if state.credential.is_none() {
+    // Recover-specific eager resolve: only Replace::PoolMutation needs the
+    // credential up front, because its post-mount RemountCycle action closes
+    // every mapper and must reopen them with the same credential. Every other
+    // op kind either has no post-mount credential consumer at all, or covers
+    // its closed-mapper / replay-verify cases via the lazy seam in
+    // recover_passphrase (single-passphrase principle preserved).
+    if is_replace_pool_mutation(&plan.journal.op) && state.credential.is_none() {
         state.credential = Some(
             credential::resolve_credential(
                 params.passphrase_stdin,
@@ -947,10 +949,20 @@ fn execute_recover_initial_open<R: CommandRunner + Sync, F: Filesystem + ?Sized>
         mount::execute_mount_only(runner, fs, params.config, open_plan)
             .map_err(InitialOpenFailure::MountOnly)
     } else {
+        if state.credential.is_none() {
+            state.credential = Some(
+                credential::resolve_credential(
+                    params.passphrase_stdin,
+                    params.passphrase_file,
+                    None, // recover does not expose --key-file today
+                )
+                .map_err(|e| RecoverError::Failed(format!("recover: {e}")))?,
+            );
+        }
         let cred = state
             .credential
             .as_ref()
-            .expect("credential resolved above when open_plan is Some");
+            .expect("credential resolved above for this branch");
         mount::execute_unlock_and_mount(
             runner,
             fs,
@@ -11865,6 +11877,531 @@ mod tests {
         assert!(
             !f.paths.pending_op_json().exists(),
             "journal should be cleared after recovery"
+        );
+    }
+
+    /// Intent: RemoveMissing::PoolMutation recovery with every union mapper
+    /// already open must NOT resolve a passphrase. The post-mount completion
+    /// path for this op kind has no credential consumer, so the eager resolve
+    /// gate in `execute_recover_initial_open` should be skipped (the eager
+    /// resolve is now scoped to Replace::PoolMutation only).
+    ///
+    /// Why it exists: a regression that hoists eager credential resolution
+    /// above the per-op gate -- or drops the gate entirely -- would prompt
+    /// for a passphrase that recover never uses, breaking the
+    /// no-prompt-when-all-mappers-open UX rule that `cmd_unlock` already
+    /// honors. RemoveMissing is the cleanest scenario because both branches
+    /// of `execute_remove_missing_pool_mutation_recovery` are
+    /// credential-free, so any read attempt must come from the eager resolve
+    /// in `execute_recover_initial_open`.
+    ///
+    /// Sentinel for "no credential read": `passphrase_file` points at a path
+    /// that does not exist, mirroring
+    /// `cmd_unlock_skips_credential_resolution_when_nothing_to_unlock`. If
+    /// the gate regresses, `luks::read_passphrase` opens the bogus path and
+    /// the test fails with a file-not-found error.
+    ///
+    /// Scenario: 3-disk pool with a `remove-missing devid 3` journal still
+    /// pending; operator manually opened all three LUKS mappers before
+    /// invoking `braid recover`. The pool is not mounted. Btrfs reports
+    /// devid 3 as MISSING, so recovery takes the "still missing" exit:
+    /// save `pre_membership`, clear the journal -- never reads a credential.
+    #[test]
+    fn remove_missing_pool_mutation_recovery_skips_credential_resolution_when_all_mappers_open() {
+        let f = PoolFixture::empty();
+
+        let journal = remove_missing_journal_two_survivors();
+        journal::write_journal(&f.paths, &journal).unwrap();
+
+        let inner = MockRunner::default()
+            // ── Initial plan_open_pool ──────────────────────────────────
+            // mountpoint check -> not mounted
+            .with_output(mountpoint_fail().0, mountpoint_fail().1)
+            // probe each pre_membership disk -> LUKS, mapper_open=true.
+            .with_output(
+                CmdRequest::CryptsetupLuksUuid {
+                    device: "/dev/disk/by-id/virtio-disk1".into(),
+                },
+                cryptsetup_uuid_ok(
+                    "/dev/disk/by-id/virtio-disk1",
+                    "11111111-1111-1111-1111-111111111111",
+                ),
+            )
+            .with_output(
+                CmdRequest::CryptsetupLuksUuid {
+                    device: "/dev/disk/by-id/virtio-disk2".into(),
+                },
+                cryptsetup_uuid_ok(
+                    "/dev/disk/by-id/virtio-disk2",
+                    "22222222-2222-2222-2222-222222222222",
+                ),
+            )
+            .with_output(
+                CmdRequest::CryptsetupLuksUuid {
+                    device: "/dev/disk/by-id/virtio-disk3".into(),
+                },
+                cryptsetup_uuid_ok(
+                    "/dev/disk/by-id/virtio-disk3",
+                    "33333333-3333-3333-3333-333333333333",
+                ),
+            )
+            // mapper_open classification: status + backing UUID for each
+            // mapper. Reused by the post-mount probe_pool for the two live
+            // (non-MISSING) devices.
+            .with_output(
+                CmdRequest::CryptsetupStatus {
+                    mapper: MapperName("braid-disk1".into()),
+                },
+                cryptsetup_status_active("braid-disk1", "/dev/vda"),
+            )
+            .with_output(
+                CmdRequest::CryptsetupLuksUuid {
+                    device: "/dev/vda".into(),
+                },
+                cryptsetup_uuid_ok("/dev/vda", "11111111-1111-1111-1111-111111111111"),
+            )
+            .with_output(
+                CmdRequest::CryptsetupStatus {
+                    mapper: MapperName("braid-disk2".into()),
+                },
+                cryptsetup_status_active("braid-disk2", "/dev/vdb"),
+            )
+            .with_output(
+                CmdRequest::CryptsetupLuksUuid {
+                    device: "/dev/vdb".into(),
+                },
+                cryptsetup_uuid_ok("/dev/vdb", "22222222-2222-2222-2222-222222222222"),
+            )
+            .with_output(
+                CmdRequest::CryptsetupStatus {
+                    mapper: MapperName("braid-disk3".into()),
+                },
+                cryptsetup_status_active("braid-disk3", "/dev/vdc"),
+            )
+            .with_output(
+                CmdRequest::CryptsetupLuksUuid {
+                    device: "/dev/vdc".into(),
+                },
+                cryptsetup_uuid_ok("/dev/vdc", "33333333-3333-3333-3333-333333333333"),
+            )
+            // ── Initial execute_mount_only ──────────────────────────────
+            // No CryptsetupTestPassphrase / LuksOpen mocks: any branch that
+            // resolves a credential would hit the bogus passphrase_file
+            // before reaching cryptsetup, but if it somehow proceeded, the
+            // missing LuksOpen mocks would fail the test as well.
+            .with_output(
+                CmdRequest::BtrfsDeviceScanAll,
+                ok_raw_empty("btrfs device scan"),
+            )
+            .with_output(
+                CmdRequest::Mount {
+                    device: "/dev/mapper/braid-disk1".into(),
+                    mount_point: MountPoint("/mnt/storage".into()),
+                },
+                ok_raw_empty("mount"),
+            )
+            // ── Post-mount probe_pool ───────────────────────────────────
+            // 3 devices but devid 3 is MISSING -> pool.missing_devids = [3],
+            // which routes execute_remove_missing_pool_mutation_recovery
+            // through the "still missing" branch (save pre_membership,
+            // clear journal, no further commands).
+            .with_output(
+                CmdRequest::BtrfsFilesystemShow {
+                    mount_point: MountPoint("/mnt/storage".into()),
+                },
+                ok_raw(
+                    "btrfs filesystem show /mnt/storage",
+                    "Label: none  uuid: aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee\n\
+                     \tTotal devices 3 FS bytes used 1.00GiB\n\
+                     \tdevid    1 size 10.00GiB used 2.00GiB path /dev/mapper/braid-disk1\n\
+                     \tdevid    2 size 10.00GiB used 2.00GiB path /dev/mapper/braid-disk2\n\
+                     \tdevid    3 size 0 used 0 path MISSING\n",
+                ),
+            )
+            .with_luks_dump_text_luks2_for(&[
+                "/dev/disk/by-id/virtio-disk1",
+                "/dev/disk/by-id/virtio-disk2",
+                "/dev/disk/by-id/virtio-disk3",
+            ]);
+
+        // All three by-id paths AND all three mapper paths present:
+        // plan_open_pool sees PresentLuks/mapper_open=true for each member,
+        // so to_unlock is empty and the initial mount takes the mount-only
+        // branch (which does not consume a credential).
+        let harness = RemountHarness::new(
+            &[
+                "/dev/disk/by-id/virtio-disk1",
+                "/dev/disk/by-id/virtio-disk2",
+                "/dev/disk/by-id/virtio-disk3",
+                "/dev/mapper/braid-disk1",
+                "/dev/mapper/braid-disk2",
+                "/dev/mapper/braid-disk3",
+            ],
+            inner,
+            &[],
+        );
+
+        let resolver = resolver_for(&[("/dev/vda", "virtio-disk1"), ("/dev/vdb", "virtio-disk2")]);
+
+        // passphrase_file points at a path that does not exist. If a
+        // regression resolves a credential eagerly for this op kind,
+        // read_passphrase will fail before recovery can complete.
+        let bogus = std::path::PathBuf::from("/definitely/not/a/real/path/passphrase");
+
+        let result = cmd_recover(
+            &harness.runner,
+            &harness.fs,
+            &resolver,
+            &f.recover_params().passphrase_file(Some(&bogus)).build(),
+        );
+
+        result.expect(
+            "remove-missing recovery with all mappers open must take the still-missing branch \
+             and never attempt to read the (nonexistent) passphrase file",
+        );
+
+        let requests = harness.requests();
+        assert!(
+            !requests.iter().any(|r| matches!(
+                r,
+                CmdRequest::CryptsetupClose { .. }
+                    | CmdRequest::CryptsetupLuksOpen { .. }
+                    | CmdRequest::CryptsetupTestPassphrase { .. }
+            )),
+            "RemoveMissing recovery must not close/reopen mappers or verify a passphrase"
+        );
+
+        // pre_membership preserved on the still-missing branch: all three
+        // disks (including the journaled devid 3) remain in pool.json.
+        assert!(f.paths.pool_json().exists(), "pool.json should exist");
+        let recovered = membership::load_membership(&f.paths).unwrap();
+        assert!(recovered.by_name(&disk_name("disk1")).is_some());
+        assert!(recovered.by_name(&disk_name("disk2")).is_some());
+        assert!(
+            recovered.by_name(&disk_name("disk3")).is_some(),
+            "still-missing branch preserves the journaled missing devid in pool.json"
+        );
+
+        // pending-op.json must have been cleared.
+        assert!(
+            !f.paths.pending_op_json().exists(),
+            "journal should be cleared after still-missing recovery"
+        );
+    }
+
+    /// Intent: Replace::PoolMutation recovery resolves the credential eagerly
+    /// even when every union mapper is already open, and uses it to drive the
+    /// post-mount remount cycle's close/reopen pair. This pins the
+    /// load-bearing case for the now-Replace-only eager resolve gate.
+    ///
+    /// Why it exists: this is the topology that motivates keeping the eager
+    /// resolve at all. The other Replace tests in this file either call
+    /// `execute_replace_pool_mutation_recovery` directly with
+    /// `credential: None` or use `RemountHarness` with mappers initially
+    /// closed (so the initial-unlock branch resolves the credential anyway).
+    /// Neither covers `Replace::PoolMutation + open_plan.to_unlock.is_empty()`,
+    /// which is the only branch where the gate is what populates
+    /// `state.credential` for the RemountCycle action's
+    /// `expect("...credential was resolved")` site.
+    ///
+    /// Scenario: operator started `braid replace old new`; the kernel-side
+    /// dev_replace finished but the resize step never landed. Before
+    /// invoking recover, the operator manually opened every union LUKS
+    /// mapper (disk1, old, new). Recover sees all mappers open, mounts the
+    /// pool, runs the cycle (close + reopen disk1, old, new using the
+    /// eagerly-resolved passphrase), then resizes the new device and clears
+    /// the journal.
+    #[test]
+    fn replace_pool_mutation_recovery_resolves_credential_and_remount_cycles_when_all_mappers_open()
+    {
+        let f = PoolFixture::empty();
+
+        let journal = replace_journal();
+        journal::write_journal(&f.paths, &journal).unwrap();
+
+        let inner = MockRunner::default()
+            // ── Initial plan_open_pool (all union mappers already open) ─
+            .with_output(mountpoint_fail().0, mountpoint_fail().1)
+            // probe_config_disk for each union member's by-id.
+            .with_output(
+                CmdRequest::CryptsetupLuksUuid {
+                    device: "/dev/disk/by-id/virtio-disk1".into(),
+                },
+                cryptsetup_uuid_ok(
+                    "/dev/disk/by-id/virtio-disk1",
+                    "11111111-1111-1111-1111-111111111111",
+                ),
+            )
+            .with_output(
+                CmdRequest::CryptsetupLuksUuid {
+                    device: "/dev/disk/by-id/virtio-old".into(),
+                },
+                cryptsetup_uuid_ok(
+                    "/dev/disk/by-id/virtio-old",
+                    "22222222-2222-2222-2222-222222222222",
+                ),
+            )
+            .with_output(
+                CmdRequest::CryptsetupLuksUuid {
+                    device: "/dev/disk/by-id/virtio-new".into(),
+                },
+                cryptsetup_uuid_ok(
+                    "/dev/disk/by-id/virtio-new",
+                    "33333333-3333-3333-3333-333333333333",
+                ),
+            )
+            // classify_mapper_ownership: status + backing-UUID probe per
+            // mapper. Reused by the post-cycle probe_pool for the two
+            // committed members (disk1, new).
+            .with_output(
+                CmdRequest::CryptsetupStatus {
+                    mapper: MapperName("braid-disk1".into()),
+                },
+                cryptsetup_status_active("braid-disk1", "/dev/vda"),
+            )
+            .with_output(
+                CmdRequest::CryptsetupLuksUuid {
+                    device: "/dev/vda".into(),
+                },
+                cryptsetup_uuid_ok("/dev/vda", "11111111-1111-1111-1111-111111111111"),
+            )
+            // braid-old and braid-new: the underlying paths in
+            // cryptsetup_status are deliberately the by-id symlinks
+            // themselves. mock_virtio_backing_path_resolver only has
+            // overrides for virtio-disk1..disk4, so for virtio-old and
+            // virtio-new the resolver canonicalizes identity. Returning
+            // the by-id as the underlying lets classify_mapper_ownership's
+            // expected vs. found canonicalize-equality check pass without
+            // configuring a custom backing-path resolver.
+            .with_output(
+                CmdRequest::CryptsetupStatus {
+                    mapper: MapperName("braid-old".into()),
+                },
+                cryptsetup_status_active("braid-old", "/dev/disk/by-id/virtio-old"),
+            )
+            .with_output(
+                CmdRequest::CryptsetupStatus {
+                    mapper: MapperName("braid-new".into()),
+                },
+                cryptsetup_status_active("braid-new", "/dev/disk/by-id/virtio-new"),
+            )
+            // ── Initial execute_mount_only (to_unlock is empty) ─────────
+            // No CryptsetupTestPassphrase / LuksOpen here: the initial
+            // mount takes the mount-only branch. The cycle below will use
+            // the eagerly-resolved credential to reopen mappers.
+            .with_output(
+                CmdRequest::BtrfsDeviceScanAll,
+                ok_raw_empty("btrfs device scan"),
+            )
+            .with_output(
+                CmdRequest::Mount {
+                    device: "/dev/mapper/braid-disk1".into(),
+                    mount_point: MountPoint("/mnt/storage".into()),
+                },
+                ok_raw_empty("mount"),
+            )
+            // ── wait_for_kernel_replace_to_finish ───────────────────────
+            // Post-resume status: Finished. The wait loop returns
+            // immediately.
+            .with_output(
+                CmdRequest::BtrfsReplaceStatus {
+                    mount_point: MountPoint("/mnt/storage".into()),
+                },
+                ok_raw(
+                    "btrfs replace status",
+                    "Started on 27.Feb 10:30:00, finished on 27.Feb 10:35:00, \
+                     0 write errs, 0 uncorr. read errs\n",
+                ),
+            )
+            // ── relock_and_remount cycle ────────────────────────────────
+            // 1. Umount.
+            .with_output(
+                CmdRequest::Umount {
+                    mount_point: MountPoint("/mnt/storage".into()),
+                },
+                ok_raw_empty("umount"),
+            )
+            // 2. scan --forget -- pool-scoped to the union mappers.
+            //    cycle_close_names iterates union.iter() (uuid order):
+            //    disk1 (1111) → old (2222) → new (3333).
+            .with_output(
+                CmdRequest::BtrfsDeviceScanForget {
+                    devices: vec![
+                        "/dev/mapper/braid-disk1".into(),
+                        "/dev/mapper/braid-old".into(),
+                        "/dev/mapper/braid-new".into(),
+                    ],
+                },
+                ok_raw_empty("btrfs device scan --forget"),
+            )
+            // 3. Close each union mapper. After each successful close,
+            //    RemountRunner removes the mapper path from fs and adds
+            //    the name to its `closed` set so the cycle's re-probe
+            //    sees the mappers as inactive.
+            .with_output(
+                CmdRequest::CryptsetupClose {
+                    mapper: MapperName("braid-disk1".into()),
+                },
+                ok_raw_empty("cryptsetup close braid-disk1"),
+            )
+            .with_output(
+                CmdRequest::CryptsetupClose {
+                    mapper: MapperName("braid-old".into()),
+                },
+                ok_raw_empty("cryptsetup close braid-old"),
+            )
+            .with_output(
+                CmdRequest::CryptsetupClose {
+                    mapper: MapperName("braid-new".into()),
+                },
+                ok_raw_empty("cryptsetup close braid-new"),
+            )
+            // 4. Cycle re-plan: mountpoint check + LuksUuid + LuksDump
+            //    mocks reused via MockRunner's HashMap. Status probes for
+            //    just-closed mappers short-circuit to inactive via
+            //    RemountRunner.
+            // 5. Cycle execute_unlock_and_mount: TestPassphrase + LuksOpen
+            //    for each member in to_unlock (iter_by_name → disk1, new,
+            //    old). LuksOpen success re-adds the mapper path to fs.
+            .with_output_stdin(
+                CmdRequest::CryptsetupTestPassphrase {
+                    device: "/dev/disk/by-id/virtio-disk1".into(),
+                },
+                TEST_PASSPHRASE_BYTES.to_vec(),
+                ok_raw_empty("cryptsetup open --test-passphrase"),
+            )
+            .with_output_stdin(
+                CmdRequest::CryptsetupTestPassphrase {
+                    device: "/dev/disk/by-id/virtio-new".into(),
+                },
+                TEST_PASSPHRASE_BYTES.to_vec(),
+                ok_raw_empty("cryptsetup open --test-passphrase"),
+            )
+            .with_output_stdin(
+                CmdRequest::CryptsetupTestPassphrase {
+                    device: "/dev/disk/by-id/virtio-old".into(),
+                },
+                TEST_PASSPHRASE_BYTES.to_vec(),
+                ok_raw_empty("cryptsetup open --test-passphrase"),
+            )
+            .with_output_stdin(
+                CmdRequest::CryptsetupLuksOpen {
+                    device: "/dev/disk/by-id/virtio-disk1".into(),
+                    mapper: MapperName("braid-disk1".into()),
+                },
+                TEST_PASSPHRASE_BYTES.to_vec(),
+                ok_raw_empty("cryptsetup open"),
+            )
+            .with_output_stdin(
+                CmdRequest::CryptsetupLuksOpen {
+                    device: "/dev/disk/by-id/virtio-new".into(),
+                    mapper: MapperName("braid-new".into()),
+                },
+                TEST_PASSPHRASE_BYTES.to_vec(),
+                ok_raw_empty("cryptsetup open"),
+            )
+            .with_output_stdin(
+                CmdRequest::CryptsetupLuksOpen {
+                    device: "/dev/disk/by-id/virtio-old".into(),
+                    mapper: MapperName("braid-old".into()),
+                },
+                TEST_PASSPHRASE_BYTES.to_vec(),
+                ok_raw_empty("cryptsetup open"),
+            )
+            // ── Post-cycle probe_pool ───────────────────────────────────
+            // The committed topology: 2 devices, disk1 (devid 1) + new
+            // (devid 2). Status + LuksUuid mocks above are reused for the
+            // per-device probes.
+            .with_output(
+                CmdRequest::BtrfsFilesystemShow {
+                    mount_point: MountPoint("/mnt/storage".into()),
+                },
+                btrfs_show_disk1_and_new(),
+            )
+            // ── replay_post_mutation ────────────────────────────────────
+            // Resize-to-max on the new device's devid (2).
+            .with_output(
+                CmdRequest::BtrfsFilesystemResize {
+                    devid: 2,
+                    mount_point: MountPoint("/mnt/storage".into()),
+                },
+                ok_raw_empty("btrfs filesystem resize"),
+            )
+            .with_luks_dump_text_luks2_for(&[
+                "/dev/disk/by-id/virtio-disk1",
+                "/dev/disk/by-id/virtio-old",
+                "/dev/disk/by-id/virtio-new",
+            ]);
+        // Note: BtrfsBalanceStatus / BtrfsBalanceRaid1Soft are not mocked
+        // because replace_journal() carries restore_raid1_after_commit=false.
+
+        // All three by-id paths AND all three mapper paths present
+        // initially. `already_closed = &[]` means probe_mapper_open hits
+        // the inner runner's status mocks (active) on the first plan, then
+        // RemountRunner records each successful CryptsetupClose into its
+        // closed set during the cycle.
+        let harness = RemountHarness::new(
+            &[
+                "/dev/disk/by-id/virtio-disk1",
+                "/dev/disk/by-id/virtio-old",
+                "/dev/disk/by-id/virtio-new",
+                "/dev/mapper/braid-disk1",
+                "/dev/mapper/braid-old",
+                "/dev/mapper/braid-new",
+            ],
+            inner,
+            &[],
+        );
+
+        let resolver = resolver_for(&[("/dev/vda", "virtio-disk1"), ("/dev/vdc", "virtio-new")]);
+
+        let result = cmd_recover(
+            &harness.runner,
+            &harness.fs,
+            &resolver,
+            &f.recover_params().build(),
+        );
+
+        result.expect(
+            "replace recovery with all union mappers open must mount, cycle, and replay resize",
+        );
+
+        // The cycle MUST run: every union mapper closed then reopened.
+        let requests = harness.requests();
+        let close_count = requests
+            .iter()
+            .filter(|r| matches!(r, CmdRequest::CryptsetupClose { .. }))
+            .count();
+        assert!(
+            close_count >= 3,
+            "expected at least 3 CryptsetupClose calls (cycle close set), got {close_count}"
+        );
+        let reopen_count = requests
+            .iter()
+            .filter(|r| matches!(r, CmdRequest::CryptsetupLuksOpen { .. }))
+            .count();
+        assert_eq!(
+            reopen_count, 3,
+            "cycle must reopen exactly the three union mappers using the eagerly-resolved credential"
+        );
+
+        // pool.json must reflect the committed replace topology.
+        assert!(f.paths.pool_json().exists(), "pool.json should exist");
+        let recovered = membership::load_membership(&f.paths).unwrap();
+        assert!(recovered.by_name(&disk_name("disk1")).is_some());
+        assert!(
+            recovered.by_name(&disk_name("new")).is_some(),
+            "post-replace membership must contain new"
+        );
+        assert!(
+            recovered.by_name(&disk_name("old")).is_none(),
+            "post-replace membership must not contain old"
+        );
+
+        // pending-op.json must have been cleared.
+        assert!(
+            !f.paths.pending_op_json().exists(),
+            "journal should be cleared after committed replace recovery"
         );
     }
 
