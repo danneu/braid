@@ -26,12 +26,14 @@ _build-checks flake_attr *args:
     fi
     rc=0
     if [ ${#tests[@]} -eq 0 ]; then
-        # Build all checks in the given flake attr.
-        # Uses nix eval to enumerate check names, then builds them all in a
-        # single `nix build` so nix can run them concurrently (up to the
-        # linux-builder's maxJobs). A single invocation also evaluates shared
-        # dependencies once and avoids SQLite lock contention that happens
-        # when multiple nix processes hit the store.
+        # Build all checks in the given flake attr. Uses nix eval to enumerate
+        # check names, then builds them all in a single `nix build` so the
+        # scheduler can run them concurrently. The `--max-jobs N` flag gates
+        # concurrent local test-driver processes: braid VM tests are
+        # aarch64-darwin derivations whose build phase invokes qemu+HVF on the
+        # Mac, so this flag is the wall-clock concurrency ceiling. Tuned to Mac
+        # RAM budget (see ~/world/agent-docs/linux-builder.md for the full
+        # budget).
         # https://nix.dev/manual/nix/stable/advanced-topics/cores-vs-jobs.html
         mapfile -t names < <(nix eval ".#{{flake_attr}}.{{system}}" \
             $nix_override \
@@ -43,7 +45,7 @@ _build-checks flake_attr *args:
         flags=()
         if $rebuild; then flags+=(--rebuild); fi
         # --no-link: tests run for side effects only; suppress result/result-N symlinks (one per check) that would otherwise pile up in the repo root.
-        nix build --no-link "${installables[@]}" "${flags[@]}" --max-jobs 4 "${build_dir[@]}" $nix_override $keep_going $verbose || rc=$?
+        nix build --no-link "${installables[@]}" "${flags[@]}" --max-jobs 8 "${build_dir[@]}" $nix_override $keep_going $verbose || rc=$?
     else
         installables=()
         for t in "${tests[@]}"; do
@@ -52,7 +54,7 @@ _build-checks flake_attr *args:
         flags=()
         if $rebuild; then flags+=(--rebuild); fi
         # --no-link: tests run for side effects only; suppress result/result-N symlinks (one per check) that would otherwise pile up in the repo root.
-        nix build --no-link "${installables[@]}" "${flags[@]}" --max-jobs 4 "${build_dir[@]}" $nix_override $keep_going $verbose || rc=$?
+        nix build --no-link "${installables[@]}" "${flags[@]}" --max-jobs 8 "${build_dir[@]}" $nix_override $keep_going $verbose || rc=$?
     fi
     if [ $rc -eq 0 ]; then
         printf '\033]777;notify;braid;tests passed\033\\'
