@@ -409,7 +409,7 @@ fn build_status<R: CommandRunner, F: Filesystem>(
         Err(e) => return Err(e.into()),
     };
 
-    let advisories = assemble_advisories(paths, None);
+    let mut advisories = assemble_advisories(paths, None);
     if !pool.mounted {
         return Ok(not_mounted_status(config, paths, advisories));
     }
@@ -424,9 +424,46 @@ fn build_status<R: CommandRunner, F: Filesystem>(
         Err(e) => return Err(e.into()),
     };
 
-    let df = fetch_df(runner, config.mount_point())?;
-    let df_summary = summarize_df(&df);
-    let capacity = get_capacity(runner, config.mount_point(), pool.missing_count, &df)?;
+    let df = match fetch_df(runner, config.mount_point()) {
+        Ok(df) => Some(df),
+        Err(_) => {
+            advisories.push(
+                "btrfs filesystem df failed -- pool capacity, allocation, and profile unavailable"
+                    .to_owned(),
+            );
+            None
+        }
+    };
+    let df_summary = df.as_ref().map(summarize_df);
+    let capacity = match df.as_ref() {
+        Some(df) => {
+            let total_bytes = if pool.missing_count == 0 {
+                match get_total_bytes(runner, config.mount_point()) {
+                    Ok(total_bytes) => Some(total_bytes),
+                    Err(_) => {
+                        advisories.push(
+                            "btrfs device usage failed -- pool total capacity unavailable"
+                                .to_owned(),
+                        );
+                        None
+                    }
+                }
+            } else {
+                None
+            };
+
+            match get_capacity(runner, config.mount_point(), df, total_bytes) {
+                Ok(capacity) => Some(capacity),
+                Err(_) => {
+                    advisories.push(
+                        "btrfs filesystem usage failed -- pool capacity unavailable".to_owned(),
+                    );
+                    None
+                }
+            }
+        }
+        None => None,
+    };
     let last_scrub = get_scrub_report(runner, config.mount_point());
     let balance = get_balance_report(runner, config.mount_point());
 
@@ -456,7 +493,14 @@ fn build_status<R: CommandRunner, F: Filesystem>(
             )
         })
         .collect::<Result<Vec<_>, _>>()?;
-    let device_stats = get_device_stats(runner, config.mount_point())?;
+    let device_stats = match get_device_stats(runner, config.mount_point()) {
+        Ok(device_stats) => device_stats,
+        Err(_) => {
+            advisories
+                .push("btrfs device stats failed -- per-disk error counts unavailable".to_owned());
+            BtrfsDeviceStatsOutput { devices: vec![] }
+        }
+    };
     let verbose_ctx = build_disk_reports(runner, &membership, &config_disks, &pool, &device_stats);
 
     let alert_state = resolve_alert_state(paths);
@@ -468,11 +512,11 @@ fn build_status<R: CommandRunner, F: Filesystem>(
         total_devices: Some(pool.total_devices),
         present_count: Some(present_count),
         missing_count: Some(pool.missing_count),
-        profile: Some(df_summary.profile),
-        capacity: Some(capacity),
+        profile: df_summary.as_ref().map(|summary| summary.profile.clone()),
+        capacity,
         last_scrub: Some(last_scrub),
         balance: Some(balance),
-        allocation: Some(df_summary.allocation),
+        allocation: df_summary.map(|summary| summary.allocation),
         disks: verbose_ctx.disks,
         advisories,
         alert_active: alert_state.active(),
@@ -631,30 +675,33 @@ fn summarize_df(df: &BtrfsDfOutput) -> DfSummary {
 fn get_capacity<R: CommandRunner>(
     runner: &R,
     mount_point: &MountPoint,
-    missing_count: u64,
     df: &BtrfsDfOutput,
+    total_bytes: Option<u64>,
 ) -> Result<CapacityReport, StatusError> {
     let raw = runner.run(&CmdRequest::BtrfsFilesystemUsageRaw {
         mount_point: mount_point.clone(),
     })?;
     let usage = parse_btrfs_filesystem_usage(&raw)?;
 
-    let total_bytes = if missing_count == 0 {
-        let dev_raw = runner.run(&CmdRequest::BtrfsDeviceUsageRaw {
-            mount_point: mount_point.clone(),
-        })?;
-        let dev_usage = parse_btrfs_device_usage(&dev_raw)?;
-        let sizes: Vec<u64> = dev_usage.devices.iter().map(|d| d.device_size).collect();
-        Some(estimate_pool_capacity(&sizes))
-    } else {
-        None
-    };
-
     Ok(CapacityReport {
         total_bytes,
         used_bytes: df.logical_used_bytes(),
         free_bytes: usage.free_estimated_bytes,
     })
+}
+
+/// Separate from `get_capacity` so device-usage failures can degrade only
+/// total capacity while preserving df / usage-derived used and free bytes.
+fn get_total_bytes<R: CommandRunner>(
+    runner: &R,
+    mount_point: &MountPoint,
+) -> Result<u64, StatusError> {
+    let dev_raw = runner.run(&CmdRequest::BtrfsDeviceUsageRaw {
+        mount_point: mount_point.clone(),
+    })?;
+    let dev_usage = parse_btrfs_device_usage(&dev_raw)?;
+    let sizes: Vec<u64> = dev_usage.devices.iter().map(|d| d.device_size).collect();
+    Ok(estimate_pool_capacity(&sizes))
 }
 
 fn get_device_stats<R: CommandRunner>(
@@ -1368,7 +1415,8 @@ mod tests {
 
         let df = fetch_df(&runner, &status_mp()).unwrap();
         let df_summary = summarize_df(&df);
-        let capacity = get_capacity(&runner, &status_mp(), 0, &df).unwrap();
+        let total_bytes = Some(get_total_bytes(&runner, &status_mp()).unwrap());
+        let capacity = get_capacity(&runner, &status_mp(), &df, total_bytes).unwrap();
         let last_scrub = get_scrub_report(&runner, &status_mp());
 
         let code = StatusCode::Intact;
@@ -2669,29 +2717,387 @@ mod tests {
         );
     }
 
+    fn build_healthy_status() -> BuiltStatus {
+        let runner = status_runner_healthy_3disk_verbose(status_runner_healthy_3disk_base());
+        let fs = status_fs_three_disk();
+        let config = status_config();
+        let (_tmp, paths) = isolated_paths();
+
+        build_status(
+            &runner,
+            &fs,
+            &config,
+            &paths,
+            crate::test_fixtures::mock_virtio_backing_path_resolver(),
+        )
+        .expect("healthy status should build")
+    }
+
+    fn build_healthy_status_with_output(
+        request: CmdRequest,
+        output: RawCommandOutput,
+    ) -> BuiltStatus {
+        let runner = status_runner_healthy_3disk_verbose(status_runner_healthy_3disk_base())
+            .with_output(request, output);
+        let fs = status_fs_three_disk();
+        let config = status_config();
+        let (_tmp, paths) = isolated_paths();
+
+        build_status(
+            &runner,
+            &fs,
+            &config,
+            &paths,
+            crate::test_fixtures::mock_virtio_backing_path_resolver(),
+        )
+        .expect("tolerant status should build")
+    }
+
+    fn render_built_status(built: &BuiltStatus) -> String {
+        let extras = built.mounted_extras.as_ref();
+        format_status_human(
+            &built.report,
+            extras.map(|e| e.compact_drives.as_slice()),
+            extras.map(|e| e.human_details.as_slice()),
+            extras.map(|e| &e.devid_names),
+        )
+    }
+
+    fn assert_common_status_survived(built: &BuiltStatus) {
+        assert_eq!(built.report.status, StatusCode::Intact);
+        assert_eq!(built.report.total_devices, Some(3));
+        assert_eq!(built.report.present_count, Some(3));
+        assert_eq!(built.report.missing_count, Some(0));
+        assert_eq!(built.report.disks.len(), 3);
+    }
+
+    fn assert_common_human_sections_survived(human: &str) {
+        assert!(human.contains("Drives:"), "got:\n{human}");
+        assert!(human.contains("Disks:"), "got:\n{human}");
+        assert!(
+            human.contains("    Device:  /dev/mapper/disk1"),
+            "got:\n{human}"
+        );
+        assert!(
+            human.contains("    Device:  /dev/mapper/disk2"),
+            "got:\n{human}"
+        );
+        assert!(
+            human.contains("    Device:  /dev/mapper/disk3"),
+            "got:\n{human}"
+        );
+        assert!(human.contains("Last scrub: never"), "got:\n{human}");
+    }
+
+    fn assert_advisory_and_warning(built: &BuiltStatus, human: &str, advisory: &str) {
+        assert!(
+            built
+                .report
+                .advisories
+                .iter()
+                .any(|actual| actual.contains(advisory)),
+            "advisories: {:?}",
+            built.report.advisories
+        );
+        assert!(
+            human.contains(&format!("warning: {advisory}")),
+            "got:\n{human}"
+        );
+    }
+
+    fn assert_error_stats_retained(built: &BuiltStatus) {
+        assert!(
+            built.report.disks.iter().all(|disk| disk.errors.is_some()),
+            "disks: {:?}",
+            built.report.disks
+        );
+    }
+
+    fn assert_scrub_and_balance_retained(built: &BuiltStatus) {
+        assert!(built.report.last_scrub.is_some());
+        assert!(built.report.balance.is_some());
+    }
+
+    fn assert_pool_sections_retained(built: &BuiltStatus) {
+        assert_eq!(built.report.profile.as_deref(), Some("RAID1"));
+        assert!(
+            built
+                .report
+                .allocation
+                .as_ref()
+                .is_some_and(|allocation| !allocation.is_empty()),
+            "allocation: {:?}",
+            built.report.allocation
+        );
+        assert!(built.report.capacity.is_some());
+    }
+
+    fn assert_disk_identity_matches_healthy(built: &BuiltStatus) {
+        let healthy = build_healthy_status();
+        for (actual, expected) in built.report.disks.iter().zip(healthy.report.disks.iter()) {
+            assert_eq!(actual.name, expected.name);
+            assert_eq!(actual.mapper, expected.mapper);
+            assert_eq!(actual.by_id, expected.by_id);
+            assert_eq!(actual.luks_uuid, expected.luks_uuid);
+            assert_eq!(actual.devid, expected.devid);
+            assert_eq!(actual.underlying, expected.underlying);
+            assert_eq!(actual.status, expected.status);
+        }
+    }
+
+    // Intent: df command failures leave `braid status` usable with explicit partial-data warnings.
+    // Why it exists: status is a first-resort diagnostic and must not die when df is temporarily unavailable.
+    // Scenario: btrfs rejects `filesystem df` during a transient pool state, but other status probes still work.
     #[test]
-    fn status_df_failure_fatal() {
-        let runner = MockRunner::default().with_output(
+    fn build_status_df_cmd_failure_tolerant() {
+        let advisory =
+            "btrfs filesystem df failed -- pool capacity, allocation, and profile unavailable";
+        let built = build_healthy_status_with_output(
             CmdRequest::BtrfsFilesystemDfJson {
-                mount_point: MountPoint("/mnt/storage".to_owned()),
+                mount_point: status_mp(),
             },
             status_err_raw("btrfs filesystem df", 1, "not a btrfs filesystem"),
         );
-        let result = fetch_df(&runner, &status_mp());
-        assert!(result.is_err());
+        let human = render_built_status(&built);
+
+        assert!(built.report.profile.is_none());
+        assert!(built.report.allocation.is_none());
+        assert!(built.report.capacity.is_none());
+        assert_advisory_and_warning(&built, &human, advisory);
+        assert_common_status_survived(&built);
+        assert_error_stats_retained(&built);
+        assert_scrub_and_balance_retained(&built);
+        assert_common_human_sections_survived(&human);
+        assert!(!human.contains("Allocation:"), "got:\n{human}");
+        assert!(!human.contains("Capacity:"), "got:\n{human}");
+        assert!(human.contains("Errors:  read 0"), "got:\n{human}");
     }
 
+    // Intent: df parse failures leave `braid status` usable with explicit partial-data warnings.
+    // Why it exists: parser drift should degrade status output instead of hiding all surviving diagnostics.
+    // Scenario: btrfs returns success for `filesystem df`, but its JSON is not parseable by this braid build.
     #[test]
-    fn status_usage_failure_fatal() {
-        let runner = MockRunner::default().with_output(
+    fn build_status_df_parse_failure_tolerant() {
+        let advisory =
+            "btrfs filesystem df failed -- pool capacity, allocation, and profile unavailable";
+        let built = build_healthy_status_with_output(
+            CmdRequest::BtrfsFilesystemDfJson {
+                mount_point: status_mp(),
+            },
+            mock_ok("btrfs filesystem df", "garbage not parseable"),
+        );
+        let human = render_built_status(&built);
+
+        assert!(built.report.profile.is_none());
+        assert!(built.report.allocation.is_none());
+        assert!(built.report.capacity.is_none());
+        assert_advisory_and_warning(&built, &human, advisory);
+        assert_common_status_survived(&built);
+        assert_error_stats_retained(&built);
+        assert_scrub_and_balance_retained(&built);
+        assert_common_human_sections_survived(&human);
+        assert!(!human.contains("Allocation:"), "got:\n{human}");
+        assert!(!human.contains("Capacity:"), "got:\n{human}");
+        assert!(human.contains("Errors:  read 0"), "got:\n{human}");
+    }
+
+    // Intent: filesystem-usage command failures only remove capacity from an otherwise usable status report.
+    // Why it exists: a capacity probe failure must not erase profile, allocation, disk, scrub, or balance diagnostics.
+    // Scenario: `btrfs filesystem usage` exits non-zero while the pool remains mounted and inspectable.
+    #[test]
+    fn build_status_usage_cmd_failure_tolerant() {
+        let advisory = "btrfs filesystem usage failed -- pool capacity unavailable";
+        let built = build_healthy_status_with_output(
             CmdRequest::BtrfsFilesystemUsageRaw {
-                mount_point: MountPoint("/mnt/storage".to_owned()),
+                mount_point: status_mp(),
             },
             status_err_raw("btrfs filesystem usage", 1, "error"),
         );
-        let df = BtrfsDfOutput { entries: vec![] };
-        let result = get_capacity(&runner, &status_mp(), 0, &df);
-        assert!(result.is_err());
+        let human = render_built_status(&built);
+
+        assert!(built.report.capacity.is_none());
+        assert_eq!(built.report.profile.as_deref(), Some("RAID1"));
+        assert!(
+            built
+                .report
+                .allocation
+                .as_ref()
+                .is_some_and(|allocation| !allocation.is_empty())
+        );
+        assert_advisory_and_warning(&built, &human, advisory);
+        assert_common_status_survived(&built);
+        assert_error_stats_retained(&built);
+        assert_scrub_and_balance_retained(&built);
+        assert_common_human_sections_survived(&human);
+        assert!(human.contains("Allocation:"), "got:\n{human}");
+        assert!(!human.contains("Capacity:"), "got:\n{human}");
+        assert!(human.contains("Errors:  read 0"), "got:\n{human}");
+    }
+
+    // Intent: filesystem-usage parse failures only remove capacity from an otherwise usable status report.
+    // Why it exists: parser drift in usage output must not erase profile, allocation, disk, scrub, or balance diagnostics.
+    // Scenario: `btrfs filesystem usage` exits successfully but omits the fields braid needs for capacity.
+    #[test]
+    fn build_status_usage_parse_failure_tolerant() {
+        let advisory = "btrfs filesystem usage failed -- pool capacity unavailable";
+        let built = build_healthy_status_with_output(
+            CmdRequest::BtrfsFilesystemUsageRaw {
+                mount_point: status_mp(),
+            },
+            mock_ok("btrfs filesystem usage", "garbage not parseable"),
+        );
+        let human = render_built_status(&built);
+
+        assert!(built.report.capacity.is_none());
+        assert_eq!(built.report.profile.as_deref(), Some("RAID1"));
+        assert!(
+            built
+                .report
+                .allocation
+                .as_ref()
+                .is_some_and(|allocation| !allocation.is_empty())
+        );
+        assert_advisory_and_warning(&built, &human, advisory);
+        assert_common_status_survived(&built);
+        assert_error_stats_retained(&built);
+        assert_scrub_and_balance_retained(&built);
+        assert_common_human_sections_survived(&human);
+        assert!(human.contains("Allocation:"), "got:\n{human}");
+        assert!(!human.contains("Capacity:"), "got:\n{human}");
+        assert!(human.contains("Errors:  read 0"), "got:\n{human}");
+    }
+
+    // Intent: device-usage command failures only remove the estimated total from capacity.
+    // Why it exists: used and free bytes come from surviving df / usage probes and should remain visible.
+    // Scenario: `btrfs device usage` exits non-zero on an intact mounted pool.
+    #[test]
+    fn build_status_device_usage_cmd_failure_tolerant() {
+        let advisory = "btrfs device usage failed -- pool total capacity unavailable";
+        let healthy = build_healthy_status();
+        let built = build_healthy_status_with_output(
+            CmdRequest::BtrfsDeviceUsageRaw {
+                mount_point: status_mp(),
+            },
+            status_err_raw("btrfs device usage", 1, "error"),
+        );
+        let human = render_built_status(&built);
+        let capacity = built.report.capacity.as_ref().expect("capacity retained");
+        let healthy_capacity = healthy.report.capacity.as_ref().unwrap();
+
+        assert_eq!(capacity.total_bytes, None);
+        assert_eq!(capacity.used_bytes, healthy_capacity.used_bytes);
+        assert_eq!(capacity.free_bytes, healthy_capacity.free_bytes);
+        assert_eq!(built.report.profile.as_deref(), Some("RAID1"));
+        assert!(
+            built
+                .report
+                .allocation
+                .as_ref()
+                .is_some_and(|allocation| !allocation.is_empty())
+        );
+        assert_advisory_and_warning(&built, &human, advisory);
+        assert_common_status_survived(&built);
+        assert_error_stats_retained(&built);
+        assert_scrub_and_balance_retained(&built);
+        assert_common_human_sections_survived(&human);
+        assert!(human.contains("Capacity:"), "got:\n{human}");
+        assert!(!human.contains("Total:"), "got:\n{human}");
+        assert!(human.contains("Used:"), "got:\n{human}");
+        assert!(human.contains("Free:"), "got:\n{human}");
+    }
+
+    // Intent: device-usage parse failures only remove the estimated total from capacity.
+    // Why it exists: parser drift in per-device sizing must not hide df / usage-derived used and free bytes.
+    // Scenario: `btrfs device usage` exits successfully but returns a malformed device stanza.
+    #[test]
+    fn build_status_device_usage_parse_failure_tolerant() {
+        let advisory = "btrfs device usage failed -- pool total capacity unavailable";
+        let healthy = build_healthy_status();
+        let built = build_healthy_status_with_output(
+            CmdRequest::BtrfsDeviceUsageRaw {
+                mount_point: status_mp(),
+            },
+            mock_ok(
+                "btrfs device usage",
+                "/dev/mapper/disk1, ID: 1\n  Device slack: 0\n  Unallocated: 0\n",
+            ),
+        );
+        let human = render_built_status(&built);
+        let capacity = built.report.capacity.as_ref().expect("capacity retained");
+        let healthy_capacity = healthy.report.capacity.as_ref().unwrap();
+
+        assert_eq!(capacity.total_bytes, None);
+        assert_eq!(capacity.used_bytes, healthy_capacity.used_bytes);
+        assert_eq!(capacity.free_bytes, healthy_capacity.free_bytes);
+        assert_eq!(built.report.profile.as_deref(), Some("RAID1"));
+        assert!(
+            built
+                .report
+                .allocation
+                .as_ref()
+                .is_some_and(|allocation| !allocation.is_empty())
+        );
+        assert_advisory_and_warning(&built, &human, advisory);
+        assert_common_status_survived(&built);
+        assert_error_stats_retained(&built);
+        assert_scrub_and_balance_retained(&built);
+        assert_common_human_sections_survived(&human);
+        assert!(human.contains("Capacity:"), "got:\n{human}");
+        assert!(!human.contains("Total:"), "got:\n{human}");
+        assert!(human.contains("Used:"), "got:\n{human}");
+        assert!(human.contains("Free:"), "got:\n{human}");
+    }
+
+    // Intent: device-stats command failures only remove per-disk error counts.
+    // Why it exists: error-stat metadata is useful but must not gate the rest of mounted-pool status.
+    // Scenario: `btrfs device stats` exits non-zero while capacity, profile, allocation, and disk identity remain readable.
+    #[test]
+    fn build_status_device_stats_cmd_failure_tolerant() {
+        let advisory = "btrfs device stats failed -- per-disk error counts unavailable";
+        let built = build_healthy_status_with_output(
+            CmdRequest::BtrfsDeviceStatsJson {
+                mount_point: status_mp(),
+            },
+            status_err_raw("btrfs device stats", 1, "error"),
+        );
+        let human = render_built_status(&built);
+
+        assert!(built.report.disks.iter().all(|disk| disk.errors.is_none()));
+        assert_pool_sections_retained(&built);
+        assert_scrub_and_balance_retained(&built);
+        assert_disk_identity_matches_healthy(&built);
+        assert_advisory_and_warning(&built, &human, advisory);
+        assert_common_status_survived(&built);
+        assert_common_human_sections_survived(&human);
+        assert!(human.contains("Allocation:"), "got:\n{human}");
+        assert!(human.contains("Capacity:"), "got:\n{human}");
+        assert!(!human.contains("Errors:  read"), "got:\n{human}");
+    }
+
+    // Intent: device-stats parse failures only remove per-disk error counts.
+    // Why it exists: parser drift in device-stats JSON must not gate the rest of mounted-pool status.
+    // Scenario: `btrfs device stats` exits successfully but returns JSON braid cannot parse.
+    #[test]
+    fn build_status_device_stats_parse_failure_tolerant() {
+        let advisory = "btrfs device stats failed -- per-disk error counts unavailable";
+        let built = build_healthy_status_with_output(
+            CmdRequest::BtrfsDeviceStatsJson {
+                mount_point: status_mp(),
+            },
+            mock_ok("btrfs device stats", "garbage not parseable"),
+        );
+        let human = render_built_status(&built);
+
+        assert!(built.report.disks.iter().all(|disk| disk.errors.is_none()));
+        assert_pool_sections_retained(&built);
+        assert_scrub_and_balance_retained(&built);
+        assert_disk_identity_matches_healthy(&built);
+        assert_advisory_and_warning(&built, &human, advisory);
+        assert_common_status_survived(&built);
+        assert_common_human_sections_survived(&human);
+        assert!(human.contains("Allocation:"), "got:\n{human}");
+        assert!(human.contains("Capacity:"), "got:\n{human}");
+        assert!(!human.contains("Errors:  read"), "got:\n{human}");
     }
 
     /// Intent: CapacityReport.used_bytes must be logical (df-derived)
@@ -2775,7 +3181,8 @@ mod tests {
             ],
         };
 
-        let report = get_capacity(&runner, &status_mp(), 0, &df).unwrap();
+        let total_bytes = Some(get_total_bytes(&runner, &status_mp()).unwrap());
+        let report = get_capacity(&runner, &status_mp(), &df, total_bytes).unwrap();
 
         assert_eq!(report.total_bytes, Some(536_870_912));
         assert!(
@@ -2785,18 +3192,6 @@ mod tests {
             report.total_bytes.unwrap(),
         );
         assert_eq!(report.used_bytes, 285_229_056);
-    }
-
-    #[test]
-    fn status_device_stats_failure_fatal() {
-        let runner = MockRunner::default().with_output(
-            CmdRequest::BtrfsDeviceStatsJson {
-                mount_point: MountPoint("/mnt/storage".to_owned()),
-            },
-            status_err_raw("btrfs device stats", 1, "error"),
-        );
-        let result = get_device_stats(&runner, &status_mp());
-        assert!(result.is_err());
     }
 
     // Intent: status keeps reporting `NotMounted` for a foreign-fstype
