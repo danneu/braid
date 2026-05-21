@@ -978,6 +978,7 @@ fn main() {
                             progress,
                             sleep_inhibitor: &sleep_inhibitor,
                             sleeper: &braid_cli::progress::RealSleeper,
+                            tty: &braid_cli::luks::RealTty,
                             backing_path_resolver: &backing_path_resolver,
                         },
                     )

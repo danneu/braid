@@ -214,6 +214,8 @@ pub struct RecoverParams<'a> {
     /// Sleeper seam for retrying transiently-busy mapper closes without
     /// slowing unit tests.
     pub sleeper: &'a dyn progress::Sleeper,
+    /// TTY reader seam for interactive recover passphrase prompts.
+    pub tty: &'a dyn luks::PassphraseReader,
     /// Seam for resolving by-id paths and mapper backings during recovery
     /// probes and already-open mapper checks.
     pub backing_path_resolver: &'a dyn BackingPathResolver,
@@ -2042,9 +2044,11 @@ fn recover_passphrase<'a>(
         Some(OpenCredential::KeyFile(_)) => Err(RecoverError::Failed(
             "add recovery requires a passphrase for delayed LUKS format".into(),
         )),
-        None => Ok(RecoverPassphrase::Owned(luks::read_passphrase(
+        None => Ok(RecoverPassphrase::Owned(luks::read_passphrase_with(
             params.passphrase_file,
             params.passphrase_stdin,
+            false,
+            params.tty,
         )?)),
     }
 }
@@ -2402,10 +2406,10 @@ fn execute_add_pool_mutation_recovery<R: CommandRunner + Sync, F: Filesystem + ?
     } = ctx;
     validate_live_members_allowed(&pool, union)?;
     let mount_point = params.config.mount_point();
+    let mut passphrase: Option<RecoverPassphrase<'_>> = None;
 
     if !add_targets_all_live(&pool, targets) {
         let mut opened_or_scanned = false;
-        let mut passphrase: Option<RecoverPassphrase<'_>> = None;
         for (target_uuid, target) in targets {
             if live_member_uuids(&pool).contains(target_uuid) {
                 continue;
@@ -2479,14 +2483,20 @@ fn execute_add_pool_mutation_recovery<R: CommandRunner + Sync, F: Filesystem + ?
     }
 
     if !add_targets_all_live(&pool, targets) {
-        let passphrase = recover_passphrase(credential, params)?;
+        if passphrase.is_none() {
+            passphrase = Some(recover_passphrase(credential, params)?);
+        }
+        let passphrase = passphrase
+            .as_ref()
+            .expect("passphrase was resolved above")
+            .expose_secret();
         verify_recover_passphrase_for_add_replay(
             runner,
             fs,
             &pool,
             targets,
             params.backing_path_resolver,
-            passphrase.expose_secret(),
+            passphrase,
         )?;
         let _guard = params
             .sleep_inhibitor
@@ -2532,7 +2542,7 @@ fn execute_add_pool_mutation_recovery<R: CommandRunner + Sync, F: Filesystem + ?
                             &target.name,
                             &target.by_id,
                             params.backing_path_resolver,
-                            passphrase.expose_secret(),
+                            passphrase,
                         )?;
                     }
                     if let Some(fsid) = visible_btrfs_fsid(runner, &mapper_path)?
@@ -2553,7 +2563,7 @@ fn execute_add_pool_mutation_recovery<R: CommandRunner + Sync, F: Filesystem + ?
                         ensure_keyfile_enrolled(
                             runner,
                             target.by_id.as_str(),
-                            passphrase.expose_secret(),
+                            passphrase,
                             key_file,
                         )?;
                         luks::backup_luks_header(
@@ -2583,7 +2593,7 @@ fn execute_add_pool_mutation_recovery<R: CommandRunner + Sync, F: Filesystem + ?
                             luks::luks_format(
                                 runner,
                                 target.by_id.as_str(),
-                                passphrase.expose_secret(),
+                                passphrase,
                                 target_uuid,
                                 &expected_label,
                                 extra_opts,
@@ -2619,7 +2629,7 @@ fn execute_add_pool_mutation_recovery<R: CommandRunner + Sync, F: Filesystem + ?
                         ensure_keyfile_enrolled(
                             runner,
                             target.by_id.as_str(),
-                            passphrase.expose_secret(),
+                            passphrase,
                             key_file,
                         )?;
                     }
@@ -2629,7 +2639,7 @@ fn execute_add_pool_mutation_recovery<R: CommandRunner + Sync, F: Filesystem + ?
                         &target.name,
                         &target.by_id,
                         params.backing_path_resolver,
-                        passphrase.expose_secret(),
+                        passphrase,
                     )?;
                     crate::pool::pool_add_device(runner, &mapper_path, mount_point, false)
                         .map_err(|e| RecoverError::Failed(format!("recover add replay: {e}")))?;
@@ -2891,9 +2901,11 @@ fn recover_passphrase_for_context<'a>(
         Some(OpenCredential::KeyFile(_)) => Err(RecoverError::Failed(format!(
             "{context} requires a passphrase"
         ))),
-        None => Ok(RecoverPassphrase::Owned(luks::read_passphrase(
+        None => Ok(RecoverPassphrase::Owned(luks::read_passphrase_with(
             params.passphrase_file,
             params.passphrase_stdin,
+            false,
+            params.tty,
         )?)),
     }
 }
@@ -3762,6 +3774,7 @@ mod tests {
     use super::*;
     use crate::cmd::{CmdError, CmdRequest, CommandRunner, MockRunner, RawCommandOutput};
     use crate::journal::{self, OpKind};
+    use crate::luks::ScriptedPassphraseReader;
     use crate::mount::MountError;
     use crate::preview::NoteLevel;
     use crate::probe::Filesystem;
@@ -5817,10 +5830,97 @@ mod tests {
         ))
     }
 
+    fn replay_returned_disk2_runner_closed_mapper_for_devid4() -> MockRunner {
+        let inactive = inactive_mapper_status("braid-disk2");
+        replay_returned_disk2_runner_for_devid4()
+            .with_output_sequence(
+                CmdRequest::CryptsetupStatus {
+                    mapper: MapperName("braid-disk2".into()),
+                },
+                vec![inactive.clone(), inactive],
+            )
+            .with_output_stdin(
+                CmdRequest::CryptsetupLuksOpen {
+                    device: "/dev/disk/by-id/virtio-disk2".into(),
+                    mapper: MapperName("braid-disk2".into()),
+                },
+                TEST_PASSPHRASE_BYTES.to_vec(),
+                ok_raw_empty("cryptsetup open"),
+            )
+    }
+
     fn replay_returned_disk2_runner_for_drifted_devid4() -> MockRunner {
         with_balance_replay(with_disk1_drifted_disk2_devid4_pool_probe(
             replay_returned_disk2_runner_base(),
         ))
+    }
+
+    // Intent
+    // Live-add recovery on an already-mounted pool with a closed mapper
+    // and a pending pool_add_device prompts for the LUKS passphrase
+    // exactly once, not twice.
+    //
+    // Why it exists
+    // Principle 4 (docs/decisions/004-single-passphrase.md) commits to
+    // "one passphrase, all drives unlock". Independent recover_passphrase
+    // calls in the discovery and replay blocks of
+    // execute_add_pool_mutation_recovery used to prompt twice; a future
+    // refactor could reintroduce the double prompt without this guard.
+    //
+    // Scenario
+    // sudo braid recover on a mounted pool with an interrupted add: disk2
+    // mapper is closed (discovery must open it) AND disk2 is not yet a
+    // pool member (replay must run pool_add_device). The operator sees
+    // one prompt, the replay reuses the cached passphrase, btrfs device
+    // add commits the target.
+    #[test]
+    fn live_add_recovery_prompts_passphrase_once_when_mapper_closed() {
+        let f = PoolFixture::empty();
+        let journal = recoverable_pool_mutation_add_journal();
+        journal::write_journal(&f.paths, &journal).unwrap();
+        let union = union_memberships(&journal);
+        let targets = match &journal.op {
+            OpKind::Add { targets, .. } => targets,
+            _ => unreachable!("test journal is Add"),
+        };
+        let runner = replay_returned_disk2_runner_closed_mapper_for_devid4();
+        let resolver = resolver_for(&[("/dev/vda", "virtio-disk1"), ("/dev/vdb", "virtio-disk2")]);
+        let pass = std::str::from_utf8(TEST_PASSPHRASE_BYTES).unwrap();
+        let reader = ScriptedPassphraseReader::new([pass, pass]);
+        let params = f
+            .recover_params()
+            .passphrase_file(None)
+            .tty(&reader)
+            .build();
+
+        execute_add_pool_mutation_recovery(
+            &runner,
+            &MockFs::new(&["/dev/disk/by-id/virtio-disk2", "/dev/mapper/braid-disk2"]),
+            &resolver,
+            &params,
+            AddPoolReplayCtx {
+                credential: None,
+                journal: &journal,
+                union: &union,
+                targets,
+                pool: pool_state_one_disk(),
+            },
+        )
+        .expect("live-add replay should finish with one prompt");
+
+        assert!(
+            runner.requests().iter().any(|r| matches!(
+                r,
+                CmdRequest::BtrfsDeviceAdd { device, .. }
+                    if device == "/dev/mapper/braid-disk2"
+            )),
+            "replay block must reach pool_add_device for disk2"
+        );
+        assert_eq!(
+            reader.remaining(),
+            1,
+            "passphrase must be prompted exactly once -- second prompt is a Principle-4 regression"
+        );
     }
 
     // Intent

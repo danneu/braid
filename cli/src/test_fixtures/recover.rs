@@ -16,6 +16,7 @@ use super::shared::{PoolFixture, mock_virtio_backing_path_resolver};
 use crate::cmd::{CmdRequest, CommandRunner, MockRunner, RawCommandOutput};
 use crate::config::Config;
 use crate::inhibit::{AcquireSleepInhibitor, SleepGuard};
+use crate::luks;
 use crate::probe::Filesystem;
 use crate::progress::{self, ProgressOutput};
 use crate::recover::RecoverParams;
@@ -56,6 +57,7 @@ impl PoolFixture {
             dry_run: false,
             progress: ProgressOutput::Off,
             sleep_inhibitor: &RECOVER_NOOP_INHIBITOR,
+            tty: &luks::RealTty,
         }
     }
 }
@@ -73,6 +75,7 @@ pub(crate) struct RecoverParamsBuilder<'a> {
     dry_run: bool,
     progress: ProgressOutput,
     sleep_inhibitor: &'a dyn AcquireSleepInhibitor,
+    tty: &'a dyn luks::PassphraseReader,
 }
 
 impl<'a> RecoverParamsBuilder<'a> {
@@ -96,6 +99,13 @@ impl<'a> RecoverParamsBuilder<'a> {
         self
     }
 
+    /// Override the interactive TTY reader for recover tests that must
+    /// observe prompt counts without opening /dev/tty.
+    pub(crate) fn tty(mut self, tty: &'a dyn luks::PassphraseReader) -> Self {
+        self.tty = tty;
+        self
+    }
+
     pub(crate) fn build(self) -> RecoverParams<'a> {
         RecoverParams {
             config: self.config,
@@ -107,6 +117,7 @@ impl<'a> RecoverParamsBuilder<'a> {
             progress: self.progress,
             sleep_inhibitor: self.sleep_inhibitor,
             sleeper: &progress::NoopSleeper,
+            tty: self.tty,
             backing_path_resolver: mock_virtio_backing_path_resolver(),
         }
     }
