@@ -709,6 +709,11 @@
               braid = linuxCrane.braid-cli-unwrapped;
             }
           );
+          pool-lock-dry-run-bypass = pkgs.testers.nixosTest (
+            import ./tests/module/pool-lock-dry-run-bypass.nix {
+              braid = linuxCrane.braid-cli-unwrapped;
+            }
+          );
           alert-state-lock = pkgs.testers.nixosTest (
             import ./tests/module/alert-state-lock.nix {
               braid = linuxCrane.braid-cli-unwrapped;
