@@ -218,7 +218,9 @@ pub enum DiscoverWriteError {
 /// surface and matching unit-test coverage in this module.
 #[derive(Debug, thiserror::Error)]
 pub enum BareDiscoverError {
-    #[error("pool.json already exists at {path} -- use 'braid add' to add disks")]
+    #[error(
+        "pool.json already exists at {path} -- live discovery is not authoritative once pool.json exists; discover is for rebuilding missing or corrupt pool state"
+    )]
     ValidUuidKeyed { path: String },
     #[error(
         "pool.json at {path} is corrupt or unreadable -- run 'braid discover --write' to rebuild from existing disks (with all intended pool members attached; see docs/luks-unlock.md)"
@@ -1700,14 +1702,14 @@ mod tests {
         );
     }
 
-    // Intent: bare `braid discover` refuses a healthy UUID-keyed
-    //   pool.json with the byte-exact `use 'braid add'` remediation.
+    // Intent: bare `braid discover` refuses an existing UUID-keyed
+    //   pool.json with the byte-exact authority/principle wording.
     // Why it exists: every byte of the refusal is operator-facing
     //   contract; this is the cheap regression net for wording drift
     //   that decision 017 leaves to code-level pinning.
-    // Scenario: an operator who knows their pool.json is fine
-    //   reflexively runs `braid discover` to "refresh" and expects to
-    //   be told to use `braid add` instead.
+    // Scenario: an operator reflexively runs `braid discover` to
+    //   "refresh" an existing state file and expects to be told why
+    //   live discovery is not the authoritative tool anymore.
     #[test]
     fn check_pool_json_for_bare_discover_refuses_valid_uuid_keyed() {
         let root = tempfile::tempdir().unwrap();
@@ -1731,7 +1733,7 @@ mod tests {
         assert_eq!(
             err.to_string(),
             format!(
-                "pool.json already exists at {} -- use 'braid add' to add disks",
+                "pool.json already exists at {} -- live discovery is not authoritative once pool.json exists; discover is for rebuilding missing or corrupt pool state",
                 paths.pool_json().display()
             )
         );

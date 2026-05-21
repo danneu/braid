@@ -183,10 +183,17 @@ with subtest("rebuilt pool.json is usable -- unlock succeeds"):
     machine.succeed("echo -n 'testpassphrase' | braid unlock --passphrase-stdin")
     machine.succeed("mountpoint /mnt/storage")
 
-with subtest("bare discover refuses healthy UUID-keyed pool.json"):
+with subtest("bare discover refuses existing UUID-keyed pool.json"):
     out = machine.fail("braid discover 2>&1")
     assert "pool.json already exists at /var/lib/braid/pool.json" in out, (
         "expected existing pool.json refusal; got:\n" + out
+    )
+    # Pin the two load-bearing clauses of the bare-mode refusal text.
+    assert "live discovery is not authoritative once pool.json exists" in out, (
+        "expected authority-principle clause; got:\n" + out
+    )
+    assert "rebuilding missing or corrupt pool state" in out, (
+        "expected command-purpose clause; got:\n" + out
     )
 
 with subtest("discover --write also refuses healthy UUID-keyed pool.json"):
