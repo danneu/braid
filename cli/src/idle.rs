@@ -270,100 +270,48 @@ mod tests {
         }
     }
 
-    // Intent: A kernel exclop wins over an overlapping running scrub.
-    // Why: Sysfs is checked first because it is cheap and blocks suspend
-    //   for operations `btrfs scrub status` cannot represent.
-    // Scenario: Autosuspend probes while a balance and scrub overlap; the
-    //   balance result should short-circuit without spawning scrub status.
+    // Intent: every kernel exclop string is reported as the matching
+    //   BusyReason::Exclop and short-circuits the scrub-status subprocess.
+    // Why it exists: pins two contracts at once. (1) Coverage for the
+    //   post-refactor exclop surface -- before the sysfs scan, only
+    //   `balance` / `balance paused` were detected and the other five were
+    //   silently reported as idle. (2) The sysfs-before-scrub ordering
+    //   matters operationally: each spurious scrub spawn is a fork/exec
+    //   on the autosuspend timer. Using MockRunner::default() (no scrub
+    //   seed) makes any regression that pre-spawns the scrub probe fail
+    //   loudly as Busy::Unknown via MissingMock, in addition to the
+    //   explicit `runner.requests().is_empty()` check.
+    // Scenario: Operator runs `btrfs device remove` directly on the pool;
+    //   `braid idle` must report busy without spending a subprocess on
+    //   `btrfs scrub status`.
     #[test]
     fn busy_exclop_short_circuits_scrub_probe() {
-        let (scrub_req, scrub_out) = idle_scrub_running(45);
-        let runner = MockRunner::default().with_output(scrub_req, scrub_out);
-        let fs = IdleMockFs::with_exclop("balance");
+        let cases = [
+            ("balance", ExclusiveOp::Balance),
+            ("balance paused", ExclusiveOp::BalancePaused),
+            ("device add", ExclusiveOp::DeviceAdd),
+            ("device remove", ExclusiveOp::DeviceRemove),
+            ("device replace", ExclusiveOp::DeviceReplace),
+            ("resize", ExclusiveOp::Resize),
+            ("swap activate", ExclusiveOp::SwapActivate),
+        ];
 
-        let result = cmd_idle(&runner, &fs, &idle_mp());
-        assert_eq!(
-            result,
-            IdleResult::Busy(BusyReason::Exclop(ExclusiveOp::Balance))
-        );
-        assert!(runner.requests().is_empty(), "{:?}", runner.requests());
-    }
+        for (exclop, expected) in cases {
+            let runner = MockRunner::default();
+            let fs = IdleMockFs::with_exclop(exclop);
 
-    // Intent: Each kernel exclop string maps to the matching BusyReason.
-    // Why: Coverage for the new behavior -- before this refactor, only
-    //   `balance` / `balance paused` were detected (and only via
-    //   `btrfs balance status`); `device add`, `device remove`, `resize`,
-    //   and `swap activate` were silently reported as idle.
-    // Scenario: Operator runs `btrfs device remove` directly on the pool;
-    //   `braid idle` must report busy so autosuspend does not suspend.
-    #[test]
-    fn busy_when_balance() {
-        let (runner, fs) = idle_ready_for_sysfs_check("balance");
-        let result = cmd_idle(&runner, &fs, &idle_mp());
-        assert_eq!(
-            result,
-            IdleResult::Busy(BusyReason::Exclop(ExclusiveOp::Balance))
-        );
-    }
-
-    #[test]
-    fn busy_when_balance_paused() {
-        let (runner, fs) = idle_ready_for_sysfs_check("balance paused");
-        let result = cmd_idle(&runner, &fs, &idle_mp());
-        assert_eq!(
-            result,
-            IdleResult::Busy(BusyReason::Exclop(ExclusiveOp::BalancePaused))
-        );
-    }
-
-    #[test]
-    fn busy_when_device_add() {
-        let (runner, fs) = idle_ready_for_sysfs_check("device add");
-        let result = cmd_idle(&runner, &fs, &idle_mp());
-        assert_eq!(
-            result,
-            IdleResult::Busy(BusyReason::Exclop(ExclusiveOp::DeviceAdd))
-        );
-    }
-
-    #[test]
-    fn busy_when_device_remove() {
-        let (runner, fs) = idle_ready_for_sysfs_check("device remove");
-        let result = cmd_idle(&runner, &fs, &idle_mp());
-        assert_eq!(
-            result,
-            IdleResult::Busy(BusyReason::Exclop(ExclusiveOp::DeviceRemove))
-        );
-    }
-
-    #[test]
-    fn busy_when_device_replace() {
-        let (runner, fs) = idle_ready_for_sysfs_check("device replace");
-        let result = cmd_idle(&runner, &fs, &idle_mp());
-        assert_eq!(
-            result,
-            IdleResult::Busy(BusyReason::Exclop(ExclusiveOp::DeviceReplace))
-        );
-    }
-
-    #[test]
-    fn busy_when_resize() {
-        let (runner, fs) = idle_ready_for_sysfs_check("resize");
-        let result = cmd_idle(&runner, &fs, &idle_mp());
-        assert_eq!(
-            result,
-            IdleResult::Busy(BusyReason::Exclop(ExclusiveOp::Resize))
-        );
-    }
-
-    #[test]
-    fn busy_when_swap_activate() {
-        let (runner, fs) = idle_ready_for_sysfs_check("swap activate");
-        let result = cmd_idle(&runner, &fs, &idle_mp());
-        assert_eq!(
-            result,
-            IdleResult::Busy(BusyReason::Exclop(ExclusiveOp::SwapActivate))
-        );
+            let result = cmd_idle(&runner, &fs, &idle_mp());
+            assert_eq!(
+                result,
+                IdleResult::Busy(BusyReason::Exclop(expected)),
+                "exclop={exclop:?}",
+            );
+            assert!(
+                runner.requests().is_empty(),
+                "exclop={exclop:?}, requests={:?}",
+                runner.requests(),
+            );
+        }
     }
 
     // Intent: Unrecognized exclop value -> Busy::Unknown (fail-closed).
