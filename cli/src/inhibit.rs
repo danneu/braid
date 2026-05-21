@@ -10,7 +10,7 @@
 //! [`SleepInhibitor::acquire`] spawns `systemd-inhibit`, which in turn
 //! spawns a `sh -c "printf READY; exec sleep infinity"` child to hold the
 //! inhibitor open. This requires `systemd-inhibit`, `sh`, and `sleep` on
-//! `PATH`. The braid wrapper ([`modules/braid/wrapper.nix`]) puts
+//! `PATH`. The braid wrapper (`modules/braid/wrapper.nix`) puts
 //! `pkgs.systemd` and the host PATH on the wrapped binary's PATH, so all
 //! three are present in the supported NixOS deployment. systemd does not
 //! ship a single-binary "block until killed with deterministic stdout"
@@ -53,7 +53,7 @@ impl<T> SleepGuard for T {}
 ///
 /// Production code uses [`RealSleepInhibitor`], which spawns
 /// `systemd-inhibit` and returns a [`SleepInhibitor`] guard. Unit tests use
-/// [`RecordingInhibitor`], which returns a trivial guard so `cmd_*`
+/// `RecordingInhibitor`, which returns a trivial guard so `cmd_*`
 /// functions stay testable without spawning subprocesses, and records each
 /// acquire call so tests can assert on the boundary placement.
 pub trait AcquireSleepInhibitor {

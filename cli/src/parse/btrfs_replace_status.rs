@@ -109,11 +109,11 @@ fn parse_replace_status_line(input: &str) -> IResult<&str, ReplaceState> {
 /// Parse the output of `btrfs replace status -1 <mount_point>`.
 ///
 /// Possible outputs (per reference/btrfs-progs/cmds/replace.c:451-505):
-/// - Running:  "45.3% done, 0 write errs, 0 uncorr. read errs"
-/// - Finished: "Started on <t1>, finished on <t2>, 0 write errs, 0 uncorr. read errs"
-/// - Canceled: "Started on <t1>, canceled on <t2> at 0.0%, ..."
-/// - Suspended: "Started on <t1>, suspended on <t2> at 12.5%, ..."
-/// - Never started: "Never started"
+/// - Running: `"45.3% done, 0 write errs, 0 uncorr. read errs"`
+/// - Finished: `"Started on <t1>, finished on <t2>, 0 write errs, 0 uncorr. read errs"`
+/// - Canceled: `"Started on <t1>, canceled on <t2> at 0.0%, ..."`
+/// - Suspended: `"Started on <t1>, suspended on <t2> at 12.5%, ..."`
+/// - Never started: `"Never started"`
 ///
 /// The zero-exit stdout must trim to exactly one recognised status line. Any
 /// other text returns `Err(ParseError::InvalidText)` because upstream

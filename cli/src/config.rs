@@ -83,7 +83,7 @@ impl Config {
     }
 }
 
-/// Returns the mapper name for a disk: braid-<name>. Validated-type
+/// Returns the mapper name for a disk: `braid-<name>`. Validated-type
 /// signature so callers cannot synthesize a `MapperName` from unchecked
 /// text at this boundary.
 pub fn mapper_name(name: &DiskName) -> MapperName {

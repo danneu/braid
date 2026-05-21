@@ -511,7 +511,7 @@ pub(crate) fn backup_luks_header_to<R: CommandRunner>(
     Ok(backup_path)
 }
 
-/// Back up the LUKS header to <state_root>/luks-headers/<mapper>.luksheader
+/// Back up the LUKS header to `<state_root>/luks-headers/<mapper>.luksheader`
 pub fn backup_luks_header<R: CommandRunner>(
     runner: &R,
     device: &str,

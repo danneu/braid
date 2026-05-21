@@ -212,7 +212,7 @@ pub enum DiscoverWriteError {
     Discover(#[from] DiscoverError),
 }
 
-/// Scan /dev/disk/by-id/ for LUKS devices with braid-<name> labels.
+/// Scan /dev/disk/by-id/ for LUKS devices with `braid-<name>` labels.
 /// Returns a report so callers can print warnings on success or error.
 pub fn discover_pool_members<R: CommandRunner>(runner: &R) -> DiscoverScan {
     discover_from_dir(

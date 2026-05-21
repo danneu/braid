@@ -503,7 +503,7 @@ pub enum ConfigDiskState {
     /// Device exists, has LUKS header, UUID known.
     /// `label` is the optional LUKS2 label captured from the same luksDump
     /// probe that verifies braid's LUKS2 invariant.
-    /// `mapper_open` = true if /dev/mapper/<name> is already active (crash recovery skip).
+    /// `mapper_open` = true if `/dev/mapper/<name>` is already active (crash recovery skip).
     PresentLuks {
         uuid: LuksUuid,
         label: Option<String>,
