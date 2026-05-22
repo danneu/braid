@@ -151,14 +151,14 @@ impl UnlockPlan {
                 match membership::enrich_from_pool_state(&mut enriched, &pool_after) {
                     Ok(_report) => {
                         if let Err(e) = membership::save_membership(&enriched, params.paths) {
-                            emit_post_mount_enrichment_warning(format_args!(
-                                "Warning: failed to save enriched membership: {e}"
+                            crate::status_tag::emit_status(&format!(
+                                "Warning: failed to save enriched membership: {e}\n"
                             ));
                         }
                     }
                     Err(e) => {
-                        emit_post_mount_enrichment_warning(format_args!(
-                            "Warning: failed to enrich pool membership: {e}"
+                        crate::status_tag::emit_status(&format!(
+                            "Warning: failed to enrich pool membership: {e}\n"
                         ));
                     }
                 }
@@ -254,57 +254,6 @@ pub fn cmd_unlock<R: CommandRunner, F: Filesystem + ?Sized>(
     }
 
     plan.execute(runner, fs, params)
-}
-
-/// Keeps post-mount enrichment warnings byte-identical in production while
-/// giving unit tests a narrow capture seam for best-effort write failures.
-fn emit_post_mount_enrichment_warning(args: std::fmt::Arguments<'_>) {
-    #[cfg(test)]
-    if unlock_stderr_capture::write(&format!("{args}\n")) {
-        return;
-    }
-    eprintln!("{args}");
-}
-
-#[cfg(test)]
-mod unlock_stderr_capture {
-    use std::cell::RefCell;
-
-    thread_local! {
-        static CAPTURED_STDERR: RefCell<Option<String>> = const { RefCell::new(None) };
-    }
-
-    pub(super) fn capture<F, T>(f: F) -> (T, String)
-    where
-        F: FnOnce() -> T,
-    {
-        CAPTURED_STDERR.with(|slot| {
-            let mut slot = slot.borrow_mut();
-            assert!(slot.is_none(), "nested unlock stderr capture");
-            *slot = Some(String::new());
-        });
-
-        let result = f();
-        let stderr = CAPTURED_STDERR.with(|slot| {
-            slot.borrow_mut()
-                .take()
-                .expect("unlock stderr capture must be active")
-        });
-        (result, stderr)
-    }
-
-    pub(super) fn write(text: &str) -> bool {
-        CAPTURED_STDERR.with(|slot| {
-            let mut slot = slot.borrow_mut();
-            match slot.as_mut() {
-                Some(stderr) => {
-                    stderr.push_str(text);
-                    true
-                }
-                None => false,
-            }
-        })
-    }
 }
 
 #[cfg(test)]
@@ -1488,8 +1437,9 @@ Label: none  uuid: aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee\n\
             .with_output(balance_req, balance_out);
         let tmp = unlock_passphrase_file();
 
-        let (result, stderr) = super::unlock_stderr_capture::capture(|| {
-            cmd_unlock(
+        let mut result = None;
+        let captured = crate::status_tag::testing::capture_with_color(false, || {
+            result = Some(cmd_unlock(
                 &runner,
                 &fs,
                 &UnlockParams {
@@ -1504,10 +1454,12 @@ Label: none  uuid: aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee\n\
                     backing_path_resolver: crate::test_fixtures::mock_virtio_backing_path_resolver(
                     ),
                 },
-            )
+            ));
         });
 
-        result.expect("unlock should tolerate post-mount save_membership failure");
+        result
+            .expect("cmd_unlock should run")
+            .expect("unlock should tolerate post-mount save_membership failure");
         assert!(
             runner.requests().iter().any(|r| matches!(
                 r,
@@ -1519,11 +1471,11 @@ Label: none  uuid: aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee\n\
             "unlock should have mounted the pool before the save failure"
         );
         assert_eq!(
-            stderr
+            captured
                 .matches("Warning: failed to save enriched membership: ")
                 .count(),
             1,
-            "expected one save-membership warning, got: {stderr:?}"
+            "expected one save-membership warning, got: {captured:?}"
         );
     }
 
