@@ -31,14 +31,12 @@ Create the subvolume while the pool is unlocked:
 sudo btrfs subvolume create /mnt/storage/movies
 ```
 
-Find the btrfs filesystem UUID:
+Find the btrfs filesystem UUID from `braid status` (look for the `FSID:`
+line; the JSON form is `braid status --json` and the field is `fsid`):
 
 ```sh
-sudo btrfs filesystem show /mnt/storage
+sudo braid status
 ```
-
-Use the `uuid:` line from that output. `braid status` does not currently show
-the btrfs filesystem UUID.
 
 Add a native systemd mount unit to your NixOS configuration:
 
@@ -97,8 +95,8 @@ source mount and you need the same mounted data at multiple paths.
 edge. Without `BindsTo`, the mount is not listed in
 `BoundBy braid-online.service`, so `braid lock` will not stop it before
 unmounting the pool. Use native `systemd.mounts` for lifecycle-bound subvolume
-mounts. See [ADR 018](../../docs/decisions/018-systemd-lifecycle.md) for the
-lifecycle model.
+mounts. See [ADR 018](https://github.com/danneu/braid/blob/master/docs/decisions/018-systemd-lifecycle.md)
+for the lifecycle model.
 
 ## Worked example: read-only access for Jellyfin
 
@@ -169,12 +167,6 @@ systemctl is-active var-lib-jellyfin-media.mount
 
 Point the Jellyfin web UI at `/var/lib/jellyfin/media`. After `braid lock`,
 both units should be inactive and the LUKS devices should be closed.
-
-## Future enhancement
-
-braid already tracks the btrfs FSID internally (`PoolState.fsid` in
-`cli/src/types.rs`), but `braid status` does not render it yet. Showing it in
-human and JSON status output would remove the `btrfs filesystem show` lookup.
 
 ## What's next
 

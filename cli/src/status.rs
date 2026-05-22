@@ -57,6 +57,8 @@ pub struct StatusReport {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub profile: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
+    pub fsid: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub capacity: Option<CapacityReport>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub last_scrub: Option<ScrubReport>,
@@ -367,6 +369,7 @@ fn not_mounted_status(config: &Config, paths: &StatePaths, advisories: Vec<Strin
             present_count: None,
             missing_count: None,
             profile: None,
+            fsid: None,
             capacity: None,
             last_scrub: None,
             balance: None,
@@ -513,6 +516,7 @@ fn build_status<R: CommandRunner, F: Filesystem>(
         present_count: Some(present_count),
         missing_count: Some(pool.missing_count),
         profile: df_summary.as_ref().map(|summary| summary.profile.clone()),
+        fsid: pool.fsid.clone(),
         capacity,
         last_scrub: Some(last_scrub),
         balance: Some(balance),
@@ -1051,6 +1055,10 @@ fn format_status_human(
             .display_human(report.missing_count.unwrap_or(0))
     ));
 
+    if let Some(fsid) = report.fsid.as_deref() {
+        out.push_str(&format!("FSID:     {fsid}\n"));
+    }
+
     if report.status == StatusCode::NotMounted {
         return out;
     }
@@ -1285,6 +1293,8 @@ mod tests {
         status_runner_healthy_3disk_verbose,
     };
 
+    const TEST_FSID: &str = "12345678-1234-1234-1234-123456789012";
+
     fn membership_from(entries: Vec<(LuksUuid, DiskMember)>) -> PoolMembership {
         let mut membership = PoolMembership::empty();
         for (uuid, member) in entries {
@@ -1324,6 +1334,7 @@ mod tests {
             present_count: None,
             missing_count: None,
             profile: None,
+            fsid: None,
             capacity: None,
             last_scrub: None,
             balance: None,
@@ -1350,6 +1361,7 @@ mod tests {
         assert!(!obj.contains_key("present_count"));
         assert!(!obj.contains_key("missing_count"));
         assert!(!obj.contains_key("profile"));
+        assert!(!obj.contains_key("fsid"));
         assert!(!obj.contains_key("capacity"));
         assert!(!obj.contains_key("last_scrub"));
         assert!(!obj.contains_key("allocation"));
@@ -1427,6 +1439,7 @@ mod tests {
             present_count: Some(3),
             missing_count: Some(0),
             profile: Some(df_summary.profile),
+            fsid: Some(TEST_FSID.to_owned()),
             capacity: Some(capacity),
             last_scrub: Some(last_scrub),
             balance: None,
@@ -1447,6 +1460,7 @@ mod tests {
         assert_eq!(obj["present_count"], 3);
         assert_eq!(obj["missing_count"], 0);
         assert_eq!(obj["profile"], "RAID1");
+        assert_eq!(obj["fsid"], TEST_FSID);
         assert!(obj.contains_key("capacity"));
         assert!(obj.contains_key("last_scrub"));
         assert_eq!(obj["disks"], serde_json::json!([]));
@@ -1478,6 +1492,7 @@ mod tests {
             present_count: Some(2),
             missing_count: Some(1),
             profile: Some("RAID1".to_owned()),
+            fsid: None,
             capacity: Some(CapacityReport {
                 total_bytes: None,
                 used_bytes: 33914880,
@@ -1557,6 +1572,7 @@ mod tests {
             present_count: Some(1),
             missing_count: Some(1),
             profile: Some("RAID1".to_owned()),
+            fsid: None,
             capacity: Some(CapacityReport {
                 total_bytes: None,
                 used_bytes: 33914880,
@@ -1623,6 +1639,7 @@ mod tests {
             present_count: None,
             missing_count: None,
             profile: None,
+            fsid: None,
             capacity: None,
             last_scrub: None,
             balance: None,
@@ -1649,6 +1666,7 @@ mod tests {
             present_count: Some(3),
             missing_count: Some(0),
             profile: Some("RAID1".to_owned()),
+            fsid: None,
             capacity: Some(CapacityReport {
                 total_bytes: Some(1040187392),
                 used_bytes: 33914880,
@@ -1678,6 +1696,7 @@ mod tests {
             present_count: Some(1),
             missing_count: Some(0),
             profile: Some("single".to_owned()),
+            fsid: None,
             capacity: Some(CapacityReport {
                 total_bytes: Some(1073741824),
                 used_bytes: 536870912,
@@ -1727,6 +1746,7 @@ mod tests {
             present_count: None,
             missing_count: None,
             profile: None,
+            fsid: None,
             capacity: None,
             last_scrub: None,
             balance: None,
@@ -1739,6 +1759,7 @@ mod tests {
         };
         let human = format_status_human(&report, None, None, None);
         assert!(human.contains("not mounted"), "got:\n{human}");
+        assert!(!human.contains("FSID:"), "got:\n{human}");
         assert!(!human.contains("Capacity"), "got:\n{human}");
         assert!(!human.contains("Allocation:"), "got:\n{human}");
     }
@@ -1753,6 +1774,7 @@ mod tests {
             present_count: Some(1),
             missing_count: Some(0),
             profile: Some("single".to_owned()),
+            fsid: Some(TEST_FSID.to_owned()),
             capacity: Some(CapacityReport {
                 total_bytes: Some(1073741824),
                 used_bytes: 536870912,
@@ -1794,6 +1816,10 @@ mod tests {
         }];
         let human = format_status_human(&report, Some(&compact), None, None);
         assert!(human.contains("intact"), "got:\n{human}");
+        assert!(
+            human.contains(&format!("FSID:     {TEST_FSID}")),
+            "got:\n{human}"
+        );
         assert!(human.contains("Drives:"), "got:\n{human}");
         assert!(human.contains("disk1"), "got:\n{human}");
         assert!(human.contains("vda"), "got:\n{human}");
@@ -1818,6 +1844,7 @@ mod tests {
             present_count: Some(3),
             missing_count: Some(0),
             profile: Some("RAID1".to_owned()),
+            fsid: Some(TEST_FSID.to_owned()),
             capacity: Some(CapacityReport {
                 total_bytes: Some(1040187392),
                 used_bytes: 33914880,
@@ -1873,6 +1900,10 @@ mod tests {
         ];
         let human = format_status_human(&report, Some(&compact), None, None);
         assert!(human.contains("intact"), "got:\n{human}");
+        assert!(
+            human.contains(&format!("FSID:     {TEST_FSID}")),
+            "got:\n{human}"
+        );
         assert!(human.contains("Drives:"), "got:\n{human}");
         assert!(human.contains("disk1"), "got:\n{human}");
         assert!(human.contains("Allocation:"), "got:\n{human}");
@@ -1892,6 +1923,7 @@ mod tests {
             present_count: Some(2),
             missing_count: Some(1),
             profile: Some("RAID1".to_owned()),
+            fsid: None,
             capacity: Some(CapacityReport {
                 total_bytes: None,
                 used_bytes: 33914880,
@@ -1945,6 +1977,7 @@ mod tests {
             present_count: Some(2),
             missing_count: Some(2),
             profile: Some("RAID1".to_owned()),
+            fsid: None,
             capacity: Some(CapacityReport {
                 total_bytes: None,
                 used_bytes: 33914880,
@@ -1998,6 +2031,7 @@ mod tests {
             present_count: Some(1),
             missing_count: Some(0),
             profile: Some("single".to_owned()),
+            fsid: None,
             capacity: Some(CapacityReport {
                 total_bytes: Some(1073741824),
                 used_bytes: 536870912,
@@ -2044,6 +2078,7 @@ mod tests {
             present_count: Some(1),
             missing_count: Some(1),
             profile: Some("RAID1".to_owned()),
+            fsid: None,
             capacity: Some(CapacityReport {
                 total_bytes: None,
                 used_bytes: 33914880,
@@ -2097,6 +2132,7 @@ mod tests {
             present_count: Some(1),
             missing_count: Some(1),
             profile: Some("RAID1".to_owned()),
+            fsid: None,
             capacity: Some(CapacityReport {
                 total_bytes: None,
                 used_bytes: 33914880,
@@ -2160,6 +2196,7 @@ mod tests {
             present_count: Some(1),
             missing_count: Some(1),
             profile: Some("RAID1".to_owned()),
+            fsid: None,
             capacity: Some(CapacityReport {
                 total_bytes: None,
                 used_bytes: 33914880,
@@ -2216,6 +2253,7 @@ mod tests {
             present_count: Some(1),
             missing_count: Some(0),
             profile: Some("single".to_owned()),
+            fsid: None,
             capacity: Some(CapacityReport {
                 total_bytes: Some(1073741824),
                 used_bytes: 536870912,
@@ -2632,6 +2670,7 @@ mod tests {
             present_count: Some(2),
             missing_count: Some(0),
             profile: Some("RAID1".to_owned()),
+            fsid: None,
             capacity: Some(CapacityReport {
                 total_bytes: Some(1040187392),
                 used_bytes: 33914880,
@@ -2668,6 +2707,7 @@ mod tests {
             present_count: Some(1),
             missing_count: Some(0),
             profile: Some("single".to_owned()),
+            fsid: None,
             capacity: Some(CapacityReport {
                 total_bytes: Some(1040187392),
                 used_bytes: 33914880,
@@ -2696,6 +2736,7 @@ mod tests {
             present_count: Some(1),
             missing_count: Some(0),
             profile: Some("single".to_owned()),
+            fsid: None,
             capacity: Some(CapacityReport {
                 total_bytes: Some(1040187392),
                 used_bytes: 33914880,
@@ -3930,6 +3971,7 @@ mod tests {
             present_count: Some(1),
             missing_count: Some(0),
             profile: Some("single".to_owned()),
+            fsid: None,
             capacity: Some(CapacityReport {
                 total_bytes: Some(1073741824),
                 used_bytes: 0,
@@ -4151,6 +4193,7 @@ mod tests {
             present_count: Some(2),
             missing_count: Some(0),
             profile: Some("RAID1".to_owned()),
+            fsid: None,
             capacity: None,
             last_scrub: Some(ScrubReport::Never),
             balance: None,
@@ -4217,6 +4260,7 @@ mod tests {
             present_count: Some(0),
             missing_count: Some(1),
             profile: Some("RAID1".to_owned()),
+            fsid: None,
             capacity: None,
             last_scrub: Some(ScrubReport::Never),
             balance: None,
@@ -4527,6 +4571,7 @@ mod tests {
             present_count: Some(1),
             missing_count: Some(0),
             profile: Some("single".to_owned()),
+            fsid: None,
             capacity: Some(CapacityReport {
                 total_bytes: Some(1073741824),
                 used_bytes: 536870912,

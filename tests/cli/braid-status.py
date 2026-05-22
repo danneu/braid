@@ -11,6 +11,7 @@
 # and mount at the configured mount point. `braid status` must read live pool state.
 
 import json
+import re
 
 start_all()
 machine.wait_for_unit("multi-user.target")
@@ -19,6 +20,7 @@ import shlex
 
 passphrase = "testpassphrase"
 luks_opts = "--pbkdf pbkdf2 --pbkdf-force-iterations 1000"
+UUID_RE = re.compile(r"[0-9a-f-]{36}")
 
 
 def add_disk(key):
@@ -56,6 +58,9 @@ with subtest("braid status shows pool summary with per-disk detail"):
     assert "scrub" in output.lower(), f"Expected 'scrub':\n{output}"
     # Per-disk detail (always shown)
     lines = output.splitlines()
+    fsid_lines = [l for l in lines if l.startswith("FSID:")]
+    assert fsid_lines, f"Expected FSID line:\n{output}"
+    assert UUID_RE.search(fsid_lines[0]), f"Expected UUID in FSID line:\n{output}"
     for disk in ["disk1", "disk2", "disk3"]:
         disk_lines = [l for l in lines if disk in l and "present" in l]
         assert disk_lines, f"{disk} not shown as present:\n{output}"
@@ -75,6 +80,8 @@ with subtest("braid status --json has schema fields and disk details"):
     assert s["missing_count"] == 0, f"Bad missing_count: {s['missing_count']}"
     assert "missing_devids" not in s, f"missing_devids should be omitted when empty: {s}"
     assert s["profile"] == "RAID1", f"Bad profile: {s['profile']}"
+    assert "fsid" in s, f"Missing fsid: {s}"
+    assert UUID_RE.fullmatch(s["fsid"]), f"Bad fsid: {s['fsid']}"
     assert "total_bytes" in s["capacity"], "Missing capacity.total_bytes"
     assert "used_bytes" in s["capacity"], "Missing capacity.used_bytes"
     assert "free_bytes" in s["capacity"], "Missing capacity.free_bytes"
