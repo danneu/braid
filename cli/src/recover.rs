@@ -1269,37 +1269,6 @@ pub fn plan_recover<R: CommandRunner + Sync, F: Filesystem + ?Sized>(
         notes.push(event.to_preview_note());
     }
 
-    let mut cycle_reopen_names: Vec<DiskName> = Vec::new();
-    for event in &report.events {
-        let Some(name) = (match event {
-            mount::ProbeEvent::DiskAvailable { name }
-            | mount::ProbeEvent::DiskAlreadyOpen { name } => Some(name),
-            _ => None,
-        }) else {
-            continue;
-        };
-        let parsed = DiskName::parse(name).map_err(|e| {
-            PlanFailure::with_notes(
-                notes.clone(),
-                RecoverError::Failed(format!(
-                    "recover remount cycle preview: invalid disk name from mount planner '{name}': {e}"
-                )),
-            )
-        })?;
-        cycle_reopen_names.push(parsed);
-    }
-    let cycle_close_names: Vec<DiskName> = union
-        .iter()
-        .filter_map(|(_, member)| {
-            let name = &member.name;
-            if cycle_reopen_names.contains(name) {
-                return Some(name.clone());
-            }
-            let mapper_path = format!("/dev/mapper/{}", config::mapper_name(name).0);
-            fs.exists(&mapper_path).then(|| name.clone())
-        })
-        .collect();
-
     let open_plan = match report.result {
         Ok(op) => op,
         Err(e) => {
@@ -1397,6 +1366,37 @@ pub fn plan_recover<R: CommandRunner + Sync, F: Filesystem + ?Sized>(
     if let Some(initial_open_plan) = &open_plan
         && is_replace_pool_mutation(&journal.op)
     {
+        let mut cycle_reopen_names: Vec<DiskName> = Vec::new();
+        for event in &report.events {
+            let Some(name) = (match event {
+                mount::ProbeEvent::DiskAvailable { name }
+                | mount::ProbeEvent::DiskAlreadyOpen { name } => Some(name),
+                _ => None,
+            }) else {
+                continue;
+            };
+            let parsed = DiskName::parse(name).map_err(|e| {
+                PlanFailure::with_notes(
+                    notes.clone(),
+                    RecoverError::Failed(format!(
+                        "recover remount cycle preview: invalid disk name from mount planner '{name}': {e}"
+                    )),
+                )
+            })?;
+            cycle_reopen_names.push(parsed);
+        }
+        let cycle_close_names: Vec<DiskName> = union
+            .iter()
+            .filter_map(|(_, member)| {
+                let name = &member.name;
+                if cycle_reopen_names.contains(name) {
+                    return Some(name.clone());
+                }
+                let mapper_path = format!("/dev/mapper/{}", config::mapper_name(name).0);
+                fs.exists(&mapper_path).then(|| name.clone())
+            })
+            .collect();
+
         for name in &cycle_reopen_names {
             if union.by_name(name).is_none() {
                 return Err(PlanFailure::with_notes(
