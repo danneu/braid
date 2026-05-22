@@ -990,7 +990,7 @@ fn execute_recover_initial_open<R: CommandRunner + Sync, F: Filesystem + ?Sized>
             // Bootstrap mount failure: probe the target devices to confirm
             // no btrfs superblock exists -- only then is it safe to advise
             // wiping.
-            if plan.journal.pre_membership.is_empty()
+            if plan.journal.is_bootstrap_add()
                 && let mount::MountError::MountFailed(_) = &failure.error
                 && let journal::OpKind::Add { targets, .. } = &plan.journal.op
             {
@@ -1128,9 +1128,7 @@ fn execute_generic_live_pool_recovery<R: CommandRunner + Sync>(
     membership::save_membership(&recovered, params.paths)?;
     eprintln!("pool.json written from live pool state.");
 
-    if matches!(&plan.journal.op, journal::OpKind::Add { .. })
-        && plan.journal.pre_membership.is_empty()
-    {
+    if plan.journal.is_bootstrap_add() {
         alert::remove_acked_stats(params.paths).map_err(|e| RecoverError::AckCleanupFailed {
             stage: "bootstrap-recovery",
             detail: e.to_string(),
@@ -1249,7 +1247,7 @@ pub fn plan_recover<R: CommandRunner + Sync, F: Filesystem + ?Sized>(
         phase: journal::AddPhase::PoolMutation,
         targets,
     } = &journal.op
-        && !journal.pre_membership.is_empty()
+        && !journal.is_bootstrap_add()
         && !params.dry_run
     {
         match discover_add_targets_before_mount(runner, fs, params, &journal, targets) {
@@ -1430,7 +1428,7 @@ pub fn plan_recover<R: CommandRunner + Sync, F: Filesystem + ?Sized>(
         journal::OpKind::Add {
             phase: journal::AddPhase::PoolMutation,
             targets,
-        } if !journal.pre_membership.is_empty() => {
+        } if !journal.is_bootstrap_add() => {
             let all_targets_already_live = probed_live_pool
                 .as_ref()
                 .is_some_and(|pool| add_targets_all_live(pool, targets));
@@ -3630,7 +3628,13 @@ fn mount_membership_for_recover<'a>(
         journal::OpKind::Add {
             phase: journal::AddPhase::PoolMutation,
             ..
-        } if !journal.pre_membership.is_empty() => &journal.pre_membership,
+        } => {
+            if journal.is_bootstrap_add() {
+                union
+            } else {
+                &journal.pre_membership
+            }
+        }
         journal::OpKind::Add {
             phase: journal::AddPhase::PostAddBalanceRaid1,
             ..
@@ -3651,10 +3655,6 @@ fn mount_membership_for_recover<'a>(
             phase: journal::ReplacePhase::PostReplaceMaintenance,
             ..
         } => &journal.target_membership,
-        journal::OpKind::Add {
-            phase: journal::AddPhase::PoolMutation,
-            ..
-        } => union,
         journal::OpKind::Remove { .. } => union,
     }
 }

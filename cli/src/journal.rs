@@ -26,6 +26,16 @@ pub struct Journal {
     pub target_membership: PoolMembership,
 }
 
+impl Journal {
+    /// True when this journal records the first add into a
+    /// previously empty pool. `pre_membership` is empty, so recovery
+    /// has no prior pool state to fall back to and must mount the
+    /// targets being added instead.
+    pub fn is_bootstrap_add(&self) -> bool {
+        matches!(self.op, OpKind::Add { .. }) && self.pre_membership.is_empty()
+    }
+}
+
 /// Phase marker for `OpKind::Add`. Distinguishes pre-commit (PoolMutation)
 /// from post-commit (PostAddBalanceRaid1) so recovery replay routes to the
 /// correct step.
