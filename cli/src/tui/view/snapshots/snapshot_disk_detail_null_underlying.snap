@@ -26,6 +26,6 @@ Data  Scrub  Browse
       │ corruption      0                            │
       │ generation      0                            │
       │                                              │
-      │ r reload · Esc to go back                    │
+      │ r reload · q/Esc to go back                  │
       └──────────────────────────────────────────────┘
 Quit: q │ Help: ? │ Reset temp hi/lo: R │ Reload: r

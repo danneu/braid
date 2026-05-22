@@ -23,7 +23,13 @@ pub fn handle_key(key: KeyEvent, ctx: &KeyContext) -> Option<Message> {
     }
 
     match key.code {
-        KeyCode::Char('q') => Some(Message::Quit),
+        KeyCode::Char('q') => {
+            if ctx.show_disk_detail {
+                Some(Message::CloseDiskDetail)
+            } else {
+                Some(Message::Quit)
+            }
+        }
         KeyCode::Char('?') => Some(Message::ToggleHelp),
         KeyCode::Tab => Some(Message::NextTab),
         KeyCode::BackTab => Some(Message::PrevTab),
@@ -91,6 +97,44 @@ mod tests {
         assert!(matches!(
             handle_key(key, &ctx(Tab::Data, false, true, BrowseFocus::Program),),
             Some(Message::RefreshPool)
+        ));
+    }
+
+    // Intent: pressing 'q' while disk detail is open closes the popup.
+    // Why it exists: `q` used to quit the whole TUI before disk-detail
+    // routing could see the key.
+    // Scenario: user opens disk detail, presses q by habit, and expects to
+    // stay in the TUI.
+    #[test]
+    fn q_closes_disk_detail_not_app() {
+        let key = KeyEvent::new(KeyCode::Char('q'), KeyModifiers::NONE);
+        assert!(matches!(
+            handle_key(key, &ctx(Tab::Data, false, true, BrowseFocus::Program),),
+            Some(Message::CloseDiskDetail)
+        ));
+    }
+
+    // Intent: pressing 'q' with no modal open still quits the TUI.
+    // Why it exists: making q modal-aware must not swallow the top-level
+    // quit binding in the normal view.
+    // Scenario: user is done inspecting the pool and presses q to exit.
+    #[test]
+    fn q_quits_when_no_modal_open() {
+        let key = KeyEvent::new(KeyCode::Char('q'), KeyModifiers::NONE);
+        assert!(matches!(handle_key(key, &data_ctx()), Some(Message::Quit)));
+    }
+
+    // Intent: help remains the topmost modal when stacked over disk detail.
+    // Why it exists: the view renders help after disk detail, so key routing
+    // must close help before the underlying detail popup.
+    // Scenario: user opens disk detail, opens help, then presses q to dismiss
+    // help while keeping detail open underneath.
+    #[test]
+    fn q_closes_help_overlay_when_stacked_over_detail() {
+        let key = KeyEvent::new(KeyCode::Char('q'), KeyModifiers::NONE);
+        assert!(matches!(
+            handle_key(key, &ctx(Tab::Data, true, true, BrowseFocus::Program),),
+            Some(Message::ToggleHelp)
         ));
     }
 

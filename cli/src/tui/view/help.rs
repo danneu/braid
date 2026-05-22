@@ -36,7 +36,7 @@ pub fn view_help(frame: &mut Frame, area: Rect) {
             Span::raw("disk detail"),
         ]),
         Line::from(vec![
-            Span::styled("<esc>   ", Style::default().fg(Color::Cyan)),
+            Span::styled("q/<esc> ", Style::default().fg(Color::Cyan)),
             Span::raw("close detail"),
         ]),
         Line::from(vec![
