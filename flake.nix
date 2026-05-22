@@ -67,6 +67,7 @@
         in
         {
           inherit (craneFor system) braid-cli-unwrapped;
+          nix-fast-build = pkgs.nix-fast-build;
         }
         // (if isLinux then { inherit (craneFor system) braid; } else { })
         // (

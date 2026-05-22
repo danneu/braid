@@ -84,8 +84,8 @@ supertest:
 test-all:
     just _build-checks checks && just _build-checks reproChecks
 
-# Run NixOS VM tests with parallel evaluation (requires nix-fast-build)
-# Add --no-nom to replace the dep graph with a one-liner progress bar
+# Run NixOS VM tests with parallel evaluation via flake-pinned nix-fast-build
+# -j mirrors _build-checks' Mac-RAM-tuned --max-jobs 7
 test-fast:
     #!/usr/bin/env bash
     set -euo pipefail
@@ -96,7 +96,7 @@ test-fast:
     else
         echo "build-dir: default"
     fi
-    nix-fast-build --no-link -j 8 --eval-workers 4 -f ".#checks" "${build_dir[@]}"
+    nix run .#nix-fast-build -- --no-link -j 7 --eval-workers 4 --eval-max-memory-size 2048 --skip-cached --no-nom -f ".#checks" "${build_dir[@]}"
 
 # Run parser compatibility canary tests (CLI parsers against live tool output)
 test-parsers *args:
