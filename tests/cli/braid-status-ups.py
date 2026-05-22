@@ -187,3 +187,23 @@ parsed_no_ups = json.loads(raw_no_ups)
 assert parsed_no_ups.get("error") == "ups_not_enabled", (
     f"expected error=ups_not_enabled, got {parsed_no_ups}"
 )
+
+# Human mode against the same no-ups config: the enable hint must land
+# on stdout (so `braid ups status > log.txt` captures it) with empty
+# stderr and exit 0. Substring is stable; full wording lives in
+# print_not_enabled and is intentionally not snapshotted here.
+exit_code = machine.execute(
+    "braid --config /tmp/no-ups.json ups status "
+    ">/tmp/no_ups_human.out 2>/tmp/no_ups_human.err"
+)[0]
+assert exit_code == 0, (
+    f"braid ups status (no ups configured) must exit 0; got {exit_code}"
+)
+out_no_ups = machine.succeed("cat /tmp/no_ups_human.out")
+err_no_ups = machine.succeed("cat /tmp/no_ups_human.err")
+assert "braid.ups.enable = true" in out_no_ups, (
+    f"expected enable-hint substring on stdout, got: {out_no_ups!r}"
+)
+assert err_no_ups == "", (
+    f"expected empty stderr in human not-enabled, got: {err_no_ups!r}"
+)
