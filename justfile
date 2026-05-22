@@ -210,7 +210,7 @@ fetch-references +ARGS="":
 docs:
     nix run nixpkgs#mdbook -- serve manual --open
 
-# Verify SUMMARY.md and manual pages are in sync
+# Verify SUMMARY.md parity and manual link integrity
 check-docs:
     #!/usr/bin/env bash
     set -euo pipefail
@@ -233,7 +233,17 @@ check-docs:
         printf '  %s\n' $stale
         rc=1
     fi
-    if [ $rc -eq 0 ]; then echo "SUMMARY.md is in sync"; fi
+    # Markdown links that escape manual/ (rendered-broken in mdBook output).
+    # Use absolute https://github.com/danneu/braid/blob/master/<path> URLs
+    # instead -- see manual/commands/idle.md for the precedent.
+    escapes=$(grep -rn '\](\.\./\.\./' manual/ --include='*.md' || true)
+    if [ -n "$escapes" ]; then
+        printf 'markdown links escape manual/ subtree (broken in rendered mdBook):\n'
+        printf '%s\n' "$escapes"
+        printf 'fix: replace with https://github.com/danneu/braid/blob/master/<path>\n'
+        rc=1
+    fi
+    if [ $rc -eq 0 ]; then echo "docs check ok"; fi
     exit $rc
 
 # Destroy an entire braid pool (dev use only — wipes LUKS signatures + state files)

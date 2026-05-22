@@ -168,7 +168,7 @@ This is deliberate: integrating UPS events into braid's shared alert
 model requires splitting `AlertCause` by persistence semantics
 (latched-until-ack for disk errors, active-while-condition-holds for
 live UPS states) and is out of scope for v1. See
-[decisions/020-ups-integration.md](../../docs/decisions/020-ups-integration.md)
+[decisions/020-ups-integration.md](https://github.com/danneu/braid/blob/master/docs/decisions/020-ups-integration.md)
 for the open-question status.
 
 If you need asynchronous UPS notifications today, wire NUT's
@@ -176,7 +176,7 @@ If you need asynchronous UPS notifications today, wire NUT's
 
 ## Related
 
-- [ADR: UPS integration](../../docs/decisions/020-ups-integration.md) --
+- [ADR: UPS integration](https://github.com/danneu/braid/blob/master/docs/decisions/020-ups-integration.md) --
   scope, shutdown path, preflight contract.
 - [`upsc` man page](https://networkupstools.org/docs/man/upsc.html) --
   the raw command braid parses.

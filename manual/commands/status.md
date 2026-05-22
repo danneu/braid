@@ -180,7 +180,7 @@ load an unparseable journal either:
 warning: failed to parse pending-op.json: <detail>. Remove /var/lib/braid/pending-op.json after manual reconciliation (see docs/luks-unlock.md) and re-run.
 ```
 
-See [Unparseable state-file reconciliation](../../docs/luks-unlock.md#unparseable-state-file-reconciliation)
+See [Unparseable state-file reconciliation](https://github.com/danneu/braid/blob/master/docs/luks-unlock.md#unparseable-state-file-reconciliation)
 for the safe-to-remove conditions.
 
 **Pending LUKS header backups.** When a header-mutating operation
@@ -197,7 +197,7 @@ operation, not the intended backup target. Copy each `.luksheader`
 file to an off-system location (USB, another machine, cloud key
 storage), then remove the local copy to silence the warning.
 
-See [LUKS header backup workflow](../../docs/luks-unlock.md#header-backup-workflow-and-messaging)
+See [LUKS header backup workflow](https://github.com/danneu/braid/blob/master/docs/luks-unlock.md#header-backup-workflow-and-messaging)
 for the full rationale.
 
 ## JSON output
