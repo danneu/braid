@@ -328,7 +328,7 @@ impl Model {
             disk_devid: disk_devid.clone(),
             paths: paths.clone(),
         }];
-        let fan_probe_inflight = fan_control.is_some();
+        let mut fan_probe_inflight = false;
         if let Some(fc) = fan_control.as_ref() {
             effects.push(Effect::ProbeFan {
                 sysfs_root: std::path::PathBuf::from("/sys"),
@@ -336,15 +336,17 @@ impl Model {
                 disk_by_id: disk_by_id.clone(),
                 fan_control: fc.clone(),
             });
+            fan_probe_inflight = true;
         }
         // Kick off the UPS probe immediately so the first render shows
         // live state rather than a placeholder that disappears on the
         // next poll tick.
-        let ups_probe_inflight = ups_config.is_some();
+        let mut ups_probe_inflight = false;
         if let Some(u) = ups_config.as_ref() {
             effects.push(Effect::ProbeUps {
                 name: u.name.clone(),
             });
+            ups_probe_inflight = true;
         }
         let model = Self {
             running: true,

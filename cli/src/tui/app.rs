@@ -505,6 +505,107 @@ mod tests {
         assert!(model.ups_scheduler_pending);
     }
 
+    // Intent: Model::new with fan_control = Some emits exactly one
+    //         Effect::ProbeFan AND flips fan_probe_inflight to true.
+    // Why it exists: the flag and the effect must be produced by the
+    //                same branch. A future refactor that gates one
+    //                without the other would strand the TUI in
+    //                "inflight" forever, because only FanProbeFinished
+    //                clears the flag and it is only sent by the worker
+    //                that the effect actually spawned.
+    // Scenario: TUI startup on a fan-enabled system.
+    #[test]
+    fn model_new_with_fan_control_emits_probe_and_sets_inflight() {
+        let tmp = tempfile::tempdir().unwrap();
+        let (model, effects) = Model::new(
+            sample_disk_names(),
+            std::collections::HashMap::new(),
+            std::collections::HashMap::new(),
+            std::collections::HashMap::new(),
+            "/mnt/storage".to_owned(),
+            Some(sample_fan_control()),
+            None,
+            vec![],
+            crate::state_paths::StatePaths::custom(tmp.path().into()),
+        );
+        assert_eq!(count_effects(&effects, is_probe_fan), 1);
+        assert!(model.fan_probe_inflight);
+    }
+
+    // Intent: Model::new with fan_control = None emits no ProbeFan
+    //         and leaves fan_probe_inflight false.
+    // Why it exists: pairs with the Some(...) test to pin the
+    //                invariant that fan_probe_inflight tracks effect
+    //                emission, not config presence.
+    // Scenario: TUI startup on a default-config system without
+    //           fanControl.
+    #[test]
+    fn model_new_without_fan_control_emits_no_probe_and_clears_inflight() {
+        let tmp = tempfile::tempdir().unwrap();
+        let (model, effects) = Model::new(
+            sample_disk_names(),
+            std::collections::HashMap::new(),
+            std::collections::HashMap::new(),
+            std::collections::HashMap::new(),
+            "/mnt/storage".to_owned(),
+            None,
+            None,
+            vec![],
+            crate::state_paths::StatePaths::custom(tmp.path().into()),
+        );
+        assert_eq!(count_effects(&effects, is_probe_fan), 0);
+        assert!(!model.fan_probe_inflight);
+    }
+
+    // Intent: Model::new with ups_config = Some emits exactly one
+    //         Effect::ProbeUps AND flips ups_probe_inflight to true.
+    // Why it exists: same pair-invariant rationale as the fan mirror.
+    //                Only UpsProbeFinished clears the flag, so a
+    //                stranded inflight=true here would silently
+    //                suppress every subsequent UPS probe.
+    // Scenario: TUI startup on a UPS-configured system.
+    #[test]
+    fn model_new_with_ups_config_emits_probe_and_sets_inflight() {
+        let tmp = tempfile::tempdir().unwrap();
+        let (model, effects) = Model::new(
+            sample_disk_names(),
+            std::collections::HashMap::new(),
+            std::collections::HashMap::new(),
+            std::collections::HashMap::new(),
+            "/mnt/storage".to_owned(),
+            None,
+            Some(sample_ups_config()),
+            vec![],
+            crate::state_paths::StatePaths::custom(tmp.path().into()),
+        );
+        assert_eq!(count_effects(&effects, is_probe_ups), 1);
+        assert!(model.ups_probe_inflight);
+    }
+
+    // Intent: Model::new with ups_config = None emits no ProbeUps
+    //         and leaves ups_probe_inflight false.
+    // Why it exists: pairs with the Some(...) test to pin the
+    //                invariant that ups_probe_inflight tracks effect
+    //                emission, not config presence.
+    // Scenario: TUI startup on a system without UPS configured.
+    #[test]
+    fn model_new_without_ups_config_emits_no_probe_and_clears_inflight() {
+        let tmp = tempfile::tempdir().unwrap();
+        let (model, effects) = Model::new(
+            sample_disk_names(),
+            std::collections::HashMap::new(),
+            std::collections::HashMap::new(),
+            std::collections::HashMap::new(),
+            "/mnt/storage".to_owned(),
+            None,
+            None,
+            vec![],
+            crate::state_paths::StatePaths::custom(tmp.path().into()),
+        );
+        assert_eq!(count_effects(&effects, is_probe_ups), 0);
+        assert!(!model.ups_probe_inflight);
+    }
+
     /*
      * Intent: RefreshPool must set a spinner_deadline so the footer spinner
      * shows for at least 500ms.
