@@ -451,7 +451,7 @@ pub fn plan_remove_missing<R: CommandRunner + Sync, F: Filesystem + ?Sized>(
     // survivor already has all data (every chunk is mirrored). This does
     // not match the reproduced relocation-failure mode.
     if pool.devices.len() >= 2 {
-        match check_relocation_space(runner, config.mount_point(), Some(params.missing_id)) {
+        match check_relocation_space(runner, config.mount_point(), params.missing_id) {
             Ok(RelocationCheck::Proceed) => {}
             Ok(RelocationCheck::ProceedWithWarning(body)) => {
                 notes.push(PreviewNote::Warn(body));
@@ -529,7 +529,7 @@ enum RelocationCheck {
 fn check_relocation_space<R: CommandRunner>(
     runner: &R,
     mount_point: &MountPoint,
-    missing_id: Option<u64>,
+    missing_id: u64,
 ) -> Result<RelocationCheck, RemoveMissingError> {
     let raw = match runner.run(&CmdRequest::BtrfsDeviceUsageRaw {
         mount_point: mount_point.clone(),
@@ -551,11 +551,11 @@ fn check_relocation_space<R: CommandRunner>(
         }
     };
 
-    // Partition: missing (device_size == 0, optionally filtered by devid) vs surviving (device_size > 0)
+    // Partition: missing (device_size == 0) vs surviving (device_size > 0)
     let target: Vec<_> = usage
         .devices
         .iter()
-        .filter(|d| d.device_size == 0 && (missing_id.is_none() || missing_id == Some(d.devid)))
+        .filter(|d| d.device_size == 0 && d.devid == missing_id)
         .collect();
     let remaining: Vec<_> = usage.devices.iter().filter(|d| d.device_size > 0).collect();
 
@@ -963,7 +963,7 @@ mod tests {
             device_usage_stdout: fixture,
         };
 
-        let result = check_relocation_space(&runner, &mp(), None);
+        let result = check_relocation_space(&runner, &mp(), 3);
         let err = result.expect_err("should reject insufficient space");
         let msg = err.to_string();
         assert!(
@@ -1006,7 +1006,7 @@ mod tests {
             device_usage_stdout: fixture,
         };
 
-        let result = check_relocation_space(&runner, &mp(), None);
+        let result = check_relocation_space(&runner, &mp(), 3);
         assert!(result.is_ok(), "should pass: {result:?}");
     }
 
@@ -1054,11 +1054,11 @@ mod tests {
         };
 
         // Targeting devid 2 (50 MB Data) -- should pass: RAID1 capacity = 200 MB >= 50 MB
-        let result = check_relocation_space(&runner, &mp(), Some(2));
+        let result = check_relocation_space(&runner, &mp(), 2);
         assert!(result.is_ok(), "targeting devid 2 should pass: {result:?}");
 
         // Targeting devid 3 (5 GB Data) -- should fail: RAID1 capacity = 200 MB < 5 GB
-        let result = check_relocation_space(&runner, &mp(), Some(3));
+        let result = check_relocation_space(&runner, &mp(), 3);
         assert!(result.is_err(), "targeting devid 3 should fail");
     }
 
@@ -1083,7 +1083,7 @@ mod tests {
             }
         }
 
-        let result = check_relocation_space(&FailingRunner, &mp(), None);
+        let result = check_relocation_space(&FailingRunner, &mp(), 3);
         assert!(result.is_ok(), "should proceed on error: {result:?}");
     }
 
