@@ -810,6 +810,10 @@ mod tests {
         assert_eq!(value["input"]["voltage"], "120.0");
         assert_eq!(value["device"]["model"], "Back-UPS ES 550G");
         assert_eq!(value["test_result"], "Done and passed");
+        assert_eq!(value["battery"]["type"], "PbAc");
+        assert_eq!(value["device"]["type"], "ups");
+        assert!(value["battery"].get("type_").is_none());
+        assert!(value["device"].get("type_").is_none());
     }
 
     // Intent: onbattery fixture renders Status: OB with a partial-charge

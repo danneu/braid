@@ -636,6 +636,7 @@ pub struct BatteryFields {
     /// `battery.voltage` -- raw textual value (formats vary across drivers).
     pub voltage: Option<String>,
     /// `battery.type` -- e.g. "PbAc".
+    #[serde(rename = "type")]
     pub type_: Option<String>,
     /// `battery.mfr.date` -- raw textual date.
     pub mfr_date: Option<String>,
@@ -664,6 +665,7 @@ pub struct DeviceFields {
     pub model: Option<String>,
     pub mfr: Option<String>,
     pub serial: Option<String>,
+    #[serde(rename = "type")]
     pub type_: Option<String>,
 }
 

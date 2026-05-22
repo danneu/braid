@@ -45,7 +45,7 @@ reachable UPS with a populated `status_flags` array and no top-level
     "charge_pct": 100,
     "runtime_secs": 1800,
     "voltage": "27.0",
-    "type_": "PbAc",
+    "type": "PbAc",
     "mfr_date": "2023/04/12",
     "runtime_low_secs": 120
   },
@@ -62,7 +62,7 @@ reachable UPS with a populated `status_flags` array and no top-level
     "model": "Back-UPS ES 550G",
     "mfr": "APC",
     "serial": "3B1234X56789",
-    "type_": "ups"
+    "type": "ups"
   },
   "extra": { "driver.name": "usbhid-ups", "battery.charge.low": "10" }
 }
