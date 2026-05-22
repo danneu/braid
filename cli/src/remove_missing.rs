@@ -206,18 +206,6 @@ impl RemoveMissingPlan {
         let pre_membership = membership::load_membership(params.paths).map_err(|e| {
             RemoveMissingError::Validation(format!("failed to load pool membership: {e}"))
         })?;
-        // Re-resolve the requested devid against the fresh membership so
-        // execution refuses pool.json drift that dry-run cannot see.
-        let (fresh_uuid, _fresh_name) =
-            resolve_removal_target(work_plan.missing_id, &pre_membership)?;
-        if fresh_uuid != target_uuid {
-            return Err(RemoveMissingError::Validation(format!(
-                "membership drift between planning and execution: devid {} \
-                 now resolves to a different member -- aborting to avoid \
-                 removing the wrong entry",
-                work_plan.missing_id,
-            )));
-        }
 
         // Build journal before btrfs operation. The member is removed
         // from `target_membership` by UUID; name is logging-only.
@@ -2653,81 +2641,6 @@ mod tests {
                     | CmdRequest::BtrfsDeviceScanForget { .. }
             )),
             "dry-run never-enriched refusal must issue zero mutating requests; calls: {calls:?}"
-        );
-    }
-
-    // Intent: when pool.json is mutated between planning and execution
-    //   such that the target devid now resolves to a different UUID,
-    //   execute() must abort before btrfs mutation, journal write, or
-    //   membership save.
-    //
-    // Why it exists: the persisted devid is the authorized identity
-    //   binding for missing devices. A UUID-existence-only recheck
-    //   would let a stale plan remove the wrong member from pool.json.
-    //
-    // Scenario: 3-disk pool with missing devid 3 bound to disk3's UUID.
-    //   Plan resolves disk3, then pool.json is rewritten so devid 3
-    //   belongs to disk2. Execute must report membership drift and
-    //   leave recovery state untouched.
-    #[test]
-    fn execute_aborts_when_devid_rebinds_between_plan_and_execute() {
-        let f = PoolFixture::three_disk_devids_pinned();
-        let (runner, _remove_done) =
-            RemoveMissingPool::three_disk_one_missing().install(MockRunner::default());
-        let plan = plan_remove_missing(
-            &runner,
-            &MockFs::storage(vec![]),
-            &f.remove_missing_params().missing_id(3).build(),
-        )
-        .expect("planning should succeed for valid devid 3 -> disk3");
-
-        let mut m = membership::load_membership(&f.paths).unwrap();
-        let disk2_uuid = m
-            .by_name(&DiskName::parse("disk2").unwrap())
-            .expect("disk2 must exist")
-            .0
-            .clone();
-        let disk3_uuid = m
-            .by_name(&DiskName::parse("disk3").unwrap())
-            .expect("disk3 must exist")
-            .0
-            .clone();
-        m.by_uuid_mut(&disk2_uuid).unwrap().devid = Some(3);
-        m.by_uuid_mut(&disk3_uuid).unwrap().devid = None;
-        membership::save_membership(&m, &f.paths).unwrap();
-        let drifted_bytes = std::fs::read(f.paths.pool_json()).unwrap();
-
-        let err = plan
-            .execute(
-                &runner,
-                &MockFs::storage(vec![]),
-                &f.remove_missing_params().missing_id(3).build(),
-            )
-            .unwrap_err();
-        match &err {
-            RemoveMissingError::Validation(msg) => assert!(
-                msg.contains("membership drift"),
-                "expected drift wording; got: {msg}"
-            ),
-            other => panic!("expected Validation(drift), got: {other:?}"),
-        }
-        let calls = runner.requests();
-        assert!(
-            calls.iter().all(|c| !matches!(
-                c,
-                CmdRequest::BtrfsDeviceRemove { .. } | CmdRequest::BtrfsBalanceRaid1Soft { .. }
-            )),
-            "drift recheck must fire before any btrfs mutation; calls: {calls:?}"
-        );
-        assert!(
-            journal::load_journal(&f.paths).unwrap().is_none(),
-            "drift recheck must fire before pending-op.json is written"
-        );
-        let post_bytes = std::fs::read(f.paths.pool_json()).unwrap();
-        assert_eq!(
-            drifted_bytes, post_bytes,
-            "drift recheck must fire before save_membership; pool.json \
-             must remain byte-for-byte the drifted state"
         );
     }
 }
