@@ -45,12 +45,19 @@ machine.wait_for_unit("multi-user.target")
 passphrase = "testpassphrase"
 pq = shlex.quote(passphrase)
 luks_opts = "--pbkdf pbkdf2 --pbkdf-force-iterations 1000"
+DELAYED_DISKS = {"disk4"}
+
+
+def disk_path(key):
+    if key in DELAYED_DISKS:
+        return f"/dev/disk/by-id/braid-test-{key}-delay"
+    return f"/dev/disk/by-id/virtio-{key}"
 
 
 def add_cmd(key):
     return (
         f"printf '%s\\n' {pq} | "
-        f"braid add --luks-format-arg=--pbkdf --luks-format-arg=pbkdf2 --luks-format-arg=--pbkdf-force-iterations --luks-format-arg=1000 {key}=/dev/disk/by-id/virtio-{key} --passphrase-stdin --yes"
+        f"braid add --luks-format-arg=--pbkdf --luks-format-arg=pbkdf2 --luks-format-arg=--pbkdf-force-iterations --luks-format-arg=1000 {key}={disk_path(key)} --passphrase-stdin --yes"
     )
 
 
@@ -60,7 +67,7 @@ def replace_cmd_bg(old, new):
     # the whole pipeline rather than just the tail braid invocation.
     return (
         f"(printf '%s\\n' {pq} | "
-        f"braid replace --luks-format-arg=--pbkdf --luks-format-arg=pbkdf2 --luks-format-arg=--pbkdf-force-iterations --luks-format-arg=1000 --old {old} --new {new}=/dev/disk/by-id/virtio-{new} "
+        f"braid replace --luks-format-arg=--pbkdf --luks-format-arg=pbkdf2 --luks-format-arg=--pbkdf-force-iterations --luks-format-arg=1000 --old {old} --new {new}={disk_path(new)} "
         f"--passphrase-stdin --yes) > /tmp/replace.log 2>&1 &"
     )
 
@@ -74,11 +81,8 @@ with subtest("Build 3-disk pool"):
     machine.succeed("mountpoint -q /mnt/storage")
 
 with subtest("Write urandom payload"):
-    # 400 MiB matches the proven sizing in the interrupted-mid-flight repro
-    # test — large enough that the kernel reports in-flight progress before
-    # the test driver can race past it.
     machine.succeed(
-        "dd if=/dev/urandom of=/mnt/storage/payload bs=1M count=400 status=none"
+        "dd if=/dev/urandom of=/mnt/storage/payload bs=1M count=16 status=none"
     )
     machine.succeed("sync")
     payload_sha = machine.succeed("sha256sum /mnt/storage/payload").split()[0]
@@ -96,6 +100,8 @@ with subtest("No braid inhibitor before replace"):
 # --- Phase 3: Start replace asynchronously and wait for in-flight progress ---
 
 with subtest("Start replace and wait for in-flight progress"):
+    dm_delay_create(machine, "disk4")
+    dm_delay_activate(machine, "disk4", write_delay_ms=200)
     machine.execute(replace_cmd_bg("disk2", "disk4"))
 
     saw_running = False
@@ -171,6 +177,7 @@ with subtest("braid sleep inhibitor is held during replace"):
     # Capture the inhibitor pid so Phase 6 can verify the entire process
     # group is torn down on release (not just the systemd-inhibit parent).
     inhibitor_pid = inh["pid"]
+    dm_delay_deactivate(machine, "disk4")
 
 # --- Phase 5: Wait for the replace to finish ---
 

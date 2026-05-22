@@ -12,11 +12,9 @@
 # This is M6 of plans/wip/forced-shutdown-recovery-proof.md and is one
 # of the four matrix tests gating the flip of ADR 020 to Active.
 #
-# 2 disks, 6 GiB each. The test populates a 1-disk pool with ~3 GiB
-# of single-profile data, then adds disk2 to trigger the post-add
-# balance. The balance has ~3 GiB of conversion work to do on
-# tmpfs-backed virtual disks, comfortably wider than the ~1s
-# shutdown window from LB detection to umount.
+# 2 disks, 6 GiB each. The test populates a 1-disk pool with a small
+# single-profile payload, then adds disk2 through dm-delay to trigger an
+# observable post-add balance during the UPS shutdown window.
 { braid }:
 { pkgs, lib, ... }:
 {
@@ -51,7 +49,12 @@
       # confirm upsmon's SHUTDOWNCMD actually triggered the previous
       # boot's `braid-online.service` ExecStop.
       services.journald.extraConfig = "Storage=persistent";
+
+      environment.systemPackages = [
+        pkgs.lvm2
+      ];
     };
 
-  testScript = builtins.readFile ./ups-lb-during-balanced-add.py;
+  testScript =
+    builtins.readFile ./dm_delay_helpers.py + "\n\n" + builtins.readFile ./ups-lb-during-balanced-add.py;
 }

@@ -36,6 +36,7 @@
         braid
         pkgs.cryptsetup
         pkgs.btrfs-progs
+        pkgs.lvm2
         pkgs.jq
       ];
 
@@ -44,5 +45,7 @@
       };
     };
 
-  testScript = builtins.readFile ./braid-status-during-balance.py;
+  testScript =
+    builtins.readFile ./../module/dm_delay_helpers.py + "\n\n"
+    + builtins.readFile ./braid-status-during-balance.py;
 }

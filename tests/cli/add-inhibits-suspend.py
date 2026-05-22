@@ -42,12 +42,19 @@ machine.wait_for_unit("multi-user.target")
 passphrase = "testpassphrase"
 pq = shlex.quote(passphrase)
 luks_opts = "--pbkdf pbkdf2 --pbkdf-force-iterations 1000"
+DELAYED_DISKS = {"disk2"}
+
+
+def disk_path(key):
+    if key in DELAYED_DISKS:
+        return f"/dev/disk/by-id/braid-test-{key}-delay"
+    return f"/dev/disk/by-id/virtio-{key}"
 
 
 def add_cmd(key):
     return (
         f"printf '%s\\n' {pq} | "
-        f"braid add --luks-format-arg=--pbkdf --luks-format-arg=pbkdf2 --luks-format-arg=--pbkdf-force-iterations --luks-format-arg=1000 {key}=/dev/disk/by-id/virtio-{key} --passphrase-stdin --yes"
+        f"braid add --luks-format-arg=--pbkdf --luks-format-arg=pbkdf2 --luks-format-arg=--pbkdf-force-iterations --luks-format-arg=1000 {key}={disk_path(key)} --passphrase-stdin --yes"
     )
 
 
@@ -55,7 +62,7 @@ def add_cmd_bg(key):
     # Background `braid add` so machine.execute returns immediately.
     return (
         f"(printf '%s\\n' {pq} | "
-        f"braid add --luks-format-arg=--pbkdf --luks-format-arg=pbkdf2 --luks-format-arg=--pbkdf-force-iterations --luks-format-arg=1000 {key}=/dev/disk/by-id/virtio-{key} --passphrase-stdin --yes) "
+        f"braid add --luks-format-arg=--pbkdf --luks-format-arg=pbkdf2 --luks-format-arg=--pbkdf-force-iterations --luks-format-arg=1000 {key}={disk_path(key)} --passphrase-stdin --yes) "
         f"> /tmp/add.log 2>&1 &"
     )
 
@@ -81,7 +88,7 @@ with subtest("Pool starts with single-profile data"):
 
 with subtest("Write urandom payload (single-profile chunks)"):
     machine.succeed(
-        "dd if=/dev/urandom of=/mnt/storage/payload bs=1M count=400 status=none"
+        "dd if=/dev/urandom of=/mnt/storage/payload bs=1M count=16 status=none"
     )
     machine.succeed("sync")
     payload_sha = machine.succeed("sha256sum /mnt/storage/payload").split()[0]
@@ -99,6 +106,8 @@ with subtest("No braid inhibitor before add"):
 # --- Phase 4: Start `braid add disk2` asynchronously ---
 
 with subtest("Start add and wait for inhibitor to appear"):
+    dm_delay_create(machine, "disk2")
+    dm_delay_activate(machine, "disk2", write_delay_ms=200)
     machine.execute(add_cmd_bg("disk2"))
 
     # Poll for the inhibitor's appearance. LUKS format runs first, then
@@ -140,7 +149,7 @@ with subtest("Inhibitor is still held during the balance phase"):
         if "balance" in excl:
             saw_balance = True
             break
-        if "none" in excl:
+        if machine.execute("test ! -f /var/lib/braid/pending-op.json")[0] == 0:
             print("note: balance phase completed before observation")
             break
         time.sleep(0.05)
@@ -152,6 +161,7 @@ with subtest("Inhibitor is still held during the balance phase"):
             "completed — the guard scope must cover the balance, not just "
             "the LUKS init and device add."
         )
+    dm_delay_deactivate(machine, "disk2")
 
 # --- Phase 6: Wait for add to finish ---
 

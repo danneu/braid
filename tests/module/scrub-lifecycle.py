@@ -39,34 +39,13 @@ STAMP = "/var/lib/systemd/timers/stamp-braid-scrub.timer"
 # TODO: Play with these values to speed up test. This test is really slow.
 SCRUB_PAYLOAD_MIB = 32
 SCRUB_READ_DELAY_MS = 500
+SCRUB_DELAY_DISKS = ["disk1", "disk2"]
 
 
 def show(node, unit, prop):
     return node.succeed(
         "systemctl show {} -p {} --value".format(unit, prop)
     ).strip()
-
-
-def dm_delay_table(node, name, read_delay_ms=0, write_delay_ms=0):
-    raw = "/dev/disk/by-id/virtio-{}".format(name)
-    sectors = node.succeed("blockdev --getsz {}".format(raw)).strip()
-    return "0 {} delay {} 0 {} {} 0 {}".format(
-        sectors, raw, read_delay_ms, raw, write_delay_ms
-    )
-
-
-def dm_delay_create(node, name):
-    node.succeed("modprobe dm-delay")
-    node.succeed(
-        "dmsetup create {}-delay --table {}".format(
-            name, shlex.quote(dm_delay_table(node, name))
-        )
-    )
-    node.succeed(
-        "ln -sfn /dev/mapper/{}-delay /dev/disk/by-id/braid-test-{}-delay".format(
-            name, name
-        )
-    )
 
 
 def luks_uuid_for_name(name):
@@ -76,19 +55,8 @@ def luks_uuid_for_name(name):
     }[name]
 
 
-def dm_delay_activate(node, read_delay_ms=0, write_delay_ms=0):
-    for name in ["disk1", "disk2"]:
-        node.succeed("dmsetup suspend {}-delay".format(name))
-        node.succeed(
-            "dmsetup reload {}-delay --table {}".format(
-                name, shlex.quote(dm_delay_table(node, name, read_delay_ms, write_delay_ms))
-            )
-        )
-        node.succeed("dmsetup resume {}-delay".format(name))
-
-
 def setup_resume_pool(node):
-    for name in ["disk1", "disk2"]:
+    for name in SCRUB_DELAY_DISKS:
         dm_delay_create(node, name)
         by_id = "/dev/disk/by-id/braid-test-{}-delay".format(name)
         node.succeed(
@@ -116,7 +84,7 @@ def setup_resume_pool(node):
                 "name": name,
                 "by_id": "/dev/disk/by-id/braid-test-{}-delay".format(name),
             }
-            for name in ["disk1", "disk2"]
+            for name in SCRUB_DELAY_DISKS
         }
     }
     node.succeed(
@@ -282,7 +250,7 @@ with subtest("resume: prepare dm-delay backed pool"):
         )
     )
     resume.succeed("sync")
-    dm_delay_activate(resume, read_delay_ms=SCRUB_READ_DELAY_MS)
+    dm_delay_activate(resume, SCRUB_DELAY_DISKS, read_delay_ms=SCRUB_READ_DELAY_MS)
 
 with subtest("resume: cancel preserves Aborted state across lock/unlock"):
     resume.succeed("systemctl start {}".format(SERVICE))
@@ -296,7 +264,7 @@ with subtest("resume: cancel preserves Aborted state across lock/unlock"):
 
     disable_trigger_hook(resume)
     resume.succeed("braid lock")
-    dm_delay_activate(resume)
+    dm_delay_deactivate(resume, SCRUB_DELAY_DISKS)
     unlock(resume)
     resume.wait_until_succeeds(
         "btrfs scrub status --raw /mnt/storage | grep -Eq 'Status:[[:space:]]+aborted'",
@@ -346,7 +314,7 @@ with subtest("resume: lock/unlock with fresh timer stamp does not start a new sc
     resume.fail("systemctl is-active {}".format(SERVICE))
 
 with subtest("resume: lock/unlock with aged timer stamp fires scheduled scrub"):
-    dm_delay_activate(resume)
+    dm_delay_deactivate(resume, SCRUB_DELAY_DISKS)
     resume.succeed("braid lock")
     wait_online_stop_settled(resume)
     resume.succeed("touch -t 202501010000 {}".format(STAMP))
@@ -382,7 +350,11 @@ with subtest("concurrency: prepare dm-delay backed pool with saved scrub progres
     concurrency.succeed("sync")
 
     # Slow I/O so the in-flight scrub stays running long enough to cancel.
-    dm_delay_activate(concurrency, read_delay_ms=SCRUB_READ_DELAY_MS)
+    dm_delay_activate(
+        concurrency,
+        SCRUB_DELAY_DISKS,
+        read_delay_ms=SCRUB_READ_DELAY_MS,
+    )
     concurrency.succeed("systemctl start {}".format(SERVICE))
     concurrency.succeed(
         "for i in $(seq 1 400); do "
@@ -400,7 +372,7 @@ with subtest("concurrency: prepare dm-delay backed pool with saved scrub progres
     wait_online_stop_settled(concurrency)
     # Reset dm-delay after cancel so the offline setup work is fast; we re-arm
     # the delay before the actual race trigger below.
-    dm_delay_activate(concurrency)
+    dm_delay_deactivate(concurrency, SCRUB_DELAY_DISKS)
     # No explicit "aborted" assertion here. braid lock returned 0, which only
     # happens after umount succeeds, so scrub.status.<fsid> is not queryable
     # from this node without re-unlocking. Cancel-success is verified ONLY by
@@ -421,7 +393,11 @@ with subtest("concurrency: overdue timer + resumable state coalesce into one scr
 
     # Re-arm dm-delay so any accidental second scrub has time to become visible
     # through a changed ExecMainStartTimestampMonotonic.
-    dm_delay_activate(concurrency, read_delay_ms=SCRUB_READ_DELAY_MS)
+    dm_delay_activate(
+        concurrency,
+        SCRUB_DELAY_DISKS,
+        read_delay_ms=SCRUB_READ_DELAY_MS,
+    )
 
     old_trigger_ts = show(concurrency, TRIGGER_SERVICE, "ExecMainStartTimestampMonotonic")
     old_scrub_ts = show(concurrency, SERVICE, "ExecMainStartTimestampMonotonic")
@@ -433,6 +409,7 @@ with subtest("concurrency: overdue timer + resumable state coalesce into one scr
 
     wait_unit_success_after(concurrency, TRIGGER_SERVICE, old_trigger_ts, timeout=30)
     wait_unit_success_after(concurrency, SERVICE, old_scrub_ts, timeout=300)
+    dm_delay_deactivate(concurrency, SCRUB_DELAY_DISKS)
 
     completed_scrub_ts = show(concurrency, SERVICE, "ExecMainStartTimestampMonotonic")
     concurrency.succeed("sleep 5")

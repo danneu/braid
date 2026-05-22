@@ -54,6 +54,13 @@ pq = shlex.quote(passphrase)
 luks_format = (
     "--batch-mode --key-file=- --pbkdf pbkdf2 --pbkdf-force-iterations 1000"
 )
+DELAYED_DISKS = ["disk1", "disk3"]
+
+
+def disk_path(name):
+    if name in DELAYED_DISKS:
+        return f"/dev/disk/by-id/braid-test-{name}-delay"
+    return f"/dev/disk/by-id/virtio-{name}"
 
 
 def luks_uuid_for_name(name):
@@ -65,8 +72,8 @@ def luks_uuid_for_name(name):
 
 
 def luks_format_open(name):
-    """Format and open a LUKS container at /dev/disk/by-id/virtio-NAME."""
-    dev = f"/dev/disk/by-id/virtio-{name}"
+    """Format and open a LUKS container at this test's path for NAME."""
+    dev = disk_path(name)
     machine.succeed(
         f"printf '%s' {pq} | cryptsetup luksFormat {luks_format} "
         f"--uuid {luks_uuid_for_name(name)} --label braid-{name} {dev}"
@@ -78,8 +85,8 @@ def luks_format_open(name):
 
 
 def luks_open(name):
-    """Open an existing LUKS container at /dev/disk/by-id/virtio-NAME."""
-    dev = f"/dev/disk/by-id/virtio-{name}"
+    """Open an existing LUKS container at this test's path for NAME."""
+    dev = disk_path(name)
     machine.succeed(
         f"printf '%s' {pq} | cryptsetup luksOpen --key-file=- "
         f"{dev} braid-{name}"
@@ -103,7 +110,29 @@ def get_devid_for_mapper(mapper):
     )
 
 
+def ensure_degraded_data_single_chunks():
+    # A small degraded write can reuse free space in an existing RAID1 data
+    # block group. Keep allocating cheap filler until btrfs reports the exact
+    # recovery precondition this test needs: at least one Data,single chunk.
+    for i in range(32):
+        fi_df = machine.succeed("btrfs filesystem df /mnt/storage")
+        if "Data, single" in fi_df:
+            return fi_df
+        machine.succeed(
+            f"fallocate -l 64M /mnt/storage/degraded-single-fill-{i}"
+        )
+        machine.succeed("sync")
+
+    fi_df = machine.succeed("btrfs filesystem df /mnt/storage")
+    raise AssertionError(
+        "could not create Data, single chunks after degraded writes:\n"
+        f"{fi_df}"
+    )
+
+
 with subtest("Build 2-disk RAID1 pool raw"):
+    for name in DELAYED_DISKS:
+        dm_delay_create(machine, name)
     luks_format_open("disk1")
     luks_format_open("disk2")
     machine.succeed(
@@ -124,7 +153,7 @@ with subtest("Build 2-disk RAID1 pool raw"):
 
 with subtest("Write baseline RAID1 payload"):
     machine.succeed(
-        "dd if=/dev/urandom of=/mnt/storage/baseline bs=1M count=512 status=none"
+        "dd if=/dev/urandom of=/mnt/storage/baseline bs=1M count=100 status=none"
     )
     machine.succeed("sync")
     baseline_sha = machine.succeed("sha256sum /mnt/storage/baseline").split()[0]
@@ -148,22 +177,15 @@ with subtest("Simulate disk2 death and remount degraded"):
     )
 
 with subtest("Write degraded-mode payload to create single-profile chunks"):
-    # 3 GiB of single-profile writes. The post-remove-missing soft
-    # balance has to read each single chunk + write two RAID1 mirrors,
-    # which on tmpfs-backed virtual disks takes long enough that we
-    # can interrupt it well before completion. We also wait below for
-    # the balance to be observably early (>=70% remaining) before
-    # triggering LB, so even fast tmpfs throughput cannot let the
-    # balance finish before umount.
     machine.succeed(
-        "dd if=/dev/urandom of=/mnt/storage/degraded-write bs=1M count=3000 status=none"
+        "dd if=/dev/urandom of=/mnt/storage/degraded-write bs=1M count=100 status=none"
     )
     machine.succeed("sync")
     degraded_sha = machine.succeed("sha256sum /mnt/storage/degraded-write").split()[0]
     print(f"degraded-write sha256: {degraded_sha}")
 
 with subtest("Single-profile chunks exist before remove-missing"):
-    fi_df = machine.succeed("btrfs filesystem df /mnt/storage")
+    fi_df = ensure_degraded_data_single_chunks()
     print(f"=== fi df after degraded writes ===\n{fi_df}")
     assert "Data, single" in fi_df, (
         f"expected single-profile data chunks after degraded write:\n{fi_df}"
@@ -198,7 +220,7 @@ with subtest("Seed pool.json with all three disks (incl. devids)"):
         "disks": {
             luks_uuid_for_name("disk1"): {
                 "name": "disk1",
-                "by_id": "/dev/disk/by-id/virtio-disk1",
+                "by_id": disk_path("disk1"),
                 "devid": disk1_devid,
             },
             luks_uuid_for_name("disk2"): {
@@ -208,7 +230,7 @@ with subtest("Seed pool.json with all three disks (incl. devids)"):
             },
             luks_uuid_for_name("disk3"): {
                 "name": "disk3",
-                "by_id": "/dev/disk/by-id/virtio-disk3",
+                "by_id": disk_path("disk3"),
             },
         }
     }
@@ -244,6 +266,7 @@ with subtest("Start remove-missing and wait for soft balance in flight"):
     )
     print(f"missing devid: {missing_devid}")
 
+    dm_delay_activate(machine, DELAYED_DISKS, write_delay_ms=500)
     machine.execute(
         f"(braid remove-missing --missing-id {missing_devid} --yes) "
         f"> /tmp/remove-missing.log 2>&1 &"
@@ -305,6 +328,8 @@ with subtest("Host shuts down in response to upsmon SHUTDOWNCMD"):
 
 machine.start()
 machine.wait_for_unit("multi-user.target", timeout=120)
+for name in DELAYED_DISKS:
+    dm_delay_create(machine, name)
 
 with subtest("Previous boot's braid-online.service stopped cleanly"):
     svc_log = machine.succeed(

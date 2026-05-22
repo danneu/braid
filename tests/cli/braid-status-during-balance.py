@@ -14,32 +14,40 @@ machine.wait_for_unit("multi-user.target")
 
 passphrase = "testpassphrase"
 luks_opts = "--pbkdf pbkdf2 --pbkdf-force-iterations 1000"
+DELAYED_DISKS = ["disk1", "disk2"]
+
+
+def disk_path(key):
+    if key in DELAYED_DISKS:
+        return f"/dev/disk/by-id/braid-test-{key}-delay"
+    return f"/dev/disk/by-id/virtio-{key}"
 
 
 def add_disk(key):
     passphrase_q = shlex.quote(passphrase)
     return (
         f"printf '%s\\n' {passphrase_q} | "
-        f"braid add --luks-format-arg=--pbkdf --luks-format-arg=pbkdf2 --luks-format-arg=--pbkdf-force-iterations --luks-format-arg=1000 {key}=/dev/disk/by-id/virtio-{key} --passphrase-stdin --yes"
+        f"braid add --luks-format-arg=--pbkdf --luks-format-arg=pbkdf2 --luks-format-arg=--pbkdf-force-iterations --luks-format-arg=1000 {key}={disk_path(key)} --passphrase-stdin --yes"
     )
 
 
 # 1. Create single-disk pool via braid add
 with subtest("create single-disk pool"):
+    for name in DELAYED_DISKS:
+        dm_delay_create(machine, name)
     machine.succeed(add_disk("disk1"))
     machine.succeed("mountpoint -q /mnt/storage")
 
-# 2. Write ~512 MiB so balance has observable work.
-#    Only 1/4 of disk size — more causes ENOSPC during single→RAID1 rebalance
-#    because btrfs needs unallocated chunk space on the source device.
+# 2. Write test data so balance has observable work.
+#    dm-delay, not payload size, makes the single->RAID1 rebalance observable.
 with subtest("write test data"):
-    machine.succeed("dd if=/dev/urandom of=/mnt/storage/bigfile bs=1M count=512")
+    machine.succeed("dd if=/dev/urandom of=/mnt/storage/bigfile bs=1M count=32")
     machine.succeed("sync")
 
 # 3. LUKS-format and open disk2 manually, add to btrfs directly
 #    (skip braid add which blocks on balance completion)
 with subtest("manually add disk2 to btrfs"):
-    dev2 = "/dev/disk/by-id/virtio-disk2"
+    dev2 = disk_path("disk2")
     passphrase_q = shlex.quote(passphrase)
     machine.succeed(
         f"printf '%s\\n' {passphrase_q} | "
@@ -58,6 +66,7 @@ with subtest("manually add disk2 to btrfs"):
 #    If the balance completes before pause catches it, retry with the opposite
 #    conversion target so there's always new work to do.
 with subtest("start and pause balance"):
+    dm_delay_activate(machine, DELAYED_DISKS, write_delay_ms=500)
     targets = ["single", "raid1"]
     paused = False
     for attempt in range(3):
@@ -99,6 +108,7 @@ with subtest("start and pause balance"):
             )
 
     assert paused, "Could not pause balance with remaining work after 3 attempts"
+    dm_delay_deactivate(machine, DELAYED_DISKS)
 
 # 5. With the balance reliably paused, check both text and JSON output.
 with subtest("status during balance"):

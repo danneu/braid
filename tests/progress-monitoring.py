@@ -12,27 +12,7 @@
 PASSPHRASE = "testpassphrase"
 MOUNT = "/mnt/storage"
 FIXTURE_DIR = "/tmp/fixtures"
-DISK3_RAW = "/dev/disk/by-id/virtio-disk3"
 DISK3_DM = "disk3-delay"
-
-
-def dm_delay_table(read_delay_ms=0, write_delay_ms=0):
-    """dm-delay table for disk3 with independent read/write delays."""
-    sectors = machine.succeed(f"blockdev --getsz {DISK3_RAW}").strip()
-    return f"0 {sectors} delay {DISK3_RAW} 0 {read_delay_ms} {DISK3_RAW} 0 {write_delay_ms}"
-
-
-def dm_delay_create():
-    """Create dm-delay wrapper on disk3 with zero delay."""
-    machine.succeed("modprobe dm-delay")
-    machine.succeed(f"dmsetup create {DISK3_DM} --table '{dm_delay_table()}'")
-
-
-def dm_delay_activate(read_delay_ms=0, write_delay_ms=0):
-    """Live-swap dm-delay table to inject real I/O delay."""
-    machine.succeed(f"dmsetup suspend {DISK3_DM}")
-    machine.succeed(f"dmsetup reload {DISK3_DM} --table '{dm_delay_table(read_delay_ms, write_delay_ms)}'")
-    machine.succeed(f"dmsetup resume {DISK3_DM}")
 
 
 start_all()
@@ -50,7 +30,7 @@ for name in ["disk1", "disk2"]:
     )
 
 # disk3: dm-delay wrapper (0ms initially) → LUKS on top
-dm_delay_create()
+dm_delay_create(machine, "disk3")
 machine.succeed(
     f"echo -n '{PASSPHRASE}' | cryptsetup luksFormat --batch-mode --key-file=- "
     f"--pbkdf pbkdf2 --pbkdf-force-iterations 1000 /dev/mapper/{DISK3_DM}"
@@ -121,7 +101,7 @@ with subtest("scrub per-device progress observed"):
     # Inject 50ms read delay on disk3 so scrub takes observable time.
     # Without this, VM I/O is so fast the scrub finishes before a single poll.
     # 5ms is insufficient (~3s scrub); 50ms stretches disk3's scrub to ~10s+.
-    dm_delay_activate(read_delay_ms=50)
+    dm_delay_activate(machine, "disk3", read_delay_ms=50)
 
     # Start scrub in background and poll in the same shell command
     # to eliminate host round-trip latency.
@@ -138,6 +118,7 @@ with subtest("scrub per-device progress observed"):
         f"printf '%s\\n' \"$agg_out\" > {FIXTURE_DIR}/btrfs-scrub-running.txt; "
         f"exit 0; fi; sleep 0.05; done; exit 1"
     )
+    dm_delay_deactivate(machine, "disk3")
 
     # Wait for scrub to finish
     machine.wait_until_succeeds(
@@ -152,7 +133,6 @@ with subtest("scrub per-device progress observed"):
     )
 
     # Remove read delay before device-remove subtest
-    dm_delay_activate()
 
 
 with subtest("device remove progress observed"):
@@ -167,7 +147,7 @@ with subtest("device remove progress observed"):
     # enough for the polling loop to observe bytes decreasing.  Write-only
     # so that btrfs device usage reads remain fast.  Without this, VM I/O
     # is so fast the remove completes before a single poll fires.
-    dm_delay_activate(write_delay_ms=20)
+    dm_delay_activate(machine, "disk3", write_delay_ms=20)
 
     # Start device remove in background and poll in the same shell command
     # to eliminate host round-trip latency — the remove can finish in ~3s
@@ -184,6 +164,7 @@ with subtest("device remove progress observed"):
         f"printf '%s\\n' \"$out\" > {FIXTURE_DIR}/btrfs-device-usage-removing.txt; "
         f"exit 0; fi; sleep 0.05; done; exit 1"
     )
+    dm_delay_deactivate(machine, "disk3")
 
     # No completion wait — we only need the in-progress fixture.
     # Full device-remove correctness is covered by btrfs-shrink and

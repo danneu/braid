@@ -8,11 +8,9 @@
 # This is M3 of plans/wip/forced-shutdown-recovery-proof.md and is one
 # of the four matrix tests that gate flipping ADR 020 to Active.
 #
-# 4 disks: disk1/2/3 are pool members (1024 MiB each), disk4 is the
-# replacement target. The 400 MiB urandom payload that disk2 holds
-# matches the staging in tests/repro/btrfs-replace-interrupted-mid-flight.py
-# so the replace runs long enough to reliably catch the in-flight state
-# from the test script.
+# 4 disks: disk1/2/3 are pool members, disk4 is the replacement target.
+# A small payload plus dm-delay on disk4 makes the replace stay in flight
+# long enough to reliably trigger the UPS shutdown window.
 { braid }:
 { pkgs, lib, ... }:
 {
@@ -31,13 +29,8 @@
         package = braid;
       };
 
-      # Disks must be large enough that the replace stays in-flight
-      # longer than the shutdown sequence between LB detection and
-      # umount. On tmpfs-backed virtual disks the replace runs at ~1
-      # GiB/s, while the shutdown window is ~1s after FINALDELAY hits
-      # 0 (lib/ups-fixture.nix). 4 GiB disks with a 3 GiB urandom
-      # payload give ~3s of replace work, comfortably wider than the
-      # shutdown window.
+      # Disk size remains generous enough for replace/recover capacity
+      # behavior, while dm-delay controls the in-flight timing window.
       virtualisation.emptyDiskImages = [
         {
           size = 4096;
@@ -62,7 +55,12 @@
       # confirm upsmon's SHUTDOWNCMD actually triggered the previous
       # boot's `braid-online.service` ExecStop (decision 018).
       services.journald.extraConfig = "Storage=persistent";
+
+      environment.systemPackages = [
+        pkgs.lvm2
+      ];
     };
 
-  testScript = builtins.readFile ./ups-lb-during-replace.py;
+  testScript =
+    builtins.readFile ./dm_delay_helpers.py + "\n\n" + builtins.readFile ./ups-lb-during-replace.py;
 }

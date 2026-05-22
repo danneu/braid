@@ -60,12 +60,19 @@ machine.wait_for_unit("multi-user.target")
 passphrase = "testpassphrase"
 pq = shlex.quote(passphrase)
 luks_opts = "--pbkdf pbkdf2 --pbkdf-force-iterations 1000"
+DELAYED_DISKS = ["disk1", "disk2"]
+
+
+def disk_path(key):
+    if key in DELAYED_DISKS:
+        return f"/dev/disk/by-id/braid-test-{key}-delay"
+    return f"/dev/disk/by-id/virtio-{key}"
 
 
 def add_cmd(key):
     return (
         f"printf '%s\\n' {pq} | "
-        f"braid add --luks-format-arg=--pbkdf --luks-format-arg=pbkdf2 --luks-format-arg=--pbkdf-force-iterations --luks-format-arg=1000 {key}=/dev/disk/by-id/virtio-{key} --passphrase-stdin --yes"
+        f"braid add --luks-format-arg=--pbkdf --luks-format-arg=pbkdf2 --luks-format-arg=--pbkdf-force-iterations --luks-format-arg=1000 {key}={disk_path(key)} --passphrase-stdin --yes"
     )
 
 
@@ -78,6 +85,8 @@ def remove_cmd_bg(key):
 # --- Phase 1: Build a 2-disk RAID1 pool and write a payload ---
 
 with subtest("Build 2-disk RAID1 pool"):
+    for name in DELAYED_DISKS:
+        dm_delay_create(machine, name)
     machine.succeed(add_cmd("disk1"))
     machine.succeed(add_cmd("disk2"))
     machine.succeed("mountpoint -q /mnt/storage")
@@ -86,10 +95,8 @@ with subtest("Build 2-disk RAID1 pool"):
     assert "RAID1" in fi_df, f"Expected RAID1 profile on 2-disk pool:\n{fi_df}"
 
 with subtest("Write urandom payload"):
-    # 400 MiB gives the pre-remove RAID1→single balance enough relocation
-    # work to take observably long on the test runner's virtual disks.
     machine.succeed(
-        "dd if=/dev/urandom of=/mnt/storage/payload bs=1M count=400 status=none"
+        "dd if=/dev/urandom of=/mnt/storage/payload bs=1M count=16 status=none"
     )
     machine.succeed("sync")
     payload_sha = machine.succeed("sha256sum /mnt/storage/payload").split()[0]
@@ -107,6 +114,7 @@ with subtest("No braid inhibitor before remove"):
 # --- Phase 3: Start remove and wait for the balance phase to be in flight ---
 
 with subtest("Start remove and wait for balance to be in flight"):
+    dm_delay_activate(machine, DELAYED_DISKS, write_delay_ms=200)
     machine.execute(remove_cmd_bg("disk2"))
 
     # Poll for the kernel entering the balance state. The 2→1 remove
@@ -151,6 +159,7 @@ with subtest("braid sleep inhibitor is held during balance"):
     # process group is torn down on release (not just the systemd-inhibit
     # parent).
     inhibitor_pid = inh["pid"]
+    dm_delay_deactivate(machine, DELAYED_DISKS)
 
 # --- Phase 5: Wait for the remove to finish ---
 

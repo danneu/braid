@@ -145,5 +145,6 @@ in
   # I/O so any accidental second scrub has time to become visible.
   nodes.concurrency = resumeNode;
 
-  testScript = builtins.readFile ./scrub-lifecycle.py;
+  testScript =
+    builtins.readFile ./dm_delay_helpers.py + "\n\n" + builtins.readFile ./scrub-lifecycle.py;
 }

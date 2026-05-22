@@ -12,9 +12,9 @@
 # docs/decisions/019-inhibit-sleep.md for the boundary rule.
 #
 # 2 disks, each 1024 MiB. The test bootstraps a 1-disk pool, writes a
-# 400 MiB single-profile payload, then adds the second disk so
-# pool_balance_raid1 has real conversion work. Without the pre-add payload
-# the balance has nothing to do and the inhibitor window collapses.
+# small single-profile payload, then adds the second disk through dm-delay
+# so pool_balance_raid1 has observable conversion work without a large
+# timing-only payload.
 { braid }:
 {
   name = "add-inhibits-suspend";
@@ -37,6 +37,7 @@
         braid
         pkgs.cryptsetup
         pkgs.btrfs-progs
+        pkgs.lvm2
       ];
 
       environment.etc."braid/config.json".text = builtins.toJSON {
@@ -45,5 +46,7 @@
     };
 
   testScript =
-    builtins.readFile ./inhibitor_helpers.py + "\n\n" + builtins.readFile ./add-inhibits-suspend.py;
+    builtins.readFile ./../module/dm_delay_helpers.py + "\n\n"
+    + builtins.readFile ./inhibitor_helpers.py + "\n\n"
+    + builtins.readFile ./add-inhibits-suspend.py;
 }

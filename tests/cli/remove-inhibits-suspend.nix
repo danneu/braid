@@ -25,13 +25,9 @@
 #   cmd_remove mutation window with the same inhibitor seam, but with
 #   a long enough phase to make the VM test stable.
 #
-# 2 × 2048 MiB disks. Doubled from the initial 1024 MiB sizing because
-# 2 × 1024 MiB in RAID1 leaves only ~512 MiB usable, and with a 400 MiB
-# payload the allocator was too constrained during the RAID1→single
-# rebalance to make forward progress (the rebalance hung). 2048 MiB
-# disks give ~1024 MiB usable, comfortably above the payload size.
-# Pool is still filled with a 400 MiB payload so the rebalance has
-# substantial real work to relocate.
+# 2 x 2048 MiB disks. The test now uses a small payload and dm-delay on
+# both surviving candidates so the RAID1->single rebalance is observable
+# without filling the filesystem with timing-only data.
 { braid }:
 {
   name = "remove-inhibits-suspend";
@@ -54,6 +50,7 @@
         braid
         pkgs.cryptsetup
         pkgs.btrfs-progs
+        pkgs.lvm2
       ];
 
       environment.etc."braid/config.json".text = builtins.toJSON {
@@ -67,5 +64,7 @@
   # module path, so a normal `import` would not work — see
   # tests/cli/inhibitor_helpers.py for details.
   testScript =
-    builtins.readFile ./inhibitor_helpers.py + "\n\n" + builtins.readFile ./remove-inhibits-suspend.py;
+    builtins.readFile ./../module/dm_delay_helpers.py + "\n\n"
+    + builtins.readFile ./inhibitor_helpers.py + "\n\n"
+    + builtins.readFile ./remove-inhibits-suspend.py;
 }

@@ -37,12 +37,19 @@ machine.wait_for_unit("upsdrv.service", timeout=60)
 passphrase = "testpassphrase"
 pq = shlex.quote(passphrase)
 luks_opts = "--pbkdf pbkdf2 --pbkdf-force-iterations 1000"
+DELAYED_DISKS = ["disk4"]
+
+
+def disk_path(key):
+    if key in DELAYED_DISKS:
+        return f"/dev/disk/by-id/braid-test-{key}-delay"
+    return f"/dev/disk/by-id/virtio-{key}"
 
 
 def add_cmd(key):
     return (
         f"printf '%s\\n' {pq} | "
-        f"braid add --luks-format-arg=--pbkdf --luks-format-arg=pbkdf2 --luks-format-arg=--pbkdf-force-iterations --luks-format-arg=1000 {key}=/dev/disk/by-id/virtio-{key} --passphrase-stdin --yes"
+        f"braid add --luks-format-arg=--pbkdf --luks-format-arg=pbkdf2 --luks-format-arg=--pbkdf-force-iterations --luks-format-arg=1000 {key}={disk_path(key)} --passphrase-stdin --yes"
     )
 
 
@@ -52,7 +59,7 @@ def replace_cmd_bg(old, new):
     # applies to the whole pipeline rather than just the tail braid call.
     return (
         f"(printf '%s\\n' {pq} | "
-        f"braid replace --luks-format-arg=--pbkdf --luks-format-arg=pbkdf2 --luks-format-arg=--pbkdf-force-iterations --luks-format-arg=1000 --old {old} --new {new}=/dev/disk/by-id/virtio-{new} "
+        f"braid replace --luks-format-arg=--pbkdf --luks-format-arg=pbkdf2 --luks-format-arg=--pbkdf-force-iterations --luks-format-arg=1000 --old {old} --new {new}={disk_path(new)} "
         f"--passphrase-stdin --yes) > /tmp/replace.log 2>&1 &"
     )
 
@@ -68,16 +75,8 @@ with subtest("Build 3-disk pool"):
     machine.succeed("mountpoint -q /mnt/storage")
 
 with subtest("Write urandom payload to make replace measurably slow"):
-    # 3000 MiB on tmpfs-backed virtual disks gives a replace that
-    # takes ~3s, which is wider than the ~1s shutdown window from LB
-    # detection to umount (lib/ups-fixture.nix lowers FINALDELAY to 0
-    # to keep that window tight). If this number gets trimmed back,
-    # the replace can finish before SHUTDOWNCMD actually unmounts the
-    # pool and the journal will already be cleared on reboot -- the
-    # test would silently degrade at the journal-survived assertion
-    # because there would be nothing to recover from.
     machine.succeed(
-        "dd if=/dev/urandom of=/mnt/storage/payload bs=1M count=3000 status=none"
+        "dd if=/dev/urandom of=/mnt/storage/payload bs=1M count=100 status=none"
     )
     machine.succeed("sync")
     payload_sha = machine.succeed("sha256sum /mnt/storage/payload").split()[0]
@@ -99,6 +98,7 @@ with subtest("Write urandom payload to make replace measurably slow"):
 # kernel is genuinely mid-flight.
 
 PCT_RE = re.compile(r"(\d+(?:\.\d+)?)% done")
+USED_RE = re.compile(r"\s+Data,RAID1:\s+(\d+)")
 
 
 def parse_replace_pct(status_text):
@@ -112,7 +112,45 @@ def parse_replace_pct(status_text):
     return ("idle", None)
 
 
+def get_data_raid1_used_bytes(mapper):
+    raw = machine.execute("btrfs device usage --raw /mnt/storage 2>&1")[1]
+    in_device = False
+    for line in raw.splitlines():
+        if line.startswith(f"/dev/mapper/{mapper}"):
+            in_device = True
+            continue
+        if in_device:
+            if line.strip() == "" or line.startswith("/dev/"):
+                break
+            m = USED_RE.match(line)
+            if m:
+                return int(m.group(1))
+    return None
+
+
+def ensure_replace_source_work(mapper):
+    # btrfs replace only has meaningful copy work if the source device owns
+    # Data,RAID1 extents. The small payload usually creates that state, but
+    # allocator placement can vary, so prepare until btrfs reports it.
+    for i in range(32):
+        used = get_data_raid1_used_bytes(mapper)
+        if used is not None and used > 0:
+            return used
+        machine.succeed(f"fallocate -l 64M /mnt/storage/replace-fill-{i}")
+        machine.succeed("sync")
+
+    usage = machine.execute("btrfs device usage --raw /mnt/storage 2>&1")[1]
+    raise AssertionError(
+        f"could not create Data,RAID1 allocation on {mapper} before replace:\n"
+        f"{usage}"
+    )
+
+
 with subtest("Start replace and wait for in-flight progress"):
+    disk2_used = ensure_replace_source_work("braid-disk2")
+    print(f"disk2 Data,RAID1 used before replace: {disk2_used}")
+    dm_delay_create(machine, "disk4")
+    dm_delay_activate(machine, "disk4", write_delay_ms=500)
     machine.execute(replace_cmd_bg("disk2", "disk4"))
 
     saw_in_flight = False
@@ -139,9 +177,9 @@ with subtest("Start replace and wait for in-flight progress"):
     print(last_status)
     assert not saw_finished_too_early, (
         "btrfs replace finished before the test could observe in-flight "
-        "state. The payload size is too small or the polling cadence is "
-        "too coarse. The matrix test cannot exercise the forced-shutdown "
-        "scenario without a reliable in-flight window. Last status:\n"
+        "state despite dm-delay, or the polling cadence is too coarse. "
+        "The matrix test cannot exercise the forced-shutdown scenario "
+        "without a reliable in-flight window. Last status:\n"
         + last_status
     )
     assert saw_in_flight, (
@@ -177,6 +215,8 @@ with subtest("Host shuts down in response to upsmon SHUTDOWNCMD"):
 
 machine.start()
 machine.wait_for_unit("multi-user.target", timeout=120)
+for name in DELAYED_DISKS:
+    dm_delay_create(machine, name)
 
 with subtest("Previous boot's braid-online.service stopped cleanly"):
     svc_log = machine.succeed(

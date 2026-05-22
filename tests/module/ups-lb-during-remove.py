@@ -20,7 +20,7 @@
 # initiates.
 #
 # Scenario: Operator started `braid remove disk3` against a 3-disk
-# RAID1 pool with several GiB of data. Utility power dropped during
+# RAID1 pool with data. Utility power dropped during
 # the device-remove relocation; upsmon fired SHUTDOWNCMD; the host
 # powered off mid-relocation. The next morning the operator boots the
 # NAS and runs `braid recover`. The pool comes back; if the remove
@@ -40,12 +40,21 @@ machine.wait_for_unit("upsdrv.service", timeout=60)
 passphrase = "testpassphrase"
 pq = shlex.quote(passphrase)
 luks_opts = "--pbkdf pbkdf2 --pbkdf-force-iterations 1000"
+DELAYED_DISKS = ["disk1", "disk2", "disk3"]
+REMOVE_DESTINATION_DISKS = ["disk1", "disk2"]
+REMOVE_SOURCE_DISKS = ["disk3"]
+
+
+def disk_path(key):
+    if key in DELAYED_DISKS:
+        return f"/dev/disk/by-id/braid-test-{key}-delay"
+    return f"/dev/disk/by-id/virtio-{key}"
 
 
 def add_cmd(key):
     return (
         f"printf '%s\\n' {pq} | "
-        f"braid add --luks-format-arg=--pbkdf --luks-format-arg=pbkdf2 --luks-format-arg=--pbkdf-force-iterations --luks-format-arg=1000 {key}=/dev/disk/by-id/virtio-{key} --passphrase-stdin --yes"
+        f"braid add --luks-format-arg=--pbkdf --luks-format-arg=pbkdf2 --luks-format-arg=--pbkdf-force-iterations --luks-format-arg=1000 {key}={disk_path(key)} --passphrase-stdin --yes"
     )
 
 
@@ -62,21 +71,16 @@ def remove_cmd_bg(name):
 # --- Phase 1: build a 3-disk RAID1 pool. ---
 
 with subtest("Build 3-disk pool"):
+    for name in DELAYED_DISKS:
+        dm_delay_create(machine, name)
     machine.succeed(add_cmd("disk1"))
     machine.succeed(add_cmd("disk2"))
     machine.succeed(add_cmd("disk3"))
     machine.succeed("mountpoint -q /mnt/storage")
 
-with subtest("Write urandom payload to make remove measurably slow"):
-    # 3000 MiB on tmpfs-backed disks gives the remove ~2s of in-
-    # flight relocation work, wider than the ~1s shutdown window. The
-    # payload size is bounded above by the ENOSPC preflight (see the
-    # disk-sizing comment in the .nix file): too much data and the
-    # surviving disks cannot absorb the disk-being-removed's chunks,
-    # so braid remove rejects in preflight and the test never
-    # exercises the in-flight path.
+with subtest("Write payload before remove"):
     machine.succeed(
-        "dd if=/dev/urandom of=/mnt/storage/payload bs=1M count=3000 status=none"
+        "dd if=/dev/urandom of=/mnt/storage/payload bs=1M count=100 status=none"
     )
     machine.succeed("sync")
     payload_sha = machine.succeed("sha256sum /mnt/storage/payload").split()[0]
@@ -84,10 +88,8 @@ with subtest("Write urandom payload to make remove measurably slow"):
 
 # --- Phase 2: kick off the remove. There is no `btrfs device remove
 # status` equivalent to `btrfs replace status -1`, so we drive the LB
-# trigger off the device-usage signal: poll `btrfs device usage --raw
-# /mnt/storage` for disk3 and break once its `Used` count drops below
-# the initial (= relocation in flight). Hard-fail if we never see
-# in-flight progress so a degraded test does not silently no-op. ---
+# trigger off the kernel exclusive-operation signal. Hard-fail if we
+# never see `device remove` so a degraded test does not silently no-op. ---
 
 USED_RE = re.compile(r"\s+Data,RAID1:\s+(\d+)")
 
@@ -109,35 +111,55 @@ def get_disk3_used_bytes():
     return None
 
 
+def ensure_disk3_relocation_work():
+    # btrfs device remove only has data relocation work if the source device
+    # owns Data,RAID1 extents. The small payload usually creates that state,
+    # but do not rely on allocator placement: allocate bounded filler until
+    # btrfs reports disk3 data extents directly.
+    for i in range(32):
+        used = get_disk3_used_bytes()
+        if used is not None and used > 0:
+            return used
+        machine.succeed(f"fallocate -l 64M /mnt/storage/remove-fill-{i}")
+        machine.succeed("sync")
+
+    usage = machine.execute("btrfs device usage --raw /mnt/storage 2>&1")[1]
+    raise AssertionError(
+        "could not create Data,RAID1 allocation on disk3 before remove:\n"
+        f"{usage}"
+    )
+
+
 with subtest("Start remove and wait for in-flight relocation"):
-    initial_used = get_disk3_used_bytes()
+    initial_used = ensure_disk3_relocation_work()
     print(f"disk3 Data,RAID1 used (initial): {initial_used}")
     assert initial_used is not None and initial_used > 0, (
         f"could not read disk3's Data,RAID1 usage before remove\n"
         f"output: {machine.execute('btrfs device usage --raw /mnt/storage 2>&1')[1]}"
     )
 
+    dm_delay_activate(machine, REMOVE_DESTINATION_DISKS, write_delay_ms=500)
+    dm_delay_activate(machine, REMOVE_SOURCE_DISKS, read_delay_ms=500)
     machine.execute(remove_cmd_bg("disk3"))
 
     saw_in_flight = False
+    last_exclusive_op = ""
     for _ in range(800):  # 40s budget
-        used = get_disk3_used_bytes()
-        if used is not None and used < initial_used:
+        ret = machine.execute(
+            "cat /sys/fs/btrfs/*/exclusive_operation 2>&1"
+        )
+        last_exclusive_op = ret[1]
+        if "device remove" in last_exclusive_op.lower():
             saw_in_flight = True
-            print(
-                f"disk3 Data,RAID1 used now: {used} "
-                f"(down from {initial_used} -- relocation in flight)"
-            )
-            break
-        if used is None:
-            # Disk3 stanza disappeared -- remove finished already.
+            print(f"exclusive_operation: {last_exclusive_op.strip()}")
             break
         time.sleep(0.05)
 
     assert saw_in_flight, (
-        "Never observed disk3 relocation in flight. The remove may have "
-        "finished too fast (bump the payload size in the .nix) or the "
-        "btrfs device-usage parsing fell out of date.\n"
+        "Never observed device remove in flight. The remove may have "
+        "finished too fast despite dm-delay, or the exclusive_operation "
+        "probe fell out of date.\n"
+        f"last exclusive_operation:\n{last_exclusive_op}\n"
         f"final usage:\n{machine.execute('btrfs device usage --raw /mnt/storage 2>&1')[1]}"
     )
 
@@ -167,6 +189,8 @@ with subtest("Host shuts down in response to upsmon SHUTDOWNCMD"):
 
 machine.start()
 machine.wait_for_unit("multi-user.target", timeout=120)
+for name in DELAYED_DISKS:
+    dm_delay_create(machine, name)
 
 with subtest("Previous boot's braid-online.service stopped cleanly"):
     svc_log = machine.succeed(
@@ -184,7 +208,7 @@ with subtest("Previous boot's braid-online.service stopped cleanly"):
 # Whether or not the journal survived depends on a millisecond-level
 # race between the kernel's chunk-relocation loop and systemd's
 # shutdown sequence. The test design forces the journal to survive in
-# the typical case (5 GiB payload + 1s shutdown window), but the
+# the typical case, but the
 # matrix's correctness contract is "post-recover state is clean",
 # not "the journal definitely existed". Capture which path we took.
 journal_existed = (
@@ -199,9 +223,8 @@ with subtest("Pending-op journal survived the forced shutdown"):
     # path is never exercised.
     assert journal_existed, (
         "remove finished before umount and the journal is gone -- the "
-        "matrix test silently degraded to a no-op. Bump the payload "
-        "size in tests/module/ups-lb-during-remove.py to widen the "
-        "in-flight window."
+        "matrix test silently degraded to a no-op. Increase the dm-delay "
+        "or the relocation-work threshold to widen the in-flight window."
     )
 
 with subtest("braid unlock refuses with journal present"):

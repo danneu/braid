@@ -40,5 +40,6 @@
       ];
     };
 
-  testScript = builtins.readFile ./progress-monitoring.py;
+  testScript =
+    builtins.readFile ./module/dm_delay_helpers.py + "\n\n" + builtins.readFile ./progress-monitoring.py;
 }

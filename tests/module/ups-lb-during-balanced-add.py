@@ -17,8 +17,8 @@
 # the replay regresses, the post-recover assertion that no `Data,
 # single` chunks remain will fail.
 #
-# Scenario: Operator's pool was 1-disk single-profile with several
-# GiB of data. They added a second disk via `braid add` to gain
+# Scenario: Operator's pool was 1-disk single-profile with data.
+# They added a second disk via `braid add` to gain
 # RAID1 redundancy. The UPS LB fired during the post-add balance
 # that converts single-profile chunks to RAID1. The next morning
 # they run `braid recover`. The pool comes back fully RAID1 -- no
@@ -37,12 +37,19 @@ machine.wait_for_unit("upsdrv.service", timeout=60)
 passphrase = "testpassphrase"
 pq = shlex.quote(passphrase)
 luks_opts = "--pbkdf pbkdf2 --pbkdf-force-iterations 1000"
+DELAYED_DISKS = ["disk2"]
+
+
+def disk_path(key):
+    if key in DELAYED_DISKS:
+        return f"/dev/disk/by-id/braid-test-{key}-delay"
+    return f"/dev/disk/by-id/virtio-{key}"
 
 
 def add_cmd(key):
     return (
         f"printf '%s\\n' {pq} | "
-        f"braid add --luks-format-arg=--pbkdf --luks-format-arg=pbkdf2 --luks-format-arg=--pbkdf-force-iterations --luks-format-arg=1000 {key}=/dev/disk/by-id/virtio-{key} --passphrase-stdin --yes"
+        f"braid add --luks-format-arg=--pbkdf --luks-format-arg=pbkdf2 --luks-format-arg=--pbkdf-force-iterations --luks-format-arg=1000 {key}={disk_path(key)} --passphrase-stdin --yes"
     )
 
 
@@ -52,7 +59,7 @@ def add_cmd_bg(key):
     # & applies to the whole pipeline rather than just the tail.
     return (
         f"(printf '%s\\n' {pq} | "
-        f"braid add --luks-format-arg=--pbkdf --luks-format-arg=pbkdf2 --luks-format-arg=--pbkdf-force-iterations --luks-format-arg=1000 {key}=/dev/disk/by-id/virtio-{key} "
+        f"braid add --luks-format-arg=--pbkdf --luks-format-arg=pbkdf2 --luks-format-arg=--pbkdf-force-iterations --luks-format-arg=1000 {key}={disk_path(key)} "
         f"--passphrase-stdin --yes) > /tmp/add.log 2>&1 &"
     )
 
@@ -64,12 +71,8 @@ with subtest("Build 1-disk pool"):
     machine.succeed("mountpoint -q /mnt/storage")
 
 with subtest("Write urandom payload as single-profile chunks"):
-    # 3 GiB on a 1-disk pool is single-profile by construction (no
-    # second disk for RAID1 mirroring). The post-add balance will
-    # convert these single chunks to RAID1, which on tmpfs-backed
-    # virtual disks takes ~3s -- wider than the ~1s shutdown window.
     machine.succeed(
-        "dd if=/dev/urandom of=/mnt/storage/payload bs=1M count=3000 status=none"
+        "dd if=/dev/urandom of=/mnt/storage/payload bs=1M count=100 status=none"
     )
     machine.succeed("sync")
     payload_sha = machine.succeed("sha256sum /mnt/storage/payload").split()[0]
@@ -93,6 +96,8 @@ with subtest("Pre-add: chunks are single-profile"):
 PCT_RE = re.compile(r"(\d+)% left")
 
 with subtest("Start braid add and wait for post-add balance in flight"):
+    dm_delay_create(machine, "disk2")
+    dm_delay_activate(machine, "disk2", write_delay_ms=500)
     machine.execute(add_cmd_bg("disk2"))
 
     saw_balance_with_room = False
@@ -141,6 +146,8 @@ with subtest("Host shuts down in response to upsmon SHUTDOWNCMD"):
 
 machine.start()
 machine.wait_for_unit("multi-user.target", timeout=120)
+for name in DELAYED_DISKS:
+    dm_delay_create(machine, name)
 
 with subtest("Previous boot's braid-online.service stopped cleanly"):
     svc_log = machine.succeed(

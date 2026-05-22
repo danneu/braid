@@ -41,6 +41,13 @@ machine.wait_for_unit("multi-user.target")
 
 passphrase = "testpassphrase"
 luks_opts = "--pbkdf pbkdf2 --pbkdf-force-iterations 1000"
+DELAYED_DISKS = {"disk1", "disk2"}
+
+
+def disk_path(key):
+    if key in DELAYED_DISKS:
+        return f"/dev/disk/by-id/braid-test-{key}-delay"
+    return f"/dev/disk/by-id/virtio-{key}"
 
 
 def add_cmd(key):
@@ -48,7 +55,7 @@ def add_cmd(key):
     pq = shlex.quote(passphrase)
     return (
         f"printf '%s\\n' {pq} | "
-        f"braid add --luks-format-arg=--pbkdf --luks-format-arg=pbkdf2 --luks-format-arg=--pbkdf-force-iterations --luks-format-arg=1000 {key}=/dev/disk/by-id/virtio-{key} --passphrase-stdin --yes"
+        f"braid add --luks-format-arg=--pbkdf --luks-format-arg=pbkdf2 --luks-format-arg=--pbkdf-force-iterations --luks-format-arg=1000 {key}={disk_path(key)} --passphrase-stdin --yes"
     )
 
 
@@ -70,6 +77,8 @@ def close_all():
 # --- Setup: Create a 3-disk RAID1 pool ---
 
 with subtest("Setup: create 3-disk pool"):
+    for name in DELAYED_DISKS:
+        dm_delay_create(machine, name)
     machine.succeed(add_cmd("disk1"))
     machine.succeed(add_cmd("disk2"))
     machine.succeed(add_cmd("disk3"))
@@ -496,7 +505,7 @@ with subtest("Test 7: uninitialized disk detected — degraded-refused enumerate
         "disks": {
             disk1_uuid: {
                 "name": "disk1",
-                "by_id": "/dev/disk/by-id/virtio-disk1",
+                "by_id": disk_path("disk1"),
             },
             "44444444-4444-4444-4444-444444444444": {
                 "name": "raw",
@@ -550,9 +559,10 @@ with subtest("Test 8: paused balance survives unlock"):
     # Write enough data to create multiple btrfs chunks so balance has
     # observable work that can be paused mid-operation.
     machine.succeed(
-        "dd if=/dev/urandom of=/mnt/storage/balancedata bs=1M count=512"
+        "dd if=/dev/urandom of=/mnt/storage/balancedata bs=1M count=32"
     )
     machine.succeed("sync")
+    dm_delay_activate(machine, DELAYED_DISKS, write_delay_ms=500)
 
     import re
 
@@ -612,6 +622,8 @@ with subtest("Test 8: paused balance survives unlock"):
             "Could not pause balance with remaining work after 3 full attempts"
         )
 
+    dm_delay_deactivate(machine, DELAYED_DISKS)
+
     # Lock and re-unlock
     close_all()
     ret = machine.execute(unlock_cmd(passphrase) + " 2>&1")
@@ -643,7 +655,7 @@ with subtest("Test 9: mount failure closes mappers opened by unlock"):
     pq = shlex.quote(passphrase)
     machine.succeed(
         f"printf '%s' {pq} | cryptsetup luksOpen --key-file=- "
-        "/dev/disk/by-id/virtio-disk1 braid-disk1"
+        f"{disk_path('disk1')} braid-disk1"
     )
     machine.succeed("wipefs -a /dev/mapper/braid-disk1")
     machine.succeed("cryptsetup close braid-disk1")

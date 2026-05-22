@@ -44,6 +44,7 @@
         braid
         pkgs.cryptsetup
         pkgs.btrfs-progs
+        pkgs.lvm2
       ];
 
       environment.etc."braid/config.json".text = builtins.toJSON {
@@ -57,5 +58,7 @@
   # module path, so a normal `import` would not work — see
   # tests/cli/inhibitor_helpers.py for details.
   testScript =
-    builtins.readFile ./inhibitor_helpers.py + "\n\n" + builtins.readFile ./replace-inhibits-suspend.py;
+    builtins.readFile ./../module/dm_delay_helpers.py + "\n\n"
+    + builtins.readFile ./inhibitor_helpers.py + "\n\n"
+    + builtins.readFile ./replace-inhibits-suspend.py;
 }
