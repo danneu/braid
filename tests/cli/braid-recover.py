@@ -308,8 +308,9 @@ with subtest("braid recover self-mounts and rebuilds pool.json"):
     assert "recover remount cycle" not in err, (
         f"post-add recovery must not run the replace remount cycle, got: {err!r}"
     )
-    # post-{label} RAID1 soft balance replay rows from replay_post_mutation.
-    # Pin the substring shared with module tests for cross-suite consistency.
+    # post-{label} RAID1 soft balance replay rows from
+    # replay_owed_raid1_maintenance. Pin the substring shared with module tests
+    # for cross-suite consistency.
     soft_replay_wait = "replaying post-add RAID1 soft balance"
     soft_replay_ok = "[ok]   pool: RAID1 soft balance replay complete\n"
     assert soft_replay_wait in err, (

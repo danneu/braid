@@ -688,9 +688,16 @@ impl RecoverCompletion {
                 *restore_raid1_after_commit,
                 false,
             ),
-            RecoverCompletion::GenericLivePool { .. } => {
-                execute_generic_live_pool_recovery(runner, by_id_resolver, params, plan, pool)
-            }
+            RecoverCompletion::GenericLivePool {
+                replay_raid1_maintenance,
+            } => execute_generic_live_pool_recovery(
+                runner,
+                by_id_resolver,
+                params,
+                plan,
+                pool,
+                *replay_raid1_maintenance,
+            ),
         }
     }
 }
@@ -1043,6 +1050,7 @@ fn execute_generic_live_pool_recovery<R: CommandRunner + Sync>(
     params: &RecoverParams<'_>,
     plan: &RecoverWorkPlan,
     pool: PoolState,
+    replay_raid1_maintenance: bool,
 ) -> Result<(), RecoverError> {
     let prior = membership::load_membership(params.paths).ok();
     let mut recovered =
@@ -1129,13 +1137,9 @@ fn execute_generic_live_pool_recovery<R: CommandRunner + Sync>(
         })?;
     }
 
-    replay_post_mutation(
-        runner,
-        &plan.mount_point,
-        &plan.journal.op,
-        &pool,
-        params.progress,
-    )?;
+    if replay_raid1_maintenance {
+        replay_owed_raid1_maintenance(runner, &plan.mount_point, "add", &pool, params.progress)?;
+    }
 
     if let journal::OpKind::Remove { luks_uuid, .. } = &plan.journal.op
         && recovered.by_uuid(luks_uuid).is_none()
@@ -1490,9 +1494,23 @@ pub fn plan_recover<R: CommandRunner + Sync, F: Filesystem + ?Sized>(
             restore_raid1_after_commit: *restore_raid1_after_commit,
         },
         journal::OpKind::Add { .. } => RecoverCompletion::GenericLivePool {
+            // For Add the new disk is already in the pool (so `braid add` would
+            // refuse on rerun), so recover-side replay avoids stranding the
+            // operator with single-profile chunks they have to fix manually
+            // with `btrfs balance start`.
             replay_raid1_maintenance: true,
         },
         journal::OpKind::Remove { .. } => RecoverCompletion::GenericLivePool {
+            // No resume, no replay. `braid remove` is the only mutation whose
+            // pre-mutation phase issues a balance (the RAID1 -> single
+            // conversion in the 2->1 case), so a paused balance observed here
+            // may belong to an unfinished pre-remove rather than to a
+            // post-mutation rebalance. Resuming it would complete the
+            // conversion-to-single without removing the device, then journal
+            // clear would silently halve redundancy. The recovery_guidance
+            // message directs the operator to re-run `braid remove` instead,
+            // which handles every shape (2->1 pre-balance, 3->2 / 4->3 with no
+            // pre-balance) correctly.
             replay_raid1_maintenance: false,
         },
     };
@@ -1813,114 +1831,6 @@ fn replay_owed_raid1_maintenance<R: CommandRunner + Sync>(
             )
         );
     }
-    Ok(())
-}
-
-/// Re-issue legacy generic post-mutation work after pool.json has been
-/// rewritten and before the journal is cleared.
-///
-/// This helper is intentionally limited to generic Add balance replay plus
-/// Remove's explicit no-op. Phased Add, Replace, and RemoveMissing recovery
-/// use phase-specific handlers so post phases cannot accidentally rerun their
-/// primary btrfs membership mutation.
-///
-///    `OpKind::Remove` is intentionally skipped for BOTH the resume and
-///    the soft replay: the operator's recovery path is to re-run
-///    `braid remove`, which itself runs the appropriate
-///    `pool_balance_single`. Resuming a paused balance here would be
-///    actively wrong for the 2->1 case -- `braid remove` runs
-///    `pool_balance_single` BEFORE the device is dropped, so a shutdown
-///    that lands during that pre-balance leaves the kernel with a paused
-///    convert-to-single balance against a still-2-disk pool. Resuming it
-///    would convert RAID1 -> single without ever removing the device,
-///    then this function returns Ok and the journal gets cleared,
-///    silently halving redundancy. Letting `braid remove` rerun handles
-///    every shape (2->1 pre-balance, 3->2 / 4->3 with no pre-balance)
-///    correctly.
-///
-///    For `OpKind::Add` the new disk is already in the pool (so
-///    `braid add` would refuse on rerun), so recover-side replay avoids
-///    stranding the operator with single-profile chunks they have to fix
-///    manually with `btrfs balance start`.
-fn replay_post_mutation<R: CommandRunner + Sync>(
-    runner: &R,
-    mount_point: &MountPoint,
-    op: &journal::OpKind,
-    pool: &PoolState,
-    progress: ProgressOutput,
-) -> Result<(), RecoverError> {
-    let color_enabled = color_enabled_for_stderr();
-    match op {
-        journal::OpKind::Add { .. } => {
-            if let BalanceReport::Paused { .. } = get_balance_report(runner, mount_point) {
-                eprint!(
-                    "{}",
-                    status_line(
-                        StatusTag::Wait,
-                        color_enabled,
-                        &format!(
-                            "pool: resuming paused balance left by interrupted {}...",
-                            journal_op_label(op)
-                        ),
-                    )
-                );
-                crate::pool::pool_balance_resume(runner, mount_point, progress)
-                    .map_err(|e| RecoverError::Failed(format!("recover balance resume: {e}")))?;
-                eprint!(
-                    "{}",
-                    status_line(
-                        StatusTag::Ok,
-                        color_enabled,
-                        "pool: balance resume complete",
-                    )
-                );
-            }
-
-            if pool.devices.len() >= 2 {
-                eprint!(
-                    "{}",
-                    status_line(
-                        StatusTag::Wait,
-                        color_enabled,
-                        &format!(
-                            "pool: replaying post-{} RAID1 soft balance (skip already-RAID1 chunks)...",
-                            journal_op_label(op)
-                        ),
-                    )
-                );
-                crate::pool::pool_balance_raid1_soft(runner, mount_point, progress)
-                    .map_err(|e| RecoverError::Failed(format!("recover balance replay: {e}")))?;
-                eprint!(
-                    "{}",
-                    status_line(
-                        StatusTag::Ok,
-                        color_enabled,
-                        "pool: RAID1 soft balance replay complete",
-                    )
-                );
-            }
-        }
-        journal::OpKind::Remove { .. } => {
-            // No resume, no replay. `braid remove` is the only mutation
-            // whose pre-mutation phase issues a balance (the RAID1 ->
-            // single conversion in the 2->1 case), so a paused balance
-            // observed here may belong to an unfinished pre-remove rather
-            // than to a post-mutation rebalance. Resuming it would
-            // complete the conversion-to-single without removing the
-            // device, then we'd clear the journal and silently lose
-            // redundancy. The recovery_guidance message directs the
-            // operator to re-run `braid remove` instead, which handles
-            // every shape (2->1 pre-balance, 3->2 / 4->3 with no
-            // pre-balance) correctly.
-        }
-        journal::OpKind::RemoveMissing { .. } | journal::OpKind::Replace { .. } => {
-            return Err(RecoverError::Failed(
-                "internal error: phased replace/remove-missing recovery reached generic replay"
-                    .into(),
-            ));
-        }
-    }
-
     Ok(())
 }
 
@@ -2346,10 +2256,10 @@ fn execute_add_post_balance_recovery<R: CommandRunner + Sync>(
                 })?,
         )
     };
-    replay_post_mutation(
+    replay_owed_raid1_maintenance(
         runner,
         params.config.mount_point(),
-        &journal.op,
+        "add",
         &pool,
         params.progress,
     )?;
@@ -5680,6 +5590,7 @@ mod tests {
             &params,
             &plan,
             pool_state_two_disks(),
+            true,
         )
         .expect("bootstrap recovery should clear acked-stats and finish");
 
@@ -6245,6 +6156,7 @@ mod tests {
             &params,
             &plan,
             pool_state_one_disk(),
+            false,
         )
         .expect("committed remove recovery should finish");
 
@@ -6282,6 +6194,7 @@ mod tests {
             &params,
             &plan,
             pool_state_disk1_with_null_underlying_disk2(),
+            false,
         )
         .expect("uncommitted remove recovery should finish");
 
@@ -6318,6 +6231,7 @@ mod tests {
             &params,
             &plan,
             pool_state_one_disk(),
+            false,
         )
         .expect("remove recovery should tolerate missing target devid");
 
@@ -6351,6 +6265,7 @@ mod tests {
             &params,
             &plan,
             pool_state_one_disk(),
+            false,
         )
         .expect("corrupt acked-stats should warn, not fail remove recovery");
 
@@ -6481,6 +6396,7 @@ mod tests {
             &params,
             &plan,
             pool_state_two_disks(),
+            true,
         )
         .unwrap_err();
 
@@ -11663,7 +11579,7 @@ mod tests {
                 },
                 cryptsetup_uuid_ok("/dev/vdb", "22222222-2222-2222-2222-222222222222"),
             )
-            // M1: replay_post_mutation runs the post-Add soft RAID1
+            // M1: replay_owed_raid1_maintenance runs the post-Add soft RAID1
             // balance because pool has 2 devices and OpKind is Add.
             .with_output(
                 CmdRequest::BtrfsBalanceRaid1Soft {
@@ -11813,7 +11729,7 @@ mod tests {
                 },
                 cryptsetup_uuid_ok("/dev/vdb", "22222222-2222-2222-2222-222222222222"),
             )
-            // M1: replay_post_mutation runs the post-Add soft RAID1
+            // M1: replay_owed_raid1_maintenance runs the post-Add soft RAID1
             // balance because pool has 2 devices and OpKind is Add.
             .with_output(
                 CmdRequest::BtrfsBalanceRaid1Soft {
@@ -12318,7 +12234,7 @@ mod tests {
                 },
                 btrfs_show_disk1_and_new(),
             )
-            // ── replay_post_mutation ────────────────────────────────────
+            // ── execute_replace_post_maintenance_recovery ───────────────
             // Resize-to-max on the new device's devid (2).
             .with_output(
                 CmdRequest::BtrfsFilesystemResize {
@@ -13214,7 +13130,7 @@ mod tests {
                 },
                 cryptsetup_uuid_ok("/dev/vdb", "22222222-2222-2222-2222-222222222222"),
             )
-            // M1: replay_post_mutation runs the post-Add soft RAID1
+            // M1: replay_owed_raid1_maintenance runs the post-Add soft RAID1
             // balance because pool has 2 devices and OpKind is Add.
             .with_output(
                 CmdRequest::BtrfsBalanceRaid1Soft {
@@ -14020,7 +13936,7 @@ mod tests {
                 },
                 cryptsetup_uuid_ok("/dev/vdb", "22222222-2222-2222-2222-222222222222"),
             )
-            // M1: replay_post_mutation runs the post-Add soft RAID1
+            // M1: replay_owed_raid1_maintenance runs the post-Add soft RAID1
             // balance because pool has 2 devices and OpKind is Add.
             .with_output(
                 CmdRequest::BtrfsBalanceRaid1Soft {
@@ -14518,8 +14434,9 @@ mod tests {
     }
 
     /// btrfs filesystem show for the post-replace pool: disk1 (devid 1) + new
-    /// (devid 2). The "new" mapper is what `replay_post_mutation` keys off to
-    /// resolve the new device's devid.
+    /// (devid 2). The "new" mapper is what
+    /// `execute_replace_post_maintenance_recovery` keys off to resolve the new
+    /// device's devid.
     fn btrfs_show_disk1_and_new() -> RawCommandOutput {
         ok_raw(
             "btrfs filesystem show /mnt/storage",
@@ -14915,7 +14832,7 @@ mod tests {
                 },
                 cryptsetup_uuid_ok("/dev/vdc", "33333333-3333-3333-3333-333333333333"),
             )
-            // ── replay_post_mutation ────────────────────────────────────
+            // ── execute_replace_post_maintenance_recovery ───────────────
             // Resize-to-max on the new device's devid (2). Load-bearing
             // assertion: without this mock the test fails with MissingMock,
             // proving recover actually issued the resize.
@@ -15153,7 +15070,7 @@ mod tests {
     /// phase issues a balance (the RAID1 -> single conversion in the 2->1
     /// case via `pool_balance_single`). A shutdown landing during that
     /// pre-balance leaves the kernel with a paused convert-to-single balance
-    /// against a still-2-disk pool. If `replay_post_mutation` resumed it
+    /// against a still-2-disk pool. If `replay_owed_raid1_maintenance` resumed it
     /// unconditionally, recover would finish the conversion to single
     /// without ever removing the device, then clear the journal, silently
     /// halving redundancy. The matrix test `ups-lb-during-remove` only
@@ -15212,11 +15129,11 @@ mod tests {
                 cryptsetup_uuid_ok("/dev/vdb", "22222222-2222-2222-2222-222222222222"),
             );
         // Note: BtrfsBalanceStatus, BtrfsBalanceResume, and BtrfsBalanceRaid1Soft
-        // are NOT mocked. If replay_post_mutation regresses and either probes
-        // balance status, issues `btrfs balance resume`, or replays the soft
-        // RAID1 balance for OpKind::Remove, the test fails with MissingMock --
-        // proving recover correctly leaves the paused balance alone for the
-        // remove path.
+        // are NOT mocked. If the runtime gate for OpKind::Remove regresses and
+        // recover calls replay_owed_raid1_maintenance -- either probing balance
+        // status, issuing `btrfs balance resume`, or replaying the soft RAID1
+        // balance -- the test fails with MissingMock, proving recover correctly
+        // leaves the paused balance alone for the remove path.
 
         let resolver = resolver_for(&[("/dev/vda", "virtio-disk1"), ("/dev/vdb", "virtio-disk2")]);
         let result = cmd_recover(
@@ -15238,6 +15155,99 @@ mod tests {
         assert!(
             !f.paths.pending_op_json().exists(),
             "journal must be cleared so the operator can re-run braid remove cleanly"
+        );
+    }
+
+    // Intent
+    // cmd_recover for a bootstrap-Add journal issues the post-mutation soft
+    // RAID1 balance.
+    //
+    // Why it exists
+    // The pivot moved the runtime decision out of a per-op match in
+    // replay_post_mutation and into the typed plan's
+    // `RecoverCompletion::GenericLivePool.replay_raid1_maintenance`, set at
+    // plan-construction time. If that value silently flips to false for Add,
+    // or the executor stops consuming it, recovery would clear the journal
+    // without replaying the soft RAID1 balance and leave the operator with
+    // single-profile chunks. The pre-existing direct-call test
+    // `bootstrap_recovery_clears_acked_stats` only asserts acked-stats
+    // cleanup, so it would stay green through such a regression. This test
+    // fails the moment either end of the construction-time/runtime contract
+    // regresses.
+    //
+    // Scenario
+    // A 2-disk bootstrap-Add crashed after btrfs created the filesystem;
+    // recovery enters with the live pool already showing both disks, replays
+    // the owed maintenance, and clears the journal.
+    #[test]
+    fn cmd_recover_bootstrap_add_replays_owed_raid1_maintenance() {
+        let f = PoolFixture::empty();
+        let fs = MockFs::new(&[]);
+
+        let journal = bootstrap_pool_mutation_add_journal();
+        journal::write_journal(&f.paths, &journal).unwrap();
+
+        let (mp_req, mp_out) = mountpoint_ok();
+        let runner = with_balance_replay(
+            MockRunner::default()
+                // mountpoint check -> already mounted (skips the mount cycle)
+                .with_output(mp_req, mp_out)
+                // probe_pool path -- both disks are live because the
+                // bootstrap crash landed after btrfs created the filesystem
+                // but before pool.json/journal cleanup ran.
+                .with_output(
+                    CmdRequest::BtrfsFilesystemShow {
+                        mount_point: MountPoint("/mnt/storage".into()),
+                    },
+                    btrfs_show_two_disks(),
+                )
+                .with_output(
+                    CmdRequest::CryptsetupStatus {
+                        mapper: MapperName("braid-disk1".into()),
+                    },
+                    cryptsetup_status_active("braid-disk1", "/dev/vda"),
+                )
+                .with_output(
+                    CmdRequest::CryptsetupLuksUuid {
+                        device: "/dev/vda".into(),
+                    },
+                    cryptsetup_uuid_ok("/dev/vda", "11111111-1111-1111-1111-111111111111"),
+                )
+                .with_output(
+                    CmdRequest::CryptsetupStatus {
+                        mapper: MapperName("braid-disk2".into()),
+                    },
+                    cryptsetup_status_active("braid-disk2", "/dev/vdb"),
+                )
+                .with_output(
+                    CmdRequest::CryptsetupLuksUuid {
+                        device: "/dev/vdb".into(),
+                    },
+                    cryptsetup_uuid_ok("/dev/vdb", "22222222-2222-2222-2222-222222222222"),
+                ),
+        );
+
+        let resolver = resolver_for(&[("/dev/vda", "virtio-disk1"), ("/dev/vdb", "virtio-disk2")]);
+        cmd_recover(
+            &runner,
+            &fs,
+            &resolver,
+            &f.recover_params().passphrase_file(None).build(),
+        )
+        .expect("bootstrap-Add recovery should replay owed maintenance");
+
+        let requests = runner.requests();
+        assert!(
+            requests.iter().any(|r| matches!(
+                r,
+                CmdRequest::BtrfsBalanceRaid1Soft { mount_point }
+                    if mount_point.as_str() == "/mnt/storage"
+            )),
+            "cmd_recover Add path must issue post-mutation soft RAID1 balance"
+        );
+        assert!(
+            !f.paths.pending_op_json().exists(),
+            "journal must clear after successful maintenance replay"
         );
     }
 
