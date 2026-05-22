@@ -149,7 +149,10 @@ impl RealStopCoordinator {
         Ok(StopCoordinatorGuard { lock })
     }
 
-    pub fn poll_for_done_or_release(&self, deadline: Duration) -> StopCoordinatorPollResult {
+    pub fn poll_for_done_or_release(
+        &self,
+        deadline: Duration,
+    ) -> Result<StopCoordinatorPollResult, StopCoordinatorError> {
         self.poll_for_done_or_release_inner(deadline, || {})
     }
 
@@ -158,29 +161,30 @@ impl RealStopCoordinator {
         &self,
         deadline: Duration,
         mut after_pre_read: F,
-    ) -> StopCoordinatorPollResult {
+    ) -> Result<StopCoordinatorPollResult, StopCoordinatorError> {
         let start = Instant::now();
         loop {
             if std::fs::read(&self.path).is_ok_and(|bytes| bytes == DONE_MARKER) {
-                return StopCoordinatorPollResult::Done;
+                return Ok(StopCoordinatorPollResult::Done);
             }
             after_pre_read();
             match self.open_and_lock() {
                 Ok(lock) => {
                     if std::fs::read(&self.path).is_ok_and(|bytes| bytes == DONE_MARKER) {
                         drop(lock);
-                        return StopCoordinatorPollResult::Done;
+                        return Ok(StopCoordinatorPollResult::Done);
                     }
-                    return StopCoordinatorPollResult::Acquired(StopCoordinatorGuard { lock });
+                    return Ok(StopCoordinatorPollResult::Acquired(StopCoordinatorGuard {
+                        lock,
+                    }));
                 }
                 Err(StopCoordinatorError::Held) if start.elapsed() < deadline => {
                     thread::sleep(STOP_COORDINATOR_POLL_INTERVAL);
                 }
-                Err(StopCoordinatorError::Held) => return StopCoordinatorPollResult::Deadline,
-                Err(_) if start.elapsed() < deadline => {
-                    thread::sleep(STOP_COORDINATOR_POLL_INTERVAL);
+                Err(StopCoordinatorError::Held) => {
+                    return Ok(StopCoordinatorPollResult::Deadline);
                 }
-                Err(_) => return StopCoordinatorPollResult::Deadline,
+                Err(e) => return Err(e),
             }
         }
     }
@@ -435,8 +439,8 @@ mod tests {
         });
 
         assert!(
-            matches!(result, StopCoordinatorPollResult::Done),
-            "expected Done after predecessor wrote done\\n and died in the TOCTOU window"
+            matches!(result, Ok(StopCoordinatorPollResult::Done)),
+            "expected Ok(Done) after predecessor wrote done\\n and died in the TOCTOU window"
         );
         assert_eq!(
             std::fs::read(&path).unwrap(),
@@ -455,7 +459,7 @@ mod tests {
 
         let other = RealStopCoordinator::new(&path);
         match other.poll_for_done_or_release(Duration::from_millis(50)) {
-            StopCoordinatorPollResult::Done => {}
+            Ok(StopCoordinatorPollResult::Done) => {}
             _ => panic!("expected done while original holder still owns flock"),
         }
         drop(guard);
@@ -471,7 +475,7 @@ mod tests {
         drop(guard);
 
         match other.poll_for_done_or_release(Duration::from_millis(50)) {
-            StopCoordinatorPollResult::Acquired(_) => {}
+            Ok(StopCoordinatorPollResult::Acquired(_)) => {}
             _ => panic!("expected acquired after release without done"),
         }
     }
@@ -485,8 +489,41 @@ mod tests {
         let other = RealStopCoordinator::new(&path);
 
         match other.poll_for_done_or_release(Duration::from_millis(20)) {
-            StopCoordinatorPollResult::Deadline => {}
+            Ok(StopCoordinatorPollResult::Deadline) => {}
             _ => panic!("expected deadline"),
         }
+    }
+
+    // Intent: poll_for_done_or_release short-circuits with Err(Io(_)) when the
+    // coordinator path cannot be opened, rather than masquerading as a
+    // Deadline.
+    // Why it exists: the previous shape used `Err(_)` catch-all arms that
+    // absorbed any non-Held failure -- including EACCES, ENOSPC, ENOENT --
+    // and silently kept polling until the deadline, then returned Deadline.
+    // The caller then printed "pool lock not released within ... -- aborting
+    // --systemd-stop", which is wrong: there was no contention; the
+    // operator's actual fault is an unwritable coordinator path. A regression
+    // that re-introduces a catch-all Err arm would silently restore the
+    // fabricated deadline.
+    // Scenario: an operator runs `braid lock --systemd-stop` against a host
+    // where the stop-coordinator path is unopenable (e.g. /run unmounted, or
+    // a hardening rule revoked write access). The poll must surface the
+    // actual I/O error so print_cli_error reports the real fault, not
+    // fabricate a contention-deadline message.
+    #[test]
+    fn stop_coordinator_poll_returns_err_io_when_coordinator_path_is_unwritable() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("missing/coord.lock");
+        let coord = RealStopCoordinator::new(&path);
+
+        let err = match coord.poll_for_done_or_release(Duration::from_millis(100)) {
+            Ok(_) => panic!("expected Err(Io(_)) for unopenable coordinator path; got Ok"),
+            Err(e) => e,
+        };
+        assert!(
+            matches!(err, StopCoordinatorError::Io(_)),
+            "expected Err(Io(_)); got Err({:?})",
+            err,
+        );
     }
 }

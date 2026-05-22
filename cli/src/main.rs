@@ -1183,10 +1183,14 @@ fn run_systemd_stop_lock(
         Ok(guard) => guard,
         Err(StopCoordinatorError::Held) => {
             match stop_coordinator.poll_for_done_or_release(deadline) {
-                StopCoordinatorPollResult::Done => return,
-                StopCoordinatorPollResult::Acquired(guard) => guard,
-                StopCoordinatorPollResult::Deadline => {
+                Ok(StopCoordinatorPollResult::Done) => return,
+                Ok(StopCoordinatorPollResult::Acquired(guard)) => guard,
+                Ok(StopCoordinatorPollResult::Deadline) => {
                     eprintln!("{}", PoolLockError::DeadlineExpired { waited: deadline });
+                    std::process::exit(1);
+                }
+                Err(e) => {
+                    print_cli_error(&e.to_string());
                     std::process::exit(1);
                 }
             }
