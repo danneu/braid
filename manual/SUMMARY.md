@@ -14,6 +14,7 @@
 - [UPS](guides/ups.md)
 - [NixOS configuration](guides/nixos-configuration.md)
 - [Sharing and permissions](guides/sharing-and-permissions.md)
+- [Mounting subvolumes](guides/mounting-subvolumes.md)
 - [Troubleshooting](guides/troubleshooting.md)
 - [Recovery scenarios](guides/recovery-scenarios.md)
 

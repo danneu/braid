@@ -38,6 +38,11 @@ users.users.bob = {
 
 Using `config.braid.poolAccessGroup` instead of the literal `"storage"` keeps the reference correct if you customize the group name.
 
+For network-facing services like Jellyfin or Plex that should only read a
+single subtree, prefer mounting that subvolume separately and using POSIX ACLs
+over adding the service to the storage group. See
+[Mounting subvolumes](mounting-subvolumes.md) for the recipe.
+
 ## Custom group name
 
 ```nix
@@ -189,4 +194,5 @@ If you enable `braid.autoSuspend`, active SMB and NFS connections automatically 
 
 - [NixOS configuration](nixos-configuration.md) -- `braid.poolAccessGroup` option reference
 - [Getting started](getting-started.md) -- first-time pool setup
+- [Mounting subvolumes](mounting-subvolumes.md) -- read-only service access to one subvolume
 - [Power management](power-management.md) -- auto-suspend with SMB/NFS awareness

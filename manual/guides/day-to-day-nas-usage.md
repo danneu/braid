@@ -116,6 +116,9 @@ The `-r` flag makes it read-only, which is best practice for backup snapshots. S
 sudo btrfs subvolume list /mnt/storage
 ```
 
+To mount a specific subvolume at a custom path, for example for a service or a
+friendlier path under `/home`, see [Mounting subvolumes](mounting-subvolumes.md).
+
 ## Adding disks over time
 
 You can add new drives to an existing pool without rebuilding or reformatting:
@@ -168,6 +171,7 @@ See [Monitoring and alerts](monitoring-and-alerts.md) for details on how alerts 
 ## What's next
 
 - [Auto-unlock](auto-unlock.md) -- skip the manual passphrase step on boot
+- [Mounting subvolumes](mounting-subvolumes.md) -- expose a subvolume at a custom path
 - [Monitoring and alerts](monitoring-and-alerts.md) -- automatic health checking and notifications
 - [Power management](power-management.md) -- suspend when idle, wake on demand
 

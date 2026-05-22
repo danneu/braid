@@ -13,6 +13,7 @@
   passphrase, # LUKS passphrase
   diskNames, # [ "disk1" "disk2" ... ]
   diskUuidMap ? null, # optional attrset: disk name -> deterministic LUKS UUID
+  btrfsFsid ? null, # optional deterministic btrfs filesystem UUID
   extraWaitDevices ? [ ], # extra block devices to wait for (e.g., USB)
   extraStorePaths ? [ ], # extra packages in initrd store
   extraPath ? [ ], # extra packages on service PATH
@@ -32,11 +33,13 @@ let
 
   allWaitDevices = (map (d: "/dev/disk/by-id/virtio-${d}") diskNames) ++ extraWaitDevices;
 
+  mkfsUuidArg = lib.optionalString (btrfsFsid != null) "-U ${btrfsFsid} ";
+
   mkfsCmd =
     if builtins.length diskNames == 1 then
-      "mkfs.btrfs -f -d single -m dup /dev/mapper/braid-${builtins.head diskNames}-fmt"
+      "mkfs.btrfs -f ${mkfsUuidArg}-d single -m dup /dev/mapper/braid-${builtins.head diskNames}-fmt"
     else
-      "mkfs.btrfs -f -d raid1 -m raid1 "
+      "mkfs.btrfs -f ${mkfsUuidArg}-d raid1 -m raid1 "
       + lib.concatMapStringsSep " " (d: "/dev/mapper/braid-${d}-fmt") diskNames;
 
   uuidCase =
