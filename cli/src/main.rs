@@ -1200,10 +1200,7 @@ fn run_systemd_stop_lock(
             std::process::exit(1);
         }
     };
-    let Some(remaining) = deadline.checked_sub(start.elapsed()) else {
-        eprintln!("{}", PoolLockError::DeadlineExpired { waited: deadline });
-        std::process::exit(1);
-    };
+    let remaining = deadline.saturating_sub(start.elapsed());
     if remaining.is_zero() {
         eprintln!("{}", PoolLockError::DeadlineExpired { waited: deadline });
         std::process::exit(1);
