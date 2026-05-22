@@ -25,10 +25,18 @@ pub enum UpsError {
     /// exits so wrapper/package breakage gets the right remediation hint.
     #[error("upsc invocation failed: {detail} -- is pkgs.nut on PATH?")]
     InvocationFailed { detail: String },
-    #[error("internal: ups query failed (json sentinel already on stdout)")]
-    QueryFailedJsonReported,
     #[error("failed to serialize ups status: {0}")]
     Serialize(#[source] serde_json::Error),
+}
+
+/// Outcome of `cmd_ups_status` so the JSON-reported case stays an
+/// `Ok` variant instead of a typed-`Err` control-flow sentinel. The
+/// CLI shell uses `JsonErrorReported` to exit 1 silently after the
+/// `--json` branch has already emitted its sentinel on stdout.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum UpsStatusOutcome {
+    Done,
+    JsonErrorReported,
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -117,7 +125,7 @@ pub fn cmd_ups_status<R: CommandRunner>(
     runner: &R,
     config_path: &Path,
     json: bool,
-) -> Result<(), UpsError> {
+) -> Result<UpsStatusOutcome, UpsError> {
     let config = config_read(config_path)?;
     let Some(ups_cfg) = config.ups() else {
         return print_not_enabled(json);
@@ -136,10 +144,10 @@ pub fn cmd_ups_status<R: CommandRunner>(
     } else {
         print!("{}", format_human(&ups_cfg.name, &parsed));
     }
-    Ok(())
+    Ok(UpsStatusOutcome::Done)
 }
 
-fn print_not_enabled(json: bool) -> Result<(), UpsError> {
+fn print_not_enabled(json: bool) -> Result<UpsStatusOutcome, UpsError> {
     if json {
         let payload = JsonReport::Error(ErrorReport::NotEnabled);
         emit_json(&payload)?;
@@ -150,28 +158,28 @@ fn print_not_enabled(json: bool) -> Result<(), UpsError> {
              safety and low-battery shutdown."
         );
     }
-    Ok(())
+    Ok(UpsStatusOutcome::Done)
 }
 
-fn emit_query_failed(json: bool, detail: String) -> Result<(), UpsError> {
+fn emit_query_failed(json: bool, detail: String) -> Result<UpsStatusOutcome, UpsError> {
     if json {
         emit_json(&JsonReport::Error(ErrorReport::QueryFailed {
             detail: &detail,
         }))?;
-        return Err(UpsError::QueryFailedJsonReported);
+        return Ok(UpsStatusOutcome::JsonErrorReported);
     }
     Err(UpsError::QueryFailed { detail })
 }
 
 /// Keep invocation failures distinct in `--json` and human mode while
 /// preserving shared exit-code wiring.
-fn emit_invocation_failed(json: bool, error: CmdError) -> Result<(), UpsError> {
+fn emit_invocation_failed(json: bool, error: CmdError) -> Result<UpsStatusOutcome, UpsError> {
     let detail = error.to_string();
     if json {
         emit_json(&JsonReport::Error(ErrorReport::InvocationFailed {
             detail: &detail,
         }))?;
-        return Err(UpsError::QueryFailedJsonReported);
+        return Ok(UpsStatusOutcome::JsonErrorReported);
     }
     Err(UpsError::InvocationFailed { detail })
 }
@@ -277,7 +285,7 @@ fn format_status(flags: &[UpsStatusFlag]) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::cmd::MockRunner;
+    use crate::cmd::{CmdError, MockRunner};
     use crate::parse::types::{BatteryFields, DeviceFields, InputFields};
     use crate::test_fixtures::{
         ups_query_connection_refused_no_newline, ups_query_connection_refused_with_newline,
@@ -676,22 +684,19 @@ mod tests {
     }
 
     // Intent: cmd_ups_status under --json routes invocation failure
-    // through QueryFailedJsonReported.
+    // through Ok(UpsStatusOutcome::JsonErrorReported).
     // Why it exists: pins the contract main.rs depends on -- the
-    // JSON-reported sentinel tells the CLI shell to exit 1 without
+    // JSON-reported outcome tells the CLI shell to exit 1 without
     // printing a duplicate human stderr line.
     // Scenario: MockRunner with no UpscQuery mock seeded simulates a
     // spawn failure (CmdError::MissingMock) under --json.
     #[test]
-    fn cmd_ups_status_invocation_failure_json_returns_already_reported() {
+    fn cmd_ups_status_invocation_failure_json_returns_json_error_reported() {
         let runner = MockRunner::default();
         let dir = tempfile::tempdir().unwrap();
         let cfg = ups_write_config(&dir, "ups");
-        let err = cmd_ups_status(&runner, &cfg, true).expect_err("query failure expected");
-        assert!(
-            matches!(err, UpsError::QueryFailedJsonReported),
-            "got {err:?}"
-        );
+        let outcome = cmd_ups_status(&runner, &cfg, true).expect("json branch returns Ok");
+        assert_eq!(outcome, UpsStatusOutcome::JsonErrorReported);
     }
 
     // Intent: cmd_ups_status returns QueryFailed with detail "exit N: <stderr>"
@@ -721,20 +726,33 @@ mod tests {
     }
 
     // Intent: emit_query_failed in --json mode returns
-    // QueryFailedJsonReported so the CLI shell skips the human-readable error
-    // line on stderr.
+    // Ok(UpsStatusOutcome::JsonErrorReported) so the CLI shell skips the
+    // human-readable error line on stderr.
     // Why it exists: stdout-quiet contract -- scripts wrapping --json must see
     // exactly one document on stdout and nothing on stderr.
     // Scenario: any query failure under --json; the branch under test is the
-    // variant choice, not detail formatting.
+    // outcome variant choice, not detail formatting.
     #[test]
-    fn emit_query_failed_json_returns_already_reported() {
-        let err = emit_query_failed(true, "exit 1: dummy".into())
-            .expect_err("err expected from emit_query_failed");
-        assert!(
-            matches!(err, UpsError::QueryFailedJsonReported),
-            "got {err:?}"
-        );
+    fn emit_query_failed_json_returns_json_error_reported() {
+        let outcome =
+            emit_query_failed(true, "exit 1: dummy".into()).expect("json branch returns Ok");
+        assert_eq!(outcome, UpsStatusOutcome::JsonErrorReported);
+    }
+
+    // Intent: emit_invocation_failed in --json mode returns
+    // Ok(UpsStatusOutcome::JsonErrorReported) so the CLI shell skips the
+    // human-readable error line on stderr.
+    // Why it exists: pins the symmetric contract with emit_query_failed --
+    // both JSON-reported emit helpers route through the outcome variant
+    // rather than a typed error sentinel.
+    // Scenario: a spawn-level failure (CmdError) routed through --json;
+    // the branch under test is the outcome variant choice, not detail
+    // formatting.
+    #[test]
+    fn emit_invocation_failed_json_returns_json_error_reported() {
+        let outcome =
+            emit_invocation_failed(true, CmdError::MissingMock).expect("json branch returns Ok");
+        assert_eq!(outcome, UpsStatusOutcome::JsonErrorReported);
     }
 
     // --- Fixture-backed render snapshots ---

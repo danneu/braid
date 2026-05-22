@@ -999,8 +999,8 @@ fn main() {
                     Path::new(&config_path),
                     status_args.json,
                 ) {
-                    Ok(()) => {}
-                    Err(braid_cli::ups::UpsError::QueryFailedJsonReported) => {
+                    Ok(braid_cli::ups::UpsStatusOutcome::Done) => {}
+                    Ok(braid_cli::ups::UpsStatusOutcome::JsonErrorReported) => {
                         std::process::exit(1);
                     }
                     Err(e) => {
