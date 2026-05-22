@@ -771,9 +771,9 @@ mod tests {
         result.expect("unlock should succeed even with paused balance");
     }
 
-    // Intent: dry-run success for two closed disks renders probe notes above
-    //   the step block, and the block still carries the expected open, scan,
-    //   and mount steps.
+    // Intent: dry-run success for two closed disks pins the full positional
+    //   chain: probe note disk1 < probe note disk2 < LUKS open disk1 <
+    //   LUKS open disk2 < btrfs device scan < mount.
     // Why it exists: a regression that drops probe notes, drops steps, or swaps
     //   their order would break the probe-context-before-steps contract.
     // Scenario: 2-disk pool, both present and closed, `--dry-run`.
@@ -805,41 +805,32 @@ mod tests {
             .preview()
             .render();
 
-        let note1 = "[ok]   disk disk1: found\n";
-        let note2 = "[ok]   disk disk2: found\n";
-        let scan = "btrfs device scan";
+        let pos = |needle: &str| {
+            rendered
+                .find(needle)
+                .unwrap_or_else(|| panic!("expected {needle:?} in render, got: {rendered:?}"))
+        };
 
-        let pos1 = rendered
-            .find(note1)
-            .unwrap_or_else(|| panic!("probe note for disk1 missing: {rendered:?}"));
-        let pos2 = rendered
-            .find(note2)
-            .unwrap_or_else(|| panic!("probe note for disk2 missing: {rendered:?}"));
-        let scan_pos = rendered
-            .find(scan)
-            .unwrap_or_else(|| panic!("btrfs device scan step missing: {rendered:?}"));
-
-        assert!(
-            pos1 < pos2 && pos2 < scan_pos,
-            "probe notes must render before the step block, got: {rendered:?}",
-        );
+        let p_note1 = pos("[ok]   disk disk1: found\n");
+        let p_note2 = pos("[ok]   disk disk2: found\n");
+        let p_open1 = pos("LUKS open /dev/disk/by-id/virtio-disk1");
+        let p_open2 = pos("LUKS open /dev/disk/by-id/virtio-disk2");
+        let p_scan = pos("btrfs device scan");
+        let p_mount = pos("mount -> /mnt/storage");
 
         assert!(
-            rendered.contains("LUKS open /dev/disk/by-id/virtio-disk1"),
-            "expected disk1 LUKS open step, got: {rendered:?}",
-        );
-        assert!(
-            rendered.contains("LUKS open /dev/disk/by-id/virtio-disk2"),
-            "expected disk2 LUKS open step, got: {rendered:?}",
-        );
-        assert!(
-            rendered.contains("mount"),
-            "expected mount step, got: {rendered:?}",
+            p_note1 < p_note2
+                && p_note2 < p_open1
+                && p_open1 < p_open2
+                && p_open2 < p_scan
+                && p_scan < p_mount,
+            "preview chain notes < opens < scan < mount must hold; got: {rendered:?}",
         );
     }
 
     // Intent: with `--key-file <path>`, dry-run preview emits the keyfile
-    //   cryptsetup invocation, not the passphrase-via-stdin form.
+    //   cryptsetup invocation (not passphrase-via-stdin) and pins the same
+    //   positional chain: probe notes < LUKS opens < scan < mount.
     // Why it exists: `compile_open_steps` is the only place the keyfile dry-run
     //   branch is rendered, so the preview needs a direct assertion.
     // Scenario: auto-unlock user runs `braid unlock --key-file
@@ -872,14 +863,28 @@ mod tests {
             .preview()
             .render();
 
+        let pos = |needle: &str| {
+            rendered
+                .find(needle)
+                .unwrap_or_else(|| panic!("expected {needle:?} in render, got: {rendered:?}"))
+        };
+
+        let p_note1 = pos("[ok]   disk disk1: found\n");
+        let p_note2 = pos("[ok]   disk disk2: found\n");
+        let p_open1 = pos("LUKS open /dev/disk/by-id/virtio-disk1");
+        let p_open2 = pos("LUKS open /dev/disk/by-id/virtio-disk2");
+        let p_scan = pos("btrfs device scan");
+        let p_mount = pos("mount -> /mnt/storage");
+
         assert!(
-            rendered.contains("LUKS open /dev/disk/by-id/virtio-disk1"),
-            "expected disk1 LUKS open step, got: {rendered:?}",
+            p_note1 < p_note2
+                && p_note2 < p_open1
+                && p_open1 < p_open2
+                && p_open2 < p_scan
+                && p_scan < p_mount,
+            "preview chain notes < opens < scan < mount must hold; got: {rendered:?}",
         );
-        assert!(
-            rendered.contains("LUKS open /dev/disk/by-id/virtio-disk2"),
-            "expected disk2 LUKS open step, got: {rendered:?}",
-        );
+
         assert!(
             rendered.contains(
                 "cryptsetup open --type luks --key-file /run/keys/braid.key --keyfile-size 4096"
