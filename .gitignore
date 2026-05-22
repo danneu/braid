@@ -11,7 +11,9 @@ manual/book/
 .envrc
 command-findings
 features1
-plans/wip/_old
+# Agents keep reading wip plans and thinking these plans
+# are an authority on anything.
+plans/wip/
 command-findings2
 command-findings3-TODO
 package-changes
