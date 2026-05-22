@@ -59,7 +59,7 @@ fn fan_probe_effect(model: &Model) -> Option<Effect> {
     Some(Effect::ProbeFan {
         sysfs_root: std::path::PathBuf::from("/sys"),
         dev_root: std::path::PathBuf::from("/dev"),
-        disk_by_id: model.disk_by_id.clone(),
+        disk_by_id: model.disks.by_id.clone(),
         fan_control: fc.clone(),
     })
 }
@@ -105,9 +105,7 @@ pub fn update(model: &mut Model, msg: Message) -> Vec<Effect> {
                 }
                 effects.push(Effect::ProbePool {
                     mount_point: model.mount_point.clone(),
-                    disk_by_id: model.disk_by_id.clone(),
-                    disk_luks_uuid: model.disk_luks_uuid.clone(),
-                    disk_devid: model.disk_devid.clone(),
+                    disks: model.disks.clone(),
                     paths,
                 });
             }
@@ -133,14 +131,14 @@ pub fn update(model: &mut Model, msg: Message) -> Vec<Effect> {
             effects
         }
         Message::SelectNextDisk => {
-            let len = model.disk_names.len();
+            let len = model.disks.names.len();
             if len > 0 {
                 model.selected_disk = (model.selected_disk + 1) % len;
             }
             vec![]
         }
         Message::SelectPrevDisk => {
-            let len = model.disk_names.len();
+            let len = model.disks.names.len();
             if len > 0 {
                 model.selected_disk = (model.selected_disk + len - 1) % len;
             }
@@ -176,7 +174,7 @@ pub fn update(model: &mut Model, msg: Message) -> Vec<Effect> {
         }
         Message::BrowseEnter => {
             let disks = DiskInventory {
-                by_id: &model.disk_by_id,
+                by_id: &model.disks.by_id,
             };
             model
                 .browse
@@ -191,7 +189,7 @@ pub fn update(model: &mut Model, msg: Message) -> Vec<Effect> {
         Message::BrowseReload => {
             if model.browse.is_detail() {
                 let disks = DiskInventory {
-                    by_id: &model.disk_by_id,
+                    by_id: &model.disks.by_id,
                 };
                 model
                     .browse
@@ -332,7 +330,7 @@ pub fn update(model: &mut Model, msg: Message) -> Vec<Effect> {
 fn browse_load_if_active(model: &mut Model) -> Vec<Effect> {
     if model.tab == Tab::Browse {
         let disks = DiskInventory {
-            by_id: &model.disk_by_id,
+            by_id: &model.disks.by_id,
         };
         model
             .browse
@@ -478,10 +476,10 @@ mod tests {
     #[test]
     fn startup_probes_without_scheduler_pending_then_first_finish_arms_loop() {
         let (mut model, init_effects) = Model::new(
-            sample_disk_names(),
-            std::collections::HashMap::new(),
-            std::collections::HashMap::new(),
-            std::collections::HashMap::new(),
+            crate::tui::model::DiskIdentity {
+                names: sample_disk_names(),
+                ..Default::default()
+            },
             "/mnt/storage".to_owned(),
             Some(sample_fan_control()),
             Some(sample_ups_config()),
@@ -518,10 +516,10 @@ mod tests {
     fn model_new_with_fan_control_emits_probe_and_sets_inflight() {
         let tmp = tempfile::tempdir().unwrap();
         let (model, effects) = Model::new(
-            sample_disk_names(),
-            std::collections::HashMap::new(),
-            std::collections::HashMap::new(),
-            std::collections::HashMap::new(),
+            crate::tui::model::DiskIdentity {
+                names: sample_disk_names(),
+                ..Default::default()
+            },
             "/mnt/storage".to_owned(),
             Some(sample_fan_control()),
             None,
@@ -543,10 +541,10 @@ mod tests {
     fn model_new_without_fan_control_emits_no_probe_and_clears_inflight() {
         let tmp = tempfile::tempdir().unwrap();
         let (model, effects) = Model::new(
-            sample_disk_names(),
-            std::collections::HashMap::new(),
-            std::collections::HashMap::new(),
-            std::collections::HashMap::new(),
+            crate::tui::model::DiskIdentity {
+                names: sample_disk_names(),
+                ..Default::default()
+            },
             "/mnt/storage".to_owned(),
             None,
             None,
@@ -568,10 +566,10 @@ mod tests {
     fn model_new_with_ups_config_emits_probe_and_sets_inflight() {
         let tmp = tempfile::tempdir().unwrap();
         let (model, effects) = Model::new(
-            sample_disk_names(),
-            std::collections::HashMap::new(),
-            std::collections::HashMap::new(),
-            std::collections::HashMap::new(),
+            crate::tui::model::DiskIdentity {
+                names: sample_disk_names(),
+                ..Default::default()
+            },
             "/mnt/storage".to_owned(),
             None,
             Some(sample_ups_config()),
@@ -592,10 +590,10 @@ mod tests {
     fn model_new_without_ups_config_emits_no_probe_and_clears_inflight() {
         let tmp = tempfile::tempdir().unwrap();
         let (model, effects) = Model::new(
-            sample_disk_names(),
-            std::collections::HashMap::new(),
-            std::collections::HashMap::new(),
-            std::collections::HashMap::new(),
+            crate::tui::model::DiskIdentity {
+                names: sample_disk_names(),
+                ..Default::default()
+            },
             "/mnt/storage".to_owned(),
             None,
             None,

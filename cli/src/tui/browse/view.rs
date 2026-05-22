@@ -398,11 +398,11 @@ mod tests {
     }
 
     fn seed_disk_by_id(model: &mut Model) {
-        model.disk_by_id.insert(
+        model.disks.by_id.insert(
             "disk1".to_owned(),
             "/dev/disk/by-id/virtio-disk1".to_owned(),
         );
-        model.disk_by_id.insert(
+        model.disks.by_id.insert(
             "disk2".to_owned(),
             "/dev/disk/by-id/virtio-disk2".to_owned(),
         );
@@ -588,7 +588,7 @@ mod tests {
             0,
         );
         let disks = DiskInventory {
-            by_id: &model.disk_by_id,
+            by_id: &model.disks.by_id,
         };
         let _ = model.browse.enter(&model.pool, &disks);
         model.browse.command_finished(
@@ -861,7 +861,7 @@ mod tests {
             0,
         );
         let disks = DiskInventory {
-            by_id: &model.disk_by_id,
+            by_id: &model.disks.by_id,
         };
         let _ = model.browse.enter(&model.pool, &disks);
         model.browse.command_finished(
@@ -926,7 +926,7 @@ mod tests {
         model.browse.select_next();
         model.browse.focus = BrowseFocus::Content;
         let disks = DiskInventory {
-            by_id: &model.disk_by_id,
+            by_id: &model.disks.by_id,
         };
         let _ = model
             .browse
@@ -945,7 +945,7 @@ mod tests {
         model.browse.select_next();
         model.browse.focus = BrowseFocus::Content;
         let disks = DiskInventory {
-            by_id: &model.disk_by_id,
+            by_id: &model.disks.by_id,
         };
         let _ = model
             .browse
@@ -987,7 +987,7 @@ mod tests {
     fn snapshot_browse_pool_offline() {
         let mut model = Model::new_demo(sample_disk_names(), PoolStatus::NotMounted);
         let disks = DiskInventory {
-            by_id: &model.disk_by_id,
+            by_id: &model.disks.by_id,
         };
         let _ = model
             .browse

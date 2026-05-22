@@ -17,8 +17,9 @@ use crate::state_paths::StatePaths;
 use crate::status::resolve_alert_state;
 use crate::status::{DiskErrors, estimate_pool_capacity, get_balance_report};
 use crate::tui::model::{
-    DaemonStatus, DiskLockState, DiskLuksInfo, DiskLuksState, DiskUsage, DrivingDrive, FanReading,
-    FanSnapshot, PoolState, TemperatureDiskId, TemperatureReading, UnpooledDiskRender, UpsSnapshot,
+    DaemonStatus, DiskIdentity, DiskLockState, DiskLuksInfo, DiskLuksState, DiskUsage,
+    DrivingDrive, FanReading, FanSnapshot, PoolState, TemperatureDiskId, TemperatureReading,
+    UnpooledDiskRender, UpsSnapshot,
 };
 use crate::types::{ByIdPath, ConfigDiskState, DiskName, LuksUuid, MountPoint};
 
@@ -142,19 +143,19 @@ pub fn probe_pool_for_tui<R: CommandRunner, F: Filesystem + ?Sized>(
     runner: &R,
     fs: &F,
     mount_point: &MountPoint,
-    disk_by_id: &HashMap<String, String>,
-    disk_luks_uuid: &HashMap<String, LuksUuid>,
-    disk_devid: &HashMap<String, u64>,
+    disks: &DiskIdentity,
     paths: &StatePaths,
     backing_path_resolver: &dyn BackingPathResolver,
 ) -> Result<(HashMap<String, DiskLuksState>, Option<PoolState>), String> {
     let domain = probe_pool(runner, fs, mount_point).map_err(|e| e.to_string())?;
 
-    let uuid_to_name: HashMap<&LuksUuid, &str> = disk_luks_uuid
+    let uuid_to_name: HashMap<&LuksUuid, &str> = disks
+        .luks_uuid
         .iter()
         .map(|(name, uuid)| (uuid, name.as_str()))
         .collect();
-    let persisted_devid_to_name: HashMap<u64, &str> = disk_devid
+    let persisted_devid_to_name: HashMap<u64, &str> = disks
+        .devid
         .iter()
         .map(|(name, devid)| (*devid, name.as_str()))
         .collect();
@@ -174,8 +175,8 @@ pub fn probe_pool_for_tui<R: CommandRunner, F: Filesystem + ?Sized>(
     }
     let disk_luks_states = build_disk_luks_states(
         runner,
-        disk_by_id,
-        disk_luks_uuid,
+        &disks.by_id,
+        &disks.luks_uuid,
         &mounted_classification,
         backing_path_resolver,
     );
@@ -249,7 +250,7 @@ pub fn probe_pool_for_tui<R: CommandRunner, F: Filesystem + ?Sized>(
 
     let mut smart_health = HashMap::new();
     let mut disk_temperature_readings = HashMap::new();
-    for (disk_name, by_id_path) in disk_by_id {
+    for (disk_name, by_id_path) in &disks.by_id {
         let probe = runner
             .run(&CmdRequest::SmartctlHealthJson {
                 device: by_id_path.clone(),
@@ -262,7 +263,7 @@ pub fn probe_pool_for_tui<R: CommandRunner, F: Filesystem + ?Sized>(
         smart_health.insert(disk_name.clone(), probe.health);
 
         if let Some(celsius) = probe.celsius {
-            let id = match disk_luks_uuid.get(disk_name.as_str()) {
+            let id = match disks.luks_uuid.get(disk_name.as_str()) {
                 Some(uuid) => TemperatureDiskId::LuksUuid(uuid.clone()),
                 None => TemperatureDiskId::ByIdPath(
                     ByIdPath::parse(by_id_path).expect("membership by-id paths are validated"),
@@ -337,7 +338,7 @@ pub fn probe_pool_for_tui<R: CommandRunner, F: Filesystem + ?Sized>(
     let live_pool_uuids: HashSet<LuksUuid> =
         domain.devices.iter().map(|d| d.luks_uuid.clone()).collect();
     let mut unpooled_by_name: HashMap<String, UnpooledDiskRender> = HashMap::new();
-    for (disk_name, by_id_path) in disk_by_id {
+    for (disk_name, by_id_path) in &disks.by_id {
         if disk_usage.contains_key(disk_name) {
             continue;
         }
@@ -920,21 +921,29 @@ mod tests {
         result.1.expect("pool should be Some")
     }
 
-    fn tui_disk_luks_uuid() -> HashMap<String, LuksUuid> {
-        HashMap::from([
-            (
-                "toshiba".to_owned(),
-                LuksUuid::parse("11111111-1111-1111-1111-111111111111").unwrap(),
-            ),
-            (
-                "ironwolf".to_owned(),
-                LuksUuid::parse("22222222-2222-2222-2222-222222222222").unwrap(),
-            ),
-        ])
+    fn tui_disks() -> DiskIdentity {
+        DiskIdentity {
+            names: vec!["ironwolf".to_owned(), "toshiba".to_owned()],
+            by_id: HashMap::new(),
+            luks_uuid: HashMap::from([
+                (
+                    "toshiba".to_owned(),
+                    LuksUuid::parse("11111111-1111-1111-1111-111111111111").unwrap(),
+                ),
+                (
+                    "ironwolf".to_owned(),
+                    LuksUuid::parse("22222222-2222-2222-2222-222222222222").unwrap(),
+                ),
+            ]),
+            devid: HashMap::from([("toshiba".to_owned(), 1), ("ironwolf".to_owned(), 2)]),
+        }
     }
 
-    fn tui_disk_devid() -> HashMap<String, u64> {
-        HashMap::from([("toshiba".to_owned(), 1), ("ironwolf".to_owned(), 2)])
+    fn tui_disks_with_by_id(by_id: HashMap<String, String>) -> DiskIdentity {
+        DiskIdentity {
+            by_id,
+            ..tui_disks()
+        }
     }
 
     /// Intent: probe_pool_for_tui passes through per-device allocations and
@@ -1052,9 +1061,7 @@ mod tests {
             &runner,
             &StubFs::empty(),
             &MountPoint("/mnt/storage".into()),
-            &HashMap::new(),
-            &tui_disk_luks_uuid(),
-            &tui_disk_devid(),
+            &tui_disks(),
             &test_paths().1,
             crate::test_fixtures::mock_virtio_backing_path_resolver(),
         )
@@ -1210,9 +1217,7 @@ mod tests {
             &runner,
             &StubFs::empty(),
             &MountPoint("/mnt/storage".into()),
-            &HashMap::new(),
-            &tui_disk_luks_uuid(),
-            &tui_disk_devid(),
+            &tui_disks(),
             &test_paths().1,
             crate::test_fixtures::mock_virtio_backing_path_resolver(),
         )
@@ -1328,9 +1333,7 @@ mod tests {
                 &runner,
                 &StubFs::empty(),
                 &MountPoint("/mnt/storage".into()),
-                &HashMap::new(),
-                &tui_disk_luks_uuid(),
-                &tui_disk_devid(),
+                &tui_disks(),
                 &test_paths().1,
                 crate::test_fixtures::mock_virtio_backing_path_resolver(),
             )
@@ -1460,9 +1463,7 @@ mod tests {
             &runner,
             &StubFs::empty(),
             &MountPoint("/mnt/storage".into()),
-            &HashMap::new(),
-            &tui_disk_luks_uuid(),
-            &tui_disk_devid(),
+            &tui_disks(),
             &test_paths().1,
             crate::test_fixtures::mock_virtio_backing_path_resolver(),
         )
@@ -1557,9 +1558,7 @@ mod tests {
             &runner,
             &StubFs::unmounted_with_paths(&[]),
             &MountPoint("/mnt/storage".into()),
-            &disk_by_id,
-            &tui_disk_luks_uuid(),
-            &tui_disk_devid(),
+            &tui_disks_with_by_id(disk_by_id),
             &test_paths().1,
             &resolver,
         )
@@ -1627,9 +1626,7 @@ mod tests {
             &runner,
             &StubFs::unmounted_with_paths(&[]),
             &MountPoint("/mnt/storage".into()),
-            &disk_by_id,
-            &tui_disk_luks_uuid(),
-            &tui_disk_devid(),
+            &tui_disks_with_by_id(disk_by_id),
             &test_paths().1,
             &resolver,
         )
@@ -1681,9 +1678,7 @@ mod tests {
             &runner,
             &StubFs::unmounted_with_paths(&[]),
             &MountPoint("/mnt/storage".into()),
-            &disk_by_id,
-            &tui_disk_luks_uuid(),
-            &tui_disk_devid(),
+            &tui_disks_with_by_id(disk_by_id),
             &test_paths().1,
             &resolver,
         )
@@ -1810,9 +1805,7 @@ mod tests {
                 &runner,
                 &fs,
                 &MountPoint("/mnt/storage".into()),
-                &disk_by_id,
-                &tui_disk_luks_uuid(),
-                &tui_disk_devid(),
+                &tui_disks_with_by_id(disk_by_id),
                 &test_paths().1,
                 crate::test_fixtures::mock_virtio_backing_path_resolver(),
             )
@@ -1894,9 +1887,7 @@ mod tests {
                 &runner,
                 &fs,
                 &MountPoint("/mnt/storage".into()),
-                &disk_by_id,
-                &tui_disk_luks_uuid(),
-                &tui_disk_devid(),
+                &tui_disks_with_by_id(disk_by_id),
                 &test_paths().1,
                 crate::test_fixtures::mock_virtio_backing_path_resolver(),
             )
@@ -1965,9 +1956,7 @@ mod tests {
                 &runner,
                 &fs,
                 &MountPoint("/mnt/storage".into()),
-                &disk_by_id,
-                &tui_disk_luks_uuid(),
-                &tui_disk_devid(),
+                &tui_disks_with_by_id(disk_by_id),
                 &test_paths().1,
                 crate::test_fixtures::mock_virtio_backing_path_resolver(),
             )
@@ -2047,9 +2036,7 @@ mod tests {
                 &runner,
                 &fs,
                 &MountPoint("/mnt/storage".into()),
-                &disk_by_id,
-                &tui_disk_luks_uuid(),
-                &tui_disk_devid(),
+                &tui_disks_with_by_id(disk_by_id),
                 &test_paths().1,
                 crate::test_fixtures::mock_virtio_backing_path_resolver(),
             )
@@ -2119,9 +2106,7 @@ mod tests {
                 &runner,
                 &fs,
                 &MountPoint("/mnt/storage".into()),
-                &disk_by_id,
-                &tui_disk_luks_uuid(),
-                &tui_disk_devid(),
+                &tui_disks_with_by_id(disk_by_id),
                 &test_paths().1,
                 crate::test_fixtures::mock_virtio_backing_path_resolver(),
             )
@@ -2198,9 +2183,7 @@ mod tests {
                 &runner,
                 &fs,
                 &MountPoint("/mnt/storage".into()),
-                &disk_by_id,
-                &tui_disk_luks_uuid(),
-                &tui_disk_devid(),
+                &tui_disks_with_by_id(disk_by_id),
                 &test_paths().1,
                 crate::test_fixtures::mock_virtio_backing_path_resolver(),
             )
@@ -2277,9 +2260,7 @@ mod tests {
                 &runner,
                 &fs,
                 &MountPoint("/mnt/storage".into()),
-                &disk_by_id,
-                &tui_disk_luks_uuid(),
-                &tui_disk_devid(),
+                &tui_disks_with_by_id(disk_by_id),
                 &test_paths().1,
                 crate::test_fixtures::mock_virtio_backing_path_resolver(),
             )

@@ -8,7 +8,6 @@ mod model;
 pub(crate) mod probe;
 mod view;
 
-use std::collections::HashMap;
 use std::io;
 use std::path::Path;
 use std::sync::mpsc;
@@ -18,7 +17,7 @@ use app::update;
 use effect::{Effect, execute_effect};
 use event::InputHandler;
 use keymap::KeyContext;
-use model::{Model, PoolStatus};
+use model::{DiskIdentity, Model, PoolStatus};
 use view::view;
 
 use crate::config::config_read;
@@ -32,32 +31,9 @@ pub fn run(config_path: &Path, paths: &StatePaths) -> io::Result<()> {
     let membership =
         membership::load_membership(paths).map_err(|e| io::Error::other(e.to_string()))?;
     let advisories = luks::header_backup_advisories(paths);
-    let members = membership.iter_by_name();
-    let disk_names: Vec<String> = members
-        .iter()
-        .map(|(_, member)| member.name.as_str().to_owned())
-        .collect();
-    let disk_by_id: HashMap<String, String> = members
-        .iter()
-        .map(|(_, member)| (member.name.as_str().to_owned(), member.by_id.to_string()))
-        .collect();
-    let disk_luks_uuid: HashMap<String, crate::types::LuksUuid> = members
-        .iter()
-        .map(|(uuid, member)| (member.name.as_str().to_owned(), (*uuid).clone()))
-        .collect();
-    let disk_devid: HashMap<String, u64> = members
-        .iter()
-        .filter_map(|(_, member)| {
-            member
-                .devid
-                .map(|devid| (member.name.as_str().to_owned(), devid))
-        })
-        .collect();
+    let disks = DiskIdentity::from_membership(&membership);
     let (model, init_effects) = Model::new(
-        disk_names,
-        disk_by_id,
-        disk_luks_uuid,
-        disk_devid,
+        disks,
         config.mount_point().0.clone(),
         config.fan_control().cloned(),
         config.ups().cloned(),

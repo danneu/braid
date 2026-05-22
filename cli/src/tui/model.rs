@@ -51,6 +51,53 @@ pub struct DiskLuksInfo {
     pub keyslot_count: u32,
 }
 
+/// Membership-derived disk identity bundled as one value so the TUI model and
+/// probe effect share a single source of truth instead of four parallel maps.
+/// All fields are name-keyed; `names` carries display order from
+/// `membership.iter_by_name()`.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct DiskIdentity {
+    pub names: Vec<String>,
+    pub by_id: HashMap<String, String>,
+    pub luks_uuid: HashMap<String, LuksUuid>,
+    /// Persistent btrfs devid bindings, used when a live probe cannot observe
+    /// the underlying LUKS UUID for a mounted device.
+    pub devid: HashMap<String, u64>,
+}
+
+impl DiskIdentity {
+    /// Build the TUI's name-keyed view of pool membership at session start.
+    pub fn from_membership(m: &crate::membership::PoolMembership) -> Self {
+        let members = m.iter_by_name();
+        let names: Vec<String> = members
+            .iter()
+            .map(|(_, member)| member.name.as_str().to_owned())
+            .collect();
+        let by_id: HashMap<String, String> = members
+            .iter()
+            .map(|(_, member)| (member.name.as_str().to_owned(), member.by_id.to_string()))
+            .collect();
+        let luks_uuid: HashMap<String, LuksUuid> = members
+            .iter()
+            .map(|(uuid, member)| (member.name.as_str().to_owned(), (*uuid).clone()))
+            .collect();
+        let devid: HashMap<String, u64> = members
+            .iter()
+            .filter_map(|(_, member)| {
+                member
+                    .devid
+                    .map(|devid| (member.name.as_str().to_owned(), devid))
+            })
+            .collect();
+        Self {
+            names,
+            by_id,
+            luks_uuid,
+            devid,
+        }
+    }
+}
+
 /// Per-declared-disk lock state surfaced independently of pool mount
 /// status so disk detail can stay truthful while the pool is offline.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -274,14 +321,7 @@ pub struct Model {
     pub show_help: bool,
     pub show_disk_detail: bool,
     pub tab: Tab,
-    pub disk_names: Vec<String>,
-    pub disk_by_id: HashMap<String, String>,
-    /// Persistent disk identity map so TUI probes do not infer pool
-    /// membership from mapper names.
-    pub disk_luks_uuid: HashMap<String, LuksUuid>,
-    /// Prior btrfs devid bindings used when a live probe cannot observe the
-    /// underlying LUKS UUID for a mounted device.
-    pub disk_devid: HashMap<String, u64>,
+    pub disks: DiskIdentity,
     pub selected_disk: usize,
     pub pool: PoolStatus,
     pub mount_point: MountPoint,
@@ -306,14 +346,8 @@ pub struct Model {
 }
 
 impl Model {
-    // Constructor mirrors persisted config plus optional subsystem configs;
-    // grouping them would hide the call-site mapping this boundary owns.
-    #[allow(clippy::too_many_arguments)]
     pub fn new(
-        disk_names: Vec<String>,
-        disk_by_id: HashMap<String, String>,
-        disk_luks_uuid: HashMap<String, LuksUuid>,
-        disk_devid: HashMap<String, u64>,
+        disks: DiskIdentity,
         mount_point: String,
         fan_control: Option<crate::config::FanControl>,
         ups_config: Option<crate::config::Ups>,
@@ -323,9 +357,7 @@ impl Model {
         let mount_point = MountPoint(mount_point);
         let mut effects: Vec<Effect> = vec![Effect::ProbePool {
             mount_point: mount_point.clone(),
-            disk_by_id: disk_by_id.clone(),
-            disk_luks_uuid: disk_luks_uuid.clone(),
-            disk_devid: disk_devid.clone(),
+            disks: disks.clone(),
             paths: paths.clone(),
         }];
         let mut fan_probe_inflight = false;
@@ -333,7 +365,7 @@ impl Model {
             effects.push(Effect::ProbeFan {
                 sysfs_root: std::path::PathBuf::from("/sys"),
                 dev_root: std::path::PathBuf::from("/dev"),
-                disk_by_id: disk_by_id.clone(),
+                disk_by_id: disks.by_id.clone(),
                 fan_control: fc.clone(),
             });
             fan_probe_inflight = true;
@@ -353,10 +385,7 @@ impl Model {
             show_help: false,
             show_disk_detail: false,
             tab: Tab::Data,
-            disk_names,
-            disk_by_id,
-            disk_luks_uuid,
-            disk_devid,
+            disks,
             selected_disk: 0,
             pool: PoolStatus::Loading,
             mount_point,
@@ -386,10 +415,10 @@ impl Model {
             show_help: false,
             show_disk_detail: false,
             tab: Tab::Data,
-            disk_names,
-            disk_by_id: HashMap::new(),
-            disk_luks_uuid: HashMap::new(),
-            disk_devid: HashMap::new(),
+            disks: DiskIdentity {
+                names: disk_names,
+                ..Default::default()
+            },
             selected_disk: 0,
             pool,
             mount_point: MountPoint(String::new()),
@@ -410,5 +439,154 @@ impl Model {
             ups_scheduler_pending: false,
             browse: BrowseState::default(),
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::membership::{DiskMember, PoolMembership};
+    use crate::state_paths::StatePaths;
+    use crate::tui::app::{Message, update};
+    use crate::types::DiskName;
+
+    fn uuid(raw: &str) -> LuksUuid {
+        LuksUuid::parse(raw).expect("valid LUKS UUID in fixture")
+    }
+
+    fn by_id(raw: &str) -> ByIdPath {
+        ByIdPath::parse(raw).expect("valid by-id path in fixture")
+    }
+
+    fn disk_name(raw: &str) -> DiskName {
+        DiskName::parse(raw).expect("valid disk name in fixture")
+    }
+
+    // Intent: DiskIdentity::from_membership maps each membership axis into the
+    //         right name-keyed slot (names sorted by DiskName, by_id and
+    //         luks_uuid name-keyed without swap, devid filtered to Some(_)
+    //         only).
+    // Why it exists: the refactor moved an inline four-map build into a named
+    //         constructor; a silent swap of luks_uuid <-> devid or a name/UUID
+    //         pairing mistake would compile and pass a structure-only test.
+    //         Inverting DiskName order against UUID order forces the test to
+    //         distinguish them.
+    // Scenario: two-member pool. UUID-A < UUID-B by sort, but UUID-A holds
+    //         "zeta" and UUID-B holds "alpha". UUID-A has devid Some(7);
+    //         UUID-B has devid None.
+    #[test]
+    fn from_membership_maps_all_four_fields() {
+        let uuid_a = uuid("11111111-1111-1111-1111-111111111111");
+        let uuid_b = uuid("22222222-2222-2222-2222-222222222222");
+        let mut m = PoolMembership::empty();
+        m.insert(
+            uuid_a.clone(),
+            DiskMember {
+                name: disk_name("zeta"),
+                by_id: by_id("/dev/disk/by-id/braid-zeta"),
+                devid: Some(7),
+                added_at: None,
+            },
+        )
+        .unwrap();
+        m.insert(
+            uuid_b.clone(),
+            DiskMember {
+                name: disk_name("alpha"),
+                by_id: by_id("/dev/disk/by-id/braid-alpha"),
+                devid: None,
+                added_at: None,
+            },
+        )
+        .unwrap();
+
+        let identity = DiskIdentity::from_membership(&m);
+
+        assert_eq!(identity.names, vec!["alpha".to_owned(), "zeta".to_owned()]);
+        assert_eq!(
+            identity.by_id.get("alpha").map(String::as_str),
+            Some("/dev/disk/by-id/braid-alpha"),
+        );
+        assert_eq!(
+            identity.by_id.get("zeta").map(String::as_str),
+            Some("/dev/disk/by-id/braid-zeta"),
+        );
+        assert_eq!(identity.luks_uuid.get("alpha"), Some(&uuid_b));
+        assert_eq!(identity.luks_uuid.get("zeta"), Some(&uuid_a));
+        assert_eq!(identity.devid.len(), 1);
+        assert_eq!(identity.devid.get("zeta"), Some(&7));
+        assert!(!identity.devid.contains_key("alpha"));
+    }
+
+    fn fixture_identity() -> DiskIdentity {
+        DiskIdentity {
+            names: vec!["alpha".to_owned()],
+            by_id: HashMap::from([("alpha".to_owned(), "/dev/disk/by-id/braid-alpha".to_owned())]),
+            luks_uuid: HashMap::from([(
+                "alpha".to_owned(),
+                uuid("11111111-1111-1111-1111-111111111111"),
+            )]),
+            devid: HashMap::from([("alpha".to_owned(), 9)]),
+        }
+    }
+
+    // Intent: Model::new's initial Effect::ProbePool must carry the full
+    //         DiskIdentity passed in, not a Default placeholder.
+    // Why it exists: the initial probe is the only data the worker thread sees
+    //         until the first refresh; emitting Default::default() would
+    //         silently strip every name->UUID/devid binding and the probe
+    //         would mis-classify mounted devices.
+    // Scenario: TUI startup with a one-disk membership.
+    #[test]
+    fn new_carries_identity_into_initial_probe() {
+        let identity = fixture_identity();
+        let tmp = tempfile::tempdir().unwrap();
+        let (_model, effects) = Model::new(
+            identity.clone(),
+            "/mnt/storage".to_owned(),
+            None,
+            None,
+            vec![],
+            StatePaths::custom(tmp.path().into()),
+        );
+        let probe_disks = effects
+            .iter()
+            .find_map(|e| match e {
+                Effect::ProbePool { disks, .. } => Some(disks),
+                _ => None,
+            })
+            .expect("startup must emit Effect::ProbePool");
+        assert_eq!(probe_disks, &identity);
+    }
+
+    // Intent: Message::RefreshPool's re-emitted Effect::ProbePool must carry
+    //         the Model's current DiskIdentity, not a stale or Default value.
+    // Why it exists: the refresh path is where the user re-presses `r`; if
+    //         the identity got dropped between startup and refresh, every
+    //         post-refresh probe would lose name->UUID/devid resolution and
+    //         disks would render as missing.
+    // Scenario: demo Model seeded with a one-disk identity and StatePaths,
+    //         user dispatches RefreshPool.
+    #[test]
+    fn refresh_pool_carries_identity_into_probe() {
+        let identity = fixture_identity();
+        let mut model = Model::new_demo(
+            vec!["alpha".to_owned()],
+            PoolStatus::Mounted(crate::tui::demo::sample_pool()),
+        );
+        model.disks = identity.clone();
+        let tmp = tempfile::tempdir().unwrap();
+        model.paths = Some(StatePaths::custom(tmp.path().into()));
+
+        let effects = update(&mut model, Message::RefreshPool);
+
+        let probe_disks = effects
+            .iter()
+            .find_map(|e| match e {
+                Effect::ProbePool { disks, .. } => Some(disks),
+                _ => None,
+            })
+            .expect("RefreshPool must emit Effect::ProbePool");
+        assert_eq!(probe_disks, &identity);
     }
 }

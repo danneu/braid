@@ -7,7 +7,8 @@ use crate::cmd::{CommandRunner, RawCommandOutput, RealRunner};
 use crate::config::FanControl;
 use crate::state_paths::StatePaths;
 use crate::tui::event::Event;
-use crate::types::{LuksUuid, MountPoint};
+use crate::tui::model::DiskIdentity;
+use crate::types::MountPoint;
 
 use std::time::Duration;
 
@@ -17,12 +18,9 @@ pub const UPS_PROBE_INTERVAL: Duration = Duration::from_secs(5);
 pub enum Effect {
     ProbePool {
         mount_point: MountPoint,
-        disk_by_id: HashMap<String, String>,
-        /// Persistent disk identity map passed to the worker probe thread.
-        disk_luks_uuid: HashMap<String, LuksUuid>,
-        /// Prior btrfs devid bindings for devices whose current probe lacks a
-        /// visible LUKS UUID.
-        disk_devid: HashMap<String, u64>,
+        /// Membership-derived disk identity passed to the worker probe thread
+        /// as a single bundle (names + by_id + luks_uuid + devid).
+        disks: DiskIdentity,
         paths: StatePaths,
     },
     ProbeFan {
@@ -54,9 +52,7 @@ pub fn execute_effect(effect: Effect, cmd_tx: &mpsc::Sender<Event>) {
     match effect {
         Effect::ProbePool {
             mount_point,
-            disk_by_id,
-            disk_luks_uuid,
-            disk_devid,
+            disks,
             paths,
         } => {
             let tx = cmd_tx.clone();
@@ -69,9 +65,7 @@ pub fn execute_effect(effect: Effect, cmd_tx: &mpsc::Sender<Event>) {
                     &runner,
                     &fs,
                     &mount_point,
-                    &disk_by_id,
-                    &disk_luks_uuid,
-                    &disk_devid,
+                    &disks,
                     &paths,
                     &backing_path_resolver,
                 );

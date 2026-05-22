@@ -200,7 +200,7 @@ fn fan_section(model: &Model) -> Table<'_> {
     // (longest disk label) + 6 -- five for "999° " (3-digit temp + degree
     // + space) plus one of slack -- with a floor of 7 so the "Driving"
     // header doesn't clip on a system with very short or no disk names.
-    let max_disk_name_len = model.disk_names.iter().map(|n| n.len()).max().unwrap_or(0);
+    let max_disk_name_len = model.disks.names.iter().map(|n| n.len()).max().unwrap_or(0);
     let driving_col_width = u16::try_from(max_disk_name_len + 6)
         .unwrap_or(u16::MAX)
         .max(7);
@@ -734,7 +734,8 @@ fn disk_table(model: &Model, unit: ByteUnit) -> Table<'_> {
     let header = Row::new(["", "Name", "Bus", "SMART", "Temp", "btrfs", "Allocated"])
         .style(Style::default().fg(Color::DarkGray));
     let rows: Vec<Row> = model
-        .disk_names
+        .disks
+        .names
         .iter()
         .enumerate()
         .map(|(i, name)| {
@@ -808,7 +809,8 @@ fn disk_table(model: &Model, unit: ByteUnit) -> Table<'_> {
         })
         .collect();
     let longest_name_len = model
-        .disk_names
+        .disks
+        .names
         .iter()
         .map(|k| k.len())
         .max()
@@ -817,7 +819,8 @@ fn disk_table(model: &Model, unit: ByteUnit) -> Table<'_> {
     let transport_width = disk_transport
         .map(|t| {
             model
-                .disk_names
+                .disks
+                .names
                 .iter()
                 .filter_map(|name| t.get(name))
                 .map(|s| s.len())
@@ -829,7 +832,8 @@ fn disk_table(model: &Model, unit: ByteUnit) -> Table<'_> {
     let smart_width = smart_health
         .map(|s| {
             model
-                .disk_names
+                .disks
+                .names
                 .iter()
                 .filter_map(|name| s.get(name))
                 .map(|h| smart_cell(h).width())
@@ -841,7 +845,8 @@ fn disk_table(model: &Model, unit: ByteUnit) -> Table<'_> {
     let temperature_width = pool
         .map(|p| {
             model
-                .disk_names
+                .disks
+                .names
                 .iter()
                 .map(|name| {
                     temperature_cell(
@@ -858,7 +863,8 @@ fn disk_table(model: &Model, unit: ByteUnit) -> Table<'_> {
     let btrfs_width = device_errors
         .map(|e| {
             model
-                .disk_names
+                .disks
+                .names
                 .iter()
                 .filter_map(|name| e.get(name))
                 .map(|err| btrfs_cell(err).width())
@@ -931,7 +937,7 @@ fn view_data(model: &Model, frame: &mut Frame, area: Rect, _now: PrimitiveDateTi
         }
         None => 1 + 1,
     };
-    let disk_height: u16 = model.disk_names.len() as u16 + 2; // +1 border, +1 header
+    let disk_height: u16 = model.disks.names.len() as u16 + 2; // +1 border, +1 header
     let fan_enabled = model.fan_control.is_some();
     let ups_enabled = model.ups_config.is_some();
     // border + header + single data row
@@ -1075,7 +1081,7 @@ fn view_scrub(model: &Model, frame: &mut Frame, area: Rect, now: PrimitiveDateTi
 }
 
 fn view_disk_detail(model: &Model, frame: &mut Frame, area: Rect) {
-    let disk_name = match model.disk_names.get(model.selected_disk) {
+    let disk_name = match model.disks.names.get(model.selected_disk) {
         Some(name) => name.clone(),
         None => return,
     };
