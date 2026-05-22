@@ -136,9 +136,14 @@ fn some_non_empty(s: &str) -> Option<String> {
 }
 
 /// Parse a percent value like `"100"` or `"47.5"` into `0..=100`. The
-/// rounding (`floor` after the split) is deliberately conservative --
-/// `99.9` becomes `99`, never `100`, so a UPS that is approximately but
-/// not actually full does not misrepresent.
+/// integer part alone is the gate: `intpart > 100` returns `None`,
+/// `intpart <= 100` returns `Some(intpart)`, fractional part discarded.
+///
+/// Floor-after-split is deliberately conservative at both ends --
+/// `99.9 -> Some(99)` so a not-quite-full UPS does not misrepresent,
+/// and `100.5 -> Some(100)` so borderline driver overshoot (firmware
+/// FP drift) is tolerated. Real driver bugs like `200` still trip the
+/// `intpart > 100` gate; see the `pct_out_of_range_is_none` test.
 fn parse_pct(s: &str) -> Option<u8> {
     let intpart = s.split_once('.').map(|(a, _)| a).unwrap_or(s);
     let n: u16 = intpart.parse().ok()?;
