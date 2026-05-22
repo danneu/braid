@@ -14913,6 +14913,104 @@ mod tests {
         );
     }
 
+    // Intent: RecoverWorkAction::WaitForKernelReplace.execute returns
+    // Ok(false) without touching the runner when state.just_mounted is false.
+    //
+    // Why it exists: The `if state.just_mounted` gate at recover.rs:440 is
+    // defense-in-depth on top of plan_recover's already-mounted refusal
+    // (recover.rs:1310, pinned by
+    // plan_recover_refuses_replace_on_externally_mounted_pool) and its
+    // `open_plan.is_some()` push gate (recover.rs:1381). Without this test, a
+    // regression that flips the gate (`if !state.just_mounted`) or removes it
+    // would compile and pass `just test-rust`, leaving production safety
+    // dependent solely on the planner refusal.
+    //
+    // Scenario: TOCTOU window -- plan_recover saw an unmounted pool and
+    // produced `open_plan: Some(_)`, but by execute time the mount call
+    // observed the pool already mounted and returned `Ok(false)`, so
+    // `state.just_mounted` ended up false. WaitForKernelReplace must not
+    // probe `btrfs replace status` on a mount session we did not open.
+    #[test]
+    fn wait_for_kernel_replace_no_ops_when_just_mounted_false() {
+        let f = PoolFixture::empty();
+        let mut plan = recover_work_plan_for_journal(replace_journal());
+        plan.open_plan = Some(OpenPlan {
+            to_unlock: Vec::new(),
+            any_open: false,
+            any_missing_member: false,
+            mount_device: String::new(),
+        });
+
+        let mut state = RecoverExecutionState {
+            credential: None,
+            just_mounted: false,
+        };
+
+        let runner = MockRunner::default();
+        let fs = MockFs::new(&[]);
+        let resolver = resolver_for(&[]);
+        let params = f.recover_params().build();
+
+        let result = RecoverWorkAction::WaitForKernelReplace
+            .execute(&plan, &mut state, &runner, &fs, &resolver, &params);
+
+        assert!(matches!(result, Ok(false)), "unexpected result: {result:?}");
+        assert!(
+            runner.requests().is_empty(),
+            "expected no runner activity, got: {:?}",
+            runner.requests()
+        );
+    }
+
+    // Intent: RecoverWorkAction::RemountCycle.execute returns Ok(false)
+    // without touching the runner when state.just_mounted is false.
+    //
+    // Why it exists: Same defense-in-depth pattern as
+    // WaitForKernelReplace -- the `if state.just_mounted` gate at
+    // recover.rs:451 guards relock_and_remount (umount + scan-forget +
+    // LUKS close+reopen + remount), all backstopped by the planner's
+    // `open_plan.is_some()` push gate at recover.rs:1406. A regression
+    // here would attempt to umount a foreign mount session.
+    //
+    // Scenario: Same TOCTOU window as the WaitForKernelReplace no-op
+    // test. The remount cycle must not run when recover did not open the
+    // mount itself.
+    #[test]
+    fn remount_cycle_no_ops_when_just_mounted_false() {
+        let f = PoolFixture::empty();
+        let mut plan = recover_work_plan_for_journal(replace_journal());
+        plan.open_plan = Some(OpenPlan {
+            to_unlock: Vec::new(),
+            any_open: false,
+            any_missing_member: false,
+            mount_device: String::new(),
+        });
+
+        let mut state = RecoverExecutionState {
+            credential: None,
+            just_mounted: false,
+        };
+
+        let runner = MockRunner::default();
+        let fs = MockFs::new(&[]);
+        let resolver = resolver_for(&[]);
+        let params = f.recover_params().build();
+
+        let result = RecoverWorkAction::RemountCycle {
+            close_names: vec![disk_name("disk1")],
+            reopen_names: vec![disk_name("disk1")],
+            any_missing_member: false,
+        }
+        .execute(&plan, &mut state, &runner, &fs, &resolver, &params);
+
+        assert!(matches!(result, Ok(false)), "unexpected result: {result:?}");
+        assert!(
+            runner.requests().is_empty(),
+            "expected no runner activity, got: {:?}",
+            runner.requests()
+        );
+    }
+
     /// Intent: When `cmd_recover` finds a paused balance after rebuilding
     /// pool.json, it MUST issue `btrfs balance resume` before clearing the
     /// journal. Otherwise the pool stays in reduced-redundancy state until
