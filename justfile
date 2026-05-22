@@ -86,6 +86,8 @@ test-all:
 
 # Run NixOS VM tests with parallel evaluation via flake-pinned nix-fast-build
 # -j mirrors _build-checks' Mac-RAM-tuned --max-jobs 7
+# Before timing with `time just test-fast`, prewarm the tool first:
+#   nix run .#nix-fast-build -- --help
 test-fast:
     #!/usr/bin/env bash
     set -euo pipefail
