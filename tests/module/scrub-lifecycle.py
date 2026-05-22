@@ -253,6 +253,7 @@ with subtest("resume: prepare dm-delay backed pool"):
     dm_delay_activate(resume, SCRUB_DELAY_DISKS, read_delay_ms=SCRUB_READ_DELAY_MS)
 
 with subtest("resume: cancel preserves Aborted state across lock/unlock"):
+    disable_trigger_hook(resume)
     resume.succeed("systemctl start {}".format(SERVICE))
     resume.succeed(
         "for i in $(seq 1 400); do "
@@ -262,7 +263,6 @@ with subtest("resume: cancel preserves Aborted state across lock/unlock"):
         "printf '%s\\n' \"$out\"; exit 1"
     )
 
-    disable_trigger_hook(resume)
     resume.succeed("braid lock")
     dm_delay_deactivate(resume, SCRUB_DELAY_DISKS)
     unlock(resume)
@@ -355,6 +355,10 @@ with subtest("concurrency: prepare dm-delay backed pool with saved scrub progres
         SCRUB_DELAY_DISKS,
         read_delay_ms=SCRUB_READ_DELAY_MS,
     )
+    # Mask the resume trigger before starting the scrub. daemon-reload can take
+    # several seconds in the VM; doing it after the scrub starts can let the
+    # scrub finish before braid lock reaches ExecStop, leaving no aborted state.
+    disable_trigger_hook(concurrency)
     concurrency.succeed("systemctl start {}".format(SERVICE))
     concurrency.succeed(
         "for i in $(seq 1 400); do "
@@ -364,10 +368,6 @@ with subtest("concurrency: prepare dm-delay backed pool with saved scrub progres
         "printf '%s\\n' \"$out\"; exit 1"
     )
 
-    # Mask the resume trigger so `braid lock` -> next `braid unlock` does not
-    # auto-trigger resume before we have aged the timer stamp and snapshotted
-    # the pre-race timestamps.
-    disable_trigger_hook(concurrency)
     concurrency.succeed("braid lock")
     wait_online_stop_settled(concurrency)
     # Reset dm-delay after cancel so the offline setup work is fast; we re-arm
