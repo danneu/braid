@@ -3,6 +3,8 @@ pub mod add;
 pub mod by_id;
 pub mod alert;
 pub mod btrfs_ioctl;
+/// Shared RAID1 capacity helpers used by advisory and mutation-safety paths.
+pub mod capacity;
 pub mod cmd;
 pub mod config;
 pub mod confirm;

@@ -3,6 +3,7 @@ use std::collections::{HashMap, HashSet};
 use serde::{Deserialize, Serialize};
 
 use crate::alert::{self, AlertCause, AlertState};
+use crate::capacity;
 use crate::cmd::{CmdError, CmdRequest, CommandRunner, LsblkFieldKind};
 use crate::config::{Config, mapper_name};
 use crate::confirm::get_lsblk_field;
@@ -10,7 +11,7 @@ use crate::journal;
 use crate::luks::{self, BackingPathResolver};
 use crate::membership::{self, PoolMembership};
 use crate::parse::types::BalanceState;
-use crate::parse::types::BtrfsDfOutput;
+use crate::parse::types::{BtrfsDeviceUsageOutput, BtrfsDfOutput};
 use crate::parse::{
     BtrfsDeviceStatsOutput, ParseError, ScrubState, parse_btrfs_balance_status,
     parse_btrfs_device_stats, parse_btrfs_device_usage, parse_btrfs_df_json,
@@ -434,6 +435,21 @@ fn build_status<R: CommandRunner, F: Filesystem>(
         Err(e) => return Err(e.into()),
     };
 
+    let dev_usage = if pool.missing_count == 0 {
+        match get_device_usage(runner, config.mount_point()) {
+            Ok(dev_usage) => Some(dev_usage),
+            Err(_) => {
+                advisories.push(
+                    "btrfs device usage failed -- pool total capacity and ENOSPC-risk advisory unavailable"
+                        .to_owned(),
+                );
+                None
+            }
+        }
+    } else {
+        None
+    };
+
     let df = match fetch_df(runner, config.mount_point()) {
         Ok(df) => Some(df),
         Err(_) => {
@@ -447,21 +463,10 @@ fn build_status<R: CommandRunner, F: Filesystem>(
     let df_summary = df.as_ref().map(summarize_df);
     let capacity = match df.as_ref() {
         Some(df) => {
-            let total_bytes = if pool.missing_count == 0 {
-                match get_total_bytes(runner, config.mount_point()) {
-                    Ok(total_bytes) => Some(total_bytes),
-                    Err(_) => {
-                        advisories.push(
-                            "btrfs device usage failed -- pool total capacity unavailable"
-                                .to_owned(),
-                        );
-                        None
-                    }
-                }
-            } else {
-                None
-            };
-
+            let total_bytes = dev_usage.as_ref().map(|out| {
+                let sizes: Vec<u64> = out.devices.iter().map(|d| d.device_size).collect();
+                estimate_pool_capacity(&sizes)
+            });
             match get_capacity(runner, config.mount_point(), df, total_bytes) {
                 Ok(capacity) => Some(capacity),
                 Err(_) => {
@@ -474,6 +479,12 @@ fn build_status<R: CommandRunner, F: Filesystem>(
         }
         None => None,
     };
+    if let Some(out) = dev_usage.as_ref() {
+        advisories.extend(capacity::enospc_risk_advisory(
+            &out.devices,
+            pool.missing_count,
+        ));
+    }
     let last_scrub = get_scrub_report(runner, config.mount_point());
     let balance = get_balance_report(runner, config.mount_point());
 
@@ -693,17 +704,16 @@ fn get_capacity<R: CommandRunner>(
 }
 
 /// Separate from `get_capacity` so device-usage failures can degrade only
-/// total capacity while preserving df / usage-derived used and free bytes.
-fn get_total_bytes<R: CommandRunner>(
+/// total capacity and ENOSPC-risk advice while preserving df / usage-derived
+/// used and free bytes.
+fn get_device_usage<R: CommandRunner>(
     runner: &R,
     mount_point: &MountPoint,
-) -> Result<u64, StatusError> {
+) -> Result<BtrfsDeviceUsageOutput, StatusError> {
     let dev_raw = runner.run(&CmdRequest::BtrfsDeviceUsageRaw {
         mount_point: mount_point.clone(),
     })?;
-    let dev_usage = parse_btrfs_device_usage(&dev_raw)?;
-    let sizes: Vec<u64> = dev_usage.devices.iter().map(|d| d.device_size).collect();
-    Ok(estimate_pool_capacity(&sizes))
+    Ok(parse_btrfs_device_usage(&dev_raw)?)
 }
 
 fn get_device_stats<R: CommandRunner>(
@@ -1561,7 +1571,9 @@ mod tests {
 
         let df = fetch_df(&runner, &status_mp()).unwrap();
         let df_summary = summarize_df(&df);
-        let total_bytes = Some(get_total_bytes(&runner, &status_mp()).unwrap());
+        let dev_usage = get_device_usage(&runner, &status_mp()).unwrap();
+        let sizes: Vec<u64> = dev_usage.devices.iter().map(|d| d.device_size).collect();
+        let total_bytes = Some(estimate_pool_capacity(&sizes));
         let capacity = get_capacity(&runner, &status_mp(), &df, total_bytes).unwrap();
         let last_scrub = get_scrub_report(&runner, &status_mp());
 
@@ -3376,6 +3388,26 @@ mod tests {
         .expect("tolerant status should build")
     }
 
+    fn status_btrfs_device_usage_raw_3disk_enospc_risk() -> RawCommandOutput {
+        mock_ok(
+            "btrfs device usage",
+            "/dev/mapper/disk1, ID: 1\n\
+             \x20  Device size:          346729130\n\
+             \x20  Device slack:              0\n\
+             \x20  Unallocated:          200000000\n\
+             \n\
+             /dev/mapper/disk2, ID: 2\n\
+             \x20  Device size:          346729130\n\
+             \x20  Device slack:              0\n\
+             \x20  Unallocated:          200000000\n\
+             \n\
+             /dev/mapper/disk3, ID: 3\n\
+             \x20  Device size:          346729130\n\
+             \x20  Device slack:              0\n\
+             \x20  Unallocated:           10000000\n",
+        )
+    }
+
     fn render_built_status(built: &BuiltStatus) -> String {
         let extras = built.mounted_extras.as_ref();
         format_status_human(
@@ -3595,7 +3627,8 @@ mod tests {
     // Scenario: `btrfs device usage` exits non-zero on an intact mounted pool.
     #[test]
     fn build_status_device_usage_cmd_failure_tolerant() {
-        let advisory = "btrfs device usage failed -- pool total capacity unavailable";
+        let advisory =
+            "btrfs device usage failed -- pool total capacity and ENOSPC-risk advisory unavailable";
         let healthy = build_healthy_status();
         let built = build_healthy_status_with_output(
             CmdRequest::BtrfsDeviceUsageRaw {
@@ -3634,7 +3667,8 @@ mod tests {
     // Scenario: `btrfs device usage` exits successfully but returns a malformed device stanza.
     #[test]
     fn build_status_device_usage_parse_failure_tolerant() {
-        let advisory = "btrfs device usage failed -- pool total capacity unavailable";
+        let advisory =
+            "btrfs device usage failed -- pool total capacity and ENOSPC-risk advisory unavailable";
         let healthy = build_healthy_status();
         let built = build_healthy_status_with_output(
             CmdRequest::BtrfsDeviceUsageRaw {
@@ -3669,6 +3703,153 @@ mod tests {
         assert!(!human.contains("Total:"), "got:\n{human}");
         assert!(human.contains("Used:"), "got:\n{human}");
         assert!(human.contains("Free:"), "got:\n{human}");
+    }
+
+    // Intent: mounted status warns when per-device headroom is one disk-loss
+    //   away from insufficient RAID1 chunk-pair capacity.
+    // Why it exists: operators need persistent visibility before
+    //   remove-missing reaches the dangerous ENOSPC middle band.
+    // Scenario: a healthy three-device mounted pool has one survivor set that
+    //   would be below the kernel-aligned data chunk threshold after a disk loss.
+    #[test]
+    fn build_status_warns_on_enospc_risk() {
+        let built = build_healthy_status_with_output(
+            CmdRequest::BtrfsDeviceUsageRaw {
+                mount_point: status_mp(),
+            },
+            status_btrfs_device_usage_raw_3disk_enospc_risk(),
+        );
+        let human = render_built_status(&built);
+
+        assert!(
+            built
+                .report
+                .advisories
+                .iter()
+                .any(|advisory| advisory.starts_with("ENOSPC risk:")),
+            "advisories: {:?}",
+            built.report.advisories
+        );
+        assert!(
+            human.contains("warning: ENOSPC risk:"),
+            "expected human advisory:\n{human}"
+        );
+    }
+
+    // Intent: the existing small-device healthy fixture remains quiet.
+    // Why it exists: a fixed 1 GiB threshold would false-positive on the VM
+    //   geometry used by status tests.
+    // Scenario: the canonical healthy three-device fixture has scaled
+    //   threshold headroom on every possible survivor set.
+    #[test]
+    fn build_status_healthy_small_fixture_has_empty_advisories() {
+        let built = build_healthy_status();
+
+        assert!(
+            built.report.advisories.is_empty(),
+            "healthy fixture should stay quiet: {:?}",
+            built.report.advisories
+        );
+    }
+
+    // Intent: ENOSPC risk remains visible when `btrfs filesystem df` fails.
+    // Why it exists: df/profile parser drift must not suppress the
+    //   independent device-usage advisory at the cliff edge.
+    // Scenario: df returns an error while btrfs device usage successfully
+    //   shows a low-unallocated RAID1 survivor set.
+    #[test]
+    fn build_status_df_failure_still_surfaces_enospc_risk() {
+        let runner = status_runner_healthy_3disk_verbose(status_runner_healthy_3disk_base())
+            .with_output(
+                CmdRequest::BtrfsFilesystemDfJson {
+                    mount_point: status_mp(),
+                },
+                status_err_raw("btrfs filesystem df", 1, "not a btrfs filesystem"),
+            )
+            .with_output(
+                CmdRequest::BtrfsDeviceUsageRaw {
+                    mount_point: status_mp(),
+                },
+                status_btrfs_device_usage_raw_3disk_enospc_risk(),
+            );
+        let fs = status_fs_three_disk();
+        let config = status_config();
+        let (_tmp, paths) = isolated_paths();
+
+        let built = build_status(
+            &runner,
+            &fs,
+            &config,
+            &paths,
+            crate::test_fixtures::mock_virtio_backing_path_resolver(),
+        )
+        .expect("status should tolerate df failure");
+
+        assert!(
+            built.report.advisories.iter().any(|advisory| advisory
+                == "btrfs filesystem df failed -- pool capacity, allocation, and profile unavailable"),
+            "advisories: {:?}",
+            built.report.advisories
+        );
+        assert!(
+            built
+                .report
+                .advisories
+                .iter()
+                .any(|advisory| advisory.starts_with("ENOSPC risk:")),
+            "advisories: {:?}",
+            built.report.advisories
+        );
+    }
+
+    // Intent: ENOSPC risk remains visible when `btrfs filesystem usage` fails.
+    // Why it exists: the capacity probe error advisory and the device-usage
+    //   risk advisory are independent diagnostics and both should survive.
+    // Scenario: df parses, device usage shows low headroom, and filesystem
+    //   usage errors before capacity can be rendered.
+    #[test]
+    fn build_status_usage_failure_still_surfaces_enospc_risk() {
+        let runner = status_runner_healthy_3disk_verbose(status_runner_healthy_3disk_base())
+            .with_output(
+                CmdRequest::BtrfsDeviceUsageRaw {
+                    mount_point: status_mp(),
+                },
+                status_btrfs_device_usage_raw_3disk_enospc_risk(),
+            )
+            .with_output(
+                CmdRequest::BtrfsFilesystemUsageRaw {
+                    mount_point: status_mp(),
+                },
+                status_err_raw("btrfs filesystem usage", 1, "error"),
+            );
+        let fs = status_fs_three_disk();
+        let config = status_config();
+        let (_tmp, paths) = isolated_paths();
+
+        let built = build_status(
+            &runner,
+            &fs,
+            &config,
+            &paths,
+            crate::test_fixtures::mock_virtio_backing_path_resolver(),
+        )
+        .expect("status should tolerate usage failure");
+
+        assert!(
+            built.report.advisories.iter().any(|advisory| advisory
+                == "btrfs filesystem usage failed -- pool capacity unavailable"),
+            "advisories: {:?}",
+            built.report.advisories
+        );
+        assert!(
+            built
+                .report
+                .advisories
+                .iter()
+                .any(|advisory| advisory.starts_with("ENOSPC risk:")),
+            "advisories: {:?}",
+            built.report.advisories
+        );
     }
 
     // Intent: device-stats command failures only remove per-disk error counts.
@@ -3804,7 +3985,9 @@ mod tests {
             ],
         };
 
-        let total_bytes = Some(get_total_bytes(&runner, &status_mp()).unwrap());
+        let dev_usage = get_device_usage(&runner, &status_mp()).unwrap();
+        let sizes: Vec<u64> = dev_usage.devices.iter().map(|d| d.device_size).collect();
+        let total_bytes = Some(estimate_pool_capacity(&sizes));
         let report = get_capacity(&runner, &status_mp(), &df, total_bytes).unwrap();
 
         assert_eq!(report.total_bytes, Some(536_870_912));

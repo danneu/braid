@@ -18,13 +18,16 @@ struct NotifierConfig {
     beep_probe_path: Option<String>,
 }
 
+use crate::capacity;
 use crate::cmd::{CmdRequest, CommandRunner, RealRunner};
 use crate::config::{Config, DEFAULT_CONFIG_PATH};
 use crate::luks;
 use crate::membership;
 use crate::online_state::{BRAID_ONLINE_UNIT, OnlineStateOps, RealOnlineStateOps, UnitActiveState};
 use crate::parse::smartctl::selftest_age_hours;
-use crate::parse::types::{BtrfsBgType, BtrfsDfOutput, BtrfsProfile, SelftestSummary};
+use crate::parse::types::{
+    BtrfsBgType, BtrfsDeviceUsageOutput, BtrfsDfOutput, BtrfsProfile, SelftestSummary,
+};
 use crate::parse::{
     parse_btrfs_device_usage, parse_btrfs_df_json, parse_cryptsetup_luks_uuid,
     parse_smartctl_selftest_log,
@@ -159,9 +162,17 @@ enum DfSnapshot {
     Ok(BtrfsDfOutput),
 }
 
-/// Per-run state for `braid doctor`: caches mountpoint, df, and live-pool
-/// probes across checks so the orchestrator avoids re-querying btrfs, and
-/// threads the parsed config plus runner/filesystem borrows each check needs.
+/// Cached `btrfs device usage` result shared by doctor checks that reason
+/// about per-device allocator headroom.
+enum DeviceUsageSnapshot {
+    NotMounted,
+    Error(String),
+    Ok(BtrfsDeviceUsageOutput),
+}
+
+/// Per-run state for `braid doctor`: caches mountpoint, df, device-usage, and
+/// live-pool probes across checks so the orchestrator avoids re-querying btrfs,
+/// and threads the parsed config plus runner/filesystem borrows each check needs.
 pub(crate) struct DoctorContext<'a, R: CommandRunner> {
     config_path: PathBuf,
     config_value: Option<serde_json::Value>,
@@ -172,6 +183,7 @@ pub(crate) struct DoctorContext<'a, R: CommandRunner> {
     paths: &'a StatePaths,
     mountpoint_is_mounted: Option<bool>,
     df_snapshot: Option<DfSnapshot>,
+    device_usage: Option<DeviceUsageSnapshot>,
     pool_state: Option<Result<PoolState, ProbeError>>,
 }
 
@@ -601,6 +613,44 @@ fn ensure_df_snapshot<R: CommandRunner>(ctx: &mut DoctorContext<'_, R>) {
     }
 }
 
+/// Populate the shared per-device usage cache for allocator-headroom checks.
+fn ensure_device_usage<R: CommandRunner>(ctx: &mut DoctorContext<'_, R>) {
+    if ctx.device_usage.is_some() {
+        return;
+    }
+
+    let config = match &ctx.config {
+        Some(c) => c,
+        None => return,
+    };
+
+    let mount_point = config.mount_point().to_owned();
+
+    if ensure_mountpoint_is_mounted(ctx) != Some(true) {
+        ctx.device_usage = Some(DeviceUsageSnapshot::NotMounted);
+        return;
+    }
+
+    let raw = match ctx.runner.run(&CmdRequest::BtrfsDeviceUsageRaw {
+        mount_point: mount_point.clone(),
+    }) {
+        Ok(raw) => raw,
+        Err(e) => {
+            ctx.device_usage = Some(DeviceUsageSnapshot::Error(e.to_string()));
+            return;
+        }
+    };
+
+    match parse_btrfs_device_usage(&raw) {
+        Ok(usage) => ctx.device_usage = Some(DeviceUsageSnapshot::Ok(usage)),
+        Err(e) => {
+            ctx.device_usage = Some(DeviceUsageSnapshot::Error(format!(
+                "could not parse output: {e}"
+            )))
+        }
+    }
+}
+
 fn ensure_pool_state<R: CommandRunner>(ctx: &mut DoctorContext<'_, R>) {
     if ctx.pool_state.is_some() {
         return;
@@ -732,6 +782,57 @@ fn check_pool_missing_devices<R: CommandRunner>(ctx: &mut DoctorContext<'_, R>) 
     }
 }
 
+/// Read-only RAID1 headroom check shared with status's ENOSPC risk advisory.
+fn check_enospc_risk<R: CommandRunner>(ctx: &mut DoctorContext<'_, R>) -> CheckResult {
+    const NAME: &str = "enospc_risk";
+    if ctx.config.is_none() {
+        return CheckResult::skip(NAME, "skipped (config not available)");
+    }
+
+    if ensure_mountpoint_is_mounted(ctx) != Some(true) {
+        return CheckResult::skip(NAME, "skipped (pool not mounted)");
+    }
+
+    ensure_pool_state(ctx);
+    let missing_count = match ctx
+        .pool_state
+        .as_ref()
+        .expect("ensure_pool_state seeds the cache when config is present and mounted")
+    {
+        Err(e) => {
+            return CheckResult::warn(
+                NAME,
+                format!("could not probe pool state -- ENOSPC risk indeterminate: {e}"),
+            );
+        }
+        Ok(pool) if pool.missing_count > 0 => {
+            return CheckResult::skip(NAME, "skipped (pool is degraded)");
+        }
+        Ok(pool) => pool.missing_count,
+    };
+
+    ensure_device_usage(ctx);
+    let device_usage = ctx
+        .device_usage
+        .as_ref()
+        .expect("ensure_device_usage sets device_usage when config is present");
+    match device_usage {
+        DeviceUsageSnapshot::NotMounted => CheckResult::skip(NAME, "skipped (pool not mounted)"),
+        DeviceUsageSnapshot::Error(_) => {
+            CheckResult::warn(NAME, "btrfs device usage failed -- ENOSPC risk indeterminate")
+        }
+        DeviceUsageSnapshot::Ok(usage) => {
+            match capacity::enospc_risk_advisory(&usage.devices, missing_count)
+                .into_iter()
+                .next()
+            {
+                Some(advisory) => CheckResult::warn(NAME, advisory),
+                None => CheckResult::ok(NAME, "per-device unallocated space healthy"),
+            }
+        }
+    }
+}
+
 /// Mounted-pool paused-balance check that points operators at resume instead
 /// of cancel/restart, preserving btrfs's existing balance progress.
 fn check_paused_balance<R: CommandRunner>(ctx: &mut DoctorContext<'_, R>) -> CheckResult {
@@ -848,34 +949,37 @@ fn check_metadata_enospc_pressure<R: CommandRunner>(
         .df_snapshot
         .as_ref()
         .expect("ensure_df_snapshot sets df_snapshot when config is present");
-    let df = match df_snapshot {
-        DfSnapshot::NotMounted => return CheckResult::skip(NAME, "skipped (pool not mounted)"),
-        DfSnapshot::Error(e) => {
-            return CheckResult::warn(NAME, format!("could not inspect metadata pressure: {e}"));
-        }
-        DfSnapshot::Ok(df) => df,
+    let (metadata_used, metadata_total) = {
+        let df = match df_snapshot {
+            DfSnapshot::NotMounted => return CheckResult::skip(NAME, "skipped (pool not mounted)"),
+            DfSnapshot::Error(e) => {
+                return CheckResult::warn(NAME, format!("could not inspect metadata pressure: {e}"));
+            }
+            DfSnapshot::Ok(df) => df,
+        };
+
+        df.entries
+            .iter()
+            .filter(|entry| entry.bg_type == BtrfsBgType::Metadata)
+            .fold((0u64, 0u64), |(used, total), entry| {
+                (used + entry.bg_used, total + entry.bg_total)
+            })
     };
 
     let mount_point = ctx.config.as_ref().unwrap().mount_point().to_owned();
-    let usage_raw = match ctx.runner.run(&CmdRequest::BtrfsDeviceUsageRaw {
-        mount_point: mount_point.clone(),
-    }) {
-        Ok(raw) => raw,
-        Err(e) => {
-            return CheckResult::warn(
-                NAME,
-                format!("could not inspect device unallocated: {e}"),
-            );
+    ensure_device_usage(ctx);
+    let usage = match ctx
+        .device_usage
+        .as_ref()
+        .expect("ensure_device_usage sets device_usage when config is present")
+    {
+        DeviceUsageSnapshot::NotMounted => {
+            return CheckResult::skip(NAME, "skipped (pool not mounted)");
         }
-    };
-    let usage = match parse_btrfs_device_usage(&usage_raw) {
-        Ok(usage) => usage,
-        Err(e) => {
-            return CheckResult::warn(
-                NAME,
-                format!("could not inspect device unallocated: could not parse output: {e}"),
-            );
+        DeviceUsageSnapshot::Error(e) => {
+            return CheckResult::warn(NAME, format!("could not inspect device unallocated: {e}"));
         }
+        DeviceUsageSnapshot::Ok(usage) => usage,
     };
     if usage.devices.is_empty() {
         return CheckResult::warn(
@@ -884,13 +988,6 @@ fn check_metadata_enospc_pressure<R: CommandRunner>(
         );
     }
 
-    let (metadata_used, metadata_total) = df
-        .entries
-        .iter()
-        .filter(|entry| entry.bg_type == BtrfsBgType::Metadata)
-        .fold((0u64, 0u64), |(used, total), entry| {
-            (used + entry.bg_used, total + entry.bg_total)
-        });
     if metadata_total == 0 {
         return CheckResult::ok(NAME, "no metadata block groups yet");
     }
@@ -1348,6 +1445,7 @@ pub fn run_doctor<R: CommandRunner>(
         paths,
         mountpoint_is_mounted: None,
         df_snapshot: None,
+        device_usage: None,
         pool_state: None,
     };
 
@@ -1357,6 +1455,7 @@ pub fn run_doctor<R: CommandRunner>(
         check_config_permissions(&mut ctx),
         check_declared_disks(&mut ctx),
         check_pool_missing_devices(&mut ctx),
+        check_enospc_risk(&mut ctx),
         check_foreign_luks_uuid(&mut ctx),
         check_data_profile_mismatch(&mut ctx),
         check_metadata_profile_mismatch(&mut ctx),
@@ -1397,6 +1496,7 @@ pub fn format_doctor_human_with(report: &DoctorReport, color_enabled: bool) -> S
             "config_permissions" => "config perms",
             "declared_disks" => "declared disks",
             "pool_missing_devices" => "missing devs",
+            "enospc_risk" => "enospc risk",
             "foreign_luks_uuid" => "foreign uuids",
             "data_profile_mismatch" => "data profiles",
             "metadata_profile_mismatch" => "meta profiles",
@@ -1503,6 +1603,7 @@ impl<'a, R: CommandRunner> DoctorContext<'a, R> {
             paths,
             mountpoint_is_mounted: None,
             df_snapshot: None,
+            device_usage: None,
             pool_state: None,
         }
     }
@@ -1518,6 +1619,7 @@ impl<'a, R: CommandRunner> DoctorContext<'a, R> {
             paths,
             mountpoint_is_mounted: None,
             df_snapshot: None,
+            device_usage: None,
             pool_state: None,
         }
     }
@@ -1552,6 +1654,36 @@ mod tests {
             .iter()
             .find(|c| c.name == name)
             .unwrap_or_else(|| panic!("check '{name}' not found"))
+    }
+
+    const MIB: u64 = 1 << 20;
+    const GIB: u64 = 1 << 30;
+
+    fn enospc_device_usage(unallocated: &[u64], device_size: u64) -> String {
+        let mut body = String::new();
+        for (index, unallocated) in unallocated.iter().enumerate() {
+            let devid = index + 1;
+            body.push_str(&format!(
+                "/dev/mapper/braid-disk{devid}, ID: {devid}\n\
+                 \x20  Device size:          {device_size}\n\
+                 \x20  Device slack:         0\n\
+                 \x20  Unallocated:          {unallocated}\n"
+            ));
+        }
+        body
+    }
+
+    fn enospc_three_disk_runner(usage: &str) -> MockRunner {
+        let (usage_req, usage_out) = device_usage_raw(usage);
+        pool_state_runner(
+            vec![
+                ("braid-disk1", 1, "/dev/vdb", test_uuid(1)),
+                ("braid-disk2", 2, "/dev/vdc", test_uuid(2)),
+                ("braid-disk3", 3, "/dev/vdd", test_uuid(3)),
+            ],
+            &[],
+        )
+        .with_output(usage_req, usage_out)
     }
 
     fn doctor_smartctl_selftest_json(
@@ -1645,6 +1777,7 @@ mod tests {
             "config_schema",
             "data_profile_mismatch",
             "declared_disks",
+            "enospc_risk",
             "foreign_luks_uuid",
             "metadata_enospc_pressure",
             "metadata_profile_mismatch",
@@ -3996,6 +4129,120 @@ mod tests {
             "must not recommend balance on degraded pool: {}",
             check.message,
         );
+    }
+
+    // --- enospc_risk tests ---
+
+    // Intent: enospc_risk reports Ok when a 3-device pool has enough RAID1
+    //   chunk-pair headroom after any single disk loss.
+    // Why it exists: the proactive risk row must not add noise to healthy
+    //   doctor output.
+    // Scenario: three 100 GiB devices each have 5 GiB unallocated.
+    #[test]
+    fn enospc_risk_healthy_three_disk_pool_ok() {
+        let usage = enospc_device_usage(&[5 * GIB, 5 * GIB, 5 * GIB], 100 * GIB);
+        let runner = enospc_three_disk_runner(&usage);
+        let (_dir, paths) = isolated_paths();
+        let fs = DoctorMockFs::mounted_btrfs_only();
+        let mut ctx =
+            DoctorContext::for_test_parsed_with_fs(&runner, &fs, &paths, valid_config_json());
+
+        let check = check_enospc_risk(&mut ctx);
+
+        assert_eq!(check.status, CheckStatus::Ok);
+        assert_eq!(check.message, "per-device unallocated space healthy");
+    }
+
+    // Intent: enospc_risk warns with the shared status advisory wording.
+    // Why it exists: status and doctor should stay in lockstep for the same
+    //   RAID1 chunk-pair risk predicate.
+    // Scenario: three 100 GiB devices have unallocated [10 GiB, 10 GiB, 50 MiB].
+    #[test]
+    fn enospc_risk_low_unallocated_warns() {
+        let usage = enospc_device_usage(&[10 * GIB, 10 * GIB, 50 * MIB], 100 * GIB);
+        let runner = enospc_three_disk_runner(&usage);
+        let (_dir, paths) = isolated_paths();
+        let fs = DoctorMockFs::mounted_btrfs_only();
+        let mut ctx =
+            DoctorContext::for_test_parsed_with_fs(&runner, &fs, &paths, valid_config_json());
+
+        let check = check_enospc_risk(&mut ctx);
+
+        assert_eq!(check.status, CheckStatus::Warn);
+        assert!(
+            check.message.starts_with("ENOSPC risk:"),
+            "expected ENOSPC advisory: {}",
+            check.message
+        );
+    }
+
+    // Intent: enospc_risk fails loud when btrfs device usage cannot be read.
+    // Why it exists: an unavailable risk input should be visible instead of a
+    //   false healthy row.
+    // Scenario: pool state probes succeed but `btrfs device usage` is missing.
+    #[test]
+    fn enospc_risk_device_usage_failure_warns() {
+        let runner = pool_state_runner(
+            vec![
+                ("braid-disk1", 1, "/dev/vdb", test_uuid(1)),
+                ("braid-disk2", 2, "/dev/vdc", test_uuid(2)),
+            ],
+            &[],
+        );
+        let (_dir, paths) = isolated_paths();
+        let fs = DoctorMockFs::mounted_btrfs_only();
+        let mut ctx =
+            DoctorContext::for_test_parsed_with_fs(&runner, &fs, &paths, valid_config_json());
+
+        let check = check_enospc_risk(&mut ctx);
+
+        assert_eq!(check.status, CheckStatus::Warn);
+        assert_eq!(
+            check.message,
+            "btrfs device usage failed -- ENOSPC risk indeterminate"
+        );
+    }
+
+    // Intent: enospc_risk fails loud when live pool state cannot be probed.
+    // Why it exists: missing-count uncertainty controls whether the risk row
+    //   should skip degraded pools, so probe failure must not become Ok.
+    // Scenario: mountpoint succeeds but `btrfs filesystem show` is unavailable.
+    #[test]
+    fn enospc_risk_pool_state_failure_warns() {
+        let runner = DfQueryFailureRunner;
+        let (_dir, paths) = isolated_paths();
+        let fs = DoctorMockFs::mounted_btrfs_only();
+        let mut ctx =
+            DoctorContext::for_test_parsed_with_fs(&runner, &fs, &paths, valid_config_json());
+
+        let check = check_enospc_risk(&mut ctx);
+
+        assert_eq!(check.status, CheckStatus::Warn);
+        assert!(
+            check
+                .message
+                .starts_with("could not probe pool state -- ENOSPC risk indeterminate:"),
+            "expected pool-state warning: {}",
+            check.message
+        );
+    }
+
+    // Intent: enospc_risk skips degraded pools.
+    // Why it exists: the missing-device row is the louder signal once the pool
+    //   has already lost a member.
+    // Scenario: btrfs reports one MISSING devid in a two-device pool.
+    #[test]
+    fn enospc_risk_degraded_pool_skips() {
+        let runner = pool_state_runner(vec![("braid-disk1", 1, "/dev/vdb", test_uuid(1))], &[2]);
+        let (_dir, paths) = isolated_paths();
+        let fs = DoctorMockFs::mounted_btrfs_only();
+        let mut ctx =
+            DoctorContext::for_test_parsed_with_fs(&runner, &fs, &paths, valid_config_json());
+
+        let check = check_enospc_risk(&mut ctx);
+
+        assert_eq!(check.status, CheckStatus::Skip);
+        assert_eq!(check.message, "skipped (pool is degraded)");
     }
 
     // --- metadata_enospc_pressure tests ---

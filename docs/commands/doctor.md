@@ -64,6 +64,7 @@ Note: `--json` mode skips the alert beep test even when combined with `--beep` (
 | `config_permissions` | Canonical `/etc/braid/config.json` is not world-writable and is owned by root; custom `--config` paths skip this check |
 | `declared_disks` | Every UUID-keyed pool.json member is present, has a readable LUKS header, and its live LUKS UUID matches the pool.json key |
 | `pool_missing_devices` | No btrfs missing devices in the live pool |
+| `enospc_risk` | Warns when the pool is one disk-loss away from insufficient RAID1 chunk-pair space. Per-device threshold scales with pool size (min(1 GiB, 10% of total device bytes), matching the kernel's effective data chunk size) |
 | `data_profile_mismatch` | Data block groups all use the same RAID profile |
 | `metadata_profile_mismatch` | Metadata block groups all use the same RAID profile |
 | `metadata_enospc_pressure` | Warns when metadata is near the next allocation threshold and fewer than two RAID1 devices have enough unallocated space for the next metadata chunk |

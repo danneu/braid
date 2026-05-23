@@ -224,6 +224,24 @@ storage), then remove the local copy to silence the warning.
 See [LUKS header backup workflow](../internals/luks-unlock.md#header-backup-workflow-and-messaging)
 for the full rationale.
 
+**ENOSPC risk on RAID1 pool.** When an intact mounted pool is one
+disk-loss away from insufficient RAID1 chunk-pair space, `braid status`
+prints:
+
+```
+warning: ENOSPC risk: 1 of 3 devices have less than 1.00 GiB unallocated -- pool may be unable to allocate new RAID1 chunks. Free up files or run 'btrfs balance start -dusage=0 -musage=0 <mount>' to reclaim empty chunks.
+```
+
+For 2-disk pools, the warning fires when either device drops below the
+threshold because new RAID1 chunks need space on both devices. For 3+
+device pools, braid simulates each possible single-disk loss and warns
+when any survivor set would have too little pairable unallocated space.
+The per-device threshold is `min(1 GiB, 10% of total device bytes)`,
+matching btrfs's effective data chunk size.
+
+See [Balance fails with No space left on device](../guides/troubleshooting.md#balance-fails-with-no-space-left-on-device)
+for recovery options.
+
 ## JSON output
 
 `--json` produces a structured report suitable for monitoring tools. Key fields:

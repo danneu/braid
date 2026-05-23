@@ -2,6 +2,7 @@ use std::fmt;
 use std::path::Path;
 
 use crate::btrfs_ioctl::BtrfsDevInfo;
+use crate::capacity;
 use crate::cmd::CmdRequest;
 use crate::cmd::CommandRunner;
 use crate::confirm;
@@ -343,11 +344,7 @@ pub fn check_raid1_relocation_space(
             ));
         }
 
-        let total: u64 = remaining_unalloc.iter().sum();
-        let largest = remaining_unalloc[0];
-        let rest: u64 = remaining_unalloc[1..].iter().sum();
-
-        let raid1_capacity = if largest > rest { rest } else { total / 2 };
+        let raid1_capacity = capacity::raid1_chunk_pair_capacity(&remaining_unalloc);
 
         if raid1_capacity < bytes_on_target {
             return Err(format!(
