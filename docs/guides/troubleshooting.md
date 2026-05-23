@@ -8,6 +8,8 @@ Symptom-oriented index for common problems. Find your symptom below and follow t
 
 btrfs balance needs temporary free space to relocate data. If the pool is very full, balance fails with ENOSPC even when there appears to be space available.
 
+First confirm where the pool's space went with `sudo btrfs filesystem usage /mnt/storage`: `df`'s "Used" and "Available" columns cannot distinguish data, metadata, and snapshot references, while `braid status` reports the same btrfs-derived capacity.
+
 **Fix:** Free up empty block groups first, then retry:
 
 ```sh

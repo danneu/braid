@@ -108,7 +108,7 @@ Snapshot a subvolume to create a point-in-time copy:
 sudo btrfs subvolume snapshot -r /mnt/storage/documents /mnt/storage/.snapshots/documents-2026-04-09
 ```
 
-The `-r` flag makes it read-only, which is best practice for backup snapshots. Snapshots are nearly instant and use no extra space until the original data changes.
+The `-r` flag makes it read-only, which is best practice for backup snapshots. Snapshots are nearly instant and use no extra space until the original data changes. Deleting a file from the original subvolume does not reclaim its blocks while any snapshot still references them. To free that space, delete the snapshots holding the data with `sudo btrfs subvolume delete /mnt/storage/.snapshots/<name>`.
 
 ### Listing subvolumes
 
