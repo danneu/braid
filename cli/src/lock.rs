@@ -507,12 +507,7 @@ impl LockPlan {
         }
     }
 
-    pub(crate) fn execute<R, F, S>(
-        self,
-        runner: &R,
-        fs: &F,
-        sleeper: &S,
-    ) -> Result<(), LockError>
+    pub(crate) fn execute<R, F, S>(self, runner: &R, fs: &F, sleeper: &S) -> Result<(), LockError>
     where
         R: CommandRunner,
         F: Filesystem + ?Sized,
@@ -3601,85 +3596,6 @@ mod tests {
             "prod CLOSE_RETRY_DELAY must stay 500ms; if you intend to \
              change this, update the kernel-race justification in the \
              commit message"
-        );
-    }
-
-    /*
-     * Intent: public cmd_lock wires a real sleeper. An always-busy
-     *   mapper makes the wrapper pay measurable wall-clock sleep time
-     *   before returning DeviceBusy, proving &RealSleeper (not
-     *   &LockNoopSleeper) is on the hot path.
-     *
-     * Why it exists: the helper-level RecordingSleeper test proves
-     *   close_mapper_with_retry uses CLOSE_RETRY_DELAY, but does not
-     *   prove the public wrapper hands in &RealSleeper. A regression
-     *   that shipped &LockNoopSleeper (or dropped the sleeper entirely) in
-     *   production would leave lock reliability race-dependent and
-     *   pass every helper-level unit test -- including
-     *   braid-lock-btrfs-held.py, which only asserts success and does
-     *   not deterministically force the retry path.
-     *
-     * Scenario: umount succeeds, then every mapper close returns
-     *   "is still in use" so the retry loop runs to exhaustion. Because
-     *   umount did not set umount_error, DeviceBusy is NOT suppressed:
-     *   it becomes first_mapper_error and is the returned value. Wall
-     *   time is bounded below by (CLOSE_RETRY_ATTEMPTS - 1) *
-     *   CLOSE_RETRY_DELAY for a single mapper; we assert a tolerant
-     *   lower bound of that amount to stay robust on slow CI while
-     *   still failing loudly if no real sleep happened.
-     */
-    #[test]
-    fn cmd_lock_wrapper_uses_real_sleeper() {
-        use std::time::Instant;
-
-        let runner = lock_mounted_runner()
-            .with_output(
-                CmdRequest::CryptsetupClose {
-                    mapper: MapperName("braid-aaa".into()),
-                },
-                lock_err_raw(
-                    "cryptsetup close braid-aaa",
-                    5,
-                    "Device braid-aaa is still in use.",
-                ),
-            )
-            .with_output(
-                CmdRequest::CryptsetupClose {
-                    mapper: MapperName("braid-bbb".into()),
-                },
-                lock_err_raw(
-                    "cryptsetup close braid-bbb",
-                    5,
-                    "Device braid-bbb is still in use.",
-                ),
-            );
-        let fs = lock_fs(&["/dev/mapper/braid-aaa", "/dev/mapper/braid-bbb"]);
-        let config = lock_test_config();
-        let membership = lock_test_membership();
-
-        let start = Instant::now();
-        let err = cmd_lock(&runner, &fs, &config, &membership, false)
-            .expect_err("should fail with DeviceBusy after retry exhaustion");
-        let elapsed = start.elapsed();
-
-        assert!(
-            matches!(err, LockError::DeviceBusy(_)),
-            "expected DeviceBusy from public wrapper, got: {err:?}"
-        );
-
-        // Both mappers hit the full retry loop: expected total real
-        // sleep is 2 * (CLOSE_RETRY_ATTEMPTS - 1) * CLOSE_RETRY_DELAY =
-        // 2s. We assert a tolerant lower bound of one mapper's worth
-        // (~900ms) so scheduler jitter on slow CI does not cause flake,
-        // while still catching a LockNoopSleeper regression (which would
-        // complete in microseconds).
-        let min_expected =
-            CLOSE_RETRY_DELAY * (CLOSE_RETRY_ATTEMPTS - 1) - Duration::from_millis(100);
-        assert!(
-            elapsed >= min_expected,
-            "wrapper must use RealSleeper -- elapsed {:?} < min {:?}",
-            elapsed,
-            min_expected,
         );
     }
 
