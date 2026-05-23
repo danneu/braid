@@ -3,12 +3,15 @@
 /.playwright-mcp
 /target
 /target
-/.claude/worktrees
+/.claude/settings.local.json
+/.claude/memory/
+/.claude/worktrees/
 target/
 /reference/
 __pycache__/
 docs/book/
 .envrc
+.DS_Store
 command-findings
 features1
 # Agents keep reading wip plans and thinking these plans

@@ -17,7 +17,6 @@ SEARCH_ROOTS = [
     ROOT / "AGENTS.md",
     ROOT / "README.md",
     ROOT / ".claude/agents",
-    ROOT / ".claude/memory",
     ROOT / "prompts",
 ]
 CITE_PATTERN = re.compile(r"docs/design/principles\.md#(\S+?)(?=[\"`)\s])")

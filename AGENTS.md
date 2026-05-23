@@ -60,6 +60,40 @@ Decision docs must include an explicit status: `Draft`, `Active`, `Superseded`, 
 
 Before modifying dry-run, preview, or mutating command planning/execution, read [`docs/design/decisions/022-dry-run-preview-model.md`](docs/design/decisions/022-dry-run-preview-model.md).
 
+## Planning and Review Hygiene
+
+- Re-read the central files immediately before writing or reviewing a plan; do
+  not rely on earlier conversation reads when code may have changed.
+- For renames, refactors, and callsite sweeps, derive the inventory from
+  tracked files with `git ls-files` plus `rg`. Be explicit about exclusions and
+  rerun the same search as verification.
+- Before planning recovery or cleanup recipes, verify every step against the
+  current `cmd_*` / `plan_*` code and the relevant tool or kernel behavior.
+  Treat issue recipes as hypotheses until the code proves them.
+- Architecture docs describe behavioral contracts, not internal helper names.
+  Verify wrapper process/lifetime claims from the wrapper code before writing
+  docs that depend on them.
+- For external-tool exit-code or wording classifiers, trace the specific
+  subcommand return path in `reference/`; a shared errno table is not enough to
+  prove one invocation's behavior.
+
+## Mutation Safety Heuristics
+
+- Query the authoritative source of state directly; do not pre-gate it with a
+  cheaper but weaker observable such as path existence.
+- Put invariant checks at the layer that owns the invariant. Primitive-level
+  checks belong inside the helper that performs the unsafe operation; caller
+  policy gates belong at callsites.
+- Keep diagnostic refinements out of mutating-command state enums when the new
+  distinction only matters for `status`, `doctor`, TUI, or error rendering.
+- Set fail-closed policy from the downstream failure mode. If a branch can
+  corrupt state or strand a journal when a preflight is wrong, every uncertainty
+  in that branch is a hard error even if a sibling branch can warn and proceed.
+- Residual invariant checks must be hard errors in all builds; do not replace a
+  production guard with `debug_assert!`.
+- Split post-commit failure variants by the operator's remediation and on-disk
+  consequence, not by implementation layer.
+
 ## User Guide
 
 End-user material lives in two places: [`README.md`](README.md) is the cookbook-style overview
@@ -202,6 +236,10 @@ Conventions).
 
 **Test scope:** Default to focused runs (`just test-vm test1 test2`) -- the full suite takes 20-30 minutes. Only run the unscoped `just test-vm` for changes with broad blast radius (systemd lifecycle, pool lock, mount/unmount, module-wide refactors) or right before handing work back to the user on a substantial change. For small, localized changes, run only the tests that exercise the touched code path.
 
+If a full-suite run surfaces one specific failing VM test, fix and verify that
+test plus any touched siblings. Do not autonomously rerun the full suite after
+the focused fix; tell the user it is ready for their full-suite rerun.
+
 ## Test Conventions
 
 Every individual test starts with a `//` line-comment preamble with three labeled sections:
@@ -211,6 +249,13 @@ Every individual test starts with a `//` line-comment preamble with three labele
 3. **Scenario** — the real-world user/system story this models, especially the concrete bug or incident that inspired the test
 
 For the literal preamble form, the flake.nix `checks` registration rule for new VM tests, and NixOS VM test framework gotchas, see [`docs/dev/testing.md`](docs/dev/testing.md).
+
+## Formatting
+
+Do not run `cargo fmt`, `rustfmt`, `just fmt`, or any formatter-over-source
+wrapper unless the user explicitly asks in the current turn. The repo can have
+pre-existing formatter drift, so formatter runs easily bury the intended diff
+in unrelated rewrites. Fix hand-written indentation with narrow edits instead.
 
 ## Development Approach: TDD with NixOS VM Tests
 

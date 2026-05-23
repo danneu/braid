@@ -14,11 +14,12 @@ Pre-flight is verify-only except for the findings directory:
 ```sh
 mkdir -p command-findings
 claude agents | grep -q '^command-reviewer\b'
-jq -e '.permissions.allow | index("Edit(/command-findings/**)")' .claude/settings.local.json
+jq empty .claude/settings.json
 ```
 
-Abort if the agent or permission rule is missing. Do not mutate Claude
-settings at runtime.
+Abort if the agent is missing or the committed shared settings file is
+invalid. The caller must already have local mutating permissions for
+`command-findings/`; do not mutate Claude settings at runtime.
 
 Create user-visible progress tasks before fan-out: issue 18
 `TaskCreate` calls in `pending` state, one titled `Review braid

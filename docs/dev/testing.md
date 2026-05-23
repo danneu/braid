@@ -63,6 +63,31 @@ In `tests/**/*.py`, never use `f"..."` without at least one `{variable}` inside.
 
 ## Patterns
 
+### Regression test quality
+
+Regression tests must fail when the bug is reintroduced. Test the layer where
+production failed, not a downstream parser or helper that only proves later
+code works when given correct input.
+
+For error propagation, assert the typed variant and payload. Use exact rendered
+strings only for tests whose purpose is to lock `Display` or user-facing
+output. If a change reclassifies an error, production and tests should call the
+same mapping helper; do not hand-build the target variant in the test.
+
+For user-visible CLI output or control-flow bugs, prefer a CLI/VM test that
+drives the real command. If stdout vs stderr matters, capture them separately
+with `>stdout 2>stderr`; merged streams do not pin routing. Render or preview
+helpers that form a user-visible boundary need exact-output coverage for every
+branch, including no-op branches.
+
+Keep repro tests focused. If adjacent behavior already has dedicated coverage,
+cite that test instead of bundling another phase into a repro whose failure
+would become ambiguous.
+
+When a dead test has a name that points at a real user-visible contract,
+replace it with a real regression test by default. Deleting the dead test
+turns bad coverage into no coverage.
+
 ### Live-tool behavior locks
 
 When braid code is changed to depend on a specific external-tool behavior -- a particular exit code, a particular output wording, a particular return-value path -- mocked unit tests prove the *classifier* is correct given the assumed behavior, but they do NOT prove the tool still behaves that way. A nixpkgs bump that changed cryptsetup's exit-code contract would silently misclassify in production while every mocked test still passed.
@@ -70,6 +95,38 @@ When braid code is changed to depend on a specific external-tool behavior -- a p
 Whenever a plan introduces a classifier of the form `exit_code == <N>` or `stderr.contains("<wording>")` against an external tool, identify (or add) a live-tool repro/VM test that asserts the same code/wording directly. List that test in the plan's verification section as a required gate. If the live-tool test would be non-trivial to add, pause and reconsider whether the classifier is actually robust.
 
 This is the same family as braid's parser-compatibility lanes (`just test-parsers`, `just test-rust-unstable`, see `AGENTS.md` (Parser Compatibility section)) -- those lock the parser against tool-output drift; a behavior-lock test locks an exit-code or wording classifier against the same drift surface. Reference example: `tests/repro/cryptsetup-close-mounted.py` asserts `exit_code == 5` for busy-close and `exit_code == 4` for already-closed, behavior-locking the assumption that `cli/src/lock.rs` retry classifier depends on.
+
+### VM and command test design
+
+Before inventing VM setup for missing disks, degraded mounts, ENOSPC, hotplug,
+or similar storage state, search `tests/cli/`, `tests/repro/`, and `tests/hw/`
+for an existing pattern and reuse it where it fits.
+
+Before proposing a VM test for a mutating command, search the same area for
+existing notes that say a shape is infeasible, and read sibling tests to learn
+which seams already exist.
+
+For ordering invariants like "persist state before post-operation
+maintenance", prefer a deterministic command-layer failure-injection test:
+allow the persistence step to succeed, force the next maintenance step to
+fail, then assert the persisted state is current and the journal still exists.
+
+When code touches kernel async workers, mount-session caches, or device-layer
+teardown, mocked unit tests are not enough. Run the relevant VM or repro test,
+inspect full logs when it fails, and repeat timing-sensitive repros enough to
+rule out a lucky pass.
+
+For `cmd_*` boolean gates derived from multiple inputs, route both branches
+through the same injected seam and test the matrix cells that distinguish the
+intended gate from plausible wrong gates.
+
+For one-off sequenced or stateful command-test behavior, prefer a file-local
+runner or wrapper over widening the shared `MockRunner`. Reserve shared runner
+API changes for behavior that many tests need.
+
+When removing sleep wall-time from tests, inject a sleeper dependency. Do not
+use `#[cfg(test)]` to zero a production timing constant whose value is part of
+the behavior.
 
 ### Eval-time test isolation: disable, don't stub
 
