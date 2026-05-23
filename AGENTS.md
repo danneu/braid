@@ -254,6 +254,19 @@ Full unstable canary workflow:
 
 ---
 
+## Plan Files
+
+Agents write plan files (design proposals, implementation plans, scratch
+analysis) to `./plans/wip/`, named `YYYY-MM-DD-{slug}.md` where `{slug}`
+is a short kebab-case identifier of the topic (e.g.
+`2026-05-23-test-perf.md`). Use today's date from the system context, not
+a guess.
+
+The `plans/wip/` directory is gitignored deliberately -- stale plans
+surfacing in project greps was causing agents to treat them as
+authoritative. Don't flag plan files as "untracked" or suggest committing
+them; that's the intended state.
+
 ## Plan Review Protocol
 
 When reviewing a plan:
