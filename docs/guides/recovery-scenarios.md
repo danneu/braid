@@ -283,13 +283,23 @@ sudo braid remove-missing --missing-id 3
 
 Use this when you do not have a replacement disk. The pool continues with fewer disks and reduced capacity. Data that was only on the dead drive is lost (but in RAID1, all data has a second copy on another drive).
 
+When this clears the last missing device and 2+ disks remain, `remove-missing` blocks on a follow-up soft RAID1 balance to restore redundancy on chunks written as `single` during degraded operation. You will see `[wait] pool: restoring RAID1 redundancy...` then `[ok]   pool: RAID1 redundancy restored` before the command returns. The wait scales with how much data was written while degraded: an idle pool finishes in seconds, while a pool written to heavily during degraded mode can take longer. A sleep inhibitor is held for the entire operation. See [`braid remove-missing`](../commands/remove-missing.md) for the full sequence.
+
+Verify:
+
+```sh
+sudo braid status
+```
+
+A successful result shows no missing devices and no `single` profile rows for data or metadata.
+
 ### Choosing between replace and remove-missing
 
 | | `replace` | `remove-missing` |
 | --- | --- | --- |
 | Requires new disk | Yes | No |
 | Rebuilds data | Yes | No |
-| Restores redundancy | Yes | No |
+| Restores redundancy | Yes | Partial: restores RAID1 profiles when 2+ disks remain, but does not add replacement capacity |
 | Duration | Hours (large disks) | Minutes |
 | When to use | You have a replacement | No replacement available |
 
