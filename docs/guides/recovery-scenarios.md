@@ -270,7 +270,7 @@ sudo braid replace --old toshiba2 \
   --missing-id 3
 ```
 
-Replace runs `btrfs replace` under the hood. This is a background operation that can take hours for large drives. Progress is visible in `braid status` and `braid tui`.
+Replace runs `btrfs replace start -B` under the hood. `braid replace` is a long-running online operation: the command waits in the foreground and shows progress while the pool remains usable. It can take hours for large drives, so run it from a shell you can leave open (or a `tmux`/`screen` session). From another shell, `braid status` and `braid tui` can show progress independently.
 
 ### Option B: Remove the missing device
 

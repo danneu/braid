@@ -167,7 +167,7 @@ See [Monitoring and alerts](monitoring-and-alerts.md) for details on how alerts 
   ```sh
   sudo braid doctor
   ```
-- **Let scrubs complete** -- braid runs monthly scrubs by default. Scrubs verify every block's checksum and repair corruption from redundant copies. Do not interrupt them.
+- **Let scrubs complete** -- braid runs monthly scrubs by default. Scrubs verify every block's checksum and repair corruption from redundant copies. braid starts them at low CPU priority (`Nice=19`) and idle I/O priority (`IOSchedulingClass=idle`). The CPU priority always applies; the I/O priority is best-effort -- how strongly the kernel honors it depends on your block-layer I/O scheduler -- so do not treat it as a guarantee that scrubs will never affect interactive workloads. The pool stays online throughout. If scrubs noticeably impact Samba, NFS, or local use on your hardware, retime them with `braid.autoScrub.interval` (any systemd calendar expression -- e.g. `"Sun *-*-* 02:00:00"`) to land in an off-peak window. Do not interrupt a scrub in progress.
 - **Create subvolumes early** -- there is no cost to creating them upfront, and you cannot convert a directory to a subvolume later without copying the data.
 
 ## What's next
