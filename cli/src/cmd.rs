@@ -768,6 +768,21 @@ impl CmdRequest {
                     // the source, same amount of I/O. The perf cost only exists
                     // for RAID5/6 (parity reconstruction), which braid doesn't use.
                     "-r".into(),
+                    // -f: skip btrfs's pre-mkfs filesystem-signature check on the
+                    // target mapper. The target is either freshly luksFormat'd by
+                    // braid (FreshLuks prep -- the encrypted view is random by
+                    // construction) or an operator-supplied LUKS device whose probed
+                    // UUID has been cleared as not-already-in-the-pool, re-probed at
+                    // the by-id form right before LUKS open, and re-verified against
+                    // the open mapper's backing path. Authority to consume any prior
+                    // content comes from the explicit `--new` argument plus passphrase
+                    // plus `--yes`/confirmation, not from prior pool membership.
+                    // btrfs-progs still runs `btrfs_prepare_device` on the target
+                    // (zero superblock-mirror regions and device ends, wipe existing
+                    // signatures, optional discard) before issuing
+                    // BTRFS_IOC_DEV_REPLACE, so the scan-forget + wipefs ladder used
+                    // by `add`'s returned-disk path (see Decision 012.e) is not
+                    // needed for the replace primitive.
                     "-f".into(),
                     "-B".into(),
                     devid.to_string(),
