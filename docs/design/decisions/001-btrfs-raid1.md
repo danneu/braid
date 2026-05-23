@@ -36,6 +36,7 @@ btrfs RAID1. The 50% space overhead is accepted as the cost of real-time auto-he
 ## Tradeoffs accepted
 
 - **50% space overhead** — 3x 12TB = ~18TB usable. Parity schemes would give ~24TB.
+- **Fixed 2-way redundancy** — btrfs RAID1 keeps exactly 2 copies of every block, regardless of pool size. A 3- or 4-drive pool tolerates one drive failure, the same as a 2-drive pool. Additional drives buy usable capacity, not extra fault tolerance. Higher-redundancy profiles (RAID1C3, RAID1C4) exist in btrfs but are not used by braid — the product's redundancy story is "tolerate one drive failure."
 - **No drive independence** — drives are part of a btrfs pool, not individually mountable. Recovery requires a working btrfs toolchain.
 - **Rebalancing cost** — adding or removing a drive triggers a balance operation that can take hours on large pools.
 - **Incremental growth** — start with 1 drive (single profile, no redundancy), add a second to convert to RAID1. This is a feature, not a tradeoff — data is available immediately, protection comes when the second drive arrives.

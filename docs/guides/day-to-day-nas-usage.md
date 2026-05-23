@@ -135,6 +135,8 @@ braid formats the new drive with LUKS (using your existing passphrase), adds it 
 
 After adding a disk, existing data gradually rebalances. You can check progress with `braid status` or `braid tui`.
 
+btrfs RAID1 keeps exactly 2 copies of every block no matter how many drives the pool has. A 3rd or 4th drive gives you more usable capacity, but it does not increase fault tolerance -- the pool still tolerates a single drive failure, the same as a 2-drive pool. See [Decision 001](../design/decisions/001-btrfs-raid1.md) for the rationale.
+
 ## Responding to alerts
 
 If the NAS beeps (or sends you an alert via a custom command), something needs attention:

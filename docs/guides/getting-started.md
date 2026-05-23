@@ -100,6 +100,8 @@ braid will:
 4. Mount the pool at `/mnt/storage`.
 5. Write pool membership to `/var/lib/braid/pool.json`.
 
+All drives join the same btrfs RAID1 filesystem. btrfs RAID1 keeps exactly 2 copies of every block regardless of how many drives you add, so the pool tolerates a single drive failure -- a 3-drive pool tolerates the same single failure as a 2-drive pool, with more usable capacity. See [Day-to-day usage](day-to-day-nas-usage.md) for what additional drives buy you and how to add them later.
+
 The disk names (`toshiba1`, `toshiba2`, etc.) are permanent presentation labels used in all future commands. Pick something short and meaningful. braid uses the LUKS UUID, not the name or LUKS label, as the persistent disk identity.
 
 After `braid add` completes, the pool is online and mounted. You can start using it immediately:
