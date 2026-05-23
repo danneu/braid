@@ -1,0 +1,15 @@
+---
+source: cli/src/tui/view/mod.rs
+expression: out
+---
+Data  Scrub  Browse
+ Scrub ─────────────────────────────────────────────────────
+ Last run     Tue Feb 24 02:00:07 2026 (11 min ago)
+ Errors       3
+ Total        32.4 MiB
+ Rate         32.3 MiB/s
+ Duration     0s
+scrub error details: sudo journalctl -k --since '2026-02-24
+02:00:07' --grep 'BTRFS.*(at logical.*on (dev|mirror)|super
+block at physical)'
+Quit: q │ Help: ? │ Reset temp hi/lo: R │ Reload: r

@@ -187,6 +187,95 @@ sudo braid unlock
 systemctl status braid-scrub.timer
 ```
 
+## Scrub reported errors
+
+**Symptom:** `braid status` shows `Last scrub: <ts> (N errors)` or
+`braid monitor` raised a btrfs error alert after a scrub.
+
+The scrub error count braid reports is authoritative -- braid parses it from
+`btrfs scrub status`. Journal lines are diagnostic *clues*, not a complete
+per-error ledger: the kernel emits scrub messages through rate-limited helpers,
+so a busy or bursty scrub can produce fewer journal lines than the count. A
+non-zero count with sparse or missing journal lines is not a braid bug -- it
+usually means the kernel dropped log entries to stay under its rate limit.
+
+Use the command printed under the scrub status, or run journalctl directly:
+
+```sh
+sudo journalctl -k --since '<scrub-start-time>' --grep 'BTRFS.*(at logical.*on (dev|mirror)|super block at physical)'
+```
+
+Output comes in two distinct grammars depending on whether the error is in a
+data/metadata extent or in a superblock copy.
+
+**Extent errors (data and metadata).** Each affected sector may log a
+repair-summary line:
+
+- Corrected via RAID1 mirror: `fixed up error at logical N on dev
+  /dev/mapper/braid-X physical N` (or `... on mirror N` when the source mirror
+  has no device). btrfs RAID1 read the healthy mirror and wrote it back over
+  the bad copy. **No file path** -- corrected lines give block coordinates
+  only. A count consisting mostly of `fixed up error` lines means data
+  integrity was preserved; investigate the disk that produced the bad reads.
+- Uncorrectable: `unable to fixup (regular) error at logical N on dev X
+  physical N` (or `... on mirror N`). RAID1 could not recover -- the mirror was
+  also bad or no mirror exists. The block is permanently damaged.
+
+An uncorrectable extent error *may* also log an additional detail line that
+identifies what was lost. The detail emission is gated by a second rate-limit
+check, so it is not guaranteed to appear for every uncorrectable error. When
+present, the shapes are:
+
+- **Data extent, path resolved.** `... at logical N on dev X, physical N, root
+  N, inode N, offset N, length N, links N (path: subdir/victim.bin)`. `(path:
+  ...)` is **relative to the affected btrfs subvolume root**, not absolute. The
+  kernel builds it from `paths_from_inode()`
+  (`reference/linux/fs/btrfs/scrub.c:457`,
+  `reference/linux/fs/btrfs/backref.c:2125`) and does not know what mount point
+  exposes that subvolume. Prepend the mount point of the affected subvolume
+  (default subvolume at `/mnt/storage`; named subvolumes wherever you
+  configured them).
+- **Data extent, path resolution failed.** Same shape but ends `... path
+  resolving failed with ret=N` instead of `(path: ...)`. Usually means the
+  extent has no remaining inode references (file already deleted) or the inode
+  lives in a snapshot rooted under a different subvolume than the search root.
+- **Metadata.** `... at logical N on dev X, physical N: metadata leaf|node
+  (level N) in tree N`. Tree-block corruption -- no file path because the bad
+  block lives in a btrfs tree, not in user data. Persistent metadata errors
+  indicate disk failure.
+
+**Superblock errors.** Logged as standalone messages from `scrub_supers`, not
+as repair-summary + detail pairs. The grammar is independent of the extent
+path:
+
+- `super block at physical N devid N has bad csum`
+- `super block at physical N devid N has bad generation N expect N`
+
+Damage to one of the device's superblock copies. Investigate the device
+(identified by `devid`), not a file.
+
+For the **path-resolution-failed** case, you can try `inode-resolve` as a
+best-effort:
+
+```sh
+sudo btrfs inspect-internal inode-resolve <inode> /mnt/storage
+```
+
+This succeeds only if the inode still exists in the subvolume rooted at the
+supplied path. Deleted files, extents with no remaining references, or files
+that live in a different subvolume will still produce no result -- the kernel
+logged "path resolving failed" for the same reason.
+
+A non-zero error count after a scrub means at least one block failed its
+checksum or I/O. With btrfs RAID1, blocks with a healthy mirror are repaired
+automatically (counted as `Corrected` -- the `fixed up` lines above);
+`Uncorrectable` means both copies were bad and the file (for data) or tree
+block (for metadata) is now damaged. The journal output is your best diagnostic
+surface, but treat it as evidence rather than a complete ledger: rely on the
+scrub count for "how many," and on the journal for "what kind, and where the
+kernel could log it." Restore affected files from backup and run `braid ack`
+once you have investigated.
+
 ## SMB/NFS service inactive after `braid lock`
 
 **Symptom:** `systemctl status samba-smbd.service` (or `nfs-server.service`) shows `inactive (dead)` immediately after you ran `braid lock`.
@@ -201,4 +290,4 @@ If the service does not restart on `braid unlock`, it is wired for the stop side
 
 - [Recovery scenarios](recovery-scenarios.md) -- detailed recovery walkthroughs
 - [NixOS configuration](nixos-configuration.md) -- module option reference
-- [Monitoring and alerts](monitoring-and-alerts.md) -- alert system details
+- [Monitoring and alerts](monitoring-and-alerts.md) -- alert system details; see "Scrub reported errors" above for the post-alert investigation steps.

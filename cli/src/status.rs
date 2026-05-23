@@ -146,14 +146,20 @@ pub enum ScrubReport {
     Finished {
         started_at: String,
         error_count: u64,
+        #[serde(skip)]
+        journal_since: String,
     },
     Aborted {
         started_at: String,
         error_count: u64,
+        #[serde(skip)]
+        journal_since: String,
     },
     Interrupted {
         started_at: String,
         error_count: u64,
+        #[serde(skip)]
+        journal_since: String,
     },
     Unknown,
 }
@@ -749,30 +755,54 @@ fn get_scrub_report<R: CommandRunner>(runner: &R, mount_point: &MountPoint) -> S
                 started_at,
                 error_count,
                 ..
-            } => ScrubReport::Finished {
-                started_at: format_scrub_timestamp(&started_at),
-                error_count,
-            },
+            } => {
+                let journal_since = format_scrub_timestamp_for_journalctl(&started_at);
+                ScrubReport::Finished {
+                    started_at: format_scrub_timestamp(&started_at),
+                    error_count,
+                    journal_since,
+                }
+            }
             ScrubState::Aborted {
                 started_at,
                 error_count,
                 ..
-            } => ScrubReport::Aborted {
-                started_at: format_scrub_timestamp(&started_at),
-                error_count,
-            },
+            } => {
+                let journal_since = format_scrub_timestamp_for_journalctl(&started_at);
+                ScrubReport::Aborted {
+                    started_at: format_scrub_timestamp(&started_at),
+                    error_count,
+                    journal_since,
+                }
+            }
             ScrubState::Interrupted {
                 started_at,
                 error_count,
                 ..
-            } => ScrubReport::Interrupted {
-                started_at: format_scrub_timestamp(&started_at),
-                error_count,
-            },
+            } => {
+                let journal_since = format_scrub_timestamp_for_journalctl(&started_at);
+                ScrubReport::Interrupted {
+                    started_at: format_scrub_timestamp(&started_at),
+                    error_count,
+                    journal_since,
+                }
+            }
             ScrubState::Unknown => ScrubReport::Unknown,
         },
         Err(_) => ScrubReport::Unknown,
     }
+}
+
+/// Journalctl accepts this stable local-time shape for `--since`.
+fn format_scrub_timestamp_for_journalctl(ts: &crate::parse::types::ScrubTimestamp) -> String {
+    use time::macros::format_description;
+    let fmt = format_description!("[year]-[month]-[day] [hour]:[minute]:[second]");
+    ts.0.format(&fmt).unwrap_or_else(|_| "unknown".to_owned())
+}
+
+/// Keeps the scrub journal grep string identical wherever status prints it.
+fn format_scrub_journal_command(journal_since: &str) -> String {
+    format!("sudo journalctl -k --since '{journal_since}' --grep '{SCRUB_JOURNAL_GREP}'")
 }
 
 fn format_scrub_timestamp(ts: &crate::parse::types::ScrubTimestamp) -> String {
@@ -1136,6 +1166,24 @@ fn format_status_human(
     }
 
     if let Some(ref scrub) = report.last_scrub {
+        let scrub_hint = match scrub {
+            ScrubReport::Finished {
+                error_count,
+                journal_since,
+                ..
+            }
+            | ScrubReport::Aborted {
+                error_count,
+                journal_since,
+                ..
+            }
+            | ScrubReport::Interrupted {
+                error_count,
+                journal_since,
+                ..
+            } if *error_count > 0 => Some(format_scrub_journal_command(journal_since)),
+            _ => None,
+        };
         let line = match scrub {
             ScrubReport::Never => "never".to_owned(),
             ScrubReport::Running { pct } => match pct {
@@ -1145,6 +1193,7 @@ fn format_status_human(
             ScrubReport::Finished {
                 started_at,
                 error_count,
+                ..
             } => {
                 if *error_count == 0 {
                     format!("{started_at} (no errors)")
@@ -1152,15 +1201,35 @@ fn format_status_human(
                     format!("{started_at} ({error_count} errors)")
                 }
             }
-            ScrubReport::Aborted { started_at, .. } => {
-                format!("{started_at} cancelled (will resume)")
+            ScrubReport::Aborted {
+                started_at,
+                error_count,
+                ..
+            } => {
+                if *error_count == 0 {
+                    format!("{started_at} cancelled (will resume)")
+                } else {
+                    format!("{started_at} ({error_count} errors) cancelled (will resume)")
+                }
             }
-            ScrubReport::Interrupted { started_at, .. } => {
-                format!("{started_at} interrupted")
+            ScrubReport::Interrupted {
+                started_at,
+                error_count,
+                ..
+            } => {
+                if *error_count == 0 {
+                    format!("{started_at} interrupted")
+                } else {
+                    format!("{started_at} ({error_count} errors) interrupted")
+                }
             }
             ScrubReport::Unknown => "unknown".to_owned(),
         };
         out.push_str(&format!("\nLast scrub: {line}\n"));
+        if let Some(command) = scrub_hint {
+            out.push_str("  scrub error details:\n");
+            out.push_str(&format!("  {command}\n"));
+        }
     }
 
     // Verbose: per-disk section
@@ -1264,6 +1333,9 @@ fn format_status_human(
 }
 
 pub use crate::confirm::format_bytes;
+
+const SCRUB_JOURNAL_GREP: &str =
+    "BTRFS.*(at logical.*on (dev|mirror)|super block at physical)";
 
 // ---------------------------------------------------------------------------
 // Tests
@@ -2290,9 +2362,11 @@ mod tests {
             ScrubReport::Finished {
                 started_at,
                 error_count,
+                journal_since,
             } => {
                 assert!(started_at.contains("Mon Feb 23"), "got: {started_at}");
                 assert_eq!(error_count, 0);
+                assert_eq!(journal_since, "2026-02-23 10:00:00");
             }
             other => panic!("expected Finished, got: {other:?}"),
         }
@@ -2315,9 +2389,11 @@ mod tests {
             ScrubReport::Finished {
                 started_at,
                 error_count,
+                journal_since,
             } => {
                 assert!(started_at.contains("Mon Feb 23"), "got: {started_at}");
                 assert_eq!(error_count, 50);
+                assert_eq!(journal_since, "2026-02-23 10:00:00");
             }
             other => panic!("expected Finished, got: {other:?}"),
         }
@@ -2339,9 +2415,11 @@ mod tests {
             ScrubReport::Aborted {
                 started_at,
                 error_count,
+                journal_since,
             } => {
                 assert!(started_at.contains("Mon Feb 23"), "got: {started_at}");
                 assert_eq!(error_count, 0);
+                assert_eq!(journal_since, "2026-02-23 10:00:00");
             }
             other => panic!("expected Aborted, got: {other:?}"),
         }
@@ -2363,9 +2441,11 @@ mod tests {
             ScrubReport::Interrupted {
                 started_at,
                 error_count,
+                journal_since,
             } => {
                 assert!(started_at.contains("Mon Feb 23"), "got: {started_at}");
                 assert_eq!(error_count, 0);
+                assert_eq!(journal_since, "2026-02-23 10:00:00");
             }
             other => panic!("expected Interrupted, got: {other:?}"),
         }
@@ -2384,6 +2464,18 @@ mod tests {
     }
 
     #[test]
+    fn scrub_journal_since_formatter_uses_journalctl_shape() {
+        // Intent: verify scrub timestamps can be rendered in journalctl's local-time shape.
+        // Why it exists: the human ctime string does not round-trip cleanly through `journalctl --since`.
+        // Scenario: status builds the copyable scrub-error journal command from raw scrub status.
+        let ts = crate::parse::types::ScrubTimestamp(time::macros::datetime!(2026-05-20 10:05:30));
+        assert_eq!(
+            format_scrub_timestamp_for_journalctl(&ts),
+            "2026-05-20 10:05:30"
+        );
+    }
+
+    #[test]
     fn scrub_report_json_finished() {
         // Intent: verify the JSON shape of ScrubReport::Finished.
         // Why it exists: the old last_scrub was a flat string — we need to ensure
@@ -2392,6 +2484,7 @@ mod tests {
         let report = ScrubReport::Finished {
             started_at: "Mon Feb 23 10:00:00 2026".to_owned(),
             error_count: 3,
+            journal_since: "2026-02-23 10:00:00".to_owned(),
         };
         let json: serde_json::Value = serde_json::to_value(&report).unwrap();
         assert_eq!(json["state"], "finished");
@@ -2408,6 +2501,7 @@ mod tests {
         let report = ScrubReport::Aborted {
             started_at: "Mon Feb 23 10:00:00 2026".to_owned(),
             error_count: 0,
+            journal_since: "2026-02-23 10:00:00".to_owned(),
         };
         let json: serde_json::Value = serde_json::to_value(&report).unwrap();
         assert_eq!(json["state"], "aborted");
@@ -2423,11 +2517,34 @@ mod tests {
         let report = ScrubReport::Interrupted {
             started_at: "Mon Feb 23 10:00:00 2026".to_owned(),
             error_count: 0,
+            journal_since: "2026-02-23 10:00:00".to_owned(),
         };
         let json: serde_json::Value = serde_json::to_value(&report).unwrap();
         assert_eq!(json["state"], "interrupted");
         assert_eq!(json["started_at"], "Mon Feb 23 10:00:00 2026");
         assert_eq!(json["error_count"], 0);
+    }
+
+    #[test]
+    fn scrub_report_json_skips_journal_since() {
+        // Intent: verify the journalctl helper timestamp stays out of JSON output.
+        // Why it exists: `journal_since` is renderer-only context, not a machine-output contract.
+        // Scenario: a JSON consumer round-trips last_scrub without seeing a new serialized field.
+        let report = ScrubReport::Finished {
+            started_at: "Mon Feb 23 10:00:00 2026".to_owned(),
+            error_count: 3,
+            journal_since: "2026-02-23 10:00:00".to_owned(),
+        };
+        let encoded = serde_json::to_string(&report).unwrap();
+        assert!(
+            !encoded.contains("journal_since"),
+            "journal_since leaked into JSON: {encoded}"
+        );
+        let decoded: ScrubReport = serde_json::from_str(&encoded).unwrap();
+        match decoded {
+            ScrubReport::Finished { journal_since, .. } => assert_eq!(journal_since, ""),
+            other => panic!("expected Finished, got: {other:?}"),
+        }
     }
 
     #[test]
@@ -2472,27 +2589,43 @@ mod tests {
         let report = status_report_with_scrub(ScrubReport::Finished {
             started_at: "Mon Feb 23 10:00:00 2026".to_owned(),
             error_count: 0,
+            journal_since: "2026-02-23 10:00:00".to_owned(),
         });
         let human = format_status_human(&report, None, None, None);
         assert!(
             human.contains("\nLast scrub: Mon Feb 23 10:00:00 2026 (no errors)\n"),
             "expected exact last-scrub line, got:\n{human}"
         );
+        assert!(
+            !human.contains("scrub error details:"),
+            "clean scrub should not print journal hint, got:\n{human}"
+        );
     }
 
     #[test]
     fn human_scrub_shows_error_count() {
         // Intent: verify human output includes error count for failed scrub.
-        // Why it exists: the old code showed only the timestamp — errors were invisible.
+        // Why it exists: the old code showed only the timestamp, so errors were invisible.
         // Scenario: user runs `braid status` after a scrub found 3 errors.
         let report = status_report_with_scrub(ScrubReport::Finished {
             started_at: "Mon Feb 23 10:00:00 2026".to_owned(),
             error_count: 3,
+            journal_since: "2026-02-23 10:00:00".to_owned(),
         });
         let human = format_status_human(&report, None, None, None);
         assert!(
             human.contains("\nLast scrub: Mon Feb 23 10:00:00 2026 (3 errors)\n"),
             "expected exact last-scrub line, got:\n{human}"
+        );
+        assert!(
+            human.contains("\n  scrub error details:\n"),
+            "expected journal hint label, got:\n{human}"
+        );
+        assert!(
+            human.contains(
+                "\n  sudo journalctl -k --since '2026-02-23 10:00:00' --grep 'BTRFS.*(at logical.*on (dev|mirror)|super block at physical)'\n"
+            ),
+            "expected exact journal command, got:\n{human}"
         );
     }
 
@@ -2504,11 +2637,39 @@ mod tests {
         let report = status_report_with_scrub(ScrubReport::Aborted {
             started_at: "Mon Feb 23 10:00:00 2026".to_owned(),
             error_count: 0,
+            journal_since: "2026-02-23 10:00:00".to_owned(),
         });
         let human = format_status_human(&report, None, None, None);
         assert!(
             human.contains("\nLast scrub: Mon Feb 23 10:00:00 2026 cancelled (will resume)\n"),
             "expected exact cancelled last-scrub line, got:\n{human}"
+        );
+        assert!(
+            !human.contains("scrub error details:"),
+            "clean cancelled scrub should not print journal hint, got:\n{human}"
+        );
+    }
+
+    #[test]
+    fn human_scrub_shows_aborted_error_hint() {
+        // Intent: verify cancelled scrubs with errors still point at journal details.
+        // Why it exists: aborted is terminal for status rendering but still carries an error count.
+        // Scenario: lock cancelled a scrub after btrfs had already found checksum errors.
+        let report = status_report_with_scrub(ScrubReport::Aborted {
+            started_at: "Mon Feb 23 10:00:00 2026".to_owned(),
+            error_count: 2,
+            journal_since: "2026-02-23 10:00:00".to_owned(),
+        });
+        let human = format_status_human(&report, None, None, None);
+        assert!(
+            human.contains(
+                "\nLast scrub: Mon Feb 23 10:00:00 2026 (2 errors) cancelled (will resume)\n"
+            ),
+            "expected error-bearing cancelled line, got:\n{human}"
+        );
+        assert!(
+            human.contains("\n  scrub error details:\n"),
+            "expected journal hint label, got:\n{human}"
         );
     }
 
@@ -2520,6 +2681,7 @@ mod tests {
         let report = status_report_with_scrub(ScrubReport::Interrupted {
             started_at: "Mon Feb 23 10:00:00 2026".to_owned(),
             error_count: 0,
+            journal_since: "2026-02-23 10:00:00".to_owned(),
         });
         let human = format_status_human(&report, None, None, None);
         assert!(

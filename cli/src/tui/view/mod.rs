@@ -7,12 +7,14 @@ use ratatui::text::{Line, Span};
 mod help;
 
 use ratatui::Frame;
-use ratatui::widgets::{Block, Borders, Cell, Clear, Padding, Paragraph, Row, Table, TableState};
+use ratatui::widgets::{
+    Block, Borders, Cell, Clear, Padding, Paragraph, Row, Table, TableState, Wrap,
+};
 use time::PrimitiveDateTime;
 use time::macros::format_description;
 
 use crate::config::FanControl;
-use crate::parse::types::{BtrfsBgType, ScrubState, SmartHealth, UpsStatusFlag};
+use crate::parse::types::{BtrfsBgType, ScrubState, ScrubTimestamp, SmartHealth, UpsStatusFlag};
 use crate::status::{BalanceReport, DiskErrors};
 use crate::tui::model::{
     DaemonStatus, DiskLockState, DiskLuksState, DrivingDrive, FanReading, Model, PoolState,
@@ -25,6 +27,82 @@ fn format_timestamp(dt: &PrimitiveDateTime) -> String {
         "[weekday repr:short] [month repr:short] [day padding:space] [hour]:[minute]:[second] [year]"
     );
     dt.format(&fmt).unwrap_or_else(|_| "unknown".to_owned())
+}
+
+const SCRUB_JOURNAL_GREP: &str =
+    "BTRFS.*(at logical.*on (dev|mirror)|super block at physical)";
+
+/// Journalctl accepts this stable local-time shape for `--since`.
+fn format_scrub_journal_since(ts: &ScrubTimestamp) -> String {
+    let fmt = format_description!("[year]-[month]-[day] [hour]:[minute]:[second]");
+    ts.0.format(&fmt).unwrap_or_else(|_| "unknown".to_owned())
+}
+
+/// Builds the copyable command shown next to terminal scrub errors.
+fn scrub_journal_command(journal_since: &str) -> String {
+    format!("sudo journalctl -k --since '{journal_since}' --grep '{SCRUB_JOURNAL_GREP}'")
+}
+
+/// Keeps the TUI hint scoped to terminal scrub states with stable start times.
+fn scrub_hint_command(scrub: &ScrubState) -> Option<String> {
+    match scrub {
+        ScrubState::Finished {
+            started_at,
+            error_count,
+            ..
+        }
+        | ScrubState::Aborted {
+            started_at,
+            error_count,
+            ..
+        }
+        | ScrubState::Interrupted {
+            started_at,
+            error_count,
+            ..
+        } if *error_count > 0 => {
+            Some(scrub_journal_command(&format_scrub_journal_since(started_at)))
+        }
+        _ => None,
+    }
+}
+
+/// Computes the wrapped height for the scrub-error paragraph at panel width.
+fn hint_lines(area_width: u16) -> u16 {
+    let width = usize::from(area_width);
+    if width == 0 {
+        return 0;
+    }
+
+    let text = format!(
+        "scrub error details: {}",
+        scrub_journal_command("2026-05-20 10:05:30")
+    );
+    let mut lines = 1_u16;
+    let mut col = 0_usize;
+
+    fn place_on_empty_line(lines: &mut u16, col: &mut usize, width: usize, word_len: usize) {
+        let segments = (word_len + width - 1) / width;
+        *lines += segments.saturating_sub(1) as u16;
+        *col = word_len % width;
+        if *col == 0 {
+            *col = width;
+        }
+    }
+
+    for word in text.split(' ') {
+        let word_len = word.len();
+        if col == 0 {
+            place_on_empty_line(&mut lines, &mut col, width, word_len);
+        } else if col + 1 + word_len <= width {
+            col += 1 + word_len;
+        } else {
+            lines += 1;
+            place_on_empty_line(&mut lines, &mut col, width, word_len);
+        }
+    }
+
+    lines
 }
 
 fn timeago(dt: &PrimitiveDateTime, now: PrimitiveDateTime) -> Option<String> {
@@ -1065,9 +1143,27 @@ fn view_scrub(model: &Model, frame: &mut Frame, area: Rect, now: PrimitiveDateTi
         | PoolStatus::Refreshing(pool)
         | PoolStatus::ErrorStale(_, pool) => {
             let scrub_height = scrub_lines(&pool.scrub) + 1;
-            let chunks = Layout::vertical([Constraint::Length(scrub_height), Constraint::Min(0)])
+            if let Some(command) = scrub_hint_command(&pool.scrub) {
+                let hint_height = hint_lines(area.width);
+                let chunks = Layout::vertical([
+                    Constraint::Length(scrub_height),
+                    Constraint::Length(hint_height),
+                    Constraint::Min(0),
+                ])
                 .split(area);
-            frame.render_widget(scrub_table(&pool.scrub, now), chunks[0]);
+                frame.render_widget(scrub_table(&pool.scrub, now), chunks[0]);
+                frame.render_widget(
+                    Paragraph::new(format!("scrub error details: {command}"))
+                        .wrap(Wrap { trim: false })
+                        .style(Style::default().fg(Color::DarkGray)),
+                    chunks[1],
+                );
+            } else {
+                let chunks =
+                    Layout::vertical([Constraint::Length(scrub_height), Constraint::Min(0)])
+                        .split(area);
+                frame.render_widget(scrub_table(&pool.scrub, now), chunks[0]);
+            }
         }
         PoolStatus::Error(msg) => {
             frame.render_widget(
@@ -1775,6 +1871,71 @@ pub(crate) mod tests {
         model.tab = Tab::Scrub;
         let terminal = render(&model, 60, 22);
         snap!(buffer_to_string(&terminal));
+    }
+
+    /*
+     * Intent: Scrub tab renders the journal hint for a finished scrub with errors.
+     *
+     * Why it exists: the hint must stay next to the error count and wrap rather
+     * than truncate at the standard narrow snapshot width.
+     *
+     * Scenario: User opens the Scrub tab after a scrub found checksum errors.
+     */
+    #[test]
+    fn snapshot_scrub_tab_with_errors() {
+        let mut pool = sample_pool();
+        if let ScrubState::Finished { error_count, .. } = &mut pool.scrub {
+            *error_count = 3;
+        }
+        let mut model = Model::new_demo(sample_disk_names(), PoolStatus::Mounted(pool));
+        model.tab = Tab::Scrub;
+        let terminal = render(&model, 60, 22);
+        let out = buffer_to_string(&terminal);
+
+        assert!(out.contains("scrub error details:"), "got:\n{out}");
+        for token in [
+            "sudo",
+            "journalctl",
+            "-k",
+            "--since",
+            "'2026-02-24",
+            "02:00:07'",
+            "--grep",
+            "'BTRFS.*(at",
+            "logical.*on",
+            "(dev|mirror)|super",
+            "block",
+            "physical)'",
+        ] {
+            assert!(out.contains(token), "missing token {token:?}, got:\n{out}");
+        }
+        assert!(
+            !out.contains('>'),
+            "wrapped command should not be truncated, got:\n{out}"
+        );
+        for row in ["Last run", "Errors       3", "Total", "Rate", "Duration"] {
+            assert!(out.contains(row), "missing scrub row {row:?}, got:\n{out}");
+        }
+
+        snap!(out);
+    }
+
+    #[test]
+    fn scrub_hint_command_ignores_running_errors() {
+        // Intent: verify the scrub journal hint is terminal-state only.
+        // Why it exists: running scrubs can have transient errors without a stable completed scrub window.
+        // Scenario: TUI refresh sees a running scrub with early-detected errors.
+        let scrub = ScrubState::Running {
+            started_at: Some(ScrubTimestamp(time::macros::datetime!(2026-04-16 18:28:44))),
+            duration_secs: Some(358),
+            time_left_secs: Some(2064),
+            eta: Some(ScrubTimestamp(time::macros::datetime!(2026-04-16 19:09:10))),
+            total_bytes: Some(596_353_253_376),
+            bytes_scrubbed: Some(88_143_626_240),
+            rate_bytes_per_sec: Some(246_211_246),
+            error_count: 5,
+        };
+        assert!(scrub_hint_command(&scrub).is_none());
     }
 
     /*
