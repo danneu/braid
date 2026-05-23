@@ -167,3 +167,7 @@ If a mutation is interrupted, braid leaves `/var/lib/braid/pending-op.json` in p
 ### Development
 
 See [docs/dev/overview.md](docs/dev/overview.md) for the dev workflow, test commands, and dependency upgrade process.
+
+## License
+
+[MIT](LICENSE)
