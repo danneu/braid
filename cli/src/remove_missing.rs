@@ -1653,7 +1653,7 @@ mod tests {
 
     #[test]
     // Intent: when soft balance fails with ENOSPC, the surfaced error includes
-    //   the recovery hint with a concrete `dusage=0` command.
+    //   the recovery hint with concrete data and metadata reclaim filters.
     // Why: the hint is appended in pool::balance_error, but it must survive
     //   PoolError -> RemoveMissingError::Pool -> Display without being lost.
     // Scenario: 3-disk NAS, one drive dies. Operator runs remove-missing. Device
@@ -1684,8 +1684,12 @@ mod tests {
             "error should contain recovery hint: {err}"
         );
         assert!(
-            err.contains("dusage=0"),
-            "error should suggest dusage=0 filter: {err}"
+            err.contains("-dusage=0 -musage=0"),
+            "error should suggest combined data and metadata filters: {err}"
+        );
+        assert!(
+            err.contains("btrfs filesystem usage"),
+            "error should suggest filesystem usage diagnostics: {err}"
         );
     }
 

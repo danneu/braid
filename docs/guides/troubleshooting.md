@@ -6,19 +6,36 @@ Symptom-oriented index for common problems. Find your symptom below and follow t
 
 ## Balance fails with "No space left on device"
 
-btrfs balance needs temporary free space to relocate data. If the pool is very full, balance fails with ENOSPC even when there appears to be space available.
+btrfs balance needs temporary free space to relocate chunks. Braid balances
+convert both data and metadata profiles, so either side can hit ENOSPC even
+when there appears to be space available.
 
-First confirm where the pool's space went with `sudo btrfs filesystem usage /mnt/storage`: `df`'s "Used" and "Available" columns cannot distinguish data, metadata, and snapshot references, while `braid status` reports the same btrfs-derived capacity.
-
-**Fix:** Free up empty block groups first, then retry:
+**Fix:** Free up empty block groups first, then retry the original operation:
 
 ```sh
-sudo btrfs balance start -dusage=0 /mnt/storage
-sudo btrfs balance start -dusage=10 /mnt/storage
-# Then retry the original operation (e.g. braid remove)
+sudo btrfs balance start -dusage=0 -musage=0 /mnt/storage
 ```
 
-The `-dusage=0` pass relocates only completely empty block groups (zero cost). `-dusage=10` relocates nearly-empty groups. This frees enough contiguous space for the full balance to proceed.
+The `usage=0` pass relocates only completely empty block groups, so it does not
+need temporary work space.
+
+If the retry still fails, inspect data vs metadata usage:
+
+```sh
+sudo btrfs filesystem usage /mnt/storage
+```
+
+`df`'s "Used" and "Available" columns cannot distinguish data, metadata, and
+snapshot references, while `braid status` reports the same btrfs-derived
+capacity. In `btrfs filesystem usage`, compare the Data and Metadata used/size
+ratios to see which side is the bottleneck.
+
+If there is enough temporary work space, a non-zero threshold can reclaim
+nearly-empty groups, but it moves data:
+
+```sh
+sudo btrfs balance start -dusage=10 -musage=10 /mnt/storage
+```
 
 ## Pool won't mount
 

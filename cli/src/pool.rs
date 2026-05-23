@@ -253,7 +253,12 @@ fn balance_error(label: &str, mount_point: &MountPoint, result: &RawCommandOutpu
     let stderr = result.stderr.to_lowercase();
     if stderr.contains("no space left") {
         PoolError::Failed(format!(
-            "{label} failed (exit {}): {}\nhint: run `btrfs balance start -dusage=0 {mount_point}` to free empty block groups, then retry",
+            "{label} failed (exit {}): {}\n\
+             hint: reclaim empty block groups with \
+             `btrfs balance start -dusage=0 -musage=0 {mount_point}`, \
+             then retry. If the failure repeats, inspect chunk usage with \
+             `btrfs filesystem usage {mount_point}` to see whether data or \
+             metadata is the bottleneck.",
             result.exit_status,
             result.stderr.trim(),
         ))
@@ -1197,8 +1202,8 @@ mod tests {
 
     #[test]
     // Intent: balance_error appends a recovery hint when stderr contains ENOSPC.
-    // Why: ENOSPC is a common balance failure with a well-known recovery
-    //   (dusage=0). Without a hint, users must search for the fix.
+    // Why: ENOSPC can come from data or metadata balance filters; without a
+    //   hint, users must search for the fix.
     // Scenario: pool is near-full, balance fails with "No space left on device".
     fn balance_error_detects_enospc() {
         let result = RawCommandOutput {
@@ -1212,8 +1217,12 @@ mod tests {
         let msg = err.to_string();
         assert!(msg.contains("hint:"), "should contain recovery hint: {msg}");
         assert!(
-            msg.contains("dusage=0"),
-            "should suggest dusage=0 filter: {msg}"
+            msg.contains("-dusage=0 -musage=0"),
+            "should suggest combined data and metadata filters: {msg}"
+        );
+        assert!(
+            msg.contains("btrfs filesystem usage"),
+            "should suggest filesystem usage diagnostics: {msg}"
         );
         assert!(
             msg.contains("/mnt/storage"),
