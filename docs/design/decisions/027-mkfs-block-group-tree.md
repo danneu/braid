@@ -10,19 +10,35 @@ status: Active
 
 ## Context
 
-btrfs-progs 6.19 (2026-02-13) flips the `block-group-tree` feature to be
-on by default in `mkfs.btrfs`. Without an explicit pin, the on-disk feature
-set of new pools varies silently across nixpkgs bumps.
+braid currently targets nixos-25.11's btrfs-progs 6.17.1. The
+nixos-26.05-era btrfs-progs 6.19.1 default set enables
+`block-group-tree`, so braid explicitly requests that one feature bit when
+creating new pools with the older stable toolchain.
+
+This pin is deliberately narrow. `mkfs.btrfs` still starts from the linked
+btrfs-progs default feature set; braid only adds `block-group-tree` to that
+set. The rest of the on-disk feature set continues to track btrfs-progs
+defaults.
 
 ## Decision
 
 `cli/src/cmd.rs` passes `-O block-group-tree` on both `mkfs.btrfs`
-invocations: single-disk bootstrap and RAID1 bootstrap. The unit tests in the
-same file assert the exact argv, and the VM test
-`braid-module-mkfs-block-group-tree` asserts the resulting on-disk bit.
+invocations: single-disk bootstrap and RAID1 bootstrap. This makes pools
+created on nixos-25.11 with btrfs-progs 6.17.1 carry the same
+`block-group-tree` bit that the nixos-26.05-era btrfs-progs 6.19.1 default
+set enables, without freezing any other mkfs default.
 
 The long form is preferred over the `bgt` alias because it is the documented
 primary name and matches the kernel sysfs entry `block_group_tree`.
+
+## Where this is enforced
+
+- `cli/src/cmd.rs` -- `MkfsBtrfs` and `MkfsBtrfsRaid1` build the
+  `mkfs.btrfs` argv with `-O block-group-tree`.
+- `cli/src/cmd.rs` -- `mkfs_btrfs_single_generates_correct_argv` and
+  `mkfs_btrfs_raid1_generates_correct_argv` assert the exact argv.
+- `tests/module/mkfs-block-group-tree.{nix,py}` -- VM coverage asserts the
+  on-disk feature bit after `braid add` creates single-disk and RAID1 pools.
 
 ## Notes
 

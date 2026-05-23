@@ -84,7 +84,7 @@ The name is stored in pool.json and used in LUKS mapper names (`braid-toshiba1`)
 1. Probes each disk to determine its state (fresh, braid-labeled, or foreign)
 2. Shows a confirmation prompt with disk model, serial, and size
 3. For fresh disks: pre-generates a LUKS UUID, LUKS-formats the disk with the pool passphrase and `braid-<name>` label, creates a LUKS header backup, and opens the LUKS mapper
-4. If no pool exists: creates a btrfs filesystem (RAID1 if 2+ disks, single if 1 disk)
+4. If no pool exists: creates a btrfs filesystem (RAID1 if 2+ disks, single if 1 disk; braid explicitly pins the `block-group-tree` feature bit so that bit is visible and stable across toolchain versions -- see [ADR-027](../design/decisions/027-mkfs-block-group-tree.md))
 5. If a pool exists: writes a phased UUID-keyed journal, adds the device to the existing btrfs filesystem, records the new membership in pool.json, then advances the journal to the balance phase
 6. If the pool now has 2+ disks: balances data to RAID1, then clears the journal
 

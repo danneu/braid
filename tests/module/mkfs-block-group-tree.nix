@@ -1,10 +1,12 @@
 # Test: mkfs-block-group-tree
 #
-# What: Bootstraps one single-disk pool and one RAID1 pool through braid add,
+# Intent: Bootstraps one single-disk pool and one RAID1 pool through braid add,
 # then checks the created btrfs superblocks for BLOCK_GROUP_TREE.
 #
-# Why: braid pins mkfs.btrfs feature flags explicitly so new pool feature bits
-# do not depend on nixpkgs' btrfs-progs default set.
+# Why it exists: braid pins the `block-group-tree` bit specifically so pools
+# created with nixos-25.11's btrfs-progs 6.17.1 carry the same bit that the
+# nixos-26.05-era btrfs-progs 6.19.1 default set enables. The rest of the
+# feature set still tracks btrfs-progs defaults; ADR-027.
 #
 # Scenario: First-time add creates fresh encrypted btrfs pools on one-disk and
 # two-disk layouts, then the underlying mapper devices expose the expected
