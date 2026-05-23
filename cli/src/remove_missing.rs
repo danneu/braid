@@ -1653,12 +1653,14 @@ mod tests {
 
     #[test]
     // Intent: when soft balance fails with ENOSPC, the surfaced error includes
-    //   the recovery hint with concrete data and metadata reclaim filters.
-    // Why: the hint is appended in pool::balance_error, but it must survive
-    //   PoolError -> RemoveMissingError::Pool -> Display without being lost.
+    //   the recovery hint with data compaction and metadata-pressure guidance.
+    // Why it exists: the hint is appended in pool::balance_error, but it must
+    //   survive PoolError -> RemoveMissingError::Pool -> Display without being
+    //   lost.
     // Scenario: 3-disk NAS, one drive dies. Operator runs remove-missing. Device
     //   removal succeeds but the post-removal soft balance hits ENOSPC. The error
-    //   message should guide the user to free empty block groups.
+    //   message should guide the user to diagnose chunk pressure and avoid
+    //   metadata rebalance filters.
     fn enospc_hint_surfaces_through_error_chain() {
         let f = PoolFixture::three_disk_devids_pinned();
         let (runner, _remove_done) =
@@ -1684,12 +1686,20 @@ mod tests {
             "error should contain recovery hint: {err}"
         );
         assert!(
-            err.contains("-dusage=0 -musage=0"),
-            "error should suggest combined data and metadata filters: {err}"
+            err.contains("btrfs balance start -dusage="),
+            "error should suggest data-only balance filters: {err}"
         );
         assert!(
-            err.contains("btrfs filesystem usage"),
+            err.contains("btrfs filesystem usage /mnt/storage"),
             "error should suggest filesystem usage diagnostics: {err}"
+        );
+        assert!(
+            err.contains("delete files"),
+            "error should describe metadata pressure remediation: {err}"
+        );
+        assert!(
+            !err.contains("mconvert") && !err.contains("musage"),
+            "error must not recommend metadata balancing: {err}"
         );
     }
 

@@ -212,6 +212,20 @@ pub(crate) fn df_json_fail() -> (CmdRequest, RawCommandOutput) {
     )
 }
 
+pub(crate) fn device_usage_raw(stdout: &str) -> (CmdRequest, RawCommandOutput) {
+    (
+        CmdRequest::BtrfsDeviceUsageRaw {
+            mount_point: MountPoint("/mnt/storage".to_owned()),
+        },
+        RawCommandOutput {
+            cmd: "btrfs device usage --raw /mnt/storage".into(),
+            stdout: stdout.into(),
+            stderr: String::new(),
+            exit_status: 0,
+        },
+    )
+}
+
 /// `btrfs filesystem show` mock that feeds `probe::probe_pool`. Both present
 /// devices and `MISSING` sentinels are formatted via `parse_btrfs_filesystem_show`'s
 /// expected layout so doctor's `pool_state.missing_devids` is populated end-to-end.
@@ -390,6 +404,98 @@ pub(crate) const DF_MIXED_METADATA: &str = r#"{
         { "bg-type": "GlobalReserve", "bg-profile": "single", "total": 3407872, "used": 0 }
     ]
 }"#;
+
+pub(crate) const DF_METADATA_78_USED: &str = r#"{
+    "filesystem-df": [
+        { "bg-type": "Data", "bg-profile": "RAID1", "total": 67108864, "used": 16777216 },
+        { "bg-type": "System", "bg-profile": "RAID1", "total": 8388608, "used": 16384 },
+        { "bg-type": "Metadata", "bg-profile": "RAID1", "total": 1000000000, "used": 780000000 },
+        { "bg-type": "GlobalReserve", "bg-profile": "single", "total": 3407872, "used": 0 }
+    ]
+}"#;
+
+pub(crate) const DF_METADATA_20_USED: &str = r#"{
+    "filesystem-df": [
+        { "bg-type": "Data", "bg-profile": "RAID1", "total": 67108864, "used": 16777216 },
+        { "bg-type": "System", "bg-profile": "RAID1", "total": 8388608, "used": 16384 },
+        { "bg-type": "Metadata", "bg-profile": "RAID1", "total": 1000000000, "used": 200000000 },
+        { "bg-type": "GlobalReserve", "bg-profile": "single", "total": 3407872, "used": 0 }
+    ]
+}"#;
+
+pub(crate) const DEVICE_USAGE_TWO_HEALTHY: &str = "/dev/mapper/braid-disk1, ID: 1\n\
+\x20  Device size:          10737418240\n\
+\x20  Device slack:         0\n\
+\x20  Data,RAID1:           1073741824\n\
+\x20  Metadata,RAID1:       268435456\n\
+\x20  System,RAID1:         8388608\n\
+\x20  Unallocated:          8589934592\n\
+    /dev/mapper/braid-disk2, ID: 2\n\
+\x20  Device size:          10737418240\n\
+\x20  Device slack:         0\n\
+\x20  Data,RAID1:           1073741824\n\
+\x20  Metadata,RAID1:       268435456\n\
+\x20  System,RAID1:         8388608\n\
+\x20  Unallocated:          8589934592\n";
+
+pub(crate) const DEVICE_USAGE_TWO_TIGHT: &str = "/dev/mapper/braid-disk1, ID: 1\n\
+\x20  Device size:          10737418240\n\
+\x20  Device slack:         0\n\
+\x20  Data,RAID1:           9126805504\n\
+\x20  Metadata,RAID1:       805306368\n\
+\x20  System,RAID1:         8388608\n\
+\x20  Unallocated:          419430400\n\
+    /dev/mapper/braid-disk2, ID: 2\n\
+\x20  Device size:          10737418240\n\
+\x20  Device slack:         0\n\
+\x20  Data,RAID1:           9126805504\n\
+\x20  Metadata,RAID1:       805306368\n\
+\x20  System,RAID1:         8388608\n\
+\x20  Unallocated:          419430400\n";
+
+pub(crate) const DEVICE_USAGE_THREE_ONE_TIGHT: &str = "/dev/mapper/braid-disk1, ID: 1\n\
+\x20  Device size:          10737418240\n\
+\x20  Device slack:         0\n\
+\x20  Data,RAID1:           9126805504\n\
+\x20  Metadata,RAID1:       805306368\n\
+\x20  System,RAID1:         8388608\n\
+\x20  Unallocated:          419430400\n\
+    /dev/mapper/braid-disk2, ID: 2\n\
+\x20  Device size:          10737418240\n\
+\x20  Device slack:         0\n\
+\x20  Data,RAID1:           1073741824\n\
+\x20  Metadata,RAID1:       268435456\n\
+\x20  System,RAID1:         8388608\n\
+\x20  Unallocated:          5368709120\n\
+    /dev/mapper/braid-disk3, ID: 3\n\
+\x20  Device size:          10737418240\n\
+\x20  Device slack:         0\n\
+\x20  Data,RAID1:           1073741824\n\
+\x20  Metadata,RAID1:       268435456\n\
+\x20  System,RAID1:         8388608\n\
+\x20  Unallocated:          5368709120\n";
+
+pub(crate) const DEVICE_USAGE_THREE_TWO_TIGHT: &str = "/dev/mapper/braid-disk1, ID: 1\n\
+\x20  Device size:          10737418240\n\
+\x20  Device slack:         0\n\
+\x20  Data,RAID1:           9126805504\n\
+\x20  Metadata,RAID1:       805306368\n\
+\x20  System,RAID1:         8388608\n\
+\x20  Unallocated:          419430400\n\
+    /dev/mapper/braid-disk2, ID: 2\n\
+\x20  Device size:          10737418240\n\
+\x20  Device slack:         0\n\
+\x20  Data,RAID1:           9126805504\n\
+\x20  Metadata,RAID1:       805306368\n\
+\x20  System,RAID1:         8388608\n\
+\x20  Unallocated:          419430400\n\
+    /dev/mapper/braid-disk3, ID: 3\n\
+\x20  Device size:          10737418240\n\
+\x20  Device slack:         0\n\
+\x20  Data,RAID1:           1073741824\n\
+\x20  Metadata,RAID1:       268435456\n\
+\x20  System,RAID1:         8388608\n\
+\x20  Unallocated:          5368709120\n";
 
 // ---------------------------------------------------------------------------
 // Custom runners

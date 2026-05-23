@@ -253,14 +253,21 @@ fn balance_error(label: &str, mount_point: &MountPoint, result: &RawCommandOutpu
     let stderr = result.stderr.to_lowercase();
     if stderr.contains("no space left") {
         PoolError::Failed(format!(
-            "{label} failed (exit {}): {}\n\
-             hint: reclaim empty block groups with \
-             `btrfs balance start -dusage=0 -musage=0 {mount_point}`, \
-             then retry. If the failure repeats, inspect chunk usage with \
-             `btrfs filesystem usage {mount_point}` to see whether data or \
-             metadata is the bottleneck.",
-            result.exit_status,
-            result.stderr.trim(),
+            concat!(
+                "{label} failed (exit {exit_status}): {stderr}\n",
+                "hint: ENOSPC during balance -- this is usually data-chunk ",
+                "fragmentation, occasionally metadata pressure.\n",
+                "  1) diagnose: `btrfs filesystem usage {mount_point}` -- look at ",
+                "Device unallocated and the Data/Metadata Used vs Total lines.\n",
+                "  2) if data is tight: `btrfs balance start -dusage=0 {mount_point}` ",
+                "(then -dusage=20, -dusage=50 if needed) to compact data chunks.\n",
+                "  3) if metadata is tight: delete files to free space; do not ",
+                "rebalance metadata chunks."
+            ),
+            label = label,
+            exit_status = result.exit_status,
+            stderr = result.stderr.trim(),
+            mount_point = mount_point,
         ))
     } else {
         PoolError::Failed(format!(
@@ -1202,8 +1209,8 @@ mod tests {
 
     #[test]
     // Intent: balance_error appends a recovery hint when stderr contains ENOSPC.
-    // Why: ENOSPC can come from data or metadata balance filters; without a
-    //   hint, users must search for the fix.
+    // Why it exists: ENOSPC can come from data chunk fragmentation or metadata
+    //   pressure; without a hint, users must search for the fix.
     // Scenario: pool is near-full, balance fails with "No space left on device".
     fn balance_error_detects_enospc() {
         let result = RawCommandOutput {
@@ -1217,16 +1224,24 @@ mod tests {
         let msg = err.to_string();
         assert!(msg.contains("hint:"), "should contain recovery hint: {msg}");
         assert!(
-            msg.contains("-dusage=0 -musage=0"),
-            "should suggest combined data and metadata filters: {msg}"
+            msg.contains("btrfs filesystem usage /mnt/storage"),
+            "should suggest filesystem usage diagnostics: {msg}"
         );
         assert!(
-            msg.contains("btrfs filesystem usage"),
-            "should suggest filesystem usage diagnostics: {msg}"
+            msg.contains("btrfs balance start -dusage="),
+            "should suggest data-only balance filters: {msg}"
+        );
+        assert!(
+            msg.contains("delete files"),
+            "should describe metadata pressure remediation: {msg}"
         );
         assert!(
             msg.contains("/mnt/storage"),
             "should include concrete mount point: {msg}"
+        );
+        assert!(
+            !msg.contains("mconvert") && !msg.contains("musage"),
+            "must not recommend metadata balancing: {msg}"
         );
     }
 

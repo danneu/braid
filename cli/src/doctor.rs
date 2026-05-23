@@ -25,7 +25,10 @@ use crate::membership;
 use crate::online_state::{BRAID_ONLINE_UNIT, OnlineStateOps, RealOnlineStateOps, UnitActiveState};
 use crate::parse::smartctl::selftest_age_hours;
 use crate::parse::types::{BtrfsBgType, BtrfsDfOutput, BtrfsProfile, SelftestSummary};
-use crate::parse::{parse_btrfs_df_json, parse_cryptsetup_luks_uuid, parse_smartctl_selftest_log};
+use crate::parse::{
+    parse_btrfs_device_usage, parse_btrfs_df_json, parse_cryptsetup_luks_uuid,
+    parse_smartctl_selftest_log,
+};
 use crate::probe::{self, Filesystem, ProbeError, RealFilesystem};
 use crate::state_paths::StatePaths;
 use crate::status::{BalanceReport, format_bytes, get_balance_report, paused_balance_advice};
@@ -820,6 +823,107 @@ fn check_metadata_profile_mismatch<R: CommandRunner>(
     )
 }
 
+/// Advisory metadata ENOSPC check that joins logical df pressure with
+/// per-device allocator headroom; either signal alone is too noisy for doctor.
+fn check_metadata_enospc_pressure<R: CommandRunner>(
+    ctx: &mut DoctorContext<'_, R>,
+) -> CheckResult {
+    const NAME: &str = "metadata_enospc_pressure";
+    if ctx.config.is_none() {
+        return CheckResult::skip(NAME, "skipped (config not available)");
+    }
+
+    if ensure_mountpoint_is_mounted(ctx) != Some(true) {
+        return CheckResult::skip(NAME, "skipped (pool not mounted)");
+    }
+
+    ensure_df_snapshot(ctx);
+    let df_snapshot = ctx
+        .df_snapshot
+        .as_ref()
+        .expect("ensure_df_snapshot sets df_snapshot when config is present");
+    let df = match df_snapshot {
+        DfSnapshot::NotMounted => return CheckResult::skip(NAME, "skipped (pool not mounted)"),
+        DfSnapshot::Error(e) => {
+            return CheckResult::warn(NAME, format!("could not inspect metadata pressure: {e}"));
+        }
+        DfSnapshot::Ok(df) => df,
+    };
+
+    let mount_point = ctx.config.as_ref().unwrap().mount_point().to_owned();
+    let usage_raw = match ctx.runner.run(&CmdRequest::BtrfsDeviceUsageRaw {
+        mount_point: mount_point.clone(),
+    }) {
+        Ok(raw) => raw,
+        Err(e) => {
+            return CheckResult::warn(
+                NAME,
+                format!("could not inspect device unallocated: {e}"),
+            );
+        }
+    };
+    let usage = match parse_btrfs_device_usage(&usage_raw) {
+        Ok(usage) => usage,
+        Err(e) => {
+            return CheckResult::warn(
+                NAME,
+                format!("could not inspect device unallocated: could not parse output: {e}"),
+            );
+        }
+    };
+    if usage.devices.is_empty() {
+        return CheckResult::warn(
+            NAME,
+            "could not inspect device unallocated: no devices reported",
+        );
+    }
+
+    let (metadata_used, metadata_total) = df
+        .entries
+        .iter()
+        .filter(|entry| entry.bg_type == BtrfsBgType::Metadata)
+        .fold((0u64, 0u64), |(used, total), entry| {
+            (used + entry.bg_used, total + entry.bg_total)
+        });
+    if metadata_total == 0 {
+        return CheckResult::ok(NAME, "no metadata block groups yet");
+    }
+
+    let metadata_ratio = metadata_used as f64 / metadata_total as f64;
+
+    // RAID1 metadata chunks need exactly 2 devices, not every device.
+    // reference/linux/fs/btrfs/volumes.c defines RAID1 with devs_min=2,
+    // devs_max=2, and ncopies=2, so a 3+ device pool only needs two
+    // members with enough unallocated space for the next metadata chunk.
+    let n_devices = usage.devices.len();
+    let with_headroom = usage
+        .devices
+        .iter()
+        .filter(|device| device.unallocated >= METADATA_CHUNK_HEADROOM)
+        .count();
+
+    if metadata_ratio > METADATA_PRESSURE_RATIO && with_headroom < 2 {
+        let pct = (metadata_ratio * 100.0).round() as u64;
+        let headroom = format_bytes(METADATA_CHUNK_HEADROOM);
+        return CheckResult::warn(
+            NAME,
+            format!(
+                "metadata {pct}% used; only {with_headroom} of {n_devices} device(s) have >= {headroom} unallocated -- RAID1 needs 2 with headroom for the next metadata chunk; delete files to free space, or compact data with `btrfs balance start -dusage=50 {mount_point}` before metadata cannot grow."
+            ),
+        );
+    }
+
+    CheckResult::ok(NAME, "metadata pressure within bounds")
+}
+
+/// Metadata utilization threshold that warns before btrfs's hard-coded 80%
+/// automatic chunk-allocation point in should_alloc_chunk().
+const METADATA_PRESSURE_RATIO: f64 = 0.75;
+
+/// Conservative per-device unallocated headroom for one future metadata chunk;
+/// RAID1 allocation needs two devices with this much room.
+const METADATA_CHUNK_HEADROOM: u64 = 1024 * 1024 * 1024;
+
 /// SMART self-test staleness threshold in powered-on hours.
 /// 90 days at 24 h/day. Matches the manual's "90 powered-on days" wording
 /// and the doctor decision matrix.
@@ -1250,6 +1354,7 @@ pub fn run_doctor<R: CommandRunner>(
         check_foreign_luks_uuid(&mut ctx),
         check_data_profile_mismatch(&mut ctx),
         check_metadata_profile_mismatch(&mut ctx),
+        check_metadata_enospc_pressure(&mut ctx),
         check_paused_balance(&mut ctx),
     ];
     checks.extend(check_smart_selftests(&mut ctx));
@@ -1288,6 +1393,7 @@ pub fn format_doctor_human_with(report: &DoctorReport, color_enabled: bool) -> S
             "foreign_luks_uuid" => "foreign uuids",
             "data_profile_mismatch" => "data profiles",
             "metadata_profile_mismatch" => "meta profiles",
+            "metadata_enospc_pressure" => "meta pressure",
             "paused_balance" => "paused balance",
             "smart_self_test" => "smart selftest",
             // The internal identifier `beep_path` stays stable for the JSON
@@ -1419,14 +1525,16 @@ mod tests {
     use crate::cmd::{CmdError, MockRunner, RawCommandOutput};
     use crate::state_paths::StatePaths;
     use crate::test_fixtures::{
-        DF_MIXED, DF_MIXED_METADATA, DF_RAID1_CLEAN, DfQueryFailureRunner, DoctorMockFs,
+        DEVICE_USAGE_THREE_ONE_TIGHT, DEVICE_USAGE_THREE_TWO_TIGHT, DEVICE_USAGE_TWO_HEALTHY,
+        DEVICE_USAGE_TWO_TIGHT, DF_METADATA_20_USED, DF_METADATA_78_USED, DF_MIXED,
+        DF_MIXED_METADATA, DF_RAID1_CLEAN, DfQueryFailureRunner, DoctorMockFs,
         PoolMissingDevicesRunner, UpscSpawnFailureRunner, beep_ctx, cls, config_with_ups_enabled,
-        config_without_ups, df_json, df_json_fail, disk_member_with, human_options, is_luks_ok,
-        isolated_paths, luks_dump_text_ok, luks_uuid_ok, mountpoint_fail, mountpoint_ok,
-        parsed_doctor_ctx, pool_state_runner, smart_selftest_runner_for, smartctl_selftest_json,
-        systemctl_show_active_state_output, test_uuid, unlock_btrfs_balance_status_idle,
-        unlock_btrfs_balance_status_paused, unlock_btrfs_balance_status_paused_skip_balance,
-        ups_ctx, valid_config_json, write_temp,
+        config_without_ups, device_usage_raw, df_json, df_json_fail, disk_member_with,
+        human_options, is_luks_ok, isolated_paths, luks_dump_text_ok, luks_uuid_ok,
+        mountpoint_fail, mountpoint_ok, parsed_doctor_ctx, pool_state_runner,
+        smart_selftest_runner_for, smartctl_selftest_json, systemctl_show_active_state_output,
+        test_uuid, unlock_btrfs_balance_status_idle, unlock_btrfs_balance_status_paused,
+        unlock_btrfs_balance_status_paused_skip_balance, ups_ctx, valid_config_json, write_temp,
     };
     use crate::types::MountPoint;
 
@@ -1530,6 +1638,7 @@ mod tests {
             "data_profile_mismatch",
             "declared_disks",
             "foreign_luks_uuid",
+            "metadata_enospc_pressure",
             "metadata_profile_mismatch",
             "paused_balance",
             "pool_missing_devices",
@@ -3760,6 +3869,303 @@ mod tests {
         assert!(
             human.contains("meta profiles"),
             "expected 'meta profiles':\n{human}"
+        );
+    }
+
+    // --- metadata_enospc_pressure tests ---
+
+    fn metadata_pressure_result(df: &str, usage: &str) -> CheckResult {
+        let (mp_req, mp_out) = mountpoint_ok();
+        let (df_req, df_out) = df_json(df);
+        let (usage_req, usage_out) = device_usage_raw(usage);
+        let runner = MockRunner::default()
+            .with_output(mp_req, mp_out)
+            .with_output(df_req, df_out)
+            .with_output(usage_req, usage_out);
+        let (_dir, paths) = isolated_paths();
+        let mut ctx = parsed_doctor_ctx(&runner, &paths);
+        check_metadata_enospc_pressure(&mut ctx)
+    }
+
+    // Intent: metadata_enospc_pressure reports Ok for a healthy RAID1 pool.
+    // Why it exists: the advisory must not add noise to ordinary doctor output.
+    // Scenario: a pool has low metadata utilization and both devices have room
+    //   for future metadata chunk allocation.
+    #[test]
+    fn metadata_pressure_healthy_pool_ok() {
+        let check = metadata_pressure_result(DF_RAID1_CLEAN, DEVICE_USAGE_TWO_HEALTHY);
+
+        assert_eq!(check.status, CheckStatus::Ok);
+        assert!(
+            check.message.contains("within bounds"),
+            "expected healthy message: {}",
+            check.message
+        );
+    }
+
+    // Intent: metadata_enospc_pressure ignores high metadata utilization when
+    //   device headroom is still available.
+    // Why it exists: the original audit's bare utilization threshold would
+    //   warn on healthy pools immediately before normal chunk growth.
+    // Scenario: metadata is 78% used, but both RAID1 devices have multiple GiB
+    //   unallocated for the allocator's next metadata chunk.
+    #[test]
+    fn metadata_pressure_high_metadata_with_headroom_ok() {
+        let check = metadata_pressure_result(DF_METADATA_78_USED, DEVICE_USAGE_TWO_HEALTHY);
+
+        assert_eq!(check.status, CheckStatus::Ok);
+        assert!(
+            check.message.contains("within bounds"),
+            "expected no warning with headroom: {}",
+            check.message
+        );
+    }
+
+    // Intent: metadata_enospc_pressure ignores low unallocated space when
+    //   metadata utilization is still low.
+    // Why it exists: the advisory targets the ENOSPC trap where metadata must
+    //   grow and cannot, not every nearly allocated device.
+    // Scenario: each device has less than 1 GiB unallocated, but metadata is
+    //   only 20% used and does not need a new chunk soon.
+    #[test]
+    fn metadata_pressure_low_headroom_with_low_metadata_ok() {
+        let check = metadata_pressure_result(DF_METADATA_20_USED, DEVICE_USAGE_TWO_TIGHT);
+
+        assert_eq!(check.status, CheckStatus::Ok);
+        assert!(
+            check.message.contains("within bounds"),
+            "expected no warning with low metadata use: {}",
+            check.message
+        );
+    }
+
+    // Intent: metadata_enospc_pressure warns when high metadata utilization and
+    //   exhausted per-device headroom coincide on a two-device pool.
+    // Why it exists: this is the actual btrfs metadata ENOSPC trap the check is
+    //   meant to surface before writes force the filesystem read-only.
+    // Scenario: metadata is 78% used and neither RAID1 member has enough
+    //   unallocated space for the next metadata chunk.
+    #[test]
+    fn metadata_pressure_two_device_pool_warns_when_both_signals_present() {
+        let check = metadata_pressure_result(DF_METADATA_78_USED, DEVICE_USAGE_TWO_TIGHT);
+
+        assert_eq!(check.status, CheckStatus::Warn);
+        assert!(check.message.contains("78%"), "{}", check.message);
+        assert!(
+            check.message.contains("RAID1 needs 2"),
+            "missing RAID1 headroom requirement: {}",
+            check.message
+        );
+        assert!(
+            check.message.contains("btrfs balance start -dusage="),
+            "missing data-balance remediation: {}",
+            check.message
+        );
+        assert!(
+            check.message.contains("delete files"),
+            "missing metadata remediation: {}",
+            check.message
+        );
+        assert!(
+            !check.message.contains("mconvert") && !check.message.contains("musage"),
+            "must not recommend metadata balancing: {}",
+            check.message
+        );
+    }
+
+    // Intent: metadata_enospc_pressure counts RAID1 allocator headroom, not
+    //   every device in a 3-device pool.
+    // Why it exists: RAID1 metadata chunks need two devices; a single tight
+    //   member should not warn when two other members can satisfy allocation.
+    // Scenario: metadata is 78% used, one device is tight, and two devices have
+    //   multi-GiB unallocated.
+    #[test]
+    fn metadata_pressure_three_device_pool_one_tight_ok() {
+        let check = metadata_pressure_result(DF_METADATA_78_USED, DEVICE_USAGE_THREE_ONE_TIGHT);
+
+        assert_eq!(check.status, CheckStatus::Ok);
+        assert!(
+            check.message.contains("within bounds"),
+            "expected allocator-aware Ok: {}",
+            check.message
+        );
+    }
+
+    // Intent: metadata_enospc_pressure warns on the 3-device boundary where
+    //   fewer than two devices have chunk headroom.
+    // Why it exists: pins the allocator-aware "fewer than 2" rule instead of
+    //   an all-devices or any-device heuristic.
+    // Scenario: metadata is 78% used, two devices are tight, and only one
+    //   device can participate in the next RAID1 metadata chunk.
+    #[test]
+    fn metadata_pressure_three_device_pool_two_tight_warns() {
+        let check = metadata_pressure_result(DF_METADATA_78_USED, DEVICE_USAGE_THREE_TWO_TIGHT);
+
+        assert_eq!(check.status, CheckStatus::Warn);
+        assert!(
+            check.message.contains("only 1 of 3"),
+            "expected headroom count in warning: {}",
+            check.message
+        );
+    }
+
+    // Intent: metadata_enospc_pressure skips when the configured pool is not
+    //   mounted.
+    // Why it exists: the check is read-only and must not query btrfs commands
+    //   against an absent mountpoint.
+    // Scenario: the NAS has booted, but the encrypted pool has not been
+    //   unlocked yet.
+    #[test]
+    fn metadata_pressure_skip_when_pool_not_mounted() {
+        let (mp_req, mp_out) = mountpoint_fail();
+        let runner = MockRunner::default().with_output(mp_req, mp_out);
+        let (_dir, paths) = isolated_paths();
+        let mut ctx = parsed_doctor_ctx(&runner, &paths);
+        let check = check_metadata_enospc_pressure(&mut ctx);
+
+        assert_eq!(check.status, CheckStatus::Skip);
+        assert!(check.message.contains("not mounted"), "{}", check.message);
+    }
+
+    // Intent: metadata_enospc_pressure reports df query failures as a scoped
+    //   warning.
+    // Why it exists: doctor should continue running and name the unavailable
+    //   input instead of failing the whole command.
+    // Scenario: the mountpoint exists, but `btrfs filesystem df` cannot be
+    //   spawned or returns an unreadable result.
+    #[test]
+    fn metadata_pressure_warns_when_df_query_errors() {
+        let runner = DfQueryFailureRunner;
+        let (_dir, paths) = isolated_paths();
+        let mut ctx = parsed_doctor_ctx(&runner, &paths);
+        let check = check_metadata_enospc_pressure(&mut ctx);
+
+        assert_eq!(check.status, CheckStatus::Warn);
+        assert!(
+            check.message.contains("could not inspect metadata pressure"),
+            "expected df inspect warning: {}",
+            check.message
+        );
+    }
+
+    // Intent: metadata_enospc_pressure reports malformed df JSON as a scoped
+    //   warning.
+    // Why it exists: the pressure math depends on parsed metadata totals, and
+    //   parser drift must not become a false Ok.
+    // Scenario: `btrfs filesystem df --format json` exits 0 but emits output
+    //   that no longer matches braid's parser contract.
+    #[test]
+    fn metadata_pressure_warns_when_df_json_malformed() {
+        let (mp_req, mp_out) = mountpoint_ok();
+        let (df_req, df_out) = df_json("{not json");
+        let runner = MockRunner::default()
+            .with_output(mp_req, mp_out)
+            .with_output(df_req, df_out);
+        let (_dir, paths) = isolated_paths();
+        let mut ctx = parsed_doctor_ctx(&runner, &paths);
+        let check = check_metadata_enospc_pressure(&mut ctx);
+
+        assert_eq!(check.status, CheckStatus::Warn);
+        assert!(
+            check.message.contains("could not inspect metadata pressure"),
+            "expected df parse warning: {}",
+            check.message
+        );
+    }
+
+    // Intent: metadata_enospc_pressure reports device-usage spawn failures as
+    //   a scoped warning.
+    // Why it exists: the advisory depends on device unallocated bytes, but a
+    //   missing secondary probe should not make doctor crash.
+    // Scenario: df output parses, then the raw `btrfs device usage` probe
+    //   cannot be run.
+    #[test]
+    fn metadata_pressure_warns_when_device_usage_query_errors() {
+        let (mp_req, mp_out) = mountpoint_ok();
+        let (df_req, df_out) = df_json(DF_METADATA_78_USED);
+        let runner = MockRunner::default()
+            .with_output(mp_req, mp_out)
+            .with_output(df_req, df_out);
+        let (_dir, paths) = isolated_paths();
+        let mut ctx = parsed_doctor_ctx(&runner, &paths);
+        let check = check_metadata_enospc_pressure(&mut ctx);
+
+        assert_eq!(check.status, CheckStatus::Warn);
+        assert!(
+            check.message.contains("could not inspect device unallocated"),
+            "expected device usage warning: {}",
+            check.message
+        );
+    }
+
+    // Intent: metadata_enospc_pressure reports malformed device-usage output
+    //   as a scoped warning.
+    // Why it exists: parser drift in btrfs-progs must degrade to an advisory
+    //   row, not a panic or a false Ok.
+    // Scenario: `btrfs device usage --raw` exits 0 but omits the required
+    //   Unallocated field from a device stanza.
+    #[test]
+    fn metadata_pressure_warns_when_device_usage_parse_fails() {
+        let malformed = "/dev/mapper/braid-disk1, ID: 1\n\
+                         \x20  Device size:          10737418240\n\
+                         \x20  Device slack:         0\n";
+        let check = metadata_pressure_result(DF_METADATA_78_USED, malformed);
+
+        assert_eq!(check.status, CheckStatus::Warn);
+        assert!(
+            check.message.contains("could not inspect device unallocated")
+                && check.message.contains("could not parse"),
+            "expected parse warning: {}",
+            check.message
+        );
+    }
+
+    // Intent: metadata_enospc_pressure treats an empty parsed device list as
+    //   an inspection warning.
+    // Why it exists: parse_btrfs_device_usage accepts empty stdout, but this
+    //   check cannot reduce zero devices into an allocator headroom decision.
+    // Scenario: `btrfs device usage --raw` exits 0 with no device stanzas.
+    #[test]
+    fn metadata_pressure_warns_when_device_usage_reports_no_devices() {
+        let check = metadata_pressure_result(DF_METADATA_78_USED, "");
+
+        assert_eq!(check.status, CheckStatus::Warn);
+        assert!(
+            check.message.contains("no devices reported"),
+            "expected empty-device warning: {}",
+            check.message
+        );
+    }
+
+    // Intent: run_doctor registers metadata_enospc_pressure and the human
+    //   formatter labels it as "meta pressure".
+    // Why it exists: the JSON check name and the operator-facing label are
+    //   separate surfaces and both must stay wired into the doctor report.
+    // Scenario: operator runs `braid doctor` on a healthy mounted pool.
+    #[test]
+    fn metadata_pressure_registered_with_human_label() {
+        let (mp_req, mp_out) = mountpoint_ok();
+        let (df_req, df_out) = df_json(DF_RAID1_CLEAN);
+        let (usage_req, usage_out) = device_usage_raw(DEVICE_USAGE_TWO_HEALTHY);
+        let runner = MockRunner::default()
+            .with_output(mp_req, mp_out)
+            .with_output(df_req, df_out)
+            .with_output(usage_req, usage_out);
+        let f = write_temp(valid_config_json());
+        let report = run_doctor(
+            f.path(),
+            &runner,
+            &RealFilesystem,
+            &isolated_paths().1,
+            human_options(),
+        );
+
+        let check = find_check(&report, "metadata_enospc_pressure");
+        assert_eq!(check.status, CheckStatus::Ok);
+        let human = format_doctor_human(&report);
+        assert!(
+            human.contains("meta pressure"),
+            "expected 'meta pressure':\n{human}"
         );
     }
 

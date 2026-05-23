@@ -148,12 +148,15 @@ pub(crate) use discover::{
 };
 #[allow(unused_imports)]
 pub(crate) use doctor::{
-    DF_MIXED, DF_MIXED_METADATA, DF_RAID1_CLEAN, DfQueryFailureRunner, DoctorMockFs,
+    DEVICE_USAGE_THREE_ONE_TIGHT, DEVICE_USAGE_THREE_TWO_TIGHT, DEVICE_USAGE_TWO_HEALTHY,
+    DEVICE_USAGE_TWO_TIGHT, DF_METADATA_20_USED, DF_METADATA_78_USED, DF_MIXED,
+    DF_MIXED_METADATA, DF_RAID1_CLEAN, DfQueryFailureRunner, DoctorMockFs,
     PoolMissingDevicesRunner, UpscSpawnFailureRunner, beep_ctx, cls, config_with_ups_enabled,
-    config_without_ups, df_json, df_json_fail, doctor_btrfs_show, doctor_cryptsetup_status_active,
-    doctor_cryptsetup_uuid_ok, human_options, isolated_paths, mountpoint_fail, mountpoint_ok,
-    parsed_doctor_ctx, pool_state_runner, smart_selftest_runner_for, smartctl_selftest_json,
-    systemctl_show_active_state_output, ups_ctx, valid_config_json, write_temp,
+    config_without_ups, device_usage_raw, df_json, df_json_fail, doctor_btrfs_show,
+    doctor_cryptsetup_status_active, doctor_cryptsetup_uuid_ok, human_options, isolated_paths,
+    mountpoint_fail, mountpoint_ok, parsed_doctor_ctx, pool_state_runner,
+    smart_selftest_runner_for, smartctl_selftest_json, systemctl_show_active_state_output, ups_ctx,
+    valid_config_json, write_temp,
 };
 pub(crate) use enroll_key_file::{
     enroll_add_keyfile_fail, enroll_add_keyfile_ok, enroll_by_id, enroll_discovery_two_disks,
