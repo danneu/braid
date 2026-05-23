@@ -853,6 +853,23 @@ pub(crate) fn get_balance_report<R: CommandRunner>(
     }
 }
 
+/// Shared paused-balance advice so unlock and doctor cannot drift in
+/// operator-facing resume/cancel guidance.
+pub(crate) struct PausedBalanceAdvice {
+    pub header: String,
+    pub resume_cmd: String,
+    pub cancel_cmd: String,
+}
+
+/// Builds the paused-balance advice for the mounted pool path.
+pub(crate) fn paused_balance_advice(mount_point: &MountPoint) -> PausedBalanceAdvice {
+    PausedBalanceAdvice {
+        header: "paused balance detected -- will not auto-resume".to_owned(),
+        resume_cmd: format!("btrfs balance resume {mount_point}"),
+        cancel_cmd: format!("btrfs balance cancel {mount_point}"),
+    }
+}
+
 /// Check for a paused balance and emit a warning to `out` if found.
 /// Returns true if a warning was emitted. Best-effort: command or parse
 /// failures emit nothing and return false.
@@ -865,10 +882,11 @@ pub fn emit_paused_balance_warning<R: CommandRunner>(
         get_balance_report(runner, mount_point),
         BalanceReport::Paused { .. }
     ) {
+        let advice = paused_balance_advice(mount_point);
         writeln!(out).ok();
-        writeln!(out, "  paused balance detected -- will not auto-resume").ok();
-        writeln!(out, "    resume:  btrfs balance resume {mount_point}").ok();
-        writeln!(out, "    cancel:  btrfs balance cancel {mount_point}").ok();
+        writeln!(out, "  {}", advice.header).ok();
+        writeln!(out, "    resume:  {}", advice.resume_cmd).ok();
+        writeln!(out, "    cancel:  {}", advice.cancel_cmd).ok();
         true
     } else {
         false

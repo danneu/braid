@@ -84,6 +84,28 @@ pub(crate) fn unlock_btrfs_balance_status_paused(
     )
 }
 
+/// Paused balance-status body captured after a `skip_balance` remount.
+/// This guards call sites from turning btrfs's `nan% left` line into
+/// misleading progress advice.
+pub(crate) fn unlock_btrfs_balance_status_paused_skip_balance(
+    mp: &MountPoint,
+) -> (CmdRequest, RawCommandOutput) {
+    (
+        CmdRequest::BtrfsBalanceStatus {
+            mount_point: mp.clone(),
+        },
+        RawCommandOutput {
+            cmd: "btrfs balance status".to_owned(),
+            stdout: include_str!(
+                "../../tests/fixtures/nixos-25.11/btrfs-balance-status-paused-skip-balance.txt"
+            )
+            .to_owned(),
+            stderr: String::new(),
+            exit_status: 0,
+        },
+    )
+}
+
 /// Adds a successful passphrase verification using the unlock/mount test
 /// passphrase bytes. Keeping this as a single chained request preserves
 /// each test's explicit per-disk runner composition.

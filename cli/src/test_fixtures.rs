@@ -228,9 +228,10 @@ pub(crate) use status::{
 #[allow(unused_imports)]
 pub(crate) use unlock::{
     unlock_btrfs_balance_status_idle, unlock_btrfs_balance_status_paused,
-    unlock_btrfs_device_scan_ok, unlock_luks_uuid_not_luks, unlock_passphrase_file,
-    unlock_storage_fs, unlock_with_mount_degraded_ok, unlock_with_mount_ok,
-    unlock_with_open_mapper_ok, unlock_with_test_passphrase_ok, unlock_with_three_mappers_open,
+    unlock_btrfs_balance_status_paused_skip_balance, unlock_btrfs_device_scan_ok,
+    unlock_luks_uuid_not_luks, unlock_passphrase_file, unlock_storage_fs,
+    unlock_with_mount_degraded_ok, unlock_with_mount_ok, unlock_with_open_mapper_ok,
+    unlock_with_test_passphrase_ok, unlock_with_three_mappers_open,
 };
 #[allow(unused_imports)]
 pub(crate) use ups::{

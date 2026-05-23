@@ -28,7 +28,7 @@ use crate::parse::types::{BtrfsBgType, BtrfsDfOutput, BtrfsProfile, SelftestSumm
 use crate::parse::{parse_btrfs_df_json, parse_cryptsetup_luks_uuid, parse_smartctl_selftest_log};
 use crate::probe::{self, Filesystem, ProbeError, RealFilesystem};
 use crate::state_paths::StatePaths;
-use crate::status::format_bytes;
+use crate::status::{BalanceReport, format_bytes, get_balance_report, paused_balance_advice};
 use crate::status_tag::{StatusTag, color_enabled_for_stdout, status_line};
 use crate::types::{LuksUuid, PoolState};
 
@@ -729,6 +729,31 @@ fn check_pool_missing_devices<R: CommandRunner>(ctx: &mut DoctorContext<'_, R>) 
     }
 }
 
+/// Mounted-pool paused-balance check that points operators at resume instead
+/// of cancel/restart, preserving btrfs's existing balance progress.
+fn check_paused_balance<R: CommandRunner>(ctx: &mut DoctorContext<'_, R>) -> CheckResult {
+    let name = "paused_balance";
+    if ctx.config.is_none() {
+        return CheckResult::skip(name, "skipped (config not available)");
+    }
+
+    if ensure_mountpoint_is_mounted(ctx) != Some(true) {
+        return CheckResult::skip(name, "skipped (pool not mounted)");
+    }
+
+    let mount_point = ctx.config.as_ref().unwrap().mount_point().to_owned();
+    match get_balance_report(ctx.runner, &mount_point) {
+        BalanceReport::Paused { .. } => {
+            let advice = paused_balance_advice(&mount_point);
+            CheckResult::warn(name, format!("{}; run: {}", advice.header, advice.resume_cmd))
+        }
+        BalanceReport::Idle | BalanceReport::Running { .. } => {
+            CheckResult::ok(name, "no paused balance")
+        }
+        BalanceReport::Unknown => CheckResult::warn(name, "could not inspect balance status"),
+    }
+}
+
 fn check_foreign_luks_uuid<R: CommandRunner>(ctx: &mut DoctorContext<'_, R>) -> CheckResult {
     const NAME: &str = "foreign_luks_uuid";
     if ctx.config.is_none() {
@@ -1225,6 +1250,7 @@ pub fn run_doctor<R: CommandRunner>(
         check_foreign_luks_uuid(&mut ctx),
         check_data_profile_mismatch(&mut ctx),
         check_metadata_profile_mismatch(&mut ctx),
+        check_paused_balance(&mut ctx),
     ];
     checks.extend(check_smart_selftests(&mut ctx));
     checks.push(check_beep_path(&mut ctx, options));
@@ -1262,6 +1288,7 @@ pub fn format_doctor_human_with(report: &DoctorReport, color_enabled: bool) -> S
             "foreign_luks_uuid" => "foreign uuids",
             "data_profile_mismatch" => "data profiles",
             "metadata_profile_mismatch" => "meta profiles",
+            "paused_balance" => "paused balance",
             "smart_self_test" => "smart selftest",
             // The internal identifier `beep_path` stays stable for the JSON
             // schema; the human label reflects the product framing — what
@@ -1397,7 +1424,9 @@ mod tests {
         config_without_ups, df_json, df_json_fail, disk_member_with, human_options, is_luks_ok,
         isolated_paths, luks_dump_text_ok, luks_uuid_ok, mountpoint_fail, mountpoint_ok,
         parsed_doctor_ctx, pool_state_runner, smart_selftest_runner_for, smartctl_selftest_json,
-        systemctl_show_active_state_output, test_uuid, ups_ctx, valid_config_json, write_temp,
+        systemctl_show_active_state_output, test_uuid, unlock_btrfs_balance_status_idle,
+        unlock_btrfs_balance_status_paused, unlock_btrfs_balance_status_paused_skip_balance,
+        ups_ctx, valid_config_json, write_temp,
     };
     use crate::types::MountPoint;
 
@@ -1502,6 +1531,7 @@ mod tests {
             "declared_disks",
             "foreign_luks_uuid",
             "metadata_profile_mismatch",
+            "paused_balance",
             "pool_missing_devices",
             "smart_self_test",
             "ups_daemon",
@@ -3391,6 +3421,181 @@ mod tests {
                 .contains("could not inspect metadata profiles"),
             "expected metadata inspect warning: {}",
             metadata.message
+        );
+    }
+
+    // --- paused_balance tests ---
+
+    fn paused_balance_expected_message() -> &'static str {
+        "paused balance detected -- will not auto-resume; run: btrfs balance resume /mnt/storage"
+    }
+
+    fn paused_balance_check_result(runner: MockRunner) -> CheckResult {
+        let (_dir, paths) = isolated_paths();
+        let mut ctx = parsed_doctor_ctx(&runner, &paths);
+        check_paused_balance(&mut ctx)
+    }
+
+    // Intent: paused_balance warns with resume guidance for a mounted pool.
+    // Why it exists: doctor is the recurring diagnostic surface, so a paused
+    //   btrfs balance must not rely only on unlock's one-shot warning.
+    // Scenario: an operator paused a balance after real chunk progress and
+    //   later runs `braid doctor` while the pool remains mounted.
+    #[test]
+    fn paused_balance_warns_with_resume_hint() {
+        let mp = MountPoint("/mnt/storage".to_owned());
+        let (mp_req, mp_out) = mountpoint_ok();
+        let (balance_req, balance_out) = unlock_btrfs_balance_status_paused(&mp);
+        let runner = MockRunner::default()
+            .with_output(mp_req, mp_out)
+            .with_output(balance_req, balance_out);
+
+        let check = paused_balance_check_result(runner);
+
+        assert_eq!(check.name, "paused_balance");
+        assert_eq!(check.status, CheckStatus::Warn);
+        assert_eq!(check.message, paused_balance_expected_message());
+        assert!(
+            !check.message.contains('%'),
+            "paused balance advice must not print progress: {}",
+            check.message
+        );
+        assert!(
+            !check.message.contains("chunks"),
+            "paused balance advice must not print chunks: {}",
+            check.message
+        );
+    }
+
+    // Intent: paused_balance ignores btrfs's `nan% left` paused fixture.
+    // Why it exists: skip_balance remounts can report 0/0 chunks with nan%,
+    //   and doctor must not render that as misleading completion progress.
+    // Scenario: a reboot remounts with skip_balance after an interrupted
+    //   balance, then the operator checks doctor before resuming it.
+    #[test]
+    fn paused_balance_skip_balance_nan_warns_without_progress() {
+        let mp = MountPoint("/mnt/storage".to_owned());
+        let (mp_req, mp_out) = mountpoint_ok();
+        let (balance_req, balance_out) = unlock_btrfs_balance_status_paused_skip_balance(&mp);
+        let runner = MockRunner::default()
+            .with_output(mp_req, mp_out)
+            .with_output(balance_req, balance_out);
+
+        let check = paused_balance_check_result(runner);
+
+        assert_eq!(check.status, CheckStatus::Warn);
+        assert_eq!(check.message, paused_balance_expected_message());
+        assert!(
+            !check.message.contains("100% complete"),
+            "nan% fixture must not become completion advice: {}",
+            check.message
+        );
+    }
+
+    // Intent: paused_balance reports Ok when btrfs says no balance is paused.
+    // Why it exists: adding the doctor check must stay quiet for the normal
+    //   mounted-pool state.
+    // Scenario: a healthy mounted pool has no active or paused balance.
+    #[test]
+    fn paused_balance_idle_ok() {
+        let mp = MountPoint("/mnt/storage".to_owned());
+        let (mp_req, mp_out) = mountpoint_ok();
+        let (balance_req, balance_out) = unlock_btrfs_balance_status_idle(&mp);
+        let runner = MockRunner::default()
+            .with_output(mp_req, mp_out)
+            .with_output(balance_req, balance_out);
+
+        let check = paused_balance_check_result(runner);
+
+        assert_eq!(check.name, "paused_balance");
+        assert_eq!(check.status, CheckStatus::Ok);
+        assert_eq!(check.message, "no paused balance");
+    }
+
+    // Intent: paused_balance warns when the mounted-pool balance probe fails.
+    // Why it exists: doctor should not report green when it cannot determine
+    //   whether a mounted pool is mid-balance.
+    // Scenario: `btrfs balance status` cannot be spawned or queried, but the
+    //   mountpoint itself is present.
+    #[test]
+    fn paused_balance_warns_when_status_probe_errors() {
+        let (mp_req, mp_out) = mountpoint_ok();
+        let runner = MockRunner::default()
+            .with_output(mp_req, mp_out)
+            .with_handler(|request| match request {
+                CmdRequest::BtrfsBalanceStatus { .. } => Some(Err(CmdError::Failed(
+                    "simulated balance status failure".to_owned(),
+                ))),
+                _ => None,
+            });
+
+        let check = paused_balance_check_result(runner);
+
+        assert_eq!(check.name, "paused_balance");
+        assert_eq!(check.status, CheckStatus::Warn);
+        assert_eq!(check.message, "could not inspect balance status");
+    }
+
+    // Intent: paused_balance skips when the configured pool is not mounted.
+    // Why it exists: querying balance status requires a mounted btrfs pool.
+    // Scenario: the NAS is booted but `braid unlock` has not mounted storage.
+    #[test]
+    fn paused_balance_skips_when_pool_not_mounted() {
+        let (mp_req, mp_out) = mountpoint_fail();
+        let runner = MockRunner::default().with_output(mp_req, mp_out);
+
+        let check = paused_balance_check_result(runner);
+
+        assert_eq!(check.name, "paused_balance");
+        assert_eq!(check.status, CheckStatus::Skip);
+        assert_eq!(check.message, "skipped (pool not mounted)");
+    }
+
+    // Intent: paused_balance skips when doctor has no parsed config.
+    // Why it exists: without config, doctor has no authoritative mountpoint
+    //   to query.
+    // Scenario: config loading fails before mounted-pool checks run.
+    #[test]
+    fn paused_balance_skips_when_config_unavailable() {
+        let runner = MockRunner::default();
+        let (_dir, paths) = isolated_paths();
+        let mut ctx = beep_ctx(&runner, &paths);
+
+        let check = check_paused_balance(&mut ctx);
+
+        assert_eq!(check.name, "paused_balance");
+        assert_eq!(check.status, CheckStatus::Skip);
+        assert_eq!(check.message, "skipped (config not available)");
+    }
+
+    // Intent: run_doctor registers paused_balance and human formatting labels it.
+    // Why it exists: direct check tests cannot catch forgetting to add the
+    //   check to the run list or formatter label table.
+    // Scenario: a full doctor run observes a paused balance on a mounted pool.
+    #[test]
+    fn run_doctor_reports_paused_balance_with_human_label() {
+        let mp = MountPoint("/mnt/storage".to_owned());
+        let (mp_req, mp_out) = mountpoint_ok();
+        let (balance_req, balance_out) = unlock_btrfs_balance_status_paused(&mp);
+        let runner = MockRunner::default()
+            .with_output(mp_req, mp_out)
+            .with_output(balance_req, balance_out);
+        let f = write_temp(valid_config_json());
+        let report = run_doctor(
+            f.path(),
+            &runner,
+            &RealFilesystem,
+            &isolated_paths().1,
+            human_options(),
+        );
+
+        let check = find_check(&report, "paused_balance");
+        assert_eq!(check.status, CheckStatus::Warn);
+        assert_eq!(check.message, paused_balance_expected_message());
+        let human = format_doctor_human(&report);
+        assert!(
+            human.contains("paused balance"),
+            "expected human paused-balance label:\n{human}"
         );
     }
 

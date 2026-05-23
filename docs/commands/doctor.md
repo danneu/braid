@@ -65,6 +65,7 @@ Note: `--json` mode skips the alert beep test even when combined with `--beep` (
 | `pool_missing_devices` | No btrfs missing devices in the live pool |
 | `data_profile_mismatch` | Data block groups all use the same RAID profile |
 | `metadata_profile_mismatch` | Metadata block groups all use the same RAID profile |
+| `paused_balance` | Warns if a btrfs balance is paused on the mounted pool (e.g. a prior balance interrupted by reboot, manual pause, or kernel pause) and suggests resuming with `btrfs balance resume <mount>`. |
 | `smart_self_test` | One result per pool drive: runs `smartctl --json -A -l selftest <by-id>` against each, then reports `Fail` on an active SMART self-test failure, `Warn` if no completed test in the last 90 powered-on days (or never), `Ok` otherwise, or `Skip` for NVMe/SCSI/unsupported drives. In `--json`, every per-drive result carries `name: "smart_self_test"` and a `subject` field naming the pool member; if pool membership is missing or empty, a single `Skip` result with `name: "smart_self_test"` is emitted; if pool membership is corrupt or unreadable, a single `Warn` result with the same `name` is emitted instead. In both fallbacks the `subject` field is omitted. Scripts should check whether `subject` is present before keying on it. |
 | `beep_path` | PC speaker alert beep is configured; with `--beep`, the alert beep command succeeds |
 | `ups_daemon` | With UPS enabled, `upsc` is available and can query the UPS daemon; missing or spawn-failed `upsc` is a failure, daemon unreachable/non-zero `upsc` is a warning |
@@ -86,7 +87,7 @@ Note: `--json` mode skips the alert beep test even when combined with `--beep` (
 
 1. Reads and validates `/etc/braid/config.json`.
 2. Loads UUID-keyed `pool.json` and probes each declared disk via `cryptsetup isLuks`, `cryptsetup luksDump`, and `cryptsetup luksUUID`.
-3. If the pool is mounted, queries `btrfs filesystem df` to check RAID profile consistency and probes for missing devices.
+3. If the pool is mounted, queries `btrfs filesystem df` to check RAID profile consistency, probes for missing devices, and runs `btrfs balance status` to detect paused balances.
 4. For each declared disk, runs `smartctl --json -A -l selftest <by-id>` and parses the self-test log to detect active failures and report the age of the most recent passing entry.
 5. If the braid monitor NixOS module is configured, reports the alert beep check as skipped by default.
 6. With `--beep` and without `--json`, plays a short test beep through the canonical beep wrapper.
