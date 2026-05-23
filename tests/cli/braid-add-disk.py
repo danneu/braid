@@ -38,6 +38,10 @@ with subtest("First disk creates single-drive pool"):
         f"{add_cmd('disk1')} >/tmp/add1.out 2>/tmp/add1.err"
     )
     add1_err = machine.succeed("cat /tmp/add1.err")
+    bootstrap_line = "Pool created (data single; metadata/system DUP -- no RAID1 disk redundancy) and mounted at /mnt/storage"
+    assert bootstrap_line in add1_err, (
+        f"expected single-disk bootstrap message in stderr, got: {add1_err!r}"
+    )
 
     # Principle 13: [wait] before each cryptsetup Argon2 step.
     fmt_wait = "[wait] disk disk1: formatting LUKS..."

@@ -52,6 +52,13 @@ with subtest("braid status shows pool summary with per-disk detail"):
     for disk in ["disk1", "disk2", "disk3"]:
         assert disk in output, f"Expected '{disk}':\n{output}"
     assert "RAID1" in output, f"Expected 'RAID1':\n{output}"
+    assert "Profile:" in output, f"Expected 'Profile:' header:\n{output}"
+    assert "Data:      RAID1" in output, f"Expected 'Data:      RAID1':\n{output}"
+    assert "Metadata:  RAID1" in output, f"Expected 'Metadata:  RAID1':\n{output}"
+    assert "System:    RAID1" in output, f"Expected 'System:    RAID1':\n{output}"
+    assert "no redundancy" not in output, (
+        f"3-disk RAID1 pool must not report 'no redundancy':\n{output}"
+    )
     assert "Total:" in output, f"Expected 'Total:':\n{output}"
     assert "Used:" in output, f"Expected 'Used:':\n{output}"
     assert "Free:" in output, f"Expected 'Free:':\n{output}"
@@ -79,7 +86,11 @@ with subtest("braid status --json has schema fields and disk details"):
     assert s["present_count"] == 3, f"Bad present_count: {s['present_count']}"
     assert s["missing_count"] == 0, f"Bad missing_count: {s['missing_count']}"
     assert "missing_devids" not in s, f"missing_devids should be omitted when empty: {s}"
-    assert s["profile"] == "RAID1", f"Bad profile: {s['profile']}"
+    assert s["profile"] == {
+        "data": ["RAID1"],
+        "metadata": ["RAID1"],
+        "system": ["RAID1"],
+    }, f"Bad profile: {s['profile']!r}"
     assert "fsid" in s, f"Missing fsid: {s}"
     assert UUID_RE.fullmatch(s["fsid"]), f"Bad fsid: {s['fsid']}"
     assert "total_bytes" in s["capacity"], "Missing capacity.total_bytes"

@@ -49,7 +49,13 @@ Demo mode shows three fake disks with sample data, useful for exploring the inte
 
 ## What it shows
 
-**Main view** -- pool status, mount point, capacity bar, RAID profile, scrub state, balance state, and active alerts.
+**Main view** -- pool status, mount point, the `Profile` summary
+(`data <X> | meta <Y> | system <Z>`, where each value is the profile name
+verbatim for a single recognized profile such as `RAID1`, `DUP`, or `single`;
+`partial` when that block-group type spans more than one profile; the raw
+profile name verbatim for an unrecognized profile like `RAID5`; or `unknown`
+only when no block groups of that type were reported), capacity bar, scrub
+state, balance state, and active alerts.
 
 **Disk table** -- one row per disk showing name, size, allocated, unallocated, transport (sata/usb/nvme), SMART health, and error counts.
 

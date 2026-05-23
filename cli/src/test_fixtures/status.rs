@@ -17,6 +17,7 @@ use crate::cmd::{CmdRequest, LsblkFieldKind, MockRunner, RawCommandOutput};
 use crate::config::{Config, mapper_name};
 use crate::membership::PoolMembership;
 use crate::probe::Filesystem;
+use crate::profile_summary::ProfileJson;
 use crate::status::{DiskReport, DiskStatus, ScrubReport, StatusCode, StatusReport};
 use crate::types::*;
 
@@ -612,7 +613,7 @@ pub(crate) fn status_report_with_scrub(last_scrub: ScrubReport) -> StatusReport 
         total_devices: Some(3),
         present_count: Some(3),
         missing_count: Some(0),
-        profile: Some("RAID1".to_owned()),
+        profile: Some(ProfileJson::uniform("RAID1")),
         fsid: None,
         capacity: None,
         last_scrub: Some(last_scrub),

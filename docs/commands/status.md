@@ -38,6 +38,11 @@ sudo braid status --json
 ```
 Pool:     /mnt/storage
 Status:   intact
+FSID:     <uuid>
+Profile:
+  Data:      RAID1
+  Metadata:  RAID1
+  System:    RAID1
 ```
 
 Status values:
@@ -47,6 +52,25 @@ Status values:
 | **intact** | All disks present, no issues |
 | **DEGRADED (N missing devices)** | One or more disks are missing; redundancy is reduced on the missing device's data |
 | **not mounted** | Pool is offline (LUKS closed or not mounted) |
+
+Profile section:
+
+`Profile:` summarizes btrfs profiles per block-group type. btrfs profiles are
+per type, so Data, Metadata, and System can differ; see
+[btrfs balance profiles](../internals/btrfs/balance-profiles.md) for the
+background.
+
+| Per-type rendering | Meaning |
+|---|---|
+| `RAID1` (also `RAID1C3`, `RAID1C4`, `RAID10`) | Mirrored across drives; reads self-heal from the redundant copy. |
+| `DUP (same-disk copies; no disk redundancy)` | Two copies on the same physical device, the default metadata/system profile on a 1-device pool. Survives bit-rot, not device failure. |
+| `single (no redundancy)` (also `RAID0 (no redundancy)`) | One copy across the affected block groups. Checksums detect bit-rot, but corruption cannot be repaired. |
+| `single, RAID1 (not fully redundant)` | Block groups for this type span more than one profile, typically after an interrupted balance or degraded writes. Run `braid doctor` for the right next step; doctor recommends a soft RAID1 balance on a healthy pool and `braid replace` first on a degraded pool. |
+| `unknown` | No block groups of this type were reported. Check `braid status` advisories for a df probe failure. |
+| `RAID5`, `RAID6`, or any unrecognized name | braid does not classify parity profiles or future btrfs profiles. The raw profile name is shown verbatim with no annotation so the operator can make their own call; braid only ever produces `single`, `DUP`, and `RAID1`. |
+
+The whole `Profile:` section is omitted when the pool is `not mounted` or
+when `btrfs filesystem df` failed.
 
 ### Alert banner
 
@@ -216,8 +240,51 @@ for the full rationale.
   disappeared). For destructive `remove-missing` / `replace --missing-id`
   workflows, see those commands' notes -- a null-underlying devid here will be
   rejected by those commands until btrfs promotes it to MISSING.
+- `profile`: object with `data`, `metadata`, and `system` arrays, present
+  whenever btrfs reports block-group allocation and omitted when the pool is
+  not mounted or `btrfs filesystem df` failed. Each array contains raw btrfs
+  profile names such as `single`, `DUP`, `RAID0`, `RAID1`, `RAID1C3`,
+  `RAID1C4`, `RAID5`, `RAID6`, `RAID10`, or an unrecognized name verbatim.
+  Arrays use canonical domain order, not alphabetical order, so mixed data is
+  `["single", "RAID1"]`, not `["RAID1", "single"]`. An empty array means btrfs
+  reported no block groups of that type.
 - `capacity`: `total_bytes`, `used_bytes`, `free_bytes`
 - `allocation`: array of block group type entries
+
+3-disk RAID1 profile:
+
+```json
+"profile": {
+  "data": ["RAID1"],
+  "metadata": ["RAID1"],
+  "system": ["RAID1"]
+}
+```
+
+Single-disk bootstrap profile:
+
+```json
+"profile": {
+  "data": ["single"],
+  "metadata": ["DUP"],
+  "system": ["DUP"]
+}
+```
+
+Mixed data after interrupted balance:
+
+```json
+"profile": {
+  "data": ["single", "RAID1"],
+  "metadata": ["RAID1"],
+  "system": ["RAID1"]
+}
+```
+
+The human-facing redundancy annotations from the text output, such as
+`(no redundancy)`, `(same-disk copies; no disk redundancy)`, and
+`(not fully redundant)`, do not appear in JSON. The JSON payload carries only
+the btrfs profile names braid observed; consumers apply their own policy.
 - `balance`: state object (`idle`, `running`, `paused`, `unknown`)
 - `last_scrub`: state object (`never`, `running`, `finished`, `aborted`,
   `interrupted`, `unknown`)

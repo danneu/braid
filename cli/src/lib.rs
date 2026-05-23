@@ -33,6 +33,7 @@ pub mod pool;
 pub mod pool_lock;
 pub mod preflight;
 pub mod preview;
+pub mod profile_summary;
 pub mod probe;
 /// Shared post-commit UUID drift probe used by replace/remove/recover to verify
 /// an observed mapper still maps to the journaled LUKS UUID before close.

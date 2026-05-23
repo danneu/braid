@@ -823,6 +823,12 @@ fn check_metadata_profile_mismatch<R: CommandRunner>(
     )
 }
 
+fn check_system_profile_mismatch<R: CommandRunner>(
+    ctx: &mut DoctorContext<'_, R>,
+) -> CheckResult {
+    check_profile_mismatch(ctx, BtrfsBgType::System, "system_profile_mismatch", "system")
+}
+
 /// Advisory metadata ENOSPC check that joins logical df pressure with
 /// per-device allocator headroom; either signal alone is too noisy for doctor.
 fn check_metadata_enospc_pressure<R: CommandRunner>(
@@ -1354,6 +1360,7 @@ pub fn run_doctor<R: CommandRunner>(
         check_foreign_luks_uuid(&mut ctx),
         check_data_profile_mismatch(&mut ctx),
         check_metadata_profile_mismatch(&mut ctx),
+        check_system_profile_mismatch(&mut ctx),
         check_metadata_enospc_pressure(&mut ctx),
         check_paused_balance(&mut ctx),
     ];
@@ -1393,6 +1400,7 @@ pub fn format_doctor_human_with(report: &DoctorReport, color_enabled: bool) -> S
             "foreign_luks_uuid" => "foreign uuids",
             "data_profile_mismatch" => "data profiles",
             "metadata_profile_mismatch" => "meta profiles",
+            "system_profile_mismatch" => "system profiles",
             "metadata_enospc_pressure" => "meta pressure",
             "paused_balance" => "paused balance",
             "smart_self_test" => "smart selftest",
@@ -1643,6 +1651,7 @@ mod tests {
             "paused_balance",
             "pool_missing_devices",
             "smart_self_test",
+            "system_profile_mismatch",
             "ups_daemon",
         ];
         assert_eq!(actual_names, expected_names);
@@ -3869,6 +3878,123 @@ mod tests {
         assert!(
             human.contains("meta profiles"),
             "expected 'meta profiles':\n{human}"
+        );
+    }
+
+    // Intent: system_profile_mismatch reports Ok for uniform RAID1 system chunks.
+    // Why it exists: System is now first-class in the status Profile section
+    // and doctor must cover its healthy baseline too.
+    // Scenario: a clean RAID1 pool has System block groups on RAID1.
+    #[test]
+    fn system_profile_clean_raid1_ok() {
+        let (mp_req, mp_out) = mountpoint_ok();
+        let (df_req, df_out) = df_json(DF_RAID1_CLEAN);
+        let runner = MockRunner::default()
+            .with_output(mp_req, mp_out)
+            .with_output(df_req, df_out);
+        let f = write_temp(valid_config_json());
+        let report = run_doctor(
+            f.path(),
+            &runner,
+            &RealFilesystem,
+            &isolated_paths().1,
+            human_options(),
+        );
+
+        let check = find_check(&report, "system_profile_mismatch");
+
+        assert_eq!(check.status, CheckStatus::Ok);
+        assert!(
+            check.message.contains("RAID1"),
+            "expected RAID1 in message: {}",
+            check.message
+        );
+    }
+
+    // Intent: system_profile_mismatch warns when System block groups span
+    // multiple profiles.
+    // Why it exists: a System row that status renders as not fully redundant
+    // must route to doctor for the same soft-balance guidance as metadata.
+    // Scenario: an interrupted metadata/system balance leaves both DUP and RAID1 system chunks.
+    #[test]
+    fn system_profile_mixed_warns() {
+        let mixed_system = r#"{
+            "filesystem-df": [
+                { "bg-type": "Data", "bg-profile": "RAID1", "total": 67108864, "used": 16777216 },
+                { "bg-type": "Metadata", "bg-profile": "RAID1", "total": 33554432, "used": 262144 },
+                { "bg-type": "System", "bg-profile": "DUP", "total": 8388608, "used": 16384 },
+                { "bg-type": "System", "bg-profile": "RAID1", "total": 8388608, "used": 16384 }
+            ]
+        }"#;
+        let (mp_req, mp_out) = mountpoint_ok();
+        let (df_req, df_out) = df_json(mixed_system);
+        let runner = MockRunner::default()
+            .with_output(mp_req, mp_out)
+            .with_output(df_req, df_out);
+        let f = write_temp(valid_config_json());
+        let report = run_doctor(
+            f.path(),
+            &runner,
+            &RealFilesystem,
+            &isolated_paths().1,
+            human_options(),
+        );
+
+        let check = find_check(&report, "system_profile_mismatch");
+
+        assert_eq!(check.status, CheckStatus::Warn);
+        assert!(
+            check.message.contains("mixed"),
+            "expected mixed-profile warning: {}",
+            check.message
+        );
+        assert!(
+            check.message.contains("-mconvert=raid1,soft"),
+            "expected soft metadata/system balance suggestion: {}",
+            check.message
+        );
+    }
+
+    // Intent: system_profile_mismatch recommends replace before balance on a
+    // degraded pool.
+    // Why it exists: the status System row tells operators to run doctor, so
+    // doctor must preserve the replace-first invariant for that row.
+    // Scenario: degraded operation allocated non-RAID1 system chunks while a member was missing.
+    #[test]
+    fn system_profile_mismatch_recommends_replace_when_degraded() {
+        let mixed_system = r#"{
+            "filesystem-df": [
+                { "bg-type": "Data", "bg-profile": "RAID1", "total": 67108864, "used": 16777216 },
+                { "bg-type": "Metadata", "bg-profile": "RAID1", "total": 33554432, "used": 262144 },
+                { "bg-type": "System", "bg-profile": "DUP", "total": 8388608, "used": 16384 },
+                { "bg-type": "System", "bg-profile": "RAID1", "total": 8388608, "used": 16384 }
+            ]
+        }"#;
+        let (df_req, df_out) = df_json(mixed_system);
+        let runner = pool_state_runner(vec![("braid-disk1", 1, "/dev/vdb", test_uuid(1))], &[2])
+            .with_output(df_req, df_out);
+        let fs = DoctorMockFs::mounted_btrfs_only();
+        let f = write_temp(valid_config_json());
+        let report = run_doctor(f.path(), &runner, &fs, &isolated_paths().1, human_options());
+
+        let check = find_check(&report, "system_profile_mismatch");
+
+        assert_eq!(check.status, CheckStatus::Warn);
+        assert!(check.message.contains("mixed"), "{}", check.message);
+        assert!(
+            check.message.contains("degraded"),
+            "expected degraded language: {}",
+            check.message,
+        );
+        assert!(
+            check.message.contains("replace"),
+            "expected replace recommendation: {}",
+            check.message,
+        );
+        assert!(
+            !check.message.contains("btrfs balance"),
+            "must not recommend balance on degraded pool: {}",
+            check.message,
         );
     }
 

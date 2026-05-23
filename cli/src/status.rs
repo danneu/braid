@@ -16,6 +16,7 @@ use crate::parse::{
     parse_btrfs_device_stats, parse_btrfs_device_usage, parse_btrfs_df_json,
     parse_btrfs_filesystem_usage, parse_btrfs_scrub_status,
 };
+use crate::profile_summary::{self, ProfileJson, ProfileSummary, Redundancy, TypeProfile};
 use crate::probe::{Filesystem, ProbeError, probe_config_disk, probe_pool};
 use crate::progress::pct_from_bytes;
 use crate::state_paths::StatePaths;
@@ -55,7 +56,7 @@ pub struct StatusReport {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub missing_count: Option<u64>,
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub profile: Option<String>,
+    pub profile: Option<ProfileJson>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub fsid: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -521,7 +522,9 @@ fn build_status<R: CommandRunner, F: Filesystem>(
         total_devices: Some(pool.total_devices),
         present_count: Some(present_count),
         missing_count: Some(pool.missing_count),
-        profile: df_summary.as_ref().map(|summary| summary.profile.clone()),
+        profile: df_summary
+            .as_ref()
+            .map(|summary| ProfileJson::from(&summary.profile_summary)),
         fsid: pool.fsid.clone(),
         capacity,
         last_scrub: Some(last_scrub),
@@ -633,7 +636,7 @@ pub(crate) fn resolve_alert_state(paths: &StatePaths) -> AlertState {
 // ---------------------------------------------------------------------------
 
 struct DfSummary {
-    profile: String,
+    profile_summary: ProfileSummary,
     allocation: Vec<AllocationEntry>,
 }
 
@@ -648,17 +651,6 @@ fn fetch_df<R: CommandRunner>(
 }
 
 fn summarize_df(df: &BtrfsDfOutput) -> DfSummary {
-    let profiles = df.profiles_for(crate::parse::types::BtrfsBgType::Data);
-    let profile = if profiles.is_empty() {
-        "unknown".to_owned()
-    } else {
-        profiles
-            .iter()
-            .map(|p| p.to_string())
-            .collect::<Vec<_>>()
-            .join(", ")
-    };
-
     let mut entries: Vec<_> = df
         .entries
         .iter()
@@ -677,7 +669,7 @@ fn summarize_df(df: &BtrfsDfOutput) -> DfSummary {
         .collect();
 
     DfSummary {
-        profile,
+        profile_summary: profile_summary::from_df_entries(&df.entries),
         allocation,
     }
 }
@@ -1057,6 +1049,21 @@ fn devid_to_name(devid_names: Option<&HashMap<u64, String>>, devid: u64) -> Stri
         .unwrap_or_else(|| format!("devid {devid}"))
 }
 
+fn format_type_profile_human(profile: &TypeProfile) -> String {
+    if profile.profiles.is_empty() {
+        return "unknown".to_owned();
+    }
+
+    let names = profile.profiles.join(", ");
+    match profile.class {
+        Redundancy::Mirrored => names,
+        Redundancy::SameDisk => format!("{names} (same-disk copies; no disk redundancy)"),
+        Redundancy::NoRedundancy => format!("{names} (no redundancy)"),
+        Redundancy::Mixed => format!("{names} (not fully redundant)"),
+        Redundancy::Unknown => names,
+    }
+}
+
 fn format_status_human(
     report: &StatusReport,
     compact_drives: Option<&[CompactDrive]>,
@@ -1109,6 +1116,23 @@ fn format_status_human(
 
     if report.status == StatusCode::NotMounted {
         return out;
+    }
+
+    if let Some(ref alloc) = report.allocation
+        && !alloc.is_empty()
+    {
+        let summary = profile_summary::from_allocation(alloc);
+        out.push_str("Profile:\n");
+        for (label, profile) in [
+            ("Data:    ", &summary.data),
+            ("Metadata:", &summary.metadata),
+            ("System:  ", &summary.system),
+        ] {
+            out.push_str(&format!(
+                "  {label}  {}\n",
+                format_type_profile_human(profile)
+            ));
+        }
     }
 
     if let Some(ref alloc) = report.allocation
@@ -1393,6 +1417,26 @@ mod tests {
         membership
     }
 
+    fn profile_json(data: &[&str], metadata: &[&str], system: &[&str]) -> ProfileJson {
+        ProfileJson {
+            data: data.iter().map(|p| (*p).to_owned()).collect(),
+            metadata: metadata.iter().map(|p| (*p).to_owned()).collect(),
+            system: system.iter().map(|p| (*p).to_owned()).collect(),
+        }
+    }
+
+    fn assert_profile_json(
+        actual: &Option<ProfileJson>,
+        data: &[&str],
+        metadata: &[&str],
+        system: &[&str],
+    ) {
+        assert_eq!(
+            actual.as_ref(),
+            Some(&profile_json(data, metadata, system))
+        );
+    }
+
     fn write_pending_remove_journal(paths: &StatePaths) {
         let journal = crate::journal::Journal {
             started_at: "2026-05-20T10:30:00Z".to_owned(),
@@ -1528,7 +1572,7 @@ mod tests {
             total_devices: Some(3),
             present_count: Some(3),
             missing_count: Some(0),
-            profile: Some(df_summary.profile),
+            profile: Some(ProfileJson::from(&df_summary.profile_summary)),
             fsid: Some(TEST_FSID.to_owned()),
             capacity: Some(capacity),
             last_scrub: Some(last_scrub),
@@ -1549,7 +1593,14 @@ mod tests {
         assert_eq!(obj["total_devices"], 3);
         assert_eq!(obj["present_count"], 3);
         assert_eq!(obj["missing_count"], 0);
-        assert_eq!(obj["profile"], "RAID1");
+        assert_eq!(
+            obj["profile"],
+            serde_json::json!({
+                "data": ["RAID1"],
+                "metadata": ["RAID1"],
+                "system": ["RAID1"]
+            })
+        );
         assert_eq!(obj["fsid"], TEST_FSID);
         assert!(obj.contains_key("capacity"));
         assert!(obj.contains_key("last_scrub"));
@@ -1572,6 +1623,176 @@ mod tests {
         );
     }
 
+    // Intent: JSON status exposes the asymmetric single-disk bootstrap profile
+    // shape as raw per-type arrays.
+    // Why it exists: a scalar profile would hide metadata/system DUP and make
+    // machine consumers infer the wrong redundancy story.
+    // Scenario: the first `braid add` has created data=single plus metadata/system=DUP.
+    #[test]
+    fn status_json_healthy_single() {
+        let report = StatusReport {
+            mount_point: MountPoint("/mnt/storage".to_owned()),
+            status: StatusCode::Intact,
+            total_devices: Some(1),
+            present_count: Some(1),
+            missing_count: Some(0),
+            profile: Some(profile_json(&["single"], &["DUP"], &["DUP"])),
+            fsid: None,
+            capacity: None,
+            last_scrub: Some(ScrubReport::Never),
+            balance: None,
+            allocation: None,
+            disks: vec![],
+            advisories: vec![],
+            alert_active: false,
+            alert_causes: vec![],
+            missing_devids: vec![],
+        };
+
+        let value = serde_json::to_value(&report).unwrap();
+
+        assert_eq!(
+            value["profile"],
+            serde_json::json!({
+                "data": ["single"],
+                "metadata": ["DUP"],
+                "system": ["DUP"]
+            })
+        );
+    }
+
+    // Intent: JSON status exposes RAID1 profile arrays for every block-group
+    // type on a fully mirrored pool.
+    // Why it exists: the structured replacement for the old scalar must still
+    // carry the familiar RAID1 fact for machine consumers.
+    // Scenario: a healthy three-disk pool has RAID1 Data, Metadata, and System rows.
+    #[test]
+    fn status_json_healthy_raid1() {
+        let report = StatusReport {
+            mount_point: MountPoint("/mnt/storage".to_owned()),
+            status: StatusCode::Intact,
+            total_devices: Some(3),
+            present_count: Some(3),
+            missing_count: Some(0),
+            profile: Some(ProfileJson::uniform("RAID1")),
+            fsid: None,
+            capacity: None,
+            last_scrub: Some(ScrubReport::Never),
+            balance: None,
+            allocation: None,
+            disks: vec![],
+            advisories: vec![],
+            alert_active: false,
+            alert_causes: vec![],
+            missing_devids: vec![],
+        };
+
+        let value = serde_json::to_value(&report).unwrap();
+
+        assert_eq!(
+            value["profile"],
+            serde_json::json!({
+                "data": ["RAID1"],
+                "metadata": ["RAID1"],
+                "system": ["RAID1"]
+            })
+        );
+    }
+
+    // Intent: JSON status preserves canonical profile order for mixed data.
+    // Why it exists: consumers rely on stable domain order, not alphabetical
+    // order, when block groups span multiple profiles.
+    // Scenario: degraded writes created single chunks before a restored RAID1 balance.
+    #[test]
+    fn status_json_mixed_data_profile() {
+        let report = StatusReport {
+            mount_point: MountPoint("/mnt/storage".to_owned()),
+            status: StatusCode::Intact,
+            total_devices: Some(2),
+            present_count: Some(2),
+            missing_count: Some(0),
+            profile: Some(profile_json(&["single", "RAID1"], &["RAID1"], &["RAID1"])),
+            fsid: None,
+            capacity: None,
+            last_scrub: Some(ScrubReport::Never),
+            balance: None,
+            allocation: None,
+            disks: vec![],
+            advisories: vec![],
+            alert_active: false,
+            alert_causes: vec![],
+            missing_devids: vec![],
+        };
+
+        let value = serde_json::to_value(&report).unwrap();
+
+        assert_eq!(value["profile"]["data"], serde_json::json!(["single", "RAID1"]));
+    }
+
+    // Intent: JSON status omits `profile` when no df-derived profile data is
+    // available.
+    // Why it exists: absent profile data should not be represented as an
+    // invented sentinel object in the wire format.
+    // Scenario: the pool is not mounted, so status does not probe btrfs df.
+    #[test]
+    fn status_json_not_mounted_omits_profile() {
+        let report = StatusReport {
+            mount_point: MountPoint("/mnt/storage".to_owned()),
+            status: StatusCode::NotMounted,
+            total_devices: None,
+            present_count: None,
+            missing_count: None,
+            profile: None,
+            fsid: None,
+            capacity: None,
+            last_scrub: None,
+            balance: None,
+            allocation: None,
+            disks: vec![],
+            advisories: vec![],
+            alert_active: false,
+            alert_causes: vec![],
+            missing_devids: vec![],
+        };
+
+        let value = serde_json::to_value(&report).unwrap();
+
+        assert!(value.get("profile").is_none(), "profile leaked: {value:?}");
+    }
+
+    // Intent: JSON status carries only raw profile names, never human
+    // classification prose.
+    // Why it exists: redundancy wording is CLI/TUI policy and must not become
+    // part of the machine-readable schema.
+    // Scenario: a consumer serializes a healthy RAID1 report and scans the payload.
+    #[test]
+    fn status_json_no_classification_text() {
+        let report = StatusReport {
+            mount_point: MountPoint("/mnt/storage".to_owned()),
+            status: StatusCode::Intact,
+            total_devices: Some(3),
+            present_count: Some(3),
+            missing_count: Some(0),
+            profile: Some(ProfileJson::uniform("RAID1")),
+            fsid: None,
+            capacity: None,
+            last_scrub: Some(ScrubReport::Never),
+            balance: None,
+            allocation: None,
+            disks: vec![],
+            advisories: vec![],
+            alert_active: false,
+            alert_causes: vec![],
+            missing_devids: vec![],
+        };
+
+        let json = serde_json::to_string(&report).unwrap();
+
+        assert!(!json.contains("no redundancy"), "json: {json}");
+        assert!(!json.contains("same-disk copies"), "json: {json}");
+        assert!(!json.contains("not fully redundant"), "json: {json}");
+    }
+
     #[test]
     fn status_json_degraded() {
         let code = StatusCode::Degraded;
@@ -1581,7 +1802,7 @@ mod tests {
             total_devices: Some(3),
             present_count: Some(2),
             missing_count: Some(1),
-            profile: Some("RAID1".to_owned()),
+            profile: Some(ProfileJson::uniform("RAID1")),
             fsid: None,
             capacity: Some(CapacityReport {
                 total_bytes: None,
@@ -1661,7 +1882,7 @@ mod tests {
             total_devices: Some(2),
             present_count: Some(1),
             missing_count: Some(1),
-            profile: Some("RAID1".to_owned()),
+            profile: Some(ProfileJson::uniform("RAID1")),
             fsid: None,
             capacity: Some(CapacityReport {
                 total_bytes: None,
@@ -1755,7 +1976,7 @@ mod tests {
             total_devices: Some(3),
             present_count: Some(3),
             missing_count: Some(0),
-            profile: Some("RAID1".to_owned()),
+            profile: Some(ProfileJson::uniform("RAID1")),
             fsid: None,
             capacity: Some(CapacityReport {
                 total_bytes: Some(1040187392),
@@ -1785,7 +2006,7 @@ mod tests {
             total_devices: Some(1),
             present_count: Some(1),
             missing_count: Some(0),
-            profile: Some("single".to_owned()),
+            profile: Some(ProfileJson::uniform("single")),
             fsid: None,
             capacity: Some(CapacityReport {
                 total_bytes: Some(1073741824),
@@ -1840,7 +2061,12 @@ mod tests {
             capacity: None,
             last_scrub: None,
             balance: None,
-            allocation: None,
+            allocation: Some(vec![AllocationEntry {
+                bg_type: "Data".to_owned(),
+                profile: "single".to_owned(),
+                used_bytes: 1,
+                allocated_bytes: 2,
+            }]),
             disks: vec![],
             advisories: vec![],
             alert_active: false,
@@ -1851,6 +2077,7 @@ mod tests {
         assert!(human.contains("not mounted"), "got:\n{human}");
         assert!(!human.contains("FSID:"), "got:\n{human}");
         assert!(!human.contains("Capacity"), "got:\n{human}");
+        assert!(!human.contains("Profile:"), "got:\n{human}");
         assert!(!human.contains("Allocation:"), "got:\n{human}");
     }
 
@@ -1863,7 +2090,7 @@ mod tests {
             total_devices: Some(1),
             present_count: Some(1),
             missing_count: Some(0),
-            profile: Some("single".to_owned()),
+            profile: Some(profile_json(&["single"], &["DUP"], &["DUP"])),
             fsid: Some(TEST_FSID.to_owned()),
             capacity: Some(CapacityReport {
                 total_bytes: Some(1073741824),
@@ -1881,13 +2108,13 @@ mod tests {
                 },
                 AllocationEntry {
                     bg_type: "Metadata".to_owned(),
-                    profile: "single".to_owned(),
+                    profile: "DUP".to_owned(),
                     used_bytes: 65536,
                     allocated_bytes: 268435456,
                 },
                 AllocationEntry {
                     bg_type: "System".to_owned(),
-                    profile: "single".to_owned(),
+                    profile: "DUP".to_owned(),
                     used_bytes: 16384,
                     allocated_bytes: 4194304,
                 },
@@ -1921,7 +2148,19 @@ mod tests {
         assert!(human.contains("Free:"), "got:\n{human}");
         assert!(!human.contains("RAID1"), "got:\n{human}");
         assert!(!human.contains("missing"), "got:\n{human}");
-        assert!(!human.contains("Profile:"), "got:\n{human}");
+        assert!(human.contains("Profile:\n"), "got:\n{human}");
+        assert!(
+            human.contains("Data:      single (no redundancy)"),
+            "got:\n{human}"
+        );
+        assert!(
+            human.contains("Metadata:  DUP (same-disk copies; no disk redundancy)"),
+            "got:\n{human}"
+        );
+        assert!(
+            human.contains("System:    DUP (same-disk copies; no disk redundancy)"),
+            "got:\n{human}"
+        );
     }
 
     #[test]
@@ -1933,7 +2172,7 @@ mod tests {
             total_devices: Some(3),
             present_count: Some(3),
             missing_count: Some(0),
-            profile: Some("RAID1".to_owned()),
+            profile: Some(ProfileJson::uniform("RAID1")),
             fsid: Some(TEST_FSID.to_owned()),
             capacity: Some(CapacityReport {
                 total_bytes: Some(1040187392),
@@ -1998,9 +2237,172 @@ mod tests {
         assert!(human.contains("disk1"), "got:\n{human}");
         assert!(human.contains("Allocation:"), "got:\n{human}");
         assert!(human.contains("RAID1"), "got:\n{human}");
+        assert!(human.contains("Profile:\n"), "got:\n{human}");
+        assert!(human.contains("Data:      RAID1"), "got:\n{human}");
+        assert!(human.contains("Metadata:  RAID1"), "got:\n{human}");
+        assert!(human.contains("System:    RAID1"), "got:\n{human}");
         assert!(human.contains("Total:"), "got:\n{human}");
         assert!(human.contains("scrub"), "got:\n{human}");
         assert!(!human.contains("missing"), "got:\n{human}");
+        assert!(!human.contains("no redundancy"), "got:\n{human}");
+        assert!(!human.contains("same-disk copies"), "got:\n{human}");
+        assert!(!human.contains("not fully redundant"), "got:\n{human}");
+    }
+
+    // Intent: the human status formatter renders the Data row with the
+    // "not fully redundant" annotation when data block groups span more
+    // than one profile.
+    // Why it exists: an exact-match "single" classifier would silently lose
+    // the redundancy warning after an interrupted balance or degraded writes.
+    // Scenario: a 2-disk RAID1 allocated single-profile data chunks while degraded.
+    #[test]
+    fn status_human_mixed_data_profile() {
+        let report = StatusReport {
+            mount_point: MountPoint("/mnt/storage".to_owned()),
+            status: StatusCode::Intact,
+            total_devices: Some(2),
+            present_count: Some(2),
+            missing_count: Some(0),
+            profile: Some(profile_json(&["single", "RAID1"], &["RAID1"], &["RAID1"])),
+            fsid: Some(TEST_FSID.to_owned()),
+            capacity: None,
+            last_scrub: Some(ScrubReport::Never),
+            balance: None,
+            allocation: Some(vec![
+                AllocationEntry {
+                    bg_type: "Data".to_owned(),
+                    profile: "RAID1".to_owned(),
+                    used_bytes: 1,
+                    allocated_bytes: 2,
+                },
+                AllocationEntry {
+                    bg_type: "Data".to_owned(),
+                    profile: "single".to_owned(),
+                    used_bytes: 1,
+                    allocated_bytes: 2,
+                },
+                AllocationEntry {
+                    bg_type: "Metadata".to_owned(),
+                    profile: "RAID1".to_owned(),
+                    used_bytes: 1,
+                    allocated_bytes: 2,
+                },
+                AllocationEntry {
+                    bg_type: "System".to_owned(),
+                    profile: "RAID1".to_owned(),
+                    used_bytes: 1,
+                    allocated_bytes: 2,
+                },
+            ]),
+            disks: vec![],
+            advisories: vec![],
+            alert_active: false,
+            alert_causes: vec![],
+            missing_devids: vec![],
+        };
+
+        let human = format_status_human(&report, None, None, None);
+
+        assert!(
+            human.contains("Data:      single, RAID1 (not fully redundant)"),
+            "got:\n{human}"
+        );
+        assert!(human.contains("Metadata:  RAID1"), "got:\n{human}");
+    }
+
+    // Intent: the human renderer prints non-empty Unknown profiles verbatim.
+    // Why it exists: collapsing RAID5 to `unknown` would hide the actual btrfs
+    // profile name the operator needs to reason about.
+    // Scenario: a non-braid-created pool reports Data=RAID5.
+    #[test]
+    fn status_human_unrecognized_profile_renders_verbatim() {
+        let report = StatusReport {
+            mount_point: MountPoint("/mnt/storage".to_owned()),
+            status: StatusCode::Intact,
+            total_devices: Some(2),
+            present_count: Some(2),
+            missing_count: Some(0),
+            profile: Some(profile_json(&["RAID5"], &["RAID1"], &["RAID1"])),
+            fsid: Some(TEST_FSID.to_owned()),
+            capacity: None,
+            last_scrub: Some(ScrubReport::Never),
+            balance: None,
+            allocation: Some(vec![
+                AllocationEntry {
+                    bg_type: "Data".to_owned(),
+                    profile: "RAID5".to_owned(),
+                    used_bytes: 1,
+                    allocated_bytes: 2,
+                },
+                AllocationEntry {
+                    bg_type: "Metadata".to_owned(),
+                    profile: "RAID1".to_owned(),
+                    used_bytes: 1,
+                    allocated_bytes: 2,
+                },
+                AllocationEntry {
+                    bg_type: "System".to_owned(),
+                    profile: "RAID1".to_owned(),
+                    used_bytes: 1,
+                    allocated_bytes: 2,
+                },
+            ]),
+            disks: vec![],
+            advisories: vec![],
+            alert_active: false,
+            alert_causes: vec![],
+            missing_devids: vec![],
+        };
+
+        let human = format_status_human(&report, None, None, None);
+        let data_row = human
+            .lines()
+            .find(|line| line.contains("Data:"))
+            .expect("Data profile row");
+
+        assert!(data_row.contains("Data:      RAID5"), "got:\n{human}");
+        assert!(!data_row.contains("unknown"), "got:\n{human}");
+        assert!(!data_row.contains("no redundancy"), "got:\n{human}");
+        assert!(!data_row.contains("same-disk copies"), "got:\n{human}");
+        assert!(!data_row.contains("not fully redundant"), "got:\n{human}");
+    }
+
+    // Intent: the human renderer prints `unknown` only for missing per-type
+    // profile data.
+    // Why it exists: empty profile vectors mean no df row was reported, which
+    // is distinct from an unclassified but non-empty profile such as RAID5.
+    // Scenario: allocation contains a Data row but no Metadata or System rows.
+    #[test]
+    fn status_human_missing_type_renders_unknown() {
+        let report = StatusReport {
+            mount_point: MountPoint("/mnt/storage".to_owned()),
+            status: StatusCode::Intact,
+            total_devices: Some(2),
+            present_count: Some(2),
+            missing_count: Some(0),
+            profile: Some(profile_json(&["RAID1"], &[], &[])),
+            fsid: Some(TEST_FSID.to_owned()),
+            capacity: None,
+            last_scrub: Some(ScrubReport::Never),
+            balance: None,
+            allocation: Some(vec![AllocationEntry {
+                bg_type: "Data".to_owned(),
+                profile: "RAID1".to_owned(),
+                used_bytes: 1,
+                allocated_bytes: 2,
+            }]),
+            disks: vec![],
+            advisories: vec![],
+            alert_active: false,
+            alert_causes: vec![],
+            missing_devids: vec![],
+        };
+
+        let human = format_status_human(&report, None, None, None);
+
+        assert!(human.contains("Data:      RAID1"), "got:\n{human}");
+        assert!(human.contains("Metadata:  unknown"), "got:\n{human}");
+        assert!(human.contains("System:    unknown"), "got:\n{human}");
     }
 
     #[test]
@@ -2012,7 +2414,7 @@ mod tests {
             total_devices: Some(3),
             present_count: Some(2),
             missing_count: Some(1),
-            profile: Some("RAID1".to_owned()),
+            profile: Some(ProfileJson::uniform("RAID1")),
             fsid: None,
             capacity: Some(CapacityReport {
                 total_bytes: None,
@@ -2066,7 +2468,7 @@ mod tests {
             total_devices: Some(4),
             present_count: Some(2),
             missing_count: Some(2),
-            profile: Some("RAID1".to_owned()),
+            profile: Some(ProfileJson::uniform("RAID1")),
             fsid: None,
             capacity: Some(CapacityReport {
                 total_bytes: None,
@@ -2120,7 +2522,7 @@ mod tests {
             total_devices: Some(1),
             present_count: Some(1),
             missing_count: Some(0),
-            profile: Some("single".to_owned()),
+            profile: Some(ProfileJson::uniform("single")),
             fsid: None,
             capacity: Some(CapacityReport {
                 total_bytes: Some(1073741824),
@@ -2167,7 +2569,7 @@ mod tests {
             total_devices: Some(2),
             present_count: Some(1),
             missing_count: Some(1),
-            profile: Some("RAID1".to_owned()),
+            profile: Some(ProfileJson::uniform("RAID1")),
             fsid: None,
             capacity: Some(CapacityReport {
                 total_bytes: None,
@@ -2221,7 +2623,7 @@ mod tests {
             total_devices: Some(2),
             present_count: Some(1),
             missing_count: Some(1),
-            profile: Some("RAID1".to_owned()),
+            profile: Some(ProfileJson::uniform("RAID1")),
             fsid: None,
             capacity: Some(CapacityReport {
                 total_bytes: None,
@@ -2285,7 +2687,7 @@ mod tests {
             total_devices: Some(2),
             present_count: Some(1),
             missing_count: Some(1),
-            profile: Some("RAID1".to_owned()),
+            profile: Some(ProfileJson::uniform("RAID1")),
             fsid: None,
             capacity: Some(CapacityReport {
                 total_bytes: None,
@@ -2342,7 +2744,7 @@ mod tests {
             total_devices: Some(1),
             present_count: Some(1),
             missing_count: Some(0),
-            profile: Some("single".to_owned()),
+            profile: Some(ProfileJson::uniform("single")),
             fsid: None,
             capacity: Some(CapacityReport {
                 total_bytes: Some(1073741824),
@@ -2849,7 +3251,7 @@ mod tests {
             total_devices: Some(2),
             present_count: Some(2),
             missing_count: Some(0),
-            profile: Some("RAID1".to_owned()),
+            profile: Some(ProfileJson::uniform("RAID1")),
             fsid: None,
             capacity: Some(CapacityReport {
                 total_bytes: Some(1040187392),
@@ -2886,7 +3288,7 @@ mod tests {
             total_devices: Some(1),
             present_count: Some(1),
             missing_count: Some(0),
-            profile: Some("single".to_owned()),
+            profile: Some(ProfileJson::uniform("single")),
             fsid: None,
             capacity: Some(CapacityReport {
                 total_bytes: Some(1040187392),
@@ -2915,7 +3317,7 @@ mod tests {
             total_devices: Some(1),
             present_count: Some(1),
             missing_count: Some(0),
-            profile: Some("single".to_owned()),
+            profile: Some(ProfileJson::uniform("single")),
             fsid: None,
             capacity: Some(CapacityReport {
                 total_bytes: Some(1040187392),
@@ -3040,7 +3442,7 @@ mod tests {
     }
 
     fn assert_pool_sections_retained(built: &BuiltStatus) {
-        assert_eq!(built.report.profile.as_deref(), Some("RAID1"));
+        assert_profile_json(&built.report.profile, &["RAID1"], &["RAID1"], &["RAID1"]);
         assert!(
             built
                 .report
@@ -3137,7 +3539,7 @@ mod tests {
         let human = render_built_status(&built);
 
         assert!(built.report.capacity.is_none());
-        assert_eq!(built.report.profile.as_deref(), Some("RAID1"));
+        assert_profile_json(&built.report.profile, &["RAID1"], &["RAID1"], &["RAID1"]);
         assert!(
             built
                 .report
@@ -3170,7 +3572,7 @@ mod tests {
         let human = render_built_status(&built);
 
         assert!(built.report.capacity.is_none());
-        assert_eq!(built.report.profile.as_deref(), Some("RAID1"));
+        assert_profile_json(&built.report.profile, &["RAID1"], &["RAID1"], &["RAID1"]);
         assert!(
             built
                 .report
@@ -3208,7 +3610,7 @@ mod tests {
         assert_eq!(capacity.total_bytes, None);
         assert_eq!(capacity.used_bytes, healthy_capacity.used_bytes);
         assert_eq!(capacity.free_bytes, healthy_capacity.free_bytes);
-        assert_eq!(built.report.profile.as_deref(), Some("RAID1"));
+        assert_profile_json(&built.report.profile, &["RAID1"], &["RAID1"], &["RAID1"]);
         assert!(
             built
                 .report
@@ -3250,7 +3652,7 @@ mod tests {
         assert_eq!(capacity.total_bytes, None);
         assert_eq!(capacity.used_bytes, healthy_capacity.used_bytes);
         assert_eq!(capacity.free_bytes, healthy_capacity.free_bytes);
-        assert_eq!(built.report.profile.as_deref(), Some("RAID1"));
+        assert_profile_json(&built.report.profile, &["RAID1"], &["RAID1"], &["RAID1"]);
         assert!(
             built
                 .report
@@ -4150,7 +4552,7 @@ mod tests {
             total_devices: Some(1),
             present_count: Some(1),
             missing_count: Some(0),
-            profile: Some("single".to_owned()),
+            profile: Some(ProfileJson::uniform("single")),
             fsid: None,
             capacity: Some(CapacityReport {
                 total_bytes: Some(1073741824),
@@ -4372,7 +4774,7 @@ mod tests {
             total_devices: Some(2),
             present_count: Some(2),
             missing_count: Some(0),
-            profile: Some("RAID1".to_owned()),
+            profile: Some(ProfileJson::uniform("RAID1")),
             fsid: None,
             capacity: None,
             last_scrub: Some(ScrubReport::Never),
@@ -4439,7 +4841,7 @@ mod tests {
             total_devices: Some(1),
             present_count: Some(0),
             missing_count: Some(1),
-            profile: Some("RAID1".to_owned()),
+            profile: Some(ProfileJson::uniform("RAID1")),
             fsid: None,
             capacity: None,
             last_scrub: Some(ScrubReport::Never),
@@ -4750,7 +5152,7 @@ mod tests {
             total_devices: Some(1),
             present_count: Some(1),
             missing_count: Some(0),
-            profile: Some("single".to_owned()),
+            profile: Some(ProfileJson::uniform("single")),
             fsid: None,
             capacity: Some(CapacityReport {
                 total_bytes: Some(1073741824),

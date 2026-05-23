@@ -1348,7 +1348,10 @@ impl AddPlan {
             } else {
                 // Single disk bootstrap
                 pool_bootstrap_mount(runner, &mapper_paths[0], mount_point)?;
-                eprintln!("Pool created and mounted at {}", mount_point);
+                eprintln!(
+                    "Pool created (data single; metadata/system DUP -- no RAID1 disk redundancy) and mounted at {}",
+                    mount_point
+                );
             }
 
             // Fresh pool identity: every previous acked baseline is stale.

@@ -52,6 +52,25 @@ with subtest("Single-disk summary"):
     assert "Used:" in output, f"Expected 'Used:':\n{output}"
     assert "Free:" in output, f"Expected 'Free:':\n{output}"
     assert "RAID1" not in output, f"Unexpected 'RAID1' in single-disk:\n{output}"
+    assert "Profile:" in output, f"Expected 'Profile:' header:\n{output}"
+    assert "Data:      single (no redundancy)" in output, (
+        f"Expected 'Data:      single (no redundancy)':\n{output}"
+    )
+    assert "Metadata:  DUP (same-disk copies; no disk redundancy)" in output, (
+        f"Expected DUP metadata row:\n{output}"
+    )
+    assert "System:    DUP (same-disk copies; no disk redundancy)" in output, (
+        f"Expected DUP system row:\n{output}"
+    )
+
+with subtest("Single-disk JSON"):
+    raw = machine.succeed(rust_status("--json"))
+    s = json.loads(raw)
+    assert s["profile"] == {
+        "data": ["single"],
+        "metadata": ["DUP"],
+        "system": ["DUP"],
+    }, f"single-disk JSON profile mismatch: {s['profile']!r}"
 
 # --- Phase 2: RAID1 healthy ---
 
@@ -98,6 +117,11 @@ with subtest("Healthy JSON"):
         assert d["errors"] is not None, f"Expected errors object: {d}"
         for key in ["read", "write", "corruption"]:
             assert key in d["errors"], f"Missing errors.{key}: {d}"
+    assert s["profile"] == {
+        "data": ["RAID1"],
+        "metadata": ["RAID1"],
+        "system": ["RAID1"],
+    }, f"3-disk RAID1 JSON profile mismatch: {s['profile']!r}"
 
 # --- Phase 3: Degraded ---
 
