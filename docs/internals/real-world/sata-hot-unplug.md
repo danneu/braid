@@ -1,5 +1,5 @@
 ---
-intent: Record what btrfs, cryptsetup, and the kernel actually report during SATA hot-unplug and replug on real hardware. Validates the state model in tool-behavior/device-disappearance.md.
+intent: Record what btrfs, cryptsetup, the kernel, and udev actually report during SATA hot-unplug and replug on real hardware. Validates the state model in tool-behavior/device-disappearance.md and the detection-signal latencies that braid relies on.
 status: Active
 ---
 
@@ -11,8 +11,71 @@ Empirical observations from physical hardware testing. Validates the device stat
 
 - Machine: Silverstone NAS (hunk)
 - Drives: 3x SATA HDD in btrfs RAID1 over LUKS
-- Disk removed: ccc (ST500LM021, devid 3)
+- Disk removed: ccc (ST500LM021, devid 3, `wwn-0x5000c500ba0a8b52`, LUKS label `braid-ccc`)
 - OS: NixOS with braid module
+
+## Detection signals and latencies
+
+How fast each layer notices the disk is gone, and what passive signals are available without user-initiated I/O.
+
+| Signal                                     | Latency                   | Passive?    | Programmatic detection          |
+| ------------------------------------------ | ------------------------- | ----------- | ------------------------------- |
+| `ata*: SATA link down` (kernel journal)    | **Instant**               | Yes         | `journalctl -kf` pattern match  |
+| udev `remove` event                        | ~11s (after SATA retries) | Yes         | udev rule on `ACTION=="remove"` |
+| `/dev/disk/by-id/wwn-*` symlink disappears | ~11s (udev cleans it)     | Yes         | inotify on `/dev/disk/by-id/`   |
+| `cryptsetup status` shows `device: (null)` | ~11s                      | Yes         | poll `cryptsetup status`        |
+| btrfs write errors (periodic commit)       | ~26s                      | Yes         | `journalctl -kf` pattern match  |
+| `btrfs device stats` shows nonzero errors  | ~26s+                     | Needs query | `btrfs device stats`            |
+
+Key takeaway: the kernel journal and udev events are the fastest passive signals. btrfs is completely oblivious until its next periodic commit (~30s default), but then notices on its own without user-initiated I/O.
+
+The udev remove event is especially useful -- it includes `ID_WWN` and `ID_FS_LABEL` (e.g. `braid-ccc`), so a udev rule can immediately identify which braid disk disappeared.
+
+### What does NOT react
+
+- **LUKS mapper** (`/dev/mapper/braid-ccc`): stays as a zombie. `cryptsetup status` still says "active" but the backing `device:` becomes `(null)`. I/O through it fails.
+- **`btrfs filesystem show`**: continues to list all 3 devices with paths and sizes even after errors. Never reports the device as missing from this command alone.
+
+### udev remove event (raw)
+
+Arrives after the SATA retries complete (~11s). Includes disk identity:
+
+```
+KERNEL[1395.061297] remove   /devices/pci0000:00/0000:00:01.2/0000:02:00.1/ata2/host1/target1:0:0/1:0:0:0/block/sda (block)
+ACTION=remove
+DEVNAME=/dev/sda
+DEVTYPE=disk
+
+UDEV  [1395.091944] remove   /devices/pci0000:00/0000:00:01.2/0000:02:00.1/ata2/host1/target1:0:0/1:0:0:0/block/sda (block)
+ACTION=remove
+DEVNAME=/dev/sda
+ID_WWN=0x5000c500ba0a8b52
+ID_FS_LABEL=braid-ccc
+ID_FS_TYPE=crypto_LUKS
+DEVLINKS=... /dev/disk/by-id/wwn-0x5000c500ba0a8b52 ... /dev/disk/by-label/braid-ccc ...
+```
+
+### cryptsetup status (zombie mapper)
+
+After the block device is gone, the LUKS mapper lingers but its backing device is null:
+
+```
+/dev/mapper/braid-ccc is active and is in use.
+  type:    n/a
+  cipher:  aes-xts-plain64
+  device:  (null)
+  mode:    read/write
+```
+
+### btrfs device stats (after errors)
+
+```
+[/dev/mapper/braid-ccc].write_io_errs    10
+[/dev/mapper/braid-ccc].read_io_errs     0
+[/dev/mapper/braid-ccc].flush_io_errs    1
+[/dev/mapper/braid-ccc].corruption_errs  0
+[/dev/mapper/braid-ccc].generation_errs  0
+```
 
 ## Test: SATA Hot-Unplug (disk removed while pool mounted)
 

@@ -1,8 +1,13 @@
+---
+intent: Document which smartd conditions fire the alert script for SATA and NVMe drives. Read before changing braid's smartd config in modules/braid/monitor.nix or the SMART classifiers in cli/src/parse/smartctl.rs.
+status: Active
+---
+
 # smartd alert conditions
 
 Reference for what triggers smartd to call the notification script.
 
-## Braid's current smartd config
+## braid's current smartd config
 
 ```
 -a -o on -S on -m <nomailer> -M exec ${smartdAlertScript}
@@ -11,6 +16,8 @@ Reference for what triggers smartd to call the notification script.
 `-a` expands to: `-H -f -t -l error -l selftest -l selfteststs -C 197 -U 198`
 
 `-o on` and `-S on` are non-monitoring config flags (enable offline testing and attribute autosave on the drive).
+
+Wired in `modules/braid/monitor.nix` (search for `smartdAlertScript`).
 
 ## SATA: conditions that fire the alert script
 
@@ -28,17 +35,17 @@ smartd polls every 30 minutes. Each condition has a `SMARTD_FAILTYPE` value pass
 | `FailedReadSmartData` | | Could not read SMART attribute data |
 | `FailedReadSmartErrorLog` | | Could not read SMART error log |
 | `FailedReadSmartSelfTestLog` | | Could not read self-test log |
-| `FailedOpenDevice` | | `open()` failed — device disappeared |
+| `FailedOpenDevice` | | `open()` failed -- device disappeared |
 | `Temperature` | `-W` | Temperature >= CRIT threshold (NOT in `-a`, must be added explicitly) |
 
 ## SATA: what `-a` does NOT alert on
 
 These are only logged to syslog, not sent to the script:
 
-- **Reallocated_Sector_Ct (5)** raw value increases — only alerted if value crosses the vendor threshold (via `-f`). To alert on raw value changes, add `-R 5!`.
-- **Reported_Uncorrect (187)**, **End-to-End_Error (184)**, **Reallocated_Event_Count (196)** — same: threshold breach only via `-f`, no raw-value alerts.
-- **Temperature** — not monitored at all without `-W DIFF,INFO,CRIT`.
-- **Prefail/Usage attribute value changes** — `-t` (= `-p -u`) logs these to syslog at LOG_INFO, but does not fire the script.
+- **Reallocated_Sector_Ct (5)** raw value increases -- only alerted if value crosses the vendor threshold (via `-f`). To alert on raw value changes, add `-R 5!`.
+- **Reported_Uncorrect (187)**, **End-to-End_Error (184)**, **Reallocated_Event_Count (196)** -- same: threshold breach only via `-f`, no raw-value alerts.
+- **Temperature** -- not monitored at all without `-W DIFF,INFO,CRIT`.
+- **Prefail/Usage attribute value changes** -- `-t` (= `-p -u`) logs these to syslog at LOG_INFO, but does not fire the script.
 
 ## SATA: syslog-only directives (no script trigger)
 
@@ -55,7 +62,7 @@ These are only logged to syslog, not sent to the script:
 
 ## NVMe: how `-a` works differently
 
-NVMe has a standardized health model — no vendor-specific attribute IDs or thresholds. The ATA-only parts of `-a` (`-C 197`, `-U 198`, `-o on`, `-S on`) are silently ignored.
+NVMe has a standardized health model -- no vendor-specific attribute IDs or thresholds. The ATA-only parts of `-a` (`-C 197`, `-U 198`, `-o on`, `-S on`) are silently ignored.
 
 ### NVMe conditions that fire the alert script
 
@@ -69,7 +76,7 @@ NVMe has a standardized health model — no vendor-specific attribute IDs or thr
 | `FailedReadSmartData` | | Could not read SMART data |
 | `FailedReadSmartErrorLog` | | Could not read error log |
 | `FailedReadSmartSelfTestLog` | | Could not read self-test log |
-| `FailedOpenDevice` | | `open()` failed — device disappeared |
+| `FailedOpenDevice` | | `open()` failed -- device disappeared |
 
 ### The Critical Warning byte (`-H`)
 
@@ -96,7 +103,7 @@ As of smartmontools 7.5, `-H MASK` (hex) can ignore specific bits, e.g. `-H 0xfb
 
 ### NVMe vs SATA summary
 
-NVMe monitoring is more straightforward because the spec defines exactly what "unhealthy" means, whereas SATA relies on vendor-specific attribute definitions and generously-set thresholds. The same `-a` config line works for both — smartd adapts per device type.
+NVMe monitoring is more straightforward because the spec defines exactly what "unhealthy" means, whereas SATA relies on vendor-specific attribute definitions and generously-set thresholds. The same `-a` config line works for both -- smartd adapts per device type.
 
 ## SATA attributes worth monitoring
 
@@ -137,4 +144,4 @@ Based on real Seagate SATA output.
 
 ## Relationship to TUI `classify_sata`
 
-The TUI currently checks raw values of 3 attributes: `Reallocated_Sector_Ct`, `Current_Pending_Sector`, `Offline_Uncorrectable`. This is complementary to smartd — smartd handles real-time alerts (with its own set of checks), while the TUI gives at-a-glance status from `smartctl --json` output. They don't need to be identical but should cover the same ground between them.
+`classify_sata` (in `cli/src/parse/smartctl.rs`) checks raw values of 3 attributes: `Reallocated_Sector_Ct`, `Current_Pending_Sector`, `Offline_Uncorrectable`. This is complementary to smartd -- smartd handles real-time alerts (with its own set of checks), while the TUI gives at-a-glance status from `smartctl --json` output. They don't need to be identical but should cover the same ground between them.
