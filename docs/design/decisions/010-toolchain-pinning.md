@@ -22,7 +22,7 @@ Pin `flake.nix` to a specific NixOS stable release (nixos-25.11). Pin only parse
 
 ### Operational escape hatch
 
-Parser-critical tools are pinned by default to the flake's nixpkgs release, but `braid.packages.*` overrides are intentional — operators may need a newer upstream version for urgent bugfixes or security patches before braid's next nixpkgs bump. The override takes precedence; if the newer version changes output format, parser tests will catch it.
+Parser-critical tools are pinned by default to the flake's nixpkgs release, but `braid.packages.*` overrides are intentional -- operators may need a newer upstream version for urgent bugfixes or security patches before braid's next nixpkgs bump. The override takes precedence. Operator-set `braid.packages.*` overrides sit outside braid's committed parser contract: the standard fixture-capture and golden-test recipes build fixed flake checks against the flake's `pkgs`, so they do not validate an arbitrary override. Treating an override as supported requires a maintainer to reproduce the fixture-refresh workflow under a temporary local input swap (e.g. `--override-input nixpkgs` on the capture/test commands, or a local flake edit) at the override's package version, then re-run `just test-rust` against the resulting fixtures. Operators who skip this step are running unverified parser inputs.
 
 ### Classification guideline
 
@@ -46,7 +46,12 @@ New runtime dependencies must be classified into one of these two groups when ad
 
 1. Bump the nixpkgs input to the next stable release.
 2. Run `nix flake update nixpkgs`.
-3. Run `make test` — the version-assertion test (`tool-versions`) catches drift.
+3. Run `make test` -- the `tool-versions` VM test verifies that each
+   pinned tool resolves to a `/nix/store/` path on the VM's PATH and
+   that its self-reported version matches `pkgs.<tool>.version` from
+   the same evaluation. It does not detect that nixpkgs has moved a
+   tool to a new version (both sides advance together); use steps 4
+   and 5 as the actual drift gate.
 4. Capture new golden-file fixtures from a VM -- `just capture-all-fixtures` writes under `cli/tests/fixtures/nixos-<release>/` (with `upsc/` holding the `capture-ups-fixtures` outputs). `just capture-all-fixtures-unstable` is the unstable-lane mirror.
 5. Update parser tests if output format changed.
 

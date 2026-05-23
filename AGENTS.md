@@ -288,8 +288,24 @@ When parser-critical tool versions change, run:
 
 Early-warning lane for upstream parser/output drift. Unstable failures signal upcoming changes, not a contract violation. Fixtures in `cli/tests/fixtures/nixos-unstable/` are committed so upstream output changes are visible in git history, but they are non-authoritative.
 
-- `just test-all-unstable` — VM tests against nixos-unstable. Covers CLI-reachable parsers against live tool output but does not cover the full parser surface (TUI-only parsers, unused parsers).
-- `just capture-all-fixtures-unstable` + `just test-rust-unstable` — covers the full parser surface (btrfs/cryptsetup/util-linux/smartctl/NUT) against unstable tool output via golden fixtures. Missing fixtures fail (not skip).
+- `just test-all-unstable` -- VM tests against nixos-unstable. Covers
+  CLI-reachable parsers against live tool output but does not cover the
+  full parser surface (TUI-only parsers, unused parsers, smartctl).
+- `just capture-all-fixtures-unstable` + `just test-rust-unstable` --
+  covers btrfs/cryptsetup/util-linux/NUT against unstable tool output via
+  golden fixtures. Missing fixtures fail (not skip).
+- **smartctl is stable-only by design.** VM virtio disks do not emit
+  useful SMART data, so the smartctl fixtures cannot be captured from the
+  VM pipeline. `smartctl-sata-with-temperature.json` is a one-time
+  physical-drive capture; the `smartctl-selftest-*.json` fixtures are
+  hand-authored (see `cli/tests/fixtures/nixos-25.11/README.md`). The
+  `tool-versions` VM test checks that `smartctl` resolves to a
+  `/nix/store/` path on the VM's PATH and that its self-reported version
+  matches the configured `pkgs.smartmontools.version`; it does not
+  exercise the braid wrapper's PATH injection for `smartctl` and it
+  does not detect nixpkgs version bumps (both sides advance together
+  with the evaluation). On any nixpkgs bump that touches smartmontools,
+  review and refresh the stable smartctl fixtures by hand.
 
 Full unstable canary workflow:
 

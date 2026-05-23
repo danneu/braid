@@ -8,7 +8,15 @@ machine.wait_for_unit("multi-user.target")
 expected = json.loads(machine.succeed("cat /etc/braid/expected-versions.json"))
 
 # Provenance: assert tools resolve to /nix/store/ paths (not ambient PATH leaks)
-for tool in ["btrfs", "cryptsetup", "findmnt", "lsblk", "mountpoint", "upsc"]:
+for tool in [
+    "btrfs",
+    "cryptsetup",
+    "findmnt",
+    "lsblk",
+    "mountpoint",
+    "upsc",
+    "smartctl",
+]:
     with subtest(f"{tool} provenance"):
         path = machine.succeed(f"readlink -f $(command -v {tool})").strip()
         assert path.startswith("/nix/store/"), f"{tool} not from nix store: {path}"
@@ -32,6 +40,11 @@ with subtest("util-linux version"):
 with subtest("nut upsc version"):
     version = machine.succeed("upsc -V").strip()
     exp = f"Network UPS Tools upsc {expected['nut']}"
+    assert version.startswith(exp), f"expected prefix {exp!r}, got {version!r}"
+
+with subtest("smartmontools version"):
+    version = machine.succeed("smartctl --version").strip().splitlines()[0]
+    exp = f"smartctl {expected['smartmontools']}"
     assert version.startswith(exp), f"expected prefix {exp!r}, got {version!r}"
 
 # Rust binary wrapper provenance
