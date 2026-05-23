@@ -60,4 +60,4 @@ This is not configurable. There is no `braid.resilient` option. Every braid depl
 
 - `modules/braid/storage.nix` — `braid-online.service`, `braid-pool.target`
 - `tests/module/` — module tests validate boot with all drives healthy
-- `archive/plans/test-boot-degraded.md` — original plan and research
+- `archive/plans/test-boot-degraded.md` — original plan and research (preserved in git history; last present at commit `9df91f9`)
