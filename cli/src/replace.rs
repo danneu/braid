@@ -1,3 +1,4 @@
+use crate::btrfs_ioctl::BtrfsDevInfo;
 use crate::cmd::{CmdRequest, CommandRunner, Step};
 use crate::config::{Config, luks_label_for, mapper_name, name_from_mapper};
 use crate::confirm;
@@ -1151,11 +1152,17 @@ mod replace_stderr_capture {
 /// Does not read or verify the passphrase or acquire the sleep
 /// inhibitor -- those happen inside `ReplacePlan::execute` so
 /// `--dry-run` keeps short-circuiting before them.
-pub fn plan_replace<R: CommandRunner + Sync, F: Filesystem + ?Sized>(
+pub fn plan_replace<R, F, D>(
     runner: &R,
     fs: &F,
+    dev_info: &D,
     params: &ReplaceParams<'_>,
-) -> Result<ReplacePlan, PlanFailure<ReplaceError>> {
+) -> Result<ReplacePlan, PlanFailure<ReplaceError>>
+where
+    R: CommandRunner + Sync,
+    F: Filesystem + ?Sized,
+    D: BtrfsDevInfo + ?Sized,
+{
     // Notes accumulator. Pre-preflight exits have no notes; later exits
     // preserve preflight diagnostics on `PlanFailure::notes`.
     let mut notes: Vec<PreviewNote> = Vec::new();
@@ -1311,6 +1318,33 @@ pub fn plan_replace<R: CommandRunner + Sync, F: Filesystem + ?Sized>(
         }
     };
 
+    let source_probe = preflight::ReplaceSourceProbe {
+        devid: match &replace_source {
+            ReplaceSource::Live { devid, .. } | ReplaceSource::Missing { devid } => *devid,
+        },
+    };
+    let target_probe = match &new_probed.state {
+        PresentConfigDiskState::PresentLuks { .. } => preflight::ReplaceTargetProbe::PresentLuks {
+            by_id: new_by_id.as_str(),
+        },
+        PresentConfigDiskState::PresentNotLuks => preflight::ReplaceTargetProbe::PresentNotLuks {
+            by_id: new_by_id.as_str(),
+        },
+    };
+    let mount = Path::new(config.mount_point().as_str());
+    if let Err(msg) = preflight::check_replace_target_capacity(
+        runner,
+        dev_info,
+        mount,
+        source_probe,
+        target_probe,
+    ) {
+        return Err(PlanFailure::with_notes(
+            notes,
+            ReplaceError::Validation(msg),
+        ));
+    }
+
     // Keyfile diagnostics are plan notes, not confirmation-only stderr.
     // This keeps dry-run stdout, real-run stderr, and preserved-error
     // stderr on the same PreviewNote contract used by `add`.
@@ -1449,12 +1483,18 @@ fn assert_new_uuid_unique(
     Ok(())
 }
 
-pub fn cmd_replace<R: CommandRunner + Sync, F: Filesystem + ?Sized>(
+pub fn cmd_replace<R, F, D>(
     runner: &R,
     fs: &F,
+    dev_info: &D,
     params: &ReplaceParams<'_>,
-) -> Result<(), ReplaceError> {
-    let plan = match plan_replace(runner, fs, params) {
+) -> Result<(), ReplaceError>
+where
+    R: CommandRunner + Sync,
+    F: Filesystem + ?Sized,
+    D: BtrfsDevInfo + ?Sized,
+{
+    let plan = match plan_replace(runner, fs, dev_info, params) {
         Ok(p) => p,
         Err(PlanFailure { notes, error }) => {
             // Preserved-context failure: accumulated notes render to
@@ -2943,7 +2983,9 @@ mod tests {
 
     use crate::cmd::CmdError;
     use crate::membership::{self, PoolMembership};
-    use crate::test_fixtures::{MockFs, PoolFixture, ReplacementPool, mock_ok};
+    use crate::test_fixtures::{
+        MockFs, PoolFixture, ReplacementPool, mock_ok, replace_dev_info_sufficient,
+    };
     use std::sync::Arc;
     use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 
@@ -2963,6 +3005,32 @@ mod tests {
             })),
             _ => None,
         }
+    }
+
+    fn plan_replace<R, F>(
+        runner: &R,
+        fs: &F,
+        params: &ReplaceParams<'_>,
+    ) -> Result<ReplacePlan, PlanFailure<ReplaceError>>
+    where
+        R: CommandRunner + Sync,
+        F: Filesystem + ?Sized,
+    {
+        let dev_info = replace_dev_info_sufficient();
+        super::plan_replace(runner, fs, &dev_info, params)
+    }
+
+    fn cmd_replace<R, F>(
+        runner: &R,
+        fs: &F,
+        params: &ReplaceParams<'_>,
+    ) -> Result<(), ReplaceError>
+    where
+        R: CommandRunner + Sync,
+        F: Filesystem + ?Sized,
+    {
+        let dev_info = replace_dev_info_sufficient();
+        super::cmd_replace(runner, fs, &dev_info, params)
     }
 
     const REPLACE_TEST_FSID: &str = "cc86845b-aec3-408e-bef5-553affc1f2b1";
@@ -4965,6 +5033,201 @@ mod tests {
         assert!(
             !rendered.contains("WARNING:"),
             "confirmation-only WARNING lines must not leak into preview, got:\n{rendered}",
+        );
+    }
+
+    // Intent: live replacement with a fresh-LUKS undersized target is refused
+    //   during planning.
+    // Why it exists: this is the destructive regression path -- without the
+    //   check, replace would write the journal and run luksFormat before
+    //   btrfs rejects the target as too small.
+    // Scenario: disk2 is live, disk3 is raw, and disk3's modeled mapper
+    //   capacity is one byte smaller than disk2's btrfs `total_bytes`.
+    #[test]
+    fn plan_replace_refuses_when_target_smaller_live_fresh() {
+        let f = PoolFixture::two_disk_healthy();
+        let fs = MockFs::storage(vec!["/dev/disk/by-id/virtio-disk3".into()]);
+        let replace_done = Arc::new(AtomicBool::new(false));
+        let runner = ReplacementPool::two_disk_healthy()
+            .install(MockRunner::default(), replace_done)
+            .with_handler(|req| match req {
+                CmdRequest::CryptsetupLuksUuid { device }
+                    if device == "/dev/disk/by-id/virtio-disk3" =>
+                {
+                    Some(Ok(RawCommandOutput {
+                        cmd: format!("cryptsetup luksUUID {device}"),
+                        stdout: String::new(),
+                        stderr: "Device is not a valid LUKS device.\n".into(),
+                        exit_status: 1,
+                    }))
+                }
+                _ => None,
+            });
+        let dev_info = crate::btrfs_ioctl::tests_support::MockBtrfsDevInfo::default()
+            .with_total_bytes("/mnt/storage", 2, 520_093_697);
+
+        let failure = match super::plan_replace(
+            &runner,
+            &fs,
+            &dev_info,
+            &f.replace_params().dry_run(true).build(),
+        ) {
+            Ok(_) => panic!("undersized fresh target should fail planning"),
+            Err(failure) => failure,
+        };
+
+        match &failure.error {
+            ReplaceError::Validation(msg) => {
+                assert!(
+                    msg.contains("smaller than the disk being replaced"),
+                    "unexpected validation: {msg}"
+                );
+            }
+            other => panic!("expected Validation, got: {other:?}"),
+        }
+        assert!(
+            journal::load_journal(&f.paths).unwrap().is_none(),
+            "planning refusal must not write pending-op.json"
+        );
+        assert!(
+            !runner
+                .requests()
+                .iter()
+                .any(|r| matches!(r, CmdRequest::CryptsetupLuksFormat { .. })),
+            "planning refusal must not format the new disk"
+        );
+    }
+
+    // Intent: live replacement with an existing-LUKS undersized target is
+    //   refused using the parsed LUKS2 segment capacity.
+    // Why it exists: existing LUKS targets skip luksFormat, but still must
+    //   fail before journal write and mapper open.
+    // Scenario: disk3 already has a dynamic LUKS2 segment whose mapper
+    //   capacity is one byte smaller than disk2's btrfs `total_bytes`.
+    #[test]
+    fn plan_replace_refuses_when_target_smaller_live_existing_luks() {
+        let f = PoolFixture::two_disk_healthy();
+        let fs = MockFs::storage(vec![
+            "/dev/disk/by-id/virtio-disk3".into(),
+            "/dev/mapper/braid-disk3".into(),
+        ]);
+        let replace_done = Arc::new(AtomicBool::new(false));
+        let runner =
+            ReplacementPool::two_disk_healthy().install(MockRunner::default(), replace_done);
+        let dev_info = crate::btrfs_ioctl::tests_support::MockBtrfsDevInfo::default()
+            .with_total_bytes("/mnt/storage", 2, 520_093_697);
+
+        let failure = match super::plan_replace(
+            &runner,
+            &fs,
+            &dev_info,
+            &f.replace_params().dry_run(true).build(),
+        ) {
+            Ok(_) => panic!("undersized existing-LUKS target should fail planning"),
+            Err(failure) => failure,
+        };
+
+        match &failure.error {
+            ReplaceError::Validation(msg) => {
+                assert!(
+                    msg.contains("smaller than the disk being replaced"),
+                    "unexpected validation: {msg}"
+                );
+            }
+            other => panic!("expected Validation, got: {other:?}"),
+        }
+        assert!(
+            journal::load_journal(&f.paths).unwrap().is_none(),
+            "planning refusal must not write pending-op.json"
+        );
+    }
+
+    // Intent: missing-source replacement still reads the missing devid's
+    //   btrfs `total_bytes` and refuses an undersized target.
+    // Why it exists: btrfs reports size 0 in some text surfaces for missing
+    //   devices; the ioctl authority must be used for this branch.
+    // Scenario: disk2 is missing, `--missing-id 2` is supplied, and disk3 is
+    //   one byte too small.
+    #[test]
+    fn plan_replace_refuses_when_target_smaller_missing() {
+        let f = PoolFixture::one_live_one_missing();
+        let fs = MockFs::storage(vec![
+            "/dev/disk/by-id/virtio-disk3".into(),
+            "/dev/mapper/braid-disk3".into(),
+        ]);
+        let replace_done = Arc::new(AtomicBool::new(false));
+        let runner = ReplacementPool::one_live_one_missing()
+            .install(MockRunner::default(), replace_done);
+        let dev_info = crate::btrfs_ioctl::tests_support::MockBtrfsDevInfo::default()
+            .with_total_bytes("/mnt/storage", 2, 520_093_697);
+
+        let failure = match super::plan_replace(
+            &runner,
+            &fs,
+            &dev_info,
+            &f.replace_params()
+                .missing_id(Some(2))
+                .dry_run(true)
+                .build(),
+        ) {
+            Ok(_) => panic!("undersized target for missing source should fail planning"),
+            Err(failure) => failure,
+        };
+
+        match &failure.error {
+            ReplaceError::Validation(msg) => {
+                assert!(
+                    msg.contains("smaller than the disk being replaced"),
+                    "unexpected validation: {msg}"
+                );
+            }
+            other => panic!("expected Validation, got: {other:?}"),
+        }
+        assert!(
+            journal::load_journal(&f.paths).unwrap().is_none(),
+            "planning refusal must not write pending-op.json"
+        );
+    }
+
+    // Intent: source-size lookup failures are preserved as planning-time
+    //   validation errors.
+    // Why it exists: unknown source size must fail closed because the
+    //   downstream failure would happen after journal and format boundaries.
+    // Scenario: btrfs device-info cannot find the resolved source devid.
+    #[test]
+    fn plan_replace_refuses_when_dev_info_devid_not_found() {
+        let f = PoolFixture::two_disk_healthy();
+        let fs = MockFs::storage(vec![
+            "/dev/disk/by-id/virtio-disk3".into(),
+            "/dev/mapper/braid-disk3".into(),
+        ]);
+        let replace_done = Arc::new(AtomicBool::new(false));
+        let runner =
+            ReplacementPool::two_disk_healthy().install(MockRunner::default(), replace_done);
+        let dev_info = crate::btrfs_ioctl::tests_support::MockBtrfsDevInfo::default();
+
+        let failure = match super::plan_replace(
+            &runner,
+            &fs,
+            &dev_info,
+            &f.replace_params().dry_run(true).build(),
+        ) {
+            Ok(_) => panic!("missing dev-info row should fail planning"),
+            Err(failure) => failure,
+        };
+
+        match &failure.error {
+            ReplaceError::Validation(msg) => {
+                assert!(
+                    msg.contains("failed to read btrfs total_bytes for devid 2"),
+                    "unexpected validation: {msg}"
+                );
+            }
+            other => panic!("expected Validation, got: {other:?}"),
+        }
+        assert!(
+            journal::load_journal(&f.paths).unwrap().is_none(),
+            "planning refusal must not write pending-op.json"
         );
     }
 

@@ -196,7 +196,7 @@ pub(crate) use remove::{
 };
 #[allow(unused_imports)]
 pub(crate) use remove_missing::{RemoveMissingParamsBuilder, RemoveMissingPool};
-pub(crate) use replace::ReplacementPool;
+pub(crate) use replace::{ReplacementPool, replace_dev_info_sufficient};
 #[allow(unused_imports)]
 pub(crate) use scrub::{
     scrub_cancel_not_running, scrub_cancel_ok, scrub_cancel_real_failure, scrub_mp,

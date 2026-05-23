@@ -1,10 +1,18 @@
 use std::fmt;
+use std::path::Path;
 
+use crate::btrfs_ioctl::BtrfsDevInfo;
+use crate::cmd::CmdRequest;
 use crate::cmd::CommandRunner;
+use crate::confirm;
 use crate::journal;
+use crate::luks::LUKS2_DEFAULT_HDR_SIZE;
 use crate::membership::PoolMembership;
 use crate::mount_check::{self, mount_entry_at_via_fs};
-use crate::parse::types::{BtrfsBgType, BtrfsDeviceUsageEntry, BtrfsDfOutput};
+use crate::parse::parse_cryptsetup_luks_dump;
+use crate::parse::types::{
+    BtrfsBgType, BtrfsDeviceUsageEntry, BtrfsDfOutput, Luks2SegmentSize,
+};
 use crate::preview::PreviewNote;
 use crate::probe::Filesystem;
 use crate::state_paths::StatePaths;
@@ -402,6 +410,125 @@ pub fn check_single_survivor_capacity(
     Ok(())
 }
 
+/// Minimal source identity for replace-size preflight; devid is the authority
+/// btrfs itself uses for `BTRFS_IOC_DEV_INFO`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ReplaceSourceProbe {
+    pub devid: u64,
+}
+
+/// Target state needed to compute the mapper capacity btrfs will compare
+/// against the source device during `btrfs replace start`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ReplaceTargetProbe<'a> {
+    PresentLuks { by_id: &'a str },
+    PresentNotLuks { by_id: &'a str },
+}
+
+/// Refuse `braid replace` before journal write or LUKS format when the target
+/// mapper capacity is smaller than btrfs's source `total_bytes`.
+pub fn check_replace_target_capacity<R, D>(
+    runner: &R,
+    dev_info: &D,
+    mount: &Path,
+    source: ReplaceSourceProbe,
+    target: ReplaceTargetProbe<'_>,
+) -> Result<(), String>
+where
+    R: CommandRunner,
+    D: BtrfsDevInfo + ?Sized,
+{
+    let source_total_bytes = dev_info
+        .total_bytes(mount, source.devid)
+        .map_err(|e| format!("failed to read btrfs total_bytes for devid {}: {e}", source.devid))?;
+    if source_total_bytes == 0 {
+        return Err(format!(
+            "btrfs reports total_bytes 0 for source devid {} -- cannot verify the new disk is large enough",
+            source.devid
+        ));
+    }
+
+    let (target_by_id, target_capacity) = match target {
+        ReplaceTargetProbe::PresentLuks { by_id } => {
+            let raw_target = target_raw_size(runner, by_id)?;
+            let raw = runner
+                .run(&CmdRequest::CryptsetupLuksDump {
+                    device: by_id.to_owned(),
+                })
+                .map_err(|e| {
+                    format!(
+                        "failed to run cryptsetup luksDump --dump-json-metadata for target {by_id}: {e}"
+                    )
+                })?;
+            let parsed = parse_cryptsetup_luks_dump(&raw).map_err(|e| {
+                format!("failed to parse LUKS2 segment metadata for target {by_id}: {e}")
+            })?;
+            let capacity = match parsed.segment_size {
+                Luks2SegmentSize::Dynamic => {
+                    mapper_capacity_from_dynamic_segment(raw_target, parsed.segment_offset_bytes, by_id)?
+                }
+                Luks2SegmentSize::Fixed(0) => {
+                    return Err(
+                        "LUKS2 segment 0 has fixed size 0 -- header is malformed".to_owned()
+                    );
+                }
+                Luks2SegmentSize::Fixed(n) => n,
+            };
+            (by_id, capacity)
+        }
+        ReplaceTargetProbe::PresentNotLuks { by_id } => {
+            let raw_target = target_raw_size(runner, by_id)?;
+            let capacity =
+                mapper_capacity_from_dynamic_segment(raw_target, LUKS2_DEFAULT_HDR_SIZE, by_id)?;
+            (by_id, capacity)
+        }
+    };
+
+    if target_capacity < source_total_bytes {
+        return Err(format!(
+            "new disk is smaller than the disk being replaced -- refusing to luksFormat / proceed. \
+             source devid {} btrfs size {} ({}), target {} mapper capacity {} ({}). \
+             Use a target at least as large as the source.",
+            source.devid,
+            source_total_bytes,
+            format_bytes(source_total_bytes),
+            target_by_id,
+            target_capacity,
+            format_bytes(target_capacity),
+        ));
+    }
+
+    Ok(())
+}
+
+fn target_raw_size<R: CommandRunner>(runner: &R, by_id: &str) -> Result<u64, String> {
+    confirm::query_disk_hw_info(runner, by_id)
+        .size
+        .ok_or_else(|| {
+            format!(
+                "failed to read raw size for target {by_id} with lsblk -- cannot verify the new disk is large enough"
+            )
+        })
+}
+
+fn mapper_capacity_from_dynamic_segment(
+    raw_target: u64,
+    offset: u64,
+    by_id: &str,
+) -> Result<u64, String> {
+    if raw_target <= offset {
+        return Err(format!(
+            "target raw size {} ({}) is not larger than LUKS2 segment offset {} ({}) for {} -- header may be corrupt",
+            raw_target,
+            format_bytes(raw_target),
+            offset,
+            format_bytes(offset),
+            by_id,
+        ));
+    }
+    Ok(raw_target - offset)
+}
+
 /// Refuse if the configured UPS is on battery, in any critical state,
 /// or unreachable.
 ///
@@ -504,7 +631,8 @@ pub fn require_lock_preflight<F: Filesystem + ?Sized>(fs: &F, fsid: &str) -> Res
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::cmd::{CmdRequest, MockRunner, RawCommandOutput};
+    use crate::btrfs_ioctl::tests_support::MockBtrfsDevInfo;
+    use crate::cmd::{CmdRequest, LsblkFieldKind, MockRunner, RawCommandOutput};
     use crate::probe::Filesystem;
 
     struct MockFs {
@@ -572,6 +700,299 @@ mod tests {
     }
 
     const FSID: &str = "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee";
+    const TARGET: &str = "/dev/disk/by-id/virtio-disk3";
+    const SOURCE_TOTAL: u64 = 520_093_696;
+    const TARGET_RAW_512_MIB: u64 = 536_870_912;
+
+    fn dev_info_with_total(total_bytes: u64) -> MockBtrfsDevInfo {
+        MockBtrfsDevInfo::default().with_total_bytes("/mnt/storage", 2, total_bytes)
+    }
+
+    fn runner_with_target_size(size: u64) -> MockRunner {
+        MockRunner::default().with_output(
+            CmdRequest::LsblkField {
+                device: TARGET.into(),
+                field: LsblkFieldKind::Size,
+            },
+            RawCommandOutput {
+                cmd: "lsblk --bytes".into(),
+                stdout: format!("{size}\n"),
+                stderr: String::new(),
+                exit_status: 0,
+            },
+        )
+    }
+
+    fn runner_with_target_size_and_luks_dump(size: u64, offset: u64, segment_size: &str) -> MockRunner {
+        runner_with_target_size(size).with_output(
+            CmdRequest::CryptsetupLuksDump {
+                device: TARGET.into(),
+            },
+            RawCommandOutput {
+                cmd: "cryptsetup luksDump --dump-json-metadata".into(),
+                stdout: luks_dump_json(offset, segment_size),
+                stderr: String::new(),
+                exit_status: 0,
+            },
+        )
+    }
+
+    fn luks_dump_json(offset: u64, segment_size: &str) -> String {
+        format!(
+            r#"{{
+  "keyslots": {{}},
+  "tokens": {{}},
+  "segments": {{
+    "0": {{
+      "type": "crypt",
+      "offset": "{offset}",
+      "size": "{segment_size}",
+      "iv_tweak": "0",
+      "encryption": "aes-xts-plain64",
+      "sector_size": 512
+    }}
+  }},
+  "digests": {{}},
+  "config": {{}}
+}}"#
+        )
+    }
+
+    fn source_probe() -> ReplaceSourceProbe {
+        ReplaceSourceProbe { devid: 2 }
+    }
+
+    #[test]
+    // Intent: fresh replacement targets are refused when the default LUKS2
+    //   data offset leaves less mapper capacity than the source device.
+    // Why it exists: protects against formatting an undersized disk before
+    //   btrfs's later replace-time size check rejects it.
+    // Scenario: 512 MiB source, 256 MiB raw replacement.
+    fn check_replace_target_capacity_fresh_refuses_when_target_smaller() {
+        let runner = runner_with_target_size(268_435_456);
+        let dev_info = dev_info_with_total(SOURCE_TOTAL);
+        let err = check_replace_target_capacity(
+            &runner,
+            &dev_info,
+            Path::new("/mnt/storage"),
+            source_probe(),
+            ReplaceTargetProbe::PresentNotLuks { by_id: TARGET },
+        )
+        .unwrap_err();
+        assert!(
+            err.contains("smaller than the disk being replaced"),
+            "unexpected error: {err}"
+        );
+    }
+
+    #[test]
+    // Intent: fresh replacement targets pass when modeled mapper capacity is
+    //   equal to or larger than the source device.
+    // Why it exists: confirms the check mirrors btrfs's strict
+    //   `source > target` refusal instead of requiring extra headroom.
+    // Scenario: 512 MiB raw target after the 16 MiB LUKS2 default offset
+    //   equals the source btrfs size, and a larger raw target also passes.
+    fn check_replace_target_capacity_fresh_accepts_equal_and_larger() {
+        for raw_size in [TARGET_RAW_512_MIB, TARGET_RAW_512_MIB + 1] {
+            let runner = runner_with_target_size(raw_size);
+            let dev_info = dev_info_with_total(SOURCE_TOTAL);
+            check_replace_target_capacity(
+                &runner,
+                &dev_info,
+                Path::new("/mnt/storage"),
+                source_probe(),
+                ReplaceTargetProbe::PresentNotLuks { by_id: TARGET },
+            )
+            .expect("fresh target with sufficient modeled capacity should pass");
+        }
+    }
+
+    #[test]
+    // Intent: existing LUKS targets with dynamic segment size derive capacity
+    //   as raw device size minus segment offset.
+    // Why it exists: the preflight must match the mapper size btrfs will see
+    //   after opening the LUKS container.
+    // Scenario: target has the default dynamic segment at 16 MiB offset.
+    fn check_replace_target_capacity_existing_dynamic_segment() {
+        let runner =
+            runner_with_target_size_and_luks_dump(TARGET_RAW_512_MIB, 16_777_216, "dynamic");
+        let dev_info = dev_info_with_total(SOURCE_TOTAL);
+        check_replace_target_capacity(
+            &runner,
+            &dev_info,
+            Path::new("/mnt/storage"),
+            source_probe(),
+            ReplaceTargetProbe::PresentLuks { by_id: TARGET },
+        )
+        .expect("dynamic segment with sufficient capacity should pass");
+    }
+
+    #[test]
+    // Intent: existing LUKS targets with fixed segment size use that fixed
+    //   size directly as mapper capacity.
+    // Why it exists: LUKS2 reencrypt states can report fixed segment sizes,
+    //   where `raw - offset` is not the mapper size btrfs will compare.
+    // Scenario: synthetic LUKS2 metadata reports a fixed 520093696-byte
+    //   segment on the replacement disk.
+    fn check_replace_target_capacity_existing_fixed_segment() {
+        let runner = runner_with_target_size_and_luks_dump(
+            TARGET_RAW_512_MIB,
+            16_777_216,
+            "520093696",
+        );
+        let dev_info = dev_info_with_total(SOURCE_TOTAL);
+        check_replace_target_capacity(
+            &runner,
+            &dev_info,
+            Path::new("/mnt/storage"),
+            source_probe(),
+            ReplaceTargetProbe::PresentLuks { by_id: TARGET },
+        )
+        .expect("fixed segment with sufficient capacity should pass");
+    }
+
+    #[test]
+    // Intent: missing or failing btrfs device-info lookup is a hard refusal.
+    // Why it exists: replace cannot safely proceed when the source-size
+    //   authority btrfs uses is unavailable.
+    // Scenario: mock btrfs device-info has no row for the source devid.
+    fn check_replace_target_capacity_refuses_when_dev_info_errors() {
+        let runner = MockRunner::default();
+        let dev_info = MockBtrfsDevInfo::default();
+        let err = check_replace_target_capacity(
+            &runner,
+            &dev_info,
+            Path::new("/mnt/storage"),
+            source_probe(),
+            ReplaceTargetProbe::PresentNotLuks { by_id: TARGET },
+        )
+        .unwrap_err();
+        assert!(
+            err.contains("failed to read btrfs total_bytes"),
+            "unexpected error: {err}"
+        );
+    }
+
+    #[test]
+    // Intent: btrfs device-info returning `total_bytes == 0` is refused.
+    // Why it exists: zero cannot prove a replacement is large enough and
+    //   usually means the source-size authority is not usable.
+    // Scenario: ioctl boundary returns a zero size for the source devid.
+    fn check_replace_target_capacity_refuses_when_total_bytes_zero() {
+        let runner = MockRunner::default();
+        let dev_info = dev_info_with_total(0);
+        let err = check_replace_target_capacity(
+            &runner,
+            &dev_info,
+            Path::new("/mnt/storage"),
+            source_probe(),
+            ReplaceTargetProbe::PresentNotLuks { by_id: TARGET },
+        )
+        .unwrap_err();
+        assert!(
+            err.contains("total_bytes 0"),
+            "unexpected error: {err}"
+        );
+    }
+
+    #[test]
+    // Intent: an existing LUKS target whose JSON dump command fails is refused.
+    // Why it exists: braid cannot model mapper capacity without trustworthy
+    //   LUKS2 segment metadata.
+    // Scenario: cryptsetup reports a non-zero exit for the target header.
+    fn check_replace_target_capacity_refuses_when_luks_dump_fails() {
+        let runner = runner_with_target_size(TARGET_RAW_512_MIB).with_output(
+            CmdRequest::CryptsetupLuksDump {
+                device: TARGET.into(),
+            },
+            RawCommandOutput {
+                cmd: "cryptsetup luksDump --dump-json-metadata".into(),
+                stdout: String::new(),
+                stderr: "metadata read failed".into(),
+                exit_status: 5,
+            },
+        );
+        let dev_info = dev_info_with_total(SOURCE_TOTAL);
+        let err = check_replace_target_capacity(
+            &runner,
+            &dev_info,
+            Path::new("/mnt/storage"),
+            source_probe(),
+            ReplaceTargetProbe::PresentLuks { by_id: TARGET },
+        )
+        .unwrap_err();
+        assert!(
+            err.contains("failed to parse LUKS2 segment metadata"),
+            "unexpected error: {err}"
+        );
+    }
+
+    #[test]
+    // Intent: missing `lsblk -b` size for the target is refused.
+    // Why it exists: target capacity cannot be checked if raw disk size is
+    //   unknown, and this branch precedes destructive format.
+    // Scenario: the runner has no size output for the replacement by-id path.
+    fn check_replace_target_capacity_refuses_when_lsblk_none() {
+        let runner = MockRunner::default();
+        let dev_info = dev_info_with_total(SOURCE_TOTAL);
+        let err = check_replace_target_capacity(
+            &runner,
+            &dev_info,
+            Path::new("/mnt/storage"),
+            source_probe(),
+            ReplaceTargetProbe::PresentNotLuks { by_id: TARGET },
+        )
+        .unwrap_err();
+        assert!(
+            err.contains("failed to read raw size"),
+            "unexpected error: {err}"
+        );
+    }
+
+    #[test]
+    // Intent: dynamic-segment capacity refuses when raw size is not larger
+    //   than the segment offset.
+    // Why it exists: subtracting the offset would underflow or yield no
+    //   usable mapper capacity.
+    // Scenario: target LUKS metadata reports a 100-byte offset on a 100-byte disk.
+    fn check_replace_target_capacity_refuses_when_raw_below_offset() {
+        let runner = runner_with_target_size_and_luks_dump(100, 100, "dynamic");
+        let dev_info = dev_info_with_total(SOURCE_TOTAL);
+        let err = check_replace_target_capacity(
+            &runner,
+            &dev_info,
+            Path::new("/mnt/storage"),
+            source_probe(),
+            ReplaceTargetProbe::PresentLuks { by_id: TARGET },
+        )
+        .unwrap_err();
+        assert!(
+            err.contains("not larger than LUKS2 segment offset"),
+            "unexpected error: {err}"
+        );
+    }
+
+    #[test]
+    // Intent: fixed-size LUKS2 segment metadata with size 0 is refused.
+    // Why it exists: a zero-capacity fixed segment is malformed and cannot
+    //   prove the target is large enough.
+    // Scenario: synthetic segment metadata reports `"size":"0"`.
+    fn check_replace_target_capacity_refuses_when_fixed_size_zero() {
+        let runner = runner_with_target_size_and_luks_dump(TARGET_RAW_512_MIB, 16_777_216, "0");
+        let dev_info = dev_info_with_total(SOURCE_TOTAL);
+        let err = check_replace_target_capacity(
+            &runner,
+            &dev_info,
+            Path::new("/mnt/storage"),
+            source_probe(),
+            ReplaceTargetProbe::PresentLuks { by_id: TARGET },
+        )
+        .unwrap_err();
+        assert!(
+            err.contains("fixed size 0"),
+            "unexpected error: {err}"
+        );
+    }
 
     // --- ExclusiveOp::parse tests ---
 

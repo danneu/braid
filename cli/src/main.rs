@@ -626,6 +626,7 @@ fn main() {
             let config = load_config_for_cmd_or_exit(Path::new(&config_path), 1);
             let runner = RealRunner;
             let fs = RealFilesystem;
+            let dev_info = braid_cli::btrfs_ioctl::LinuxBtrfsDevInfo;
             let backing_path_resolver = braid_cli::luks::RealBackingPathResolver;
             let enroll_kf = args
                 .enroll_key_file
@@ -634,6 +635,7 @@ fn main() {
             if let Err(e) = braid_cli::replace::cmd_replace(
                 &runner,
                 &fs,
+                &dev_info,
                 &braid_cli::replace::ReplaceParams {
                     config: &config,
                     old_name: &args.old,

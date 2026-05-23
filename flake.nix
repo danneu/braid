@@ -338,6 +338,11 @@
               braid = linuxCrane.braid;
             }
           );
+          replace-rejects-smaller-target = pkgs.testers.nixosTest (
+            import ./tests/cli/replace-rejects-smaller-target.nix {
+              braid = linuxCrane.braid;
+            }
+          );
           replace-2disk-pool = pkgs.testers.nixosTest (
             import ./tests/cli/replace-2disk-pool.nix {
               braid = linuxCrane.braid;

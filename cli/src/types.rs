@@ -303,9 +303,14 @@ const MANAGED_LUKS_FORMAT_LONG_FLAGS: &[&str] = &[
     "--integrity-legacy-padding",
     "--keyfile-offset",
     "--keyfile-size",
+    "--offset",
+    "--align-payload",
+    "--luks2-metadata-size",
+    "--luks2-keyslots-size",
+    "--sector-size",
 ];
 
-const MANAGED_LUKS_FORMAT_SHORT_FLAGS: &[char] = &['d', 'S', 'M', 'I', 'l'];
+const MANAGED_LUKS_FORMAT_SHORT_FLAGS: &[char] = &['d', 'S', 'M', 'I', 'l', 'o'];
 
 fn is_managed_format_flag(token: &str) -> bool {
     // These flags either overlap identity fields braid writes itself
@@ -737,6 +742,15 @@ mod tests {
         assert!(opts.as_slice().is_empty());
     }
 
+    fn assert_luks_format_extra_rejects(token: &str) {
+        let err = LuksFormatExtraOpts::parse(&[token.to_owned()]).unwrap_err();
+        match err {
+            LuksFormatExtraOptsError::ManagedFormatFlag { token: offending } => {
+                assert_eq!(offending, token);
+            }
+        }
+    }
+
     #[test]
     fn luks_format_extra_opts_rejects_uuid_equals() {
         // Intent: `--uuid=<value>` is rejected with the pinned wording.
@@ -760,6 +774,71 @@ mod tests {
             err.to_string()
                 .contains("--luks-format-arg '--uuid' targets a braid-managed identity or storage-model-breaking cryptsetup option")
         );
+    }
+
+    #[test]
+    fn luks_format_extra_opts_rejects_offset() {
+        // Intent: `--offset` is rejected before cryptsetup can change
+        //   the LUKS2 payload offset.
+        // Why: replace preflight models fresh-LUKS mapper capacity from
+        //   braid's fixed default header size.
+        // Scenario: operator attempts to pass a raw offset override.
+        assert_luks_format_extra_rejects("--offset");
+    }
+
+    #[test]
+    fn luks_format_extra_opts_rejects_offset_short() {
+        // Intent: `-o` is rejected as the short alias for `--offset`.
+        // Why: short-option clusters must not bypass the offset guard.
+        // Scenario: operator passes cryptsetup's short offset flag.
+        assert_luks_format_extra_rejects("-o");
+    }
+
+    #[test]
+    fn luks_format_extra_opts_rejects_align_payload() {
+        // Intent: `--align-payload` is rejected before it can alter
+        //   payload placement.
+        // Why: fresh-LUKS target capacity must stay derived from the
+        //   cryptsetup LUKS2 default, not user-chosen alignment.
+        // Scenario: operator tries an alignment override during replace.
+        assert_luks_format_extra_rejects("--align-payload");
+    }
+
+    #[test]
+    fn luks_format_extra_opts_rejects_luks2_metadata_size() {
+        // Intent: `--luks2-metadata-size` is rejected.
+        // Why: changing metadata area size changes the space reserved
+        //   before the data segment.
+        // Scenario: operator tries to customize LUKS2 metadata sizing.
+        assert_luks_format_extra_rejects("--luks2-metadata-size");
+    }
+
+    #[test]
+    fn luks_format_extra_opts_rejects_luks2_keyslots_size() {
+        // Intent: `--luks2-keyslots-size` is rejected.
+        // Why: changing keyslot area size changes header layout and the
+        //   payload offset braid assumes for fresh targets.
+        // Scenario: operator tries to customize LUKS2 keyslot sizing.
+        assert_luks_format_extra_rejects("--luks2-keyslots-size");
+    }
+
+    #[test]
+    fn luks_format_extra_opts_rejects_sector_size() {
+        // Intent: `--sector-size` is rejected conservatively.
+        // Why: sector-size overrides can affect cryptsetup alignment and
+        //   make braid's fresh-LUKS capacity estimate unsafe.
+        // Scenario: operator tries a non-default sector-size override.
+        assert_luks_format_extra_rejects("--sector-size");
+    }
+
+    #[test]
+    fn luks_format_extra_opts_rejects_payload_offset_equals_form() {
+        // Intent: offset-affecting flags are rejected in `--flag=value`
+        //   form, not only as bare tokens.
+        // Why: clap passes each `--luks-format-arg=--offset=...` value
+        //   through as one raw token.
+        // Scenario: operator supplies a byte offset inline.
+        assert_luks_format_extra_rejects("--offset=32768");
     }
 
     #[test]

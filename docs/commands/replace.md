@@ -106,6 +106,7 @@ A sleep inhibitor is held throughout the replace to prevent the system from susp
 - Refuses if `--old` and `--new` are the same disk
 - Refuses if the new disk's LUKS UUID is already in use by the pool (registered membership or live btrfs devices) -- detach the conflicting disk before retrying
 - Refuses if the new disk is absent (not plugged in)
+- Refuses if the new disk's mapper capacity is smaller than the source disk's btrfs `total_bytes` (read via `BTRFS_IOC_DEV_INFO`, the same value `btrfs replace start` compares against). For existing LUKS targets, mapper capacity is derived from the LUKS2 segment `offset` and `size` (`dynamic` means `raw - offset`, fixed means the segment size). For fresh-LUKS targets, braid uses cryptsetup's default 16 MiB offset; offset-affecting `--luks-format-arg` flags (`--offset`/`-o`, `--align-payload`, `--luks2-metadata-size`, `--luks2-keyslots-size`, `--sector-size`) are rejected for this reason.
 - For live replacements: refuses if the pool has missing devices (resolve those first)
 - For missing replacements: refuses if `--missing-id` points to a live device
 - When multiple devices are missing: requires `--missing-id` to disambiguate

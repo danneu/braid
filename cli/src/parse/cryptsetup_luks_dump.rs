@@ -5,7 +5,7 @@ use serde::Deserialize;
 use crate::cmd::RawCommandOutput;
 
 use super::ParseError;
-use super::types::CryptsetupLuksDumpOutput;
+use super::types::{CryptsetupLuksDumpOutput, Luks2SegmentSize};
 
 // --- Serde helper structs (not exposed to domain code) ---
 
@@ -39,6 +39,8 @@ struct RawKeyslot {
 #[derive(Deserialize)]
 struct RawSegment {
     encryption: String,
+    offset: String,
+    size: String,
 }
 
 // --- Public parse function ---
@@ -60,15 +62,38 @@ pub fn parse_cryptsetup_luks_dump(
             detail: e.to_string(),
         })?;
 
-    let cipher = parsed
-        .segments
-        .values()
-        .next()
-        .map(|s| s.encryption.clone())
-        .ok_or_else(|| ParseError::InvalidJson {
+    let segment = parsed.segments.get("0").ok_or_else(|| ParseError::InvalidJson {
+        cmd: raw.cmd.clone(),
+        detail: "segments.0 missing".to_owned(),
+    })?;
+
+    let segment_offset_bytes =
+        segment
+            .offset
+            .parse::<u64>()
+            .map_err(|e| ParseError::InvalidJson {
+                cmd: raw.cmd.clone(),
+                detail: format!("segments.0.offset: {e}"),
+            })?;
+
+    let segment_size = if segment.size == "dynamic" {
+        Luks2SegmentSize::Dynamic
+    } else {
+        Luks2SegmentSize::Fixed(segment.size.parse::<u64>().map_err(|e| {
+            ParseError::InvalidJson {
+                cmd: raw.cmd.clone(),
+                detail: format!("segments.0.size: {e}"),
+            }
+        })?)
+    };
+
+    let cipher = segment.encryption.clone();
+    if cipher.is_empty() {
+        return Err(ParseError::InvalidJson {
             cmd: raw.cmd.clone(),
-            detail: "no segments found".to_owned(),
-        })?;
+            detail: "segments.0.encryption is empty".to_owned(),
+        });
+    }
 
     let key_size_bits = parsed
         .keyslots
@@ -83,6 +108,8 @@ pub fn parse_cryptsetup_luks_dump(
         cipher,
         key_size_bits,
         keyslot_count,
+        segment_offset_bytes,
+        segment_size,
     })
 }
 
@@ -101,6 +128,11 @@ mod tests {
     // --- Contract tests (nixos-25.11 fixtures) ---
 
     #[test]
+    // Intent: the stable cryptsetup JSON fixture yields core header fields
+    //   plus the default dynamic segment model.
+    // Why it exists: parser drift here breaks TUI metadata and replace
+    //   target-capacity preflight.
+    // Scenario: nixos-25.11 cryptsetup emits one keyslot and segment 0.
     fn luks_dump_parses_single_keyslot_fixture() {
         let raw = RawCommandOutput {
             cmd: "cryptsetup luksDump".into(),
@@ -112,11 +144,18 @@ mod tests {
         assert_eq!(out.cipher, "aes-xts-plain64");
         assert_eq!(out.key_size_bits, 512);
         assert_eq!(out.keyslot_count, 1);
+        assert_eq!(out.segment_offset_bytes, 16_777_216);
+        assert_eq!(out.segment_size, Luks2SegmentSize::Dynamic);
     }
 
     // --- Synthetic tests (inline) ---
 
     #[test]
+    // Intent: multiple keyslots are counted while segment 0 still provides
+    //   cipher, offset, and size metadata.
+    // Why it exists: keyslot inventory and segment-capacity parsing share
+    //   one JSON parser and must not regress each other.
+    // Scenario: synthetic LUKS2 metadata has two keyslots and a dynamic segment.
     fn luks_dump_parses_multiple_keyslots() {
         let raw = RawCommandOutput {
             cmd: "cryptsetup luksDump".into(),
@@ -147,9 +186,123 @@ mod tests {
         assert_eq!(out.cipher, "aes-xts-plain64");
         assert_eq!(out.key_size_bits, 512);
         assert_eq!(out.keyslot_count, 2);
+        assert_eq!(out.segment_offset_bytes, 16_777_216);
+        assert_eq!(out.segment_size, Luks2SegmentSize::Dynamic);
     }
 
     #[test]
+    // Intent: a numeric LUKS2 segment size parses as `Fixed(bytes)`.
+    // Why it exists: replace preflight must handle fixed-size segment
+    //   metadata without using `raw - offset`.
+    // Scenario: synthetic segment 0 reports `"size":"1073741824"`.
+    fn parse_extracts_fixed_segment_size() {
+        let raw = RawCommandOutput {
+            cmd: "cryptsetup luksDump".into(),
+            stdout: r#"{
+  "keyslots": {
+    "0": {
+      "type": "luks2", "key_size": 64,
+      "af": {}, "area": {}, "kdf": {}
+    }
+  },
+  "tokens": {},
+  "segments": {"0": {"type":"crypt","offset":"16777216","size":"1073741824","iv_tweak":"0","encryption":"aes-xts-plain64","sector_size":4096}},
+  "digests": {},
+  "config": {}
+}"#
+            .into(),
+            stderr: String::new(),
+            exit_status: 0,
+        };
+        let out = parse_cryptsetup_luks_dump(&raw).unwrap();
+        assert_eq!(out.segment_offset_bytes, 16_777_216);
+        assert_eq!(out.segment_size, Luks2SegmentSize::Fixed(1_073_741_824));
+    }
+
+    #[test]
+    // Intent: missing segment 0 is rejected even if another segment exists.
+    // Why it exists: braid's capacity model is defined for LUKS2 crypt
+    //   segment 0, not arbitrary map iteration order.
+    // Scenario: synthetic metadata has only segment 1.
+    fn parse_rejects_missing_segment_zero() {
+        let raw = RawCommandOutput {
+            cmd: "cryptsetup luksDump".into(),
+            stdout: r#"{
+  "keyslots": {},
+  "tokens": {},
+  "segments": {"1": {"type":"crypt","offset":"16777216","size":"dynamic","iv_tweak":"0","encryption":"aes-xts-plain64","sector_size":4096}},
+  "digests": {},
+  "config": {}
+}"#
+            .into(),
+            stderr: String::new(),
+            exit_status: 0,
+        };
+        let err = parse_cryptsetup_luks_dump(&raw).unwrap_err();
+        assert!(
+            err.to_string().contains("segments.0"),
+            "unexpected error: {err}"
+        );
+    }
+
+    #[test]
+    // Intent: malformed segment offset is rejected with a field-specific
+    //   parse error.
+    // Why it exists: replace preflight must fail closed rather than
+    //   guessing a data offset.
+    // Scenario: segment 0 has `"offset":"not-bytes"`.
+    fn parse_rejects_malformed_offset() {
+        let raw = RawCommandOutput {
+            cmd: "cryptsetup luksDump".into(),
+            stdout: r#"{
+  "keyslots": {},
+  "tokens": {},
+  "segments": {"0": {"type":"crypt","offset":"not-bytes","size":"dynamic","iv_tweak":"0","encryption":"aes-xts-plain64","sector_size":4096}},
+  "digests": {},
+  "config": {}
+}"#
+            .into(),
+            stderr: String::new(),
+            exit_status: 0,
+        };
+        let err = parse_cryptsetup_luks_dump(&raw).unwrap_err();
+        assert!(
+            err.to_string().contains("segments.0.offset"),
+            "unexpected error: {err}"
+        );
+    }
+
+    #[test]
+    // Intent: malformed fixed segment size is rejected with a field-specific
+    //   parse error.
+    // Why it exists: replace preflight must fail closed rather than
+    //   guessing mapper capacity.
+    // Scenario: segment 0 has `"size":"not-bytes"`.
+    fn parse_rejects_malformed_size() {
+        let raw = RawCommandOutput {
+            cmd: "cryptsetup luksDump".into(),
+            stdout: r#"{
+  "keyslots": {},
+  "tokens": {},
+  "segments": {"0": {"type":"crypt","offset":"16777216","size":"not-bytes","iv_tweak":"0","encryption":"aes-xts-plain64","sector_size":4096}},
+  "digests": {},
+  "config": {}
+}"#
+            .into(),
+            stderr: String::new(),
+            exit_status: 0,
+        };
+        let err = parse_cryptsetup_luks_dump(&raw).unwrap_err();
+        assert!(
+            err.to_string().contains("segments.0.size"),
+            "unexpected error: {err}"
+        );
+    }
+
+    #[test]
+    // Intent: non-JSON cryptsetup output is rejected.
+    // Why it exists: JSON parsing failures must surface as parser errors.
+    // Scenario: command succeeds but stdout is not valid LUKS JSON.
     fn luks_dump_rejects_malformed_json() {
         let raw = RawCommandOutput {
             cmd: "cryptsetup luksDump".into(),
@@ -162,6 +315,10 @@ mod tests {
     }
 
     #[test]
+    // Intent: non-zero cryptsetup exit status is reported as command failure.
+    // Why it exists: callers need to distinguish unreadable headers from
+    //   malformed successful JSON.
+    // Scenario: cryptsetup reports that a device does not exist.
     fn luks_dump_rejects_nonzero_exit() {
         let raw = RawCommandOutput {
             cmd: "cryptsetup luksDump".into(),

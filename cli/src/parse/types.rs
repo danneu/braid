@@ -151,6 +151,16 @@ pub struct CryptsetupLuksDumpOutput {
     pub cipher: String,     // e.g. "aes-xts-plain64"
     pub key_size_bits: u32, // e.g. 512
     pub keyslot_count: u32, // e.g. 1
+    pub segment_offset_bytes: u64,
+    pub segment_size: Luks2SegmentSize,
+}
+
+/// LUKS2 segment capacity model used to estimate mapper size before opening
+/// the replacement target.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Luks2SegmentSize {
+    Dynamic,
+    Fixed(u64),
 }
 
 /// cryptsetup luksDump (text output) — LUKS label field

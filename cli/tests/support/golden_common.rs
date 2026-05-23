@@ -329,6 +329,11 @@ golden_test!(
         assert_eq!(out.cipher, "aes-xts-plain64");
         assert_eq!(out.key_size_bits, 512);
         assert_eq!(out.keyslot_count, 1);
+        assert_eq!(out.segment_offset_bytes, 16_777_216);
+        assert_eq!(
+            out.segment_size,
+            parse::types::Luks2SegmentSize::Dynamic
+        );
     }
 );
 

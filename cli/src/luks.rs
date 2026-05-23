@@ -24,6 +24,10 @@ pub const KEYFILE_NAME: &str = "braid.key";
 /// Keyfile size in bytes: 4096 bytes of random data from /dev/urandom.
 pub const KEYFILE_SIZE: usize = 4096;
 
+/// Cryptsetup's default LUKS2 data offset, used to model mapper capacity for
+/// fresh targets before braid opens them (`luks2.h:LUKS2_DEFAULT_HDR_SIZE`).
+pub const LUKS2_DEFAULT_HDR_SIZE: u64 = 16_777_216;
+
 /// Shared user-keyfile boundary so every caller rejects symlinks and
 /// wrong-size files before invoking cryptsetup with the path.
 pub fn validate_user_keyfile_path(path: &Path) -> Result<(), LuksError> {

@@ -2,7 +2,8 @@
 //! and the replace-only `PoolFixture` constructors.
 
 use super::shared::{PoolFixture, mock_ok, mock_virtio_offset_backing_path_resolver};
-use crate::cmd::{CmdError, CmdRequest, MockRunner, RawCommandOutput};
+use crate::btrfs_ioctl::tests_support::MockBtrfsDevInfo;
+use crate::cmd::{CmdError, CmdRequest, LsblkFieldKind, MockRunner, RawCommandOutput};
 use crate::config::Config;
 use crate::inhibit::RecordingInhibitor;
 use crate::membership::{self, PoolMembership};
@@ -62,6 +63,35 @@ const POST_USAGE_RAW_DISK1_DISK3: &str = "/dev/mapper/braid-disk1, ID: 1\n\
      \tDevice slack:                  0\n\
      \tData,RAID1:            469762048\n\
      \tUnallocated:            50331648\n\n";
+
+const REPLACE_FIXTURE_MAPPER_SIZE: u64 = 520_093_696;
+const REPLACE_FIXTURE_RAW_SIZE: u64 = 536_870_912;
+
+pub(crate) fn replace_dev_info_sufficient() -> MockBtrfsDevInfo {
+    MockBtrfsDevInfo::default()
+        .with_total_bytes("/mnt/storage", 1, REPLACE_FIXTURE_MAPPER_SIZE)
+        .with_total_bytes("/mnt/storage", 2, REPLACE_FIXTURE_MAPPER_SIZE)
+}
+
+fn luks_dump_json_dynamic_default() -> String {
+    r#"{
+  "keyslots": {},
+  "tokens": {},
+  "segments": {
+    "0": {
+      "type": "crypt",
+      "offset": "16777216",
+      "size": "dynamic",
+      "iv_tweak": "0",
+      "encryption": "aes-xts-plain64",
+      "sector_size": 512
+    }
+  },
+  "digests": {},
+  "config": {}
+}"#
+    .to_owned()
+}
 
 /// Canonical pool-topology mock-handler installer.
 ///
@@ -232,6 +262,21 @@ impl ReplacementPool {
             CmdRequest::CryptsetupLuksDumpText { device } => Some(Ok(mock_ok(
                 &format!("cryptsetup luksDump {device}"),
                 "LUKS header information\nVersion:       \t2\n",
+            ))),
+            CmdRequest::CryptsetupLuksDump { device }
+                if device == "/dev/disk/by-id/virtio-disk3" =>
+            {
+                Some(Ok(mock_ok(
+                    &format!("cryptsetup luksDump --dump-json-metadata {device}"),
+                    &luks_dump_json_dynamic_default(),
+                )))
+            }
+            CmdRequest::LsblkField {
+                device,
+                field: LsblkFieldKind::Size,
+            } if device == "/dev/disk/by-id/virtio-disk3" => Some(Ok(mock_ok(
+                &format!("lsblk -b {device}"),
+                &format!("{REPLACE_FIXTURE_RAW_SIZE}\n"),
             ))),
             CmdRequest::BtrfsBalanceStatus { .. } => Some(Ok(mock_ok(
                 "btrfs balance status",

@@ -195,6 +195,24 @@ is in flight, such as `mkfs.btrfs` succeeding but `btrfs device add` not yet
 running, or a `replace` paused mid-rebuild. In those cases, follow the
 [recovery scenario guide](../guides/recovery-scenarios.md) instead.
 
+## Replace Target Size Preflight
+
+`braid replace` mirrors btrfs's own source-size authority by issuing
+`BTRFS_IOC_DEV_INFO` for the source devid and reading `total_bytes`, the same
+value `btrfs replace start` compares against. The ioctl is wrapped behind the
+`BtrfsDevInfo` trait so planning code can be unit-tested like the existing
+`Filesystem` boundary; production uses `LinuxBtrfsDevInfo` with
+`nix::ioctl_readwrite!`.
+
+Target capacity is computed before opening the replacement mapper. Existing
+LUKS targets read LUKS2 segment `offset` and `size` from
+`cryptsetup luksDump --dump-json-metadata`: `dynamic` segments use
+`raw - offset`, while fixed segments use `segment.size` directly. Fresh targets
+use cryptsetup's default 16 MiB LUKS2 offset. If any of those values cannot be
+read or parsed, or the computed target capacity is smaller than the source
+`total_bytes`, replace refuses before writing `pending-op.json`, formatting a
+fresh target, or opening the replacement mapper.
+
 ## Failed unlock cleanup
 
 If `braid unlock` or a recovery mount path opens one or more LUKS mappers
