@@ -242,6 +242,11 @@ check-docs:
         printf '%s\n' "$escapes"
         rc=1
     fi
+    # README.md / docs/index.md tables must match SUMMARY.md order and use the
+    # H1-derived label for each guide/command.
+    if ! python3 scripts/docs/check-doc-tables.py; then
+        rc=1
+    fi
     if [ $rc -eq 0 ]; then echo "docs check ok"; fi
     exit $rc
 

@@ -135,6 +135,7 @@ If a mutation is interrupted, braid leaves `/var/lib/braid/pending-op.json` in p
 | [replace](docs/commands/replace.md) | Replace a live or dead disk |
 | [unlock](docs/commands/unlock.md) | Open LUKS devices and mount the pool |
 | [lock](docs/commands/lock.md) | Unmount the pool and close LUKS devices |
+| [idle](docs/commands/idle.md) | Check if the pool is idle (for auto-suspend) |
 | [status](docs/commands/status.md) | Pool health, disk status, allocation, scrub info |
 | [doctor](docs/commands/doctor.md) | Diagnostic checks for config and pool health |
 | [monitor](docs/commands/monitor.md) | Health check for alerting (used by systemd timer) |
@@ -142,7 +143,6 @@ If a mutation is interrupted, braid leaves `/var/lib/braid/pending-op.json` in p
 | [enroll](docs/commands/enroll.md) | Enroll a USB keyfile for auto-unlock |
 | [discover](docs/commands/discover.md) | Scan for braid LUKS devices and rebuild pool.json |
 | [recover](docs/commands/recover.md) | Recover from an interrupted operation |
-| [idle](docs/commands/idle.md) | Check if the pool is idle (for auto-suspend) |
 | [tui](docs/commands/tui.md) | Interactive dashboard with raw-output Browse tab |
 | [ups status](docs/commands/ups-status.md) | Live UPS state (NUT); `--json` for scripts |
 
@@ -150,6 +150,7 @@ If a mutation is interrupted, braid leaves `/var/lib/braid/pending-op.json` in p
 
 | Guide | Description |
 | --- | --- |
+| [Install NixOS](docs/guides/install-nixos.md) | Install NixOS itself before setting up braid |
 | [Getting started](docs/guides/getting-started.md) | First-time setup: find disks, create pool, unlock |
 | [Day-to-day NAS usage](docs/guides/day-to-day-nas-usage.md) | Subvolumes, file permissions, Samba shares |
 | [Auto-unlock](docs/guides/auto-unlock.md) | USB keyfile setup for unattended reboots |
@@ -159,6 +160,7 @@ If a mutation is interrupted, braid leaves `/var/lib/braid/pending-op.json` in p
 | [UPS](docs/guides/ups.md) | NUT-backed orderly poweroff, preflight safety, live status |
 | [NixOS configuration](docs/guides/nixos-configuration.md) | Module options, scrub scheduling, pinned toolchain |
 | [Sharing and permissions](docs/guides/sharing-and-permissions.md) | Storage group, mount permissions, Samba |
+| [Mounting subvolumes](docs/guides/mounting-subvolumes.md) | Expose a btrfs subvolume at a custom path |
 | [Troubleshooting](docs/guides/troubleshooting.md) | ENOSPC balance, paused balance, missing devices |
 | [Recovery scenarios](docs/guides/recovery-scenarios.md) | Interrupted operations, lost pool.json, degraded mount |
 
