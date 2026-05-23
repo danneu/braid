@@ -14,6 +14,8 @@ braid runs a health check every 5 minutes via a systemd timer. The check looks a
 2. **Missing devices** -- a drive that should be in the pool but is not present.
 3. **SMART alerts** -- smartd detected a SMART health warning on a drive.
 
+A scrub that discovers unrepairable read, checksum, or generation errors increments the same btrfs device stats, so it follows the same beep and `braid status` flow as an everyday I/O error.
+
 If any check triggers, braid activates an alert.
 
 ### What happens on alert

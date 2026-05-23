@@ -38,6 +38,15 @@ braid owns btrfs device stats + missing device detection. smartd owns SMART moni
 
 write_io_errs, read_io_errs, flush_io_errs, corruption_errs, generation_errs. Any non-zero counter above the acked baseline triggers an alert.
 
+Two kernel paths feed those counters: ordinary I/O and scrub. Scrub records
+read, checksum, and generation failures by incrementing
+`BTRFS_DEV_STAT_READ_ERRS`, `BTRFS_DEV_STAT_CORRUPTION_ERRS`, and
+`BTRFS_DEV_STAT_GENERATION_ERRS` in
+`reference/linux/fs/btrfs/scrub.c:985-993`. The monitor polls the same device
+stats either way, so scrub-discovered uncorrectable errors reach the operator
+through the same `BtrfsDeviceErrors` cause and beep as everyday I/O errors; a
+separate scrub-status alert probe would be redundant with this pipeline.
+
 ### Latched alerts
 
 Alerts persist until `braid ack` — even if the triggering condition disappears. This means "something happened that needs acknowledgment," not "something is currently true." This avoids cross-source bugs where one source clearing could hide another source's alert, and matches Synology UX.

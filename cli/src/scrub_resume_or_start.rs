@@ -21,6 +21,7 @@ pub enum ScrubResumeOrStartError {
 ///
 /// This is the scheduled/manual scrub helper. Exit 2 from resume falls back to
 /// `btrfs scrub start -B`; all other resume/start exit codes mirror btrfs.
+/// Exit 3 preserves btrfs parity for service status; ADR 014's device-stats poll, not this exit code, is the primary alert path.
 pub fn cmd_scrub_resume_or_start<R: CommandRunner>(
     runner: &R,
     mount_point: &MountPoint,
