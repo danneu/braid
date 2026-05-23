@@ -8,7 +8,7 @@
 #   dir aborts the command before pool_remove_device_using runs.
 #
 # Why it exists:
-#   Per ADR-017 (docs/decisions/017-runtime-disk-membership.md,
+#   Per ADR-017 (docs/design/decisions/017-runtime-disk-membership.md,
 #   "Mutation ordering"), every mutating command writes pending-op.json
 #   BEFORE the irreversible btrfs membership change, then writes
 #   pool.json AFTER btrfs commits. This test pins the

@@ -488,12 +488,12 @@ fn main() {
     let pool_lock = RealPoolLock::production();
     let stop_coordinator = RealStopCoordinator::production();
     // Snapshot-rule ordering: Add/Unlock/Recover snapshot online state inside this lock window;
-    // see docs/decisions/026-pool-lock-rust-owned.md.
+    // see docs/design/decisions/026-pool-lock-rust-owned.md.
     let _pool_guard = acquire_per_policy(&pool_lock, lock_policy(&cli.command));
 
     // Hoisted once: shared by add/remove/remove-missing/replace. Each command's
     // cmd_* function holds the inhibitor only across its irreversible mutation
-    // window — see docs/decisions/019-inhibit-sleep.md for the boundary rule.
+    // window — see docs/design/decisions/019-inhibit-sleep.md for the boundary rule.
     let sleep_inhibitor = braid_cli::inhibit::RealSleepInhibitor;
 
     match cli.command {
@@ -804,7 +804,7 @@ fn main() {
         Commands::ScrubCancel(args) => {
             // Mount comes from --mount, NOT config_read. ExecStop must have zero
             // filesystem dependencies beyond the binary itself — see
-            // docs/decisions/018-systemd-lifecycle.md (thin-systemd-layer principle).
+            // docs/design/decisions/018-systemd-lifecycle.md (thin-systemd-layer principle).
             let runner = RealRunner;
             let mount_point = braid_cli::types::MountPoint(args.mount.clone());
             match braid_cli::scrub_cancel::cmd_scrub_cancel(&runner, &mount_point) {

@@ -7,7 +7,7 @@
 # Why: monitor, ack, add, remove, and remove-missing all touch alert
 # state. The pool lock is the serialization boundary that prevents
 # stale read-modify-write cycles from resurrecting acknowledged alerts.
-# See docs/decisions/026-pool-lock-rust-owned.md.
+# See docs/design/decisions/026-pool-lock-rust-owned.md.
 { braid }:
 { pkgs, ... }:
 {

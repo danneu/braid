@@ -52,7 +52,7 @@ in
 
       # keyDevice must use /dev/disk/by-id/ — /dev/sdX names shift when devices
       # are added or removed. by-id paths use hardware serial numbers and are
-      # stable across reboots. See docs/luks-unlock.md § "USB device naming
+      # stable across reboots. See docs/internals/luks-unlock.md § "USB device naming
       # stability".
       keyDevice = lib.mkOption {
         type = lib.types.str;

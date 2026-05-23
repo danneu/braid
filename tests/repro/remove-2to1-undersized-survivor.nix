@@ -12,7 +12,7 @@
 # `btrfs device remove` path that either ENOSPCs mid-migration or crashes
 # the filesystem read-only.
 #
-# See docs/decisions/012-intent-cli.md ("ENOSPC pre-flight check") for the
+# See docs/design/decisions/012-intent-cli.md ("ENOSPC pre-flight check") for the
 # updated invariant.
 { braid }:
 {

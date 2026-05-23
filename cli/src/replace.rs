@@ -4285,7 +4285,7 @@ mod tests {
             .expect(
                 "btrfs soft balance must be issued after replace+resize on missing path \
                  -- maybe_restore_raid1 is part of the `replace` contract per \
-                 docs/principles.md",
+                 docs/design/principles.md",
             );
         assert!(
             replace_idx < resize_idx && resize_idx < balance_idx,

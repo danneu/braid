@@ -9,7 +9,7 @@
 # Why: suspending mid-balance interrupts the conversion of single-profile
 # chunks to RAID1, leaving new data unprotected. braid enables autosuspend
 # by default, so this is reachable in normal operation. See
-# docs/decisions/019-inhibit-sleep.md for the boundary rule.
+# docs/design/decisions/019-inhibit-sleep.md for the boundary rule.
 #
 # 2 disks, each 1024 MiB. The test bootstraps a 1-disk pool, writes a
 # small single-profile payload, then adds the second disk through dm-delay

@@ -8,7 +8,7 @@
 # On real hardware with slow USB drives, this hangs for hours before
 # crashing. In a VM with fast virtual disks, the crash happens in ~40s.
 #
-# See docs/claude-enospc-vs-hang.md for full analysis.
+# See docs/internals/btrfs/enospc-vs-hang.md for full analysis.
 { braid }:
 {
   name = "btrfs-remove-enospc-crash";

@@ -7,7 +7,7 @@
 # pinned `nut` package.
 #
 # Why: NUT joins btrfs-progs / cryptsetup / util-linux as a pinned
-# parser-critical tool (see docs/decisions/010-toolchain-pinning.md).
+# parser-critical tool (see docs/design/decisions/010-toolchain-pinning.md).
 # Fixture-backed golden tests lock in the contract against captured
 # output; this canary is the live-tool mirror that confirms the pin
 # actually still parses when the wrapped `upsc` runs end-to-end through

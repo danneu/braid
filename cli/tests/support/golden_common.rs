@@ -461,7 +461,7 @@ fn golden_cryptsetup_status_inactive() {
 // Fixtures live under `upsc/` because they were captured by the dedicated
 // `capture-ups-fixtures` VM test; the stable (nixos-25.11) fixtures are
 // authoritative and the unstable sibling tracks upstream drift. See
-// docs/decisions/010-toolchain-pinning.md for the pinning contract.
+// docs/design/decisions/010-toolchain-pinning.md for the pinning contract.
 
 fn upsc_fixture(name: &str) -> Option<String> {
     fixture(&format!("upsc/{name}"))

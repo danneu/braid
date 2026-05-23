@@ -3526,7 +3526,7 @@ mod tests {
      * branch skips pushing into devices). Without the union, JSON consumers can
      * see mutually inconsistent fields where missing_count includes a
      * hot-unplugged drive but missing_devids does not. Per
-     * docs/tool-behavior/device-disappearance.md, null-underlying is the
+     * docs/internals/tool-behavior/device-disappearance.md, null-underlying is the
      * empirical first state after a SATA hot-unplug, so this is the common
      * case, not a corner case.
      *

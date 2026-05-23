@@ -290,7 +290,7 @@ impl RemoveMissingPlan {
             .map_err(|e| RemoveMissingError::Validation(e.to_string()))?;
         // Hygiene only -- failure is non-fatal because `cmd_add` is the
         // fail-closed correctness boundary for reused devids. See
-        // docs/decisions/014-alerts.md "Acked-stats hygiene".
+        // docs/design/decisions/014-alerts.md "Acked-stats hygiene".
         if let Err(e) = alert::drop_ghost_acked_for_devids(params.paths, &[work_plan.missing_id]) {
             eprintln!("Warning: failed to update acked stats: {e}");
         }
@@ -402,7 +402,7 @@ pub fn plan_remove_missing<R: CommandRunner + Sync, F: Filesystem + ?Sized>(
     // `num_devices - 1` (where num_devices is fs_devices->num_devices,
     // counting present + missing) and rejects with
     // BTRFS_ERROR_DEV_RAID1_MIN_NOT_MET when that drops below devs_min=2.
-    // Per docs/decisions/012-intent-cli.md, remove-missing is cleanup-only;
+    // Per docs/design/decisions/012-intent-cli.md, remove-missing is cleanup-only;
     // the documented repair path for a dead disk on a 2-disk pool is
     // `braid replace --missing-id <devid>`. Pools with total_devices > 2
     // are intentionally out of scope here -- the kernel accepts those

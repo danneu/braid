@@ -42,7 +42,7 @@
 # - What risk/regression this protects against.
 #   - cmd_remove_missing's mutation window is one of the four storage
 #     operations covered by the inhibit-sleep decision (see
-#     docs/decisions/019-inhibit-sleep.md). The wiring is identical in
+#     docs/design/decisions/019-inhibit-sleep.md). The wiring is identical in
 #     shape to cmd_replace's, but a copy-paste regression in
 #     cmd_remove_missing would not be caught by replace's existing
 #     end-to-end test.

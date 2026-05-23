@@ -4,7 +4,7 @@
 # unallocated space, `btrfs device remove missing` fails immediately
 # with ENOSPC. The filesystem stays healthy.
 #
-# See docs/claude-enospc-vs-hang.md for full analysis.
+# See docs/internals/btrfs/enospc-vs-hang.md for full analysis.
 { braid }:
 {
   name = "btrfs-remove-enospc";

@@ -7,7 +7,7 @@
 # remove/remove-missing. Without Rust-level serialization, concurrent
 # replace attempts can clobber pending-op.json.tmp before btrfs rejects
 # the second kernel replace.
-# See docs/decisions/026-pool-lock-rust-owned.md.
+# See docs/design/decisions/026-pool-lock-rust-owned.md.
 { braid }:
 { pkgs, lib, ... }:
 {

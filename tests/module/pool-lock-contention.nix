@@ -7,7 +7,7 @@
 # hang any concurrent `braid unlock` invocation forever. This test
 # guards the failure layer -- it must fail if dispatch regresses
 # to a blocking flock.
-# See docs/decisions/026-pool-lock-rust-owned.md.
+# See docs/design/decisions/026-pool-lock-rust-owned.md.
 { braid }:
 { pkgs, lib, ... }:
 let

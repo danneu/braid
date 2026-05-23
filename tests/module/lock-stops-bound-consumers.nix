@@ -54,7 +54,7 @@ in
       '';
 
       # Fake long-running consumer that holds /mnt/storage busy. Conforms to
-      # the contract documented in docs/decisions/018-systemd-lifecycle.md
+      # the contract documented in docs/design/decisions/018-systemd-lifecycle.md
       # for "long-running services holding open files" -- BindsTo + After +
       # wantedBy braid-online.service plus ConditionPathIsMountPoint as
       # defense-in-depth against direct activation when the pool is offline.

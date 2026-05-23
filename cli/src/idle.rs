@@ -63,7 +63,7 @@ pub fn cmd_idle<R: CommandRunner, F: Filesystem + ?Sized>(
     //    the same parser preflight.rs uses for mutating commands
     //    (ExclusiveOp::parse), so the two code paths cannot disagree
     //    about what counts as "busy." See
-    //    docs/decisions/016-auto-suspend.md for the any-busy semantic.
+    //    docs/design/decisions/016-auto-suspend.md for the any-busy semantic.
     match check_any_btrfs_exclusive_op(fs) {
         Ok(()) => {}
         Err(ExclusiveOpError::Busy(op)) => return IdleResult::Busy(BusyReason::Exclop(op)),

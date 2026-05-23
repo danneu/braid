@@ -208,19 +208,19 @@ test-hw *args:
 fetch-references +ARGS="":
     python3 scripts/fetch-references.py {{ARGS}}
 
-# Build and serve the manual locally
+# Build and serve the docs locally
 docs:
-    nix run nixpkgs#mdbook -- serve manual --open
+    nix develop .#docs -c mdbook serve docs --open
 
-# Verify SUMMARY.md parity and manual link integrity
+# Verify SUMMARY.md parity and docs link integrity
 check-docs:
     #!/usr/bin/env bash
     set -euo pipefail
     # Set A: .md files on disk (excluding SUMMARY.md itself)
-    disk=$(find manual -name '*.md' ! -name SUMMARY.md -type f \
-           | sed 's|^manual/||' | sort)
+    disk=$(find docs -path docs/book -prune -o -name '*.md' ! -name SUMMARY.md -type f -print \
+           | sed 's|^docs/||' | sort)
     # Set B: link targets extracted from SUMMARY.md markdown links
-    summary=$(sed -n 's/.*](\([^)]*\.md\)).*/\1/p' manual/SUMMARY.md | sort)
+    summary=$(sed -n 's/.*](\([^)]*\.md\)).*/\1/p' docs/SUMMARY.md | sort)
     # Compare
     missing=$(comm -23 <(echo "$disk") <(echo "$summary"))
     stale=$(comm -13 <(echo "$disk") <(echo "$summary"))
@@ -235,18 +235,27 @@ check-docs:
         printf '  %s\n' $stale
         rc=1
     fi
-    # Markdown links that escape manual/ (rendered-broken in mdBook output).
-    # Use absolute https://github.com/danneu/braid/blob/master/<path> URLs
-    # instead -- see manual/commands/idle.md for the precedent.
-    escapes=$(grep -rn '\](\.\./\.\./' manual/ --include='*.md' || true)
+    # Markdown links that escape docs/ are broken in deployed mdBook output.
+    escapes=$(grep -rn '\](\.\./\.\./' docs/ --include='*.md' --exclude-dir=book || true)
     if [ -n "$escapes" ]; then
-        printf 'markdown links escape manual/ subtree (broken in rendered mdBook):\n'
+        printf 'markdown links escape docs/ subtree (broken in rendered mdBook):\n'
         printf '%s\n' "$escapes"
-        printf 'fix: replace with https://github.com/danneu/braid/blob/master/<path>\n'
         rc=1
     fi
     if [ $rc -eq 0 ]; then echo "docs check ok"; fi
     exit $rc
+
+# Verify docs source frontmatter required for agent-facing pages
+check-docs-frontmatter:
+    python3 scripts/docs/check-frontmatter.py
+
+# Verify rendered docs do not leak YAML frontmatter
+check-docs-rendered-frontmatter:
+    python3 scripts/docs/check-rendered-frontmatter.py
+
+# Verify code-side principles anchors resolve to rendered mdBook headings
+check-code-doc-anchors:
+    python3 scripts/docs/check-code-doc-anchors.py
 
 # Destroy an entire braid pool (dev use only — wipes LUKS signatures + state files)
 destroy config="/etc/braid/config.json":

@@ -34,13 +34,17 @@ Unlock:
 - `cli/src/` — Rust CLI (clap commands, TUI in `tui/`)
 - `modules/braid/` — NixOS module (options, systemd units, storage config)
 - `tests/` — NixOS VM tests (`.py` scripts, `module/` NixOS configs, `hw/` hardware canary tests)
-- `docs/decisions/` — architecture decision records
+- `docs/` — unified mdBook docs (single TOC at `docs/SUMMARY.md`, landing at `docs/index.md`)
+  - `guides/`, `commands/` — end-user material (formerly under `manual/`)
+  - `design/principles.md`, `design/decisions/` — architecture authority
+  - `internals/` — implementation notes (luks-unlock, tool behavior, btrfs deep-dives)
+  - `dev/` — contributor docs (development workflow, testing, TUI snapshots)
 - `scripts/` — helper scripts (fetch references, destroy pool)
 - `reference/` — upstream source checkouts for reading, not shipped. See [Reference source](#reference-source) below for the full inventory. Refresh with `just fetch-references`.
 
 ## Systemd Lifecycle
 
-Systemd lifecycle design: [`docs/decisions/018-systemd-lifecycle.md`](docs/decisions/018-systemd-lifecycle.md). Read before modifying units, the wrapper, or writing systemd-related tests.
+Systemd lifecycle design: [`docs/design/decisions/018-systemd-lifecycle.md`](docs/design/decisions/018-systemd-lifecycle.md). Read before modifying units, the wrapper, or writing systemd-related tests.
 
 ## No backwards compatibility
 
@@ -48,21 +52,29 @@ braid is unreleased software. Never add migration paths, compatibility shims, or
 
 ## Architecture Authority
 
-Design principles and invariants live in [`docs/principles.md`](docs/principles.md). Detailed rationale, rejected alternatives, and historical context live in [`docs/decisions/`](docs/decisions/).
+Design principles and invariants live in [`docs/design/principles.md`](docs/design/principles.md). Detailed rationale, rejected alternatives, and historical context live in [`docs/design/decisions/`](docs/design/decisions/).
 
 Any change to behavior or invariants must update those docs. Code that contradicts a principle is wrong — fix the code or update the principle with rationale.
 
 Decision docs must include an explicit status: `Draft`, `Active`, `Superseded`, or `Deprecated`.
 
-Before modifying dry-run, preview, or mutating command planning/execution, read [`docs/decisions/022-dry-run-preview-model.md`](docs/decisions/022-dry-run-preview-model.md).
+Before modifying dry-run, preview, or mutating command planning/execution, read [`docs/design/decisions/022-dry-run-preview-model.md`](docs/design/decisions/022-dry-run-preview-model.md).
 
 ## User Guide
 
-[`README.md`](README.md) is the end-user guide. Keep it updated when adding features or changing behavior. Style: brief, cookbook-like — short descriptions with copy-paste examples. Not reference material.
+End-user material lives in two places: [`README.md`](README.md) is the cookbook-style overview
+(brief, copy-paste examples), and `docs/guides/` + `docs/commands/` is the mdBook reference
+(formerly `manual/`). Keep both in sync when adding features or changing behavior. Style for
+README.md: brief, cookbook-like — short descriptions with copy-paste examples. Not reference
+material.
 
 ## Documentation
 
-[`docs/index.md`](docs/index.md) is the directory of all design docs and decision records. Check there before searching the codebase for context.
+[`docs/SUMMARY.md`](docs/SUMMARY.md) is the TOC for the unified docs tree (end-user guides,
+commands, design principles, ADRs, internals, contributor docs). [`docs/index.md`](docs/index.md)
+is the landing page. Check `SUMMARY.md` before searching the codebase for context. All cross-links
+inside `docs/` are validated by `mdbook-linkcheck` during `mdbook build docs` (configured in
+`docs/book.toml` per Decision 5) -- a broken cross-link fails CI.
 
 ### Reference source
 
@@ -132,7 +144,7 @@ Use `--` (double hyphen), not `—` (em-dash), in all user-facing CLI output -- 
 
 Example: `pool is not mounted -- nothing to acknowledge`
 
-For the LUKS header backup workflow and the messaging invariant for `doctor`/`status`/`unlock` recovery hints, see [`docs/luks-unlock.md`](docs/luks-unlock.md#header-backup-workflow-and-messaging).
+For the LUKS header backup workflow and the messaging invariant for `doctor`/`status`/`unlock` recovery hints, see [`docs/internals/luks-unlock.md`](docs/internals/luks-unlock.md#header-backup-workflow-and-messaging).
 
 ## Doc Comments
 
@@ -198,7 +210,7 @@ Every individual test starts with a `//` line-comment preamble with three labele
 2. **Why it exists** — what risk/regression this protects against
 3. **Scenario** — the real-world user/system story this models, especially the concrete bug or incident that inspired the test
 
-For the literal preamble form, the flake.nix `checks` registration rule for new VM tests, and NixOS VM test framework gotchas, see [`docs/testing.md`](docs/testing.md).
+For the literal preamble form, the flake.nix `checks` registration rule for new VM tests, and NixOS VM test framework gotchas, see [`docs/dev/testing.md`](docs/dev/testing.md).
 
 ## Development Approach: TDD with NixOS VM Tests
 

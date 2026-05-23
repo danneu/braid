@@ -246,7 +246,7 @@ pub struct OnlineSnapshot {
 
 /// Captures the `braid-online.service` entry state used by `mark_online` after mutation.
 /// Must run at the start of the pool-lock window; see the snapshot rule in
-/// docs/decisions/026-pool-lock-rust-owned.md.
+/// docs/design/decisions/026-pool-lock-rust-owned.md.
 pub fn snapshot(ops: &dyn OnlineStateOps) -> OnlineSnapshot {
     let online_state = ops
         .unit_active_state(BRAID_ONLINE_UNIT)
@@ -256,7 +256,7 @@ pub fn snapshot(ops: &dyn OnlineStateOps) -> OnlineSnapshot {
 
 /// Uses this lock window's entry-state `OnlineSnapshot` to gate `braid-online.service` start.
 /// Skipping captured active/activating/deactivating states avoids queueing start behind stop;
-/// see the snapshot rule in docs/decisions/026-pool-lock-rust-owned.md.
+/// see the snapshot rule in docs/design/decisions/026-pool-lock-rust-owned.md.
 pub fn mark_online(
     snap: Option<&OnlineSnapshot>,
     cfg: &Config,
@@ -334,7 +334,7 @@ pub fn run_with_online_marker<E>(
 
 /// Plain lock finalizer: stop does not use the online snapshot gate.
 /// It relies on `/run/braid-stop-coordinator.lock` and the `done\n` protocol from
-/// docs/decisions/026-pool-lock-rust-owned.md instead.
+/// docs/design/decisions/026-pool-lock-rust-owned.md instead.
 /// An unknown mountpoint state is treated as still-mounted -- mirrors
 /// `mark_online`'s fail-safe and skips the synchronous stop.
 pub fn mark_offline(cfg: &Config, ops: &dyn OnlineStateOps) -> Result<(), OnlineError> {

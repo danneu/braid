@@ -1007,8 +1007,8 @@ mod tests {
     // Why: the pool probe is heavy (smartctl -H -A per disk, btrfs
     //      commands). Auto-rescheduling would wake sleeping drives and
     //      contradict the HDD spindown posture from
-    //      docs/decisions/015-hdd-defaults.md and the anti-wake stance in
-    //      docs/decisions/016-auto-suspend.md. This test locks in the
+    //      docs/design/decisions/015-hdd-defaults.md and the anti-wake stance in
+    //      docs/design/decisions/016-auto-suspend.md. This test locks in the
     //      manual-only contract; reintroducing a scheduler here needs to
     //      revisit those decision docs first.
     // Scenario: any pool probe completion.

@@ -168,9 +168,9 @@ pub fn drain_warnings<W: std::io::Write>(
 pub enum DiscoverWriteError {
     /// `pending-op.json` exists at the journal path -- the discover
     /// `--write` precondition fails closed instead of overwriting
-    /// `pool.json` mid-recovery (see `docs/luks-unlock.md`).
+    /// `pool.json` mid-recovery (see `docs/internals/luks-unlock.md`).
     #[error(
-        "discover refusing to write pool.json: pending-op.json exists at {path} -- run 'braid recover' first (see docs/luks-unlock.md)"
+        "discover refusing to write pool.json: pending-op.json exists at {path} -- run 'braid recover' first (see docs/internals/luks-unlock.md)"
     )]
     PendingOpExists { path: String },
     /// Existing `pool.json` on disk is already a healthy UUID-keyed
@@ -180,7 +180,7 @@ pub enum DiscoverWriteError {
     /// `missing_devids`. The operator must move the file aside;
     /// `discover` is not the surface for mutating an established pool.
     #[error(
-        "discover refusing to write pool.json: existing file at {path} is already a healthy UUID-keyed membership -- back it up and move it aside before retrying, or use 'braid add' / 'braid remove' / 'braid replace' to mutate membership (see docs/luks-unlock.md)"
+        "discover refusing to write pool.json: existing file at {path} is already a healthy UUID-keyed membership -- back it up and move it aside before retrying, or use 'braid add' / 'braid remove' / 'braid replace' to mutate membership (see docs/internals/luks-unlock.md)"
     )]
     ValidUuidKeyed { path: String },
     /// Existing `pool.json` is corrupt and would normally be rebuilt in
@@ -223,7 +223,7 @@ pub enum BareDiscoverError {
     )]
     ValidUuidKeyed { path: String },
     #[error(
-        "pool.json at {path} is corrupt or unreadable -- run 'braid discover --write' to rebuild from existing disks (with all intended pool members attached; see docs/luks-unlock.md)"
+        "pool.json at {path} is corrupt or unreadable -- run 'braid discover --write' to rebuild from existing disks (with all intended pool members attached; see docs/internals/luks-unlock.md)"
     )]
     Corrupt { path: String },
 }
@@ -1763,7 +1763,7 @@ mod tests {
         assert_eq!(
             err.to_string(),
             format!(
-                "pool.json at {} is corrupt or unreadable -- run 'braid discover --write' to rebuild from existing disks (with all intended pool members attached; see docs/luks-unlock.md)",
+                "pool.json at {} is corrupt or unreadable -- run 'braid discover --write' to rebuild from existing disks (with all intended pool members attached; see docs/internals/luks-unlock.md)",
                 paths.pool_json().display()
             )
         );

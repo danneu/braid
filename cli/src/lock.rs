@@ -3382,7 +3382,7 @@ mod tests {
     // (reference/linux/fs/btrfs/volumes.c btrfs_free_stale_devices).
     // Forgetting only membership leaves an orphan mapper (from a prior
     // crash between cryptsetup open and pool.json write, per
-    // docs/principles.md:18) with a stale scan entry, reviving the
+    // docs/design/principles.md#3-safe-by-construction-operations) with a stale scan entry, reviving the
     // cryptsetup-close-btrfs-held race for the orphan.
     // Scenario: 1 membership mapper, 1 orphan; forget devices = union.
     #[test]

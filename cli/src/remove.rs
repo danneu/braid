@@ -294,7 +294,7 @@ impl RemovePlan {
         // (Pre-journal) topology drift validation -- clean failure if the
         // world changed between plan_remove and here. Above journal::write_journal
         // so failure does NOT strand pending-op.json (principle 3,
-        // docs/principles.md:23). Hot-unplug variant surfaces a journal-free
+        // docs/design/principles.md#3-safe-by-construction-operations). Hot-unplug variant surfaces a journal-free
         // recovery sequence (re-plug, OR close + reopen the stale mapper via
         // lock/unlock or reboot, then re-run); `braid recover` is intentionally
         // NOT mentioned here because it would fail with no pending journal.
@@ -451,7 +451,7 @@ impl RemovePlan {
         journal::clear_journal(params.paths).map_err(map_journal_clear_failure)?;
         // Hygiene only -- failure is non-fatal because `cmd_add` is the
         // fail-closed correctness boundary for reused devids. See
-        // docs/decisions/014-alerts.md "Acked-stats hygiene".
+        // docs/design/decisions/014-alerts.md "Acked-stats hygiene".
         if let Err(e) = alert::drop_ghost_acked_for_devids(params.paths, &[work_plan.target_devid])
         {
             eprintln!("Warning: failed to update acked stats: {e}");

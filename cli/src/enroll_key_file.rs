@@ -3350,7 +3350,7 @@ mod tests {
     //   journal, so an interrupted apply phase cannot strand the user
     //   in recovery mode.
     // Why it exists: this property is the justification recorded in
-    //   `docs/decisions/019-inhibit-sleep.md`'s "Excluded: braid
+    //   `docs/design/decisions/019-inhibit-sleep.md`'s "Excluded: braid
     //   enroll" subsection for not acquiring a sleep inhibitor; a
     //   regression that silently introduces a journal write to enroll
     //   would invalidate that justification without failing any
@@ -3441,7 +3441,7 @@ mod tests {
     //   luksDump. A re-check positioned at the top of execute (before
     //   plan_enrollment) would silently leave the same window open; the
     //   ordering assertion below pins that the re-check is placed
-    //   immediately before generate_key_file. See docs/luks-unlock.md
+    //   immediately before generate_key_file. See docs/internals/luks-unlock.md
     //   "Keyfile creation target invariant".
     // Scenario: operator mounted /tmp/usb correctly, ran enroll, but
     //   systemd-automount timed out (or admin manually unmounted)

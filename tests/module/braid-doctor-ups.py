@@ -17,7 +17,7 @@
 # the fault; the unit's ExecStop runs `braid lock`, which unmounts.
 # So we open LUKS + mount directly, bypassing braid-online.
 #
-# See docs/decisions/020-ups-integration.md "braid-online becomes
+# See docs/design/decisions/020-ups-integration.md "braid-online becomes
 # safety-critical under UPS" for the rationale.
 
 import json

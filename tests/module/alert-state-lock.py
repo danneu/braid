@@ -8,7 +8,7 @@
 # Rust-level serialization, owned by the pool lock, ack can clear an alert
 # while monitor resurrects it from a stale snapshot. add/remove/remove-missing
 # also write acked-stats.json and must share the same lock.
-# See docs/decisions/026-pool-lock-rust-owned.md.
+# See docs/design/decisions/026-pool-lock-rust-owned.md.
 #
 # Scenario: A monitor timer cycle, a manual ack, and pool membership
 # commands contend with an already-running braid operation. The contended

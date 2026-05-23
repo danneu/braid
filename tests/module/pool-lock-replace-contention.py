@@ -13,7 +13,7 @@
 # `braid replace --old disk2 --new disk4=...` in another shell against a
 # mounted 3-disk pool with a spare disk. The second command should fail
 # at the Rust-owned pool lock and leave no pending-op.json behind.
-# See docs/decisions/026-pool-lock-rust-owned.md.
+# See docs/design/decisions/026-pool-lock-rust-owned.md.
 
 import shlex
 

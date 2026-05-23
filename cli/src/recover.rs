@@ -64,7 +64,7 @@ pub enum RecoverError {
     /// has no matching member in the relevant journal snapshot, so the
     /// pre-crash identity binding is unrecoverable from the journal alone.
     #[error(
-        "no member in journaled membership has devid {devid}; the journal entry was written against a never-enriched member -- see docs/luks-unlock.md and manual/guides/recovery-scenarios.md before removing /var/lib/braid/pending-op.json"
+        "no member in journaled membership has devid {devid}; the journal entry was written against a never-enriched member -- see docs/internals/luks-unlock.md and docs/guides/recovery-scenarios.md before removing /var/lib/braid/pending-op.json"
     )]
     NoMemberForJournaledDevid { devid: u64 },
 }
@@ -1960,7 +1960,7 @@ fn add_recovery_uuid_mismatch_message(
     target_state: &str,
 ) -> String {
     format!(
-        "add recovery aborted: target {by_id} LUKS UUID mismatch -- journaled {expected_uuid}, observed {observed_uuid} ({target_state}); the disk at this by-id was reformatted out-of-band between crash and recovery (see manual/guides/recovery-scenarios.md)"
+        "add recovery aborted: target {by_id} LUKS UUID mismatch -- journaled {expected_uuid}, observed {observed_uuid} ({target_state}); the disk at this by-id was reformatted out-of-band between crash and recovery (see docs/guides/recovery-scenarios.md)"
     )
 }
 
@@ -5696,7 +5696,7 @@ mod tests {
     // exactly once, not twice.
     //
     // Why it exists
-    // Principle 4 (docs/decisions/004-single-passphrase.md) commits to
+    // Principle 4 (docs/design/decisions/004-single-passphrase.md) commits to
     // "one passphrase, all drives unlock". Independent recover_passphrase
     // calls in the discovery and replay blocks of
     // execute_add_pool_mutation_recovery used to prompt twice; a future
@@ -7963,7 +7963,7 @@ mod tests {
     //   renders `cryptsetup luksAddKey` + `cryptsetup luksHeaderBackup`
     //   BEFORE `btrfs device scan --forget`, `wipefs`, and
     //   `btrfs device add`.
-    // Why it exists: per `docs/decisions/022-dry-run-preview-model.md`,
+    // Why it exists: per `docs/design/decisions/022-dry-run-preview-model.md`,
     //   the preview must stay byte-aligned with the executor. The
     //   add-recovery executor inserts addKey + headerBackup before
     //   pool_add_device when the journal carries `enroll_key_file:

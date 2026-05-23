@@ -84,7 +84,7 @@ with subtest("discover --write acquires before pending-op and probe reads"):
 
 with subtest("discover --write does not read pool.json before acquiring lock"):
     # Intent: pool.json must not be opened before the pool lock is held.
-    # Why: principle 12 (`docs/principles.md`) and ADR 018 require lock acquire
+    # Why: principle 12 (`docs/design/principles.md#12-one-pool-operation-at-a-time`) and ADR 018 require lock acquire
     # to precede any pool.json load on locked dispatch arms. A regression that
     # reads pool.json pre-lock would not be caught by the existing pending-op /
     # probe assertions because the classify result is discarded on --write and

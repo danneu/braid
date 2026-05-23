@@ -79,7 +79,7 @@ in
             # `timeout` lives inside the bash invocation so its non-zero
             # overrun result is inverted by `!` to 0 -- which autosuspend
             # treats as activity (block suspend), preserving the fail-closed
-            # invariant in `docs/decisions/016-auto-suspend.md`. `-k 2`
+            # invariant in `docs/design/decisions/016-auto-suspend.md`. `-k 2`
             # escalates TERM to KILL after two more seconds for processes
             # that ignore or delay TERM. An outer `timeout` would fail open:
             # bash gets killed before `!` runs.

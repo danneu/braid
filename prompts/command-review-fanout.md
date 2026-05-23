@@ -2,7 +2,7 @@
 
 Discover the public command surface before spawning reviewers: run
 `rg -n '#\[command\(hide = true\)\]|^\s*[A-Z][A-Za-z]+\(' cli/src/main.rs`
-and `ls manual/commands/`. Build the leaf manifest from `Commands` and
+and `ls docs/commands/`. Build the leaf manifest from `Commands` and
 public nested subcommand enums, using effective Clap names. Expected
 review targets: `add`, `remove`, `remove-missing`, `replace`, `status`,
 `doctor`, `unlock`, `lock`, `enroll`, `idle`, `monitor`, `ack`, `tui`,
@@ -41,7 +41,7 @@ Representative starting files:
 Choose `{FILES}` as useful starting points for that command, typically
 `cli/src/main.rs`, the matching `cli/src/<module>.rs` or command
 directory, any obvious shared planner/executor module, and
-`manual/commands/<slug>.md`. These are starting points only; the
+`docs/commands/<slug>.md`. These are starting points only; the
 subagent owns full discovery.
 
 As each reviewer returns
@@ -85,7 +85,7 @@ Append this section verbatim to every subagent prompt. Delete the body
 for a default run.
 
 braid just migrated disk identity to LUKS UUIDs. Guidelines:
-`docs/decisions/024-luks-uuid-identity.md`. Flag code, tests, fixtures,
+`docs/design/decisions/024-luks-uuid-identity.md`. Flag code, tests, fixtures,
 docs, error messages, or comments that still use pre-migration
 identifiers (device paths, serials, by-id) or otherwise contradict that
 doc.

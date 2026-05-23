@@ -7,7 +7,7 @@
 target/
 /reference/
 __pycache__/
-manual/book/
+docs/book/
 .envrc
 command-findings
 features1

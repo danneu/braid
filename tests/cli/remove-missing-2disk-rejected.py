@@ -27,7 +27,7 @@
 # - 2-disk NAS, disk2 dies. Operator reaches for
 #   `braid remove-missing` (a reasonable instinct). braid steers them
 #   to `braid replace --missing-id <devid>` -- the supported repair
-#   path documented in docs/decisions/012-intent-cli.md.
+#   path documented in docs/design/decisions/012-intent-cli.md.
 #
 # Missing-disk setup reuses the canonical pattern from
 # tests/cli/remove-missing-inhibits-suspend.py: umount -> cryptsetup

@@ -4,7 +4,7 @@
 //! stdout. Anything that affects how a user interprets the structured
 //! preview is a `PreviewNote`, not stray stderr. Long-running
 //! side-effect-free probes may still emit status rows to stderr; see
-//! `docs/decisions/022-dry-run-preview-model.md`.
+//! `docs/design/decisions/022-dry-run-preview-model.md`.
 //!
 //! PR 0 lands the types and rendering primitives only -- no command
 //! migrations.

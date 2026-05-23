@@ -8,7 +8,7 @@
 # long-running `braid add` balance) would silently hang any concurrent
 # `braid unlock` invocation forever, with no feedback. A blocking-flock
 # regression must fail this test, not silently pass it.
-# See docs/decisions/026-pool-lock-rust-owned.md.
+# See docs/design/decisions/026-pool-lock-rust-owned.md.
 #
 # Scenario: Admin starts `braid add` in one shell (modeled here as a
 # background flock holder), then opens a second shell and runs

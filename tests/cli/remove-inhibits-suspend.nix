@@ -7,7 +7,7 @@
 # Why: suspending the host mid-remove can leave the kernel-side
 # device-remove state machine in a partially-relocated state requiring
 # recovery, and braid enables autosuspend by default, so this interaction
-# is reachable in normal operation. See docs/decisions/019-inhibit-sleep.md
+# is reachable in normal operation. See docs/design/decisions/019-inhibit-sleep.md
 # for the boundary rule.
 #
 # Topology choice — 2 disks, not 3:

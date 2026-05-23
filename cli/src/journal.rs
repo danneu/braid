@@ -7,7 +7,7 @@ use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
 use thiserror::Error;
 
-const PENDING_OP_MANUAL_REMEDIATION: &str = "Remove /var/lib/braid/pending-op.json after manual reconciliation (see docs/luks-unlock.md) and re-run.";
+const PENDING_OP_MANUAL_REMEDIATION: &str = "Remove /var/lib/braid/pending-op.json after manual reconciliation (see docs/internals/luks-unlock.md) and re-run.";
 
 /// A pending-operation journal records the full context of a mutation in progress.
 /// When this file exists, braid enters recovery mode: only `status`, `recover`,
@@ -209,13 +209,13 @@ pub enum OpKind {
 
 /// Pinned error inventory for `pending-op.json` I/O. The plan locks the
 /// variant set to exactly Parse/Io/Save; Parse is the only variant whose
-/// `Display` text is pinned verbatim (so `docs/luks-unlock.md` can quote
+/// `Display` text is pinned verbatim (so `docs/internals/luks-unlock.md` can quote
 /// it). `Io` covers read failures and `Save` covers write-side IO
 /// (including durable delete) and serialization failures.
 #[derive(Debug, Error)]
 pub enum JournalError {
     #[error(
-        "failed to parse pending-op.json: {detail}. Remove /var/lib/braid/pending-op.json after manual reconciliation (see docs/luks-unlock.md) and re-run."
+        "failed to parse pending-op.json: {detail}. Remove /var/lib/braid/pending-op.json after manual reconciliation (see docs/internals/luks-unlock.md) and re-run."
     )]
     Parse { detail: String },
 
@@ -681,7 +681,7 @@ mod tests {
 
         assert_eq!(advisories.len(), 1);
         assert!(advisories[0].contains(
-            "Remove /var/lib/braid/pending-op.json after manual reconciliation (see docs/luks-unlock.md) and re-run."
+            "Remove /var/lib/braid/pending-op.json after manual reconciliation (see docs/internals/luks-unlock.md) and re-run."
         ));
         assert!(!advisories[0].contains("braid recover"));
     }
@@ -699,7 +699,7 @@ mod tests {
 
         assert_eq!(advisories.len(), 1);
         assert!(advisories[0].contains(
-            "Remove /var/lib/braid/pending-op.json after manual reconciliation (see docs/luks-unlock.md) and re-run."
+            "Remove /var/lib/braid/pending-op.json after manual reconciliation (see docs/internals/luks-unlock.md) and re-run."
         ));
         assert!(!advisories[0].contains("braid recover"));
     }
@@ -932,7 +932,7 @@ mod tests {
         );
         assert!(
             s.contains(
-                "Remove /var/lib/braid/pending-op.json after manual reconciliation (see docs/luks-unlock.md) and re-run."
+                "Remove /var/lib/braid/pending-op.json after manual reconciliation (see docs/internals/luks-unlock.md) and re-run."
             ),
             "got: {s}"
         );

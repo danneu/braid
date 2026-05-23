@@ -1,0 +1,12 @@
+[book]
+title = "braid"
+src = "."
+
+[preprocessor.yml-header]
+
+[output.html]
+git-repository-url = "https://github.com/danneu/braid"
+site-url = "/braid/"
+
+[output.linkcheck]
+follow-web-links = false

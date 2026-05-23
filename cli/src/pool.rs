@@ -140,7 +140,7 @@ impl TopologyDrift {
 /// - Pre-`journal::write_journal` (clean failure path): caller wraps
 ///   with "re-run `braid remove`". Failure here is a "command never
 ///   started" exit and must NOT strand `pending-op.json`
-///   (principle 3, `docs/principles.md:23`).
+///   (principle 3, `docs/design/principles.md#3-safe-by-construction-operations`).
 /// - Post-`journal::write_journal` (recovery-handoff path): caller
 ///   wraps with "run `braid recover` to reconcile". Failure here
 ///   intentionally preserves `pending-op.json` so the recovery flow

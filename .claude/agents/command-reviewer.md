@@ -37,7 +37,7 @@ Review the command's behavior for:
    where the implementation is more complex than the problem requires.
    Respect braid's "no backwards compatibility" rule -- simplification
    is welcome.
-4. **Project fit** -- contradictions with `docs/principles.md`,
+4. **Project fit** -- contradictions with `docs/design/principles.md`,
    relevant decision records, README/user-guide behavior, CLI output
    style, or documented LUKS/systemd/btrfs invariants.
 
@@ -48,15 +48,15 @@ Review the command's behavior for:
   argument parsing and dispatch in `cli/src/main.rs`, the command
   implementation module, shared planner/executor code it depends on,
   parser code it relies on, tests, NixOS module or systemd wiring that
-  invokes it, and `manual/commands/` or README documentation.
+  invokes it, and `docs/commands/` or README documentation.
 - If the command's tools include btrfs, cryptsetup/LUKS, systemd,
   smartctl, NUT, util-linux, autosuspend, hddfancontrol, or the
   kernel, consult `./btrfs-links.md` selectively and consult
   `./reference/` first. `reference/` contains vendored upstream
   source and is preferred over the web for parser output formats and
   tool behavior.
-- Read `docs/principles.md` and any relevant `docs/decisions/*.md`.
-  Read `docs/decisions/018-systemd-lifecycle.md` if the command
+- Read `docs/design/principles.md` and any relevant `docs/design/decisions/*.md`.
+  Read `docs/design/decisions/018-systemd-lifecycle.md` if the command
   touches units, the wrapper, or mount state.
 - Do additional web research with `WebSearch`/`WebFetch` only when
   `reference/` and `btrfs-links.md` do not cover what you need. Spend

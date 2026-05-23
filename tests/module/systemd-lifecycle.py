@@ -12,7 +12,7 @@
 # verify systemd unit state transitions. A broken dependency or dispatch
 # regression could leave braid-online.service out of sync with actual pool
 # state, causing silent failure of automatic locking on shutdown.
-# See docs/decisions/026-pool-lock-rust-owned.md.
+# See docs/design/decisions/026-pool-lock-rust-owned.md.
 #
 # Scenario: 2-disk RAID1 pool pre-created by initrd fixture (disk1, disk2),
 # plus spare disks (disk3 for the add test, disk4+disk5 for the concurrent-add

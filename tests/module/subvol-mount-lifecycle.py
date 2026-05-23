@@ -3,7 +3,7 @@
 # Intent: A documented `systemd.mounts` subvolume mount participates in the
 #   `braid lock` BoundBy cascade and starts again on the next unlock.
 #
-# Why it exists: manual/guides/mounting-subvolumes.md tells users to bind the
+# Why it exists: docs/guides/mounting-subvolumes.md tells users to bind the
 #   mount to braid-online.service and bind Jellyfin-style services to the
 #   mount unit. This is the regression gate for that lifecycle shape.
 #

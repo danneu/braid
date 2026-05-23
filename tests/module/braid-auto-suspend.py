@@ -90,7 +90,7 @@ with subtest("BraidPool command fail-closes when braid idle overruns the inner t
     #   outer `timeout`. On overrun the outer `timeout` killed bash, exited
     #   124, and the `!` never inverted -- autosuspend treated it as no
     #   activity and allowed suspend. That broke the fail-closed invariant
-    #   in docs/decisions/016-auto-suspend.md.
+    #   in docs/design/decisions/016-auto-suspend.md.
     # Scenario: substitute a hanging stub for `braid idle` in the configured
     #   command, run it, and verify the inner `timeout` fires and `!` inverts
     #   to 0 before the outer watchdog fires.

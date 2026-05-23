@@ -98,6 +98,21 @@
           ];
         };
 
+      docsShellFor =
+        system:
+        let
+          pkgs = nixpkgs.legacyPackages.${system};
+        in
+        pkgs.mkShell {
+          packages = [
+            pkgs.mdbook
+            pkgs.mdbook-linkcheck
+            pkgs.mdbook-yml-header
+            pkgs.just
+            (pkgs.python3.withPackages (ps: [ ps.pyyaml ]))
+          ];
+        };
+
       checksFor =
         system:
         let
@@ -960,10 +975,17 @@
 
       packages = forAllSystems packagesFor;
 
-      # Linux-only: the devShell pulls in btrfs-progs/cryptsetup/nut/util-linux,
+      # Linux-only: the default devShell pulls in btrfs-progs/cryptsetup/nut/util-linux,
       # none of which evaluate on darwin. Use linux-builder or a Linux host.
       devShells = forAllSystems (
-        system: if builtins.match ".*-linux" system != null then { default = devShellFor system; } else { }
+        system:
+        let
+          isLinux = builtins.match ".*-linux" system != null;
+        in
+        {
+          docs = docsShellFor system;
+        }
+        // (if isLinux then { default = devShellFor system; } else { })
       );
 
       checks = forAllSystems (

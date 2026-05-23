@@ -1,7 +1,0 @@
-[book]
-title = "braid"
-src = "."
-
-[output.html]
-git-repository-url = "https://github.com/danneu/braid"
-site-url = "/braid/"

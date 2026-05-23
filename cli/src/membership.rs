@@ -30,7 +30,7 @@ pub enum MembershipError {
     /// value-side field, unknown top-level key, etc. The display string is
     /// pinned so the recovery docs can quote it verbatim.
     #[error(
-        "pool membership file corrupt at {path}: {detail} -- run 'braid discover --write' to rebuild from existing disks (with all intended pool members attached; see docs/luks-unlock.md)"
+        "pool membership file corrupt at {path}: {detail} -- run 'braid discover --write' to rebuild from existing disks (with all intended pool members attached; see docs/internals/luks-unlock.md)"
     )]
     Corrupt { path: PathBuf, detail: String },
 
@@ -1037,7 +1037,7 @@ mod tests {
         let s = err.to_string();
         assert!(
             s.contains(
-                "-- run 'braid discover --write' to rebuild from existing disks (with all intended pool members attached; see docs/luks-unlock.md)"
+                "-- run 'braid discover --write' to rebuild from existing disks (with all intended pool members attached; see docs/internals/luks-unlock.md)"
             ),
             "got: {s}"
         );

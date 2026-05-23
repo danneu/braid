@@ -1005,7 +1005,7 @@ fn check_ups_daemon_up<R: CommandRunner>(ctx: &mut DoctorContext<'_, R>) -> Chec
 /// UPS doctor check: report braid-online.service state while the pool is
 /// mounted under UPS.
 ///
-/// This is the critical configuration fault in `docs/decisions/020-
+/// This is the critical configuration fault in `docs/design/decisions/020-
 /// ups-integration.md`'s "braid-online becomes safety-critical"
 /// section: without `braid-online.service` active, reloading, or
 /// refreshing, the `SHUTDOWNCMD = systemctl poweroff` path does NOT
@@ -3130,7 +3130,8 @@ mod tests {
     // Intent: data_profile_mismatch routes to replace-first language on a degraded pool.
     // Why it exists: braid's invariant is replace/repair first, then run the soft
     //   RAID1 balance to drain single-profile chunks written during degraded
-    //   operation (docs/principles.md:21; tests/repro/degraded-soft-balance.py).
+    //   operation (docs/design/principles.md#3-safe-by-construction-operations)
+    //   and tests/repro/degraded-soft-balance.py.
     //   The mixed-profile warning's balance suggestion contradicts that order on a
     //   degraded pool; this test pins the routing that keeps the two messages aligned.
     // Scenario: a 2-disk RAID1 lost a disk; new chunks were allocated as `single`

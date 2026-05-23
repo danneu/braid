@@ -105,7 +105,7 @@ sudo braid replace --old ironwolf --new seagate=/dev/disk/by-id/ata-Seagate_NEW_
 sudo braid lock
 ```
 
-See the [command reference](manual/commands/) for full usage of each command.
+See the [command reference](docs/commands/) for full usage of each command.
 
 ## Preview with --dry-run
 
@@ -123,45 +123,45 @@ If a mutation is interrupted, braid leaves `/var/lib/braid/pending-op.json` in p
 
 `pool.json` is keyed by each member's LUKS UUID. Disk names are still the names you type in commands and see in output; by-id paths are the hardware addresses braid uses to find disks.
 
-## Manual
+## Docs
 
 ### Commands
 
 | Command | Description |
 | --- | --- |
-| [add](manual/commands/add.md) | Add disks to the pool (or create a new pool) |
-| [remove](manual/commands/remove.md) | Remove a live disk from the pool |
-| [remove-missing](manual/commands/remove-missing.md) | Forget a dead/missing device entry |
-| [replace](manual/commands/replace.md) | Replace a live or dead disk |
-| [unlock](manual/commands/unlock.md) | Open LUKS devices and mount the pool |
-| [lock](manual/commands/lock.md) | Unmount the pool and close LUKS devices |
-| [status](manual/commands/status.md) | Pool health, disk status, allocation, scrub info |
-| [doctor](manual/commands/doctor.md) | Diagnostic checks for config and pool health |
-| [monitor](manual/commands/monitor.md) | Health check for alerting (used by systemd timer) |
-| [ack](manual/commands/ack.md) | Acknowledge and silence an active alert |
-| [enroll](manual/commands/enroll.md) | Enroll a USB keyfile for auto-unlock |
-| [discover](manual/commands/discover.md) | Scan for braid LUKS devices and rebuild pool.json |
-| [recover](manual/commands/recover.md) | Recover from an interrupted operation |
-| [idle](manual/commands/idle.md) | Check if the pool is idle (for auto-suspend) |
-| [tui](manual/commands/tui.md) | Interactive dashboard with raw-output Browse tab |
-| [ups status](manual/commands/ups-status.md) | Live UPS state (NUT); `--json` for scripts |
+| [add](docs/commands/add.md) | Add disks to the pool (or create a new pool) |
+| [remove](docs/commands/remove.md) | Remove a live disk from the pool |
+| [remove-missing](docs/commands/remove-missing.md) | Forget a dead/missing device entry |
+| [replace](docs/commands/replace.md) | Replace a live or dead disk |
+| [unlock](docs/commands/unlock.md) | Open LUKS devices and mount the pool |
+| [lock](docs/commands/lock.md) | Unmount the pool and close LUKS devices |
+| [status](docs/commands/status.md) | Pool health, disk status, allocation, scrub info |
+| [doctor](docs/commands/doctor.md) | Diagnostic checks for config and pool health |
+| [monitor](docs/commands/monitor.md) | Health check for alerting (used by systemd timer) |
+| [ack](docs/commands/ack.md) | Acknowledge and silence an active alert |
+| [enroll](docs/commands/enroll.md) | Enroll a USB keyfile for auto-unlock |
+| [discover](docs/commands/discover.md) | Scan for braid LUKS devices and rebuild pool.json |
+| [recover](docs/commands/recover.md) | Recover from an interrupted operation |
+| [idle](docs/commands/idle.md) | Check if the pool is idle (for auto-suspend) |
+| [tui](docs/commands/tui.md) | Interactive dashboard with raw-output Browse tab |
+| [ups status](docs/commands/ups-status.md) | Live UPS state (NUT); `--json` for scripts |
 
 ### Guides
 
 | Guide | Description |
 | --- | --- |
-| [Getting started](manual/guides/getting-started.md) | First-time setup: find disks, create pool, unlock |
-| [Day-to-day NAS usage](manual/guides/day-to-day-nas-usage.md) | Subvolumes, file permissions, Samba shares |
-| [Auto-unlock](manual/guides/auto-unlock.md) | USB keyfile setup for unattended reboots |
-| [Monitoring and alerts](manual/guides/monitoring-and-alerts.md) | Disk health alerts, beeper, alert commands |
-| [Power management](manual/guides/power-management.md) | Auto-suspend, Wake-on-LAN, RTC wakeups |
-| [Fan control](manual/guides/fan-control.md) | HDD-driven chassis fan control via hddfancontrol |
-| [UPS](manual/guides/ups.md) | NUT-backed orderly poweroff, preflight safety, live status |
-| [NixOS configuration](manual/guides/nixos-configuration.md) | Module options, scrub scheduling, pinned toolchain |
-| [Sharing and permissions](manual/guides/sharing-and-permissions.md) | Storage group, mount permissions, Samba |
-| [Troubleshooting](manual/guides/troubleshooting.md) | ENOSPC balance, paused balance, missing devices |
-| [Recovery scenarios](manual/guides/recovery-scenarios.md) | Interrupted operations, lost pool.json, degraded mount |
+| [Getting started](docs/guides/getting-started.md) | First-time setup: find disks, create pool, unlock |
+| [Day-to-day NAS usage](docs/guides/day-to-day-nas-usage.md) | Subvolumes, file permissions, Samba shares |
+| [Auto-unlock](docs/guides/auto-unlock.md) | USB keyfile setup for unattended reboots |
+| [Monitoring and alerts](docs/guides/monitoring-and-alerts.md) | Disk health alerts, beeper, alert commands |
+| [Power management](docs/guides/power-management.md) | Auto-suspend, Wake-on-LAN, RTC wakeups |
+| [Fan control](docs/guides/fan-control.md) | HDD-driven chassis fan control via hddfancontrol |
+| [UPS](docs/guides/ups.md) | NUT-backed orderly poweroff, preflight safety, live status |
+| [NixOS configuration](docs/guides/nixos-configuration.md) | Module options, scrub scheduling, pinned toolchain |
+| [Sharing and permissions](docs/guides/sharing-and-permissions.md) | Storage group, mount permissions, Samba |
+| [Troubleshooting](docs/guides/troubleshooting.md) | ENOSPC balance, paused balance, missing devices |
+| [Recovery scenarios](docs/guides/recovery-scenarios.md) | Interrupted operations, lost pool.json, degraded mount |
 
 ### Development
 
-See [manual/development.md](manual/development.md) for the dev workflow, test commands, and dependency upgrade process.
+See [docs/dev/overview.md](docs/dev/overview.md) for the dev workflow, test commands, and dependency upgrade process.

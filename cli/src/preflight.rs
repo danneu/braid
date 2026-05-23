@@ -419,7 +419,7 @@ pub fn check_single_survivor_capacity(
 /// widens the mid-mutation recovery surface.
 ///
 /// Wire into `add`, `remove`, `remove-missing`, `replace` before journal
-/// write. See docs/decisions/020-ups-integration.md for the safety
+/// write. See docs/design/decisions/020-ups-integration.md for the safety
 /// rationale.
 pub fn check_ups_not_on_battery<R: CommandRunner>(
     runner: &R,

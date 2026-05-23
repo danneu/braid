@@ -4,7 +4,7 @@
   Why it exists: The mounting-subvolumes guide tells users to bind native
     mount units to braid-online.service. This guards the lifecycle contract
     against regressions in systemd wiring or lock teardown behavior.
-  Scenario: The guide in manual/guides/mounting-subvolumes.md documents a
+  Scenario: The guide in docs/guides/mounting-subvolumes.md documents a
     read-only Jellyfin-style subvolume mount with a service bound to the mount.
     The test unlocks, proves both units start, locks while the service holds the
     subvolume mount busy, and then unlocks again to prove reactivation works.
