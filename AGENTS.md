@@ -275,6 +275,23 @@ braid parses output from btrfs-progs, cryptsetup, util-linux, smartmontools, and
 - `just test-rust` — validates golden fixtures for the full parser set, including `parse_upsc`. Fixture-backed coverage stays current only after running `just capture-all-fixtures` when parser-critical tool versions change (e.g. nixpkgs bump).
 - Fixture refresh is a separate obligation: `just test-parsers` passing does not guarantee TUI-only parsers (`parse_lsblk_json`, `parse_cryptsetup_luks_dump`, `parse_smartctl_health`) or unused parsers (`parse_btrfs_scrub_status_per_device`) are compatible with the current toolchain.
 - Fixtures in `cli/tests/fixtures/nixos-25.11/` are committed and authoritative. NUT fixtures live in `cli/tests/fixtures/nixos-25.11/upsc/` (and the unstable mirror); they are produced by `just capture-ups-fixtures`, which boots a dedicated NUT VM with per-state `dummy-ups` drivers (see `tests/capture-ups-fixtures.nix`).
+- **smartctl fixtures are stable-only by design.** VM virtio disks do
+  not emit useful SMART data, so `just capture-all-fixtures` does not
+  regenerate `smartctl-sata-with-temperature.json` or
+  `smartctl-selftest-*.json`. `smartctl-sata-with-temperature.json` is
+  a one-time physical-drive capture; `smartctl-selftest-*.json`
+  fixtures are hand-authored (see
+  `cli/tests/fixtures/nixos-25.11/README.md`). The `tool-versions` VM
+  test checks that `smartctl` resolves to a `/nix/store/` path on the
+  VM's PATH and that its self-reported version matches
+  `pkgs.smartmontools.version`, but it does not detect nixpkgs version
+  bumps because both sides advance together. On any nixpkgs bump that
+  touches smartmontools, manually review and refresh
+  `smartctl-selftest-*.json` against the new
+  `ata_smart_self_test_log.standard` JSON shape and
+  `smartctl-sata-with-temperature.json` against the new
+  health/temperature JSON shape (`smart_status`, `temperature`,
+  `ata_smart_attributes`).
 
 Parser-critical tool versions are the pinned `nixpkgs` versions of `btrfs-progs`, `cryptsetup`, `util-linux`, `nut`, and `smartmontools`. Treat any change to the `nixpkgs` node in `flake.lock`, any `flake.nix` change that alters the `nixpkgs` input, or any change to `braid.packages.{btrfsProgs,cryptsetup,utilLinux,nut,smartmontools}` as a required fixture-refresh event.
 
@@ -294,18 +311,10 @@ Early-warning lane for upstream parser/output drift. Unstable failures signal up
 - `just capture-all-fixtures-unstable` + `just test-rust-unstable` --
   covers btrfs/cryptsetup/util-linux/NUT against unstable tool output via
   golden fixtures. Missing fixtures fail (not skip).
-- **smartctl is stable-only by design.** VM virtio disks do not emit
-  useful SMART data, so the smartctl fixtures cannot be captured from the
-  VM pipeline. `smartctl-sata-with-temperature.json` is a one-time
-  physical-drive capture; the `smartctl-selftest-*.json` fixtures are
-  hand-authored (see `cli/tests/fixtures/nixos-25.11/README.md`). The
-  `tool-versions` VM test checks that `smartctl` resolves to a
-  `/nix/store/` path on the VM's PATH and that its self-reported version
-  matches the configured `pkgs.smartmontools.version`; it does not
-  exercise the braid wrapper's PATH injection for `smartctl` and it
-  does not detect nixpkgs version bumps (both sides advance together
-  with the evaluation). On any nixpkgs bump that touches smartmontools,
-  review and refresh the stable smartctl fixtures by hand.
+- **smartctl has no unstable fixtures.** Unstable capture/test coverage
+  intentionally covers btrfs/cryptsetup/util-linux/NUT only; see the
+  Stable lane for why smartctl fixtures are stable-only and how to
+  refresh them on smartmontools bumps.
 
 Full unstable canary workflow:
 
