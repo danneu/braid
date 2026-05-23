@@ -28,6 +28,16 @@ Defaults are chosen for HDD NAS deployments. Flash media (SSDs, NVMe, USB sticks
 - **No TRIM passthrough** — braid pins discard off at the LUKS layer by omitting `--allow-discards` and, by consequence, at the btrfs mount layer because no effective `discard=async` can pass through regardless of kernel default. SSDs used with braid experience increased write amplification and performance degradation over time.
 - **No flash-specific testing** — flash-related issues in LUKS or mount configuration may go unnoticed.
 
+## Alternatives considered
+
+### Default-on btrfs compression (compress=zstd:1)
+
+Rejected. braid targets HDD bulk-storage NAS pools where the dominant content is media and archives: video, audio, photos, and other formats already compressed at the application layer. Transparent filesystem compression usually saves little or no space on that mix, while the btrfs heuristic that skips incompressible extents still spends CPU on each write. On low-power NAS hardware, that cost is not free.
+
+Reversal is also partial. Removing `compress=...` affects future writes only; extents already written compressed stay compressed until the data is rewritten or explicitly defragmented. Making compression the default would bake that conversion cost into unreleased software for users who later discover their workload does not benefit. For that reason, `cli/src/cmd.rs` `base_mount_options()` intentionally omits compression.
+
+Fedora's `compress=zstd:1` precedent is workstation root filesystems on SSDs: binaries, logs, configs, and package payloads. That precedent does not transfer cleanly to HDD bulk-storage NAS workloads. Users with compression-friendly data, such as text, code, or document servers, can opt specific paths into compression today with `btrfs property set <path> compression zstd`; `reference/btrfs-progs/Documentation/btrfs-property.rst` documents this modern per-inode interface. This is preferable to legacy `chattr +c`, which uses ext2-style flags and defaults to zlib. No braid feature gate is needed for this per-path opt-in.
+
 ## See
 
 - `cli/src/cmd.rs` — `CryptsetupLuksOpen` and `CryptsetupLuksOpenKeyFile` omit `--allow-discards`

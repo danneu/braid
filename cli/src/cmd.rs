@@ -430,6 +430,9 @@ impl Step {
 /// No `discard` option is set. LUKS is opened without `--allow-discards`
 /// (see ADR-015), so the mapped device never advertises discard support upward
 /// and any mount-layer discard would be silently dropped.
+///
+/// Compression is intentionally omitted for HDD bulk-storage workloads; see
+/// ADR-015 before adding a default `compress=...` mount option.
 fn base_mount_options() -> Vec<String> {
     vec![
         "noatime".to_owned(),
