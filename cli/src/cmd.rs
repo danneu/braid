@@ -426,6 +426,10 @@ impl Step {
 /// `btrfs subvolume set-default` is set to. Without this, a set-default to a
 /// non-top-level subvolume would silently change what braid mounts, hiding
 /// sibling subvolumes from the mountpoint.
+///
+/// No `discard` option is set. LUKS is opened without `--allow-discards`
+/// (see ADR-015), so the mapped device never advertises discard support upward
+/// and any mount-layer discard would be silently dropped.
 fn base_mount_options() -> Vec<String> {
     vec![
         "noatime".to_owned(),

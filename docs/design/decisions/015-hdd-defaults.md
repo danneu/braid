@@ -11,7 +11,7 @@ status: Active
 
 braid manages a NAS pool of LUKS-encrypted btrfs RAID1 drives. The typical deployment is bulk storage on large-capacity spinning drives (e.g., 12–16 TB HDDs). Several defaults already assume rotational media:
 
-- `cryptsetup open` omits `--allow-discards`, so TRIM/discard requests from btrfs never reach the underlying device. This is correct for HDDs (TRIM is a no-op) but harmful for SSDs (write amplification, degraded performance, shorter lifespan).
+- `cryptsetup open` omits `--allow-discards`, so TRIM/discard requests from btrfs never reach the underlying device. btrfs also exposes a mount-layer discard knob (`discard=async`, the kernel default since 6.2 on devices that advertise discard support), but braid's LUKS layer gates it: without `--allow-discards`, the mapped device never reports discard support upward, so the kernel default never activates and any explicit `discard=async` would be silently dropped.
 - `noatime` mount rationale references HDD spindown prevention.
 - Monthly scrub interval is tuned for spinning disk wear and noise.
 
@@ -25,11 +25,12 @@ Defaults are chosen for HDD NAS deployments. Flash media (SSDs, NVMe, USB sticks
 
 ## Tradeoffs accepted
 
-- **No TRIM passthrough** — SSDs used with braid experience increased write amplification and performance degradation over time.
+- **No TRIM passthrough** — braid pins discard off at the LUKS layer by omitting `--allow-discards` and, by consequence, at the btrfs mount layer because no effective `discard=async` can pass through regardless of kernel default. SSDs used with braid experience increased write amplification and performance degradation over time.
 - **No flash-specific testing** — flash-related issues in LUKS or mount configuration may go unnoticed.
 
 ## See
 
 - `cli/src/cmd.rs` — `CryptsetupLuksOpen` and `CryptsetupLuksOpenKeyFile` omit `--allow-discards`
+- `cli/src/cmd.rs` — `base_mount_options()` omits any `discard` option, relying on the kernel default that is itself gated by the LUKS layer
 - `modules/braid/storage.nix` — `noatime` rationale references HDD spindown
 - [Sane defaults](005-sane-defaults.md) — scrub interval tuned for spinning disks
