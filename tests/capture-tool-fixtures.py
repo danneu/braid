@@ -39,8 +39,9 @@ machine.succeed("sync")
 # --- Capture fixtures ---
 
 # 1. lsblk (JSON) — filter to the disks we set up
+# Keep the --output list in sync with CmdRequest::LsblkJson in cli/src/cmd.rs.
 machine.succeed(
-    f"lsblk --json --bytes --output NAME,TYPE,SIZE,MODEL,SERIAL,UUID /dev/vdb /dev/vdc"
+    f"lsblk --json --bytes --output NAME,TYPE,SIZE,MODEL,SERIAL,UUID,ROTA,TRAN /dev/vdb /dev/vdc"
     f" > {FIXTURE_DIR}/lsblk-2disk.json"
 )
 

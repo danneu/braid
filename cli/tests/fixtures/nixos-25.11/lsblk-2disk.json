@@ -7,6 +7,8 @@
          "model": null,
          "serial": "disk1",
          "uuid": "8c78a966-ef17-4610-b835-5b376ef10b4e",
+         "rota": true,
+         "tran": "virtio",
          "children": [
             {
                "name": "braid-vdb",
@@ -14,7 +16,9 @@
                "size": 1056964608,
                "model": null,
                "serial": null,
-               "uuid": "de2b8517-f972-45fc-b121-3e160c8ea432"
+               "uuid": "de2b8517-f972-45fc-b121-3e160c8ea432",
+               "rota": true,
+               "tran": null
             }
          ]
       },{
@@ -24,6 +28,8 @@
          "model": null,
          "serial": "disk2",
          "uuid": "fafe4e43-ad96-4ba5-b01d-0400d69f5d07",
+         "rota": true,
+         "tran": "virtio",
          "children": [
             {
                "name": "braid-vdc",
@@ -31,7 +37,9 @@
                "size": 1056964608,
                "model": null,
                "serial": null,
-               "uuid": "de2b8517-f972-45fc-b121-3e160c8ea432"
+               "uuid": "de2b8517-f972-45fc-b121-3e160c8ea432",
+               "rota": true,
+               "tran": null
             }
          ]
       }

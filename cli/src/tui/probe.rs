@@ -946,6 +946,132 @@ mod tests {
         }
     }
 
+    fn transport_test_disks() -> DiskIdentity {
+        DiskIdentity {
+            names: vec!["vdb".to_owned()],
+            by_id: HashMap::new(),
+            luks_uuid: HashMap::from([(
+                "vdb".to_owned(),
+                LuksUuid::parse("11111111-1111-1111-1111-111111111111").unwrap(),
+            )]),
+            devid: HashMap::from([("vdb".to_owned(), 1)]),
+        }
+    }
+
+    fn lsblk_transport_json(parent_tran: Option<&str>) -> String {
+        let tran = parent_tran
+            .map(|value| format!(r#""{value}""#))
+            .unwrap_or_else(|| "null".to_owned());
+        format!(
+            r#"{{
+                "blockdevices": [{{
+                    "name": "vdb",
+                    "type": "disk",
+                    "size": 1073741824,
+                    "model": null,
+                    "serial": "disk1",
+                    "uuid": "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa",
+                    "rota": true,
+                    "tran": {tran},
+                    "children": [{{
+                        "name": "braid-vdb",
+                        "type": "crypt",
+                        "size": 1056964608,
+                        "model": null,
+                        "serial": null,
+                        "uuid": "bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb",
+                        "rota": null,
+                        "tran": null
+                    }}]
+                }}]
+            }}"#
+        )
+    }
+
+    fn probe_disk_transport(parent_tran: Option<&str>) -> HashMap<String, String> {
+        let mp = MountPoint("/mnt/storage".to_owned());
+        let runner = MockRunner::default()
+            .with_output(
+                CmdRequest::BtrfsFilesystemShow {
+                    mount_point: mp.clone(),
+                },
+                ok_raw(
+                    "btrfs filesystem show",
+                    "Label: none  uuid: aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee\n\
+                     \tTotal devices 1 FS bytes used 1.00GiB\n\
+                     \tdevid    1 size 10.00GiB used 2.00GiB path /dev/mapper/braid-vdb\n",
+                ),
+            )
+            .with_output(
+                CmdRequest::CryptsetupStatus {
+                    mapper: MapperName("braid-vdb".into()),
+                },
+                ok_raw(
+                    "cryptsetup status",
+                    "/dev/mapper/braid-vdb is active.\n\tdevice:  /dev/vdb\n",
+                ),
+            )
+            .with_output(
+                CmdRequest::CryptsetupLuksUuid {
+                    device: "/dev/vdb".into(),
+                },
+                ok_raw(
+                    "cryptsetup luksUUID",
+                    "11111111-1111-1111-1111-111111111111\n",
+                ),
+            )
+            .with_output(
+                CmdRequest::BtrfsFilesystemDfJson {
+                    mount_point: mp.clone(),
+                },
+                ok_raw(
+                    "btrfs filesystem df",
+                    r#"{"filesystem-df": [
+                        {"bg-type": "Data", "bg-profile": "single", "total": 67108864, "used": 16777216}
+                    ]}"#,
+                ),
+            )
+            .with_output(
+                CmdRequest::BtrfsDeviceUsageRaw {
+                    mount_point: mp.clone(),
+                },
+                ok_raw(
+                    "btrfs device usage",
+                    "/dev/dm-0, ID: 1\n\
+                     \x20  Device size:          1073741824\n\
+                     \x20  Device slack:              0\n\
+                     \x20  Data,single:          67108864\n\
+                     \x20  Unallocated:          1006632960\n",
+                ),
+            )
+            .with_output(
+                CmdRequest::BtrfsBalanceStatus {
+                    mount_point: mp.clone(),
+                },
+                ok_raw(
+                    "btrfs balance status",
+                    "No balance found on '/mnt/storage'\n",
+                ),
+            )
+            .with_output(
+                CmdRequest::LsblkJson,
+                ok_raw("lsblk", &lsblk_transport_json(parent_tran)),
+            );
+
+        let pool = expect_pool(
+            probe_pool_for_tui(
+                &runner,
+                &StubFs::empty(),
+                &mp,
+                &transport_test_disks(),
+                &test_paths().1,
+                crate::test_fixtures::mock_virtio_backing_path_resolver(),
+            )
+            .unwrap(),
+        );
+        pool.disk_transport
+    }
+
     /// Intent: probe_pool_for_tui passes through per-device allocations and
     /// unallocated bytes from btrfs device usage into DiskUsage, rather than
     /// collapsing them into aggregate data/metadata sums.
@@ -1118,6 +1244,21 @@ mod tests {
         // Logical used = sum of non-GlobalReserve bg_used from the df
         // mock: 16777216 (Data) + 16384 (System) + 65536 (Metadata).
         assert_eq!(pool.capacity_used_bytes, 16777216 + 16384 + 65536);
+    }
+
+    // Intent: TUI pool probing maps a physical parent's lsblk TRAN value
+    // to the child braid mapper's disk name.
+    // Why it exists: the Data-tab Bus column depends on this best-effort
+    // bridge, and VM browse tests only exercise the `lsblk -f` path.
+    // Scenario: /dev/vdb reports tran=sata for child mapper braid-vdb;
+    // a parent with tran=null leaves the disk without a bus mapping.
+    #[test]
+    fn disk_transport_comes_from_parent_lsblk_tran() {
+        let transport = probe_disk_transport(Some("sata"));
+        assert_eq!(transport.get("vdb").map(String::as_str), Some("sata"));
+
+        let transport = probe_disk_transport(None);
+        assert!(!transport.contains_key("vdb"));
     }
 
     /// Intent: TUI device_errors is keyed by disk name resolved via devid,
