@@ -218,7 +218,7 @@ struct UpsStatusArgs {
 struct RecoverArgs {
     #[command(flatten)]
     passphrase: PassphraseInputArgs,
-    /// Allow mounting with missing devices (degraded mode -- new writes have no redundancy)
+    /// Allow mounting with missing devices (degraded mode -- redundancy is reduced until you replace the missing device)
     #[arg(long)]
     allow_degraded: bool,
     /// Show what would be done without making changes
@@ -367,7 +367,7 @@ struct UnlockArgs {
     /// Unlock with a binary keyfile instead of passphrase
     #[arg(long, conflicts_with_all = ["passphrase_stdin", "passphrase_file"])]
     key_file: Option<std::path::PathBuf>,
-    /// Allow mounting with missing devices (degraded mode -- new writes have no redundancy)
+    /// Allow mounting with missing devices (degraded mode -- redundancy is reduced until you replace the missing device)
     #[arg(long)]
     allow_degraded: bool,
     /// Show what would be done without making changes

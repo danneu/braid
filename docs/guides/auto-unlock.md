@@ -108,7 +108,7 @@ If you want the pool to come online even with a missing drive (for example, if a
 autoUnlock.allowDegraded = true;
 ```
 
-New writes in degraded mode have no redundancy until the drive is replaced and data rebalances.
+Redundancy is reduced until the drive is replaced and data rebalances.
 
 ## Step 3: Test it
 

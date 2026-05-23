@@ -45,7 +45,7 @@ Status values:
 | Status | Meaning |
 |---|---|
 | **intact** | All disks present, no issues |
-| **DEGRADED (N missing devices)** | One or more disks are missing; new writes have no redundancy for the missing device's data |
+| **DEGRADED (N missing devices)** | One or more disks are missing; redundancy is reduced on the missing device's data |
 | **not mounted** | Pool is offline (LUKS closed or not mounted) |
 
 ### Alert banner

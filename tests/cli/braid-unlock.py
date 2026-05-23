@@ -443,7 +443,14 @@ with subtest("Test 4a_dry: dry-run missing disk -- stderr has probe + refusal, s
 # --- Test 4b: Missing disk — --allow-degraded mounts degraded ---
 
 with subtest("Test 4b: missing disk — --allow-degraded mounts degraded"):
-    machine.succeed(unlock_cmd(passphrase, extra="--allow-degraded"))
+    machine.succeed(
+        f"{unlock_cmd(passphrase, extra='--allow-degraded')}"
+        " >/tmp/unlock-degraded-stdout 2>/tmp/unlock-degraded-stderr"
+    )
+    err = machine.succeed("cat /tmp/unlock-degraded-stderr")
+    assert "redundancy is reduced" in err, (
+        f"expected post-mount degraded warning on stderr; got: {err!r}"
+    )
 
     machine.succeed("mountpoint -q /mnt/storage")
 

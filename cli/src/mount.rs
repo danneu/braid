@@ -13,6 +13,8 @@ use crate::status_tag::{StatusTag, color_enabled_for_stderr, emit_status, status
 use crate::types::{ByIdPath, ConfigDiskState, DiskName, MapperName, MountPoint};
 use std::path::Path;
 
+const DEGRADED_MOUNT_WARNING: &str = "pool: mounted degraded with missing device(s) -- redundancy is reduced; next: braid replace";
+
 #[derive(Debug, thiserror::Error)]
 pub enum MountError {
     #[error("{0}")]
@@ -84,7 +86,7 @@ fn format_degraded_refused(missing: &[(String, MissingReason)], command_hint: &s
         };
         lines.push(format!("  {name}: {reason_text}"));
     }
-    lines.push("new writes would have ZERO redundancy (single-profile chunks)".to_owned());
+    lines.push("new writes would land on a degraded pool with reduced redundancy".to_owned());
     lines.push(format!("hint: braid {command_hint} --allow-degraded"));
     if missing.iter().any(|(_, r)| r.is_luks_header_state()) {
         lines.push("run 'braid doctor' for recovery guidance".to_owned());
@@ -852,6 +854,13 @@ fn scan_and_mount<R: CommandRunner, F: Filesystem + ?Sized>(
         )
     );
 
+    if plan.any_missing_member {
+        eprint!(
+            "{}",
+            status_line(StatusTag::Warn, color_enabled, DEGRADED_MOUNT_WARNING)
+        );
+    }
+
     Ok(true)
 }
 
@@ -1247,6 +1256,18 @@ mod tests {
         assert!(result.unwrap());
     }
 
+    // Intent: the degraded mount warning keeps the two operator-facing tokens
+    //   that explain the hazard and the next command.
+    // Why it exists: a degraded mount can otherwise look like an ordinary
+    //   successful unlock if the user misses the earlier per-disk probe rows.
+    // Scenario: `braid unlock --allow-degraded` mounts successfully and the
+    //   stderr tail must mention reduced redundancy and `braid replace`.
+    #[test]
+    fn degraded_mount_warning_mentions_reduced_redundancy_and_replace() {
+        assert!(DEGRADED_MOUNT_WARNING.contains("redundancy is reduced"));
+        assert!(DEGRADED_MOUNT_WARNING.contains("braid replace"));
+    }
+
     /// Intent: When a disk is absent and --allow-degraded is NOT passed, the
     /// mount must be refused with a clear error including the command hint.
     ///
@@ -1340,9 +1361,8 @@ mod tests {
     }
 
     /// Intent: format_degraded_refused must surface the disk name, the
-    /// reason ("LUKS header unreadable"), the substring contracts that
-    /// existing tests anchor on, and the singular "1 missing device" form
-    /// for a single-disk failure.
+    /// reason ("LUKS header unreadable"), the reduced-redundancy warning,
+    /// and the singular "1 missing device" form for a single-disk failure.
     ///
     /// Why: The Test 7 VM scenario hits exactly this shape (one raw
     /// member in a 2-disk pool). If any of these substrings drift, both
@@ -1379,8 +1399,8 @@ mod tests {
             "singular form should not have trailing 's': {msg}"
         );
         assert!(
-            msg.contains("new writes would have ZERO redundancy"),
-            "missing redundancy warning preserved from old message: {msg}"
+            msg.contains("reduced redundancy"),
+            "missing reduced-redundancy warning: {msg}"
         );
     }
 

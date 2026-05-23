@@ -60,7 +60,7 @@ sudo braid recover --dry-run
 | --- | --- |
 | `--passphrase-stdin` | Read passphrase from stdin instead of TTY prompt |
 | `--passphrase-file <path>` | Read passphrase from a file instead of TTY prompt (conflicts with `--passphrase-stdin`) |
-| `--allow-degraded` | Allow mounting with missing devices (new writes have no redundancy) |
+| `--allow-degraded` | Allow mounting with missing devices (redundancy is reduced until you replace the missing device) |
 | `--dry-run` | Show what would be done without making changes |
 
 ## What happens under the hood

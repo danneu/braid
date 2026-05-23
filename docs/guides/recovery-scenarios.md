@@ -186,7 +186,7 @@ If a drive failed during the interrupted operation:
 sudo braid recover --allow-degraded
 ```
 
-Without `--allow-degraded`, recover exits with code 2 when devices are missing. The degraded flag allows mounting with missing devices so recovery can complete. New writes will have no redundancy until the missing device is replaced.
+Without `--allow-degraded`, recover exits with code 2 when devices are missing. The degraded flag allows mounting with missing devices so recovery can complete. Redundancy is reduced until the missing device is replaced.
 
 ### Scripted recovery
 
@@ -229,7 +229,7 @@ If the pool is not mounted:
 sudo braid unlock --allow-degraded
 ```
 
-This mounts the pool in degraded mode. All data is still accessible (btrfs RAID1 keeps a copy on the surviving disk(s)), but new writes have no redundancy until you replace the dead drive.
+This mounts the pool in degraded mode. All data is still accessible (btrfs RAID1 keeps a copy on the surviving disk(s)), but the pool is running with reduced redundancy until you replace the dead drive.
 
 ### Hot-unplug while pool is mounted
 
@@ -295,7 +295,7 @@ Use this when you do not have a replacement disk. The pool continues with fewer 
 
 ## Degraded mount
 
-A degraded mount means at least one pool disk is missing. The pool is usable but new writes have no redundancy on the missing device's share of data.
+A degraded mount means at least one pool disk is missing. The pool is usable but the pool is running with reduced redundancy on the missing device's share of data.
 
 ### When degraded mounts happen
 
@@ -305,7 +305,7 @@ A degraded mount means at least one pool disk is missing. The pool is usable but
 
 ### Risks
 
-- **No redundancy for new writes** -- data written while degraded exists on fewer disks. A second drive failure could lose data.
+- **Reduced redundancy** -- the pool is short the missing device's mirror copy of existing data, and on 2-disk pools new writes are allocated as single-profile chunks. A further drive failure could lose data.
 - **No self-healing** -- btrfs cannot repair corrupted blocks from a redundant copy if the copy was on the missing device.
 
 ### Resolution
