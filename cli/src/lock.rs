@@ -9,10 +9,13 @@ use crate::preflight;
 use crate::preview::{Preview, PreviewCompleteness, PreviewNote};
 use crate::probe::{Filesystem, ProbeError, probe_fsid, probe_pool};
 use crate::progress::{RealSleeper, Sleeper};
-use crate::status_tag::{StatusTag, color_enabled_for_stderr, status_line};
+use crate::status_tag::{StatusTag, color_enabled_for_stderr, emit_status, status_line};
 use crate::types::{DiskName, LuksUuid, MapperName, MountPoint, PoolState, format_uuid_list};
 use std::collections::HashSet;
 use std::io::{self, Write};
+
+const UMOUNT_RETRY_ATTEMPTS: u32 = 3;
+const UMOUNT_RETRY_DELAY: std::time::Duration = std::time::Duration::from_millis(500);
 
 #[derive(Debug, thiserror::Error)]
 pub enum LockError {
@@ -335,6 +338,57 @@ fn umount_stderr_is_busy(stderr: &str) -> bool {
     s == "target is busy" || s.ends_with(": target is busy")
 }
 
+/// Centralize the umount failure message and lsof/fuser hint so retry
+/// exhaustion and non-busy failures preserve one operator-facing contract.
+fn build_umount_error(mount_point: &MountPoint, exit_status: i32, stderr: &str) -> LockError {
+    let mut msg = format!("umount {mount_point} failed (exit {exit_status}): {stderr}");
+    if umount_stderr_is_busy(stderr) {
+        msg.push_str(&format!(
+            "\nhint: a process may be using files on the mount. \
+             Run 'lsof {mount_point}' or 'fuser -vm {mount_point}' to identify it."
+        ));
+    }
+    LockError::Failed(msg)
+}
+
+/// Retry transient EBUSY from the kernel-side file-descriptor release race
+/// after lifecycle consumers such as SMB/NFS have already stopped.
+fn umount_with_retry<R, S>(
+    runner: &R,
+    sleeper: &S,
+    mount_point: &MountPoint,
+    color_enabled: bool,
+) -> Result<(), LockError>
+where
+    R: CommandRunner,
+    S: Sleeper + ?Sized,
+{
+    for attempt in 1..=UMOUNT_RETRY_ATTEMPTS {
+        let result = runner.run(&CmdRequest::Umount {
+            mount_point: mount_point.clone(),
+        })?;
+        if result.exit_status == 0 {
+            return Ok(());
+        }
+        let stderr = result.stderr.trim();
+        if !umount_stderr_is_busy(stderr) {
+            return Err(build_umount_error(mount_point, result.exit_status, stderr));
+        }
+        if attempt == UMOUNT_RETRY_ATTEMPTS {
+            return Err(build_umount_error(mount_point, result.exit_status, stderr));
+        }
+        emit_status(&status_line(
+            StatusTag::Warn,
+            color_enabled,
+            &format!(
+                "umount {mount_point} busy, retrying ({attempt}/{UMOUNT_RETRY_ATTEMPTS})..."
+            ),
+        ));
+        sleeper.sleep(UMOUNT_RETRY_DELAY);
+    }
+    unreachable!()
+}
+
 /// Shared close-and-aggregate state for the membership and orphan
 /// loop in `LockPlan::execute`. Bundles the loop-invariant inputs
 /// (runner, sleeper, color, umount-busy suppression flag) with the
@@ -539,73 +593,64 @@ impl LockPlan {
                     &format!("pool: unmounting {mount_point}..."),
                 )
             );
-            let umount_result = runner.run(&CmdRequest::Umount {
-                mount_point: mount_point.clone(),
-            })?;
-            if umount_result.exit_status != 0 {
-                let stderr = umount_result.stderr.trim();
-                let mut msg = format!(
-                    "umount {mount_point} failed (exit {}): {stderr}",
-                    umount_result.exit_status,
-                );
-                if umount_stderr_is_busy(stderr) {
-                    msg.push_str(&format!(
-                        "\nhint: a process may be using files on the mount. \
-                         Run 'lsof {mount_point}' or 'fuser -vm {mount_point}' to identify it."
-                    ));
-                }
-                let err = LockError::Failed(msg);
-                eprint!("{}", line(StatusTag::Fail, &format!("{err}")));
-                eprint!(
-                    "{}",
-                    line(
-                        StatusTag::Warn,
-                        "attempting to close LUKS mappers despite umount failure..."
-                    )
-                );
-                umount_error = Some(err);
-            } else {
-                eprint!(
-                    "{}",
-                    line(StatusTag::Ok, &format!("pool: unmounted {mount_point}"))
-                );
+            match umount_with_retry(runner, sleeper, mount_point, color_enabled) {
+                Ok(()) => {
+                    eprint!(
+                        "{}",
+                        line(StatusTag::Ok, &format!("pool: unmounted {mount_point}"))
+                    );
 
-                // Clear btrfs kernel scan registry so that cryptsetup close
-                // doesn't race against stale device references on multi-device
-                // pools. Scope to the close set (membership + orphan mappers)
-                // -- the no-arg form is kernel-global and would invalidate
-                // scan entries for unrelated btrfs filesystems on the host.
-                let mut forget_devs = self.close_set.forget_paths();
-                forget_devs.retain(|p| fs.exists(p));
-                if !forget_devs.is_empty() {
-                    let forget_result = runner.run(&CmdRequest::BtrfsDeviceScanForget {
-                        devices: forget_devs,
-                    });
-                    match forget_result {
-                        Ok(r) if r.exit_status == 0 => {}
-                        Ok(r) => {
-                            eprint!(
-                                "{}",
-                                line(
-                                    StatusTag::Warn,
-                                    &format!(
-                                        "btrfs device scan --forget failed (exit {}): {} (continuing)",
-                                        r.exit_status,
-                                        r.stderr.trim()
+                    // Clear btrfs kernel scan registry so that cryptsetup close
+                    // doesn't race against stale device references on multi-device
+                    // pools. Scope to the close set (membership + orphan mappers)
+                    // -- the no-arg form is kernel-global and would invalidate
+                    // scan entries for unrelated btrfs filesystems on the host.
+                    let mut forget_devs = self.close_set.forget_paths();
+                    forget_devs.retain(|p| fs.exists(p));
+                    if !forget_devs.is_empty() {
+                        let forget_result = runner.run(&CmdRequest::BtrfsDeviceScanForget {
+                            devices: forget_devs,
+                        });
+                        match forget_result {
+                            Ok(r) if r.exit_status == 0 => {}
+                            Ok(r) => {
+                                eprint!(
+                                    "{}",
+                                    line(
+                                        StatusTag::Warn,
+                                        &format!(
+                                            "btrfs device scan --forget failed (exit {}): {} (continuing)",
+                                            r.exit_status,
+                                            r.stderr.trim()
+                                        )
                                     )
-                                )
-                            );
-                        }
-                        Err(e) => {
-                            eprint!(
-                                "{}",
-                                line(
-                                    StatusTag::Warn,
-                                    &format!("btrfs device scan --forget failed: {e} (continuing)")
-                                )
-                            );
+                                );
+                            }
+                            Err(e) => {
+                                eprint!(
+                                    "{}",
+                                    line(
+                                        StatusTag::Warn,
+                                        &format!(
+                                            "btrfs device scan --forget failed: {e} (continuing)"
+                                        )
+                                    )
+                                );
+                            }
                         }
                     }
+                }
+                Err(err @ LockError::Cmd(_)) => return Err(err),
+                Err(err) => {
+                    eprint!("{}", line(StatusTag::Fail, &format!("{err}")));
+                    eprint!(
+                        "{}",
+                        line(
+                            StatusTag::Warn,
+                            "attempting to close LUKS mappers despite umount failure..."
+                        )
+                    );
+                    umount_error = Some(err);
                 }
             }
         }
@@ -1157,6 +1202,32 @@ mod tests {
             .iter()
             .map(DiskName::as_str)
             .collect()
+    }
+
+    fn umount_request() -> CmdRequest {
+        CmdRequest::Umount {
+            mount_point: MountPoint("/mnt/storage".to_owned()),
+        }
+    }
+
+    fn umount_busy_output() -> RawCommandOutput {
+        lock_err_raw("umount /mnt/storage", 32, "target is busy")
+    }
+
+    fn umount_request_count(runner: &MockRunner) -> usize {
+        runner
+            .requests()
+            .iter()
+            .filter(|request| matches!(request, CmdRequest::Umount { .. }))
+            .count()
+    }
+
+    fn cryptsetup_close_request_count(runner: &MockRunner) -> usize {
+        runner
+            .requests()
+            .iter()
+            .filter(|request| matches!(request, CmdRequest::CryptsetupClose { .. }))
+            .count()
     }
 
     fn btrfs_show_for_lock_mappers(mapper_aaa: &str, mapper_bbb: &str) -> RawCommandOutput {
@@ -1788,11 +1859,13 @@ mod tests {
             },
             lock_ok_raw("mountpoint -q /mnt/storage"),
         ))
-        .with_output(
-            CmdRequest::Umount {
-                mount_point: MountPoint("/mnt/storage".to_owned()),
-            },
-            lock_err_raw("umount /mnt/storage", 32, "target is busy"),
+        .with_output_sequence(
+            umount_request(),
+            vec![
+                umount_busy_output(),
+                umount_busy_output(),
+                umount_busy_output(),
+            ],
         )
         .with_output(
             CmdRequest::CryptsetupClose {
@@ -1821,6 +1894,11 @@ mod tests {
         let err = cmd_lock_impl(&runner, &fs, &LockNoopSleeper, &config, &membership, false)
             .expect_err("should fail on busy");
         assert!(err.to_string().contains("target is busy"));
+        assert_eq!(
+            umount_request_count(&runner),
+            UMOUNT_RETRY_ATTEMPTS as usize,
+            "busy umount should exhaust retry attempts"
+        );
     }
 
     // Intent: the umount-busy error message includes actionable diagnostic hints.
@@ -1836,11 +1914,13 @@ mod tests {
             },
             lock_ok_raw("mountpoint -q /mnt/storage"),
         ))
-        .with_output(
-            CmdRequest::Umount {
-                mount_point: MountPoint("/mnt/storage".to_owned()),
-            },
-            lock_err_raw("umount /mnt/storage", 32, "target is busy"),
+        .with_output_sequence(
+            umount_request(),
+            vec![
+                umount_busy_output(),
+                umount_busy_output(),
+                umount_busy_output(),
+            ],
         )
         .with_output(
             CmdRequest::CryptsetupClose {
@@ -1872,6 +1952,182 @@ mod tests {
         assert!(
             msg.contains("lsof") && msg.contains("fuser"),
             "expected lsof/fuser hint in error, got: {msg}"
+        );
+    }
+
+    // Intent: transient umount EBUSY retries and succeeds when a later attempt
+    //   observes the kernel-side holder release.
+    // Why it exists: SMB/NFS lifecycle consumers can stop successfully while
+    //   the kernel has not yet released the last file descriptors, so one
+    //   immediate umount failure must not abort an otherwise clean lock.
+    // Scenario: first umount returns "target is busy", the second succeeds,
+    //   then lock forgets btrfs scan state and closes both member mappers.
+    #[test]
+    fn lock_umount_busy_retry_succeeds_on_second_attempt() {
+        let runner = lock_with_fsid_probe_mocks(MockRunner::default().with_output(
+            CmdRequest::MountpointCheck {
+                path: MountPoint("/mnt/storage".to_owned()),
+            },
+            lock_ok_raw("mountpoint -q /mnt/storage"),
+        ))
+        .with_output_sequence(
+            umount_request(),
+            vec![umount_busy_output(), lock_ok_raw("umount /mnt/storage")],
+        )
+        .with_output(
+            CmdRequest::BtrfsDeviceScanForget {
+                devices: vec![
+                    "/dev/mapper/braid-aaa".into(),
+                    "/dev/mapper/braid-bbb".into(),
+                ],
+            },
+            lock_ok_raw("btrfs device scan --forget"),
+        )
+        .with_output(
+            CmdRequest::CryptsetupClose {
+                mapper: MapperName("braid-aaa".into()),
+            },
+            lock_ok_raw("cryptsetup close braid-aaa"),
+        )
+        .with_output(
+            CmdRequest::CryptsetupClose {
+                mapper: MapperName("braid-bbb".into()),
+            },
+            lock_ok_raw("cryptsetup close braid-bbb"),
+        );
+        let fs = lock_fs(&["/dev/mapper/braid-aaa", "/dev/mapper/braid-bbb"]);
+        let config = lock_test_config();
+        let membership = lock_test_membership();
+
+        let mut result = None;
+        let captured = crate::status_tag::testing::capture_with_color(false, || {
+            result = Some(cmd_lock_impl(
+                &runner,
+                &fs,
+                &LockNoopSleeper,
+                &config,
+                &membership,
+                false,
+            ));
+        });
+
+        result
+            .expect("lock result should be captured")
+            .expect("lock should succeed after transient umount busy");
+        assert_eq!(
+            umount_request_count(&runner),
+            2,
+            "second umount attempt should succeed"
+        );
+        assert_eq!(
+            cryptsetup_close_request_count(&runner),
+            2,
+            "lock should close both member mappers after successful umount retry"
+        );
+        let warn = "[warn] umount /mnt/storage busy, retrying (1/3)...";
+        assert!(
+            captured.contains(warn),
+            "missing umount retry warning {warn:?} in {captured:?}"
+        );
+    }
+
+    // Intent: non-busy umount failures fail without retrying.
+    // Why it exists: exit 32 is generic for libmount syscall failures; retry
+    //   must be reserved for the EBUSY diagnostic so unrelated failures are
+    //   not delayed or mislabeled as transient holders.
+    // Scenario: umount reports "device not configured"; lock records one
+    //   umount request, emits no retry warning, and returns the umount error.
+    #[test]
+    fn lock_umount_non_busy_failure_does_not_retry() {
+        let runner = lock_with_fsid_probe_mocks(MockRunner::default().with_output(
+            CmdRequest::MountpointCheck {
+                path: MountPoint("/mnt/storage".to_owned()),
+            },
+            lock_ok_raw("mountpoint -q /mnt/storage"),
+        ))
+        .with_output(
+            umount_request(),
+            lock_err_raw(
+                "umount /mnt/storage",
+                32,
+                "umount: /mnt/storage: device not configured.",
+            ),
+        )
+        .with_output(
+            CmdRequest::CryptsetupClose {
+                mapper: MapperName("braid-aaa".into()),
+            },
+            lock_ok_raw("cryptsetup close braid-aaa"),
+        )
+        .with_output(
+            CmdRequest::CryptsetupClose {
+                mapper: MapperName("braid-bbb".into()),
+            },
+            lock_ok_raw("cryptsetup close braid-bbb"),
+        );
+        let fs = lock_fs(&["/dev/mapper/braid-aaa", "/dev/mapper/braid-bbb"]);
+        let config = lock_test_config();
+        let membership = lock_test_membership();
+
+        let mut result = None;
+        let captured = crate::status_tag::testing::capture_with_color(false, || {
+            result = Some(cmd_lock_impl(
+                &runner,
+                &fs,
+                &LockNoopSleeper,
+                &config,
+                &membership,
+                false,
+            ));
+        });
+
+        let err = result
+            .expect("lock result should be captured")
+            .expect_err("non-busy umount failure should fail lock");
+        assert!(
+            err.to_string().contains("device not configured"),
+            "expected non-busy umount stderr in error, got: {err}"
+        );
+        assert_eq!(
+            umount_request_count(&runner),
+            1,
+            "non-busy umount failure must not retry"
+        );
+        assert!(
+            !captured.contains("retrying"),
+            "non-busy umount failure should not emit retry warning: {captured:?}"
+        );
+    }
+
+    // Intent: command-runner failures from umount bubble out immediately.
+    // Why it exists: `runner.run` errors mean braid could not execute umount
+    //   at all, so continuing into mapper close would hide a command
+    //   execution failure behind best-effort cleanup behavior.
+    // Scenario: the mounted-pool plan reaches umount, but the runner has no
+    //   umount mock and returns MissingMock; lock returns LockError::Cmd and
+    //   never issues a CryptsetupClose request.
+    #[test]
+    fn lock_umount_cmd_error_bubbles_immediately_without_mapper_close() {
+        let runner = lock_with_fsid_probe_mocks(MockRunner::default().with_output(
+            CmdRequest::MountpointCheck {
+                path: MountPoint("/mnt/storage".to_owned()),
+            },
+            lock_ok_raw("mountpoint -q /mnt/storage"),
+        ));
+        let fs = lock_fs(&["/dev/mapper/braid-aaa", "/dev/mapper/braid-bbb"]);
+        let config = lock_test_config();
+        let membership = lock_test_membership();
+
+        let err = cmd_lock_impl(&runner, &fs, &LockNoopSleeper, &config, &membership, false)
+            .expect_err("missing umount mock should return command error");
+        assert!(
+            matches!(err, LockError::Cmd(CmdError::MissingMock)),
+            "expected umount MissingMock to bubble as LockError::Cmd, got: {err:?}"
+        );
+        assert_eq!(
+            cryptsetup_close_request_count(&runner),
+            0,
+            "command-execution failure from umount must not attempt mapper close"
         );
     }
 
@@ -3527,6 +3783,63 @@ mod tests {
                 "/dev/mapper/braid-ccc".to_string(),
             ]],
             "forget must include the orphan mapper in the close set"
+        );
+    }
+
+    // Intent: umount_with_retry sleeps exactly UMOUNT_RETRY_DELAY between
+    //   busy attempts, and the production value remains 500ms.
+    // Why it exists: the retry delay covers a kernel-side file-descriptor
+    //   release race after SMB/NFS consumers stop. Other tests use
+    //   LockNoopSleeper, so they cannot catch a regression that zeroes,
+    //   removes, or bypasses the production sleep.
+    // Scenario: umount reports "target is busy" for all retry attempts; the
+    //   RecordingSleeper captures one 500ms sleep between each attempt pair
+    //   and the helper returns the final umount failure.
+    #[test]
+    fn umount_with_retry_sleeps_prod_delay_between_busy_attempts() {
+        struct RecordingSleeper(Mutex<Vec<Duration>>);
+        impl Sleeper for RecordingSleeper {
+            fn sleep(&self, d: Duration) {
+                self.0.lock().unwrap().push(d);
+            }
+        }
+
+        let sleeper = RecordingSleeper(Mutex::new(Vec::new()));
+        let runner = MockRunner::default().with_output_sequence(
+            umount_request(),
+            vec![
+                umount_busy_output(),
+                umount_busy_output(),
+                umount_busy_output(),
+            ],
+        );
+        let mount_point = MountPoint("/mnt/storage".into());
+
+        let err = umount_with_retry(&runner, &sleeper, &mount_point, false)
+            .expect_err("should exhaust retries and return umount failure");
+        assert!(
+            matches!(err, LockError::Failed(_)),
+            "expected LockError::Failed after retry exhaustion, got: {err:?}"
+        );
+
+        let recorded = sleeper.0.lock().unwrap().clone();
+        assert_eq!(
+            recorded.len(),
+            (UMOUNT_RETRY_ATTEMPTS - 1) as usize,
+            "expected one sleep between each pair of attempts, got: {recorded:?}"
+        );
+        for d in &recorded {
+            assert_eq!(
+                *d, UMOUNT_RETRY_DELAY,
+                "each retry must sleep UMOUNT_RETRY_DELAY, got: {recorded:?}"
+            );
+        }
+        assert_eq!(
+            UMOUNT_RETRY_DELAY,
+            Duration::from_millis(500),
+            "prod UMOUNT_RETRY_DELAY must stay 500ms; if you intend to \
+             change this, update the kernel-race justification in the \
+             commit message"
         );
     }
 
