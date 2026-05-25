@@ -48,12 +48,13 @@ Minimal configuration:
 # configuration.nix
 braid = {
   enable = true;
-  package = braid.packages.x86_64-linux.default;
   mountPoint = "/mnt/storage";  # default
 };
 ```
 
-`braid.enable` and `braid.package` are required. `mountPoint` defaults to `/mnt/storage`.
+Only `braid.enable = true` is required. `nixosModules.default` defaults
+`braid.package` to braid's pinned `braid-cli-unwrapped`; `mountPoint` defaults
+to `/mnt/storage`.
 
 Rebuild and switch:
 

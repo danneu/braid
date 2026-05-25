@@ -31,11 +31,11 @@ Complete reference for the braid NixOS module options. Read this when setting up
 # configuration.nix
 braid = {
   enable = true;
-  package = braid.packages.x86_64-linux.default;
 };
 ```
 
-`braid.package` is required when `braid.enable = true`. The module will fail evaluation without it.
+`nixosModules.default` supplies `braid.package` automatically. Override it only
+to build the CLI yourself.
 
 ## What you get for free
 
@@ -57,7 +57,7 @@ When `braid.enable = true`, the module sets up:
 | Option | Type | Default | Description |
 | --- | --- | --- | --- |
 | `braid.enable` | bool | `false` | Enable the braid module |
-| `braid.package` | package or null | `null` | The braid CLI package (required when enabled) |
+| `braid.package` | package or null | `null` | The braid CLI package; `nixosModules.default` defaults it to `braid-cli-unwrapped` |
 | `braid.mountPoint` | path | `/mnt/storage` | Where to mount the btrfs pool |
 | `braid.poolAccessGroup` | string or null | `"storage"` | Group for mount point access. `null` to disable |
 
@@ -163,7 +163,8 @@ Every option with its default (or a representative value for required/optional f
 ```nix
 braid = {
   enable = true;
-  package = braid.packages.x86_64-linux.default;
+  # package -- defaults to nixosModules.default's pinned braid-cli-unwrapped;
+  # set only to build the CLI yourself.
   mountPoint = "/mnt/storage";   # default
   poolAccessGroup = "storage";   # default; null to disable
 

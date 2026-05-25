@@ -35,7 +35,6 @@ The monthly btrfs scrub timer is registered as an autosuspend wakeup source. If 
 ```nix
 braid = {
   enable = true;
-  package = braid.packages.x86_64-linux.default;
 
   autoSuspend = {
     enable = true;

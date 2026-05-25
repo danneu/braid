@@ -72,7 +72,6 @@ Add to your NixOS configuration:
 # configuration.nix
 braid = {
   enable = true;
-  package = braid.packages.x86_64-linux.default;
 
   autoUnlock = {
     enable = true;

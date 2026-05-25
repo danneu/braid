@@ -48,6 +48,15 @@ sudo braid lock
 
 ## Install
 
+> NixOS/Linux only (x86_64). The CLI wraps Linux storage tooling (LUKS, btrfs,
+> systemd) and does not run on macOS.
+
+Try it without installing anything:
+
+```sh
+nix run github:danneu/braid -- --help
+```
+
 Add braid to your flake inputs and import the module:
 
 ```nix

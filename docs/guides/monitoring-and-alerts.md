@@ -38,7 +38,6 @@ Monitoring is on by default when `braid.enable = true`. Here is the full set of 
 ```nix
 braid = {
   enable = true;
-  package = braid.packages.x86_64-linux.default;
 
   monitor = {
     enable = true;        # default: true

@@ -69,7 +69,18 @@
           inherit (craneFor system) braid-cli-unwrapped;
           nix-fast-build = pkgs.nix-fast-build;
         }
-        // (if isLinux then { inherit (craneFor system) braid; } else { })
+        // (
+          if isLinux then
+            let
+              inherit (craneFor system) braid;
+            in
+            {
+              inherit braid;
+              default = braid;
+            }
+          else
+            { }
+        )
         // (
           if system == "aarch64-darwin" then
             {
@@ -805,6 +816,10 @@
             import ./tests/eval/lock-systemd-stop-deadline-assertion-fails.nix {
               inherit pkgs linuxPkgs nixpkgs linuxSystem;
             };
+          eval-nixos-module-default-supplies-package =
+            import ./tests/eval/nixos-module-default-package.nix {
+              inherit pkgs self nixpkgs;
+            };
           ups-preflight-on-battery = pkgs.testers.nixosTest (
             import ./tests/module/ups-preflight-on-battery.nix {
               braid = linuxCrane.braid-cli-unwrapped;
@@ -984,6 +999,29 @@
         };
 
       packages = forAllSystems packagesFor;
+
+      # Linux-only runnable CLI. `nix run`/`nix build` resolve `default` and
+      # the explicit `braid` app to the wrapped binary, which carries storage
+      # tooling on PATH. Darwin gets no runnable app on purpose.
+      apps = forAllSystems (
+        system:
+        let
+          isLinux = builtins.match ".*-linux" system != null;
+        in
+        if isLinux then
+          let
+            braidApp = {
+              type = "app";
+              program = "${self.packages.${system}.braid}/bin/braid";
+            };
+          in
+          {
+            braid = braidApp;
+            default = braidApp;
+          }
+        else
+          { }
+      );
 
       # Linux-only: the default devShell pulls in btrfs-progs/cryptsetup/nut/util-linux,
       # none of which evaluate on darwin. Use linux-builder or a Linux host.
