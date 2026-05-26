@@ -1,17 +1,17 @@
 # Test: braid idle exit codes
 #
 # Intent: Verify that `braid idle` returns exit 0 when the pool is idle or
-#   offline, and exit 1 when a btrfs operation is running or a
-#   pool-state probe fails.
+#   offline, exit 1 when a btrfs operation is running or a pool-state probe
+#   fails, and exit 2 when config loading fails.
 #
 # Why it exists: braid idle is the integration point for autosuspend --
 #   incorrect exit codes would either prevent the NAS from ever sleeping
 #   (false busy) or allow sleep during active I/O (false idle).
 #
-# Scenario: 2-disk RAID1 pool. Check exit 0 when pool offline, exit 0 when
-#   pool idle, exit 1 on a forced probe failure, and exit 1 during scrub
-#   (racy on small VM disks -- unit tests are authoritative for the busy
-#   path).
+# Scenario: 2-disk RAID1 pool. Check exit 0 when pool offline, exit 2 for
+#   unreadable or unparseable config, exit 0 when pool idle, exit 1 on a forced
+#   probe failure, and exit 1 during scrub (racy on small VM disks -- unit
+#   tests are authoritative for the busy path).
 
 import base64
 import re
@@ -26,6 +26,19 @@ with subtest("braid idle exits 0 when pool is offline"):
     machine.succeed("braid idle")
     output = machine.succeed("braid idle").strip()
     assert "idle" in output, f"Expected 'idle' in output, got: {output}"
+
+with subtest("braid idle exits 2 on config-load failure (setup error, not exit 1)"):
+    # Exit 2 is the documented "config could not be read" contract (idle.md, ADR 016).
+    # The path-substring check proves config_read ran: Cli::parse() runs before the
+    # config load and Clap usage errors also exit 2, so the exit code alone is not
+    # proof (the injected path only appears via ConfigError::{Read,Parse} Display).
+    machine.succeed("echo 'not json {{{' > /tmp/bad.json")
+    status, output = machine.execute("braid idle --config /tmp/bad.json 2>&1")
+    assert status == 2, f"unparseable config must exit 2 (not 1), got {status}: {output}"
+    assert "/tmp/bad.json" in output, f"exit 2 must be config-load (not clap usage), got: {output}"
+    status, output = machine.execute("braid idle --config /tmp/nonexistent.json 2>&1")
+    assert status == 2, f"missing config must exit 2 (not 1), got {status}: {output}"
+    assert "/tmp/nonexistent.json" in output, f"exit 2 must be config-load (not clap usage), got: {output}"
 
 with subtest("Create 2-disk RAID1 pool"):
     for d in ["disk1", "disk2"]:

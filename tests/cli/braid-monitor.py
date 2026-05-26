@@ -1,15 +1,17 @@
 # Test: braid monitor + ack lifecycle
 #
 # Intent: Verify the full alert lifecycle for btrfs-detected issues:
-#   detection → status banner → ack → cleared.
+#   detection -> status banner -> ack -> cleared, plus exit 2 for
+#   config-load setup errors.
 #
 # Why it exists: Without this test, we have no integration proof that
 #   `braid monitor` exit codes, `braid status` banners, and `braid ack`
 #   all agree on the alert state.
 #
-# Scenario: 3-disk RAID1 pool. One LUKS mapper is closed to simulate a
-#   failed drive. monitor detects the degraded state, status shows the
-#   banner, ack clears it, and monitor returns clean.
+# Scenario: 3-disk RAID1 pool. Check config-load failures after a healthy
+#   monitor proves the pool lock is acquirable. Then close one LUKS mapper
+#   to simulate a failed drive. monitor detects the degraded state, status
+#   shows the banner, ack clears it, and monitor returns clean.
 
 import json
 import re
@@ -60,6 +62,19 @@ with subtest("Create 3-disk RAID1 pool"):
 
 with subtest("Healthy pool: monitor exits 0"):
     machine.succeed("braid monitor")
+
+with subtest("braid monitor exits 2 on config-load failure (setup error, not lock/alert exit)"):
+    # monitor takes the pool lock first (MonitorSilent); lock errors also exit 2.
+    # The healthy run above proves the lock is acquirable, so the only changed
+    # variable is --config. Assert the error names the config path to confirm
+    # exit 2 is the config-load path, not a lock error.
+    machine.succeed("echo 'not json {{{' > /tmp/bad.json")
+    status, output = machine.execute("braid monitor --config /tmp/bad.json 2>&1")
+    assert status == 2, f"unparseable config must exit 2, got {status}: {output}"
+    assert "/tmp/bad.json" in output, f"exit 2 must be config-load (not lock), got: {output}"
+    status, output = machine.execute("braid monitor --config /tmp/nonexistent.json 2>&1")
+    assert status == 2, f"missing config must exit 2, got {status}: {output}"
+    assert "/tmp/nonexistent.json" in output, f"exit 2 must be config-load (not lock), got: {output}"
 
 with subtest("Healthy pool: status has no ALERT"):
     output = machine.succeed("braid status")
