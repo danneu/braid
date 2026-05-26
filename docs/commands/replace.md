@@ -11,13 +11,10 @@ Replace a disk with a new one using `btrfs replace`. Works for both live (still-
 
 ## Basic example
 
-Replace a live disk:
-
-```
-sudo braid replace --old toshiba1 --new toshiba4=/dev/disk/by-id/ata-TOSHIBA_MN07ACA12T_NEW1
-```
-
-Replace a dead/missing disk (the missing devid is resolved automatically from --old's pool.json entry):
+The same invocation replaces a disk whether it is still live or already
+dead/missing. braid resolves `--old` against `pool.json` to find the member and
+detects its state automatically, so there is no mode to choose and `--missing-id`
+is never required:
 
 ```
 sudo braid replace --old toshiba1 --new toshiba4=/dev/disk/by-id/ata-TOSHIBA_MN07ACA12T_NEW1
