@@ -5,6 +5,7 @@ use super::shared::{PoolFixture, mock_ok, mock_virtio_offset_backing_path_resolv
 use crate::btrfs_ioctl::tests_support::MockBtrfsDevInfo;
 use crate::cmd::{CmdError, CmdRequest, LsblkFieldKind, MockRunner, RawCommandOutput};
 use crate::config::Config;
+use crate::confirm::RecordingConfirm;
 use crate::inhibit::RecordingInhibitor;
 use crate::membership::{self, PoolMembership};
 use crate::progress::{self, ProgressOutput};
@@ -324,6 +325,7 @@ impl PoolFixture {
             config: base.config,
             pass_path: base.pass_path,
             inhibitor: RecordingInhibitor::new(),
+            confirm: RecordingConfirm::new(),
         }
     }
 
@@ -345,6 +347,7 @@ impl PoolFixture {
             config: &self.config,
             paths: &self.paths,
             inhibitor: &self.inhibitor,
+            confirm: &self.confirm,
             backing_path_resolver: mock_virtio_offset_backing_path_resolver(),
         }
     }
@@ -370,6 +373,7 @@ pub(crate) struct ReplaceParamsBuilder<'a> {
     config: &'a Config,
     paths: &'a StatePaths,
     inhibitor: &'a RecordingInhibitor,
+    confirm: &'a RecordingConfirm,
     backing_path_resolver: &'a dyn crate::luks::BackingPathResolver,
 }
 
@@ -421,6 +425,7 @@ impl<'a> ReplaceParamsBuilder<'a> {
             progress: self.progress,
             paths: self.paths,
             sleep_inhibitor: self.inhibitor,
+            confirm: self.confirm,
             sleeper: &progress::NoopSleeper,
             backing_path_resolver: self.backing_path_resolver,
         }

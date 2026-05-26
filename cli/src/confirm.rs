@@ -4,6 +4,87 @@ use zeroize::Zeroizing;
 use crate::cmd::{CmdRequest, CommandRunner, LsblkFieldKind};
 
 // ---------------------------------------------------------------------------
+// Confirm seam
+// ---------------------------------------------------------------------------
+
+/// Seam for the operator go/no-go prompt used by mutating commands.
+///
+/// Production prints the already-assembled prompt and reads `yes` from the
+/// real tty; tests record the prompt and return an armed verdict.
+pub trait Confirm {
+    /// Show `prompt` and require the operator to approve the operation.
+    fn confirm(&self, prompt: &str) -> Result<(), String>;
+}
+
+/// Production confirmation that preserves the existing stdin behavior.
+pub struct RealConfirm;
+
+impl Confirm for RealConfirm {
+    fn confirm(&self, prompt: &str) -> Result<(), String> {
+        eprint!("{prompt}");
+        confirm_yes()
+    }
+}
+
+#[cfg(test)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Verdict {
+    Unexpected,
+    Accept,
+    Decline,
+}
+
+#[cfg(test)]
+impl Default for Verdict {
+    fn default() -> Self {
+        Self::Unexpected
+    }
+}
+
+/// Test confirmation seam that records prompts and fails closed unless armed.
+#[cfg(test)]
+#[derive(Default)]
+pub struct RecordingConfirm {
+    verdict: std::cell::Cell<Verdict>,
+    prompts: std::cell::RefCell<Vec<String>>,
+}
+
+#[cfg(test)]
+impl RecordingConfirm {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    pub fn accept(&self) {
+        self.verdict.set(Verdict::Accept);
+    }
+
+    pub fn decline(&self) {
+        self.verdict.set(Verdict::Decline);
+    }
+
+    pub fn prompts(&self) -> Vec<String> {
+        self.prompts.borrow().clone()
+    }
+
+    pub fn last_prompt(&self) -> Option<String> {
+        self.prompts.borrow().last().cloned()
+    }
+}
+
+#[cfg(test)]
+impl Confirm for RecordingConfirm {
+    fn confirm(&self, prompt: &str) -> Result<(), String> {
+        self.prompts.borrow_mut().push(prompt.to_owned());
+        match self.verdict.get() {
+            Verdict::Unexpected => panic!("confirmation requested without an armed verdict"),
+            Verdict::Accept => Ok(()),
+            Verdict::Decline => Err("aborted by user".into()),
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
 // format_bytes
 // ---------------------------------------------------------------------------
 
@@ -318,5 +399,51 @@ mod tests {
         let mut input = std::io::Cursor::new(line);
         let err = confirm_yes_from(&mut input).unwrap_err();
         assert_eq!(err, "aborted by user");
+    }
+
+    // Intent: RecordingConfirm records the full prompt and accepts only after
+    //   the test arms an accepting verdict.
+    // Why it exists: command tests need to assert prompt bytes without reading
+    //   from the real process stdin.
+    // Scenario: a mutating command reaches its `yes=false` gate and the test
+    //   allows it to proceed.
+    #[test]
+    fn recording_confirm_accept_records_prompt() {
+        let confirm = RecordingConfirm::new();
+        confirm.accept();
+
+        confirm.confirm("proceed?\n").expect("armed accept");
+
+        assert_eq!(confirm.prompts(), vec!["proceed?\n".to_owned()]);
+        assert_eq!(confirm.last_prompt().as_deref(), Some("proceed?\n"));
+    }
+
+    // Intent: RecordingConfirm returns the same decline text as confirm_yes.
+    // Why it exists: command tests should exercise the same error surface as
+    //   the production prompt without needing a tty.
+    // Scenario: a mutating command reaches its prompt and the operator does
+    //   not type the exact approval word.
+    #[test]
+    fn recording_confirm_decline_matches_confirm_yes() {
+        let confirm = RecordingConfirm::new();
+        confirm.decline();
+
+        let err = confirm.confirm("proceed?\n").unwrap_err();
+
+        assert_eq!(err, "aborted by user");
+        assert_eq!(confirm.prompts(), vec!["proceed?\n".to_owned()]);
+    }
+
+    // Intent: RecordingConfirm panics when production code prompts without a
+    //   test arming the verdict.
+    // Why it exists: fail-closed defaults catch regressions where `--yes`
+    //   still asks for confirmation.
+    // Scenario: a test fixture leaves the recorder unarmed because the path
+    //   should not prompt, but the command unexpectedly reaches the gate.
+    #[test]
+    #[should_panic(expected = "confirmation requested without an armed verdict")]
+    fn recording_confirm_unarmed_panics() {
+        let confirm = RecordingConfirm::new();
+        let _ = confirm.confirm("unexpected\n");
     }
 }

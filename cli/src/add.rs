@@ -855,6 +855,10 @@ pub struct AddParams<'a> {
     /// portion of the add. Production passes `&RealSleepInhibitor`;
     /// unit tests pass `&RecordingInhibitor` to avoid spawning subprocesses.
     pub sleep_inhibitor: &'a dyn AcquireSleepInhibitor,
+    /// Seam for the operator go/no-go prompt. Production prints the
+    /// assembled prompt and reads from the tty; tests record the prompt
+    /// and provide a deterministic verdict.
+    pub confirm: &'a dyn confirm::Confirm,
     /// Seam for reading a LUKS passphrase from the TTY. Production
     /// passes `&RealTty`; tests pass a scripted reader so the
     /// bootstrap-confirm path is observable at the `cmd_add` layer.
@@ -997,8 +1001,8 @@ impl AddPlan {
                     }
                 })
                 .collect();
-            eprintln!("{}", format_add_confirm(&confirm_disks));
-            confirm::confirm_yes().map_err(AddError::Validation)?;
+            let prompt = format!("{}\n", format_add_confirm(&confirm_disks));
+            params.confirm.confirm(&prompt).map_err(AddError::Validation)?;
         }
 
         // Confirm the new passphrase iff this add will `luks_format` without
@@ -2453,6 +2457,7 @@ mod tests {
         let fs = MockFs;
         let (_state_dir, sp) = test_paths();
         let inhibitor = crate::inhibit::RecordingInhibitor::new();
+        let confirm = crate::confirm::RecordingConfirm::new();
 
         let result = cmd_add(
             &runner,
@@ -2472,6 +2477,7 @@ mod tests {
                 progress: ProgressOutput::Off,
                 paths: &sp,
                 sleep_inhibitor: &inhibitor,
+                confirm: &confirm,
                 passphrase_reader: &RealTty,
                 backing_path_resolver:
                     crate::test_fixtures::mock_virtio_offset_backing_path_resolver(),
@@ -3033,6 +3039,7 @@ mod tests {
         let runner = pool_probe_runner(POOL_FSID, &[("clone-foreign", 2, "/dev/vde", UUID)]);
         let fs = AddMockFs(vec![BY_ID.into()]);
         let inhibitor = crate::inhibit::RecordingInhibitor::new();
+        let confirm = crate::confirm::RecordingConfirm::new();
         let resolver =
             crate::test_fixtures::MockBackingPathResolver::default().with_path(BY_ID, "/dev/vdc");
 
@@ -3052,6 +3059,7 @@ mod tests {
                     progress: ProgressOutput::Off,
                     paths: &paths,
                     sleep_inhibitor: &inhibitor,
+                    confirm: &confirm,
                     passphrase_reader: &RealTty,
                     backing_path_resolver: &resolver,
                 },
@@ -3107,6 +3115,7 @@ mod tests {
         let runner = pool_probe_runner(POOL_FSID, &[("braid-disk2", 2, "/dev/vdc", UUID)]);
         let fs = AddMockFs(vec![BY_ID.into()]);
         let inhibitor = crate::inhibit::RecordingInhibitor::new();
+        let confirm = crate::confirm::RecordingConfirm::new();
         let resolver =
             crate::test_fixtures::MockBackingPathResolver::default().with_path(BY_ID, "/dev/vdc");
 
@@ -3126,6 +3135,7 @@ mod tests {
                     progress: ProgressOutput::Off,
                     paths: &paths,
                     sleep_inhibitor: &inhibitor,
+                    confirm: &confirm,
                     passphrase_reader: &RealTty,
                     backing_path_resolver: &resolver,
                 },
@@ -3192,6 +3202,7 @@ mod tests {
         );
         let fs = AddMockFs(vec![BY_ID.into()]);
         let inhibitor = crate::inhibit::RecordingInhibitor::new();
+        let confirm = crate::confirm::RecordingConfirm::new();
         let resolver = CountingBackingPathResolver::default().with_path(BY_ID, "/dev/vdc");
 
         let err = plan
@@ -3210,6 +3221,7 @@ mod tests {
                     progress: ProgressOutput::Off,
                     paths: &paths,
                     sleep_inhibitor: &inhibitor,
+                    confirm: &confirm,
                     passphrase_reader: &RealTty,
                     backing_path_resolver: &resolver,
                 },
@@ -3253,6 +3265,7 @@ mod tests {
         let runner = MockRunner::default();
         let fs = AddOfflineMockFs(vec![BY_ID.into()]);
         let inhibitor = crate::inhibit::RecordingInhibitor::new();
+        let confirm = crate::confirm::RecordingConfirm::new();
         let resolver = CountingBackingPathResolver::default().with_path(BY_ID, "/dev/vdc");
 
         let err = plan
@@ -3271,6 +3284,7 @@ mod tests {
                     progress: ProgressOutput::Off,
                     paths: &paths,
                     sleep_inhibitor: &inhibitor,
+                    confirm: &confirm,
                     passphrase_reader: &RealTty,
                     backing_path_resolver: &resolver,
                 },
@@ -3319,6 +3333,7 @@ mod tests {
         ));
         let fs = AddMockFs(vec![BY_ID.into()]);
         let inhibitor = crate::inhibit::RecordingInhibitor::new();
+        let confirm = crate::confirm::RecordingConfirm::new();
         let resolver = CountingBackingPathResolver::default().with_path(BY_ID, "/dev/vdc");
 
         let err = plan
@@ -3337,6 +3352,7 @@ mod tests {
                     progress: ProgressOutput::Off,
                     paths: &paths,
                     sleep_inhibitor: &inhibitor,
+                    confirm: &confirm,
                     passphrase_reader: &RealTty,
                     backing_path_resolver: &resolver,
                 },
@@ -3394,6 +3410,7 @@ mod tests {
         );
         let fs = AddMockFs(vec![BY_ID.into()]);
         let inhibitor = crate::inhibit::RecordingInhibitor::new();
+        let confirm = crate::confirm::RecordingConfirm::new();
         let resolver = CountingBackingPathResolver::default().with_path(BY_ID, "/dev/vdc");
 
         let err = plan
@@ -3412,6 +3429,7 @@ mod tests {
                     progress: ProgressOutput::Off,
                     paths: &paths,
                     sleep_inhibitor: &inhibitor,
+                    confirm: &confirm,
                     passphrase_reader: &RealTty,
                     backing_path_resolver: &resolver,
                 },
@@ -3761,6 +3779,7 @@ mod tests {
             pool_membership,
         };
         let inhibitor = crate::inhibit::RecordingInhibitor::new();
+        let confirm = crate::confirm::RecordingConfirm::new();
         plan.execute(
             &runner,
             &AddMockFs(vec![]),
@@ -3776,6 +3795,7 @@ mod tests {
                 progress: ProgressOutput::Off,
                 paths: &paths,
                 sleep_inhibitor: &inhibitor,
+                confirm: &confirm,
                 passphrase_reader: &RealTty,
                 backing_path_resolver:
                     crate::test_fixtures::mock_virtio_offset_backing_path_resolver(),
@@ -4427,6 +4447,7 @@ mod tests {
         // membership normally.
         let runner = RecoverableAddRunner::new();
         let inhibitor = crate::inhibit::RecordingInhibitor::new();
+        let confirm = crate::confirm::RecordingConfirm::new();
 
         let config = crate::config::Config::new(MountPoint("/mnt/storage".into())).unwrap();
         let by_id_disk2 = ByIdPath::parse("/dev/disk/by-id/virtio-disk2").unwrap();
@@ -4510,6 +4531,7 @@ mod tests {
                     progress: ProgressOutput::Off,
                     paths: &paths,
                     sleep_inhibitor: &inhibitor,
+                    confirm: &confirm,
                     passphrase_reader: &crate::luks::RealTty,
                     backing_path_resolver:
                         crate::test_fixtures::mock_virtio_offset_backing_path_resolver(),
@@ -4544,6 +4566,7 @@ mod tests {
         let fs = AddMockFs(vec!["/dev/disk/by-id/virtio-disk2".into()]);
         let runner = RequestRecordingRunner::new(RecoverableAddRunner::new());
         let inhibitor = crate::inhibit::RecordingInhibitor::new();
+        let confirm = crate::confirm::RecordingConfirm::new();
         let target = fresh_target(
             "disk2",
             "/dev/disk/by-id/virtio-disk2",
@@ -4586,6 +4609,7 @@ mod tests {
                 progress: ProgressOutput::Off,
                 paths: &paths,
                 sleep_inhibitor: &inhibitor,
+                confirm: &confirm,
                 passphrase_reader: &RealTty,
                 backing_path_resolver:
                     crate::test_fixtures::mock_virtio_offset_backing_path_resolver(),
@@ -4601,6 +4625,193 @@ mod tests {
         assert_eq!(
             balance_count, 1,
             "fresh add should issue exactly one RAID1 balance: {requests:?}"
+        );
+    }
+
+    fn fresh_add_confirm_plan() -> AddPlan {
+        const UUID: &str = "22222222-2222-2222-2222-222222222222";
+        const BY_ID: &str = "/dev/disk/by-id/virtio-disk2";
+        let target = fresh_target("disk2", BY_ID, UUID);
+        let target_uuid = target.luks_uuid.clone();
+        let pool = PoolState {
+            mounted: true,
+            devices: vec![PoolDevice {
+                mapper: MapperName("braid-disk1".into()),
+                luks_uuid: LuksUuid::parse("11111111-1111-1111-1111-111111111111").unwrap(),
+                devid: 1,
+                underlying: "/dev/vdb".into(),
+            }],
+            missing_count: 0,
+            missing_devids: vec![],
+            total_devices: 1,
+            fsid: Some(POOL_FSID.into()),
+            null_underlying: vec![],
+        };
+        let mut plan = plan_for_execute_target(
+            AddTargetWork::Fresh(target.clone()),
+            journal_targets_with(target_uuid, fresh_journal_target(&target)),
+            pool,
+        );
+        plan.work_plan.prelude.confirm_disks = vec![AddConfirmDiskPlan {
+            name: disk("disk2"),
+            by_id: ByIdPath::parse(BY_ID).unwrap(),
+            needs_luks_format: true,
+        }];
+        plan
+    }
+
+    // Intent: a declined add confirmation aborts before irreversible side
+    //   effects.
+    // Why it exists: the interactive gate must remain before passphrase work,
+    //   sleep-inhibitor acquisition, and journal write.
+    // Scenario: an operator starts adding a fresh disk to a one-disk mounted
+    //   pool and declines at the confirmation prompt.
+    #[test]
+    fn add_declined_confirm_aborts_before_side_effects() {
+        const BY_ID: &str = "/dev/disk/by-id/virtio-disk2";
+        let plan = fresh_add_confirm_plan();
+        let (_state_tmp, paths, _tmp, pass_path) = execute_fixture();
+        let runner = RequestRecordingRunner::new(RecoverableAddRunner::new());
+        let fs = AddMockFs(vec![BY_ID.into()]);
+        let inhibitor = crate::inhibit::RecordingInhibitor::new();
+        let confirm = crate::confirm::RecordingConfirm::new();
+        confirm.decline();
+        let config = test_config();
+
+        let err = plan
+            .execute(
+                &runner,
+                &fs,
+                &AddParams {
+                    config: &config,
+                    disk_specs: &[],
+                    dry_run: false,
+                    yes: false,
+                    passphrase_stdin: false,
+                    passphrase_file: Some(pass_path.as_path()),
+                    enroll_key_file: None,
+                    luks_format_extra_opts: &[],
+                    progress: ProgressOutput::Off,
+                    paths: &paths,
+                    sleep_inhibitor: &inhibitor,
+                    confirm: &confirm,
+                    passphrase_reader: &RealTty,
+                    backing_path_resolver:
+                        crate::test_fixtures::mock_virtio_offset_backing_path_resolver(),
+                },
+            )
+            .expect_err("declined confirm should abort");
+
+        assert_eq!(err.to_string(), "aborted by user");
+        assert_eq!(inhibitor.acquire_count(), 0);
+        assert!(journal::load_journal(&paths).unwrap().is_none());
+        let requests = runner.requests();
+        assert!(
+            !requests
+                .iter()
+                .any(|request| matches!(request, CmdRequest::BtrfsDeviceAdd { .. })),
+            "declined confirm must not issue BtrfsDeviceAdd: {requests:?}"
+        );
+    }
+
+    // Intent: accepted add confirmation records the exact assembled prompt.
+    // Why it exists: the confirm seam must receive the formatter output plus
+    //   its trailing newline exactly once for the planned fresh target.
+    // Scenario: adding a fresh disk to a mounted pool prompts for the disk
+    //   that will be LUKS-formatted.
+    #[test]
+    fn add_accepted_confirm_records_prompt() {
+        const BY_ID: &str = "/dev/disk/by-id/virtio-disk2";
+        let plan = fresh_add_confirm_plan();
+        let (_state_tmp, paths, _tmp, pass_path) = execute_fixture();
+        let runner = RequestRecordingRunner::new(RecoverableAddRunner::new());
+        let fs = AddMockFs(vec![BY_ID.into()]);
+        let inhibitor = crate::inhibit::RecordingInhibitor::new();
+        let confirm = crate::confirm::RecordingConfirm::new();
+        confirm.accept();
+        let config = test_config();
+
+        plan.execute(
+            &runner,
+            &fs,
+            &AddParams {
+                config: &config,
+                disk_specs: &[],
+                dry_run: false,
+                yes: false,
+                passphrase_stdin: false,
+                passphrase_file: Some(pass_path.as_path()),
+                enroll_key_file: None,
+                luks_format_extra_opts: &[],
+                progress: ProgressOutput::Off,
+                paths: &paths,
+                sleep_inhibitor: &inhibitor,
+                confirm: &confirm,
+                passphrase_reader: &RealTty,
+                backing_path_resolver:
+                    crate::test_fixtures::mock_virtio_offset_backing_path_resolver(),
+            },
+        )
+        .expect("accepted confirm should proceed");
+
+        let expected = format!(
+            "{}\n",
+            format_add_confirm(&[AddConfirmDisk {
+                name: "disk2",
+                by_id: BY_ID,
+                hw: crate::confirm::DiskHwInfo::default(),
+                needs_luks_format: true,
+            }])
+        );
+        assert_eq!(confirm.prompts(), vec![expected]);
+    }
+
+    // Intent: accepted add confirmation does not block mutation.
+    // Why it exists: the seam must preserve the happy path, not just the
+    //   declined abort path.
+    // Scenario: the operator accepts the fresh add prompt and braid reaches
+    //   `btrfs device add`.
+    #[test]
+    fn add_accepted_confirm_proceeds_to_device_add() {
+        const BY_ID: &str = "/dev/disk/by-id/virtio-disk2";
+        let plan = fresh_add_confirm_plan();
+        let (_state_tmp, paths, _tmp, pass_path) = execute_fixture();
+        let runner = RequestRecordingRunner::new(RecoverableAddRunner::new());
+        let fs = AddMockFs(vec![BY_ID.into()]);
+        let inhibitor = crate::inhibit::RecordingInhibitor::new();
+        let confirm = crate::confirm::RecordingConfirm::new();
+        confirm.accept();
+        let config = test_config();
+
+        plan.execute(
+            &runner,
+            &fs,
+            &AddParams {
+                config: &config,
+                disk_specs: &[],
+                dry_run: false,
+                yes: false,
+                passphrase_stdin: false,
+                passphrase_file: Some(pass_path.as_path()),
+                enroll_key_file: None,
+                luks_format_extra_opts: &[],
+                progress: ProgressOutput::Off,
+                paths: &paths,
+                sleep_inhibitor: &inhibitor,
+                confirm: &confirm,
+                passphrase_reader: &RealTty,
+                backing_path_resolver:
+                    crate::test_fixtures::mock_virtio_offset_backing_path_resolver(),
+            },
+        )
+        .expect("accepted confirm should proceed");
+
+        let requests = runner.requests();
+        assert!(
+            requests
+                .iter()
+                .any(|request| matches!(request, CmdRequest::BtrfsDeviceAdd { .. })),
+            "accepted confirm must reach BtrfsDeviceAdd: {requests:?}"
         );
     }
 
@@ -5295,6 +5506,7 @@ mod tests {
         let fs = AddMockFs(vec!["/dev/disk/by-id/virtio-disk2".into()]);
         let runner = AddFullPathRunner::live().with_disk2_devid(7);
         let inhibitor = crate::inhibit::RecordingInhibitor::new();
+        let confirm = crate::confirm::RecordingConfirm::new();
 
         cmd_add(
             &runner,
@@ -5311,6 +5523,7 @@ mod tests {
                 progress: ProgressOutput::Off,
                 paths: &paths,
                 sleep_inhibitor: &inhibitor,
+                confirm: &confirm,
                 passphrase_reader: &RealTty,
                 backing_path_resolver:
                     crate::test_fixtures::mock_virtio_offset_backing_path_resolver(),
@@ -5349,6 +5562,7 @@ mod tests {
         let fs = AddMockFs(vec!["/dev/disk/by-id/virtio-disk2".into()]);
         let runner = AddFullPathRunner::live().with_added_mapper_drifted("braid-WRONG");
         let inhibitor = crate::inhibit::RecordingInhibitor::new();
+        let confirm = crate::confirm::RecordingConfirm::new();
 
         let result = cmd_add(
             &runner,
@@ -5365,6 +5579,7 @@ mod tests {
                 progress: ProgressOutput::Off,
                 paths: &paths,
                 sleep_inhibitor: &inhibitor,
+                confirm: &confirm,
                 passphrase_reader: &RealTty,
                 backing_path_resolver:
                     crate::test_fixtures::mock_virtio_offset_backing_path_resolver(),
@@ -5419,6 +5634,7 @@ mod tests {
         let runner = AddFullPathRunner::bootstrap().with_bootstrap_post_mount_probe_failure();
         let fs = runner.fs(vec!["/dev/disk/by-id/virtio-disk1".into()]);
         let inhibitor = crate::inhibit::RecordingInhibitor::new();
+        let confirm = crate::confirm::RecordingConfirm::new();
 
         cmd_add(
             &runner,
@@ -5435,6 +5651,7 @@ mod tests {
                 progress: ProgressOutput::Off,
                 paths: &paths,
                 sleep_inhibitor: &inhibitor,
+                confirm: &confirm,
                 passphrase_reader: &RealTty,
                 backing_path_resolver:
                     crate::test_fixtures::mock_virtio_offset_backing_path_resolver(),
@@ -5461,6 +5678,7 @@ mod tests {
         let runner = AddFullPathRunner::bootstrap().with_bootstrap_post_mount_probe_failure();
         let fs = runner.fs(vec!["/dev/disk/by-id/virtio-disk1".into()]);
         let inhibitor = crate::inhibit::RecordingInhibitor::new();
+        let confirm = crate::confirm::RecordingConfirm::new();
 
         let mut result = None;
         let captured = crate::status_tag::testing::capture_with_color(false, || {
@@ -5479,6 +5697,7 @@ mod tests {
                     progress: ProgressOutput::Off,
                     paths: &paths,
                     sleep_inhibitor: &inhibitor,
+                    confirm: &confirm,
                     passphrase_reader: &RealTty,
                     backing_path_resolver:
                         crate::test_fixtures::mock_virtio_offset_backing_path_resolver(),
@@ -5526,6 +5745,7 @@ mod tests {
         let runner = AddFullPathRunner::bootstrap().with_malformed_bootstrap_post_mount_probe();
         let fs = runner.fs(vec!["/dev/disk/by-id/virtio-disk1".into()]);
         let inhibitor = crate::inhibit::RecordingInhibitor::new();
+        let confirm = crate::confirm::RecordingConfirm::new();
 
         cmd_add(
             &runner,
@@ -5542,6 +5762,7 @@ mod tests {
                 progress: ProgressOutput::Off,
                 paths: &paths,
                 sleep_inhibitor: &inhibitor,
+                confirm: &confirm,
                 passphrase_reader: &RealTty,
                 backing_path_resolver:
                     crate::test_fixtures::mock_virtio_offset_backing_path_resolver(),
@@ -5595,6 +5816,7 @@ mod tests {
         ]);
         let runner = AddFullPathRunner::live().with_second_add_failure();
         let inhibitor = crate::inhibit::RecordingInhibitor::new();
+        let confirm = crate::confirm::RecordingConfirm::new();
 
         let result = cmd_add(
             &runner,
@@ -5614,6 +5836,7 @@ mod tests {
                 progress: ProgressOutput::Off,
                 paths: &paths,
                 sleep_inhibitor: &inhibitor,
+                confirm: &confirm,
                 passphrase_reader: &RealTty,
                 backing_path_resolver:
                     crate::test_fixtures::mock_virtio_offset_backing_path_resolver(),
@@ -5660,6 +5883,7 @@ mod tests {
         ]);
         let runner = AddFullPathRunner::live().with_second_add_failure();
         let inhibitor = crate::inhibit::RecordingInhibitor::new();
+        let confirm = crate::confirm::RecordingConfirm::new();
 
         let result = cmd_add(
             &runner,
@@ -5679,6 +5903,7 @@ mod tests {
                 progress: ProgressOutput::Off,
                 paths: &paths,
                 sleep_inhibitor: &inhibitor,
+                confirm: &confirm,
                 passphrase_reader: &RealTty,
                 backing_path_resolver:
                     crate::test_fixtures::mock_virtio_offset_backing_path_resolver(),
@@ -5749,6 +5974,7 @@ mod tests {
         let fs = AddMockFs(vec!["/dev/disk/by-id/virtio-disk2".into()]);
         let runner = AddFullPathRunner::live();
         let inhibitor = crate::inhibit::RecordingInhibitor::new();
+        let confirm = crate::confirm::RecordingConfirm::new();
 
         let result = cmd_add(
             &runner,
@@ -5765,6 +5991,7 @@ mod tests {
                 progress: ProgressOutput::Off,
                 paths: &paths,
                 sleep_inhibitor: &inhibitor,
+                confirm: &confirm,
                 passphrase_reader: &RealTty,
                 backing_path_resolver:
                     crate::test_fixtures::mock_virtio_offset_backing_path_resolver(),
@@ -5803,6 +6030,7 @@ mod tests {
         let runner = AddFullPathRunner::bootstrap();
         let fs = runner.fs(vec!["/dev/disk/by-id/virtio-disk1".into()]);
         let inhibitor = crate::inhibit::RecordingInhibitor::new();
+        let confirm = crate::confirm::RecordingConfirm::new();
 
         let result = cmd_add(
             &runner,
@@ -5819,6 +6047,7 @@ mod tests {
                 progress: ProgressOutput::Off,
                 paths: &paths,
                 sleep_inhibitor: &inhibitor,
+                confirm: &confirm,
                 passphrase_reader: &RealTty,
                 backing_path_resolver:
                     crate::test_fixtures::mock_virtio_offset_backing_path_resolver(),
@@ -5866,6 +6095,7 @@ mod tests {
             let (_state_tmp, paths, _tmp, config_path, pass_path) = add_test_setup();
             let fs = AddMockFs(vec!["/dev/disk/by-id/virtio-disk2".into()]);
             let inhibitor = crate::inhibit::RecordingInhibitor::new();
+        let confirm = crate::confirm::RecordingConfirm::new();
 
             let result = cmd_add(
                 &runner,
@@ -5882,6 +6112,7 @@ mod tests {
                     progress: ProgressOutput::Off,
                     paths: &paths,
                     sleep_inhibitor: &inhibitor,
+                    confirm: &confirm,
                     passphrase_reader: &RealTty,
                     backing_path_resolver: crate::test_fixtures::mock_virtio_backing_path_resolver(
                     ),
@@ -5923,6 +6154,7 @@ mod tests {
             no_btrfs_superblock: false,
         };
         let inhibitor = crate::inhibit::RecordingInhibitor::new();
+        let confirm = crate::confirm::RecordingConfirm::new();
 
         cmd_add(
             &runner,
@@ -5939,6 +6171,7 @@ mod tests {
                 progress: ProgressOutput::Off,
                 paths: &paths,
                 sleep_inhibitor: &inhibitor,
+                confirm: &confirm,
                 passphrase_reader: &RealTty,
                 backing_path_resolver:
                     crate::test_fixtures::mock_virtio_offset_backing_path_resolver(),
@@ -5981,6 +6214,7 @@ mod tests {
             no_btrfs_superblock: false,
         };
         let inhibitor = crate::inhibit::RecordingInhibitor::new();
+        let confirm = crate::confirm::RecordingConfirm::new();
 
         let result = cmd_add(
             &runner,
@@ -5997,6 +6231,7 @@ mod tests {
                 progress: ProgressOutput::Off,
                 paths: &paths,
                 sleep_inhibitor: &inhibitor,
+                confirm: &confirm,
                 passphrase_reader: &RealTty,
                 backing_path_resolver:
                     crate::test_fixtures::mock_virtio_offset_backing_path_resolver(),
@@ -6044,6 +6279,7 @@ mod tests {
             "1".to_owned(),
         ];
         let inhibitor = crate::inhibit::RecordingInhibitor::new();
+        let confirm = crate::confirm::RecordingConfirm::new();
 
         let result = cmd_add(
             &runner,
@@ -6060,6 +6296,7 @@ mod tests {
                 progress: ProgressOutput::Off,
                 paths: &paths,
                 sleep_inhibitor: &inhibitor,
+                confirm: &confirm,
                 passphrase_reader: &RealTty,
                 backing_path_resolver:
                     crate::test_fixtures::mock_virtio_offset_backing_path_resolver(),
@@ -6132,6 +6369,7 @@ mod tests {
             no_btrfs_superblock: true,
         };
         let inhibitor = crate::inhibit::RecordingInhibitor::new();
+        let confirm = crate::confirm::RecordingConfirm::new();
 
         let result = cmd_add(
             &runner,
@@ -6148,6 +6386,7 @@ mod tests {
                 progress: ProgressOutput::Off,
                 paths: &paths,
                 sleep_inhibitor: &inhibitor,
+                confirm: &confirm,
                 passphrase_reader: &RealTty,
                 backing_path_resolver:
                     crate::test_fixtures::mock_virtio_offset_backing_path_resolver(),
@@ -6193,6 +6432,7 @@ mod tests {
             },
         });
         let inhibitor = crate::inhibit::RecordingInhibitor::new();
+        let confirm = crate::confirm::RecordingConfirm::new();
 
         let mut result = Ok(());
         crate::status_tag::testing::capture_with_color(false, || {
@@ -6211,6 +6451,7 @@ mod tests {
                     progress: ProgressOutput::Off,
                     paths: &paths,
                     sleep_inhibitor: &inhibitor,
+                    confirm: &confirm,
                     passphrase_reader: &RealTty,
                     backing_path_resolver: crate::test_fixtures::mock_virtio_backing_path_resolver(
                     ),
@@ -6289,6 +6530,7 @@ mod tests {
         // "nothing executed".
         let runner = MockRunner::default();
         let inhibitor = crate::inhibit::RecordingInhibitor::new();
+        let confirm = crate::confirm::RecordingConfirm::new();
 
         let result = cmd_add(
             &runner,
@@ -6310,6 +6552,7 @@ mod tests {
                 progress: ProgressOutput::Off,
                 paths: &paths,
                 sleep_inhibitor: &inhibitor,
+                confirm: &confirm,
                 passphrase_reader: &RealTty,
                 backing_path_resolver:
                     crate::test_fixtures::mock_virtio_offset_backing_path_resolver(),
@@ -6385,6 +6628,7 @@ mod tests {
             .with_mapper_closed("braid-disk2");
 
         let inhibitor = crate::inhibit::RecordingInhibitor::new();
+        let confirm = crate::confirm::RecordingConfirm::new();
         let result = cmd_add(
             &runner,
             &fs,
@@ -6400,6 +6644,7 @@ mod tests {
                 progress: ProgressOutput::Off,
                 paths: &paths,
                 sleep_inhibitor: &inhibitor,
+                confirm: &confirm,
                 passphrase_reader: &RealTty,
                 backing_path_resolver:
                     crate::test_fixtures::mock_virtio_offset_backing_path_resolver(),
@@ -6485,6 +6730,7 @@ mod tests {
             );
         let fs = AddOfflineMockFs(vec![by_id.into()]);
         let inhibitor = crate::inhibit::RecordingInhibitor::new();
+        let confirm = crate::confirm::RecordingConfirm::new();
 
         let result = cmd_add(
             &runner,
@@ -6501,6 +6747,7 @@ mod tests {
                 progress: ProgressOutput::Off,
                 paths: &paths,
                 sleep_inhibitor: &inhibitor,
+                confirm: &confirm,
                 passphrase_reader: &RealTty,
                 backing_path_resolver:
                     crate::test_fixtures::mock_virtio_offset_backing_path_resolver(),
@@ -6581,6 +6828,7 @@ mod tests {
             );
         let fs = AddOfflineMockFs(vec![disk1.into(), disk2.into()]);
         let inhibitor = crate::inhibit::RecordingInhibitor::new();
+        let confirm = crate::confirm::RecordingConfirm::new();
 
         let result = cmd_add(
             &runner,
@@ -6600,6 +6848,7 @@ mod tests {
                 progress: ProgressOutput::Off,
                 paths: &paths,
                 sleep_inhibitor: &inhibitor,
+                confirm: &confirm,
                 passphrase_reader: &RealTty,
                 backing_path_resolver:
                     crate::test_fixtures::mock_virtio_offset_backing_path_resolver(),
@@ -7394,6 +7643,7 @@ mod tests {
         let (_state_tmp, paths, tmp, config_path) = confirm_test_setup();
         let kf_path = tmp.path().join("does-not-exist").join("braid.key");
         let inhibitor = crate::inhibit::RecordingInhibitor::new();
+        let confirm = crate::confirm::RecordingConfirm::new();
 
         let failure = match plan_add(
             &PanicRunner,
@@ -7410,6 +7660,7 @@ mod tests {
                 progress: ProgressOutput::Off,
                 paths: &paths,
                 sleep_inhibitor: &inhibitor,
+                confirm: &confirm,
                 passphrase_reader: &crate::luks::RealTty,
                 backing_path_resolver:
                     crate::test_fixtures::mock_virtio_offset_backing_path_resolver(),
@@ -7446,6 +7697,7 @@ mod tests {
         let kf_path = tmp.path().join("braid.key");
         std::fs::create_dir(&kf_path).unwrap();
         let inhibitor = crate::inhibit::RecordingInhibitor::new();
+        let confirm = crate::confirm::RecordingConfirm::new();
 
         let failure = match plan_add(
             &PanicRunner,
@@ -7462,6 +7714,7 @@ mod tests {
                 progress: ProgressOutput::Off,
                 paths: &paths,
                 sleep_inhibitor: &inhibitor,
+                confirm: &confirm,
                 passphrase_reader: &crate::luks::RealTty,
                 backing_path_resolver:
                     crate::test_fixtures::mock_virtio_offset_backing_path_resolver(),
@@ -7508,6 +7761,7 @@ mod tests {
         let fs = AddOfflineMockFs(vec!["/dev/disk/by-id/virtio-disk1".into()]);
         let runner = AddRecordingRunner::new(false);
         let inhibitor = crate::inhibit::RecordingInhibitor::new();
+        let confirm = crate::confirm::RecordingConfirm::new();
         let tty = ScriptedPassphraseReader::new(["typo-one", "typo-two"]);
 
         let result = cmd_add(
@@ -7525,6 +7779,7 @@ mod tests {
                 progress: ProgressOutput::Off,
                 paths: &paths,
                 sleep_inhibitor: &inhibitor,
+                confirm: &confirm,
                 passphrase_reader: &tty,
                 backing_path_resolver:
                     crate::test_fixtures::mock_virtio_offset_backing_path_resolver(),
@@ -7578,6 +7833,7 @@ mod tests {
         let fs = AddOfflineMockFs(vec!["/dev/disk/by-id/virtio-disk1".into()]);
         let runner = AddRecordingRunner::new(false);
         let inhibitor = crate::inhibit::RecordingInhibitor::new();
+        let confirm = crate::confirm::RecordingConfirm::new();
         let tty = ScriptedPassphraseReader::new(["ok", "ok"]);
 
         let result = cmd_add(
@@ -7595,6 +7851,7 @@ mod tests {
                 progress: ProgressOutput::Off,
                 paths: &paths,
                 sleep_inhibitor: &inhibitor,
+                confirm: &confirm,
                 passphrase_reader: &tty,
                 backing_path_resolver:
                     crate::test_fixtures::mock_virtio_offset_backing_path_resolver(),
@@ -7627,6 +7884,7 @@ mod tests {
         let runner =
             AddRecordingRunner::new(false).with_backup_failure_stderr("No space left on device");
         let inhibitor = crate::inhibit::RecordingInhibitor::new();
+        let confirm = crate::confirm::RecordingConfirm::new();
         let tty = ScriptedPassphraseReader::new(["ok", "ok"]);
 
         let err = cmd_add(
@@ -7644,6 +7902,7 @@ mod tests {
                 progress: ProgressOutput::Off,
                 paths: &paths,
                 sleep_inhibitor: &inhibitor,
+                confirm: &confirm,
                 passphrase_reader: &tty,
                 backing_path_resolver:
                     crate::test_fixtures::mock_virtio_offset_backing_path_resolver(),
@@ -7693,6 +7952,7 @@ mod tests {
         let fs = AddOfflineMockFs(vec!["/dev/disk/by-id/virtio-disk1".into()]);
         let runner = AddRecordingRunner::new(false).with_backup_success();
         let inhibitor = crate::inhibit::RecordingInhibitor::new();
+        let confirm = crate::confirm::RecordingConfirm::new();
         let tty = ScriptedPassphraseReader::new(["ok", "ok"]);
         let kf_dir = tempfile::tempdir().unwrap();
         let kf_path = kf_dir.path().join("braid.key");
@@ -7713,6 +7973,7 @@ mod tests {
                 progress: ProgressOutput::Off,
                 paths: &paths,
                 sleep_inhibitor: &inhibitor,
+                confirm: &confirm,
                 passphrase_reader: &tty,
                 backing_path_resolver:
                     crate::test_fixtures::mock_virtio_offset_backing_path_resolver(),
@@ -7768,6 +8029,7 @@ mod tests {
         let fs = AddOfflineMockFs(vec!["/dev/disk/by-id/virtio-disk2".into()]);
         let runner = AddRecordingRunner::new(false);
         let inhibitor = crate::inhibit::RecordingInhibitor::new();
+        let confirm = crate::confirm::RecordingConfirm::new();
         let tty = ScriptedPassphraseReader::new(["SENTINEL"]);
 
         let result = cmd_add(
@@ -7785,6 +8047,7 @@ mod tests {
                 progress: ProgressOutput::Off,
                 paths: &paths,
                 sleep_inhibitor: &inhibitor,
+                confirm: &confirm,
                 passphrase_reader: &tty,
                 backing_path_resolver:
                     crate::test_fixtures::mock_virtio_offset_backing_path_resolver(),
@@ -7846,6 +8109,7 @@ mod tests {
         ]);
         let runner = AddRecordingRunner::new(true);
         let inhibitor = crate::inhibit::RecordingInhibitor::new();
+        let confirm = crate::confirm::RecordingConfirm::new();
         let tty = ScriptedPassphraseReader::new(["pw", "SENTINEL"]);
 
         let _ = cmd_add(
@@ -7863,6 +8127,7 @@ mod tests {
                 progress: ProgressOutput::Off,
                 paths: &paths,
                 sleep_inhibitor: &inhibitor,
+                confirm: &confirm,
                 passphrase_reader: &tty,
                 backing_path_resolver:
                     crate::test_fixtures::mock_virtio_offset_backing_path_resolver(),
@@ -7904,6 +8169,7 @@ mod tests {
         ]);
         let runner = AddRecordingRunner::new(true).with_disk1_present_luks_member();
         let inhibitor = crate::inhibit::RecordingInhibitor::new();
+        let confirm = crate::confirm::RecordingConfirm::new();
 
         let result = cmd_add(
             &runner,
@@ -7923,6 +8189,7 @@ mod tests {
                 progress: ProgressOutput::Off,
                 paths: &paths,
                 sleep_inhibitor: &inhibitor,
+                confirm: &confirm,
                 passphrase_reader: &RealTty,
                 backing_path_resolver:
                     crate::test_fixtures::mock_virtio_offset_backing_path_resolver(),
@@ -8141,7 +8408,7 @@ mod tests {
 
     /// Build a fresh-disk AddParams pointing `disk2` at a PresentNotLuks
     /// fixture. The caller supplies the runner; this helper owns the
-    /// config, paths, and inhibitor lifetimes so each test stays small.
+    /// config, paths, inhibitor, and confirm lifetimes so each test stays small.
     struct PlanAddFixture {
         _state_tmp: tempfile::TempDir,
         paths: StatePaths,
@@ -8149,6 +8416,7 @@ mod tests {
         config: Config,
         pass_path: std::path::PathBuf,
         inhibitor: crate::inhibit::RecordingInhibitor,
+        confirm: crate::confirm::RecordingConfirm,
     }
 
     fn plan_add_fixture() -> PlanAddFixture {
@@ -8161,6 +8429,7 @@ mod tests {
             config,
             pass_path,
             inhibitor: crate::inhibit::RecordingInhibitor::new(),
+            confirm: crate::confirm::RecordingConfirm::new(),
         }
     }
 
@@ -8187,6 +8456,7 @@ mod tests {
                 progress: ProgressOutput::Off,
                 paths: &self.paths,
                 sleep_inhibitor: &self.inhibitor,
+                confirm: &self.confirm,
                 passphrase_reader: &RealTty,
                 backing_path_resolver:
                     crate::test_fixtures::mock_virtio_offset_backing_path_resolver(),
@@ -8489,6 +8759,7 @@ mod tests {
             no_btrfs_superblock: false,
         };
         let inhibitor = crate::inhibit::RecordingInhibitor::new();
+        let confirm = crate::confirm::RecordingConfirm::new();
 
         let disk_specs = ["disk2=/dev/disk/by-id/virtio-disk2".to_string()];
         let report = plan_add(
@@ -8506,6 +8777,7 @@ mod tests {
                 progress: ProgressOutput::Off,
                 paths: &paths,
                 sleep_inhibitor: &inhibitor,
+                confirm: &confirm,
                 passphrase_reader: &RealTty,
                 backing_path_resolver:
                     crate::test_fixtures::mock_virtio_offset_backing_path_resolver(),
@@ -8544,6 +8816,7 @@ mod tests {
         ]);
         let runner = AddRecordingRunner::new(true).with_disk1_present_luks_member();
         let inhibitor = crate::inhibit::RecordingInhibitor::new();
+        let confirm = crate::confirm::RecordingConfirm::new();
         let disk_specs = [
             "disk1=/dev/disk/by-id/virtio-disk1".to_string(),
             "disk2=/dev/disk/by-id/virtio-disk2".to_string(),
@@ -8564,6 +8837,7 @@ mod tests {
                 progress: ProgressOutput::Off,
                 paths: &paths,
                 sleep_inhibitor: &inhibitor,
+                confirm: &confirm,
                 passphrase_reader: &RealTty,
                 backing_path_resolver:
                     crate::test_fixtures::mock_virtio_offset_backing_path_resolver(),
@@ -8624,6 +8898,7 @@ mod tests {
         // unmounted-pool branch and simulates disk1 as PresentNotLuks.
         let runner = AddRecordingRunner::new(false);
         let inhibitor = crate::inhibit::RecordingInhibitor::new();
+        let confirm = crate::confirm::RecordingConfirm::new();
 
         let disk_specs = ["disk1=/dev/disk/by-id/virtio-disk1".to_string()];
         let report = plan_add(
@@ -8641,6 +8916,7 @@ mod tests {
                 progress: ProgressOutput::Off,
                 paths: &paths,
                 sleep_inhibitor: &inhibitor,
+                confirm: &confirm,
                 passphrase_reader: &RealTty,
                 backing_path_resolver:
                     crate::test_fixtures::mock_virtio_offset_backing_path_resolver(),
@@ -9645,6 +9921,7 @@ mod tests {
             let recording = RequestRecordingRunner::new(MockRunner::default());
             let fs = AddOfflineMockFs(vec!["/dev/disk/by-id/virtio-disk1".into()]);
             let inhibitor = crate::inhibit::RecordingInhibitor::new();
+        let confirm = crate::confirm::RecordingConfirm::new();
             let extras = vec![token.to_owned()];
 
             let result = cmd_add(
@@ -9662,6 +9939,7 @@ mod tests {
                     progress: ProgressOutput::Off,
                     paths: &paths,
                     sleep_inhibitor: &inhibitor,
+                    confirm: &confirm,
                     passphrase_reader: &RealTty,
                     backing_path_resolver: crate::test_fixtures::mock_virtio_backing_path_resolver(
                     ),
@@ -9719,6 +9997,7 @@ mod tests {
         let recording = RequestRecordingRunner::new(runner);
         let extras = vec!["--use-random".to_owned()];
         let inhibitor = crate::inhibit::RecordingInhibitor::new();
+        let confirm = crate::confirm::RecordingConfirm::new();
 
         let result = cmd_add(
             &recording,
@@ -9735,6 +10014,7 @@ mod tests {
                 progress: ProgressOutput::Off,
                 paths: &paths,
                 sleep_inhibitor: &inhibitor,
+                confirm: &confirm,
                 passphrase_reader: &RealTty,
                 backing_path_resolver:
                     crate::test_fixtures::mock_virtio_offset_backing_path_resolver(),

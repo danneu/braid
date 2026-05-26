@@ -496,6 +496,7 @@ fn main() {
     // cmd_* function holds the inhibitor only across its irreversible mutation
     // window — see docs/design/decisions/019-inhibit-sleep.md for the boundary rule.
     let sleep_inhibitor = braid_cli::inhibit::RealSleepInhibitor;
+    let confirm = braid_cli::confirm::RealConfirm;
 
     match cli.command {
         Commands::Help(args) => {
@@ -542,6 +543,7 @@ fn main() {
                             progress,
                             paths: &paths,
                             sleep_inhibitor: &sleep_inhibitor,
+                            confirm: &confirm,
                             passphrase_reader: &braid_cli::luks::RealTty,
                             backing_path_resolver: &backing_path_resolver,
                         },
@@ -576,6 +578,7 @@ fn main() {
                     progress,
                     paths: &paths,
                     sleep_inhibitor: &sleep_inhibitor,
+                    confirm: &confirm,
                     sleeper: &braid_cli::progress::RealSleeper,
                 },
             ) {
@@ -607,6 +610,7 @@ fn main() {
                     progress,
                     paths: &paths,
                     sleep_inhibitor: &sleep_inhibitor,
+                    confirm: &confirm,
                     sleeper: &braid_cli::progress::RealSleeper,
                 },
             ) {
@@ -651,6 +655,7 @@ fn main() {
                     progress,
                     paths: &paths,
                     sleep_inhibitor: &sleep_inhibitor,
+                    confirm: &confirm,
                     sleeper: &braid_cli::progress::RealSleeper,
                     backing_path_resolver: &backing_path_resolver,
                 },

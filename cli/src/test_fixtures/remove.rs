@@ -4,6 +4,7 @@
 use super::shared::{PoolFixture, disk_member_with, mock_ok};
 use crate::cmd::{CmdRequest, MockRunner};
 use crate::config::{Config, mapper_name};
+use crate::confirm::RecordingConfirm;
 use crate::inhibit::RecordingInhibitor;
 use crate::membership::{self, PoolMembership};
 use crate::progress::{self, ProgressOutput};
@@ -97,6 +98,7 @@ impl PoolFixture {
             config: base.config,
             pass_path: base.pass_path,
             inhibitor: RecordingInhibitor::new(),
+            confirm: RecordingConfirm::new(),
         }
     }
 
@@ -111,6 +113,7 @@ impl PoolFixture {
             progress: ProgressOutput::Off,
             paths: &self.paths,
             inhibitor: &self.inhibitor,
+            confirm: &self.confirm,
         }
     }
 }
@@ -208,6 +211,7 @@ pub(crate) struct RemoveParamsBuilder<'a> {
     progress: ProgressOutput,
     paths: &'a StatePaths,
     inhibitor: &'a RecordingInhibitor,
+    confirm: &'a RecordingConfirm,
 }
 
 impl<'a> RemoveParamsBuilder<'a> {
@@ -235,6 +239,7 @@ impl<'a> RemoveParamsBuilder<'a> {
             progress: self.progress,
             paths: self.paths,
             sleep_inhibitor: self.inhibitor,
+            confirm: self.confirm,
             sleeper: &progress::NoopSleeper,
         }
     }

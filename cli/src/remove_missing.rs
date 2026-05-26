@@ -71,6 +71,10 @@ pub struct RemoveMissingParams<'a> {
     /// portion of the remove-missing. Production passes `&RealSleepInhibitor`;
     /// unit tests pass `&RecordingInhibitor` to avoid spawning subprocesses.
     pub sleep_inhibitor: &'a dyn AcquireSleepInhibitor,
+    /// Seam for the operator go/no-go prompt. Production prints the
+    /// assembled prompt and reads from the tty; tests record the prompt
+    /// and provide a deterministic verdict.
+    pub confirm: &'a dyn confirm::Confirm,
     /// Seam for the device-remove heartbeat loop. Production passes
     /// `&progress::RealSleeper`; tests pass `&progress::NoopSleeper`
     /// so progress-path coverage does not pay real wall-clock time.
@@ -170,8 +174,8 @@ impl RemoveMissingPlan {
 
         // Confirm
         if !params.yes {
-            eprintln!(
-                "{}",
+            let prompt = format!(
+                "{}\n",
                 format_remove_missing_confirm(
                     name_to_remove.as_str(),
                     work_plan.missing_id,
@@ -179,7 +183,10 @@ impl RemoveMissingPlan {
                     work_plan.missing_count,
                 )
             );
-            confirm::confirm_yes().map_err(RemoveMissingError::Validation)?;
+            params
+                .confirm
+                .confirm(&prompt)
+                .map_err(RemoveMissingError::Validation)?;
         }
 
         // Hold a logind sleep inhibitor for the rest of the remove-missing
@@ -813,6 +820,82 @@ mod tests {
         ) -> Result<RawCommandOutput, CmdError> {
             self.run(request)
         }
+    }
+
+    // Intent: a declined remove-missing confirmation aborts before
+    //   irreversible side effects.
+    // Why it exists: the interactive gate must remain before the sleep
+    //   inhibitor and journal write so a decline cannot strand recovery state.
+    // Scenario: an operator starts removing missing devid 3 from a degraded
+    //   three-disk pool and declines at the prompt.
+    #[test]
+    fn cmd_remove_missing_declined_confirm_aborts_before_side_effects() {
+        let f = PoolFixture::three_disk_devids_pinned();
+        f.confirm.decline();
+        let (runner, _) =
+            RemoveMissingPool::three_disk_one_missing().install(MockRunner::default());
+        let fs = MockFs::storage(vec![]);
+
+        let err = cmd_remove_missing(&runner, &fs, &f.remove_missing_params().yes(false).build())
+            .expect_err("declined confirm should abort");
+
+        assert_eq!(err.to_string(), "aborted by user");
+        assert_eq!(f.inhibitor.acquire_count(), 0);
+        assert!(journal::load_journal(&f.paths).unwrap().is_none());
+        let calls = runner.requests();
+        assert!(
+            !calls
+                .iter()
+                .any(|c| matches!(c, CmdRequest::BtrfsDeviceRemove { .. })),
+            "declined confirm must not issue BtrfsDeviceRemove: {calls:?}"
+        );
+    }
+
+    // Intent: accepted remove-missing confirmation records the exact
+    //   assembled prompt.
+    // Why it exists: the confirm seam must receive the formatter output plus
+    //   its trailing newline exactly once, with the target name/devid counts
+    //   wired from the planned removal.
+    // Scenario: missing devid 3 is removed from a three-disk pool with two
+    //   live survivors and no extra warning line.
+    #[test]
+    fn cmd_remove_missing_accepted_confirm_records_prompt() {
+        let f = PoolFixture::three_disk_devids_pinned();
+        f.confirm.accept();
+        let (runner, _) =
+            RemoveMissingPool::three_disk_one_missing().install(MockRunner::default());
+        let fs = MockFs::storage(vec![]);
+
+        cmd_remove_missing(&runner, &fs, &f.remove_missing_params().yes(false).build())
+            .expect("accepted confirm should proceed");
+
+        let expected = format!("{}\n", format_remove_missing_confirm("disk3", 3, 2, 1));
+        assert_eq!(f.confirm.prompts(), vec![expected]);
+    }
+
+    // Intent: accepted remove-missing confirmation does not block mutation.
+    // Why it exists: the seam must preserve the happy path, not just the
+    //   declined abort path.
+    // Scenario: the operator accepts removal of missing devid 3 and braid
+    //   issues the targeted btrfs device remove.
+    #[test]
+    fn cmd_remove_missing_accepted_confirm_proceeds_to_device_remove() {
+        let f = PoolFixture::three_disk_devids_pinned();
+        f.confirm.accept();
+        let (runner, _) =
+            RemoveMissingPool::three_disk_one_missing().install(MockRunner::default());
+        let fs = MockFs::storage(vec![]);
+
+        cmd_remove_missing(&runner, &fs, &f.remove_missing_params().yes(false).build())
+            .expect("accepted confirm should proceed");
+
+        let calls = runner.requests();
+        assert!(
+            calls
+                .iter()
+                .any(|c| matches!(c, CmdRequest::BtrfsDeviceRemove { .. })),
+            "accepted confirm must reach BtrfsDeviceRemove: {calls:?}"
+        );
     }
 
     /*

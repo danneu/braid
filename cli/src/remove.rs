@@ -94,6 +94,10 @@ pub struct RemoveParams<'a> {
     /// portion of the remove. Production passes `&RealSleepInhibitor`;
     /// unit tests pass `&RecordingInhibitor` to avoid spawning subprocesses.
     pub sleep_inhibitor: &'a dyn AcquireSleepInhibitor,
+    /// Seam for the operator go/no-go prompt. Production prints the
+    /// assembled prompt and reads from the tty; tests record the prompt
+    /// and provide a deterministic verdict.
+    pub confirm: &'a dyn confirm::Confirm,
     /// Sleeper seam for retrying transiently-busy mapper closes without
     /// slowing unit tests.
     pub sleeper: &'a dyn progress::Sleeper,
@@ -257,8 +261,8 @@ impl RemovePlan {
         // Confirm
         if !params.yes {
             let hw = confirm::query_disk_hw_info(runner, &work_plan.target_underlying);
-            eprintln!(
-                "{}",
+            let mut prompt = format!(
+                "{}\n",
                 format_remove_confirm(
                     &RemoveConfirmDisk {
                         name: work_plan.name.as_str(),
@@ -273,9 +277,9 @@ impl RemovePlan {
                 // Confirmation UI only: this is the go/no-go gate. The
                 // dry-run preview already shows the consequence as the
                 // `RAID1 -> single` balance step; see `preview()`.
-                eprintln!("WARNING: Pool will have 1 disk -- no RAID1 redundancy.\n");
+                prompt.push_str("WARNING: Pool will have 1 disk -- no RAID1 redundancy.\n\n");
             }
-            confirm::confirm_yes().map_err(RemoveError::Validation)?;
+            params.confirm.confirm(&prompt).map_err(RemoveError::Validation)?;
         }
 
         // Hold a logind sleep inhibitor for the rest of the remove operation --
@@ -947,6 +951,89 @@ mod tests {
             f.inhibitor.acquire_count(),
             1,
             "sleep inhibitor must be acquired exactly once on the path through journal::write_journal"
+        );
+    }
+
+    // Intent: a declined remove confirmation aborts before irreversible
+    //   side effects.
+    // Why it exists: the interactive gate must remain before the sleep
+    //   inhibitor and journal write so a "no" cannot strand recovery state.
+    // Scenario: an operator starts a 2->1 remove, sees the warning prompt,
+    //   and declines before the disk remove begins.
+    #[test]
+    fn cmd_remove_declined_confirm_aborts_before_side_effects() {
+        let f = PoolFixture::two_disk_healthy();
+        f.confirm.decline();
+        let runner = RemovalPool::two_disk().install(MockRunner::default());
+        let fs = MockFs::storage(vec![]);
+
+        let err = cmd_remove(&runner, &fs, &f.remove_params().yes(false).build())
+            .expect_err("declined confirm should abort");
+
+        assert_eq!(err.to_string(), "aborted by user");
+        assert_eq!(f.inhibitor.acquire_count(), 0);
+        assert!(journal::load_journal(&f.paths).unwrap().is_none());
+        let calls = runner.requests();
+        assert!(
+            !calls
+                .iter()
+                .any(|c| matches!(c, CmdRequest::BtrfsDeviceRemove { .. })),
+            "declined confirm must not issue BtrfsDeviceRemove: {calls:?}"
+        );
+    }
+
+    // Intent: accepted remove confirmation records the exact assembled prompt.
+    // Why it exists: the confirm seam must receive the formatter output plus
+    //   the single-survivor warning bytes exactly once.
+    // Scenario: removing disk2 from a two-disk pool leaves one disk, so the
+    //   operator sees the normal remove prompt and the no-RAID1 warning.
+    #[test]
+    fn cmd_remove_accepted_confirm_records_prompt_with_warning() {
+        let f = PoolFixture::two_disk_healthy();
+        f.confirm.accept();
+        let runner = RemovalPool::two_disk().install(MockRunner::default());
+        let fs = MockFs::storage(vec![]);
+
+        cmd_remove(&runner, &fs, &f.remove_params().yes(false).build())
+            .expect("accepted confirm should proceed");
+
+        let mut expected = format!(
+            "{}\n",
+            format_remove_confirm(
+                &RemoveConfirmDisk {
+                    name: "disk2",
+                    hw: Some(&confirm::DiskHwInfo::default()),
+                    devid: 2,
+                },
+                1,
+                2,
+            )
+        );
+        expected.push_str("WARNING: Pool will have 1 disk -- no RAID1 redundancy.\n\n");
+        assert_eq!(f.confirm.prompts(), vec![expected]);
+    }
+
+    // Intent: accepted remove confirmation does not block the mutation.
+    // Why it exists: the seam must preserve the happy path, not just the
+    //   declined abort path.
+    // Scenario: the operator accepts the 2->1 remove prompt and braid issues
+    //   the btrfs device remove command.
+    #[test]
+    fn cmd_remove_accepted_confirm_proceeds_to_device_remove() {
+        let f = PoolFixture::two_disk_healthy();
+        f.confirm.accept();
+        let runner = RemovalPool::two_disk().install(MockRunner::default());
+        let fs = MockFs::storage(vec![]);
+
+        cmd_remove(&runner, &fs, &f.remove_params().yes(false).build())
+            .expect("accepted confirm should proceed");
+
+        let calls = runner.requests();
+        assert!(
+            calls
+                .iter()
+                .any(|c| matches!(c, CmdRequest::BtrfsDeviceRemove { .. })),
+            "accepted confirm must reach BtrfsDeviceRemove: {calls:?}"
         );
     }
 

@@ -3,6 +3,7 @@
 
 use crate::cmd::RawCommandOutput;
 use crate::config::Config;
+use crate::confirm::RecordingConfirm;
 use crate::inhibit::RecordingInhibitor;
 use crate::luks::BackingPathResolver;
 use crate::membership::{self, DiskMember, PoolMembership};
@@ -293,6 +294,7 @@ pub(crate) struct PoolFixture {
     pub(crate) config: Config,
     pub(crate) pass_path: PathBuf,
     pub(crate) inhibitor: RecordingInhibitor,
+    pub(crate) confirm: RecordingConfirm,
 }
 
 /// Common ground produced by `empty_inner`. Bundled into a struct so
@@ -357,6 +359,7 @@ impl PoolFixture {
             config: base.config,
             pass_path: base.pass_path,
             inhibitor: RecordingInhibitor::new(),
+            confirm: RecordingConfirm::new(),
         }
     }
 
@@ -383,6 +386,7 @@ impl PoolFixture {
             config: base.config,
             pass_path: base.pass_path,
             inhibitor: RecordingInhibitor::new(),
+            confirm: RecordingConfirm::new(),
         }
     }
 
@@ -399,6 +403,7 @@ impl PoolFixture {
             config: base.config,
             pass_path: base.pass_path,
             inhibitor: RecordingInhibitor::new(),
+            confirm: RecordingConfirm::new(),
         }
     }
 }

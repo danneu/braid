@@ -165,6 +165,10 @@ pub struct ReplaceParams<'a> {
     /// portion of the replace. Production passes `&RealSleepInhibitor`;
     /// unit tests pass `&NoopSleepInhibitor` to avoid spawning subprocesses.
     pub sleep_inhibitor: &'a dyn AcquireSleepInhibitor,
+    /// Seam for the operator go/no-go prompt. Production prints the
+    /// assembled prompt and reads from the tty; tests record the prompt
+    /// and provide a deterministic verdict.
+    pub confirm: &'a dyn confirm::Confirm,
     /// Sleeper seam for retrying transiently-busy mapper closes without
     /// slowing unit tests.
     pub sleeper: &'a dyn progress::Sleeper,
@@ -451,7 +455,7 @@ impl ReplacePlan {
             let new_hw = confirm::query_disk_hw_info(runner, new_by_id.as_str());
             let is_missing = matches!(&replace_source, ReplaceSource::Missing { .. });
 
-            emit_replace_stderr(&format!(
+            let mut prompt = format!(
                 "{}\n",
                 format_replace_confirm(
                     &ReplaceConfirmOld {
@@ -468,13 +472,11 @@ impl ReplacePlan {
                     },
                     pool.total_devices,
                 )
-            ));
+            );
             if pool.total_devices == 1 {
-                emit_replace_stderr(
-                    "WARNING: This replace leaves only 1 disk -- no redundancy.\n\n",
-                );
+                prompt.push_str("WARNING: This replace leaves only 1 disk -- no redundancy.\n\n");
             }
-            confirm::confirm_yes().map_err(ReplaceError::Validation)?;
+            params.confirm.confirm(&prompt).map_err(ReplaceError::Validation)?;
         }
 
         // Read passphrase
@@ -3127,6 +3129,135 @@ mod tests {
 
     const REPLACE_TEST_FSID: &str = "cc86845b-aec3-408e-bef5-553affc1f2b1";
 
+    // Intent: a declined replace confirmation aborts before irreversible
+    //   side effects.
+    // Why it exists: the interactive gate must remain before the sleep
+    //   inhibitor and journal write so a decline cannot strand recovery state.
+    // Scenario: an operator starts replacing live disk2 with disk3 and
+    //   declines at the prompt.
+    #[test]
+    fn cmd_replace_declined_confirm_aborts_before_side_effects() {
+        let f = PoolFixture::two_disk_healthy();
+        f.confirm.decline();
+        let fs = MockFs::storage(vec![
+            "/dev/disk/by-id/virtio-disk3".into(),
+            "/dev/mapper/braid-disk3".into(),
+        ]);
+        let replace_done = Arc::new(AtomicBool::new(false));
+        let runner = ReplacementPool::two_disk_healthy()
+            .install(MockRunner::default(), replace_done)
+            .with_handler(replace_start_fails_handler());
+
+        let err = cmd_replace(&runner, &fs, &f.replace_params().yes(false).build())
+            .expect_err("declined confirm should abort");
+
+        assert_eq!(err.to_string(), "aborted by user");
+        assert_eq!(f.inhibitor.acquire_count(), 0);
+        assert!(journal::load_journal(&f.paths).unwrap().is_none());
+        let calls = runner.requests();
+        assert!(
+            !calls
+                .iter()
+                .any(|c| matches!(c, CmdRequest::BtrfsReplaceStart { .. })),
+            "declined confirm must not issue BtrfsReplaceStart: {calls:?}"
+        );
+    }
+
+    // Intent: accepted replace confirmation records the exact assembled
+    //   prompt, including the single-device warning bytes.
+    // Why it exists: the confirm seam must receive the formatter output plus
+    //   the warning exactly once when the planned topology has one disk.
+    // Scenario: replacing the only live source leaves a single-disk pool, so
+    //   the operator sees the normal replace prompt and the no-redundancy warning.
+    #[test]
+    fn cmd_replace_accepted_confirm_records_prompt_with_warning() {
+        let f = PoolFixture::empty();
+        f.confirm.accept();
+        let new_by_id = ByIdPath::parse("/dev/disk/by-id/virtio-disk3").unwrap();
+        let new_probed = PresentConfigDisk {
+            name: disk_name("disk3"),
+            by_id_path: new_by_id.clone(),
+            state: PresentConfigDiskState::PresentNotLuks,
+        };
+        let source = ReplaceSource::Live {
+            mapper: MapperName("braid-disk2".into()),
+            devid: 2,
+        };
+        let plan = ReplacePlan {
+            notes: vec![],
+            work_plan: replace_work_plan_for_test(&ReplaceWorkPlanTestInput {
+                new_name: "disk3",
+                new_by_id: &new_by_id,
+                new_probed: &new_probed,
+                replace_source: &source,
+                mount_point: &MountPoint("/mnt/storage".into()),
+                will_clear_last_missing: false,
+                total_devices: 1,
+                paths: &f.paths,
+                enroll_key_file: None,
+                luks_format_extra_opts: &[],
+            }),
+        };
+        let fs = MockFs::unmounted(vec![]);
+        let runner = MockRunner::default();
+
+        let _ = plan.execute(&runner, &fs, &f.replace_params().yes(false).build());
+
+        let mut expected = format!(
+            "{}\n",
+            format_replace_confirm(
+                &ReplaceConfirmOld {
+                    name: "disk2",
+                    hw: Some(&confirm::DiskHwInfo::default()),
+                    source: &source,
+                },
+                &ReplaceConfirmNew {
+                    name: "disk3",
+                    by_id: "/dev/disk/by-id/virtio-disk3",
+                    hw: &confirm::DiskHwInfo::default(),
+                    needs_luks_format: true,
+                    is_rebuild: false,
+                },
+                1,
+            )
+        );
+        expected.push_str("WARNING: This replace leaves only 1 disk -- no redundancy.\n\n");
+        assert_eq!(f.confirm.prompts(), vec![expected]);
+    }
+
+    // Intent: accepted replace confirmation does not block the mutation.
+    // Why it exists: the seam must preserve the happy path, not just the
+    //   declined abort path.
+    // Scenario: the operator accepts a live replace and braid reaches
+    //   `btrfs replace start`.
+    #[test]
+    fn cmd_replace_accepted_confirm_proceeds_to_replace_start() {
+        let f = PoolFixture::two_disk_healthy();
+        f.confirm.accept();
+        let fs = MockFs::storage(vec![
+            "/dev/disk/by-id/virtio-disk3".into(),
+            "/dev/mapper/braid-disk3".into(),
+        ]);
+        let replace_done = Arc::new(AtomicBool::new(false));
+        let runner = ReplacementPool::two_disk_healthy()
+            .install(MockRunner::default(), replace_done)
+            .with_handler(replace_start_fails_handler());
+
+        let result = cmd_replace(&runner, &fs, &f.replace_params().yes(false).build());
+
+        assert!(
+            result.is_err(),
+            "test runner forces replace start to fail after the gate"
+        );
+        let calls = runner.requests();
+        assert!(
+            calls
+                .iter()
+                .any(|c| matches!(c, CmdRequest::BtrfsReplaceStart { .. })),
+            "accepted confirm must reach BtrfsReplaceStart: {calls:?}"
+        );
+    }
+
     fn fresh_luks_execute_plan_for_test(f: &PoolFixture, new_uuid: LuksUuid) -> ReplacePlan {
         let old_uuid = LuksUuid::parse("22222222-2222-2222-2222-222222222222").unwrap();
         let new_name = disk_name("disk3");
@@ -5375,6 +5506,7 @@ mod tests {
         let state_tmp = tempfile::tempdir().unwrap();
         let paths = StatePaths::custom(state_tmp.path().into());
         let inhibitor = crate::inhibit::RecordingInhibitor::new();
+        let confirm = crate::confirm::RecordingConfirm::new();
         let failure = match plan_replace(
             &PanicRunner,
             &PanicFilesystem,
@@ -5392,6 +5524,7 @@ mod tests {
                 progress: crate::progress::ProgressOutput::Off,
                 paths: &paths,
                 sleep_inhibitor: &inhibitor,
+                confirm: &confirm,
                 sleeper: &crate::progress::NoopSleeper,
                 backing_path_resolver:
                     crate::test_fixtures::mock_virtio_offset_backing_path_resolver(),
@@ -5431,6 +5564,7 @@ mod tests {
         let config_tmp = tempfile::tempdir().unwrap();
         let kf_path = config_tmp.path().join("does-not-exist").join("braid.key");
         let inhibitor = crate::inhibit::RecordingInhibitor::new();
+        let confirm = crate::confirm::RecordingConfirm::new();
 
         let report = plan_replace(
             &PanicRunner,
@@ -5449,6 +5583,7 @@ mod tests {
                 progress: crate::progress::ProgressOutput::Off,
                 paths: &paths,
                 sleep_inhibitor: &inhibitor,
+                confirm: &confirm,
                 sleeper: &crate::progress::NoopSleeper,
                 backing_path_resolver:
                     crate::test_fixtures::mock_virtio_offset_backing_path_resolver(),
@@ -5488,6 +5623,7 @@ mod tests {
         let kf_path = config_tmp.path().join("braid.key");
         std::fs::create_dir(&kf_path).unwrap();
         let inhibitor = crate::inhibit::RecordingInhibitor::new();
+        let confirm = crate::confirm::RecordingConfirm::new();
 
         let report = plan_replace(
             &PanicRunner,
@@ -5506,6 +5642,7 @@ mod tests {
                 progress: crate::progress::ProgressOutput::Off,
                 paths: &paths,
                 sleep_inhibitor: &inhibitor,
+                confirm: &confirm,
                 sleeper: &crate::progress::NoopSleeper,
                 backing_path_resolver:
                     crate::test_fixtures::mock_virtio_offset_backing_path_resolver(),
@@ -6576,6 +6713,7 @@ mod tests {
             let state_tmp = tempfile::tempdir().unwrap();
             let paths = StatePaths::custom(state_tmp.path().into());
             let inhibitor = crate::inhibit::RecordingInhibitor::new();
+            let confirm = crate::confirm::RecordingConfirm::new();
             let bad = vec![token.to_owned()];
             let result = plan_replace(
                 &PanicRunner,
@@ -6594,6 +6732,7 @@ mod tests {
                     progress: crate::progress::ProgressOutput::Off,
                     paths: &paths,
                     sleep_inhibitor: &inhibitor,
+                    confirm: &confirm,
                     sleeper: &crate::progress::NoopSleeper,
                     backing_path_resolver:
                         crate::test_fixtures::mock_virtio_offset_backing_path_resolver(),
