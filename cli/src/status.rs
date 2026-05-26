@@ -5946,4 +5946,45 @@ mod tests {
             "detail must point at ack recovery, got: {detail}"
         );
     }
+
+    // Intent: resolve_alert_state keeps a live smartd flag from duplicating an
+    //   already-latched SmartdAlert cause.
+    // Why it exists: status and TUI render the latch plus the live smartd flag,
+    //   so the bridge must preserve the latched-until-ack model without
+    //   producing duplicate alert causes.
+    // Scenario: monitor latched a smartd alert, the smartd flag is still set,
+    //   and the operator runs `braid status` before acknowledging it.
+    #[test]
+    fn resolve_alert_state_dedups_smartd_alert_against_latch() {
+        let (_tmp, paths) = isolated_paths();
+        alert::save_alert_latch(
+            &AlertState {
+                causes: vec![AlertCause::SmartdAlert],
+            },
+            &paths,
+        )
+        .unwrap();
+        std::fs::write(paths.smartd_alert(), b"").unwrap();
+
+        let state = resolve_alert_state(&paths);
+
+        assert!(state.active(), "smartd flag must surface as active alert");
+        assert_eq!(state.causes, vec![AlertCause::SmartdAlert]);
+    }
+
+    // Intent: resolve_alert_state bridges a live smartd flag into AlertState
+    //   when no latch has recorded the SmartdAlert yet.
+    // Why it exists: smartd can fire between monitor cycles, and read-only
+    //   status surfaces must still show that live flag immediately.
+    // Scenario: smartd wrote the alert flag, monitor has not persisted a latch
+    //   yet, and the operator runs `braid status` during that gap.
+    #[test]
+    fn resolve_alert_state_appends_smartd_alert_when_latch_absent() {
+        let (_tmp, paths) = isolated_paths();
+        std::fs::write(paths.smartd_alert(), b"").unwrap();
+
+        let state = resolve_alert_state(&paths);
+
+        assert_eq!(state.causes, vec![AlertCause::SmartdAlert]);
+    }
 }
