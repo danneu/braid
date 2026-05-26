@@ -1637,6 +1637,54 @@ mod tests {
         );
     }
 
+    // Intent: Offline ack treats an unreadable alert latch as active even
+    //   when no causes can be parsed from it.
+    // Why it exists: ADR 014's recovery contract depends on `cmd_ack_impl`
+    //   mapping both Read and Parse latch load failures to `latch_corrupt =
+    //   true`. If a future refactor narrows that gate to Parse only, the
+    //   offline branch returns PoolNotMounted before cleanup and leaves the
+    //   user unable to clear the broken latch while the pool is locked.
+    // Scenario: pool is offline, and filesystem damage or external tampering
+    //   leaves a directory where alert-latch.json should be.
+    #[test]
+    fn ack_offline_read_error_latch_reaches_cleanup_failed() {
+        let (_dir, paths) = isolated_paths();
+        std::fs::create_dir(paths.alert_latch_json()).unwrap();
+        let beeper_calls = std::cell::Cell::new(0u32);
+        let beeper = || beeper_calls.set(beeper_calls.get() + 1);
+
+        let err = cmd_ack_impl(
+            &AckPanicRunner,
+            &ack_fs_not_mounted(),
+            &ack_mp(),
+            &paths,
+            &beeper,
+        )
+        .expect_err("unreadable latch on an offline pool must reach cleanup");
+
+        assert!(
+            matches!(err, AckError::CleanupFailed(_)),
+            "Read-error latch must gate as active and reach cleanup, got {err:?}"
+        );
+        assert_eq!(
+            beeper_calls.get(),
+            1,
+            "stop_beeper must fire before the failed latch removal"
+        );
+        assert!(
+            paths.alert_latch_json().exists(),
+            "latch directory cannot be removed by remove_file"
+        );
+        assert!(
+            paths.alert_cleanup_pending().is_file(),
+            "sentinel must be marked before the failed latch removal"
+        );
+        assert!(
+            !paths.acked_stats_json().exists(),
+            "no MissingDevice cause means no acked-stats write"
+        );
+    }
+
     /*
      * Intent: Offline ack refuses with OfflineBtrfsErrorsRefused when the
      * latch contains any BtrfsDeviceErrors cause, even if it also contains

@@ -601,6 +601,29 @@ mod tests {
         );
     }
 
+    // Intent: load_alert_latch returns Err(LatchLoadError::Read) when the
+    //   latch path exists but cannot be read as a regular file.
+    // Why it exists: ADR 014 requires callers to distinguish absent latch,
+    //   filesystem read failure, and parse failure. A directory at the latch
+    //   path is a root-independent non-NotFound I/O failure that must not be
+    //   folded into Parse or Ok(None).
+    // Scenario: filesystem damage or external tampering leaves a directory
+    //   where alert-latch.json should be. Callers must receive the Read
+    //   variant and apply their own fail-closed policy.
+    #[test]
+    fn load_alert_latch_directory_returns_read_err() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("latch-as-dir");
+        std::fs::create_dir(&path).unwrap();
+
+        let result = load_alert_latch_at(&path);
+
+        assert!(
+            matches!(result, Err(LatchLoadError::Read(_))),
+            "got {result:?}"
+        );
+    }
+
     /*
      * Intent: load_alert_latch round-trips a previously-saved AlertState
      * from disk, returning Ok(Some(state)).
