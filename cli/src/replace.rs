@@ -114,16 +114,18 @@ pub enum ReplaceError {
         "'{name}' not found in pool.json membership -- no disk entry has this name. Pool membership may need manual repair."
     )]
     OldMemberNotFound { name: String },
-    /// `--missing-id` cross-check against the old member's persisted
-    /// `devid` failed: either the persisted devid is `None`, or the
-    /// resolved missing devid does not match the persisted value.
+    /// Operator's `--missing-id` disagrees with the old member's persisted
+    /// `devid`: `--old` resolves to a member recording one devid while
+    /// `--missing-id` names another. A typo guard caught before any btrfs
+    /// cross-check. (The persisted-devid-is-`None` case is the separate
+    /// `OldMemberMissingDevid` variant.)
     #[error(
-        "--old '{old_name}' records devid {pool_devid:?} in pool.json, but btrfs reports missing devid {observed}. --old and --missing-id disagree about which member is being replaced."
+        "--old '{old_name}' records devid {pool_devid} in pool.json, but --missing-id was {supplied}. --old and --missing-id disagree about which member is being replaced -- run 'braid status' to confirm which disk is missing."
     )]
     OldDevidMismatch {
         old_name: String,
-        pool_devid: Option<u64>,
-        observed: u64,
+        pool_devid: u64,
+        supplied: u64,
     },
     /// Old member is being replaced via the missing path but the
     /// persisted membership row has no `devid`. Without a persisted
@@ -1710,8 +1712,8 @@ fn resolve_replace_source<R: CommandRunner>(
         if supplied != persisted_devid {
             return Err(ReplaceError::OldDevidMismatch {
                 old_name: old_name.as_str().to_owned(),
-                pool_devid: Some(persisted_devid),
-                observed: supplied,
+                pool_devid: persisted_devid,
+                supplied,
             });
         }
         if pool.devices.iter().any(|d| d.devid == supplied) {
@@ -2708,15 +2710,28 @@ mod tests {
             &mp(),
         )
         .unwrap_err();
+        let msg = err.to_string();
+        assert!(
+            !msg.contains("Some("),
+            "must not leak Debug Option wrapper: {msg}"
+        );
+        assert!(
+            !msg.contains("btrfs reports"),
+            "must not attribute --missing-id to btrfs: {msg}"
+        );
+        assert!(
+            msg.contains("devid 2") && msg.contains("--missing-id was 99"),
+            "should show persisted devid 2 and supplied 99: {msg}"
+        );
         match err {
             ReplaceError::OldDevidMismatch {
                 old_name,
                 pool_devid,
-                observed,
+                supplied,
             } => {
                 assert_eq!(old_name, "disk2");
-                assert_eq!(pool_devid, Some(2));
-                assert_eq!(observed, 99);
+                assert_eq!(pool_devid, 2);
+                assert_eq!(supplied, 99);
             }
             other => panic!("expected OldDevidMismatch, got: {other:?}"),
         }
