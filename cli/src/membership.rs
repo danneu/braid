@@ -599,12 +599,6 @@ impl CorruptSidecarError {
         &self.target
     }
 
-    /// Borrow the underlying I/O error without consuming the wrapper.
-    #[allow(dead_code)]
-    pub(crate) fn source(&self) -> &std::io::Error {
-        &self.source
-    }
-
     /// Move the underlying I/O error into a caller-owned error variant.
     pub(crate) fn into_source(self) -> std::io::Error {
         self.source
