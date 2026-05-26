@@ -75,6 +75,13 @@ fn run_loop(
 ) -> io::Result<()> {
     while model.running {
         model.frame = model.frame.wrapping_add(1);
+        // `now` is naive-LOCAL on purpose: it must share a time basis with the scrub
+        // `ctime`, which parse_ctime returns as a naive-local PrimitiveDateTime. A UTC
+        // `now` here would skew the relative timeago text by the host's offset.
+        //
+        // current_local_offset() is sound despite the multithreaded TUI: time >= 0.3.37
+        // dropped the old "fail when multithreaded" rule and calls localtime_r directly,
+        // so unwrap_or(UTC) guards only a genuine localtime failure, not thread count.
         let now = {
             let offset = time::UtcOffset::current_local_offset().unwrap_or(time::UtcOffset::UTC);
             let local = time::OffsetDateTime::now_utc().to_offset(offset);
