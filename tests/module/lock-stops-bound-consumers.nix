@@ -1,20 +1,23 @@
 /*
   Intent: braid lock (user-initiated) and `systemctl stop braid-online.service`
     (shutdown / manual ExecStop) both stop bound pool consumers and unmount
-    cleanly when a long-running consumer holds /mnt/storage busy.
+    cleanly when a long-running consumer holds /mnt/storage busy, including a
+    BindsTo-only consumer with no stop-ordering guarantee.
   Why it exists: regression guard for the EBUSY-on-busy-mount class of bug
     (samba on caja, future nfs/syncthing). The user-initiated lock path
     relies on cmd_lock iterating BoundBy braid-online.service through
     OnlineStateOps::list_bound_by; the ExecStop path relies on systemd's
-    BindsTo cascade stopping consumers before `braid lock --systemd-stop`
-    runs cmd_lock.
+    BindsTo cascade stopping full-triad consumers before
+    `braid lock --systemd-stop` runs cmd_lock, and on cmd_lock's explicit
+    BoundBy stop for BindsTo-only consumers that may still be active.
   Scenario: pool unlocked with a fake consumer service holding fd 3 on
     /mnt/storage/.consumer-lock (BindsTo+After+wantedBy braid-online.service,
-    ConditionPathIsMountPoint=/mnt/storage). Cycle 1 runs `braid lock` and
-    asserts the consumer is stopped, the mount is gone, and LUKS mappers
-    are closed. Cycle 2 unlocks again, runs `systemctl stop
-    braid-online.service`, and asserts the same teardown via the ExecStop
-    reentry path.
+    ConditionPathIsMountPoint=/mnt/storage). Cycle 1 runs `braid lock`; cycle
+    2 unlocks again and runs `systemctl stop braid-online.service`. Cycle 3
+    manually starts a SIGTERM-resistant BindsTo-only consumer holding
+    /mnt/storage/.consumer-unordered-lock, then stops braid-online.service.
+    Each cycle asserts the consumer is stopped, the mount is gone, and LUKS
+    mappers are closed.
 */
 { braid }:
 { pkgs, lib, ... }:
@@ -69,6 +72,26 @@ in
           ExecStart = pkgs.writeShellScript "dummy-pool-consumer" ''
             exec 3>/mnt/storage/.consumer-lock
             sleep 300
+          '';
+        };
+      };
+
+      # Misordered long-running consumer: BindsTo keeps it in BoundBy, but the
+      # missing After means systemd does not order it before braid-online
+      # ExecStop. cmd_lock's explicit BoundBy stop is the guard under test.
+      systemd.services.dummy-pool-consumer-unordered = {
+        description = "Fake BindsTo-only consumer that holds /mnt/storage busy";
+        bindsTo = [ "braid-online.service" ];
+        unitConfig.ConditionPathIsMountPoint = "/mnt/storage";
+        serviceConfig = {
+          Type = "simple";
+          TimeoutStopSec = "10s";
+          ExecStart = pkgs.writeShellScript "dummy-pool-consumer-unordered" ''
+            exec 3>/mnt/storage/.consumer-unordered-lock
+            trap "" TERM
+            while :; do
+              sleep 1
+            done
           '';
         };
       };

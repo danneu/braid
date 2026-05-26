@@ -142,7 +142,16 @@ permission fixups but do not touch `braid-online.service`.
 6. When `systemd_lifecycle = true`, Rust checks the mount is gone and runs `systemctl stop braid-online.service` synchronously so the command returns only after the lifecycle owner is inactive. The synchronous stop runs only when the post-cleanup mountpoint check confirms the mount is gone; if the check itself fails, Rust warns and skips the stop, leaving the unit active for the operator to retry. The recursive `ExecStop` reentry polls the coordinator, observes `done\n`, and exits 0.
 
 **On system shutdown:**
-1. systemd stops `braid-online.service` (if active).
+1. systemd stops `braid-online.service` (if active); its `BindsTo`+`After`
+   cascade stops the scrub units and any full-triad consumer first. ExecStop
+   then re-runs the same scrub-stop + `BoundBy` iteration as the "On `lock`"
+   steps 2-3. For the scrub units and any consumer that follows the documented
+   `WantedBy`+`BindsTo`+`After` triad, the cascade has already stopped them, so
+   these re-issued stops are no-ops. A consumer that declares `BindsTo` without
+   `After` has no stop-ordering guarantee and may still be active when ExecStop
+   runs, so the explicit blocking stop here is what frees the mount. Running the
+   pre-steps unconditionally covers both cases, keeping teardown code-owned and
+   independent of cascade ordering.
 2. `ExecStop = braid lock --systemd-stop --deadline-secs <n>` waits for an in-flight plain `braid lock` to finish through the stop coordinator, or waits for the pool lock up to the configured deadline.
 3. Lock dispatch loads membership from `pool.json`; if `pool.json` is absent or corrupt, it warns and proceeds with empty membership because mapper cleanup still requires per-candidate LUKS UUID verification.
 4. CLI unmounts and closes LUKS.
@@ -171,6 +180,12 @@ Current pattern: `braid-online.service` runs `braid lock --systemd-stop --deadli
 `systemctl start <unit>` on an already-active oneshot+RemainAfterExit unit is a no-op at the work level, but it still queues a job. If a *stop* job for the same unit is already in flight (because someone else invoked `systemctl stop`), the start queues *behind* the stop. If that stop's `ExecStop=` is itself blocked on a resource the caller holds, the result is a deadlock.
 
 This is load-bearing for any CLI that both holds a resource and uses `systemctl start/stop` on a unit whose `ExecStart=`/`ExecStop=` touches that resource (e.g. Rust dispatch holding `pool.lock` while activating `braid-online.service` whose `ExecStop` calls `braid lock`).
+
+These rules govern `start`/`stop` of `braid-online.service` itself. The
+`systemctl stop` calls in `run_lock_pre_steps` target bound consumers and scrub
+units, not the lifecycle owner, so they queue no job against
+`braid-online.service` and the start-behind-stop deadlock above does not apply
+to them.
 
 Rules:
 

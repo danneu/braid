@@ -1131,6 +1131,11 @@ where
     plan.execute(runner, fs, sleeper)
 }
 
+/// Shared pre-unmount teardown for both plain `braid lock` and the
+/// `--systemd-stop` ExecStop path: stop scrub units, then each `BoundBy
+/// braid-online.service` consumer. Run unconditionally so teardown is
+/// code-owned regardless of systemd's cascade ordering; decision 018 covers
+/// when these ExecStop stops are no-ops vs. load-bearing.
 fn run_lock_pre_steps(cfg: &Config, online_ops: &dyn OnlineStateOps, out: &mut dyn Write) {
     if !cfg.systemd_lifecycle() {
         return;
