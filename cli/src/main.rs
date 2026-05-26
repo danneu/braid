@@ -759,7 +759,7 @@ fn main() {
         Commands::Lock(args) => {
             if args.dry_run {
                 let config = load_config_or_exit(Path::new(&config_path), 1);
-                let membership = load_membership_or_exit(&paths, 1);
+                let membership = load_membership_for_lock(&paths);
                 let runner = RealRunner;
                 let fs = RealFilesystem;
                 if let Err(e) = braid_cli::lock::cmd_lock(&runner, &fs, &config, &membership, true)
