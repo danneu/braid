@@ -760,6 +760,8 @@ impl AddWorkPlan {
                 }
             }
             let total_after = self.existing_pool_device_count + self.target_count();
+            // Defensive lower-bound guard for live-pool adds: normal plans
+            // have existing present devices plus at least one committed target.
             if total_after >= 2 {
                 steps.push(Step {
                     risk: "long",
@@ -1484,8 +1486,9 @@ impl AddPlan {
             journal::write_journal(params.paths, &balance_journal)
                 .map_err(|e| AddError::Validation(e.to_string()))?;
 
-            // Balance to RAID1 if total >= 2
             let total_after = self.pool.devices.len() + mapper_paths.len();
+            // Defensive lower-bound guard for live-pool adds: normal plans
+            // have existing present devices plus at least one committed target.
             if total_after >= 2 {
                 eprint!(
                     "{}",
@@ -4256,6 +4259,18 @@ mod tests {
                     &format!("cryptsetup open --test-passphrase {device}"),
                     "",
                 )),
+                CmdRequest::CryptsetupLuksFormat { .. } => {
+                    Ok(mock_ok("cryptsetup luksFormat", ""))
+                }
+                CmdRequest::CryptsetupLuksHeaderBackup { backup_path, .. } => {
+                    if let Some(parent) = std::path::Path::new(backup_path.as_str()).parent() {
+                        std::fs::create_dir_all(parent)
+                            .map_err(|e| CmdError::Failed(format!("mock: create_dir_all: {e}")))?;
+                    }
+                    std::fs::write(backup_path, b"")
+                        .map_err(|e| CmdError::Failed(format!("mock: write backup: {e}")))?;
+                    Ok(mock_ok("cryptsetup luksHeaderBackup", ""))
+                }
                 CmdRequest::CryptsetupLuksOpen { .. } => {
                     self.disk2_opened
                         .store(true, std::sync::atomic::Ordering::SeqCst);
@@ -4508,6 +4523,78 @@ mod tests {
         assert!(
             captured.find(wait) < captured.find(ok),
             "wait must precede ok, got: {captured:?}"
+        );
+    }
+
+    // Intent: executing a fresh add into a mounted single-device pool issues
+    // exactly one RAID1 balance after the btrfs device add.
+    // Why it exists: the live-pool add path must convert data to RAID1 once
+    // the pool reaches two devices; otherwise new data can remain unprotected.
+    // Scenario: disk1 is already mounted in the pool and disk2 is a fresh
+    // LUKS target that gets formatted, opened, added, and balanced.
+    #[test]
+    fn execute_fresh_add_to_mounted_single_device_pool_balances_once() {
+        let (_state_tmp, paths, _tmp, pass_path) = execute_fixture();
+        let fs = AddMockFs(vec!["/dev/disk/by-id/virtio-disk2".into()]);
+        let runner = RequestRecordingRunner::new(RecoverableAddRunner::new());
+        let inhibitor = crate::inhibit::RecordingInhibitor::new();
+        let target = fresh_target(
+            "disk2",
+            "/dev/disk/by-id/virtio-disk2",
+            "22222222-2222-2222-2222-222222222222",
+        );
+        let target_uuid = target.luks_uuid.clone();
+        let pool = PoolState {
+            mounted: true,
+            devices: vec![PoolDevice {
+                mapper: MapperName("braid-disk1".into()),
+                luks_uuid: LuksUuid::parse("11111111-1111-1111-1111-111111111111").unwrap(),
+                devid: 1,
+                underlying: "/dev/vdb".into(),
+            }],
+            missing_count: 0,
+            missing_devids: vec![],
+            total_devices: 1,
+            fsid: Some(POOL_FSID.into()),
+            null_underlying: vec![],
+        };
+        let plan = plan_for_execute_target(
+            AddTargetWork::Fresh(target.clone()),
+            journal_targets_with(target_uuid, fresh_journal_target(&target)),
+            pool,
+        );
+        let config = test_config();
+
+        let result = plan.execute(
+            &runner,
+            &fs,
+            &AddParams {
+                config: &config,
+                disk_specs: &[],
+                dry_run: false,
+                yes: true,
+                passphrase_stdin: false,
+                passphrase_file: Some(pass_path.as_path()),
+                enroll_key_file: None,
+                luks_format_extra_opts: &[],
+                progress: ProgressOutput::Off,
+                paths: &paths,
+                sleep_inhibitor: &inhibitor,
+                passphrase_reader: &RealTty,
+                backing_path_resolver:
+                    crate::test_fixtures::mock_virtio_offset_backing_path_resolver(),
+            },
+        );
+
+        assert!(result.is_ok(), "fresh add should succeed: {result:?}");
+        let requests = runner.requests();
+        let balance_count = requests
+            .iter()
+            .filter(|request| matches!(request, CmdRequest::BtrfsBalanceRaid1 { .. }))
+            .count();
+        assert_eq!(
+            balance_count, 1,
+            "fresh add should issue exactly one RAID1 balance: {requests:?}"
         );
     }
 
@@ -6536,10 +6623,11 @@ mod tests {
         );
     }
 
-    #[test]
     // Intent: dry-run for fresh single-disk bootstrap shows LUKS init + mkfs + mount commands.
-    // Why: verifies header backup and mount commands appear, with correct CmdRequests.
+    // Why it exists: verifies header backup and mount commands appear, and
+    // pins the single-profile side of the bootstrap mkfs boundary.
     // Scenario: first disk added to an empty pool (no pool mounted yet).
+    #[test]
     fn dry_run_render_fresh_single_disk_bootstrap() {
         let runner = MockRunner::default();
         let probed = vec![PresentConfigDisk {
@@ -6577,7 +6665,7 @@ mod tests {
         let output = Step::render_dry_run(&steps);
         let lines: Vec<&str> = output.lines().collect();
 
-        // Steps: LUKS format, header backup, LUKS open, mkfs, mount = 5 steps × 2 lines = 10
+        // Steps: LUKS format, header backup, LUKS open, mkfs, mount = 5 steps x 2 lines = 10
         assert_eq!(lines.len(), 10, "expected 10 lines, got:\n{output}");
 
         // LUKS format
@@ -6598,6 +6686,8 @@ mod tests {
         // mkfs
         assert!(lines[6].contains("mkfs.btrfs"));
         assert!(lines[7].contains("$ mkfs.btrfs"));
+        assert!(lines[7].contains("-d single -m dup"));
+        assert!(!lines[7].contains("raid1"));
 
         // mount
         assert!(lines[8].contains("mount"));
@@ -6837,6 +6927,70 @@ mod tests {
         assert!(
             output.contains("$ cryptsetup open --type luks"),
             "still expected the LUKS open step; got:\n{output}"
+        );
+    }
+
+    // Intent: dry-run for two fresh bootstrap disks renders RAID1 mkfs, not a
+    // post-mkfs balance.
+    // Why it exists: pins the two-disk side of the bootstrap mkfs boundary so
+    // two fresh devices are not accidentally created as a single-profile pool.
+    // Scenario: first pool creation receives disk1 and disk2 together while
+    // no pool is mounted yet.
+    #[test]
+    fn dry_run_render_fresh_two_disk_bootstrap_uses_raid1_mkfs() {
+        let runner = MockRunner::default();
+        let by_id_disk1 = ByIdPath::parse("/dev/disk/by-id/disk1").unwrap();
+        let by_id_disk2 = ByIdPath::parse("/dev/disk/by-id/disk2").unwrap();
+        let names = vec![
+            DiskName::parse("disk1").unwrap(),
+            DiskName::parse("disk2").unwrap(),
+        ];
+        let by_ids = vec![&by_id_disk1, &by_id_disk2];
+        let probed = vec![
+            PresentConfigDisk {
+                name: names[0].clone(),
+                by_id_path: by_id_disk1.clone(),
+                state: PresentConfigDiskState::PresentNotLuks,
+            },
+            PresentConfigDisk {
+                name: names[1].clone(),
+                by_id_path: by_id_disk2.clone(),
+                state: PresentConfigDiskState::PresentNotLuks,
+            },
+        ];
+        let pool = pool_unmounted();
+
+        let steps = build_add_work_plan(
+            &runner,
+            &AddStepsInput {
+                names: &names,
+                by_ids: &by_ids,
+                probed: &probed,
+                pool: &pool,
+                mount_point: &MountPoint("/mnt/storage".into()),
+                paths: &test_paths().1,
+                enroll_key_file: None,
+                luks_format_extra_opts: &LuksFormatExtraOpts::default(),
+                backing_path_resolver:
+                    crate::test_fixtures::mock_virtio_offset_backing_path_resolver(),
+                pool_membership: &PoolMembership::empty(),
+            },
+        )
+        .unwrap()
+        .render_steps();
+        let output = Step::render_dry_run(&steps);
+
+        assert!(
+            output.contains("mkfs.btrfs RAID1"),
+            "missing RAID1 mkfs step description: {output}"
+        );
+        assert!(
+            output.contains("$ mkfs.btrfs -d raid1 -m raid1"),
+            "missing RAID1 mkfs command: {output}"
+        );
+        assert!(
+            !output.contains("btrfs balance to RAID1"),
+            "bootstrap RAID1 mkfs must not render a balance step: {output}"
         );
     }
 
