@@ -3007,6 +3007,72 @@ pool already mounted at /mnt/storage
         );
     }
 
+    // Intent: a verify rejection on a NON-first to-unlock disk must prevent
+    // any mapper open -- the credential is verify-tested against every disk
+    // before the open loop begins.
+    // Why it exists: passphrase_mismatch_names_failing_disk and
+    // wrong_passphrase_zero_open_cleanup_is_noop both still pass if
+    // verification regresses to "verify disk1, then open all", because disk2's
+    // failure then resurfaces at the open step. This pins the Principle 4
+    // "verify all before open any" ordering against that reordering.
+    // Scenario: 2-disk RAID1 where someone changed disk2's passphrase outside
+    // braid; disk2's header is intact, disk1 still accepts.
+    #[test]
+    fn non_first_disk_verify_rejection_opens_no_mapper() {
+        let config = test_config();
+        let fs = direct_two_disk_fs_with_mappers();
+        let plan = direct_two_disk_plan();
+        let disk1 = "/dev/disk/by-id/virtio-disk1";
+        let disk2 = "/dev/disk/by-id/virtio-disk2";
+        let (tp2_req, tp2_out) = test_passphrase_fail(disk2);
+        let (is2_req, is2_out) = is_luks_ok(disk2);
+        let (dump2_req, dump2_out) = luks_dump_text_ok(disk2);
+        let runner = MockRunner::default()
+            .with_output_stdin(
+                CmdRequest::CryptsetupTestPassphrase {
+                    device: disk1.into(),
+                },
+                MOUNT_TEST_PASSPHRASE_BYTES.to_vec(),
+                ok_raw("cryptsetup open --test-passphrase"),
+            )
+            .with_output_stdin(tp2_req, MOUNT_TEST_PASSPHRASE_BYTES.to_vec(), tp2_out)
+            .with_output(is2_req, is2_out)
+            .with_output(dump2_req, dump2_out)
+            .with_mappers_closed(&["braid-disk1", "braid-disk2"]);
+
+        let failure = execute_unlock_and_mount(
+            &runner,
+            &fs,
+            &config,
+            &plan,
+            crate::test_fixtures::mock_virtio_backing_path_resolver(),
+            &test_passphrase(),
+        )
+        .expect_err("non-first disk verify rejection should fail before any open");
+
+        assert!(
+            runner.requests().iter().any(|r| matches!(
+                r,
+                CmdRequest::CryptsetupTestPassphrase { device } if device == disk2
+            )),
+            "verification must reach disk2 before failing"
+        );
+        assert!(
+            !runner
+                .requests()
+                .iter()
+                .any(|r| matches!(r, CmdRequest::CryptsetupLuksOpen { .. })),
+            "verify rejection must prevent every mapper open"
+        );
+        assert!(
+            failure.opened_mappers.is_empty(),
+            "verify rejection should not report opened mappers"
+        );
+        let msg = failure.error.to_string();
+        assert!(msg.contains("disk2"), "failure should name disk2: {msg}");
+        assert!(!msg.contains("disk1"), "failure should not name disk1: {msg}");
+    }
+
     // Intent: Keyfile unlock uses the same opened-mapper cleanup tracking as
     // passphrase unlock.
     // Why it exists: a passphrase-only fix would leave auto-unlock failures
