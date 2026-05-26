@@ -16,6 +16,8 @@ use crate::tui::model::{DiskLuksState, FanSnapshot, PoolState, UpsSnapshot};
 #[allow(clippy::large_enum_variant)]
 pub enum Event {
     Key(KeyEvent),
+    /// Wake-only terminal resize; redraw re-queries the backend size.
+    Resize,
     PoolProbeFinished(
         Result<(HashMap<String, DiskLuksState>, Option<PoolState>), String>,
         Duration,
@@ -39,6 +41,7 @@ impl Event {
                 }
                 keymap::handle_key(key, ctx)
             }
+            Event::Resize => None,
             Event::PoolProbeFinished(result, elapsed) => {
                 Some(Message::PoolProbeFinished(result, elapsed))
             }
@@ -50,6 +53,16 @@ impl Event {
                 Some(Message::BrowseCommandFinished { raw, generation })
             }
         }
+    }
+}
+
+/// Pure crossterm-to-TUI event mapping so resize forwarding stays covered by
+/// unit tests instead of depending on a live terminal input thread.
+fn to_tui_event(ev: event::Event) -> Option<Event> {
+    match ev {
+        event::Event::Key(key) => Some(Event::Key(key)),
+        event::Event::Resize(_, _) => Some(Event::Resize),
+        _ => None,
     }
 }
 
@@ -70,10 +83,15 @@ impl InputHandler {
             while !thread_shutdown.load(Ordering::Relaxed) {
                 match event::poll(Duration::from_millis(100)) {
                     Ok(true) => {
-                        if let Ok(event::Event::Key(key)) = event::read()
-                            && thread_tx.send(Event::Key(key)).is_err()
-                        {
-                            break;
+                        match event::read() {
+                            Ok(ev) => {
+                                if let Some(event) = to_tui_event(ev)
+                                    && thread_tx.send(event).is_err()
+                                {
+                                    break;
+                                }
+                            }
+                            Err(_) => break,
                         }
                     }
                     Ok(false) => {}
@@ -102,7 +120,9 @@ impl Drop for InputHandler {
 
 #[cfg(test)]
 mod tests {
-    use ratatui::crossterm::event::{KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
+    use ratatui::crossterm::event::{
+        self, KeyCode, KeyEvent, KeyEventKind, KeyModifiers,
+    };
 
     use super::*;
     use crate::tui::browse::BrowseFocus;
@@ -123,6 +143,39 @@ mod tests {
             KeyModifiers::NONE,
             kind,
         ))
+    }
+
+    // Intent: crossterm key and resize events are forwarded into the TUI event
+    //         channel, while unsupported terminal events are ignored.
+    // Why it exists: the render loop no longer redraws at 60Hz while idle, so
+    //         resize must wake it explicitly to avoid stale layout.
+    // Scenario: user resizes an idle terminal, presses a key, or the terminal
+    //         reports a focus event.
+    #[test]
+    fn to_tui_event_forwards_resize_and_keys() {
+        assert!(matches!(
+            to_tui_event(event::Event::Resize(80, 24)),
+            Some(Event::Resize)
+        ));
+        assert!(matches!(
+            to_tui_event(event::Event::Key(KeyEvent::new(
+                KeyCode::Char('q'),
+                KeyModifiers::NONE,
+            ))),
+            Some(Event::Key(_))
+        ));
+        assert!(to_tui_event(event::Event::FocusGained).is_none());
+    }
+
+    // Intent: a resize event is a wake-only event and does not dispatch an app
+    //         message.
+    // Why it exists: ratatui re-queries terminal size during draw, so resize
+    //         should trigger redraw without mutating model state.
+    // Scenario: user resizes the terminal while no key input or probe result is
+    //         pending.
+    #[test]
+    fn resize_into_message_is_none() {
+        assert!(Event::Resize.into_message(&ctx()).is_none());
     }
 
     // Intent: Release events are dropped before tui keymap dispatch.

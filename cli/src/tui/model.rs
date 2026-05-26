@@ -440,6 +440,18 @@ impl Model {
             browse: BrowseState::default(),
         }
     }
+
+    /// Single source of truth for the pool footer spinner so the view and
+    /// render loop agree about when its glyph needs to advance.
+    pub fn pool_spinner_active(&self) -> bool {
+        self.pool.is_inflight() || self.spinner_deadline.is_some_and(|d| Instant::now() < d)
+    }
+
+    /// Render-loop cadence gate: true only while a visible spinner needs
+    /// sub-second redraws.
+    pub fn is_animating(&self) -> bool {
+        self.pool_spinner_active() || (self.tab == Tab::Browse && self.browse.loading())
+    }
 }
 
 #[cfg(test)]
@@ -460,6 +472,101 @@ mod tests {
 
     fn disk_name(raw: &str) -> DiskName {
         DiskName::parse(raw).expect("valid disk name in fixture")
+    }
+
+    fn mounted_demo_model() -> Model {
+        Model::new_demo(
+            crate::tui::demo::sample_disk_names(),
+            PoolStatus::Mounted(crate::tui::demo::sample_pool()),
+        )
+    }
+
+    // Intent: an idle Data-tab model reports that no spinner animation is
+    //         needed.
+    // Why it exists: the render loop uses Model::is_animating to decide
+    //         whether it can leave the 16ms redraw cadence.
+    // Scenario: user leaves braid tui open on the default Data tab with fresh
+    //         pool data and no browse command running.
+    #[test]
+    fn is_animating_false_when_idle() {
+        let model = mounted_demo_model();
+
+        assert!(!model.is_animating());
+    }
+
+    // Intent: an in-flight pool probe keeps the render loop on the fast
+    //         cadence.
+    // Why it exists: the footer reload spinner is visible while the pool is
+    //         loading, so dropping to the idle cadence would freeze it.
+    // Scenario: TUI startup or manual refresh while the pool probe has not
+    //         returned yet.
+    #[test]
+    fn is_animating_true_when_pool_inflight() {
+        let model = Model::new_demo(crate::tui::demo::sample_disk_names(), PoolStatus::Loading);
+
+        assert!(model.is_animating());
+    }
+
+    // Intent: the minimum-visible footer spinner window keeps animation active
+    //         after a refresh completes.
+    // Why it exists: the footer intentionally shows the reload spinner briefly
+    //         even when the probe is no longer in flight.
+    // Scenario: a fast refresh completed, but spinner_deadline has not expired.
+    #[test]
+    fn is_animating_true_when_spinner_deadline_live() {
+        let mut model = mounted_demo_model();
+        model.spinner_deadline = Some(Instant::now() + Duration::from_secs(10));
+
+        assert!(model.is_animating());
+    }
+
+    // Intent: an expired footer spinner deadline no longer holds the fast
+    //         redraw cadence.
+    // Why it exists: stale deadlines must not recreate the idle 60Hz redraw
+    //         this change removes.
+    // Scenario: a manual refresh completed and the minimum-visible spinner
+    //         window has elapsed.
+    #[test]
+    fn is_animating_false_when_spinner_deadline_expired() {
+        let mut model = mounted_demo_model();
+        model.spinner_deadline = Some(Instant::now() - Duration::from_secs(1));
+
+        assert!(!model.is_animating());
+    }
+
+    // Intent: a Browse-tab command load keeps animation active while its
+    //         spinner is visible.
+    // Why it exists: Browse has its own spinner glyphs that also depend on
+    //         Model::frame advancing at a sub-second cadence.
+    // Scenario: user switches from Data through Scrub into Browse, starting
+    //         the initial Browse command load.
+    #[test]
+    fn is_animating_true_when_browse_loading() {
+        let mut model = mounted_demo_model();
+        let _ = update(&mut model, Message::NextTab);
+        let _ = update(&mut model, Message::NextTab);
+
+        assert_eq!(model.tab, Tab::Browse);
+        assert!(model.browse.loading());
+        assert!(model.is_animating());
+    }
+
+    // Intent: background Browse loading does not keep animation active after
+    //         leaving the Browse tab.
+    // Why it exists: Browse command completion may lag a tab switch, but its
+    //         spinner is no longer visible and must not force 16ms redraws.
+    // Scenario: user enters Browse, starts a command load, then tabs back to
+    //         Data before the command finishes.
+    #[test]
+    fn is_animating_false_when_browse_loading_off_tab() {
+        let mut model = mounted_demo_model();
+        let _ = update(&mut model, Message::NextTab);
+        let _ = update(&mut model, Message::NextTab);
+        let _ = update(&mut model, Message::NextTab);
+
+        assert_eq!(model.tab, Tab::Data);
+        assert!(model.browse.loading());
+        assert!(!model.is_animating());
     }
 
     // Intent: DiskIdentity::from_membership maps each membership axis into the

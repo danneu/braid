@@ -65,6 +65,9 @@ fn run_with_model(mut model: Model, init_effects: Vec<Effect>) -> io::Result<()>
 }
 
 const FRAME_BUDGET: Duration = Duration::from_millis(16);
+/// Idle redraw cadence when no spinner is animating: slow enough to avoid
+/// busy-redraw, fast enough to keep minute-granular relative times fresh.
+const IDLE_REDRAW_INTERVAL: Duration = Duration::from_secs(10);
 const MAX_EVENTS_PER_FRAME: usize = 100;
 
 fn run_loop(
@@ -87,21 +90,32 @@ fn run_loop(
             let local = time::OffsetDateTime::now_utc().to_offset(offset);
             time::PrimitiveDateTime::new(local.date(), local.time())
         };
+        let animating = model.is_animating();
         terminal.draw(|f| view(model, f, now))?;
 
+        let timeout = if animating {
+            FRAME_BUDGET
+        } else {
+            IDLE_REDRAW_INTERVAL
+        };
+
         let mut messages = Vec::new();
-        if let Ok(event) = rx.recv_timeout(FRAME_BUDGET) {
-            let ctx = key_context(model);
-            messages.extend(event.into_message(&ctx));
-            for _ in 1..MAX_EVENTS_PER_FRAME {
-                match rx.try_recv() {
-                    Ok(event) => {
-                        let ctx = key_context(model);
-                        messages.extend(event.into_message(&ctx))
+        match rx.recv_timeout(timeout) {
+            Ok(event) => {
+                let ctx = key_context(model);
+                messages.extend(event.into_message(&ctx));
+                for _ in 1..MAX_EVENTS_PER_FRAME {
+                    match rx.try_recv() {
+                        Ok(event) => {
+                            let ctx = key_context(model);
+                            messages.extend(event.into_message(&ctx))
+                        }
+                        Err(_) => break,
                     }
-                    Err(_) => break,
                 }
             }
+            Err(mpsc::RecvTimeoutError::Timeout) => {}
+            Err(mpsc::RecvTimeoutError::Disconnected) => break,
         }
 
         let mut effects = Vec::new();

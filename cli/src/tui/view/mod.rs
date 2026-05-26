@@ -1,6 +1,4 @@
 use std::collections::HashMap;
-use std::time::Instant;
-
 use ratatui::layout::{Constraint, Layout, Rect};
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
@@ -1519,8 +1517,7 @@ pub fn view(model: &Model, frame: &mut Frame, now: PrimitiveDateTime) {
         Tab::Browse => crate::tui::browse::view::view_browse(model, frame, outer[off + 2]),
     }
 
-    let spinning =
-        model.pool.is_inflight() || model.spinner_deadline.is_some_and(|d| Instant::now() < d);
+    let spinning = model.pool_spinner_active();
 
     let reload = if spinning {
         const SPINNER: &[char] = &['⠋', '⠙', '⠹', '⠸', '⠼', '⠴', '⠦', '⠧', '⠇', '⠏'];
