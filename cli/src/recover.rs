@@ -11271,32 +11271,141 @@ mod tests {
         }
     }
 
+    // Intent: cmd_recover with dry_run = true previews and returns through
+    // the short-circuit without acquiring the sleep inhibitor or performing
+    // execute-phase mutation, even for a journal whose real execute path
+    // would acquire.
+    // Why it exists: the guarantee is enforced only by the cmd_recover dry-run
+    // branch. A regression deleting it would fall through to plan.execute()
+    // and acquire; the prior version drove plan_recover, which has no acquire
+    // site and could only assert a construction-true property.
+    // Scenario: interrupted replace committed the pool mutation
+    // (PostReplaceMaintenance), so recovery would resize the new devid and
+    // clear the journal; the operator runs --dry-run first and must observe
+    // zero inhibitor acquisitions and zero state mutation.
     #[test]
     fn recover_dry_run_does_not_acquire_sleep_inhibitor() {
         let f = PoolFixture::empty();
-        journal::write_journal(&f.paths, &recoverable_pool_mutation_add_journal()).unwrap();
-        let fs = MockFs::new(&["/dev/disk/by-id/virtio-disk1"]);
+        let fs = MockFs::new(&[]);
+        let new_uuid = uuid_for_name("disk-new");
+        let new_uuid_text = new_uuid.to_string();
+        let pre = membership_from(vec![
+            membership_entry("disk1", "/dev/disk/by-id/virtio-disk1", None, Some(1)),
+            membership_entry("old", "/dev/disk/by-id/virtio-old", None, None),
+            membership_entry("disk3", "/dev/disk/by-id/virtio-disk3", None, Some(3)),
+        ]);
+        let target = membership_from(vec![
+            membership_entry("disk1", "/dev/disk/by-id/virtio-disk1", None, Some(1)),
+            (
+                new_uuid.clone(),
+                disk_member_named("disk-new", "/dev/disk/by-id/virtio-disk-new", None, Some(2)),
+            ),
+            membership_entry("disk3", "/dev/disk/by-id/virtio-disk3", None, Some(3)),
+        ]);
+        let journal = journal::Journal {
+            started_at: "2026-01-01T00:00:00Z".into(),
+            op: OpKind::Replace {
+                phase: journal::ReplacePhase::PostReplaceMaintenance,
+                old_uuid: uuid_for_name("old"),
+                old_name: disk_name("old"),
+                new_uuid: new_uuid.clone(),
+                new_name: disk_name("disk-new"),
+                new_target: journal::ReplaceJournalTarget {
+                    by_id: ByIdPath::parse("/dev/disk/by-id/virtio-disk-new").unwrap(),
+                    mode: journal::ReplaceJournalMode::ExistingLuks {
+                        enroll_key_file: None,
+                    },
+                },
+                source: journal::ReplaceJournalSource::Missing { old_devid: 2 },
+                restore_raid1_after_commit: false,
+            },
+            pre_membership: pre,
+            target_membership: target,
+        };
+        journal::write_journal(&f.paths, &journal).unwrap();
+
+        let show = ok_raw(
+            "btrfs filesystem show /mnt/storage",
+            "Label: none  uuid: aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee\n\
+             \tTotal devices 3 FS bytes used 1.00GiB\n\
+             \tdevid    1 size 10.00GiB used 2.00GiB path /dev/mapper/braid-disk1\n\
+             \tdevid    2 size 10.00GiB used 2.00GiB path /dev/mapper/braid-disk-new\n\
+             \tdevid    3 size 0 used 0 path MISSING\n",
+        );
+        let (mp_req, mp_out) = mountpoint_ok();
         let runner = MockRunner::default()
-            .with_output(mountpoint_fail().0, mountpoint_fail().1)
+            .with_output(mp_req, mp_out)
+            .with_output(
+                CmdRequest::BtrfsFilesystemShow {
+                    mount_point: MountPoint("/mnt/storage".into()),
+                },
+                show,
+            )
+            .with_output(
+                CmdRequest::CryptsetupStatus {
+                    mapper: MapperName("braid-disk1".into()),
+                },
+                cryptsetup_status_active("braid-disk1", "/dev/vda"),
+            )
             .with_output(
                 CmdRequest::CryptsetupLuksUuid {
-                    device: "/dev/disk/by-id/virtio-disk1".into(),
+                    device: "/dev/vda".into(),
                 },
-                cryptsetup_uuid_ok(
-                    "/dev/disk/by-id/virtio-disk1",
-                    "11111111-1111-1111-1111-111111111111",
-                ),
+                cryptsetup_uuid_ok("/dev/vda", "11111111-1111-1111-1111-111111111111"),
             )
-            .with_luks_dump_text_luks2("/dev/disk/by-id/virtio-disk1")
-            .with_mapper_closed("braid-disk1");
+            .with_output(
+                CmdRequest::CryptsetupStatus {
+                    mapper: MapperName("braid-disk-new".into()),
+                },
+                cryptsetup_status_active("braid-disk-new", "/dev/vdb"),
+            )
+            .with_output(
+                CmdRequest::CryptsetupLuksUuid {
+                    device: "/dev/vdb".into(),
+                },
+                cryptsetup_uuid_ok("/dev/vdb", &new_uuid_text),
+            )
+            .with_output(
+                CmdRequest::BtrfsFilesystemResize {
+                    devid: 2,
+                    mount_point: MountPoint("/mnt/storage".into()),
+                },
+                ok_raw_empty("btrfs filesystem resize"),
+            );
+        let resolver = resolver_for(&[
+            ("/dev/vda", "virtio-disk1"),
+            ("/dev/vdb", "virtio-disk-new"),
+        ]);
         let params = f
             .recover_params()
             .passphrase_file(None)
             .dry_run(true)
             .sleep_inhibitor(&f.inhibitor)
             .build();
-        plan_recover(&runner, &fs, &params).expect("dry-run planning should not acquire inhibitor");
-        assert_eq!(f.inhibitor.acquire_count(), 0);
+
+        cmd_recover(&runner, &fs, &resolver, &params)
+            .expect("dry-run recover should preview and return without executing");
+
+        assert_eq!(
+            f.inhibitor.acquire_count(),
+            0,
+            "dry-run must not acquire the inhibitor"
+        );
+        assert!(
+            f.paths.pending_op_json().exists(),
+            "dry-run must not clear the journal"
+        );
+        assert!(
+            membership::load_membership(&f.paths).is_err(),
+            "dry-run must not write pool.json"
+        );
+        let requests = runner.requests();
+        assert!(
+            !requests
+                .iter()
+                .any(|request| matches!(request, CmdRequest::BtrfsFilesystemResize { .. })),
+            "dry-run must not issue the post-replace resize: {requests:?}"
+        );
     }
 
     // Intent: verify that when the live pool contains a braid-prefixed
