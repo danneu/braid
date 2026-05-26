@@ -1,6 +1,6 @@
 ---
 source: cli/src/tui/browse/view.rs
-assertion_line: 600
+assertion_line: 603
 expression: "buffer_to_string(&render(&model, 80, 14))"
 ---
 ┌ Pgm ─────┐┌ Cmd ─────────┐┌ View ────────┐┌ Content ─────────────────────────┐
@@ -16,4 +16,4 @@ expression: "buffer_to_string(&render(&model, 80, 14))"
 │          ││              ││              ││                                  │
 │          ││              ││              ││                                  │
 └──────────┘└──────────────┘└──────────────┘└──────────────────────────────────┘
-$ btrfs subvolume list ''
+$ btrfs subvolume show /mnt/storage/data

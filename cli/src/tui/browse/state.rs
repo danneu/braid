@@ -435,6 +435,9 @@ pub(crate) struct BrowseState {
     systemd_unit_selected: usize,
     systemd_picker_output: Vec<String>,
     force_reload_once: bool,
+    /// Footer source for detail modes: the request last dispatched into a
+    /// drill-in. Normal mode derives its footer from the selection map.
+    last_detail_request: Option<CmdRequest>,
 }
 
 impl Default for BrowseState {
@@ -471,6 +474,7 @@ impl Default for BrowseState {
             systemd_unit_selected: 0,
             systemd_picker_output: Vec::new(),
             force_reload_once: false,
+            last_detail_request: None,
         }
     }
 }
@@ -888,85 +892,92 @@ impl BrowseState {
         mount_point: &MountPoint,
         ups_config: Option<&Ups>,
     ) -> Option<String> {
-        let selection = self.current_selection();
-        let request = match selection {
-            _ if matches!(self.mode, BrowseMode::SmartctlDeviceDetail) => {
-                self.selected_smartctl_request()?
-            }
-            _ if matches!(self.mode, BrowseMode::SystemdUnitDetail) => {
-                self.selected_systemd_request()?
-            }
+        let request = match self.mode {
+            BrowseMode::Normal => self.selection_request(Some(mount_point), ups_config)?,
+            _ => self.last_detail_request.clone()?,
+        };
+        Some(request.to_argv().to_shell_string())
+    }
+
+    /// Single map from a Normal-mode Browse selection to its command so
+    /// dispatch and footer rendering cannot drift for raw command views.
+    fn selection_request(
+        &self,
+        mount_point: Option<&MountPoint>,
+        ups_config: Option<&Ups>,
+    ) -> Option<CmdRequest> {
+        let request = match self.current_selection() {
             BrowseSelection::BtrfsFilesystem(FilesystemSubview::Usage) => {
                 CmdRequest::BtrfsFilesystemUsage {
-                    mount_point: mount_point.clone(),
+                    mount_point: mount_point?.clone(),
                 }
             }
             BrowseSelection::BtrfsFilesystem(FilesystemSubview::Show) => {
                 CmdRequest::BtrfsFilesystemShow {
-                    mount_point: mount_point.clone(),
+                    mount_point: mount_point?.clone(),
                 }
             }
             BrowseSelection::BtrfsFilesystem(FilesystemSubview::Df) => {
                 CmdRequest::BtrfsFilesystemDf {
-                    mount_point: mount_point.clone(),
+                    mount_point: mount_point?.clone(),
                 }
             }
             BrowseSelection::BtrfsFilesystem(FilesystemSubview::CommitStats) => {
                 CmdRequest::BtrfsFilesystemCommitStats {
-                    mount_point: mount_point.clone(),
+                    mount_point: mount_point?.clone(),
                 }
             }
             BrowseSelection::BtrfsDevices(DeviceSubview::Usage) => CmdRequest::BtrfsDeviceUsage {
-                mount_point: mount_point.clone(),
+                mount_point: mount_point?.clone(),
             },
             BrowseSelection::BtrfsDevices(DeviceSubview::Stats) => CmdRequest::BtrfsDeviceStats {
-                mount_point: mount_point.clone(),
+                mount_point: mount_point?.clone(),
             },
             BrowseSelection::BtrfsSubvolumes(SubvolumeSubview::List) => {
                 CmdRequest::BtrfsSubvolumeList {
-                    mount_point: mount_point.clone(),
+                    mount_point: mount_point?.clone(),
                 }
             }
             BrowseSelection::BtrfsSubvolumes(SubvolumeSubview::Full) => {
                 CmdRequest::BtrfsSubvolumeListFull {
-                    mount_point: mount_point.clone(),
+                    mount_point: mount_point?.clone(),
                 }
             }
             BrowseSelection::BtrfsSubvolumes(SubvolumeSubview::Snapshots) => {
                 CmdRequest::BtrfsSubvolumeListSnapshots {
-                    mount_point: mount_point.clone(),
+                    mount_point: mount_point?.clone(),
                 }
             }
             BrowseSelection::BtrfsSubvolumes(SubvolumeSubview::Deleted) => {
                 CmdRequest::BtrfsSubvolumeListDeleted {
-                    mount_point: mount_point.clone(),
+                    mount_point: mount_point?.clone(),
                 }
             }
             BrowseSelection::BtrfsSubvolumes(SubvolumeSubview::Default) => {
                 CmdRequest::BtrfsSubvolumeGetDefault {
-                    mount_point: mount_point.clone(),
+                    mount_point: mount_point?.clone(),
                 }
             }
             BrowseSelection::BtrfsScrub(ScrubSubview::Status) => {
                 CmdRequest::BtrfsScrubStatusHuman {
-                    mount_point: mount_point.clone(),
+                    mount_point: mount_point?.clone(),
                 }
             }
             BrowseSelection::BtrfsScrub(ScrubSubview::Limits) => CmdRequest::BtrfsScrubLimit {
-                mount_point: mount_point.clone(),
+                mount_point: mount_point?.clone(),
             },
             BrowseSelection::BtrfsBalance => CmdRequest::BtrfsBalanceStatus {
-                mount_point: mount_point.clone(),
+                mount_point: mount_point?.clone(),
             },
             BrowseSelection::BtrfsQuota(QuotaSubview::Status) => CmdRequest::BtrfsQuotaStatus {
-                mount_point: mount_point.clone(),
+                mount_point: mount_point?.clone(),
             },
             BrowseSelection::BtrfsQuota(QuotaSubview::Qgroups) => CmdRequest::BtrfsQgroupShow {
-                mount_point: mount_point.clone(),
+                mount_point: mount_point?.clone(),
             },
             BrowseSelection::BtrfsInspect(InspectSubview::Chunks) => {
                 CmdRequest::BtrfsInspectListChunks {
-                    mount_point: mount_point.clone(),
+                    mount_point: mount_point?.clone(),
                 }
             }
             BrowseSelection::NutStatus | BrowseSelection::NutVariables => CmdRequest::UpscQuery {
@@ -994,14 +1005,14 @@ impl BrowseState {
             | BrowseSelection::SmartctlInfo
             | BrowseSelection::SmartctlAttributes
             | BrowseSelection::SmartctlSelftestLog
-            | BrowseSelection::SmartctlErrorLog => self.selected_smartctl_request()?,
+            | BrowseSelection::SmartctlErrorLog => return self.selected_smartctl_request(),
             BrowseSelection::LsblkTree => CmdRequest::LsblkTree,
             BrowseSelection::LsblkFilesystems => CmdRequest::LsblkFilesystems,
             BrowseSelection::LsblkDisks => CmdRequest::LsblkDisks,
             BrowseSelection::LsblkAllColumns => CmdRequest::LsblkAllColumns,
             BrowseSelection::LsblkScsi => CmdRequest::LsblkScsi,
         };
-        Some(request.to_argv().to_shell_string())
+        Some(request)
     }
 
     fn install_empty(&mut self, state: BrowseEmptyState) {
@@ -1043,6 +1054,7 @@ impl BrowseState {
         self.loading = true;
         self.empty_state = None;
         self.output.clear();
+        self.last_detail_request = Some(request.clone());
         Some(Effect::BrowseRunCommand {
             request,
             generation: self.command_gen,
@@ -1050,121 +1062,11 @@ impl BrowseState {
     }
 
     fn current_request(&self, pool: &PoolStatus, ups_config: Option<&Ups>) -> Option<CmdRequest> {
-        let mount_point = pool.current().map(|p| &p.mount_point);
-        match self.current_selection() {
-            BrowseSelection::BtrfsFilesystem(FilesystemSubview::Usage) => {
-                Some(CmdRequest::BtrfsFilesystemUsage {
-                    mount_point: mount_point?.clone(),
-                })
-            }
-            BrowseSelection::BtrfsFilesystem(FilesystemSubview::Show) => {
-                Some(CmdRequest::BtrfsFilesystemShow {
-                    mount_point: mount_point?.clone(),
-                })
-            }
-            BrowseSelection::BtrfsFilesystem(FilesystemSubview::Df) => {
-                Some(CmdRequest::BtrfsFilesystemDf {
-                    mount_point: mount_point?.clone(),
-                })
-            }
-            BrowseSelection::BtrfsFilesystem(FilesystemSubview::CommitStats) => {
-                Some(CmdRequest::BtrfsFilesystemCommitStats {
-                    mount_point: mount_point?.clone(),
-                })
-            }
-            BrowseSelection::BtrfsDevices(DeviceSubview::Usage) => {
-                Some(CmdRequest::BtrfsDeviceUsage {
-                    mount_point: mount_point?.clone(),
-                })
-            }
-            BrowseSelection::BtrfsDevices(DeviceSubview::Stats) => {
-                Some(CmdRequest::BtrfsDeviceStats {
-                    mount_point: mount_point?.clone(),
-                })
-            }
-            BrowseSelection::BtrfsSubvolumes(SubvolumeSubview::List) => {
-                Some(CmdRequest::BtrfsSubvolumeList {
-                    mount_point: mount_point?.clone(),
-                })
-            }
-            BrowseSelection::BtrfsSubvolumes(SubvolumeSubview::Full) => {
-                Some(CmdRequest::BtrfsSubvolumeListFull {
-                    mount_point: mount_point?.clone(),
-                })
-            }
-            BrowseSelection::BtrfsSubvolumes(SubvolumeSubview::Snapshots) => {
-                Some(CmdRequest::BtrfsSubvolumeListSnapshots {
-                    mount_point: mount_point?.clone(),
-                })
-            }
-            BrowseSelection::BtrfsSubvolumes(SubvolumeSubview::Deleted) => {
-                Some(CmdRequest::BtrfsSubvolumeListDeleted {
-                    mount_point: mount_point?.clone(),
-                })
-            }
-            BrowseSelection::BtrfsSubvolumes(SubvolumeSubview::Default) => {
-                Some(CmdRequest::BtrfsSubvolumeGetDefault {
-                    mount_point: mount_point?.clone(),
-                })
-            }
-            BrowseSelection::BtrfsScrub(ScrubSubview::Status) => {
-                Some(CmdRequest::BtrfsScrubStatusHuman {
-                    mount_point: mount_point?.clone(),
-                })
-            }
-            BrowseSelection::BtrfsScrub(ScrubSubview::Limits) => {
-                Some(CmdRequest::BtrfsScrubLimit {
-                    mount_point: mount_point?.clone(),
-                })
-            }
-            BrowseSelection::BtrfsBalance => Some(CmdRequest::BtrfsBalanceStatus {
-                mount_point: mount_point?.clone(),
-            }),
-            BrowseSelection::BtrfsQuota(QuotaSubview::Status) => {
-                Some(CmdRequest::BtrfsQuotaStatus {
-                    mount_point: mount_point?.clone(),
-                })
-            }
-            BrowseSelection::BtrfsQuota(QuotaSubview::Qgroups) => {
-                Some(CmdRequest::BtrfsQgroupShow {
-                    mount_point: mount_point?.clone(),
-                })
-            }
-            BrowseSelection::BtrfsInspect(InspectSubview::Chunks) => {
-                Some(CmdRequest::BtrfsInspectListChunks {
-                    mount_point: mount_point?.clone(),
-                })
-            }
-            BrowseSelection::NutStatus | BrowseSelection::NutVariables => None,
-            BrowseSelection::NutCommands => Some(CmdRequest::UpscmdList {
-                name: ups_config?.name.clone(),
-            }),
-            BrowseSelection::NutClients => Some(CmdRequest::UpscClients {
-                name: ups_config?.name.clone(),
-            }),
-            BrowseSelection::NutRwVars => Some(CmdRequest::UpsrwList {
-                name: ups_config?.name.clone(),
-            }),
-            BrowseSelection::NutUpses => Some(CmdRequest::UpscListUpses),
-            BrowseSelection::SystemdStatus | BrowseSelection::SystemdShow => {
-                Some(CmdRequest::SystemctlListUnitsBraidJson)
-            }
-            BrowseSelection::SystemdBraid => Some(CmdRequest::SystemctlListUnitsBraid),
-            BrowseSelection::SystemdFailed => Some(CmdRequest::SystemctlListUnitsFailed),
-            BrowseSelection::SystemdTimers => Some(CmdRequest::SystemctlListTimers),
-            BrowseSelection::SystemdMounts => Some(CmdRequest::SystemctlListMounts),
-            BrowseSelection::SmartctlScan => Some(CmdRequest::SmartctlScan),
-            BrowseSelection::SmartctlHealth
-            | BrowseSelection::SmartctlInfo
-            | BrowseSelection::SmartctlAttributes
-            | BrowseSelection::SmartctlSelftestLog
-            | BrowseSelection::SmartctlErrorLog => None,
-            BrowseSelection::LsblkTree => Some(CmdRequest::LsblkTree),
-            BrowseSelection::LsblkFilesystems => Some(CmdRequest::LsblkFilesystems),
-            BrowseSelection::LsblkDisks => Some(CmdRequest::LsblkDisks),
-            BrowseSelection::LsblkAllColumns => Some(CmdRequest::LsblkAllColumns),
-            BrowseSelection::LsblkScsi => Some(CmdRequest::LsblkScsi),
+        let selection = self.current_selection();
+        if selection.uses_model_snapshot() || selection.is_smartctl_picker() {
+            return None;
         }
+        self.selection_request(pool.current().map(|p| &p.mount_point), ups_config)
     }
 
     fn selected_smartctl_request(&self) -> Option<CmdRequest> {
@@ -1453,6 +1355,90 @@ mod tests {
         ]
         .into_iter()
         .collect()
+    }
+
+    // Intent: the default Btrfs Browse selection renders the command it
+    // would dispatch as the footer.
+    // Why it exists: the footer and navigation path share one selection map,
+    // so this pins the common Normal-mode path.
+    // Scenario: user opens Browse on a mounted pool and sees filesystem usage.
+    #[test]
+    fn command_display_normal_btrfs_matches_selection_request() {
+        let state = BrowseState::default();
+        let mount_point = MountPoint("/mnt/storage".to_owned());
+
+        assert_eq!(
+            state.command_display(&mount_point, Some(&ups())),
+            Some("btrfs filesystem usage /mnt/storage".to_owned())
+        );
+    }
+
+    // Intent: SMART picker selections render a per-device preview without
+    // dispatching a command during normal navigation.
+    // Why it exists: picker rows come from braid's disk inventory, but the
+    // footer still needs to track the selected device command.
+    // Scenario: user opens Browse > SMART > Health and inspects disk1.
+    #[test]
+    fn command_display_smartctl_picker_preview_uses_selected_device() {
+        let mut state = BrowseState::default();
+        state.program = BrowseProgram::Smartctl;
+        state.smartctl_command = BrowseCommand::SmartctlHealth;
+        let disks = disk_inventory();
+        let effect = state.load_current(&pool(), Some(&ups()), &DiskInventory { by_id: &disks });
+        let mount_point = MountPoint("/mnt/storage".to_owned());
+
+        assert!(effect.is_none());
+        assert_eq!(
+            state.command_display(&mount_point, Some(&ups())),
+            Some("smartctl -H /dev/disk/by-id/virtio-disk1".to_owned())
+        );
+    }
+
+    // Intent: NUT snapshot-backed Browse selections still render the raw
+    // `upsc` query that produced the model snapshot.
+    // Why it exists: NUT status and variables intentionally do not dispatch
+    // during Browse navigation, but the footer remains useful provenance.
+    // Scenario: user opens Browse > NUT > Status with braid.ups.name set.
+    #[test]
+    fn command_display_nut_snapshot_source_shows_upsc_query() {
+        let mut state = BrowseState::default();
+        state.program = BrowseProgram::Nut;
+        let mount_point = MountPoint("/mnt/storage".to_owned());
+
+        assert_eq!(
+            state.command_display(&mount_point, Some(&ups())),
+            Some("upsc ups".to_owned())
+        );
+    }
+
+    // Intent: subvolume detail renders the `btrfs subvolume show` command
+    // dispatched when the user drilled into the row.
+    // Why it exists: subvolume detail used to show the list footer even
+    // though the detail view was produced by a show command.
+    // Scenario: user drills into `data` and the footer must not keep showing
+    // the stale subvolume-list command from the parent view.
+    #[test]
+    fn command_display_subvolume_detail_shows_dispatched_request() {
+        let mut state = BrowseState::default();
+        state.btrfs_command = BrowseCommand::BtrfsSubvolumes;
+        state.focus = BrowseFocus::Content;
+        state.command_finished(
+            RawCommandOutput {
+                cmd: "btrfs subvolume list /mnt/storage".into(),
+                stdout: "ID 256 gen 10 top level 5 path data\n".into(),
+                stderr: String::new(),
+                exit_status: 0,
+            },
+            0,
+        );
+        let disks = HashMap::new();
+        let _ = state.enter(&pool(), &DiskInventory { by_id: &disks });
+        let mount_point = MountPoint("/mnt/storage".to_owned());
+
+        assert_eq!(
+            state.command_display(&mount_point, Some(&ups())),
+            Some("btrfs subvolume show /mnt/storage/data".to_owned())
+        );
     }
 
     // Intent: h at the leftmost Browse column stays on Program.
