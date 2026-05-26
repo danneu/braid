@@ -3103,6 +3103,102 @@ mod tests {
         );
     }
 
+    // Intent: apply_enrollment aborts at the first disk's post-mutation
+    // backup failure and leaves every later disk fully unmutated.
+    // Why it exists: decision-019's recoverability argument for skipping the
+    // sleep inhibitor depends on later disks staying untouched for the
+    // idempotent re-run; the single-disk backup-failure test cannot catch a
+    // reorder or swallowed error that mutates disk2.
+    // Scenario: enroll runs over two disks, disk1's keyfile enrollment
+    // succeeds, the local .luksheader backup fails because the state dir is
+    // full, and disk2 is left untouched for the retry.
+    #[test]
+    fn apply_enrollment_backup_failure_leaves_later_disk_unmutated() {
+        let d1 = "/dev/disk/by-id/d1";
+        let d2 = "/dev/disk/by-id/d2";
+        let kf = "/tmp/braid.key";
+        let pass = "testpass";
+        let (_state_dir, paths) = isolated_paths();
+
+        let (e1_req, e1_stdin, e1_out) = enroll_add_keyfile_ok(d1, kf, pass);
+        let (e2_req, e2_stdin, e2_out) = enroll_add_keyfile_ok(d2, kf, pass);
+        let runner = MockRunner::default()
+            .with_output_stdin(e1_req, e1_stdin, e1_out)
+            .with_output(
+                CmdRequest::CryptsetupLuksHeaderBackup {
+                    device: d1.to_owned(),
+                    backup_path: paths
+                        .luks_headers_dir()
+                        .join("braid-disk1.luksheader.tmp")
+                        .display()
+                        .to_string(),
+                },
+                enroll_err_raw("cryptsetup luksHeaderBackup", 1, "No space left on device"),
+            )
+            .with_output_stdin(e2_req, e2_stdin, e2_out);
+        let plan = vec![
+            DiskEnrollAction::NeedsEnroll {
+                name: disk("disk1"),
+                by_id: enroll_by_id(d1),
+            },
+            DiskEnrollAction::NeedsEnroll {
+                name: disk("disk2"),
+                by_id: enroll_by_id(d2),
+            },
+        ];
+
+        let err = apply_enrollment(
+            &runner,
+            &plan,
+            &enroll_passphrase(pass),
+            Path::new(kf),
+            &paths,
+        )
+        .expect_err("disk1 backup failure should abort enrollment apply")
+        .to_string();
+
+        assert!(
+            err.contains("cryptsetup luksHeaderBackup --header-backup-file"),
+            "expected remediation command in: {err}"
+        );
+        assert!(err.contains(d1), "expected disk by-id path in: {err}");
+        assert!(
+            err.contains("after the LUKS mutation completed"),
+            "expected post-mutation framing in: {err}"
+        );
+
+        let requests = runner.requests();
+        let add_pos = requests
+            .iter()
+            .position(
+                |r| matches!(r, CmdRequest::CryptsetupLuksAddKeyFile { device, .. } if device == d1),
+            )
+            .expect("disk1 keyfile enrollment must run before backup failure");
+        let backup_pos = requests
+            .iter()
+            .position(
+                |r| matches!(r, CmdRequest::CryptsetupLuksHeaderBackup { device, .. } if device == d1),
+            )
+            .expect("disk1 header backup must be attempted and fail");
+        assert!(
+            add_pos < backup_pos,
+            "post-mutation backup ordering requires enroll before backup; \
+             add_pos={add_pos}, backup_pos={backup_pos}, requests={requests:?}"
+        );
+        assert!(
+            !requests
+                .iter()
+                .any(|r| matches!(r, CmdRequest::CryptsetupLuksAddKeyFile { device, .. } if device == d2)),
+            "disk2 keyfile enrollment must be left for the idempotent re-run; requests={requests:?}"
+        );
+        assert!(
+            !requests
+                .iter()
+                .any(|r| matches!(r, CmdRequest::CryptsetupLuksHeaderBackup { device, .. } if device == d2)),
+            "disk2 header backup must be left for the idempotent re-run; requests={requests:?}"
+        );
+    }
+
     // Intent: EnrollPlan::execute enriches the apply-phase error with the
     // drop-`--generate` recovery hint when --generate succeeded.
     // Why it exists: a partial luksAddKey failure on disk2 leaves an orphan
