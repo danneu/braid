@@ -107,7 +107,7 @@ braid classifies each disk before acting:
 - Rejects disks that conflict with existing pool membership (same LUKS UUID, same name, or same by-id path)
 - Rejects absent disks (not plugged in)
 - Verifies the passphrase against an existing pool member before formatting new disks
-- Warns if the pool has missing devices (suggests `braid replace` first)
+- Warns if the pool has missing devices but does not refuse: `braid add` still attempts to add the new disk. It does not remove or replace the missing member, so even if the add succeeds the pool stays degraded. Run `braid replace` first to repair the missing member and return the pool to full health.
 - Warns if existing pool drives have a keyfile but `--enroll` was not passed
 - Refuses if a pending operation journal (`pending-op.json`) exists -- run `braid recover` to reconcile.
 - Refuses if another braid operation is in progress (pool lock `/run/braid-pool.lock` is held) -- retry once it finishes.
