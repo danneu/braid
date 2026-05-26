@@ -1268,6 +1268,9 @@ pub fn plan_recover<R: CommandRunner + Sync, F: Filesystem + ?Sized>(
         && !journal.is_bootstrap_add()
         && !params.dry_run
     {
+        // Preflight add-target reconciliation -- the one deliberate mutation in the
+        // planner. Gated by `!dry_run` so preview stays side-effect-free; see
+        // `discover_add_targets_before_mount` for why it must precede the mount.
         match discover_add_targets_before_mount(runner, fs, params, &journal, targets) {
             Ok(credential) => pre_resolved_credential = credential,
             Err(e) => {
@@ -1975,6 +1978,9 @@ fn add_recovery_uuid_mismatch_message(
     )
 }
 
+/// Preflight for an interrupted existing-pool add: may open closed validated
+/// add-targets -- resolving the unlock credential once when it does -- and scan
+/// them before mount. The deliberate `!dry_run`-gated exception to Decision 022.
 fn discover_add_targets_before_mount<R: CommandRunner, F: Filesystem + ?Sized>(
     runner: &R,
     fs: &F,

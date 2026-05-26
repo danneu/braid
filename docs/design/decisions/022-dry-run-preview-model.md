@@ -95,6 +95,21 @@ not part of the structured preview.
 The typed work-plan preview model is the precedent for `add`, `replace`,
 `remove`, `remove-missing`, and `recover`.
 
+Recover is the one deliberate exception to the read-side planner rule. When
+recovering an interrupted existing-pool add and the pool is not already mounted,
+`plan_recover` reconciles the validated add-targets -- those present,
+LUKS-openable, and not yet pool members -- before mount: it opens any whose
+mapper is closed (resolving the unlock credential once, and only then), and
+btrfs-scans a target only when its mapper shows a btrfs signature. All of this
+is gated by `!dry_run` (`discover_add_targets_before_mount`, after an
+already-mounted short-circuit). The preflight is non-destructive and exists for
+two reasons: resolving the credential in the preflight window where an
+interactive prompt belongs, then caching it so execute reuses it without a
+second prompt (single passphrase, Principle 4); and making an
+already-committed-but-closed target visible to the kernel before the initial
+mount so the mount assembles it instead of recover re-adding or re-formatting
+it. It is not a general license to mutate inside `plan_*()`.
+
 The LUKS-UUID-identity migration also gave `lock` a typed close set
 (`LockCloseSet` carrying ordered `LockMapperClose` entries in
 `cli/src/lock.rs`). Dry-run step compilation (`compile_lock_steps`),
