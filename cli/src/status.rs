@@ -508,6 +508,15 @@ fn build_status<R: CommandRunner, F: Filesystem>(
         .into_iter()
         .map(|(_, member)| member)
         .collect();
+    // Probe every configured member even though the returned `ConfigDisk`
+    // identity is only consumed for unpooled/missing rows below. The error
+    // path is the status-side fault surface for config-side mapper backing
+    // mismatches, mapper conflicts, LUKS-version drift, and luksDump failures
+    // on live pool members; `build_status` propagates those errors through
+    // `?`. `doctor` does not probe configured disks, and the TUI skips live
+    // members, so dropping the present-member probe would silently remove the
+    // diagnostic pinned by `status_surfaces_mapper_conflict`. The redundant
+    // cryptsetup I/O on a healthy pool is the accepted cost of that check.
     let config_disks: Vec<ConfigDisk> = members
         .into_iter()
         .map(|member| {
@@ -932,15 +941,13 @@ fn build_disk_reports<R: CommandRunner>(
     // Present pool devices
     for pd in &pool.devices {
         let matched_member = membership.by_uuid(&pd.luks_uuid);
-        let matched_config =
-            matched_member.and_then(|member| config_disks.iter().find(|cd| cd.name == member.name));
 
-        // `build_status` derives `config_disks` from membership today, but
-        // keep the member-name fallback so this helper stays correct for
-        // partial probes or future callers.
-        let disk_name = matched_config
-            .map(|cd| cd.name.as_str().to_owned())
-            .or_else(|| matched_member.map(|member| member.name.as_str().to_owned()))
+        // Present-disk identity comes from the UUID-keyed membership join
+        // (decision 024). `config_disks` is intentionally not consulted here:
+        // for a present member, it carries the same name/by-id as
+        // `matched_member`; for foreign live devices, there is no member join.
+        let disk_name = matched_member
+            .map(|member| member.name.as_str().to_owned())
             .unwrap_or_else(|| {
                 // Display-only fallback for foreign live devices. Keep the
                 // raw mapper basename instead of deriving a member name from
@@ -948,9 +955,8 @@ fn build_disk_reports<R: CommandRunner>(
                 pd.mapper.0.clone()
             });
 
-        let by_id = matched_config
-            .map(|cd| cd.by_id_path.as_str().to_owned())
-            .or_else(|| matched_member.map(|member| member.by_id.as_str().to_owned()))
+        let by_id = matched_member
+            .map(|member| member.by_id.as_str().to_owned())
             .unwrap_or_else(|| format!("/dev/mapper/{}", pd.mapper.0));
 
         let mapper = pd.mapper.0.clone();
