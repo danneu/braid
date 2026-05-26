@@ -426,6 +426,8 @@ pub struct EnrollKeyFileParams<'a> {
 #[derive(Debug)]
 pub struct EnrollPlan {
     pub notes: Vec<PreviewNote>,
+    /// Preview-only output artifact; empty on real-run plans, which
+    /// re-plan from `candidates` after passphrase verification.
     pub steps: Vec<Step>,
     pub candidates: Vec<EnrollmentCandidate>,
     pub generate: bool,
@@ -611,10 +613,10 @@ fn validate_generated_keyfile_target<R: CommandRunner>(
 /// (set by `--generate`) skips the keyfile probe entirely (the file
 /// does not exist yet) and runs only the slot-1 check. Slot-1 conflicts
 /// surface as `PlanFailure` with the same canonical `cryptsetup
-/// luksKillSlot` recovery wording the real run uses. Real-run path
-/// (`dry_run = false`) leaves every discovered candidate in the step
-/// list and defers classification to `plan_enrollment` at execute time
-/// after the passphrase prompt.
+/// luksKillSlot` recovery wording the real run uses. Real-run plans
+/// (`dry_run = false`) leave `steps` empty because steps are preview-only;
+/// execution defers classification to `plan_enrollment` after the
+/// passphrase prompt.
 pub fn plan_enroll<R: CommandRunner, F: Filesystem + ?Sized>(
     runner: &R,
     fs: &F,
@@ -673,7 +675,9 @@ pub fn plan_enroll<R: CommandRunner, F: Filesystem + ?Sized>(
         }
         compile_enroll_steps(&needs_enroll, key_file_path, generate, paths)
     } else {
-        compile_enroll_steps(&candidates, key_file_path, generate, paths)
+        // Steps are a dry-run/preview-only artifact; real execution
+        // re-plans from candidates after passphrase verification.
+        Vec::new()
     };
 
     Ok(EnrollPlan {
