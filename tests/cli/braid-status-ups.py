@@ -100,6 +100,37 @@ assert err == "", (
     f"expected empty stderr in --json query-failed, got: {err!r}"
 )
 
+# --- Query-failed branch, human mode ---
+# Same stopped-upsd state as the JSON block above, now without --json.
+# The common "my UPS daemon is down" failure must land on stderr with the
+# query-failed prefix, leave stdout empty, and exit non-zero. This is the
+# lone uncovered cell of the {human,json} x {outcome} matrix: JSON
+# query-failed is pinned above and human invocation-failed below, but
+# human query-failed -- the most operator-visible failure, and the path
+# preflight cross-references -- was unpinned.
+exit_code = machine.execute(
+    "braid ups status >/tmp/ups_qf_human.out 2>/tmp/ups_qf_human.err"
+)[0]
+assert exit_code != 0, (
+    "braid ups status must exit non-zero when query fails; got 0"
+)
+out_qf_human = machine.succeed("cat /tmp/ups_qf_human.out")
+err_qf_human = machine.succeed("cat /tmp/ups_qf_human.err")
+assert out_qf_human == "", (
+    f"expected empty stdout in human query-failed, got: {out_qf_human!r}"
+)
+assert err_qf_human.startswith("error: upsc query failed:"), (
+    f"expected human query-failed prefix, got: {err_qf_human!r}"
+)
+assert "Connection failure" in err_qf_human, (
+    f"expected upsc stderr 'Connection failure' in human query-failed, "
+    f"got: {err_qf_human!r}"
+)
+assert "invocation failed" not in err_qf_human, (
+    f"invocation-failed wording leaked into human query-failed: "
+    f"{err_qf_human!r}"
+)
+
 # --- Invocation-failed branch ---
 # Force upsc to fail to spawn by running the unwrapped braid with a PATH
 # that does not include nut. This pins the invocation_failed sentinel
