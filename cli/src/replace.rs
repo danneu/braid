@@ -2538,6 +2538,46 @@ mod tests {
         );
     }
 
+    // Intent: with two devids missing and no `--missing-id`, auto-resolve selects
+    //   the devid recorded in pool.json, independent of the missing count.
+    // Why it exists: the auto-resolve-independent-of-count contract is
+    //   unverified; every other dead-disk test uses a single-element missing
+    //   set, so indexing `missing_devids[0]` or requiring `--missing-id` for
+    //   multiple missing devices would otherwise pass.
+    // Scenario: two devices are missing (devids 2 and 3); the operator runs
+    //   `braid replace --old disk3` with no `--missing-id`, and pool.json
+    //   records the old member as devid 3.
+    #[test]
+    fn dead_old_resolution_multiple_missing_picks_persisted_devid() {
+        let mut pool = two_device_pool();
+        pool.devices.retain(|d| d.mapper.as_str() != "braid-disk2");
+        pool.missing_count = 2;
+        pool.total_devices = 3;
+        pool.missing_devids = vec![2, 3];
+        let runner = MockRunner::default();
+        let uuid = LuksUuid::parse("33333333-3333-3333-3333-333333333333").unwrap();
+        let member = membership::DiskMember {
+            name: disk_name("disk3"),
+            by_id: ByIdPath::parse("/dev/disk/by-id/virtio-disk3").unwrap(),
+            devid: Some(3),
+            added_at: None,
+        };
+        let result = resolve_replace_source(
+            &runner,
+            &disk_name("disk3"),
+            &uuid,
+            &member,
+            None,
+            &pool,
+            &mp(),
+        );
+        assert!(
+            matches!(result, Ok(ReplaceSource::Missing { devid: 3 })),
+            "expected Missing {{ devid: 3 }} (persisted devid disambiguates the \
+             two-element missing set), got: {result:?}"
+        );
+    }
+
     // Intent: explicit `--missing-id` refuses a null-underlying-only devid
     // with the hot-unplug diagnostic.
     // Why it exists: status reports null-underlying devids as alert-missing,
