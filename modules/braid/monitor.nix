@@ -123,6 +123,10 @@ in
     systemd.services.braid-monitor = {
       description = "Poll btrfs device stats for disk errors";
       unitConfig.ConditionPathIsMountPoint = cfg.mountPoint;
+      # statx-based gate (STATX_ATTR_MOUNT_ROOT), independent of the
+      # /proc/self/mountinfo parse `braid monitor` fails closed on -- skips
+      # only a confirmed-offline pool, never the mounted-but-anomalous beep.
+      # Keep it: removal means wasteful 5-min offline runs. See ADR 018.
       serviceConfig.Type = "oneshot";
       path = [
         braidWrapped

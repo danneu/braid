@@ -27,7 +27,22 @@ passphrase = "testpassphrase"
 with subtest("Monitor timer is active at boot"):
     machine.succeed("systemctl is-active braid-monitor.timer")
 
-# --- Subtest 2: No alert side effects before mount ---
+# --- Subtest 2: Monitor service carries mount-point gate ---
+
+with subtest("braid-monitor.service carries the statx mount-point gate"):
+    # Regression tripwire. The gate is a statx(STATX_ATTR_MOUNT_ROOT) check,
+    # independent of the /proc/self/mountinfo parse `braid monitor` fails
+    # closed on, so it skips only a confirmed-offline pool and never masks the
+    # mounted-but-anomalous beep (see ADR 018). Subtests 3/9 below pass with or
+    # without the gate (offline -> exit 0 -> no beep), so without this
+    # assertion the gate could be deleted silently. Mirrors auto-scrub.py.
+    unit = machine.succeed("systemctl cat braid-monitor.service")
+    assert "ConditionPathIsMountPoint=/mnt/storage" in unit, (
+        "braid-monitor.service must carry ConditionPathIsMountPoint; got:\n"
+        + unit
+    )
+
+# --- Subtest 3: No alert side effects before mount ---
 
 with subtest("No alert side effects before pool mount"):
     # Pool is not yet mounted. ConditionPathIsMountPoint gates the
@@ -37,14 +52,14 @@ with subtest("No alert side effects before pool mount"):
     machine.fail("systemctl is-active braid-alert.service")
     machine.fail("test -f /root/alert-fired")
 
-# --- Subtest 3: Unlock pool ---
+# --- Subtest 4: Unlock pool ---
 
 with subtest("Unlock pool via braid-pool.target"):
     machine.succeed("systemctl start braid-pool.target")
     machine.succeed("mountpoint -q /mnt/storage")
     machine.succeed("systemctl is-active braid-online.service")
 
-# --- Subtest 4: Healthy monitor run produces no alert ---
+# --- Subtest 5: Healthy monitor run produces no alert ---
 
 with subtest("Healthy pool: monitor runs without triggering alert"):
     machine.succeed("rm -f /root/alert-fired")
@@ -52,7 +67,7 @@ with subtest("Healthy pool: monitor runs without triggering alert"):
     machine.fail("systemctl is-active braid-alert.service")
     machine.fail("test -f /root/alert-fired")
 
-# --- Subtest 5: Degrade pool ---
+# --- Subtest 6: Degrade pool ---
 
 with subtest("Degrade pool by closing one LUKS mapper"):
     machine.succeed("umount /mnt/storage")
@@ -63,7 +78,7 @@ with subtest("Degrade pool by closing one LUKS mapper"):
     # Wait for systemd to detect the mount and activate the unit.
     machine.wait_until_succeeds("systemctl is-active mnt-storage.mount")
 
-# --- Subtest 6: Monitor triggers alert on degraded pool ---
+# --- Subtest 7: Monitor triggers alert on degraded pool ---
 
 with subtest("Degraded pool: monitor triggers braid-alert.service"):
     machine.succeed("rm -f /root/alert-fired")
@@ -73,14 +88,14 @@ with subtest("Degraded pool: monitor triggers braid-alert.service"):
     machine.succeed("systemctl is-active braid-alert.service")
     machine.succeed("test -f /root/alert-fired")
 
-# --- Subtest 7: Ack clears alert via systemd ---
+# --- Subtest 8: Ack clears alert via systemd ---
 
 with subtest("braid ack clears alert and stops alert service"):
     machine.succeed("braid ack")
     machine.fail("systemctl is-active braid-alert.service")
     machine.fail("test -f /var/lib/braid/alert-latch.json")
 
-# --- Subtest 8: No alert side effects after unmount ---
+# --- Subtest 9: No alert side effects after unmount ---
 
 with subtest("No alert side effects after pool unmount"):
     machine.succeed("rm -f /root/alert-fired")
