@@ -526,8 +526,9 @@ impl AddTargetWork {
         }
     }
 
-    /// Borrow the target's hardware path so confirmation renders the
-    /// classified work set instead of the raw user input.
+    /// Borrow the target's hardware `by_id`. Used to build the add
+    /// confirmation list from the actual work targets so the prompt never
+    /// names a disk that won't be added.
     fn by_id(&self) -> &ByIdPath {
         match self {
             AddTargetWork::Fresh(target) => &target.by_id,
@@ -550,6 +551,16 @@ struct AddWorkPlan {
     mount_point: MountPoint,
     pool_was_mounted: bool,
     existing_pool_device_count: usize,
+}
+
+/// Single definition of the `DiskName`-sorted add-target order used by
+/// confirmation and work-step output. The confirmation prelude is built
+/// before `AddWorkPlan` exists, so callers share this helper instead of
+/// copying the comparator.
+fn sort_targets_by_name(targets: &[AddTargetWork]) -> Vec<&AddTargetWork> {
+    let mut v: Vec<&AddTargetWork> = targets.iter().collect();
+    v.sort_by(|a, b| a.name().cmp(b.name()));
+    v
 }
 
 impl AddWorkPlan {
@@ -586,9 +597,7 @@ impl AddWorkPlan {
     /// random per invocation). Internal-only loops and summaries that
     /// preserve input order iterate `self.targets` directly.
     fn targets_sorted_by_name(&self) -> Vec<&AddTargetWork> {
-        let mut v: Vec<&AddTargetWork> = self.targets.iter().collect();
-        v.sort_by(|a, b| a.name().cmp(b.name()));
-        v
+        sort_targets_by_name(&self.targets)
     }
 
     fn render_steps(&self) -> Vec<Step> {
@@ -1828,12 +1837,15 @@ struct AddStepsInput<'a> {
     pool_membership: &'a PoolMembership,
 }
 
+/// Build the credential prelude from the sorted work targets so the
+/// confirmation prompt neither names skipped disks nor reorders relative
+/// to dry-run work steps.
 fn build_add_credential_prelude(
     input: &AddStepsInput<'_>,
     targets: &[AddTargetWork],
 ) -> AddCredentialPrelude {
-    let confirm_disks = targets
-        .iter()
+    let confirm_disks = sort_targets_by_name(targets)
+        .into_iter()
         .map(|target| AddConfirmDiskPlan {
             name: target.name().clone(),
             by_id: target.by_id().clone(),
@@ -8342,6 +8354,72 @@ mod tests {
         assert!(
             !rendered.contains("nothing to do."),
             "generic `nothing to do.` fallback must NOT appear alongside the Info note"
+        );
+    }
+
+    // Intent: a mixed add lists only the fresh disk in the confirmation plan.
+    //
+    // Why it exists: guards the `confirm_disks`-from-targets invariant
+    //   against regressing back to over-listing already-in-pool disks.
+    //
+    // Scenario: the operator re-passes an in-pool disk alongside a new one,
+    //   and the confirmation must not imply the in-pool disk is being re-added.
+    #[test]
+    fn plan_add_mixed_already_in_pool_and_fresh_confirms_only_fresh_disk() {
+        let (_state_tmp, paths, _tmp, config_path, pass_path) = add_test_setup();
+        let fs = AddMockFs(vec![
+            "/dev/disk/by-id/virtio-disk1".into(),
+            "/dev/disk/by-id/virtio-disk2".into(),
+        ]);
+        let runner = AddRecordingRunner::new(true).with_disk1_present_luks_member();
+        let inhibitor = crate::inhibit::RecordingInhibitor::new();
+        let disk_specs = [
+            "disk1=/dev/disk/by-id/virtio-disk1".to_string(),
+            "disk2=/dev/disk/by-id/virtio-disk2".to_string(),
+        ];
+
+        let plan = plan_add(
+            &runner,
+            &fs,
+            &AddParams {
+                config: &read_test_config(&config_path),
+                disk_specs: &disk_specs,
+                dry_run: true,
+                yes: true,
+                passphrase_stdin: false,
+                passphrase_file: Some(pass_path.as_path()),
+                enroll_key_file: None,
+                luks_format_extra_opts: &[],
+                progress: ProgressOutput::Off,
+                paths: &paths,
+                sleep_inhibitor: &inhibitor,
+                passphrase_reader: &RealTty,
+                backing_path_resolver:
+                    crate::test_fixtures::mock_virtio_offset_backing_path_resolver(),
+            },
+        )
+        .expect("plan_add should succeed for mixed already-in-pool + fresh add");
+
+        let confirm_names: Vec<&str> = plan
+            .work_plan
+            .prelude
+            .confirm_disks
+            .iter()
+            .map(|d| d.name.as_str())
+            .collect();
+        assert_eq!(
+            confirm_names,
+            vec!["disk2"],
+            "confirmation must list only the fresh disk, not the already-in-pool disk1"
+        );
+        assert_eq!(
+            plan.work_plan.targets.len(),
+            1,
+            "only the fresh disk is real work"
+        );
+        assert!(
+            plan.work_plan.prelude.confirm_disks[0].needs_luks_format,
+            "the fresh disk must be flagged for LUKS format"
         );
     }
 
