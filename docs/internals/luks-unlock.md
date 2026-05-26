@@ -207,11 +207,15 @@ value `btrfs replace start` compares against. The ioctl is wrapped behind the
 Target capacity is computed before opening the replacement mapper. Existing
 LUKS targets read LUKS2 segment `offset` and `size` from
 `cryptsetup luksDump --dump-json-metadata`: `dynamic` segments use
-`raw - offset`, while fixed segments use `segment.size` directly. Fresh targets
-use cryptsetup's default 16 MiB LUKS2 offset. If any of those values cannot be
-read or parsed, or the computed target capacity is smaller than the source
-`total_bytes`, replace refuses before writing `pending-op.json`, formatting a
-fresh target, or opening the replacement mapper.
+`raw - offset` with no sector_size rounding because cryptsetup sizes the
+dm-crypt device that way exactly and the kernel rejects, rather than rounds, a
+non-sector_size-multiple mapper, so an existing container's capacity is exact at
+any sector_size. Fixed segments use `segment.size` directly. Fresh targets
+instead assume cryptsetup's default 16 MiB LUKS2 offset, which holds because
+braid rejects `--sector-size` and offset-changing format flags. If any of those
+values cannot be read or parsed, or the computed target capacity is smaller
+than the source `total_bytes`, replace refuses before writing `pending-op.json`,
+formatting a fresh target, or opening the replacement mapper.
 
 ## Failed unlock cleanup
 

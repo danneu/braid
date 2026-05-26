@@ -511,6 +511,14 @@ fn target_raw_size<R: CommandRunner>(runner: &R, by_id: &str) -> Result<u64, Str
         })
 }
 
+/// Mapper capacity btrfs compares against the source `total_bytes`, computed
+/// as `raw - offset` with no sector_size rounding: cryptsetup sizes the
+/// dm-crypt device that way in 512B sectors exactly (`device_block_adjust`),
+/// and dm-crypt rejects -- never rounds -- a mapper whose length is not a
+/// sector_size multiple (`crypt_ctr`), so an existing container is exact at
+/// any sector_size. The offset is the caller's: existing LUKS targets pass
+/// their real luksDump segment offset; fresh targets pass the default 16 MiB
+/// offset, which holds because braid rejects offset/sector-size format flags.
 fn mapper_capacity_from_dynamic_segment(
     raw_target: u64,
     offset: u64,
@@ -723,21 +731,26 @@ mod tests {
         )
     }
 
-    fn runner_with_target_size_and_luks_dump(size: u64, offset: u64, segment_size: &str) -> MockRunner {
+    fn runner_with_target_size_and_luks_dump(
+        size: u64,
+        offset: u64,
+        segment_size: &str,
+        sector_size: u64,
+    ) -> MockRunner {
         runner_with_target_size(size).with_output(
             CmdRequest::CryptsetupLuksDump {
                 device: TARGET.into(),
             },
             RawCommandOutput {
                 cmd: "cryptsetup luksDump --dump-json-metadata".into(),
-                stdout: luks_dump_json(offset, segment_size),
+                stdout: luks_dump_json(offset, segment_size, sector_size),
                 stderr: String::new(),
                 exit_status: 0,
             },
         )
     }
 
-    fn luks_dump_json(offset: u64, segment_size: &str) -> String {
+    fn luks_dump_json(offset: u64, segment_size: &str, sector_size: u64) -> String {
         format!(
             r#"{{
   "keyslots": {{}},
@@ -749,7 +762,7 @@ mod tests {
       "size": "{segment_size}",
       "iv_tweak": "0",
       "encryption": "aes-xts-plain64",
-      "sector_size": 512
+      "sector_size": {sector_size}
     }}
   }},
   "digests": {{}},
@@ -814,8 +827,12 @@ mod tests {
     //   after opening the LUKS container.
     // Scenario: target has the default dynamic segment at 16 MiB offset.
     fn check_replace_target_capacity_existing_dynamic_segment() {
-        let runner =
-            runner_with_target_size_and_luks_dump(TARGET_RAW_512_MIB, 16_777_216, "dynamic");
+        let runner = runner_with_target_size_and_luks_dump(
+            TARGET_RAW_512_MIB,
+            16_777_216,
+            "dynamic",
+            512,
+        );
         let dev_info = dev_info_with_total(SOURCE_TOTAL);
         check_replace_target_capacity(
             &runner,
@@ -825,6 +842,36 @@ mod tests {
             ReplaceTargetProbe::PresentLuks { by_id: TARGET },
         )
         .expect("dynamic segment with sufficient capacity should pass");
+    }
+
+    #[test]
+    // Intent: existing dynamic LUKS target capacity is not rounded down to
+    //   the reported segment sector_size.
+    // Why it exists: guards the no-rounding invariant for externally
+    //   formatted 4Kn targets; whole-MiB fixtures cannot catch a round-down
+    //   regression because they are already 4096-aligned.
+    // Scenario: the target's raw size leaves exactly 4608 bytes after the
+    //   16 MiB segment offset, which is enough for btrfs but would be refused
+    //   if rounded down to the reported 4096-byte sector_size.
+    fn check_replace_target_capacity_existing_dynamic_segment_does_not_round_sector_size() {
+        let offset = 16_777_216;
+        let source_total = 4_608;
+        let runner = runner_with_target_size_and_luks_dump(
+            offset + source_total,
+            offset,
+            "dynamic",
+            4096,
+        );
+        let dev_info = dev_info_with_total(source_total);
+
+        check_replace_target_capacity(
+            &runner,
+            &dev_info,
+            Path::new("/mnt/storage"),
+            source_probe(),
+            ReplaceTargetProbe::PresentLuks { by_id: TARGET },
+        )
+        .expect("dynamic segment capacity should not be rounded down to sector_size");
     }
 
     #[test]
@@ -839,6 +886,7 @@ mod tests {
             TARGET_RAW_512_MIB,
             16_777_216,
             "520093696",
+            512,
         );
         let dev_info = dev_info_with_total(SOURCE_TOTAL);
         check_replace_target_capacity(
@@ -956,7 +1004,7 @@ mod tests {
     //   usable mapper capacity.
     // Scenario: target LUKS metadata reports a 100-byte offset on a 100-byte disk.
     fn check_replace_target_capacity_refuses_when_raw_below_offset() {
-        let runner = runner_with_target_size_and_luks_dump(100, 100, "dynamic");
+        let runner = runner_with_target_size_and_luks_dump(100, 100, "dynamic", 512);
         let dev_info = dev_info_with_total(SOURCE_TOTAL);
         let err = check_replace_target_capacity(
             &runner,
@@ -978,7 +1026,8 @@ mod tests {
     //   prove the target is large enough.
     // Scenario: synthetic segment metadata reports `"size":"0"`.
     fn check_replace_target_capacity_refuses_when_fixed_size_zero() {
-        let runner = runner_with_target_size_and_luks_dump(TARGET_RAW_512_MIB, 16_777_216, "0");
+        let runner =
+            runner_with_target_size_and_luks_dump(TARGET_RAW_512_MIB, 16_777_216, "0", 512);
         let dev_info = dev_info_with_total(SOURCE_TOTAL);
         let err = check_replace_target_capacity(
             &runner,
