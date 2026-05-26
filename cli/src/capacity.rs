@@ -45,6 +45,13 @@ pub fn enospc_risk_advisory(
 
     let current_total: u64 = devices.iter().map(|device| device.device_size).sum();
     let current_threshold = enospc_risk_threshold(current_total);
+    // count_below intentionally uses the pre-loss threshold rendered in the
+    // advisory, while the 3+ disk predicate below compares each survivor set
+    // with its no-larger post-loss threshold. That cannot produce a firing
+    // advisory with a "0 of N" count: survivor_threshold <= current_threshold,
+    // and any survivor set whose members are all >= current_threshold has
+    // chunk-pair capacity >= current_threshold, therefore >= survivor_threshold.
+    // So at_risk implies at least one device is below current_threshold.
     let count_below = devices
         .iter()
         .filter(|device| device.unallocated < current_threshold)
@@ -240,21 +247,23 @@ mod tests {
     }
 
     // Intent: enospc_risk_advisory simulates every single-disk loss on 3+
-    //   device pools.
-    // Why it exists: a flat count-above-threshold rule misses cases where
-    //   losing either roomy disk strands one tight survivor.
-    // Scenario: three 100 GiB disks have unallocated [10 GiB, 10 GiB, 50 MiB].
+    //   device pools and renders a non-zero count when the advisory fires.
+    // Why it exists: this pins the count_below >= 1 invariant across a
+    //   pre-loss 1 GiB threshold vs post-loss ~819.20 MiB survivor threshold
+    //   gap, so a firing advisory cannot regress to "0 of N".
+    // Scenario: three 4 GiB disks have unallocated [3 GiB, 3 GiB, 700 MiB].
     #[test]
     fn enospc_risk_advisory_fires_on_3_disk_loss_simulation() {
         let devices = vec![
-            device(1, 100 * GIB, 10 * GIB),
-            device(2, 100 * GIB, 10 * GIB),
-            device(3, 100 * GIB, 50 * MIB),
+            device(1, 4 * GIB, 3 * GIB),
+            device(2, 4 * GIB, 3 * GIB),
+            device(3, 4 * GIB, 700 * MIB),
         ];
         let advisories = enospc_risk_advisory(&devices, 0);
 
         assert_eq!(advisories.len(), 1);
         assert!(advisories[0].starts_with("ENOSPC risk:"));
+        assert!(advisories[0].contains("1 of 3 devices"));
     }
 
     // Intent: enospc_risk_advisory tolerates one low device when every
