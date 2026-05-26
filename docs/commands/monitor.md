@@ -33,7 +33,7 @@ sudo braid monitor; echo $?
 - **btrfs device errors** -- any device in the pool has read, write, flush, corruption, or generation errors above the acknowledged baseline, including errors discovered during scrub.
 - **Missing device** -- btrfs reports a device as missing or a pool device has a null underlying path.
 - **SMART alert** -- smartd has written a SMART alert flag (via the braid smartd notifier).
-- **Computation error** -- a probe, parse, btrfs device stats call, mountinfo read, acked-stats baseline read, or alert latch read failed. Monitor fails closed: it latches a `ComputationError` cause so the beeper fires and `braid status` shows the detail.
+- **Computation error** -- a probe, parse, btrfs device stats call, mountinfo read, acked-stats baseline load, acked-stats save during self-heal, or alert-latch load/quarantine failed. Monitor fails closed: it latches a `ComputationError` cause so the beeper fires and `braid status` shows the detail.
 
 ## Flags
 
@@ -43,12 +43,10 @@ None. Monitor has no flags -- it reads from the braid config and state files.
 
 1. Checks if the pool is mounted. If not, exits 0 (nothing to monitor).
 2. Runs `btrfs device stats` on the pool mount point.
-3. Loads the acknowledged-stats baseline (`acked-stats.json`) from a previous `braid ack`.
-4. Computes which devices have new errors above the baseline.
-5. Checks for missing/null-underlying devices.
-6. Checks for a smartd alert flag.
-7. Merges results into the alert latch (`alert-latch.json`). The latch is sticky: once an alert fires, it stays active until `braid ack` clears it.
-8. Self-heals stale ack state: if a device was previously acknowledged as missing but is now present, the missing-acked flag is automatically cleared.
+3. Loads the acknowledged-stats baseline (`acked-stats.json`) from a previous `braid ack`. If the file is unreadable or unparseable, monitor fails closed -- it latches a `ComputationError` rather than firing every acknowledged cause against an empty baseline.
+4. Self-heals stale ack state before computing alerts: prunes baseline entries for devices no longer in the pool, and clears the missing-acked flag for any device that was acknowledged missing but is now present again. If the baseline changed, the updated `acked-stats.json` is written immediately; a write failure (e.g. EROFS, ENOSPC) is itself a fail-closed `ComputationError`.
+5. Computes alert causes against the reconciled baseline: btrfs device errors above the baseline, missing/null-underlying devices, and the smartd alert flag.
+6. Merges the causes into the alert latch (`alert-latch.json`). The latch is sticky: once an alert fires, it stays active until `braid ack` clears it.
 
 ## Alert pipeline
 
