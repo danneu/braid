@@ -13,6 +13,7 @@ use braid_cli::pool_lock::{
     StopCoordinatorPollResult,
 };
 use braid_cli::preflight;
+use braid_cli::preview::{PerDiskStyle, PreviewNote};
 use braid_cli::probe::RealFilesystem;
 use braid_cli::progress::{ProgressMode, resolve_progress_output};
 use braid_cli::state_paths::StatePaths;
@@ -758,15 +759,7 @@ fn main() {
         }
         Commands::Lock(args) => {
             if args.dry_run {
-                let config = load_config_or_exit(Path::new(&config_path), 1);
-                let membership = load_membership_for_lock(&paths);
-                let runner = RealRunner;
-                let fs = RealFilesystem;
-                if let Err(e) = braid_cli::lock::cmd_lock(&runner, &fs, &config, &membership, true)
-                {
-                    print_cli_error(&e.to_string());
-                    std::process::exit(1);
-                }
+                run_dry_run_lock(Path::new(&config_path), &paths);
             } else if args.systemd_stop {
                 run_systemd_stop_lock(
                     &pool_lock,
@@ -1100,24 +1093,24 @@ fn load_membership_or_exit(paths: &StatePaths, exit_code: i32) -> PoolMembership
 /// Lenient pool.json loader for `lock` paths only. `lock` is the only
 /// command for which pool.json is non-authoritative: per-candidate
 /// `cryptsetup luksUUID` probes in `cli/src/lock.rs` remain the fail-closed
-/// guard, so empty membership still produces a correct teardown.
-fn load_membership_for_lock(paths: &StatePaths) -> PoolMembership {
+/// guard. The returned diagnostic lets each caller route it to the right stream.
+fn load_membership_for_lock(paths: &StatePaths) -> (PoolMembership, Option<PreviewNote>) {
     const EMPTY_MEMBERSHIP_WARN_SUFFIX: &str = " -- proceeding with empty membership; every observed braid-* mapper will be verified by LUKS UUID before close";
 
     match braid_cli::membership::load_membership(paths) {
-        Ok(membership) => membership,
+        Ok(membership) => (membership, None),
         Err(e) => {
-            match e {
-                MembershipError::Io { path, source } => eprintln!(
-                    "warn: pool.json unreadable at {}: {source}{EMPTY_MEMBERSHIP_WARN_SUFFIX}",
-                    path.display(),
+            let body = match e {
+                MembershipError::Io { path, source } => format!(
+                    "pool.json unreadable at {}: {source}{EMPTY_MEMBERSHIP_WARN_SUFFIX}",
+                    path.display()
                 ),
-                MembershipError::Corrupt { path, detail } => eprintln!(
-                    "warn: pool.json corrupt at {}: {detail}{EMPTY_MEMBERSHIP_WARN_SUFFIX}",
-                    path.display(),
+                MembershipError::Corrupt { path, detail } => format!(
+                    "pool.json corrupt at {}: {detail}{EMPTY_MEMBERSHIP_WARN_SUFFIX}",
+                    path.display()
                 ),
                 MembershipError::Conflict(msg) => {
-                    eprintln!("warn: pool.json conflict: {msg}{EMPTY_MEMBERSHIP_WARN_SUFFIX}");
+                    format!("pool.json conflict: {msg}{EMPTY_MEMBERSHIP_WARN_SUFFIX}")
                 }
                 MembershipError::DuplicateDevid { devid, members } => {
                     let members = members
@@ -1125,14 +1118,30 @@ fn load_membership_for_lock(paths: &StatePaths) -> PoolMembership {
                         .map(ToString::to_string)
                         .collect::<Vec<_>>()
                         .join(", ");
-                    eprintln!(
-                        "warn: pool.json duplicate devid {devid} across members {members}{EMPTY_MEMBERSHIP_WARN_SUFFIX}"
-                    );
+                    format!(
+                        "pool.json duplicate devid {devid} across members {members}{EMPTY_MEMBERSHIP_WARN_SUFFIX}"
+                    )
                 }
                 MembershipError::Save { .. } => unreachable!("load_membership cannot return Save"),
-            }
-            PoolMembership::empty()
+            };
+            (PoolMembership::empty(), Some(PreviewNote::Warn(body)))
         }
+    }
+}
+
+/// Dry-run lock dispatch keeps membership-load diagnostics inside the stdout
+/// preview, preserving the single-stream dry-run contract for recovery hosts.
+fn run_dry_run_lock(config_path: &Path, paths: &StatePaths) {
+    let config = load_config_or_exit(config_path, 1);
+    let (membership, load_note) = load_membership_for_lock(paths);
+    let runner = RealRunner;
+    let fs = RealFilesystem;
+    let extra_notes: Vec<PreviewNote> = load_note.into_iter().collect();
+    if let Err(e) =
+        braid_cli::lock::cmd_lock(&runner, &fs, &config, &membership, true, extra_notes)
+    {
+        print_cli_error(&e.to_string());
+        std::process::exit(1);
     }
 }
 
@@ -1155,7 +1164,13 @@ fn run_plain_lock(
     };
     let _pool_guard = acquire_pool_or_exit(pool_lock);
     let config = load_config_or_exit(config_path, 1);
-    let membership = load_membership_for_lock(paths);
+    let (membership, load_note) = load_membership_for_lock(paths);
+    if let Some(note) = &load_note {
+        braid_cli::preview::emit_notes_to_stderr(
+            std::slice::from_ref(note),
+            PerDiskStyle::Bracketed,
+        );
+    }
     let runner = RealRunner;
     let fs = RealFilesystem;
     let online_ops = RealOnlineStateOps::new(&runner);
@@ -1219,10 +1234,17 @@ fn run_systemd_stop_lock(
         }
     };
     let config = load_config_or_exit(config_path, 1);
-    let membership = load_membership_for_lock(paths);
+    let (membership, load_note) = load_membership_for_lock(paths);
+    if let Some(note) = &load_note {
+        braid_cli::preview::emit_notes_to_stderr(
+            std::slice::from_ref(note),
+            PerDiskStyle::Bracketed,
+        );
+    }
     let runner = RealRunner;
     let fs = RealFilesystem;
-    if let Err(e) = braid_cli::lock::cmd_lock(&runner, &fs, &config, &membership, false) {
+    if let Err(e) = braid_cli::lock::cmd_lock(&runner, &fs, &config, &membership, false, Vec::new())
+    {
         print_cli_error(&e.to_string());
         std::process::exit(1);
     }
@@ -1413,9 +1435,10 @@ mod tests {
         ]);
         membership::save_membership(&expected, &paths).unwrap();
 
-        let loaded = load_membership_for_lock(&paths);
+        let (loaded, note) = load_membership_for_lock(&paths);
 
         assert_eq!(loaded, expected);
+        assert!(note.is_none());
     }
 
     // Intent: lock returns empty membership when pool.json is unreadable.
@@ -1426,9 +1449,15 @@ mod tests {
     fn load_membership_for_lock_returns_empty_on_missing_pool_json() {
         let (_tmp, paths) = isolated_paths();
 
-        let loaded = load_membership_for_lock(&paths);
+        let (loaded, note) = load_membership_for_lock(&paths);
 
         assert!(loaded.is_empty());
+        let body = match note {
+            Some(PreviewNote::Warn(body)) => body,
+            other => panic!("expected warn note, got {other:?}"),
+        };
+        assert!(body.contains("pool.json unreadable"), "{body}");
+        assert!(body.contains("proceeding with empty membership"), "{body}");
     }
 
     // Intent: lock returns empty membership when pool.json is corrupt.
@@ -1440,9 +1469,15 @@ mod tests {
         let (_tmp, paths) = isolated_paths();
         std::fs::write(paths.pool_json(), "{not valid json}").unwrap();
 
-        let loaded = load_membership_for_lock(&paths);
+        let (loaded, note) = load_membership_for_lock(&paths);
 
         assert!(loaded.is_empty());
+        let body = match note {
+            Some(PreviewNote::Warn(body)) => body,
+            other => panic!("expected warn note, got {other:?}"),
+        };
+        assert!(body.contains("pool.json corrupt"), "{body}");
+        assert!(body.contains("proceeding with empty membership"), "{body}");
     }
 
     // Intent: lock returns empty membership when pool.json has conflicting
@@ -1459,9 +1494,15 @@ mod tests {
         )
         .unwrap();
 
-        let loaded = load_membership_for_lock(&paths);
+        let (loaded, note) = load_membership_for_lock(&paths);
 
         assert!(loaded.is_empty());
+        let body = match note {
+            Some(PreviewNote::Warn(body)) => body,
+            other => panic!("expected warn note, got {other:?}"),
+        };
+        assert!(body.contains("pool.json conflict"), "{body}");
+        assert!(body.contains("proceeding with empty membership"), "{body}");
     }
 
     #[test]

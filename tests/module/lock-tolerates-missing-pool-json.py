@@ -30,7 +30,7 @@ with subtest("Unlock pool and remove pool.json"):
     machine.wait_until_succeeds("systemctl is-active --quiet braid-online.service", timeout=30)
     machine.succeed("mv /var/lib/braid/pool.json /var/lib/braid/pool.json.away")
 
-with subtest("braid lock --dry-run previews cleanup without pool.json"):
+with subtest("Dry-run lock previews teardown on stdout without pool.json"):
     rc, _ = machine.execute(
         "braid lock --dry-run "
         ">/tmp/lock-missing-pool-json-dry-run.out "
@@ -40,10 +40,13 @@ with subtest("braid lock --dry-run previews cleanup without pool.json"):
     stderr = machine.succeed("cat /tmp/lock-missing-pool-json-dry-run.err")
 
     assert rc == 0, "braid lock --dry-run should succeed without pool.json:\n" + stderr
-    assert "pool.json unreadable" in stderr, "missing pool.json warning absent:\n" + stderr
-    assert "close LUKS mapper" in stdout, "dry-run cleanup preview absent:\n" + stdout
+    assert "pool.json unreadable" in stdout, "missing pool.json warning absent:\n" + stdout
+    assert "unmount /mnt/storage" in stdout, "unmount step missing from preview:\n" + stdout
+    assert "close LUKS mapper braid-" in stdout, "dry-run cleanup preview absent:\n" + stdout
     assert "orphaned mapper" in stdout, "dry-run orphan warning absent:\n" + stdout
     assert "nothing to do" not in stdout, "dry-run must not render a no-op:\n" + stdout
+    # Probe/status rows may still use stderr; the membership warning must not.
+    assert "pool.json" not in stderr, "membership warning leaked to stderr:\n" + stderr
     machine.succeed("ls /dev/mapper/braid-* >/dev/null")
     machine.succeed("mountpoint -q /mnt/storage")
     machine.succeed("systemctl is-active --quiet braid-online.service")

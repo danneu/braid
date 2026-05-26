@@ -1020,8 +1020,17 @@ pub fn cmd_lock<R: CommandRunner, F: Filesystem + ?Sized>(
     config: &Config,
     membership: &PoolMembership,
     dry_run: bool,
+    extra_notes: Vec<PreviewNote>,
 ) -> Result<(), LockError> {
-    cmd_lock_impl(runner, fs, &RealSleeper, config, membership, dry_run)
+    cmd_lock_impl_with_notes(
+        runner,
+        fs,
+        &RealSleeper,
+        config,
+        membership,
+        dry_run,
+        extra_notes,
+    )
 }
 
 /// Plain-lock ordering invariant: run `cmd_lock` first, write `done\n`
@@ -1046,7 +1055,9 @@ where
         online_ops,
         config,
         membership,
-        |runner, fs, config, membership, dry_run| cmd_lock(runner, fs, config, membership, dry_run),
+        |runner, fs, config, membership, dry_run| {
+            cmd_lock(runner, fs, config, membership, dry_run, Vec::new())
+        },
         || coordinator_guard.mark_done(),
     )
 }
@@ -1073,6 +1084,7 @@ where
     Ok(())
 }
 
+#[cfg(test)]
 fn cmd_lock_impl<R, F, S>(
     runner: &R,
     fs: &F,
@@ -1086,12 +1098,32 @@ where
     F: Filesystem + ?Sized,
     S: Sleeper,
 {
+    cmd_lock_impl_with_notes(runner, fs, sleeper, config, membership, dry_run, Vec::new())
+}
+
+/// Shared lock command body so dispatch-supplied diagnostics can join dry-run
+/// preview notes without changing the test-facing helper arity.
+fn cmd_lock_impl_with_notes<R, F, S>(
+    runner: &R,
+    fs: &F,
+    sleeper: &S,
+    config: &Config,
+    membership: &PoolMembership,
+    dry_run: bool,
+    extra_notes: Vec<PreviewNote>,
+) -> Result<(), LockError>
+where
+    R: CommandRunner,
+    F: Filesystem + ?Sized,
+    S: Sleeper,
+{
     if !dry_run {
         let online_ops = RealOnlineStateOps::new(runner);
         run_lock_pre_steps(config, &online_ops, &mut std::io::stderr());
     }
 
-    let plan = plan_lock(runner, fs, config, membership)?;
+    let mut plan = plan_lock(runner, fs, config, membership)?;
+    plan.notes.splice(0..0, extra_notes);
     if dry_run {
         plan.preview().print_colored();
         return Ok(());
