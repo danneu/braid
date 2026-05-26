@@ -115,17 +115,16 @@ pub enum ReplaceError {
     )]
     OldMemberNotFound { name: String },
     /// Operator's `--missing-id` disagrees with the old member's persisted
-    /// `devid`: `--old` resolves to a member recording one devid while
-    /// `--missing-id` names another. A typo guard caught before any btrfs
-    /// cross-check. (The persisted-devid-is-`None` case is the separate
-    /// `OldMemberMissingDevid` variant.)
+    /// non-null `devid`: `--old` resolves to a member recording one devid
+    /// while `--missing-id` names another. A typo guard caught before any
+    /// btrfs missing-set cross-check.
     #[error(
-        "--old '{old_name}' records devid {pool_devid} in pool.json, but --missing-id was {supplied}. --old and --missing-id disagree about which member is being replaced -- run 'braid status' to confirm which disk is missing."
+        "--old '{old_name}' records devid {pool_devid} in pool.json, but --missing-id was {supplied_devid}. --old and --missing-id disagree about which member is being replaced."
     )]
     OldDevidMismatch {
         old_name: String,
         pool_devid: u64,
-        supplied: u64,
+        supplied_devid: u64,
     },
     /// Old member is being replaced via the missing path but the
     /// persisted membership row has no `devid`. Without a persisted
@@ -1713,7 +1712,7 @@ fn resolve_replace_source<R: CommandRunner>(
             return Err(ReplaceError::OldDevidMismatch {
                 old_name: old_name.as_str().to_owned(),
                 pool_devid: persisted_devid,
-                supplied,
+                supplied_devid: supplied,
             });
         }
         if pool.devices.iter().any(|d| d.devid == supplied) {
@@ -2712,26 +2711,27 @@ mod tests {
         .unwrap_err();
         let msg = err.to_string();
         assert!(
-            !msg.contains("Some("),
+            !msg.contains("Some(2)"),
             "must not leak Debug Option wrapper: {msg}"
         );
+        let stale_btrfs_report = ["btrfs reports", "missing devid"].join(" ");
         assert!(
-            !msg.contains("btrfs reports"),
+            !msg.contains(&stale_btrfs_report),
             "must not attribute --missing-id to btrfs: {msg}"
         );
         assert!(
-            msg.contains("devid 2") && msg.contains("--missing-id was 99"),
+            msg.contains("records devid 2") && msg.contains("--missing-id was 99"),
             "should show persisted devid 2 and supplied 99: {msg}"
         );
         match err {
             ReplaceError::OldDevidMismatch {
                 old_name,
                 pool_devid,
-                supplied,
+                supplied_devid,
             } => {
                 assert_eq!(old_name, "disk2");
                 assert_eq!(pool_devid, 2);
-                assert_eq!(supplied, 99);
+                assert_eq!(supplied_devid, 99);
             }
             other => panic!("expected OldDevidMismatch, got: {other:?}"),
         }
@@ -2796,6 +2796,43 @@ mod tests {
             &uuid,
             &member,
             None,
+            &pool,
+            &mp(),
+        )
+        .unwrap_err();
+        assert!(
+            matches!(err, ReplaceError::OldMemberMissingDevid { .. }),
+            "expected OldMemberMissingDevid, got: {err:?}"
+        );
+    }
+
+    #[test]
+    // Intent: supplied --missing-id cannot rescue a missing persisted
+    //   devid.
+    // Why: `OldMemberMissingDevid` is the sole remediation path when
+    //   pool.json lacks the old member's devid; operator input is only a
+    //   cross-check against persisted state.
+    // Scenario: pool.json's disk2 entry has `devid: None`, and the
+    //   operator passes `--missing-id 2` for the missing-path replace.
+    fn missing_path_without_persisted_devid_rejected_with_missing_id() {
+        let mut pool = two_device_pool();
+        pool.devices.retain(|d| d.mapper.as_str() != "braid-disk2");
+        pool.missing_count = 1;
+        pool.total_devices = 2;
+        let runner = MockRunner::default();
+        let uuid = LuksUuid::parse("22222222-2222-2222-2222-222222222222").unwrap();
+        let member = membership::DiskMember {
+            name: disk_name("disk2"),
+            by_id: ByIdPath::parse("/dev/disk/by-id/virtio-disk2").unwrap(),
+            devid: None,
+            added_at: None,
+        };
+        let err = resolve_replace_source(
+            &runner,
+            &disk_name("disk2"),
+            &uuid,
+            &member,
+            Some(2),
             &pool,
             &mp(),
         )
