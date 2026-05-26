@@ -28,6 +28,11 @@ Output:
 pass --write to save to /var/lib/braid/pool.json
 ```
 
+The membership rows are written to stdout; the `pass --write to save` hint, the
+`--write` "pool membership written" confirmation, scan warnings, and errors go
+to stderr. So `braid discover > members` (or `braid discover | grep <disk>`)
+captures only the rows.
+
 ## Common variations
 
 Write the discovered membership to pool.json:

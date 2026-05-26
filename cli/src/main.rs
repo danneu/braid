@@ -914,7 +914,7 @@ fn main() {
                 std::process::exit(1);
             }
             for line in braid_cli::discover::render_preview_lines(&members) {
-                eprintln!("{line}");
+                println!("{line}");
             }
             if args.write {
                 match braid_cli::discover::write_discovered_membership(
