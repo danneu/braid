@@ -61,40 +61,43 @@ pub struct CheckResult {
 }
 
 impl CheckResult {
-    fn ok(name: impl Into<String>, message: impl Into<String>) -> Self {
+    /// Sole field-initialization site so adding a result field touches one constructor.
+    fn new(name: impl Into<String>, status: CheckStatus, message: impl Into<String>) -> Self {
         Self {
             name: name.into(),
-            status: CheckStatus::Ok,
+            status,
             message: message.into(),
             subject: None,
         }
+    }
+
+    /// Subject-tagged result used when one logical check reports per-device state.
+    fn new_for(
+        name: impl Into<String>,
+        subject: impl Into<String>,
+        status: CheckStatus,
+        message: impl Into<String>,
+    ) -> Self {
+        Self {
+            subject: Some(subject.into()),
+            ..Self::new(name, status, message)
+        }
+    }
+
+    fn ok(name: impl Into<String>, message: impl Into<String>) -> Self {
+        Self::new(name, CheckStatus::Ok, message)
     }
 
     fn warn(name: impl Into<String>, message: impl Into<String>) -> Self {
-        Self {
-            name: name.into(),
-            status: CheckStatus::Warn,
-            message: message.into(),
-            subject: None,
-        }
+        Self::new(name, CheckStatus::Warn, message)
     }
 
     fn fail(name: impl Into<String>, message: impl Into<String>) -> Self {
-        Self {
-            name: name.into(),
-            status: CheckStatus::Fail,
-            message: message.into(),
-            subject: None,
-        }
+        Self::new(name, CheckStatus::Fail, message)
     }
 
     fn skip(name: impl Into<String>, message: impl Into<String>) -> Self {
-        Self {
-            name: name.into(),
-            status: CheckStatus::Skip,
-            message: message.into(),
-            subject: None,
-        }
+        Self::new(name, CheckStatus::Skip, message)
     }
 
     fn ok_for(
@@ -102,12 +105,7 @@ impl CheckResult {
         subject: impl Into<String>,
         message: impl Into<String>,
     ) -> Self {
-        Self {
-            name: name.into(),
-            status: CheckStatus::Ok,
-            message: message.into(),
-            subject: Some(subject.into()),
-        }
+        Self::new_for(name, subject, CheckStatus::Ok, message)
     }
 
     fn warn_for(
@@ -115,12 +113,7 @@ impl CheckResult {
         subject: impl Into<String>,
         message: impl Into<String>,
     ) -> Self {
-        Self {
-            name: name.into(),
-            status: CheckStatus::Warn,
-            message: message.into(),
-            subject: Some(subject.into()),
-        }
+        Self::new_for(name, subject, CheckStatus::Warn, message)
     }
 
     fn fail_for(
@@ -128,12 +121,7 @@ impl CheckResult {
         subject: impl Into<String>,
         message: impl Into<String>,
     ) -> Self {
-        Self {
-            name: name.into(),
-            status: CheckStatus::Fail,
-            message: message.into(),
-            subject: Some(subject.into()),
-        }
+        Self::new_for(name, subject, CheckStatus::Fail, message)
     }
 
     fn skip_for(
@@ -141,12 +129,7 @@ impl CheckResult {
         subject: impl Into<String>,
         message: impl Into<String>,
     ) -> Self {
-        Self {
-            name: name.into(),
-            status: CheckStatus::Skip,
-            message: message.into(),
-            subject: Some(subject.into()),
-        }
+        Self::new_for(name, subject, CheckStatus::Skip, message)
     }
 }
 
