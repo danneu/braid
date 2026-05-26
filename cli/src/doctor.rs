@@ -1227,7 +1227,7 @@ fn check_ups_daemon_up<R: CommandRunner>(ctx: &mut DoctorContext<'_, R>) -> Chec
                 ups_cfg.name
             ),
         ),
-        Ok(out) if out.status_flags.is_empty() => CheckResult::warn(
+        Ok(q) if q.parsed.status_flags.is_empty() => CheckResult::warn(
             name,
             format!(
                 "upsc {} responded but ups.status is empty -- driver may still be starting",

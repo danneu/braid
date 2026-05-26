@@ -571,7 +571,7 @@ pub fn check_ups_not_on_battery<R: CommandRunner>(
         ))
     };
     let parsed = match query_ups(runner, name) {
-        Ok(p) => p,
+        Ok(q) => q.parsed,
         Err(UpsQueryError::InvocationFailed(_)) => {
             return refuse("upsc invocation failed");
         }

@@ -51,7 +51,15 @@ pub enum UpsQueryError {
     QueryFailed { exit_code: i32, stderr: String },
 }
 
-pub fn query_ups<R: CommandRunner>(runner: &R, name: &str) -> Result<UpscOutput, UpsQueryError> {
+/// Successful `upsc` query payload so callers share one exit-code gate while
+/// preserving raw stdout for the TUI Variables panel and parsed command state.
+#[derive(Debug)]
+pub struct UpscQueried {
+    pub raw_stdout: String,
+    pub parsed: UpscOutput,
+}
+
+pub fn query_ups<R: CommandRunner>(runner: &R, name: &str) -> Result<UpscQueried, UpsQueryError> {
     let raw = runner.run(&CmdRequest::UpscQuery {
         name: name.to_owned(),
     })?;
@@ -61,7 +69,11 @@ pub fn query_ups<R: CommandRunner>(runner: &R, name: &str) -> Result<UpscOutput,
             stderr: raw.stderr.trim().to_owned(),
         });
     }
-    Ok(parse_upsc(&raw.stdout))
+    let parsed = parse_upsc(&raw.stdout);
+    Ok(UpscQueried {
+        raw_stdout: raw.stdout,
+        parsed,
+    })
 }
 
 /// `--json` output mode for `braid ups status`. Separate from
@@ -131,7 +143,7 @@ pub fn cmd_ups_status<R: CommandRunner>(
         return print_not_enabled(json);
     };
     let parsed = match query_ups(runner, &ups_cfg.name) {
-        Ok(p) => p,
+        Ok(q) => q.parsed,
         Err(UpsQueryError::InvocationFailed(e)) => {
             return emit_invocation_failed(json, e);
         }
@@ -641,8 +653,8 @@ mod tests {
 
         let out = query_ups(&runner, "ups").expect("healthy upsc output parses");
 
-        assert!(out.status_flags.contains(&UpsStatusFlag::Ol));
-        assert_eq!(out.battery.charge_pct, Some(100));
+        assert!(out.parsed.status_flags.contains(&UpsStatusFlag::Ol));
+        assert_eq!(out.parsed.battery.charge_pct, Some(100));
     }
 
     // Intent: cmd_ups_status routes invocation failure to

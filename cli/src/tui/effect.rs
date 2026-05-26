@@ -32,8 +32,8 @@ pub enum Effect {
     ScheduleFanProbe {
         delay: Duration,
     },
-    /// Run `upsc <name>` through `query_ups` on a worker thread; the result
-    /// becomes `Event::UpsProbeFinished`.
+    /// Run `upsc <name>` through `query_ups` on a worker thread; raw stdout
+    /// and parsed state become `Event::UpsProbeFinished`.
     ProbeUps {
         name: String,
     },

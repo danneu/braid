@@ -5,7 +5,6 @@ use std::time::Instant;
 use crate::cmd::{CmdRequest, CommandRunner};
 use crate::config::{FanControl, mapper_name};
 use crate::luks::{self, BackingPathResolver};
-use crate::parse::parse_upsc;
 use crate::parse::types::{ScrubState, SmartHealth, SmartProbe};
 use crate::parse::{
     parse_btrfs_device_stats, parse_btrfs_device_usage, parse_btrfs_scrub_status,
@@ -742,23 +741,18 @@ const UPS_DAEMON_UNIT: &str = "upsd.service";
 /// the plan's risk 3 ("TUI snapshot drifts from UpscOutput"): all
 /// conversion happens here, tests snapshot the converter output.
 pub fn probe_ups_for_tui<R: CommandRunner>(runner: &R, name: &str) -> UpsSnapshot {
-    let raw = match runner.run(&CmdRequest::UpscQuery {
-        name: name.to_owned(),
-    }) {
-        Ok(raw) => raw,
+    let queried = match crate::ups::query_ups(runner, name) {
+        Ok(queried) => queried,
         Err(_) => return ups_snapshot_query_failed(runner),
     };
-    if raw.exit_status != 0 {
-        return ups_snapshot_query_failed(runner);
-    }
-    let parsed = parse_upsc(&raw.stdout);
+    let parsed = queried.parsed;
     UpsSnapshot {
         flags: parsed.status_flags.clone(),
         battery_charge_pct: parsed.battery.charge_pct,
         runtime_secs: parsed.battery.runtime_secs,
         load_pct: parsed.load_pct,
         watts_estimated: parsed.watts_estimated(),
-        raw_text: raw.stdout,
+        raw_text: queried.raw_stdout,
         // A successful `upsc` implies the daemon is reachable -- call
         // the unit status just in case the upstream check captures a
         // transitional state worth rendering (active / failed).
@@ -2873,12 +2867,9 @@ mod tests {
     // Scenario: upsc returns OL + full battery + load; upsd is active.
     #[test]
     fn probe_ups_populates_typed_fields_on_success() {
-        let mock = mock_with_upsc_and_unit(
-            "ups.status: OL\nbattery.charge: 100\nbattery.runtime: 1800\n\
-             ups.load: 20\nups.realpower.nominal: 500\n",
-            0,
-            "active\n",
-        );
+        let stdout = "ups.status: OL\nbattery.charge: 100\nbattery.runtime: 1800\n\
+                      ups.load: 20\nups.realpower.nominal: 500\n";
+        let mock = mock_with_upsc_and_unit(stdout, 0, "active\n");
         let snap = probe_ups_for_tui(&mock, "ups");
         assert!(snap.flags.contains(&crate::parse::types::UpsStatusFlag::Ol));
         assert_eq!(snap.battery_charge_pct, Some(100));
@@ -2886,6 +2877,7 @@ mod tests {
         assert_eq!(snap.load_pct, Some(20));
         // 20% * 500 W = 100 W
         assert_eq!(snap.watts_estimated, Some(100));
+        assert_eq!(snap.raw_text, stdout);
         assert_eq!(snap.daemon, DaemonStatus::Active);
     }
 
@@ -2929,6 +2921,7 @@ mod tests {
         assert!(snap.flags.is_empty());
         assert_eq!(snap.battery_charge_pct, None);
         assert_eq!(snap.load_pct, None);
+        assert!(snap.raw_text.is_empty());
         assert_eq!(snap.daemon, DaemonStatus::Inactive);
     }
 
@@ -2944,6 +2937,7 @@ mod tests {
         assert!(snap.flags.is_empty());
         assert_eq!(snap.battery_charge_pct, None);
         assert_eq!(snap.load_pct, None);
+        assert!(snap.raw_text.is_empty());
         assert_eq!(snap.daemon, DaemonStatus::Inactive);
     }
 }
