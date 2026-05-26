@@ -408,8 +408,8 @@ struct DiscoverArgs {
     /// detached disk (loose cable, USB power glitch, udev race) or
     /// extra braid-labeled disk cannot silently produce the wrong
     /// pool.json.
-    /// Only honored alongside --write.
-    #[arg(long = "expect-count", value_name = "N")]
+    /// Requires --write.
+    #[arg(long = "expect-count", value_name = "N", requires = "write")]
     expect_count: Option<usize>,
 }
 
@@ -1767,5 +1767,35 @@ mod tests {
         let err = Cli::try_parse_from(["braid", "lock", "--systemd-stop", "--deadline-secs", "0"])
             .expect_err("deadline must be positive");
         assert_eq!(err.kind(), ErrorKind::ValueValidation);
+    }
+
+    // Intent: the documented guarded rebuild `discover --write --expect-count N`
+    //   still parses cleanly, with both flags reaching DiscoverArgs.
+    // Why it exists: the requires="write" constraint or a misnamed arg id could
+    //   over-tighten and break the only path that consumes expect_count.
+    // Scenario: operator runs `sudo braid discover --write --expect-count 3` to
+    //   guard a known 3-disk rebuild.
+    #[test]
+    fn discover_write_with_expect_count_parses() {
+        let cli = Cli::try_parse_from(["braid", "discover", "--write", "--expect-count", "3"])
+            .expect("guarded-write discover parses");
+        let Commands::Discover(args) = cli.command else {
+            panic!("expected discover command");
+        };
+        assert!(args.write);
+        assert_eq!(args.expect_count, Some(3));
+    }
+
+    // Intent: `discover --expect-count N` without `--write` is rejected at parse
+    //   time instead of silently running a read-only preview.
+    // Why it exists: expect_count is a fail-closed guard honored only on the
+    //   --write branch; without requires="write" it is silently dropped.
+    // Scenario: operator runs `sudo braid discover --expect-count 3`, forgetting
+    //   --write, during a rebuild.
+    #[test]
+    fn discover_expect_count_without_write_rejected() {
+        let err = Cli::try_parse_from(["braid", "discover", "--expect-count", "3"])
+            .expect_err("expect-count requires write");
+        assert_eq!(err.kind(), ErrorKind::MissingRequiredArgument);
     }
 }
