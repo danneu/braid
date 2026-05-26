@@ -1381,9 +1381,9 @@ mod tests {
      * devid.
      *
      * Why it exists: after the LUKS UUID identity migration, persisted devid
-     * is still the authorized fallback when btrfs reports a device by devid
-     * but no live LUKS UUID is observable. The TUI must not require a mapper
-     * name for `<missing disk>` stats rows.
+     * is still the authorized fallback when btrfs reports a stats row by
+     * devid but no live LUKS UUID is observable. The TUI must not require a
+     * mapper name for missing-device stats rows.
      *
      * Scenario: btrfs reports disk1 live and devid 2 as MISSING. Device stats
      * reports `<missing disk>` for devid 2 with a read error. The TUI surfaces

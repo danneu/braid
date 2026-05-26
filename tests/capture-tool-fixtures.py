@@ -316,9 +316,30 @@ machine.succeed(
 # Remove the payload before remaining teardown.
 machine.succeed(f"rm {MOUNT}/replacedata")
 
+# --- Degraded device stats: drop one member, capture the missing-device row ---
+# Rebuild a clean 2-disk pool on the open mappers, then close one member and
+# mount degraded. The parser ignores the btrfs-emitted device string and keys
+# on devid, so this fixture pins the real degraded JSON shape.
+machine.succeed(f"umount {MOUNT}")
+machine.succeed(
+    "mkfs.btrfs -f -d raid1 -m raid1 /dev/mapper/braid-vdb /dev/mapper/braid-vdc"
+)
+machine.succeed(f"mount /dev/mapper/braid-vdb {MOUNT}")
+machine.succeed(f"umount {MOUNT}")
+machine.succeed("cryptsetup close braid-vdc")
+machine.succeed(f"mount -o degraded /dev/mapper/braid-vdb {MOUNT}")
+machine.succeed(
+    f"btrfs --format json device stats {MOUNT}"
+    f" > {FIXTURE_DIR}/btrfs-device-stats-degraded.json"
+)
+machine.succeed(
+    f"btrfs device stats {MOUNT}"
+    f" > {FIXTURE_DIR}/btrfs-device-stats-degraded.txt"
+)
+machine.succeed(f"umount {MOUNT}")
+
 # 11. cryptsetup status (inactive stderr/stdout)
 # Must unmount before closing mapper; otherwise cryptsetup reports "still in use".
-machine.succeed(f"umount {MOUNT}")
 machine.succeed("cryptsetup close braid-vdb")
 machine.succeed(
     f"cryptsetup status braid-vdb"

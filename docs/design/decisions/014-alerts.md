@@ -23,7 +23,7 @@ A single shared computation produces an `AlertState` consumed by all surfaces �
 ### Alert causes
 
 `AlertCause` is an explicit enum:
-- `BtrfsDeviceErrors { devid }` — non-zero btrfs device stat counters above acked baseline
+- `BtrfsDeviceErrors { devid }` — non-zero btrfs device stat counters above acked baseline, excluding alert-local missing devids
 - `MissingDevice { devid }` — device missing from pool
 - `SmartdAlert` — smartd SMART health warning
 - `ComputationError { detail }` — probe or parse failed before a structured cause could be determined
@@ -36,7 +36,7 @@ braid owns btrfs device stats + missing device detection. smartd owns SMART moni
 
 ### All five btrfs device stat counters trigger alerts
 
-write_io_errs, read_io_errs, flush_io_errs, corruption_errs, generation_errs. Any non-zero counter above the acked baseline triggers an alert.
+write_io_errs, read_io_errs, flush_io_errs, corruption_errs, generation_errs. Any non-zero counter above the acked baseline triggers an alert for a present recognized devid. Devids in the alert-local missing set are excluded from `BtrfsDeviceErrors` and alert through `MissingDevice` instead.
 
 Two kernel paths feed those counters: ordinary I/O and scrub. Scrub records
 read, checksum, and generation failures by incrementing
@@ -64,6 +64,8 @@ A flag that exists at cleanup time when the snapshot saw neither active smartd s
 Acked baselines are keyed by btrfs devid (`acked-stats.json` maps stringified devid to baseline) -- no path or LUKS UUID mapping is required to associate a stats row with its baseline. The parser captures missing device devids from MISSING sentinel lines.
 
 Membership cross-reference is performed at the alert-pipeline boundary, not at the baseline-keying level. `AlertPoolState::recognized_devids` (in `cli/src/probe.rs`) returns the union of `present_devids`, `null_underlying`, and `missing_devids` for the current cycle. Both `compute_alert_state` and `snapshot_current` filter `btrfs device stats` rows against that set before emitting causes or writing baselines. A stats row whose devid is outside the recognized set is treated as transient/stale identity: it cannot latch `BtrfsDeviceErrors`, and `braid ack` does not persist a baseline for it, which prevents a loop on the next monitor cycle's `reconcile_acked_stats` prune.
+
+Within the recognized set, `compute_alert_state` also skips rows whose devid is in the alert-local missing set (`missing_devids` plus `null_underlying`). Those rows alert through `MissingDevice`, not `BtrfsDeviceErrors`, regardless of the device string btrfs printed. `snapshot_current` still records recognized rows by devid before layering `missing_acked = true` from the missing set, so a returning member does not re-alert on stale counters already acknowledged while missing.
 
 ### Ack state separate from pool.json
 

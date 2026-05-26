@@ -3,7 +3,7 @@ use serde::Deserialize;
 use crate::cmd::RawCommandOutput;
 
 use super::ParseError;
-use super::types::{BtrfsDeviceStatsOutput, DeviceErrorStats, DeviceStatsTarget};
+use super::types::{BtrfsDeviceStatsOutput, DeviceErrorStats};
 
 // --- Serde helper structs (not exposed to domain code) ---
 
@@ -19,7 +19,6 @@ struct RawDeviceStatsOutput {
 // No deny_unknown_fields: forward-compatible with future fields like discard_errs.
 #[derive(Deserialize)]
 struct RawDeviceStatsEntry {
-    device: String,
     devid: u64,
     write_io_errs: u64,
     read_io_errs: u64,
@@ -51,26 +50,8 @@ pub fn parse_btrfs_device_stats(
         .device_stats
         .into_iter()
         .map(|e| {
-            // Missing-device sentinel handling.
-            //
-            // Observed degraded-mount behavior in braid's VM test:
-            // `btrfs --format json device stats` reports `"<missing disk>"` for the
-            // missing member. That is the case that caused `braid monitor` to misparse
-            // the row as a normal path and fail with `UnmappedDeviceError`.
-            //
-            // In the btrfs-progs source I checked (v6.19-5-g10717dd7), there is also a
-            // separate fallback that synthesizes `"devid:<n>"` when
-            // `path_canonicalize(path)` returns NULL. That fallback does not explain the
-            // degraded-mount `"<missing disk>"` output; it is a different code path.
-            // Accept both forms.
-            let target = if e.device.starts_with("devid:") || e.device == "<missing disk>" {
-                DeviceStatsTarget::MissingDisk
-            } else {
-                DeviceStatsTarget::Path(e.device)
-            };
             DeviceErrorStats {
                 devid: e.devid,
-                target,
                 read_io_errs: e.read_io_errs,
                 write_io_errs: e.write_io_errs,
                 flush_io_errs: e.flush_io_errs,
@@ -95,10 +76,6 @@ mod tests {
         std::fs::read_to_string(&path).unwrap_or_else(|e| panic!("fixture {name}: {e}"))
     }
 
-    fn is_dm_or_mapper_path(s: &str) -> bool {
-        s.starts_with("/dev/dm-") || s.starts_with("/dev/mapper/braid-")
-    }
-
     // --- Contract tests (nixos-25.11 fixtures) ---
 
     #[test]
@@ -111,18 +88,8 @@ mod tests {
         };
         let out = parse_btrfs_device_stats(&raw).unwrap();
         assert_eq!(out.devices.len(), 2);
-        assert!(
-            is_dm_or_mapper_path(out.devices[0].target.as_path().unwrap()),
-            "device 0 path should be dm or mapper, got: {:?}",
-            out.devices[0].target
-        );
         assert_eq!(out.devices[0].devid, 1);
         assert_eq!(out.devices[0].read_io_errs, 0);
-        assert!(
-            is_dm_or_mapper_path(out.devices[1].target.as_path().unwrap()),
-            "device 1 path should be dm or mapper, got: {:?}",
-            out.devices[1].target
-        );
         assert_eq!(out.devices[1].devid, 2);
     }
 
@@ -193,80 +160,6 @@ mod tests {
         assert_eq!(out.devices[0].read_io_errs, 2);
         assert_eq!(out.devices[0].write_io_errs, 0);
         // discard_errs (unknown) is silently dropped — not in DeviceErrorStats
-    }
-
-    /// Observed degraded-mount sentinel: btrfs-progs emits "<missing disk>"
-    /// as the device path for absent drives.
-    #[test]
-    fn device_stats_parses_observed_missing_disk_sentinel() {
-        let raw = RawCommandOutput {
-            cmd: "btrfs device stats".into(),
-            stdout: r#"{
-                "device-stats": [
-                    {
-                        "device": "/dev/mapper/braid-vda",
-                        "devid": 1,
-                        "write_io_errs": 0,
-                        "read_io_errs": 0,
-                        "flush_io_errs": 0,
-                        "corruption_errs": 0,
-                        "generation_errs": 0
-                    },
-                    {
-                        "device": "<missing disk>",
-                        "devid": 2,
-                        "write_io_errs": 0,
-                        "read_io_errs": 0,
-                        "flush_io_errs": 0,
-                        "corruption_errs": 0,
-                        "generation_errs": 0
-                    }
-                ]
-            }"#
-            .into(),
-            stderr: String::new(),
-            exit_status: 0,
-        };
-        let out = parse_btrfs_device_stats(&raw).unwrap();
-        assert_eq!(out.devices.len(), 2);
-        assert_eq!(
-            out.devices[0].target,
-            DeviceStatsTarget::Path("/dev/mapper/braid-vda".to_owned())
-        );
-        assert_eq!(out.devices[0].devid, 1);
-        assert_eq!(out.devices[1].target, DeviceStatsTarget::MissingDisk);
-        // devid is preserved even for the <missing disk> sentinel row.
-        assert_eq!(out.devices[1].devid, 2);
-    }
-
-    /// Separate upstream fallback case: in btrfs-progs v6.19-5-g10717dd7,
-    /// `"devid:<n>"` is synthesized when `path_canonicalize(path)` returns NULL.
-    /// This is not the observed degraded-mount sentinel in braid's failing VM
-    /// test, but we accept it defensively.
-    #[test]
-    fn device_stats_parses_upstream_devid_fallback_sentinel() {
-        let raw = RawCommandOutput {
-            cmd: "btrfs device stats".into(),
-            stdout: r#"{
-                "device-stats": [
-                    {
-                        "device": "devid:2",
-                        "devid": 2,
-                        "write_io_errs": 0,
-                        "read_io_errs": 0,
-                        "flush_io_errs": 0,
-                        "corruption_errs": 0,
-                        "generation_errs": 0
-                    }
-                ]
-            }"#
-            .into(),
-            stderr: String::new(),
-            exit_status: 0,
-        };
-        let out = parse_btrfs_device_stats(&raw).unwrap();
-        assert_eq!(out.devices.len(), 1);
-        assert_eq!(out.devices[0].target, DeviceStatsTarget::MissingDisk);
     }
 
     #[test]

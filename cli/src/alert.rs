@@ -3,7 +3,7 @@ use std::path::Path;
 
 use serde::{Deserialize, Serialize};
 
-use crate::parse::types::{BtrfsDeviceStatsOutput, DeviceErrorStats, DeviceStatsTarget};
+use crate::parse::types::{BtrfsDeviceStatsOutput, DeviceErrorStats};
 use crate::state_io::atomic_write;
 use crate::state_paths::StatePaths;
 
@@ -96,10 +96,9 @@ pub fn save_acked_stats_at(path: &Path, stats: &AckedStats) -> Result<(), std::i
 /// alert-local recognized and missing devid sets.
 ///
 /// Identity is `dev.devid` (btrfs supplies it on every stats row). The
-/// `<missing disk>` sentinel is skipped here even though its devid is
-/// available, and rows outside `recognized_devids` are ignored as stale
-/// identities. `MissingDevice` causes are generated independently from
-/// `missing_devids`.
+/// alert-local missing set is skipped for `BtrfsDeviceErrors` because those
+/// devids alert through `MissingDevice`, and rows outside `recognized_devids`
+/// are ignored as stale identities.
 pub fn compute_alert_state(
     current_stats: &BtrfsDeviceStatsOutput,
     acked: &AckedStats,
@@ -109,9 +108,10 @@ pub fn compute_alert_state(
 ) -> AlertState {
     let mut causes = Vec::new();
     let recognized: BTreeSet<u64> = recognized_devids.iter().copied().collect();
+    let missing: BTreeSet<u64> = missing_devids.iter().copied().collect();
 
     for dev in &current_stats.devices {
-        if matches!(dev.target, DeviceStatsTarget::MissingDisk) {
+        if missing.contains(&dev.devid) {
             continue;
         }
         if !recognized.contains(&dev.devid) {
@@ -173,12 +173,6 @@ pub fn snapshot_current(
     let recognized: BTreeSet<u64> = recognized_devids.iter().copied().collect();
 
     for dev in &current_stats.devices {
-        // Skip <missing disk> sentinel rows: their devid is available but the
-        // row carries zero counters and is already represented in
-        // missing_devids below.
-        if matches!(dev.target, DeviceStatsTarget::MissingDisk) {
-            continue;
-        }
         if !recognized.contains(&dev.devid) {
             continue;
         }
@@ -503,22 +497,9 @@ mod tests {
         BtrfsDeviceStatsOutput { devices }
     }
 
-    fn zero_device(path: &str, devid: u64) -> DeviceErrorStats {
+    fn zero_device(devid: u64) -> DeviceErrorStats {
         DeviceErrorStats {
             devid,
-            target: DeviceStatsTarget::Path(path.to_owned()),
-            read_io_errs: 0,
-            write_io_errs: 0,
-            flush_io_errs: 0,
-            corruption_errs: 0,
-            generation_errs: 0,
-        }
-    }
-
-    fn zero_missing_device(devid: u64) -> DeviceErrorStats {
-        DeviceErrorStats {
-            devid,
-            target: DeviceStatsTarget::MissingDisk,
             read_io_errs: 0,
             write_io_errs: 0,
             flush_io_errs: 0,
@@ -1004,7 +985,7 @@ mod tests {
 
     #[test]
     fn no_alert_when_all_zero() {
-        let stats = make_stats(vec![zero_device("/dev/mapper/braid-vda", 1)]);
+        let stats = make_stats(vec![zero_device(1)]);
         let acked = AckedStats::default();
         let alert = compute_alert_state(&stats, &acked, &[1], &[], false);
         assert!(!alert.active());
@@ -1013,7 +994,7 @@ mod tests {
 
     #[test]
     fn alert_on_btrfs_device_errors() {
-        let mut dev = zero_device("/dev/mapper/braid-vda", 1);
+        let mut dev = zero_device(1);
         dev.read_io_errs = 3;
         dev.corruption_errs = 1;
         let stats = make_stats(vec![dev]);
@@ -1026,7 +1007,7 @@ mod tests {
 
     #[test]
     fn alert_on_missing_device() {
-        let stats = make_stats(vec![zero_device("/dev/mapper/braid-vda", 1)]);
+        let stats = make_stats(vec![zero_device(1)]);
         let acked = AckedStats::default();
         let alert = compute_alert_state(&stats, &acked, &[1, 2], &[2], false);
         assert!(alert.active());
@@ -1036,7 +1017,7 @@ mod tests {
 
     #[test]
     fn alert_on_smartd() {
-        let stats = make_stats(vec![zero_device("/dev/mapper/braid-vda", 1)]);
+        let stats = make_stats(vec![zero_device(1)]);
         let acked = AckedStats::default();
         let alert = compute_alert_state(&stats, &acked, &[1], &[], true);
         assert!(alert.active());
@@ -1046,7 +1027,7 @@ mod tests {
 
     #[test]
     fn no_alert_after_ack() {
-        let mut dev = zero_device("/dev/mapper/braid-vda", 1);
+        let mut dev = zero_device(1);
         dev.read_io_errs = 3;
         let stats = make_stats(vec![dev]);
 
@@ -1070,7 +1051,7 @@ mod tests {
     fn counter_reset_detection() {
         // Current < acked means counters were reset (remount). Treat acked as 0,
         // so current value (which is > 0) triggers an alert.
-        let mut dev = zero_device("/dev/mapper/braid-vda", 1);
+        let mut dev = zero_device(1);
         dev.read_io_errs = 1;
         let stats = make_stats(vec![dev]);
 
@@ -1092,7 +1073,7 @@ mod tests {
 
     #[test]
     fn missing_acked_suppresses_alert() {
-        let stats = make_stats(vec![zero_device("/dev/mapper/braid-vda", 1)]);
+        let stats = make_stats(vec![zero_device(1)]);
         let mut acked_map = BTreeMap::new();
         acked_map.insert(
             "2".to_owned(),
@@ -1108,7 +1089,7 @@ mod tests {
 
     #[test]
     fn multiple_causes() {
-        let mut dev = zero_device("/dev/mapper/braid-vda", 1);
+        let mut dev = zero_device(1);
         dev.write_io_errs = 1;
         let stats = make_stats(vec![dev]);
         let acked = AckedStats::default();
@@ -1119,7 +1100,7 @@ mod tests {
 
     #[test]
     fn snapshot_current_captures_stats() {
-        let mut dev = zero_device("/dev/mapper/braid-vda", 1);
+        let mut dev = zero_device(1);
         dev.read_io_errs = 3;
         dev.corruption_errs = 1;
         let stats = make_stats(vec![dev]);
@@ -1142,7 +1123,7 @@ mod tests {
     // while probe also classifies devid 2 as alert-local missing.
     #[test]
     fn snapshot_current_preserves_null_underlying_stats() {
-        let mut dev = zero_device("/dev/mapper/braid-disk2", 2);
+        let mut dev = zero_device(2);
         dev.read_io_errs = 3;
         dev.write_io_errs = 4;
         dev.flush_io_errs = 5;
@@ -1163,7 +1144,7 @@ mod tests {
 
     #[test]
     fn new_errors_after_ack_trigger_alert() {
-        let mut dev = zero_device("/dev/mapper/braid-vda", 1);
+        let mut dev = zero_device(1);
         dev.read_io_errs = 5;
         let stats = make_stats(vec![dev]);
 
@@ -1199,7 +1180,7 @@ mod tests {
      */
     #[test]
     fn unknown_devid_zero_counters_does_not_alert() {
-        let stats = make_stats(vec![zero_device("/dev/mapper/braid-stale", 99)]);
+        let stats = make_stats(vec![zero_device(99)]);
         let acked = AckedStats::default();
         let alert = compute_alert_state(&stats, &acked, &[99], &[], false);
         assert!(!alert.active());
@@ -1214,7 +1195,7 @@ mod tests {
     //   while the current probe recognizes no such devid.
     #[test]
     fn unrecognized_devid_with_errors_does_not_alert() {
-        let mut dev = zero_device("/dev/mapper/braid-stale", 99);
+        let mut dev = zero_device(99);
         dev.read_io_errs = 3;
         dev.corruption_errs = 1;
         let stats = make_stats(vec![dev]);
@@ -1224,15 +1205,35 @@ mod tests {
         assert!(alert.causes.is_empty());
     }
 
+    // Intent: a missing devid's stats row never produces BtrfsDeviceErrors,
+    //   even with non-zero counters -- it alerts solely via MissingDevice.
+    // Why it exists: the skip used to key on the btrfs device path string; a
+    //   version-drifted string could fall through and fire a spurious
+    //   BtrfsDeviceErrors on top of MissingDevice.
+    // Scenario: degraded pool, devid 2 missing, btrfs reports devid 2's
+    //   persisted read and corruption counters as non-zero on its stats row.
     #[test]
-    fn missing_disk_sentinel_skipped_in_alert() {
-        // btrfs emits "<missing disk>" in device stats during degraded mount.
-        // This sentinel must be skipped -- missing-device alerting comes from
-        // missing_devids, not from stats rows.
-        let stats = make_stats(vec![
-            zero_device("/dev/mapper/braid-vda", 1),
-            zero_missing_device(2),
-        ]);
+    fn missing_devid_with_errors_alerts_only_as_missing_device() {
+        let mut dev = zero_device(2);
+        dev.read_io_errs = 3;
+        dev.corruption_errs = 1;
+        let stats = make_stats(vec![zero_device(1), dev]);
+        let acked = AckedStats::default();
+
+        let alert = compute_alert_state(&stats, &acked, &[1, 2], &[2], false);
+
+        assert_eq!(alert.causes, vec![AlertCause::MissingDevice { devid: 2 }]);
+    }
+
+    // Intent: a missing devid's stats row never produces
+    //   BtrfsDeviceErrors, even when btrfs emits a normal-looking row.
+    // Why it exists: missing-device alerting must key on `missing_devids`,
+    //   not on the unpinned btrfs device string.
+    // Scenario: degraded pool, devid 2 missing, btrfs still reports a stats
+    //   row for devid 2.
+    #[test]
+    fn missing_devid_row_skipped_in_alert() {
+        let stats = make_stats(vec![zero_device(1), zero_device(2)]);
         let acked = AckedStats::default();
         let alert = compute_alert_state(&stats, &acked, &[1, 2], &[2], false);
         assert!(alert.active());
@@ -1240,18 +1241,23 @@ mod tests {
         assert_eq!(alert.causes[0], AlertCause::MissingDevice { devid: 2 });
     }
 
+    // Intent: a missing devid's stats row is still snapshotted by devid while
+    //   the missing flag is layered on top from `missing_devids`.
+    // Why it exists: ack baselines must preserve counters for missing or
+    //   null-underlying rows so a returning member does not re-alert on old
+    //   counts.
+    // Scenario: degraded pool, devid 2 missing, btrfs reports persisted
+    //   counters for devid 2 in its stats row.
     #[test]
-    fn missing_disk_sentinel_skipped_in_snapshot() {
-        let stats = make_stats(vec![
-            zero_device("/dev/mapper/braid-vda", 1),
-            zero_missing_device(2),
-        ]);
+    fn missing_devid_row_snapshotted_and_marked_missing_acked() {
+        let mut dev = zero_device(2);
+        dev.read_io_errs = 3;
+        let stats = make_stats(vec![zero_device(1), dev]);
         let snapshot = snapshot_current(&stats, &[1, 2], &[2]);
-        // Present device is snapshotted normally
         assert!(snapshot.0.contains_key("1"));
-        // Missing device comes from missing_devids, not the sentinel row
         let disk2 = snapshot.0.get("2").unwrap();
         assert!(disk2.missing_acked);
+        assert_eq!(disk2.device_stats.read_io_errs, 3);
     }
 
     // --- merge_into_latch tests ---
@@ -1606,8 +1612,8 @@ mod tests {
         // Device stats include both a healthy device and the null-underlying
         // device (btrfs still reports its mapper path)
         let stats = make_stats(vec![
-            zero_device("/dev/mapper/braid-disk1", 1),
-            zero_device("/dev/mapper/braid-disk2", 2),
+            zero_device(1),
+            zero_device(2),
         ]);
         let acked = AckedStats::default();
         // Alert-local missing devids includes the null-underlying device's devid

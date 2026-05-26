@@ -1,0 +1,10 @@
+[/dev/mapper/braid-vdb].write_io_errs    0
+[/dev/mapper/braid-vdb].read_io_errs     0
+[/dev/mapper/braid-vdb].flush_io_errs    0
+[/dev/mapper/braid-vdb].corruption_errs  0
+[/dev/mapper/braid-vdb].generation_errs  0
+[<missing disk>].write_io_errs    0
+[<missing disk>].read_io_errs     0
+[<missing disk>].flush_io_errs    0
+[<missing disk>].corruption_errs  0
+[<missing disk>].generation_errs  0

@@ -143,6 +143,25 @@ golden_test!(
 );
 
 golden_test!(
+    golden_btrfs_device_stats_degraded,
+    "btrfs-device-stats-degraded.json",
+    "btrfs device stats",
+    parse::btrfs_device_stats::parse_btrfs_device_stats,
+    |out: parse::types::BtrfsDeviceStatsOutput| {
+        let mut devids: Vec<u64> = out.devices.iter().map(|d| d.devid).collect();
+        devids.sort_unstable();
+        assert_eq!(devids, vec![1, 2], "expected present and missing devids");
+        for dev in &out.devices {
+            assert_eq!(dev.read_io_errs, 0);
+            assert_eq!(dev.write_io_errs, 0);
+            assert_eq!(dev.flush_io_errs, 0);
+            assert_eq!(dev.corruption_errs, 0);
+            assert_eq!(dev.generation_errs, 0);
+        }
+    }
+);
+
+golden_test!(
     golden_btrfs_scrub_never,
     "btrfs-scrub-never.txt",
     "btrfs scrub status",

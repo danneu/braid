@@ -4873,7 +4873,7 @@ mod tests {
     // and another pool row is the real disk1 member with errors.
     #[test]
     fn build_disk_reports_routes_foreign_mapper_errors_to_doctor() {
-        use crate::parse::types::{DeviceErrorStats, DeviceStatsTarget};
+        use crate::parse::types::DeviceErrorStats;
 
         let member_uuid = LuksUuid::parse("11111111-1111-1111-1111-111111111111").unwrap();
         let foreign_uuid = LuksUuid::parse("99999999-9999-9999-9999-999999999999").unwrap();
@@ -4912,7 +4912,6 @@ mod tests {
             devices: vec![
                 DeviceErrorStats {
                     devid: 1,
-                    target: DeviceStatsTarget::Path("/dev/mapper/braid-disk1".to_owned()),
                     read_io_errs: 5,
                     write_io_errs: 0,
                     flush_io_errs: 0,
@@ -4921,7 +4920,6 @@ mod tests {
                 },
                 DeviceErrorStats {
                     devid: 2,
-                    target: DeviceStatsTarget::Path("/dev/mapper/braid-member".to_owned()),
                     read_io_errs: 7,
                     write_io_errs: 0,
                     flush_io_errs: 0,
@@ -5741,25 +5739,20 @@ mod tests {
 
     /*
      * Intent: build_disk_reports pairs btrfs device-stats rows to DiskReport
-     * by devid, not by mapper-path string. A stats row whose path differs
-     * from the expected /dev/mapper/braid-X but whose devid matches a pool
-     * member must still populate DiskReport.errors.
+     * by devid. A stats row whose devid matches a pool member must populate
+     * DiskReport.errors without requiring a path string.
      *
-     * Why it exists: the previous `target.as_path() == Some(dev_path)`
-     * comparison silently dropped error stats whenever btrfs reported a
-     * row by an alternate path spelling (e.g. /dev/dm-N) -- the same
-     * path-match blind spot that the alert pipeline used to suffer via
-     * UnmappedDeviceError. This test pins the devid-based pairing so a
-     * future revert to path matching cannot land silently.
+     * Why it exists: parser output intentionally carries only the btrfs
+     * devid and counters. This pins the devid-based pairing so path matching
+     * cannot be reintroduced silently.
      *
      * Scenario: pool device with mapper "braid-disk1" / devid 1; stats row
-     * for devid 1 carries path "/dev/dm-0" (not "/dev/mapper/braid-disk1")
-     * and read_io_errs = 5. The disk1 DiskReport must surface those 5
-     * errors despite the path mismatch.
+     * for devid 1 carries read_io_errs = 5. The disk1 DiskReport must
+     * surface those 5 errors.
      */
     #[test]
-    fn disk_report_pairs_stats_by_devid_when_path_differs() {
-        use crate::parse::types::{BtrfsDeviceStatsOutput, DeviceErrorStats, DeviceStatsTarget};
+    fn disk_report_pairs_stats_by_devid() {
+        use crate::parse::types::{BtrfsDeviceStatsOutput, DeviceErrorStats};
         use crate::types::{DiskName, LuksUuid, MapperName, PoolDevice};
 
         let pool = PoolState {
@@ -5785,12 +5778,9 @@ mod tests {
                 mapper_open: true,
             },
         }];
-        // Stats row for devid 1 reports "/dev/dm-0", NOT "/dev/mapper/braid-disk1".
-        // Old path-match code would have dropped this row.
         let stats = BtrfsDeviceStatsOutput {
             devices: vec![DeviceErrorStats {
                 devid: 1,
-                target: DeviceStatsTarget::Path("/dev/dm-0".to_owned()),
                 read_io_errs: 5,
                 write_io_errs: 0,
                 flush_io_errs: 0,
@@ -5807,7 +5797,7 @@ mod tests {
         let errors = ctx.disks[0]
             .errors
             .as_ref()
-            .expect("disk1 errors must be present despite mismatched stats path");
+            .expect("disk1 errors must be present for matching devid");
         assert_eq!(
             errors.read, 5,
             "stats row paired by devid must surface its read_io_errs"

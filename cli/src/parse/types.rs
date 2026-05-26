@@ -305,47 +305,15 @@ pub struct BtrfsScrubStatusPerDeviceOutput {
     pub devices: Vec<DeviceScrubEntry>,
 }
 
-/// Target device in `btrfs device stats` output.
-///
-/// btrfs-progs emits `<missing disk>` as the device path for absent drives
-/// during a degraded mount. This enum converts that sentinel into a typed
-/// variant at parse time so downstream code uses pattern matching instead of
-/// string comparisons.
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
-pub enum DeviceStatsTarget {
-    Path(String),
-    MissingDisk,
-}
-
-impl DeviceStatsTarget {
-    pub fn as_path(&self) -> Option<&str> {
-        match self {
-            Self::Path(p) => Some(p),
-            Self::MissingDisk => None,
-        }
-    }
-}
-
-impl std::fmt::Display for DeviceStatsTarget {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            Self::Path(p) => f.write_str(p),
-            Self::MissingDisk => f.write_str("<missing disk>"),
-        }
-    }
-}
-
 /// btrfs device stats
 ///
 /// `devid` is the btrfs-native key for a stats row -- always present in the
 /// btrfs JSON schema and stable across mapper-path changes. Alert pairing,
 /// snapshot keys, and status/replace/TUI row lookups use `devid` for this
 /// parser output; LUKS UUID remains braid's persistent member identity.
-/// `target` is retained for direct display strings only.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct DeviceErrorStats {
     pub devid: u64,
-    pub target: DeviceStatsTarget,
     pub read_io_errs: u64,
     pub write_io_errs: u64,
     pub corruption_errs: u64,
