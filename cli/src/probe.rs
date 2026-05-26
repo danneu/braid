@@ -4,6 +4,7 @@ use crate::cmd::{CmdError, CmdRequest, CommandRunner};
 use crate::config::mapper_name;
 use crate::luks::{
     BackingPathResolver, MapperOwnership, OwnershipError, classify_mapper_ownership,
+    mapper_conflict_found_display,
 };
 use crate::parse::{
     ParseError, parse_btrfs_filesystem_show, parse_cryptsetup_luks_label,
@@ -80,7 +81,7 @@ pub enum ProbeError {
          backed by the configured disk. Expected LUKS UUID {expected}, \
          found {}. Close the conflicting mapper with \
          'sudo cryptsetup close braid-{name}' and re-run.",
-        found_display(found)
+        mapper_conflict_found_display(found)
     )]
     MapperConflict {
         name: String,
@@ -110,13 +111,6 @@ pub enum ProbeError {
     },
     #[error("mountinfo error: {0}")]
     MountInfo(#[from] crate::mount_check::MountInfoError),
-}
-
-fn found_display(found: &Option<LuksUuid>) -> String {
-    match found {
-        Some(uuid) => uuid.to_string(),
-        None => "no backing (stale mapper)".to_owned(),
-    }
 }
 
 impl From<OwnershipError> for ProbeError {
@@ -642,6 +636,46 @@ mod tests {
     }
 
     // -- probe_config_disk tests --
+
+    // Intent: ProbeError::MapperConflict renders the configured and found
+    //   LUKS UUIDs with the operator remediation text.
+    // Why it exists: probe and LUKS mapper-conflict errors share wording, so
+    //   this locks the probe public Display string against helper drift.
+    // Scenario: a mapper named for disk1 is active but backed by a different
+    //   LUKS container than the configured disk.
+    #[test]
+    fn probe_mapper_conflict_display_found_uuid() {
+        let err = ProbeError::MapperConflict {
+            name: "disk1".to_owned(),
+            expected: LuksUuid::parse("11111111-1111-1111-1111-111111111111").unwrap(),
+            found: Some(LuksUuid::parse("99999999-9999-9999-9999-999999999999").unwrap()),
+        };
+
+        assert_eq!(
+            err.to_string(),
+            "disk 'disk1' mapper '/dev/mapper/braid-disk1' is open but not backed by the configured disk. Expected LUKS UUID 11111111-1111-1111-1111-111111111111, found 99999999-9999-9999-9999-999999999999. Close the conflicting mapper with 'sudo cryptsetup close braid-disk1' and re-run.",
+        );
+    }
+
+    // Intent: ProbeError::MapperConflict renders stale mappers as having no
+    //   backing rather than a missing UUID placeholder.
+    // Why it exists: hot-unplug conflict wording is operator-facing recovery
+    //   text and must stay aligned with the LUKS-layer error.
+    // Scenario: a mapper named for disk1 is active after its backing device
+    //   disappeared, so no found LUKS UUID can be read.
+    #[test]
+    fn probe_mapper_conflict_display_no_backing() {
+        let err = ProbeError::MapperConflict {
+            name: "disk1".to_owned(),
+            expected: LuksUuid::parse("11111111-1111-1111-1111-111111111111").unwrap(),
+            found: None,
+        };
+
+        assert_eq!(
+            err.to_string(),
+            "disk 'disk1' mapper '/dev/mapper/braid-disk1' is open but not backed by the configured disk. Expected LUKS UUID 11111111-1111-1111-1111-111111111111, found no backing (stale mapper). Close the conflicting mapper with 'sudo cryptsetup close braid-disk1' and re-run.",
+        );
+    }
 
     #[test]
     fn probe_config_disk_absent() {

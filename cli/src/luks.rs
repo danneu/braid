@@ -110,7 +110,7 @@ pub enum LuksError {
          backed by the configured disk. Expected LUKS UUID {expected}, \
          found {}. Close the conflicting mapper with \
          'sudo cryptsetup close braid-{name}' and re-run.",
-        luks_found_display(found)
+        mapper_conflict_found_display(found)
     )]
     MapperConflict {
         name: String,
@@ -146,7 +146,9 @@ pub enum LuksError {
     Io(#[from] std::io::Error),
 }
 
-fn luks_found_display(found: &Option<LuksUuid>) -> String {
+/// Centralized mapper-conflict backing rendering so probe and LUKS errors
+/// preserve the same LUKS UUID wording.
+pub(crate) fn mapper_conflict_found_display(found: &Option<LuksUuid>) -> String {
     match found {
         Some(uuid) => uuid.to_string(),
         None => "no backing (stale mapper)".to_owned(),
@@ -750,7 +752,7 @@ pub(crate) enum MapperOwnership {
 
 #[derive(Debug, thiserror::Error)]
 pub(crate) enum OwnershipError {
-    #[error("mapper conflict on '{name}': expected {expected}, found {}", luks_found_display(found))]
+    #[error("mapper conflict on '{name}': expected {expected}, found {}", mapper_conflict_found_display(found))]
     Conflict {
         name: String,
         expected: LuksUuid,
@@ -1153,6 +1155,46 @@ mod tests {
             LuksError::Validation(msg) => msg,
             other => panic!("expected Validation, got {other:?}"),
         }
+    }
+
+    // Intent: LuksError::MapperConflict renders the configured and found
+    //   LUKS UUIDs with the operator remediation text.
+    // Why it exists: probe and LUKS mapper-conflict errors share wording, so
+    //   this locks the LUKS public Display string against helper drift.
+    // Scenario: a mapper named for disk1 is active but backed by a different
+    //   LUKS container than the configured disk.
+    #[test]
+    fn luks_mapper_conflict_display_found_uuid() {
+        let err = LuksError::MapperConflict {
+            name: "disk1".to_owned(),
+            expected: LuksUuid::parse("11111111-1111-1111-1111-111111111111").unwrap(),
+            found: Some(LuksUuid::parse("99999999-9999-9999-9999-999999999999").unwrap()),
+        };
+
+        assert_eq!(
+            err.to_string(),
+            "disk 'disk1' mapper '/dev/mapper/braid-disk1' is open but not backed by the configured disk. Expected LUKS UUID 11111111-1111-1111-1111-111111111111, found 99999999-9999-9999-9999-999999999999. Close the conflicting mapper with 'sudo cryptsetup close braid-disk1' and re-run.",
+        );
+    }
+
+    // Intent: LuksError::MapperConflict renders stale mappers as having no
+    //   backing rather than a missing UUID placeholder.
+    // Why it exists: hot-unplug conflict wording is operator-facing recovery
+    //   text and must stay aligned with the probe-layer error.
+    // Scenario: a mapper named for disk1 is active after its backing device
+    //   disappeared, so no found LUKS UUID can be read.
+    #[test]
+    fn luks_mapper_conflict_display_no_backing() {
+        let err = LuksError::MapperConflict {
+            name: "disk1".to_owned(),
+            expected: LuksUuid::parse("11111111-1111-1111-1111-111111111111").unwrap(),
+            found: None,
+        };
+
+        assert_eq!(
+            err.to_string(),
+            "disk 'disk1' mapper '/dev/mapper/braid-disk1' is open but not backed by the configured disk. Expected LUKS UUID 11111111-1111-1111-1111-111111111111, found no backing (stale mapper). Close the conflicting mapper with 'sudo cryptsetup close braid-disk1' and re-run.",
+        );
     }
 
     // Intent: the helper produces <dir>/<mapper>.luksheader and nothing
