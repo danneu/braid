@@ -2935,6 +2935,31 @@ mod tests {
         assert!(msg.contains("partial output"), "expected stderr in: {msg}");
     }
 
+    // Intent: A signal-killed child with empty stderr still produces a
+    //   CmdError::Failed naming the signal, with no trailing diagnostic suffix.
+    // Why it exists: The empty-stderr arm formats a distinct detail
+    //   ("...({name})" with no ": {stderr}" tail). A swapped empty/non-empty
+    //   arm, a dropped signal name, or a lost command prefix would mislead
+    //   debugging; only an empty-stderr input exercises that arm.
+    // Scenario: OOM-killer sends SIGKILL to a child that wrote nothing to
+    //   stderr before dying -- braid must still report the signal.
+    #[test]
+    fn output_to_raw_signal_killed_empty_stderr_reports_signal() {
+        use std::process::ExitStatus;
+
+        let status = ExitStatus::from_raw(libc::SIGKILL);
+        let output = std::process::Output {
+            status,
+            stdout: Vec::new(),
+            stderr: Vec::new(),
+        };
+        let err = output_to_raw("cryptsetup luksOpen /dev/sda".into(), output).unwrap_err();
+        assert_eq!(
+            err.to_string(),
+            "command failed: cryptsetup luksOpen /dev/sda: killed by signal 9 (SIGKILL)",
+        );
+    }
+
     // Intent: output_to_raw returns Ok(RawCommandOutput) for normal exits.
     // Why: Refactoring exec()/exec_with_stdin() to use output_to_raw must not
     //   change behavior for the normal (non-signal) path.

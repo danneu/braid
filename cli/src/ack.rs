@@ -1987,6 +1987,32 @@ mod tests {
         );
     }
 
+    // Intent: A non-zero `systemctl stop braid-alert.service` exit with empty
+    //   stderr still warns, rendering the process status with no trailing
+    //   diagnostic suffix.
+    // Why it exists: The empty-stderr arm formats a distinct message
+    //   ("...{status}" with no ": {stderr}" tail). A swapped empty/non-empty
+    //   arm, a dropped status, or a lost prefix would ship a malformed or
+    //   useless beeper-stop warning; only an empty-stderr input exercises that
+    //   arm.
+    // Scenario: systemctl exits non-zero but prints nothing to stderr (the
+    //   stop is rejected with only an exit code), so braid must still surface
+    //   the status.
+    #[cfg(unix)]
+    #[test]
+    fn format_systemctl_stop_failure_warns_on_nonzero_exit_without_stderr() {
+        let output = Output {
+            status: ExitStatus::from_raw(5 << 8),
+            stdout: Vec::new(),
+            stderr: Vec::new(),
+        };
+
+        assert_eq!(
+            format_systemctl_stop_failure(&output),
+            Some("warning: systemctl stop braid-alert.service: exit status: 5".to_string()),
+        );
+    }
+
     /*
      * Intent: Successful `systemctl stop braid-alert.service` exits do not
      * produce a warning.
