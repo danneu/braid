@@ -4,9 +4,9 @@
 # - What behavior this test (tries to) verify.
 #   - `braid replace --old <dead> --new <new>` succeeds when the old disk has
 #     been physically removed (LUKS mapper closed, device missing from pool).
-#     Both auto-detect (single missing → ReplaceSource::Missing auto-resolved)
-#     and explicit `--missing-id <devid>` paths use `btrfs replace start` to
-#     rebuild from RAID redundancy.
+#     Both auto-detect (devid resolved from `--old`'s pool.json entry) and
+#     explicit `--missing-id <devid>` paths use `btrfs replace start` to rebuild
+#     from RAID redundancy.
 #
 # Why it exists:
 # - What risk/regression this protects against.
@@ -18,7 +18,8 @@
 # - Real-world situation this models.
 #   - A drive fails in a 3-drive NAS. The operator plugs in a new drive and
 #     runs `braid replace` to swap it in. Later a second drive dies and is
-#     replaced using `--missing-id` to disambiguate.
+#     replaced with an explicit `--missing-id` to exercise the devid cross-check
+#     path.
 
 import json
 

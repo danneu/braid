@@ -17,7 +17,7 @@ Replace a live disk:
 sudo braid replace --old toshiba1 --new toshiba4=/dev/disk/by-id/ata-TOSHIBA_MN07ACA12T_NEW1
 ```
 
-Replace a dead/missing disk (auto-detects devid when only one device is missing):
+Replace a dead/missing disk (the missing devid is resolved automatically from --old's pool.json entry):
 
 ```
 sudo braid replace --old toshiba1 --new toshiba4=/dev/disk/by-id/ata-TOSHIBA_MN07ACA12T_NEW1
@@ -33,7 +33,7 @@ auto-resolve path refuse the devid with a specific hot-unplug diagnostic until
 that promotion happens. See
 [Hot-unplug while pool is mounted](../guides/recovery-scenarios.md#hot-unplug-while-pool-is-mounted).
 
-Replace a dead disk when multiple devices are missing (must specify which):
+Optionally assert which missing devid you expect (braid refuses if it disagrees with pool.json):
 
 ```
 sudo braid replace \
@@ -72,7 +72,7 @@ sudo braid replace --old toshiba1 --new toshiba4=/dev/disk/by-id/ata-TOSHIBA_MN0
 |---|---|
 | `--old <name>` | Name of the disk to replace |
 | `--new <name>=<path>` | Name and by-id path of the replacement disk |
-| `--missing-id <devid>` | Target a specific missing device by btrfs devid (required when multiple devices are missing) |
+| `--missing-id <devid>` | Optional cross-check for a dead-disk replace: assert the missing btrfs devid. braid refuses if it disagrees with the devid pool.json records for --old. Never required. |
 | `--enroll <dir>` | Enroll `braid.key` from this directory into LUKS slot 1 on the new disk |
 | `--dry-run` | Show what would happen without executing |
 | `--yes` | Skip interactive confirmation |
@@ -109,7 +109,8 @@ A sleep inhibitor is held throughout the replace to prevent the system from susp
 - Refuses if the new disk's mapper capacity is smaller than the source disk's btrfs `total_bytes` (read via `BTRFS_IOC_DEV_INFO`, the same value `btrfs replace start` compares against). For existing LUKS targets, mapper capacity is derived from the LUKS2 segment `offset` and `size` (`dynamic` means `raw - offset`, fixed means the segment size). For fresh-LUKS targets, braid uses cryptsetup's default 16 MiB offset; offset-affecting `--luks-format-arg` flags (`--offset`/`-o`, `--align-payload`, `--luks2-metadata-size`, `--luks2-keyslots-size`, `--sector-size`) are rejected for this reason.
 - For live replacements: refuses if the pool has missing devices (resolve those first)
 - For missing replacements: refuses if `--missing-id` points to a live device
-- When multiple devices are missing: requires `--missing-id` to disambiguate
+- For missing replacements: refuses if `--missing-id` disagrees with the devid pool.json records for `--old` (`--old` already identifies which member to rebuild)
+- For missing replacements: refuses if pool.json has no recorded devid for `--old` -- `--missing-id` cannot substitute, it must match the recorded devid
 - Verifies the passphrase against an existing pool member before formatting
 - Warns if the source device has I/O errors (informational, does not block)
 - Warns if existing pool drives have a keyfile but `--enroll` was not passed
