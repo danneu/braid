@@ -357,7 +357,7 @@ struct DoctorArgs {
     #[arg(long)]
     json: bool,
     /// Play the audible alert test beep when checking the alert path.
-    #[arg(long)]
+    #[arg(long, conflicts_with = "json")]
     beep: bool,
 }
 
@@ -1597,6 +1597,52 @@ mod tests {
         .expect_err("luks format args must use --luks-format-arg=ARG");
 
         assert!(err.to_string().contains("equal sign is needed"));
+    }
+
+    // Intent: `doctor --json` parses as machine-readable output without the
+    // audible alert test flag.
+    // Why it exists: JSON doctor output is consumed by scripts and must remain
+    // side-effect-free by default.
+    // Scenario: an operator pipes `sudo braid doctor --json` into jq during
+    // remote diagnostics.
+    #[test]
+    fn doctor_json_parses_without_beep() {
+        let cli = Cli::try_parse_from(["braid", "doctor", "--json"])
+            .expect("doctor --json should parse");
+        let Commands::Doctor(args) = cli.command else {
+            panic!("expected doctor command");
+        };
+        assert!(args.json);
+        assert!(!args.beep);
+    }
+
+    // Intent: `doctor --beep` parses as an explicit audible alert test without
+    // JSON output.
+    // Why it exists: the PC speaker probe is intentionally opt-in and must
+    // still reach the doctor implementation when requested alone.
+    // Scenario: an operator SSHes into the NAS and runs `sudo braid doctor
+    // --beep` to test the real alert sound.
+    #[test]
+    fn doctor_beep_parses_without_json() {
+        let cli = Cli::try_parse_from(["braid", "doctor", "--beep"])
+            .expect("doctor --beep should parse");
+        let Commands::Doctor(args) = cli.command else {
+            panic!("expected doctor command");
+        };
+        assert!(args.beep);
+        assert!(!args.json);
+    }
+
+    // Intent: clap rejects `doctor --json --beep` before command execution.
+    // Why it exists: machine-readable JSON output cannot be combined with an
+    // audible side-effect request.
+    // Scenario: a script cargo-cults a human diagnostic flag into a JSON doctor
+    // invocation and gets a usage error instead of a silently ignored beep.
+    #[test]
+    fn doctor_json_and_beep_conflict() {
+        let err = Cli::try_parse_from(["braid", "doctor", "--json", "--beep"])
+            .expect_err("doctor --json --beep should be an argument conflict");
+        assert_eq!(err.kind(), ErrorKind::ArgumentConflict);
     }
 
     // Intent: clap rejects conflicting passphrase inputs on every command

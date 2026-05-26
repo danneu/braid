@@ -53,7 +53,7 @@ sudo braid doctor --json
 
 Prints a JSON object with `status` (one of `ok`, `warn`, `fail`, `skip`) and a `checks` array. Each check has `name`, `status`, and `message`. Per-drive checks also include `subject`.
 
-Note: `--json` mode skips the alert beep test even when combined with `--beep` (no audible side effects in machine-readable output). The check still appears in the report as `skip`.
+`--json` mode never plays the alert beep test. The check still appears in the report as `skip`. `--json` and `--beep` conflict; run a separate `sudo braid doctor --beep` when you want to test the audible alert path.
 
 ## What it checks
 
@@ -80,8 +80,8 @@ Note: `--json` mode skips the alert beep test even when combined with `--beep` (
 
 | Flag | Effect |
 | --- | --- |
-| `--json` | Machine-readable JSON output (suppresses alert beep test) |
-| `--beep` | Play the audible alert test beep (ignored in `--json` mode) |
+| `--json` | Machine-readable JSON output; never plays the alert beep test |
+| `--beep` | Play the audible alert test beep; conflicts with `--json` |
 
 ## Exit codes
 
@@ -95,7 +95,7 @@ Note: `--json` mode skips the alert beep test even when combined with `--beep` (
 3. If the pool is mounted, queries `btrfs filesystem df` and `btrfs device usage --raw` to check RAID profile consistency and metadata allocation headroom, probes for missing devices, reconciles each live pool member's LUKS UUID against `pool.json` to flag foreign devices, and runs `btrfs balance status` to detect paused balances.
 4. For each declared disk, runs `smartctl --json -A -l selftest <by-id>` and parses the self-test log to detect active failures and report the age of the most recent passing entry.
 5. If the braid monitor NixOS module is configured, reports the alert beep check as skipped by default.
-6. With `--beep` and without `--json`, plays a short test beep through the canonical beep wrapper.
+6. With `--beep`, plays a short test beep through the canonical beep wrapper.
 7. If UPS support is enabled, checks `upsc` and the mounted-pool `braid-online.service` shutdown hook.
 8. Aggregates results and prints a summary.
 

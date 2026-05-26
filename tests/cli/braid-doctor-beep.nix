@@ -2,15 +2,15 @@
 #
 # Intent: Validates that the doctor `beep_path` check skips by default, plays
 # the alert test beep only when `--beep` is passed, reports wrapper failures
-# for explicit `--beep`, and skips silently in `--json` mode even when
-# `--beep` is also passed.
+# for explicit `--beep`, and rejects the conflicting `--json --beep`
+# combination before invoking the beep wrapper.
 #
 # Why: Without an active alert, a broken PC speaker is invisible -- the alert
 # service's `|| true` swallows beep failures and the user only discovers the
 # problem when a real disk alert produces no sound. doctor exists to surface
 # this kind of latent breakage, but the audible test must be opt-in. `--json`
-# mode must never produce audible side effects so scripts piping doctor output
-# stay silent.
+# mode must never produce audible side effects, so scripts piping doctor
+# output stay silent and clap rejects an audible side-effect request.
 #
 # Scenario: NixOS machine with braid.monitor.beep = true and pkgs.beep
 # replaced by a flag-file-gated mock. The test toggles /tmp/beep-broken and

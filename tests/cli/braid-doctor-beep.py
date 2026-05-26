@@ -2,14 +2,14 @@
 #
 # Intent: Verify the doctor `beep_path` check across its live branches:
 #   plain doctor skips without playing sound, explicit `--beep` reports Ok
-#   or Fail from the wrapper, and JSON mode skips even when combined with
-#   `--beep`.
+#   or Fail from the wrapper, and the conflicting `--json --beep` combination
+#   is rejected before the wrapper can run.
 #
 # Why it exists: Doctor is the proactive diagnostic surface for "is braid
 #   wired up correctly?" The alert test sound must be explicit so routine
 #   doctor runs stay quiet, while `--beep` still catches a broken speaker
 #   before a real disk alert silently fails. JSON output must never produce
-#   audible side effects.
+#   audible side effects, so clap rejects combining `--json` with `--beep`.
 #
 # Scenario: NixOS machine with braid.monitor.beep = true and pkgs.beep
 #   replaced by a flag-file-gated mock. /etc/braid/notifier-config.json is
@@ -50,21 +50,13 @@ with subtest("Explicit --beep fails when mock beep is broken"):
     assert rc == 1, f"expected exit 1 for broken beep with --beep, got {rc}"
     machine.succeed("test -e /tmp/beep-invoked")
 
-with subtest("JSON plus --beep skips without invoking wrapper"):
-    # Use broken beep to prove that the wrapper is not invoked even when it
-    # would fail -- the Skip must happen before any subprocess is spawned.
+with subtest("JSON plus --beep is rejected without invoking wrapper"):
+    # Use broken beep to prove that clap rejects the invocation before any
+    # doctor subprocess can run the wrapper.
     machine.succeed("rm -f /tmp/beep-invoked; touch /tmp/beep-broken")
-    out = machine.succeed("braid doctor --json --beep")
-    report = json.loads(out)
-    beep = next(c for c in report["checks"] if c["name"] == "beep_path")
-    assert beep["status"] == "skip", f"expected skip in json mode, got {beep}"
-    assert (
-        beep["message"]
-        == "skipped in --json mode -- rerun with --beep without --json to play the alert test beep"
-    ), (
-        "Skip message must explain suppression in --json mode: "
-        f"{beep['message']}"
-    )
+    rc, out = machine.execute("braid doctor --json --beep 2>&1")
+    assert rc == 2, f"expected clap usage error exit 2, got {rc}: {out}"
+    assert "cannot be used with" in out, f"expected conflict message, got: {out}"
     machine.fail("test -e /tmp/beep-invoked")
     # Clean up so the next VM test (if any) starts from the healthy state.
     machine.succeed("rm -f /tmp/beep-broken /tmp/beep-invoked")

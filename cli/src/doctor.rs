@@ -1180,9 +1180,9 @@ fn check_smart_selftests<R: CommandRunner>(ctx: &mut DoctorContext<'_, R>) -> Ve
 /// A successful `--beep` run is both a notifier-health check and a positive
 /// guarantee that future disk alerts will produce the same audible beep.
 ///
-/// `--json` mode suppresses the beep: machine-readable output must never
-/// produce audible side effects. The check still appears in the JSON report
-/// (as `Skip`) so scripts auditing doctor output can see it.
+/// `--json` mode suppresses the beep as defense-in-depth: machine-readable
+/// output must never produce audible side effects. The check still appears in
+/// the JSON report (as `Skip`) so scripts auditing doctor output can see it.
 ///
 /// This is the public entry point. It hits the real notifier config path;
 /// unit tests target `check_beep_path_inner` directly so they can inject the
@@ -4963,14 +4963,15 @@ mod tests {
 
     // Intent: when invoked in --json mode, the check skips with a clear
     //   "json mode" message AND does not invoke the runner at all, even
-    //   when --beep is set and a real-looking probe path is configured.
-    // Why: `braid doctor --json` is for programmatic consumption — emitting
+    //   if an internal caller also sets the beep option.
+    // Why: `braid doctor --json` is for programmatic consumption -- emitting
     //   an audible side effect from a data-output command would surprise
-    //   any script piping doctor's JSON into a monitoring system. The
-    //   runner-not-invoked invariant is enforced implicitly: MockRunner
-    //   returns MissingMock for any unmatched call, so a regression that
-    //   spawned the wrapper before checking the json gate would surface
-    //   as a Fail rather than a Skip.
+    //   any script piping doctor's JSON into a monitoring system. The public
+    //   CLI rejects `--json --beep`; this lower-level guard is
+    //   defense-in-depth. The runner-not-invoked invariant is enforced
+    //   implicitly: MockRunner returns MissingMock for any unmatched call, so
+    //   a regression that spawned the wrapper before checking the json gate
+    //   would surface as a Fail rather than a Skip.
     // Scenario: an oncall engineer pipes `braid doctor --json | jq` from
     //   a remote shell to inspect health, expecting silence.
     #[test]
@@ -4987,7 +4988,7 @@ mod tests {
             f.path(),
             DoctorOptions {
                 json: true,
-                beep: true, // --json still suppresses it
+                beep: true, // Internal defense-in-depth despite CLI conflict.
             },
         );
         assert_eq!(result.status, CheckStatus::Skip);

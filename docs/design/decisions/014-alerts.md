@@ -105,9 +105,9 @@ systemd timer + oneshot service. No mount condition on the timer — `braid moni
 Plain `braid doctor` reports the alert-beep check as skipped after confirming
 beep monitoring is configured. `braid doctor --beep` runs the canonical
 `braid-beep-probe` wrapper so operators can test the real alert sound on
-purpose. `braid doctor --json` always skips the audible probe, even when
-combined with `--beep`, so machine-readable output has no audible side
-effects.
+purpose. `braid doctor --json` always skips the audible probe, and `--json`
+conflicts with `--beep` at parse time, so machine-readable output has no
+audible side effects.
 
 ### Latch as append/refresh log
 
