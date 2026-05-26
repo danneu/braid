@@ -642,15 +642,15 @@ mod tests {
 
     impl MockFs {
         fn with_sysfs(fsid: &str, content: &str) -> Self {
-            let mut files = std::collections::HashMap::new();
-            files.insert(
+            Self::empty().with_sysfs_entry(fsid, content)
+        }
+
+        fn with_sysfs_entry(mut self, fsid: &str, content: &str) -> Self {
+            self.files.insert(
                 format!("/sys/fs/btrfs/{fsid}/exclusive_operation"),
                 content.to_owned(),
             );
-            Self {
-                files,
-                mountinfo: None,
-            }
+            self
         }
 
         fn empty() -> Self {
@@ -1629,6 +1629,35 @@ mod tests {
         assert!(
             err.contains("unrecognized exclusive operation"),
             "expected unrecognized-value error, got: {err}"
+        );
+    }
+
+    #[test]
+    // Intent: require_lock_preflight reads the exclusive_operation file for the
+    //   exact fsid it is given, not a fixed or sibling fsid's file.
+    // Why it exists: the path is /sys/fs/btrfs/{fsid}/exclusive_operation; a
+    //   regression that stopped tracking the fsid argument (hardcoded, cached,
+    //   or captured-outer fsid) would read the wrong filesystem's busy state.
+    //   Lock teardown is fail-closed precisely to avoid unmounting mid
+    //   balance/replace, so the per-fsid derivation is a real safety gate. The
+    //   lock fixtures (test_fixtures/shared.rs) match any path ending in
+    //   /exclusive_operation and cannot prove this -- assert it here in the
+    //   fsid-keyed unit lane.
+    // Scenario: two btrfs filesystems present -- one mid-balance, one idle.
+    //   Locking the idle pool must pass; locking the balancing pool must refuse.
+    fn lock_preflight_keys_off_given_fsid() {
+        const OTHER_FSID: &str = "11111111-2222-3333-4444-555555555555";
+        let fs = MockFs::with_sysfs(FSID, "balance\n").with_sysfs_entry(OTHER_FSID, "none\n");
+
+        assert!(
+            require_lock_preflight(&fs, OTHER_FSID).is_ok(),
+            "expected idle fsid to pass preflight"
+        );
+
+        let err = require_lock_preflight(&fs, FSID).unwrap_err();
+        assert!(
+            err.contains("in progress"),
+            "expected busy refusal for the balancing fsid, got: {err}"
         );
     }
 
