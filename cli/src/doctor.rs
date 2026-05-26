@@ -989,6 +989,27 @@ fn check_metadata_enospc_pressure<R: CommandRunner>(
         .count();
 
     if metadata_ratio > METADATA_PRESSURE_RATIO && with_headroom < 2 {
+        // About to recommend a data balance. On a degraded pool, that widens
+        // the recovery surface by allowing single-profile chunks; defer to the
+        // replace-first path already surfaced by check_pool_missing_devices.
+        ensure_pool_state(ctx);
+        match ctx
+            .pool_state
+            .as_ref()
+            .expect("ensure_pool_state seeds the cache when config is present and mounted")
+        {
+            Err(e) => {
+                return CheckResult::warn(
+                    NAME,
+                    format!("could not probe pool state -- metadata pressure indeterminate: {e}"),
+                );
+            }
+            Ok(pool) if pool.missing_count > 0 => {
+                return CheckResult::skip(NAME, "skipped (pool is degraded)");
+            }
+            Ok(_) => {}
+        }
+
         let pct = (metadata_ratio * 100.0).round() as u64;
         let headroom = format_bytes(METADATA_CHUNK_HEADROOM);
         return CheckResult::warn(
@@ -4292,6 +4313,42 @@ mod tests {
         check_metadata_enospc_pressure(&mut ctx)
     }
 
+    fn metadata_pressure_result_with_pool(
+        df: &str,
+        usage: &str,
+        present: Vec<(&'static str, u64, &'static str, LuksUuid)>,
+        missing_devids: &[u64],
+    ) -> CheckResult {
+        let (df_req, df_out) = df_json(df);
+        let (usage_req, usage_out) = device_usage_raw(usage);
+        let runner = pool_state_runner(present, missing_devids)
+            .with_output(df_req, df_out)
+            .with_output(usage_req, usage_out);
+        let (_dir, paths) = isolated_paths();
+        let fs = DoctorMockFs::mounted_btrfs_only();
+        let mut ctx =
+            DoctorContext::for_test_parsed_with_fs(&runner, &fs, &paths, valid_config_json());
+        check_metadata_enospc_pressure(&mut ctx)
+    }
+
+    fn metadata_pressure_with_cached_pool_state(
+        df: &str,
+        usage: &str,
+        pool_state: Result<PoolState, ProbeError>,
+    ) -> CheckResult {
+        let (mp_req, mp_out) = mountpoint_ok();
+        let (df_req, df_out) = df_json(df);
+        let (usage_req, usage_out) = device_usage_raw(usage);
+        let runner = MockRunner::default()
+            .with_output(mp_req, mp_out)
+            .with_output(df_req, df_out)
+            .with_output(usage_req, usage_out);
+        let (_dir, paths) = isolated_paths();
+        let mut ctx = parsed_doctor_ctx(&runner, &paths);
+        ctx.pool_state = Some(pool_state);
+        check_metadata_enospc_pressure(&mut ctx)
+    }
+
     // Intent: metadata_enospc_pressure reports Ok for a healthy RAID1 pool.
     // Why it exists: the advisory must not add noise to ordinary doctor output.
     // Scenario: a pool has low metadata utilization and both devices have room
@@ -4352,7 +4409,15 @@ mod tests {
     //   unallocated space for the next metadata chunk.
     #[test]
     fn metadata_pressure_two_device_pool_warns_when_both_signals_present() {
-        let check = metadata_pressure_result(DF_METADATA_78_USED, DEVICE_USAGE_TWO_TIGHT);
+        let check = metadata_pressure_result_with_pool(
+            DF_METADATA_78_USED,
+            DEVICE_USAGE_TWO_TIGHT,
+            vec![
+                ("braid-disk1", 1, "/dev/vdb", test_uuid(1)),
+                ("braid-disk2", 2, "/dev/vdc", test_uuid(2)),
+            ],
+            &[],
+        );
 
         assert_eq!(check.status, CheckStatus::Warn);
         assert!(check.message.contains("78%"), "{}", check.message);
@@ -4404,12 +4469,106 @@ mod tests {
     //   device can participate in the next RAID1 metadata chunk.
     #[test]
     fn metadata_pressure_three_device_pool_two_tight_warns() {
-        let check = metadata_pressure_result(DF_METADATA_78_USED, DEVICE_USAGE_THREE_TWO_TIGHT);
+        let check = metadata_pressure_result_with_pool(
+            DF_METADATA_78_USED,
+            DEVICE_USAGE_THREE_TWO_TIGHT,
+            vec![
+                ("braid-disk1", 1, "/dev/vdb", test_uuid(1)),
+                ("braid-disk2", 2, "/dev/vdc", test_uuid(2)),
+                ("braid-disk3", 3, "/dev/vdd", test_uuid(3)),
+            ],
+            &[],
+        );
 
         assert_eq!(check.status, CheckStatus::Warn);
         assert!(
             check.message.contains("only 1 of 3"),
             "expected headroom count in warning: {}",
+            check.message
+        );
+    }
+
+    // Intent: metadata_enospc_pressure skips a degraded pool instead of
+    //   recommending a data balance.
+    // Why it exists: a balance on a degraded RAID1 pool allocates single-profile
+    //   chunks and widens the recovery surface; braid's invariant is replace-first,
+    //   then balance (docs/design/principles.md, 001-btrfs-raid1.md). Pins parity
+    //   with check_enospc_risk's degraded skip.
+    // Scenario: btrfs reports one MISSING devid while metadata is 78% used and
+    //   both members are tight on unallocated space -- the exact state that would
+    //   otherwise emit the `btrfs balance start -dusage=50` recommendation.
+    #[test]
+    fn metadata_pressure_degraded_pool_skips() {
+        let check = metadata_pressure_result_with_pool(
+            DF_METADATA_78_USED,
+            DEVICE_USAGE_TWO_TIGHT,
+            vec![("braid-disk1", 1, "/dev/vdb", test_uuid(1))],
+            &[2],
+        );
+
+        assert_eq!(check.status, CheckStatus::Skip);
+        assert_eq!(check.message, "skipped (pool is degraded)");
+    }
+
+    // Intent: metadata_enospc_pressure fails closed when pool state is
+    //   indeterminate -- it must not emit the balance recommendation.
+    // Why it exists: the degraded gate's whole point is to never recommend a
+    //   degraded balance; if probing the pool fails we cannot confirm the pool is
+    //   healthy, so the unsafe `btrfs balance start -dusage=50` text must be
+    //   suppressed. The healthy/degraded tests would not catch a fall-through here.
+    // Scenario: metadata is 78% used with both members tight (the warn condition),
+    //   but the pool probe errored.
+    #[test]
+    fn metadata_pressure_indeterminate_pool_state_warns_without_balance() {
+        let check = metadata_pressure_with_cached_pool_state(
+            DF_METADATA_78_USED,
+            DEVICE_USAGE_TWO_TIGHT,
+            Err(ProbeError::PoolDevice {
+                mapper: "braid-disk1".to_owned(),
+                detail: "simulated probe failure".to_owned(),
+            }),
+        );
+
+        assert_eq!(check.status, CheckStatus::Warn);
+        assert!(
+            check.message.contains("metadata pressure indeterminate"),
+            "expected fail-closed probe warning: {}",
+            check.message
+        );
+        assert!(
+            !check.message.contains("btrfs balance start"),
+            "must not recommend a balance when pool state is unknown: {}",
+            check.message
+        );
+    }
+
+    // Intent: metadata_enospc_pressure returns Ok on a degraded pool when there
+    //   is no metadata pressure -- it does not early-skip like check_enospc_risk.
+    // Why it exists: the gate is placed inside the warn condition by design
+    //   (degraded-ness only matters when about to recommend a balance). An
+    //   accidental move to an early degraded skip would flip this to Skip.
+    // Scenario: one devid is MISSING, but metadata is only 20% used and both
+    //   members have ample unallocated space -- nothing to warn about.
+    #[test]
+    fn metadata_pressure_degraded_but_no_pressure_returns_ok() {
+        let check = metadata_pressure_with_cached_pool_state(
+            DF_METADATA_20_USED,
+            DEVICE_USAGE_TWO_HEALTHY,
+            Ok(PoolState {
+                mounted: true,
+                devices: vec![],
+                missing_count: 1,
+                total_devices: 2,
+                fsid: None,
+                missing_devids: vec![2],
+                null_underlying: vec![],
+            }),
+        );
+
+        assert_eq!(check.status, CheckStatus::Ok);
+        assert!(
+            check.message.contains("within bounds"),
+            "degraded pool without pressure must report Ok: {}",
             check.message
         );
     }
