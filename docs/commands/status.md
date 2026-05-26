@@ -305,7 +305,11 @@ The human-facing redundancy annotations from the text output, such as
 the btrfs profile names braid observed; consumers apply their own policy.
 - `balance`: state object (`idle`, `running`, `paused`, `unknown`)
 - `last_scrub`: state object (`never`, `running`, `finished`, `aborted`,
-  `interrupted`, `unknown`)
+  `interrupted`, `unknown`). For `finished`, `aborted`, and `interrupted`,
+  `started_at` is an offset-free host-local ISO-8601 wall-clock timestamp
+  (`YYYY-MM-DDTHH:MM:SS`) as reported by btrfs. It records `Scrub started`, or
+  `Scrub resumed` after a resumed scrub, and is not directly comparable to UTC
+  fields such as pending-operation `started_at` values ending in `Z`.
 
 ## Related commands
 
