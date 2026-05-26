@@ -81,10 +81,6 @@ pub fn credential_wait_line(kind: CredentialKind, color_enabled: bool, name: &st
     )
 }
 
-pub fn emit_credential_wait_line(kind: CredentialKind, color_enabled: bool, name: &str) {
-    emit_status(&credential_wait_line(kind, color_enabled, name));
-}
-
 pub fn credential_ok_line(kind: CredentialKind, color_enabled: bool, name: &str) -> String {
     status_line(
         StatusTag::Ok,

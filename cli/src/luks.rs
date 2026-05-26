@@ -944,19 +944,6 @@ pub fn ensure_luks_open<R: CommandRunner>(
     Ok(OpenOutcome::Opened)
 }
 
-/// Check if a mapper device has a btrfs superblock.
-pub fn device_has_btrfs_superblock<R: CommandRunner>(
-    runner: &R,
-    mapper_path: &str,
-) -> Result<bool, LuksError> {
-    // Use BtrfsDeviceScan on the specific device — if it succeeds, btrfs recognizes the device.
-    // A non-btrfs device or empty device will fail.
-    let result = runner.run(&CmdRequest::BtrfsDeviceScan {
-        device: mapper_path.to_owned(),
-    })?;
-    Ok(result.exit_status == 0)
-}
-
 /// Open a LUKS device with a binary keyfile (no passphrase, no PBKDF).
 pub fn ensure_luks_open_with_key_file<R: CommandRunner>(
     runner: &R,

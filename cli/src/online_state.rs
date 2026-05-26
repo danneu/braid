@@ -444,10 +444,6 @@ impl RecordingOnlineStateOps {
         self.coord_snapshots.borrow().clone()
     }
 
-    pub fn set_state(&self, state: UnitActiveState) {
-        *self.state.borrow_mut() = Ok(state);
-    }
-
     pub fn set_mounted(&self, mounted: bool) {
         *self.mounted.borrow_mut() = Ok(mounted);
     }
