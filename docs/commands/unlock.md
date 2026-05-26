@@ -62,8 +62,8 @@ sudo braid unlock --dry-run
 
 1. Checks that no other braid operation is pending
 2. Probes each UUID-keyed member in pool.json: checks whether the by-id device is present, whether its LUKS UUID matches, and whether its LUKS mapper is already open
-3. Verifies the passphrase against the first unlockable disk
-4. Opens LUKS mappers for all locked disks using the verified passphrase
+3. Verifies the selected credential against every disk it will unlock
+4. Opens LUKS mappers for all locked disks using the verified credential
 5. Runs `btrfs device scan` to let the kernel discover all pool members
 6. Mounts the btrfs filesystem with `noatime`, `skip_balance`, and `subvolid=5`
 7. If any disks are unavailable and `--allow-degraded` is set: mounts with the `degraded` option
@@ -91,7 +91,7 @@ The exit code is **2** when a degraded mount is refused (vs. **1** for other err
 - Refuses if a pending operation journal (`pending-op.json`) exists -- run `braid recover` to reconcile.
 - Refuses if another braid operation is in progress (pool lock `/run/braid-pool.lock` is held) -- retry once it finishes.
 - Refuses to mount degraded without explicit `--allow-degraded`
-- If a disk rejects the passphrase after another disk accepted it, the error names both disks (indicates someone changed a disk's passphrase outside braid)
+- If any disk rejects the selected credential during verification, unlock fails before opening any mapper and names the failing disk. If another disk already accepted the same credential, that points to disk-specific credential drift outside braid.
 - Does not prompt for a passphrase if all mappers are already open (idempotent re-run)
 
 ## Related commands

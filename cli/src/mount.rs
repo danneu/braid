@@ -1646,8 +1646,9 @@ mod tests {
         );
     }
 
-    /// Intent: When a passphrase is verified against disk1 but rejected by
-    /// disk2, the error must name both disks.
+    /// Intent: When a passphrase verifies on disk1 but is rejected on disk2
+    /// during preflight, the error must name only the failing disk (disk2),
+    /// not the disk that already verified.
     ///
     /// Why: The single-passphrase invariant (Principle 4) may be violated by
     /// external LUKS manipulation. The error must help the user identify which
