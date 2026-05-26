@@ -82,6 +82,10 @@ machine.fail("systemctl is-active --quiet braid-online.service")
 # exit (doctor exits non-zero when any check fails).
 exit_code, raw = machine.execute("braid doctor --json")
 report = json.loads(raw)
+assert exit_code != 0, (
+    f"doctor must exit non-zero when a check fails: {exit_code}\n{raw}"
+)
+assert report["status"] == "fail", f"expected overall fail:\n{raw}"
 bo = find_check(report, "braid_online_active")
 assert bo["status"] == "fail", f"expected Fail on braid_online_active, got: {bo}"
 assert "UPS shutdown" in bo["message"], bo["message"]

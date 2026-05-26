@@ -1520,6 +1520,17 @@ pub enum DoctorError {
     Serialize(#[source] serde_json::Error),
 }
 
+impl DoctorReport {
+    /// Single source of truth for `braid doctor`'s exit-code contract: a `Fail`
+    /// report fails the command, while `Warn`/`Ok`/`Skip` reports succeed.
+    pub(crate) fn command_result(&self) -> Result<(), DoctorError> {
+        match self.status {
+            CheckStatus::Fail => Err(DoctorError::Failed),
+            _ => Ok(()),
+        }
+    }
+}
+
 pub fn cmd_doctor(
     config_path: &Path,
     paths: &StatePaths,
@@ -1542,10 +1553,7 @@ pub fn cmd_doctor(
         );
     }
 
-    match report.status {
-        CheckStatus::Fail => Err(DoctorError::Failed),
-        _ => Ok(()),
-    }
+    report.command_result()
 }
 
 // ---------------------------------------------------------------------------
@@ -2581,6 +2589,47 @@ mod tests {
             },
         ];
         assert_eq!(overall_status(&checks), CheckStatus::Fail);
+    }
+
+    // Intent: `braid doctor` fails the command only for Fail reports.
+    // Why it exists: the process exit contract belongs to report status, not
+    //   any individual doctor check or VM scenario.
+    // Scenario: a future change accidentally makes Warn fail, or lets Fail
+    //   succeed, when translating a report into a command result.
+    #[test]
+    fn doctor_report_command_result_fails_only_on_fail() {
+        for (status, should_fail) in [
+            (CheckStatus::Ok, false),
+            (CheckStatus::Warn, false),
+            (CheckStatus::Fail, true),
+            (CheckStatus::Skip, false),
+        ] {
+            let report = DoctorReport {
+                status,
+                checks: vec![],
+            };
+            assert_eq!(
+                report.command_result().is_err(),
+                should_fail,
+                "{status:?}"
+            );
+        }
+    }
+
+    // Intent: any Fail-producing check escalates to command failure.
+    // Why it exists: per-check failure scenarios should rely on the shared
+    //   worst-status and status-to-exit contract instead of duplicating exit
+    //   assertions through every checker.
+    // Scenario: one passing check and one failing check produce an overall Fail
+    //   report, and `braid doctor` exits non-zero from that report.
+    #[test]
+    fn any_fail_check_escalates_to_command_failure() {
+        let checks = vec![CheckResult::ok("a", ""), CheckResult::fail("b", "boom")];
+        let status = overall_status(&checks);
+        let report = DoctorReport { status, checks };
+
+        assert_eq!(report.status, CheckStatus::Fail);
+        assert!(report.command_result().is_err());
     }
 
     #[test]
