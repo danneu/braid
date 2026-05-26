@@ -53,7 +53,7 @@ pub enum RemoveMissingError {
 fn resolve_removal_target(
     devid: u64,
     membership: &membership::PoolMembership,
-) -> Result<(crate::types::LuksUuid, crate::types::DiskName), RemoveMissingError> {
+) -> Result<(LuksUuid, DiskName), RemoveMissingError> {
     match membership.by_devid(devid)? {
         Some((uuid, member)) => Ok((uuid.clone(), member.name.clone())),
         None => Err(RemoveMissingError::NoMemberForDevid { devid }),
@@ -78,21 +78,20 @@ pub struct RemoveMissingParams<'a> {
 }
 
 /// Dry-run preview source of truth for `braid remove-missing` plus the
-/// execute inputs pre-computed during planning. `preview()` renders
-/// accumulated notes plus steps from the semantic work plan; `execute()`
-/// consumes the preflight state (`missing_id`, `missing_count`,
-/// `remaining_present`) and renders any accumulated notes to stderr via
-/// the shared `preview::render_notes_for_stderr` helper (canonical
-/// `[warn] <body>` wording) before mutating.
+/// execute inputs pre-computed during planning. The membership snapshots
+/// are resolved under the command pool lock so `execute()` can journal the
+/// before/after state and persist the target state without reloading
+/// `pool.json`.
 pub struct RemoveMissingPlan {
     pub notes: Vec<PreviewNote>,
     work_plan: RemoveMissingWorkPlan,
+    pre_membership: membership::PoolMembership,
+    target_membership: membership::PoolMembership,
 }
 
 #[derive(Debug, Clone)]
 struct RemoveMissingWorkPlan {
     missing_id: u64,
-    target_uuid: LuksUuid,
     target_name: DiskName,
     remaining_present: usize,
     missing_count: u64,
@@ -163,9 +162,10 @@ impl RemoveMissingPlan {
         let RemoveMissingPlan {
             notes: _,
             work_plan,
+            pre_membership,
+            target_membership,
         } = self;
 
-        let target_uuid = work_plan.target_uuid.clone();
         let name_to_remove = work_plan.target_name.clone();
 
         // Confirm
@@ -203,14 +203,6 @@ impl RemoveMissingPlan {
                 ))
             })?;
 
-        let pre_membership = membership::load_membership(params.paths).map_err(|e| {
-            RemoveMissingError::Validation(format!("failed to load pool membership: {e}"))
-        })?;
-
-        // Build journal before btrfs operation. The member is removed
-        // from `target_membership` by UUID; name is logging-only.
-        let mut target_membership = pre_membership.clone();
-        target_membership.remove_by_uuid(&target_uuid);
         let restore_raid1_after_commit = work_plan.restore_raid1_after_commit();
         let journal = journal::build_journal(
             pre_membership,
@@ -457,15 +449,24 @@ pub fn plan_remove_missing<R: CommandRunner + Sync, F: Filesystem + ?Sized>(
     }
 
     let remaining_present = pool.devices.len();
+    // target_uuid was just resolved from pre_membership via by_devid, so
+    // the removal is guaranteed to match. The pool lock pins pool.json
+    // for the whole command lifetime.
+    let mut target_membership = pre_membership.clone();
+    let _ = target_membership.remove_by_uuid(&target_uuid);
     let work_plan = RemoveMissingWorkPlan {
         missing_id: params.missing_id,
-        target_uuid,
         target_name,
         remaining_present,
         missing_count: pool.missing_count,
         mount_point: config.mount_point().clone(),
     };
-    Ok(RemoveMissingPlan { notes, work_plan })
+    Ok(RemoveMissingPlan {
+        notes,
+        work_plan,
+        pre_membership,
+        target_membership,
+    })
 }
 
 pub fn cmd_remove_missing<R: CommandRunner + Sync, F: Filesystem + ?Sized>(
@@ -589,7 +590,6 @@ fn remove_missing_work_plan_for_test(
 ) -> RemoveMissingWorkPlan {
     RemoveMissingWorkPlan {
         missing_id,
-        target_uuid: LuksUuid::parse("00000000-0000-0000-0000-000000000001").unwrap(),
         target_name: DiskName::parse("disk-test").unwrap(),
         remaining_present,
         missing_count,
@@ -1646,6 +1646,34 @@ mod tests {
             journal::load_journal(&f.paths).unwrap().is_some(),
             "pending-op.json must survive error exit so braid recover can reconcile"
         );
+        let journal = journal::load_journal(&f.paths)
+            .unwrap()
+            .expect("pending-op.json must survive device-remove failure");
+        let disk1 = DiskName::parse("disk1").unwrap();
+        let disk2 = DiskName::parse("disk2").unwrap();
+        let disk3 = DiskName::parse("disk3").unwrap();
+        assert_eq!(
+            journal.pre_membership.len(),
+            3,
+            "journal pre_membership must retain all three original disks"
+        );
+        assert!(
+            journal.pre_membership.by_name(&disk1).is_some()
+                && journal.pre_membership.by_name(&disk2).is_some()
+                && journal.pre_membership.by_name(&disk3).is_some(),
+            "journal pre_membership must contain disk1, disk2, and disk3"
+        );
+        assert_eq!(
+            journal.target_membership.len(),
+            2,
+            "journal target_membership must contain only the two surviving disks"
+        );
+        assert!(
+            journal.target_membership.by_name(&disk1).is_some()
+                && journal.target_membership.by_name(&disk2).is_some()
+                && journal.target_membership.by_name(&disk3).is_none(),
+            "journal target_membership must contain disk1 and disk2 but not disk3"
+        );
         assert!(
             membership::load_membership(&f.paths)
                 .unwrap()
@@ -2137,6 +2165,8 @@ mod tests {
                 "read-only pre-flight failed: mountinfo probe failed; proceeding anyway".into(),
             )],
             work_plan,
+            pre_membership: PoolMembership::empty(),
+            target_membership: PoolMembership::empty(),
         };
         let rendered = plan.preview().render();
         let lines: Vec<&str> = rendered.lines().collect();
