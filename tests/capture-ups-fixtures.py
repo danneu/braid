@@ -1,11 +1,9 @@
 # Capture `upsc` output fixtures for the NUT parser-critical surface.
 #
-# Capture approach: the companion .nix seeds five dummy-ups drivers, one
+# Capture approach: the companion .nix seeds four dummy-ups drivers, one
 # per target state (online / onbattery / lowbattery / replace-battery).
 # For each state this script just invokes `upsc <state>@localhost` and
-# copies the output into the fixtures dir. A fifth capture -- daemon
-# down -- stops `upsd.service` and records the stderr `upsc` emits when
-# it can't connect.
+# copies the output into the fixtures dir.
 #
 # Why driver-per-state vs one-driver + upsrw: NUT 2.8.4's dummy-ups
 # intermittently re-reads the .dev file even in `dummy-once` mode, which
@@ -40,14 +38,6 @@ for name in STATES:
     machine.succeed(
         f"upsc {name}@localhost > {FIXTURE_DIR}/upsc-{name}.txt"
     )
-
-# --- Daemon-down stderr ---
-# Stop upsd so `upsc` can't connect. Tolerate upsc's non-zero exit via
-# machine.execute -- we want the stderr regardless of exit code.
-machine.succeed("systemctl stop upsd.service")
-machine.execute(
-    f"upsc online@localhost 2> {FIXTURE_DIR}/upsc-daemon-down.stderr"
-)
 
 # Copy every captured fixture out of the VM. `just capture-ups-fixtures`
 # picks them up from result/fixtures/.

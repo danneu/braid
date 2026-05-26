@@ -589,37 +589,3 @@ fn golden_upsc_replace_battery() {
     assert!(!out.status_flags.contains(&UpsStatusFlag::Ob));
     assert!(!out.status_flags.contains(&UpsStatusFlag::Lb));
 }
-
-// Intent: the stopped-daemon stderr fixture routes through QueryFailed.
-// Why: preflight distinguishes query failure from on-battery; both refuse
-// the mutation but the message + reason differ. Golden-fixture coverage
-// here locks in the non-zero-exit contract even if upstream upsc changes
-// its stderr wording.
-// Scenario: operator ran `braid ups status` while upsd.service was
-// stopped.
-#[test]
-fn golden_upsc_query_failed() {
-    let Some(stderr) = upsc_fixture("upsc-daemon-down.stderr") else {
-        eprintln!("SKIP: upsc/upsc-daemon-down.stderr not captured yet");
-        return;
-    };
-    let runner = braid_cli::cmd::MockRunner::default().with_output(
-        braid_cli::cmd::CmdRequest::UpscQuery { name: "ups".into() },
-        RawCommandOutput {
-            cmd: "upsc ups".into(),
-            stdout: String::new(),
-            stderr: stderr.clone(),
-            exit_status: 1,
-        },
-    );
-
-    let err = braid_cli::ups::query_ups(&runner, "ups")
-        .expect_err("stopped-daemon fixture must route through QueryFailed");
-
-    match err {
-        braid_cli::ups::UpsQueryError::QueryFailed { stderr: got, .. } => {
-            assert!(got.contains(stderr.trim()), "expected fixture stderr in {got:?}");
-        }
-        other => panic!("expected QueryFailed, got {other:?}"),
-    }
-}

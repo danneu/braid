@@ -1,7 +1,7 @@
 # Test: capture `upsc` output fixtures for the NUT (Network UPS Tools)
 # parser-critical surface.
 #
-# What: Boots a single-host NUT stack with five `dummy-ups` drivers in
+# What: Boots a single-host NUT stack with four `dummy-ups` drivers in
 # `dummy-once` mode, each reading a distinct `/etc/nut/<state>.dev`
 # file seeded with one target UPS state. Captures `upsc <name>` output
 # for each state.
@@ -13,7 +13,7 @@
 # A nixpkgs bump that changes `nut`'s output format must refresh
 # these fixtures in lockstep.
 #
-# Design note -- why 5 .dev files instead of `upsrw -s`:
+# Design note -- why 4 .dev files instead of `upsrw -s`:
 #
 # An earlier revision used one .dev file + `upsrw -s` to flip state
 # between captures. That works cleanly on NUT 2.8.3 but regresses on
