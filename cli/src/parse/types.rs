@@ -189,18 +189,14 @@ impl DataRatio {
         let whole: u32 = whole.parse().ok()?;
         let frac_val: u32 = frac.parse().ok()?;
         let hundredths = match frac.len() {
-            1 => whole * 100 + frac_val * 10,
-            2 => whole * 100 + frac_val,
+            1 => whole.checked_mul(100)?.checked_add(frac_val.checked_mul(10)?)?,
+            2 => whole.checked_mul(100)?.checked_add(frac_val)?,
             _ => return None,
         };
         if hundredths == 0 {
             return None;
         }
         Some(Self(hundredths))
-    }
-
-    pub fn logical_bytes(self, device_size_bytes: u64) -> u64 {
-        device_size_bytes * 100 / u64::from(self.0)
     }
 }
 
@@ -291,11 +287,11 @@ pub struct DeviceScrubEntry {
 impl DeviceScrubEntry {
     pub fn total_errors(&self) -> u64 {
         self.read_errors
-            + self.csum_errors
-            + self.verify_errors
-            + self.uncorrectable_errors
-            + self.corrected_errors
-            + self.super_errors
+            .saturating_add(self.csum_errors)
+            .saturating_add(self.verify_errors)
+            .saturating_add(self.uncorrectable_errors)
+            .saturating_add(self.corrected_errors)
+            .saturating_add(self.super_errors)
     }
 }
 
@@ -680,7 +676,9 @@ impl UpscOutput {
     /// must render the missing case explicitly).
     pub fn watts_estimated(&self) -> Option<u32> {
         match (self.load_pct, self.realpower_nominal_watts) {
-            (Some(pct), Some(nominal)) => Some((u32::from(pct) * nominal + 50) / 100),
+            (Some(pct), Some(nominal)) => {
+                Some(((u64::from(pct) * u64::from(nominal) + 50) / 100) as u32)
+            }
             _ => None,
         }
     }
@@ -730,14 +728,14 @@ mod tests {
         assert_eq!(DataRatio::parse("0.00"), None);
     }
 
+    // Intent: DataRatio::parse rejects syntactically valid ratios whose fixed-point
+    // representation would overflow u32.
+    // Why it exists: btrfs ratio text is parsed from an external tool, so the
+    // parser must fail cleanly instead of panicking or wrapping.
+    // Scenario: corrupt btrfs output reports an implausibly large data ratio.
     #[test]
-    fn data_ratio_logical_bytes_raid1() {
-        assert_eq!(DataRatio(200).logical_bytes(1_000_000), 500_000);
-    }
-
-    #[test]
-    fn data_ratio_logical_bytes_intermediate() {
-        assert_eq!(DataRatio(101).logical_bytes(1_000_000), 990_099);
+    fn data_ratio_parse_overflow_returns_none() {
+        assert_eq!(DataRatio::parse("99999999.0"), None);
     }
 
     // Intent: UpsStatusFlag::is_critical names the exact set used by

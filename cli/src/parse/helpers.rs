@@ -23,5 +23,23 @@ pub(super) fn parse_duration_hms(s: &str) -> Option<u64> {
     let h: u64 = parts[0].parse().ok()?;
     let m: u64 = parts[1].parse().ok()?;
     let s: u64 = parts[2].parse().ok()?;
-    Some(h * 3600 + m * 60 + s)
+    h.checked_mul(3600)?
+        .checked_add(m.checked_mul(60)?)?
+        .checked_add(s)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // Intent: parse_duration_hms rejects durations whose seconds total would
+    // overflow u64.
+    // Why it exists: btrfs scrub status duration text is external tool output,
+    // so a malformed but numeric duration must not panic or wrap.
+    // Scenario: corrupt scrub status output reports an astronomically large
+    // hour count.
+    #[test]
+    fn parse_duration_hms_overflow_returns_none() {
+        assert_eq!(parse_duration_hms("99999999999999999:00:00"), None);
+    }
 }

@@ -346,6 +346,16 @@ ups.test.result: Done and passed\n\
         assert_eq!(both.watts_estimated(), Some(165));
     }
 
+    // Intent: watts_estimated handles maximum parsed nominal wattage without overflow.
+    // Why it exists: NUT driver output is an ungated u32, and debug overflow
+    // checks must not panic on syntactically valid values.
+    // Scenario: buggy driver emits u32::MAX while load is 100%.
+    #[test]
+    fn watts_estimated_handles_max_nominal_watts() {
+        let out = parse_upsc("ups.load: 100\nups.realpower.nominal: 4294967295\n");
+        assert_eq!(out.watts_estimated(), Some(u32::MAX));
+    }
+
     // Intent: percent values out of range round-trip to None.
     // Why: a driver bug that emits `battery.charge: 200` should not be
     // quietly clipped; callers render "--" and the typed field reflects

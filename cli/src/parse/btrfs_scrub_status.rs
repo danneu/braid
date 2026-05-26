@@ -124,7 +124,7 @@ fn parse_error_summary(input: &str) -> IResult<&str, u64> {
         .split_whitespace()
         .filter_map(|kv| kv.split('=').nth(1))
         .filter_map(|v| v.parse::<u64>().ok())
-        .sum();
+        .fold(0u64, |acc, value| acc.saturating_add(value));
     Ok((input, count))
 }
 
@@ -222,9 +222,9 @@ pub fn parse_btrfs_scrub_status(
         } else if let Ok((_, rate)) = parse_rate_line(line) {
             acc.rate_bytes_per_sec = Some(rate);
         } else if let Ok((_, count)) = parse_error_summary(line) {
-            acc.error_count += count;
+            acc.error_count = acc.error_count.saturating_add(count);
         } else if let Ok((_, count)) = parse_error_continuation(line) {
-            acc.error_count += count;
+            acc.error_count = acc.error_count.saturating_add(count);
         }
     }
 
@@ -512,6 +512,37 @@ Error summary:    read=1 csum=2
                 assert_eq!(*duration_secs, Some(10));
                 assert_eq!(*total_bytes, Some(1_073_741_824));
                 assert_eq!(*rate_bytes_per_sec, Some(104_857_600));
+            }
+            other => panic!("expected Finished, got {other:?}"),
+        }
+    }
+
+    // Intent: scrub error counts saturate when summary and continuation
+    // counters exceed u64.
+    // Why it exists: btrfs error counters are diagnostic external-tool output,
+    // so huge values must not panic, wrap to zero, or suppress error reporting.
+    // Scenario: corrupt scrub status output reports u64::MAX read errors plus
+    // more counters on the following lines.
+    #[test]
+    fn scrub_error_count_saturates_on_large_summary_and_continuation() {
+        let raw = RawCommandOutput {
+            cmd: "btrfs scrub status --raw".into(),
+            stdout: "\
+UUID:             cc86845b-aec3-408e-bef5-553affc1f2b1
+Scrub started:    Tue Feb 25 10:00:00 2026
+Status:           finished
+Duration:         0:00:10
+Error summary:    read=18446744073709551615 csum=1
+  Corrected:      1
+"
+            .into(),
+            stderr: String::new(),
+            exit_status: 0,
+        };
+        let out = parse_btrfs_scrub_status(&raw).unwrap();
+        match &out.state {
+            ScrubState::Finished { error_count, .. } => {
+                assert_eq!(*error_count, u64::MAX);
             }
             other => panic!("expected Finished, got {other:?}"),
         }

@@ -400,6 +400,41 @@ Duration:         0:00:30
         assert_eq!(out.devices[0].total_errors(), 4);
     }
 
+    // Intent: total_errors saturates when per-device counters exceed u64.
+    // Why it exists: per-device scrub counters are diagnostic external-tool
+    // output, so huge values must still render as "too many" instead of
+    // panicking or wrapping.
+    // Scenario: corrupt per-device scrub status reports u64::MAX read errors
+    // plus one csum error.
+    #[test]
+    fn total_errors_saturates_on_large_counters() {
+        let raw = RawCommandOutput {
+            cmd: CMD.into(),
+            stdout: "\
+UUID:             aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee
+
+Scrub device /dev/sda (id 1) history
+Scrub started:    Wed Feb 25 10:00:00 2026
+Status:           finished
+Duration:         0:00:30
+    data_bytes_scrubbed: 500
+    tree_bytes_scrubbed: 0
+    read_errors: 18446744073709551615
+    csum_errors: 1
+    verify_errors: 0
+    uncorrectable_errors: 0
+    corrected_errors: 0
+    super_errors: 0
+    last_physical: 1000
+"
+            .into(),
+            stderr: String::new(),
+            exit_status: 0,
+        };
+        let out = parse_btrfs_scrub_status_per_device(&raw).unwrap();
+        assert_eq!(out.devices[0].total_errors(), u64::MAX);
+    }
+
     /// Intent: non-zero exit status returns CommandFailed.
     /// Why: protects against silently returning partial data on command failure.
     /// Scenario: btrfs scrub status fails (e.g. filesystem not mounted).

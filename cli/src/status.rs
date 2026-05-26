@@ -218,7 +218,11 @@ pub struct DiskErrors {
 
 impl DiskErrors {
     pub fn total(&self) -> u64 {
-        self.read + self.write + self.flush + self.corruption + self.generation
+        self.read
+            .saturating_add(self.write)
+            .saturating_add(self.flush)
+            .saturating_add(self.corruption)
+            .saturating_add(self.generation)
     }
 }
 
@@ -1364,7 +1368,7 @@ fn format_status_human(
                         "    Errors:  read {} / write {} / flush {} / corruption {} / generation {}\n",
                         e.read, e.write, e.flush, e.corruption, e.generation
                     ));
-                    e.read + e.write + e.flush + e.corruption + e.generation > 0
+                    e.total() > 0
                 }
                 None if d.status == DiskStatus::Missing => {
                     out.push_str("    Errors:  unknown (device absent)\n");
@@ -2584,6 +2588,60 @@ mod tests {
         assert!(human.contains("Serial:"), "got:\n{human}");
     }
 
+    // Intent: verbose status still emits replacement guidance when disk error
+    // counters overflow a plain u64 sum.
+    // Why it exists: a wrapped-to-zero diagnostic total would suppress the
+    // operator action for a disk with obvious btrfs errors.
+    // Scenario: btrfs device stats reports u64::MAX read errors and one write
+    // error for a configured member.
+    #[test]
+    fn status_verbose_error_guidance_uses_saturating_total() {
+        let human_disks = vec![HumanDisk {
+            name: "disk1".to_owned(),
+            member_name: Some(DiskName::parse("disk1").unwrap()),
+            by_id: "/dev/disk/by-id/disk1".to_owned(),
+            luks_uuid: "11111111-1111-1111-1111-111111111111".to_owned(),
+            devid: Some("1".to_owned()),
+            status: DiskStatus::Present,
+            model: Some("VBOX HARDDISK".to_owned()),
+            serial: Some("disk1".to_owned()),
+            errors: Some(DiskErrors {
+                read: u64::MAX,
+                write: 1,
+                flush: 0,
+                corruption: 0,
+                generation: 0,
+            }),
+        }];
+
+        let report = StatusReport {
+            mount_point: MountPoint("/mnt/storage".to_owned()),
+            status: StatusCode::Intact,
+            total_devices: Some(1),
+            present_count: Some(1),
+            missing_count: Some(0),
+            profile: Some(ProfileJson::uniform("single")),
+            fsid: None,
+            capacity: Some(CapacityReport {
+                total_bytes: Some(1073741824),
+                used_bytes: 536870912,
+                free_bytes: 536870912,
+            }),
+            last_scrub: Some(ScrubReport::Never),
+            balance: None,
+            allocation: None,
+            disks: vec![],
+            advisories: vec![],
+            alert_active: false,
+            alert_causes: vec![],
+            missing_devids: vec![],
+        };
+
+        let human = format_status_human(&report, None, Some(&human_disks), None);
+        assert!(human.contains("Action:"), "got:\n{human}");
+        assert!(human.contains("braid replace --old disk1"), "got:\n{human}");
+    }
+
     #[test]
     fn status_verbose_missing_disk() {
         let human_disks = vec![HumanDisk {
@@ -2804,6 +2862,24 @@ mod tests {
     // =======================================================================
     // Error policy tests
     // =======================================================================
+
+    // Intent: DiskErrors::total saturates when diagnostic counters exceed u64.
+    // Why it exists: btrfs device stats counters are external-tool output, and
+    // the status layer should preserve the "errors exist" signal for huge
+    // values instead of panicking or wrapping.
+    // Scenario: corrupt device stats reports u64::MAX read errors plus one
+    // write error.
+    #[test]
+    fn disk_errors_total_saturates_on_large_counters() {
+        let errors = DiskErrors {
+            read: u64::MAX,
+            write: 1,
+            flush: 0,
+            corruption: 0,
+            generation: 0,
+        };
+        assert_eq!(errors.total(), u64::MAX);
+    }
 
     #[test]
     fn status_scrub_finished() {

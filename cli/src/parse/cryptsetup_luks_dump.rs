@@ -95,12 +95,22 @@ pub fn parse_cryptsetup_luks_dump(
         });
     }
 
-    let key_size_bits = parsed
-        .keyslots
-        .values()
-        .next()
-        .map(|k| k.key_size * 8)
-        .unwrap_or(0) as u32;
+    let key_size_bits = match parsed.keyslots.iter().next() {
+        None => 0,
+        Some((slot, k)) => {
+            let bits = k
+                .key_size
+                .checked_mul(8)
+                .ok_or_else(|| ParseError::InvalidJson {
+                    cmd: raw.cmd.clone(),
+                    detail: format!("keyslots.{slot}.key_size {} overflows u64 (*8)", k.key_size),
+                })?;
+            u32::try_from(bits).map_err(|_| ParseError::InvalidJson {
+                cmd: raw.cmd.clone(),
+                detail: format!("keyslots.{slot}.key_size {bits} bits exceeds u32"),
+            })?
+        }
+    };
 
     let keyslot_count = parsed.keyslots.len() as u32;
 
@@ -123,6 +133,27 @@ mod tests {
             env!("CARGO_MANIFEST_DIR")
         );
         std::fs::read_to_string(&path).unwrap_or_else(|e| panic!("fixture {name}: {e}"))
+    }
+
+    fn raw_with_key_size(key_size: &str) -> RawCommandOutput {
+        RawCommandOutput {
+            cmd: "cryptsetup luksDump".into(),
+            stdout: r#"{
+  "keyslots": {
+    "0": {
+      "type": "luks2", "key_size": __KEY_SIZE__,
+      "af": {}, "area": {}, "kdf": {}
+    }
+  },
+  "tokens": {},
+  "segments": {"0": {"type":"crypt","offset":"16777216","size":"dynamic","iv_tweak":"0","encryption":"aes-xts-plain64","sector_size":4096}},
+  "digests": {},
+  "config": {}
+}"#
+            .replace("__KEY_SIZE__", key_size),
+            stderr: String::new(),
+            exit_status: 0,
+        }
     }
 
     // --- Contract tests (nixos-25.11 fixtures) ---
@@ -217,6 +248,35 @@ mod tests {
         let out = parse_cryptsetup_luks_dump(&raw).unwrap();
         assert_eq!(out.segment_offset_bytes, 16_777_216);
         assert_eq!(out.segment_size, Luks2SegmentSize::Fixed(1_073_741_824));
+    }
+
+    // Intent: key_size values that fit u64 but exceed the output u32 field are
+    // rejected as malformed metadata.
+    // Why it exists: silently truncating LUKS key sizes would make status and
+    // TUI metadata lie about cryptsetup output.
+    // Scenario: corrupt luksDump JSON reports an oversized keyslot key size.
+    #[test]
+    fn parse_rejects_key_size_bits_exceeding_u32() {
+        let err = parse_cryptsetup_luks_dump(&raw_with_key_size("600000000")).unwrap_err();
+        assert!(
+            matches!(err, ParseError::InvalidJson { .. }),
+            "unexpected error: {err}"
+        );
+    }
+
+    // Intent: key_size multiplication itself is checked before converting to
+    // the output field.
+    // Why it exists: debug overflow checks must not panic on adversarial but
+    // syntactically valid cryptsetup JSON.
+    // Scenario: corrupt luksDump JSON reports u64::MAX as the keyslot key size.
+    #[test]
+    fn parse_rejects_key_size_bits_multiplication_overflow() {
+        let err = parse_cryptsetup_luks_dump(&raw_with_key_size("18446744073709551615"))
+            .unwrap_err();
+        assert!(
+            matches!(err, ParseError::InvalidJson { .. }),
+            "unexpected error: {err}"
+        );
     }
 
     #[test]
