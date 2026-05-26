@@ -128,6 +128,16 @@ impl MonitorTestRunner {
         }
     }
 
+    /// Build a runner with a caller-supplied `btrfs device stats` payload so a
+    /// test can place non-zero counters on a *recognized* devid (the existing
+    /// stale/healthy constants only zero recognized devids).
+    pub(crate) fn with_stats_payload(payload: impl Into<String>) -> Self {
+        Self {
+            stats_payload: payload.into(),
+            override_op: Mutex::new(None),
+        }
+    }
+
     fn take_btrfs_show_payload(&self) -> Option<String> {
         let mut guard = self.override_op.lock().unwrap();
         if matches!(guard.as_ref(), Some(MonitorOverride::BtrfsShowPayload(_)))

@@ -290,12 +290,14 @@ pub enum AckError {
 mod tests {
     use super::*;
     use crate::alert::{AckedDeviceCounters, AckedDisk, AckedStats, load_acked_stats};
+    use crate::monitor::{MonitorResult, cmd_monitor};
     use crate::test_fixtures::{
-        AckPanicFilesystem, AckPanicRunner, ack_fs_btrfs, ack_fs_ext4, ack_fs_not_mounted,
-        ack_mounted_fs_that_touches_smartd, ack_mounted_probe_runner,
+        AckPanicFilesystem, AckPanicRunner, MonitorTestRunner, ack_fs_btrfs, ack_fs_ext4,
+        ack_fs_not_mounted, ack_mounted_fs_that_touches_smartd, ack_mounted_probe_runner,
         ack_mounted_probe_runner_with_device_stats,
         ack_mounted_probe_runner_with_stale_devid_stats, ack_mp, ack_noop_beeper,
-        ack_offline_fs_that_touches_smartd, ack_write_latch, isolated_paths,
+        ack_offline_fs_that_touches_smartd, ack_write_latch, isolated_paths, monitor_fs_btrfs,
+        monitor_mp,
     };
     use std::collections::BTreeMap;
     #[cfg(unix)]
@@ -420,6 +422,118 @@ mod tests {
             !keys.contains(&"99"),
             "unrecognized devid must not be persisted, got {keys:?}"
         );
+    }
+
+    // Intent: the documented ack contract -- acking BtrfsDeviceErrors "sets the
+    //   current device error counts as the new baseline so the same condition
+    //   won't re-trigger" -- holds across the real cmd_monitor -> cmd_ack ->
+    //   cmd_monitor wiring: monitor latches BtrfsDeviceErrors, ack snapshots the
+    //   live counters as the baseline keyed by devid, the next monitor pass at
+    //   the same counters stays Ok, and counters above the baseline re-fire.
+    // Why it exists: snapshot -> persist -> load -> compare -> key was only
+    //   covered as isolated halves (snapshot_current writes counters;
+    //   compute_alert_state suppresses below a hand-built baseline). A regression
+    //   where ack persists a wrong/empty baseline, keys it differently than
+    //   monitor reads (devid.to_string()), or where the recognized-devid filter
+    //   drops the acked row would re-fire the same disk-error alert forever, and
+    //   no test would catch it. The MissingDevice round-trip
+    //   (monitor-lifecycle.py) and the negative unrecognized-devid case
+    //   (stale_mapper_row_with_errors_does_not_latch_or_loop) leave this positive
+    //   counter-baseline path unexercised end-to-end.
+    // Scenario: devid 1 reports read/corruption errors on a mounted, recognized
+    //   2-disk pool; monitor latches BtrfsDeviceErrors{devid:1}. The operator
+    //   runs braid ack, which baselines the live counts. The next monitor cycle
+    //   at the same counts must stay silent; a later cycle with higher counts on
+    //   devid 1 must alert again -- the baseline is a floor, not a permanent mute.
+    #[test]
+    fn ack_baseline_suppresses_then_refires_btrfs_device_errors() {
+        // devid 1 has errors; devid 2 clean. Both are recognized (present in show).
+        const STATS_DEVID1_ERRORS: &str = r#"{
+    "__header": {"version": "1"},
+    "device-stats": [
+        {"device": "/dev/mapper/braid-vdb", "devid": 1, "write_io_errs": 0, "read_io_errs": 3, "flush_io_errs": 0, "corruption_errs": 1, "generation_errs": 0},
+        {"device": "/dev/mapper/braid-vdc", "devid": 2, "write_io_errs": 0, "read_io_errs": 0, "flush_io_errs": 0, "corruption_errs": 0, "generation_errs": 0}
+    ]
+}"#;
+        // devid 1 strictly above the acked baseline (read_io_errs 5 > 3) for the
+        // re-fire phase.
+        const STATS_DEVID1_ERRORS_HIGHER: &str = r#"{
+    "__header": {"version": "1"},
+    "device-stats": [
+        {"device": "/dev/mapper/braid-vdb", "devid": 1, "write_io_errs": 0, "read_io_errs": 5, "flush_io_errs": 0, "corruption_errs": 1, "generation_errs": 0},
+        {"device": "/dev/mapper/braid-vdc", "devid": 2, "write_io_errs": 0, "read_io_errs": 0, "flush_io_errs": 0, "corruption_errs": 0, "generation_errs": 0}
+    ]
+}"#;
+
+        let (_dir, paths) = isolated_paths();
+        let fs = monitor_fs_btrfs();
+        let mp = monitor_mp();
+        let runner = MonitorTestRunner::with_stats_payload(STATS_DEVID1_ERRORS);
+
+        // Phase 1: monitor latches BtrfsDeviceErrors{devid:1}.
+        let first = cmd_monitor(&runner, &fs, &mp, &paths);
+        match first {
+            MonitorResult::Alert(s) => assert_eq!(
+                s.causes,
+                vec![AlertCause::BtrfsDeviceErrors { devid: 1 }],
+                "monitor must latch exactly the devid-1 btrfs error"
+            ),
+            other => panic!("expected Alert, got {other:?}"),
+        }
+        assert!(
+            paths.alert_latch_json().exists(),
+            "phase 1 must write the latch"
+        );
+
+        // Phase 2: ack snapshots the live counters as the baseline, keyed by
+        // devid, for every recognized devid, and removes the latch. The value +
+        // key assertions directly witness the three named regressions, so a
+        // break pinpoints the layer rather than only flipping phase 3 red.
+        cmd_ack_impl(&runner, &fs, &mp, &paths, &ack_noop_beeper).expect("ack ok");
+        let acked = load_acked_stats(&paths);
+        let d1 = acked
+            .0
+            .get("1")
+            .expect("recognized devid 1 baseline persisted");
+        assert_eq!(
+            d1.device_stats.read_io_errs, 3,
+            "right baseline + right key"
+        );
+        assert_eq!(d1.device_stats.corruption_errs, 1);
+        assert!(
+            acked.0.contains_key("2"),
+            "ack snapshots all recognized devids"
+        );
+        assert!(
+            !paths.alert_latch_json().exists(),
+            "ack must remove the latch"
+        );
+
+        // Phase 3: monitor with the SAME counters must NOT re-fire.
+        let second = cmd_monitor(&runner, &fs, &mp, &paths);
+        assert_eq!(
+            second,
+            MonitorResult::Ok,
+            "counters at the acked baseline must stay suppressed"
+        );
+        assert!(
+            !paths.alert_latch_json().exists(),
+            "no latch on the suppressed cycle"
+        );
+
+        // Phase 4 (re-fire): counters above the baseline alert again -- the
+        // baseline is a floor, not a permanent mute for the devid.
+        let runner_higher = MonitorTestRunner::with_stats_payload(STATS_DEVID1_ERRORS_HIGHER);
+        let third = cmd_monitor(&runner_higher, &fs, &mp, &paths);
+        match third {
+            MonitorResult::Alert(s) => assert!(
+                s.causes
+                    .contains(&AlertCause::BtrfsDeviceErrors { devid: 1 }),
+                "errors above the baseline must re-fire, got {:?}",
+                s.causes
+            ),
+            other => panic!("expected re-fire Alert, got {other:?}"),
+        }
     }
 
     /*
