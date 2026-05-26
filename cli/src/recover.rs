@@ -16,7 +16,7 @@ use crate::parse::btrfs_filesystem_show::{DeviceBtrfsProbe, classify_btrfs_probe
 use crate::parse::{ReplaceState, parse_btrfs_replace_status};
 use crate::preview::{self, PerDiskStyle, PlanFailure, Preview, PreviewCompleteness, PreviewNote};
 use crate::probe::{self, Filesystem, ProbeError};
-use crate::progress::{self, ProgressOutput, RealSleeper, Sleeper};
+use crate::progress::{self, ProgressOutput, Sleeper};
 use crate::secret::Passphrase;
 use crate::state_paths::StatePaths;
 use crate::status::{BalanceReport, get_balance_report};
@@ -179,8 +179,8 @@ pub struct RecoverParams<'a> {
     /// use because the resume can be long-running.
     pub progress: ProgressOutput,
     pub sleep_inhibitor: &'a dyn AcquireSleepInhibitor,
-    /// Sleeper seam for retrying transiently-busy mapper closes without
-    /// slowing unit tests.
+    /// Sleeper seam for transient mapper-close retries and recovery
+    /// polling paths so unit tests never depend on real wall-clock sleeps.
     pub sleeper: &'a dyn progress::Sleeper,
     /// TTY reader seam for interactive recover passphrase prompts.
     pub tty: &'a dyn luks::PassphraseReader,
@@ -441,7 +441,7 @@ impl RecoverWorkAction {
                     wait_for_kernel_replace_to_finish(
                         runner,
                         &plan.mount_point,
-                        &progress::RealSleeper,
+                        params.sleeper,
                         color_enabled_for_stderr(),
                     )?;
                 }
@@ -457,6 +457,7 @@ impl RecoverWorkAction {
                     relock_and_remount(
                         runner,
                         fs,
+                        params.sleeper,
                         params.config,
                         &recovery_mount_membership,
                         params.backing_path_resolver,
@@ -1003,7 +1004,7 @@ fn execute_recover_initial_open<R: CommandRunner + Sync, F: Filesystem + ?Sized>
                 });
                 let _ = mount::close_opened_mappers(
                     runner,
-                    &RealSleeper,
+                    params.sleeper,
                     fs,
                     &failure.opened_mappers,
                     color_enabled_for_stderr(),
@@ -1033,7 +1034,7 @@ fn execute_recover_initial_open<R: CommandRunner + Sync, F: Filesystem + ?Sized>
             }
             let _ = mount::close_opened_mappers(
                 runner,
-                &RealSleeper,
+                params.sleeper,
                 fs,
                 &failure.opened_mappers,
                 color_enabled_for_stderr(),
@@ -3378,6 +3379,7 @@ fn wait_for_kernel_replace_to_finish<R: CommandRunner>(
 fn relock_and_remount<R: CommandRunner, F: Filesystem + ?Sized>(
     runner: &R,
     fs: &F,
+    sleeper: &dyn Sleeper,
     config: &Config,
     membership: &PoolMembership,
     backing_path_resolver: &dyn BackingPathResolver,
@@ -3529,7 +3531,7 @@ fn relock_and_remount<R: CommandRunner, F: Filesystem + ?Sized>(
         Err(failure) => {
             let _ = mount::close_opened_mappers(
                 runner,
-                &RealSleeper,
+                sleeper,
                 fs,
                 &failure.opened_mappers,
                 color_enabled,
@@ -3666,10 +3668,13 @@ mod tests {
     use crate::cmd::{CmdError, CmdRequest, CommandRunner, MockRunner, RawCommandOutput};
     use crate::journal::{self, OpKind};
     use crate::luks::ScriptedPassphraseReader;
+    use crate::mapper_close::{CLOSE_RETRY_ATTEMPTS, CLOSE_RETRY_DELAY};
     use crate::mount::MountError;
     use crate::preview::NoteLevel;
     use crate::probe::Filesystem;
-    use crate::test_fixtures::{PoolFixture, RemountHarness, TEST_PASSPHRASE_BYTES};
+    use crate::test_fixtures::{
+        PoolFixture, RecordingSleeper, RemountHarness, TEST_PASSPHRASE_BYTES,
+    };
     use crate::types::{
         ByIdPath, DiskName, LuksFormatExtraOpts, LuksUuid, MapperName, MountPoint,
         NullUnderlyingDevice, PoolDevice,
@@ -3866,6 +3871,14 @@ mod tests {
             stderr: stderr.to_owned(),
             exit_status: exit_code,
         }
+    }
+
+    fn assert_close_retry_sleeps(calls: Vec<std::time::Duration>) {
+        assert_eq!(
+            calls,
+            vec![CLOSE_RETRY_DELAY; (CLOSE_RETRY_ATTEMPTS - 1) as usize],
+            "close retry sleeps must use the injected sleeper"
+        );
     }
 
     fn running_runs(n: usize, pct: &str) -> Vec<ReplaceStatusItem> {
@@ -11905,6 +11918,120 @@ mod tests {
         );
     }
 
+    // Intent: the general initial-open cleanup path uses RecoverParams.sleeper
+    //   for mapper-close retries after an unlock-and-mount failure.
+    // Why it exists: this branch is distinct from bootstrap-add cleanup; a
+    //   regression in either branch can silently fall back to RealSleeper.
+    // Scenario: recover opens a non-bootstrap add journal, mount fails, and
+    //   cleanup sees one mapper remain busy through all retry attempts.
+    #[test]
+    fn recover_initial_open_general_cleanup_honors_injected_sleeper() {
+        let f = PoolFixture::empty();
+        let fs = MockFs::new(&[
+            "/dev/disk/by-id/virtio-disk1",
+            "/dev/disk/by-id/virtio-disk2",
+        ]);
+
+        let journal = committed_two_disk_add_journal();
+        journal::write_journal(&f.paths, &journal).unwrap();
+
+        let (mp_req, mp_out) = mountpoint_fail();
+        let runner = MockRunner::default()
+            .with_output(mp_req, mp_out)
+            .with_output(
+                CmdRequest::CryptsetupLuksUuid {
+                    device: "/dev/disk/by-id/virtio-disk1".into(),
+                },
+                cryptsetup_uuid_ok(
+                    "/dev/disk/by-id/virtio-disk1",
+                    "11111111-1111-1111-1111-111111111111",
+                ),
+            )
+            .with_output(
+                CmdRequest::CryptsetupLuksUuid {
+                    device: "/dev/disk/by-id/virtio-disk2".into(),
+                },
+                cryptsetup_uuid_ok(
+                    "/dev/disk/by-id/virtio-disk2",
+                    "22222222-2222-2222-2222-222222222222",
+                ),
+            )
+            .with_luks_dump_text_luks2_for(&[
+                "/dev/disk/by-id/virtio-disk1",
+                "/dev/disk/by-id/virtio-disk2",
+            ])
+            .with_mappers_closed(&["braid-disk1", "braid-disk2"])
+            .with_output_stdin(
+                CmdRequest::CryptsetupTestPassphrase {
+                    device: "/dev/disk/by-id/virtio-disk1".into(),
+                },
+                TEST_PASSPHRASE_BYTES.to_vec(),
+                ok_raw_empty("cryptsetup open --test-passphrase"),
+            )
+            .with_output_stdin(
+                CmdRequest::CryptsetupTestPassphrase {
+                    device: "/dev/disk/by-id/virtio-disk2".into(),
+                },
+                TEST_PASSPHRASE_BYTES.to_vec(),
+                ok_raw_empty("cryptsetup open --test-passphrase"),
+            )
+            .with_output_stdin(
+                CmdRequest::CryptsetupLuksOpen {
+                    device: "/dev/disk/by-id/virtio-disk1".into(),
+                    mapper: MapperName("braid-disk1".into()),
+                },
+                TEST_PASSPHRASE_BYTES.to_vec(),
+                ok_raw_empty("cryptsetup open"),
+            )
+            .with_output_stdin(
+                CmdRequest::CryptsetupLuksOpen {
+                    device: "/dev/disk/by-id/virtio-disk2".into(),
+                    mapper: MapperName("braid-disk2".into()),
+                },
+                TEST_PASSPHRASE_BYTES.to_vec(),
+                ok_raw_empty("cryptsetup open"),
+            )
+            .with_output(
+                CmdRequest::BtrfsDeviceScanAll,
+                ok_raw_empty("btrfs device scan"),
+            )
+            .with_output(
+                CmdRequest::Mount {
+                    device: "/dev/mapper/braid-disk1".into(),
+                    mount_point: MountPoint("/mnt/storage".into()),
+                },
+                err_raw("mount", 32, "wrong fs type"),
+            )
+            .with_output_sequence(
+                CmdRequest::CryptsetupClose {
+                    mapper: MapperName("braid-disk1".into()),
+                },
+                vec![
+                    err_raw("cryptsetup close", 5, "busy"),
+                    err_raw("cryptsetup close", 5, "busy"),
+                    err_raw("cryptsetup close", 5, "busy"),
+                ],
+            )
+            .with_output(
+                CmdRequest::CryptsetupClose {
+                    mapper: MapperName("braid-disk2".into()),
+                },
+                ok_raw_empty("cryptsetup close"),
+            );
+        let sleeper = RecordingSleeper::default();
+        let params = f.recover_params().sleeper(&sleeper).build();
+
+        let result = cmd_recover(&runner, &fs, &MockByIdResolver::default(), &params);
+
+        let err = result.expect_err("initial mount failure should fail recover");
+        assert!(
+            err.to_string().contains("mount failed (exit 32): wrong fs type"),
+            "primary mount error should be preserved, got: {err}; requests: {:?}",
+            runner.requests()
+        );
+        assert_close_retry_sleeps(sleeper.calls());
+    }
+
     /// Intent: RemoveMissing::PoolMutation recovery with every union mapper
     /// already open must NOT resolve a passphrase. The post-mount completion
     /// path for this op kind has no credential consumer, so the eager resolve
@@ -12747,6 +12874,7 @@ mod tests {
         relock_and_remount(
             &runner,
             &fs,
+            &progress::NoopSleeper,
             &config,
             &membership,
             &backing_path_resolver,
@@ -12902,6 +13030,7 @@ mod tests {
         relock_and_remount(
             &runner,
             &fs,
+            &progress::NoopSleeper,
             &config,
             &membership,
             crate::test_fixtures::mock_virtio_backing_path_resolver(),
@@ -13056,6 +13185,7 @@ mod tests {
         let err = relock_and_remount(
             &runner,
             &fs,
+            &progress::NoopSleeper,
             &config,
             &membership,
             crate::test_fixtures::mock_virtio_backing_path_resolver(),
@@ -13080,6 +13210,148 @@ mod tests {
             closes, 4,
             "two cycle closes plus two cleanup closes should run"
         );
+    }
+
+    // Intent: remount-cycle re-mount cleanup uses the injected sleeper for
+    //   busy mapper-close retries.
+    // Why it exists: relock_and_remount has its own cleanup call site after
+    //   reopening mappers, separate from initial-open cleanup.
+    // Scenario: relock/remount closes two mappers, reopens both, final mount
+    //   fails, and one cleanup close stays busy through all retry attempts.
+    #[test]
+    fn recover_remount_cycle_mount_failure_cleanup_honors_injected_sleeper() {
+        let config = Config::new(MountPoint("/mnt/storage".into())).unwrap();
+        let fs = MockFs::new(&[
+            "/dev/disk/by-id/virtio-disk1",
+            "/dev/disk/by-id/virtio-disk2",
+            "/dev/mapper/braid-disk1",
+            "/dev/mapper/braid-disk2",
+        ]);
+        let membership = membership_from(vec![
+            membership_entry("disk1", "/dev/disk/by-id/virtio-disk1", None, None),
+            membership_entry("disk2", "/dev/disk/by-id/virtio-disk2", None, None),
+        ]);
+        let (mp_req, mp_out) = mountpoint_fail();
+        let runner = MockRunner::default()
+            .with_output(
+                CmdRequest::Umount {
+                    mount_point: MountPoint("/mnt/storage".into()),
+                },
+                ok_raw_empty("umount"),
+            )
+            .with_output(
+                CmdRequest::BtrfsDeviceScanForget {
+                    devices: vec![
+                        "/dev/mapper/braid-disk1".into(),
+                        "/dev/mapper/braid-disk2".into(),
+                    ],
+                },
+                ok_raw_empty("btrfs device scan --forget"),
+            )
+            .with_output_sequence(
+                CmdRequest::CryptsetupClose {
+                    mapper: MapperName("braid-disk1".into()),
+                },
+                vec![
+                    ok_raw_empty("cryptsetup close"),
+                    err_raw("cryptsetup close", 5, "busy"),
+                    err_raw("cryptsetup close", 5, "busy"),
+                    err_raw("cryptsetup close", 5, "busy"),
+                ],
+            )
+            .with_output(
+                CmdRequest::CryptsetupClose {
+                    mapper: MapperName("braid-disk2".into()),
+                },
+                ok_raw_empty("cryptsetup close"),
+            )
+            .with_output(mp_req, mp_out)
+            .with_output(
+                CmdRequest::CryptsetupLuksUuid {
+                    device: "/dev/disk/by-id/virtio-disk1".into(),
+                },
+                cryptsetup_uuid_ok(
+                    "/dev/disk/by-id/virtio-disk1",
+                    "11111111-1111-1111-1111-111111111111",
+                ),
+            )
+            .with_output(
+                CmdRequest::CryptsetupLuksUuid {
+                    device: "/dev/disk/by-id/virtio-disk2".into(),
+                },
+                cryptsetup_uuid_ok(
+                    "/dev/disk/by-id/virtio-disk2",
+                    "22222222-2222-2222-2222-222222222222",
+                ),
+            )
+            .with_luks_dump_text_luks2_for(&[
+                "/dev/disk/by-id/virtio-disk1",
+                "/dev/disk/by-id/virtio-disk2",
+            ])
+            .with_mappers_closed(&["braid-disk1", "braid-disk2"])
+            .with_output_stdin(
+                CmdRequest::CryptsetupTestPassphrase {
+                    device: "/dev/disk/by-id/virtio-disk1".into(),
+                },
+                b"testpass".to_vec(),
+                ok_raw_empty("cryptsetup open --test-passphrase"),
+            )
+            .with_output_stdin(
+                CmdRequest::CryptsetupTestPassphrase {
+                    device: "/dev/disk/by-id/virtio-disk2".into(),
+                },
+                b"testpass".to_vec(),
+                ok_raw_empty("cryptsetup open --test-passphrase"),
+            )
+            .with_output_stdin(
+                CmdRequest::CryptsetupLuksOpen {
+                    device: "/dev/disk/by-id/virtio-disk1".into(),
+                    mapper: MapperName("braid-disk1".into()),
+                },
+                b"testpass".to_vec(),
+                ok_raw_empty("cryptsetup open"),
+            )
+            .with_output_stdin(
+                CmdRequest::CryptsetupLuksOpen {
+                    device: "/dev/disk/by-id/virtio-disk2".into(),
+                    mapper: MapperName("braid-disk2".into()),
+                },
+                b"testpass".to_vec(),
+                ok_raw_empty("cryptsetup open"),
+            )
+            .with_output(
+                CmdRequest::BtrfsDeviceScanAll,
+                ok_raw_empty("btrfs device scan"),
+            )
+            .with_output(
+                CmdRequest::Mount {
+                    device: "/dev/mapper/braid-disk1".into(),
+                    mount_point: MountPoint("/mnt/storage".into()),
+                },
+                err_raw("mount", 32, "mount failed"),
+            );
+        let close_names = vec![disk_name("disk1"), disk_name("disk2")];
+        let sleeper = RecordingSleeper::default();
+
+        let err = relock_and_remount(
+            &runner,
+            &fs,
+            &sleeper,
+            &config,
+            &membership,
+            crate::test_fixtures::mock_virtio_backing_path_resolver(),
+            false,
+            &OpenCredential::Passphrase(Passphrase::from_zeroizing(zeroize::Zeroizing::new(
+                "testpass".to_owned(),
+            ))),
+            &close_names,
+        )
+        .expect_err("final mount should fail");
+        assert!(
+            err.to_string().contains("recover remount cycle: re-mount"),
+            "error should preserve re-mount context: {err}"
+        );
+        assert_close_retry_sleeps(sleeper.calls());
     }
 
     /// Intent: When a disk is absent and --allow-degraded is not passed, recover
@@ -13592,7 +13864,8 @@ mod tests {
     /// Scenario: first-ever braid add of one disk. LUKS format succeeded, crash
     ///   before mkfs.btrfs. User runs braid recover. Mount fails because no btrfs
     ///   superblock exists. Error should name the pending-op.json path, the disk's
-    ///   by-id path, and wipefs.
+    ///   by-id path, and wipefs; the busy cleanup close should use the injected
+    ///   sleeper seam.
     #[test]
     fn recover_bootstrap_crash_gives_actionable_instructions() {
         let f = PoolFixture::empty();
@@ -13669,16 +13942,17 @@ mod tests {
                 CmdRequest::CryptsetupClose {
                     mapper: MapperName("braid-disk1".into()),
                 },
-                ok_raw_empty("cryptsetup close"),
+                err_raw("cryptsetup close", 5, "busy"),
             )
             .with_luks_dump_text_luks2("/dev/disk/by-id/virtio-disk1")
             .with_mapper_closed("braid-disk1");
+        let sleeper = RecordingSleeper::default();
 
         let result = cmd_recover(
             &runner,
             &fs,
             &MockByIdResolver::default(),
-            &f.recover_params().build(),
+            &f.recover_params().sleeper(&sleeper).build(),
         );
 
         let err = result.expect_err("should fail with bootstrap instructions");
@@ -13717,6 +13991,7 @@ mod tests {
             probe_pos < close_pos,
             "bootstrap probe must precede cleanup"
         );
+        assert_close_retry_sleeps(sleeper.calls());
     }
 
     /// Intent: when bootstrap recover fails due to wrong passphrase, the error
@@ -15068,6 +15343,60 @@ mod tests {
             runner.requests().is_empty(),
             "expected no runner activity, got: {:?}",
             runner.requests()
+        );
+    }
+
+    // Intent: RecoverWorkAction::WaitForKernelReplace.execute uses the
+    //   sleeper seam supplied by RecoverParams while polling kernel replace.
+    // Why it exists: the action previously constructed RealSleeper inline,
+    //   making tests burn wall-clock time and leaving the injected seam unused.
+    // Scenario: recover just mounted a replace journal; replace status reports
+    //   Running once and Finished on the next poll, so exactly one sleep is
+    //   recorded by the injected sleeper.
+    #[test]
+    fn wait_for_kernel_replace_action_honors_injected_sleeper() {
+        let f = PoolFixture::empty();
+        let mut plan = recover_work_plan_for_journal(replace_journal());
+        plan.open_plan = Some(OpenPlan {
+            to_unlock: Vec::new(),
+            any_open: false,
+            any_missing_member: false,
+            mount_device: String::new(),
+        });
+
+        let mut state = RecoverExecutionState {
+            credential: None,
+            just_mounted: true,
+        };
+
+        let runner = MockRunner::default().with_output_sequence(
+            CmdRequest::BtrfsReplaceStatus {
+                mount_point: MountPoint("/mnt/storage".into()),
+            },
+            vec![
+                ok_raw(
+                    "btrfs replace status -1 /mnt/storage",
+                    "5.0% done, 0 write errs, 0 uncorr. read errs\n",
+                ),
+                ok_raw(
+                    "btrfs replace status -1 /mnt/storage",
+                    "Started on 27.Feb 10:30:00, finished on 27.Feb 10:35:00, 0 write errs, 0 uncorr. read errs\n",
+                ),
+            ],
+        );
+        let fs = MockFs::new(&[]);
+        let resolver = resolver_for(&[]);
+        let sleeper = RecordingSleeper::default();
+        let params = f.recover_params().sleeper(&sleeper).build();
+
+        let result = RecoverWorkAction::WaitForKernelReplace
+            .execute(&plan, &mut state, &runner, &fs, &resolver, &params);
+
+        assert!(matches!(result, Ok(false)), "unexpected result: {result:?}");
+        assert_eq!(
+            sleeper.calls(),
+            vec![REPLACE_WAIT_POLL_INTERVAL],
+            "replace polling must sleep through RecoverParams.sleeper"
         );
     }
 

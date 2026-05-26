@@ -706,7 +706,7 @@ pub(crate) fn close_opened_mappers<R, S, F>(
 ) -> Result<(), CloseMapperError>
 where
     R: CommandRunner,
-    S: Sleeper,
+    S: Sleeper + ?Sized,
     F: Filesystem + ?Sized,
 {
     if opened.is_empty() {

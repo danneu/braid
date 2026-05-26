@@ -7,10 +7,13 @@ use crate::inhibit::RecordingInhibitor;
 use crate::luks::BackingPathResolver;
 use crate::membership::{self, DiskMember, PoolMembership};
 use crate::probe::Filesystem;
+use crate::progress::Sleeper;
 use crate::state_paths::StatePaths;
 use crate::types::{ByIdPath, DiskName, LuksUuid, MountPoint};
 use std::collections::BTreeMap;
 use std::path::PathBuf;
+use std::sync::{Arc, Mutex};
+use std::time::Duration;
 use tempfile::TempDir;
 
 // ---------------------------------------------------------------------------
@@ -75,6 +78,26 @@ pub(crate) fn mock_ok(cmd: &str, stdout: &str) -> RawCommandOutput {
         stdout: stdout.to_owned(),
         stderr: String::new(),
         exit_status: 0,
+    }
+}
+
+/// Shared sleeper test double for command seams that must prove retry
+/// or polling code used the injected sleeper instead of wall-clock sleep.
+#[derive(Clone, Default)]
+pub(crate) struct RecordingSleeper {
+    calls: Arc<Mutex<Vec<Duration>>>,
+}
+
+impl RecordingSleeper {
+    /// Return a snapshot of recorded sleep durations for assertions.
+    pub(crate) fn calls(&self) -> Vec<Duration> {
+        self.calls.lock().unwrap().clone()
+    }
+}
+
+impl Sleeper for RecordingSleeper {
+    fn sleep(&self, duration: Duration) {
+        self.calls.lock().unwrap().push(duration);
     }
 }
 

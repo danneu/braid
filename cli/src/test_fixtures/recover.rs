@@ -18,7 +18,7 @@ use crate::config::Config;
 use crate::inhibit::{AcquireSleepInhibitor, SleepGuard};
 use crate::luks;
 use crate::probe::Filesystem;
-use crate::progress::{self, ProgressOutput};
+use crate::progress::{self, ProgressOutput, Sleeper};
 use crate::recover::RecoverParams;
 use crate::state_paths::StatePaths;
 use std::collections::HashSet;
@@ -57,6 +57,7 @@ impl PoolFixture {
             dry_run: false,
             progress: ProgressOutput::Off,
             sleep_inhibitor: &RECOVER_NOOP_INHIBITOR,
+            sleeper: &progress::NoopSleeper,
             tty: &luks::RealTty,
         }
     }
@@ -75,6 +76,7 @@ pub(crate) struct RecoverParamsBuilder<'a> {
     dry_run: bool,
     progress: ProgressOutput,
     sleep_inhibitor: &'a dyn AcquireSleepInhibitor,
+    sleeper: &'a dyn Sleeper,
     tty: &'a dyn luks::PassphraseReader,
 }
 
@@ -99,6 +101,13 @@ impl<'a> RecoverParamsBuilder<'a> {
         self
     }
 
+    /// Override the sleeper seam for recover tests that need to assert
+    /// retry or polling behavior without sleeping.
+    pub(crate) fn sleeper(mut self, sleeper: &'a dyn Sleeper) -> Self {
+        self.sleeper = sleeper;
+        self
+    }
+
     /// Override the interactive TTY reader for recover tests that must
     /// observe prompt counts without opening /dev/tty.
     pub(crate) fn tty(mut self, tty: &'a dyn luks::PassphraseReader) -> Self {
@@ -116,7 +125,7 @@ impl<'a> RecoverParamsBuilder<'a> {
             dry_run: self.dry_run,
             progress: self.progress,
             sleep_inhibitor: self.sleep_inhibitor,
-            sleeper: &progress::NoopSleeper,
+            sleeper: self.sleeper,
             tty: self.tty,
             backing_path_resolver: mock_virtio_backing_path_resolver(),
         }

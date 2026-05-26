@@ -715,6 +715,7 @@ fn main() {
                             key_file: args.key_file.as_deref(),
                             allow_degraded: args.allow_degraded,
                             dry_run: args.dry_run,
+                            sleeper: &braid_cli::progress::RealSleeper,
                             backing_path_resolver: &backing_path_resolver,
                         },
                     )

@@ -5,7 +5,6 @@ use crate::mount::{self, MountError, OpenPlan, ProbeEvent};
 use crate::preflight;
 use crate::preview::{self, PerDiskStyle, PlanFailure, Preview, PreviewCompleteness, PreviewNote};
 use crate::probe::{self, Filesystem};
-use crate::progress::RealSleeper;
 use crate::state_paths::StatePaths;
 use crate::status_tag::color_enabled_for_stderr;
 use std::path::Path;
@@ -29,6 +28,9 @@ pub struct UnlockParams<'a> {
     pub key_file: Option<&'a Path>,
     pub allow_degraded: bool,
     pub dry_run: bool,
+    /// Sleeper seam for transient mapper-close cleanup retries so tests
+    /// can pin retry behavior without real wall-clock sleeps.
+    pub sleeper: &'a dyn crate::progress::Sleeper,
     /// Seam for resolving by-id paths and mapper backings during probe
     /// and already-open unlock checks.
     pub backing_path_resolver: &'a dyn crate::luks::BackingPathResolver,
@@ -118,7 +120,7 @@ impl UnlockPlan {
                 Err(failure) => {
                     let _ = mount::close_opened_mappers(
                         runner,
-                        &RealSleeper,
+                        params.sleeper,
                         fs,
                         &failure.opened_mappers,
                         color_enabled_for_stderr(),
@@ -260,13 +262,15 @@ pub fn cmd_unlock<R: CommandRunner, F: Filesystem + ?Sized>(
 mod tests {
     use super::*;
     use crate::cmd::{CmdRequest, MockRunner, RawCommandOutput};
+    use crate::mapper_close::{CLOSE_RETRY_ATTEMPTS, CLOSE_RETRY_DELAY};
     use crate::mount::MountError;
     use crate::preview::NoteLevel;
     use crate::test_fixtures::{
-        MOUNT_TEST_PASSPHRASE_BYTES, base_two_disk_runner, err_raw as unlock_err_raw,
-        isolated_paths, luks_uuid_ok, mount_fs, ok_raw as unlock_ok_raw, test_config,
-        test_passphrase_fail, three_disk_membership as unlock_three_disk_membership,
-        two_disk_membership, unlock_btrfs_balance_status_idle, unlock_btrfs_balance_status_paused,
+        MOUNT_TEST_PASSPHRASE_BYTES, RecordingSleeper, base_two_disk_runner,
+        err_raw as unlock_err_raw, isolated_paths, luks_uuid_ok, mount_fs,
+        ok_raw as unlock_ok_raw, test_config, test_passphrase_fail,
+        three_disk_membership as unlock_three_disk_membership, two_disk_membership,
+        unlock_btrfs_balance_status_idle, unlock_btrfs_balance_status_paused,
         unlock_btrfs_device_scan_ok, unlock_luks_uuid_not_luks, unlock_passphrase_file,
         unlock_storage_fs, unlock_with_mount_degraded_ok, unlock_with_mount_ok,
         unlock_with_open_mapper_ok, unlock_with_test_passphrase_ok, unlock_with_three_mappers_open,
@@ -342,6 +346,7 @@ mod tests {
                 key_file: None,
                 allow_degraded: true,
                 dry_run: false,
+                sleeper: &crate::progress::NoopSleeper,
                 backing_path_resolver: crate::test_fixtures::mock_virtio_backing_path_resolver(),
             },
         );
@@ -415,6 +420,7 @@ mod tests {
                 key_file: None,
                 allow_degraded: false,
                 dry_run: false,
+                sleeper: &crate::progress::NoopSleeper,
                 backing_path_resolver: crate::test_fixtures::mock_virtio_backing_path_resolver(),
             },
         );
@@ -489,6 +495,7 @@ mod tests {
                 key_file: None,
                 allow_degraded: false,
                 dry_run: false,
+                sleeper: &crate::progress::NoopSleeper,
                 backing_path_resolver: crate::test_fixtures::mock_virtio_backing_path_resolver(),
             },
         );
@@ -510,7 +517,8 @@ mod tests {
     }
 
     // Intent: unlock reports the original post-open mount failure even if
-    //   best-effort cleanup also fails.
+    //   best-effort cleanup also fails, and cleanup retry sleeps use the
+    //   injected sleeper seam.
     // Why it exists: a cleanup regression must not replace the primary user
     //   action failure with a secondary `cryptsetup close` error.
     // Scenario: two disks open successfully, mount fails, and one mapper stays
@@ -520,6 +528,7 @@ mod tests {
         let (_state_dir, sp) = isolated_paths();
         let config = test_config();
         let membership = two_disk_membership();
+        let sleeper = RecordingSleeper::default();
         let fs = unlock_storage_fs(&[
             "/dev/disk/by-id/virtio-disk1",
             "/dev/disk/by-id/virtio-disk2",
@@ -579,6 +588,7 @@ mod tests {
                     key_file: None,
                     allow_degraded: false,
                     dry_run: false,
+                    sleeper: &sleeper,
                     backing_path_resolver: crate::test_fixtures::mock_virtio_backing_path_resolver(
                     ),
                 },
@@ -600,6 +610,11 @@ mod tests {
         assert!(
             captured.contains("cleanup failed: one or more LUKS mappers opened by this command"),
             "cleanup failure guidance should be emitted, got: {captured:?}"
+        );
+        assert_eq!(
+            sleeper.calls(),
+            vec![CLOSE_RETRY_DELAY; (CLOSE_RETRY_ATTEMPTS - 1) as usize],
+            "cleanup close retry sleeps must use the injected sleeper"
         );
         assert!(
             runner.requests().iter().any(|r| matches!(
@@ -712,6 +727,7 @@ mod tests {
                 key_file: None,
                 allow_degraded: false,
                 dry_run: false,
+                sleeper: &crate::progress::NoopSleeper,
                 backing_path_resolver: crate::test_fixtures::mock_virtio_backing_path_resolver(),
             },
         );
@@ -746,6 +762,7 @@ mod tests {
             key_file: None,
             allow_degraded: false,
             dry_run: true,
+            sleeper: &crate::progress::NoopSleeper,
             backing_path_resolver: crate::test_fixtures::mock_virtio_backing_path_resolver(),
         };
 
@@ -804,6 +821,7 @@ mod tests {
             key_file: Some(Path::new("/run/keys/braid.key")),
             allow_degraded: false,
             dry_run: true,
+            sleeper: &crate::progress::NoopSleeper,
             backing_path_resolver: crate::test_fixtures::mock_virtio_backing_path_resolver(),
         };
 
@@ -877,6 +895,7 @@ mod tests {
             key_file: None,
             allow_degraded: false,
             dry_run: true,
+            sleeper: &crate::progress::NoopSleeper,
             backing_path_resolver: crate::test_fixtures::mock_virtio_backing_path_resolver(),
         };
 
@@ -950,6 +969,7 @@ mod tests {
             key_file: None,
             allow_degraded: false,
             dry_run: true,
+            sleeper: &crate::progress::NoopSleeper,
             backing_path_resolver: crate::test_fixtures::mock_virtio_backing_path_resolver(),
         };
 
@@ -1055,6 +1075,7 @@ mod tests {
                     key_file: None,
                     allow_degraded: false,
                     dry_run: false,
+                    sleeper: &crate::progress::NoopSleeper,
                     backing_path_resolver: crate::test_fixtures::mock_virtio_backing_path_resolver(
                     ),
                 },
@@ -1159,6 +1180,7 @@ mod tests {
                     key_file: None,
                     allow_degraded: false,
                     dry_run: false,
+                    sleeper: &crate::progress::NoopSleeper,
                     backing_path_resolver: crate::test_fixtures::mock_virtio_backing_path_resolver(
                     ),
                 },
@@ -1280,6 +1302,7 @@ mod tests {
                 key_file: None,
                 allow_degraded: false,
                 dry_run: false,
+                sleeper: &crate::progress::NoopSleeper,
                 backing_path_resolver: crate::test_fixtures::mock_virtio_backing_path_resolver(),
             },
         );
@@ -1451,6 +1474,7 @@ Label: none  uuid: aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee\n\
                     key_file: None,
                     allow_degraded: false,
                     dry_run: false,
+                    sleeper: &crate::progress::NoopSleeper,
                     backing_path_resolver: crate::test_fixtures::mock_virtio_backing_path_resolver(
                     ),
                 },
@@ -1555,6 +1579,7 @@ Label: none  uuid: aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee\n\
                 key_file: None,
                 allow_degraded: false,
                 dry_run: false,
+                sleeper: &crate::progress::NoopSleeper,
                 backing_path_resolver: crate::test_fixtures::mock_virtio_backing_path_resolver(),
             },
         );

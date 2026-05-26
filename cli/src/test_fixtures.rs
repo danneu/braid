@@ -200,7 +200,8 @@ pub(crate) use scrub::{
 };
 #[allow(unused_imports)]
 pub(crate) use shared::{
-    MockBackingPathResolver, MockFs, PoolFixture, TEST_PASSPHRASE_BYTES, disk_member,
+    MockBackingPathResolver, MockFs, PoolFixture, RecordingSleeper, TEST_PASSPHRASE_BYTES,
+    disk_member,
     disk_member_with, mock_ok, mock_virtio_backing_path_resolver,
     mock_virtio_offset_backing_path_resolver, test_uuid,
 };
