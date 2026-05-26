@@ -5,7 +5,7 @@ use crate::confirm;
 use crate::inhibit::AcquireSleepInhibitor;
 use crate::journal;
 use crate::membership;
-use crate::parse::parse_btrfs_device_usage;
+use crate::parse::{ParseError, parse_btrfs_device_usage};
 use crate::pool::pool_remove_device_using;
 use crate::preflight;
 use crate::preview::{self, PerDiskStyle, PlanFailure, Preview, PreviewCompleteness, PreviewNote};
@@ -451,14 +451,8 @@ pub fn plan_remove_missing<R: CommandRunner + Sync, F: Filesystem + ?Sized>(
     // survivor already has all data (every chunk is mirrored). This does
     // not match the reproduced relocation-failure mode.
     if pool.devices.len() >= 2 {
-        match check_relocation_space(runner, config.mount_point(), params.missing_id) {
-            Ok(RelocationCheck::Proceed) => {}
-            Ok(RelocationCheck::ProceedWithWarning(body)) => {
-                notes.push(PreviewNote::Warn(body));
-            }
-            Err(e) => {
-                return Err(PlanFailure::with_notes(notes, e));
-            }
+        if let Err(e) = check_relocation_space(runner, config.mount_point(), params.missing_id) {
+            return Err(PlanFailure::with_notes(notes, e));
         }
     }
 
@@ -500,53 +494,62 @@ pub fn cmd_remove_missing<R: CommandRunner + Sync, F: Filesystem + ?Sized>(
     plan.execute(runner, fs, params)
 }
 
-/// Outcome of the relocation-space preflight. `Proceed` means either
-/// the check ran and survivors have enough space, or it was skipped.
-/// `ProceedWithWarning` means the check itself failed (command or
-/// parse error) and the caller should surface the warning body to the
-/// user but still proceed -- a bug in the safety net must not block a
-/// valid operation. A hard "survivors lack space" outcome is a
-/// `RemoveMissingError::Validation` instead.
-#[derive(Debug)]
-enum RelocationCheck {
-    Proceed,
-    ProceedWithWarning(String),
-}
-
 /// Check that surviving devices have enough RAID1-aware, per-type space to absorb
 /// the missing device's allocations. If they don't, btrfs device remove will
 /// either ENOSPC instantly or -- worse -- crash the filesystem to read-only
 /// mid-relocation.
 ///
+/// This helper is fail-closed on every input uncertainty: spawn errors,
+/// nonzero `btrfs device usage --raw` exits, parser-shape errors, and a
+/// missing target entry in the usage output all refuse the operation. The
+/// downstream failure mode is a degraded-pool read-only crash with
+/// `pending-op.json` already written (see
+/// `tests/repro/btrfs-remove-enospc-crash.py`), so a relocation-space
+/// preflight that cannot prove survivor capacity must not proceed.
+///
+/// This deliberately diverges from `remove.rs`'s `>= 2` soft-warn branch:
+/// `remove` runs against a healthy pool where `btrfs device remove` ENOSPCs
+/// cleanly, while `remove-missing` always starts from the degraded context
+/// that reproduced the read-only crash. Do not unify the policies.
+///
 /// Missing devices are identified by `device_size == 0` in `btrfs device usage
 /// --raw` output. This is reliable: present devices always have device_size > 0,
 /// and missing devices always report 0. Their allocation lines (Data, Metadata,
 /// System) are preserved and accurate.
-///
-/// If the check itself fails (parse error, command error), the caller receives
-/// `ProceedWithWarning(body)` so it can surface the warning through the
-/// preview + execute paths without this helper printing directly.
 fn check_relocation_space<R: CommandRunner>(
     runner: &R,
     mount_point: &MountPoint,
     missing_id: u64,
-) -> Result<RelocationCheck, RemoveMissingError> {
+) -> Result<(), RemoveMissingError> {
     let raw = match runner.run(&CmdRequest::BtrfsDeviceUsageRaw {
         mount_point: mount_point.clone(),
     }) {
         Ok(r) => r,
         Err(e) => {
-            return Ok(RelocationCheck::ProceedWithWarning(format!(
-                "ENOSPC pre-flight check failed: {e}; proceeding anyway"
+            return Err(RemoveMissingError::Validation(format!(
+                "ENOSPC pre-flight: btrfs device usage spawn failed: {e}. \
+                 Refusing to remove the missing device without a validated \
+                 relocation-space check. Inspect `btrfs device usage --raw \
+                 {mount_point}` manually, then re-run."
             )));
         }
     };
 
     let usage = match parse_btrfs_device_usage(&raw) {
         Ok(u) => u,
+        Err(ParseError::CommandFailed {
+            exit_code, stderr, ..
+        }) => {
+            return Err(RemoveMissingError::Validation(format!(
+                "btrfs device usage failed (exit {exit_code}): {stderr}"
+            )));
+        }
         Err(e) => {
-            return Ok(RelocationCheck::ProceedWithWarning(format!(
-                "ENOSPC pre-flight check failed: {e}; proceeding anyway"
+            return Err(RemoveMissingError::Validation(format!(
+                "ENOSPC pre-flight: btrfs device usage output unparseable: {e}. \
+                 Refusing to remove the missing device without a validated \
+                 relocation-space check. Inspect `btrfs device usage --raw \
+                 {mount_point}` manually, then re-run."
             )));
         }
     };
@@ -559,8 +562,17 @@ fn check_relocation_space<R: CommandRunner>(
         .collect();
     let remaining: Vec<_> = usage.devices.iter().filter(|d| d.device_size > 0).collect();
 
+    if target.is_empty() {
+        return Err(RemoveMissingError::Validation(format!(
+            "ENOSPC pre-flight: missing devid {missing_id} is not listed in \
+             `btrfs device usage --raw {mount_point}`, so its allocations cannot \
+             be measured. Refusing to remove the missing device without a \
+             validated relocation-space check. Inspect the command output \
+             manually, then re-run."
+        )));
+    }
+
     preflight::check_raid1_relocation_space(&target, &remaining)
-        .map(|()| RelocationCheck::Proceed)
         .map_err(|e| {
             RemoveMissingError::Validation(format!(
                 "{e}\n\nFree up space by deleting files, or add a new device first with `braid add`."
@@ -1063,12 +1075,14 @@ mod tests {
     }
 
     #[test]
-    // Intent: check_relocation_space proceeds gracefully when the command fails.
+    // Intent: check_relocation_space fails closed when the command cannot spawn.
     //
-    // Why it exists: A bug in the safety check shouldn't block a valid operation.
+    // Why it exists: a failed ENOSPC pre-flight means survivor relocation
+    // capacity is unknown, so remove-missing must not start the degraded
+    // btrfs remove path.
     //
-    // Scenario: btrfs device usage returns an error (e.g., old kernel, permission issue).
-    fn check_relocation_space_proceeds_on_command_error() {
+    // Scenario: btrfs device usage cannot be invoked at all.
+    fn check_relocation_space_fails_closed_on_command_error() {
         struct FailingRunner;
         impl CommandRunner for FailingRunner {
             fn run(&self, _request: &CmdRequest) -> Result<RawCommandOutput, CmdError> {
@@ -1084,7 +1098,174 @@ mod tests {
         }
 
         let result = check_relocation_space(&FailingRunner, &mp(), 3);
-        assert!(result.is_ok(), "should proceed on error: {result:?}");
+        let err = result.expect_err("preflight must fail closed on spawn error");
+        match err {
+            RemoveMissingError::Validation(msg) => {
+                assert!(msg.contains("spawn failed"), "got: {msg}");
+                assert!(
+                    msg.contains("validated relocation-space check"),
+                    "got: {msg}"
+                );
+            }
+            other => panic!("expected Validation, got: {other:?}"),
+        }
+    }
+
+    #[test]
+    // Intent: check_relocation_space surfaces a nonzero btrfs exit as a hard
+    // validation failure with btrfs' stderr preserved.
+    //
+    // Why it exists: a command failure such as "not a btrfs filesystem" is
+    // authoritative btrfs feedback, not a braid soft-warn condition.
+    //
+    // Scenario: btrfs device usage exits 1 before emitting parseable output.
+    fn check_relocation_space_fails_closed_on_command_failed_exit() {
+        struct FailingExitRunner;
+        impl CommandRunner for FailingExitRunner {
+            fn run(&self, request: &CmdRequest) -> Result<RawCommandOutput, CmdError> {
+                match request {
+                    CmdRequest::BtrfsDeviceUsageRaw { .. } => Ok(RawCommandOutput {
+                        cmd: "btrfs device usage --raw /mnt/storage".to_owned(),
+                        stdout: String::new(),
+                        stderr: "ERROR: not a btrfs filesystem".to_owned(),
+                        exit_status: 1,
+                    }),
+                    _ => Err(CmdError::MissingMock),
+                }
+            }
+            fn run_with_stdin(
+                &self,
+                request: &CmdRequest,
+                _stdin: &[u8],
+            ) -> Result<RawCommandOutput, CmdError> {
+                self.run(request)
+            }
+        }
+
+        let err = check_relocation_space(&FailingExitRunner, &mp(), 3)
+            .expect_err("nonzero btrfs exit must fail closed");
+        match err {
+            RemoveMissingError::Validation(msg) => {
+                assert!(msg.contains("exit 1"), "got: {msg}");
+                assert!(msg.contains("not a btrfs filesystem"), "got: {msg}");
+                assert!(
+                    !msg.contains("ENOSPC pre-flight"),
+                    "btrfs command failure must not get the braid preflight prefix: {msg}"
+                );
+            }
+            other => panic!("expected Validation, got: {other:?}"),
+        }
+    }
+
+    #[test]
+    // Intent: check_relocation_space fails closed when btrfs exits 0 but emits
+    // output the parser cannot trust.
+    //
+    // Why it exists: malformed usage output means braid cannot prove survivor
+    // capacity before the degraded remove.
+    //
+    // Scenario: btrfs device usage emits a device header missing Device size.
+    fn check_relocation_space_fails_closed_on_parse_error() {
+        let runner = EnospcRunner {
+            device_usage_stdout: "/dev/mapper/braid-disk1, ID: 1\n\
+                                  \x20  Device slack:                 0\n\
+                                  \x20  Unallocated:          10000000\n\n",
+        };
+
+        let err = check_relocation_space(&runner, &mp(), 3)
+            .expect_err("parse uncertainty must fail closed");
+        match err {
+            RemoveMissingError::Validation(msg) => {
+                assert!(msg.contains("unparseable"), "got: {msg}");
+                assert!(
+                    msg.contains("validated relocation-space check"),
+                    "got: {msg}"
+                );
+            }
+            other => panic!("expected Validation, got: {other:?}"),
+        }
+    }
+
+    #[test]
+    // Intent: check_relocation_space fails closed when the requested missing
+    // devid is absent from the parsed usage output.
+    //
+    // Why it exists: an absent target would otherwise look like zero bytes on
+    // the target and incorrectly pass without measuring relocation work.
+    //
+    // Scenario: usage lists only surviving devices even though the pool probe
+    // reported missing devid 3.
+    fn check_relocation_space_fails_closed_on_target_absent_from_usage() {
+        let fixture = "\
+/dev/mapper/braid-disk1, ID: 1
+   Device size:           520093696
+   Device slack:                  0
+   Data,RAID1:             67108864
+   Unallocated:           452984832
+
+/dev/mapper/braid-disk2, ID: 2
+   Device size:           520093696
+   Device slack:                  0
+   Data,RAID1:             67108864
+   Unallocated:           452984832
+
+";
+
+        let runner = EnospcRunner {
+            device_usage_stdout: fixture,
+        };
+
+        let err = check_relocation_space(&runner, &mp(), 3)
+            .expect_err("absent missing target must fail closed");
+        match err {
+            RemoveMissingError::Validation(msg) => {
+                assert!(msg.contains("missing devid 3"), "got: {msg}");
+                assert!(msg.contains("is not listed"), "got: {msg}");
+            }
+            other => panic!("expected Validation, got: {other:?}"),
+        }
+    }
+
+    #[test]
+    // Intent: check_relocation_space still accepts a present missing target
+    // with zero allocations.
+    //
+    // Why it exists: the fail-closed absent-target guard must not reject the
+    // benign no-op case where btrfs lists the missing devid but there is
+    // nothing to relocate.
+    //
+    // Scenario: missing devid 3 is present with device_size 0 and no
+    // allocations; survivors have no useful free space.
+    fn check_relocation_space_passes_present_zero_allocation_missing_target() {
+        let fixture = "\
+/dev/mapper/braid-disk1, ID: 1
+   Device size:           520093696
+   Device slack:                  0
+   Data,RAID1:             67108864
+   Unallocated:                  0
+
+/dev/mapper/braid-disk2, ID: 2
+   Device size:           520093696
+   Device slack:                  0
+   Data,RAID1:             67108864
+   Unallocated:                  0
+
+<missing disk>, ID: 3
+   Device size:                  0
+   Device slack:                  0
+   Unallocated:                  0
+
+";
+
+        let runner = EnospcRunner {
+            device_usage_stdout: fixture,
+        };
+
+        let result = check_relocation_space(&runner, &mp(), 3);
+        assert!(
+            result.is_ok(),
+            "present zero-allocation missing target should pass: {result:?}"
+        );
     }
 
     // --- work-plan render tests ---
@@ -1839,26 +2020,22 @@ mod tests {
         }
     }
 
-    // --- plan_remove_missing soft-warn tests ---
+    // --- plan_remove_missing fail-closed tests ---
 
     /* Intent: when the relocation-space preflight fails with a command
-     * error, `plan_remove_missing` returns a successful plan carrying
-     * one `PreviewNote::Warn` with the ENOSPC soft-warn body and the
-     * usual compiled steps.
+     * error, `plan_remove_missing` refuses with a validation error.
      *
-     * Why it exists: PR 3 moves the direct `eprintln!("warning: ...")`
-     * into the preview model. Without this test, a regression that
-     * dropped the note or re-added the direct stderr print from the
-     * preflight helper would still pass the older "proceeds on command
-     * error" test (which only asserts control flow).
+     * Why it exists: remove-missing runs against a degraded pool where
+     * an unchecked relocation path can force the filesystem read-only
+     * after the journal has been written. The planner must fail before
+     * dry-run or real execution can proceed.
      *
      * Scenario: 3-disk RAID1 pool with devid 3 missing; the
      * `btrfs device usage --raw` call from check_relocation_space fails
-     * with a CmdError so the planner routes the soft-warn into
-     * plan.notes instead of stderr.
+     * with a CmdError while planning a dry-run.
      */
     #[test]
-    fn plan_remove_missing_surfaces_soft_warn_on_command_error() {
+    fn plan_remove_missing_fails_closed_on_command_error() {
         let f = PoolFixture::three_disk_devids_pinned();
         let (runner, _remove_done) =
             RemoveMissingPool::three_disk_one_missing().install(MockRunner::default());
@@ -1870,65 +2047,36 @@ mod tests {
             &runner,
             &MockFs::storage(vec![]),
             &f.remove_missing_params().dry_run(true).build(),
-        )
-        .expect("planning should succeed");
-        assert_eq!(plan.notes.len(), 1, "expected exactly one soft-warn note");
-        match &plan.notes[0] {
-            PreviewNote::Warn(body) => {
+        );
+        let failure = match plan {
+            Ok(_) => panic!("planning must fail closed"),
+            Err(failure) => failure,
+        };
+        assert!(failure.notes.is_empty(), "unexpected notes: {:?}", failure.notes);
+        match failure.error {
+            RemoveMissingError::Validation(msg) => {
+                assert!(msg.contains("spawn failed"), "got: {msg}");
                 assert!(
-                    body.starts_with("ENOSPC pre-flight check failed: "),
-                    "warning body must start with the canonical prefix; got {body:?}"
-                );
-                assert!(
-                    body.ends_with("; proceeding anyway"),
-                    "warning body must end with the canonical suffix; got {body:?}"
-                );
-                assert!(
-                    !body.starts_with("warning:"),
-                    "warn body must not carry the legacy 'warning:' prefix; got {body:?}"
+                    msg.contains("validated relocation-space check"),
+                    "got: {msg}"
                 );
             }
-            other => panic!("expected PreviewNote::Warn, got {other:?}"),
+            other => panic!("expected Validation, got: {other:?}"),
         }
-        // Steps still render: devid 3 is the last missing in a
-        // 2-survivor pool so the soft balance step must be present.
-        let preview = plan.preview();
-        let descriptions: Vec<&str> = preview
-            .steps
-            .iter()
-            .map(|s| s.description.as_str())
-            .collect();
-        assert!(
-            descriptions
-                .iter()
-                .any(|d| d.contains("target specific missing device")),
-            "expected device remove step; got {descriptions:?}"
-        );
-        assert!(
-            descriptions
-                .iter()
-                .any(|d| d.contains("restore redundancy")),
-            "expected soft balance step; got {descriptions:?}"
-        );
     }
 
-    /* Intent: when the relocation-space preflight's parse fails, the
-     * planner still returns a successful plan carrying the soft-warn
-     * note, same as the command-error branch.
+    /* Intent: when the relocation-space preflight's btrfs probe exits
+     * nonzero, the planner fails closed in dry-run too.
      *
-     * Why it exists: `check_relocation_space` has two soft-warn
-     * branches (command error, parse error). Both used to share one
-     * `eprintln!` site; after the refactor, each builds a warn body
-     * independently. This test is the parse-error twin of the
-     * command-error test above and guards against drift between the
-     * two bodies.
+     * Why it exists: a dry-run is still an operator decision point. It
+     * must report that braid cannot validate relocation space instead
+     * of showing an executable plan.
      *
      * Scenario: same 3-disk pool; the `btrfs device usage --raw` call
-     * returns unparseable stdout, triggering
-     * `parse_btrfs_device_usage` to error.
+     * returns exit 1, triggering `ParseError::CommandFailed`.
      */
     #[test]
-    fn plan_remove_missing_surfaces_soft_warn_on_parse_error() {
+    fn plan_remove_missing_fails_closed_on_parse_error() {
         let f = PoolFixture::three_disk_devids_pinned();
         let (runner, _remove_done) =
             RemoveMissingPool::three_disk_one_missing().install(MockRunner::default());
@@ -1946,37 +2094,36 @@ mod tests {
             &MockFs::storage(vec![]),
             &f.remove_missing_params().dry_run(true).build(),
         );
-        let plan = report.expect("planning should succeed");
-        assert_eq!(plan.notes.len(), 1, "expected exactly one soft-warn note");
-        match &plan.notes[0] {
-            PreviewNote::Warn(body) => {
-                assert!(
-                    body.starts_with("ENOSPC pre-flight check failed: "),
-                    "warning body must start with the canonical prefix; got {body:?}"
-                );
-                assert!(
-                    body.ends_with("; proceeding anyway"),
-                    "warning body must end with the canonical suffix; got {body:?}"
-                );
+        let failure = match report {
+            Ok(_) => panic!("planning must fail closed"),
+            Err(failure) => failure,
+        };
+        assert!(failure.notes.is_empty(), "unexpected notes: {:?}", failure.notes);
+        match failure.error {
+            RemoveMissingError::Validation(msg) => {
+                assert!(msg.contains("btrfs device usage failed"), "got: {msg}");
+                assert!(msg.contains("exit 1"), "got: {msg}");
+                assert!(msg.contains("boom"), "got: {msg}");
             }
-            other => panic!("expected PreviewNote::Warn, got {other:?}"),
+            other => panic!("expected Validation, got: {other:?}"),
         }
-        assert!(!plan.preview().steps.is_empty(), "steps must still render");
     }
 
-    /* Intent: `plan.preview().render()` places the ENOSPC soft-warn
+    /* Intent: `plan.preview().render()` places a producible Warn note
      * line above the step block and uses the canonical `[warn] <body>`
      * shape (no legacy `warning:` prefix).
      *
      * Why it exists: the dry-run stdout contract for remove-missing in
      * PR 3 is "warn note(s) render before steps" and the warn body is
-     * body-only. Without a preview-boundary test, a regression that
+     * body-only. The ENOSPC preflight now fails closed, but the
+     * read-only probe can still produce a Warn note for this command.
+     * Without a preview-boundary test, a regression that
      * rendered the warn inline with steps, dropped the `[warn] `
      * prefix, or re-added the `warning:` prefix would only surface in
      * the VM stream-routing test -- adding a unit guardrail here is
      * cheap and catches drift before the VM layer.
      *
-     * Scenario: a hand-built plan with one soft-warn note and the
+     * Scenario: a hand-built plan with one read-only-probe warn note and the
      * compiled steps for devid-3 removal on a 2-survivor pool; assert
      * the rendered byte sequence starts with the warn line and is
      * followed by the dry-run step lines.
@@ -1987,14 +2134,15 @@ mod tests {
             remove_missing_work_plan_for_test(3, 1, 2, &MountPoint("/mnt/storage".into()));
         let plan = RemoveMissingPlan {
             notes: vec![PreviewNote::Warn(
-                "ENOSPC pre-flight check failed: boom; proceeding anyway".into(),
+                "read-only pre-flight failed: mountinfo probe failed; proceeding anyway".into(),
             )],
             work_plan,
         };
         let rendered = plan.preview().render();
         let lines: Vec<&str> = rendered.lines().collect();
         assert_eq!(
-            lines[0], "[warn] ENOSPC pre-flight check failed: boom; proceeding anyway",
+            lines[0],
+            "[warn] read-only pre-flight failed: mountinfo probe failed; proceeding anyway",
             "warn note must render first; got full output:\n{rendered}"
         );
         assert!(
@@ -2020,19 +2168,19 @@ mod tests {
      * canonical form. A regression that reintroduces the legacy
      * prefix -- either in execute's replay or by re-wrapping the body
      * -- fails here.
-     * Scenario: hand-built notes vec with one soft-warn body; render
+     * Scenario: hand-built notes vec with one read-only-probe warn body; render
      * via `RemoveMissingPlan::STDERR_STYLE` and assert byte-exact
      * output with no `warning:` substring.
      */
     #[test]
     fn remove_missing_warn_notes_render_canonical_bracketed_form() {
         let notes = vec![PreviewNote::Warn(
-            "ENOSPC pre-flight check failed: boom; proceeding anyway".into(),
+            "read-only pre-flight failed: mountinfo probe failed; proceeding anyway".into(),
         )];
         let rendered = preview::render_notes_for_stderr(&notes, RemoveMissingPlan::STDERR_STYLE);
         assert_eq!(
             rendered,
-            "[warn] ENOSPC pre-flight check failed: boom; proceeding anyway\n",
+            "[warn] read-only pre-flight failed: mountinfo probe failed; proceeding anyway\n",
         );
         assert!(
             !rendered.contains("warning:"),

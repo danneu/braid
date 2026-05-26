@@ -1,22 +1,21 @@
-# Test: braid remove-missing -- ENOSPC pre-flight soft-warn stream routing
+# Test: braid remove-missing -- ENOSPC pre-flight fails closed
 #
-# Intent: pin the stdout/stderr contract for the soft-warn branch of
-# `check_relocation_space`. Under `--dry-run` the warning must appear on
-# stdout as a `[warn] <body>` note and stderr must be empty; under
-# real-run the same warning must appear on stderr using the canonical
-# `[warn] <body>` wording (no legacy `warning: ` prefix -- plan-derived
-# Warn notes now render through the shared
-# `preview::render_notes_for_stderr` helper in both modes).
+# Intent: verify that `braid remove-missing` refuses when the ENOSPC
+# relocation-space pre-flight cannot validate `btrfs device usage --raw`,
+# in both dry-run and real-run.
 #
-# Why it exists: a regression that either (a) leaks the warn on stderr
-# during `--dry-run`, (b) drops the `[warn] ` prefix during real-run,
-# or (c) reintroduces the legacy `warning: ` prefix would only surface
-# through a human noticing drift in an SSH session. Unit tests catch
-# the plan-level shape; this test catches the wire-level stream routing.
+# Why it exists: this command runs on a degraded pool. If the pre-flight
+# cannot prove survivor relocation capacity, proceeding can hit ENOSPC
+# mid-relocation, force the filesystem read-only, and strand
+# pending-op.json. The refusal fires inside `plan_remove_missing`,
+# before `journal::write_journal`; the absence of pending-op.json after
+# the real-run refusal is the proof of fail-closed behavior.
 #
 # Scenario: 3-disk RAID1 pool, disk3 dies, pool mounted degraded. A PATH
 # wrapper intercepts `btrfs device usage --raw` and fails the single
-# call issued by `check_relocation_space`.
+# call issued by `check_relocation_space`. Dry-run and real-run both
+# exit nonzero, leave the missing device in btrfs, and the real-run
+# leaves no journal behind.
 
 import base64
 import json
@@ -122,72 +121,48 @@ def run_with_wrapper(args):
     return machine.execute(shell_cmd)
 
 
-# --- Phase 4: Dry-run must route the warn to stdout, leave stderr empty ---
+# --- Phase 4: Dry-run must refuse and leave the pool unchanged ---
 
-with subtest("dry-run: warn goes to stdout, stderr is empty"):
+with subtest("dry-run: preflight failure refuses before plan render"):
     (status, _) = run_with_wrapper(
         f"remove-missing --missing-id {missing_devid} --dry-run "
         ">/tmp/out 2>/tmp/err"
     )
-    assert status == 0, f"dry-run should succeed; exit {status}"
+    assert status != 0, f"dry-run should fail; exit {status}"
     out = machine.succeed("cat /tmp/out")
     err = machine.succeed("cat /tmp/err")
     assert (
-        "[warn] ENOSPC pre-flight check failed:" in out
-    ), f"expected [warn] line on stdout; got:\n{out}"
-    assert (
-        "; proceeding anyway" in out
-    ), f"expected canonical suffix on stdout; got:\n{out}"
-    assert (
-        "warning:" not in out
-    ), f"dry-run stdout must not carry the legacy 'warning:' prefix; got:\n{out}"
-    assert "\x1b[" not in out, f"dry-run stdout must be plain without a TTY; got:\n{out}"
-    assert err.strip() == "", f"dry-run stderr must be empty; got:\n{err!r}"
+        "btrfs device usage failed (exit 1): simulated btrfs failure" in err
+    ), f"expected validation message on stderr; got:\n{err}"
+    assert "ENOSPC pre-flight" not in err, (
+        f"btrfs command failure should surface btrfs stderr directly; got:\n{err}"
+    )
+    assert "[long" not in out, f"dry-run must not render mutation steps:\n{out}"
+    fi_show = machine.succeed("btrfs fi show /mnt/storage")
+    assert "missing" in fi_show.lower(), (
+        f"dry-run refusal must leave missing device in pool:\n{fi_show}"
+    )
 
-# --- Phase 5: Real-run must emit the canonical `[warn] ...` stderr line ---
-# This phase mutates the pool (the remove-missing completes), so it must
-# come last.
+# --- Phase 5: Real-run must refuse before writing a journal ---
 
-with subtest("real-run: warn appears on stderr with the canonical [warn] prefix"):
+with subtest("real-run: preflight failure refuses before journal"):
     (status, _) = run_with_wrapper(
         f"remove-missing --missing-id {missing_devid} --yes "
         ">/tmp/out2 2>/tmp/err2"
     )
-    assert status == 0, f"real-run should succeed; exit {status}"
+    assert status != 0, f"real-run should fail; exit {status}"
     err2 = machine.succeed("cat /tmp/err2")
     assert (
-        "[warn] ENOSPC pre-flight check failed:" in err2
-    ), f"expected canonical '[warn] ...' line on stderr; got:\n{err2}"
-    assert (
-        "; proceeding anyway" in err2
-    ), f"expected canonical suffix on stderr; got:\n{err2}"
-    assert (
-        "warning:" not in err2
-    ), f"real-run stderr must not carry the legacy 'warning:' prefix; got:\n{err2}"
-    # Principle 13: a [wait] row precedes the btrfs device remove and the
-    # post-remove RAID1 soft-balance restore, each closed by an [ok] row.
-    rm_wait = f"[wait] pool: removing missing devid {missing_devid}..."
-    rm_ok = f"[ok]   pool: missing devid {missing_devid} removed"
-    assert rm_wait in err2 and rm_ok in err2, (
-        f"expected remove-missing wait/ok pair, got: {err2!r}"
-    )
-    assert err2.find(rm_wait) < err2.find(rm_ok), (
-        f"remove-missing wait must precede ok, got: {err2!r}"
-    )
-    restore_wait = "[wait] pool: restoring RAID1 redundancy..."
-    restore_ok = "[ok]   pool: RAID1 redundancy restored"
-    assert restore_wait in err2 and restore_ok in err2, (
-        f"expected RAID1 restore wait/ok pair, got: {err2!r}"
-    )
-    assert err2.find(restore_wait) < err2.find(restore_ok), (
-        f"restore wait must precede restore ok, got: {err2!r}"
+        "btrfs device usage failed (exit 1): simulated btrfs failure" in err2
+    ), f"expected validation message on stderr; got:\n{err2}"
+    assert "[wait] pool: removing missing devid" not in err2, (
+        f"real-run must fail before the mutating btrfs remove starts:\n{err2}"
     )
     assert "\x1b[" not in err2, f"real-run stderr must be plain without a TTY; got:\n{err2}"
-
-with subtest("real-run actually removed the missing device"):
     fi_show = machine.succeed("btrfs fi show /mnt/storage")
-    assert (
-        "missing" not in fi_show.lower()
-    ), f"pool should have no missing device after real-run:\n{fi_show}"
+    assert "missing" in fi_show.lower(), (
+        f"real-run refusal must leave missing device in pool:\n{fi_show}"
+    )
+    machine.fail("test -f /var/lib/braid/pending-op.json")
 
 machine.shutdown()

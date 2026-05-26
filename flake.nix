@@ -599,8 +599,8 @@
               braid = linuxCrane.braid;
             }
           );
-          braid-remove-missing-softwarn = pkgs.testers.nixosTest (
-            import ./tests/cli/braid-remove-missing-softwarn.nix {
+          braid-remove-missing-preflight-fails-closed = pkgs.testers.nixosTest (
+            import ./tests/cli/braid-remove-missing-preflight-fails-closed.nix {
               braid = linuxCrane.braid;
             }
           );
