@@ -60,10 +60,12 @@ pub(crate) fn scrub_status_running() -> (CmdRequest, RawCommandOutput) {
         "UUID:             12345678-1234-1234-1234-123456789abc\n\
          Scrub started:    Mon Jan  1 00:00:00 2024\n\
          Status:           running\n\
-         Duration:         0:00:05\n\
-         Total to scrub:   30408704000\n\
-         Rate:             2952790016/s\n\
-         10.00% done\n\
+         Duration:         0:00:01\n\
+         Time left:        0:00:01\n\
+         ETA:              Mon Jan  1 00:00:02 2024\n\
+         Total to scrub:   1073741824\n\
+         Bytes scrubbed:   536870912  (50.00%)\n\
+         Rate:             536870912/s\n\
          Error summary:    no errors found\n",
     )
 }

@@ -178,26 +178,24 @@ pub(crate) fn idle_scrub_finished() -> (CmdRequest, RawCommandOutput) {
     )
 }
 
-/// Running scrub output with percentage-driven bytes to pin parser math.
-pub(crate) fn idle_scrub_running(pct: u8) -> (CmdRequest, RawCommandOutput) {
-    let total: u64 = 30408704000;
-    let scrubbed = total * u64::from(pct) / 100;
+/// Concrete 45% running scrub output with btrfs-derived estimates.
+pub(crate) fn idle_scrub_running() -> (CmdRequest, RawCommandOutput) {
     (
         CmdRequest::BtrfsScrubStatus {
             mount_point: idle_mp(),
         },
         mock_ok(
             "btrfs scrub status --raw /mnt/storage",
-            &format!(
-                "UUID:             12345678-1234-1234-1234-123456789abc\n\
-                 Scrub started:    Mon Jan  1 00:00:00 2024\n\
-                 Status:           running\n\
-                 Duration:         0:00:05\n\
-                 Total to scrub:   {total}\n\
-                 Bytes scrubbed:   {scrubbed}  ({pct}.00%)\n\
-                 Rate:             2952790016/s\n\
-                 Error summary:    no errors found\n"
-            ),
+            "UUID:             12345678-1234-1234-1234-123456789abc\n\
+             Scrub started:    Mon Jan  1 00:00:00 2024\n\
+             Status:           running\n\
+             Duration:         0:00:05\n\
+             Time left:        0:00:06\n\
+             ETA:              Mon Jan  1 00:00:11 2024\n\
+             Total to scrub:   30408704000\n\
+             Bytes scrubbed:   13683916800  (45.00%)\n\
+             Rate:             2736783360/s\n\
+             Error summary:    no errors found\n",
         ),
     )
 }

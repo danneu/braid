@@ -217,7 +217,7 @@ mod tests {
     //   `busy_exclop_short_circuits_scrub_probe`.
     #[test]
     fn busy_when_scrub_running() {
-        let (scrub_req, scrub_out) = idle_scrub_running(45);
+        let (scrub_req, scrub_out) = idle_scrub_running();
         let runner = MockRunner::default().with_output(scrub_req, scrub_out);
         let fs = IdleMockFs::with_exclop("none");
 
