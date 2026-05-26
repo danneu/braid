@@ -47,8 +47,11 @@ pub fn check_pool_unlocked_if_membership_exists(
 }
 
 /// Refuse if a pending-operation journal exists.
-/// When the journal is present, pool.json may be inconsistent — only
-/// `status`, `recover`, and `lock` are safe to run.
+/// This gate is called by the membership/mount/key-enrollment commands
+/// (`add`, `remove`, `remove-missing`, `replace`, `unlock`, `enroll`, and
+/// `discover --write`). `recover` is the only journal-clearing path; read-only
+/// diagnostics and cleanup surfaces (`status`, `doctor`, `lock`, bare
+/// `discover`) stay available.
 pub fn check_no_pending_operation(paths: &StatePaths) -> Result<(), String> {
     match journal::load_journal(paths) {
         Ok(Some(j)) => Err(format!(

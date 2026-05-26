@@ -98,6 +98,43 @@ with subtest("discover lists labeled disks and prints write hint"):
 with subtest("discover without --write does not create pool.json"):
     assert_pool_json_absent()
 
+with subtest("bare discover ignores pending-op journal"):
+    # Intent: bare discover remains available while pending-op.json exists.
+    # Why it exists: recovery mode must preserve read-only diagnostics; a
+    # regression that sends bare discover through the pending-op gate would
+    # hide the labeled-disk preview operators need during recovery.
+    # Scenario: an interrupted mutation left a pending journal, and the
+    # operator runs bare discover to inspect attached braid-labeled disks
+    # without modifying pool.json.
+    journal = {
+        "started_at": "2026-01-01T00:00:00Z",
+        "op": {"op": "Add", "phase": "PoolMutation", "targets": {}},
+        "pre_membership": {"disks": {}},
+        "target_membership": {"disks": {}},
+    }
+    machine.succeed("mkdir -p /var/lib/braid")
+    machine.succeed(
+        "printf '%s' "
+        + shlex.quote(json.dumps(journal, sort_keys=True))
+        + " > /var/lib/braid/pending-op.json"
+    )
+
+    rc, out = machine.execute("braid discover 2>&1")
+    assert rc == 0, "bare discover should succeed with pending-op present:\n" + out
+    assert "disk1" in out, "expected disk1 in discover output:\n" + out
+    assert "disk2" in out, "expected disk2 in discover output:\n" + out
+    assert "pass --write to save to /var/lib/braid/pool.json" in out, (
+        "expected write hint in discover output:\n" + out
+    )
+    assert "interrupted operation" not in out, (
+        "bare discover must not report the pending-op gate:\n" + out
+    )
+    assert "pending-op.json" not in out, (
+        "bare discover must not consult the pending-op journal:\n" + out
+    )
+    machine.succeed("rm /var/lib/braid/pending-op.json")
+    assert_pool_json_absent()
+
 with subtest("parseable off-schema preview refuses and leaves pool.json unchanged"):
     # Intent: bare discover refuses parseable but off-schema pool.json
     # with rebuild guidance and makes no changes.

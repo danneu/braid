@@ -80,6 +80,42 @@ with subtest("Lock pool and inject journal"):
     )
     machine.succeed("test -f /var/lib/braid/pending-op.json")
 
+# --- Phase 2.5: diagnostics remain available in recovery mode ---
+
+with subtest("doctor and lock remain available with journal present"):
+    # Intent: `braid doctor --json` and `braid lock` bypass the pending-op
+    # gate while recovery mode is active.
+    # Why it exists: recovery mode must keep diagnostics and cleanup
+    # available; a broad preflight would strand operators with no doctor
+    # report and no idempotent lock path.
+    # Scenario: the pool is already locked and an interrupted-operation
+    # journal exists. The operator checks diagnostics and retries lock
+    # before running recover.
+    doctor_rc, doctor_raw = machine.execute("braid doctor --json 2>/tmp/doctor-pending.err")
+    doctor_err = machine.succeed("cat /tmp/doctor-pending.err")
+    doctor_report = json.loads(doctor_raw)
+    assert "checks" in doctor_report, (
+        "doctor should render a JSON diagnostic report, rc={}: stdout={!r} stderr={!r}".format(
+            doctor_rc, doctor_raw, doctor_err
+        )
+    )
+    assert "interrupted operation detected (pending-op.json exists" not in (
+        doctor_raw + doctor_err
+    ), (
+        "doctor must not report the pending-op gate, rc={}: stdout={!r} stderr={!r}".format(
+            doctor_rc, doctor_raw, doctor_err
+        )
+    )
+
+    lock_rc, lock_out = machine.execute("braid lock 2>&1")
+    assert lock_rc == 0, "lock should be an idempotent no-op, got:\n" + lock_out
+    assert "pool already locked" in lock_out, (
+        "lock should reach its normal no-op path, got:\n" + lock_out
+    )
+    assert "interrupted operation detected (pending-op.json exists" not in lock_out, (
+        "lock must not report the pending-op gate:\n" + lock_out
+    )
+
 # --- Phase 3: braid unlock must fail ---
 
 with subtest("braid unlock refuses with journal present"):

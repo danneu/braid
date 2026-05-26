@@ -10,8 +10,11 @@ use thiserror::Error;
 const PENDING_OP_MANUAL_REMEDIATION: &str = "Remove /var/lib/braid/pending-op.json after manual reconciliation (see docs/internals/luks-unlock.md) and re-run.";
 
 /// A pending-operation journal records the full context of a mutation in progress.
-/// When this file exists, braid enters recovery mode: only `status`, `recover`,
-/// and `lock` are permitted. All other commands hard-fail. The two embedded
+/// When this file exists, braid enters recovery mode: `add`, `remove`,
+/// `remove-missing`, `replace`, `unlock`, `enroll`, and `discover --write`
+/// hard-fail, while read-only diagnostics and cleanup surfaces (`status`,
+/// `doctor`, `lock`, bare `discover`) stay available. `recover` is the only
+/// command that clears the journal. The two embedded
 /// `PoolMembership` snapshots are load-bearing identity surfaces (see plan
 /// "Accepted risk: journal-as-identity trust surface"); `deny_unknown_fields`
 /// rejects unknown top-level keys to catch coherent hand-edits at load.

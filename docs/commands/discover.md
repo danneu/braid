@@ -52,7 +52,7 @@ sudo braid discover --write --expect-count 3
 
 ## What happens under the hood
 
-1. Checks for a pending operation journal (refuses if one exists).
+1. With `--write`, refuses if a pending operation journal (`pending-op.json`) exists. Bare `discover` is read-only and skips this gate.
 2. Refuses over an existing UUID-keyed `pool.json` (bare and `--write`). A corrupt or off-schema `pool.json` is the documented rebuild path: bare `discover` prints the rebuild remediation, and `discover --write` writes a forensic `pool.json.corrupt-<RFC3339-UTC>` snapshot adjacent to the new file, then rebuilds. If the snapshot cannot be written (full disk, read-only state directory), `discover --write` refuses rather than destroy the corrupt original.
 3. Reads all entries in `/dev/disk/by-id/`, skipping partition entries (e.g., `ata-TOSHIBA-part1`).
 4. Resolves each by-id symlink to its canonical kernel device. Skips with a `cannot canonicalize` warning when the symlink is dangling (e.g., udev didn't clean up after a disk removal).
@@ -68,10 +68,10 @@ sudo braid discover --write --expect-count 3
 ## Safety checks
 
 - Refuses any operation on an existing UUID-keyed `pool.json`. Corrupt or off-schema files are allowed for `--write` rebuild only; the original is copied to `pool.json.corrupt-<RFC3339-UTC>` before overwrite, and `--write` refuses if that snapshot cannot be written (full disk, read-only state directory). Run with all intended pool members attached; see `docs/internals/luks-unlock.md`.
-- Refuses if a pending operation journal (`pending-op.json`) exists -- run `braid recover` to reconcile.
-- Refuses if another braid operation is in progress (pool lock `/run/braid-pool.lock` is held) -- retry once it finishes.
+- With `--write`, refuses if a pending operation journal (`pending-op.json`) exists -- run `braid recover` to reconcile.
+- With `--write`, refuses if another braid operation is in progress (pool lock `/run/braid-pool.lock` is held) -- retry once it finishes.
 - With `--expect-count`, refuses to write if the discovered member count is not exactly the requested count.
-- Without `--write`, makes no changes at all -- read-only scan.
+- Without `--write`, makes no changes at all -- read-only scan that takes no pool lock and does not consult the pending-op journal.
 - Dangling `/dev/disk/by-id/` symlinks are skipped with a warning -- a diagnostic operators need when udev leaves a stale alias behind after a disk swap.
 - LUKS1 devices are skipped with a warning.
 - Refuses the scan if two distinct devices share the same `braid-<name>` LUKS label -- relabel or detach one disk before retrying.
