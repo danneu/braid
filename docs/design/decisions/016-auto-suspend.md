@@ -75,7 +75,7 @@ Neither smartd nor braid-monitor should wake the system or prevent suspend. They
 
 ### Paused balance = busy
 
-A paused balance holds the btrfs exclusive operation lock. `check_no_exclusive_op` in preflight.rs already treats paused as "refuse." Same logic in `braid idle` — don't suspend mid-pause.
+A paused balance holds the btrfs exclusive-operation lock. The mutating-command preflight in `preflight.rs` already treats a paused balance as a hard refusal (it can block indefinitely, so braid cannot enqueue behind it). Same logic in `braid idle` -- don't suspend mid-pause.
 
 ### WoL managed by braid
 

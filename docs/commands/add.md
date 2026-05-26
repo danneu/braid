@@ -90,6 +90,8 @@ The name is stored in pool.json and used in LUKS mapper names (`braid-toshiba1`)
 
 A sleep inhibitor is held during all irreversible operations to prevent the system from suspending mid-operation.
 
+If a btrfs exclusive operation (a running balance, device add/remove/replace, resize, or swap activate) is already in flight on the pool, braid does not fail -- its `btrfs` commands queue behind the in-flight operation (via `--enqueue`) and the kernel runs them when the pool is free. A *paused* balance is the exception and is refused (see Safety checks below).
+
 ## Disk acceptance rules
 
 braid classifies each disk before acting:
@@ -111,7 +113,7 @@ braid classifies each disk before acting:
 - Warns if existing pool drives have a keyfile but `--enroll` was not passed
 - Refuses if a pending operation journal (`pending-op.json`) exists -- run `braid recover` to reconcile.
 - Refuses if another braid operation is in progress (pool lock `/run/braid-pool.lock` is held) -- retry once it finishes.
-- Refuses if a btrfs exclusive operation (balance, device remove, resize) is already running on the pool
+- Refuses if a btrfs balance is *paused* on the pool -- resume or cancel it first. A paused balance holds the exclusive-operation lock indefinitely, so braid cannot wait it out.
 
 ## Interrupted adds
 

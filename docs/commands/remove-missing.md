@@ -68,6 +68,8 @@ sudo braid remove-missing --missing-id 3 --yes
 
 A sleep inhibitor is held during the removal and the subsequent soft balance (if triggered).
 
+If a btrfs exclusive operation (a running balance, device add/remove/replace, resize, or swap activate) is already in flight on the pool, braid does not fail -- its `btrfs` commands queue behind the in-flight operation (via `--enqueue`) and the kernel runs them when the pool is free. A *paused* balance is the exception and is refused (see Safety checks below).
+
 ## Safety checks / refusal cases
 
 - Refuses if the pool is not mounted
@@ -78,7 +80,7 @@ A sleep inhibitor is held during the removal and the subsequent soft balance (if
 - Refuses on a 2-disk RAID1 pool with one disk missing -- the kernel refuses to drop a RAID1 pool below two devices. Use `braid replace --old <missing-name> --new <new-name>=/dev/disk/by-id/<...> --missing-id <devid>` to repair the dead disk, or `braid add` first and then re-run.
 - Refuses if a pending operation journal (`pending-op.json`) exists -- run `braid recover` to reconcile.
 - Refuses if another braid operation is in progress (pool lock `/run/braid-pool.lock` is held) -- retry once it finishes.
-- Refuses if a btrfs exclusive operation is already running
+- Refuses if a btrfs balance is *paused* on the pool -- resume or cancel it first. A paused balance holds the exclusive-operation lock indefinitely, so braid cannot wait it out.
 
 ## Related commands
 
