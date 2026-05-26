@@ -888,8 +888,9 @@ fn format_disk_name_list(names: &[DiskName]) -> String {
 }
 
 /// Returns the no-op "nothing to do" message, without any channel-specific
-/// formatting. Shared by the dry-run `PreviewNote::Info` and the real-run
-/// stderr `eprintln!` so both paths see byte-identical wording.
+/// formatting. Builds the planning-time `PreviewNote::Info`; dry-run renders
+/// it via `Preview::render` and real-run emits it via `emit_notes_to_stderr`,
+/// so both channels see byte-identical wording from one source.
 fn format_add_noop(names: &[DiskName]) -> String {
     format!(
         "Nothing to do -- {} already in pool.",
@@ -1143,10 +1144,20 @@ impl AddPlan {
             }
         }
 
+        // A non-empty work plan must yield at least one journal target:
+        // is_noop() (targets.is_empty()) already returned at the top of
+        // execute(), and every surviving target either inserts into
+        // journal_targets (Fresh/OpenRecoverable at planning,
+        // ClosedPresentLuks SamePool above) or returns Err. Empty here is an
+        // internal accounting bug -- fail closed before the journal write
+        // instead of falling through. The downstream pool_after .expect()
+        // relies on this.
         if journal_targets.is_empty() {
-            luks_guard.disarm();
-            eprintln!("{}", format_add_noop(&self.names));
-            return Ok(());
+            return Err(AddError::Validation(
+                "add work plan has targets but produced no journal targets after \
+                 identity verification"
+                    .into(),
+            ));
         }
 
         let mount_point = self.config.mount_point();
@@ -1771,9 +1782,9 @@ pub fn plan_add<R: CommandRunner + Sync, F: Filesystem + ?Sized>(
     // No-op preview: zero steps + Info note naming the already-in-pool
     // target(s). The Info note suppresses `Preview::render`'s
     // `nothing to do.` fallback (see `preview.rs`:
-    // `render_info_note_suppresses_nothing_to_do`), matching real-run's
-    // `eprintln!("Nothing to do -- ...")` wording via the shared
-    // `format_add_noop` helper.
+    // `render_info_note_suppresses_nothing_to_do`). Real-run emits this same
+    // Info note via `emit_notes_to_stderr`, so dry-run and real-run share one
+    // `format_add_noop` source with no separate real-run `eprintln!`.
     if work_plan.is_noop() {
         notes.push(PreviewNote::Info(format_add_noop(&names)));
     }
