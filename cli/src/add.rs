@@ -766,6 +766,12 @@ impl AddWorkPlan {
                 steps.push(Step {
                     risk: "long",
                     description: "btrfs balance to RAID1".into(),
+                    // HARD convert, not ,soft. When growing an already-RAID1
+                    // pool (3rd+ device), every chunk is already RAID1, so only
+                    // a hard rewrite redistributes copies onto the new device;
+                    // ,soft would skip them all and leave it empty. A 1->2 add
+                    // converts existing single chunks either way. See
+                    // docs/internals/btrfs/balance-soft.md.
                     commands: vec![CmdRequest::BtrfsBalanceRaid1 {
                         mount_point: self.mount_point.clone(),
                     }],

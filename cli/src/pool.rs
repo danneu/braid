@@ -346,7 +346,9 @@ fn device_remove_error(
     }
 }
 
-/// Balance pool to RAID1 with progress display.
+/// Hard-convert pool to RAID1 with progress display; `add` uses this so
+/// an already-RAID1 pool rewrites chunks onto the new device. Contrast
+/// `pool_balance_raid1_soft` (see docs/internals/btrfs/balance-soft.md).
 pub fn pool_balance_raid1<R: CommandRunner + Sync>(
     runner: &R,
     mount_point: &MountPoint,
