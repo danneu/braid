@@ -22,7 +22,8 @@ use crate::state_paths::StatePaths;
 use crate::status::{BalanceReport, get_balance_report};
 use crate::status_tag::{StatusTag, color_enabled_for_stderr, emit_status, status_line};
 use crate::types::{
-    ByIdPath, ConfigDiskState, DiskName, LuksUuid, MountPoint, PoolState, format_uuid_list,
+    ByIdPath, ConfigDiskState, DiskName, LuksUuid, MountPoint, PoolDevice, PoolState,
+    format_uuid_list,
 };
 use std::path::PathBuf;
 use std::time::Duration;
@@ -160,6 +161,22 @@ fn resolve_by_id_for_underlying(
     matches.sort_by(|a, b| (a.0, &a.1).cmp(&(b.0, &b.1)));
     let selected = matches.into_iter().next().unwrap().2;
     ByIdPath::parse(&selected).map_err(|e| RecoverError::Failed(e.to_string()))
+}
+
+/// Decision 017 `added_at` precedence for recover's pool.json rebuild.
+///
+/// Existing pool.json wins, then the journal snapshot member, then a fresh
+/// stamp. Keep this local because recover owns the multi-source replay rule.
+fn resolve_added_at(
+    prior: Option<&PoolMembership>,
+    fallback: &DiskMember,
+    uuid: &LuksUuid,
+) -> Option<String> {
+    prior
+        .and_then(|p| p.by_uuid(uuid))
+        .and_then(|m| m.added_at.clone())
+        .or_else(|| fallback.added_at.clone())
+        .or_else(|| Some(crate::util::now_iso()))
 }
 
 /// Rebuild pool.json from the live mounted pool and clear the pending-operation journal.
@@ -1636,6 +1653,8 @@ fn recover_membership_matching_expected(
     let mut recovered = PoolMembership::empty();
     for dev in &pool.devices {
         let Some(expected_member) = expected.by_uuid(&dev.luks_uuid) else {
+            // Decision 017 uses committed target membership here, so this
+            // wording intentionally differs from the pre/target-union paths.
             return Err(RecoverError::Failed(format!(
                 "device {} (LUKS UUID {}) is in the live pool but is not part of the expected \
                  committed membership.",
@@ -1643,11 +1662,7 @@ fn recover_membership_matching_expected(
             )));
         };
         let by_id = resolve_by_id_for_underlying(by_id_resolver, &dev.underlying)?;
-        let added_at = prior
-            .and_then(|p| p.by_uuid(&dev.luks_uuid))
-            .and_then(|m| m.added_at.clone())
-            .or_else(|| expected_member.added_at.clone())
-            .or_else(|| Some(crate::util::now_iso()));
+        let added_at = resolve_added_at(prior, expected_member, &dev.luks_uuid);
         recovered.insert(
             dev.luks_uuid.clone(),
             DiskMember {
@@ -1679,11 +1694,7 @@ fn recover_membership_matching_expected(
                 if recovered.by_uuid(uuid).is_some() {
                     continue;
                 }
-                let added_at = prior
-                    .and_then(|p| p.by_uuid(uuid))
-                    .and_then(|m| m.added_at.clone())
-                    .or_else(|| expected_member.added_at.clone())
-                    .or_else(|| Some(crate::util::now_iso()));
+                let added_at = resolve_added_at(prior, expected_member, uuid);
                 recovered.insert(
                     uuid.clone(),
                     DiskMember {
@@ -1849,19 +1860,28 @@ fn live_member_uuids(pool: &PoolState) -> std::collections::BTreeSet<LuksUuid> {
         .collect()
 }
 
+/// Foreign-device rejection for recovery paths that rebuild from the
+/// pre-operation and target membership union.
+///
+/// Kept distinct from the committed-target rejection because Decision 017 uses
+/// different membership sets in different recovery phases.
+fn foreign_live_device_not_in_snapshot(dev: &PoolDevice) -> RecoverError {
+    RecoverError::Failed(format!(
+        "device {} (LUKS UUID {}) is in the live pool but has no by-id path in either \
+         the pre-operation or target membership snapshot.\n\
+         This must be resolved manually -- provide the correct \
+         /dev/disk/by-id/ path and re-run recovery.",
+        dev.mapper.0, dev.luks_uuid
+    ))
+}
+
 fn validate_live_members_allowed(
     pool: &PoolState,
     allowed: &PoolMembership,
 ) -> Result<(), RecoverError> {
     for dev in &pool.devices {
         if allowed.by_uuid(&dev.luks_uuid).is_none() {
-            return Err(RecoverError::Failed(format!(
-                "device {} (LUKS UUID {}) is in the live pool but has no by-id path in either \
-                 the pre-operation or target membership snapshot.\n\
-                 This must be resolved manually -- provide the correct \
-                 /dev/disk/by-id/ path and re-run recovery.",
-                dev.mapper.0, dev.luks_uuid
-            )));
+            return Err(foreign_live_device_not_in_snapshot(dev));
         }
     }
     Ok(())
@@ -1884,20 +1904,10 @@ fn build_membership_from_live_pool(
     let mut recovered = PoolMembership::empty();
     for dev in &pool.devices {
         let Some(union_member) = union.by_uuid(&dev.luks_uuid) else {
-            return Err(RecoverError::Failed(format!(
-                "device {} (LUKS UUID {}) is in the live pool but has no by-id path in either \
-                 the pre-operation or target membership snapshot.\n\
-                 This must be resolved manually -- provide the correct \
-                 /dev/disk/by-id/ path and re-run recovery.",
-                dev.mapper.0, dev.luks_uuid
-            )));
+            return Err(foreign_live_device_not_in_snapshot(dev));
         };
         let by_id = resolve_by_id_for_underlying(by_id_resolver, &dev.underlying)?;
-        let added_at = prior
-            .and_then(|p| p.by_uuid(&dev.luks_uuid))
-            .and_then(|m| m.added_at.clone())
-            .or_else(|| union_member.added_at.clone())
-            .or_else(|| Some(crate::util::now_iso()));
+        let added_at = resolve_added_at(prior, union_member, &dev.luks_uuid);
         recovered.insert(
             dev.luks_uuid.clone(),
             DiskMember {
