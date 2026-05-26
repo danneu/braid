@@ -818,4 +818,58 @@ mod tests {
             "alert latch must be written on ProbeError::PoolDevice"
         );
     }
+
+    // Intent: cmd_monitor must thread the smartd flag into alert computation
+    // and persist the resulting SmartdAlert cause for a mounted healthy pool.
+    // Why it exists: helper tests cover the flag reader and compute helper in
+    // isolation, but not the command wiring that merges and saves live causes.
+    // Scenario: smartd touched its alert flag while the pool remains mounted
+    // and otherwise healthy, so the monitor timer must latch exactly one SMART
+    // cause for the headless alert wrapper.
+    #[test]
+    fn cmd_monitor_latches_smartd_alert_when_mounted() {
+        let (_dir, paths) = isolated_paths();
+        std::fs::write(paths.smartd_alert(), b"").unwrap();
+
+        let result = cmd_monitor(
+            &MonitorTestRunner::with_stale_mapper_stats(),
+            &monitor_fs_btrfs(),
+            &monitor_mp(),
+            &paths,
+        );
+        let state = alert_state(&result);
+        assert_eq!(state.causes, vec![AlertCause::SmartdAlert]);
+
+        let saved = alert::load_alert_latch(&paths).unwrap().unwrap();
+        assert_eq!(
+            &saved, state,
+            "saved latch must match returned monitor alert"
+        );
+    }
+
+    // Intent: cmd_monitor must classify an unmounted pool as offline before
+    // consulting or latching the smartd alert flag.
+    // Why it exists: without this command-level check, a refactor could let a
+    // stale smartd flag make an offline pool beep about SMART instead of
+    // returning the quiet PoolOffline state.
+    // Scenario: the NAS has booted but the encrypted pool is still locked and
+    // unmounted, while an old smartd alert flag remains in braid state.
+    #[test]
+    fn cmd_monitor_offline_pool_ignores_smartd_flag() {
+        let (_dir, paths) = isolated_paths();
+        std::fs::write(paths.smartd_alert(), b"").unwrap();
+
+        let result = cmd_monitor(
+            &MonitorTestRunner::with_stale_mapper_stats(),
+            &monitor_fs_not_mounted(),
+            &monitor_mp(),
+            &paths,
+        );
+
+        assert_eq!(result, MonitorResult::PoolOffline);
+        assert!(
+            !paths.alert_latch_json().exists(),
+            "offline pool must not latch a smartd alert"
+        );
+    }
 }
