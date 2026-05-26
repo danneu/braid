@@ -5,15 +5,22 @@ use crate::probe::Filesystem;
 use crate::progress::pct_from_bytes;
 use crate::types::MountPoint;
 
+/// Tri-state result of the `braid idle` autosuspend gate: `PoolOffline`
+/// and `Idle` both allow suspend (exit 0), `Busy` blocks it (exit 1).
+/// Fail-closed -- any unknowable probe maps to `Busy`, never to idle.
 #[derive(Debug, PartialEq)]
 pub enum IdleResult {
     /// Pool is idle -- no exclusive operations running.
     Idle,
     /// Pool not mounted -- nothing to protect -- allow suspend.
     PoolOffline,
+    /// Pool is busy -- block suspend. Carries the reason for status output.
     Busy(BusyReason),
 }
 
+/// Why `braid idle` reports busy. Its `Display` is the idle-specific
+/// status-line surface and intentionally diverges from
+/// `ExclusiveOp::Display` (e.g. "balance paused" vs "balance (paused)").
 #[derive(Debug, PartialEq)]
 pub enum BusyReason {
     /// Probe failed, so the pool state is unknowable. Treat as busy so
