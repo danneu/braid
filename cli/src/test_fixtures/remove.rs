@@ -221,15 +221,8 @@ impl<'a> RemoveParamsBuilder<'a> {
         self
     }
 
-    #[allow(dead_code)]
     pub(crate) fn yes(mut self, yes: bool) -> Self {
         self.yes = yes;
-        self
-    }
-
-    #[allow(dead_code)]
-    pub(crate) fn progress(mut self, progress: ProgressOutput) -> Self {
-        self.progress = progress;
         self
     }
 

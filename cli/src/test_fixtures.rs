@@ -13,13 +13,6 @@
 //!     installer for `replace` (mapper -> dev, dev -> uuid, btrfs
 //!     filesystem show / usage with state flipping on `replace_done`,
 //!     plus the boring preflight surface).
-//!   * `AddTopology` -- canonical static one-disk pool topology installer
-//!     for `add` tests that exercise the live-pool returning-disk surface.
-//!   * `AddStatefulPool` + `AddPoolHandle` + `AddDynFs` -- stateful
-//!     bootstrap+live mutation lifecycle installer for `add` tests that
-//!     observe mount/device-add commits and per-mapper opens.
-//!   * `AddPlanTopology` -- `plan_add` boundary topology with
-//!     parameterised keyfile-probe responses and missing-device count.
 //!   * `RemovalPool` -- canonical pool-topology mock-handler installer
 //!     for `remove` tests that exercise 2->1 and 3->2 success paths.
 //!   * `RemountHarness` -- promoted stateful-FS + mapper-closing-runner
@@ -106,18 +99,17 @@
 //!     facade collisions with the `doctor::config_with_ups_*` family.
 //!   * `PoolFixture` -- bundled tempdirs + `StatePaths` + config +
 //!     passphrase + `RecordingInhibitor`.
-//!   * `ReplaceParamsBuilder` / `AddParamsBuilder` / `RemoveParamsBuilder`
+//!   * `ReplaceParamsBuilder` / `RemoveParamsBuilder`
 //!     / `RemoveMissingParamsBuilder` / `RecoverParamsBuilder` -- per-test
 //!     builders over command defaults.
 //!
 //! Layout: this file is a facade. `shared` holds cross-scope items;
-//! `replace`, `add`, `remove`, `remove_missing`, `recover`, `doctor`,
+//! `replace`, `remove`, `remove_missing`, `recover`, `doctor`,
 //! `mount`, `enroll_key_file`, `unlock`, `status`, `lock`, `ack`, `monitor`,
 //! `idle`, `scrub`, `discover`, and `ups` hold their per-scope topologies,
 //! builders, and helpers.
 
 mod ack;
-mod add;
 mod discover;
 mod doctor;
 mod enroll_key_file;

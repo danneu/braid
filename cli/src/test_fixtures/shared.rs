@@ -47,7 +47,6 @@ pub(crate) fn disk_member(seed: u64, name: &str, by_id: &str) -> (LuksUuid, Disk
 /// Build a `(LuksUuid, DiskMember)` pair with an explicit `devid` and/or
 /// `added_at`. Same shape as `disk_member` so fixture call sites stay
 /// one-line for the common case.
-#[allow(dead_code)]
 pub(crate) fn disk_member_with(
     seed: u64,
     name: &str,

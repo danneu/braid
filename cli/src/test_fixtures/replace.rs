@@ -394,11 +394,6 @@ impl<'a> ReplaceParamsBuilder<'a> {
         self.yes = yes;
         self
     }
-    #[allow(dead_code)]
-    pub(crate) fn passphrase_stdin(mut self, on: bool) -> Self {
-        self.passphrase_stdin = on;
-        self
-    }
     pub(crate) fn passphrase_file(mut self, path: Option<&'a Path>) -> Self {
         self.passphrase_file = path;
         self
@@ -409,11 +404,6 @@ impl<'a> ReplaceParamsBuilder<'a> {
     }
     pub(crate) fn luks_format_extra_opts(mut self, opts: &'a [String]) -> Self {
         self.luks_format_extra_opts = opts;
-        self
-    }
-    #[allow(dead_code)]
-    pub(crate) fn progress(mut self, p: ProgressOutput) -> Self {
-        self.progress = p;
         self
     }
     pub(crate) fn build(self) -> ReplaceParams<'a> {

@@ -50,7 +50,6 @@ impl DiscoverLabelMap {
     /// per-path UUID so the dump parser always sees one and discover's
     /// missing/invalid UUID handling can be exercised separately by
     /// `with_dump_response`.
-    #[allow(dead_code)]
     pub(crate) fn with_uuid(mut self, path: &str, uuid: &str) -> Self {
         self.uuids.insert(path.to_string(), uuid.to_string());
         self
