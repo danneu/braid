@@ -665,11 +665,22 @@ mod tests {
     use crate::cmd::{CmdError, CmdRequest, CommandRunner, MockRunner, RawCommandOutput};
     use crate::config::mapper_name;
     use crate::membership::PoolMembership;
-    use crate::test_fixtures::{MockFs, PoolFixture, RemoveMissingPool, mock_ok};
+    use crate::test_fixtures::{
+        DeviceUsageSpec, MockFs, PoolFixture, RemoveMissingPool, device_usage_raw_body, mock_ok,
+    };
     use crate::types::{NullUnderlyingDevice, PoolDevice};
 
     fn mp() -> MountPoint {
         MountPoint("/mnt/storage".into())
+    }
+
+    fn relocation_usage_live_device(
+        path: &str,
+        devid: u64,
+        allocations: &[(&str, &str, u64)],
+        unallocated: u64,
+    ) -> DeviceUsageSpec {
+        DeviceUsageSpec::live(path, devid, 520_093_696, allocations, unallocated)
     }
 
     fn target_validation_pool() -> PoolState {
@@ -704,7 +715,7 @@ mod tests {
     }
 
     struct EnospcRunner {
-        device_usage_stdout: &'static str,
+        device_usage_stdout: String,
     }
 
     impl CommandRunner for EnospcRunner {
@@ -712,7 +723,7 @@ mod tests {
             match request {
                 CmdRequest::BtrfsDeviceUsageRaw { .. } => Ok(RawCommandOutput {
                     cmd: "btrfs device usage --raw /mnt/storage".to_owned(),
-                    stdout: self.device_usage_stdout.to_owned(),
+                    stdout: self.device_usage_stdout.clone(),
                     stderr: String::new(),
                     exit_status: 0,
                 }),
@@ -1029,30 +1040,29 @@ mod tests {
     fn check_relocation_space_rejects_insufficient_space() {
         // Missing device (devid 3): device_size=0, ~2 GiB allocated
         // Survivors (devid 1,2): 50 MiB unallocated each = 100 MiB total
-        let fixture = "\
-/dev/mapper/braid-disk1, ID: 1
-   Device size:           520093696
-   Device slack:                  0
-   Data,RAID1:            469762048
-   Metadata,RAID1:              0
-   Unallocated:            50331648
-
-/dev/mapper/braid-disk2, ID: 2
-   Device size:           520093696
-   Device slack:                  0
-   Data,RAID1:            469762048
-   Metadata,RAID1:              0
-   Unallocated:            50331648
-
-<missing disk>, ID: 3
-   Device size:                  0
-   Device slack:                  0
-   Data,RAID1:           2147483648
-   Metadata,RAID1:        268435456
-   System,RAID1:           33554432
-   Unallocated:          1828716544
-
-";
+        let fixture = device_usage_raw_body(&[
+            relocation_usage_live_device(
+                "/dev/mapper/braid-disk1",
+                1,
+                &[("Data", "RAID1", 469_762_048), ("Metadata", "RAID1", 0)],
+                50_331_648,
+            ),
+            relocation_usage_live_device(
+                "/dev/mapper/braid-disk2",
+                2,
+                &[("Data", "RAID1", 469_762_048), ("Metadata", "RAID1", 0)],
+                50_331_648,
+            ),
+            DeviceUsageSpec::missing(
+                3,
+                &[
+                    ("Data", "RAID1", 2_147_483_648),
+                    ("Metadata", "RAID1", 268_435_456),
+                    ("System", "RAID1", 33_554_432),
+                ],
+                1_828_716_544,
+            ),
+        ]);
 
         let runner = EnospcRunner {
             device_usage_stdout: fixture,
@@ -1076,26 +1086,21 @@ mod tests {
     // Scenario: Missing device has small allocations, survivors have plenty of
     //   unallocated space.
     fn check_relocation_space_passes_sufficient_space() {
-        let fixture = "\
-/dev/mapper/braid-disk1, ID: 1
-   Device size:           520093696
-   Device slack:                  0
-   Data,RAID1:             67108864
-   Unallocated:           452984832
-
-/dev/mapper/braid-disk2, ID: 2
-   Device size:           520093696
-   Device slack:                  0
-   Data,RAID1:             67108864
-   Unallocated:           452984832
-
-<missing disk>, ID: 3
-   Device size:                  0
-   Device slack:                  0
-   Data,RAID1:             67108864
-   Unallocated:                  0
-
-";
+        let fixture = device_usage_raw_body(&[
+            relocation_usage_live_device(
+                "/dev/mapper/braid-disk1",
+                1,
+                &[("Data", "RAID1", 67_108_864)],
+                452_984_832,
+            ),
+            relocation_usage_live_device(
+                "/dev/mapper/braid-disk2",
+                2,
+                &[("Data", "RAID1", 67_108_864)],
+                452_984_832,
+            ),
+            DeviceUsageSpec::missing(3, &[("Data", "RAID1", 67_108_864)], 0),
+        ]);
 
         let runner = EnospcRunner {
             device_usage_stdout: fixture,
@@ -1117,32 +1122,22 @@ mod tests {
     fn check_relocation_space_with_missing_id_filters() {
         // Two surviving devices (4-disk pool, 2 missing). The RAID1-aware check
         // requires >= 2 surviving devices with space, which this fixture satisfies.
-        let fixture = "\
-/dev/mapper/braid-disk1, ID: 1
-   Device size:           520093696
-   Device slack:                  0
-   Data,RAID1:             67108864
-   Unallocated:           200000000
-
-/dev/mapper/braid-disk4, ID: 4
-   Device size:           520093696
-   Device slack:                  0
-   Data,RAID1:             67108864
-   Unallocated:           200000000
-
-<missing disk>, ID: 2
-   Device size:                  0
-   Device slack:                  0
-   Data,RAID1:             50000000
-   Unallocated:                  0
-
-<missing disk>, ID: 3
-   Device size:                  0
-   Device slack:                  0
-   Data,RAID1:           5000000000
-   Unallocated:                  0
-
-";
+        let fixture = device_usage_raw_body(&[
+            relocation_usage_live_device(
+                "/dev/mapper/braid-disk1",
+                1,
+                &[("Data", "RAID1", 67_108_864)],
+                200_000_000,
+            ),
+            relocation_usage_live_device(
+                "/dev/mapper/braid-disk4",
+                4,
+                &[("Data", "RAID1", 67_108_864)],
+                200_000_000,
+            ),
+            DeviceUsageSpec::missing(2, &[("Data", "RAID1", 50_000_000)], 0),
+            DeviceUsageSpec::missing(3, &[("Data", "RAID1", 5_000_000_000)], 0),
+        ]);
 
         let runner = EnospcRunner {
             device_usage_stdout: fixture,
@@ -1252,7 +1247,8 @@ mod tests {
         let runner = EnospcRunner {
             device_usage_stdout: "/dev/mapper/braid-disk1, ID: 1\n\
                                   \x20  Device slack:                 0\n\
-                                  \x20  Unallocated:          10000000\n\n",
+                                  \x20  Unallocated:          10000000\n\n"
+                .to_owned(),
         };
 
         let err = check_relocation_space(&runner, &mp(), 3)
@@ -1279,20 +1275,20 @@ mod tests {
     // Scenario: usage lists only surviving devices even though the pool probe
     // reported missing devid 3.
     fn check_relocation_space_fails_closed_on_target_absent_from_usage() {
-        let fixture = "\
-/dev/mapper/braid-disk1, ID: 1
-   Device size:           520093696
-   Device slack:                  0
-   Data,RAID1:             67108864
-   Unallocated:           452984832
-
-/dev/mapper/braid-disk2, ID: 2
-   Device size:           520093696
-   Device slack:                  0
-   Data,RAID1:             67108864
-   Unallocated:           452984832
-
-";
+        let fixture = device_usage_raw_body(&[
+            relocation_usage_live_device(
+                "/dev/mapper/braid-disk1",
+                1,
+                &[("Data", "RAID1", 67_108_864)],
+                452_984_832,
+            ),
+            relocation_usage_live_device(
+                "/dev/mapper/braid-disk2",
+                2,
+                &[("Data", "RAID1", 67_108_864)],
+                452_984_832,
+            ),
+        ]);
 
         let runner = EnospcRunner {
             device_usage_stdout: fixture,
@@ -1320,25 +1316,21 @@ mod tests {
     // Scenario: missing devid 3 is present with device_size 0 and no
     // allocations; survivors have no useful free space.
     fn check_relocation_space_passes_present_zero_allocation_missing_target() {
-        let fixture = "\
-/dev/mapper/braid-disk1, ID: 1
-   Device size:           520093696
-   Device slack:                  0
-   Data,RAID1:             67108864
-   Unallocated:                  0
-
-/dev/mapper/braid-disk2, ID: 2
-   Device size:           520093696
-   Device slack:                  0
-   Data,RAID1:             67108864
-   Unallocated:                  0
-
-<missing disk>, ID: 3
-   Device size:                  0
-   Device slack:                  0
-   Unallocated:                  0
-
-";
+        let fixture = device_usage_raw_body(&[
+            relocation_usage_live_device(
+                "/dev/mapper/braid-disk1",
+                1,
+                &[("Data", "RAID1", 67_108_864)],
+                0,
+            ),
+            relocation_usage_live_device(
+                "/dev/mapper/braid-disk2",
+                2,
+                &[("Data", "RAID1", 67_108_864)],
+                0,
+            ),
+            DeviceUsageSpec::missing(3, &[], 0),
+        ]);
 
         let runner = EnospcRunner {
             device_usage_stdout: fixture,

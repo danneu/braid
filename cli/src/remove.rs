@@ -871,8 +871,9 @@ mod tests {
     use crate::membership::PoolMembership;
     use crate::state_paths::StatePaths;
     use crate::test_fixtures::{
-        MockFs, PoolFixture, RemovalPool, mock_ok, target_device, valid_three_disk_df_json,
-        valid_three_disk_usage_stdout, valid_two_disk_df_json, valid_two_disk_usage_stdout,
+        DeviceUsageSpec, MockFs, PoolFixture, RemovalPool, device_usage_raw_body, mock_ok,
+        target_device, valid_three_disk_df_json, valid_three_disk_usage_stdout,
+        valid_two_disk_df_json, valid_two_disk_usage_stdout,
     };
     use std::collections::BTreeMap;
 
@@ -1836,7 +1837,7 @@ mod tests {
         let runner = MockRunner::default().with_handler(|req| match req {
             CmdRequest::BtrfsDeviceUsageRaw { .. } => Some(Ok(mock_ok(
                 "btrfs device usage --raw /mnt/storage",
-                valid_two_disk_usage_stdout(),
+                &valid_two_disk_usage_stdout(),
             ))),
             _ => None,
         });
@@ -1867,7 +1868,7 @@ mod tests {
         let runner = MockRunner::default().with_handler(|req| match req {
             CmdRequest::BtrfsDeviceUsageRaw { .. } => Some(Ok(mock_ok(
                 "btrfs device usage --raw /mnt/storage",
-                valid_two_disk_usage_stdout(),
+                &valid_two_disk_usage_stdout(),
             ))),
             CmdRequest::BtrfsFilesystemDfJson { .. } => Some(Ok(mock_ok(
                 "btrfs --format json filesystem df /mnt/storage",
@@ -1902,13 +1903,17 @@ mod tests {
         let runner = MockRunner::default().with_handler(|req| match req {
             CmdRequest::BtrfsDeviceUsageRaw { .. } => Some(Ok(mock_ok(
                 "btrfs device usage --raw /mnt/storage",
-                "/dev/mapper/braid-disk1, ID: 1\n\
-                 \x20  Device size:         1073741824\n\
-                 \x20  Device slack:                 0\n\
-                 \x20  Data,RAID1:            52428800\n\
-                 \x20  Metadata,RAID1:        10485760\n\
-                 \x20  System,RAID1:             32768\n\
-                 \x20  Unallocated:         1010794496\n",
+                &device_usage_raw_body(&[DeviceUsageSpec::live(
+                    "/dev/mapper/braid-disk1",
+                    1,
+                    1_073_741_824,
+                    &[
+                        ("Data", "RAID1", 52_428_800),
+                        ("Metadata", "RAID1", 10_485_760),
+                        ("System", "RAID1", 32_768),
+                    ],
+                    1_010_794_496,
+                )]),
             ))),
             CmdRequest::BtrfsFilesystemDfJson { .. } => Some(Ok(mock_ok(
                 "btrfs --format json filesystem df /mnt/storage",
@@ -1943,7 +1948,7 @@ mod tests {
         let runner = MockRunner::default().with_handler(|req| match req {
             CmdRequest::BtrfsDeviceUsageRaw { .. } => Some(Ok(mock_ok(
                 "btrfs device usage --raw /mnt/storage",
-                valid_two_disk_usage_stdout(),
+                &valid_two_disk_usage_stdout(),
             ))),
             CmdRequest::BtrfsFilesystemDfJson { .. } => Some(Ok(RawCommandOutput {
                 cmd: "btrfs --format json filesystem df /mnt/storage".into(),
@@ -2978,7 +2983,7 @@ mod tests {
                 ))),
                 CmdRequest::BtrfsDeviceUsageRaw { .. } => Some(Ok(mock_ok(
                     "btrfs device usage --raw /mnt/storage",
-                    valid_three_disk_usage_stdout(),
+                    &valid_three_disk_usage_stdout(),
                 ))),
                 CmdRequest::BtrfsFilesystemDfJson { .. } => Some(Ok(mock_ok(
                     "btrfs --format json filesystem df /mnt/storage",
@@ -3121,7 +3126,7 @@ mod tests {
                 ))),
                 CmdRequest::BtrfsDeviceUsageRaw { .. } => Some(Ok(mock_ok(
                     "btrfs device usage --raw /mnt/storage",
-                    valid_three_disk_usage_stdout(),
+                    &valid_three_disk_usage_stdout(),
                 ))),
                 CmdRequest::BtrfsFilesystemDfJson { .. } => Some(Ok(mock_ok(
                     "btrfs --format json filesystem df /mnt/storage",

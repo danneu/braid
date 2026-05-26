@@ -1386,7 +1386,7 @@ mod tests {
      * mapper name for missing-device stats rows.
      *
      * Scenario: btrfs reports disk1 live and devid 2 as MISSING. Device stats
-     * reports `<missing disk>` for devid 2 with a read error. The TUI surfaces
+     * reports `devid:2` for devid 2 with a read error. The TUI surfaces
      * that counter on the member whose persisted prior devid is 2.
      */
     #[test]
@@ -1464,7 +1464,7 @@ mod tests {
                 ok_raw(
                     "btrfs device stats",
                     r#"{"device-stats": [
-                        {"device": "<missing disk>", "devid": 2, "write_io_errs": 0, "read_io_errs": 9, "flush_io_errs": 0, "corruption_errs": 0, "generation_errs": 0}
+                        {"device": "devid:2", "devid": 2, "write_io_errs": 0, "read_io_errs": 9, "flush_io_errs": 0, "corruption_errs": 0, "generation_errs": 0}
                     ]}"#,
                 ),
             );

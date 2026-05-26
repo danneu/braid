@@ -16,7 +16,7 @@ This mapping is not derivable from reading braid's code or btrfs docs alone — 
 | **Healthy**           | `path /dev/mapper/X`         | `[/dev/mapper/X]`      | `device: /dev/sdY`  | `pool.devices`         |
 | **Null-underlying**   | `path /dev/mapper/X`         | `[/dev/mapper/X]`      | `device: (null)`    | `pool.null_underlying` |
 | **MISSING with path** | `path /dev/mapper/X MISSING` | `[/dev/mapper/X]` (??) | not queried         | `missing_devids` only  |
-| **Fully gone**        | `path MISSING`               | `[<missing disk>]`     | not queried         | `missing_devids`       |
+| **Fully gone**        | `path MISSING`               | `[devid:N]`            | not queried         | `missing_devids`       |
 
 **Empirical note**: SATA hot-unplug on real hardware enters Null-underlying immediately and stays there for at least 5 minutes without I/O pressure. We have not yet observed the MISSING-with-path state in practice. See [`real-world/sata-hot-unplug.md`](../real-world/sata-hot-unplug.md) for full test results.
 
@@ -40,7 +40,7 @@ authority; status output still uses live btrfs stats for displayed devids.
 
 btrfs has registered the device as missing, but still remembers which mapper path it had. `btrfs filesystem show` appends `MISSING` to the path. The parser puts the devid into `missing_devids` but discards the path. `probe_pool` never processes this device (it only iterates `show.devices`), so it doesn't appear in `pool.devices` or `pool.null_underlying`.
 
-**Handling:** `btrfs device stats` rows always carry a mandatory `devid` field, so the alert pipeline identifies the row by devid regardless of which path string btrfs reports (`[/dev/mapper/X]` or `[<missing disk>]`). The `MissingDevice` alert is generated independently from `missing_devids`. Rows for alert-local missing devids are skipped for `BtrfsDeviceErrors`, while `braid ack` still snapshots their counters by devid so old counts do not re-alert if the member returns.
+**Handling:** `btrfs device stats` rows always carry a mandatory `devid` field, so the alert pipeline identifies the row by devid regardless of which path string btrfs reports (`[/dev/mapper/X]` or `[devid:N]`). The `MissingDevice` alert is generated independently from `missing_devids`. Rows for alert-local missing devids are skipped for `BtrfsDeviceErrors`, while `braid ack` still snapshots their counters by devid so old counts do not re-alert if the member returns.
 
 The same restricted devid fallback applies to membership correlation: when
 btrfs reports a missing device only by devid, braid can resolve the member whose
@@ -51,7 +51,7 @@ mapper name or LUKS label.
 
 ### Fully gone
 
-Device is completely absent — either the LUKS mapper was torn down, or the device was missing at mount time (degraded mount). `btrfs filesystem show` reports bare `path MISSING` (no mapper path). `btrfs device stats` has reported `[<missing disk>]` in observed degraded captures, but braid does not depend on that string: the parser ignores the device field and keeps the row's `devid` and counters.
+Device is completely absent — either the LUKS mapper was torn down, or the device was missing at mount time (degraded mount). `btrfs filesystem show` reports bare `path MISSING` (no mapper path). Pinned btrfs-progs v6.17.1 renders the missing-device stats path as `[devid:N]` (`device.c:625-634`); `[<missing disk>]` is an older btrfs rendering. braid does not depend on either string: the parser ignores the device field and keeps the row's `devid` and counters.
 
 At this point there is no mapper and no observable LUKS UUID. Mutating commands
 that target the missing device, such as `remove-missing` and missing-path

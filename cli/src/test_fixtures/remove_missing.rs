@@ -6,7 +6,7 @@
 //! through the pool.json membership map; the shared `two_disk_healthy`
 //! and `one_live_one_missing` constructors only pin disk2.
 
-use super::shared::{PoolFixture, disk_member_with, mock_ok};
+use super::shared::{DeviceUsageSpec, PoolFixture, device_usage_raw_body, disk_member_with, mock_ok};
 use crate::cmd::{CmdRequest, MockRunner};
 use crate::config::Config;
 use crate::confirm::RecordingConfirm;
@@ -38,9 +38,30 @@ const TWO_DISK_POST_SHOW: &str = "Label: none  uuid: cc86845b-aec3-408e-bef5-553
      \tTotal devices 1 FS bytes used 16.17MiB\n\
      \tdevid    1 size 496.00MiB used 121.56MiB path /dev/mapper/braid-disk1\n";
 
-const USAGE_RAW_THREE_DISK_ONE_MISSING: &str = "/dev/mapper/braid-disk1, ID: 1\n   Device size:           520093696\n   Device slack:                  0\n   Data,RAID1:            67108864\n   Unallocated:           452984832\n\n/dev/mapper/braid-disk2, ID: 2\n   Device size:           520093696\n   Device slack:                  0\n   Data,RAID1:            67108864\n   Unallocated:           452984832\n\n<missing disk>, ID: 3\n   Device size:                  0\n   Device slack:                  0\n   Data,RAID1:            67108864\n   Unallocated:                  0\n\n";
+fn usage_raw_three_disk_one_missing() -> String {
+    device_usage_raw_body(&[
+        remove_missing_usage_live_device(1),
+        remove_missing_usage_live_device(2),
+        DeviceUsageSpec::missing(3, &[("Data", "RAID1", 67_108_864)], 0),
+    ])
+}
 
-const USAGE_RAW_TWO_DISK_ONE_MISSING: &str = "/dev/mapper/braid-disk1, ID: 1\n   Device size:           520093696\n   Device slack:                  0\n   Data,RAID1:            67108864\n   Unallocated:           452984832\n\n<missing disk>, ID: 2\n   Device size:                  0\n   Device slack:                  0\n   Data,RAID1:            67108864\n   Unallocated:                  0\n\n";
+fn usage_raw_two_disk_one_missing() -> String {
+    device_usage_raw_body(&[
+        remove_missing_usage_live_device(1),
+        DeviceUsageSpec::missing(2, &[("Data", "RAID1", 67_108_864)], 0),
+    ])
+}
+
+fn remove_missing_usage_live_device(devid: u64) -> DeviceUsageSpec {
+    DeviceUsageSpec::live(
+        &format!("/dev/mapper/braid-disk{devid}"),
+        devid,
+        520_093_696,
+        &[("Data", "RAID1", 67_108_864)],
+        452_984_832,
+    )
+}
 
 /// Canonical pool topology installer for `remove-missing` tests.
 ///
@@ -54,7 +75,7 @@ const USAGE_RAW_TWO_DISK_ONE_MISSING: &str = "/dev/mapper/braid-disk1, ID: 1\n  
 pub(crate) struct RemoveMissingPool {
     pre_show: &'static str,
     post_show: &'static str,
-    usage_raw: &'static str,
+    usage_raw: String,
     still_degraded_after: bool,
 }
 
@@ -66,7 +87,7 @@ impl RemoveMissingPool {
         Self {
             pre_show: THREE_DISK_PRE_SHOW,
             post_show: THREE_DISK_POST_SHOW,
-            usage_raw: USAGE_RAW_THREE_DISK_ONE_MISSING,
+            usage_raw: usage_raw_three_disk_one_missing(),
             still_degraded_after: false,
         }
     }
@@ -78,7 +99,7 @@ impl RemoveMissingPool {
         Self {
             pre_show: TWO_DISK_PRE_SHOW,
             post_show: TWO_DISK_POST_SHOW,
-            usage_raw: USAGE_RAW_TWO_DISK_ONE_MISSING,
+            usage_raw: usage_raw_two_disk_one_missing(),
             still_degraded_after: false,
         }
     }
@@ -141,7 +162,7 @@ impl RemoveMissingPool {
             ))),
             CmdRequest::BtrfsDeviceUsageRaw { .. } => Some(Ok(mock_ok(
                 "btrfs device usage --raw /mnt/storage",
-                usage_raw,
+                &usage_raw,
             ))),
             CmdRequest::BtrfsDeviceRemove { .. } => {
                 remove_done_handler.store(true, Ordering::SeqCst);

@@ -1400,7 +1400,7 @@ mod tests {
     use crate::membership::{DiskMember, PoolMembership};
     // Keep the err_raw alias to document that status reuses mount's raw
     // error factory through the test fixture facade.
-    use crate::test_fixtures::{disk_member_with, test_uuid};
+    use crate::test_fixtures::{DeviceUsageSpec, device_usage_raw_body, disk_member_with, test_uuid};
     use crate::test_fixtures::{
         err_raw as status_err_raw, isolated_paths, mock_ok, status_btrfs_device_stats_3disk,
         status_btrfs_device_usage_raw_1disk, status_btrfs_df_raid1, status_btrfs_df_single,
@@ -3391,20 +3391,21 @@ mod tests {
     fn status_btrfs_device_usage_raw_3disk_enospc_risk() -> RawCommandOutput {
         mock_ok(
             "btrfs device usage",
-            "/dev/mapper/disk1, ID: 1\n\
-             \x20  Device size:          346729130\n\
-             \x20  Device slack:              0\n\
-             \x20  Unallocated:          200000000\n\
-             \n\
-             /dev/mapper/disk2, ID: 2\n\
-             \x20  Device size:          346729130\n\
-             \x20  Device slack:              0\n\
-             \x20  Unallocated:          200000000\n\
-             \n\
-             /dev/mapper/disk3, ID: 3\n\
-             \x20  Device size:          346729130\n\
-             \x20  Device slack:              0\n\
-             \x20  Unallocated:           10000000\n",
+            &device_usage_raw_body(&[
+                status_enospc_usage_device(1, 200_000_000),
+                status_enospc_usage_device(2, 200_000_000),
+                status_enospc_usage_device(3, 10_000_000),
+            ]),
+        )
+    }
+
+    fn status_enospc_usage_device(devid: u64, unallocated: u64) -> DeviceUsageSpec {
+        DeviceUsageSpec::live(
+            &format!("/dev/mapper/disk{devid}"),
+            devid,
+            346_729_130,
+            &[],
+            unallocated,
         )
     }
 

@@ -1,7 +1,10 @@
 //! Replace-scope fixtures: `ReplacementPool` topology, `ReplaceParamsBuilder`,
 //! and the replace-only `PoolFixture` constructors.
 
-use super::shared::{PoolFixture, mock_ok, mock_virtio_offset_backing_path_resolver};
+use super::shared::{
+    DeviceUsageSpec, PoolFixture, device_usage_raw_body, mock_ok,
+    mock_virtio_offset_backing_path_resolver,
+};
 use crate::btrfs_ioctl::tests_support::MockBtrfsDevInfo;
 use crate::cmd::{CmdError, CmdRequest, LsblkFieldKind, MockRunner, RawCommandOutput};
 use crate::config::Config;
@@ -32,39 +35,6 @@ const POST_SHOW_DISK1_DISK3: &str = "Label: none  uuid: cc86845b-aec3-408e-bef5-
      \tdevid    1 size 496.00MiB used 121.56MiB path /dev/mapper/braid-disk1\n\
      \tdevid    2 size 496.00MiB used 121.56MiB path /dev/mapper/braid-disk3\n";
 
-const PRE_USAGE_RAW_TWO_HEALTHY: &str = "/dev/mapper/braid-disk1, ID: 1\n\
-     \tDevice size:           520093696\n\
-     \tDevice slack:                  0\n\
-     \tData,RAID1:            469762048\n\
-     \tUnallocated:            50331648\n\n\
-     /dev/mapper/braid-disk2, ID: 2\n\
-     \tDevice size:           520093696\n\
-     \tDevice slack:                  0\n\
-     \tData,RAID1:            469762048\n\
-     \tUnallocated:            50331648\n\n";
-
-const PRE_USAGE_RAW_ONE_LIVE_MISSING: &str = "/dev/mapper/braid-disk1, ID: 1\n\
-     \tDevice size:           520093696\n\
-     \tDevice slack:                  0\n\
-     \tData,RAID1:            469762048\n\
-     \tUnallocated:            50331648\n\n\
-     <missing disk>, ID: 2\n\
-     \tDevice size:                  0\n\
-     \tDevice slack:                  0\n\
-     \tData,RAID1:            469762048\n\
-     \tUnallocated:                  0\n\n";
-
-const POST_USAGE_RAW_DISK1_DISK3: &str = "/dev/mapper/braid-disk1, ID: 1\n\
-     \tDevice size:           520093696\n\
-     \tDevice slack:                  0\n\
-     \tData,RAID1:            469762048\n\
-     \tUnallocated:            50331648\n\n\
-     /dev/mapper/braid-disk3, ID: 2\n\
-     \tDevice size:           520093696\n\
-     \tDevice slack:                  0\n\
-     \tData,RAID1:            469762048\n\
-     \tUnallocated:            50331648\n\n";
-
 const REPLACE_FIXTURE_MAPPER_SIZE: u64 = 520_093_696;
 const REPLACE_FIXTURE_RAW_SIZE: u64 = 536_870_912;
 
@@ -72,6 +42,37 @@ pub(crate) fn replace_dev_info_sufficient() -> MockBtrfsDevInfo {
     MockBtrfsDevInfo::default()
         .with_total_bytes("/mnt/storage", 1, REPLACE_FIXTURE_MAPPER_SIZE)
         .with_total_bytes("/mnt/storage", 2, REPLACE_FIXTURE_MAPPER_SIZE)
+}
+
+fn pre_usage_raw_two_healthy() -> String {
+    device_usage_raw_body(&[
+        replace_usage_live_device("/dev/mapper/braid-disk1", 1),
+        replace_usage_live_device("/dev/mapper/braid-disk2", 2),
+    ])
+}
+
+fn pre_usage_raw_one_live_missing() -> String {
+    device_usage_raw_body(&[
+        replace_usage_live_device("/dev/mapper/braid-disk1", 1),
+        DeviceUsageSpec::missing(2, &[("Data", "RAID1", 469_762_048)], 0),
+    ])
+}
+
+fn post_usage_raw_disk1_disk3() -> String {
+    device_usage_raw_body(&[
+        replace_usage_live_device("/dev/mapper/braid-disk1", 1),
+        replace_usage_live_device("/dev/mapper/braid-disk3", 2),
+    ])
+}
+
+fn replace_usage_live_device(path: &str, devid: u64) -> DeviceUsageSpec {
+    DeviceUsageSpec::live(
+        path,
+        devid,
+        REPLACE_FIXTURE_MAPPER_SIZE,
+        &[("Data", "RAID1", 469_762_048)],
+        50_331_648,
+    )
 }
 
 fn luks_dump_json_dynamic_default() -> String {
@@ -103,8 +104,8 @@ fn luks_dump_json_dynamic_default() -> String {
 pub(crate) struct ReplacementPool {
     pre_show: &'static str,
     post_show: &'static str,
-    pre_usage_raw: &'static str,
-    post_usage_raw: &'static str,
+    pre_usage_raw: String,
+    post_usage_raw: String,
     mapper_to_dev: HashMap<&'static str, &'static str>,
     dev_to_uuid: HashMap<&'static str, &'static str>,
     closed_mappers: HashSet<&'static str>,
@@ -157,8 +158,8 @@ impl ReplacementPool {
         Self {
             pre_show: PRE_SHOW_TWO_HEALTHY,
             post_show: POST_SHOW_DISK1_DISK3,
-            pre_usage_raw: PRE_USAGE_RAW_TWO_HEALTHY,
-            post_usage_raw: POST_USAGE_RAW_DISK1_DISK3,
+            pre_usage_raw: pre_usage_raw_two_healthy(),
+            post_usage_raw: post_usage_raw_disk1_disk3(),
             mapper_to_dev: Self::canonical_mapper_to_dev(),
             dev_to_uuid: Self::canonical_dev_to_uuid(),
             closed_mappers: HashSet::new(),
@@ -171,8 +172,8 @@ impl ReplacementPool {
         Self {
             pre_show: PRE_SHOW_ONE_LIVE_MISSING,
             post_show: POST_SHOW_DISK1_DISK3,
-            pre_usage_raw: PRE_USAGE_RAW_ONE_LIVE_MISSING,
-            post_usage_raw: POST_USAGE_RAW_DISK1_DISK3,
+            pre_usage_raw: pre_usage_raw_one_live_missing(),
+            post_usage_raw: post_usage_raw_disk1_disk3(),
             mapper_to_dev: Self::canonical_mapper_to_dev(),
             dev_to_uuid: Self::canonical_dev_to_uuid(),
             closed_mappers: HashSet::new(),
@@ -230,9 +231,9 @@ impl ReplacementPool {
             }
             CmdRequest::BtrfsDeviceUsageRaw { .. } => {
                 let body = if replace_done.load(Ordering::Relaxed) {
-                    post_usage_raw
+                    &post_usage_raw
                 } else {
-                    pre_usage_raw
+                    &pre_usage_raw
                 };
                 Some(Ok(mock_ok("btrfs device usage --raw", body)))
             }

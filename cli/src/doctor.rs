@@ -1647,16 +1647,17 @@ mod tests {
     use crate::cmd::{CmdError, MockRunner, RawCommandOutput};
     use crate::state_paths::StatePaths;
     use crate::test_fixtures::{
-        DEVICE_USAGE_THREE_ONE_TIGHT, DEVICE_USAGE_THREE_TWO_TIGHT, DEVICE_USAGE_TWO_HEALTHY,
-        DEVICE_USAGE_TWO_TIGHT, DF_METADATA_20_USED, DF_METADATA_78_USED, DF_MIXED,
-        DF_MIXED_METADATA, DF_RAID1_CLEAN, DfQueryFailureRunner, DoctorMockFs,
+        DF_METADATA_20_USED, DF_METADATA_78_USED, DF_MIXED, DF_MIXED_METADATA, DF_RAID1_CLEAN,
+        DfQueryFailureRunner, DoctorMockFs,
         PoolMissingDevicesRunner, UpscSpawnFailureRunner, beep_ctx, cls, config_with_ups_enabled,
-        config_without_ups, device_usage_raw, df_json, df_json_fail, disk_member_with,
-        human_options, is_luks_ok, isolated_paths, luks_dump_text_ok, luks_uuid_ok,
-        mountpoint_fail, mountpoint_ok, parsed_doctor_ctx, pool_state_runner,
-        smart_selftest_runner_for, smartctl_selftest_json, systemctl_show_active_state_output,
-        test_uuid, unlock_btrfs_balance_status_idle, unlock_btrfs_balance_status_paused,
-        unlock_btrfs_balance_status_paused_skip_balance, ups_ctx, valid_config_json, write_temp,
+        config_without_ups, device_usage_raw, device_usage_raw_body, device_usage_three_one_tight,
+        device_usage_three_two_tight, device_usage_two_healthy, device_usage_two_tight, df_json,
+        df_json_fail, disk_member_with, human_options, is_luks_ok, isolated_paths,
+        luks_dump_text_ok, luks_uuid_ok, mountpoint_fail, mountpoint_ok, parsed_doctor_ctx,
+        pool_state_runner, smart_selftest_runner_for, smartctl_selftest_json,
+        systemctl_show_active_state_output, test_uuid, unlock_btrfs_balance_status_idle,
+        unlock_btrfs_balance_status_paused, unlock_btrfs_balance_status_paused_skip_balance,
+        ups_ctx, valid_config_json, write_temp, DeviceUsageSpec,
     };
     use crate::types::MountPoint;
 
@@ -1672,17 +1673,21 @@ mod tests {
     const GIB: u64 = 1 << 30;
 
     fn enospc_device_usage(unallocated: &[u64], device_size: u64) -> String {
-        let mut body = String::new();
-        for (index, unallocated) in unallocated.iter().enumerate() {
-            let devid = index + 1;
-            body.push_str(&format!(
-                "/dev/mapper/braid-disk{devid}, ID: {devid}\n\
-                 \x20  Device size:          {device_size}\n\
-                 \x20  Device slack:         0\n\
-                 \x20  Unallocated:          {unallocated}\n"
-            ));
-        }
-        body
+        let specs: Vec<_> = unallocated
+            .iter()
+            .enumerate()
+            .map(|(index, unallocated)| {
+                let devid = (index + 1) as u64;
+                DeviceUsageSpec::live(
+                    &format!("/dev/mapper/braid-disk{devid}"),
+                    devid,
+                    device_size,
+                    &[],
+                    *unallocated,
+                )
+            })
+            .collect();
+        device_usage_raw_body(&specs)
     }
 
     fn enospc_three_disk_runner(usage: &str) -> MockRunner {
@@ -4300,7 +4305,8 @@ mod tests {
 
     // --- metadata_enospc_pressure tests ---
 
-    fn metadata_pressure_result(df: &str, usage: &str) -> CheckResult {
+    fn metadata_pressure_result(df: &str, usage: impl AsRef<str>) -> CheckResult {
+        let usage = usage.as_ref();
         let (mp_req, mp_out) = mountpoint_ok();
         let (df_req, df_out) = df_json(df);
         let (usage_req, usage_out) = device_usage_raw(usage);
@@ -4315,10 +4321,11 @@ mod tests {
 
     fn metadata_pressure_result_with_pool(
         df: &str,
-        usage: &str,
+        usage: impl AsRef<str>,
         present: Vec<(&'static str, u64, &'static str, LuksUuid)>,
         missing_devids: &[u64],
     ) -> CheckResult {
+        let usage = usage.as_ref();
         let (df_req, df_out) = df_json(df);
         let (usage_req, usage_out) = device_usage_raw(usage);
         let runner = pool_state_runner(present, missing_devids)
@@ -4333,9 +4340,10 @@ mod tests {
 
     fn metadata_pressure_with_cached_pool_state(
         df: &str,
-        usage: &str,
+        usage: impl AsRef<str>,
         pool_state: Result<PoolState, ProbeError>,
     ) -> CheckResult {
+        let usage = usage.as_ref();
         let (mp_req, mp_out) = mountpoint_ok();
         let (df_req, df_out) = df_json(df);
         let (usage_req, usage_out) = device_usage_raw(usage);
@@ -4355,7 +4363,7 @@ mod tests {
     //   for future metadata chunk allocation.
     #[test]
     fn metadata_pressure_healthy_pool_ok() {
-        let check = metadata_pressure_result(DF_RAID1_CLEAN, DEVICE_USAGE_TWO_HEALTHY);
+        let check = metadata_pressure_result(DF_RAID1_CLEAN, device_usage_two_healthy());
 
         assert_eq!(check.status, CheckStatus::Ok);
         assert!(
@@ -4373,7 +4381,7 @@ mod tests {
     //   unallocated for the allocator's next metadata chunk.
     #[test]
     fn metadata_pressure_high_metadata_with_headroom_ok() {
-        let check = metadata_pressure_result(DF_METADATA_78_USED, DEVICE_USAGE_TWO_HEALTHY);
+        let check = metadata_pressure_result(DF_METADATA_78_USED, device_usage_two_healthy());
 
         assert_eq!(check.status, CheckStatus::Ok);
         assert!(
@@ -4391,7 +4399,7 @@ mod tests {
     //   only 20% used and does not need a new chunk soon.
     #[test]
     fn metadata_pressure_low_headroom_with_low_metadata_ok() {
-        let check = metadata_pressure_result(DF_METADATA_20_USED, DEVICE_USAGE_TWO_TIGHT);
+        let check = metadata_pressure_result(DF_METADATA_20_USED, device_usage_two_tight());
 
         assert_eq!(check.status, CheckStatus::Ok);
         assert!(
@@ -4411,7 +4419,7 @@ mod tests {
     fn metadata_pressure_two_device_pool_warns_when_both_signals_present() {
         let check = metadata_pressure_result_with_pool(
             DF_METADATA_78_USED,
-            DEVICE_USAGE_TWO_TIGHT,
+            device_usage_two_tight(),
             vec![
                 ("braid-disk1", 1, "/dev/vdb", test_uuid(1)),
                 ("braid-disk2", 2, "/dev/vdc", test_uuid(2)),
@@ -4451,7 +4459,8 @@ mod tests {
     //   multi-GiB unallocated.
     #[test]
     fn metadata_pressure_three_device_pool_one_tight_ok() {
-        let check = metadata_pressure_result(DF_METADATA_78_USED, DEVICE_USAGE_THREE_ONE_TIGHT);
+        let check =
+            metadata_pressure_result(DF_METADATA_78_USED, device_usage_three_one_tight());
 
         assert_eq!(check.status, CheckStatus::Ok);
         assert!(
@@ -4471,7 +4480,7 @@ mod tests {
     fn metadata_pressure_three_device_pool_two_tight_warns() {
         let check = metadata_pressure_result_with_pool(
             DF_METADATA_78_USED,
-            DEVICE_USAGE_THREE_TWO_TIGHT,
+            device_usage_three_two_tight(),
             vec![
                 ("braid-disk1", 1, "/dev/vdb", test_uuid(1)),
                 ("braid-disk2", 2, "/dev/vdc", test_uuid(2)),
@@ -4501,7 +4510,7 @@ mod tests {
     fn metadata_pressure_degraded_pool_skips() {
         let check = metadata_pressure_result_with_pool(
             DF_METADATA_78_USED,
-            DEVICE_USAGE_TWO_TIGHT,
+            device_usage_two_tight(),
             vec![("braid-disk1", 1, "/dev/vdb", test_uuid(1))],
             &[2],
         );
@@ -4522,7 +4531,7 @@ mod tests {
     fn metadata_pressure_indeterminate_pool_state_warns_without_balance() {
         let check = metadata_pressure_with_cached_pool_state(
             DF_METADATA_78_USED,
-            DEVICE_USAGE_TWO_TIGHT,
+            device_usage_two_tight(),
             Err(ProbeError::PoolDevice {
                 mapper: "braid-disk1".to_owned(),
                 detail: "simulated probe failure".to_owned(),
@@ -4553,7 +4562,7 @@ mod tests {
     fn metadata_pressure_degraded_but_no_pressure_returns_ok() {
         let check = metadata_pressure_with_cached_pool_state(
             DF_METADATA_20_USED,
-            DEVICE_USAGE_TWO_HEALTHY,
+            device_usage_two_healthy(),
             Ok(PoolState {
                 mounted: true,
                 devices: vec![],
@@ -4710,7 +4719,8 @@ mod tests {
     fn metadata_pressure_registered_with_human_label() {
         let (mp_req, mp_out) = mountpoint_ok();
         let (df_req, df_out) = df_json(DF_RAID1_CLEAN);
-        let (usage_req, usage_out) = device_usage_raw(DEVICE_USAGE_TWO_HEALTHY);
+        let usage = device_usage_two_healthy();
+        let (usage_req, usage_out) = device_usage_raw(&usage);
         let runner = MockRunner::default()
             .with_output(mp_req, mp_out)
             .with_output(df_req, df_out)

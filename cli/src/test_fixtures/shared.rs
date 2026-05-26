@@ -82,6 +82,85 @@ pub(crate) fn mock_ok(cmd: &str, stdout: &str) -> RawCommandOutput {
     }
 }
 
+/// Device stanza spec for faithful `btrfs device usage --raw` fixture output.
+/// Mirrors the fields braid's parser consumes so command tests share one
+/// btrfs-progs-shaped raw-output source.
+pub(crate) struct DeviceUsageSpec {
+    /// `None` renders the v6.17.1 missing-device header, `missing, ID: N`.
+    pub(crate) path: Option<String>,
+    pub(crate) devid: u64,
+    pub(crate) device_size: u64,
+    pub(crate) device_slack: u64,
+    pub(crate) allocations: Vec<(String, String, u64)>,
+    pub(crate) unallocated: u64,
+}
+
+impl DeviceUsageSpec {
+    /// Build a live-device stanza; current fixtures all use zero device slack.
+    pub(crate) fn live(
+        path: &str,
+        devid: u64,
+        device_size: u64,
+        allocations: &[(&str, &str, u64)],
+        unallocated: u64,
+    ) -> Self {
+        Self {
+            path: Some(path.to_owned()),
+            devid,
+            device_size,
+            device_slack: 0,
+            allocations: allocations
+                .iter()
+                .map(|(kind, profile, bytes)| ((*kind).to_owned(), (*profile).to_owned(), *bytes))
+                .collect(),
+            unallocated,
+        }
+    }
+
+    /// Build a missing-device stanza using the pinned btrfs-progs marker.
+    pub(crate) fn missing(
+        devid: u64,
+        allocations: &[(&str, &str, u64)],
+        unallocated: u64,
+    ) -> Self {
+        Self {
+            path: None,
+            devid,
+            device_size: 0,
+            device_slack: 0,
+            allocations: allocations
+                .iter()
+                .map(|(kind, profile, bytes)| ((*kind).to_owned(), (*profile).to_owned(), *bytes))
+                .collect(),
+            unallocated,
+        }
+    }
+}
+
+/// Render faithful `btrfs device usage --raw` stdout for test fixtures.
+/// v6.17.1 uses 3-space key/value indentation, `missing` for absent devices,
+/// and a blank line after every device stanza.
+pub(crate) fn device_usage_raw_body(specs: &[DeviceUsageSpec]) -> String {
+    fn push_kv(body: &mut String, label: &str, value: u64) {
+        let width = 33usize.saturating_sub(3 + label.len());
+        body.push_str(&format!("   {label}:{value:>width$}\n"));
+    }
+
+    let mut body = String::new();
+    for spec in specs {
+        let path = spec.path.as_deref().unwrap_or("missing");
+        body.push_str(&format!("{path}, ID: {}\n", spec.devid));
+        push_kv(&mut body, "Device size", spec.device_size);
+        push_kv(&mut body, "Device slack", spec.device_slack);
+        for (alloc_type, profile, bytes) in &spec.allocations {
+            push_kv(&mut body, &format!("{alloc_type},{profile}"), *bytes);
+        }
+        push_kv(&mut body, "Unallocated", spec.unallocated);
+        body.push('\n');
+    }
+    body
+}
+
 /// Shared sleeper test double for command seams that must prove retry
 /// or polling code used the injected sleeper instead of wall-clock sleep.
 #[derive(Clone, Default)]
@@ -405,5 +484,45 @@ impl PoolFixture {
             inhibitor: RecordingInhibitor::new(),
             confirm: RecordingConfirm::new(),
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    // Intent: pin the shared raw-device-usage fixture builder to btrfs-progs'
+    //   missing-device and whitespace shape.
+    // Why it exists: downstream parser tests tolerate path text and whitespace,
+    //   so only this exact assertion protects fixture fidelity.
+    // Scenario: fixture authors need one canonical live + missing sample that
+    //   cannot drift back to the stale older missing-device rendering.
+    fn device_usage_raw_body_renders_canonical_live_and_missing_devices() {
+        let body = device_usage_raw_body(&[
+            DeviceUsageSpec::live(
+                "/dev/mapper/braid-disk1",
+                1,
+                1_073_741_824,
+                &[("Data", "RAID1", 52_428_800), ("Metadata", "DUP", 10_485_760)],
+                1_010_794_496,
+            ),
+            DeviceUsageSpec::missing(3, &[("Data", "RAID1", 67_108_864)], 0),
+        ]);
+
+        assert_eq!(
+            body,
+            "/dev/mapper/braid-disk1, ID: 1\n\
+             \x20  Device size:         1073741824\n\
+             \x20  Device slack:                 0\n\
+             \x20  Data,RAID1:            52428800\n\
+             \x20  Metadata,DUP:          10485760\n\
+             \x20  Unallocated:         1010794496\n\n\
+             missing, ID: 3\n\
+             \x20  Device size:                  0\n\
+             \x20  Device slack:                 0\n\
+             \x20  Data,RAID1:            67108864\n\
+             \x20  Unallocated:                  0\n\n"
+        );
     }
 }

@@ -1,7 +1,7 @@
 //! Remove-scope fixtures: `RemovalPool`, `RemoveParamsBuilder`, and
 //! remove-only `PoolFixture` constructors.
 
-use super::shared::{PoolFixture, disk_member_with, mock_ok};
+use super::shared::{DeviceUsageSpec, PoolFixture, device_usage_raw_body, disk_member_with, mock_ok};
 use crate::cmd::{CmdRequest, MockRunner};
 use crate::config::{Config, mapper_name};
 use crate::confirm::RecordingConfirm;
@@ -22,43 +22,6 @@ const THREE_DISK_SHOW: &str = "Label: none  uuid: cc86845b-aec3-408e-bef5-553aff
      \tdevid    1 size 496.00MiB used 121.56MiB path /dev/mapper/braid-disk1\n\
      \tdevid    2 size 496.00MiB used 121.56MiB path /dev/mapper/braid-disk2\n\
      \tdevid    3 size 496.00MiB used 121.56MiB path /dev/mapper/braid-disk3\n";
-
-const TWO_DISK_USAGE_RAW: &str = "/dev/mapper/braid-disk1, ID: 1\n\
-     \x20  Device size:         1073741824\n\
-     \x20  Device slack:                 0\n\
-     \x20  Data,RAID1:            52428800\n\
-     \x20  Metadata,RAID1:        10485760\n\
-     \x20  System,RAID1:             32768\n\
-     \x20  Unallocated:         1010794496\n\n\
-     /dev/mapper/braid-disk2, ID: 2\n\
-     \x20  Device size:         1073741824\n\
-     \x20  Device slack:                 0\n\
-     \x20  Data,RAID1:            52428800\n\
-     \x20  Metadata,RAID1:        10485760\n\
-     \x20  System,RAID1:             32768\n\
-     \x20  Unallocated:         1010794496\n";
-
-const THREE_DISK_USAGE_RAW: &str = "/dev/mapper/braid-disk1, ID: 1\n\
-     \x20  Device size:         1073741824\n\
-     \x20  Device slack:                 0\n\
-     \x20  Data,RAID1:            52428800\n\
-     \x20  Metadata,RAID1:        10485760\n\
-     \x20  System,RAID1:             32768\n\
-     \x20  Unallocated:         1010794496\n\n\
-     /dev/mapper/braid-disk2, ID: 2\n\
-     \x20  Device size:         1073741824\n\
-     \x20  Device slack:                 0\n\
-     \x20  Data,RAID1:            52428800\n\
-     \x20  Metadata,RAID1:        10485760\n\
-     \x20  System,RAID1:             32768\n\
-     \x20  Unallocated:         1010794496\n\n\
-     /dev/mapper/braid-disk3, ID: 3\n\
-     \x20  Device size:         1073741824\n\
-     \x20  Device slack:                 0\n\
-     \x20  Data,RAID1:            52428800\n\
-     \x20  Metadata,RAID1:        10485760\n\
-     \x20  System,RAID1:             32768\n\
-     \x20  Unallocated:         1010794496\n";
 
 const TWO_DISK_DF_JSON: &str = r#"{
   "filesystem-df": [
@@ -124,7 +87,7 @@ impl PoolFixture {
 /// later `MockRunner::with_handler`, which shadows this broad handler.
 pub(crate) struct RemovalPool {
     show: &'static str,
-    usage_raw: &'static str,
+    usage_raw: String,
     df_json: &'static str,
 }
 
@@ -181,7 +144,10 @@ impl RemovalPool {
                 "No balance found on '/mnt/storage'\n",
             ))),
             CmdRequest::BtrfsDeviceUsageRaw { .. } => {
-                Some(Ok(mock_ok("btrfs device usage --raw /mnt/storage", usage_raw)))
+                Some(Ok(mock_ok(
+                    "btrfs device usage --raw /mnt/storage",
+                    &usage_raw,
+                )))
             }
             CmdRequest::BtrfsFilesystemDfJson { .. } => Some(Ok(mock_ok(
                 "btrfs --format json filesystem df /mnt/storage",
@@ -263,13 +229,20 @@ pub(crate) fn target_device(name: &str) -> PoolDevice {
 }
 
 /// Valid two-disk `btrfs device usage --raw` stdout for override tests.
-pub(crate) fn valid_two_disk_usage_stdout() -> &'static str {
-    TWO_DISK_USAGE_RAW
+pub(crate) fn valid_two_disk_usage_stdout() -> String {
+    device_usage_raw_body(&[
+        remove_usage_live_device(1),
+        remove_usage_live_device(2),
+    ])
 }
 
 /// Valid three-disk `btrfs device usage --raw` stdout for override tests.
-pub(crate) fn valid_three_disk_usage_stdout() -> &'static str {
-    THREE_DISK_USAGE_RAW
+pub(crate) fn valid_three_disk_usage_stdout() -> String {
+    device_usage_raw_body(&[
+        remove_usage_live_device(1),
+        remove_usage_live_device(2),
+        remove_usage_live_device(3),
+    ])
 }
 
 /// Valid two-disk `btrfs --format json filesystem df` stdout for overrides.
@@ -280,6 +253,20 @@ pub(crate) fn valid_two_disk_df_json() -> &'static str {
 /// Valid three-disk `btrfs --format json filesystem df` stdout for overrides.
 pub(crate) fn valid_three_disk_df_json() -> &'static str {
     THREE_DISK_DF_JSON
+}
+
+fn remove_usage_live_device(devid: u64) -> DeviceUsageSpec {
+    DeviceUsageSpec::live(
+        &format!("/dev/mapper/braid-disk{devid}"),
+        devid,
+        1_073_741_824,
+        &[
+            ("Data", "RAID1", 52_428_800),
+            ("Metadata", "RAID1", 10_485_760),
+            ("System", "RAID1", 32_768),
+        ],
+        1_010_794_496,
+    )
 }
 
 fn mapper_underlying(mapper: &str) -> Option<&'static str> {

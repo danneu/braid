@@ -14,6 +14,7 @@ use crate::cmd::{CmdError, CmdRequest, CommandRunner, MockRunner, RawCommandOutp
 use crate::doctor::{DiskState, DoctorContext, DoctorOptions};
 use crate::probe::Filesystem;
 use crate::state_paths::StatePaths;
+use super::shared::{DeviceUsageSpec, device_usage_raw_body};
 use crate::types::{LuksUuid, MapperName, MountPoint};
 use std::io::Write;
 use std::sync::Mutex;
@@ -423,79 +424,69 @@ pub(crate) const DF_METADATA_20_USED: &str = r#"{
     ]
 }"#;
 
-pub(crate) const DEVICE_USAGE_TWO_HEALTHY: &str = "/dev/mapper/braid-disk1, ID: 1\n\
-\x20  Device size:          10737418240\n\
-\x20  Device slack:         0\n\
-\x20  Data,RAID1:           1073741824\n\
-\x20  Metadata,RAID1:       268435456\n\
-\x20  System,RAID1:         8388608\n\
-\x20  Unallocated:          8589934592\n\
-    /dev/mapper/braid-disk2, ID: 2\n\
-\x20  Device size:          10737418240\n\
-\x20  Device slack:         0\n\
-\x20  Data,RAID1:           1073741824\n\
-\x20  Metadata,RAID1:       268435456\n\
-\x20  System,RAID1:         8388608\n\
-\x20  Unallocated:          8589934592\n";
+/// Healthy two-device raw usage body shared by metadata-pressure doctor tests.
+pub(crate) fn device_usage_two_healthy() -> String {
+    device_usage_raw_body(&[
+        doctor_usage_live_device(1, doctor_usage_balanced_allocations(), 8_589_934_592),
+        doctor_usage_live_device(2, doctor_usage_balanced_allocations(), 8_589_934_592),
+    ])
+}
 
-pub(crate) const DEVICE_USAGE_TWO_TIGHT: &str = "/dev/mapper/braid-disk1, ID: 1\n\
-\x20  Device size:          10737418240\n\
-\x20  Device slack:         0\n\
-\x20  Data,RAID1:           9126805504\n\
-\x20  Metadata,RAID1:       805306368\n\
-\x20  System,RAID1:         8388608\n\
-\x20  Unallocated:          419430400\n\
-    /dev/mapper/braid-disk2, ID: 2\n\
-\x20  Device size:          10737418240\n\
-\x20  Device slack:         0\n\
-\x20  Data,RAID1:           9126805504\n\
-\x20  Metadata,RAID1:       805306368\n\
-\x20  System,RAID1:         8388608\n\
-\x20  Unallocated:          419430400\n";
+/// Two tight devices so metadata-pressure tests can exercise the warn path.
+pub(crate) fn device_usage_two_tight() -> String {
+    device_usage_raw_body(&[
+        doctor_usage_live_device(1, doctor_usage_tight_allocations(), 419_430_400),
+        doctor_usage_live_device(2, doctor_usage_tight_allocations(), 419_430_400),
+    ])
+}
 
-pub(crate) const DEVICE_USAGE_THREE_ONE_TIGHT: &str = "/dev/mapper/braid-disk1, ID: 1\n\
-\x20  Device size:          10737418240\n\
-\x20  Device slack:         0\n\
-\x20  Data,RAID1:           9126805504\n\
-\x20  Metadata,RAID1:       805306368\n\
-\x20  System,RAID1:         8388608\n\
-\x20  Unallocated:          419430400\n\
-    /dev/mapper/braid-disk2, ID: 2\n\
-\x20  Device size:          10737418240\n\
-\x20  Device slack:         0\n\
-\x20  Data,RAID1:           1073741824\n\
-\x20  Metadata,RAID1:       268435456\n\
-\x20  System,RAID1:         8388608\n\
-\x20  Unallocated:          5368709120\n\
-    /dev/mapper/braid-disk3, ID: 3\n\
-\x20  Device size:          10737418240\n\
-\x20  Device slack:         0\n\
-\x20  Data,RAID1:           1073741824\n\
-\x20  Metadata,RAID1:       268435456\n\
-\x20  System,RAID1:         8388608\n\
-\x20  Unallocated:          5368709120\n";
+/// Three-device body where only one member lacks allocation headroom.
+pub(crate) fn device_usage_three_one_tight() -> String {
+    device_usage_raw_body(&[
+        doctor_usage_live_device(1, doctor_usage_tight_allocations(), 419_430_400),
+        doctor_usage_live_device(2, doctor_usage_balanced_allocations(), 5_368_709_120),
+        doctor_usage_live_device(3, doctor_usage_balanced_allocations(), 5_368_709_120),
+    ])
+}
 
-pub(crate) const DEVICE_USAGE_THREE_TWO_TIGHT: &str = "/dev/mapper/braid-disk1, ID: 1\n\
-\x20  Device size:          10737418240\n\
-\x20  Device slack:         0\n\
-\x20  Data,RAID1:           9126805504\n\
-\x20  Metadata,RAID1:       805306368\n\
-\x20  System,RAID1:         8388608\n\
-\x20  Unallocated:          419430400\n\
-    /dev/mapper/braid-disk2, ID: 2\n\
-\x20  Device size:          10737418240\n\
-\x20  Device slack:         0\n\
-\x20  Data,RAID1:           9126805504\n\
-\x20  Metadata,RAID1:       805306368\n\
-\x20  System,RAID1:         8388608\n\
-\x20  Unallocated:          419430400\n\
-    /dev/mapper/braid-disk3, ID: 3\n\
-\x20  Device size:          10737418240\n\
-\x20  Device slack:         0\n\
-\x20  Data,RAID1:           1073741824\n\
-\x20  Metadata,RAID1:       268435456\n\
-\x20  System,RAID1:         8388608\n\
-\x20  Unallocated:          5368709120\n";
+/// Three-device body where two members lack allocation headroom.
+pub(crate) fn device_usage_three_two_tight() -> String {
+    device_usage_raw_body(&[
+        doctor_usage_live_device(1, doctor_usage_tight_allocations(), 419_430_400),
+        doctor_usage_live_device(2, doctor_usage_tight_allocations(), 419_430_400),
+        doctor_usage_live_device(3, doctor_usage_balanced_allocations(), 5_368_709_120),
+    ])
+}
+
+fn doctor_usage_live_device(
+    devid: u64,
+    allocations: &[(&str, &str, u64)],
+    unallocated: u64,
+) -> DeviceUsageSpec {
+    DeviceUsageSpec::live(
+        &format!("/dev/mapper/braid-disk{devid}"),
+        devid,
+        10_737_418_240,
+        allocations,
+        unallocated,
+    )
+}
+
+fn doctor_usage_balanced_allocations() -> &'static [(&'static str, &'static str, u64)] {
+    &[
+        ("Data", "RAID1", 1_073_741_824),
+        ("Metadata", "RAID1", 268_435_456),
+        ("System", "RAID1", 8_388_608),
+    ]
+}
+
+fn doctor_usage_tight_allocations() -> &'static [(&'static str, &'static str, u64)] {
+    &[
+        ("Data", "RAID1", 9_126_805_504),
+        ("Metadata", "RAID1", 805_306_368),
+        ("System", "RAID1", 8_388_608),
+    ]
+}
 
 // ---------------------------------------------------------------------------
 // Custom runners

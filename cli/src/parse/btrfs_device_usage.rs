@@ -224,6 +224,46 @@ mod tests {
         assert_eq!(out.devices[0].allocations[1].profile, "DUP");
     }
 
+    #[test]
+    // Intent: parse the current btrfs-progs missing-device marker from
+    //   `device usage --raw`.
+    // Why it exists: remove-missing relocation checks depend on `device_size
+    //   == 0`, devid, allocations, and unallocated bytes surviving even when
+    //   the path is the v6.17.1 `missing` marker.
+    // Scenario: btrfs-progs `filesystem-usage.c:820-821` renders one live
+    //   device plus one absent device as `missing, ID: 3`.
+    fn device_usage_parses_missing_device_marker() {
+        let raw = RawCommandOutput {
+            cmd: "btrfs device usage".into(),
+            stdout: "/dev/mapper/braid-vda, ID: 1\n\
+                     \x20  Device size:          536870912\n\
+                     \x20  Device slack:                 0\n\
+                     \x20  Data,RAID1:            67108864\n\
+                     \x20  Unallocated:          469762048\n\n\
+                     missing, ID: 3\n\
+                     \x20  Device size:                  0\n\
+                     \x20  Device slack:                 0\n\
+                     \x20  Data,RAID1:            67108864\n\
+                     \x20  Unallocated:            1234567\n"
+                .into(),
+            stderr: String::new(),
+            exit_status: 0,
+        };
+
+        let out = parse_btrfs_device_usage(&raw).unwrap();
+        assert_eq!(out.devices.len(), 2);
+        let missing = &out.devices[1];
+        assert_eq!(missing.path, "missing");
+        assert_eq!(missing.devid, 3);
+        assert_eq!(missing.device_size, 0);
+        assert_eq!(missing.device_slack, 0);
+        assert_eq!(missing.unallocated, 1_234_567);
+        assert_eq!(missing.allocations.len(), 1);
+        assert_eq!(missing.allocations[0].alloc_type, "Data");
+        assert_eq!(missing.allocations[0].profile, "RAID1");
+        assert_eq!(missing.allocations[0].bytes, 67_108_864);
+    }
+
     /// Unknown keys from future btrfs-progs versions are silently ignored.
     /// Known fields and allocations still parse correctly.
     /// See cli/docs/command-capabilities.md.

@@ -11,7 +11,7 @@
 //! allowed the staged migration to import fixture helpers while same-purpose
 //! local helpers still existed in `status.rs::tests`.
 
-use super::shared::{disk_member, mock_ok};
+use super::shared::{DeviceUsageSpec, device_usage_raw_body, disk_member, mock_ok};
 use crate::alert::AlertCause;
 use crate::cmd::{CmdRequest, LsblkFieldKind, MockRunner, RawCommandOutput};
 use crate::config::{Config, mapper_name};
@@ -238,29 +238,11 @@ pub(crate) fn status_btrfs_usage_raw() -> RawCommandOutput {
 pub(crate) fn status_btrfs_device_usage_raw_3disk() -> RawCommandOutput {
     mock_ok(
         "btrfs device usage",
-        "/dev/mapper/disk1, ID: 1\n\
-         \x20  Device size:          346729130\n\
-         \x20  Device slack:              0\n\
-         \x20  Data,RAID1:           67108864\n\
-         \x20  Metadata,RAID1:       33554432\n\
-         \x20  System,RAID1:          4194304\n\
-         \x20  Unallocated:         241871530\n\
-         \n\
-         /dev/mapper/disk2, ID: 2\n\
-         \x20  Device size:          346729130\n\
-         \x20  Device slack:              0\n\
-         \x20  Data,RAID1:           67108864\n\
-         \x20  Metadata,RAID1:       33554432\n\
-         \x20  System,RAID1:          4194304\n\
-         \x20  Unallocated:         241871530\n\
-         \n\
-         /dev/mapper/disk3, ID: 3\n\
-         \x20  Device size:          346729130\n\
-         \x20  Device slack:              0\n\
-         \x20  Data,RAID1:           67108864\n\
-         \x20  Metadata,RAID1:       33554432\n\
-         \x20  System,RAID1:          4194304\n\
-         \x20  Unallocated:         241871530\n",
+        &device_usage_raw_body(&[
+            status_usage_raid1_device(1, 241_871_530),
+            status_usage_raid1_device(2, 241_871_530),
+            status_usage_raid1_device(3, 241_871_530),
+        ]),
     )
 }
 
@@ -268,13 +250,31 @@ pub(crate) fn status_btrfs_device_usage_raw_3disk() -> RawCommandOutput {
 pub(crate) fn status_btrfs_device_usage_raw_1disk() -> RawCommandOutput {
     mock_ok(
         "btrfs device usage",
-        "/dev/mapper/disk1, ID: 1\n\
-         \x20  Device size:         1040187392\n\
-         \x20  Device slack:              0\n\
-         \x20  Data,single:         1073741824\n\
-         \x20  Metadata,single:      268435456\n\
-         \x20  System,single:          4194304\n\
-         \x20  Unallocated:                 0\n",
+        &device_usage_raw_body(&[DeviceUsageSpec::live(
+            "/dev/mapper/disk1",
+            1,
+            1_040_187_392,
+            &[
+                ("Data", "single", 1_073_741_824),
+                ("Metadata", "single", 268_435_456),
+                ("System", "single", 4_194_304),
+            ],
+            0,
+        )]),
+    )
+}
+
+fn status_usage_raid1_device(devid: u64, unallocated: u64) -> DeviceUsageSpec {
+    DeviceUsageSpec::live(
+        &format!("/dev/mapper/disk{devid}"),
+        devid,
+        346_729_130,
+        &[
+            ("Data", "RAID1", 67_108_864),
+            ("Metadata", "RAID1", 33_554_432),
+            ("System", "RAID1", 4_194_304),
+        ],
+        unallocated,
     )
 }
 
