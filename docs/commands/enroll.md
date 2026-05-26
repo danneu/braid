@@ -69,7 +69,8 @@ sudo braid enroll /mnt/usb --generate --dry-run
 
 ## Safety checks
 
-- Refuses if a pending operation exists (recovery mode).
+- Refuses if a pending operation journal (`pending-op.json`) exists -- run `braid recover` to reconcile.
+- Refuses if another braid operation is in progress (pool lock `/run/braid-pool.lock` is held) -- retry once it finishes.
 - With `--generate`, refuses unless the target directory is already a mount point.
 - Passphrase is verified before any mutations.
 - Slot 1 conflicts are detected before the keyfile is generated, so you never end up with an orphan keyfile.

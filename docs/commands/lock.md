@@ -55,6 +55,7 @@ Standalone CLI installs (no NixOS module) skip all three -- there is no `braid-o
 
 ## Error handling
 
+- Refuses if another braid operation is in progress (pool lock `/run/braid-pool.lock` is held) -- retry once it finishes.
 - If unmount fails after 3 retry attempts (e.g. a process has files open on the mount), lock still attempts to close the LUKS mappers and reports the failure
 - If a mapper close fails with "device busy" after unmount also failed, the error is downgraded to a warning (the root cause is likely the stuck unmount)
 - The hint `lsof <mount_point>` or `fuser -vm <mount_point>` is printed when unmount fails, to help identify the blocking process
