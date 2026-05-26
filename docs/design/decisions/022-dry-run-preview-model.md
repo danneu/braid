@@ -70,6 +70,21 @@ stdout preview. Real-run notes, and notes preserved on a later planning error,
 render to stderr through the shared preview renderers so warning and info
 wording stays byte-compatible across modes.
 
+### Confirmation UI
+
+Confirmation UI is not a preview note. The interactive `!params.yes` block --
+the command summary, yes/no prompt, and go/no-go safety warnings attached to
+that prompt -- is deliberately absent from both `--dry-run` and `--yes` output.
+In `cli/src/remove.rs` and `cli/src/replace.rs`, the 1-disk redundancy warning
+belongs to this class because it gates the operator's final decision about an
+explicitly requested action, rather than reporting a discovered precondition.
+
+For `remove` 2->1, dry-run still surfaces the redundancy-loss consequence as
+the `RAID1 -> single` balance step. For `replace`, the 1-disk warning is
+confirmation-only context for a pool that is non-redundant before and after;
+dry-run previews the replacement steps, and no redundancy-changing step exists
+for that warning.
+
 Long-running side-effect-free probes that run while building a preview may emit
 `[wait]` / `[ok]` / `[skip]` status rows to stderr per
 [Principle 13](../principles.md#13-announce-long-running-work). Those rows are

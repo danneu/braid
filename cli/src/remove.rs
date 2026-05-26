@@ -105,7 +105,9 @@ pub struct RemoveParams<'a> {
 /// the preflight state (target device, remaining/total counts, mount
 /// point) and renders any accumulated notes to stderr via the shared
 /// `preview::render_notes_for_stderr` helper (canonical `[warn] <body>`
-/// wording) before mutating.
+/// wording) before mutating. The 1-disk `WARNING:` (no RAID1 redundancy)
+/// is confirmation UI, not a `PreviewNote`: it stays behind the
+/// `!params.yes` gate and never appears in `--dry-run` or `--yes` runs.
 pub struct RemovePlan {
     pub notes: Vec<PreviewNote>,
     work_plan: RemoveWorkPlan,
@@ -224,6 +226,9 @@ impl RemovePlan {
     /// stderr-note contract uniform with the other migrated commands.
     pub const STDERR_STYLE: PerDiskStyle = PerDiskStyle::Bracketed;
 
+    /// Build a `Preview` carrying any plan-derived notes. The 1-disk
+    /// `WARNING:` line stays in `execute()` behind the `!params.yes`
+    /// gate and does not appear here.
     pub fn preview(&self) -> Preview {
         Preview {
             completeness: PreviewCompleteness::Complete,
@@ -265,6 +270,9 @@ impl RemovePlan {
                 )
             );
             if work_plan.remaining == 1 {
+                // Confirmation UI only: this is the go/no-go gate. The
+                // dry-run preview already shows the consequence as the
+                // `RAID1 -> single` balance step; see `preview()`.
                 eprintln!("WARNING: Pool will have 1 disk -- no RAID1 redundancy.\n");
             }
             confirm::confirm_yes().map_err(RemoveError::Validation)?;
@@ -1334,6 +1342,50 @@ mod tests {
         assert_eq!(
             lines[1],
             "               $ btrfs balance start --enqueue '-dconvert=single' '-mconvert=dup' -f /mnt/storage"
+        );
+    }
+
+    #[test]
+    // Intent: the 2->1 dry-run preview flows through
+    //   `plan_remove(...).preview().render()`, and the confirmation-only
+    //   1-disk `WARNING:` line must never leak into `--dry-run` stdout.
+    //
+    // Why it exists: `braid remove --dry-run` routes through
+    //   `RemovePlan::preview()` instead of `Step::print_dry_run(&steps)`.
+    //   A regression that surfaces the confirmation-only `WARNING:` line as
+    //   a `PreviewNote` would change the bytes an operator sees.
+    //
+    // Scenario: operator previews removing disk2 from a healthy 2-disk
+    //   pool. The preview must show the RAID1 -> single balance step, while
+    //   keeping the go/no-go redundancy warning exclusive to confirmation.
+    fn plan_remove_2to1_preview_omits_confirmation_only_redundancy_warning() {
+        let f = PoolFixture::two_disk_healthy();
+        let runner = RemovalPool::two_disk().install(MockRunner::default());
+        let fs = MockFs::storage(vec![]);
+        let params = f.remove_params().dry_run(true).build();
+        let plan = plan_remove(&runner, &fs, &params)
+            .expect("plan_remove should succeed on 2->1 fixture");
+
+        let preview = plan.preview();
+        let rendered = preview.render();
+        let legacy = Step::render_dry_run(&preview.steps);
+        // Byte-equivalence holds because this fixture produces zero
+        // notes (clean preflight on a rw pool with no busy op). A
+        // future fixture with real preflight notes would render them
+        // above the step block and byte-equivalence would no longer
+        // hold.
+        assert_eq!(
+            rendered, legacy,
+            "plan.preview().render() must be byte-equivalent to Step::render_dry_run(&plan.preview().steps) for the 2->1 path",
+        );
+
+        assert!(
+            rendered.contains("RAID1 -> single"),
+            "2->1 preview must still show the redundancy-loss balance step, got:\n{rendered}",
+        );
+        assert!(
+            !rendered.contains("WARNING:"),
+            "2->1 dry-run preview must not leak confirmation-only WARNING lines, got:\n{rendered}",
         );
     }
 
