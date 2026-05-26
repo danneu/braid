@@ -142,10 +142,16 @@ pub fn compute_alert_state(
     AlertState { causes }
 }
 
-// Counter reset detection: if current < acked, the kernel has zeroed the
-// stats (e.g. across a remount), so treat the acked baseline as 0 and alert
-// on any nonzero current. Otherwise alert only when current exceeds the acked
-// baseline.
+/// Alert when `current` exceeds the acked baseline, treating a baseline
+/// *above* `current` as 0 so braid fails loud instead of suppressing.
+///
+/// btrfs device-stats counters are persistent and monotonic -- reset only by
+/// `btrfs device stats -z`, which braid never runs -- so a current value below
+/// the ack baseline is not a comparable post-ack counter value. It means the
+/// baseline belongs to a different counter stream: either a reused devid
+/// inherited a ghost baseline before add/recover cleanup dropped its acked entry
+/// (ADR 014), or an operator reset the live counters with `-z`. Treat the
+/// baseline as 0 so any nonzero current still alerts.
 fn exceeds_acked(current: u64, acked: u64) -> bool {
     current > if current < acked { 0 } else { acked }
 }
@@ -1070,10 +1076,22 @@ mod tests {
         assert!(!alert.active());
     }
 
+    // Intent: when the acked baseline is higher than the current counter,
+    //   exceeds_acked treats the baseline as 0 and alerts on any nonzero current
+    //   rather than suppressing.
+    // Why it exists: btrfs device-stats counters are persistent and monotonic,
+    //   so a current value below the ack baseline is not a comparable post-ack
+    //   counter value -- the baseline belongs to a different counter stream (a
+    //   reused-devid ghost baseline before add/recover cleanup, or a manual
+    //   `-z`). This pins the fail-loud behavior so a future "simplify to
+    //   current > acked" change, which would silently suppress a later nonzero
+    //   counter, fails here.
+    // Scenario: an add reused devid 1 (last_devid+1) and crashed before
+    //   drop_ghost_acked_for_devids ran, so the acked baseline still reads
+    //   read_io_errs=5 from the prior holder. A monitor cycle runs before
+    //   recover sweeps it, and the fresh disk has already logged 1 read error.
     #[test]
-    fn counter_reset_detection() {
-        // Current < acked means counters were reset (remount). Treat acked as 0,
-        // so current value (which is > 0) triggers an alert.
+    fn stale_high_baseline_does_not_suppress_alert() {
         let mut dev = zero_device(1);
         dev.read_io_errs = 1;
         let stats = make_stats(vec![dev]);
@@ -1091,7 +1109,7 @@ mod tests {
         );
         let acked = AckedStats(acked_map);
         let alert = compute_alert_state(&stats, &acked, &[1], &[], false);
-        assert!(alert.active(), "counter reset should trigger alert");
+        assert!(alert.active(), "stale-high baseline should trigger alert");
     }
 
     #[test]
