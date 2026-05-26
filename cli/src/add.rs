@@ -525,6 +525,16 @@ impl AddTargetWork {
             AddTargetWork::ClosedPresentLuks(target) => &target.name,
         }
     }
+
+    /// Borrow the target's hardware path so confirmation renders the
+    /// classified work set instead of the raw user input.
+    fn by_id(&self) -> &ByIdPath {
+        match self {
+            AddTargetWork::Fresh(target) => &target.by_id,
+            AddTargetWork::OpenRecoverable(target) => &target.by_id,
+            AddTargetWork::ClosedPresentLuks(target) => &target.by_id,
+        }
+    }
 }
 
 /// Semantic add work plan. `initial_journal_targets` is keyed by
@@ -558,13 +568,23 @@ impl AddWorkPlan {
             .collect()
     }
 
+    /// Disk names that survived classification, in input spec order.
+    /// The done summary uses this so already-in-pool no-ops are not
+    /// reported as newly added.
+    fn target_names(&self) -> Vec<DiskName> {
+        self.targets
+            .iter()
+            .map(|target| target.name().clone())
+            .collect()
+    }
+
     /// Build a `DiskName`-sorted view of `self.targets`. Every
-    /// operator-visible iteration of work-plan targets MUST iterate
-    /// this sorted view so progress lines and dry-run output do not
-    /// reorder on each fresh `braid add` (UUIDs are random per disk
-    /// for fresh targets, so a UUID-keyed iteration is effectively
-    /// random per invocation). Internal-only loops iterate `self.targets`
-    /// directly.
+    /// operator-visible work-step iteration of work-plan targets MUST
+    /// iterate this sorted view so progress lines and dry-run output
+    /// do not reorder on each fresh `braid add` (UUIDs are random per
+    /// disk for fresh targets, so a UUID-keyed iteration is effectively
+    /// random per invocation). Internal-only loops and summaries that
+    /// preserve input order iterate `self.targets` directly.
     fn targets_sorted_by_name(&self) -> Vec<&AddTargetWork> {
         let mut v: Vec<&AddTargetWork> = self.targets.iter().collect();
         v.sort_by(|a, b| a.name().cmp(b.name()));
@@ -1468,7 +1488,7 @@ impl AddPlan {
                 .map_err(|e| AddError::Validation(e.to_string()))?;
         }
 
-        eprintln!("{}", format_add_done(&self.names));
+        eprintln!("{}", format_add_done(&self.work_plan.target_names()));
         Ok(())
     }
 }
@@ -1808,16 +1828,16 @@ struct AddStepsInput<'a> {
     pool_membership: &'a PoolMembership,
 }
 
-fn build_add_credential_prelude(input: &AddStepsInput<'_>) -> AddCredentialPrelude {
-    let confirm_disks = input
-        .names
+fn build_add_credential_prelude(
+    input: &AddStepsInput<'_>,
+    targets: &[AddTargetWork],
+) -> AddCredentialPrelude {
+    let confirm_disks = targets
         .iter()
-        .zip(input.by_ids.iter())
-        .zip(input.probed.iter())
-        .map(|((name, by_id), probed)| AddConfirmDiskPlan {
-            name: name.clone(),
-            by_id: (*by_id).clone(),
-            needs_luks_format: matches!(probed.state, PresentConfigDiskState::PresentNotLuks),
+        .map(|target| AddConfirmDiskPlan {
+            name: target.name().clone(),
+            by_id: target.by_id().clone(),
+            needs_luks_format: matches!(target, AddTargetWork::Fresh(_)),
         })
         .collect();
 
@@ -2097,7 +2117,7 @@ fn build_add_work_plan<R: CommandRunner>(
     }
 
     Ok(AddWorkPlan {
-        prelude: build_add_credential_prelude(input),
+        prelude: build_add_credential_prelude(input, &targets),
         targets,
         initial_journal_targets,
         mount_point: input.mount_point.clone(),
@@ -9108,6 +9128,87 @@ mod tests {
         assert!(
             runner.requests().is_empty(),
             "closed no-op classification should not need command probes: {:?}",
+            runner.requests()
+        );
+    }
+
+    // Intent: mixed no-op and fresh-disk planning derives confirm and done
+    // target names from disks that survived classification.
+    // Why it exists: `braid add disk1=... disk2=...` must not ask the
+    // operator to confirm or later report adding a SameBacking no-op disk.
+    // Scenario: clone is a closed PresentLuks disk with the same UUID and
+    // backing as a live pool member, while fresh is a new PresentNotLuks disk.
+    #[test]
+    fn add_mixed_noop_and_fresh_excludes_noop_from_workplan() {
+        let collision_uuid = "55555555-5555-5555-5555-555555555555";
+        let uuid = LuksUuid::parse(collision_uuid).unwrap();
+        let clone_by_id = ByIdPath::parse("/dev/disk/by-id/usb-CLONE").unwrap();
+        let fresh_by_id = ByIdPath::parse("/dev/disk/by-id/usb-FRESH").unwrap();
+        let mut pool =
+            pool_with_live_devices(vec![live_pool_device("braid-drifted", &uuid, "/dev/vdb")]);
+        pool.fsid = Some("cc86845b-aec3-408e-bef5-553affc1f2b1".into());
+        let runner = RequestRecordingRunner::new(MockRunner::default());
+        let probed = vec![
+            cloned_disk_probed_with_mapper_state(
+                "clone",
+                clone_by_id.as_str(),
+                collision_uuid,
+                false,
+            ),
+            PresentConfigDisk {
+                name: DiskName::parse("fresh").unwrap(),
+                by_id_path: fresh_by_id.clone(),
+                state: PresentConfigDiskState::PresentNotLuks,
+            },
+        ];
+        let names = vec![
+            DiskName::parse("clone").unwrap(),
+            DiskName::parse("fresh").unwrap(),
+        ];
+        let by_ids_refs: Vec<&ByIdPath> = vec![&clone_by_id, &fresh_by_id];
+        let resolver = crate::test_fixtures::MockBackingPathResolver::default()
+            .with_path(clone_by_id.as_str(), "/dev/vdb");
+
+        let work_plan = build_add_work_plan(
+            &runner,
+            &AddStepsInput {
+                names: &names,
+                by_ids: &by_ids_refs,
+                probed: &probed,
+                pool: &pool,
+                mount_point: &MountPoint("/mnt/storage".into()),
+                paths: &test_paths().1,
+                enroll_key_file: None,
+                luks_format_extra_opts: &LuksFormatExtraOpts::default(),
+                backing_path_resolver: &resolver,
+                pool_membership: &PoolMembership::empty(),
+            },
+        )
+        .expect("fresh target should keep mixed add from being a no-op");
+
+        assert!(!work_plan.is_noop(), "expected mixed add to do work");
+        assert_eq!(work_plan.target_count(), 1);
+        let confirm_disks = &work_plan.prelude.confirm_disks;
+        assert_eq!(
+            confirm_disks.len(),
+            1,
+            "confirm prompt should include only surviving targets: {confirm_disks:?}"
+        );
+        assert_eq!(confirm_disks[0].name.as_str(), "fresh");
+        assert!(confirm_disks[0].needs_luks_format);
+        assert!(
+            confirm_disks
+                .iter()
+                .all(|disk| disk.name.as_str() != "clone"),
+            "SameBacking no-op must be absent from confirm disks: {confirm_disks:?}"
+        );
+        assert_eq!(
+            work_plan.target_names(),
+            vec![DiskName::parse("fresh").unwrap()]
+        );
+        assert!(
+            runner.requests().is_empty(),
+            "closed no-op plus fresh planning should not need command probes: {:?}",
             runner.requests()
         );
     }

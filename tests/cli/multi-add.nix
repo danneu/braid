@@ -1,9 +1,10 @@
 # Test: multi-disk braid add
 #
-# What: Tests `braid add disk1 disk2` (multi-disk add) through three scenarios:
+# What: Tests `braid add disk1 disk2` (multi-disk add) through four scenarios:
 # (1) bootstrap a new pool with 2 disks → RAID1 from the start, no balance;
 # (2) add 2 more disks to existing pool → one balance at the end;
 # (3) single-disk add to an existing pool.
+# (4) mixed already-in-pool + fresh add confirms and reports only real work.
 #
 # Why: Multi-disk add is the recommended way to start a pool. It avoids the
 # single→RAID1 balance that rewrites all data. This test proves the mkfs.btrfs
@@ -37,6 +38,10 @@
         {
           size = 1024;
           driveConfig.deviceExtraOpts.serial = "disk5";
+        }
+        {
+          size = 1024;
+          driveConfig.deviceExtraOpts.serial = "disk6";
         }
       ];
 
