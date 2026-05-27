@@ -6,7 +6,7 @@ and `ls docs/commands/`. Build the leaf manifest from `Commands` and
 public nested subcommand enums, using effective Clap names. Expected
 review targets: `add`, `remove`, `remove-missing`, `replace`, `status`,
 `doctor`, `unlock`, `lock`, `enroll`, `idle`, `monitor`, `ack`, `tui`,
-`browse`, `discover`, `recover`, and `ups status`. Exclude hidden scrub
+`discover`, `recover`, and `ups status`. Exclude hidden scrub
 helpers and do not review `ups` as a parent-only command.
 
 Pre-flight is verify-only except for the findings directory:
@@ -21,15 +21,15 @@ Abort if the agent is missing or the committed shared settings file is
 invalid. The caller must already have local mutating permissions for
 `command-findings/`; do not mutate Claude settings at runtime.
 
-Create user-visible progress tasks before fan-out: issue 18
+Create user-visible progress tasks before fan-out: issue 17
 `TaskCreate` calls in `pending` state, one titled `Review braid
-<command>` for each of the 17 targets and one titled `Roll up findings
+<command>` for each of the 16 targets and one titled `Roll up findings
 into command-findings/index.md`. Capture every `taskId` and maintain a
 local `command -> taskId` mapping. In the same assistant message that
 fans out the reviewers, call `TaskUpdate` on each review task to mark
 it `in_progress`.
 
-Spawn all 17 reviewers as parallel `Agent` tool calls with
+Spawn all 16 reviewers as parallel `Agent` tool calls with
 `subagent_type: "command-reviewer"`. If the harness caps parallelism,
 send the remainder in a follow-up message. Each prompt should be only:
 
@@ -52,11 +52,11 @@ mark it `completed` before processing the next return. If a subagent
 fails or returns malformed output, still mark its task `completed` with
 a short note in the task body.
 
-After all 17 review tasks are completed, verify
-`ls command-findings/ | wc -l` reports 17 and `git status` shows only
+After all 16 review tasks are completed, verify
+`ls command-findings/ | wc -l` reports 16 and `git status` shows only
 untracked files under `command-findings/`. Then mark the rollup task
 `in_progress` and spawn one `general-purpose` rollup agent to read the
-17 findings files and write `command-findings/index.md`. The rollup may
+16 findings files and write `command-findings/index.md`. The rollup may
 not create new findings or reinterpret existing ones; copy each
 one-line `Issue` text verbatim into a severity-sorted table, High
 before Medium before Low.
