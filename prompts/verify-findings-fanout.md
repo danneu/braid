@@ -21,12 +21,15 @@ For each row:
 
    ```bash
    danterm tab new \
+     --background --at-group-end \
      --cwd /Users/dan/Code/braid \
      --title "<command> <N>: <sev>" \
      --cmd "sh -c 'cat /tmp/verify-issue-<command>-<N>.md | claude --effort max'"
    ```
 
    - This uses the known-good `cat file.md | claude --effort max` stdin path.
+   - `--background` keeps the new tab from stealing focus; `--at-group-end`
+     appends it after the existing tabs in the caller's group. Always pass both.
    - `sev` is lowercase abbreviation: `high` / `med` / `low`.
 
 3. **Mark the row `wip` in `index.md`.** Replace that row's `|        |` cell (8 spaces) with `| wip    |` (4 trailing spaces). Column is 8 chars wide between pipes -- preserve alignment. The row is unique by its anchor like `[#N](./<command>.md:LINE)`.
