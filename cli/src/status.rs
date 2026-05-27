@@ -237,17 +237,33 @@ struct CompactDrive {
     status: DiskStatus,
 }
 
+/// Single source of the decision-024 present-device display-name rule:
+/// UUID-join membership to the operator name, falling back to the raw mapper
+/// basename for foreign live devices. Shared so compact, verbose, and
+/// devid-name rendering cannot diverge.
+fn present_display_name(member: Option<&membership::DiskMember>, mapper: &MapperName) -> String {
+    member
+        .map(|m| m.name.as_str().to_owned())
+        .unwrap_or_else(|| mapper.0.clone())
+}
+
 fn build_compact_drives(pool: &PoolState, membership: &PoolMembership) -> Vec<CompactDrive> {
     let mut drives = Vec::new();
 
     // Present pool devices
     let pool_luks_uuids: HashSet<&LuksUuid> = pool.devices.iter().map(|d| &d.luks_uuid).collect();
-    for pd in &pool.devices {
-        let name = membership
-            .by_uuid(&pd.luks_uuid)
-            .map(|member| member.name.as_str())
-            .unwrap_or(&pd.mapper.0)
-            .to_owned();
+    let mut present: Vec<(&PoolDevice, String)> = pool
+        .devices
+        .iter()
+        .map(|pd| {
+            (
+                pd,
+                present_display_name(membership.by_uuid(&pd.luks_uuid), &pd.mapper),
+            )
+        })
+        .collect();
+    present.sort_by(|(_, left), (_, right)| left.cmp(right));
+    for (pd, name) in present {
         let device_short = pd
             .underlying
             .strip_prefix("/dev/")
@@ -293,10 +309,7 @@ fn build_devid_names(
     let mut names = HashMap::new();
 
     for pd in &pool.devices {
-        let name = membership
-            .by_uuid(&pd.luks_uuid)
-            .map(|member| member.name.as_str().to_owned())
-            .unwrap_or_else(|| pd.mapper.0.clone());
+        let name = present_display_name(membership.by_uuid(&pd.luks_uuid), &pd.mapper);
         names.insert(pd.devid, name);
     }
 
@@ -943,22 +956,24 @@ fn build_disk_reports<R: CommandRunner>(
     let mut human_details = Vec::new();
 
     // Present pool devices
-    for pd in &pool.devices {
-        let matched_member = membership.by_uuid(&pd.luks_uuid);
-
+    let mut present: Vec<(&PoolDevice, Option<&membership::DiskMember>, String)> = pool
+        .devices
+        .iter()
+        .map(|pd| {
+            let matched_member = membership.by_uuid(&pd.luks_uuid);
+            (
+                pd,
+                matched_member,
+                present_display_name(matched_member, &pd.mapper),
+            )
+        })
+        .collect();
+    present.sort_by(|(_, _, left), (_, _, right)| left.cmp(right));
+    for (pd, matched_member, disk_name) in present {
         // Present-disk identity comes from the UUID-keyed membership join
         // (decision 024). `config_disks` is intentionally not consulted here:
         // for a present member, it carries the same name/by-id as
         // `matched_member`; for foreign live devices, there is no member join.
-        let disk_name = matched_member
-            .map(|member| member.name.as_str().to_owned())
-            .unwrap_or_else(|| {
-                // Display-only fallback for foreign live devices. Keep the
-                // raw mapper basename instead of deriving a member name from
-                // `braid-*`; UUID-keyed membership remains the identity join.
-                pd.mapper.0.clone()
-            });
-
         let by_id = matched_member
             .map(|member| member.by_id.as_str().to_owned())
             .unwrap_or_else(|| format!("/dev/mapper/{}", pd.mapper.0));
@@ -5019,6 +5034,115 @@ mod tests {
         assert_eq!(ctx.disks[1].status, DiskStatus::Unknown);
     }
 
+    // Intent: present verbose rows are ordered by resolved `DiskName`, not by
+    // btrfs devid order.
+    // Why it exists: decision 024 requires name ordering; present rows came
+    // straight off devid-ordered `pool.devices`, diverging from the
+    // name-sorted missing half.
+    // Scenario: a pool whose devids run opposite to disk names still shows
+    // `alpha` before `bravo`, while preserving present-then-missing grouping.
+    #[test]
+    fn build_disk_reports_sorts_present_rows_by_name_not_devid() {
+        let (bravo_uuid, bravo_member) = disk_member_with(
+            951,
+            "bravo",
+            "/dev/disk/by-id/disk-bravo",
+            Some(1),
+            None,
+        );
+        let (alpha_uuid, alpha_member) = disk_member_with(
+            952,
+            "alpha",
+            "/dev/disk/by-id/disk-alpha",
+            Some(2),
+            None,
+        );
+        let (aardvark_uuid, aardvark_member) = disk_member_with(
+            953,
+            "aardvark",
+            "/dev/disk/by-id/disk-aardvark",
+            Some(3),
+            None,
+        );
+        let membership = membership_from(vec![
+            (bravo_uuid.clone(), bravo_member),
+            (alpha_uuid.clone(), alpha_member),
+            (aardvark_uuid, aardvark_member),
+        ]);
+        let config_disks = vec![
+            ConfigDisk {
+                name: DiskName::parse("aardvark").unwrap(),
+                by_id_path: ByIdPath::parse("/dev/disk/by-id/disk-aardvark").unwrap(),
+                state: ConfigDiskState::Absent,
+            },
+            ConfigDisk {
+                name: DiskName::parse("alpha").unwrap(),
+                by_id_path: ByIdPath::parse("/dev/disk/by-id/disk-alpha").unwrap(),
+                state: ConfigDiskState::PresentLuks {
+                    uuid: alpha_uuid.clone(),
+                    label: None,
+                    mapper_open: true,
+                },
+            },
+            ConfigDisk {
+                name: DiskName::parse("bravo").unwrap(),
+                by_id_path: ByIdPath::parse("/dev/disk/by-id/disk-bravo").unwrap(),
+                state: ConfigDiskState::PresentLuks {
+                    uuid: bravo_uuid.clone(),
+                    label: None,
+                    mapper_open: true,
+                },
+            },
+        ];
+        let pool = PoolState {
+            mounted: true,
+            devices: vec![
+                PoolDevice {
+                    mapper: MapperName("braid-bravo".to_owned()),
+                    luks_uuid: bravo_uuid,
+                    devid: 1,
+                    underlying: "/dev/vdb".to_owned(),
+                },
+                PoolDevice {
+                    mapper: MapperName("braid-alpha".to_owned()),
+                    luks_uuid: alpha_uuid,
+                    devid: 2,
+                    underlying: "/dev/vda".to_owned(),
+                },
+            ],
+            missing_count: 1,
+            missing_devids: vec![3],
+            total_devices: 3,
+            fsid: None,
+            null_underlying: vec![],
+        };
+        let runner = MockRunner::default();
+        let stats = BtrfsDeviceStatsOutput { devices: vec![] };
+
+        let ctx = build_disk_reports(&runner, &membership, &config_disks, &pool, &stats);
+
+        let disk_rows: Vec<(&str, DiskStatus)> = ctx
+            .disks
+            .iter()
+            .map(|disk| (disk.name.as_str(), disk.status))
+            .collect();
+        assert_eq!(
+            disk_rows,
+            vec![
+                ("alpha", DiskStatus::Present),
+                ("bravo", DiskStatus::Present),
+                ("aardvark", DiskStatus::Missing),
+            ]
+        );
+
+        let human_rows: Vec<(&str, DiskStatus)> = ctx
+            .human_details
+            .iter()
+            .map(|disk| (disk.name.as_str(), disk.status))
+            .collect();
+        assert_eq!(human_rows, disk_rows);
+    }
+
     // Intent: foreign live mappers with btrfs errors must not receive a
     // member-scoped `braid replace --old` action in verbose status.
     // Why it exists: replacement targets are member names joined by LUKS UUID;
@@ -5394,6 +5518,80 @@ mod tests {
         assert_eq!(drives[0].status, DiskStatus::Present);
         assert_eq!(drives[1].name, "disk1");
         assert_eq!(drives[1].status, DiskStatus::Missing);
+    }
+
+    // Intent: present compact rows are ordered by resolved `DiskName`, not by
+    // btrfs devid order.
+    // Why it exists: decision 024 requires name ordering; present rows came
+    // straight off devid-ordered `pool.devices`, diverging from the
+    // name-sorted missing half.
+    // Scenario: a pool whose devids run opposite to disk names still shows
+    // `alpha` before `bravo`, while preserving present-then-missing grouping.
+    #[test]
+    fn build_compact_drives_sorts_present_rows_by_name_not_devid() {
+        let (bravo_uuid, bravo_member) = disk_member_with(
+            961,
+            "bravo",
+            "/dev/disk/by-id/disk-bravo",
+            Some(1),
+            None,
+        );
+        let (alpha_uuid, alpha_member) = disk_member_with(
+            962,
+            "alpha",
+            "/dev/disk/by-id/disk-alpha",
+            Some(2),
+            None,
+        );
+        let (aardvark_uuid, aardvark_member) = disk_member_with(
+            963,
+            "aardvark",
+            "/dev/disk/by-id/disk-aardvark",
+            Some(3),
+            None,
+        );
+        let membership = membership_from(vec![
+            (bravo_uuid.clone(), bravo_member),
+            (alpha_uuid.clone(), alpha_member),
+            (aardvark_uuid, aardvark_member),
+        ]);
+        let pool = PoolState {
+            mounted: true,
+            devices: vec![
+                PoolDevice {
+                    mapper: MapperName("braid-bravo".to_owned()),
+                    luks_uuid: bravo_uuid,
+                    devid: 1,
+                    underlying: "/dev/vdb".to_owned(),
+                },
+                PoolDevice {
+                    mapper: MapperName("braid-alpha".to_owned()),
+                    luks_uuid: alpha_uuid,
+                    devid: 2,
+                    underlying: "/dev/vda".to_owned(),
+                },
+            ],
+            missing_count: 1,
+            missing_devids: vec![3],
+            total_devices: 3,
+            fsid: None,
+            null_underlying: vec![],
+        };
+
+        let drives = build_compact_drives(&pool, &membership);
+
+        let rows: Vec<(&str, DiskStatus)> = drives
+            .iter()
+            .map(|drive| (drive.name.as_str(), drive.status))
+            .collect();
+        assert_eq!(
+            rows,
+            vec![
+                ("alpha", DiskStatus::Present),
+                ("bravo", DiskStatus::Present),
+                ("aardvark", DiskStatus::Missing),
+            ]
+        );
     }
 
     #[test]
