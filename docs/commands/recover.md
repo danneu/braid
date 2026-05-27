@@ -84,7 +84,7 @@ sudo braid recover --dry-run
 
 - Refuses if no `pending-op.json` exists.
 - Refuses if another braid operation is in progress (pool lock `/run/braid-pool.lock` is held) -- retry once it finishes.
-- Refuses to adopt live pool members that aren't in either the pre-operation or target journal snapshot (guards against devices added outside braid).
+- Refuses to adopt live pool members outside the recovery admission membership for the current journal phase (guards against devices added outside braid). Most phases admit the pre-operation snapshot plus target-only members; `Replace::PostReplaceMaintenance` admits only the committed target membership because btrfs preserves the old device's devid on the replacement after commit.
 - Hard-fails if a live pool device has no `/dev/disk/by-id/` symlink (recovery can't guess a stable identifier).
 - Detects interrupted bootstrap add (first disk, no filesystem yet) and gives specific wipe-and-retry instructions instead of a confusing mount error.
 - Refuses to overwrite `pool.json` or clear `pending-op.json` if the post-mount probe at the configured mount point sees the pool unmounted or with zero btrfs devices. The mount may have been removed externally between recover's mount step and membership probe; `pool.json` and `pending-op.json` are both preserved -- investigate the mount, then re-run `braid recover`.

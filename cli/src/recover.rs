@@ -228,7 +228,7 @@ struct RecoverWorkPlan {
     open_plan: Option<OpenPlan>,
     pre_resolved_credential: Option<OpenCredential>,
     journal: Journal,
-    union: PoolMembership,
+    admission_membership: PoolMembership,
     mount_point: MountPoint,
     pool_json_path: PathBuf,
     pending_op_path: PathBuf,
@@ -379,7 +379,7 @@ impl RecoverWorkAction {
 
                 for name in reopen_names {
                     let member = plan
-                        .union
+                        .admission_membership
                         .by_name(name)
                         .map(|(_, m)| m)
                         .expect("remount-cycle reopen target validated during planning");
@@ -467,7 +467,8 @@ impl RecoverWorkAction {
             RecoverWorkAction::RemountCycle { close_names, .. } => {
                 if state.just_mounted {
                     let recovery_mount_membership =
-                        mount_membership_for_recover(&plan.journal, &plan.union).clone();
+                        mount_membership_for_recover(&plan.journal, &plan.admission_membership)
+                            .clone();
                     let cred = state.credential.as_ref().expect(
                         "just_mounted implies open_plan was Some and credential was resolved",
                     );
@@ -595,7 +596,7 @@ impl RecoverCompletion {
         // longer sees a mounted pool with members, preserve pool.json and
         // the pending journal so the operator can fix the mount state and
         // retry.
-        if !pool.mounted || (pool.devices.is_empty() && !plan.union.is_empty()) {
+        if !pool.mounted || (pool.devices.is_empty() && !plan.admission_membership.is_empty()) {
             let probe_state = if !pool.mounted {
                 "no btrfs mount"
             } else {
@@ -620,7 +621,7 @@ impl RecoverCompletion {
                     AddPoolReplayCtx {
                         credential: state.credential.as_ref(),
                         journal: &plan.journal,
-                        union: &plan.union,
+                        union: &plan.admission_membership,
                         targets,
                         pool,
                     },
@@ -631,7 +632,7 @@ impl RecoverCompletion {
                 by_id_resolver,
                 params,
                 &plan.journal,
-                &plan.union,
+                &plan.admission_membership,
                 pool,
                 false,
             ),
@@ -677,7 +678,7 @@ impl RecoverCompletion {
                 params,
                 state.credential.as_ref(),
                 &plan.journal,
-                &plan.union,
+                &plan.admission_membership,
                 pool,
                 old_uuid,
                 new_uuid,
@@ -1028,7 +1029,7 @@ fn execute_recover_initial_open<R: CommandRunner + Sync, F: Filesystem + ?Sized>
                 );
                 if all_no_btrfs {
                     let disk_list: Vec<_> = plan
-                        .union
+                        .admission_membership
                         .iter()
                         .map(|(_, m)| format!("  {} ({})", m.name, m.by_id))
                         .collect();
@@ -1071,8 +1072,12 @@ fn execute_generic_live_pool_recovery<R: CommandRunner + Sync>(
     replay_raid1_maintenance: bool,
 ) -> Result<(), RecoverError> {
     let prior = membership::load_membership(params.paths).ok();
-    let mut recovered =
-        build_membership_from_live_pool(&pool, &plan.union, prior.as_ref(), by_id_resolver)?;
+    let mut recovered = build_membership_from_live_pool(
+        &pool,
+        &plan.admission_membership,
+        prior.as_ref(),
+        by_id_resolver,
+    )?;
 
     // OpKind::Remove guard: restore any pre_membership disk that btrfs still
     // owns. build_membership_from_live_pool walks pool.devices only, so any
@@ -1222,7 +1227,7 @@ impl RecoverPlan {
 }
 
 /// Plan a `braid recover` run. Owns everything above today's real-run
-/// mutation body: journal load, `union_memberships`,
+/// mutation body: journal load, admission membership construction,
 /// `mount::plan_open_pool`, ProbeEvent-to-PreviewNote conversion,
 /// dry-run already-mounted reconciliation, and dry-run step
 /// construction (write pool.json / clear pending-op.json, plus
@@ -1257,8 +1262,13 @@ pub fn plan_recover<R: CommandRunner + Sync, F: Filesystem + ?Sized>(
     // plan_open_pool, or fails at the already-mounted reconciliation.
     let mut notes = vec![PreviewNote::Info(format_recover_entry(&journal))];
 
-    let union = union_memberships(&journal);
-    let mount_membership = mount_membership_for_recover(&journal, &union);
+    let admission_membership = match recovery_admission_membership(&journal) {
+        Ok(membership) => membership,
+        Err(e) => {
+            return Err(PlanFailure::with_notes(notes, RecoverError::Membership(e)));
+        }
+    };
+    let mount_membership = mount_membership_for_recover(&journal, &admission_membership);
     let mut pre_resolved_credential = None;
 
     if let journal::OpKind::Add {
@@ -1332,8 +1342,8 @@ pub fn plan_recover<R: CommandRunner + Sync, F: Filesystem + ?Sized>(
     let probed_live_pool = if open_plan.is_none() && params.dry_run {
         // Pool is already mounted -- run the same read-only reconciliation
         // validation that execution's later probe_pool loop does. This
-        // catches errors like "device X has no by-id path in either
-        // snapshot" before claiming recovery is ready. Kept dry-run only
+        // catches errors like "device X is outside the admission membership"
+        // before claiming recovery is ready. Kept dry-run only
         // to preserve today's asymmetry: real-run already-mounted skips
         // this check because it happens implicitly downstream in
         // `execute()` when it walks the probed pool devices.
@@ -1369,7 +1379,7 @@ pub fn plan_recover<R: CommandRunner + Sync, F: Filesystem + ?Sized>(
                 ));
             }
         }
-        if let Err(e) = validate_live_members_allowed(&pool, &union) {
+        if let Err(e) = validate_live_members_allowed(&pool, &admission_membership) {
             return Err(PlanFailure::with_notes(notes, e));
         }
         Some(pool)
@@ -1408,7 +1418,7 @@ pub fn plan_recover<R: CommandRunner + Sync, F: Filesystem + ?Sized>(
             })?;
             cycle_reopen_names.push(parsed);
         }
-        let cycle_close_names: Vec<DiskName> = union
+        let cycle_close_names: Vec<DiskName> = admission_membership
             .iter()
             .filter_map(|(_, member)| {
                 let name = &member.name;
@@ -1421,11 +1431,11 @@ pub fn plan_recover<R: CommandRunner + Sync, F: Filesystem + ?Sized>(
             .collect();
 
         for name in &cycle_reopen_names {
-            if union.by_name(name).is_none() {
+            if admission_membership.by_name(name).is_none() {
                 return Err(PlanFailure::with_notes(
                     notes,
                     RecoverError::Failed(format!(
-                        "recover remount cycle preview: disk '{name}' missing from membership union"
+                        "recover remount cycle preview: disk '{name}' missing from recovery admission membership"
                     )),
                 ));
             }
@@ -1539,7 +1549,7 @@ pub fn plan_recover<R: CommandRunner + Sync, F: Filesystem + ?Sized>(
         open_plan,
         pre_resolved_credential,
         journal,
-        union,
+        admission_membership,
         mount_point: params.config.mount_point().clone(),
         pool_json_path: params.paths.pool_json(),
         pending_op_path: params.paths.pending_op_json(),
@@ -1657,7 +1667,8 @@ fn recover_membership_matching_expected(
     for dev in &pool.devices {
         let Some(expected_member) = expected.by_uuid(&dev.luks_uuid) else {
             // Decision 017 uses committed target membership here, so this
-            // wording intentionally differs from the pre/target-union paths.
+            // wording intentionally differs from the phase-aware admission
+            // paths.
             return Err(RecoverError::Failed(format!(
                 "device {} (LUKS UUID {}) is in the live pool but is not part of the expected \
                  committed membership.",
@@ -1864,14 +1875,14 @@ fn live_member_uuids(pool: &PoolState) -> std::collections::BTreeSet<LuksUuid> {
 }
 
 /// Foreign-device rejection for recovery paths that rebuild from the
-/// pre-operation and target membership union.
+/// phase-aware admission membership.
 ///
-/// Kept distinct from the committed-target rejection because Decision 017 uses
-/// different membership sets in different recovery phases.
-fn foreign_live_device_not_in_snapshot(dev: &PoolDevice) -> RecoverError {
+/// Kept distinct from the committed-target rejection because recover admits
+/// different journal snapshots in different phases.
+fn foreign_live_device_not_admitted(dev: &PoolDevice) -> RecoverError {
     RecoverError::Failed(format!(
-        "device {} (LUKS UUID {}) is in the live pool but has no by-id path in either \
-         the pre-operation or target membership snapshot.\n\
+        "device {} (LUKS UUID {}) is in the live pool but has no journaled by-id \
+         binding in the recovery admission membership for this phase.\n\
          This must be resolved manually -- provide the correct \
          /dev/disk/by-id/ path and re-run recovery.",
         dev.mapper.0, dev.luks_uuid
@@ -1884,7 +1895,7 @@ fn validate_live_members_allowed(
 ) -> Result<(), RecoverError> {
     for dev in &pool.devices {
         if allowed.by_uuid(&dev.luks_uuid).is_none() {
-            return Err(foreign_live_device_not_in_snapshot(dev));
+            return Err(foreign_live_device_not_admitted(dev));
         }
     }
     Ok(())
@@ -1900,21 +1911,21 @@ fn add_targets_all_live(
 
 fn build_membership_from_live_pool(
     pool: &PoolState,
-    union: &PoolMembership,
+    admission_membership: &PoolMembership,
     prior: Option<&PoolMembership>,
     by_id_resolver: &dyn ByIdResolver,
 ) -> Result<PoolMembership, RecoverError> {
     let mut recovered = PoolMembership::empty();
     for dev in &pool.devices {
-        let Some(union_member) = union.by_uuid(&dev.luks_uuid) else {
-            return Err(foreign_live_device_not_in_snapshot(dev));
+        let Some(admission_member) = admission_membership.by_uuid(&dev.luks_uuid) else {
+            return Err(foreign_live_device_not_admitted(dev));
         };
         let by_id = resolve_by_id_for_underlying(by_id_resolver, &dev.underlying)?;
-        let added_at = resolve_added_at(prior, union_member, &dev.luks_uuid);
+        let added_at = resolve_added_at(prior, admission_member, &dev.luks_uuid);
         recovered.insert(
             dev.luks_uuid.clone(),
             DiskMember {
-                name: union_member.name.clone(),
+                name: admission_member.name.clone(),
                 by_id,
                 devid: Some(dev.devid),
                 added_at,
@@ -2284,7 +2295,7 @@ fn execute_add_post_balance_recovery<R: CommandRunner + Sync>(
 }
 
 /// Per-replay state for the `add` PoolMutation recovery path: keeps the
-/// replay-time inputs (credential, journal slice, union membership,
+/// replay-time inputs (credential, journal slice, admission membership,
 /// per-disk targets) and the live `PoolState` that the helper rebuilds
 /// after opening any returned disks.
 struct AddPoolReplayCtx<'a> {
@@ -3625,22 +3636,38 @@ fn recovery_guidance(
     }
 }
 
-/// Merge pre_membership and target_membership into a single set of all known devices.
-fn union_memberships(journal: &Journal) -> PoolMembership {
-    let mut union = journal.pre_membership.clone();
+/// Build the phase-specific journal membership that recovery may admit live.
+///
+/// Replace post-maintenance uses the committed target snapshot only because
+/// btrfs preserves the old device's devid on the replacement after commit.
+/// Other phases admit the pre-operation snapshot plus target-only UUIDs so
+/// interrupted mutations can observe either side without accepting unrelated
+/// live devices.
+fn recovery_admission_membership(
+    journal: &Journal,
+) -> Result<PoolMembership, membership::MembershipError> {
+    if matches!(
+        &journal.op,
+        journal::OpKind::Replace {
+            phase: journal::ReplacePhase::PostReplaceMaintenance,
+            ..
+        }
+    ) {
+        return Ok(journal.target_membership.clone());
+    }
+
+    let mut membership = journal.pre_membership.clone();
     for (uuid, member) in journal.target_membership.iter() {
-        if union.by_uuid(uuid).is_none() {
-            union
-                .insert(uuid.clone(), member.clone())
-                .expect("journal snapshots should not violate membership uniqueness");
+        if membership.by_uuid(uuid).is_none() {
+            membership.insert(uuid.clone(), member.clone())?;
         }
     }
-    union
+    Ok(membership)
 }
 
 fn mount_membership_for_recover<'a>(
     journal: &'a Journal,
-    union: &'a PoolMembership,
+    admission_membership: &'a PoolMembership,
 ) -> &'a PoolMembership {
     match &journal.op {
         journal::OpKind::Add {
@@ -3648,7 +3675,7 @@ fn mount_membership_for_recover<'a>(
             ..
         } => {
             if journal.is_bootstrap_add() {
-                union
+                admission_membership
             } else {
                 &journal.pre_membership
             }
@@ -3668,12 +3695,12 @@ fn mount_membership_for_recover<'a>(
         journal::OpKind::Replace {
             phase: journal::ReplacePhase::PoolMutation,
             ..
-        } => union,
+        } => admission_membership,
         journal::OpKind::Replace {
             phase: journal::ReplacePhase::PostReplaceMaintenance,
             ..
         } => &journal.target_membership,
-        journal::OpKind::Remove { .. } => union,
+        journal::OpKind::Remove { .. } => admission_membership,
     }
 }
 
@@ -4695,13 +4722,17 @@ mod tests {
         }
     }
 
+    fn test_recovery_admission_membership(journal: &journal::Journal) -> PoolMembership {
+        recovery_admission_membership(journal).expect("fixture admission membership should be valid")
+    }
+
     fn recover_work_plan_for_journal(journal: journal::Journal) -> RecoverWorkPlan {
-        let union = union_memberships(&journal);
+        let union = test_recovery_admission_membership(&journal);
         RecoverWorkPlan {
             open_plan: None,
             pre_resolved_credential: None,
             journal,
-            union,
+            admission_membership: union,
             mount_point: MountPoint("/mnt/storage".into()),
             pool_json_path: std::path::PathBuf::from("/var/lib/braid/pool.json"),
             pending_op_path: std::path::PathBuf::from("/var/lib/braid/pending-op.json"),
@@ -5742,7 +5773,7 @@ mod tests {
         let f = PoolFixture::empty();
         let journal = recoverable_pool_mutation_add_journal();
         journal::write_journal(&f.paths, &journal).unwrap();
-        let union = union_memberships(&journal);
+        let union = test_recovery_admission_membership(&journal);
         let targets = match &journal.op {
             OpKind::Add { targets, .. } => targets,
             _ => unreachable!("test journal is Add"),
@@ -5803,7 +5834,7 @@ mod tests {
         let f = PoolFixture::empty();
         let journal = recoverable_pool_mutation_add_journal();
         journal::write_journal(&f.paths, &journal).unwrap();
-        let union = union_memberships(&journal);
+        let union = test_recovery_admission_membership(&journal);
         let targets = match &journal.op {
             OpKind::Add { targets, .. } => targets,
             _ => unreachable!("test journal is Add"),
@@ -5863,7 +5894,7 @@ mod tests {
         let f = PoolFixture::empty();
         let journal = recoverable_pool_mutation_add_journal();
         journal::write_journal(&f.paths, &journal).unwrap();
-        let union = union_memberships(&journal);
+        let union = test_recovery_admission_membership(&journal);
         let targets = match &journal.op {
             OpKind::Add { targets, .. } => targets,
             _ => unreachable!("test journal is Add"),
@@ -5923,7 +5954,7 @@ mod tests {
         let f = PoolFixture::empty();
         let journal = recoverable_pool_mutation_add_journal();
         journal::write_journal(&f.paths, &journal).unwrap();
-        let union = union_memberships(&journal);
+        let union = test_recovery_admission_membership(&journal);
         let targets = match &journal.op {
             OpKind::Add { targets, .. } => targets,
             _ => unreachable!("test journal is Add"),
@@ -5981,7 +6012,7 @@ mod tests {
         let f = PoolFixture::empty();
         let journal = recoverable_pool_mutation_add_journal();
         journal::write_journal(&f.paths, &journal).unwrap();
-        let union = union_memberships(&journal);
+        let union = test_recovery_admission_membership(&journal);
         let targets = match &journal.op {
             OpKind::Add { targets, .. } => targets,
             _ => unreachable!("test journal is Add"),
@@ -6041,7 +6072,7 @@ mod tests {
         let f = PoolFixture::empty();
         let journal = two_target_recoverable_pool_mutation_add_journal();
         journal::write_journal(&f.paths, &journal).unwrap();
-        let union = union_memberships(&journal);
+        let union = test_recovery_admission_membership(&journal);
         let targets = match &journal.op {
             OpKind::Add { targets, .. } => targets,
             _ => unreachable!("test journal is Add"),
@@ -6455,7 +6486,7 @@ mod tests {
         let f = PoolFixture::empty();
         let journal = recoverable_pool_mutation_add_journal();
         journal::write_journal(&f.paths, &journal).unwrap();
-        let union = union_memberships(&journal);
+        let union = test_recovery_admission_membership(&journal);
         let targets = match &journal.op {
             OpKind::Add { targets, .. } => targets,
             _ => unreachable!("test journal is Add"),
@@ -7166,7 +7197,7 @@ mod tests {
         let fs = MockFs::new(&["/dev/disk/by-id/virtio-disk2", "/dev/mapper/braid-disk2"]);
 
         let journal = recoverable_pool_mutation_add_journal();
-        let union = union_memberships(&journal);
+        let union = test_recovery_admission_membership(&journal);
         let targets = match &journal.op {
             OpKind::Add { targets, .. } => targets,
             _ => unreachable!("test journal is Add"),
@@ -7290,7 +7321,7 @@ mod tests {
         let fs = MockFs::new(&[]);
         let journal = two_pre_recoverable_add_disk3_journal();
         journal::write_journal(&f.paths, &journal).unwrap();
-        let union = union_memberships(&journal);
+        let union = test_recovery_admission_membership(&journal);
         let targets = match &journal.op {
             OpKind::Add { targets, .. } => targets,
             _ => unreachable!("test journal is Add"),
@@ -7362,7 +7393,7 @@ mod tests {
         let fs = MockFs::new(&["/dev/mapper/braid-disk1"]);
         let journal = recoverable_pool_mutation_add_journal();
         journal::write_journal(&f.paths, &journal).unwrap();
-        let union = union_memberships(&journal);
+        let union = test_recovery_admission_membership(&journal);
         let targets = match &journal.op {
             OpKind::Add { targets, .. } => targets,
             _ => unreachable!("test journal is Add"),
@@ -7549,7 +7580,7 @@ mod tests {
         let stored_opts = vec!["--label".into(), "braid-disk2".into()];
         let journal = fresh_pool_mutation_add_journal(stored_opts, None);
         journal::write_journal(&f.paths, &journal).unwrap();
-        let union = union_memberships(&journal);
+        let union = test_recovery_admission_membership(&journal);
         let targets = match &journal.op {
             OpKind::Add { targets, .. } => targets,
             _ => unreachable!("test journal is Add"),
@@ -7694,7 +7725,7 @@ mod tests {
         let fs = MockFs::new(&["/dev/disk/by-id/virtio-disk2", "/dev/mapper/braid-disk2"]);
         let journal = recoverable_pool_mutation_add_journal();
         journal::write_journal(&f.paths, &journal).unwrap();
-        let union = union_memberships(&journal);
+        let union = test_recovery_admission_membership(&journal);
         let targets = match &journal.op {
             OpKind::Add { targets, .. } => targets,
             _ => unreachable!("test journal is Add"),
@@ -7846,7 +7877,7 @@ mod tests {
         let key_file = write_valid_keyfile(&key_dir, "braid.key");
         let journal = recoverable_pool_mutation_add_journal_with_enroll(key_file.clone());
         journal::write_journal(&f.paths, &journal).unwrap();
-        let union = union_memberships(&journal);
+        let union = test_recovery_admission_membership(&journal);
         let targets = match &journal.op {
             OpKind::Add { targets, .. } => targets,
             _ => unreachable!("test journal is Add"),
@@ -8021,7 +8052,7 @@ mod tests {
             open_plan: None,
             pre_resolved_credential: None,
             journal: recoverable_pool_mutation_add_journal(),
-            union: PoolMembership::empty(),
+            admission_membership: PoolMembership::empty(),
             mount_point: MountPoint("/mnt/storage".into()),
             pool_json_path: std::path::PathBuf::from("/var/lib/braid/pool.json"),
             pending_op_path: std::path::PathBuf::from("/var/lib/braid/pending-op.json"),
@@ -8076,7 +8107,7 @@ mod tests {
             open_plan: None,
             pre_resolved_credential: None,
             journal: recoverable_pool_mutation_add_journal(),
-            union: PoolMembership::empty(),
+            admission_membership: PoolMembership::empty(),
             mount_point: MountPoint("/mnt/storage".into()),
             pool_json_path: std::path::PathBuf::from("/var/lib/braid/pool.json"),
             pending_op_path: std::path::PathBuf::from("/var/lib/braid/pending-op.json"),
@@ -8107,7 +8138,7 @@ mod tests {
         let fs = MockFs::new(&["/dev/disk/by-id/virtio-disk2", "/dev/mapper/braid-disk2"]);
         let journal = recoverable_pool_mutation_add_journal();
         journal::write_journal(&f.paths, &journal).unwrap();
-        let union = union_memberships(&journal);
+        let union = test_recovery_admission_membership(&journal);
         let targets = match &journal.op {
             OpKind::Add { targets, .. } => targets,
             _ => unreachable!("test journal is Add"),
@@ -8196,7 +8227,7 @@ mod tests {
         let fs = MockFs::new(&[]);
         let journal = mixed_pool_mutation_add_journal();
         journal::write_journal(&f.paths, &journal).unwrap();
-        let union = union_memberships(&journal);
+        let union = test_recovery_admission_membership(&journal);
         let targets = match &journal.op {
             OpKind::Add { targets, .. } => targets,
             _ => unreachable!("test journal is Add"),
@@ -8293,7 +8324,7 @@ mod tests {
             let fs = MockFs::new(&["/dev/disk/by-id/virtio-disk2", "/dev/mapper/braid-disk2"]);
             let journal = recoverable_pool_mutation_add_journal();
             journal::write_journal(&f.paths, &journal).unwrap();
-            let union = union_memberships(&journal);
+            let union = test_recovery_admission_membership(&journal);
             let targets = match &journal.op {
                 OpKind::Add { targets, .. } => targets,
                 _ => unreachable!("test journal is Add"),
@@ -8515,7 +8546,7 @@ mod tests {
         ];
         let journal = fresh_pool_mutation_add_journal(stored_opts.clone(), None);
         journal::write_journal(&f.paths, &journal).unwrap();
-        let union = union_memberships(&journal);
+        let union = test_recovery_admission_membership(&journal);
         let targets = match &journal.op {
             OpKind::Add { targets, .. } => targets,
             _ => unreachable!("test journal is Add"),
@@ -8609,7 +8640,7 @@ mod tests {
         let journal =
             fresh_pool_mutation_add_journal(vec!["--label".into(), "braid-disk2".into()], None);
         journal::write_journal(&f.paths, &journal).unwrap();
-        let union = union_memberships(&journal);
+        let union = test_recovery_admission_membership(&journal);
         let targets = match &journal.op {
             OpKind::Add { targets, .. } => targets,
             _ => unreachable!("test journal is Add"),
@@ -8858,7 +8889,7 @@ mod tests {
             let journal =
                 fresh_pool_mutation_add_journal(vec!["--label".into(), "braid-disk2".into()], None);
             journal::write_journal(&f.paths, &journal).unwrap();
-            let union = union_memberships(&journal);
+            let union = test_recovery_admission_membership(&journal);
             let targets = match &journal.op {
                 OpKind::Add { targets, .. } => targets,
                 _ => unreachable!("test journal is Add"),
@@ -8922,7 +8953,7 @@ mod tests {
         let journal =
             fresh_pool_mutation_add_journal(vec!["--label".into(), "braid-disk2".into()], None);
         journal::write_journal(&f.paths, &journal).unwrap();
-        let union = union_memberships(&journal);
+        let union = test_recovery_admission_membership(&journal);
         let targets = match &journal.op {
             OpKind::Add { targets, .. } => targets,
             _ => unreachable!("test journal is Add"),
@@ -9029,7 +9060,7 @@ mod tests {
         let f = PoolFixture::empty();
         let journal = committed_two_disk_add_journal();
         journal::write_journal(&f.paths, &journal).unwrap();
-        let union = union_memberships(&journal);
+        let union = test_recovery_admission_membership(&journal);
         let runner = with_balance_replay(MockRunner::default());
         let resolver = resolver_for(&[("/dev/vda", "virtio-disk1"), ("/dev/vdb", "virtio-disk2")]);
         let params = f
@@ -9072,7 +9103,7 @@ mod tests {
         let f = PoolFixture::empty();
         let journal = committed_two_disk_add_journal();
         journal::write_journal(&f.paths, &journal).unwrap();
-        let union = union_memberships(&journal);
+        let union = test_recovery_admission_membership(&journal);
         let runner = MockRunner::default().with_output_stdin(
             CmdRequest::CryptsetupTestPassphrase {
                 device: "/dev/vda".into(),
@@ -9105,7 +9136,7 @@ mod tests {
         let fs = MockFs::new(&[]);
         let journal = recoverable_pool_mutation_add_journal();
         journal::write_journal(&f.paths, &journal).unwrap();
-        let union = union_memberships(&journal);
+        let union = test_recovery_admission_membership(&journal);
         let targets = match &journal.op {
             OpKind::Add { targets, .. } => targets,
             _ => unreachable!("test journal is Add"),
@@ -9153,7 +9184,7 @@ mod tests {
         let f = PoolFixture::empty();
         let journal = committed_two_disk_add_journal();
         journal::write_journal(&f.paths, &journal).unwrap();
-        let union = union_memberships(&journal);
+        let union = test_recovery_admission_membership(&journal);
         let runner = MockRunner::default();
         let resolver = resolver_for(&[("/dev/vda", "virtio-disk1"), ("/dev/vdb", "virtio-disk2")]);
         let inhibitor = FailingInhibitor;
@@ -9415,7 +9446,7 @@ mod tests {
         let fs = MockFs::new(&[]);
         let journal = replace_journal();
         journal::write_journal(&f.paths, &journal).unwrap();
-        let union = union_memberships(&journal);
+        let union = test_recovery_admission_membership(&journal);
         let runner = MockRunner::default()
             .with_output(
                 CmdRequest::CryptsetupClose {
@@ -9496,7 +9527,7 @@ mod tests {
         let fs = MockFs::new(&["/dev/disk/by-id/virtio-new"]);
         let journal = replace_journal();
         journal::write_journal(&f.paths, &journal).unwrap();
-        let union = union_memberships(&journal);
+        let union = test_recovery_admission_membership(&journal);
         let runner = MockRunner::default()
             .with_output(
                 CmdRequest::CryptsetupLuksUuid {
@@ -9575,7 +9606,7 @@ mod tests {
         let fs = MockFs::new(&[]);
         let journal = replace_journal();
         journal::write_journal(&f.paths, &journal).unwrap();
-        let union = union_memberships(&journal);
+        let union = test_recovery_admission_membership(&journal);
         let runner = MockRunner::default();
         let params = f.recover_params().passphrase_file(None).build();
         let OpKind::Replace {
@@ -9624,7 +9655,7 @@ mod tests {
         let key_file = write_valid_keyfile(&key_dir, "braid-new.key");
         let journal = replace_fresh_luks_journal(key_file.clone());
         journal::write_journal(&f.paths, &journal).unwrap();
-        let union = union_memberships(&journal);
+        let union = test_recovery_admission_membership(&journal);
         let runner = MockRunner::default()
             .with_output(
                 CmdRequest::CryptsetupLuksUuid {
@@ -9779,7 +9810,7 @@ mod tests {
         let fs = MockFs::new(&["/dev/disk/by-id/virtio-new"]);
         let journal = replace_fresh_luks_journal("/run/keys/braid-new.key".into());
         journal::write_journal(&f.paths, &journal).unwrap();
-        let union = union_memberships(&journal);
+        let union = test_recovery_admission_membership(&journal);
         let runner = MockRunner::default()
             .with_output(
                 CmdRequest::CryptsetupLuksUuid {
@@ -9858,7 +9889,7 @@ mod tests {
         let fs = MockFs::new(&[]);
         let journal = replace_fresh_luks_journal("/run/keys/braid-new.key".into());
         journal::write_journal(&f.paths, &journal).unwrap();
-        let union = union_memberships(&journal);
+        let union = test_recovery_admission_membership(&journal);
         let runner = MockRunner::default();
         let params = f
             .recover_params()
@@ -9914,7 +9945,7 @@ mod tests {
         let key_file = std::path::PathBuf::from("/run/keys/braid-new.key");
         let journal = replace_fresh_luks_journal(key_file);
         journal::write_journal(&f.paths, &journal).unwrap();
-        let union = union_memberships(&journal);
+        let union = test_recovery_admission_membership(&journal);
         let passphrase_file = tempfile::NamedTempFile::new().unwrap();
         {
             use std::io::Write;
@@ -10026,7 +10057,7 @@ mod tests {
         let key_file = write_valid_keyfile(&key_dir, "braid-new.key");
         let journal = replace_fresh_luks_journal(key_file.clone());
         journal::write_journal(&f.paths, &journal).unwrap();
-        let union = union_memberships(&journal);
+        let union = test_recovery_admission_membership(&journal);
         let runner = MockRunner::default()
             .with_output(
                 CmdRequest::CryptsetupLuksUuid {
@@ -10147,7 +10178,7 @@ mod tests {
         let key_file = write_valid_keyfile(&key_dir, "braid-new.key");
         let journal = replace_existing_luks_with_enroll_journal(key_file.clone());
         journal::write_journal(&f.paths, &journal).unwrap();
-        let union = union_memberships(&journal);
+        let union = test_recovery_admission_membership(&journal);
         // probe returns a DIFFERENT UUID than the journaled one.
         let runner = MockRunner::default()
             .with_output(
@@ -10235,7 +10266,7 @@ mod tests {
         let key_file = write_valid_keyfile(&key_dir, "braid-new.key");
         let journal = replace_existing_luks_with_enroll_journal(key_file.clone());
         journal::write_journal(&f.paths, &journal).unwrap();
-        let union = union_memberships(&journal);
+        let union = test_recovery_admission_membership(&journal);
         let passphrase_file = tempfile::NamedTempFile::new().unwrap();
         {
             use std::io::Write;
@@ -10359,7 +10390,7 @@ mod tests {
         let key_file = write_valid_keyfile(&key_dir, "braid-new.key");
         let journal = replace_existing_luks_with_enroll_journal(key_file.clone());
         journal::write_journal(&f.paths, &journal).unwrap();
-        let union = union_memberships(&journal);
+        let union = test_recovery_admission_membership(&journal);
         let runner = MockRunner::default()
             .with_output(
                 CmdRequest::CryptsetupLuksUuid {
@@ -10487,8 +10518,7 @@ mod tests {
     fn replace_post_maintenance_skips_unowed_balance() {
         let f = PoolFixture::empty();
         let fs = MockFs::new(&[]);
-        let journal = replace_journal_in_phase(
-            journal::ReplacePhase::PostReplaceMaintenance,
+        let journal = replace_post_maintenance_journal(
             false,
             journal::ReplaceJournalSource::Missing { old_devid: 2 },
         );
@@ -10557,8 +10587,7 @@ mod tests {
     fn recover_replace_old_close_retries_on_busy_then_succeeds() {
         let f = PoolFixture::empty();
         let fs = MockFs::new(&["/dev/mapper/braid-old"]);
-        let journal = replace_journal_in_phase(
-            journal::ReplacePhase::PostReplaceMaintenance,
+        let journal = replace_post_maintenance_journal(
             false,
             journal::ReplaceJournalSource::Live {
                 old_devid: 2,
@@ -10647,8 +10676,7 @@ mod tests {
     fn replace_post_maintenance_runs_owed_balance() {
         let f = PoolFixture::empty();
         let fs = MockFs::new(&[]);
-        let journal = replace_journal_in_phase(
-            journal::ReplacePhase::PostReplaceMaintenance,
+        let journal = replace_post_maintenance_journal(
             true,
             journal::ReplaceJournalSource::Missing { old_devid: 2 },
         );
@@ -10713,7 +10741,7 @@ mod tests {
         let new_uuid_text = new_uuid.to_string();
         let pre = membership_from(vec![
             membership_entry("disk1", "/dev/disk/by-id/virtio-disk1", None, Some(1)),
-            membership_entry("old", "/dev/disk/by-id/virtio-old", None, None),
+            membership_entry("old", "/dev/disk/by-id/virtio-old", None, Some(2)),
             membership_entry("disk3", "/dev/disk/by-id/virtio-disk3", None, Some(3)),
         ]);
         let target = membership_from(vec![
@@ -10846,7 +10874,7 @@ mod tests {
         let new_uuid_text = new_uuid.to_string();
         let pre = membership_from(vec![
             membership_entry("disk1", "/dev/disk/by-id/virtio-disk1", None, Some(1)),
-            membership_entry("old", "/dev/disk/by-id/virtio-old", None, None),
+            membership_entry("old", "/dev/disk/by-id/virtio-old", None, Some(2)),
             membership_entry("disk3", "/dev/disk/by-id/virtio-disk3", None, Some(3)),
         ]);
         let target = membership_from(vec![
@@ -10963,8 +10991,7 @@ mod tests {
     fn replace_post_maintenance_inhibitor_failure_preserves_journal() {
         let f = PoolFixture::empty();
         let fs = MockFs::new(&["/dev/mapper/braid-old"]);
-        let journal = replace_journal_in_phase(
-            journal::ReplacePhase::PostReplaceMaintenance,
+        let journal = replace_post_maintenance_journal(
             true,
             journal::ReplaceJournalSource::Live {
                 old_devid: 2,
@@ -11010,8 +11037,8 @@ mod tests {
     }
 
     // Intent: build_membership_from_live_pool rejects a live pool device whose
-    // LUKS UUID is absent from the expected union, even if its mapper is not
-    // braid-prefixed.
+    // LUKS UUID is absent from the admission membership, even if its mapper is
+    // not braid-prefixed.
     // Why it exists: recovery must not treat mapper naming as an identity
     // gate; live-pool membership is correlated by UUID.
     // Scenario: a mounted pool contains disk1 plus an externally named LUKS
@@ -11030,8 +11057,8 @@ mod tests {
             "error must name the foreign live UUID: {msg}"
         );
         assert!(
-            msg.contains("has no by-id path in either"),
-            "error must describe the snapshot mismatch: {msg}"
+            msg.contains("recovery admission membership"),
+            "error must describe the admission mismatch: {msg}"
         );
     }
 
@@ -11320,7 +11347,7 @@ mod tests {
         let new_uuid_text = new_uuid.to_string();
         let pre = membership_from(vec![
             membership_entry("disk1", "/dev/disk/by-id/virtio-disk1", None, Some(1)),
-            membership_entry("old", "/dev/disk/by-id/virtio-old", None, None),
+            membership_entry("old", "/dev/disk/by-id/virtio-old", None, Some(2)),
             membership_entry("disk3", "/dev/disk/by-id/virtio-disk3", None, Some(3)),
         ]);
         let target = membership_from(vec![
@@ -14735,11 +14762,11 @@ mod tests {
     /// before braid could re-issue `pool_resize_device`.
     fn replace_journal() -> journal::Journal {
         let pre = membership_from(vec![
-            membership_entry("disk1", "/dev/disk/by-id/virtio-disk1", None, None),
-            membership_entry("old", "/dev/disk/by-id/virtio-old", None, None),
+            membership_entry("disk1", "/dev/disk/by-id/virtio-disk1", None, Some(1)),
+            membership_entry("old", "/dev/disk/by-id/virtio-old", None, Some(2)),
         ]);
         let target = membership_from(vec![
-            membership_entry("disk1", "/dev/disk/by-id/virtio-disk1", None, None),
+            membership_entry("disk1", "/dev/disk/by-id/virtio-disk1", None, Some(1)),
             membership_entry("new", "/dev/disk/by-id/virtio-new", None, None),
         ]);
 
@@ -14786,6 +14813,38 @@ mod tests {
         *stored_phase = phase;
         *stored_source = source;
         *stored_restore = restore_raid1_after_commit;
+        journal
+    }
+
+    fn replace_post_maintenance_journal(
+        restore_raid1_after_commit: bool,
+        source: journal::ReplaceJournalSource,
+    ) -> journal::Journal {
+        let mut journal = replace_journal_in_phase(
+            journal::ReplacePhase::PostReplaceMaintenance,
+            restore_raid1_after_commit,
+            source,
+        );
+        let new_uuid = uuid_for_name("new");
+        let new_member = journal
+            .target_membership
+            .by_uuid(&new_uuid)
+            .expect("replace target fixture member")
+            .clone();
+        journal
+            .target_membership
+            .remove_by_uuid(&new_uuid)
+            .expect("replace target fixture member");
+        journal
+            .target_membership
+            .insert(
+                new_uuid,
+                DiskMember {
+                    devid: Some(2),
+                    ..new_member
+                },
+            )
+            .expect("post-maintenance target enrichment");
         journal
     }
 
@@ -14844,6 +14903,16 @@ mod tests {
              \tTotal devices 2 FS bytes used 1.00GiB\n\
              \tdevid    1 size 10.00GiB used 2.00GiB path /dev/mapper/braid-disk1\n\
              \tdevid    2 size 10.00GiB used 2.00GiB path /dev/mapper/braid-new\n",
+        )
+    }
+
+    fn btrfs_show_disk1_and_old() -> RawCommandOutput {
+        ok_raw(
+            "btrfs filesystem show /mnt/storage",
+            "Label: none  uuid: aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee\n\
+             \tTotal devices 2 FS bytes used 1.00GiB\n\
+             \tdevid    1 size 10.00GiB used 2.00GiB path /dev/mapper/braid-disk1\n\
+             \tdevid    2 size 10.00GiB used 2.00GiB path /dev/mapper/braid-old\n",
         )
     }
 
@@ -16863,7 +16932,7 @@ mod tests {
      * Scenario: pool already mounted; plan_open_pool short-circuits
      * to Ok(None) with a single AlreadyMounted event. The dry-run
      * reconciliation walks the probed pool and finds both live
-     * devices in the journal union, so it proceeds to emit the
+     * devices in the recovery admission membership, so it proceeds to emit the
      * write/clear steps.
      */
     #[test]
@@ -16944,10 +17013,10 @@ mod tests {
     }
 
     // Intent: already-mounted recover dry-run rejects a live pool device whose
-    // LUKS UUID is absent from the journal snapshots, even when its mapper is
-    // not braid-prefixed.
+    // LUKS UUID is absent from the recovery admission membership, even when
+    // its mapper is not braid-prefixed.
     // Why it exists: dry-run must not claim recovery is ready when live
-    // topology contains a UUID not in the expected membership union.
+    // topology contains a UUID not in the admission membership.
     // Scenario: a mounted btrfs pool contains disk1, disk2, and an externally
     // named LUKS mapper with a foreign UUID.
     #[test]
@@ -16978,8 +17047,200 @@ mod tests {
             "error must name the foreign live UUID, got: {err:?}",
         );
         assert!(
-            err.contains("has no by-id path in either"),
-            "error must describe the snapshot mismatch, got: {err:?}",
+            err.contains("recovery admission membership"),
+            "error must describe the admission mismatch, got: {err:?}",
+        );
+    }
+
+    // Intent: Replace::PostReplaceMaintenance planning accepts a realistic
+    // committed journal where the new member inherited the old member's devid.
+    // Why it exists: post-commit replace recovery must use target-only
+    // admission, not a pre-plus-target merge that treats the inherited devid
+    // as journal corruption.
+    // Scenario: replace old -> new committed, pending-op.json reached
+    // PostReplaceMaintenance, and dry-run reuses an already-mounted pool whose
+    // live topology is the committed target.
+    #[test]
+    fn plan_recover_post_replace_maintenance_accepts_inherited_devid() {
+        let f = PoolFixture::empty();
+        let fs = MockFs::new(&[]);
+
+        let journal = replace_post_maintenance_journal(
+            false,
+            journal::ReplaceJournalSource::Missing { old_devid: 2 },
+        );
+        journal::write_journal(&f.paths, &journal).unwrap();
+
+        let (mp_req, mp_out) = mountpoint_ok();
+        let runner = MockRunner::default()
+            .with_output(mp_req, mp_out)
+            .with_output(
+                CmdRequest::BtrfsFilesystemShow {
+                    mount_point: MountPoint("/mnt/storage".into()),
+                },
+                btrfs_show_disk1_and_new(),
+            )
+            .with_output(
+                CmdRequest::CryptsetupStatus {
+                    mapper: MapperName("braid-disk1".into()),
+                },
+                cryptsetup_status_active("braid-disk1", "/dev/vda"),
+            )
+            .with_output(
+                CmdRequest::CryptsetupLuksUuid {
+                    device: "/dev/vda".into(),
+                },
+                cryptsetup_uuid_ok("/dev/vda", "11111111-1111-1111-1111-111111111111"),
+            )
+            .with_output(
+                CmdRequest::CryptsetupStatus {
+                    mapper: MapperName("braid-new".into()),
+                },
+                cryptsetup_status_active("braid-new", "/dev/vdc"),
+            )
+            .with_output(
+                CmdRequest::CryptsetupLuksUuid {
+                    device: "/dev/vdc".into(),
+                },
+                cryptsetup_uuid_ok("/dev/vdc", "33333333-3333-3333-3333-333333333333"),
+            );
+
+        let params = f
+            .recover_params()
+            .passphrase_file(None)
+            .dry_run(true)
+            .build();
+
+        plan_recover(&runner, &fs, &params)
+            .expect("post-replace maintenance planning should accept inherited devid");
+    }
+
+    // Intent: non-post-maintenance replace recovery fails cleanly when the
+    // admission merge finds a cross-snapshot membership conflict.
+    // Why it exists: recovery admission construction must surface a
+    // PlanFailure instead of panicking on unexpected journal conflicts.
+    // Scenario: individually valid pre and target snapshots conflict only
+    // when Replace::PoolMutation admits both snapshots: target new reuses
+    // pre old's by-id binding.
+    #[test]
+    fn plan_recover_pool_mutation_admission_conflict_preserves_entry_note() {
+        let f = PoolFixture::empty();
+        let fs = MockFs::without_mounted_pool(&[]);
+
+        let mut journal = replace_journal();
+        let new_uuid = uuid_for_name("new");
+        let mut new_member = journal
+            .target_membership
+            .remove_by_uuid(&new_uuid)
+            .expect("replace target fixture member");
+        new_member.by_id = ByIdPath::parse("/dev/disk/by-id/virtio-old").unwrap();
+        journal
+            .target_membership
+            .insert(new_uuid, new_member)
+            .expect("target snapshot remains individually valid");
+        journal::write_journal(&f.paths, &journal).unwrap();
+
+        let runner = MockRunner::default();
+        let params = f.recover_params().passphrase_file(None).build();
+
+        let failure = match plan_recover(&runner, &fs, &params) {
+            Err(failure) => failure,
+            other => panic!("expected admission-conflict PlanFailure, got: {other:?}"),
+        };
+        match &failure.error {
+            RecoverError::Membership(membership::MembershipError::Conflict(msg)) => {
+                assert!(
+                    msg.contains("by_id '/dev/disk/by-id/virtio-old' already in use"),
+                    "conflict should name the duplicated by-id, got: {msg}"
+                );
+            }
+            other => panic!("expected membership conflict, got: {other:?}"),
+        }
+        let entry_banner = format_recover_entry(&journal);
+        assert!(
+            matches!(&failure.notes[0], PreviewNote::Info(msg) if msg == &entry_banner),
+            "entry banner note must be preserved, got: {:?}",
+            failure.notes,
+        );
+        assert!(
+            runner.requests().is_empty(),
+            "admission conflict should fail before mount planning"
+        );
+    }
+
+    // Intent: already-mounted Replace::PostReplaceMaintenance dry-run rejects
+    // a live pre-only old UUID under target-only admission.
+    // Why it exists: post-commit replace recovery must not keep admitting the
+    // pre snapshot after the journal reaches PostReplaceMaintenance.
+    // Scenario: the journal says replace committed old -> new, but the
+    // mounted pool still reports old as live; dry-run refuses before
+    // advertising recovery steps.
+    #[test]
+    fn plan_recover_post_replace_maintenance_rejects_live_old_uuid() {
+        let f = PoolFixture::empty();
+        let fs = MockFs::new(&[]);
+
+        let journal = replace_post_maintenance_journal(
+            false,
+            journal::ReplaceJournalSource::Missing { old_devid: 2 },
+        );
+        journal::write_journal(&f.paths, &journal).unwrap();
+
+        let (mp_req, mp_out) = mountpoint_ok();
+        let runner = MockRunner::default()
+            .with_output(mp_req, mp_out)
+            .with_output(
+                CmdRequest::BtrfsFilesystemShow {
+                    mount_point: MountPoint("/mnt/storage".into()),
+                },
+                btrfs_show_disk1_and_old(),
+            )
+            .with_output(
+                CmdRequest::CryptsetupStatus {
+                    mapper: MapperName("braid-disk1".into()),
+                },
+                cryptsetup_status_active("braid-disk1", "/dev/vda"),
+            )
+            .with_output(
+                CmdRequest::CryptsetupLuksUuid {
+                    device: "/dev/vda".into(),
+                },
+                cryptsetup_uuid_ok("/dev/vda", "11111111-1111-1111-1111-111111111111"),
+            )
+            .with_output(
+                CmdRequest::CryptsetupStatus {
+                    mapper: MapperName("braid-old".into()),
+                },
+                cryptsetup_status_active("braid-old", "/dev/vdb"),
+            )
+            .with_output(
+                CmdRequest::CryptsetupLuksUuid {
+                    device: "/dev/vdb".into(),
+                },
+                cryptsetup_uuid_ok("/dev/vdb", "22222222-2222-2222-2222-222222222222"),
+            );
+
+        let params = f
+            .recover_params()
+            .passphrase_file(None)
+            .dry_run(true)
+            .build();
+
+        let failure = match plan_recover(&runner, &fs, &params) {
+            Err(failure) => failure,
+            other => panic!("expected target-only admission failure, got: {other:?}"),
+        };
+        let err = match &failure.error {
+            RecoverError::Failed(msg) => msg,
+            other => panic!("expected RecoverError::Failed for live old UUID, got: {other:?}"),
+        };
+        assert!(
+            err.contains("device braid-old (LUKS UUID 22222222-2222-2222-2222-222222222222)"),
+            "error must name old as the rejected live UUID, got: {err:?}",
+        );
+        assert!(
+            err.contains("recovery admission membership"),
+            "error must describe target-only admission, got: {err:?}",
         );
     }
 
