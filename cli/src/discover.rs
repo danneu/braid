@@ -348,7 +348,27 @@ fn discover_from_dir_inner<R: CommandRunner>(
             }
         };
 
-        // Check if LUKS
+        // isLuks is the silent bulk filter: discover probes every
+        // non-partition by-id entry and most are legitimately not LUKS
+        // (boot disk, USB sticks), so a nonzero exit is the common case
+        // and must not warn. The header-classification failure is
+        // unclassifiable in-band: after crypt_init succeeds,
+        // action_isLuks installs quiet_log before crypt_load
+        // (reference/cryptsetup/src/cryptsetup.c:2475-2479;
+        // src/utils_tools.c:84-91), crypt_load calls
+        // _crypt_load_luks(..., true, false)
+        // (reference/cryptsetup/lib/setup.c:1121), and the quiet LUKS
+        // path suppresses the normal "not a valid LUKS device" error
+        // (reference/cryptsetup/lib/setup.c:892-893). translate_errno
+        // collapses both -EINVAL ("not a LUKS device") and default -EIO
+        // to exit 1 (src/utils_tools.c:219-235), so a transient read
+        // error is indistinguishable from a non-member. We skip silently
+        // and let `discover --write --expect-count <N>` fail closed if a
+        // member is momentarily unreadable. (probe_luks_header in
+        // luks.rs maps the same nonzero exit to `Unreadable` because
+        // its caller already knows the device is a pool member; the
+        // luksDump path below warns because isLuks has by then confirmed
+        // this is LUKS.)
         let raw = runner.run(&CmdRequest::CryptsetupIsLuks {
             device: path_str.clone(),
         })?;
