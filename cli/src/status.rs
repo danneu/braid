@@ -1414,9 +1414,7 @@ fn format_status_human(
                 match &d.member_name {
                     Some(name) => {
                         let repair_command = repair_hint::missing_replace_command(Some(name));
-                        out.push_str(&format!(
-                            "    Action:  add replacement disk to config, then: {repair_command}\n",
-                        ));
+                        out.push_str(&format!("    Action:  {repair_command}\n"));
                     }
                     None => out.push_str(
                         "    Action:  foreign mapper detected -- run 'braid doctor' to investigate\n",
@@ -5261,6 +5259,10 @@ mod tests {
             !human.contains("replace --missing-id"),
             "member row must not request replace --missing-id; got:\n{human}"
         );
+        assert!(
+            !human.contains("add replacement disk to config"),
+            "member row Action must drop the stale config prefix; got:\n{human}"
+        );
     }
 
     // Intent: missing member rows built from config disks must retain their
@@ -5325,6 +5327,10 @@ mod tests {
         assert!(
             !human.contains("replace --missing-id"),
             "missing member must not request replace --missing-id; got:\n{human}"
+        );
+        assert!(
+            !human.contains("add replacement disk to config"),
+            "missing member Action must drop the stale config prefix; got:\n{human}"
         );
     }
 
