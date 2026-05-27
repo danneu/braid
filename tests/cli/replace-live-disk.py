@@ -223,7 +223,7 @@ with subtest("Mixed state: simulate dead disk, then live replace fails"):
     assert status != 0, f"Expected failure for mixed state, got exit 0: {output}"
     assert "missing" in output.lower(), f"Expected mention of missing devices:\n{output}"
     assert (
-        "braid replace --old <name> --new <new-name>=/dev/disk/by-id/<...>"
+        "braid replace --old <missing-name> --new <new-name>=/dev/disk/by-id/<...>"
         in output
     ), f"Expected full replace repair guidance:\n{output}"
     assert "replace --missing-id" not in output, (

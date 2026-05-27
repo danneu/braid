@@ -15,6 +15,7 @@ use crate::preview::{self, PerDiskStyle, PlanFailure, Preview, PreviewCompletene
 use crate::probe::{Filesystem, ProbeError, probe_pool};
 use crate::probe_mapper_uuid::probe_observed_mapper_uuid;
 use crate::progress::{self, ProgressOutput};
+use crate::repair_hint;
 use crate::state_paths::StatePaths;
 use crate::status_tag::{StatusTag, color_enabled_for_stderr, status_line};
 use crate::types::*;
@@ -546,7 +547,7 @@ pub fn plan_remove<R: CommandRunner + Sync, F: Filesystem + ?Sized>(
         None => {
             let mut msg = format!("disk '{}' not found in pool.", params.name);
             if pool.missing_count > 0 {
-                let repair_command = preflight::replace_repair_command(None);
+                let repair_command = repair_hint::missing_replace_command(None);
                 msg.push_str(&format!(
                     " ({} missing device{} detected. \
                      To repair onto a new disk, use `{repair_command}`. \

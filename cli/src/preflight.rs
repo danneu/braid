@@ -16,9 +16,10 @@ use crate::parse::types::{
 };
 use crate::preview::PreviewNote;
 use crate::probe::Filesystem;
+use crate::repair_hint;
 use crate::state_paths::StatePaths;
 use crate::status::format_bytes;
-use crate::types::{DiskName, MountPoint, PoolState};
+use crate::types::{MountPoint, PoolState};
 use crate::ups::{UpsQueryError, query_ups};
 
 /// Refuse if pool.json lists members but the pool is not mounted (locked).
@@ -289,21 +290,10 @@ fn check_not_read_only<F: Filesystem + ?Sized>(
     Ok(None)
 }
 
-/// Canonical missing-device repair command shared by hint surfaces so
-/// operator guidance stays aligned with replace's persisted-devid resolution.
-pub(crate) fn replace_repair_command(old: Option<&DiskName>) -> String {
-    match old {
-        Some(name) => {
-            format!("braid replace --old {name} --new <new-name>=/dev/disk/by-id/<...>")
-        }
-        None => "braid replace --old <name> --new <new-name>=/dev/disk/by-id/<...>".to_owned(),
-    }
-}
-
 /// Refuse if the pool has missing devices.
 pub fn check_no_missing_devices(missing_count: u64, action: &str) -> Result<(), String> {
     if missing_count > 0 {
-        let repair_command = replace_repair_command(None);
+        let repair_command = repair_hint::missing_replace_command(None);
         Err(format!(
             "pool has {missing_count} missing device{}. \
              Resolve the missing device{} first -- repair with \
@@ -1273,23 +1263,6 @@ mod tests {
     }
 
     #[test]
-    // Intent: replace_repair_command renders the shared dead-disk repair shape.
-    // Why it exists: Every missing-device hint should point at the same command without `replace --missing-id`.
-    // Scenario: Generic gates know only that a member is missing; status knows the member name.
-    fn replace_repair_command_renders_canonical_shape() {
-        assert_eq!(
-            replace_repair_command(None),
-            "braid replace --old <name> --new <new-name>=/dev/disk/by-id/<...>"
-        );
-
-        let old = DiskName::parse("disk2").unwrap();
-        assert_eq!(
-            replace_repair_command(Some(&old)),
-            "braid replace --old disk2 --new <new-name>=/dev/disk/by-id/<...>"
-        );
-    }
-
-    #[test]
     // Intent: check_no_missing_devices passes when no devices are missing.
     // Why: Confirms healthy pools are not rejected.
     // Scenario: Normal 3-disk pool, all present.
@@ -1308,7 +1281,9 @@ mod tests {
             "expected count in: {err}"
         );
         assert!(
-            err.contains("braid replace --old <name> --new <new-name>=/dev/disk/by-id/<...>"),
+            err.contains(
+                "braid replace --old <missing-name> --new <new-name>=/dev/disk/by-id/<...>"
+            ),
             "expected repair guidance in: {err}"
         );
         assert!(

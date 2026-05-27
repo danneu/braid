@@ -24,6 +24,7 @@ use crate::preview::{self, PerDiskStyle, PlanFailure, Preview, PreviewCompletene
 use crate::probe::{Filesystem, ProbeError, probe_config_disk, probe_pool};
 use crate::progress::ProgressOutput;
 use crate::progress::RealSleeper;
+use crate::repair_hint;
 use crate::state_paths::StatePaths;
 use crate::status_tag::{StatusTag, color_enabled_for_stderr, emit_status, status_line};
 use crate::types::*;
@@ -874,7 +875,7 @@ pub struct AddParams<'a> {
 /// `PreviewNote::Warn` and render it as the canonical `[warn] <body>`
 /// -- one contract for both modes.
 fn format_add_missing_devices_warning(missing_count: u64) -> String {
-    let repair_command = preflight::replace_repair_command(None);
+    let repair_command = repair_hint::missing_replace_command(None);
     format!(
         "pool has {} missing device{}. \
          Consider repairing with `{repair_command}` first. \
@@ -9011,7 +9012,7 @@ mod tests {
         let expected = concat!(
             "Nothing to do -- disk2 already in pool.\n",
             "[warn] pool has 1 missing device. Consider repairing with",
-            " `braid replace --old <name> --new <new-name>=/dev/disk/by-id/<...>` first.",
+            " `braid replace --old <missing-name> --new <new-name>=/dev/disk/by-id/<...>` first.",
             " Use `braid status` to see the missing disk's name.\n",
             "[warn] Existing pool drives have a keyfile (keyslot-1) for auto-unlock,",
             " but the new drive will not.\n",

@@ -262,6 +262,15 @@ sudo braid replace --old toshiba2 \
   --new toshiba4=/dev/disk/by-id/ata-NEW_DRIVE_SERIAL
 ```
 
+`--old` identifies the missing member. If you want to cross-check the btrfs
+devid from `braid status`, add `--missing-id` after the required args:
+
+```sh
+sudo braid replace --old toshiba2 \
+  --new toshiba4=/dev/disk/by-id/ata-NEW_DRIVE_SERIAL \
+  --missing-id 3
+```
+
 Replace runs `btrfs replace start -B` under the hood. `braid replace` is a long-running online operation: the command waits in the foreground and shows progress while the pool remains usable. It can take hours for large drives, so run it from a shell you can leave open (or a `tmux`/`screen` session). From another shell, `braid status` and `braid tui` can show progress independently.
 
 ### Option B: Remove the missing device
@@ -315,7 +324,7 @@ A degraded mount means at least one pool disk is missing. The pool is usable but
 Replace the missing disk as soon as possible:
 
 ```sh
-sudo braid replace --old <dead-name> \
+sudo braid replace --old <missing-name> \
   --new <new-name>=/dev/disk/by-id/<new-drive>
 ```
 

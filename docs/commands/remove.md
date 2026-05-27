@@ -56,7 +56,7 @@ If a btrfs exclusive operation (a running balance, device add/remove/replace, re
 ## Safety checks / refusal cases
 
 - Refuses if the pool is not mounted
-- Refuses if the named disk is not a live member of the pool (suggests `braid replace` or `braid remove-missing` if missing devices are detected)
+- Refuses if the named disk is not a live member of the pool (suggests `braid replace --old <missing-name> --new <new-name>=/dev/disk/by-id/<...>` or `braid remove-missing` if missing devices are detected)
 - Refuses to remove the last disk from the pool
 - Refuses if there are missing devices in the pool (resolve those first)
 - Refuses if remaining disks lack space to absorb the removed disk's data (ENOSPC pre-flight)

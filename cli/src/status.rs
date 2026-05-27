@@ -19,8 +19,8 @@ use crate::parse::{
 };
 use crate::profile_summary::{self, ProfileJson, ProfileSummary, Redundancy, TypeProfile};
 use crate::probe::{Filesystem, ProbeError, probe_config_disk, probe_pool};
-use crate::preflight;
 use crate::progress::pct_from_bytes;
+use crate::repair_hint;
 use crate::state_paths::StatePaths;
 use crate::types::*;
 
@@ -1413,7 +1413,7 @@ fn format_status_human(
             if has_errors || d.status == DiskStatus::Missing {
                 match &d.member_name {
                     Some(name) => {
-                        let repair_command = preflight::replace_repair_command(Some(name));
+                        let repair_command = repair_hint::missing_replace_command(Some(name));
                         out.push_str(&format!(
                             "    Action:  add replacement disk to config, then: {repair_command}\n",
                         ));

@@ -5,7 +5,7 @@
 #   - `braid remove-missing --missing-id <devid>` against a 2-disk
 #     RAID1 pool with one disk missing exits non-zero, prints the
 #     "2-disk RAID1 pool with one disk missing" reject body naming
-#     `braid replace --old <name> --new <new-name>=...`, and leaves no
+#     `braid replace --old <missing-name> --new <new-name>=...`, and leaves no
 #     `pending-op.json`
 #     behind.
 #   - The same reject fires with `--dry-run`, confirming the guard
@@ -27,7 +27,7 @@
 # Scenario:
 # - 2-disk NAS, disk2 dies. Operator reaches for
 #   `braid remove-missing` (a reasonable instinct). braid steers them
-#   to `braid replace --old <name> --new <new-name>=...` -- the supported
+#   to `braid replace --old <missing-name> --new <new-name>=...` -- the supported
 #   repair path documented in docs/design/decisions/012-intent-cli.md.
 #
 # Missing-disk setup reuses the canonical pattern from
@@ -102,7 +102,7 @@ with subtest("braid remove-missing --yes rejects with the expected body"):
     assert "2-disk RAID1 pool with one disk missing" in output, output
     assert "braid replace" in output, output
     assert (
-        "braid replace --old <name> --new <new-name>=/dev/disk/by-id/<...>"
+        "braid replace --old <missing-name> --new <new-name>=/dev/disk/by-id/<...>"
         in output
     ), output
     assert "replace --missing-id" not in output, output
@@ -123,7 +123,7 @@ with subtest("braid remove-missing --dry-run rejects with the expected body"):
     assert "2-disk RAID1 pool with one disk missing" in output, output
     assert "braid replace" in output, output
     assert (
-        "braid replace --old <name> --new <new-name>=/dev/disk/by-id/<...>"
+        "braid replace --old <missing-name> --new <new-name>=/dev/disk/by-id/<...>"
         in output
     ), output
     assert "replace --missing-id" not in output, output

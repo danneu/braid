@@ -22,6 +22,7 @@ use crate::preview::{self, PerDiskStyle, PlanFailure, Preview, PreviewCompletene
 use crate::probe::{Filesystem, ProbeError, probe_config_disk, probe_pool};
 use crate::probe_mapper_uuid::probe_observed_mapper_uuid;
 use crate::progress::{self, ProgressOutput};
+use crate::repair_hint;
 use crate::state_paths::StatePaths;
 use crate::status_tag::{StatusTag, color_enabled_for_stderr, status_line};
 use crate::types::*;
@@ -1666,7 +1667,7 @@ fn resolve_replace_source<R: CommandRunner>(
             ));
         }
         if pool.missing_count > 0 {
-            let repair_command = preflight::replace_repair_command(None);
+            let repair_command = repair_hint::missing_replace_command(None);
             return Err(ReplaceError::Validation(format!(
                 "pool has {} missing device{}. \
                  Repair the missing device{} first with `{repair_command}`, \
@@ -2295,7 +2296,9 @@ mod tests {
         );
         assert!(
             err.to_string()
-                .contains("braid replace --old <name> --new <new-name>=/dev/disk/by-id/<...>"),
+                .contains(
+                    "braid replace --old <missing-name> --new <new-name>=/dev/disk/by-id/<...>"
+                ),
             "should suggest the shared replace repair command: {err}"
         );
         assert!(
@@ -2591,7 +2594,8 @@ mod tests {
     // Why it exists: status reports null-underlying devids as alert-missing,
     // but replace must wait until btrfs promotes the devid to MISSING.
     // Scenario: the old disk's mapper remains open with `device: (null)`,
-    // and the operator passes its devid to `braid replace --missing-id`.
+    // and the operator passes its devid to
+    // `braid replace --old disk2 --new disk3=... --missing-id`.
     #[test]
     fn missing_id_null_underlying_refused() {
         let mut pool = two_device_pool();

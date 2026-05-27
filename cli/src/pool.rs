@@ -4,6 +4,7 @@ use crate::progress::{
     self, ProgressOutput, run_device_remove_with_progress, run_replace_with_progress,
     run_with_progress,
 };
+use crate::repair_hint;
 use crate::status_tag::{StatusTag, color_enabled_for_stderr, status_line};
 use crate::types::{LuksUuid, MapperName, MountPoint};
 use std::collections::BTreeMap;
@@ -326,7 +327,7 @@ fn device_remove_error(
                  pending operation, then retry `braid remove`."
             ),
             RemoveContext::Missing => {
-                let repair_command = crate::preflight::replace_repair_command(None);
+                let repair_command = repair_hint::missing_replace_command(None);
                 format!(
                     "a non-RAID1 chunk requires more devices than will remain. \
                      While a device is missing, do not lower redundancy -- \
@@ -1366,7 +1367,9 @@ mod tests {
             .to_string();
         assert!(err.contains("hint:"), "error should include hint: {err}");
         assert!(
-            err.contains("braid replace --old <name> --new <new-name>=/dev/disk/by-id/<...>"),
+            err.contains(
+                "braid replace --old <missing-name> --new <new-name>=/dev/disk/by-id/<...>"
+            ),
             "hint should point at missing-device replacement: {err}"
         );
         assert!(
@@ -1509,7 +1512,9 @@ mod tests {
                 .expect_err("min-devices rejection should return an error")
                 .to_string();
         assert!(
-            err.contains("braid replace --old <name> --new <new-name>=/dev/disk/by-id/<...>"),
+            err.contains(
+                "braid replace --old <missing-name> --new <new-name>=/dev/disk/by-id/<...>"
+            ),
             "missing hint should point at replacement: {err}"
         );
         assert!(

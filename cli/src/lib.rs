@@ -43,6 +43,9 @@ pub mod progress;
 pub mod recover;
 pub mod remove;
 pub mod remove_missing;
+/// Shared missing-device repair hint builders used by runtime diagnostics and
+/// tests to keep `braid replace --old ... --new ...` guidance consistent.
+pub(crate) mod repair_hint;
 pub mod replace;
 pub mod scrub_cancel;
 pub mod scrub_needs_resume;

@@ -33,7 +33,7 @@ use crate::parse::{
     parse_smartctl_selftest_log,
 };
 use crate::probe::{self, Filesystem, ProbeError, RealFilesystem};
-use crate::preflight;
+use crate::repair_hint;
 use crate::state_paths::StatePaths;
 use crate::status::{BalanceReport, format_bytes, get_balance_report, paused_balance_advice};
 use crate::status_tag::{StatusTag, color_enabled_for_stdout, status_line};
@@ -748,11 +748,25 @@ fn check_pool_missing_devices<R: CommandRunner>(ctx: &mut DoctorContext<'_, R>) 
         Ok(pool) => {
             let devids: Vec<String> = pool.missing_devids.iter().map(|d| d.to_string()).collect();
             let n = pool.missing_devids.len();
-            let repair_command = preflight::replace_repair_command(None);
+            let repair_command = repair_hint::missing_replace_command(None);
+            let cross_check = match pool.missing_devids.as_slice() {
+                [devid] => format!(
+                    "Optional cross-check: `{}`.",
+                    repair_hint::missing_replace_command_with_devid(None, *devid)
+                ),
+                _ => repair_hint::optional_missing_id_cross_check_phrase(),
+            };
+            let cross_check_target = if n == 1 {
+                "Use the listed ID."
+            } else {
+                "Use one of the listed IDs."
+            };
             CheckResult::warn(
                 "pool_missing_devices",
                 format!(
-                    "pool has {} missing device{} (devid{}: {}); replace with: `{repair_command}`; use `braid status` to see the missing disk's name",
+                    "pool has {} missing device{} (devid{}: {}); replace with: \
+                     `{repair_command}`; {cross_check} {cross_check_target} \
+                     Use `braid status` to see the missing disk's name",
                     n,
                     if n == 1 { "" } else { "s" },
                     if n == 1 { "" } else { "s" },
@@ -4827,18 +4841,75 @@ mod tests {
         assert!(
             check
                 .message
-                .contains("braid replace --old <name> --new <new-name>=/dev/disk/by-id/<...>"),
+                .contains(
+                    "braid replace --old <missing-name> --new <new-name>=/dev/disk/by-id/<...>"
+                ),
             "expected full replace recommendation: {}",
             check.message
         );
         assert!(
-            !check.message.contains("replace --missing-id"),
-            "replace recommendation must not request --missing-id: {}",
+            !check.message.contains("braid replace --missing-id"),
+            "replace recommendation must not render bare --missing-id command: {}",
             check.message
         );
         assert!(
             check.message.contains("devid"),
             "expected devid in message: {}",
+            check.message
+        );
+    }
+
+    // Intent: pool_missing_devices plural output lists missing devids once and
+    // shows a single base replace command plus optional cross-check wording.
+    // Why it exists: multi-missing guidance should not print one command per
+    // devid or regress to bare `replace --missing-id` instructions.
+    // Scenario: two pool members are missing and doctor guides the operator to
+    // replace one by name while optionally checking against the listed devids.
+    #[test]
+    fn pool_missing_devices_plural_warns_with_single_replace_command() {
+        let runner = pool_state_runner(
+            vec![("braid-disk1", 1, "/dev/vdb", test_uuid(1))],
+            &[2, 3],
+        );
+        let fs = DoctorMockFs::mounted_btrfs_only();
+        let f = write_temp(valid_config_json());
+        let report = run_doctor(f.path(), &runner, &fs, &isolated_paths().1, human_options());
+        let check = find_check(&report, "pool_missing_devices");
+
+        assert_eq!(check.status, CheckStatus::Warn);
+        assert!(
+            check.message.contains("pool has 2 missing devices (devids: 2, 3)"),
+            "expected plural devid list: {}",
+            check.message
+        );
+        assert_eq!(
+            check.message.matches("braid replace --old").count(),
+            1,
+            "expected exactly one replace command: {}",
+            check.message
+        );
+        assert!(
+            check.message.contains(
+                "braid replace --old <missing-name> --new <new-name>=/dev/disk/by-id/<...>"
+            ),
+            "expected base replace command: {}",
+            check.message
+        );
+        assert!(
+            check
+                .message
+                .contains("Optionally add `--missing-id <devid>` as a cross-check."),
+            "expected optional cross-check phrase: {}",
+            check.message
+        );
+        assert!(
+            check.message.contains("Use one of the listed IDs."),
+            "expected multi-missing cross-check target: {}",
+            check.message
+        );
+        assert!(
+            !check.message.contains("braid replace --missing-id"),
+            "must not render bare replace --missing-id guidance: {}",
             check.message
         );
     }

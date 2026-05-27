@@ -238,7 +238,7 @@ with subtest("braid remove disk3 fails for dead disk"):
     assert "missing" in output.lower(), f"Expected mention of missing devices:\n{output}"
     assert "braid replace" in output, f"Expected suggestion to use braid replace:\n{output}"
     assert (
-        "braid replace --old <name> --new <new-name>=/dev/disk/by-id/<...>"
+        "braid replace --old <missing-name> --new <new-name>=/dev/disk/by-id/<...>"
         in output
     ), f"Expected full replace repair guidance:\n{output}"
     assert "replace --missing-id" not in output, (

@@ -64,7 +64,7 @@ The dry-run preview itself stays on stdout. Side-effect-free probes that neverth
 - Both paths use `btrfs replace start` — the sole replacement primitive. Live disks replace in-place; missing disks are rebuilt from RAID redundancy by devid.
 - `--missing-id` is only valid when `--old` is dead/missing. Rejected with live `--old`. Validated against `PoolState::missing_devids` (live btrfs state via `probe::probe_pool`).
 - The missing devid is auto-resolved from `--old`'s persisted pool.json devid, cross-checked against `PoolState::missing_devids` -- independent of how many devices are missing. Because `--old`'s name already identifies the member, no missing-count gate is needed; `--missing-id` is an optional cross-check (it must equal the persisted devid, else `OldDevidMismatch`) and is never required.
-- Mixed state (live `--old` + pool has missing devices) is rejected -- operator must repair the missing device first with `braid replace`. `braid remove-missing` is only for intentional cleanup (forgetting stale entries without rebuilding data).
+- Mixed state (live `--old` + pool has missing devices) is rejected -- operator must repair the missing device first with `braid replace --old <missing-name> --new <new-name>=/dev/disk/by-id/<...>`. `braid remove-missing` is only for intentional cleanup (forgetting stale entries without rebuilding data).
 - No replacement path uses `btrfs device add`. Missing-path replace may run a post-commit soft RAID1 balance only when it clears the last missing device.
 
 ### ENOSPC pre-flight check

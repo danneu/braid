@@ -25,9 +25,9 @@ sudo braid replace --old toshiba1 --new toshiba4=/dev/disk/by-id/ata-TOSHIBA_MN0
 Note: `braid replace` operates only on btrfs-authoritative `MISSING` devids. A
 drive that is hot-unplugged while the pool is mounted contributes to
 `missing_count` and appears in `missing_devids` in `braid status` before btrfs
-promotes its devid to `MISSING`; both `replace --missing-id N` and the no-flag
-auto-resolve path refuse the devid with a specific hot-unplug diagnostic until
-that promotion happens. See
+promotes its devid to `MISSING`; both an explicit `--missing-id` cross-check
+and the no-flag auto-resolve path refuse the devid with a specific hot-unplug
+diagnostic until that promotion happens. See
 [Hot-unplug while pool is mounted](../guides/recovery-scenarios.md#hot-unplug-while-pool-is-mounted).
 
 Optionally assert which missing devid you expect (braid refuses if it disagrees with pool.json):
