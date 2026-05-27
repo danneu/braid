@@ -55,6 +55,7 @@ None.
 - If the pool is not mounted and no alerts are latched, ack refuses with "pool is not mounted -- nothing to acknowledge"
 - If the pool is mounted but healthy with no latch entries, no smartd alert flag, and no corrupt latch, ack is a no-op and does not mutate `acked-stats.json`
 - If the configured mount point is mounted as something other than btrfs, ack refuses with the fstype mismatch and does not clear or rewrite alert state
+- Refuses if another braid operation is in progress (pool lock `/run/braid-pool.lock` is held) -- retry once it finishes.
 
 ## Related commands
 
