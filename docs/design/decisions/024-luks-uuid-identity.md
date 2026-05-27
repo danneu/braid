@@ -173,6 +173,12 @@ one.
   `cryptsetup luksFormat --uuid <uuid> --label <label>` argv order.
 - `cli/src/status.rs` unit tests pin compact status names by resolving live
   pool UUIDs back to `DiskName`, including a drifted mapper case.
+- `tests/cli/braid-status-rust.py` pins that present disks' rendered
+  `luks_uuid` equals the real cryptsetup UUID and the `pool.json` membership
+  key, and that `name` is the operator name, in intact and degraded states.
+- `tests/cli/status-mapper-drift.py` pins that `braid status` resolves the
+  operator name via the UUID join when a member is open under a drifted mapper
+  (`braid-WRONG`), not the mapper basename, in both JSON and human output.
 - `cli/src/lock.rs` unit tests pin the normal UUID/devid-classified close set,
   observed-mapper closing, UUID-scanned fallback cleanup, orphan warnings for
   non-member UUID/devid cases, duplicate-devid `null_underlying` skip behavior,

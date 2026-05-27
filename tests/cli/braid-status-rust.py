@@ -79,6 +79,12 @@ with subtest("Setup: 3-disk RAID1 pool"):
     machine.succeed(add_disk("disk3"))
     df_output = machine.succeed("btrfs fi df /mnt/storage")
     assert "RAID1" in df_output, f"Expected RAID1 after adding 3 disks:\n{df_output}"
+    real_uuids = {
+        name: machine.succeed(
+            f"cryptsetup luksUUID /dev/disk/by-id/virtio-{name}"
+        ).strip()
+        for name in ("disk1", "disk2", "disk3")
+    }
 
 with subtest("Healthy RAID1 summary"):
     output = machine.succeed(rust_status())
@@ -117,6 +123,21 @@ with subtest("Healthy JSON"):
         assert d["errors"] is not None, f"Expected errors object: {d}"
         for key in ["read", "write", "corruption"]:
             assert key in d["errors"], f"Missing errors.{key}: {d}"
+    by_uuid = {d["luks_uuid"]: d for d in s["disks"]}
+    pool = json.loads(machine.succeed("cat /var/lib/braid/pool.json"))
+    key_by_name = {entry["name"]: key for key, entry in pool["disks"].items()}
+    for name in ("disk1", "disk2", "disk3"):
+        uuid = real_uuids[name]
+        assert uuid in by_uuid, (
+            f"{name} real UUID {uuid} absent from status: {list(by_uuid)}"
+        )
+        assert by_uuid[uuid]["name"] == name, (
+            f"{name} must resolve to operator name via UUID join, "
+            f"got {by_uuid[uuid]['name']!r}"
+        )
+        assert key_by_name[name] == uuid, (
+            f"pool.json key for {name} != real LUKS UUID {uuid}"
+        )
     assert s["profile"] == {
         "data": ["RAID1"],
         "metadata": ["RAID1"],
@@ -157,6 +178,11 @@ with subtest("Degraded JSON"):
     unknown_disks = [d for d in s["disks"] if d["status"] == "unknown"]
     assert len(present_disks) >= 2, f"Expected at least 2 present disks: {present_disks}"
     assert len(unknown_disks) >= 1, f"Expected at least 1 unknown disk: {unknown_disks}"
+    present_by_uuid = {d["luks_uuid"]: d for d in present_disks}
+    for name in ("disk1", "disk2"):
+        uuid = real_uuids[name]
+        assert uuid in present_by_uuid, f"{name} real UUID missing from present disks"
+        assert present_by_uuid[uuid]["name"] == name
 
 # --- Phase 4: Not mounted ---
 

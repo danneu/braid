@@ -494,6 +494,11 @@
               braid = linuxCrane.braid;
             }
           );
+          status-mapper-drift = pkgs.testers.nixosTest (
+            import ./tests/cli/status-mapper-drift.nix {
+              braid = linuxCrane.braid;
+            }
+          );
           luks-lock-skipped-no-false-closed = pkgs.testers.nixosTest (
             import ./tests/cli/luks-lock-skipped-no-false-closed.nix {
               braid = linuxCrane.braid;
