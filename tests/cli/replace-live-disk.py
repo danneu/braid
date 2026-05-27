@@ -222,6 +222,12 @@ with subtest("Mixed state: simulate dead disk, then live replace fails"):
     (status, output) = machine.execute(replace_cmd("disk1", "disk3") + " 2>&1")
     assert status != 0, f"Expected failure for mixed state, got exit 0: {output}"
     assert "missing" in output.lower(), f"Expected mention of missing devices:\n{output}"
-    assert "replace --missing-id" in output, f"Expected replace --missing-id guidance:\n{output}"
+    assert (
+        "braid replace --old <name> --new <new-name>=/dev/disk/by-id/<...>"
+        in output
+    ), f"Expected full replace repair guidance:\n{output}"
+    assert "replace --missing-id" not in output, (
+        f"Repair guidance must not request replace --missing-id:\n{output}"
+    )
 
 machine.shutdown()

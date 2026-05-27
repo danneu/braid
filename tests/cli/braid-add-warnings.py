@@ -76,8 +76,9 @@ with subtest("Dry-run missing-device warning routes to stdout as [warn]"):
 with subtest("Real-run missing-device warning renders as canonical [warn]"):
     # Intent: `braid add disk3` (no --dry-run) with a missing device
     # must print the canonical `[warn] pool has 1 missing device.
-    # Consider repairing with `braid replace --missing-id <devid>`
-    # first. Use `braid status` to see device IDs.` line on stderr --
+    # Consider repairing with `braid replace --old <name>
+    # --new <new-name>=/dev/disk/by-id/<...>` first. Use `braid status`
+    # to see the missing disk's name.` line on stderr --
     # the SAME bytes dry-run produces on stdout. The add-local
     # `warning: ` legacy replay was removed; plan-derived Warn notes
     # now route through the shared `preview::render_notes_for_stderr`
@@ -97,11 +98,15 @@ with subtest("Real-run missing-device warning renders as canonical [warn]"):
 
     expected_line = (
         "[warn] pool has 1 missing device. Consider repairing with"
-        " `braid replace --missing-id <devid>` first. Use `braid status`"
-        " to see device IDs."
+        " `braid replace --old <name> --new <new-name>=/dev/disk/by-id/<...>`"
+        " first. Use `braid status` to see the missing disk's name."
     )
     assert expected_line in err, (
         "real-run stderr must contain the canonical `[warn] ...` line;"
+        " exit={} stderr={!r}".format(ec, err)
+    )
+    assert "replace --missing-id" not in err, (
+        "real-run warning must not request replace --missing-id;"
         " exit={} stderr={!r}".format(ec, err)
     )
     assert "warning: pool has" not in err, (
@@ -170,13 +175,17 @@ with subtest("Phase 4: preserved-context failure renders canonical [warn]"):
     )
     warn_line = (
         "[warn] pool has 1 missing device. Consider repairing with"
-        " `braid replace --missing-id <devid>` first. Use `braid status`"
-        " to see device IDs."
+        " `braid replace --old <name> --new <new-name>=/dev/disk/by-id/<...>`"
+        " first. Use `braid status` to see the missing disk's name."
     )
     warn_pos = err.find(warn_line)
     assert warn_pos != -1, (
         "stderr must carry the canonical `[warn] ...` line on the refusal "
         "path; got: {!r}".format(err)
+    )
+    assert "replace --missing-id" not in err, (
+        "refusal-path warning must not request replace --missing-id; "
+        "got: {!r}".format(err)
     )
     # Identity-error wording comes from identity_to_error's
     # BraidLabeledNoBtrfs branch in cli/src/add.rs.

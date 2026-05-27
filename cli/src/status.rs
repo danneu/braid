@@ -19,6 +19,7 @@ use crate::parse::{
 };
 use crate::profile_summary::{self, ProfileJson, ProfileSummary, Redundancy, TypeProfile};
 use crate::probe::{Filesystem, ProbeError, probe_config_disk, probe_pool};
+use crate::preflight;
 use crate::progress::pct_from_bytes;
 use crate::state_paths::StatePaths;
 use crate::types::*;
@@ -1411,9 +1412,12 @@ fn format_status_human(
             );
             if has_errors || d.status == DiskStatus::Missing {
                 match &d.member_name {
-                    Some(name) => out.push_str(&format!(
-                        "    Action:  add replacement disk to config, then: braid replace --old {name} --new <new-name>\n",
-                    )),
+                    Some(name) => {
+                        let repair_command = preflight::replace_repair_command(Some(name));
+                        out.push_str(&format!(
+                            "    Action:  add replacement disk to config, then: {repair_command}\n",
+                        ));
+                    }
                     None => out.push_str(
                         "    Action:  foreign mapper detected -- run 'braid doctor' to investigate\n",
                     ),
@@ -5255,8 +5259,14 @@ mod tests {
         assert!(human.contains("foreign mapper detected"), "got:\n{human}");
         assert!(human.contains("run 'braid doctor'"), "got:\n{human}");
         assert!(
-            human.contains("braid replace --old disk1 --new <new-name>"),
+            human.contains(
+                "braid replace --old disk1 --new <new-name>=/dev/disk/by-id/<...>"
+            ),
             "member row must keep replacement guidance; got:\n{human}"
+        );
+        assert!(
+            !human.contains("replace --missing-id"),
+            "member row must not request replace --missing-id; got:\n{human}"
         );
     }
 
@@ -5316,8 +5326,14 @@ mod tests {
         let human = format_status_human(&report, None, Some(&ctx.human_details), None);
 
         assert!(
-            human.contains("braid replace --old disk1 --new <new-name>"),
+            human.contains(
+                "braid replace --old disk1 --new <new-name>=/dev/disk/by-id/<...>"
+            ),
             "missing member must keep replacement guidance; got:\n{human}"
+        );
+        assert!(
+            !human.contains("replace --missing-id"),
+            "missing member must not request replace --missing-id; got:\n{human}"
         );
     }
 

@@ -874,10 +874,11 @@ pub struct AddParams<'a> {
 /// `PreviewNote::Warn` and render it as the canonical `[warn] <body>`
 /// -- one contract for both modes.
 fn format_add_missing_devices_warning(missing_count: u64) -> String {
+    let repair_command = preflight::replace_repair_command(None);
     format!(
         "pool has {} missing device{}. \
-         Consider repairing with `braid replace --missing-id <devid>` first. \
-         Use `braid status` to see device IDs.",
+         Consider repairing with `{repair_command}` first. \
+         Use `braid status` to see the missing disk's name.",
         missing_count,
         if missing_count == 1 { "" } else { "s" }
     )
@@ -9010,8 +9011,8 @@ mod tests {
         let expected = concat!(
             "Nothing to do -- disk2 already in pool.\n",
             "[warn] pool has 1 missing device. Consider repairing with",
-            " `braid replace --missing-id <devid>` first.",
-            " Use `braid status` to see device IDs.\n",
+            " `braid replace --old <name> --new <new-name>=/dev/disk/by-id/<...>` first.",
+            " Use `braid status` to see the missing disk's name.\n",
             "[warn] Existing pool drives have a keyfile (keyslot-1) for auto-unlock,",
             " but the new drive will not.\n",
             "  Passphrase unlock still works, but the keyfile won't unlock the new drive",

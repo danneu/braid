@@ -5,7 +5,8 @@
 #   - `braid remove-missing --missing-id <devid>` against a 2-disk
 #     RAID1 pool with one disk missing exits non-zero, prints the
 #     "2-disk RAID1 pool with one disk missing" reject body naming
-#     `braid replace --missing-id`, and leaves no `pending-op.json`
+#     `braid replace --old <name> --new <new-name>=...`, and leaves no
+#     `pending-op.json`
 #     behind.
 #   - The same reject fires with `--dry-run`, confirming the guard
 #     lives in `plan_remove_missing` rather than `execute()`.
@@ -26,8 +27,8 @@
 # Scenario:
 # - 2-disk NAS, disk2 dies. Operator reaches for
 #   `braid remove-missing` (a reasonable instinct). braid steers them
-#   to `braid replace --missing-id <devid>` -- the supported repair
-#   path documented in docs/design/decisions/012-intent-cli.md.
+#   to `braid replace --old <name> --new <new-name>=...` -- the supported
+#   repair path documented in docs/design/decisions/012-intent-cli.md.
 #
 # Missing-disk setup reuses the canonical pattern from
 # tests/cli/remove-missing-inhibits-suspend.py: umount -> cryptsetup
@@ -100,7 +101,11 @@ with subtest("braid remove-missing --yes rejects with the expected body"):
     assert status != 0, f"expected non-zero exit, got {status}:\n{output}"
     assert "2-disk RAID1 pool with one disk missing" in output, output
     assert "braid replace" in output, output
-    assert "--missing-id" in output, output
+    assert (
+        "braid replace --old <name> --new <new-name>=/dev/disk/by-id/<...>"
+        in output
+    ), output
+    assert "replace --missing-id" not in output, output
 
 # --- Phase 5: Dry-run reject ---
 #
@@ -117,7 +122,11 @@ with subtest("braid remove-missing --dry-run rejects with the expected body"):
     assert status != 0, f"expected non-zero exit, got {status}:\n{output}"
     assert "2-disk RAID1 pool with one disk missing" in output, output
     assert "braid replace" in output, output
-    assert "--missing-id" in output, output
+    assert (
+        "braid replace --old <name> --new <new-name>=/dev/disk/by-id/<...>"
+        in output
+    ), output
+    assert "replace --missing-id" not in output, output
 
 # --- Phase 6: No journal stranded ---
 #

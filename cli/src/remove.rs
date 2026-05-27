@@ -546,10 +546,12 @@ pub fn plan_remove<R: CommandRunner + Sync, F: Filesystem + ?Sized>(
         None => {
             let mut msg = format!("disk '{}' not found in pool.", params.name);
             if pool.missing_count > 0 {
+                let repair_command = preflight::replace_repair_command(None);
                 msg.push_str(&format!(
                     " ({} missing device{} detected. \
-                     To repair onto a new disk, use `braid replace`. \
-                     To forget the entry, use `braid remove-missing`.)",
+                     To repair onto a new disk, use `{repair_command}`. \
+                     To forget the entry, use `braid remove-missing`. \
+                     Use `braid status` to see the missing disk's name and device IDs.)",
                     pool.missing_count,
                     if pool.missing_count == 1 { "" } else { "s" }
                 ));

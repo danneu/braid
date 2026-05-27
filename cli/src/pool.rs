@@ -325,12 +325,17 @@ fn device_remove_error(
                  to convert it back to RAID1, then `braid recover` to clear the \
                  pending operation, then retry `braid remove`."
             ),
-            RemoveContext::Missing => "a non-RAID1 chunk requires more devices than will remain. \
-                 While a device is missing, do not lower redundancy -- \
-                 repair the missing device instead. Run `braid recover` to \
-                 clear the pending operation, then `braid replace --missing-id <devid>` \
-                 to rebuild data onto a replacement disk."
-                .to_owned(),
+            RemoveContext::Missing => {
+                let repair_command = crate::preflight::replace_repair_command(None);
+                format!(
+                    "a non-RAID1 chunk requires more devices than will remain. \
+                     While a device is missing, do not lower redundancy -- \
+                     repair the missing device instead. Run `braid recover` to \
+                     clear the pending operation, then `{repair_command}` \
+                     to rebuild data onto a replacement disk. Use `braid status` to see the \
+                     missing disk's name."
+                )
+            }
         };
         PoolError::Failed(format!(
             "btrfs device remove failed (exit {}): {}\nhint: {hint}",
@@ -1361,8 +1366,12 @@ mod tests {
             .to_string();
         assert!(err.contains("hint:"), "error should include hint: {err}");
         assert!(
-            err.contains("braid replace --missing-id"),
+            err.contains("braid replace --old <name> --new <new-name>=/dev/disk/by-id/<...>"),
             "hint should point at missing-device replacement: {err}"
+        );
+        assert!(
+            !err.contains("braid replace --missing-id"),
+            "hint must not request replace --missing-id: {err}"
         );
         assert!(
             err.contains("braid recover"),
@@ -1500,8 +1509,12 @@ mod tests {
                 .expect_err("min-devices rejection should return an error")
                 .to_string();
         assert!(
-            err.contains("braid replace --missing-id"),
+            err.contains("braid replace --old <name> --new <new-name>=/dev/disk/by-id/<...>"),
             "missing hint should point at replacement: {err}"
+        );
+        assert!(
+            !err.contains("braid replace --missing-id"),
+            "missing hint must not request replace --missing-id: {err}"
         );
         assert!(
             err.contains("braid recover"),

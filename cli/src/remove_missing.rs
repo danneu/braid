@@ -403,21 +403,21 @@ pub fn plan_remove_missing<R: CommandRunner + Sync, F: Filesystem + ?Sized>(
     // BTRFS_ERROR_DEV_RAID1_MIN_NOT_MET when that drops below devs_min=2.
     // Per docs/design/decisions/012-intent-cli.md, remove-missing is cleanup-only;
     // the documented repair path for a dead disk on a 2-disk pool is
-    // `braid replace --missing-id <devid>`. Pools with total_devices > 2
+    // `braid replace --old <name> --new <new-name>=...`. Pools with total_devices > 2
     // are intentionally out of scope here -- the kernel accepts those
     // calls, and reasoning about data integrity in multi-missing states
     // (where the survivor is not guaranteed to mirror every chunk under
     // btrfs RAID1's ncopies=2 layout) is left to existing/future logic.
     if pool.total_devices == 2 && pool.devices.len() == 1 && pool.missing_count == 1 {
+        let repair_command = preflight::replace_repair_command(None);
         return Err(PlanFailure::with_notes(
             notes,
             RemoveMissingError::Validation(format!(
                 "cannot remove missing devid {devid} -- this is a 2-disk \
                  RAID1 pool with one disk missing, and the kernel refuses \
                  to drop a RAID1 pool below two devices. Repair the dead \
-                 disk with `braid replace --old <missing-name> \
-                 --new <new-name>=/dev/disk/by-id/<...> --missing-id \
-                 {devid}`, or run `braid add <new-name>=/dev/disk/by-id/<...>` \
+                 disk with `{repair_command}`, or run \
+                 `braid add <new-name>=/dev/disk/by-id/<...>` \
                  first and then re-run `braid remove-missing`. \
                  Use `braid status` to see device names and IDs.",
                 devid = params.missing_id,
@@ -923,7 +923,7 @@ mod tests {
      *
      * Scenario: 2-disk NAS, disk2 dies. Operator reaches for
      * `braid remove-missing --missing-id 2`. braid rejects up-front and
-     * names the supported repair paths.
+     * names the supported replace repair path without `replace --missing-id`.
      */
     #[test]
     fn single_survivor_rejected_at_preflight() {
@@ -947,8 +947,12 @@ mod tests {
             "error must name the replace command as the repair path; got: {msg}"
         );
         assert!(
-            msg.contains("--missing-id"),
-            "error must name the --missing-id flag of replace; got: {msg}"
+            msg.contains("braid replace --old <name> --new <new-name>=/dev/disk/by-id/<...>"),
+            "error must name the full replace command as the repair path; got: {msg}"
+        );
+        assert!(
+            !msg.contains("replace --missing-id"),
+            "error must not request replace --missing-id; got: {msg}"
         );
 
         assert_eq!(
@@ -981,7 +985,8 @@ mod tests {
      *
      * Scenario: Same 2-disk NAS as the real-run case, operator runs
      * `braid remove-missing --missing-id 2 --dry-run`. braid still
-     * rejects up-front -- no inhibitor, no journal, no btrfs calls.
+     * rejects up-front with the replace hint that omits `replace --missing-id` -- no
+     * inhibitor, no journal, no btrfs calls.
      */
     #[test]
     fn single_survivor_rejected_in_dry_run() {
@@ -1010,8 +1015,12 @@ mod tests {
             "error must name the replace command as the repair path; got: {msg}"
         );
         assert!(
-            msg.contains("--missing-id"),
-            "error must name the --missing-id flag of replace; got: {msg}"
+            msg.contains("braid replace --old <name> --new <new-name>=/dev/disk/by-id/<...>"),
+            "error must name the full replace command as the repair path; got: {msg}"
+        );
+        assert!(
+            !msg.contains("replace --missing-id"),
+            "error must not request replace --missing-id; got: {msg}"
         );
 
         assert_eq!(

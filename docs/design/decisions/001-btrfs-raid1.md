@@ -50,7 +50,7 @@ Device replacement always uses `btrfs replace start`, including when the source 
 3. **Single operation**: one `btrfs replace start` call vs. three separate commands with partial-failure risk.
 
 `braid remove-missing` is retained for cleanup only (forgetting stale device entries), not for replacement.
-When braid blocks a live replacement because the pool has missing devices, the intended next step is repairing the missing device via `braid replace --missing-id <devid>`, not forgetting it.
+When braid blocks a live replacement because the pool has missing devices, the intended next step is repairing the missing device via `braid replace` (the missing devid auto-resolves from `--old`), not forgetting it.
 
 ## See
 

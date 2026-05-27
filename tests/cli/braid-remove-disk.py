@@ -237,6 +237,13 @@ with subtest("braid remove disk3 fails for dead disk"):
     assert "not found in pool" in output, f"Expected 'not found in pool' in error:\n{output}"
     assert "missing" in output.lower(), f"Expected mention of missing devices:\n{output}"
     assert "braid replace" in output, f"Expected suggestion to use braid replace:\n{output}"
+    assert (
+        "braid replace --old <name> --new <new-name>=/dev/disk/by-id/<...>"
+        in output
+    ), f"Expected full replace repair guidance:\n{output}"
+    assert "replace --missing-id" not in output, (
+        f"Repair guidance must not request replace --missing-id:\n{output}"
+    )
     assert "remove-missing" in output, f"Expected suggestion to use remove-missing:\n{output}"
 
 with subtest("Pool unchanged after failed remove"):

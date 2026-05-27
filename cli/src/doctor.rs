@@ -33,6 +33,7 @@ use crate::parse::{
     parse_smartctl_selftest_log,
 };
 use crate::probe::{self, Filesystem, ProbeError, RealFilesystem};
+use crate::preflight;
 use crate::state_paths::StatePaths;
 use crate::status::{BalanceReport, format_bytes, get_balance_report, paused_balance_advice};
 use crate::status_tag::{StatusTag, color_enabled_for_stdout, status_line};
@@ -747,10 +748,11 @@ fn check_pool_missing_devices<R: CommandRunner>(ctx: &mut DoctorContext<'_, R>) 
         Ok(pool) => {
             let devids: Vec<String> = pool.missing_devids.iter().map(|d| d.to_string()).collect();
             let n = pool.missing_devids.len();
+            let repair_command = preflight::replace_repair_command(None);
             CheckResult::warn(
                 "pool_missing_devices",
                 format!(
-                    "pool has {} missing device{} (devid{}: {}); replace with: braid replace --old <disk> --new <disk> --missing-id <devid>",
+                    "pool has {} missing device{} (devid{}: {}); replace with: `{repair_command}`; use `braid status` to see the missing disk's name",
                     n,
                     if n == 1 { "" } else { "s" },
                     if n == 1 { "" } else { "s" },
@@ -4823,8 +4825,15 @@ mod tests {
             check.message
         );
         assert!(
-            check.message.contains("--missing-id"),
-            "expected --missing-id in recommendation: {}",
+            check
+                .message
+                .contains("braid replace --old <name> --new <new-name>=/dev/disk/by-id/<...>"),
+            "expected full replace recommendation: {}",
+            check.message
+        );
+        assert!(
+            !check.message.contains("replace --missing-id"),
+            "replace recommendation must not request --missing-id: {}",
             check.message
         );
         assert!(

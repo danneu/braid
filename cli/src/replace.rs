@@ -1666,10 +1666,11 @@ fn resolve_replace_source<R: CommandRunner>(
             ));
         }
         if pool.missing_count > 0 {
+            let repair_command = preflight::replace_repair_command(None);
             return Err(ReplaceError::Validation(format!(
                 "pool has {} missing device{}. \
-                 Repair the missing device{} first with `braid replace --missing-id <devid>`, \
-                 then retry this live replace. Use `braid status` to see device IDs.",
+                 Repair the missing device{} first with `{repair_command}`, \
+                 then retry this live replace. Use `braid status` to see the missing disk's name.",
                 pool.missing_count,
                 if pool.missing_count == 1 { "" } else { "s" },
                 if pool.missing_count == 1 { "" } else { "s" },
@@ -2293,8 +2294,13 @@ mod tests {
             "unexpected error: {err}"
         );
         assert!(
-            err.to_string().contains("replace --missing-id"),
-            "should suggest replace --missing-id: {err}"
+            err.to_string()
+                .contains("braid replace --old <name> --new <new-name>=/dev/disk/by-id/<...>"),
+            "should suggest the shared replace repair command: {err}"
+        );
+        assert!(
+            !err.to_string().contains("replace --missing-id"),
+            "should not suggest replace --missing-id: {err}"
         );
         assert!(
             !err.to_string().contains("remove-missing"),
