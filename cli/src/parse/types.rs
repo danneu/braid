@@ -189,7 +189,9 @@ impl DataRatio {
         let whole: u32 = whole.parse().ok()?;
         let frac_val: u32 = frac.parse().ok()?;
         let hundredths = match frac.len() {
-            1 => whole.checked_mul(100)?.checked_add(frac_val.checked_mul(10)?)?,
+            1 => whole
+                .checked_mul(100)?
+                .checked_add(frac_val.checked_mul(10)?)?,
             2 => whole.checked_mul(100)?.checked_add(frac_val)?,
             _ => return None,
         };

@@ -42,19 +42,11 @@ nix::ioctl_readwrite!(btrfs_dev_info_raw, 0x94, 30, BtrfsIoctlDevInfoArgs);
 #[derive(Debug, thiserror::Error)]
 pub enum BtrfsIoctlError {
     #[error("open {mount}: {errno}")]
-    OpenFailed {
-        mount: String,
-        errno: Errno,
-    },
+    OpenFailed { mount: String, errno: Errno },
     #[error("devid {devid} was not found in the mounted btrfs filesystem")]
-    DevidNotFound {
-        devid: u64,
-    },
+    DevidNotFound { devid: u64 },
     #[error("BTRFS_IOC_DEV_INFO failed for devid {devid}: {errno}")]
-    IoctlFailed {
-        devid: u64,
-        errno: Errno,
-    },
+    IoctlFailed { devid: u64, errno: Errno },
 }
 
 /// Abstracts the btrfs device-info syscall so replace planning and unit tests
@@ -175,10 +167,7 @@ mod tests {
         let err = dev_info
             .total_bytes(Path::new("/mnt/storage"), 99)
             .expect_err("unconfigured devid should fail");
-        assert!(matches!(
-            err,
-            BtrfsIoctlError::DevidNotFound { devid: 99 }
-        ));
+        assert!(matches!(err, BtrfsIoctlError::DevidNotFound { devid: 99 }));
     }
 
     #[ignore = "requires BRAID_BTRFS_IOCTL_SMOKE_MOUNT and BRAID_BTRFS_IOCTL_SMOKE_DEVID"]

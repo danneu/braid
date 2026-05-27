@@ -11,9 +11,7 @@ use crate::luks::LUKS2_DEFAULT_HDR_SIZE;
 use crate::membership::PoolMembership;
 use crate::mount_check::{self, mount_entry_at_via_fs};
 use crate::parse::parse_cryptsetup_luks_dump;
-use crate::parse::types::{
-    BtrfsBgType, BtrfsDeviceUsageEntry, BtrfsDfOutput, Luks2SegmentSize,
-};
+use crate::parse::types::{BtrfsBgType, BtrfsDeviceUsageEntry, BtrfsDfOutput, Luks2SegmentSize};
 use crate::preview::PreviewNote;
 use crate::probe::Filesystem;
 use crate::repair_hint;
@@ -440,9 +438,12 @@ where
     R: CommandRunner,
     D: BtrfsDevInfo + ?Sized,
 {
-    let source_total_bytes = dev_info
-        .total_bytes(mount, source.devid)
-        .map_err(|e| format!("failed to read btrfs total_bytes for devid {}: {e}", source.devid))?;
+    let source_total_bytes = dev_info.total_bytes(mount, source.devid).map_err(|e| {
+        format!(
+            "failed to read btrfs total_bytes for devid {}: {e}",
+            source.devid
+        )
+    })?;
     if source_total_bytes == 0 {
         return Err(format!(
             "btrfs reports total_bytes 0 for source devid {} -- cannot verify the new disk is large enough",
@@ -466,9 +467,11 @@ where
                 format!("failed to parse LUKS2 segment metadata for target {by_id}: {e}")
             })?;
             let capacity = match parsed.segment_size {
-                Luks2SegmentSize::Dynamic => {
-                    mapper_capacity_from_dynamic_segment(raw_target, parsed.segment_offset_bytes, by_id)?
-                }
+                Luks2SegmentSize::Dynamic => mapper_capacity_from_dynamic_segment(
+                    raw_target,
+                    parsed.segment_offset_bytes,
+                    by_id,
+                )?,
                 Luks2SegmentSize::Fixed(0) => {
                     return Err(
                         "LUKS2 segment 0 has fixed size 0 -- header is malformed".to_owned()
@@ -829,12 +832,8 @@ mod tests {
     //   after opening the LUKS container.
     // Scenario: target has the default dynamic segment at 16 MiB offset.
     fn check_replace_target_capacity_existing_dynamic_segment() {
-        let runner = runner_with_target_size_and_luks_dump(
-            TARGET_RAW_512_MIB,
-            16_777_216,
-            "dynamic",
-            512,
-        );
+        let runner =
+            runner_with_target_size_and_luks_dump(TARGET_RAW_512_MIB, 16_777_216, "dynamic", 512);
         let dev_info = dev_info_with_total(SOURCE_TOTAL);
         check_replace_target_capacity(
             &runner,
@@ -858,12 +857,8 @@ mod tests {
     fn check_replace_target_capacity_existing_dynamic_segment_does_not_round_sector_size() {
         let offset = 16_777_216;
         let source_total = 4_608;
-        let runner = runner_with_target_size_and_luks_dump(
-            offset + source_total,
-            offset,
-            "dynamic",
-            4096,
-        );
+        let runner =
+            runner_with_target_size_and_luks_dump(offset + source_total, offset, "dynamic", 4096);
         let dev_info = dev_info_with_total(source_total);
 
         check_replace_target_capacity(
@@ -884,12 +879,8 @@ mod tests {
     // Scenario: synthetic LUKS2 metadata reports a fixed 520093696-byte
     //   segment on the replacement disk.
     fn check_replace_target_capacity_existing_fixed_segment() {
-        let runner = runner_with_target_size_and_luks_dump(
-            TARGET_RAW_512_MIB,
-            16_777_216,
-            "520093696",
-            512,
-        );
+        let runner =
+            runner_with_target_size_and_luks_dump(TARGET_RAW_512_MIB, 16_777_216, "520093696", 512);
         let dev_info = dev_info_with_total(SOURCE_TOTAL);
         check_replace_target_capacity(
             &runner,
@@ -939,10 +930,7 @@ mod tests {
             ReplaceTargetProbe::PresentNotLuks { by_id: TARGET },
         )
         .unwrap_err();
-        assert!(
-            err.contains("total_bytes 0"),
-            "unexpected error: {err}"
-        );
+        assert!(err.contains("total_bytes 0"), "unexpected error: {err}");
     }
 
     #[test]
@@ -1039,10 +1027,7 @@ mod tests {
             ReplaceTargetProbe::PresentLuks { by_id: TARGET },
         )
         .unwrap_err();
-        assert!(
-            err.contains("fixed size 0"),
-            "unexpected error: {err}"
-        );
+        assert!(err.contains("fixed size 0"), "unexpected error: {err}");
     }
 
     // --- ExclusiveOp::parse tests ---

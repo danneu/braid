@@ -1004,7 +1004,10 @@ impl AddPlan {
                 })
                 .collect();
             let prompt = format!("{}\n", format_add_confirm(&confirm_disks));
-            params.confirm.confirm(&prompt).map_err(AddError::Validation)?;
+            params
+                .confirm
+                .confirm(&prompt)
+                .map_err(AddError::Validation)?;
         }
 
         // Confirm the new passphrase iff this add will `luks_format` without
@@ -4287,9 +4290,7 @@ mod tests {
                     &format!("cryptsetup open --test-passphrase {device}"),
                     "",
                 )),
-                CmdRequest::CryptsetupLuksFormat { .. } => {
-                    Ok(mock_ok("cryptsetup luksFormat", ""))
-                }
+                CmdRequest::CryptsetupLuksFormat { .. } => Ok(mock_ok("cryptsetup luksFormat", "")),
                 CmdRequest::CryptsetupLuksHeaderBackup { backup_path, .. } => {
                     if let Some(parent) = std::path::Path::new(backup_path.as_str()).parent() {
                         std::fs::create_dir_all(parent)
@@ -6097,7 +6098,7 @@ mod tests {
             let (_state_tmp, paths, _tmp, config_path, pass_path) = add_test_setup();
             let fs = AddMockFs(vec!["/dev/disk/by-id/virtio-disk2".into()]);
             let inhibitor = crate::inhibit::RecordingInhibitor::new();
-        let confirm = crate::confirm::RecordingConfirm::new();
+            let confirm = crate::confirm::RecordingConfirm::new();
 
             let result = cmd_add(
                 &runner,
@@ -9923,7 +9924,7 @@ mod tests {
             let recording = RequestRecordingRunner::new(MockRunner::default());
             let fs = AddOfflineMockFs(vec!["/dev/disk/by-id/virtio-disk1".into()]);
             let inhibitor = crate::inhibit::RecordingInhibitor::new();
-        let confirm = crate::confirm::RecordingConfirm::new();
+            let confirm = crate::confirm::RecordingConfirm::new();
             let extras = vec![token.to_owned()];
 
             let result = cmd_add(

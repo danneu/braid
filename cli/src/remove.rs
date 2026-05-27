@@ -280,7 +280,10 @@ impl RemovePlan {
                 // `RAID1 -> single` balance step; see `preview()`.
                 prompt.push_str("WARNING: Pool will have 1 disk -- no RAID1 redundancy.\n\n");
             }
-            params.confirm.confirm(&prompt).map_err(RemoveError::Validation)?;
+            params
+                .confirm
+                .confirm(&prompt)
+                .map_err(RemoveError::Validation)?;
         }
 
         // Hold a logind sleep inhibitor for the rest of the remove operation --
@@ -1454,8 +1457,8 @@ mod tests {
         let runner = RemovalPool::two_disk().install(MockRunner::default());
         let fs = MockFs::storage(vec![]);
         let params = f.remove_params().dry_run(true).build();
-        let plan = plan_remove(&runner, &fs, &params)
-            .expect("plan_remove should succeed on 2->1 fixture");
+        let plan =
+            plan_remove(&runner, &fs, &params).expect("plan_remove should succeed on 2->1 fixture");
 
         let preview = plan.preview();
         let rendered = preview.render();

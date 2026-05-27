@@ -1143,8 +1143,7 @@ fn run_dry_run_lock(config_path: &Path, paths: &StatePaths) {
     let runner = RealRunner;
     let fs = RealFilesystem;
     let extra_notes: Vec<PreviewNote> = load_note.into_iter().collect();
-    if let Err(e) =
-        braid_cli::lock::cmd_lock(&runner, &fs, &config, &membership, true, extra_notes)
+    if let Err(e) = braid_cli::lock::cmd_lock(&runner, &fs, &config, &membership, true, extra_notes)
     {
         print_cli_error(&e.to_string());
         std::process::exit(1);
@@ -1613,8 +1612,8 @@ mod tests {
     // remote diagnostics.
     #[test]
     fn doctor_json_parses_without_beep() {
-        let cli = Cli::try_parse_from(["braid", "doctor", "--json"])
-            .expect("doctor --json should parse");
+        let cli =
+            Cli::try_parse_from(["braid", "doctor", "--json"]).expect("doctor --json should parse");
         let Commands::Doctor(args) = cli.command else {
             panic!("expected doctor command");
         };
@@ -1630,8 +1629,8 @@ mod tests {
     // --beep` to test the real alert sound.
     #[test]
     fn doctor_beep_parses_without_json() {
-        let cli = Cli::try_parse_from(["braid", "doctor", "--beep"])
-            .expect("doctor --beep should parse");
+        let cli =
+            Cli::try_parse_from(["braid", "doctor", "--beep"]).expect("doctor --beep should parse");
         let Commands::Doctor(args) = cli.command else {
             panic!("expected doctor command");
         };

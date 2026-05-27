@@ -35,10 +35,7 @@ pub fn raid1_chunk_pair_capacity(unallocated_desc: &[u64]) -> u64 {
 ///
 /// This intentionally returns a vector to match the other status advisory
 /// helpers, while currently emitting at most one message.
-pub fn enospc_risk_advisory(
-    devices: &[BtrfsDeviceUsageEntry],
-    missing_count: u64,
-) -> Vec<String> {
+pub fn enospc_risk_advisory(devices: &[BtrfsDeviceUsageEntry], missing_count: u64) -> Vec<String> {
     if missing_count > 0 || devices.len() < 2 {
         return Vec::new();
     }

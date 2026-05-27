@@ -4723,7 +4723,8 @@ mod tests {
     }
 
     fn test_recovery_admission_membership(journal: &journal::Journal) -> PoolMembership {
-        recovery_admission_membership(journal).expect("fixture admission membership should be valid")
+        recovery_admission_membership(journal)
+            .expect("fixture admission membership should be valid")
     }
 
     fn recover_work_plan_for_journal(journal: journal::Journal) -> RecoverWorkPlan {
@@ -12068,7 +12069,8 @@ mod tests {
 
         let err = result.expect_err("initial mount failure should fail recover");
         assert!(
-            err.to_string().contains("mount failed (exit 32): wrong fs type"),
+            err.to_string()
+                .contains("mount failed (exit 32): wrong fs type"),
             "primary mount error should be preserved, got: {err}; requests: {:?}",
             runner.requests()
         );

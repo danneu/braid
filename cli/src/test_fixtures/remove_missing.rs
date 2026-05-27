@@ -6,7 +6,9 @@
 //! through the pool.json membership map; the shared `two_disk_healthy`
 //! and `one_live_one_missing` constructors only pin disk2.
 
-use super::shared::{DeviceUsageSpec, PoolFixture, device_usage_raw_body, disk_member_with, mock_ok};
+use super::shared::{
+    DeviceUsageSpec, PoolFixture, device_usage_raw_body, disk_member_with, mock_ok,
+};
 use crate::cmd::{CmdRequest, MockRunner};
 use crate::config::Config;
 use crate::confirm::RecordingConfirm;

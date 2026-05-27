@@ -17,8 +17,8 @@ use crate::parse::{
     parse_btrfs_device_stats, parse_btrfs_device_usage, parse_btrfs_df_json,
     parse_btrfs_filesystem_usage, parse_btrfs_scrub_status,
 };
-use crate::profile_summary::{self, ProfileJson, ProfileSummary, Redundancy, TypeProfile};
 use crate::probe::{Filesystem, ProbeError, probe_config_disk, probe_pool};
+use crate::profile_summary::{self, ProfileJson, ProfileSummary, Redundancy, TypeProfile};
 use crate::progress::pct_from_bytes;
 use crate::repair_hint;
 use crate::state_paths::StatePaths;
@@ -1433,8 +1433,7 @@ fn format_status_human(
 
 pub use crate::confirm::format_bytes;
 
-const SCRUB_JOURNAL_GREP: &str =
-    "BTRFS.*(at logical.*on (dev|mirror)|super block at physical)";
+const SCRUB_JOURNAL_GREP: &str = "BTRFS.*(at logical.*on (dev|mirror)|super block at physical)";
 
 // ---------------------------------------------------------------------------
 // Tests
@@ -1447,7 +1446,9 @@ mod tests {
     use crate::membership::{DiskMember, PoolMembership};
     // Keep the err_raw alias to document that status reuses mount's raw
     // error factory through the test fixture facade.
-    use crate::test_fixtures::{DeviceUsageSpec, device_usage_raw_body, disk_member_with, test_uuid};
+    use crate::test_fixtures::{
+        DeviceUsageSpec, device_usage_raw_body, disk_member_with, test_uuid,
+    };
     use crate::test_fixtures::{
         err_raw as status_err_raw, isolated_paths, mock_ok, status_btrfs_device_stats_3disk,
         status_btrfs_device_usage_raw_1disk, status_btrfs_df_raid1, status_btrfs_df_single,
@@ -1488,10 +1489,7 @@ mod tests {
         metadata: &[&str],
         system: &[&str],
     ) {
-        assert_eq!(
-            actual.as_ref(),
-            Some(&profile_json(data, metadata, system))
-        );
+        assert_eq!(actual.as_ref(), Some(&profile_json(data, metadata, system)));
     }
 
     fn write_pending_remove_journal(paths: &StatePaths) {
@@ -1785,7 +1783,10 @@ mod tests {
 
         let value = serde_json::to_value(&report).unwrap();
 
-        assert_eq!(value["profile"]["data"], serde_json::json!(["single", "RAID1"]));
+        assert_eq!(
+            value["profile"]["data"],
+            serde_json::json!(["single", "RAID1"])
+        );
     }
 
     // Intent: JSON status omits `profile` when no df-derived profile data is
@@ -4010,8 +4011,12 @@ mod tests {
         .expect("status should tolerate usage failure");
 
         assert!(
-            built.report.advisories.iter().any(|advisory| advisory
-                == "btrfs filesystem usage failed -- pool capacity unavailable"),
+            built
+                .report
+                .advisories
+                .iter()
+                .any(|advisory| advisory
+                    == "btrfs filesystem usage failed -- pool capacity unavailable"),
             "advisories: {:?}",
             built.report.advisories
         );
@@ -5047,20 +5052,10 @@ mod tests {
     // `alpha` before `bravo`, while preserving present-then-missing grouping.
     #[test]
     fn build_disk_reports_sorts_present_rows_by_name_not_devid() {
-        let (bravo_uuid, bravo_member) = disk_member_with(
-            951,
-            "bravo",
-            "/dev/disk/by-id/disk-bravo",
-            Some(1),
-            None,
-        );
-        let (alpha_uuid, alpha_member) = disk_member_with(
-            952,
-            "alpha",
-            "/dev/disk/by-id/disk-alpha",
-            Some(2),
-            None,
-        );
+        let (bravo_uuid, bravo_member) =
+            disk_member_with(951, "bravo", "/dev/disk/by-id/disk-bravo", Some(1), None);
+        let (alpha_uuid, alpha_member) =
+            disk_member_with(952, "alpha", "/dev/disk/by-id/disk-alpha", Some(2), None);
         let (aardvark_uuid, aardvark_member) = disk_member_with(
             953,
             "aardvark",
@@ -5259,9 +5254,7 @@ mod tests {
         assert!(human.contains("foreign mapper detected"), "got:\n{human}");
         assert!(human.contains("run 'braid doctor'"), "got:\n{human}");
         assert!(
-            human.contains(
-                "braid replace --old disk1 --new <new-name>=/dev/disk/by-id/<...>"
-            ),
+            human.contains("braid replace --old disk1 --new <new-name>=/dev/disk/by-id/<...>"),
             "member row must keep replacement guidance; got:\n{human}"
         );
         assert!(
@@ -5326,9 +5319,7 @@ mod tests {
         let human = format_status_human(&report, None, Some(&ctx.human_details), None);
 
         assert!(
-            human.contains(
-                "braid replace --old disk1 --new <new-name>=/dev/disk/by-id/<...>"
-            ),
+            human.contains("braid replace --old disk1 --new <new-name>=/dev/disk/by-id/<...>"),
             "missing member must keep replacement guidance; got:\n{human}"
         );
         assert!(
@@ -5545,20 +5536,10 @@ mod tests {
     // `alpha` before `bravo`, while preserving present-then-missing grouping.
     #[test]
     fn build_compact_drives_sorts_present_rows_by_name_not_devid() {
-        let (bravo_uuid, bravo_member) = disk_member_with(
-            961,
-            "bravo",
-            "/dev/disk/by-id/disk-bravo",
-            Some(1),
-            None,
-        );
-        let (alpha_uuid, alpha_member) = disk_member_with(
-            962,
-            "alpha",
-            "/dev/disk/by-id/disk-alpha",
-            Some(2),
-            None,
-        );
+        let (bravo_uuid, bravo_member) =
+            disk_member_with(961, "bravo", "/dev/disk/by-id/disk-bravo", Some(1), None);
+        let (alpha_uuid, alpha_member) =
+            disk_member_with(962, "alpha", "/dev/disk/by-id/disk-alpha", Some(2), None);
         let (aardvark_uuid, aardvark_member) = disk_member_with(
             963,
             "aardvark",

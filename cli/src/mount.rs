@@ -13,7 +13,8 @@ use crate::status_tag::{StatusTag, color_enabled_for_stderr, emit_status, status
 use crate::types::{ByIdPath, ConfigDiskState, DiskName, MapperName, MountPoint};
 use std::path::Path;
 
-const DEGRADED_MOUNT_WARNING: &str = "pool: mounted degraded with missing device(s) -- redundancy is reduced; next: braid replace";
+const DEGRADED_MOUNT_WARNING: &str =
+    "pool: mounted degraded with missing device(s) -- redundancy is reduced; next: braid replace";
 
 #[derive(Debug, thiserror::Error)]
 pub enum MountError {
@@ -3070,7 +3071,10 @@ pool already mounted at /mnt/storage
         );
         let msg = failure.error.to_string();
         assert!(msg.contains("disk2"), "failure should name disk2: {msg}");
-        assert!(!msg.contains("disk1"), "failure should not name disk1: {msg}");
+        assert!(
+            !msg.contains("disk1"),
+            "failure should not name disk1: {msg}"
+        );
     }
 
     // Intent: Keyfile unlock uses the same opened-mapper cleanup tracking as

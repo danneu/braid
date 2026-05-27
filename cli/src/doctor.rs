@@ -817,9 +817,10 @@ fn check_enospc_risk<R: CommandRunner>(ctx: &mut DoctorContext<'_, R>) -> CheckR
         .expect("ensure_device_usage sets device_usage when config is present");
     match device_usage {
         DeviceUsageSnapshot::NotMounted => CheckResult::skip(NAME, "skipped (pool not mounted)"),
-        DeviceUsageSnapshot::Error(_) => {
-            CheckResult::warn(NAME, "btrfs device usage failed -- ENOSPC risk indeterminate")
-        }
+        DeviceUsageSnapshot::Error(_) => CheckResult::warn(
+            NAME,
+            "btrfs device usage failed -- ENOSPC risk indeterminate",
+        ),
         DeviceUsageSnapshot::Ok(usage) => {
             match capacity::enospc_risk_advisory(&usage.devices, missing_count)
                 .into_iter()
@@ -848,7 +849,10 @@ fn check_paused_balance<R: CommandRunner>(ctx: &mut DoctorContext<'_, R>) -> Che
     match get_balance_report(ctx.runner, &mount_point) {
         BalanceReport::Paused { .. } => {
             let advice = paused_balance_advice(&mount_point);
-            CheckResult::warn(name, format!("{}; run: {}", advice.header, advice.resume_cmd))
+            CheckResult::warn(
+                name,
+                format!("{}; run: {}", advice.header, advice.resume_cmd),
+            )
         }
         BalanceReport::Idle | BalanceReport::Running { .. } => {
             CheckResult::ok(name, "no paused balance")
@@ -923,17 +927,18 @@ fn check_metadata_profile_mismatch<R: CommandRunner>(
     )
 }
 
-fn check_system_profile_mismatch<R: CommandRunner>(
-    ctx: &mut DoctorContext<'_, R>,
-) -> CheckResult {
-    check_profile_mismatch(ctx, BtrfsBgType::System, "system_profile_mismatch", "system")
+fn check_system_profile_mismatch<R: CommandRunner>(ctx: &mut DoctorContext<'_, R>) -> CheckResult {
+    check_profile_mismatch(
+        ctx,
+        BtrfsBgType::System,
+        "system_profile_mismatch",
+        "system",
+    )
 }
 
 /// Advisory metadata ENOSPC check that joins logical df pressure with
 /// per-device allocator headroom; either signal alone is too noisy for doctor.
-fn check_metadata_enospc_pressure<R: CommandRunner>(
-    ctx: &mut DoctorContext<'_, R>,
-) -> CheckResult {
+fn check_metadata_enospc_pressure<R: CommandRunner>(ctx: &mut DoctorContext<'_, R>) -> CheckResult {
     const NAME: &str = "metadata_enospc_pressure";
     if ctx.config.is_none() {
         return CheckResult::skip(NAME, "skipped (config not available)");
@@ -952,7 +957,10 @@ fn check_metadata_enospc_pressure<R: CommandRunner>(
         let df = match df_snapshot {
             DfSnapshot::NotMounted => return CheckResult::skip(NAME, "skipped (pool not mounted)"),
             DfSnapshot::Error(e) => {
-                return CheckResult::warn(NAME, format!("could not inspect metadata pressure: {e}"));
+                return CheckResult::warn(
+                    NAME,
+                    format!("could not inspect metadata pressure: {e}"),
+                );
             }
             DfSnapshot::Ok(df) => df,
         };
@@ -1664,16 +1672,16 @@ mod tests {
     use crate::state_paths::StatePaths;
     use crate::test_fixtures::{
         DF_METADATA_20_USED, DF_METADATA_78_USED, DF_MIXED, DF_MIXED_METADATA, DF_RAID1_CLEAN,
-        DfQueryFailureRunner, DoctorMockFs,
-        PoolMissingDevicesRunner, UpscSpawnFailureRunner, beep_ctx, cls, config_with_ups_enabled,
-        config_without_ups, device_usage_raw, device_usage_raw_body, device_usage_three_one_tight,
+        DeviceUsageSpec, DfQueryFailureRunner, DoctorMockFs, PoolMissingDevicesRunner,
+        UpscSpawnFailureRunner, beep_ctx, cls, config_with_ups_enabled, config_without_ups,
+        device_usage_raw, device_usage_raw_body, device_usage_three_one_tight,
         device_usage_three_two_tight, device_usage_two_healthy, device_usage_two_tight, df_json,
         df_json_fail, disk_member_with, human_options, is_luks_ok, isolated_paths,
         luks_dump_text_ok, luks_uuid_ok, mountpoint_fail, mountpoint_ok, parsed_doctor_ctx,
         pool_state_runner, smart_selftest_runner_for, smartctl_selftest_json,
         systemctl_show_active_state_output, test_uuid, unlock_btrfs_balance_status_idle,
         unlock_btrfs_balance_status_paused, unlock_btrfs_balance_status_paused_skip_balance,
-        ups_ctx, valid_config_json, write_temp, DeviceUsageSpec,
+        ups_ctx, valid_config_json, write_temp,
     };
     use crate::types::MountPoint;
 
@@ -2650,11 +2658,7 @@ mod tests {
                 status,
                 checks: vec![],
             };
-            assert_eq!(
-                report.command_result().is_err(),
-                should_fail,
-                "{status:?}"
-            );
+            assert_eq!(report.command_result().is_err(), should_fail, "{status:?}");
         }
     }
 
@@ -4475,8 +4479,7 @@ mod tests {
     //   multi-GiB unallocated.
     #[test]
     fn metadata_pressure_three_device_pool_one_tight_ok() {
-        let check =
-            metadata_pressure_result(DF_METADATA_78_USED, device_usage_three_one_tight());
+        let check = metadata_pressure_result(DF_METADATA_78_USED, device_usage_three_one_tight());
 
         assert_eq!(check.status, CheckStatus::Ok);
         assert!(
@@ -4631,7 +4634,9 @@ mod tests {
 
         assert_eq!(check.status, CheckStatus::Warn);
         assert!(
-            check.message.contains("could not inspect metadata pressure"),
+            check
+                .message
+                .contains("could not inspect metadata pressure"),
             "expected df inspect warning: {}",
             check.message
         );
@@ -4656,7 +4661,9 @@ mod tests {
 
         assert_eq!(check.status, CheckStatus::Warn);
         assert!(
-            check.message.contains("could not inspect metadata pressure"),
+            check
+                .message
+                .contains("could not inspect metadata pressure"),
             "expected df parse warning: {}",
             check.message
         );
@@ -4681,7 +4688,9 @@ mod tests {
 
         assert_eq!(check.status, CheckStatus::Warn);
         assert!(
-            check.message.contains("could not inspect device unallocated"),
+            check
+                .message
+                .contains("could not inspect device unallocated"),
             "expected device usage warning: {}",
             check.message
         );
@@ -4702,7 +4711,9 @@ mod tests {
 
         assert_eq!(check.status, CheckStatus::Warn);
         assert!(
-            check.message.contains("could not inspect device unallocated")
+            check
+                .message
+                .contains("could not inspect device unallocated")
                 && check.message.contains("could not parse"),
             "expected parse warning: {}",
             check.message
@@ -4839,11 +4850,9 @@ mod tests {
             check.message
         );
         assert!(
-            check
-                .message
-                .contains(
-                    "braid replace --old <missing-name> --new <new-name>=/dev/disk/by-id/<...>"
-                ),
+            check.message.contains(
+                "braid replace --old <missing-name> --new <new-name>=/dev/disk/by-id/<...>"
+            ),
             "expected full replace recommendation: {}",
             check.message
         );
@@ -4867,10 +4876,7 @@ mod tests {
     // replace one by name while optionally checking against the listed devids.
     #[test]
     fn pool_missing_devices_plural_warns_with_single_replace_command() {
-        let runner = pool_state_runner(
-            vec![("braid-disk1", 1, "/dev/vdb", test_uuid(1))],
-            &[2, 3],
-        );
+        let runner = pool_state_runner(vec![("braid-disk1", 1, "/dev/vdb", test_uuid(1))], &[2, 3]);
         let fs = DoctorMockFs::mounted_btrfs_only();
         let f = write_temp(valid_config_json());
         let report = run_doctor(f.path(), &runner, &fs, &isolated_paths().1, human_options());
@@ -4878,7 +4884,9 @@ mod tests {
 
         assert_eq!(check.status, CheckStatus::Warn);
         assert!(
-            check.message.contains("pool has 2 missing devices (devids: 2, 3)"),
+            check
+                .message
+                .contains("pool has 2 missing devices (devids: 2, 3)"),
             "expected plural devid list: {}",
             check.message
         );

@@ -1,7 +1,7 @@
-use std::collections::HashMap;
 use ratatui::layout::{Constraint, Layout, Rect};
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
+use std::collections::HashMap;
 mod help;
 
 use ratatui::Frame;
@@ -28,8 +28,7 @@ fn format_timestamp(dt: &PrimitiveDateTime) -> String {
     dt.format(&fmt).unwrap_or_else(|_| "unknown".to_owned())
 }
 
-const SCRUB_JOURNAL_GREP: &str =
-    "BTRFS.*(at logical.*on (dev|mirror)|super block at physical)";
+const SCRUB_JOURNAL_GREP: &str = "BTRFS.*(at logical.*on (dev|mirror)|super block at physical)";
 
 /// Journalctl accepts this stable local-time shape for `--since`.
 fn format_scrub_journal_since(ts: &ScrubTimestamp) -> String {
@@ -59,9 +58,9 @@ fn scrub_hint_command(scrub: &ScrubState) -> Option<String> {
             started_at,
             error_count,
             ..
-        } if *error_count > 0 => {
-            Some(scrub_journal_command(&format_scrub_journal_since(started_at)))
-        }
+        } if *error_count > 0 => Some(scrub_journal_command(&format_scrub_journal_since(
+            started_at,
+        ))),
         _ => None,
     }
 }

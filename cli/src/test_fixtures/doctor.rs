@@ -10,11 +10,11 @@
 //! constructors" section there); doctor.rs holds the private fields, so this
 //! module cannot field-literal-construct it directly.
 
+use super::shared::{DeviceUsageSpec, device_usage_raw_body};
 use crate::cmd::{CmdError, CmdRequest, CommandRunner, MockRunner, RawCommandOutput};
 use crate::doctor::{DiskState, DoctorContext, DoctorOptions};
 use crate::probe::Filesystem;
 use crate::state_paths::StatePaths;
-use super::shared::{DeviceUsageSpec, device_usage_raw_body};
 use crate::types::{LuksUuid, MapperName, MountPoint};
 use std::io::Write;
 use std::sync::Mutex;

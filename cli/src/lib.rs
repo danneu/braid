@@ -1,8 +1,8 @@
 pub mod ack;
 pub mod add;
-pub mod by_id;
 pub mod alert;
 pub mod btrfs_ioctl;
+pub mod by_id;
 /// Shared RAID1 capacity helpers used by advisory and mutation-safety paths.
 pub mod capacity;
 pub mod cmd;
@@ -34,11 +34,11 @@ pub mod pool;
 pub mod pool_lock;
 pub mod preflight;
 pub mod preview;
-pub mod profile_summary;
 pub mod probe;
 /// Shared post-commit UUID drift probe used by replace/remove/recover to verify
 /// an observed mapper still maps to the journaled LUKS UUID before close.
 pub(crate) mod probe_mapper_uuid;
+pub mod profile_summary;
 pub mod progress;
 pub mod recover;
 pub mod remove;

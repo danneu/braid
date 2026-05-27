@@ -118,11 +118,7 @@ impl DeviceUsageSpec {
     }
 
     /// Build a missing-device stanza using the pinned btrfs-progs marker.
-    pub(crate) fn missing(
-        devid: u64,
-        allocations: &[(&str, &str, u64)],
-        unallocated: u64,
-    ) -> Self {
+    pub(crate) fn missing(devid: u64, allocations: &[(&str, &str, u64)], unallocated: u64) -> Self {
         Self {
             path: None,
             devid,
@@ -504,7 +500,10 @@ mod tests {
                 "/dev/mapper/braid-disk1",
                 1,
                 1_073_741_824,
-                &[("Data", "RAID1", 52_428_800), ("Metadata", "DUP", 10_485_760)],
+                &[
+                    ("Data", "RAID1", 52_428_800),
+                    ("Metadata", "DUP", 10_485_760),
+                ],
                 1_010_794_496,
             ),
             DeviceUsageSpec::missing(3, &[("Data", "RAID1", 67_108_864)], 0),

@@ -62,10 +62,13 @@ pub fn parse_cryptsetup_luks_dump(
             detail: e.to_string(),
         })?;
 
-    let segment = parsed.segments.get("0").ok_or_else(|| ParseError::InvalidJson {
-        cmd: raw.cmd.clone(),
-        detail: "segments.0 missing".to_owned(),
-    })?;
+    let segment = parsed
+        .segments
+        .get("0")
+        .ok_or_else(|| ParseError::InvalidJson {
+            cmd: raw.cmd.clone(),
+            detail: "segments.0 missing".to_owned(),
+        })?;
 
     let segment_offset_bytes =
         segment
@@ -271,8 +274,8 @@ mod tests {
     // Scenario: corrupt luksDump JSON reports u64::MAX as the keyslot key size.
     #[test]
     fn parse_rejects_key_size_bits_multiplication_overflow() {
-        let err = parse_cryptsetup_luks_dump(&raw_with_key_size("18446744073709551615"))
-            .unwrap_err();
+        let err =
+            parse_cryptsetup_luks_dump(&raw_with_key_size("18446744073709551615")).unwrap_err();
         assert!(
             matches!(err, ParseError::InvalidJson { .. }),
             "unexpected error: {err}"

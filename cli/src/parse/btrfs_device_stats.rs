@@ -49,15 +49,13 @@ pub fn parse_btrfs_device_stats(
     let devices = parsed
         .device_stats
         .into_iter()
-        .map(|e| {
-            DeviceErrorStats {
-                devid: e.devid,
-                read_io_errs: e.read_io_errs,
-                write_io_errs: e.write_io_errs,
-                flush_io_errs: e.flush_io_errs,
-                corruption_errs: e.corruption_errs,
-                generation_errs: e.generation_errs,
-            }
+        .map(|e| DeviceErrorStats {
+            devid: e.devid,
+            read_io_errs: e.read_io_errs,
+            write_io_errs: e.write_io_errs,
+            flush_io_errs: e.flush_io_errs,
+            corruption_errs: e.corruption_errs,
+            generation_errs: e.generation_errs,
         })
         .collect();
 

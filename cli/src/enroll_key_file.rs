@@ -3186,9 +3186,9 @@ mod tests {
              add_pos={add_pos}, backup_pos={backup_pos}, requests={requests:?}"
         );
         assert!(
-            !requests
-                .iter()
-                .any(|r| matches!(r, CmdRequest::CryptsetupLuksAddKeyFile { device, .. } if device == d2)),
+            !requests.iter().any(
+                |r| matches!(r, CmdRequest::CryptsetupLuksAddKeyFile { device, .. } if device == d2)
+            ),
             "disk2 keyfile enrollment must be left for the idempotent re-run; requests={requests:?}"
         );
         assert!(

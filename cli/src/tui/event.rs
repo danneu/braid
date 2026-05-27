@@ -82,18 +82,16 @@ impl InputHandler {
         let thread = thread::spawn(move || {
             while !thread_shutdown.load(Ordering::Relaxed) {
                 match event::poll(Duration::from_millis(100)) {
-                    Ok(true) => {
-                        match event::read() {
-                            Ok(ev) => {
-                                if let Some(event) = to_tui_event(ev)
-                                    && thread_tx.send(event).is_err()
-                                {
-                                    break;
-                                }
+                    Ok(true) => match event::read() {
+                        Ok(ev) => {
+                            if let Some(event) = to_tui_event(ev)
+                                && thread_tx.send(event).is_err()
+                            {
+                                break;
                             }
-                            Err(_) => break,
                         }
-                    }
+                        Err(_) => break,
+                    },
                     Ok(false) => {}
                     Err(_) => break,
                 }
@@ -120,9 +118,7 @@ impl Drop for InputHandler {
 
 #[cfg(test)]
 mod tests {
-    use ratatui::crossterm::event::{
-        self, KeyCode, KeyEvent, KeyEventKind, KeyModifiers,
-    };
+    use ratatui::crossterm::event::{self, KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
 
     use super::*;
     use crate::tui::browse::BrowseFocus;

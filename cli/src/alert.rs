@@ -1652,10 +1652,7 @@ mod tests {
     fn null_underlying_device_triggers_missing_alert() {
         // Device stats include both a healthy device and the null-underlying
         // device (btrfs still reports its mapper path)
-        let stats = make_stats(vec![
-            zero_device(1),
-            zero_device(2),
-        ]);
+        let stats = make_stats(vec![zero_device(1), zero_device(2)]);
         let acked = AckedStats::default();
         // Alert-local missing devids includes the null-underlying device's devid
         let alert_missing = vec![2u64];

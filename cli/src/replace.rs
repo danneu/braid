@@ -477,7 +477,10 @@ impl ReplacePlan {
             if pool.total_devices == 1 {
                 prompt.push_str("WARNING: This replace leaves only 1 disk -- no redundancy.\n\n");
             }
-            params.confirm.confirm(&prompt).map_err(ReplaceError::Validation)?;
+            params
+                .confirm
+                .confirm(&prompt)
+                .map_err(ReplaceError::Validation)?;
         }
 
         // Read passphrase
@@ -2295,10 +2298,9 @@ mod tests {
             "unexpected error: {err}"
         );
         assert!(
-            err.to_string()
-                .contains(
-                    "braid replace --old <missing-name> --new <new-name>=/dev/disk/by-id/<...>"
-                ),
+            err.to_string().contains(
+                "braid replace --old <missing-name> --new <new-name>=/dev/disk/by-id/<...>"
+            ),
             "should suggest the shared replace repair command: {err}"
         );
         assert!(
@@ -3124,11 +3126,7 @@ mod tests {
         super::plan_replace(runner, fs, &dev_info, params)
     }
 
-    fn cmd_replace<R, F>(
-        runner: &R,
-        fs: &F,
-        params: &ReplaceParams<'_>,
-    ) -> Result<(), ReplaceError>
+    fn cmd_replace<R, F>(runner: &R, fs: &F, params: &ReplaceParams<'_>) -> Result<(), ReplaceError>
     where
         R: CommandRunner + Sync,
         F: Filesystem + ?Sized,
@@ -5389,8 +5387,8 @@ mod tests {
             "/dev/mapper/braid-disk3".into(),
         ]);
         let replace_done = Arc::new(AtomicBool::new(false));
-        let runner = ReplacementPool::one_live_one_missing()
-            .install(MockRunner::default(), replace_done);
+        let runner =
+            ReplacementPool::one_live_one_missing().install(MockRunner::default(), replace_done);
         let dev_info = crate::btrfs_ioctl::tests_support::MockBtrfsDevInfo::default()
             .with_total_bytes("/mnt/storage", 2, 520_093_697);
 
@@ -5398,10 +5396,7 @@ mod tests {
             &runner,
             &fs,
             &dev_info,
-            &f.replace_params()
-                .missing_id(Some(2))
-                .dry_run(true)
-                .build(),
+            &f.replace_params().missing_id(Some(2)).dry_run(true).build(),
         ) {
             Ok(_) => panic!("undersized target for missing source should fail planning"),
             Err(failure) => failure,

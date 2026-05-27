@@ -380,9 +380,7 @@ where
         emit_status(&status_line(
             StatusTag::Warn,
             color_enabled,
-            &format!(
-                "umount {mount_point} busy, retrying ({attempt}/{UMOUNT_RETRY_ATTEMPTS})..."
-            ),
+            &format!("umount {mount_point} busy, retrying ({attempt}/{UMOUNT_RETRY_ATTEMPTS})..."),
         ));
         sleeper.sleep(UMOUNT_RETRY_DELAY);
     }

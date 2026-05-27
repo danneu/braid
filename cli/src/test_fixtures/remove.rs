@@ -1,7 +1,9 @@
 //! Remove-scope fixtures: `RemovalPool`, `RemoveParamsBuilder`, and
 //! remove-only `PoolFixture` constructors.
 
-use super::shared::{DeviceUsageSpec, PoolFixture, device_usage_raw_body, disk_member_with, mock_ok};
+use super::shared::{
+    DeviceUsageSpec, PoolFixture, device_usage_raw_body, disk_member_with, mock_ok,
+};
 use crate::cmd::{CmdRequest, MockRunner};
 use crate::config::{Config, mapper_name};
 use crate::confirm::RecordingConfirm;
@@ -230,10 +232,7 @@ pub(crate) fn target_device(name: &str) -> PoolDevice {
 
 /// Valid two-disk `btrfs device usage --raw` stdout for override tests.
 pub(crate) fn valid_two_disk_usage_stdout() -> String {
-    device_usage_raw_body(&[
-        remove_usage_live_device(1),
-        remove_usage_live_device(2),
-    ])
+    device_usage_raw_body(&[remove_usage_live_device(1), remove_usage_live_device(2)])
 }
 
 /// Valid three-disk `btrfs device usage --raw` stdout for override tests.

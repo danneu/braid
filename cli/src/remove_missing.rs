@@ -581,12 +581,11 @@ fn check_relocation_space<R: CommandRunner>(
         )));
     }
 
-    preflight::check_raid1_relocation_space(&target, &remaining)
-        .map_err(|e| {
-            RemoveMissingError::Validation(format!(
-                "{e}\n\nFree up space by deleting files, or add a new device first with `braid add`."
-            ))
-        })
+    preflight::check_raid1_relocation_space(&target, &remaining).map_err(|e| {
+        RemoveMissingError::Validation(format!(
+            "{e}\n\nFree up space by deleting files, or add a new device first with `braid add`."
+        ))
+    })
 }
 
 #[cfg(test)]
@@ -2169,7 +2168,11 @@ mod tests {
             Ok(_) => panic!("planning must fail closed"),
             Err(failure) => failure,
         };
-        assert!(failure.notes.is_empty(), "unexpected notes: {:?}", failure.notes);
+        assert!(
+            failure.notes.is_empty(),
+            "unexpected notes: {:?}",
+            failure.notes
+        );
         match failure.error {
             RemoveMissingError::Validation(msg) => {
                 assert!(msg.contains("spawn failed"), "got: {msg}");
@@ -2215,7 +2218,11 @@ mod tests {
             Ok(_) => panic!("planning must fail closed"),
             Err(failure) => failure,
         };
-        assert!(failure.notes.is_empty(), "unexpected notes: {:?}", failure.notes);
+        assert!(
+            failure.notes.is_empty(),
+            "unexpected notes: {:?}",
+            failure.notes
+        );
         match failure.error {
             RemoveMissingError::Validation(msg) => {
                 assert!(msg.contains("btrfs device usage failed"), "got: {msg}");

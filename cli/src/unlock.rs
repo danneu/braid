@@ -267,10 +267,9 @@ mod tests {
     use crate::preview::NoteLevel;
     use crate::test_fixtures::{
         MOUNT_TEST_PASSPHRASE_BYTES, RecordingSleeper, base_two_disk_runner,
-        err_raw as unlock_err_raw, isolated_paths, luks_uuid_ok, mount_fs,
-        ok_raw as unlock_ok_raw, test_config, test_passphrase_fail,
-        three_disk_membership as unlock_three_disk_membership, two_disk_membership,
-        unlock_btrfs_balance_status_idle, unlock_btrfs_balance_status_paused,
+        err_raw as unlock_err_raw, isolated_paths, luks_uuid_ok, mount_fs, ok_raw as unlock_ok_raw,
+        test_config, test_passphrase_fail, three_disk_membership as unlock_three_disk_membership,
+        two_disk_membership, unlock_btrfs_balance_status_idle, unlock_btrfs_balance_status_paused,
         unlock_btrfs_device_scan_ok, unlock_luks_uuid_not_luks, unlock_passphrase_file,
         unlock_storage_fs, unlock_with_mount_degraded_ok, unlock_with_mount_ok,
         unlock_with_open_mapper_ok, unlock_with_test_passphrase_ok, unlock_with_three_mappers_open,

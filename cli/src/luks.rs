@@ -752,7 +752,10 @@ pub(crate) enum MapperOwnership {
 
 #[derive(Debug, thiserror::Error)]
 pub(crate) enum OwnershipError {
-    #[error("mapper conflict on '{name}': expected {expected}, found {}", mapper_conflict_found_display(found))]
+    #[error(
+        "mapper conflict on '{name}': expected {expected}, found {}",
+        mapper_conflict_found_display(found)
+    )]
     Conflict {
         name: String,
         expected: LuksUuid,
