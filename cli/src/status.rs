@@ -5996,6 +5996,36 @@ mod tests {
         );
     }
 
+    // Intent: resolve_alert_state surfaces a live smartd flag even when the
+    //   alert latch is corrupt.
+    // Why it exists: the unreadable-latch path returns early and appends
+    //   smartd state manually, separate from the normal dedup branch.
+    // Scenario: latch bytes are corrupt while smartd has written its alert
+    //   flag, and the operator runs `braid status`.
+    #[test]
+    fn resolve_alert_state_bridges_smartd_alert_when_latch_corrupt() {
+        let (_tmp, paths) = isolated_paths();
+        std::fs::write(paths.alert_latch_json(), b"not json").unwrap();
+        std::fs::write(paths.smartd_alert(), b"").unwrap();
+
+        let state = resolve_alert_state(&paths);
+
+        let [
+            AlertCause::ComputationError { detail },
+            AlertCause::SmartdAlert,
+        ] = state.causes.as_slice()
+        else {
+            panic!(
+                "expected corrupt latch ComputationError followed by SmartdAlert, got {:?}",
+                state.causes
+            );
+        };
+        assert!(
+            detail.contains("alert latch unreadable"),
+            "detail must name unreadable latch state, got: {detail}"
+        );
+    }
+
     // Intent: resolve_alert_state surfaces a cleanup-pending sentinel as an
     //   active ComputationError even when no latch or smartd flag exists.
     // Why it exists: ack cleanup can fail after removing alert-latch.json, so
