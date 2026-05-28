@@ -95,7 +95,7 @@ fn cmd_ack_impl<R: CommandRunner, F: Filesystem + ?Sized>(
     // 5. Snapshot current state. Identity is the devid carried on each
     //    stats row by btrfs -- no path-to-devid map needed.
     let new_acked = snapshot_current(&device_stats, &recognized_devids, &alert_missing_devids);
-    save_acked_stats(&new_acked, paths)?;
+    save_acked_stats(&new_acked, paths).map_err(AckError::Io)?;
 
     if let Err(e) = cleanup_alert_files_and_beeper(paths, stop_beeper, remove_smartd) {
         return Err(AckError::CleanupFailed(e));
@@ -156,11 +156,11 @@ fn ack_offline(
         .collect();
 
     if !missing_devids.is_empty() {
-        let mut acked = load_acked_stats_fallible(paths)?;
+        let mut acked = load_acked_stats_fallible(paths).map_err(AckError::Io)?;
         for devid in missing_devids {
             acked.0.entry(devid.to_string()).or_default().missing_acked = true;
         }
-        save_acked_stats(&acked, paths)?;
+        save_acked_stats(&acked, paths).map_err(AckError::Io)?;
     }
 
     if let Err(e) = cleanup_alert_files_and_beeper(paths, stop_beeper, remove_smartd) {
@@ -266,8 +266,12 @@ pub enum AckError {
     Cmd(#[from] crate::cmd::CmdError),
     #[error("parse error: {0}")]
     Parse(#[from] crate::parse::ParseError),
+    /// Pre-cleanup state-load/save I/O failure. `#[from]` is deliberately
+    /// omitted so `AckError`-returning code must use `map_err(AckError::Io)`
+    /// or wrap as `CleanupFailed`; a new `?` propagating an `io::Error` into
+    /// `AckError` cannot silently bypass the partial-state recovery message.
     #[error("I/O error: {0}")]
-    Io(#[from] std::io::Error),
+    Io(#[source] std::io::Error),
     /// Cleanup of latch + smartd-alert + corrupt-latch files failed after the
     /// best-effort beeper stop hook had already been attempted and ack had
     /// already started persisting state: after `save_acked_stats` in the
