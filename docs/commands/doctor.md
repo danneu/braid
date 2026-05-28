@@ -22,7 +22,7 @@ Output:
 [ok]   config file     /etc/braid/config.json exists and is valid JSON
 [ok]   config schema   required fields present and valid
 [ok]   config perms    /etc/braid/config.json permissions ok
-[ok]   declared disks  all 3 declared disk(s) present
+[ok]   declared disks  all 3 declared disks present
 [ok]   missing devs    no missing devices
 [ok]   data profiles   data profile: RAID1
 [ok]   meta profiles   metadata profile: RAID1
