@@ -207,7 +207,9 @@ warning: failed to parse pending-op.json: <detail>. Remove /var/lib/braid/pendin
 See [Unparseable state-file reconciliation](../internals/luks-unlock.md#unparseable-state-file-reconciliation)
 for the safe-to-remove conditions.
 
-**Pending LUKS header backups.** When a header-mutating operation
+#### Pending LUKS header backups
+
+When a header-mutating operation
 (`braid add`, `braid replace`, `braid enroll`) writes a local LUKS
 header backup to `/var/lib/braid/luks-headers/<disk>.luksheader`,
 `braid status` prints a warning until those files are removed:

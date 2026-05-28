@@ -67,6 +67,8 @@ sudo braid enroll /mnt/usb --generate --dry-run
 9. Enrolls the keyfile into LUKS slot 1 on each disk.
 10. Creates a LUKS header backup for each modified disk.
 
+See [Pending LUKS header backups](status.md#pending-luks-header-backups) -- copy each `.luksheader` off-system and delete the local copy.
+
 ## Safety checks
 
 - Refuses if a pending operation journal (`pending-op.json`) exists -- run `braid recover` to reconcile.
