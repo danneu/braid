@@ -1265,6 +1265,17 @@ mod tests {
             .count()
     }
 
+    fn forget_requests(runner: &MockRunner) -> Vec<Vec<String>> {
+        runner
+            .requests()
+            .into_iter()
+            .filter_map(|request| match request {
+                CmdRequest::BtrfsDeviceScanForget { devices } => Some(devices),
+                _ => None,
+            })
+            .collect()
+    }
+
     fn btrfs_show_for_lock_mappers(mapper_aaa: &str, mapper_bbb: &str) -> RawCommandOutput {
         RawCommandOutput {
             cmd: "btrfs filesystem show /mnt/storage".into(),
@@ -1936,6 +1947,64 @@ mod tests {
         );
     }
 
+    // Intent: a failed unmount skips the BtrfsDeviceScanForget request and
+    //   proceeds straight to mapper close.
+    // Why it exists: the lock cookbook documents this contract; without a
+    //   pin, a refactor that always called forget would only surface a runtime
+    //   warn because the forget error path is non-fatal.
+    // Scenario: umount fails three times with "target is busy"; lock issues
+    //   zero forget requests, still attempts each member mapper close, and
+    //   returns the umount error.
+    #[test]
+    fn lock_umount_failure_skips_forget() {
+        let runner = lock_with_fsid_probe_mocks(MockRunner::default().with_output(
+            CmdRequest::MountpointCheck {
+                path: MountPoint("/mnt/storage".to_owned()),
+            },
+            lock_ok_raw("mountpoint -q /mnt/storage"),
+        ))
+        .with_output_sequence(
+            umount_request(),
+            vec![
+                umount_busy_output(),
+                umount_busy_output(),
+                umount_busy_output(),
+            ],
+        )
+        .with_output(
+            CmdRequest::CryptsetupClose {
+                mapper: MapperName("braid-aaa".into()),
+            },
+            lock_ok_raw("cryptsetup close braid-aaa"),
+        )
+        .with_output(
+            CmdRequest::CryptsetupClose {
+                mapper: MapperName("braid-bbb".into()),
+            },
+            lock_ok_raw("cryptsetup close braid-bbb"),
+        );
+        let fs = lock_fs(&["/dev/mapper/braid-aaa", "/dev/mapper/braid-bbb"]);
+        let config = lock_test_config();
+        let membership = lock_test_membership();
+
+        let err = cmd_lock_impl(&runner, &fs, &LockNoopSleeper, &config, &membership, false)
+            .expect_err("umount failure should be reported after best-effort close");
+
+        assert!(
+            err.to_string().contains("target is busy"),
+            "expected umount stderr in error, got: {err}"
+        );
+        assert!(
+            forget_requests(&runner).is_empty(),
+            "umount failure must not issue btrfs forget"
+        );
+        assert_eq!(
+            cryptsetup_close_request_count(&runner),
+            2,
+            "umount failure should still attempt each member mapper close"
+        );
+    }
+
     // Intent: the umount-busy error message includes actionable diagnostic hints.
     // Why it exists: users need to know how to find the blocking process so
     //   they can kill it and retry lock.
@@ -2295,6 +2364,68 @@ mod tests {
         // MissingMock and the test would fail.
         cmd_lock_impl(&runner, &fs, &LockNoopSleeper, &config, &membership, false)
             .expect("lock should succeed with forget");
+    }
+
+    // Intent: execute drops planned close-set mappers whose /dev/mapper path
+    //   disappeared between plan and execute before issuing BtrfsDeviceScanForget.
+    // Why it exists: the lock cookbook documents this filter; preview-side
+    //   helpers only pin compile_lock_steps, which has no execute-time
+    //   fs.exists filter.
+    // Scenario: the mounted plan observes braid-aaa and braid-bbb, but
+    //   /dev/mapper/braid-bbb has disappeared before execution; lock forgets
+    //   and closes only braid-aaa, treating braid-bbb as already closed.
+    #[test]
+    fn lock_execute_forget_filters_disappeared_mapper() {
+        let runner = lock_with_fsid_probe_mocks(MockRunner::default().with_output(
+            CmdRequest::MountpointCheck {
+                path: MountPoint("/mnt/storage".to_owned()),
+            },
+            lock_ok_raw("mountpoint -q /mnt/storage"),
+        ))
+        .with_output(
+            CmdRequest::Umount {
+                mount_point: MountPoint("/mnt/storage".to_owned()),
+            },
+            lock_ok_raw("umount /mnt/storage"),
+        )
+        .with_output(
+            CmdRequest::BtrfsDeviceScanForget {
+                devices: vec!["/dev/mapper/braid-aaa".into()],
+            },
+            lock_ok_raw("btrfs device scan --forget"),
+        )
+        .with_output(
+            CmdRequest::CryptsetupClose {
+                mapper: MapperName("braid-aaa".into()),
+            },
+            lock_ok_raw("cryptsetup close braid-aaa"),
+        );
+        let fs = lock_fs(&["/dev/mapper/braid-aaa"]);
+        let config = lock_test_config();
+        let membership = lock_test_membership();
+
+        cmd_lock_impl(&runner, &fs, &LockNoopSleeper, &config, &membership, false)
+            .expect("lock should succeed when one planned mapper disappeared");
+
+        assert_eq!(
+            forget_requests(&runner),
+            vec![vec!["/dev/mapper/braid-aaa".to_owned()]],
+            "forget should only receive still-existing mapper paths"
+        );
+
+        let close_requests: Vec<String> = runner
+            .requests()
+            .into_iter()
+            .filter_map(|request| match request {
+                CmdRequest::CryptsetupClose { mapper } => Some(mapper.as_str().to_owned()),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(
+            close_requests,
+            vec!["braid-aaa".to_owned()],
+            "execute should not close the disappeared braid-bbb mapper"
+        );
     }
 
     #[test]

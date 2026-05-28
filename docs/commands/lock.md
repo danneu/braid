@@ -35,7 +35,7 @@ sudo braid lock --dry-run
 1. Checks if the pool is mounted
 2. Checks that no btrfs exclusive operation (balance, device remove, etc.) is running
 3. Unmounts the btrfs filesystem, retrying up to 3 times if the device is busy (covers the brief race after stopping SMB/NFS consumers, where the kernel has not yet released the last file descriptors)
-4. Runs `btrfs device scan --forget` to clear the kernel's device registry (prevents stale references from racing with mapper close)
+4. After a successful unmount, runs `btrfs device scan --forget` for the planned close-set mappers (member-owned plus any orphaned `braid-*` mappers from a prior crash) that still exist on disk, clearing the kernel's device registry so stale references do not race with mapper close. Skipped when there is nothing left to forget.
 5. Classifies live mappers by LUKS UUID/devid ownership, then closes member-owned observed mapper names, retrying up to 3 times if the device is busy
 6. Scans for orphaned `braid-*` mappers not owned by UUID-keyed membership (e.g. from a prior crash) and closes those too
 
@@ -56,7 +56,7 @@ Standalone CLI installs (no NixOS module) skip all three -- there is no `braid-o
 ## Error handling
 
 - Refuses if another braid operation is in progress (pool lock `/run/braid-pool.lock` is held) -- retry once it finishes.
-- If unmount fails after 3 retry attempts (e.g. a process has files open on the mount), lock still attempts to close the LUKS mappers and reports the failure
+- If unmount fails after 3 retry attempts (e.g. a process has files open on the mount), lock skips `btrfs device scan --forget` and still attempts to close the LUKS mappers, reporting the failure
 - If a mapper close fails with "device busy" after unmount also failed, the error is downgraded to a warning (the root cause is likely the stuck unmount)
 - The hint `lsof <mount_point>` or `fuser -vm <mount_point>` is printed when unmount fails, to help identify the blocking process
 
