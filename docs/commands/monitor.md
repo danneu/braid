@@ -24,7 +24,7 @@ sudo braid monitor; echo $?
 
 | Code | Meaning |
 | --- | --- |
-| **0** | Healthy, or pool is offline (nothing to check) |
+| **0** | Healthy, pool is offline, or another braid command holds the pool lock (cycle skipped, re-evaluated on the next timer tick) |
 | **1** | Alert active -- one or more problems detected |
 | **2** | Pre-monitor setup error (e.g. pool-lock I/O, config load failure) |
 

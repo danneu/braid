@@ -152,7 +152,7 @@ systemctl status braid-monitor.timer
 ```
 braid-monitor.timer (every 5 min)
   -> braid-monitor.service
-    -> braid monitor (exit 0 = ok, 1 = alert, 2 = setup error)
+    -> braid monitor (exit 0 = ok/offline/lock-contended, 1 = alert, 2 = setup error)
       -> on exit 1: start braid-alert.service
         -> beep (PC speaker, 5s -> 10s -> ... -> 15min)
         -> alertCommand (if configured)

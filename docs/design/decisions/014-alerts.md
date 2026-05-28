@@ -80,7 +80,7 @@ On a new machine, acked state doesn't exist — everything evaluates fresh.
 Checks state and returns an exit code. Does not start/stop services. The systemd wrapper starts the beeper on exit 1.
 
 Exit codes:
-- **0** -- ok or pool offline with no active alerts
+- **0** -- ok, pool offline with no active alerts, or pool-lock-contended cycle (silently skipped; re-evaluated on the next timer tick)
 - **1** -- alert active (disk health issue OR indeterminate state latched as `ComputationError` -- e.g. probe failure, parse failure, unmapped device)
 - **2** -- pre-`cmd_monitor` setup failure (e.g. pool-lock I/O, config load failure). Reserved for "could not even attempt to detect"; never emitted by `cmd_monitor` itself.
 
