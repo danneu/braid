@@ -179,8 +179,12 @@ with subtest("Kill disk3: simulate second drive failure"):
     assert "missing" in fi_show.lower(), f"Expected missing device:\n{fi_show}"
 
 with subtest("Wrong --missing-id is rejected early (no pool mutation)"):
-    # With btrfs-replace-based replacement, wrong --missing-id is caught at
-    # validation time (before any LUKS formatting or pool changes).
+    # Wrong --missing-id is caught at validation time, before any LUKS
+    # formatting or pool changes. Snapshot pool.json and the btrfs array
+    # first so we can prove nothing mutated.
+    machine.succeed("cp /var/lib/braid/pool.json /tmp/pool-before-wrong-id.json")
+    machine.succeed("btrfs fi show /mnt/storage > /tmp/fi-show-before-wrong-id.txt")
+
     wrong_devid = 9999
     (status, output) = machine.execute(
         replace_cmd("disk3", "disk5", extra=f"--missing-id {wrong_devid}") + " 2>&1"
@@ -190,7 +194,20 @@ with subtest("Wrong --missing-id is rejected early (no pool mutation)"):
     )
     print(f"Wrong --missing-id error (expected):\n{output}")
 
-    # No cleanup needed — the command failed at validation, before any pool changes.
+    # Must be the early devid cross-check (OldDevidMismatch), not a late
+    # failure after journal/LUKS/btrfs mutation.
+    assert "--old and --missing-id disagree" in output, (
+        f"Expected the devid-disagreement typo guard, got: {output}"
+    )
+
+    # No journal stranded, pool membership untouched, btrfs array untouched,
+    # and the new disk was never LUKS-formatted -- proves the rejection
+    # landed before execute() ran any mutation.
+    machine.fail("test -e /var/lib/braid/pending-op.json")
+    machine.succeed("cmp /tmp/pool-before-wrong-id.json /var/lib/braid/pool.json")
+    machine.succeed("btrfs fi show /mnt/storage > /tmp/fi-show-after-wrong-id.txt")
+    machine.succeed("cmp /tmp/fi-show-before-wrong-id.txt /tmp/fi-show-after-wrong-id.txt")
+    machine.fail("cryptsetup isLuks /dev/disk/by-id/virtio-disk5")
 
 with subtest("Replace dead disk3 with disk5 (correct --missing-id)"):
     result = machine.succeed(
