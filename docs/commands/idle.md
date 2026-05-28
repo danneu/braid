@@ -60,6 +60,12 @@ command/parser failures. The error text preserves the underlying diagnostic.
 
 When the pool is offline (not mounted), exit code is 0 -- there is nothing to protect, so suspend is safe.
 
+`braid idle` must run as root. A non-root invocation exits 1 with
+`error: braid must be run as root` on stderr before config loading or any probe
+runs, with no stdout output. The streams disambiguate this from the documented
+exits above: exit 0 prints `idle:` on stdout, busy/probe-failure exit 1 prints
+`busy:` on stdout, and config-load exit 2 emits a config-error diagnostic.
+
 ## Autosuspend integration
 
 braid idle is designed to be used as an [autosuspend](https://autosuspend.readthedocs.io/) check. Add it to your autosuspend configuration:

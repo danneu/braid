@@ -2,16 +2,17 @@
 #
 # Intent: Verify that `braid idle` returns exit 0 when the pool is idle or
 #   offline, exit 1 when a btrfs operation is running or a pool-state probe
-#   fails, and exit 2 when config loading fails.
+#   fails, exit 1 at the non-root gate, and exit 2 when config loading fails.
 #
 # Why it exists: braid idle is the integration point for autosuspend --
 #   incorrect exit codes would either prevent the NAS from ever sleeping
 #   (false busy) or allow sleep during active I/O (false idle).
 #
 # Scenario: 2-disk RAID1 pool. Check exit 0 when pool offline, exit 2 for
-#   unreadable or unparseable config, exit 0 when pool idle, exit 1 on a forced
-#   probe failure, and exit 1 during scrub (racy on small VM disks -- unit
-#   tests are authoritative for the busy path).
+#   unreadable or unparseable config, exit 1 before config/probes when run
+#   without root, exit 0 when pool idle, exit 1 on a forced probe failure, and
+#   exit 1 during scrub (racy on small VM disks -- unit tests are authoritative
+#   for the busy path).
 
 import base64
 import re
@@ -39,6 +40,24 @@ with subtest("braid idle exits 2 on config-load failure (setup error, not exit 1
     status, output = machine.execute("braid idle --config /tmp/nonexistent.json 2>&1")
     assert status == 2, f"missing config must exit 2 (not 1), got {status}: {output}"
     assert "/tmp/nonexistent.json" in output, f"exit 2 must be config-load (not clap usage), got: {output}"
+
+with subtest("braid idle exits 1 at the non-root gate before config/probes"):
+    machine.succeed("rm -f /tmp/idle.stdout /tmp/idle.stderr")
+    status, output = machine.execute(
+        "runuser -u nobody -- braid idle >/tmp/idle.stdout 2>/tmp/idle.stderr"
+    )
+    stdout = machine.succeed("cat /tmp/idle.stdout")
+    stderr = machine.succeed("cat /tmp/idle.stderr")
+
+    assert status == 1, f"non-root braid idle must exit 1, got {status}: {output}"
+    assert "error: braid must be run as root" in stderr, (
+        f"root-gate diagnostic must be on stderr, got stderr={stderr!r}"
+    )
+    assert stdout == "", f"root gate must not emit stdout, got: {stdout!r}"
+    assert "idle:" not in stdout, f"root gate must not classify idle, got: {stdout!r}"
+    assert "busy:" not in stdout, f"root gate must not classify busy, got: {stdout!r}"
+
+    machine.succeed("rm -f /tmp/idle.stdout /tmp/idle.stderr")
 
 with subtest("Create 2-disk RAID1 pool"):
     for d in ["disk1", "disk2"]:
