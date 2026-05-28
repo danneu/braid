@@ -51,18 +51,16 @@ Review the command's behavior for:
   invokes it, and `docs/commands/` or README documentation.
 - If the command's tools include btrfs, cryptsetup/LUKS, systemd,
   smartctl, NUT, util-linux, autosuspend, hddfancontrol, or the
-  kernel, consult `./btrfs-links.md` selectively and consult
-  `./reference/` first. `reference/` contains vendored upstream
-  source and is preferred over the web for parser output formats and
-  tool behavior.
+  kernel, consult `./reference/` first. `reference/` contains
+  vendored upstream source and is preferred over the web for parser
+  output formats and tool behavior.
 - Read `docs/design/principles.md` and any relevant `docs/design/decisions/*.md`.
   Read `docs/design/decisions/018-systemd-lifecycle.md` if the command
   touches units, the wrapper, or mount state.
 - Do additional web research with `WebSearch`/`WebFetch` only when
-  `reference/` and `btrfs-links.md` do not cover what you need. Spend
-  at most about 30% of your turns on external research. If you have
-  not begun drafting findings by then, stop researching and write what
-  you have.
+  `reference/` does not cover what you need. Spend at most about 30%
+  of your turns on external research. If you have not begun drafting
+  findings by then, stop researching and write what you have.
 - If `WebFetch` returns 403/429 or an anti-bot interstitial, skip
   that source -- do not block on it.
 
@@ -90,7 +88,7 @@ Use this structure:
 ## Scope
 
 - Files reviewed (paths)
-- References consulted (btrfs-links articles, reference/ paths, decision docs)
+- References consulted (reference/ paths, decision docs)
 
 ## Findings
 

@@ -2,9 +2,9 @@
 
 ## Context
 
-`btrfs-findings/b4-balance-enospc.md` raised three HIGH findings about
+`btrfs-findings/b4-balance-enospc.md` [since removed from repo] raised three HIGH findings about
 braid's ENOSPC handling. Verification against the current code and the
-cited sources (`btrfs-links/forza_enospc.html`,
+cited sources (`btrfs-links/forza_enospc.html` [since removed from repo],
 `btrfs-links/lwn_metadata_enospc.html`, `reference/linux/fs/btrfs/`)
 landed three different conclusions:
 

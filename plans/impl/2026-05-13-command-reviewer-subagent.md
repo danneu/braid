@@ -162,7 +162,7 @@ briefing, with these edits:
 
 - Drop "Read `AGENTS.md`. It's authoritative." -- auto-loaded via
   CLAUDE.md.
-- Drop "Read `./btrfs-links.md` and..." preamble; replace with a
+- Drop "Read `./btrfs-links.md` and..." [since removed from repo] preamble; replace with a
   pointer that says "If your command's tools include btrfs,
   cryptsetup/LUKS, systemd, smartctl, NUT, util-linux,
   autosuspend, hddfancontrol, or the kernel, consult
