@@ -2041,6 +2041,126 @@ mod tests {
         );
     }
 
+    // Intent: cmd_remove_missing surfaces device_remove_error's Missing-context
+    //   replace hint when btrfs rejects with "unable to go below" min-devices,
+    //   alongside journal preservation.
+    // Why it exists: the planner intentionally leaves multi-missing topologies
+    //   to the kernel + device_remove_error. pool_remove_device_using's own
+    //   test pins the wrapper, but only this command-level test catches a
+    //   regression in the wiring -- e.g. swapping RemoveContext::Missing for
+    //   ::Live, swallowing the PoolError, or replacing the hint with a generic
+    //   message.
+    // Scenario: 3-disk NAS, devid 3 dies. Operator runs `braid remove-missing
+    //   --missing-id 3`. A stray RAID1C3 chunk left over from an earlier
+    //   conversion still requires three devices, so btrfs refuses the
+    //   device-remove call with the RAID1C3 min-devices rejection. The journal
+    //   must survive and the operator must see the replace command + recover
+    //   hint, not raw kernel stderr.
+    #[test]
+    fn cmd_remove_missing_failure_emits_missing_replace_hint() {
+        let f = PoolFixture::three_disk_devids_pinned();
+        let (runner, _remove_done) =
+            RemoveMissingPool::three_disk_one_missing().install(MockRunner::default());
+        let runner = runner.with_handler(|req| match req {
+            CmdRequest::BtrfsDeviceRemove { .. } => Some(Ok(RawCommandOutput {
+                cmd: "btrfs device remove 3 /mnt/storage".into(),
+                stdout: String::new(),
+                stderr:
+                    "ERROR: error removing device '3': unable to go below three devices on raid1c3"
+                        .into(),
+                exit_status: 1,
+            })),
+            _ => None,
+        });
+        let result = cmd_remove_missing(
+            &runner,
+            &MockFs::storage(vec![]),
+            &f.remove_missing_params().build(),
+        );
+
+        let err = result.unwrap_err().to_string();
+        assert!(
+            err.contains("btrfs device remove failed (exit 1)"),
+            "remove-missing should fail from the device-remove step: {err}"
+        );
+        assert!(err.contains("hint:"), "error should include hint: {err}");
+        assert!(
+            err.contains(
+                "braid replace --old <missing-name> --new <new-name>=/dev/disk/by-id/<...>"
+            ),
+            "missing hint should point at replacement: {err}"
+        );
+        assert!(
+            err.contains("braid recover"),
+            "missing hint should clear pending operation first: {err}"
+        );
+        assert!(
+            !err.contains("braid replace --missing-id"),
+            "missing hint must not request replace --missing-id: {err}"
+        );
+        assert!(
+            !err.contains("dconvert=raid1"),
+            "missing hint must not suggest RAID1 conversion: {err}"
+        );
+        assert!(
+            journal::load_journal(&f.paths).unwrap().is_some(),
+            "pending-op.json must survive error exit so braid recover can reconcile"
+        );
+        let journal = journal::load_journal(&f.paths)
+            .unwrap()
+            .expect("pending-op.json must survive device-remove failure");
+        let disk1 = DiskName::parse("disk1").unwrap();
+        let disk2 = DiskName::parse("disk2").unwrap();
+        let disk3 = DiskName::parse("disk3").unwrap();
+        assert_eq!(
+            journal.pre_membership.len(),
+            3,
+            "journal pre_membership must retain all three original disks"
+        );
+        assert!(
+            journal.pre_membership.by_name(&disk1).is_some()
+                && journal.pre_membership.by_name(&disk2).is_some()
+                && journal.pre_membership.by_name(&disk3).is_some(),
+            "journal pre_membership must contain disk1, disk2, and disk3"
+        );
+        assert_eq!(
+            journal.target_membership.len(),
+            2,
+            "journal target_membership must contain only the two surviving disks"
+        );
+        assert!(
+            journal.target_membership.by_name(&disk1).is_some()
+                && journal.target_membership.by_name(&disk2).is_some()
+                && journal.target_membership.by_name(&disk3).is_none(),
+            "journal target_membership must contain disk1 and disk2 but not disk3"
+        );
+        assert!(
+            membership::load_membership(&f.paths)
+                .unwrap()
+                .by_name(&crate::types::DiskName::parse("disk3").unwrap())
+                .is_some(),
+            "pool.json must still contain the target disk when device remove fails"
+        );
+        let calls = runner.requests();
+        assert!(
+            calls
+                .iter()
+                .any(|c| matches!(c, CmdRequest::BtrfsDeviceRemove { .. })),
+            "expected BtrfsDeviceRemove; calls: {calls:?}"
+        );
+        assert!(
+            !calls
+                .iter()
+                .any(|c| matches!(c, CmdRequest::BtrfsBalanceRaid1Soft { .. })),
+            "soft balance must not run after device remove fails; calls: {calls:?}"
+        );
+        assert_eq!(
+            f.inhibitor.acquire_count(),
+            1,
+            "sleep inhibitor must be acquired exactly once on the path through journal::write_journal"
+        );
+    }
+
     // Intent: pending-op.json survives when pool.json persistence fails after
     //   the btrfs device-remove phase has succeeded.
     // Why it exists: remove-missing must not advance the phased journal or run
