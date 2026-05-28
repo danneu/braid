@@ -781,23 +781,6 @@ impl ReplacePlan {
         }
 
         // Step 2+: Execute replacement -- both paths use btrfs replace start.
-        // Live-only: warn if the source device has accumulated I/O errors.
-        if let ReplaceSource::Live { mapper: _, devid } = &replace_source {
-            let stats_raw = runner.run(&CmdRequest::BtrfsDeviceStatsJson {
-                mount_point: config.mount_point().clone(),
-            });
-            if let Ok(ref raw) = stats_raw
-                && let Ok(stats) = parse_btrfs_device_stats(raw)
-                && source_has_io_errors(&stats, *devid)
-            {
-                eprintln!(
-                    "Warning: source device (devid {devid}) has I/O errors. \
-                     btrfs replace will read from mirrors where possible, \
-                     but may fail if any data lacks a healthy mirror copy."
-                );
-            }
-        }
-
         // Kickoff wording differs (replace-in-place vs rebuild-missing), but the
         // underlying `btrfs replace start` + resize sequence is identical. Bind
         // devid here so the shared spine below runs once.
@@ -1089,6 +1072,22 @@ fn source_has_io_errors(stats: &crate::parse::types::BtrfsDeviceStatsOutput, dev
     })
 }
 
+/// Shared source-health note body so dry-run stdout and real-run stderr render
+/// the same warning through `PreviewNote::Warn`'s owned `[warn]` prefix.
+fn format_source_io_error_warning(devid: u64) -> String {
+    format!(
+        "source device (devid {devid}) has I/O errors. \
+         btrfs replace will read from mirrors where possible, \
+         but may fail if any data lacks a healthy mirror copy."
+    )
+}
+
+/// Shared source-health probe failure body for the non-blocking diagnostic
+/// path; replace must keep planning even when the stats probe is unavailable.
+fn format_source_io_probe_failure(devid: u64, err: &str) -> String {
+    format!("could not probe source device (devid {devid}) for I/O errors: {err}")
+}
+
 fn emit_replace_notes_to_stderr(notes: &[PreviewNote]) {
     let rendered =
         render_replace_notes_for_stderr(notes, crate::status_tag::color_enabled_for_stderr());
@@ -1297,6 +1296,28 @@ where
             return Err(PlanFailure::with_notes(notes, e));
         }
     };
+
+    // Source-read-health note. Pushed as a plan note so it renders in
+    // --dry-run stdout and the pre-confirmation prelude, before journal
+    // write and luksFormat. Live-only: a Missing source has no live device
+    // to stat.
+    if let ReplaceSource::Live { devid, .. } = &replace_source {
+        let probe = runner
+            .run(&CmdRequest::BtrfsDeviceStatsJson {
+                mount_point: config.mount_point().clone(),
+            })
+            .map_err(|e| e.to_string())
+            .and_then(|raw| parse_btrfs_device_stats(&raw).map_err(|e| e.to_string()));
+        match probe {
+            Ok(stats) if source_has_io_errors(&stats, *devid) => {
+                notes.push(PreviewNote::Warn(format_source_io_error_warning(*devid)));
+            }
+            Ok(_) => {}
+            Err(e) => notes.push(PreviewNote::Warn(format_source_io_probe_failure(
+                *devid, &e,
+            ))),
+        }
+    }
 
     // Probe --new disk state
     let new_probed = match probe_config_disk(
@@ -5985,6 +6006,256 @@ mod tests {
         assert_eq!(
             warns[0],
             &format_target_keyfile_probe_failure(&target, &err)
+        );
+    }
+
+    fn source_io_stats_json(devid: u64, read_io_errs: u64) -> String {
+        format!(
+            r#"{{
+  "device-stats": [
+    {{
+      "devid": {devid},
+      "read_io_errs": {read_io_errs},
+      "write_io_errs": 0,
+      "flush_io_errs": 0,
+      "corruption_errs": 0,
+      "generation_errs": 0
+    }}
+  ]
+}}"#
+        )
+    }
+
+    fn dirty_source_stats_handler(
+        devid: u64,
+    ) -> impl Fn(&CmdRequest) -> Option<Result<RawCommandOutput, CmdError>> + Send + Sync + 'static
+    {
+        let stats = source_io_stats_json(devid, 3);
+        move |req| match req {
+            CmdRequest::BtrfsDeviceStatsJson { .. } => {
+                Some(Ok(mock_ok("btrfs device stats", &stats)))
+            }
+            _ => None,
+        }
+    }
+
+    // Intent: live-source planning emits a structured warning note when the
+    // selected source devid has non-zero btrfs I/O error counters.
+    // Why it exists: source-health diagnostics must appear in dry-run stdout
+    // before an operator commits to wiping the replacement disk.
+    // Scenario: disk2 resolves to live devid 2 and `btrfs device stats`
+    // reports read_io_errs = 3 for that same devid.
+    #[test]
+    fn plan_replace_live_emits_warn_when_source_has_io_errors() {
+        let f = PoolFixture::two_disk_healthy();
+        let fs = MockFs::storage(vec![
+            "/dev/disk/by-id/virtio-disk3".into(),
+            "/dev/mapper/braid-disk3".into(),
+        ]);
+        let replace_done = Arc::new(AtomicBool::new(false));
+        let runner = ReplacementPool::two_disk_healthy()
+            .install(MockRunner::default(), replace_done)
+            .with_handler(dirty_source_stats_handler(2));
+
+        let plan = plan_replace(&runner, &fs, &f.replace_params().dry_run(true).build())
+            .expect("plan_replace should succeed");
+
+        let warns: Vec<&String> = plan
+            .notes
+            .iter()
+            .filter_map(|n| match n {
+                PreviewNote::Warn(b) => Some(b),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(warns.len(), 1, "expected one Warn note, got {warns:?}");
+        assert_eq!(warns[0], &format_source_io_error_warning(2));
+
+        let rendered = plan.preview().render();
+        assert!(
+            rendered.contains("[warn] source device (devid 2) has I/O errors"),
+            "dry-run preview must include the source I/O warning, got:\n{rendered}"
+        );
+    }
+
+    // Intent: live-source planning turns a failed btrfs stats command into a
+    // structured warning note rather than aborting replacement planning.
+    // Why it exists: the source-health probe is informational and must stay
+    // non-blocking even when the external command is unavailable.
+    // Scenario: disk2 resolves to live devid 2, but `btrfs device stats`
+    // returns a runner error.
+    #[test]
+    fn plan_replace_live_warns_when_source_stats_probe_fails() {
+        let f = PoolFixture::two_disk_healthy();
+        let fs = MockFs::storage(vec![
+            "/dev/disk/by-id/virtio-disk3".into(),
+            "/dev/mapper/braid-disk3".into(),
+        ]);
+        let replace_done = Arc::new(AtomicBool::new(false));
+        let runner = ReplacementPool::two_disk_healthy()
+            .install(MockRunner::default(), replace_done)
+            .with_handler(|req| match req {
+                CmdRequest::BtrfsDeviceStatsJson { .. } => {
+                    Some(Err(CmdError::Failed("stats unavailable".into())))
+                }
+                _ => None,
+            });
+
+        let plan = plan_replace(&runner, &fs, &f.replace_params().dry_run(true).build())
+            .expect("plan_replace should succeed");
+
+        let warns: Vec<&String> = plan
+            .notes
+            .iter()
+            .filter_map(|n| match n {
+                PreviewNote::Warn(b) => Some(b),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(warns.len(), 1, "expected one Warn note, got {warns:?}");
+        assert!(
+            warns[0].starts_with("could not probe source device (devid 2) for I/O errors"),
+            "runner failures must surface as source probe warnings, got: {:?}",
+            warns[0]
+        );
+    }
+
+    // Intent: live-source planning turns unparseable btrfs stats JSON into a
+    // structured warning note rather than aborting replacement planning.
+    // Why it exists: parser drift in an informational source-health probe
+    // should be visible but must not become a hard replace refusal.
+    // Scenario: disk2 resolves to live devid 2, but `btrfs device stats --format
+    // json` returns invalid JSON.
+    #[test]
+    fn plan_replace_live_warns_when_source_stats_unparseable() {
+        let f = PoolFixture::two_disk_healthy();
+        let fs = MockFs::storage(vec![
+            "/dev/disk/by-id/virtio-disk3".into(),
+            "/dev/mapper/braid-disk3".into(),
+        ]);
+        let replace_done = Arc::new(AtomicBool::new(false));
+        let runner = ReplacementPool::two_disk_healthy()
+            .install(MockRunner::default(), replace_done)
+            .with_handler(|req| match req {
+                CmdRequest::BtrfsDeviceStatsJson { .. } => Some(Ok(RawCommandOutput {
+                    cmd: "btrfs device stats".into(),
+                    stdout: "not json{".into(),
+                    stderr: String::new(),
+                    exit_status: 0,
+                })),
+                _ => None,
+            });
+
+        let plan = plan_replace(&runner, &fs, &f.replace_params().dry_run(true).build())
+            .expect("plan_replace should succeed");
+
+        let warns: Vec<&String> = plan
+            .notes
+            .iter()
+            .filter_map(|n| match n {
+                PreviewNote::Warn(b) => Some(b),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(warns.len(), 1, "expected one Warn note, got {warns:?}");
+        assert!(
+            warns[0].starts_with("could not probe source device (devid 2) for I/O errors"),
+            "parse failures must surface as source probe warnings, got: {:?}",
+            warns[0]
+        );
+    }
+
+    // Intent: missing-source planning does not run the live-source stats probe.
+    // Why it exists: a missing source has no live device to read from, so the
+    // live-source I/O warning would be misleading and wasteful.
+    // Scenario: disk2 is a btrfs MISSING devid and the stats handler would
+    // report dirty counters if it were called.
+    #[test]
+    fn plan_replace_missing_source_skips_io_probe_even_with_dirty_stats() {
+        let f = PoolFixture::one_live_one_missing();
+        let fs = MockFs::storage(vec![
+            "/dev/disk/by-id/virtio-disk3".into(),
+            "/dev/mapper/braid-disk3".into(),
+        ]);
+        let replace_done = Arc::new(AtomicBool::new(false));
+        let runner = ReplacementPool::one_live_one_missing()
+            .install(MockRunner::default(), replace_done)
+            .with_handler(dirty_source_stats_handler(2));
+
+        let plan = plan_replace(
+            &runner,
+            &fs,
+            &f.replace_params()
+                .old("disk2")
+                .new_disk("disk3=/dev/disk/by-id/virtio-disk3")
+                .missing_id(Some(2))
+                .dry_run(true)
+                .build(),
+        )
+        .expect("plan_replace should succeed");
+
+        let warns: Vec<&String> = plan
+            .notes
+            .iter()
+            .filter_map(|n| match n {
+                PreviewNote::Warn(b) => Some(b),
+                _ => None,
+            })
+            .collect();
+        assert!(
+            warns.iter().all(|body| !body.contains("I/O errors")),
+            "missing-source planning must not emit source I/O warnings, got {warns:?}"
+        );
+        let calls = runner.requests();
+        let stats_requests = calls
+            .iter()
+            .filter(|r| matches!(r, CmdRequest::BtrfsDeviceStatsJson { .. }))
+            .count();
+        assert_eq!(
+            stats_requests, 0,
+            "missing-source planning must not run btrfs device stats, got {calls:?}"
+        );
+    }
+
+    // Intent: real replace runs render the source I/O warning exactly once.
+    // Why it exists: moving the warning into planning must delete the legacy
+    // execute-time stats probe, or real runs would probe and warn twice.
+    // Scenario: disk2 has dirty stats, confirmation is accepted, and a forced
+    // `btrfs replace start` failure stops the run after note rendering.
+    #[test]
+    fn cmd_replace_live_source_io_warning_renders_once_on_real_run() {
+        let f = PoolFixture::two_disk_healthy();
+        f.confirm.accept();
+        let fs = MockFs::storage(vec![
+            "/dev/disk/by-id/virtio-disk3".into(),
+            "/dev/mapper/braid-disk3".into(),
+        ]);
+        let replace_done = Arc::new(AtomicBool::new(false));
+        let runner = ReplacementPool::two_disk_healthy()
+            .install(MockRunner::default(), replace_done)
+            .with_handler(dirty_source_stats_handler(2))
+            .with_handler(replace_start_fails_handler());
+
+        let (result, stderr) = super::replace_stderr_capture::capture(|| {
+            cmd_replace(&runner, &fs, &f.replace_params().yes(false).build())
+        });
+
+        assert!(result.is_err(), "forced replace-start failure must surface");
+        assert_eq!(
+            stderr
+                .matches("[warn] source device (devid 2) has I/O errors")
+                .count(),
+            1,
+            "real-run stderr must render source I/O warning exactly once, got:\n{stderr}"
+        );
+        let calls = runner.requests();
+        let stats_requests = calls
+            .iter()
+            .filter(|r| matches!(r, CmdRequest::BtrfsDeviceStatsJson { .. }))
+            .count();
+        assert_eq!(
+            stats_requests, 1,
+            "source stats must be probed only by plan_replace, got {calls:?}"
         );
     }
 

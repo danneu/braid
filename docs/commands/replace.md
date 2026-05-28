@@ -113,7 +113,7 @@ If a btrfs exclusive operation (a running balance, device add/remove/replace, re
 - For missing replacements: refuses if `--missing-id` disagrees with the devid pool.json records for `--old` (`--old` already identifies which member to rebuild)
 - For missing replacements: refuses if pool.json has no recorded devid for `--old` -- `--missing-id` cannot substitute, it must match the recorded devid
 - Verifies the passphrase against an existing pool member before formatting
-- Warns if the source device has I/O errors (informational, does not block)
+- Warns before confirmation and in `--dry-run` if the live source device has I/O errors (informational, does not block)
 - Warns if existing pool drives have a keyfile but `--enroll` was not passed
 - Refuses if a pending operation journal (`pending-op.json`) exists -- run `braid recover` to reconcile.
 - Refuses if another braid operation is in progress (pool lock `/run/braid-pool.lock` is held) -- retry once it finishes.
