@@ -1,8 +1,16 @@
 Read `/Users/dan/Code/braid/command-findings/index.md`. Find the next 10 rows from the top whose Status column is blank (`|        |` cells -- 8 spaces between pipes). Process top-to-bottom. If fewer than 10 blank rows exist, process what's there.
 
+**Once per run, before processing any rows,** create a unique scratch directory so repeated runs never collide on filenames (the `<command>-<N>` key is only unique within one `index.md`, not across runs):
+
+```bash
+mktemp -d /tmp/verify-issue.XXXXXXXX
+```
+
+Capture the literal path it prints (referred to below as `RUN_DIR`). A fresh shell will not keep a `$RUN_DIR` variable and the Write tool will not expand it, so substitute the actual printed path everywhere `RUN_DIR` appears -- in the prompt-file path you Write and in the `cat ... | claude` launch command. Write every prompt file for this run into that directory.
+
 For each row:
 
-1. **Build the prompt file.** The Finding column has a link like `[#N](./<command>.md:LINE)`. Open that per-command file at the `(N)` heading and capture the entire Severity / Category / Issue / Location / Impact / Fix block. Write it to `/tmp/verify-issue-<command>-<N>.md` with `/verify-issue` as the first line so the skill triggers when claude consumes the file as the initial message:
+1. **Build the prompt file.** The Finding column has a link like `[#N](./<command>.md:LINE)`. Open that per-command file at the `(N)` heading and capture the entire Severity / Category / Issue / Location / Impact / Fix block. Write it to `RUN_DIR/verify-issue-<command>-<N>.md` with `/verify-issue` as the first line so the skill triggers when claude consumes the file as the initial message:
 
    ```
    /verify-issue
@@ -24,7 +32,7 @@ For each row:
      --background --at-group-end \
      --cwd /Users/dan/Code/braid \
      --title "<command> <N>: <sev>" \
-     --cmd "sh -c 'cat /tmp/verify-issue-<command>-<N>.md | claude --effort max'"
+     --cmd "sh -c 'cat RUN_DIR/verify-issue-<command>-<N>.md | claude --effort max'"
    ```
 
    - This uses the known-good `cat file.md | claude --effort max` stdin path.
