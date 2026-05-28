@@ -250,9 +250,13 @@ pub fn probe_pool_for_tui<R: CommandRunner, F: Filesystem + ?Sized>(
     let mut smart_health = HashMap::new();
     let mut disk_temperature_readings = HashMap::new();
     for (disk_name, by_id_path) in &disks.by_id {
+        let query_device = mounted_classification
+            .get(disk_name)
+            .and_then(|(_, underlying)| underlying.as_deref())
+            .unwrap_or(by_id_path.as_str());
         let probe = runner
             .run(&CmdRequest::SmartctlHealthJson {
-                device: by_id_path.clone(),
+                device: query_device.to_owned(),
             })
             .map(|raw| parse_smartctl(&raw))
             .unwrap_or(SmartProbe {
@@ -1253,6 +1257,58 @@ mod tests {
 
         let transport = probe_disk_transport(None);
         assert!(!transport.contains_key("vdb"));
+    }
+
+    // Intent: TUI SMART health and temperature probes for present members use
+    //   the live backing path, not the persisted by-id path.
+    // Why it exists: by-id drift must not blank or corrupt SMART data for a
+    //   UUID-identified member that is already open in the pool.
+    // Scenario: toshiba is live at /dev/vda; the by-id mock returns a failing
+    //   no-temperature result, while /dev/vda returns healthy temperature data.
+    #[test]
+    fn smartctl_health_for_present_member_uses_live_underlying() {
+        let disk_by_id = HashMap::from([(
+            "toshiba".to_owned(),
+            "/dev/disk/by-id/braid-toshiba".to_owned(),
+        )]);
+        let runner = one_disk_mounted_pool_runner()
+            .with_output(
+                CmdRequest::SmartctlHealthJson {
+                    device: "/dev/vda".to_owned(),
+                },
+                ok_raw(
+                    "smartctl",
+                    r#"{"smart_status":{"passed":true},"temperature":{"current":38}}"#,
+                ),
+            )
+            .with_output(
+                CmdRequest::SmartctlHealthJson {
+                    device: "/dev/disk/by-id/braid-toshiba".to_owned(),
+                },
+                ok_raw("smartctl", r#"{"smart_status":{"passed":false}}"#),
+            );
+
+        let pool = expect_pool(
+            probe_pool_for_tui(
+                &runner,
+                &StubFs::empty(),
+                &MountPoint("/mnt/storage".into()),
+                &tui_disks_with_by_id(disk_by_id),
+                &test_paths().1,
+                crate::test_fixtures::mock_virtio_backing_path_resolver(),
+            )
+            .unwrap(),
+        );
+
+        assert_eq!(
+            pool.smart_health.get("toshiba"),
+            Some(&SmartHealth::Healthy)
+        );
+        let reading = pool
+            .disk_temperature_readings
+            .get("toshiba")
+            .expect("temperature from live smartctl probe");
+        assert_eq!(reading.celsius, 38);
     }
 
     /// Intent: TUI device_errors is keyed by disk name resolved via devid,

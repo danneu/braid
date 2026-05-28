@@ -73,6 +73,10 @@ one.
   names such as `toshiba1`; mapper names and labels remain `braid-<DiskName>`.
   UUIDs appear where they help diagnostics or machine-readable state, not as the
   normal command vocabulary.
+- **Present-device hardware probes use live paths.** Queries such as lsblk
+  model/serial and smartctl use the live backing path
+  (`PoolState::underlying_for_uuid`), not persisted by-id setup/repair handles
+  that can drift while the disk is still present.
 
 ## Concrete Improvements
 

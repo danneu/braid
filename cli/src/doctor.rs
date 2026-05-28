@@ -1172,12 +1172,18 @@ fn check_smart_selftests<R: CommandRunner>(ctx: &mut DoctorContext<'_, R>) -> Ve
         Err(cr) => return vec![cr],
     };
 
+    ensure_pool_state(ctx);
+    let live = ctx.pool_state.as_ref().and_then(|r| r.as_ref().ok());
+
     let mut checks = Vec::new();
-    for (_, member) in membership.iter_by_name() {
+    for (uuid, member) in membership.iter_by_name() {
         let subject = member.name.as_str();
         let by_id = member.by_id.as_str();
+        let query_device = live
+            .and_then(|pool| pool.underlying_for_uuid(uuid))
+            .unwrap_or(by_id);
         let raw = match ctx.runner.run(&CmdRequest::SmartctlSelftestLogJson {
-            device: by_id.to_owned(),
+            device: query_device.to_owned(),
         }) {
             Ok(raw) => raw,
             Err(e) => {
@@ -2397,6 +2403,38 @@ mod tests {
             single_selftest_fixture_results("smartctl-selftest-ata-empty.json", 0);
         let r = only_result(&results);
         assert!(r.message.contains("/dev/disk/by-id/disk1"), "{}", r.message);
+    }
+
+    // Intent: self-test status for a present member is queried through the
+    //   live backing path.
+    // Why it exists: a drifted by-id path must not make doctor report stale
+    //   or missing SMART self-test data for a currently mounted member.
+    // Scenario: disk1 is present at /dev/vdb; /dev/vdb has a recent passing
+    //   self-test, while the persisted by-id mock has a stale result.
+    #[test]
+    fn check_smart_selftest_present_member_queries_live_underlying() {
+        let (dir, paths) = isolated_paths();
+        save_doctor_membership(&paths, &[(1, "disk1", "/dev/disk/by-id/disk1", Some(1))]);
+        let (live_req, live_out) =
+            smartctl_selftest_json("/dev/vdb", "smartctl-selftest-ata-recent-pass.json", 0);
+        let (by_id_req, by_id_out) = smartctl_selftest_json(
+            "/dev/disk/by-id/disk1",
+            "smartctl-selftest-ata-stale.json",
+            0,
+        );
+        let runner = pool_state_runner(vec![("braid-disk1", 1, "/dev/vdb", test_uuid(1))], &[])
+            .with_output(live_req, live_out)
+            .with_output(by_id_req, by_id_out);
+        let fs = DoctorMockFs::mounted_btrfs_only();
+        let mut ctx =
+            DoctorContext::for_test_parsed_with_fs(&runner, &fs, &paths, valid_config_json());
+
+        let results = check_smart_selftests(&mut ctx);
+        drop(dir);
+
+        let r = only_result(&results);
+        assert_eq!(r.status, CheckStatus::Ok);
+        assert!(r.message.contains("passed ~2 days ago"), "{}", r.message);
     }
 
     /* Intent: valid custom config files skip canonical permission enforcement.

@@ -537,42 +537,42 @@ pub(crate) fn status_runner_healthy_3disk_verbose(runner: MockRunner) -> MockRun
         )
         .with_output(
             CmdRequest::LsblkField {
-                device: "/dev/disk/by-id/disk1".into(),
+                device: "/dev/vda".into(),
                 field: LsblkFieldKind::Model,
             },
             status_lsblk_field_ok("lsblk", "VBOX HARDDISK"),
         )
         .with_output(
             CmdRequest::LsblkField {
-                device: "/dev/disk/by-id/disk1".into(),
+                device: "/dev/vda".into(),
                 field: LsblkFieldKind::Serial,
             },
             status_lsblk_field_ok("lsblk", "disk1"),
         )
         .with_output(
             CmdRequest::LsblkField {
-                device: "/dev/disk/by-id/disk2".into(),
+                device: "/dev/vdb".into(),
                 field: LsblkFieldKind::Model,
             },
             status_lsblk_field_ok("lsblk", "VBOX HARDDISK"),
         )
         .with_output(
             CmdRequest::LsblkField {
-                device: "/dev/disk/by-id/disk2".into(),
+                device: "/dev/vdb".into(),
                 field: LsblkFieldKind::Serial,
             },
             status_lsblk_field_ok("lsblk", "disk2"),
         )
         .with_output(
             CmdRequest::LsblkField {
-                device: "/dev/disk/by-id/disk3".into(),
+                device: "/dev/vdc".into(),
                 field: LsblkFieldKind::Model,
             },
             status_lsblk_field_ok("lsblk", "VBOX HARDDISK"),
         )
         .with_output(
             CmdRequest::LsblkField {
-                device: "/dev/disk/by-id/disk3".into(),
+                device: "/dev/vdc".into(),
                 field: LsblkFieldKind::Serial,
             },
             status_lsblk_field_ok("lsblk", "disk3"),

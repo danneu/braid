@@ -448,11 +448,7 @@ impl ReplacePlan {
         // Confirm
         if !params.yes {
             let old_underlying = match &replace_source {
-                ReplaceSource::Live { .. } => pool
-                    .devices
-                    .iter()
-                    .find(|d| d.luks_uuid == old_uuid)
-                    .map(|d| d.underlying.as_str()),
+                ReplaceSource::Live { .. } => pool.underlying_for_uuid(&old_uuid),
                 ReplaceSource::Missing { .. } => None,
             };
             let old_hw = old_underlying.map(|u| confirm::query_disk_hw_info(runner, u));

@@ -981,9 +981,10 @@ fn build_disk_reports<R: CommandRunner>(
 
         let mapper = pd.mapper.0.clone();
 
-        // Model/serial via lsblk (tolerant)
-        let model = get_lsblk_field(runner, &by_id, LsblkFieldKind::Model);
-        let serial = get_lsblk_field(runner, &by_id, LsblkFieldKind::Serial);
+        // Present-device hardware comes from the live backing path; persisted
+        // by-id paths are setup/repair handles and can drift.
+        let model = get_lsblk_field(runner, &pd.underlying, LsblkFieldKind::Model);
+        let serial = get_lsblk_field(runner, &pd.underlying, LsblkFieldKind::Serial);
 
         // Error stats. Pair by the btrfs-native devid row key -- the stats
         // row's path can differ from the mapper path without changing which
@@ -1457,9 +1458,9 @@ mod tests {
         status_btrfs_usage_raw, status_cfg_present_not_luks, status_config,
         status_cryptsetup_status_active, status_cryptsetup_uuid_ok, status_disk_report_missing,
         status_disk_report_named, status_fs_ext4, status_fs_mounted, status_fs_not_mounted,
-        status_fs_one_disk, status_fs_three_disk, status_is_luks_raw, status_luks_dump_text_raw,
-        status_membership_1disk, status_mp, status_pool_empty, status_report_with_alerts,
-        status_report_with_scrub, status_runner_healthy_3disk_base,
+        status_fs_one_disk, status_fs_three_disk, status_is_luks_raw, status_lsblk_field_ok,
+        status_luks_dump_text_raw, status_membership_1disk, status_mp, status_pool_empty,
+        status_report_with_alerts, status_report_with_scrub, status_runner_healthy_3disk_base,
         status_runner_healthy_3disk_verbose,
     };
 
@@ -5039,6 +5040,74 @@ mod tests {
         );
         assert_eq!(ctx.disks[1].name, "disk1");
         assert_eq!(ctx.disks[1].status, DiskStatus::Unknown);
+    }
+
+    // Intent: verbose status probes present-disk hardware through the live
+    //   backing path, not the persisted by-id path.
+    // Why it exists: by-id paths are setup/repair handles that can drift
+    //   while UUID identity still proves the member is present.
+    // Scenario: disk1 is live at /dev/vda, while its persisted by-id mock
+    //   returns misleading model/serial values.
+    #[test]
+    fn present_disk_hw_queried_off_live_underlying_not_by_id() {
+        let uuid = LuksUuid::parse("11111111-1111-1111-1111-111111111111").unwrap();
+        let pool = PoolState {
+            mounted: true,
+            devices: vec![PoolDevice {
+                mapper: MapperName("disk1".to_owned()),
+                luks_uuid: uuid,
+                devid: 1,
+                underlying: "/dev/vda".to_owned(),
+            }],
+            missing_count: 0,
+            missing_devids: vec![],
+            total_devices: 1,
+            fsid: None,
+            null_underlying: vec![],
+        };
+        let runner = MockRunner::default()
+            .with_output(
+                CmdRequest::LsblkField {
+                    device: "/dev/disk/by-id/disk1".to_owned(),
+                    field: LsblkFieldKind::Model,
+                },
+                status_lsblk_field_ok("lsblk", "WRONG MODEL"),
+            )
+            .with_output(
+                CmdRequest::LsblkField {
+                    device: "/dev/disk/by-id/disk1".to_owned(),
+                    field: LsblkFieldKind::Serial,
+                },
+                status_lsblk_field_ok("lsblk", "WRONG-SERIAL"),
+            )
+            .with_output(
+                CmdRequest::LsblkField {
+                    device: "/dev/vda".to_owned(),
+                    field: LsblkFieldKind::Model,
+                },
+                status_lsblk_field_ok("lsblk", "LIVE MODEL"),
+            )
+            .with_output(
+                CmdRequest::LsblkField {
+                    device: "/dev/vda".to_owned(),
+                    field: LsblkFieldKind::Serial,
+                },
+                status_lsblk_field_ok("lsblk", "LIVE-SERIAL"),
+            );
+        let membership = status_membership_1disk();
+        let config_disks: Vec<ConfigDisk> = vec![];
+        let stats = BtrfsDeviceStatsOutput { devices: vec![] };
+
+        let ctx = build_disk_reports(&runner, &membership, &config_disks, &pool, &stats);
+
+        let disk = ctx
+            .human_details
+            .iter()
+            .find(|disk| disk.name == "disk1")
+            .expect("disk1 present row");
+        assert_eq!(disk.model.as_deref(), Some("LIVE MODEL"));
+        assert_eq!(disk.serial.as_deref(), Some("LIVE-SERIAL"));
+        assert_eq!(disk.by_id, "/dev/disk/by-id/disk1");
     }
 
     // Intent: present verbose rows are ordered by resolved `DiskName`, not by

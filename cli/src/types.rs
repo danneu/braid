@@ -446,6 +446,16 @@ pub struct PoolState {
 }
 
 impl PoolState {
+    /// Live backing path for a present pool device identified by LUKS UUID.
+    /// Hardware queries must prefer this over persisted by-id paths because
+    /// those setup/repair handles can drift while the member is still present.
+    pub fn underlying_for_uuid(&self, uuid: &LuksUuid) -> Option<&str> {
+        self.devices
+            .iter()
+            .find(|d| d.luks_uuid == *uuid)
+            .map(|d| d.underlying.as_str())
+    }
+
     /// Devids that must fire `MissingDevice` alert causes: the btrfs-
     /// authoritative MISSING set unioned with null-underlying devids,
     /// deduplicated and sorted. Dedup matters when btrfs has promoted a
