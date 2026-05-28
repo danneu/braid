@@ -457,9 +457,41 @@ golden_test!(
     "btrfs device usage",
     parse::btrfs_device_usage::parse_btrfs_device_usage,
     |out: parse::types::BtrfsDeviceUsageOutput| {
-        assert!(!out.devices.is_empty(), "expected at least one device");
-        let has_used = out.devices.iter().any(|d| d.used_bytes() > 0);
-        assert!(has_used, "expected at least one device with used_bytes > 0");
+        // The device being removed: btrfs marks its entire capacity as slack
+        // (slack == size) so no new allocations land on it. `device_size > 0`
+        // excludes missing devices, which btrfs-progs renders with
+        // `Device size: 0, Device slack: 0` and would otherwise match the
+        // `0 == 0` degenerate case.
+        let removing = out
+            .devices
+            .iter()
+            .find(|d| d.device_size > 0 && d.device_slack == d.device_size)
+            .expect("expected a device being removed (slack == size)");
+        // The captured `Unallocated` was negative; seeing 0 proves the
+        // `parse_i64` + `.max(0)` clamp in `parse_kv_line` actually ran.
+        // Without it the parser would fail (old `parse_u64` form) or overflow.
+        assert_eq!(
+            removing.unallocated, 0,
+            "removing device's negative Unallocated must clamp to 0"
+        );
+        // btrfs is still relocating block groups off the device mid-remove, so
+        // its allocations are present -- proves this is the transient state and
+        // not a post-remove snapshot.
+        assert!(
+            removing.used_bytes() > 0,
+            "removing device should still hold allocations mid-remove"
+        );
+        // The dual nature of a RAID1 remove: at least one survivor absorbing
+        // the shed allocations. `device_size > 0` again excludes missing
+        // devices, which also report slack == 0.
+        let has_survivor = out
+            .devices
+            .iter()
+            .any(|d| d.device_size > 0 && d.device_slack == 0);
+        assert!(
+            has_survivor,
+            "expected at least one survivor device (slack == 0)"
+        );
     }
 );
 

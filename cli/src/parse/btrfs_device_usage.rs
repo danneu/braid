@@ -290,6 +290,47 @@ mod tests {
     }
 
     #[test]
+    // Intent: a negative `Unallocated` from an in-progress `btrfs device
+    //   remove` clamps to 0 while device size, slack, and allocations
+    //   round-trip.
+    // Why it exists: `parse_kv_line` parses values as i64 and clamps with
+    //   `.max(0) as u64` only because btrfs reports negative Unallocated
+    //   mid-remove. The captured `btrfs-device-usage-removing.txt` fixture is
+    //   otherwise the only coverage, and the stable lane skips it when absent
+    //   (REQUIRE_FIXTURES = false); a refactor back to `parse_u64` would
+    //   regress silently. This synthetic test fails immediately under
+    //   `just test-rust` with no VM fixture round-trip.
+    // Scenario: the transient state captured by
+    //   `tests/progress-monitoring.py:164` -- a device shedding block groups
+    //   reports its full size as slack and a negative Unallocated.
+    fn device_usage_clamps_negative_unallocated() {
+        let raw = RawCommandOutput {
+            cmd: "btrfs device usage".into(),
+            stdout: "/dev/mapper/braid-vdc, ID: 3\n\
+                     \x20  Device size:          4278190080\n\
+                     \x20  Device slack:         4278190080\n\
+                     \x20  Data,RAID1:           1073741824\n\
+                     \x20  Metadata,RAID1:        268435456\n\
+                     \x20  System,RAID1:           33554432\n\
+                     \x20  Unallocated:          -1375731712\n"
+                .into(),
+            stderr: String::new(),
+            exit_status: 0,
+        };
+        let out = parse_btrfs_device_usage(&raw).unwrap();
+        assert_eq!(out.devices.len(), 1);
+        let dev = &out.devices[0];
+        // Negative Unallocated clamps to 0.
+        assert_eq!(dev.unallocated, 0);
+        // Device size and slack survive; slack == size is the remove signature.
+        assert_eq!(dev.device_size, 4_278_190_080);
+        assert_eq!(dev.device_slack, dev.device_size);
+        // Allocations are preserved -- block groups are still being relocated off.
+        assert_eq!(dev.allocations.len(), 3);
+        assert_eq!(dev.used_bytes(), 1_073_741_824 + 268_435_456 + 33_554_432);
+    }
+
+    #[test]
     fn device_usage_used_bytes_helper() {
         let entry = BtrfsDeviceUsageEntry {
             path: "/dev/mapper/test".into(),
