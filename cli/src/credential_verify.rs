@@ -1,9 +1,7 @@
 use crate::cmd::CommandRunner;
 use crate::luks::{self, LuksError, VerifyOutcome};
 use crate::secret::Passphrase;
-use crate::status_tag::{
-    CredentialKind, StatusTag, credential_ok_line, credential_wait_line, status_line,
-};
+use crate::status_tag::{StatusTag, status_line};
 use std::path::Path;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -18,6 +16,23 @@ pub enum Credential<'a> {
     KeyFile(&'a Path),
 }
 
+/// Cheap `Copy` display discriminant for credential-verification rows;
+/// deliberately separate from `Credential<'a>`, which borrows the live secret.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum CredentialKind {
+    Passphrase,
+    KeyFile,
+}
+
+impl CredentialKind {
+    fn label(self) -> &'static str {
+        match self {
+            CredentialKind::Passphrase => "passphrase",
+            CredentialKind::KeyFile => "keyfile",
+        }
+    }
+}
+
 #[derive(Debug)]
 pub enum CredentialVerifyError {
     Rejected {
@@ -27,6 +42,22 @@ pub enum CredentialVerifyError {
         target: CredentialVerifyTarget,
         source: luks::LuksError,
     },
+}
+
+fn credential_wait_line(kind: CredentialKind, color_enabled: bool, name: &str) -> String {
+    status_line(
+        StatusTag::Wait,
+        color_enabled,
+        &format!("{}: checking against {name}...", kind.label()),
+    )
+}
+
+fn credential_ok_line(kind: CredentialKind, color_enabled: bool, name: &str) -> String {
+    status_line(
+        StatusTag::Ok,
+        color_enabled,
+        &format!("{}: accepted by {name}", kind.label()),
+    )
 }
 
 // CLI-level call site -- not a hot path -- so the ~128-byte LuksError variant is held at most once per invocation; boxing would add indirection without measurable benefit.
@@ -240,6 +271,34 @@ mod tests {
                 );
             }
         }
+    }
+
+    // Intent: credential verification rows use the shared
+    //   status-line renderer and fixed wording for both credential
+    //   kinds.
+    // Why it exists: every command that validates a passphrase or
+    //   keyfile should fill the silent cryptsetup delay with
+    //   byte-identical rows.
+    // Scenario: passphrase and keyfile wait/ok lines render in
+    //   plain mode.
+    #[test]
+    fn credential_wait_line_formats_known_credentials() {
+        assert_eq!(
+            credential_wait_line(CredentialKind::Passphrase, false, "disk1"),
+            "[wait] passphrase: checking against disk1...\n"
+        );
+        assert_eq!(
+            credential_wait_line(CredentialKind::KeyFile, false, "disk1"),
+            "[wait] keyfile: checking against disk1...\n"
+        );
+        assert_eq!(
+            credential_ok_line(CredentialKind::Passphrase, false, "disk1"),
+            "[ok]   passphrase: accepted by disk1\n"
+        );
+        assert_eq!(
+            credential_ok_line(CredentialKind::KeyFile, false, "disk1"),
+            "[ok]   keyfile: accepted by disk1\n"
+        );
     }
 
     #[test]

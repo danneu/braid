@@ -18,21 +18,6 @@ pub enum StatusTag {
     Wait,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum CredentialKind {
-    Passphrase,
-    KeyFile,
-}
-
-impl CredentialKind {
-    fn label(self) -> &'static str {
-        match self {
-            CredentialKind::Passphrase => "passphrase",
-            CredentialKind::KeyFile => "keyfile",
-        }
-    }
-}
-
 pub fn render_status_tag(tag: StatusTag, color_enabled: bool) -> &'static str {
     match (tag, color_enabled) {
         (StatusTag::Ok, false) => "[ok]",
@@ -71,22 +56,6 @@ pub fn emit_status(line: &str) {
         }
     }
     eprint!("{line}");
-}
-
-pub fn credential_wait_line(kind: CredentialKind, color_enabled: bool, name: &str) -> String {
-    status_line(
-        StatusTag::Wait,
-        color_enabled,
-        &format!("{}: checking against {name}...", kind.label()),
-    )
-}
-
-pub fn credential_ok_line(kind: CredentialKind, color_enabled: bool, name: &str) -> String {
-    status_line(
-        StatusTag::Ok,
-        color_enabled,
-        &format!("{}: accepted by {name}", kind.label()),
-    )
 }
 
 pub fn should_color_status_tags(is_terminal: bool, no_color_active: bool) -> bool {
@@ -294,45 +263,6 @@ mod tests {
                 render_status_tag(tag, false)
             );
         }
-    }
-
-    /* Intent: credential verification rows use the shared status-line
-     * renderer and fixed wording for both credential kinds.
-     * Why it exists: every command that validates a passphrase or keyfile
-     * should fill the silent cryptsetup delay with byte-identical rows.
-     * Scenario: passphrase and keyfile wait/ok lines render in plain
-     * and colored modes.
-     */
-    #[test]
-    fn credential_wait_line_formats_known_credentials() {
-        assert_eq!(
-            credential_wait_line(CredentialKind::Passphrase, false, "disk1"),
-            "[wait] passphrase: checking against disk1...\n"
-        );
-        assert_eq!(
-            credential_wait_line(CredentialKind::KeyFile, false, "disk1"),
-            "[wait] keyfile: checking against disk1...\n"
-        );
-        assert_eq!(
-            credential_ok_line(CredentialKind::Passphrase, false, "disk1"),
-            "[ok]   passphrase: accepted by disk1\n"
-        );
-        assert_eq!(
-            credential_ok_line(CredentialKind::KeyFile, false, "disk1"),
-            "[ok]   keyfile: accepted by disk1\n"
-        );
-        assert_eq!(
-            strip_ansi(&credential_wait_line(
-                CredentialKind::Passphrase,
-                true,
-                "disk1"
-            )),
-            "[wait] passphrase: checking against disk1...\n"
-        );
-        assert_eq!(
-            strip_ansi(&credential_ok_line(CredentialKind::KeyFile, true, "disk1")),
-            "[ok]   keyfile: accepted by disk1\n"
-        );
     }
 
     /* Intent: unit tests can capture status rows without redirecting
