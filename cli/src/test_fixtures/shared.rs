@@ -87,7 +87,8 @@ pub(crate) fn mock_ok(cmd: &str, stdout: &str) -> RawCommandOutput {
 /// btrfs-progs-shaped raw-output source.
 pub(crate) struct DeviceUsageSpec {
     /// `None` renders the missing-device header `<missing disk>, ID: N` --
-    /// the literal token `btrfs device usage` emits for an absent device.
+    /// the kernel's `btrfs_dev_name()` marker as copied through
+    /// `BTRFS_IOC_DEV_INFO` by `btrfs device usage`.
     pub(crate) path: Option<String>,
     pub(crate) devid: u64,
     pub(crate) device_size: u64,
@@ -118,7 +119,7 @@ impl DeviceUsageSpec {
         }
     }
 
-    /// Build a missing-device stanza using the pinned btrfs-progs marker.
+    /// Build a missing-device stanza using the pinned kernel path marker.
     pub(crate) fn missing(devid: u64, allocations: &[(&str, &str, u64)], unallocated: u64) -> Self {
         Self {
             path: None,
@@ -135,8 +136,8 @@ impl DeviceUsageSpec {
 }
 
 /// Render faithful `btrfs device usage --raw` stdout for test fixtures.
-/// Uses 3-space key/value indentation, `<missing disk>` for absent devices,
-/// and a blank line after every device stanza.
+/// Uses 3-space key/value indentation, the kernel-sourced `<missing disk>`
+/// marker for absent devices, and a blank line after every device stanza.
 pub(crate) fn device_usage_raw_body(specs: &[DeviceUsageSpec]) -> String {
     fn push_kv(body: &mut String, label: &str, value: u64) {
         let width = 33usize.saturating_sub(3 + label.len());

@@ -5,6 +5,7 @@ use crate::confirm;
 use crate::inhibit::AcquireSleepInhibitor;
 use crate::journal;
 use crate::membership;
+use crate::parse::types::BtrfsDeviceUsageEntry;
 use crate::parse::{ParseError, parse_btrfs_device_usage};
 use crate::pool::pool_remove_device_using;
 use crate::preflight;
@@ -581,11 +582,64 @@ fn check_relocation_space<R: CommandRunner>(
         )));
     }
 
+    validate_missing_target_usage_shape(target.as_slice(), mount_point, missing_id)?;
+
     preflight::check_raid1_relocation_space(&target, &remaining).map_err(|e| {
         RemoveMissingError::Validation(format!(
             "{e}\n\nFree up space by deleting files, or add a new device first with `braid add`."
         ))
     })
+}
+
+/// Fail-closed shape contract for the missing-device stanza before the generic
+/// RAID1 relocation math treats absent allocation types as zero demand.
+fn validate_missing_target_usage_shape(
+    target: &[&BtrfsDeviceUsageEntry],
+    mount_point: &MountPoint,
+    missing_id: u64,
+) -> Result<(), RemoveMissingError> {
+    const SUPPORTED_ALLOC_TYPES: &[&str] = &["Data", "Metadata", "System"];
+
+    let fail_closed_suffix = format!(
+        "Refusing to remove the missing device without a validated \
+         relocation-space check. Inspect `btrfs device usage --raw {mount_point}` \
+         manually, then re-run."
+    );
+
+    if target.len() > 1 {
+        return Err(RemoveMissingError::Validation(format!(
+            "ENOSPC pre-flight: missing devid {missing_id} is listed more than \
+             once in `btrfs device usage --raw {mount_point}`. {fail_closed_suffix}"
+        )));
+    }
+
+    let target = target[0];
+    let mut saw_positive_supported_raid1 = false;
+    for allocation in &target.allocations {
+        if allocation.bytes == 0 {
+            continue;
+        }
+        let supported_type = SUPPORTED_ALLOC_TYPES.contains(&allocation.alloc_type.as_str());
+        let supported_profile = allocation.profile == "RAID1";
+        if supported_type && supported_profile {
+            saw_positive_supported_raid1 = true;
+            continue;
+        }
+        return Err(RemoveMissingError::Validation(format!(
+            "ENOSPC pre-flight: unsupported missing-device allocation \
+             {},{} = {} on devid {missing_id}. {fail_closed_suffix}",
+            allocation.alloc_type, allocation.profile, allocation.bytes,
+        )));
+    }
+
+    if !saw_positive_supported_raid1 {
+        return Err(RemoveMissingError::Validation(format!(
+            "ENOSPC pre-flight: missing devid {missing_id} has no positive \
+             Data/Metadata/System RAID1 allocation row. {fail_closed_suffix}"
+        )));
+    }
+
+    Ok(())
 }
 
 #[cfg(test)]
@@ -1090,15 +1144,17 @@ mod tests {
         );
     }
 
-    #[test]
     // Intent: check_relocation_space passes when survivors have enough space.
     //
     // Why it exists: Ensures the check doesn't false-positive and block valid
-    //   remove-missing operations.
+    //   remove-missing operations, including a sparse missing-device stanza
+    //   that has Data but no Metadata or System allocation row.
     //
-    // Scenario: Missing device has small allocations, survivors have plenty of
-    //   unallocated space.
-    fn check_relocation_space_passes_sufficient_space() {
+    // Scenario: Missing device has a small Data allocation, survivors have
+    //   plenty of unallocated space, and the target never held Metadata or
+    //   System chunks.
+    #[test]
+    fn check_relocation_space_accepts_sparse_data_only_missing_target() {
         let fixture = device_usage_raw_body(&[
             relocation_usage_live_device(
                 "/dev/mapper/braid-disk1",
@@ -1113,6 +1169,54 @@ mod tests {
                 452_984_832,
             ),
             DeviceUsageSpec::missing(3, &[("Data", "RAID1", 67_108_864)], 0),
+        ]);
+
+        let runner = EnospcRunner {
+            device_usage_stdout: fixture,
+        };
+
+        let result = check_relocation_space(&runner, &mp(), 3);
+        assert!(result.is_ok(), "should pass: {result:?}");
+    }
+
+    // Intent: check_relocation_space accepts a sparse RAID1 target with no
+    //   System row.
+    //
+    // Why it exists: 3+ device RAID1 pools can legitimately place only a
+    //   subset of Data, Metadata, and System chunk pairs on a member; the
+    //   fail-closed shape guard must not require per-type completeness.
+    //
+    // Scenario: Missing devid 3 has Data and Metadata RAID1 chunks but never
+    //   held the tiny System chunk; survivors still have enough space.
+    #[test]
+    fn check_relocation_space_accepts_sparse_data_metadata_missing_target() {
+        let fixture = device_usage_raw_body(&[
+            relocation_usage_live_device(
+                "/dev/mapper/braid-disk1",
+                1,
+                &[
+                    ("Data", "RAID1", 67_108_864),
+                    ("Metadata", "RAID1", 33_554_432),
+                ],
+                452_984_832,
+            ),
+            relocation_usage_live_device(
+                "/dev/mapper/braid-disk2",
+                2,
+                &[
+                    ("Data", "RAID1", 67_108_864),
+                    ("Metadata", "RAID1", 33_554_432),
+                ],
+                452_984_832,
+            ),
+            DeviceUsageSpec::missing(
+                3,
+                &[
+                    ("Data", "RAID1", 67_108_864),
+                    ("Metadata", "RAID1", 33_554_432),
+                ],
+                0,
+            ),
         ]);
 
         let runner = EnospcRunner {
@@ -1318,17 +1422,18 @@ mod tests {
         }
     }
 
+    // Intent: check_relocation_space fails closed when a present missing target
+    //   has no positive supported allocation rows.
+    //
+    // Why it exists: braid cannot distinguish a true no-op target from runtime
+    //   output drift that hid every allocation row, so remove-missing must not
+    //   treat an empty stanza as zero relocation demand.
+    //
+    // Scenario: missing devid 3 is listed with device_size 0 and no allocation
+    //   rows; survivors have no useful free space, but the refusal should name
+    //   the untrusted target shape rather than relocation capacity.
     #[test]
-    // Intent: check_relocation_space still accepts a present missing target
-    // with zero allocations.
-    //
-    // Why it exists: the fail-closed absent-target guard must not reject the
-    // benign no-op case where btrfs lists the missing devid but there is
-    // nothing to relocate.
-    //
-    // Scenario: missing devid 3 is present with device_size 0 and no
-    // allocations; survivors have no useful free space.
-    fn check_relocation_space_passes_present_zero_allocation_missing_target() {
+    fn check_relocation_space_fails_closed_on_present_zero_allocation_missing_target() {
         let fixture = device_usage_raw_body(&[
             relocation_usage_live_device(
                 "/dev/mapper/braid-disk1",
@@ -1349,10 +1454,155 @@ mod tests {
             device_usage_stdout: fixture,
         };
 
-        let result = check_relocation_space(&runner, &mp(), 3);
+        let err = check_relocation_space(&runner, &mp(), 3)
+            .expect_err("present zero-allocation missing target must fail closed");
+        let msg = err.to_string();
         assert!(
-            result.is_ok(),
-            "present zero-allocation missing target should pass: {result:?}"
+            msg.contains("no positive Data/Metadata/System RAID1 allocation row"),
+            "expected no-positive-row error, got: {msg}"
+        );
+        assert!(
+            msg.contains("validated relocation-space check"),
+            "got: {msg}"
+        );
+        assert!(
+            !msg.contains("fewer than 2 remaining devices"),
+            "shape validation must fire before relocation math, got: {msg}"
+        );
+    }
+
+    // Intent: check_relocation_space fails closed when supported rows exist but
+    //   are all zero bytes.
+    //
+    // Why it exists: present-but-zero supported rows are still not a validated
+    //   missing-device allocation shape for the degraded remove path.
+    //
+    // Scenario: btrfs usage lists Data, Metadata, and System RAID1 rows for
+    //   missing devid 3, but every row is zero.
+    #[test]
+    fn check_relocation_space_fails_closed_on_all_zero_supported_rows() {
+        let fixture = device_usage_raw_body(&[
+            relocation_usage_live_device(
+                "/dev/mapper/braid-disk1",
+                1,
+                &[("Data", "RAID1", 67_108_864)],
+                452_984_832,
+            ),
+            relocation_usage_live_device(
+                "/dev/mapper/braid-disk2",
+                2,
+                &[("Data", "RAID1", 67_108_864)],
+                452_984_832,
+            ),
+            DeviceUsageSpec::missing(
+                3,
+                &[
+                    ("Data", "RAID1", 0),
+                    ("Metadata", "RAID1", 0),
+                    ("System", "RAID1", 0),
+                ],
+                0,
+            ),
+        ]);
+
+        let runner = EnospcRunner {
+            device_usage_stdout: fixture,
+        };
+
+        let err = check_relocation_space(&runner, &mp(), 3)
+            .expect_err("all-zero supported rows must fail closed");
+        let msg = err.to_string();
+        assert!(
+            msg.contains("no positive Data/Metadata/System RAID1 allocation row"),
+            "expected no-positive-row error, got: {msg}"
+        );
+    }
+
+    // Intent: check_relocation_space fails closed on positive target
+    //   allocations outside the supported Data/Metadata/System RAID1 shape.
+    //
+    // Why it exists: the generic RAID1 preflight only models RAID1 relocation
+    //   demand; accepting a positive single, RAID1C3, or unknown row would make
+    //   remove-missing reason from an unsupported model.
+    //
+    // Scenario: missing devid 3 reports Data,single allocation while survivors
+    //   have enough free space for the ordinary RAID1 path.
+    #[test]
+    fn check_relocation_space_fails_closed_on_unsupported_target_profile() {
+        let fixture = device_usage_raw_body(&[
+            relocation_usage_live_device(
+                "/dev/mapper/braid-disk1",
+                1,
+                &[("Data", "RAID1", 67_108_864)],
+                452_984_832,
+            ),
+            relocation_usage_live_device(
+                "/dev/mapper/braid-disk2",
+                2,
+                &[("Data", "RAID1", 67_108_864)],
+                452_984_832,
+            ),
+            DeviceUsageSpec::missing(3, &[("Data", "single", 67_108_864)], 0),
+        ]);
+
+        let runner = EnospcRunner {
+            device_usage_stdout: fixture,
+        };
+
+        let err = check_relocation_space(&runner, &mp(), 3)
+            .expect_err("unsupported target profile must fail closed");
+        let msg = err.to_string();
+        assert!(
+            msg.contains("unsupported missing-device allocation Data,single = 67108864"),
+            "expected unsupported-cell error, got: {msg}"
+        );
+        assert!(
+            msg.contains("validated relocation-space check"),
+            "got: {msg}"
+        );
+    }
+
+    // Intent: check_relocation_space fails closed when the target missing devid
+    //   appears in more than one usage stanza.
+    //
+    // Why it exists: summing duplicate missing-device stanzas would trust an
+    //   impossible btrfs output shape and could hide parser or runtime drift.
+    //
+    // Scenario: btrfs usage output lists two device_size 0 stanzas for missing
+    //   devid 3 while survivors have no useful relocation space.
+    #[test]
+    fn check_relocation_space_fails_closed_on_duplicate_target_stanza() {
+        let fixture = device_usage_raw_body(&[
+            relocation_usage_live_device(
+                "/dev/mapper/braid-disk1",
+                1,
+                &[("Data", "RAID1", 67_108_864)],
+                0,
+            ),
+            relocation_usage_live_device(
+                "/dev/mapper/braid-disk2",
+                2,
+                &[("Data", "RAID1", 67_108_864)],
+                0,
+            ),
+            DeviceUsageSpec::missing(3, &[("Data", "RAID1", 67_108_864)], 0),
+            DeviceUsageSpec::missing(3, &[("Data", "RAID1", 67_108_864)], 0),
+        ]);
+
+        let runner = EnospcRunner {
+            device_usage_stdout: fixture,
+        };
+
+        let err = check_relocation_space(&runner, &mp(), 3)
+            .expect_err("duplicate target stanzas must fail closed");
+        let msg = err.to_string();
+        assert!(
+            msg.contains("missing devid 3 is listed more than once"),
+            "expected duplicate-target error, got: {msg}"
+        );
+        assert!(
+            !msg.contains("not enough space to relocate"),
+            "duplicate validation must fire before relocation math, got: {msg}"
         );
     }
 

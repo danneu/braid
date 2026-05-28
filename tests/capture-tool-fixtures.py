@@ -343,9 +343,9 @@ machine.succeed(
     f" > {FIXTURE_DIR}/btrfs-device-stats-degraded.txt"
 )
 # Capture the missing-device `device usage --raw` stanza while still mounted
-# degraded: devid 2 renders as `<missing disk>, ID: 2` with Device size 0 but
-# keeps its RAID1 allocation rows. Pins the shape check_raid1_relocation_space
-# reads.
+# degraded: the kernel-sourced path renders as `<missing disk>, ID: 2` with
+# Device size 0 but keeps its RAID1 allocation rows. Pins the shape
+# check_raid1_relocation_space reads.
 machine.succeed(
     f"btrfs device usage --raw {MOUNT}"
     f" > {FIXTURE_DIR}/btrfs-device-usage-missing.txt"

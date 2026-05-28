@@ -75,6 +75,14 @@ unallocated space to absorb the target device's allocations before invoking
 crash the filesystem to read-only mid-relocation (reproduced in
 `tests/repro/`).
 
+`remove-missing` also refuses an untrusted missing-device allocation shape
+before `btrfs device remove`. Its trust check validates shape, not per-type
+completeness: the targeted missing devid must have exactly one usage stanza,
+every positive target allocation row must be one of Data/Metadata/System RAID1,
+and at least one positive supported row must be present. Missing supported row
+types are treated as zero demand because a sparse 3+ device RAID1 member may
+legitimately hold only a subset of Data, Metadata, and System chunks.
+
 Single-survivor cases use a path-specific check:
 
 - **`remove` (2→1):** the RAID1-aware relocation check does not apply
