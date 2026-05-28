@@ -122,8 +122,12 @@ enum AddLuksBtrfsProbe {
 /// pool row also resolve to the same backing block device.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum LivePoolMatch<'a> {
-    SameBacking { device: &'a PoolDevice },
-    DifferentBacking { device: &'a PoolDevice },
+    /// The target is already represented by a live row with the same backing.
+    /// Unit because callers only need the no-op signal.
+    SameBacking,
+    DifferentBacking {
+        device: &'a PoolDevice,
+    },
     NoMatch,
 }
 
@@ -238,7 +242,7 @@ fn classify_live_pool_match<'a>(
                 target_by_id
             ))
         })?;
-    let mut same_backing = None;
+    let mut same_backing = false;
     let mut different_backing = None;
 
     for device in pool
@@ -257,14 +261,14 @@ fn classify_live_pool_match<'a>(
         if live_backing != target_backing {
             different_backing.get_or_insert(device);
         } else {
-            same_backing.get_or_insert(device);
+            same_backing = true;
         }
     }
 
     if let Some(device) = different_backing {
         Ok(LivePoolMatch::DifferentBacking { device })
-    } else if let Some(device) = same_backing {
-        Ok(LivePoolMatch::SameBacking { device })
+    } else if same_backing {
+        Ok(LivePoolMatch::SameBacking)
     } else {
         Ok(LivePoolMatch::NoMatch)
     }
@@ -317,7 +321,7 @@ fn recheck_execute_live_pool_targets(
                     device,
                 ));
             }
-            LivePoolMatch::SameBacking { .. } => {
+            LivePoolMatch::SameBacking => {
                 return Err(AddError::Validation(format!(
                     "pool state changed between planning and execution -- disk '{}' (UUID `{}`) is now a live pool member. Re-run `braid add` to converge.",
                     target.name, uuid
@@ -2059,7 +2063,7 @@ fn build_add_work_plan<R: CommandRunner>(
                                 input.pool,
                                 input.backing_path_resolver,
                             )? {
-                                LivePoolMatch::SameBacking { .. } => continue,
+                                LivePoolMatch::SameBacking => continue,
                                 LivePoolMatch::DifferentBacking { device } => {
                                     return Err(duplicate_live_pool_uuid_error(
                                         uuid, name, by_id, device,
@@ -2124,7 +2128,7 @@ fn build_add_work_plan<R: CommandRunner>(
                         input.pool,
                         input.backing_path_resolver,
                     )? {
-                        LivePoolMatch::SameBacking { .. } => continue,
+                        LivePoolMatch::SameBacking => continue,
                         LivePoolMatch::DifferentBacking { device } => {
                             return Err(duplicate_live_pool_uuid_error(uuid, name, by_id, device));
                         }
@@ -2699,12 +2703,7 @@ mod tests {
 
         let result = classify_live_pool_match(&uuid, &by_id, &pool, &resolver).unwrap();
 
-        match result {
-            LivePoolMatch::SameBacking { device } => {
-                assert_eq!(device.mapper, MapperName("braid-drifted".into()));
-            }
-            other => panic!("expected SameBacking, got: {other:?}"),
-        }
+        assert_eq!(result, LivePoolMatch::SameBacking);
     }
 
     // Intent: classify_live_pool_match rejects a UUID match whose backing
