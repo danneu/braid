@@ -21,7 +21,9 @@ use crate::pool::{pool_replace_device, pool_resize_device};
 use crate::preflight;
 use crate::preview::{self, PerDiskStyle, PlanFailure, Preview, PreviewCompleteness, PreviewNote};
 use crate::probe::{Filesystem, ProbeError, probe_config_disk, probe_pool};
-use crate::probe_mapper_uuid::probe_observed_mapper_uuid;
+use crate::probe_mapper_uuid::{
+    MapperOwnership, probe_observed_mapper_uuid, warn_close_skipped_inactive,
+};
 use crate::progress::{self, ProgressOutput};
 use crate::repair_hint;
 use crate::state_paths::StatePaths;
@@ -873,12 +875,10 @@ impl ReplacePlan {
         //
         // Defense-in-depth double-drift probe: before `CryptsetupClose`,
         // probe the live LUKS UUID at the observed mapper and require it
-        // to equal the journaled `old_uuid`. On mismatch or probe failure,
-        // demote the close to a logged-warning skip so we don't tear down
-        // a foreign dm slot that the operator opened under the same
-        // mapper between plan and this point. Mirrors the
-        // `remove.rs::probe_observed_mapper_uuid` site (Phase 3a) at the
-        // same defense-in-depth seam.
+        // to equal the journaled `old_uuid`. On mismatch or unverifiable
+        // state, demote the close to a logged-warning skip; inactive is
+        // caller-classified below because it is surprising during live
+        // execution but normal during recovery replay.
         if let journal::OpKind::Replace {
             source:
                 journal::ReplaceJournalSource::Live {
@@ -892,18 +892,24 @@ impl ReplacePlan {
                 .as_str()
                 .strip_prefix("braid-")
                 .unwrap_or(mapper.as_str());
-            if probe_observed_mapper_uuid(runner, mapper, journaled_old_uuid)
-                && close_mapper_best_effort(
-                    runner,
-                    params.sleeper,
-                    mapper,
-                    old_label,
-                    color_enabled,
-                )
-            {
-                eprintln!(
-                    "Old device closed. If repurposing the physical disk, wipe it separately."
-                );
+            match probe_observed_mapper_uuid(runner, mapper, journaled_old_uuid) {
+                MapperOwnership::Owned => {
+                    if close_mapper_best_effort(
+                        runner,
+                        params.sleeper,
+                        mapper,
+                        old_label,
+                        color_enabled,
+                    ) {
+                        eprintln!(
+                            "Old device closed. If repurposing the physical disk, wipe it separately."
+                        );
+                    }
+                }
+                MapperOwnership::Inactive => {
+                    warn_close_skipped_inactive(mapper, journaled_old_uuid);
+                }
+                MapperOwnership::Unverified => {}
             }
         }
 
@@ -3866,6 +3872,68 @@ mod tests {
         );
     }
 
+    // Intent: live replace warns and skips the old-mapper close when the
+    //   close-time UUID probe reports an inactive mapper.
+    // Why it exists: inactive is now caller-classified; the helper returns it
+    //   silently, so this execute path must keep the operator-facing warning.
+    // Scenario: live replace of disk2 -> disk3 commits, but braid-disk2 is
+    //   already closed before the post-commit best-effort close runs.
+    #[test]
+    fn live_replace_old_close_inactive_warns_and_skips_close() {
+        let f = PoolFixture::two_disk_healthy();
+        let fs = MockFs::storage(vec![
+            "/dev/disk/by-id/virtio-disk3".into(),
+            "/dev/mapper/braid-disk3".into(),
+        ]);
+        let replace_done = Arc::new(AtomicBool::new(false));
+        let runner = ReplacementPool::two_disk_healthy()
+            .install(MockRunner::default(), replace_done.clone())
+            .with_handler({
+                let replace_done = replace_done.clone();
+                move |req| match req {
+                    CmdRequest::BtrfsReplaceStart { .. } => {
+                        replace_done.store(true, Ordering::Relaxed);
+                        Some(Ok(mock_ok("btrfs replace start", "")))
+                    }
+                    CmdRequest::CryptsetupStatus { mapper }
+                        if mapper.as_str() == "braid-disk2"
+                            && replace_done.load(Ordering::Relaxed) =>
+                    {
+                        Some(Ok(RawCommandOutput {
+                            cmd: "cryptsetup status braid-disk2".into(),
+                            stdout: String::new(),
+                            stderr: "/dev/mapper/braid-disk2 is inactive.\n".into(),
+                            exit_status: 4,
+                        }))
+                    }
+                    CmdRequest::BtrfsFilesystemResize { .. } => {
+                        Some(Ok(mock_ok("btrfs filesystem resize", "")))
+                    }
+                    _ => None,
+                }
+            });
+
+        let captured = crate::status_tag::testing::capture_with_color(false, || {
+            cmd_replace(&runner, &fs, &f.replace_params().build())
+                .expect("inactive close skip must not fail replace");
+        });
+
+        assert!(
+            captured.contains(
+                "Warning: post-commit close skipped for mapper braid-disk2: \
+                 probe failed (mapper is inactive); expected LUKS UUID \
+                 22222222-2222-2222-2222-222222222222\n"
+            ),
+            "inactive old-mapper close must warn: {captured:?}"
+        );
+        assert!(
+            !runner.requests().iter().any(|request| {
+                matches!(request, CmdRequest::CryptsetupClose { mapper } if mapper.as_str() == "braid-disk2")
+            }),
+            "inactive old-mapper probe must skip close"
+        );
+    }
+
     #[test]
     // Intent: cmd_replace's missing path rejects a --old name that is absent
     //   from pool.json, with no inhibitor acquired and no journal written.
@@ -6543,7 +6611,7 @@ mod tests {
     /// logged warning skip; zero `CryptsetupClose` requests reach the
     /// runner.
     //
-    // Intent: probe_observed_mapper_uuid returns false on mismatch and
+    // Intent: probe_observed_mapper_uuid returns Unverified on mismatch and
     //   the caller skips the close.
     // Why: defense-in-depth against operator double-drift -- closing
     //   the wrong dm slot would tear down a foreign disk's mapper.
@@ -6565,12 +6633,13 @@ mod tests {
             },
         );
         let mapper = MapperName("braid-WRONG".into());
-        let matched = probe_observed_mapper_uuid(&runner, &mapper, &u_old);
-        assert!(
-            !matched,
-            "probe mismatch must signal skip-close (returned false)"
+        let ownership = probe_observed_mapper_uuid(&runner, &mapper, &u_old);
+        assert_eq!(
+            ownership,
+            MapperOwnership::Unverified,
+            "probe mismatch must signal skip-close"
         );
-        // Caller must NOT issue CryptsetupClose on the false arm.
+        // Caller must NOT issue CryptsetupClose on the unverified arm.
         let requests = runner.requests();
         let probe_count = requests
             .iter()
@@ -6594,10 +6663,10 @@ mod tests {
 
     /// Seed 621: Control arm for the post-commit close double-drift
     /// probe. When the active mapper's backing-device LUKS UUID matches
-    /// the journaled value, `probe_observed_mapper_uuid` returns true so
+    /// the journaled value, `probe_observed_mapper_uuid` returns Owned so
     /// the caller proceeds to close.
     //
-    // Intent: probe match returns true; caller continues to close.
+    // Intent: probe match returns Owned; caller continues to close.
     // Why: pins the fail-safe-skip-only semantic so a future change
     //   that turned the probe into fail-skip-on-any-condition would
     //   flip this assertion.
@@ -6618,8 +6687,12 @@ mod tests {
             },
         );
         let mapper = MapperName("braid-disk2".into());
-        let matched = probe_observed_mapper_uuid(&runner, &mapper, &u_old);
-        assert!(matched, "probe match must allow close (returned true)");
+        let ownership = probe_observed_mapper_uuid(&runner, &mapper, &u_old);
+        assert_eq!(
+            ownership,
+            MapperOwnership::Owned,
+            "probe match must allow close"
+        );
     }
 
     /// Seed 630: ExistingLuks new-target open-boundary re-probe

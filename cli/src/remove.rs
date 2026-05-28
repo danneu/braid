@@ -13,7 +13,9 @@ use crate::pool::{
 use crate::preflight;
 use crate::preview::{self, PerDiskStyle, PlanFailure, Preview, PreviewCompleteness, PreviewNote};
 use crate::probe::{Filesystem, ProbeError, probe_pool};
-use crate::probe_mapper_uuid::probe_observed_mapper_uuid;
+use crate::probe_mapper_uuid::{
+    MapperOwnership, probe_observed_mapper_uuid, warn_close_skipped_inactive,
+};
 use crate::progress::{self, ProgressOutput};
 use crate::repair_hint;
 use crate::state_paths::StatePaths;
@@ -446,19 +448,26 @@ impl RemovePlan {
         );
 
         // Defense-in-depth: probe the journaled identity at the
-        // observed mapper before close. On mismatch (or probe failure)
-        // demote the close to a logged-warning skip so we don't tear
-        // down a foreign dm slot that the operator opened under the
-        // same mapper between plan and this point.
+        // observed mapper before close. On mismatch or unverifiable
+        // state, demote the close to a logged-warning skip so we don't
+        // tear down a foreign dm slot that the operator opened under
+        // the same mapper between plan and this point. Inactive is a
+        // distinct caller-classified outcome.
         let close_label = mapper_str.strip_prefix("braid-").unwrap_or(mapper_str);
-        if probe_observed_mapper_uuid(runner, &work_plan.target_mapper, &work_plan.target_uuid) {
-            close_mapper_best_effort(
-                runner,
-                params.sleeper,
-                &work_plan.target_mapper,
-                close_label,
-                color_enabled,
-            );
+        match probe_observed_mapper_uuid(runner, &work_plan.target_mapper, &work_plan.target_uuid) {
+            MapperOwnership::Owned => {
+                close_mapper_best_effort(
+                    runner,
+                    params.sleeper,
+                    &work_plan.target_mapper,
+                    close_label,
+                    color_enabled,
+                );
+            }
+            MapperOwnership::Inactive => {
+                warn_close_skipped_inactive(&work_plan.target_mapper, &work_plan.target_uuid);
+            }
+            MapperOwnership::Unverified => {}
         }
 
         // Post-commit: write pool.json and clear journal.
@@ -3174,6 +3183,65 @@ mod tests {
         assert_eq!(
             closes_for_wrong, 0,
             "zero CryptsetupClose against braid-WRONG -- probe mismatch must demote to skip"
+        );
+    }
+
+    // Intent: remove warns and skips the target-mapper close when the
+    //   close-time UUID probe reports an inactive mapper.
+    // Why it exists: inactive is now caller-classified; the helper returns it
+    //   silently, so the remove execute path must keep its operator warning.
+    // Scenario: disk2 is removed from a healthy pool, but braid-disk2 has
+    //   already been closed before the post-commit best-effort close runs.
+    #[test]
+    fn post_commit_close_inactive_warns_and_skips_close() {
+        use std::sync::Arc;
+        use std::sync::atomic::{AtomicBool, Ordering};
+
+        let f = PoolFixture::two_disk_healthy();
+        let remove_committed = Arc::new(AtomicBool::new(false));
+        let runner = RemovalPool::two_disk()
+            .install(MockRunner::default())
+            .with_handler({
+                let remove_committed = Arc::clone(&remove_committed);
+                move |req| match req {
+                    CmdRequest::BtrfsDeviceRemove { .. } => {
+                        remove_committed.store(true, Ordering::SeqCst);
+                        Some(Ok(mock_ok("btrfs device remove", "")))
+                    }
+                    CmdRequest::CryptsetupStatus { mapper }
+                        if mapper.as_str() == "braid-disk2"
+                            && remove_committed.load(Ordering::SeqCst) =>
+                    {
+                        Some(Ok(RawCommandOutput {
+                            cmd: "cryptsetup status braid-disk2".into(),
+                            stdout: String::new(),
+                            stderr: "/dev/mapper/braid-disk2 is inactive.\n".into(),
+                            exit_status: 4,
+                        }))
+                    }
+                    _ => None,
+                }
+            });
+        let fs = MockFs::storage(vec![]);
+
+        let captured = crate::status_tag::testing::capture_with_color(false, || {
+            cmd_remove(&runner, &fs, &f.remove_params().build())
+                .expect("inactive close skip must not fail remove");
+        });
+
+        assert!(
+            captured.contains(
+                "Warning: post-commit close skipped for mapper braid-disk2: \
+                 probe failed (mapper is inactive); expected LUKS UUID \
+                 22222222-2222-2222-2222-222222222222\n"
+            ),
+            "inactive target-mapper close must warn: {captured:?}"
+        );
+        assert!(
+            !runner.requests().iter().any(|request| {
+                matches!(request, CmdRequest::CryptsetupClose { mapper } if mapper.as_str() == "braid-disk2")
+            }),
+            "inactive target-mapper probe must skip close"
         );
     }
 }

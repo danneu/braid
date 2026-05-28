@@ -120,12 +120,13 @@ pub enum ReplaceJournalSource {
         old_devid: u64,
         /// Pattern #1: the observed mapper for the post-commit
         /// `close_mapper_best_effort` call and the recovery mirror in
-        /// `finish_uncommitted_replace_recovery`. Journaled at plan time
-        /// so a drifted mapper between plan and post-commit close still
-        /// targets the right dm slot. Identity decisions read `old_uuid`
-        /// at the op level; this field is consulted only for the close.
-        /// Parallels `lock.rs`'s "close observed, not reconstructed"
-        /// doctrine for the same drift-safety reason.
+        /// `execute_replace_post_maintenance_recovery` /
+        /// `close_old_mapper_best_effort`. Journaled at plan time so a
+        /// drifted mapper between plan and post-commit close still targets
+        /// the right dm slot. Identity decisions read `old_uuid` at the op
+        /// level; this field is consulted only for the close. Parallels
+        /// `lock.rs`'s "close observed, not reconstructed" doctrine for the
+        /// same drift-safety reason.
         old_mapper: MapperName,
     },
     Missing {

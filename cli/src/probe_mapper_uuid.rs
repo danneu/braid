@@ -1,82 +1,95 @@
 //! Shared LUKS UUID re-probe at observed mapper paths.
 //!
 //! The `cryptsetup status <mapper>` plus `cryptsetup luksUUID <backing>`
-//! round-trip is the defense-in-depth seam used to prevent post-commit
-//! closes of foreign disks: between the planning UUID classification and
-//! the per-mapper `cryptsetup close`, an operator can manually open a
-//! different disk under the same mapper name. Probing the mapper's
-//! current backing-device LUKS UUID immediately before close lets each
-//! call site demote the close to a logged-warning skip on mismatch.
+//! round-trip is the defense-in-depth seam used to prevent post-commit closes
+//! of foreign disks: between the planning UUID classification and the
+//! per-mapper `cryptsetup close`, an operator can manually open a different
+//! disk under the same mapper name. Probing the mapper's current
+//! backing-device LUKS UUID immediately before close lets each call site
+//! demote the close to a skip on mismatch or unverifiable state.
 //!
-//! Today the same helper exists inline in `remove.rs` and `replace.rs`;
-//! Phase 4 of the LUKS-UUID-as-identity migration lifts the body here
-//! so the two existing callers and the upcoming recovery-side callers
-//! (`finish_uncommitted_replace_recovery`, addressed in Phase 4b) share a
-//! single source of truth. The helper is logger-coupled by design -- every
-//! failure path emits the operator-facing Warning text and returns `false`
-//! so the caller proceeds to skip the close. Phase 4b will reuse this body.
+//! The helper centralizes the close-time ownership check for `remove`, live
+//! `replace`, and post-maintenance replace recovery. Mismatch and unverifiable
+//! probe paths emit the shared operator-facing `Warning:` text through
+//! `emit_status`; inactive mappers are returned silently so each caller can
+//! decide whether an already-closed mapper is surprising.
 
 use crate::cmd::{CmdRequest, CommandRunner};
 use crate::parse::types::{BackingDevice, CryptsetupStatusOutput};
 use crate::parse::{parse_cryptsetup_luks_uuid, parse_cryptsetup_status};
+use crate::status_tag::emit_status;
 use crate::types::{LuksUuid, MapperName};
 
-/// Probe the live LUKS UUID at the observed mapper and require it to
-/// equal `expected_uuid`. Returns `true` if the probe matched (caller
-/// should proceed to close); returns `false` on mismatch or any probe
-/// failure (caller should skip close). The failure path emits a
-/// `Warning: ...` to stderr naming the mapper, expected UUID, and the
-/// observed UUID or probe error -- the message a future operator runs
-/// to reason about why the close was skipped.
+/// Outcome of the close-time live mapper ownership probe.
+///
+/// Separates a clean "no active mapping" result from active-but-wrong or
+/// unverifiable states, so recovery can treat absence as the normal
+/// already-closed no-op while execute-time callers still warn.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum MapperOwnership {
+    /// Active mapper backed by the expected LUKS UUID; the caller may close it.
+    Owned,
+    /// No active dm mapping for this name; caller decides whether to warn.
+    Inactive,
+    /// Active but wrong, or the probe could not prove ownership.
+    Unverified,
+}
+
+/// Operator-facing note for execute-time close sites where inactive is odd.
+pub(crate) fn warn_close_skipped_inactive(mapper: &MapperName, expected_uuid: &LuksUuid) {
+    emit_status(&format!(
+        "Warning: post-commit close skipped for mapper {mapper}: probe failed (mapper is inactive); expected LUKS UUID {expected}\n",
+        mapper = mapper,
+        expected = expected_uuid,
+    ));
+}
+
+/// Probe the live LUKS UUID at the observed mapper and classify ownership.
+/// Mismatch and unverifiable states emit a `Warning:` naming the mapper,
+/// expected UUID, and observed UUID or probe error; inactive returns silently
+/// so the call site can decide whether absence is normal.
 pub(crate) fn probe_observed_mapper_uuid<R: CommandRunner>(
     runner: &R,
     mapper: &MapperName,
     expected_uuid: &LuksUuid,
-) -> bool {
+) -> MapperOwnership {
     let status = match runner.run(&CmdRequest::CryptsetupStatus {
         mapper: mapper.clone(),
     }) {
         Ok(out) => out,
         Err(e) => {
-            eprintln!(
-                "Warning: post-commit close skipped for mapper {mapper}: probe failed ({err}); expected LUKS UUID {expected}",
+            emit_status(&format!(
+                "Warning: post-commit close skipped for mapper {mapper}: probe failed ({err}); expected LUKS UUID {expected}\n",
                 mapper = mapper,
                 err = e,
                 expected = expected_uuid,
-            );
-            return false;
+            ));
+            return MapperOwnership::Unverified;
         }
     };
     let backing_device = match parse_cryptsetup_status(&status) {
         Ok(CryptsetupStatusOutput::Active {
             backing: BackingDevice::Path(device),
         }) => device,
-        Ok(CryptsetupStatusOutput::Inactive) => {
-            eprintln!(
-                "Warning: post-commit close skipped for mapper {mapper}: probe failed (mapper is inactive); expected LUKS UUID {expected}",
-                mapper = mapper,
-                expected = expected_uuid,
-            );
-            return false;
-        }
+        Ok(CryptsetupStatusOutput::Inactive) => return MapperOwnership::Inactive,
         Ok(CryptsetupStatusOutput::Active {
             backing: BackingDevice::Null,
         }) => {
-            eprintln!(
-                "Warning: post-commit close skipped for mapper {mapper}: probe failed (mapper backing device is unavailable (cryptsetup reports null)); expected LUKS UUID {expected}",
+            emit_status(&format!(
+                "Warning: post-commit close skipped for mapper {mapper}: probe failed (mapper backing device is unavailable (cryptsetup reports null)); expected LUKS UUID {expected}\n",
                 mapper = mapper,
                 expected = expected_uuid,
-            );
-            return false;
+            ));
+            return MapperOwnership::Unverified;
         }
         Err(e) => {
-            eprintln!(
-                "Warning: post-commit close skipped for mapper {mapper}: probe failed ({err}); expected LUKS UUID {expected}",
+            emit_status(&format!(
+                "Warning: post-commit close skipped for mapper {mapper}: probe failed ({err}); expected LUKS UUID {expected}\n",
                 mapper = mapper,
                 err = e,
                 expected = expected_uuid,
-            );
-            return false;
+            ));
+            return MapperOwnership::Unverified;
         }
     };
 
@@ -85,41 +98,41 @@ pub(crate) fn probe_observed_mapper_uuid<R: CommandRunner>(
     }) {
         Ok(out) => out,
         Err(e) => {
-            eprintln!(
-                "Warning: post-commit close skipped for mapper {mapper}: probe failed ({err}); expected LUKS UUID {expected}",
+            emit_status(&format!(
+                "Warning: post-commit close skipped for mapper {mapper}: probe failed ({err}); expected LUKS UUID {expected}\n",
                 mapper = mapper,
                 err = e,
                 expected = expected_uuid,
-            );
-            return false;
+            ));
+            return MapperOwnership::Unverified;
         }
     };
     match parse_cryptsetup_luks_uuid(&probe) {
-        Ok(parsed) if parsed.uuid == *expected_uuid => true,
+        Ok(parsed) if parsed.uuid == *expected_uuid => MapperOwnership::Owned,
         Ok(parsed) => {
-            eprintln!(
-                "Warning: post-commit close skipped for mapper {mapper}: expected LUKS UUID {expected} but observed {observed}",
+            emit_status(&format!(
+                "Warning: post-commit close skipped for mapper {mapper}: expected LUKS UUID {expected} but observed {observed}\n",
                 mapper = mapper,
                 expected = expected_uuid,
                 observed = parsed.uuid,
-            );
-            false
+            ));
+            MapperOwnership::Unverified
         }
         Err(e) => {
-            eprintln!(
-                "Warning: post-commit close skipped for mapper {mapper}: probe failed ({err}); expected LUKS UUID {expected}",
+            emit_status(&format!(
+                "Warning: post-commit close skipped for mapper {mapper}: probe failed ({err}); expected LUKS UUID {expected}\n",
                 mapper = mapper,
                 err = e,
                 expected = expected_uuid,
-            );
-            false
+            ));
+            MapperOwnership::Unverified
         }
     }
 }
 
 #[cfg(test)]
 mod tests {
-    use super::probe_observed_mapper_uuid;
+    use super::{MapperOwnership, probe_observed_mapper_uuid};
     use crate::cmd::{CmdError, CmdRequest, MockRunner};
     use crate::test_fixtures::mock_ok;
     use crate::types::{LuksUuid, MapperName};
@@ -130,14 +143,14 @@ mod tests {
     }
 
     // Intent: a cryptsetup status runner error makes the close probe
-    //   return false before any backing-device UUID probe.
+    //   return Unverified before any backing-device UUID probe.
     // Why it exists: command-spawn or command-runner failures after
     //   the irreversible btrfs commit must demote to skip-close, not
     //   hard-error or close an unverified mapper.
     // Scenario: the observed mapper exists in the post-commit close
     //   path, but `cryptsetup status` cannot run.
     #[test]
-    fn probe_returns_false_when_cryptsetup_status_runner_errs() {
+    fn probe_returns_unverified_when_cryptsetup_status_runner_errs() {
         let mapper = MapperName("braid-WRONG".into());
         let expected = test_uuid(710);
         let runner = MockRunner::default().with_handler(|req| match req {
@@ -147,9 +160,13 @@ mod tests {
             _ => None,
         });
 
-        let matched = probe_observed_mapper_uuid(&runner, &mapper, &expected);
+        let ownership = probe_observed_mapper_uuid(&runner, &mapper, &expected);
 
-        assert!(!matched, "status runner error must signal skip-close");
+        assert_eq!(
+            ownership,
+            MapperOwnership::Unverified,
+            "status runner error must signal skip-close"
+        );
         assert_eq!(
             runner.requests(),
             vec![CmdRequest::CryptsetupStatus {
@@ -160,14 +177,14 @@ mod tests {
     }
 
     // Intent: an unparseable cryptsetup status body makes the close
-    //   probe return false before any backing-device UUID probe.
+    //   probe return Unverified before any backing-device UUID probe.
     // Why it exists: malformed status output cannot prove mapper
     //   ownership, so the fail-closed post-commit behavior is to skip
     //   the close.
     // Scenario: `cryptsetup status braid-WRONG` exits successfully but
     //   emits garbage instead of an active or inactive status shape.
     #[test]
-    fn probe_returns_false_when_status_parse_fails() {
+    fn probe_returns_unverified_when_status_parse_fails() {
         let mapper = MapperName("braid-WRONG".into());
         let expected = test_uuid(711);
         let runner = MockRunner::default().with_output(
@@ -177,9 +194,13 @@ mod tests {
             mock_ok("cryptsetup status braid-WRONG", "garbage\n"),
         );
 
-        let matched = probe_observed_mapper_uuid(&runner, &mapper, &expected);
+        let ownership = probe_observed_mapper_uuid(&runner, &mapper, &expected);
 
-        assert!(!matched, "status parse error must signal skip-close");
+        assert_eq!(
+            ownership,
+            MapperOwnership::Unverified,
+            "status parse error must signal skip-close"
+        );
         assert_eq!(
             runner.requests(),
             vec![CmdRequest::CryptsetupStatus {
@@ -190,13 +211,13 @@ mod tests {
     }
 
     // Intent: an active mapper whose status reports a null backing
-    //   device makes the close probe return false before luksUUID.
+    //   device makes the close probe return Unverified before luksUUID.
     // Why it exists: a null backing cannot be tied to the expected LUKS
     //   UUID, and closing it would be an ownership guess.
     // Scenario: `cryptsetup status braid-WRONG` reports the mapper as
     //   active, but the backing device line is `(null)`.
     #[test]
-    fn probe_returns_false_when_backing_device_is_null() {
+    fn probe_returns_unverified_when_backing_device_is_null() {
         let mapper = MapperName("braid-WRONG".into());
         let expected = test_uuid(712);
         let runner = MockRunner::default().with_output(
@@ -209,9 +230,13 @@ mod tests {
             ),
         );
 
-        let matched = probe_observed_mapper_uuid(&runner, &mapper, &expected);
+        let ownership = probe_observed_mapper_uuid(&runner, &mapper, &expected);
 
-        assert!(!matched, "null backing device must signal skip-close");
+        assert_eq!(
+            ownership,
+            MapperOwnership::Unverified,
+            "null backing device must signal skip-close"
+        );
         assert_eq!(
             runner.requests(),
             vec![CmdRequest::CryptsetupStatus {
@@ -221,7 +246,7 @@ mod tests {
         );
     }
 
-    // Intent: an inactive mapper makes the close probe return false
+    // Intent: an inactive mapper makes the close probe return Inactive
     //   before any backing-device UUID probe.
     // Why it exists: a post-commit mapper can disappear between plan
     //   and close; that is already a safe skip, not evidence to close
@@ -229,7 +254,7 @@ mod tests {
     // Scenario: `cryptsetup status braid-WRONG` reports the mapper as
     //   inactive in the post-commit close path.
     #[test]
-    fn probe_returns_false_when_mapper_is_inactive() {
+    fn probe_returns_inactive_when_mapper_is_inactive() {
         let mapper = MapperName("braid-WRONG".into());
         let expected = test_uuid(713);
         let runner = MockRunner::default().with_output(
@@ -242,9 +267,13 @@ mod tests {
             ),
         );
 
-        let matched = probe_observed_mapper_uuid(&runner, &mapper, &expected);
+        let ownership = probe_observed_mapper_uuid(&runner, &mapper, &expected);
 
-        assert!(!matched, "inactive mapper must signal skip-close");
+        assert_eq!(
+            ownership,
+            MapperOwnership::Inactive,
+            "inactive mapper must return the caller-classified absence result"
+        );
         assert_eq!(
             runner.requests(),
             vec![CmdRequest::CryptsetupStatus {
@@ -255,7 +284,7 @@ mod tests {
     }
 
     // Intent: a backing-device luksUUID runner error makes the close
-    //   probe return false after the status probe identifies the backing
+    //   probe return Unverified after the status probe identifies the backing
     //   device.
     // Why it exists: once the helper cannot read the backing LUKS UUID,
     //   it cannot prove the observed mapper still belongs to the
@@ -263,7 +292,7 @@ mod tests {
     // Scenario: status resolves `braid-WRONG` to `/dev/vdc`, but
     //   `cryptsetup luksUUID /dev/vdc` fails.
     #[test]
-    fn probe_returns_false_when_luks_uuid_runner_errs() {
+    fn probe_returns_unverified_when_luks_uuid_runner_errs() {
         let mapper = MapperName("braid-WRONG".into());
         let expected = test_uuid(714);
         let runner = MockRunner::default().with_handler(|req| match req {
@@ -279,9 +308,13 @@ mod tests {
             _ => None,
         });
 
-        let matched = probe_observed_mapper_uuid(&runner, &mapper, &expected);
+        let ownership = probe_observed_mapper_uuid(&runner, &mapper, &expected);
 
-        assert!(!matched, "luksUUID runner error must signal skip-close");
+        assert_eq!(
+            ownership,
+            MapperOwnership::Unverified,
+            "luksUUID runner error must signal skip-close"
+        );
         assert_eq!(
             runner.requests(),
             vec![
@@ -297,7 +330,7 @@ mod tests {
     }
 
     // Intent: an unparseable backing-device luksUUID body makes the
-    //   close probe return false after the status probe identifies the
+    //   close probe return Unverified after the status probe identifies the
     //   backing device.
     // Why it exists: invalid UUID output is not proof that the observed
     //   mapper still owns the expected disk, so the post-commit close
@@ -305,7 +338,7 @@ mod tests {
     // Scenario: status resolves `braid-WRONG` to `/dev/vdc`, but
     //   `cryptsetup luksUUID /dev/vdc` emits `not-a-uuid`.
     #[test]
-    fn probe_returns_false_when_luks_uuid_parse_fails() {
+    fn probe_returns_unverified_when_luks_uuid_parse_fails() {
         let mapper = MapperName("braid-WRONG".into());
         let expected = test_uuid(715);
         let runner = MockRunner::default()
@@ -325,9 +358,13 @@ mod tests {
                 mock_ok("cryptsetup luksUUID /dev/vdc", "not-a-uuid\n"),
             );
 
-        let matched = probe_observed_mapper_uuid(&runner, &mapper, &expected);
+        let ownership = probe_observed_mapper_uuid(&runner, &mapper, &expected);
 
-        assert!(!matched, "luksUUID parse error must signal skip-close");
+        assert_eq!(
+            ownership,
+            MapperOwnership::Unverified,
+            "luksUUID parse error must signal skip-close"
+        );
         assert_eq!(
             runner.requests(),
             vec![

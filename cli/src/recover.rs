@@ -16,6 +16,7 @@ use crate::parse::btrfs_filesystem_show::{DeviceBtrfsProbe, classify_btrfs_probe
 use crate::parse::{ReplaceState, parse_btrfs_replace_status};
 use crate::preview::{self, PerDiskStyle, PlanFailure, Preview, PreviewCompleteness, PreviewNote};
 use crate::probe::{self, Filesystem, ProbeError};
+use crate::probe_mapper_uuid::{MapperOwnership, probe_observed_mapper_uuid};
 use crate::progress::{self, ProgressOutput, Sleeper};
 use crate::secret::Passphrase;
 use crate::state_paths::StatePaths;
@@ -700,7 +701,6 @@ impl RecoverCompletion {
                 new_uuid,
                 new_name,
                 source,
-                fs,
                 *restore_raid1_after_commit,
                 false,
             ),
@@ -3118,7 +3118,6 @@ fn execute_replace_pool_mutation_recovery<R: CommandRunner + Sync, F: Filesystem
             new_uuid,
             new_name,
             source,
-            fs,
             restore_raid1_after_commit,
             false,
         );
@@ -3147,31 +3146,40 @@ fn execute_replace_pool_mutation_recovery<R: CommandRunner + Sync, F: Filesystem
     ))
 }
 
-fn close_old_mapper_best_effort<R, S, F>(
+fn close_old_mapper_best_effort<R, S>(
     runner: &R,
     sleeper: &S,
-    fs: &F,
     mapper: &crate::types::MapperName,
+    old_uuid: &LuksUuid,
 ) where
     R: CommandRunner,
     S: Sleeper + ?Sized,
-    F: Filesystem + ?Sized,
 {
-    if !fs.exists(&format!("/dev/mapper/{}", mapper.0)) {
-        return;
-    }
     let color_enabled = color_enabled_for_stderr();
     let old_label = mapper
         .as_str()
         .strip_prefix("braid-")
         .unwrap_or(mapper.as_str());
-    if close_mapper_best_effort(runner, sleeper, mapper, old_label, color_enabled) {
-        eprintln!("Old device closed. If repurposing the physical disk, wipe it separately.");
+    // Recovery mirrors the execute path's UUID authority. A transient probe
+    // failure can leak this old dm slot until `braid lock` or reboot, but it
+    // does not block later resize and journal-clear steps.
+    match probe_observed_mapper_uuid(runner, mapper, old_uuid) {
+        MapperOwnership::Owned => {
+            if close_mapper_best_effort(runner, sleeper, mapper, old_label, color_enabled) {
+                eprintln!(
+                    "Old device closed. If repurposing the physical disk, wipe it separately."
+                );
+            }
+        }
+        // Already closed is the normal post-crash / post-remount-cycle state.
+        MapperOwnership::Inactive => {}
+        // Foreign or unverifiable mapper; the probe helper already warned.
+        MapperOwnership::Unverified => {}
     }
 }
 
 #[allow(clippy::too_many_arguments)]
-fn execute_replace_post_maintenance_recovery<R, S, F>(
+fn execute_replace_post_maintenance_recovery<R, S>(
     runner: &R,
     sleeper: &S,
     by_id_resolver: &dyn ByIdResolver,
@@ -3181,14 +3189,12 @@ fn execute_replace_post_maintenance_recovery<R, S, F>(
     new_uuid: &LuksUuid,
     new_name: &DiskName,
     source: &journal::ReplaceJournalSource,
-    fs: &F,
     restore_raid1_after_commit: bool,
     inhibitor_already_held: bool,
 ) -> Result<(), RecoverError>
 where
     R: CommandRunner + Sync,
     S: Sleeper + ?Sized,
-    F: Filesystem + ?Sized,
 {
     match live_pool_matches_membership(&pool, &journal.target_membership) {
         Ok(true) => {}
@@ -3244,7 +3250,10 @@ where
     };
 
     if let journal::ReplaceJournalSource::Live { old_mapper, .. } = source {
-        close_old_mapper_best_effort(runner, sleeper, fs, old_mapper);
+        let journal::OpKind::Replace { old_uuid, .. } = &journal.op else {
+            unreachable!("post-maintenance recovery runs only for Replace journals");
+        };
+        close_old_mapper_best_effort(runner, sleeper, old_mapper, old_uuid);
     }
 
     let Some(dev) = pool.devices.iter().find(|d| &d.luks_uuid == new_uuid) else {
@@ -10505,7 +10514,6 @@ mod tests {
     #[test]
     fn replace_post_maintenance_skips_unowed_balance() {
         let f = PoolFixture::empty();
-        let fs = MockFs::new(&[]);
         let journal = replace_post_maintenance_journal(
             false,
             journal::ReplaceJournalSource::Missing { old_devid: 2 },
@@ -10538,7 +10546,6 @@ mod tests {
             &uuid_for_name("new"),
             &disk_name("new"),
             source,
-            &fs,
             false,
             false,
         )
@@ -10574,7 +10581,6 @@ mod tests {
     #[test]
     fn recover_replace_old_close_retries_on_busy_then_succeeds() {
         let f = PoolFixture::empty();
-        let fs = MockFs::new(&["/dev/mapper/braid-old"]);
         let journal = replace_post_maintenance_journal(
             false,
             journal::ReplaceJournalSource::Live {
@@ -10604,6 +10610,21 @@ mod tests {
                 }
             })
             .with_output(
+                CmdRequest::CryptsetupStatus {
+                    mapper: MapperName("braid-old".into()),
+                },
+                cryptsetup_status_active("braid-old", "/dev/disk/by-id/virtio-old"),
+            )
+            .with_output(
+                CmdRequest::CryptsetupLuksUuid {
+                    device: "/dev/disk/by-id/virtio-old".into(),
+                },
+                cryptsetup_uuid_ok(
+                    "/dev/disk/by-id/virtio-old",
+                    "22222222-2222-2222-2222-222222222222",
+                ),
+            )
+            .with_output(
                 CmdRequest::BtrfsFilesystemResize {
                     devid: 2,
                     mount_point: MountPoint("/mnt/storage".into()),
@@ -10631,7 +10652,6 @@ mod tests {
                 &uuid_for_name("new"),
                 &disk_name("new"),
                 source,
-                &fs,
                 false,
                 false,
             )
@@ -10652,6 +10672,257 @@ mod tests {
         );
     }
 
+    // Intent: direct post-maintenance replace recovery treats an inactive old
+    //   mapper as an already-closed no-op.
+    // Why it exists: recovery replays after crashes that may happen after the
+    //   live close but before journal clear; that path must stay silent while
+    //   still finishing resize and journal cleanup.
+    // Scenario: replace committed, braid-old is already closed, and recovery
+    //   re-runs PostReplaceMaintenance directly without a remount cycle.
+    #[test]
+    fn recover_replace_old_close_inactive_silently_skips() {
+        let f = PoolFixture::empty();
+        let journal = replace_post_maintenance_journal(
+            false,
+            journal::ReplaceJournalSource::Live {
+                old_devid: 2,
+                old_mapper: MapperName("braid-old".into()),
+            },
+        );
+        journal::write_journal(&f.paths, &journal).unwrap();
+        let runner = MockRunner::default()
+            .with_output(
+                CmdRequest::CryptsetupStatus {
+                    mapper: MapperName("braid-old".into()),
+                },
+                inactive_mapper_status("braid-old"),
+            )
+            .with_output(
+                CmdRequest::BtrfsFilesystemResize {
+                    devid: 2,
+                    mount_point: MountPoint("/mnt/storage".into()),
+                },
+                ok_raw_empty("btrfs filesystem resize"),
+            );
+        let resolver = resolver_for(&[("/dev/vda", "virtio-disk1"), ("/dev/vdc", "virtio-new")]);
+        let params = f
+            .recover_params()
+            .passphrase_file(None)
+            .sleep_inhibitor(&f.inhibitor)
+            .build();
+        let OpKind::Replace { source, .. } = &journal.op else {
+            unreachable!("replace_journal_in_phase returns Replace");
+        };
+
+        let captured = crate::status_tag::testing::capture_with_color(false, || {
+            execute_replace_post_maintenance_recovery(
+                &runner,
+                &progress::NoopSleeper,
+                &resolver,
+                &params,
+                &journal,
+                pool_state_disk1_and_new(),
+                &uuid_for_name("new"),
+                &disk_name("new"),
+                source,
+                false,
+                false,
+            )
+            .expect("inactive old mapper should skip close and finish recovery");
+        });
+
+        let requests = runner.requests();
+        assert!(
+            !requests.iter().any(|r| matches!(
+                r,
+                CmdRequest::CryptsetupClose { mapper } if mapper.as_str() == "braid-old"
+            )),
+            "already-closed old mapper must not be closed again: {requests:?}"
+        );
+        assert!(
+            requests
+                .iter()
+                .any(|r| matches!(r, CmdRequest::BtrfsFilesystemResize { devid: 2, .. })),
+            "resize must still replay after inactive close skip: {requests:?}"
+        );
+        assert!(
+            !captured.contains("Warning: post-commit close skipped"),
+            "recovery inactive skip must stay silent: {captured:?}"
+        );
+        assert!(!f.paths.pending_op_json().exists());
+    }
+
+    // Intent: direct post-maintenance replace recovery skips closing a foreign
+    //   disk that appears under the old mapper name.
+    // Why it exists: recovery must mirror live replace's UUID authority so an
+    //   operator-opened foreign dm slot is not torn down during replay.
+    // Scenario: replace committed, but before recovery runs a foreign disk is
+    //   opened as braid-old; recovery warns, skips close, resizes, and clears.
+    #[test]
+    fn recover_replace_old_close_foreign_mapper_warns_and_skips() {
+        let f = PoolFixture::empty();
+        let journal = replace_post_maintenance_journal(
+            false,
+            journal::ReplaceJournalSource::Live {
+                old_devid: 2,
+                old_mapper: MapperName("braid-old".into()),
+            },
+        );
+        journal::write_journal(&f.paths, &journal).unwrap();
+        let runner = MockRunner::default()
+            .with_output(
+                CmdRequest::CryptsetupStatus {
+                    mapper: MapperName("braid-old".into()),
+                },
+                cryptsetup_status_active("braid-old", "/dev/vdf"),
+            )
+            .with_output(
+                CmdRequest::CryptsetupLuksUuid {
+                    device: "/dev/vdf".into(),
+                },
+                cryptsetup_uuid_ok("/dev/vdf", "99999999-9999-9999-9999-999999999999"),
+            )
+            .with_output(
+                CmdRequest::BtrfsFilesystemResize {
+                    devid: 2,
+                    mount_point: MountPoint("/mnt/storage".into()),
+                },
+                ok_raw_empty("btrfs filesystem resize"),
+            );
+        let resolver = resolver_for(&[("/dev/vda", "virtio-disk1"), ("/dev/vdc", "virtio-new")]);
+        let params = f
+            .recover_params()
+            .passphrase_file(None)
+            .sleep_inhibitor(&f.inhibitor)
+            .build();
+        let OpKind::Replace { source, .. } = &journal.op else {
+            unreachable!("replace_journal_in_phase returns Replace");
+        };
+
+        let captured = crate::status_tag::testing::capture_with_color(false, || {
+            execute_replace_post_maintenance_recovery(
+                &runner,
+                &progress::NoopSleeper,
+                &resolver,
+                &params,
+                &journal,
+                pool_state_disk1_and_new(),
+                &uuid_for_name("new"),
+                &disk_name("new"),
+                source,
+                false,
+                false,
+            )
+            .expect("foreign old mapper should skip close and finish recovery");
+        });
+
+        let requests = runner.requests();
+        assert!(
+            !requests.iter().any(|r| matches!(
+                r,
+                CmdRequest::CryptsetupClose { mapper } if mapper.as_str() == "braid-old"
+            )),
+            "foreign old mapper must not be closed: {requests:?}"
+        );
+        assert!(
+            requests
+                .iter()
+                .any(|r| matches!(r, CmdRequest::BtrfsFilesystemResize { devid: 2, .. })),
+            "resize must still replay after foreign close skip: {requests:?}"
+        );
+        assert!(
+            captured.contains(
+                "Warning: post-commit close skipped for mapper braid-old: \
+                 expected LUKS UUID 22222222-2222-2222-2222-222222222222 \
+                 but observed 99999999-9999-9999-9999-999999999999\n"
+            ),
+            "foreign close skip must warn with both UUIDs: {captured:?}"
+        );
+        assert!(!f.paths.pending_op_json().exists());
+    }
+
+    // Intent: direct post-maintenance replace recovery closes an owned active
+    //   mapper even when the `/dev/mapper` path node is absent.
+    // Why it exists: dm/cryptsetup status is the close authority; path
+    //   existence is only a weaker observable and must not gate recovery.
+    // Scenario: replace committed, braid-old is active by dm name with the
+    //   expected old UUID, but `/dev/mapper/braid-old` is missing.
+    #[test]
+    fn recover_replace_old_close_owned_mapper_without_path_node_closes() {
+        let f = PoolFixture::empty();
+        let journal = replace_post_maintenance_journal(
+            false,
+            journal::ReplaceJournalSource::Live {
+                old_devid: 2,
+                old_mapper: MapperName("braid-old".into()),
+            },
+        );
+        journal::write_journal(&f.paths, &journal).unwrap();
+        let runner = MockRunner::default()
+            .with_output(
+                CmdRequest::CryptsetupStatus {
+                    mapper: MapperName("braid-old".into()),
+                },
+                cryptsetup_status_active("braid-old", "/dev/disk/by-id/virtio-old"),
+            )
+            .with_output(
+                CmdRequest::CryptsetupLuksUuid {
+                    device: "/dev/disk/by-id/virtio-old".into(),
+                },
+                cryptsetup_uuid_ok(
+                    "/dev/disk/by-id/virtio-old",
+                    "22222222-2222-2222-2222-222222222222",
+                ),
+            )
+            .with_output(
+                CmdRequest::CryptsetupClose {
+                    mapper: MapperName("braid-old".into()),
+                },
+                ok_raw_empty("cryptsetup close braid-old"),
+            )
+            .with_output(
+                CmdRequest::BtrfsFilesystemResize {
+                    devid: 2,
+                    mount_point: MountPoint("/mnt/storage".into()),
+                },
+                ok_raw_empty("btrfs filesystem resize"),
+            );
+        let resolver = resolver_for(&[("/dev/vda", "virtio-disk1"), ("/dev/vdc", "virtio-new")]);
+        let params = f
+            .recover_params()
+            .passphrase_file(None)
+            .sleep_inhibitor(&f.inhibitor)
+            .build();
+        let OpKind::Replace { source, .. } = &journal.op else {
+            unreachable!("replace_journal_in_phase returns Replace");
+        };
+
+        execute_replace_post_maintenance_recovery(
+            &runner,
+            &progress::NoopSleeper,
+            &resolver,
+            &params,
+            &journal,
+            pool_state_disk1_and_new(),
+            &uuid_for_name("new"),
+            &disk_name("new"),
+            source,
+            false,
+            false,
+        )
+        .expect("owned old mapper should close even without a path node");
+
+        let close_count = runner
+            .requests()
+            .iter()
+            .filter(|request| {
+                matches!(request, CmdRequest::CryptsetupClose { mapper } if mapper.as_str() == "braid-old")
+            })
+            .count();
+        assert_eq!(close_count, 1, "owned active old mapper must close");
+        assert!(!f.paths.pending_op_json().exists());
+    }
+
     // Intent: Replace::PostReplaceMaintenance runs owed RAID1 maintenance
     // when the journal says the committed replace cleared the last missing
     // device.
@@ -10663,7 +10934,6 @@ mod tests {
     #[test]
     fn replace_post_maintenance_runs_owed_balance() {
         let f = PoolFixture::empty();
-        let fs = MockFs::new(&[]);
         let journal = replace_post_maintenance_journal(
             true,
             journal::ReplaceJournalSource::Missing { old_devid: 2 },
@@ -10696,7 +10966,6 @@ mod tests {
             &uuid_for_name("new"),
             &disk_name("new"),
             source,
-            &fs,
             true,
             false,
         )
@@ -10978,7 +11247,6 @@ mod tests {
     #[test]
     fn replace_post_maintenance_inhibitor_failure_preserves_journal() {
         let f = PoolFixture::empty();
-        let fs = MockFs::new(&["/dev/mapper/braid-old"]);
         let journal = replace_post_maintenance_journal(
             true,
             journal::ReplaceJournalSource::Live {
@@ -11009,7 +11277,6 @@ mod tests {
             &uuid_for_name("new"),
             &disk_name("new"),
             source,
-            &fs,
             true,
             false,
         )
@@ -12559,6 +12826,16 @@ mod tests {
         assert!(
             close_count >= 3,
             "expected at least 3 CryptsetupClose calls (cycle close set), got {close_count}"
+        );
+        let old_close_count = requests
+            .iter()
+            .filter(|r| {
+                matches!(r, CmdRequest::CryptsetupClose { mapper } if mapper.as_str() == "braid-old")
+            })
+            .count();
+        assert_eq!(
+            old_close_count, 2,
+            "braid-old should close once in the cycle and once in post-maintenance"
         );
         let reopen_count = requests
             .iter()
@@ -15368,6 +15645,12 @@ mod tests {
                 },
                 cryptsetup_uuid_ok("/dev/vdc", "33333333-3333-3333-3333-333333333333"),
             )
+            .with_output(
+                CmdRequest::CryptsetupStatus {
+                    mapper: MapperName("braid-old".into()),
+                },
+                cryptsetup_status_active("braid-old", "/dev/disk/by-id/virtio-old"),
+            )
             // ── execute_replace_post_maintenance_recovery ───────────────
             // Resize-to-max on the new device's devid (2). Load-bearing
             // assertion: without this mock the test fails with MissingMock,
@@ -15437,6 +15720,16 @@ mod tests {
         assert!(
             !f.paths.pending_op_json().exists(),
             "journal must be cleared after a successful resize replay"
+        );
+        let old_close_count = requests
+            .iter()
+            .filter(|r| {
+                matches!(r, CmdRequest::CryptsetupClose { mapper } if mapper.as_str() == "braid-old")
+            })
+            .count();
+        assert_eq!(
+            old_close_count, 2,
+            "braid-old should close once in the cycle and once in post-maintenance"
         );
         assert!(
             !requests.iter().any(|r| matches!(

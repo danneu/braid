@@ -195,6 +195,9 @@ one.
 - `cli/src/replace.rs` unit tests verify `ReplacePlan::execute` re-probes the
   live pool before journal write, rejects unmounted/FSID-drifted/colliding
   live-pool state, and still proceeds when the fresh probe is clean.
+- `cli/src/recover.rs` unit tests verify post-maintenance replace recovery
+  re-probes the old mapper UUID before close, skips foreign mappers, and still
+  closes owned active dm mappings without relying on `/dev/mapper` path nodes.
 - `cli/src/luks.rs` and `cli/src/probe.rs` unit tests verify already-open
   expected mappers must have the requested backing path before UUID ownership
   is accepted.
