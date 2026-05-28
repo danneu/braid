@@ -59,7 +59,7 @@ sudo braid discover --write --expect-count 3
 
 1. With `--write`, refuses if a pending operation journal (`pending-op.json`) exists. Bare `discover` is read-only and skips this gate.
 2. Refuses over an existing UUID-keyed `pool.json` (bare and `--write`). A corrupt or off-schema `pool.json` is the documented rebuild path: bare `discover` prints the rebuild remediation, and `discover --write` writes a forensic `pool.json.corrupt-<RFC3339-UTC>` snapshot adjacent to the new file, then rebuilds. If the snapshot cannot be written (full disk, read-only state directory), `discover --write` refuses rather than destroy the corrupt original.
-3. Reads all entries in `/dev/disk/by-id/`, skipping partition entries (e.g., `ata-TOSHIBA-part1`).
+3. Reads all entries in `/dev/disk/by-id/` in sorted filename order, skipping partition entries (e.g., `ata-TOSHIBA-part1`). Sorting up front makes label-collision reporting (step 10) independent of `read_dir` order.
 4. Resolves each by-id symlink to its canonical kernel device. Skips with a `cannot canonicalize` warning when the symlink is dangling (e.g., udev didn't clean up after a disk removal).
 5. For each entry, runs `cryptsetup isLuks` to check if it's a LUKS device.
 6. Runs `cryptsetup luksDump` to read the LUKS label, version, and UUID.
