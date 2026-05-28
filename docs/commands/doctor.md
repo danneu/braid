@@ -24,13 +24,19 @@ Output:
 [ok]   config perms    /etc/braid/config.json permissions ok
 [ok]   declared disks  all 3 declared disks present
 [ok]   missing devs    no missing devices
+[ok]   enospc risk     per-device unallocated space healthy
+[ok]   foreign uuids   no foreign LUKS UUIDs in live pool
 [ok]   data profiles   data profile: RAID1
 [ok]   meta profiles   metadata profile: RAID1
+[ok]   system profiles  system profile: RAID1
 [ok]   meta pressure   metadata pressure within bounds
+[ok]   paused balance  no paused balance
 [ok]   smart selftest disk1  passed ~2 days ago
 [ok]   smart selftest disk2  passed ~12 days ago
 [ok]   smart selftest disk3  passed ~30 days ago
 [skip] alert beep      skipped (pass --beep to play the audible alert test beep)
+[skip] ups daemon      skipped (braid.ups not enabled)
+[skip] braid-online    skipped (braid.ups not enabled)
 ```
 
 The SMART self-test check emits one row per pool drive. If a drive has no recent completed self-test, the row includes a paste-ready smartctl command:
