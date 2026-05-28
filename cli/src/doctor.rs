@@ -3350,6 +3350,41 @@ mod tests {
         );
     }
 
+    // Intent: when a UUID mismatch coexists with any other warn-level problem,
+    //   the declared_disks check still reports Fail.
+    // Why it exists: the severity rule must remain "Fail iff uuid_mismatch is
+    //   non-empty"; pairing the mismatch only with a healthy disk would miss a
+    //   regression that makes mismatch fail only when it is the sole problem.
+    // Scenario: a degraded NAS has one swapped declared disk and another disk
+    //   with damaged LUKS metadata before any mutating command runs.
+    #[test]
+    fn summarize_declared_disks_fail_dominates_warn_level_problems() {
+        let expected = test_uuid(1);
+        let observed = test_uuid(2);
+        let inputs = [
+            cls(
+                "disk1",
+                "/dev/disk/by-id/wwn-0x1",
+                DiskState::LuksUuidMismatch {
+                    expected: expected.clone(),
+                    observed: observed.clone(),
+                },
+            ),
+            cls(
+                "disk2",
+                "/dev/disk/by-id/wwn-0x2",
+                DiskState::LuksHeaderDamaged,
+            ),
+        ];
+
+        let result = summarize_declared_disks(&inputs);
+
+        assert_eq!(result.status, CheckStatus::Fail);
+        let msg = &result.message;
+        assert!(msg.contains("disk1"), "missing disk1: {msg}");
+        assert!(msg.contains("disk2"), "missing disk2: {msg}");
+    }
+
     #[test]
     fn summarize_preserves_missing_and_not_block_messages() {
         /*
