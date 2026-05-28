@@ -680,6 +680,53 @@ mod tests {
         );
     }
 
+    // Intent: A fully healthy cycle -- probe ok, stats ok, no smartd flag --
+    //   still loads, merges, and re-persists a pre-existing active latch, so
+    //   an alert survives until braid ack even after the triggering condition
+    //   resolves.
+    // Why it exists: ADR 014's sticky-latch invariant is pinned at cmd_monitor
+    //   level only via stats_failure_merges_existing_non_computation_latch_once,
+    //   which exercises the failure-detail branch.
+    //   merge_no_new_causes_carries_forward_latched covers the helper in
+    //   isolation. A regression that gated merge_into_latch on
+    //   failure_detail.is_some(), passed None for existing_latch on the success
+    //   branch, or skipped the latch load entirely would compile and pass every
+    //   other monitor unit test while silently violating latched-until-ack on a
+    //   recovered pool.
+    // Scenario: a prior cycle latched MissingDevice { devid: 7 }, then the next
+    //   cycle finds the pool healthy -- btrfs reports the same two members with
+    //   zero counters, no smartd flag, no probe failure. monitor must return
+    //   MonitorResult::Alert carrying MissingDevice { devid: 7 } and re-persist
+    //   it so alert-latch.json reloads to the returned state.
+    #[test]
+    fn healthy_cycle_carries_forward_existing_non_computation_latch() {
+        let (_dir, paths) = isolated_paths();
+        let existing = alert::AlertState {
+            causes: vec![AlertCause::MissingDevice { devid: 7 }],
+        };
+        alert::save_alert_latch(&existing, &paths).unwrap();
+
+        let result = cmd_monitor(
+            &MonitorTestRunner::with_stale_mapper_stats(),
+            &monitor_fs_btrfs(),
+            &monitor_mp(),
+            &paths,
+        );
+
+        let state = alert_state(&result);
+        assert_eq!(
+            state.causes,
+            vec![AlertCause::MissingDevice { devid: 7 }],
+            "healthy cycle must carry forward the latched cause unchanged"
+        );
+
+        let saved = alert::load_alert_latch(&paths).unwrap().unwrap();
+        assert_eq!(
+            &saved, state,
+            "saved latch must match returned monitor alert"
+        );
+    }
+
     /*
      * Intent: When mountinfo reports the mount target is held by a non-btrfs
      * filesystem, cmd_monitor must return MonitorResult::PoolOffline and
