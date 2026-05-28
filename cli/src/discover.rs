@@ -18,6 +18,11 @@ pub enum DiscoverError {
     Cmd(#[from] crate::cmd::CmdError),
     #[error("failed to read /dev/disk/by-id: {0}")]
     ReadDir(#[source] std::io::Error),
+    /// Defensive post-discover-precheck insert backstop for logic bugs,
+    /// separate from reachable duplicate-disk paths (`DuplicateUuid` and
+    /// `LabelCollision`) that discover reports before membership insertion.
+    #[error("membership insert failed after discover pre-checks: {0}")]
+    MembershipInsert(#[source] crate::membership::MembershipError),
     #[error(
         "label collision: braid-{name} found on two distinct devices ({path1}, {path2}) -- relabel or detach one before retrying"
     )]
@@ -545,19 +550,17 @@ fn discover_from_dir_inner<R: CommandRunner>(
     // (axis-1 UUID + axis-2 name + axis-3 by-id) even though the
     // pre-pass above has just narrowed the duplicate-UUID case.
     let mut membership = PoolMembership::empty();
+    // Unreachable: insert's four axes are all pre-satisfied here. Axis 1
+    // (UUID) by the seen_uuids pre-pass above; axis 2 (name) by members
+    // being keyed on DiskName; axis 3 (by-id) by read_dir yielding unique
+    // directory entries; axis 4 (devid) by DiskMember::new starting with
+    // devid: None. Wrap defensively so any future regression surfaces the
+    // MembershipError text verbatim.
     for (name, cand) in members {
         let member = DiskMember::new(name, cand.by_id);
-        membership.insert(cand.luks_uuid, member).map_err(|e| {
-            // Unreachable: insert's four axes are all pre-satisfied here. Axis 1
-            // (UUID) by the seen_uuids pre-pass above; axis 2 (name) by members
-            // being keyed on DiskName; axis 3 (by-id) by read_dir yielding unique
-            // directory entries; axis 4 (devid) by DiskMember::new starting with
-            // devid: None. Wrap defensively so any future regression surfaces the
-            // MembershipError text verbatim.
-            DiscoverError::ReadDir(std::io::Error::other(format!(
-                "membership insert failed after discover pre-checks: {e}"
-            )))
-        })?;
+        membership
+            .insert(cand.luks_uuid, member)
+            .map_err(DiscoverError::MembershipInsert)?;
     }
 
     Ok(membership)
