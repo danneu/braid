@@ -5,7 +5,7 @@ use crate::progress::{
     run_with_progress,
 };
 use crate::repair_hint;
-use crate::status_tag::{StatusTag, color_enabled_for_stderr, status_line};
+use crate::status_tag::{StatusTag, color_enabled_for_stderr, emit_status, status_line};
 use crate::types::{LuksUuid, MapperName, MountPoint};
 use std::collections::BTreeMap;
 
@@ -471,25 +471,25 @@ pub fn maybe_restore_raid1<R: CommandRunner + Sync, F: Filesystem + ?Sized>(
     }
     let pool_after = probe_pool(runner, fs, mount_point)
         .map_err(|e| PoolError::Failed(format!("post-operation pool probe failed: {e}")))?;
+    let color_enabled = color_enabled_for_stderr();
     if pool_after.missing_count == 0 && pool_after.devices.len() >= 2 {
-        let color_enabled = color_enabled_for_stderr();
-        eprint!(
-            "{}",
-            status_line(
-                StatusTag::Wait,
-                color_enabled,
-                "pool: restoring RAID1 redundancy...",
-            )
-        );
+        emit_status(&status_line(
+            StatusTag::Wait,
+            color_enabled,
+            "pool: restoring RAID1 redundancy...",
+        ));
         pool_balance_raid1_soft(runner, mount_point, progress)?;
-        eprint!(
-            "{}",
-            status_line(
-                StatusTag::Ok,
-                color_enabled,
-                "pool: RAID1 redundancy restored",
-            )
-        );
+        emit_status(&status_line(
+            StatusTag::Ok,
+            color_enabled,
+            "pool: RAID1 redundancy restored",
+        ));
+    } else {
+        emit_status(&status_line(
+            StatusTag::Skip,
+            color_enabled,
+            "pool: rebalance skipped -- redundancy not restored",
+        ));
     }
     Ok(())
 }
@@ -1171,8 +1171,22 @@ mod tests {
     // Scenario: 4-disk pool had 2 missing, operator removes 1, 1 still missing.
     fn maybe_restore_raid1_skips_when_still_degraded() {
         let runner = RestoreRunner::new(1, 2); // post-op: 1 still missing
-        let result = maybe_restore_raid1(&runner, &RestoreFs, &mp(), 2, ProgressOutput::Off);
+        let mut result = None;
+        let captured = crate::status_tag::testing::capture_with_color(false, || {
+            result = Some(maybe_restore_raid1(
+                &runner,
+                &RestoreFs,
+                &mp(),
+                2,
+                ProgressOutput::Off,
+            ));
+        });
+        let result = result.expect("maybe_restore_raid1 should run");
         assert!(result.is_ok(), "should succeed: {result:?}");
+        assert_eq!(
+            captured,
+            "[skip] pool: rebalance skipped -- redundancy not restored\n"
+        );
         assert!(
             !runner
                 .calls()

@@ -674,7 +674,7 @@ fn format_remove_missing_confirm(
         name, devid
     ));
     if missing_count == 1 && remaining_present >= 2 {
-        msg.push_str("  Data on remaining disks will be rebalanced.\n");
+        msg.push_str("  Data on remaining disks will be rebalanced if redundancy is restored.\n");
     } else if missing_count == 1 {
         msg.push_str("  Surviving disk already has all data.\n");
     } else {
@@ -2438,7 +2438,7 @@ mod tests {
         assert!(msg.contains("toshiba (devid 2)"));
         assert!(msg.contains("missing"));
         assert!(msg.contains("no hardware info available"));
-        assert!(msg.contains("rebalanced"));
+        assert!(msg.contains("rebalanced if redundancy is restored"));
         assert!(msg.contains("2 present + 1 missing -> 2 disks"));
     }
 
