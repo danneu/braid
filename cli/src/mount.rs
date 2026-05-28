@@ -630,9 +630,8 @@ fn open_disks_with_credential<R: CommandRunner>(
 ///
 /// Returns `Ok(true)` once the mount succeeds. (Callers detect the
 /// already-mounted case earlier, by `plan_open_pool` returning `None`.)
-pub fn execute_mount_only<R: CommandRunner, F: Filesystem + ?Sized>(
+pub fn execute_mount_only<R: CommandRunner>(
     runner: &R,
-    fs: &F,
     config: &Config,
     plan: &OpenPlan,
 ) -> Result<bool, MountError> {
@@ -642,7 +641,7 @@ pub fn execute_mount_only<R: CommandRunner, F: Filesystem + ?Sized>(
         ));
     }
     let color_enabled = color_enabled_for_stderr();
-    scan_and_mount(runner, fs, config, plan, color_enabled)
+    scan_and_mount(runner, config, plan, color_enabled)
 }
 
 /// Execute a pre-built `OpenPlan` that has disks to unlock.
@@ -659,9 +658,8 @@ pub fn execute_mount_only<R: CommandRunner, F: Filesystem + ?Sized>(
 /// caller invokes first. This function does NOT plan; it only executes.
 ///
 /// Returns `Ok(true)` once the mount succeeds.
-pub fn execute_unlock_and_mount<R: CommandRunner, F: Filesystem + ?Sized>(
+pub fn execute_unlock_and_mount<R: CommandRunner>(
     runner: &R,
-    fs: &F,
     config: &Config,
     plan: &OpenPlan,
     backing_path_resolver: &dyn BackingPathResolver,
@@ -692,7 +690,7 @@ pub fn execute_unlock_and_mount<R: CommandRunner, F: Filesystem + ?Sized>(
         opened_mappers: opened_mappers.clone(),
     })?;
 
-    scan_and_mount(runner, fs, config, plan, color_enabled).map_err(|error| UnlockAndMountFailure {
+    scan_and_mount(runner, config, plan, color_enabled).map_err(|error| UnlockAndMountFailure {
         error,
         opened_mappers,
     })
@@ -796,9 +794,8 @@ where
 /// Shared tail for both execute entry points: btrfs device scan, ensure the
 /// mount point exists, then mount (with `degraded` when any membership disk
 /// is missing).
-fn scan_and_mount<R: CommandRunner, F: Filesystem + ?Sized>(
+fn scan_and_mount<R: CommandRunner>(
     runner: &R,
-    _fs: &F,
     config: &Config,
     plan: &OpenPlan,
     color_enabled: bool,
@@ -906,7 +903,6 @@ mod tests {
     #[test]
     fn execute_unlock_and_mount_rejects_empty_plan() {
         let config = test_config();
-        let fs = mount_fs(&[]);
         // Runner with no outputs wired — if the guard lets us through,
         // the first real command (btrfs device scan or cryptsetup verify)
         // will panic on lookup, which would also fail the test.
@@ -922,7 +918,6 @@ mod tests {
         let cred = test_passphrase();
         let res = execute_unlock_and_mount(
             &runner,
-            &fs,
             &config,
             &plan,
             crate::test_fixtures::mock_virtio_backing_path_resolver(),
@@ -964,7 +959,6 @@ mod tests {
     #[test]
     fn execute_mount_only_rejects_non_empty_plan() {
         let config = test_config();
-        let fs = mount_fs(&[]);
         let runner = MockRunner::default();
 
         let plan = OpenPlan {
@@ -977,7 +971,7 @@ mod tests {
             mount_device: "/dev/mapper/braid-disk1".to_owned(),
         };
 
-        let res = execute_mount_only(&runner, &fs, &config, &plan);
+        let res = execute_mount_only(&runner, &config, &plan);
         match res {
             Err(MountError::Failed(msg)) => {
                 assert!(
@@ -2667,7 +2661,6 @@ pool already mounted at /mnt/storage
 
         let failure = execute_unlock_and_mount(
             &runner,
-            &fs,
             &config,
             &plan,
             crate::test_fixtures::mock_virtio_backing_path_resolver(),
@@ -2716,7 +2709,6 @@ pool already mounted at /mnt/storage
     #[test]
     fn unlock_scan_failure_reports_opened_mappers_for_cleanup() {
         let config = test_config();
-        let fs = direct_two_disk_fs_with_mappers();
         let plan = direct_two_disk_plan();
         let runner = direct_two_disk_open_runner().with_output(
             CmdRequest::BtrfsDeviceScanAll,
@@ -2727,7 +2719,6 @@ pool already mounted at /mnt/storage
             .with_path("/dev/disk/by-id/virtio-disk1", "/dev/vdb");
         let failure = execute_unlock_and_mount(
             &runner,
-            &fs,
             &config,
             &plan,
             &backing_path_resolver,
@@ -2824,7 +2815,6 @@ pool already mounted at /mnt/storage
             .with_path("/dev/disk/by-id/virtio-disk1", "/dev/vdb");
         let failure = execute_unlock_and_mount(
             &runner,
-            &fs,
             &config,
             &plan,
             &backing_path_resolver,
@@ -2885,7 +2875,6 @@ pool already mounted at /mnt/storage
 
         let failure = execute_unlock_and_mount(
             &runner,
-            &fs,
             &config,
             &plan,
             crate::test_fixtures::mock_virtio_backing_path_resolver(),
@@ -2982,7 +2971,6 @@ pool already mounted at /mnt/storage
 
         let failure = execute_unlock_and_mount(
             &runner,
-            &fs,
             &config,
             &plan,
             crate::test_fixtures::mock_virtio_backing_path_resolver(),
@@ -3021,7 +3009,6 @@ pool already mounted at /mnt/storage
     #[test]
     fn non_first_disk_verify_rejection_opens_no_mapper() {
         let config = test_config();
-        let fs = direct_two_disk_fs_with_mappers();
         let plan = direct_two_disk_plan();
         let disk1 = "/dev/disk/by-id/virtio-disk1";
         let disk2 = "/dev/disk/by-id/virtio-disk2";
@@ -3043,7 +3030,6 @@ pool already mounted at /mnt/storage
 
         let failure = execute_unlock_and_mount(
             &runner,
-            &fs,
             &config,
             &plan,
             crate::test_fixtures::mock_virtio_backing_path_resolver(),
@@ -3149,7 +3135,6 @@ pool already mounted at /mnt/storage
 
         let failure = execute_unlock_and_mount(
             &runner,
-            &fs,
             &config,
             &plan,
             crate::test_fixtures::mock_virtio_backing_path_resolver(),

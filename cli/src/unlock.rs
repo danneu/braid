@@ -100,7 +100,7 @@ impl UnlockPlan {
         // open_and_mount_pool. Pinned by
         // cmd_unlock_skips_credential_resolution_when_nothing_to_unlock.
         if plan.to_unlock.is_empty() {
-            mount::execute_mount_only(runner, fs, params.config, &plan)?;
+            mount::execute_mount_only(runner, params.config, &plan)?;
         } else {
             let credential = crate::credential::resolve_credential(
                 params.passphrase_stdin,
@@ -110,7 +110,6 @@ impl UnlockPlan {
             .map_err(MountError::from)?;
             match mount::execute_unlock_and_mount(
                 runner,
-                fs,
                 params.config,
                 &plan,
                 params.backing_path_resolver,

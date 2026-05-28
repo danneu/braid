@@ -514,7 +514,7 @@ pub fn plan_remove<R: CommandRunner + Sync, F: Filesystem + ?Sized>(
 
     // Preflight
     let fsid = pool.fsid.as_deref().expect("mounted pool must have FSID");
-    match preflight::require_mutation_preflight(runner, fs, fsid, config.mount_point()) {
+    match preflight::require_mutation_preflight(fs, fsid, config.mount_point()) {
         Ok(preflight_notes) => notes.extend(preflight_notes),
         Err(msg) => return Err(PlanFailure::empty(RemoveError::Validation(msg))),
     }

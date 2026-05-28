@@ -1225,7 +1225,7 @@ where
 
     // Preflight
     let fsid = pool.fsid.as_deref().expect("mounted pool must have FSID");
-    match preflight::require_mutation_preflight(runner, fs, fsid, config.mount_point()) {
+    match preflight::require_mutation_preflight(fs, fsid, config.mount_point()) {
         Ok(preflight_notes) => notes.extend(preflight_notes),
         Err(msg) => return Err(PlanFailure::empty(ReplaceError::Validation(msg))),
     }
@@ -1286,13 +1286,11 @@ where
     // `PoolDevice.luks_uuid == old_uuid`; the observed `mapper` is cloned
     // from the matched device, not reconstructed from the resolved name.
     let replace_source = match resolve_replace_source(
-        runner,
         &old_name_parsed,
         &old_uuid,
         &old_member,
         params.missing_id,
         &pool,
-        config.mount_point(),
     ) {
         Ok(v) => v,
         Err(e) => {
@@ -1669,14 +1667,12 @@ fn build_replace_journal_target(
 ///   - Missing arm: cross-check `old_member.devid` against the resolved
 ///     btrfs missing devid; reject any disagreement and reject any
 ///     `--old` whose persisted member has no devid.
-fn resolve_replace_source<R: CommandRunner>(
-    _runner: &R,
+fn resolve_replace_source(
     old_name: &DiskName,
     old_uuid: &LuksUuid,
     old_member: &membership::DiskMember,
     missing_id: Option<u64>,
     pool: &PoolState,
-    _mount_point: &MountPoint,
 ) -> Result<ReplaceSource, ReplaceError> {
     // Pattern 4: find by UUID, not by reconstructed mapper.
     if let Some(matched) = pool.devices.iter().find(|d| d.luks_uuid == *old_uuid) {
@@ -2249,17 +2245,8 @@ mod tests {
     // Scenario: operator swaps a slow-but-alive drive for a faster one.
     fn live_old_resolution_succeeds_no_missing() {
         let pool = two_device_pool();
-        let runner = MockRunner::default();
         let (uuid, member) = disk2_member_for_two_device_pool();
-        let result = resolve_replace_source(
-            &runner,
-            &disk_name("disk2"),
-            &uuid,
-            &member,
-            None,
-            &pool,
-            &mp(),
-        );
+        let result = resolve_replace_source(&disk_name("disk2"), &uuid, &member, None, &pool);
         assert!(
             matches!(result, Ok(ReplaceSource::Live { .. })),
             "expected Live target, got: {result:?}"
@@ -2272,18 +2259,9 @@ mod tests {
     // Scenario: operator passes --missing-id when old disk is still alive.
     fn live_old_with_missing_id_rejects() {
         let pool = two_device_pool();
-        let runner = MockRunner::default();
         let (uuid, member) = disk2_member_for_two_device_pool();
-        let err = resolve_replace_source(
-            &runner,
-            &disk_name("disk2"),
-            &uuid,
-            &member,
-            Some(99),
-            &pool,
-            &mp(),
-        )
-        .unwrap_err();
+        let err = resolve_replace_source(&disk_name("disk2"), &uuid, &member, Some(99), &pool)
+            .unwrap_err();
         assert!(
             err.to_string().contains("--missing-id cannot be used"),
             "unexpected error: {err}"
@@ -2298,18 +2276,9 @@ mod tests {
         let mut pool = two_device_pool();
         pool.missing_count = 1;
         pool.total_devices = 3;
-        let runner = MockRunner::default();
         let (uuid, member) = disk2_member_for_two_device_pool();
-        let err = resolve_replace_source(
-            &runner,
-            &disk_name("disk2"),
-            &uuid,
-            &member,
-            None,
-            &pool,
-            &mp(),
-        )
-        .unwrap_err();
+        let err =
+            resolve_replace_source(&disk_name("disk2"), &uuid, &member, None, &pool).unwrap_err();
         assert!(
             err.to_string().contains("missing device"),
             "unexpected error: {err}"
@@ -2522,17 +2491,8 @@ mod tests {
         pool.missing_count = 1;
         pool.total_devices = 2;
         pool.missing_devids = vec![2];
-        let runner = MockRunner::default();
         let (uuid, member) = disk2_member_for_two_device_pool();
-        let result = resolve_replace_source(
-            &runner,
-            &disk_name("disk2"),
-            &uuid,
-            &member,
-            None,
-            &pool,
-            &mp(),
-        );
+        let result = resolve_replace_source(&disk_name("disk2"), &uuid, &member, None, &pool);
         assert!(
             matches!(result, Ok(ReplaceSource::Missing { devid: 2 })),
             "expected Missing {{ devid: 2 }}, got: {result:?}"
@@ -2551,17 +2511,8 @@ mod tests {
         pool.missing_count = 1;
         pool.total_devices = 2;
         pool.missing_devids = vec![2];
-        let runner = MockRunner::default();
         let (uuid, member) = disk2_member_for_two_device_pool();
-        let result = resolve_replace_source(
-            &runner,
-            &disk_name("disk2"),
-            &uuid,
-            &member,
-            Some(2),
-            &pool,
-            &mp(),
-        );
+        let result = resolve_replace_source(&disk_name("disk2"), &uuid, &member, Some(2), &pool);
         assert!(
             matches!(result, Ok(ReplaceSource::Missing { devid: 2 })),
             "expected Missing {{ devid: 2 }}, got: {result:?}"
@@ -2584,7 +2535,6 @@ mod tests {
         pool.missing_count = 2;
         pool.total_devices = 3;
         pool.missing_devids = vec![2, 3];
-        let runner = MockRunner::default();
         let uuid = LuksUuid::parse("33333333-3333-3333-3333-333333333333").unwrap();
         let member = membership::DiskMember {
             name: disk_name("disk3"),
@@ -2592,15 +2542,7 @@ mod tests {
             devid: Some(3),
             added_at: None,
         };
-        let result = resolve_replace_source(
-            &runner,
-            &disk_name("disk3"),
-            &uuid,
-            &member,
-            None,
-            &pool,
-            &mp(),
-        );
+        let result = resolve_replace_source(&disk_name("disk3"), &uuid, &member, None, &pool);
         assert!(
             matches!(result, Ok(ReplaceSource::Missing { devid: 3 })),
             "expected Missing {{ devid: 3 }} (persisted devid disambiguates the \
@@ -2622,19 +2564,10 @@ mod tests {
         pool.missing_count = 1;
         pool.total_devices = 2;
         pool.null_underlying.push(null_underlying_device(2));
-        let runner = MockRunner::default();
         let (uuid, member) = disk2_member_for_two_device_pool();
 
-        let err = resolve_replace_source(
-            &runner,
-            &disk_name("disk2"),
-            &uuid,
-            &member,
-            Some(2),
-            &pool,
-            &mp(),
-        )
-        .unwrap_err();
+        let err = resolve_replace_source(&disk_name("disk2"), &uuid, &member, Some(2), &pool)
+            .unwrap_err();
 
         assert_eq!(
             err.to_string(),
@@ -2660,19 +2593,10 @@ mod tests {
         pool.missing_count = 1;
         pool.total_devices = 2;
         pool.null_underlying.push(null_underlying_device(2));
-        let runner = MockRunner::default();
         let (uuid, member) = disk2_member_for_two_device_pool();
 
-        let err = resolve_replace_source(
-            &runner,
-            &disk_name("disk2"),
-            &uuid,
-            &member,
-            None,
-            &pool,
-            &mp(),
-        )
-        .unwrap_err();
+        let err =
+            resolve_replace_source(&disk_name("disk2"), &uuid, &member, None, &pool).unwrap_err();
 
         assert_eq!(
             err.to_string(),
@@ -2698,18 +2622,9 @@ mod tests {
         pool.total_devices = 2;
         pool.missing_devids = vec![2];
         pool.null_underlying.push(null_underlying_device(2));
-        let runner = MockRunner::default();
         let (uuid, member) = disk2_member_for_two_device_pool();
 
-        let result = resolve_replace_source(
-            &runner,
-            &disk_name("disk2"),
-            &uuid,
-            &member,
-            Some(2),
-            &pool,
-            &mp(),
-        );
+        let result = resolve_replace_source(&disk_name("disk2"), &uuid, &member, Some(2), &pool);
 
         assert!(
             matches!(result, Ok(ReplaceSource::Missing { devid: 2 })),
@@ -2728,7 +2643,6 @@ mod tests {
         pool.devices.retain(|d| d.mapper.as_str() != "braid-disk2");
         pool.missing_count = 1;
         pool.total_devices = 2;
-        let runner = MockRunner::default();
         // disk2's persisted member pins devid 1 (the live one) so the
         // operator's --missing-id 1 lines up with the persisted entry --
         // but devid 1 is live in `pool.devices`, so the live-check fires.
@@ -2739,16 +2653,8 @@ mod tests {
             devid: Some(1),
             added_at: None,
         };
-        let err = resolve_replace_source(
-            &runner,
-            &disk_name("disk2"),
-            &uuid,
-            &member,
-            Some(1),
-            &pool,
-            &mp(),
-        )
-        .unwrap_err();
+        let err = resolve_replace_source(&disk_name("disk2"), &uuid, &member, Some(1), &pool)
+            .unwrap_err();
         assert!(
             err.to_string().contains("live device"),
             "expected 'live device' error, got: {err}"
@@ -2768,18 +2674,9 @@ mod tests {
         pool.devices.retain(|d| d.mapper.as_str() != "braid-disk2");
         pool.missing_count = 1;
         pool.total_devices = 2;
-        let runner = MockRunner::default();
         let (uuid, member) = disk2_member_for_two_device_pool();
-        let err = resolve_replace_source(
-            &runner,
-            &disk_name("disk2"),
-            &uuid,
-            &member,
-            Some(99),
-            &pool,
-            &mp(),
-        )
-        .unwrap_err();
+        let err = resolve_replace_source(&disk_name("disk2"), &uuid, &member, Some(99), &pool)
+            .unwrap_err();
         let msg = err.to_string();
         assert!(
             !msg.contains("Some(2)"),
@@ -2822,18 +2719,9 @@ mod tests {
         pool.missing_count = 1;
         pool.total_devices = 2;
         pool.missing_devids = vec![3];
-        let runner = MockRunner::default();
         let (uuid, member) = disk2_member_for_two_device_pool();
-        let err = resolve_replace_source(
-            &runner,
-            &disk_name("disk2"),
-            &uuid,
-            &member,
-            None,
-            &pool,
-            &mp(),
-        )
-        .unwrap_err();
+        let err =
+            resolve_replace_source(&disk_name("disk2"), &uuid, &member, None, &pool).unwrap_err();
         assert!(
             err.to_string()
                 .contains("Pool membership may be out of date"),
@@ -2853,7 +2741,6 @@ mod tests {
         pool.devices.retain(|d| d.mapper.as_str() != "braid-disk2");
         pool.missing_count = 1;
         pool.total_devices = 2;
-        let runner = MockRunner::default();
         let uuid = LuksUuid::parse("22222222-2222-2222-2222-222222222222").unwrap();
         let member = membership::DiskMember {
             name: disk_name("disk2"),
@@ -2861,16 +2748,8 @@ mod tests {
             devid: None,
             added_at: None,
         };
-        let err = resolve_replace_source(
-            &runner,
-            &disk_name("disk2"),
-            &uuid,
-            &member,
-            None,
-            &pool,
-            &mp(),
-        )
-        .unwrap_err();
+        let err =
+            resolve_replace_source(&disk_name("disk2"), &uuid, &member, None, &pool).unwrap_err();
         assert!(
             matches!(err, ReplaceError::OldMemberMissingDevid { .. }),
             "expected OldMemberMissingDevid, got: {err:?}"
@@ -2890,7 +2769,6 @@ mod tests {
         pool.devices.retain(|d| d.mapper.as_str() != "braid-disk2");
         pool.missing_count = 1;
         pool.total_devices = 2;
-        let runner = MockRunner::default();
         let uuid = LuksUuid::parse("22222222-2222-2222-2222-222222222222").unwrap();
         let member = membership::DiskMember {
             name: disk_name("disk2"),
@@ -2898,16 +2776,8 @@ mod tests {
             devid: None,
             added_at: None,
         };
-        let err = resolve_replace_source(
-            &runner,
-            &disk_name("disk2"),
-            &uuid,
-            &member,
-            Some(2),
-            &pool,
-            &mp(),
-        )
-        .unwrap_err();
+        let err = resolve_replace_source(&disk_name("disk2"), &uuid, &member, Some(2), &pool)
+            .unwrap_err();
         assert!(
             matches!(err, ReplaceError::OldMemberMissingDevid { .. }),
             "expected OldMemberMissingDevid, got: {err:?}"
@@ -5235,6 +5105,86 @@ mod tests {
         );
     }
 
+    // Intent: missing-path planning resolves `--old` by persisted member
+    //   name/UUID/devid without probing by-id paths that only look like the
+    //   old name.
+    // Why it exists: the helper-level no-probe assertion became vacuous once
+    //   `resolve_replace_source` stopped receiving a runner. This pins the
+    //   behavior at the command-request boundary that still owns probes.
+    // Scenario: pool.json has `misleading-label` at `/dev/disk/by-id/right`
+    //   and `decoy` at `/dev/disk/by-id/misleading-label`; btrfs reports
+    //   devid 2 missing, and planning must select devid 2 without targeting
+    //   either decoy by-id.
+    #[test]
+    fn plan_replace_missing_path_decoy_does_not_probe_old_by_ids() {
+        let f = PoolFixture::empty();
+        let u_r = LuksUuid::parse("aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaa0600").unwrap();
+        let u_d = LuksUuid::parse("bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbb0601").unwrap();
+        let member_r = membership::DiskMember {
+            name: disk_name("misleading-label"),
+            by_id: ByIdPath::parse("/dev/disk/by-id/right").unwrap(),
+            devid: Some(2),
+            added_at: None,
+        };
+        let member_d = membership::DiskMember {
+            name: disk_name("decoy"),
+            by_id: ByIdPath::parse("/dev/disk/by-id/misleading-label").unwrap(),
+            devid: Some(99),
+            added_at: None,
+        };
+        let pre = membership_from(vec![(u_r, member_r), (u_d, member_d)]);
+        membership::save_membership(&pre, &f.paths).expect("save decoy membership");
+
+        let fs = MockFs::storage(vec!["/dev/disk/by-id/new".into()]);
+        let replace_done = Arc::new(AtomicBool::new(false));
+        let runner = ReplacementPool::one_live_one_missing()
+            .install(MockRunner::default(), replace_done)
+            .with_handler(|req| match req {
+                CmdRequest::CryptsetupLuksUuid { device } if device == "/dev/disk/by-id/new" => {
+                    Some(Ok(RawCommandOutput {
+                        cmd: format!("cryptsetup luksUUID {device}"),
+                        stdout: String::new(),
+                        stderr: "Device is not a valid LUKS device.\n".into(),
+                        exit_status: 1,
+                    }))
+                }
+                CmdRequest::LsblkField {
+                    device,
+                    field: crate::cmd::LsblkFieldKind::Size,
+                } if device == "/dev/disk/by-id/new" => {
+                    Some(Ok(mock_ok(&format!("lsblk -b {device}"), "536870912\n")))
+                }
+                _ => None,
+            });
+
+        let plan = plan_replace(
+            &runner,
+            &fs,
+            &f.replace_params()
+                .old("misleading-label")
+                .new_disk("replacement=/dev/disk/by-id/new")
+                .dry_run(true)
+                .build(),
+        )
+        .expect("missing-path decoy fixture should plan");
+        match &plan.work_plan.replace_source {
+            ReplaceSource::Missing { devid } => assert_eq!(*devid, 2),
+            other => panic!("expected Missing {{ devid: 2 }}, got: {other:?}"),
+        }
+
+        let forbidden_targets = ["/dev/disk/by-id/right", "/dev/disk/by-id/misleading-label"];
+        let requests = runner.requests();
+        for request in &requests {
+            let argv = request.to_argv();
+            assert!(
+                argv.args
+                    .iter()
+                    .all(|arg| !forbidden_targets.contains(&arg.as_str())),
+                "missing-path planning must not target decoy by-id paths; request={request:?}, argv={argv:?}, requests={requests:?}"
+            );
+        }
+    }
+
     /* Intent: plan_replace surfaces an in-flight exclusive op as a
      * PreviewNote::Info on `plan.notes`, and the rendered preview
      * contains the "waiting for in-flight <op>" line. Confirmation-only
@@ -6159,7 +6109,6 @@ mod tests {
             fsid: None,
             null_underlying: vec![],
         };
-        let runner = MockRunner::default();
         let target_name = disk_name("misleading-label");
         let (resolved_uuid, resolved_member) = pre
             .by_name(&target_name)
@@ -6173,16 +6122,9 @@ mod tests {
             Some(2),
             "U_R's persisted devid must be 2 (the missing devid)"
         );
-        let source = resolve_replace_source(
-            &runner,
-            &target_name,
-            resolved_uuid,
-            resolved_member,
-            None,
-            &pool,
-            &mp(),
-        )
-        .expect("missing-path resolution must succeed for U_R");
+        let source =
+            resolve_replace_source(&target_name, resolved_uuid, resolved_member, None, &pool)
+                .expect("missing-path resolution must succeed for U_R");
         match source {
             ReplaceSource::Missing { devid } => assert_eq!(devid, 2),
             other => panic!("expected ReplaceSource::Missing {{ devid: 2 }}, got {other:?}"),
@@ -6220,15 +6162,6 @@ mod tests {
         assert!(
             target_membership.by_uuid(&new_uuid).is_some(),
             "new UUID inserted"
-        );
-        // No CryptsetupLuksUuid was issued for any decoy by-id: the
-        // missing-path resolution path uses persisted state, not probes.
-        let requests = runner.requests();
-        assert!(
-            !requests
-                .iter()
-                .any(|r| matches!(r, CmdRequest::CryptsetupLuksUuid { .. })),
-            "missing-path planning must not probe LUKS UUID against any decoy by-id: {requests:?}"
         );
     }
 
@@ -6270,17 +6203,8 @@ mod tests {
             fsid: None,
             null_underlying: vec![],
         };
-        let runner = MockRunner::default();
-        let source = resolve_replace_source(
-            &runner,
-            &disk_name("right"),
-            &u_old,
-            &member,
-            None,
-            &pool,
-            &mp(),
-        )
-        .expect("Pattern 4 find by UUID must succeed");
+        let source = resolve_replace_source(&disk_name("right"), &u_old, &member, None, &pool)
+            .expect("Pattern 4 find by UUID must succeed");
         match source.clone() {
             ReplaceSource::Live { mapper, devid } => {
                 assert_eq!(

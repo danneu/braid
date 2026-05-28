@@ -267,7 +267,6 @@ enum RecoverCompletion {
     ReplacePoolMutation {
         old_uuid: LuksUuid,
         new_uuid: LuksUuid,
-        old_name: DiskName,
         new_name: DiskName,
         new_target: journal::ReplaceJournalTarget,
         source: journal::ReplaceJournalSource,
@@ -666,7 +665,6 @@ impl RecoverCompletion {
             RecoverCompletion::ReplacePoolMutation {
                 old_uuid,
                 new_uuid,
-                old_name,
                 new_name,
                 new_target,
                 source,
@@ -682,7 +680,6 @@ impl RecoverCompletion {
                 pool,
                 old_uuid,
                 new_uuid,
-                old_name,
                 new_name,
                 new_target,
                 source,
@@ -972,7 +969,7 @@ fn execute_recover_initial_open<R: CommandRunner + Sync, F: Filesystem + ?Sized>
     }
 
     let res: Result<bool, InitialOpenFailure> = if open_plan.to_unlock.is_empty() {
-        mount::execute_mount_only(runner, fs, params.config, open_plan)
+        mount::execute_mount_only(runner, params.config, open_plan)
             .map_err(InitialOpenFailure::MountOnly)
     } else {
         if state.credential.is_none() {
@@ -991,7 +988,6 @@ fn execute_recover_initial_open<R: CommandRunner + Sync, F: Filesystem + ?Sized>
             .expect("credential resolved above for this branch");
         mount::execute_unlock_and_mount(
             runner,
-            fs,
             params.config,
             open_plan,
             params.backing_path_resolver,
@@ -1494,7 +1490,6 @@ pub fn plan_recover<R: CommandRunner + Sync, F: Filesystem + ?Sized>(
             phase: journal::ReplacePhase::PoolMutation,
             old_uuid,
             new_name,
-            old_name,
             new_uuid,
             new_target,
             source,
@@ -1503,7 +1498,6 @@ pub fn plan_recover<R: CommandRunner + Sync, F: Filesystem + ?Sized>(
         } => RecoverCompletion::ReplacePoolMutation {
             old_uuid: old_uuid.clone(),
             new_uuid: new_uuid.clone(),
-            old_name: old_name.clone(),
             new_name: new_name.clone(),
             new_target: new_target.clone(),
             source: source.clone(),
@@ -3067,7 +3061,6 @@ fn execute_replace_pool_mutation_recovery<R: CommandRunner + Sync, F: Filesystem
     pool: PoolState,
     old_uuid: &LuksUuid,
     new_uuid: &LuksUuid,
-    _old_name: &DiskName,
     new_name: &DiskName,
     new_target: &journal::ReplaceJournalTarget,
     source: &journal::ReplaceJournalSource,
@@ -3554,7 +3547,6 @@ fn relock_and_remount<R: CommandRunner, F: Filesystem + ?Sized>(
         })?;
     match mount::execute_unlock_and_mount(
         runner,
-        fs,
         config,
         &cycle_plan,
         backing_path_resolver,
@@ -9492,7 +9484,6 @@ mod tests {
             pool_state_disk1_and_new(),
             &uuid_for_name("old"),
             &uuid_for_name("new"),
-            &disk_name("old"),
             &disk_name("new"),
             new_target,
             source,
@@ -9575,7 +9566,6 @@ mod tests {
             pool_state_disk1_and_old(),
             &uuid_for_name("old"),
             &uuid_for_name("new"),
-            &disk_name("old"),
             &disk_name("new"),
             new_target,
             source,
@@ -9634,7 +9624,6 @@ mod tests {
             pool_state_disk1_old_and_new(),
             &uuid_for_name("old"),
             &uuid_for_name("new"),
-            &disk_name("old"),
             &disk_name("new"),
             new_target,
             source,
@@ -9752,7 +9741,6 @@ mod tests {
             pool_state_disk1_and_old(),
             &uuid_for_name("old"),
             &uuid_for_name("new"),
-            &disk_name("old"),
             &disk_name("new"),
             new_target,
             source,
@@ -9858,7 +9846,6 @@ mod tests {
             pool_state_disk1_and_old(),
             &uuid_for_name("old"),
             &uuid_for_name("new"),
-            &disk_name("old"),
             &disk_name("new"),
             new_target,
             source,
@@ -9921,7 +9908,6 @@ mod tests {
             pool_state_disk1_and_old(),
             &uuid_for_name("old"),
             &uuid_for_name("new"),
-            &disk_name("old"),
             &disk_name("new"),
             new_target,
             source,
@@ -10020,7 +10006,6 @@ mod tests {
             pool_state_disk1_and_old(),
             &uuid_for_name("old"),
             &uuid_for_name("new"),
-            &disk_name("old"),
             &disk_name("new"),
             new_target,
             source,
@@ -10141,7 +10126,6 @@ mod tests {
             pool_state_disk1_and_old(),
             &uuid_for_name("old"),
             &uuid_for_name("new"),
-            &disk_name("old"),
             &disk_name("new"),
             new_target,
             source,
@@ -10227,7 +10211,6 @@ mod tests {
             pool_state_disk1_and_old(),
             &uuid_for_name("old"),
             &uuid_for_name("new"),
-            &disk_name("old"),
             &disk_name("new"),
             new_target,
             source,
@@ -10348,7 +10331,6 @@ mod tests {
             pool_state_disk1_and_old(),
             &uuid_for_name("old"),
             &uuid_for_name("new"),
-            &disk_name("old"),
             &disk_name("new"),
             new_target,
             source,
@@ -10485,7 +10467,6 @@ mod tests {
             pool_state_disk1_and_old(),
             &uuid_for_name("old"),
             &uuid_for_name("new"),
-            &disk_name("old"),
             &disk_name("new"),
             new_target,
             source,

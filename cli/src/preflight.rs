@@ -609,8 +609,7 @@ pub fn check_ups_not_on_battery<R: CommandRunner>(
 /// `Ok(notes)`: the vec may be empty (clean preflight) or carry one
 /// `Info` (busy-op enqueued) and/or one `Warn` (read-only probe
 /// degraded), in that insertion order.
-pub fn require_mutation_preflight<R: CommandRunner + Sync, F: Filesystem + ?Sized>(
-    _runner: &R,
+pub fn require_mutation_preflight<F: Filesystem + ?Sized>(
     fs: &F,
     fsid: &str,
     mount_point: &MountPoint,
@@ -1717,8 +1716,7 @@ mod tests {
     // Scenario: sysfs says "none", mountinfo reports rw.
     fn mutation_preflight_passes_when_none() {
         let fs = MockFs::with_sysfs(FSID, "none\n").with_mountinfo(&mountinfo_rw());
-        let runner = MockRunner::default();
-        let notes = require_mutation_preflight(&runner, &fs, FSID, &mp()).unwrap();
+        let notes = require_mutation_preflight(&fs, FSID, &mp()).unwrap();
         assert!(notes.is_empty(), "expected empty notes, got {notes:?}");
     }
 
@@ -1729,8 +1727,7 @@ mod tests {
     // Scenario: sysfs says "balance paused".
     fn mutation_preflight_rejects_balance_paused() {
         let fs = MockFs::with_sysfs(FSID, "balance paused\n");
-        let runner = MockRunner::default();
-        let err = require_mutation_preflight(&runner, &fs, FSID, &mp()).unwrap_err();
+        let err = require_mutation_preflight(&fs, FSID, &mp()).unwrap_err();
         assert!(
             err.contains("balance is paused"),
             "expected 'balance is paused' in: {err}"
@@ -1746,8 +1743,7 @@ mod tests {
     // Scenario: sysfs says "device add", mountinfo reports rw.
     fn mutation_preflight_busy_op_returns_info_note() {
         let fs = MockFs::with_sysfs(FSID, "device add\n").with_mountinfo(&mountinfo_rw());
-        let runner = MockRunner::default();
-        let notes = require_mutation_preflight(&runner, &fs, FSID, &mp()).unwrap();
+        let notes = require_mutation_preflight(&fs, FSID, &mp()).unwrap();
         assert_eq!(notes.len(), 1, "expected one Info note, got {notes:?}");
         match &notes[0] {
             PreviewNote::Info(body) => {
@@ -1768,8 +1764,7 @@ mod tests {
     fn mutation_preflight_readonly_probe_failure_returns_warn_note() {
         let fs = MockFs::with_sysfs(FSID, "none\n")
             .with_mountinfo_error(std::io::ErrorKind::PermissionDenied);
-        let runner = MockRunner::default();
-        let notes = require_mutation_preflight(&runner, &fs, FSID, &mp()).unwrap();
+        let notes = require_mutation_preflight(&fs, FSID, &mp()).unwrap();
         assert_eq!(notes.len(), 1, "expected one Warn note, got {notes:?}");
         match &notes[0] {
             PreviewNote::Warn(body) => {
@@ -1793,8 +1788,7 @@ mod tests {
     fn mutation_preflight_busy_and_probe_failure_returns_info_then_warn() {
         let fs = MockFs::with_sysfs(FSID, "device add\n")
             .with_mountinfo_error(std::io::ErrorKind::PermissionDenied);
-        let runner = MockRunner::default();
-        let notes = require_mutation_preflight(&runner, &fs, FSID, &mp()).unwrap();
+        let notes = require_mutation_preflight(&fs, FSID, &mp()).unwrap();
         assert_eq!(notes.len(), 2, "expected two notes, got {notes:?}");
         assert!(
             matches!(
@@ -1966,8 +1960,7 @@ mod tests {
     fn mutation_preflight_rejects_read_only() {
         let fs = MockFs::with_sysfs(FSID, "none\n")
             .with_mountinfo(&mountinfo_for_target("ro,relatime", "rw,space_cache=v2"));
-        let runner = MockRunner::default();
-        let err = require_mutation_preflight(&runner, &fs, FSID, &mp()).unwrap_err();
+        let err = require_mutation_preflight(&fs, FSID, &mp()).unwrap_err();
         assert!(err.contains("read-only"), "expected 'read-only' in: {err}");
     }
 
