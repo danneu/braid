@@ -283,8 +283,8 @@ fn check_config_permissions_for_path(path: &Path) -> CheckResult {
 
 /// Classification of a single declared disk after the doctor's LUKS probe.
 /// `summarize_declared_disks` translates a slice of these into a `CheckResult`;
-/// the variants pin the six reachable outcomes (header Ok, UUID mismatch,
-/// header unreadable, header damaged, missing/non-block/probe-failed).
+/// the variants pin the rendered declared-disk outcomes (header Ok, UUID mismatch,
+/// header unreadable, header damaged, missing, non-block, probe-failed).
 #[derive(Debug, Clone)]
 pub(crate) enum DiskState {
     /// Header probes succeeded and the live LUKS UUID matched the pool.json key.
