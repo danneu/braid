@@ -349,7 +349,8 @@ with subtest("concurrency: prepare dm-delay backed pool with saved scrub progres
     )
     concurrency.succeed("sync")
 
-    # Slow I/O so the in-flight scrub stays running long enough to cancel.
+    # Slow I/O so the in-flight scrub stays running long enough for the
+    # explicit btrfs scrub cancel below to land before it finishes.
     dm_delay_activate(
         concurrency,
         SCRUB_DELAY_DISKS,
@@ -357,7 +358,7 @@ with subtest("concurrency: prepare dm-delay backed pool with saved scrub progres
     )
     # Mask the resume trigger before starting the scrub. daemon-reload can take
     # several seconds in the VM; doing it after the scrub starts can let the
-    # scrub finish before braid lock reaches ExecStop, leaving no aborted state.
+    # scrub finish before the cancel lands, leaving no resumable state.
     disable_trigger_hook(concurrency)
     concurrency.succeed("systemctl start {}".format(SERVICE))
     concurrency.succeed(
@@ -368,22 +369,27 @@ with subtest("concurrency: prepare dm-delay backed pool with saved scrub progres
         "printf '%s\\n' \"$out\"; exit 1"
     )
 
+    # Cancel directly via btrfs and assert the resumable precondition,
+    # instead of racing a full braid lock pipeline against scrub completion.
+    # The lock-cancels-scrub path is covered by the resume node's
+    # "cancel preserves Aborted state across lock/unlock" subtest; this
+    # subtest only needs a saved scrub state as a precondition so the
+    # "Scrub resumed:" assertion below proves coalesced timer+trigger
+    # activation, not a working cancel. btrfs reports the saved state as
+    # "aborted" (canceled=1) or "interrupted" (canceled=0/finished=0); both
+    # are resumable (reference/btrfs-progs/cmds/scrub.c:1430).
+    concurrency.succeed("btrfs scrub cancel /mnt/storage")
+    concurrency.wait_until_succeeds(
+        "btrfs scrub status --raw /mnt/storage | "
+        "grep -Eq 'Status:[[:space:]]+(aborted|interrupted)'",
+        timeout=30,
+    )
+
     concurrency.succeed("braid lock")
     wait_online_stop_settled(concurrency)
-    # Reset dm-delay after cancel so the offline setup work is fast; we re-arm
-    # the delay before the actual race trigger below.
+    # Reset dm-delay so the offline setup work is fast; we re-arm the delay
+    # before the actual race trigger below.
     dm_delay_deactivate(concurrency, SCRUB_DELAY_DISKS)
-    # No explicit "aborted" assertion here. braid lock returned 0, which only
-    # happens after umount succeeds, so scrub.status.<fsid> is not queryable
-    # from this node without re-unlocking. Cancel-success is verified ONLY by
-    # the resume node's "cancel preserves Aborted state across lock/unlock"
-    # subtest, which asserts the persisted `aborted` (canceled=1) state after
-    # re-unlock. The "Scrub resumed:" assertion below is NOT a transitive
-    # cancel-success guard: btrfs scrub resume -B accepts both canceled=1
-    # ("aborted") and canceled=0/finished=0 ("interrupted") progress
-    # (reference/btrfs-progs/cmds/scrub.c:1430). This subtest only validates
-    # that an overdue timer fire and a resumable pool-online state coalesce
-    # into one scrub run.
 
 with subtest("concurrency: overdue timer + resumable state coalesce into one scrub"):
     # Age the timer stamp so Persistent=true fires immediately on next unlock.
