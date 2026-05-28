@@ -3299,6 +3299,12 @@ const REPLACE_WAIT_HEARTBEAT_INTERVAL: Duration = Duration::from_secs(30);
 /// `[fail]` and return `RecoverError::Failed` -- preserving the journal so
 /// the next `braid recover` can retry instead of racing the resume worker
 /// and clearing `pending-op.json`.
+///
+/// The `Running` arm is intentionally unbounded. Proceeding past it would
+/// race the resume kthread this barrier exists to close; a fail-returning
+/// timeout would preserve the journal, but only re-hit the same kernel state
+/// on the next recover. Stalls surface as elapsed-time heartbeats; SIGINT is
+/// the operator escape.
 fn wait_for_kernel_replace_to_finish<R: CommandRunner>(
     runner: &R,
     mount_point: &MountPoint,
