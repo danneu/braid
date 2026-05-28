@@ -14756,6 +14756,84 @@ mod tests {
         );
     }
 
+    // Intent: pin the `braid recover` entry-banner literal so the
+    //   `{:?}` formatting of the lowercase op label cannot drift
+    //   silently from what `docs/commands/recover.md` shows.
+    // Why it exists: docs/commands/recover.md previously claimed
+    //   `Recovering from interrupted Add operation ...` while the
+    //   real output was `Recovering from interrupted "add" operation
+    //   ...` (quoted lowercase). The VM substring assertion at
+    //   tests/cli/braid-recover.py only checks the `"Recovering from
+    //   interrupted"` prefix, so the drift went unnoticed until a
+    //   doc audit caught it.
+    // Scenario: format a journal for each of the four op kinds and
+    //   compare against the exact stderr line a real recover run
+    //   prints to operators.
+    #[test]
+    fn format_recover_entry_pins_banner_for_each_op_kind() {
+        let started_at = "2026-03-15T14:30:00Z";
+
+        let mut add_targets_by_name = BTreeMap::new();
+        add_targets_by_name.insert(
+            "disk3".to_owned(),
+            ByIdPath::parse("/dev/disk/by-id/x").unwrap(),
+        );
+        let add_op = add_op_from_disks(add_targets_by_name);
+
+        let remove_op = OpKind::Remove {
+            luks_uuid: uuid_for_name("toshiba"),
+            name: disk_name("toshiba"),
+        };
+
+        let remove_missing_op = OpKind::RemoveMissing {
+            phase: journal::RemoveMissingPhase::PoolMutation,
+            devid: 2,
+            restore_raid1_after_commit: true,
+        };
+
+        let replace_op = OpKind::Replace {
+            phase: journal::ReplacePhase::PoolMutation,
+            old_uuid: uuid_for_name("old"),
+            old_name: disk_name("old"),
+            new_uuid: uuid_for_name("new"),
+            new_name: disk_name("new"),
+            new_target: journal::ReplaceJournalTarget {
+                by_id: ByIdPath::parse("/dev/disk/by-id/x").unwrap(),
+                mode: journal::ReplaceJournalMode::ExistingLuks {
+                    enroll_key_file: None,
+                },
+            },
+            source: journal::ReplaceJournalSource::Live {
+                old_devid: 2,
+                old_mapper: MapperName("braid-old".into()),
+            },
+            restore_raid1_after_commit: false,
+        };
+
+        let cases = [
+            (add_op, "add"),
+            (remove_op, "remove"),
+            (remove_missing_op, "remove-missing"),
+            (replace_op, "replace"),
+        ];
+
+        for (op, label) in cases {
+            let journal = journal::Journal {
+                started_at: started_at.to_owned(),
+                op,
+                pre_membership: PoolMembership::empty(),
+                target_membership: PoolMembership::empty(),
+            };
+            assert_eq!(
+                format_recover_entry(&journal),
+                format!(
+                    "Recovering from interrupted {:?} operation (started {})...",
+                    label, started_at
+                )
+            );
+        }
+    }
+
     // ----- M1 (Pre-M11 remediation) tests -----
 
     /// Two-device journal modeling an interrupted Replace: pre = {disk1, old},

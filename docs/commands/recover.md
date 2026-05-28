@@ -19,12 +19,13 @@ sudo braid recover
 You'll be prompted for the pool passphrase. Output shows the recovery process:
 
 ```
-Recovering from interrupted Add operation (started 2026-03-15T14:30:00Z)...
+Recovering from interrupted "add" operation (started 2026-03-15T14:30:00Z)...
   pre-operation membership:  {"ironwolf", "toshiba"}
   target membership:         {"ironwolf", "toshiba", "wdc"}
   recovered (live pool):     {"ironwolf", "toshiba", "wdc"}
-note: target membership achieved -- the interrupted operation completed before the crash.
-pool.json written from live pool state.
+note: add completed -- 'wdc' now in the pool.
+pool.json written from completed add membership.
+pool.json written from committed add membership.
 pending-op.json cleared. Recovery complete.
 ```
 

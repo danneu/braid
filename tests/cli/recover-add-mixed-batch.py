@@ -229,6 +229,19 @@ with subtest("Recover mixed-batch add"):
     assert "recover remount cycle" not in err, (
         f"add recovery must not run the replace remount cycle, got: {err!r}"
     )
+
+    completed_line = "pool.json written from completed add membership.\n"
+    committed_line = "pool.json written from committed add membership.\n"
+    assert completed_line in err, (
+        "completed-add pool.json line missing, got: " + repr(err)
+    )
+    assert committed_line in err, (
+        "committed-add pool.json line missing, got: " + repr(err)
+    )
+    assert err.find(completed_line) < err.find(committed_line), (
+        "completed-add line must precede committed-add line, got: " + repr(err)
+    )
+
     machine.succeed("mountpoint -q /mnt/storage")
 
 
