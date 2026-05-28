@@ -495,6 +495,102 @@ golden_test!(
     }
 );
 
+// Intent: lock the captured-from-tool shape of a missing-device
+//   stanza in `btrfs device usage --raw` -- path token, sizes,
+//   and allocation rows -- against btrfs-progs output drift.
+// Why it exists: the shared `DeviceUsageSpec::missing` builder
+//   hard-codes the missing-device marker that every `remove_missing`
+//   and `replace` command-level test reuses, and the parser's inline
+//   unit test pins it too; both are blind to btrfs-progs output, so
+//   without a live-tool golden a format change in either lane would
+//   pass every parser test while making the ENOSPC preflight under
+//   `remove_missing` (`check_raid1_relocation_space`) undercount any
+//   of the Data, Metadata, or System chunks it sums independently on
+//   the absent member.
+// Scenario: degraded 2-disk RAID1 with one member's LUKS mapper
+//   closed; `btrfs device usage` renders the absent device as the
+//   literal `<missing disk>, ID: 2` with Device size 0 but its
+//   Data,RAID1, Metadata,RAID1, and System,RAID1 chunks still
+//   tracked on devid 2.
+golden_test!(
+    golden_btrfs_device_usage_missing,
+    "btrfs-device-usage-missing.txt",
+    "btrfs device usage",
+    parse::btrfs_device_usage::parse_btrfs_device_usage,
+    |out: parse::types::BtrfsDeviceUsageOutput| {
+        assert_eq!(out.devices.len(), 2, "expected 2 devices");
+
+        // devid 1 -- the surviving live member.
+        assert_eq!(out.devices[0].devid, 1);
+        assert!(
+            is_dm_or_mapper_path(&out.devices[0].path),
+            "devid 1 path should be dm or mapper, got: {}",
+            out.devices[0].path
+        );
+        assert!(
+            out.devices[0].device_size > 0,
+            "live device_size should be positive"
+        );
+
+        // devid 2 -- the absent member. This is the shape
+        // check_relocation_space and DeviceUsageSpec::missing
+        // both depend on.
+        let missing = &out.devices[1];
+        assert_eq!(missing.devid, 2);
+        assert_eq!(
+            missing.path, "<missing disk>",
+            "missing-device path token must be the literal `<missing disk>` \
+             (the kernel's btrfs_dev_name() for a MISSING device, via \
+             BTRFS_IOC_DEV_INFO; btrfs-progs' `missing` literal is only its \
+             empty-path fallback)",
+        );
+        assert_eq!(
+            missing.device_size, 0,
+            "missing-device Device size must be 0",
+        );
+        assert_eq!(
+            missing.device_slack, 0,
+            "missing-device Device slack must be 0 \
+             (calc_slack_size returns 0 when device_size == 0)",
+        );
+        // No exact assertion on missing.unallocated: btrfs prints
+        // Unallocated as `devinfo->size - allocated` where
+        // `devinfo->size` is `dev_info.total_bytes` even on the
+        // missing branch (filesystem-usage.c:833, 1337), so the value
+        // is positive and depends on how much data was written before
+        // the device went missing. The parser already errors out with
+        // ParseError::MissingField if the `Unallocated:` line is
+        // absent, so a successful parse implicitly locks the line's
+        // presence.
+        //
+        // Allocation rows must survive parsing for every type
+        // check_raid1_relocation_space sums independently:
+        // `for alloc_type in ["Data", "Metadata", "System"] { ... }`
+        // at preflight.rs:327. `bytes_on_target == 0` silently
+        // skips that type's ENOSPC check (preflight.rs:333-335),
+        // so dropping or renaming any one row -- not just Data --
+        // would let production undercount relocation demand while
+        // the parser still parses. A freshly-mkfs'd RAID1 pool with
+        // a 16 MiB write allocates all three chunk types on both
+        // members; once braid-vdc is closed, devid 2 still tracks
+        // them. Loop over the same triple production iterates.
+        for required in &["Data", "Metadata", "System"] {
+            let bytes: u64 = missing
+                .allocations
+                .iter()
+                .filter(|a| a.alloc_type == *required && a.profile == "RAID1")
+                .map(|a| a.bytes)
+                .sum();
+            assert!(
+                bytes > 0,
+                "missing device must have a {required},RAID1 allocation \
+                 with bytes > 0 (got allocations: {:?})",
+                missing.allocations,
+            );
+        }
+    }
+);
+
 // --- Manual golden tests (don't fit the macro) ---
 
 #[test]

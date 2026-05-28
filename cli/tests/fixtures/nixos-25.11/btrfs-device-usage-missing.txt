@@ -1,0 +1,16 @@
+/dev/mapper/braid-vdb, ID: 1
+   Device size:          1056964608
+   Device slack:                  0
+   Data,RAID1:            105644032
+   Metadata,RAID1:        105644032
+   System,RAID1:            8388608
+   Unallocated:           837287936
+
+<missing disk>, ID: 2
+   Device size:                   0
+   Device slack:                  0
+   Data,RAID1:            105644032
+   Metadata,RAID1:        105644032
+   System,RAID1:            8388608
+   Unallocated:           837287936
+

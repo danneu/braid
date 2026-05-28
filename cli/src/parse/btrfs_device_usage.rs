@@ -225,13 +225,19 @@ mod tests {
     }
 
     #[test]
-    // Intent: parse the current btrfs-progs missing-device marker from
-    //   `device usage --raw`.
+    // Intent: parse the missing-device marker `btrfs device usage`
+    //   emits -- the literal `<missing disk>` path token.
     // Why it exists: remove-missing relocation checks depend on `device_size
     //   == 0`, devid, allocations, and unallocated bytes surviving even when
-    //   the path is the v6.17.1 `missing` marker.
-    // Scenario: btrfs-progs `filesystem-usage.c:820-821` renders one live
-    //   device plus one absent device as `missing, ID: 3`.
+    //   the path is the `<missing disk>` marker. Pins the exact byte layout
+    //   (column widths, indentation) that the captured
+    //   `btrfs-device-usage-missing.txt` golden only checks structurally.
+    // Scenario: one live device plus one absent device, rendered as
+    //   `<missing disk>, ID: 3`. The Linux kernel's `btrfs_dev_name()`
+    //   returns `<missing disk>` for a device with BTRFS_DEV_STATE_MISSING
+    //   set, delivered via BTRFS_IOC_DEV_INFO; btrfs-progs copies it and
+    //   only falls back to the literal `missing` when the ioctl hands back
+    //   an empty path. Confirmed by the captured golden in both lanes.
     fn device_usage_parses_missing_device_marker() {
         let raw = RawCommandOutput {
             cmd: "btrfs device usage".into(),
@@ -240,7 +246,7 @@ mod tests {
                      \x20  Device slack:                 0\n\
                      \x20  Data,RAID1:            67108864\n\
                      \x20  Unallocated:          469762048\n\n\
-                     missing, ID: 3\n\
+                     <missing disk>, ID: 3\n\
                      \x20  Device size:                  0\n\
                      \x20  Device slack:                 0\n\
                      \x20  Data,RAID1:            67108864\n\
@@ -253,7 +259,7 @@ mod tests {
         let out = parse_btrfs_device_usage(&raw).unwrap();
         assert_eq!(out.devices.len(), 2);
         let missing = &out.devices[1];
-        assert_eq!(missing.path, "missing");
+        assert_eq!(missing.path, "<missing disk>");
         assert_eq!(missing.devid, 3);
         assert_eq!(missing.device_size, 0);
         assert_eq!(missing.device_slack, 0);

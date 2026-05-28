@@ -86,7 +86,8 @@ pub(crate) fn mock_ok(cmd: &str, stdout: &str) -> RawCommandOutput {
 /// Mirrors the fields braid's parser consumes so command tests share one
 /// btrfs-progs-shaped raw-output source.
 pub(crate) struct DeviceUsageSpec {
-    /// `None` renders the v6.17.1 missing-device header, `missing, ID: N`.
+    /// `None` renders the missing-device header `<missing disk>, ID: N` --
+    /// the literal token `btrfs device usage` emits for an absent device.
     pub(crate) path: Option<String>,
     pub(crate) devid: u64,
     pub(crate) device_size: u64,
@@ -134,7 +135,7 @@ impl DeviceUsageSpec {
 }
 
 /// Render faithful `btrfs device usage --raw` stdout for test fixtures.
-/// v6.17.1 uses 3-space key/value indentation, `missing` for absent devices,
+/// Uses 3-space key/value indentation, `<missing disk>` for absent devices,
 /// and a blank line after every device stanza.
 pub(crate) fn device_usage_raw_body(specs: &[DeviceUsageSpec]) -> String {
     fn push_kv(body: &mut String, label: &str, value: u64) {
@@ -144,7 +145,7 @@ pub(crate) fn device_usage_raw_body(specs: &[DeviceUsageSpec]) -> String {
 
     let mut body = String::new();
     for spec in specs {
-        let path = spec.path.as_deref().unwrap_or("missing");
+        let path = spec.path.as_deref().unwrap_or("<missing disk>");
         body.push_str(&format!("{path}, ID: {}\n", spec.devid));
         push_kv(&mut body, "Device size", spec.device_size);
         push_kv(&mut body, "Device slack", spec.device_slack);
@@ -517,7 +518,7 @@ mod tests {
              \x20  Data,RAID1:            52428800\n\
              \x20  Metadata,DUP:          10485760\n\
              \x20  Unallocated:         1010794496\n\n\
-             missing, ID: 3\n\
+             <missing disk>, ID: 3\n\
              \x20  Device size:                  0\n\
              \x20  Device slack:                 0\n\
              \x20  Data,RAID1:            67108864\n\

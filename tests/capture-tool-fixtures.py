@@ -325,6 +325,12 @@ machine.succeed(
     "mkfs.btrfs -f -d raid1 -m raid1 /dev/mapper/braid-vdb /dev/mapper/braid-vdc"
 )
 machine.succeed(f"mount /dev/mapper/braid-vdb {MOUNT}")
+# Write data on the healthy mount so btrfs allocates a Data,RAID1 chunk on
+# both members -- chunk allocation is lazy, so a fresh mkfs has no Data row.
+# The missing-device usage capture below depends on devid 2 still tracking
+# Data/Metadata/System RAID1 rows after braid-vdc is closed.
+machine.succeed(f"dd if=/dev/urandom of={MOUNT}/degradeddata bs=1M count=16")
+machine.succeed("sync")
 machine.succeed(f"umount {MOUNT}")
 machine.succeed("cryptsetup close braid-vdc")
 machine.succeed(f"mount -o degraded /dev/mapper/braid-vdb {MOUNT}")
@@ -335,6 +341,14 @@ machine.succeed(
 machine.succeed(
     f"btrfs device stats {MOUNT}"
     f" > {FIXTURE_DIR}/btrfs-device-stats-degraded.txt"
+)
+# Capture the missing-device `device usage --raw` stanza while still mounted
+# degraded: devid 2 renders as `<missing disk>, ID: 2` with Device size 0 but
+# keeps its RAID1 allocation rows. Pins the shape check_raid1_relocation_space
+# reads.
+machine.succeed(
+    f"btrfs device usage --raw {MOUNT}"
+    f" > {FIXTURE_DIR}/btrfs-device-usage-missing.txt"
 )
 machine.succeed(f"umount {MOUNT}")
 
