@@ -8,9 +8,10 @@ use crate::credential_verify::{
 use crate::inhibit::AcquireSleepInhibitor;
 use crate::journal;
 use crate::luks::{
-    BackingPathResolver, OwnershipError, backup_luks_header_post_mutation,
-    classify_mapper_ownership, ensure_luks_open, format_keyfile_asymmetry_warning,
-    format_keyfile_enrollment_probe_failure, luks_format, luks_header_backup_path,
+    BackingPathResolver, KeySlotState, LUKS_SLOT_KEYFILE, OwnershipError,
+    backup_luks_header_post_mutation, check_key_slot, classify_mapper_ownership, ensure_luks_open,
+    format_keyfile_asymmetry_warning, format_keyfile_enrollment_probe_failure,
+    format_target_keyfile_probe_failure, luks_format, luks_header_backup_path,
     probe_pool_keyfile_enrollment, read_passphrase,
 };
 use crate::mapper_close::close_mapper_best_effort;
@@ -1355,16 +1356,32 @@ where
     // Keyfile diagnostics are plan notes, not confirmation-only stderr.
     // This keeps dry-run stdout, real-run stderr, and preserved-error
     // stderr on the same PreviewNote contract used by `add`.
-    if matches!(new_probed.state, PresentConfigDiskState::PresentNotLuks)
-        && params.enroll_key_file.is_none()
-    {
-        let keyfile_probe = probe_pool_keyfile_enrollment(runner, &pool.devices);
-        if keyfile_probe.has_enrollment {
-            notes.push(PreviewNote::Warn(format_keyfile_asymmetry_warning()));
-        } else {
-            notes.extend(keyfile_probe.failures.iter().map(|failure| {
-                PreviewNote::Warn(format_keyfile_enrollment_probe_failure(failure))
-            }));
+    if params.enroll_key_file.is_none() {
+        let target_lacks_keyfile = match &new_probed.state {
+            PresentConfigDiskState::PresentNotLuks => true,
+            PresentConfigDiskState::PresentLuks { .. } => {
+                match check_key_slot(runner, new_by_id.as_str(), LUKS_SLOT_KEYFILE) {
+                    Ok(KeySlotState::Empty) => true,
+                    Ok(KeySlotState::Occupied) => false,
+                    Err(err) => {
+                        notes.push(PreviewNote::Warn(format_target_keyfile_probe_failure(
+                            &new_by_id, &err,
+                        )));
+                        false
+                    }
+                }
+            }
+        };
+
+        if target_lacks_keyfile {
+            let keyfile_probe = probe_pool_keyfile_enrollment(runner, &pool.devices);
+            if keyfile_probe.has_enrollment {
+                notes.push(PreviewNote::Warn(format_keyfile_asymmetry_warning()));
+            } else {
+                notes.extend(keyfile_probe.failures.iter().map(|failure| {
+                    PreviewNote::Warn(format_keyfile_enrollment_probe_failure(failure))
+                }));
+            }
         }
     }
 
@@ -5825,6 +5842,199 @@ mod tests {
         assert!(
             !rendered.contains("could not check keyfile enrollment"),
             "occupied slot 1 must suppress probe-failure uncertainty notes, got:\n{rendered}",
+        );
+    }
+
+    fn keyfile_pool_occupied_handler()
+    -> impl Fn(&CmdRequest) -> Option<Result<RawCommandOutput, CmdError>> + Send + Sync + 'static
+    {
+        |req| match req {
+            CmdRequest::CryptsetupLuksDump { device }
+                if device == "/dev/vdb" || device == "/dev/vdc" =>
+            {
+                Some(Ok(mock_ok(
+                    &format!("cryptsetup luksDump --dump-json-metadata {device}"),
+                    r#"{"keyslots":{"0":{"type":"luks2"},"1":{"type":"luks2"}}}"#,
+                )))
+            }
+            _ => None,
+        }
+    }
+
+    fn luks_dump_dynamic_json(keyslots: &str) -> String {
+        format!(
+            r#"{{
+  "keyslots": {{{keyslots}}},
+  "tokens": {{}},
+  "segments": {{
+    "0": {{
+      "type": "crypt",
+      "offset": "16777216",
+      "size": "dynamic",
+      "iv_tweak": "0",
+      "encryption": "aes-xts-plain64",
+      "sector_size": 512
+    }}
+  }},
+  "digests": {{}},
+  "config": {{}}
+}}"#
+        )
+    }
+
+    fn luks_dump_keyslot_json(slot: u8) -> String {
+        format!(
+            r#""{slot}": {{"type": "luks2", "key_size": 64, "af": {{}}, "area": {{}}, "kdf": {{}}}}"#
+        )
+    }
+
+    // Intent: replacing with a returning LUKS disk whose slot 1 is empty emits
+    // the keyfile-asymmetry warning when the pool has keyfile enrollment.
+    // Why it exists: replace used to warn only for fresh-format targets, so
+    // returning LUKS disks could silently remain outside auto-unlock.
+    // Scenario: disk3 is a closed LUKS replacement target with slot 0 only,
+    // while disk1 and disk2 prove keyfile enrollment.
+    #[test]
+    fn plan_replace_keyfile_asymmetry_emits_warn_for_returning_disk_with_empty_slot_1() {
+        let f = PoolFixture::two_disk_healthy();
+        let fs = MockFs::storage(vec!["/dev/disk/by-id/virtio-disk3".into()]);
+        let replace_done = Arc::new(AtomicBool::new(false));
+        let runner = ReplacementPool::two_disk_healthy()
+            .with_mapper_closed("braid-disk3")
+            .install(MockRunner::default(), replace_done)
+            .with_handler(keyfile_pool_occupied_handler());
+
+        let plan = plan_replace(
+            &runner,
+            &fs,
+            &f.replace_params().dry_run(true).yes(false).build(),
+        )
+        .expect("plan_replace should succeed");
+
+        let warns: Vec<&String> = plan
+            .notes
+            .iter()
+            .filter_map(|n| match n {
+                PreviewNote::Warn(b) => Some(b),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(warns.len(), 1, "expected one Warn note, got {warns:?}");
+        assert_eq!(warns[0], &format_keyfile_asymmetry_warning());
+    }
+
+    // Intent: replacing with a returning LUKS disk whose slot 1 is occupied
+    // does not emit keyfile-asymmetry warnings.
+    // Why it exists: returning targets should warn only when they would lack
+    // slot 1 after replacement.
+    // Scenario: disk3 is a closed LUKS replacement target that already has
+    // keyfile slot 1 populated.
+    #[test]
+    fn plan_replace_keyfile_no_warn_for_returning_disk_with_occupied_slot_1() {
+        let f = PoolFixture::two_disk_healthy();
+        let fs = MockFs::storage(vec!["/dev/disk/by-id/virtio-disk3".into()]);
+        let replace_done = Arc::new(AtomicBool::new(false));
+        let runner = ReplacementPool::two_disk_healthy()
+            .with_mapper_closed("braid-disk3")
+            .install(MockRunner::default(), replace_done)
+            .with_handler(|req| match req {
+                CmdRequest::CryptsetupLuksDump { device }
+                    if device == "/dev/disk/by-id/virtio-disk3" =>
+                {
+                    let keyslots = format!(
+                        "{},{}",
+                        luks_dump_keyslot_json(0),
+                        luks_dump_keyslot_json(1)
+                    );
+                    Some(Ok(mock_ok(
+                        &format!("cryptsetup luksDump --dump-json-metadata {device}"),
+                        &luks_dump_dynamic_json(&keyslots),
+                    )))
+                }
+                _ => None,
+            })
+            .with_handler(keyfile_pool_occupied_handler());
+
+        let plan = plan_replace(
+            &runner,
+            &fs,
+            &f.replace_params().dry_run(true).yes(false).build(),
+        )
+        .expect("plan_replace should succeed");
+
+        let warns: Vec<&String> = plan
+            .notes
+            .iter()
+            .filter_map(|n| match n {
+                PreviewNote::Warn(b) => Some(b),
+                _ => None,
+            })
+            .collect();
+        assert!(warns.is_empty(), "expected no Warn notes, got {warns:?}");
+    }
+
+    // Intent: returning replacement target slot-probe failures surface as
+    // target-specific PreviewNote::Warn diagnostics.
+    // Why it exists: a target-side luksDump error should not be rendered as
+    // existing-pool enrollment uncertainty.
+    // Scenario: disk3 is a closed LUKS replacement target, but probing its
+    // JSON luksDump fails during preview.
+    #[test]
+    fn plan_replace_keyfile_emits_target_probe_failure_for_returning_disk_dump_error() {
+        let f = PoolFixture::two_disk_healthy();
+        let fs = MockFs::storage(vec!["/dev/disk/by-id/virtio-disk3".into()]);
+        let target = ByIdPath::parse("/dev/disk/by-id/virtio-disk3").unwrap();
+        let replace_done = Arc::new(AtomicBool::new(false));
+        let target_dump_count = Arc::new(AtomicU32::new(0));
+        let runner = ReplacementPool::two_disk_healthy()
+            .with_mapper_closed("braid-disk3")
+            .install(MockRunner::default(), replace_done)
+            .with_handler({
+                let target_dump_count = target_dump_count.clone();
+                move |req| match req {
+                    CmdRequest::CryptsetupLuksDump { device }
+                        if device == "/dev/disk/by-id/virtio-disk3" =>
+                    {
+                        if target_dump_count.fetch_add(1, Ordering::SeqCst) == 0 {
+                            return Some(Ok(mock_ok(
+                                &format!("cryptsetup luksDump --dump-json-metadata {device}"),
+                                &luks_dump_dynamic_json(""),
+                            )));
+                        }
+                        Some(Ok(RawCommandOutput {
+                            cmd: format!("cryptsetup luksDump --dump-json-metadata {device}"),
+                            stdout: String::new(),
+                            stderr: format!("forced luksDump failure on target {device}"),
+                            exit_status: 5,
+                        }))
+                    }
+                    _ => None,
+                }
+            })
+            .with_handler(keyfile_pool_occupied_handler());
+
+        let plan = plan_replace(
+            &runner,
+            &fs,
+            &f.replace_params().dry_run(true).yes(false).build(),
+        )
+        .expect("plan_replace should succeed");
+
+        let warns: Vec<&String> = plan
+            .notes
+            .iter()
+            .filter_map(|n| match n {
+                PreviewNote::Warn(b) => Some(b),
+                _ => None,
+            })
+            .collect();
+        let err = crate::luks::LuksError::Validation(format!(
+            "cryptsetup luksDump failed (exit 5): forced luksDump failure on target {target}"
+        ));
+        assert_eq!(warns.len(), 1, "expected one Warn note, got {warns:?}");
+        assert_eq!(
+            warns[0],
+            &format_target_keyfile_probe_failure(&target, &err)
         );
     }
 

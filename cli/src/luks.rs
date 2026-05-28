@@ -1080,6 +1080,15 @@ pub fn format_keyfile_enrollment_probe_failure(failure: &KeyfileEnrollmentProbeF
     )
 }
 
+/// Target-side keyfile probe failure wording for add/replace previews.
+/// Separate from the pool-member formatter because this diagnostic skips
+/// only one candidate disk, not the existing-pool enrollment decision.
+pub fn format_target_keyfile_probe_failure(by_id: &ByIdPath, err: &LuksError) -> String {
+    format!(
+        "could not check whether new disk {by_id} already has a keyfile (slot 1): {err}; proceeding without the asymmetry check for this disk"
+    )
+}
+
 /// Returns the keyfile-asymmetry warning body with no channel-specific prefix.
 /// `PreviewNote::Warn` owns the `[warn]` prefix for dry-run stdout and real-run
 /// stderr renders.

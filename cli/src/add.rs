@@ -8,9 +8,11 @@ use crate::credential_verify::{
 use crate::inhibit::AcquireSleepInhibitor;
 use crate::journal;
 use crate::luks::{
-    BackingPathResolver, OpenOutcome, PassphraseReader, backup_luks_header_post_mutation,
-    ensure_luks_open, format_keyfile_asymmetry_warning, format_keyfile_enrollment_probe_failure,
-    luks_format, luks_header_backup_path, probe_pool_keyfile_enrollment, read_passphrase_with,
+    BackingPathResolver, KeySlotState, LUKS_SLOT_KEYFILE, OpenOutcome, PassphraseReader,
+    backup_luks_header_post_mutation, check_key_slot, ensure_luks_open,
+    format_keyfile_asymmetry_warning, format_keyfile_enrollment_probe_failure,
+    format_target_keyfile_probe_failure, luks_format, luks_header_backup_path,
+    probe_pool_keyfile_enrollment, read_passphrase_with,
 };
 use crate::mapper_close::close_mapper_with_retry;
 use crate::membership::{self, DiskMember, LuksUuidMap, PoolMembership};
@@ -1758,27 +1760,9 @@ pub fn plan_add<R: CommandRunner + Sync, F: Filesystem + ?Sized>(
         )));
     }
 
-    let any_needs_format = probed
-        .iter()
-        .any(|p| matches!(p.state, PresentConfigDiskState::PresentNotLuks));
-
-    // Keyfile-asymmetry warning: body-only, no legacy `WARNING:` prefix.
-    // Appended after the missing-devices warning so `AddPlan::execute`
-    // replays them in that order on stderr.
-    if any_needs_format && params.enroll_key_file.is_none() {
-        let keyfile_probe = probe_pool_keyfile_enrollment(runner, &pool.devices);
-        if keyfile_probe.has_enrollment {
-            notes.push(PreviewNote::Warn(format_keyfile_asymmetry_warning()));
-        } else {
-            notes.extend(keyfile_probe.failures.iter().map(|failure| {
-                PreviewNote::Warn(format_keyfile_enrollment_probe_failure(failure))
-            }));
-        }
-    }
-
     // Build the semantic work plan. This can fail on PresentLuks identity / foreign-pool
-    // guards -- any accumulated notes up to here (missing-devices,
-    // keyfile-asymmetry) must survive on `PlanFailure::notes` so the caller can
+    // guards -- any accumulated notes up to here (missing-devices) must
+    // survive on `PlanFailure::notes` so the caller can
     // render them to stderr before the error.
     let by_ids_refs: Vec<&ByIdPath> = by_ids.iter().collect();
     let work_plan = match build_add_work_plan(
@@ -1801,6 +1785,46 @@ pub fn plan_add<R: CommandRunner + Sync, F: Filesystem + ?Sized>(
             return Err(PlanFailure::with_notes(notes, e));
         }
     };
+    // Keyfile-asymmetry warning: body-only, no legacy `WARNING:` prefix.
+    // Derived from the actual work targets so already-in-pool no-ops do
+    // not warn about a disk that will not be adopted.
+    if params.enroll_key_file.is_none() {
+        let mut any_target_lacks_keyfile = false;
+        for target in &work_plan.targets {
+            match target {
+                AddTargetWork::Fresh(_) => any_target_lacks_keyfile = true,
+                AddTargetWork::OpenRecoverable(target) => {
+                    match check_key_slot(runner, target.by_id.as_str(), LUKS_SLOT_KEYFILE) {
+                        Ok(KeySlotState::Empty) => any_target_lacks_keyfile = true,
+                        Ok(KeySlotState::Occupied) => {}
+                        Err(err) => notes.push(PreviewNote::Warn(
+                            format_target_keyfile_probe_failure(&target.by_id, &err),
+                        )),
+                    }
+                }
+                AddTargetWork::ClosedPresentLuks(target) => {
+                    match check_key_slot(runner, target.by_id.as_str(), LUKS_SLOT_KEYFILE) {
+                        Ok(KeySlotState::Empty) => any_target_lacks_keyfile = true,
+                        Ok(KeySlotState::Occupied) => {}
+                        Err(err) => notes.push(PreviewNote::Warn(
+                            format_target_keyfile_probe_failure(&target.by_id, &err),
+                        )),
+                    }
+                }
+            }
+        }
+
+        if any_target_lacks_keyfile {
+            let keyfile_probe = probe_pool_keyfile_enrollment(runner, &pool.devices);
+            if keyfile_probe.has_enrollment {
+                notes.push(PreviewNote::Warn(format_keyfile_asymmetry_warning()));
+            } else {
+                notes.extend(keyfile_probe.failures.iter().map(|failure| {
+                    PreviewNote::Warn(format_keyfile_enrollment_probe_failure(failure))
+                }));
+            }
+        }
+    }
     // No-op preview: zero steps + Info note naming the already-in-pool
     // target(s). The Info note suppresses `Preview::render`'s
     // `nothing to do.` fallback (see `preview.rs`:
@@ -2335,6 +2359,7 @@ mod tests {
     use super::*;
     use crate::luks::{RealTty, ScriptedPassphraseReader};
     use crate::secret::Passphrase;
+    use std::collections::HashMap;
 
     fn disk(name: &str) -> DiskName {
         DiskName::parse(name).expect("test disk name")
@@ -8249,9 +8274,19 @@ mod tests {
         Failure,
     }
 
+    #[derive(Clone, Copy)]
+    enum AddPlanTargetProbe {
+        ClosedSlot1Empty,
+        ClosedSlot1Occupied,
+        ClosedDumpFails,
+        OpenRecoverableSlot1Empty,
+        AlreadyInPoolSlot1Empty,
+    }
+
     struct AddPlanTestRunner {
         missing_count: u64,
         keyfile_probes: Vec<AddPlanKeyfileProbe>,
+        target_probes: HashMap<String, AddPlanTargetProbe>,
     }
 
     impl AddPlanTestRunner {
@@ -8259,6 +8294,7 @@ mod tests {
             Self {
                 missing_count: 0,
                 keyfile_probes: vec![AddPlanKeyfileProbe::Empty],
+                target_probes: HashMap::new(),
             }
         }
 
@@ -8282,8 +8318,50 @@ mod tests {
             self
         }
 
+        fn with_target_probe(mut self, by_id: &str, probe: AddPlanTargetProbe) -> Self {
+            self.target_probes.insert(by_id.to_owned(), probe);
+            self
+        }
+
         fn pool_underlying(index: usize) -> String {
             format!("/dev/vd{}", (b'b' + index as u8) as char)
+        }
+
+        fn pool_uuid(index: usize) -> String {
+            format!("11111111-1111-1111-1111-11111111111{index}")
+        }
+
+        fn disk_index_from_by_id(by_id: &str) -> Option<usize> {
+            by_id
+                .strip_prefix("/dev/disk/by-id/virtio-disk")?
+                .parse::<usize>()
+                .ok()?
+                .checked_sub(1)
+        }
+
+        fn disk_index_from_mapper(mapper: &str) -> Option<usize> {
+            mapper
+                .strip_prefix("braid-disk")?
+                .parse::<usize>()
+                .ok()?
+                .checked_sub(1)
+        }
+
+        fn by_id_for_index(index: usize) -> String {
+            format!("/dev/disk/by-id/virtio-disk{}", index + 1)
+        }
+
+        fn target_probe_by_index(&self, index: usize) -> Option<AddPlanTargetProbe> {
+            let by_id = Self::by_id_for_index(index);
+            self.target_probes.get(&by_id).copied()
+        }
+
+        fn target_probe_for_device(&self, device: &str) -> Option<(usize, AddPlanTargetProbe)> {
+            self.target_probes.iter().find_map(|(by_id, probe)| {
+                let index = Self::disk_index_from_by_id(by_id)?;
+                (device == by_id || device == Self::pool_underlying(index))
+                    .then_some((index, *probe))
+            })
         }
     }
 
@@ -8323,7 +8401,19 @@ mod tests {
                         .checked_sub(1)
                         .ok_or(CmdError::MissingMock)?;
                     if index >= self.keyfile_probes.len() {
-                        return Err(CmdError::MissingMock);
+                        if let Some(probe) = self.target_probe_by_index(index) {
+                            match probe {
+                                AddPlanTargetProbe::ClosedSlot1Empty
+                                | AddPlanTargetProbe::ClosedSlot1Occupied
+                                | AddPlanTargetProbe::ClosedDumpFails => {
+                                    return Ok(mock_status_inactive(mapper.as_str()));
+                                }
+                                AddPlanTargetProbe::OpenRecoverableSlot1Empty
+                                | AddPlanTargetProbe::AlreadyInPoolSlot1Empty => {}
+                            }
+                        } else {
+                            return Err(CmdError::MissingMock);
+                        }
                     }
                     let underlying = Self::pool_underlying(index);
                     Ok(mock_ok(
@@ -8340,15 +8430,28 @@ mod tests {
                             .iter()
                             .enumerate()
                             .find_map(|(index, _)| {
-                                let disk = index + 1;
                                 let underlying = Self::pool_underlying(index);
-                                let by_id = format!("/dev/disk/by-id/virtio-disk{disk}");
+                                let by_id = Self::by_id_for_index(index);
                                 (device == &underlying || device == &by_id).then_some(index)
                             })
                     {
                         Ok(mock_ok(
                             &format!("cryptsetup luksUUID {device}"),
-                            &format!("11111111-1111-1111-1111-11111111111{index}\n"),
+                            &format!("{}\n", Self::pool_uuid(index)),
+                        ))
+                    } else if let Some((index, probe)) = self.target_probe_for_device(device) {
+                        let uuid = match probe {
+                            AddPlanTargetProbe::ClosedSlot1Empty
+                            | AddPlanTargetProbe::ClosedSlot1Occupied
+                            | AddPlanTargetProbe::ClosedDumpFails
+                            | AddPlanTargetProbe::OpenRecoverableSlot1Empty => {
+                                "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa".to_owned()
+                            }
+                            AddPlanTargetProbe::AlreadyInPoolSlot1Empty => Self::pool_uuid(index),
+                        };
+                        Ok(mock_ok(
+                            &format!("cryptsetup luksUUID {device}"),
+                            &format!("{uuid}\n"),
                         ))
                     } else {
                         Ok(RawCommandOutput {
@@ -8363,10 +8466,65 @@ mod tests {
                     "btrfs balance status",
                     "No balance found on '/mnt/storage'\n",
                 )),
+                CmdRequest::CryptsetupLuksDumpText { device } => {
+                    let Some(index) = Self::disk_index_from_by_id(device) else {
+                        return Err(CmdError::MissingMock);
+                    };
+                    if self.target_probe_by_index(index).is_none() {
+                        return Err(CmdError::MissingMock);
+                    }
+                    Ok(mock_ok(
+                        &format!("cryptsetup luksDump {device}"),
+                        &format!(
+                            "LUKS header information\nVersion:\t2\nLabel:\tbraid-disk{}\n",
+                            index + 1
+                        ),
+                    ))
+                }
+                CmdRequest::BtrfsFilesystemShowTarget { target } => {
+                    let mapper = target
+                        .strip_prefix("/dev/mapper/")
+                        .ok_or(CmdError::MissingMock)?;
+                    let Some(index) = Self::disk_index_from_mapper(mapper) else {
+                        return Err(CmdError::MissingMock);
+                    };
+                    match self.target_probe_by_index(index) {
+                        Some(
+                            AddPlanTargetProbe::OpenRecoverableSlot1Empty
+                            | AddPlanTargetProbe::AlreadyInPoolSlot1Empty,
+                        ) => Ok(mock_ok(
+                            &format!("btrfs filesystem show {target}"),
+                            &format!(
+                                "Label: none  uuid: {POOL_FSID}\n\tTotal devices 1 FS bytes used 16.17MiB\n\tdevid    1 size 496.00MiB used 121.56MiB path {target}\n"
+                            ),
+                        )),
+                        Some(_) | None => Err(CmdError::MissingMock),
+                    }
+                }
                 CmdRequest::CryptsetupLuksDump { .. } => {
                     let CmdRequest::CryptsetupLuksDump { device } = request else {
                         unreachable!();
                     };
+                    if let Some((_, probe)) = self.target_probe_for_device(device) {
+                        return match probe {
+                            AddPlanTargetProbe::ClosedSlot1Empty
+                            | AddPlanTargetProbe::OpenRecoverableSlot1Empty
+                            | AddPlanTargetProbe::AlreadyInPoolSlot1Empty => Ok(mock_ok(
+                                "cryptsetup luksDump --dump-json-metadata",
+                                r#"{"keyslots":{"0":{"type":"luks2"}}}"#,
+                            )),
+                            AddPlanTargetProbe::ClosedSlot1Occupied => Ok(mock_ok(
+                                "cryptsetup luksDump --dump-json-metadata",
+                                r#"{"keyslots":{"0":{"type":"luks2"},"1":{"type":"luks2"}}}"#,
+                            )),
+                            AddPlanTargetProbe::ClosedDumpFails => Ok(RawCommandOutput {
+                                cmd: format!("cryptsetup luksDump --dump-json-metadata {device}"),
+                                stdout: String::new(),
+                                stderr: format!("forced luksDump failure on target {device}"),
+                                exit_status: 5,
+                            }),
+                        };
+                    }
                     let Some((index, probe)) = self
                         .keyfile_probes
                         .iter()
@@ -8700,6 +8858,222 @@ mod tests {
             &format_keyfile_asymmetry_warning(),
             "occupied slot 1 must emit only the keyfile-asymmetry warning"
         );
+    }
+
+    // Intent: returning closed LUKS add targets with empty slot 1 emit the
+    // keyfile-asymmetry warning when the existing pool has keyfile enrollment.
+    // Why it exists: fresh-format gating missed returning disks that predate
+    // the pool's keyfile rollout.
+    // Scenario: disk2 is a closed braid-labeled LUKS disk with slot 0 only,
+    // and the operator re-adds it without --enroll.
+    #[test]
+    fn plan_add_keyfile_asymmetry_emits_warn_for_returning_disk_with_empty_slot_1() {
+        let fixture = plan_add_fixture();
+        let fs = AddMockFs(vec!["/dev/disk/by-id/virtio-disk2".into()]);
+        let runner = AddPlanTestRunner::new().with_keyfile().with_target_probe(
+            "/dev/disk/by-id/virtio-disk2",
+            AddPlanTargetProbe::ClosedSlot1Empty,
+        );
+
+        let disk_specs = ["disk2=/dev/disk/by-id/virtio-disk2".to_string()];
+        let plan = plan_add(&runner, &fs, &fixture.params(&disk_specs, true))
+            .expect("plan_add should succeed");
+
+        let warns: Vec<&String> = plan
+            .notes
+            .iter()
+            .filter_map(|n| match n {
+                PreviewNote::Warn(b) => Some(b),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(warns.len(), 1, "expected one Warn note, got {warns:?}");
+        assert_eq!(warns[0], &format_keyfile_asymmetry_warning());
+    }
+
+    // Intent: returning closed LUKS add targets with occupied slot 1 do not
+    // emit the keyfile-asymmetry warning.
+    // Why it exists: the returning-disk check must distinguish already
+    // enrolled disks from asymmetric disks.
+    // Scenario: disk2 already carries slot 1, so re-adding it without
+    // --enroll does not create keyfile asymmetry.
+    #[test]
+    fn plan_add_keyfile_no_warn_for_returning_disk_with_occupied_slot_1() {
+        let fixture = plan_add_fixture();
+        let fs = AddMockFs(vec!["/dev/disk/by-id/virtio-disk2".into()]);
+        let runner = AddPlanTestRunner::new().with_keyfile().with_target_probe(
+            "/dev/disk/by-id/virtio-disk2",
+            AddPlanTargetProbe::ClosedSlot1Occupied,
+        );
+
+        let disk_specs = ["disk2=/dev/disk/by-id/virtio-disk2".to_string()];
+        let plan = plan_add(&runner, &fs, &fixture.params(&disk_specs, true))
+            .expect("plan_add should succeed");
+
+        let warns: Vec<&String> = plan
+            .notes
+            .iter()
+            .filter_map(|n| match n {
+                PreviewNote::Warn(b) => Some(b),
+                _ => None,
+            })
+            .collect();
+        assert!(warns.is_empty(), "expected no Warn notes, got {warns:?}");
+    }
+
+    // Intent: returning LUKS target slot-probe failures surface as
+    // target-specific PreviewNote::Warn diagnostics.
+    // Why it exists: target-side uncertainty should not be confused with
+    // pool-member enrollment uncertainty.
+    // Scenario: disk2 is returning LUKS, but its JSON luksDump fails while
+    // previewing add without --enroll.
+    #[test]
+    fn plan_add_keyfile_emits_target_probe_failure_for_returning_disk_dump_error() {
+        let fixture = plan_add_fixture();
+        let target = ByIdPath::parse("/dev/disk/by-id/virtio-disk2").unwrap();
+        let fs = AddMockFs(vec![target.as_str().to_owned()]);
+        let runner = AddPlanTestRunner::new()
+            .with_keyfile()
+            .with_target_probe(target.as_str(), AddPlanTargetProbe::ClosedDumpFails);
+
+        let disk_specs = [format!("disk2={target}")];
+        let plan = plan_add(&runner, &fs, &fixture.params(&disk_specs, true))
+            .expect("plan_add should succeed");
+
+        let warns: Vec<&String> = plan
+            .notes
+            .iter()
+            .filter_map(|n| match n {
+                PreviewNote::Warn(b) => Some(b),
+                _ => None,
+            })
+            .collect();
+        let err = crate::luks::LuksError::Validation(format!(
+            "cryptsetup luksDump failed (exit 5): forced luksDump failure on target {target}"
+        ));
+        assert_eq!(warns.len(), 1, "expected one Warn note, got {warns:?}");
+        assert_eq!(
+            warns[0],
+            &format_target_keyfile_probe_failure(&target, &err)
+        );
+    }
+
+    // Intent: pool-side keyfile probe failures still surface when a returning
+    // target lacks slot 1 and the pool enrollment state is uncertain.
+    // Why it exists: moving the add warning gate after work-plan construction
+    // must not make the existing pool-side uncertainty channel unreachable.
+    // Scenario: disk2 has slot 1 empty, and the only pool member's luksDump
+    // fails while previewing add without --enroll.
+    #[test]
+    fn plan_add_keyfile_pool_probe_failure_for_returning_disk_with_empty_slot_1() {
+        let fixture = plan_add_fixture();
+        let fs = AddMockFs(vec!["/dev/disk/by-id/virtio-disk2".into()]);
+        let runner = AddPlanTestRunner::new()
+            .with_keyfile_probe_failure()
+            .with_target_probe(
+                "/dev/disk/by-id/virtio-disk2",
+                AddPlanTargetProbe::ClosedSlot1Empty,
+            );
+
+        let disk_specs = ["disk2=/dev/disk/by-id/virtio-disk2".to_string()];
+        let plan = plan_add(&runner, &fs, &fixture.params(&disk_specs, true))
+            .expect("plan_add should succeed");
+
+        let warns: Vec<&String> = plan
+            .notes
+            .iter()
+            .filter_map(|n| match n {
+                PreviewNote::Warn(b) => Some(b),
+                _ => None,
+            })
+            .collect();
+        let failure = crate::luks::KeyfileEnrollmentProbeFailure {
+            device: "/dev/vdb".to_owned(),
+            error:
+                "cryptsetup luksDump failed (exit 5): forced luksDump failure on existing disk 1"
+                    .to_owned(),
+        };
+        assert_eq!(warns.len(), 1, "expected one Warn note, got {warns:?}");
+        assert_eq!(warns[0], &format_keyfile_enrollment_probe_failure(&failure));
+    }
+
+    // Intent: already-in-pool add targets do not emit keyfile-asymmetry
+    // warnings even when that disk has empty slot 1.
+    // Why it exists: the warning decision must derive from work_plan.targets,
+    // after SameBacking no-op targets have been filtered out.
+    // Scenario: disk2 is already a live pool member, the pool proves keyfile
+    // enrollment via disk1, and the operator runs a no-op `braid add disk2`.
+    #[test]
+    fn plan_add_keyfile_no_warn_when_target_already_in_pool_with_empty_slot_1() {
+        let fixture = plan_add_fixture();
+        let fs = AddMockFs(vec!["/dev/disk/by-id/virtio-disk2".into()]);
+        let runner = AddPlanTestRunner::new()
+            .with_keyfile_probes(vec![
+                AddPlanKeyfileProbe::Occupied,
+                AddPlanKeyfileProbe::Empty,
+            ])
+            .with_target_probe(
+                "/dev/disk/by-id/virtio-disk2",
+                AddPlanTargetProbe::AlreadyInPoolSlot1Empty,
+            );
+
+        let disk_specs = ["disk2=/dev/disk/by-id/virtio-disk2".to_string()];
+        let plan = plan_add(&runner, &fs, &fixture.params(&disk_specs, true))
+            .expect("plan_add should succeed");
+
+        let warns: Vec<&String> = plan
+            .notes
+            .iter()
+            .filter_map(|n| match n {
+                PreviewNote::Warn(b) => Some(b),
+                _ => None,
+            })
+            .collect();
+        let infos: Vec<&String> = plan
+            .notes
+            .iter()
+            .filter_map(|n| match n {
+                PreviewNote::Info(b) => Some(b),
+                _ => None,
+            })
+            .collect();
+        assert!(warns.is_empty(), "expected no Warn notes, got {warns:?}");
+        assert_eq!(infos.len(), 1, "expected one Info note, got {infos:?}");
+        assert_eq!(
+            infos[0],
+            &format_add_noop(&[DiskName::parse("disk2").unwrap()])
+        );
+    }
+
+    // Intent: open recoverable returning add targets with empty slot 1 emit
+    // the keyfile-asymmetry warning.
+    // Why it exists: the warning gate must cover both ClosedPresentLuks and
+    // OpenRecoverable work-plan variants.
+    // Scenario: disk2's mapper is already open, belongs to the same btrfs
+    // FSID, is not a live pool member, and lacks keyfile slot 1.
+    #[test]
+    fn plan_add_keyfile_asymmetry_emits_warn_for_open_returning_disk_with_empty_slot_1() {
+        let fixture = plan_add_fixture();
+        let fs = AddMockFs(vec!["/dev/disk/by-id/virtio-disk2".into()]);
+        let runner = AddPlanTestRunner::new().with_keyfile().with_target_probe(
+            "/dev/disk/by-id/virtio-disk2",
+            AddPlanTargetProbe::OpenRecoverableSlot1Empty,
+        );
+
+        let disk_specs = ["disk2=/dev/disk/by-id/virtio-disk2".to_string()];
+        let plan = plan_add(&runner, &fs, &fixture.params(&disk_specs, true))
+            .expect("plan_add should succeed");
+
+        let warns: Vec<&String> = plan
+            .notes
+            .iter()
+            .filter_map(|n| match n {
+                PreviewNote::Warn(b) => Some(b),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(warns.len(), 1, "expected one Warn note, got {warns:?}");
+        assert_eq!(warns[0], &format_keyfile_asymmetry_warning());
     }
 
     // Intent: pin the shared `braid add` no-op and done message helpers.

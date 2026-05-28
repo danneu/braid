@@ -273,6 +273,14 @@ impl ReplacementPool {
                     &luks_dump_json_dynamic_default(),
                 )))
             }
+            CmdRequest::CryptsetupLuksDump { device }
+                if device == "/dev/vdb" || device == "/dev/vdc" =>
+            {
+                Some(Ok(mock_ok(
+                    &format!("cryptsetup luksDump --dump-json-metadata {device}"),
+                    r#"{"keyslots":{"0":{"type":"luks2"}}}"#,
+                )))
+            }
             CmdRequest::LsblkField {
                 device,
                 field: LsblkFieldKind::Size,

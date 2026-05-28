@@ -257,4 +257,26 @@ with subtest("Test 4c: keyfile-asymmetry real-run -> stderr canonical [warn] blo
         " got: {!r}".format(err)
     )
 
+with subtest("Test 4d: returning slot0-only disk dry-run emits keyfile-asymmetry warn"):
+    # Intent: re-adding a returning LUKS disk without slot 1 emits the same
+    # keyfile-asymmetry dry-run warning as a fresh add.
+    # Why it exists: the add planner used to warn only for fresh-format
+    # targets, so returning disks could miss the auto-unlock advisory.
+    # Scenario: disk3 was added without --enroll in Test 4c, then removed
+    # without wiping its LUKS header; re-adding it should warn.
+    machine.succeed("braid remove disk3 --yes")
+
+    machine.succeed(
+        f"{add_cmd_disk3('--dry-run')} >/tmp/rka-returning-stdout 2>/tmp/rka-returning-stderr"
+    )
+    out = machine.succeed("cat /tmp/rka-returning-stdout")
+    err = machine.succeed("cat /tmp/rka-returning-stderr")
+
+    assert "[warn] Existing pool drives have a keyfile (keyslot-1)" in out, (
+        "returning-disk dry-run stdout must surface the keyfile-asymmetry Warn; got: {!r}".format(out)
+    )
+    assert err == "", (
+        "returning-disk dry-run stderr must be empty on success; got: {!r}".format(err)
+    )
+
 machine.shutdown()
