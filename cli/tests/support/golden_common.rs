@@ -190,8 +190,15 @@ golden_test!(
     "cryptsetup status",
     parse::cryptsetup_status::parse_cryptsetup_status,
     |out: parse::types::CryptsetupStatusOutput| {
-        assert!(out.is_active);
-        assert!(out.device.is_some(), "active status should have a device");
+        assert!(
+            matches!(
+                out,
+                parse::types::CryptsetupStatusOutput::Active {
+                    backing: parse::types::BackingDevice::Path(_),
+                }
+            ),
+            "active status should carry a backing path"
+        );
     }
 );
 
@@ -349,10 +356,7 @@ golden_test!(
         assert_eq!(out.key_size_bits, 512);
         assert_eq!(out.keyslot_count, 1);
         assert_eq!(out.segment_offset_bytes, 16_777_216);
-        assert_eq!(
-            out.segment_size,
-            parse::types::Luks2SegmentSize::Dynamic
-        );
+        assert_eq!(out.segment_size, parse::types::Luks2SegmentSize::Dynamic);
     }
 );
 
@@ -476,8 +480,7 @@ fn golden_cryptsetup_status_inactive() {
     };
     let out = parse::cryptsetup_status::parse_cryptsetup_status(&raw)
         .expect("parser failed on golden fixture: cryptsetup-status-inactive");
-    assert!(!out.is_active);
-    assert_eq!(out.device, None);
+    assert_eq!(out, parse::types::CryptsetupStatusOutput::Inactive);
 }
 
 // --- NUT (upsc) parsers ---
@@ -565,7 +568,10 @@ fn golden_upsc_lowbattery() {
     assert!(out.status_flags.contains(&UpsStatusFlag::Lb));
     // Sanity: the fixture seeds battery.charge below the low threshold.
     match out.battery.charge_pct {
-        Some(pct) => assert!(pct <= 10, "lowbattery fixture should seed charge <=10, got {pct}"),
+        Some(pct) => assert!(
+            pct <= 10,
+            "lowbattery fixture should seed charge <=10, got {pct}"
+        ),
         None => panic!("battery.charge must parse on the lowbattery fixture"),
     }
 }

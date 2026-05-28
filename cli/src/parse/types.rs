@@ -132,11 +132,26 @@ pub struct BtrfsFilesystemShowOutput {
     pub missing_devids: Vec<u64>,
 }
 
-/// cryptsetup status
+/// Result of `cryptsetup status <mapper>`. The active-vs-inactive split is
+/// enforced by the parser: an inactive mapper carries no backing device; an
+/// active one always carries a typed backing.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct CryptsetupStatusOutput {
-    pub is_active: bool,
-    pub device: Option<String>,
+pub enum CryptsetupStatusOutput {
+    Inactive,
+    Active { backing: BackingDevice },
+}
+
+/// Backing block device reported by an active mapper. Cryptsetup prints
+/// `device: (null)` when the underlying block device has been hot-unplugged;
+/// braid additionally folds empty or whitespace-only parsed values into `Null`
+/// defensively, since `parse_device_line` can yield `""` if the value side of
+/// the `device:` line is blank. Folding both into a single `Null` variant
+/// prevents consumers from routing either value through the real-path code
+/// path.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum BackingDevice {
+    Path(String),
+    Null,
 }
 
 /// cryptsetup luksUUID

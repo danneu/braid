@@ -17,6 +17,7 @@
 //! so the caller proceeds to skip the close. Phase 4b will reuse this body.
 
 use crate::cmd::{CmdRequest, CommandRunner};
+use crate::parse::types::{BackingDevice, CryptsetupStatusOutput};
 use crate::parse::{parse_cryptsetup_luks_uuid, parse_cryptsetup_status};
 use crate::types::{LuksUuid, MapperName};
 
@@ -46,33 +47,33 @@ pub(crate) fn probe_observed_mapper_uuid<R: CommandRunner>(
             return false;
         }
     };
-    let status = match parse_cryptsetup_status(&status) {
-        Ok(status) => status,
+    let backing_device = match parse_cryptsetup_status(&status) {
+        Ok(CryptsetupStatusOutput::Active {
+            backing: BackingDevice::Path(device),
+        }) => device,
+        Ok(CryptsetupStatusOutput::Inactive) => {
+            eprintln!(
+                "Warning: post-commit close skipped for mapper {mapper}: probe failed (mapper is inactive); expected LUKS UUID {expected}",
+                mapper = mapper,
+                expected = expected_uuid,
+            );
+            return false;
+        }
+        Ok(CryptsetupStatusOutput::Active {
+            backing: BackingDevice::Null,
+        }) => {
+            eprintln!(
+                "Warning: post-commit close skipped for mapper {mapper}: probe failed (mapper backing device is unavailable (cryptsetup reports null)); expected LUKS UUID {expected}",
+                mapper = mapper,
+                expected = expected_uuid,
+            );
+            return false;
+        }
         Err(e) => {
             eprintln!(
                 "Warning: post-commit close skipped for mapper {mapper}: probe failed ({err}); expected LUKS UUID {expected}",
                 mapper = mapper,
                 err = e,
-                expected = expected_uuid,
-            );
-            return false;
-        }
-    };
-    let backing_device = match status.device.as_deref() {
-        Some(device) if !device.is_empty() && device != "(null)" => device,
-        Some(device) => {
-            eprintln!(
-                "Warning: post-commit close skipped for mapper {mapper}: probe failed (mapper backing device is {device}); expected LUKS UUID {expected}",
-                mapper = mapper,
-                device = device,
-                expected = expected_uuid,
-            );
-            return false;
-        }
-        None => {
-            eprintln!(
-                "Warning: post-commit close skipped for mapper {mapper}: probe failed (mapper is inactive); expected LUKS UUID {expected}",
-                mapper = mapper,
                 expected = expected_uuid,
             );
             return false;

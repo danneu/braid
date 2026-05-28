@@ -3,6 +3,7 @@ use crate::config::{Config, name_from_mapper};
 use crate::mapper_close::{CloseMapperError, close_mapper_with_retry};
 use crate::membership::{MembershipError, PoolMembership};
 use crate::online_state::{OnlineError, OnlineStateOps, RealOnlineStateOps, mark_offline};
+use crate::parse::types::{BackingDevice, CryptsetupStatusOutput};
 use crate::parse::{parse_cryptsetup_luks_uuid, parse_cryptsetup_status};
 use crate::pool_lock::StopCoordinatorGuard;
 use crate::preflight;
@@ -166,31 +167,29 @@ fn classify_candidate_mapper<R: CommandRunner>(
     let status_raw = runner.run(&CmdRequest::CryptsetupStatus {
         mapper: mapper.clone(),
     })?;
-    let status = parse_cryptsetup_status(&status_raw)
-        .map_err(|e| CmdError::Failed(format!("cryptsetup status {mapper}: {e}")))?;
-    if !status.is_active {
-        return Err(CmdError::Failed(format!(
-            "cryptsetup status {}: mapper is inactive",
-            mapper
-        )));
-    }
-    let backing_device = match status.device.as_deref() {
-        Some(device) if !device.is_empty() && device != "(null)" => device,
-        Some(device) => {
-            return Err(CmdError::Failed(format!(
-                "cryptsetup status {}: mapper backing device is {device}",
-                mapper
-            )));
-        }
-        None => {
+    let backing_device = match parse_cryptsetup_status(&status_raw)
+        .map_err(|e| CmdError::Failed(format!("cryptsetup status {mapper}: {e}")))?
+    {
+        CryptsetupStatusOutput::Inactive => {
             return Err(CmdError::Failed(format!(
                 "cryptsetup status {}: mapper is inactive",
                 mapper
             )));
         }
+        CryptsetupStatusOutput::Active {
+            backing: BackingDevice::Null,
+        } => {
+            return Err(CmdError::Failed(format!(
+                "cryptsetup status {}: mapper backing device is unavailable (cryptsetup reports null)",
+                mapper
+            )));
+        }
+        CryptsetupStatusOutput::Active {
+            backing: BackingDevice::Path(device),
+        } => device,
     };
     let uuid_raw = runner.run(&CmdRequest::CryptsetupLuksUuid {
-        device: backing_device.to_owned(),
+        device: backing_device.clone(),
     })?;
     let parsed = parse_cryptsetup_luks_uuid(&uuid_raw)
         .map_err(|e| CmdError::Failed(format!("cryptsetup luksUUID {backing_device}: {e}")))?;

@@ -9,7 +9,7 @@ use nom::{
 use crate::cmd::RawCommandOutput;
 
 use super::ParseError;
-use super::types::CryptsetupStatusOutput;
+use super::types::{BackingDevice, CryptsetupStatusOutput};
 
 // Parses: "  device:  /dev/vda"  →  "/dev/vda"
 fn parse_device_line(input: &str) -> IResult<&str, &str> {
@@ -38,10 +38,7 @@ pub fn parse_cryptsetup_status(
     if parse_inactive_message(raw.stdout.trim()).is_ok()
         || parse_inactive_message(raw.stderr.trim()).is_ok()
     {
-        return Ok(CryptsetupStatusOutput {
-            is_active: false,
-            device: None,
-        });
+        return Ok(CryptsetupStatusOutput::Inactive);
     }
 
     if raw.exit_status != 0 {
@@ -49,10 +46,7 @@ pub fn parse_cryptsetup_status(
         // Non-zero exit is expected when device is not active.
         // Benign if stderr is empty or matches structured "not active" message.
         if stderr.is_empty() || parse_inactive_message(stderr).is_ok() {
-            return Ok(CryptsetupStatusOutput {
-                is_active: false,
-                device: None,
-            });
+            return Ok(CryptsetupStatusOutput::Inactive);
         }
         return Err(ParseError::CommandFailed {
             cmd: raw.cmd.clone(),
@@ -75,10 +69,12 @@ pub fn parse_cryptsetup_status(
             field: "device".into(),
         })?;
 
-    Ok(CryptsetupStatusOutput {
-        is_active: true,
-        device: Some(device),
-    })
+    let backing = if device.is_empty() || device == "(null)" {
+        BackingDevice::Null
+    } else {
+        BackingDevice::Path(device)
+    };
+    Ok(CryptsetupStatusOutput::Active { backing })
 }
 
 #[cfg(test)]
@@ -102,8 +98,10 @@ mod tests {
             exit_status: 0,
         };
         let out = parse_cryptsetup_status(&raw).unwrap();
-        assert!(out.is_active);
-        assert_eq!(out.device.as_deref(), Some("/dev/vdb"));
+        assert!(matches!(
+            out,
+            CryptsetupStatusOutput::Active { backing: BackingDevice::Path(p) } if p == "/dev/vdb"
+        ));
     }
 
     #[test]
@@ -115,8 +113,7 @@ mod tests {
             exit_status: 4,
         };
         let out = parse_cryptsetup_status(&raw).unwrap();
-        assert!(!out.is_active);
-        assert_eq!(out.device, None);
+        assert_eq!(out, CryptsetupStatusOutput::Inactive);
     }
 
     #[test]
@@ -142,5 +139,33 @@ mod tests {
         };
         let err = parse_cryptsetup_status(&raw).unwrap_err();
         assert!(matches!(err, ParseError::MissingField { .. }));
+    }
+
+    #[test]
+    fn cryptsetup_status_active_with_null_backing_collapses_to_null() {
+        let null_literal = RawCommandOutput {
+            cmd: "cryptsetup status".into(),
+            stdout: "/dev/mapper/braid-vda is active.\n  device:  (null)\n  type:  LUKS2\n".into(),
+            stderr: String::new(),
+            exit_status: 0,
+        };
+        let whitespace_only = RawCommandOutput {
+            cmd: "cryptsetup status".into(),
+            stdout: "/dev/mapper/braid-vda is active.\n  device:    \n  type:  LUKS2\n".into(),
+            stderr: String::new(),
+            exit_status: 0,
+        };
+        assert_eq!(
+            parse_cryptsetup_status(&null_literal).unwrap(),
+            CryptsetupStatusOutput::Active {
+                backing: BackingDevice::Null
+            }
+        );
+        assert_eq!(
+            parse_cryptsetup_status(&whitespace_only).unwrap(),
+            CryptsetupStatusOutput::Active {
+                backing: BackingDevice::Null
+            }
+        );
     }
 }

@@ -5,7 +5,9 @@ use std::time::Instant;
 use crate::cmd::{CmdRequest, CommandRunner};
 use crate::config::{FanControl, mapper_name};
 use crate::luks::{self, BackingPathResolver};
-use crate::parse::types::{ScrubState, SmartHealth, SmartProbe};
+use crate::parse::types::{
+    BackingDevice, CryptsetupStatusOutput, ScrubState, SmartHealth, SmartProbe,
+};
 use crate::parse::{
     parse_btrfs_device_stats, parse_btrfs_device_usage, parse_btrfs_scrub_status,
     parse_cryptsetup_luks_dump, parse_cryptsetup_luks_uuid, parse_cryptsetup_status,
@@ -37,17 +39,15 @@ fn fallback_disk_luks_lock<R: CommandRunner>(
         Ok(raw) => raw,
         Err(_) => return (DiskLockState::Unknown, None),
     };
-    let status = match parse_cryptsetup_status(&status_raw) {
-        Ok(status) => status,
+    let underlying = match parse_cryptsetup_status(&status_raw) {
+        Ok(CryptsetupStatusOutput::Inactive) => return (DiskLockState::Locked, None),
+        Ok(CryptsetupStatusOutput::Active {
+            backing: BackingDevice::Path(path),
+        }) => path,
+        Ok(CryptsetupStatusOutput::Active {
+            backing: BackingDevice::Null,
+        }) => return (DiskLockState::Unknown, None),
         Err(_) => return (DiskLockState::Unknown, None),
-    };
-    if !status.is_active {
-        return (DiskLockState::Locked, None);
-    }
-
-    let underlying = match status.device.as_deref() {
-        Some(path) if !path.is_empty() && path != "(null)" => path.to_owned(),
-        _ => return (DiskLockState::Unknown, None),
     };
 
     let expected_path = match backing_path_resolver.canonicalize(by_id_path) {

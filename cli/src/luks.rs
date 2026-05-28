@@ -1,5 +1,6 @@
 use crate::cmd::{CmdError, CmdRequest, CommandRunner, RawCommandOutput};
 use crate::config::mapper_name;
+use crate::parse::types::{BackingDevice, CryptsetupStatusOutput};
 use crate::parse::{
     ParseError, cryptsetup_luks_uuid_reports_not_luks, parse_cryptsetup_luks_uuid,
     parse_cryptsetup_status,
@@ -846,14 +847,11 @@ where
     let status_raw = runner.run(&CmdRequest::CryptsetupStatus {
         mapper: mapper.clone(),
     })?;
-    let status = parse_cryptsetup_status(&status_raw)?;
-
-    if !status.is_active {
-        return Ok(MapperOwnership::Inactive);
-    }
-
-    let underlying = match status.device.as_deref() {
-        None | Some("") | Some("(null)") => {
+    let underlying_owned = match parse_cryptsetup_status(&status_raw)? {
+        CryptsetupStatusOutput::Inactive => return Ok(MapperOwnership::Inactive),
+        CryptsetupStatusOutput::Active {
+            backing: BackingDevice::Null,
+        } => {
             let expected = expected_uuid()?;
             return Err(OwnershipError::Conflict {
                 name: name.as_str().to_owned(),
@@ -861,8 +859,11 @@ where
                 found: None,
             });
         }
-        Some(device) => device,
+        CryptsetupStatusOutput::Active {
+            backing: BackingDevice::Path(device),
+        } => device,
     };
+    let underlying = underlying_owned.as_str();
 
     let expected_path = backing_path_resolver
         .canonicalize(expected_by_id.as_str())

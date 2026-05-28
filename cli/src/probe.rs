@@ -6,6 +6,7 @@ use crate::luks::{
     BackingPathResolver, MapperOwnership, OwnershipError, classify_mapper_ownership,
     mapper_conflict_found_display,
 };
+use crate::parse::types::{BackingDevice, CryptsetupStatusOutput};
 use crate::parse::{
     ParseError, parse_btrfs_filesystem_show, parse_cryptsetup_luks_label,
     parse_cryptsetup_luks_uuid, parse_cryptsetup_luks_version, parse_cryptsetup_status,
@@ -341,29 +342,24 @@ pub fn probe_pool_alerts<R: CommandRunner, F: Filesystem + ?Sized>(
         let status_raw = runner.run(&CmdRequest::CryptsetupStatus {
             mapper: MapperName(name.clone()),
         })?;
-        let status = parse_cryptsetup_status(&status_raw)?;
-
-        if !status.is_active {
-            return Err(ProbeError::PoolDevice {
-                mapper: name,
-                detail: "not active".to_owned(),
-            });
-        }
-
-        match status.device {
-            None => {
+        match parse_cryptsetup_status(&status_raw)? {
+            CryptsetupStatusOutput::Inactive => {
+                return Err(ProbeError::PoolDevice {
+                    mapper: name,
+                    detail: "not active".to_owned(),
+                });
+            }
+            CryptsetupStatusOutput::Active {
+                backing: BackingDevice::Null,
+            } => {
                 null_underlying.push(NullUnderlyingDevice {
                     mapper: MapperName(name),
                     devid: bdev.devid,
                 });
             }
-            Some(device) if device == "(null)" => {
-                null_underlying.push(NullUnderlyingDevice {
-                    mapper: MapperName(name),
-                    devid: bdev.devid,
-                });
-            }
-            Some(_) => present_devids.push(bdev.devid),
+            CryptsetupStatusOutput::Active {
+                backing: BackingDevice::Path(_),
+            } => present_devids.push(bdev.devid),
         }
     }
 
@@ -434,34 +430,28 @@ pub fn probe_pool<R: CommandRunner, F: Filesystem + ?Sized>(
         let status_raw = runner.run(&CmdRequest::CryptsetupStatus {
             mapper: MapperName(name.clone()),
         })?;
-        let status = parse_cryptsetup_status(&status_raw)?;
-
-        if !status.is_active {
-            return Err(ProbeError::PoolDevice {
-                mapper: name,
-                detail: "not active".to_owned(),
-            });
-        }
-
         // When a backing device is hot-unplugged, cryptsetup reports
         // device: (null). Record these as null-underlying — the mapper
         // is open but the block device is gone.
-        let underlying = match status.device {
-            None => {
+        let underlying = match parse_cryptsetup_status(&status_raw)? {
+            CryptsetupStatusOutput::Inactive => {
+                return Err(ProbeError::PoolDevice {
+                    mapper: name,
+                    detail: "not active".to_owned(),
+                });
+            }
+            CryptsetupStatusOutput::Active {
+                backing: BackingDevice::Null,
+            } => {
                 null_underlying.push(NullUnderlyingDevice {
                     mapper: MapperName(name),
                     devid: bdev.devid,
                 });
                 continue;
             }
-            Some(ref d) if d == "(null)" => {
-                null_underlying.push(NullUnderlyingDevice {
-                    mapper: MapperName(name),
-                    devid: bdev.devid,
-                });
-                continue;
-            }
-            Some(d) => d,
+            CryptsetupStatusOutput::Active {
+                backing: BackingDevice::Path(d),
+            } => d,
         };
 
         let uuid_raw = runner.run(&CmdRequest::CryptsetupLuksUuid {
