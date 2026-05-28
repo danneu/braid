@@ -54,11 +54,11 @@ pub fn cmd_monitor<R: CommandRunner, F: Filesystem + ?Sized>(
             // Treat as offline; no fail-closed beep needed.
             Err(ProbeError::NotBtrfs { .. }) => return Ok(None),
             // All remaining variants describe indeterminate pool state --
-            // tooling breakage (Cmd/Parse), pool show internally inconsistent
-            // (PoolDevice), or LUKS-side mismatch (UnsupportedLuksVersion /
-            // MapperConflict, both unreachable from probe_pool_alerts today
-            // but listed for the gate). Fail closed per ADR 014: latch
-            // ComputationError so the wrapper beeps.
+            // tooling/probe breakage (Cmd/Parse/MountInfo), pool show
+            // internally inconsistent (PoolDevice), or LUKS-side validation
+            // failure (the LUKS-side variants are all unreachable from
+            // probe_pool_alerts today but listed for the gate). Fail closed
+            // per ADR 014: latch ComputationError so the wrapper beeps.
             Err(
                 e @ (ProbeError::Cmd(_)
                 | ProbeError::Parse(_)
