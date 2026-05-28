@@ -249,9 +249,77 @@ for recovery options.
 `--json` produces a structured report suitable for monitoring tools. Key fields:
 
 - `status`: `"intact"`, `"degraded"`, or `"not_mounted"`
-- `disks`: array of disk reports with `name`, `status`, `devid`, `errors`, etc.
+- `disks`: array of per-disk reports -- one element per disk braid knows
+  about: present pool members (matched members and foreign live devices),
+  plus configured disks that are not currently live pool members (reported
+  as `missing`, `unknown`, or `luks-header-*`; see the `status` values
+  below). The field list below describes a **present** element (as in the
+  example); non-present elements differ as called out per field and in the
+  note after the example.
+  - `luks_uuid`: the disk's **live-observed** LUKS UUID -- the persistent
+    member identity. For a matched present member it equals the `pool.json`
+    membership key; a foreign present device carries a live UUID that is
+    **not** in membership (paralleling its mapper-basename `name`).
+    **Populated for present disks only.** A non-present disk reports `""`,
+    because the UUID is read from the live device and is unavailable when
+    the device is absent; correlate non-present disks by `name`, not
+    `luks_uuid`.
+  - `name`: operator-facing name (e.g. `toshiba1`). For a matched present
+    member it is resolved via the UUID-keyed membership join; for a foreign
+    present device it falls back to the mapper basename; for a non-present
+    disk it is the configured name. For display/command selection, not
+    identity.
+  - `by_id`: stable `/dev/disk/by-id/...` hardware path -- a runtime
+    handle, not identity.
+  - `mapper`: the **observed** device-mapper name -- normally
+    `braid-<name>`, but may differ when a member is open under a drifted
+    mapper (decision 024 tolerates mapper drift). A runtime handle, not
+    identity; do not reconstruct it as `braid-${name}`.
+  - `underlying`: current backing block device (e.g. `/dev/sda`), or
+    `null` when the disk is not present.
+  - `devid`: btrfs device ID **as a string** (e.g. `"1"`), or `null`
+    when the disk is not a live pool member.
+  - `status`: one of `present`, `missing`, `luks-header-unreadable`,
+    `luks-header-damaged`, `unknown`.
+  - `errors`: btrfs I/O error counters (`read`, `write`, `flush`,
+    `corruption`, `generation`, all integers). Present when btrfs device
+    stats are available; omitted entirely otherwise -- including for
+    present disks when `btrfs device stats` fails (which also emits a
+    `btrfs device stats failed` advisory).
+
+```json
+{
+  "name": "toshiba1",
+  "mapper": "braid-toshiba1",
+  "by_id": "/dev/disk/by-id/ata-TOSHIBA_MN07ACA12T_1234",
+  "luks_uuid": "aaaaaaaa-1111-2222-3333-444444444444",
+  "devid": "1",
+  "underlying": "/dev/sda",
+  "status": "present",
+  "errors": { "read": 0, "write": 0, "flush": 0, "corruption": 0, "generation": 0 }
+}
+```
+
+> A non-present disk (`missing`, `unknown`, or `luks-header-*`) reports
+> `"luks_uuid": ""`, `"devid": null`, `"underlying": null`, and no
+> `errors` key. Correlate it by `name`.
+
 - `alert_active`: boolean
-- `alert_causes`: array of alert cause objects
+- `alert_causes`: array of alert cause objects. **Omitted entirely when no
+  alert is active** (the key is absent, not `[]`) -- check the
+  always-present `alert_active` boolean first, mirroring how `advisories`
+  is "omitted when none". When present, each object is tagged by a `type`
+  discriminator:
+  - `{ "type": "btrfs_device_errors", "devid": <number> }` -- btrfs I/O
+    errors on that device.
+  - `{ "type": "missing_device", "devid": <number> }` -- a device counted
+    as missing.
+  - `{ "type": "smartd_alert" }` -- a SMART health warning from smartd.
+  - `{ "type": "computation_error", "detail": "<string>" }` -- braid could
+    not compute alert state; `detail` explains.
+
+  Note `devid` here is a JSON **number**, unlike the string `devid` in
+  `disks[]`.
 - `advisories`: array of human-readable advisory strings (omitted when
   none). See the Advisories section above for what currently produces
   them.
@@ -269,7 +337,11 @@ for recovery options.
   `["single", "RAID1"]`, not `["RAID1", "single"]`. An empty array means btrfs
   reported no block groups of that type.
 - `capacity`: `total_bytes`, `used_bytes`, `free_bytes`
-- `allocation`: array of block group type entries
+- `allocation`: array of block-group entries, one per allocated type.
+  Each entry has `bg_type` (e.g. `Data`, `Metadata`, `System`), `profile`
+  (raw btrfs profile name, same vocabulary as `profile` above),
+  `used_bytes`, and `allocated_bytes` (both integers). Omitted when the
+  pool is not mounted or `btrfs filesystem df` failed.
 
 3-disk RAID1 profile:
 

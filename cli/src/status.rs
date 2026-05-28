@@ -1981,6 +1981,10 @@ mod tests {
         assert_eq!(d1["status"], "missing");
         assert!(d1["errors"].is_null());
         assert!(d1["devid"].is_null());
+        // A non-present element carries no live LUKS UUID and no backing
+        // device; the docs tell monitoring authors to correlate by `name`.
+        assert_eq!(d1["luks_uuid"], "");
+        assert!(d1["underlying"].is_null());
 
         // LUKS header unreadable disk
         let d2 = &disks[2];
