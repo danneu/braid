@@ -48,20 +48,11 @@ enum MissingReason {
     /// could not read or validate a LUKS header. Where genuine metadata
     /// damage lands (see luks::probe_luks_header).
     LuksHeaderUnreadable,
-    /// Device exists, `isLuks` succeeded, but `cryptsetup luksDump` then
-    /// exited non-zero. Not a distinguishable on-disk damage state -- both
-    /// share one crypt_load, so real corruption fails isLuks first
-    /// (-> Unreadable); only a transient fault produces this. Mapped to
-    /// `cryptsetup repair` guidance (see luks::probe_luks_header).
-    LuksHeaderDamaged,
 }
 
 impl MissingReason {
     fn is_luks_header_state(self) -> bool {
-        matches!(
-            self,
-            MissingReason::LuksHeaderUnreadable | MissingReason::LuksHeaderDamaged
-        )
+        matches!(self, MissingReason::LuksHeaderUnreadable)
     }
 }
 
@@ -84,7 +75,6 @@ fn format_degraded_refused(missing: &[(String, MissingReason)], command_hint: &s
         let reason_text = match reason {
             MissingReason::Unplugged => "not found (unplugged?)",
             MissingReason::LuksHeaderUnreadable => "LUKS header unreadable",
-            MissingReason::LuksHeaderDamaged => "LUKS header metadata damaged",
         };
         lines.push(format!("  {name}: {reason_text}"));
     }
@@ -119,7 +109,6 @@ pub enum ProbeEvent {
     AlreadyMounted { mount_point: String },
     DiskAbsent { name: String },
     DiskLuksHeaderUnreadable { name: String },
-    DiskLuksHeaderDamaged { name: String },
     DiskAlreadyOpen { name: String },
     DiskAvailable { name: String },
 }
@@ -144,11 +133,6 @@ impl ProbeEvent {
                 name: name.clone(),
                 level: NoteLevel::Skip,
                 message: "LUKS header unreadable".to_owned(),
-            },
-            ProbeEvent::DiskLuksHeaderDamaged { name } => PreviewNote::PerDisk {
-                name: name.clone(),
-                level: NoteLevel::Skip,
-                message: "LUKS header metadata damaged".to_owned(),
             },
             ProbeEvent::DiskAlreadyOpen { name } => PreviewNote::PerDisk {
                 name: name.clone(),
@@ -251,31 +235,20 @@ fn plan_open_pool_inner<R: CommandRunner, F: Filesystem + ?Sized>(
                 missing.push((display_name.to_owned(), MissingReason::Unplugged));
             }
             ConfigDiskState::PresentNotLuks => {
-                // Refine PresentNotLuks (luksUUID failed) into Unreadable vs
-                // Damaged for diagnostic reporting only -- do NOT propagate
-                // this back into ConfigDiskState. add/replace must keep
-                // seeing the coarse PresentNotLuks state to preserve their
-                // destructive-format guards.
-                let reason = match luks::probe_luks_header(runner, member.by_id.as_str()) {
-                    luks::LuksHeaderState::Damaged => MissingReason::LuksHeaderDamaged,
-                    // Everything except Damaged collapses to the conservative
-                    // Unreadable label. Damaged is promoted separately only
-                    // because it maps to distinct `cryptsetup repair` guidance
-                    // -- but on a stable disk genuine corruption fails isLuks
-                    // and surfaces as Unreadable, so Damaged here reflects a
-                    // transient fault between the two probes, not confirmed
-                    // in-place-repairable damage (see luks::probe_luks_header).
-                    _ => MissingReason::LuksHeaderUnreadable,
-                };
-                events.push(match reason {
-                    MissingReason::LuksHeaderDamaged => ProbeEvent::DiskLuksHeaderDamaged {
-                        name: display_name.to_owned(),
-                    },
-                    _ => ProbeEvent::DiskLuksHeaderUnreadable {
-                        name: display_name.to_owned(),
-                    },
+                // luksUUID failed: crypt_load could not read or validate a
+                // LUKS header, so report the conservative Unreadable label.
+                // Diagnostic reporting only -- do NOT propagate this back into
+                // ConfigDiskState; add/replace must keep seeing the coarse
+                // PresentNotLuks state to preserve their destructive-format
+                // guards. No re-probe here: probe_luks_header gates on the same
+                // crypt_load as luksUUID, so it could only re-confirm
+                // Unreadable -- and skipping it avoids a needless probe (a
+                // possible header auto-recovery write) during read-only
+                // planning (see luks::probe_luks_header).
+                events.push(ProbeEvent::DiskLuksHeaderUnreadable {
+                    name: display_name.to_owned(),
                 });
-                missing.push((display_name.to_owned(), reason));
+                missing.push((display_name.to_owned(), MissingReason::LuksHeaderUnreadable));
             }
             ConfigDiskState::PresentLuks {
                 uuid, mapper_open, ..
@@ -441,18 +414,14 @@ pub fn compile_open_steps(
 /// Classify an unlock-time failure against the LUKS header state of the
 /// affected disk, producing the best user-facing error.
 ///
-/// The four match arms each represent a distinct user story:
+/// The three match arms each represent a distinct user story:
 ///
 /// - `Unreadable` → crypt_load could not read/validate the header (where
 ///   genuine damage lands); emit the off-system backup guidance regardless
 ///   of what cryptsetup originally said.
-/// - `Damaged` → isLuks ok but luksDump failed; emit the `cryptsetup repair`
-///   guidance with a safe-backup warning. Not confirmed corruption -- both
-///   probes share one crypt_load, so this reflects a transient fault, not
-///   in-place-repairable damage (see luks::probe_luks_header).
-/// - `Ok` → crypt_load + dump succeeded, so the failure really is about the
-///   caller-supplied context (passphrase, invariant, device state,
-///   generic I/O error, etc.); use `ok_fallback` unchanged.
+/// - `Ok` → crypt_load validated the header (isLuks ok), so the failure
+///   really is about the caller-supplied context (passphrase, invariant,
+///   device state, generic I/O error, etc.); use `ok_fallback` unchanged.
 /// - `ProbeFailed` → we genuinely do not know whether the header is
 ///   sound, so we must NOT confidently pick a narrative. Emit a
 ///   dedicated "diagnosis incomplete" message that surfaces both the
@@ -473,10 +442,6 @@ fn explain_open_failure(
         luks::LuksHeaderState::Unreadable => MountError::Failed(format!(
             "failed to unlock disk '{disk_name}' ({device}): {}",
             luks::luks_header_unreadable_guidance()
-        )),
-        luks::LuksHeaderState::Damaged => MountError::Failed(format!(
-            "failed to unlock disk '{disk_name}' ({device}): {}",
-            luks::luks_header_damaged_guidance(device)
         )),
         luks::LuksHeaderState::Ok => ok_fallback,
         luks::LuksHeaderState::ProbeFailed(probe_err) => MountError::Failed(format!(
@@ -1543,34 +1508,6 @@ mod tests {
         );
     }
 
-    /// Intent: format_degraded_refused must surface a distinct
-    /// "LUKS header metadata damaged" line for `MissingReason::LuksHeaderDamaged`.
-    ///
-    /// Why: the formatter must render each MissingReason with its own label so
-    /// Damaged and Unreadable do not collapse into one line. (Damaged is
-    /// effectively unreachable from real corruption -- see
-    /// luks::probe_luks_header -- but the formatter still owns the mapping, and
-    /// this pins it.)
-    ///
-    /// Scenario: synthetic. A single declared disk with
-    /// `MissingReason::LuksHeaderDamaged`, standing in for the transient-fault
-    /// path that produces that state.
-    #[test]
-    fn format_degraded_refused_damaged_includes_disk_name_and_reason() {
-        let msg = format_degraded_refused(
-            &[("raw".to_owned(), MissingReason::LuksHeaderDamaged)],
-            "unlock",
-        );
-        assert!(
-            msg.contains("raw: LUKS header metadata damaged"),
-            "missing damaged label: {msg}"
-        );
-        assert!(
-            msg.contains("1 missing device") && !msg.contains("1 missing devices"),
-            "expected singular: {msg}"
-        );
-    }
-
     /// Intent: format_degraded_refused must append a doctor-guidance footer
     /// when at least one disk has an Unreadable LUKS header.
     ///
@@ -1584,25 +1521,6 @@ mod tests {
     fn format_degraded_refused_unreadable_includes_doctor_footer() {
         let msg = format_degraded_refused(
             &[("raw".to_owned(), MissingReason::LuksHeaderUnreadable)],
-            "unlock",
-        );
-        assert!(
-            msg.contains("run 'braid doctor' for recovery guidance"),
-            "missing doctor footer: {msg}"
-        );
-    }
-
-    /// Intent: format_degraded_refused must append a doctor-guidance footer
-    /// when at least one disk has a Damaged LUKS header.
-    ///
-    /// Why: same bridge as the unreadable case — the per-disk label is
-    /// short, and `braid doctor` carries the full repair guidance.
-    ///
-    /// Scenario: a single LuksHeaderDamaged disk.
-    #[test]
-    fn format_degraded_refused_damaged_includes_doctor_footer() {
-        let msg = format_degraded_refused(
-            &[("raw".to_owned(), MissingReason::LuksHeaderDamaged)],
             "unlock",
         );
         assert!(
@@ -1637,14 +1555,14 @@ mod tests {
     /// confuse the user about whether each line is a separate
     /// recommendation. The footer is a single trailing instruction.
     ///
-    /// Scenario: one Unplugged + one Damaged disk; both labels appear,
+    /// Scenario: one Unplugged + one Unreadable disk; both labels appear,
     /// the footer appears exactly once.
     #[test]
     fn format_degraded_refused_mixed_includes_doctor_footer_once() {
         let msg = format_degraded_refused(
             &[
                 ("disk2".to_owned(), MissingReason::Unplugged),
-                ("disk3".to_owned(), MissingReason::LuksHeaderDamaged),
+                ("disk3".to_owned(), MissingReason::LuksHeaderUnreadable),
             ],
             "unlock",
         );
@@ -1653,8 +1571,8 @@ mod tests {
             "missing unplugged line: {msg}"
         );
         assert!(
-            msg.contains("disk3: LUKS header metadata damaged"),
-            "missing damaged line: {msg}"
+            msg.contains("disk3: LUKS header unreadable"),
+            "missing unreadable line: {msg}"
         );
         assert_eq!(
             msg.matches("run 'braid doctor' for recovery guidance")
@@ -1960,9 +1878,6 @@ mod tests {
             ProbeEvent::DiskLuksHeaderUnreadable {
                 name: "disk2".to_owned(),
             },
-            ProbeEvent::DiskLuksHeaderDamaged {
-                name: "disk3".to_owned(),
-            },
             ProbeEvent::DiskAlreadyOpen {
                 name: "disk4".to_owned(),
             },
@@ -1977,7 +1892,6 @@ mod tests {
 pool already mounted at /mnt/storage
 [skip] disk disk1: not found (unplugged?)
 [skip] disk disk2: LUKS header unreadable
-[skip] disk disk3: LUKS header metadata damaged
 [ok]   disk disk4: already open
 [ok]   disk disk5: found
 ";
@@ -2026,12 +1940,6 @@ pool already mounted at /mnt/storage
                     name: "disk2".to_owned(),
                 },
                 "[skip] disk disk2: LUKS header unreadable\n",
-            ),
-            (
-                ProbeEvent::DiskLuksHeaderDamaged {
-                    name: "disk3".to_owned(),
-                },
-                "[skip] disk disk3: LUKS header metadata damaged\n",
             ),
             (
                 ProbeEvent::DiskAlreadyOpen {
@@ -2526,56 +2434,6 @@ pool already mounted at /mnt/storage
         assert!(
             !msg.contains("ARBITRARY FALLBACK TEXT"),
             "unreadable branch must override fallback: {msg}"
-        );
-        assert!(
-            !msg.contains("/var/lib/braid/luks-headers/"),
-            "must not reference local backup directory: {msg}"
-        );
-        assert!(
-            !msg.contains(".luksheader"),
-            "must not reference local .luksheader files: {msg}"
-        );
-    }
-
-    /*
-     * Intent: Damaged overrides fallback and suggests cryptsetup repair
-     *   with a safe-backup warning.
-     * Why it exists: when probe returns Damaged, explain_open_failure must
-     *   emit the cryptsetup repair guidance, which pairs repair with a
-     *   back-up-first warning because repair mutates the header. This is the
-     *   pairing that makes the suggestion safe to follow.
-     * Scenario: synthetic -- the Damaged state is fed directly. Genuine
-     *   corruption cannot produce it: isLuks and luksDump share one crypt_load,
-     *   so real damage fails both (-> Unreadable); Damaged only arises from a
-     *   transient fault between the two probes (see luks::probe_luks_header).
-     */
-    #[test]
-    fn explain_open_failure_damaged_overrides_fallback() {
-        let device = "/dev/disk/by-id/wwn-0xCAFE";
-        let err = explain_open_failure(
-            "disk2",
-            device,
-            luks::LuksHeaderState::Damaged,
-            "some original summary",
-            arbitrary_fallback(),
-        );
-        let msg = err.to_string();
-        assert!(msg.contains("disk2"), "missing disk name: {msg}");
-        assert!(
-            msg.contains("metadata damaged"),
-            "missing 'metadata damaged': {msg}"
-        );
-        assert!(
-            msg.contains(&format!("cryptsetup repair --type luks2 {device}")),
-            "missing repair command with device path: {msg}"
-        );
-        assert!(
-            msg.contains("safe backup"),
-            "missing safe-backup warning: {msg}"
-        );
-        assert!(
-            !msg.contains("ARBITRARY FALLBACK TEXT"),
-            "damaged branch must override fallback: {msg}"
         );
         assert!(
             !msg.contains("/var/lib/braid/luks-headers/"),
@@ -3348,7 +3206,7 @@ pool already mounted at /mnt/storage
      *   call; the gateway must still refuse rather than fall through to unlock.
      */
     #[test]
-    fn unlock_damaged_luks2_metadata_fails_at_gateway() {
+    fn unlock_gateway_rejects_luksdump_failure_before_unlock() {
         let config = test_config();
         let membership = two_disk_membership();
         let fs = mount_fs(&[

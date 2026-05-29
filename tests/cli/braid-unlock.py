@@ -540,10 +540,11 @@ with subtest("Test 7: uninitialized disk detected — degraded-refused enumerate
     assert "braid unlock --allow-degraded" in output, \
         f"Expected --allow-degraded hint, got: {output}"
 
-    # The renamed status line in `plan_open_pool` must use the new vocabulary,
-    # never the old "LUKS header damaged" wording.
+    # `plan_open_pool` only emits "LUKS header unreadable" for a non-LUKS
+    # member; the "LUKS header damaged" vocabulary was removed entirely, so it
+    # must never appear.
     assert "LUKS header damaged" not in output, \
-        f"Old 'LUKS header damaged' string must not appear after rename: {output}"
+        f"removed 'LUKS header damaged' string must not appear: {output}"
 
     # Cross-command negative invariant: unlock errors never point users at
     # local /var/lib/braid/luks-headers/ files (those are off-system).
@@ -693,19 +694,19 @@ with subtest("Test 9: mount failure closes mappers opened by unlock"):
 # NOTE on LUKS-header-corruption testing at the VM level:
 #
 # The new unlock error-enrichment path (verify/open-loop failure → probe
-# header → emit off-system backup or cryptsetup repair guidance) is NOT
+# header → emit off-system backup guidance) is NOT
 # reachable via dd-based corruption in a VM test. The `plan_open_pool`
 # probe phase runs `cryptsetup luksUUID` before the per-disk open loop
 # ever starts; `luksUUID` validates enough of the LUKS2 header that any
 # dd-based corruption reliably destroys it first. The disk gets
 # classified as `ConfigDiskState::PresentNotLuks` and the pool fails
-# with the existing "LUKS header damaged" + degraded-refused path,
+# with the existing "LUKS header unreadable" + degraded-refused path,
 # which is out of scope for this PR.
 #
 # The enrichment path IS proven by unit tests in cli/src/mount.rs:
 #
-#   - `explain_open_failure_*` (5 tests): classify branches of the pure
-#     helper (Unreadable/Damaged/Ok/ProbeFailed).
+#   - `explain_open_failure_*` (4 tests): classify branches of the pure
+#     helper (Unreadable/Ok/ProbeFailed).
 #   - `unlock_*` (5 tests): drive `open_and_mount_pool` end-to-end with
 #     MockRunner through all four enrichment call sites (keyfile/passphrase
 #     × verify/open-loop) and the critical ProbeFailed-at-exit-2 case.

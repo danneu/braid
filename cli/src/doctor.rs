@@ -284,13 +284,13 @@ fn check_config_permissions_for_path(path: &Path) -> CheckResult {
 /// Classification of a single declared disk after the doctor's LUKS probe.
 /// `summarize_declared_disks` translates a slice of these into a `CheckResult`;
 /// the variants pin the rendered declared-disk outcomes (header Ok, UUID mismatch,
-/// header unreadable, header damaged, missing, non-block, probe-failed).
+/// header unreadable, missing, non-block, probe-failed).
 #[derive(Debug, Clone)]
 pub(crate) enum DiskState {
     /// Header probes succeeded and the live LUKS UUID matched the pool.json key.
     LuksHeaderOk,
-    /// `cryptsetup isLuks`, `cryptsetup luksDump`, and `cryptsetup luksUUID`
-    /// succeeded, but the live LUKS UUID does not match the pool.json key.
+    /// `cryptsetup isLuks` and `cryptsetup luksUUID` succeeded, but the live
+    /// LUKS UUID does not match the pool.json key.
     LuksUuidMismatch {
         expected: LuksUuid,
         observed: LuksUuid,
@@ -307,11 +307,6 @@ pub(crate) enum DiskState {
     /// `cryptsetup isLuks` exited non-zero -- crypt_load could not read or
     /// validate a LUKS header. Where genuine metadata damage lands. Severe.
     LuksHeaderUnreadable,
-    /// `cryptsetup isLuks` succeeded but `cryptsetup luksDump` then failed.
-    /// Both share one crypt_load, so this is not a distinguishable on-disk
-    /// damage state -- real corruption fails isLuks first (-> Unreadable);
-    /// only a transient fault produces this. See luks::probe_luks_header.
-    LuksHeaderDamaged,
 }
 
 /// Probe a single declared disk to figure out its `DiskState`.
@@ -348,7 +343,6 @@ fn classify_luks_identity<R: CommandRunner>(
 ) -> DiskState {
     match luks::probe_luks_header(runner, device) {
         luks::LuksHeaderState::Unreadable => return DiskState::LuksHeaderUnreadable,
-        luks::LuksHeaderState::Damaged => return DiskState::LuksHeaderDamaged,
         luks::LuksHeaderState::ProbeFailed(err) => return DiskState::ProbeFailed(err),
         luks::LuksHeaderState::Ok => {}
     }
@@ -390,7 +384,6 @@ fn summarize_declared_disks(classifications: &[(String, String, DiskState)]) -> 
     let mut not_block: Vec<String> = Vec::new();
     let mut probe_failed: Vec<String> = Vec::new();
     let mut header_unreadable: Vec<String> = Vec::new();
-    let mut header_damaged: Vec<String> = Vec::new();
     let mut uuid_mismatch: Vec<String> = Vec::new();
 
     for (name, by_id, state) in classifications {
@@ -413,12 +406,6 @@ fn summarize_declared_disks(classifications: &[(String, String, DiskState)]) -> 
                     luks::luks_header_unreadable_guidance()
                 ));
             }
-            DiskState::LuksHeaderDamaged => {
-                header_damaged.push(format!(
-                    "{name} ({by_id}): {}",
-                    luks::luks_header_damaged_guidance(by_id)
-                ));
-            }
         }
     }
 
@@ -426,7 +413,6 @@ fn summarize_declared_disks(classifications: &[(String, String, DiskState)]) -> 
         + not_block.len()
         + probe_failed.len()
         + header_unreadable.len()
-        + header_damaged.len()
         + uuid_mismatch.len();
 
     if problem_count == 0 {
@@ -459,13 +445,6 @@ fn summarize_declared_disks(classifications: &[(String, String, DiskState)]) -> 
             "{} with unreadable LUKS header: {}",
             header_unreadable.len(),
             header_unreadable.join("; ")
-        ));
-    }
-    if !header_damaged.is_empty() {
-        parts.push(format!(
-            "{} with damaged LUKS header metadata: {}",
-            header_damaged.len(),
-            header_damaged.join("; ")
         ));
     }
     if !uuid_mismatch.is_empty() {
@@ -3210,54 +3189,6 @@ mod tests {
     }
 
     #[test]
-    fn summarize_warn_luks_header_damaged() {
-        /*
-         * Intent: when a disk is classified LuksHeaderDamaged (isLuks ok but
-         *   luksDump then failed), the check warns and suggests `cryptsetup
-         *   repair --type luks2` with an explicit "make a safe backup first"
-         *   warning.
-         * Why it exists: pins the Damaged -> repair-guidance mapping and the
-         *   safe-backup pairing (repair mutates the header, so users must back
-         *   up first). Negative assertions also pin the no-local-backup-
-         *   references invariant.
-         * Scenario: synthetic. Genuine corruption cannot produce isLuks-ok +
-         *   luksDump-fail -- both share one crypt_load, so real damage fails
-         *   isLuks (-> Unreadable). The state is fed directly here, standing in
-         *   for the transient fault that is its only real cause (see
-         *   luks::probe_luks_header).
-         */
-        let inputs = [cls(
-            "disk1",
-            "/dev/disk/by-id/wwn-0xCAFE",
-            DiskState::LuksHeaderDamaged,
-        )];
-        let result = summarize_declared_disks(&inputs);
-        assert_eq!(result.status, CheckStatus::Warn);
-        let msg = &result.message;
-        assert!(msg.contains("disk1"), "missing disk name: {msg}");
-        assert!(
-            msg.contains("metadata damaged"),
-            "missing 'metadata damaged': {msg}"
-        );
-        assert!(
-            msg.contains("cryptsetup repair --type luks2"),
-            "missing repair command: {msg}"
-        );
-        assert!(
-            msg.contains("safe backup"),
-            "missing safe-backup warning: {msg}"
-        );
-        assert!(
-            !msg.contains("/var/lib/braid/luks-headers/"),
-            "doctor must not reference local backup directory: {msg}"
-        );
-        assert!(
-            !msg.contains(".luksheader"),
-            "doctor must not reference local .luksheader files: {msg}"
-        );
-    }
-
-    #[test]
     fn summarize_warn_probe_failed_does_not_suggest_repair() {
         /*
          * Intent: when the cryptsetup probe itself fails to execute (Err from
@@ -3399,7 +3330,7 @@ mod tests {
     //   non-empty"; pairing the mismatch only with a healthy disk would miss a
     //   regression that makes mismatch fail only when it is the sole problem.
     // Scenario: a degraded NAS has one swapped declared disk and another
-    //   classified LuksHeaderDamaged before any mutating command runs.
+    //   classified LuksHeaderUnreadable before any mutating command runs.
     #[test]
     fn summarize_declared_disks_fail_dominates_warn_level_problems() {
         let expected = test_uuid(1);
@@ -3416,7 +3347,7 @@ mod tests {
             cls(
                 "disk2",
                 "/dev/disk/by-id/wwn-0x2",
-                DiskState::LuksHeaderDamaged,
+                DiskState::LuksHeaderUnreadable,
             ),
         ];
 
@@ -3466,7 +3397,7 @@ mod tests {
          *   category; the check must aggregate findings instead of reporting
          *   only the first.
          * Scenario: a degraded NAS with one missing disk, one classified
-         *   LuksHeaderUnreadable, and one classified LuksHeaderDamaged
+         *   LuksHeaderUnreadable, and one with a probe failure
          *   simultaneously.
          */
         let inputs = [
@@ -3479,7 +3410,7 @@ mod tests {
             cls(
                 "disk3",
                 "/dev/disk/by-id/wwn-0x3",
-                DiskState::LuksHeaderDamaged,
+                DiskState::ProbeFailed("simulated probe failure".to_owned()),
             ),
             cls("disk4", "/dev/disk/by-id/wwn-0x4", DiskState::LuksHeaderOk),
         ];

@@ -162,7 +162,6 @@ Disk states (compact `Drives:` list and detail view):
 | **present** | Disk is online and healthy |
 | **MISSING** | Disk not found at its by-id path |
 | **LUKS HEADER UNREADABLE** | Device present but LUKS header cannot be read |
-| **LUKS HEADER DAMAGED** | Device present but LUKS header is damaged |
 | **LUKS UUID MISMATCH** | Device present but its LUKS header UUID differs from the recorded member -- swapped, cloned, or reformatted; run `braid doctor` |
 | **UNKNOWN** | State could not be determined |
 
@@ -281,7 +280,7 @@ for recovery options.
   - `devid`: btrfs device ID **as a number** (e.g. `1`), or `null`
     when the disk is not a live pool member.
   - `status`: one of `present`, `missing`, `luks-header-unreadable`,
-    `luks-header-damaged`, `unknown`.
+    `luks-uuid-mismatch`, `unknown`.
   - `errors`: btrfs I/O error counters (`read`, `write`, `flush`,
     `corruption`, `generation`, all integers). Present when btrfs device
     stats are available; omitted entirely otherwise -- including for

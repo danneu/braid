@@ -156,7 +156,6 @@ each disk.
 When verify or open fails, `open_disks_with_credential` re-probes the header
 at failure time and routes the result through `explain_open_failure`:
 
-- `Damaged` -- emit `cryptsetup repair` guidance.
 - `Unreadable` -- emit the off-system-backup guidance (per the messaging
   invariant above).
 - `Ok` -- the header is intact, so the original cryptsetup/verify error is

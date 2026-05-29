@@ -18326,7 +18326,7 @@ mod tests {
 
     /* Intent
      * Verify the remount cycle reopen set excludes a by-id-present disk
-     * classified LuksHeaderDamaged, even when its mapper path exists.
+     * classified LuksHeaderUnreadable, even when its mapper path exists.
      *
      * Why it exists
      * The cycle reopen set must come from healthy probe events, not from
@@ -18334,33 +18334,18 @@ mod tests {
      * incorrectly preview reopening a disk whose LUKS header cannot be used.
      *
      * Scenario
-     * Synthetic. Interrupted replace where old's by-id and mapper paths both
-     * exist; the mocks drive `luksUUID` fail + `isLuks` ok + `luksDump` fail to
-     * force a Damaged probe event. Genuine corruption cannot produce that
-     * combination (luksUUID and luksDump share one crypt_load, so real damage
-     * fails luksUUID first); the mock stands in for a transient fault on the
-     * second probe (see luks::probe_luks_header).
+     * Interrupted replace where old's by-id and mapper paths both exist, but
+     * `luksUUID` fails so old is classified PresentNotLuks and reported as an
+     * unreadable header.
      */
     #[test]
-    fn plan_recover_dry_run_cycle_reopen_set_excludes_damaged_header_disk() {
+    fn plan_recover_dry_run_cycle_reopen_set_excludes_unreadable_header_disk() {
         let runner = closed_two_disk_dry_run_runner()
             .with_output(
                 CmdRequest::CryptsetupLuksUuid {
                     device: "/dev/disk/by-id/virtio-old".into(),
                 },
                 err_raw("cryptsetup luksUUID", 1, "LUKS metadata corrupted"),
-            )
-            .with_output(
-                CmdRequest::CryptsetupIsLuks {
-                    device: "/dev/disk/by-id/virtio-old".into(),
-                },
-                ok_raw_empty("cryptsetup isLuks"),
-            )
-            .with_output(
-                CmdRequest::CryptsetupLuksDumpText {
-                    device: "/dev/disk/by-id/virtio-old".into(),
-                },
-                err_raw("cryptsetup luksDump", 1, "LUKS2 metadata corrupted"),
             )
             .with_output(
                 CmdRequest::CryptsetupLuksUuid {
@@ -18387,18 +18372,18 @@ mod tests {
         );
 
         assert!(
-            rendered.contains("[skip] disk old: LUKS header metadata damaged"),
-            "test setup should classify old as damaged, got: {rendered:?}",
+            rendered.contains("[skip] disk old: LUKS header unreadable"),
+            "test setup should classify old as unreadable, got: {rendered:?}",
         );
         assert!(
             rendered.contains("close LUKS mapper braid-old (recover remount cycle)"),
-            "close set should include damaged old mapper: {rendered:?}",
+            "close set should include unreadable old mapper: {rendered:?}",
         );
         assert!(
             !rendered.contains(
                 "LUKS open /dev/disk/by-id/virtio-old -> braid-old (recover remount cycle)"
             ),
-            "reopen set should not include damaged old disk: {rendered:?}",
+            "reopen set should not include unreadable old disk: {rendered:?}",
         );
     }
 

@@ -80,7 +80,7 @@ Standalone CLI installs (no NixOS module) skip this -- there is no `braid-online
 
 ## Degraded mode
 
-When a disk is missing (physically absent or with a damaged LUKS header), unlock refuses to mount by default. The error message names the affected disk and tells you to pass `--allow-degraded`.
+When a disk is missing (physically absent or with an unreadable LUKS header), unlock refuses to mount by default. The error message names the affected disk and tells you to pass `--allow-degraded`.
 
 In degraded mode, the pool mounts with reduced redundancy. New writes are NOT mirrored to the missing disk. You should repair the pool as soon as possible with `braid replace --old <missing-name> --new <new-name>=/dev/disk/by-id/<...>`.
 

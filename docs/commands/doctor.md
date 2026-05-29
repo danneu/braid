@@ -68,7 +68,7 @@ Prints a JSON object with `status` (one of `ok`, `warn`, `fail`, `skip`) and a `
 | `config_file` | Config exists and is valid JSON |
 | `config_schema` | Required fields present and deserializable |
 | `config_permissions` | Canonical `/etc/braid/config.json` is not world-writable and is owned by root; custom `--config` paths skip this check |
-| `declared_disks` | Every UUID-keyed `pool.json` member is present, is a block device, has a readable LUKS header, and its live LUKS UUID matches the `pool.json` key. **Warn** if a member is missing, is not a block device, or has an unreadable or damaged LUKS header (or a probe failure); **Fail** if a member's live LUKS UUID does not match its `pool.json` key. |
+| `declared_disks` | Every UUID-keyed `pool.json` member is present, is a block device, has a readable LUKS header, and its live LUKS UUID matches the `pool.json` key. **Warn** if a member is missing, is not a block device, or has an unreadable LUKS header (or a probe failure); **Fail** if a member's live LUKS UUID does not match its `pool.json` key. |
 | `pool_missing_devices` | No btrfs missing devices in the live pool |
 | `enospc_risk` | Warns when the pool is one disk-loss away from insufficient RAID1 chunk-pair space. Per-device threshold scales with pool size (min(1 GiB, 10% of total device bytes), matching the kernel's effective data chunk size) |
 | `foreign_luks_uuid` | **Fail** when the live (mounted) pool contains a btrfs device whose LUKS UUID is not declared in `pool.json` (a foreign disk). The message names each foreign UUID and its mapper and suggests `btrfs device remove /dev/mapper/<mapper> <mount>` then `cryptsetup close <mapper>`. Skipped when the pool is not mounted. |

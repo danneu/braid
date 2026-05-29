@@ -829,9 +829,6 @@ fn unpooled_disk_status_cell(state: &PoolState, name: &str) -> Option<Span<'stat
         UnpooledDiskRender::LuksHeaderUnreadable => {
             Span::styled("LUKS header unreadable", Style::default().fg(Color::Red))
         }
-        UnpooledDiskRender::LuksHeaderDamaged => {
-            Span::styled("LUKS header damaged", Style::default().fg(Color::Red))
-        }
         UnpooledDiskRender::WrongLuksVersion(v) => Span::styled(
             format!("LUKS{v} (unsupported)"),
             Style::default().fg(Color::Red),
@@ -2343,8 +2340,8 @@ pub(crate) mod tests {
 
     /// Intent: unpooled_disk_status_cell must surface a distinct label per
     /// UnpooledDiskRender variant so the disk table can differentiate
-    /// "missing", "valid LUKS not in pool", "header unreadable", and
-    /// "header damaged" instead of collapsing them all into "missing".
+    /// "missing", "valid LUKS not in pool", and "header unreadable" instead of
+    /// collapsing them all into "missing".
     ///
     /// Why: prior to the unpooled-disks plumbing, the TUI rendered every
     /// declared-but-unrepresented disk as plain "missing", hiding the
@@ -2365,7 +2362,6 @@ pub(crate) mod tests {
                 "charlie".to_owned(),
                 UnpooledDiskRender::LuksHeaderUnreadable,
             ),
-            ("delta".to_owned(), UnpooledDiskRender::LuksHeaderDamaged),
             ("echo".to_owned(), UnpooledDiskRender::WrongLuksVersion(1)),
             ("foxtrot".to_owned(), UnpooledDiskRender::MapperHijacked),
             ("golf".to_owned(), UnpooledDiskRender::UuidMismatch),
@@ -2381,7 +2377,6 @@ pub(crate) mod tests {
         assert_eq!(cell("alpha"), "missing");
         assert_eq!(cell("bravo"), "unknown");
         assert_eq!(cell("charlie"), "LUKS header unreadable");
-        assert_eq!(cell("delta"), "LUKS header damaged");
         assert_eq!(cell("echo"), "LUKS1 (unsupported)");
         assert_eq!(cell("foxtrot"), "mapper conflict");
         assert_eq!(cell("golf"), "uuid mismatch");

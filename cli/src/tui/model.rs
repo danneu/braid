@@ -270,15 +270,9 @@ pub enum UnpooledDiskRender {
     /// reformatted out-of-band (decision 024). The full expected/observed
     /// pair lives in `braid doctor`; the TUI cell stays terse.
     UuidMismatch,
-    /// `ConfigDiskState::PresentNotLuks` refined to
-    /// `LuksHeaderState::Unreadable` (or fallback). Severe — needs
-    /// off-system header backup restore.
+    /// `ConfigDiskState::PresentNotLuks`: luksUUID could not read or validate
+    /// a LUKS header. Severe -- needs off-system header backup restore.
     LuksHeaderUnreadable,
-    /// `ConfigDiskState::PresentNotLuks` refined to
-    /// `LuksHeaderState::Damaged`. Maps to `cryptsetup repair` guidance,
-    /// though Damaged is reachable only via a transient fault, not genuine
-    /// corruption (see luks::probe_luks_header).
-    LuksHeaderDamaged,
     /// `probe_config_disk` returned `ProbeError::UnsupportedLuksVersion`.
     /// The disk is on-disk LUKS but the wrong version (LUKS1 — braid
     /// requires LUKS2). Recovery: back up data, re-add via `braid add`.
@@ -301,7 +295,7 @@ pub struct PoolState {
     pub device_errors: HashMap<String, DiskErrors>,
     /// Per-declared-disk render classification for disks NOT in
     /// `disk_usage`. Populated by `tui::probe` via `probe_config_disk`
-    /// so the disk table can render Unreadable / Damaged / UnknownLuks /
+    /// so the disk table can render Unreadable / UnknownLuks /
     /// Missing distinctly. Disks present in `disk_usage` are omitted.
     pub unpooled_disks: HashMap<String, UnpooledDiskRender>,
     pub alert_state: AlertState,

@@ -341,8 +341,8 @@ pub fn probe_pool_for_tui<R: CommandRunner, F: Filesystem + ?Sized>(
     };
 
     // Classify any declared disk that is NOT in the live pool's
-    // disk_usage so the disk table can render Unreadable / Damaged /
-    // UnknownLuks / Missing distinctly. The live-pool UUID set is built
+    // disk_usage so the disk table can render Unreadable / UnknownLuks /
+    // Missing distinctly. The live-pool UUID set is built
     // from `domain.devices` (the authoritative live source).
     let live_pool_uuids: HashSet<LuksUuid> =
         domain.devices.iter().map(|d| d.luks_uuid.clone()).collect();
@@ -415,17 +415,14 @@ pub fn probe_pool_for_tui<R: CommandRunner, F: Filesystem + ?Sized>(
                 }
             }
             ConfigDiskState::PresentNotLuks => {
-                // Refine PresentNotLuks (luksUuid failed) into Unreadable
-                // vs Damaged for diagnostic rendering only — do NOT
-                // propagate the refinement back into ConfigDiskState.
-                // Mutating commands (add/replace) keep the coarse state.
-                match luks::probe_luks_header(runner, by_id_path) {
-                    luks::LuksHeaderState::Damaged => UnpooledDiskRender::LuksHeaderDamaged,
-                    // Unreadable, the inconsistent Ok-but-luksUuid-failed
-                    // case, and ProbeFailed all collapse to Unreadable
-                    // (consistent with mount.rs::plan_open_pool).
-                    _ => UnpooledDiskRender::LuksHeaderUnreadable,
-                }
+                // luksUuid failed: crypt_load could not read or validate a
+                // LUKS header, so render the conservative Unreadable state.
+                // Diagnostic rendering only -- do NOT propagate back into
+                // ConfigDiskState; mutating commands (add/replace) keep the
+                // coarse state. No re-probe here: probe_luks_header gates on
+                // the same crypt_load as luksUuid, so it could only re-confirm
+                // Unreadable (consistent with mount.rs::plan_open_pool).
+                UnpooledDiskRender::LuksHeaderUnreadable
             }
         };
         unpooled_by_name.insert(disk_name.clone(), render);
@@ -2323,42 +2320,29 @@ mod tests {
         );
     }
 
-    /// Intent: probe_pool_for_tui must refine PresentNotLuks → Unreadable
-    /// when isLuks fails (crypt_load cannot read or validate the header).
+    /// Intent: probe_pool_for_tui must render a PresentNotLuks disk
+    /// (luksUuid failed) as Unreadable.
     ///
     /// Why: the previous TUI rendered every unrepresented disk as plain
     /// "missing"; users could not see whether a header restore was the
     /// right next step. Surfacing Unreadable as a distinct state is the
     /// trigger that points the user at off-system header backups.
     ///
-    /// Scenario: 1-disk live pool. Second declared disk: `luksUuid` exits
-    /// non-zero, `isLuks` exits non-zero (crypt_load cannot recognize a LUKS
-    /// header).
+    /// Scenario: 1-disk live pool. Second declared disk's `luksUuid` exits
+    /// non-zero, so probe_config_disk classifies it PresentNotLuks.
     #[test]
     fn unpooled_disk_present_not_luks_unreadable_classified_correctly() {
-        let runner = one_disk_mounted_pool_runner()
-            .with_output(
-                CmdRequest::CryptsetupLuksUuid {
-                    device: "/dev/disk/by-id/braid-ironwolf".into(),
-                },
-                RawCommandOutput {
-                    cmd: "cryptsetup luksUUID".into(),
-                    stdout: String::new(),
-                    stderr: "Device is not a valid LUKS device.\n".into(),
-                    exit_status: 1,
-                },
-            )
-            .with_output(
-                CmdRequest::CryptsetupIsLuks {
-                    device: "/dev/disk/by-id/braid-ironwolf".into(),
-                },
-                RawCommandOutput {
-                    cmd: "cryptsetup isLuks".into(),
-                    stdout: String::new(),
-                    stderr: "Device is not a valid LUKS device.\n".into(),
-                    exit_status: 1,
-                },
-            );
+        let runner = one_disk_mounted_pool_runner().with_output(
+            CmdRequest::CryptsetupLuksUuid {
+                device: "/dev/disk/by-id/braid-ironwolf".into(),
+            },
+            RawCommandOutput {
+                cmd: "cryptsetup luksUUID".into(),
+                stdout: String::new(),
+                stderr: "Device is not a valid LUKS device.\n".into(),
+                exit_status: 1,
+            },
+        );
         let fs = StubFs::with_paths(&[
             "/dev/disk/by-id/braid-toshiba",
             "/dev/disk/by-id/braid-ironwolf",
@@ -2390,89 +2374,6 @@ mod tests {
         assert_eq!(
             pool.unpooled_disks.get("ironwolf"),
             Some(&UnpooledDiskRender::LuksHeaderUnreadable)
-        );
-    }
-
-    /// Intent: probe_pool_for_tui must refine PresentNotLuks → Damaged
-    /// when isLuks succeeds but luksDump fails -- pinning the Damaged render
-    /// path.
-    ///
-    /// Why: the Damaged classification maps to a distinct `cryptsetup repair`
-    /// guidance, so the TUI must not collapse it into "missing" or Unreadable.
-    /// (On a stable disk genuine corruption fails isLuks and surfaces as
-    /// Unreadable; Damaged reflects a transient fault -- see
-    /// luks::probe_luks_header.)
-    ///
-    /// Scenario: 1-disk live pool. Second declared disk's mocks drive
-    /// `luksUuid` fail + `isLuks` ok + `luksDump` fail -- synthetic, the
-    /// combination only a transient fault produces.
-    #[test]
-    fn unpooled_disk_present_not_luks_damaged_classified_correctly() {
-        let runner = one_disk_mounted_pool_runner()
-            .with_output(
-                CmdRequest::CryptsetupLuksUuid {
-                    device: "/dev/disk/by-id/braid-ironwolf".into(),
-                },
-                RawCommandOutput {
-                    cmd: "cryptsetup luksUUID".into(),
-                    stdout: String::new(),
-                    stderr: "Cannot read LUKS header metadata.\n".into(),
-                    exit_status: 1,
-                },
-            )
-            .with_output(
-                CmdRequest::CryptsetupIsLuks {
-                    device: "/dev/disk/by-id/braid-ironwolf".into(),
-                },
-                RawCommandOutput {
-                    cmd: "cryptsetup isLuks".into(),
-                    stdout: String::new(),
-                    stderr: String::new(),
-                    exit_status: 0,
-                },
-            )
-            .with_output(
-                CmdRequest::CryptsetupLuksDumpText {
-                    device: "/dev/disk/by-id/braid-ironwolf".into(),
-                },
-                RawCommandOutput {
-                    cmd: "cryptsetup luksDump".into(),
-                    stdout: String::new(),
-                    stderr: "Cannot read LUKS header metadata.\n".into(),
-                    exit_status: 1,
-                },
-            );
-        let fs = StubFs::with_paths(&[
-            "/dev/disk/by-id/braid-toshiba",
-            "/dev/disk/by-id/braid-ironwolf",
-        ]);
-
-        let disk_by_id = HashMap::from([
-            (
-                "toshiba".to_owned(),
-                "/dev/disk/by-id/braid-toshiba".to_owned(),
-            ),
-            (
-                "ironwolf".to_owned(),
-                "/dev/disk/by-id/braid-ironwolf".to_owned(),
-            ),
-        ]);
-
-        let pool = expect_pool(
-            probe_pool_for_tui(
-                &runner,
-                &fs,
-                &MountPoint("/mnt/storage".into()),
-                &tui_disks_with_by_id(disk_by_id),
-                &test_paths().1,
-                crate::test_fixtures::mock_virtio_backing_path_resolver(),
-            )
-            .unwrap(),
-        );
-
-        assert_eq!(
-            pool.unpooled_disks.get("ironwolf"),
-            Some(&UnpooledDiskRender::LuksHeaderDamaged)
         );
     }
 
