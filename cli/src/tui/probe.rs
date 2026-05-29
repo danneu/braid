@@ -400,7 +400,18 @@ pub fn probe_pool_for_tui<R: CommandRunner, F: Filesystem + ?Sized>(
                     // defensively rather than lying about state.
                     UnpooledDiskRender::Missing
                 } else {
-                    UnpooledDiskRender::UnknownLuks
+                    // Not in the live pool: compare the on-disk UUID against
+                    // the recorded membership UUID so a reformatted/swapped
+                    // member is distinguished from a correct-but-offline one
+                    // (decision 024). Shared with `status` via the classifier.
+                    match luks::classify_member_luks_identity(&uuid, disks.luks_uuid.get(disk_name))
+                    {
+                        // Correct-but-offline member: reuse Missing rather than
+                        // lying about state, matching the live-pool branch.
+                        luks::MemberLuksIdentity::Matches => UnpooledDiskRender::Missing,
+                        luks::MemberLuksIdentity::Mismatch => UnpooledDiskRender::UuidMismatch,
+                        luks::MemberLuksIdentity::Unrecorded => UnpooledDiskRender::UnknownLuks,
+                    }
                 }
             }
             ConfigDiskState::PresentNotLuks => {
@@ -2063,19 +2074,22 @@ mod tests {
         );
     }
 
-    /// Intent: probe_pool_for_tui must classify a declared disk that has a
-    /// valid LUKS header whose UUID does NOT belong to the live pool as
-    /// `UnpooledDiskRender::UnknownLuks` — distinct from "missing".
+    /// Intent: probe_pool_for_tui must classify a declared member whose
+    /// on-disk LUKS UUID contradicts its recorded membership UUID as
+    /// `UnpooledDiskRender::UuidMismatch` — distinct from both "missing" and
+    /// the generic "unknown" used for foreign disks.
     ///
-    /// Why: a stale-LUKS disk left over from a previous pool, or a disk
-    /// belonging to a different braid instance, should be visibly
-    /// different from a hot-unplugged cable so the operator does not
-    /// confuse them.
+    /// Why: this is decision 024's swap/clone/reformat case. The TUI glance
+    /// must tell a reformatted member apart from a stray disk; previously it
+    /// collapsed both into "unknown", silently diverging from `doctor`, which
+    /// already fails closed on the same condition.
     ///
-    /// Scenario: 1-disk live pool with UUID `11111111...`. Second declared
-    /// disk has a valid LUKS header reporting UUID `99999999...`.
+    /// Scenario: 1-disk live pool with UUID `11111111...`. The second declared
+    /// member `ironwolf` records membership UUID `22222222...`, but its
+    /// on-disk header now reports `99999999...` — it was reformatted or
+    /// swapped out-of-band.
     #[test]
-    fn unpooled_disk_present_luks_unknown_uuid_classified_as_unknown_luks() {
+    fn unpooled_disk_present_luks_uuid_mismatch_classified_as_uuid_mismatch() {
         let runner = one_disk_mounted_pool_runner()
             .with_output(
                 CmdRequest::CryptsetupLuksUuid {
@@ -2128,6 +2142,175 @@ mod tests {
                 &fs,
                 &MountPoint("/mnt/storage".into()),
                 &tui_disks_with_by_id(disk_by_id),
+                &test_paths().1,
+                crate::test_fixtures::mock_virtio_backing_path_resolver(),
+            )
+            .unwrap(),
+        );
+
+        assert_eq!(
+            pool.unpooled_disks.get("ironwolf"),
+            Some(&UnpooledDiskRender::UuidMismatch)
+        );
+    }
+
+    /// Intent: probe_pool_for_tui must classify a declared member whose
+    /// on-disk LUKS UUID still equals its recorded membership UUID, but which
+    /// is absent from the live pool, as `UnpooledDiskRender::Missing` — not
+    /// `UuidMismatch`.
+    ///
+    /// Why: pins the locked offline-member decision (plan precedence table): a
+    /// correct-but-offline member reuses the existing Missing bucket rather
+    /// than lying about a swap. Without this, the new classifier could drift a
+    /// Matches verdict toward a scarier render.
+    ///
+    /// Scenario: 1-disk live pool (toshiba @ 11111111). The declared member
+    /// `ironwolf` records membership UUID 22222222 and its on-disk header
+    /// still reports 22222222, but it is not currently assembled into the pool.
+    #[test]
+    fn unpooled_disk_present_luks_matching_uuid_offline_classified_as_missing() {
+        let runner = one_disk_mounted_pool_runner()
+            .with_output(
+                CmdRequest::CryptsetupLuksUuid {
+                    device: "/dev/disk/by-id/braid-ironwolf".into(),
+                },
+                ok_raw(
+                    "cryptsetup luksUUID",
+                    "22222222-2222-2222-2222-222222222222\n",
+                ),
+            )
+            .with_output(
+                CmdRequest::CryptsetupLuksDumpText {
+                    device: "/dev/disk/by-id/braid-ironwolf".into(),
+                },
+                ok_raw(
+                    "cryptsetup luksDump",
+                    "LUKS header information\nVersion:       \t2\n",
+                ),
+            )
+            .with_output(
+                CmdRequest::CryptsetupStatus {
+                    mapper: MapperName("braid-ironwolf".into()),
+                },
+                RawCommandOutput {
+                    cmd: "cryptsetup status braid-ironwolf".into(),
+                    stdout: String::new(),
+                    stderr: "/dev/mapper/braid-ironwolf is inactive.\n".into(),
+                    exit_status: 4,
+                },
+            );
+        let fs = StubFs::with_paths(&[
+            "/dev/disk/by-id/braid-toshiba",
+            "/dev/disk/by-id/braid-ironwolf",
+        ]);
+
+        let disk_by_id = HashMap::from([
+            (
+                "toshiba".to_owned(),
+                "/dev/disk/by-id/braid-toshiba".to_owned(),
+            ),
+            (
+                "ironwolf".to_owned(),
+                "/dev/disk/by-id/braid-ironwolf".to_owned(),
+            ),
+        ]);
+
+        let pool = expect_pool(
+            probe_pool_for_tui(
+                &runner,
+                &fs,
+                &MountPoint("/mnt/storage".into()),
+                &tui_disks_with_by_id(disk_by_id),
+                &test_paths().1,
+                crate::test_fixtures::mock_virtio_backing_path_resolver(),
+            )
+            .unwrap(),
+        );
+
+        assert_eq!(
+            pool.unpooled_disks.get("ironwolf"),
+            Some(&UnpooledDiskRender::Missing)
+        );
+    }
+
+    /// Intent: probe_pool_for_tui must fall back to
+    /// `UnpooledDiskRender::UnknownLuks` for a present LUKS disk that has no
+    /// recorded membership UUID to compare against.
+    ///
+    /// Why: keeps the defensive Unrecorded branch tested. Declared members are
+    /// UUID-keyed (decision 024), so this is unreachable in practice, but the
+    /// classifier must not render a scary `uuid mismatch` when there is simply
+    /// nothing on file to contradict the observed UUID.
+    ///
+    /// Scenario: 1-disk live pool (toshiba @ 11111111). `ironwolf` is declared
+    /// (present in by_id) with a valid LUKS header reporting 99999999, but the
+    /// membership UUID map omits it entirely.
+    #[test]
+    fn unpooled_disk_present_luks_unrecorded_uuid_classified_as_unknown_luks() {
+        let runner = one_disk_mounted_pool_runner()
+            .with_output(
+                CmdRequest::CryptsetupLuksUuid {
+                    device: "/dev/disk/by-id/braid-ironwolf".into(),
+                },
+                ok_raw(
+                    "cryptsetup luksUUID",
+                    "99999999-9999-9999-9999-999999999999\n",
+                ),
+            )
+            .with_output(
+                CmdRequest::CryptsetupLuksDumpText {
+                    device: "/dev/disk/by-id/braid-ironwolf".into(),
+                },
+                ok_raw(
+                    "cryptsetup luksDump",
+                    "LUKS header information\nVersion:       \t2\n",
+                ),
+            )
+            .with_output(
+                CmdRequest::CryptsetupStatus {
+                    mapper: MapperName("braid-ironwolf".into()),
+                },
+                RawCommandOutput {
+                    cmd: "cryptsetup status braid-ironwolf".into(),
+                    stdout: String::new(),
+                    stderr: "/dev/mapper/braid-ironwolf is inactive.\n".into(),
+                    exit_status: 4,
+                },
+            );
+        let fs = StubFs::with_paths(&[
+            "/dev/disk/by-id/braid-toshiba",
+            "/dev/disk/by-id/braid-ironwolf",
+        ]);
+
+        let disk_by_id = HashMap::from([
+            (
+                "toshiba".to_owned(),
+                "/dev/disk/by-id/braid-toshiba".to_owned(),
+            ),
+            (
+                "ironwolf".to_owned(),
+                "/dev/disk/by-id/braid-ironwolf".to_owned(),
+            ),
+        ]);
+
+        // Membership records toshiba's UUID but omits ironwolf, so the
+        // classifier sees no recorded UUID to compare the observed one against.
+        let disks = DiskIdentity {
+            names: vec!["ironwolf".to_owned(), "toshiba".to_owned()],
+            by_id: disk_by_id,
+            luks_uuid: HashMap::from([(
+                "toshiba".to_owned(),
+                LuksUuid::parse("11111111-1111-1111-1111-111111111111").unwrap(),
+            )]),
+            devid: HashMap::from([("toshiba".to_owned(), 1), ("ironwolf".to_owned(), 2)]),
+        };
+
+        let pool = expect_pool(
+            probe_pool_for_tui(
+                &runner,
+                &fs,
+                &MountPoint("/mnt/storage".into()),
+                &disks,
                 &test_paths().1,
                 crate::test_fixtures::mock_virtio_backing_path_resolver(),
             )

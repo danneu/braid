@@ -155,7 +155,7 @@ Disks:
     Device:  /dev/disk/by-id/ata-TOSHIBA_MN07ACA12T_5678  (not found)
 ```
 
-Disk states in the detail view:
+Disk states (compact `Drives:` list and detail view):
 
 | State | Meaning |
 |---|---|
@@ -163,6 +163,7 @@ Disk states in the detail view:
 | **MISSING** | Disk not found at its by-id path |
 | **LUKS HEADER UNREADABLE** | Device present but LUKS header cannot be read |
 | **LUKS HEADER DAMAGED** | Device present but LUKS header is damaged |
+| **LUKS UUID MISMATCH** | Device present but its LUKS header UUID differs from the recorded member -- swapped, cloned, or reformatted; run `braid doctor` |
 | **UNKNOWN** | State could not be determined |
 
 ### Advisories

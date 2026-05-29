@@ -261,9 +261,15 @@ impl DiskUsage {
 pub enum UnpooledDiskRender {
     /// `ConfigDiskState::Absent` — device file does not exist.
     Missing,
-    /// `ConfigDiskState::PresentLuks` whose UUID is not in the live pool.
-    /// LUKS header is valid but the disk does not belong to this pool.
+    /// `ConfigDiskState::PresentLuks` with a valid LUKS header but no
+    /// recorded membership UUID to compare against (defensive fallback;
+    /// declared members are UUID-keyed per decision 024).
     UnknownLuks,
+    /// `ConfigDiskState::PresentLuks` whose on-disk UUID contradicts the
+    /// recorded membership UUID -- the disk was swapped, cloned, or
+    /// reformatted out-of-band (decision 024). The full expected/observed
+    /// pair lives in `braid doctor`; the TUI cell stays terse.
+    UuidMismatch,
     /// `ConfigDiskState::PresentNotLuks` refined to
     /// `LuksHeaderState::Unreadable` (or fallback). Severe — needs
     /// off-system header backup restore.

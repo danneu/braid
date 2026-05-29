@@ -713,6 +713,36 @@ pub(crate) fn luks_uuid_mismatch_guidance() -> &'static str {
      intentional"
 }
 
+/// Verdict for a present declared member whose on-disk LUKS UUID is compared
+/// against the UUID recorded in membership. Shared by `status` and the TUI so
+/// both glance surfaces agree on swap/reformat detection (decision 024);
+/// previously only `doctor` compared the two and the read-only surfaces
+/// silently diverged.
+pub(crate) enum MemberLuksIdentity {
+    /// On-disk UUID equals the recorded membership UUID.
+    Matches,
+    /// On-disk UUID contradicts the recorded UUID -- swapped, cloned, or
+    /// reformatted out-of-band.
+    Mismatch,
+    /// No recorded UUID to compare against. Defensive: unreachable for
+    /// declared members, which are UUID-keyed per decision 024.
+    Unrecorded,
+}
+
+/// Classify a present member's on-disk LUKS UUID against its recorded
+/// membership UUID. The single tested place both glance surfaces route
+/// through so they cannot drift on swap/reformat detection (decision 024).
+pub(crate) fn classify_member_luks_identity(
+    observed: &LuksUuid,
+    recorded: Option<&LuksUuid>,
+) -> MemberLuksIdentity {
+    match recorded {
+        Some(expected) if expected == observed => MemberLuksIdentity::Matches,
+        Some(_) => MemberLuksIdentity::Mismatch,
+        None => MemberLuksIdentity::Unrecorded,
+    }
+}
+
 /// Resolves live block-device paths for mapper ownership checks without
 /// widening the generic filesystem probe surface.
 pub trait BackingPathResolver {
@@ -1195,6 +1225,36 @@ mod tests {
             err.to_string(),
             "disk 'disk1' mapper '/dev/mapper/braid-disk1' is open but not backed by the configured disk. Expected LUKS UUID 11111111-1111-1111-1111-111111111111, found no backing (stale mapper). Close the conflicting mapper with 'sudo cryptsetup close braid-disk1' and re-run.",
         );
+    }
+
+    // Intent: classify_member_luks_identity returns Matches only when the
+    //   observed and recorded UUIDs are equal, Mismatch when a recorded UUID
+    //   contradicts the observed one, and Unrecorded when nothing is on file.
+    // Why it exists: this is the single classifier `status` and the TUI route
+    //   through for swap/reformat detection (decision 024). Testing it once is
+    //   the anti-drift payoff -- the two glance surfaces can never disagree on
+    //   the verdict because they share this function.
+    // Scenario: a declared member observed as 99999999 vs recorded 11111111
+    //   (reformatted/swapped), the matching case, and a member absent from the
+    //   recorded UUID map.
+    #[test]
+    fn classify_member_luks_identity_verdicts() {
+        let observed = LuksUuid::parse("99999999-9999-9999-9999-999999999999").unwrap();
+        let recorded_match = LuksUuid::parse("99999999-9999-9999-9999-999999999999").unwrap();
+        let recorded_other = LuksUuid::parse("11111111-1111-1111-1111-111111111111").unwrap();
+
+        assert!(matches!(
+            classify_member_luks_identity(&observed, Some(&recorded_match)),
+            MemberLuksIdentity::Matches
+        ));
+        assert!(matches!(
+            classify_member_luks_identity(&observed, Some(&recorded_other)),
+            MemberLuksIdentity::Mismatch
+        ));
+        assert!(matches!(
+            classify_member_luks_identity(&observed, None),
+            MemberLuksIdentity::Unrecorded
+        ));
     }
 
     // Intent: the helper produces <dir>/<mapper>.luksheader and nothing

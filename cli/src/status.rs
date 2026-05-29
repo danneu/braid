@@ -180,6 +180,7 @@ pub enum DiskStatus {
     Missing,
     LuksHeaderUnreadable,
     LuksHeaderDamaged,
+    LuksUuidMismatch,
     Unknown,
 }
 
@@ -190,6 +191,7 @@ impl std::fmt::Display for DiskStatus {
             Self::Missing => f.write_str("missing"),
             Self::LuksHeaderUnreadable => f.write_str("luks-header-unreadable"),
             Self::LuksHeaderDamaged => f.write_str("luks-header-damaged"),
+            Self::LuksUuidMismatch => f.write_str("luks-uuid-mismatch"),
             Self::Unknown => f.write_str("unknown"),
         }
     }
@@ -248,7 +250,14 @@ fn present_display_name(member: Option<&membership::DiskMember>, mapper: &Mapper
         .unwrap_or_else(|| mapper.0.clone())
 }
 
-fn build_compact_drives(pool: &PoolState, membership: &PoolMembership) -> Vec<CompactDrive> {
+/// `member_status` carries each member's detail-section `DiskStatus` so the
+/// compact summary renders the same verdict as the detail view (decision 024);
+/// unpooled members default to `Missing` when absent from the map.
+fn build_compact_drives(
+    pool: &PoolState,
+    membership: &PoolMembership,
+    member_status: &HashMap<String, DiskStatus>,
+) -> Vec<CompactDrive> {
     let mut drives = Vec::new();
 
     // Present pool devices
@@ -290,7 +299,12 @@ fn build_compact_drives(pool: &PoolState, membership: &PoolMembership) -> Vec<Co
             name: name.to_owned(),
             device_short: "-".to_owned(),
             devid,
-            status: DiskStatus::Missing,
+            // Mirror the detail section's verdict for this member; a genuinely
+            // absent member has no detail report and falls back to Missing.
+            status: member_status
+                .get(name)
+                .copied()
+                .unwrap_or(DiskStatus::Missing),
         });
     }
 
@@ -518,7 +532,6 @@ fn build_status<R: CommandRunner, F: Filesystem>(
         StatusCode::Degraded
     };
 
-    let compact_drives = build_compact_drives(&pool, &membership);
     let devid_names = build_devid_names(&pool, &membership)?;
 
     let members: Vec<_> = membership
@@ -556,6 +569,17 @@ fn build_status<R: CommandRunner, F: Filesystem>(
         }
     };
     let verbose_ctx = build_disk_reports(runner, &membership, &config_disks, &pool, &device_stats);
+
+    // Compact and detail must agree on each unpooled member's status (decision
+    // 024 swap/reformat detection): derive the compact summary from the detail
+    // reports so the two sub-surfaces of `braid status` can never contradict
+    // (e.g. `missing` vs `LUKS UUID MISMATCH` for the same present disk).
+    let member_status: HashMap<String, DiskStatus> = verbose_ctx
+        .disks
+        .iter()
+        .map(|report| (report.name.clone(), report.status))
+        .collect();
+    let compact_drives = build_compact_drives(&pool, &membership, &member_status);
 
     let alert_state = resolve_alert_state(paths);
 
@@ -1034,16 +1058,38 @@ fn build_disk_reports<R: CommandRunner>(
             continue;
         }
 
-        let status = match &cd.state {
-            ConfigDiskState::Absent => DiskStatus::Missing,
-            ConfigDiskState::PresentLuks { .. } => DiskStatus::Unknown,
+        // `luks_uuid` is carried into the report only for the mismatch case
+        // (see below); every other unpooled state leaves it blank as before.
+        let (status, luks_uuid) = match &cd.state {
+            ConfigDiskState::Absent => (DiskStatus::Missing, String::new()),
+            ConfigDiskState::PresentLuks { uuid, .. } => {
+                // Compare the on-disk UUID against the recorded membership UUID
+                // via the shared classifier so this detail surface agrees with
+                // the TUI and doctor on swap/reformat detection (decision 024).
+                match luks::classify_member_luks_identity(
+                    uuid,
+                    membership.by_name(&cd.name).map(|(u, _)| u),
+                ) {
+                    // Surface the observed UUID only on a mismatch, so the
+                    // human `LUKS:` line can show what the disk now reports.
+                    luks::MemberLuksIdentity::Mismatch => {
+                        (DiskStatus::LuksUuidMismatch, uuid.as_str().to_owned())
+                    }
+                    // Matches = correct-but-offline member; Unrecorded =
+                    // defensive (declared members are UUID-keyed). Both keep
+                    // today's generic Unknown with no UUID line.
+                    luks::MemberLuksIdentity::Matches | luks::MemberLuksIdentity::Unrecorded => {
+                        (DiskStatus::Unknown, String::new())
+                    }
+                }
+            }
             ConfigDiskState::PresentNotLuks => {
                 // luksUuid failed during the initial probe. Refine here for
                 // diagnostic reporting only -- do NOT propagate this back into
                 // ConfigDiskState (mutating commands like add/replace must keep
                 // seeing the coarse PresentNotLuks state to preserve their
                 // destructive-format guards).
-                match luks::probe_luks_header(runner, cd.by_id_path.as_str()) {
+                let status = match luks::probe_luks_header(runner, cd.by_id_path.as_str()) {
                     luks::LuksHeaderState::Unreadable => DiskStatus::LuksHeaderUnreadable,
                     luks::LuksHeaderState::Damaged => DiskStatus::LuksHeaderDamaged,
                     // luksUuid failed but isLuks + luksDump succeeded -- the
@@ -1058,7 +1104,8 @@ fn build_disk_reports<R: CommandRunner>(
                     // Unknown bucket rather than guessing at Unreadable vs
                     // Damaged.
                     luks::LuksHeaderState::ProbeFailed(_) => DiskStatus::Unknown,
-                }
+                };
+                (status, String::new())
             }
         };
         let mapper = mapper_name(&cd.name).0;
@@ -1067,7 +1114,7 @@ fn build_disk_reports<R: CommandRunner>(
             name: cd.name.as_str().to_owned(),
             mapper: mapper.clone(),
             by_id: cd.by_id_path.as_str().to_owned(),
-            luks_uuid: String::new(),
+            luks_uuid: luks_uuid.clone(),
             devid: None,
             underlying: None,
             status,
@@ -1078,7 +1125,7 @@ fn build_disk_reports<R: CommandRunner>(
             name: cd.name.as_str().to_owned(),
             member_name: Some(cd.name.clone()),
             by_id: cd.by_id_path.as_str().to_owned(),
-            luks_uuid: String::new(),
+            luks_uuid,
             devid: None,
             status,
             model: None,
@@ -1348,6 +1395,9 @@ fn format_status_human(
                 DiskStatus::LuksHeaderDamaged => {
                     out.push_str(&format!("  {:<18}LUKS HEADER DAMAGED\n", d.name));
                 }
+                DiskStatus::LuksUuidMismatch => {
+                    out.push_str(&format!("  {:<18}LUKS UUID MISMATCH\n", d.name));
+                }
                 DiskStatus::Present => {
                     let devid_str = d.devid.map(|id| format!("devid {id}")).unwrap_or_default();
                     out.push_str(&format!("  {:<18}{:<10}{}\n", d.name, devid_str, d.status));
@@ -1395,6 +1445,10 @@ fn format_status_human(
                     out.push_str("    Errors:  unknown (LUKS header damaged)\n");
                     false
                 }
+                None if d.status == DiskStatus::LuksUuidMismatch => {
+                    out.push_str("    Errors:  unknown (LUKS UUID mismatch)\n");
+                    false
+                }
                 None if d.status == DiskStatus::Unknown => {
                     out.push_str("    Errors:  unknown (metadata unavailable)\n");
                     false
@@ -1417,6 +1471,14 @@ fn format_status_human(
                         "    Action:  foreign mapper detected -- run 'braid doctor' to investigate\n",
                     ),
                 }
+            } else if d.status == DiskStatus::LuksUuidMismatch {
+                // Reuse the canonical mismatch guidance so every membership
+                // boundary gives the same safe-default recovery path; the
+                // authoritative expected-vs-observed pair lives in doctor.
+                out.push_str(&format!(
+                    "    Action:  {} -- run 'braid doctor' for the expected vs observed UUID\n",
+                    luks::luks_uuid_mismatch_guidance()
+                ));
             } else if needs_doctor {
                 out.push_str("    Action:  run 'braid doctor' for recovery guidance\n");
             }
@@ -1930,6 +1992,17 @@ mod tests {
             status: DiskStatus::LuksHeaderDamaged,
             errors: None,
         };
+        let mismatch = DiskReport {
+            name: "disk6".to_owned(),
+            mapper: "disk6".to_owned(),
+            by_id: "/dev/disk/by-id/disk6".to_owned(),
+            // A mismatch row carries the observed on-disk UUID.
+            luks_uuid: "99999999-9999-9999-9999-999999999999".to_owned(),
+            devid: None,
+            underlying: None,
+            status: DiskStatus::LuksUuidMismatch,
+            errors: None,
+        };
 
         let report = StatusReport {
             mount_point: MountPoint("/mnt/storage".to_owned()),
@@ -1947,7 +2020,7 @@ mod tests {
             last_scrub: Some(ScrubReport::Never),
             balance: None,
             allocation: None,
-            disks: vec![present, missing, unreadable, damaged],
+            disks: vec![present, missing, unreadable, damaged, mismatch],
             advisories: vec![],
             alert_active: false,
             alert_causes: vec![],
@@ -1957,7 +2030,7 @@ mod tests {
         let json_str = serde_json::to_string_pretty(&report).unwrap();
         let v: serde_json::Value = serde_json::from_str(&json_str).unwrap();
         let disks = v["disks"].as_array().unwrap();
-        assert_eq!(disks.len(), 4);
+        assert_eq!(disks.len(), 5);
 
         // Present disk
         let d0 = &disks[0];
@@ -1993,6 +2066,13 @@ mod tests {
         assert_eq!(d3["mapper"], "disk5");
         assert_eq!(d3["status"], "luks-header-damaged");
         assert!(d3["errors"].is_null());
+
+        // LUKS UUID mismatch disk -- kebab-case token plus the observed UUID
+        let d4 = &disks[4];
+        assert_eq!(d4["mapper"], "disk6");
+        assert_eq!(d4["status"], "luks-uuid-mismatch");
+        assert_eq!(d4["luks_uuid"], "99999999-9999-9999-9999-999999999999");
+        assert!(d4["errors"].is_null());
     }
 
     // =======================================================================
@@ -2828,6 +2908,73 @@ mod tests {
             !human.contains("braid replace"),
             "header-state disks must not surface a replace action; got:\n{human}"
         );
+    }
+
+    /// Intent: a disk classified as `LuksUuidMismatch` in the verbose human
+    /// output must show the dedicated label, the observed on-disk UUID, and
+    /// the canonical mismatch remediation guidance.
+    ///
+    /// Why: decision 024's swap/clone/reformat case must be distinguishable at
+    /// a glance from a generic `unknown` disk, and the action line must reuse
+    /// the shared `luks_uuid_mismatch_guidance()` so every membership boundary
+    /// gives the same recovery path. The authoritative expected-vs-observed
+    /// pair stays in `braid doctor`.
+    ///
+    /// Scenario: declared member `disk6` whose on-disk header now reports a
+    /// UUID that contradicts the recorded membership UUID. status.rs surfaces
+    /// the observed UUID and the mismatch guidance.
+    #[test]
+    fn status_verbose_luks_uuid_mismatch_disk() {
+        let human_disks = vec![HumanDisk {
+            name: "disk6".to_owned(),
+            member_name: Some(DiskName::parse("disk6").unwrap()),
+            by_id: "/dev/disk/by-id/disk6".to_owned(),
+            luks_uuid: "99999999-9999-9999-9999-999999999999".to_owned(),
+            devid: None,
+            status: DiskStatus::LuksUuidMismatch,
+            model: None,
+            serial: None,
+            errors: None,
+        }];
+
+        let report = StatusReport {
+            mount_point: MountPoint("/mnt/storage".to_owned()),
+            status: StatusCode::Degraded,
+            total_devices: Some(2),
+            present_count: Some(1),
+            missing_count: Some(1),
+            profile: Some(ProfileJson::uniform("RAID1")),
+            fsid: None,
+            capacity: Some(CapacityReport {
+                total_bytes: None,
+                used_bytes: 33914880,
+                free_bytes: 442957824,
+            }),
+            last_scrub: Some(ScrubReport::Never),
+            balance: None,
+            allocation: None,
+            disks: vec![],
+            advisories: vec![],
+            alert_active: false,
+            alert_causes: vec![],
+            missing_devids: vec![],
+        };
+
+        let human = format_status_human(&report, None, Some(&human_disks), None);
+        assert!(human.contains("LUKS UUID MISMATCH"), "got:\n{human}");
+        // The observed on-disk UUID is surfaced so the operator sees what the
+        // disk now reports.
+        assert!(
+            human.contains("99999999-9999-9999-9999-999999999999"),
+            "got:\n{human}"
+        );
+        // The action line reuses the canonical mismatch guidance verbatim.
+        assert!(
+            human.contains(luks::luks_uuid_mismatch_guidance()),
+            "got:\n{human}"
+        );
+        // It also points at doctor for the authoritative expected-vs-observed pair.
+        assert!(human.contains("braid doctor"), "got:\n{human}");
     }
 
     #[test]
@@ -4989,18 +5136,22 @@ mod tests {
     }
 
     /*
-     * Intent: a config disk whose current by-id target reports the foreign
-     * live UUID still does not satisfy the UUID-keyed member.
+     * Intent: a config disk whose by-id target reports a UUID that contradicts
+     * the recorded membership UUID is classified `LuksUuidMismatch`, and the
+     * observed UUID is surfaced on the row -- not collapsed into the generic
+     * `Unknown` bucket shared with foreign disks.
      *
-     * Why it exists: a swapped/reformatted disk can make the member's by-id
-     * path point at the live foreign UUID. Verbose status must not attach the
-     * member's name to that live UUID or suppress the member diagnostic row.
+     * Why it exists: this is decision 024's swap/clone/reformat case. The
+     * detail surface must distinguish a reformatted member from a stray disk
+     * (matching the TUI and doctor) rather than hiding the divergence; it must
+     * also still not attach the member's name to the live foreign UUID or
+     * suppress the member diagnostic row.
      *
      * Scenario: membership expects disk1 at UUID U1, but disk1's by-id path
      * probes as PresentLuks UUID U9 and the mounted pool also reports U9.
      */
     #[test]
-    fn build_disk_reports_foreign_config_uuid_does_not_hide_missing_member() {
+    fn build_disk_reports_foreign_config_uuid_classified_as_uuid_mismatch() {
         let foreign_uuid = LuksUuid::parse("99999999-9999-9999-9999-999999999999").unwrap();
         let pool = PoolState {
             mounted: true,
@@ -5039,7 +5190,13 @@ mod tests {
             "99999999-9999-9999-9999-999999999999"
         );
         assert_eq!(ctx.disks[1].name, "disk1");
-        assert_eq!(ctx.disks[1].status, DiskStatus::Unknown);
+        assert_eq!(ctx.disks[1].status, DiskStatus::LuksUuidMismatch);
+        // The mismatch row surfaces the observed UUID so the operator can see
+        // what the disk now reports; the expected pair stays in doctor.
+        assert_eq!(
+            ctx.disks[1].luks_uuid,
+            "99999999-9999-9999-9999-999999999999"
+        );
     }
 
     // Intent: verbose status probes present-disk hardware through the live
@@ -5531,9 +5688,55 @@ mod tests {
             null_underlying: vec![],
         };
         let membership = status_membership_1disk();
-        let drives = build_compact_drives(&pool, &membership);
+        let drives = build_compact_drives(&pool, &membership, &HashMap::new());
         assert_eq!(drives.len(), 1);
         assert_eq!(drives[0].status, DiskStatus::Missing);
+    }
+
+    // Intent: the compact summary renders an unpooled member's detail-section
+    //   status -- a mismatch member shows `luks-uuid-mismatch`, while a
+    //   genuinely absent member (no detail report) still shows `missing`.
+    // Why it exists: compact used to hardcode every unpooled member as
+    //   `missing`, so a present-but-reformatted disk that the detail section
+    //   flagged `LUKS UUID MISMATCH` rendered `missing` on the literal primary
+    //   glance -- a same-invocation contradiction. Deriving compact from the
+    //   detail reports (decision 024) closes that drift.
+    // Scenario: two declared members, neither assembled into the pool. The
+    //   detail pass classified disk1 as LuksUuidMismatch (its header was
+    //   reformatted) and produced no distinct verdict for disk2 (truly
+    //   unplugged), so disk2 falls back to Missing.
+    #[test]
+    fn build_compact_drives_unpooled_member_mirrors_detail_status() {
+        let (disk1_uuid, disk1_member) =
+            disk_member_with(101, "disk1", "/dev/disk/by-id/disk1", None, None);
+        let (disk2_uuid, disk2_member) =
+            disk_member_with(102, "disk2", "/dev/disk/by-id/disk2", None, None);
+        let membership =
+            membership_from(vec![(disk1_uuid, disk1_member), (disk2_uuid, disk2_member)]);
+        let pool = PoolState {
+            mounted: true,
+            devices: vec![],
+            missing_count: 2,
+            missing_devids: vec![],
+            total_devices: 2,
+            fsid: None,
+            null_underlying: vec![],
+        };
+        // disk1 was classified a mismatch by the detail pass; disk2 has no
+        // detail report (genuinely absent) and must fall back to Missing.
+        let member_status = HashMap::from([("disk1".to_owned(), DiskStatus::LuksUuidMismatch)]);
+
+        let drives = build_compact_drives(&pool, &membership, &member_status);
+
+        let status_of = |name: &str| {
+            drives
+                .iter()
+                .find(|d| d.name == name)
+                .unwrap_or_else(|| panic!("expected a compact row for {name}"))
+                .status
+        };
+        assert_eq!(status_of("disk1"), DiskStatus::LuksUuidMismatch);
+        assert_eq!(status_of("disk2"), DiskStatus::Missing);
     }
 
     #[test]
@@ -5554,7 +5757,7 @@ mod tests {
         };
         let membership = status_membership_1disk();
 
-        let drives = build_compact_drives(&pool, &membership);
+        let drives = build_compact_drives(&pool, &membership, &HashMap::new());
 
         assert_eq!(drives.len(), 1);
         assert_eq!(drives[0].name, "disk1");
@@ -5593,7 +5796,7 @@ mod tests {
         };
         let membership = status_membership_1disk();
 
-        let drives = build_compact_drives(&pool, &membership);
+        let drives = build_compact_drives(&pool, &membership, &HashMap::new());
 
         assert_eq!(drives.len(), 2);
         assert_eq!(drives[0].name, "braid-disk1");
@@ -5650,7 +5853,7 @@ mod tests {
             null_underlying: vec![],
         };
 
-        let drives = build_compact_drives(&pool, &membership);
+        let drives = build_compact_drives(&pool, &membership, &HashMap::new());
 
         let rows: Vec<(&str, DiskStatus)> = drives
             .iter()
@@ -5686,7 +5889,7 @@ mod tests {
             null_underlying: vec![],
         };
 
-        let drives = build_compact_drives(&pool, &membership);
+        let drives = build_compact_drives(&pool, &membership, &HashMap::new());
 
         assert_eq!(drives.len(), 1);
         assert_eq!(drives[0].name, "toshiba3");
@@ -5714,7 +5917,7 @@ mod tests {
             null_underlying: vec![],
         };
 
-        let drives = build_compact_drives(&pool, &membership);
+        let drives = build_compact_drives(&pool, &membership, &HashMap::new());
 
         assert_eq!(drives.len(), 1);
         assert_eq!(drives[0].name, "toshiba3");

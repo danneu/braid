@@ -823,6 +823,9 @@ fn unpooled_disk_status_cell(state: &PoolState, name: &str) -> Option<Span<'stat
         UnpooledDiskRender::UnknownLuks => {
             Span::styled("unknown", Style::default().fg(Color::Yellow))
         }
+        UnpooledDiskRender::UuidMismatch => {
+            Span::styled("uuid mismatch", Style::default().fg(Color::Red))
+        }
         UnpooledDiskRender::LuksHeaderUnreadable => {
             Span::styled("LUKS header unreadable", Style::default().fg(Color::Red))
         }
@@ -2365,6 +2368,7 @@ pub(crate) mod tests {
             ("delta".to_owned(), UnpooledDiskRender::LuksHeaderDamaged),
             ("echo".to_owned(), UnpooledDiskRender::WrongLuksVersion(1)),
             ("foxtrot".to_owned(), UnpooledDiskRender::MapperHijacked),
+            ("golf".to_owned(), UnpooledDiskRender::UuidMismatch),
         ]);
 
         let cell = |name: &str| {
@@ -2380,9 +2384,12 @@ pub(crate) mod tests {
         assert_eq!(cell("delta"), "LUKS header damaged");
         assert_eq!(cell("echo"), "LUKS1 (unsupported)");
         assert_eq!(cell("foxtrot"), "mapper conflict");
+        assert_eq!(cell("golf"), "uuid mismatch");
 
         let foxtrot_span = unpooled_disk_status_cell(&pool, "foxtrot").expect("expected an entry");
         assert_eq!(foxtrot_span.style.fg, Some(Color::Red));
+        let golf_span = unpooled_disk_status_cell(&pool, "golf").expect("expected an entry");
+        assert_eq!(golf_span.style.fg, Some(Color::Red));
         assert!(
             unpooled_disk_status_cell(&pool, "hotel").is_none(),
             "names not in unpooled_disks must return None so callers can fall back"
