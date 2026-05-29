@@ -1587,4 +1587,82 @@ Label: none  uuid: aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee\n\
              branch and never attempt to read the (nonexistent) passphrase file",
         );
     }
+
+    // Intent: `cmd_unlock --dry-run` must render the preview and return WITHOUT
+    //   resolving the unlock credential, even when there ARE disks to unlock.
+    // Why it exists: the dry-run gate in cmd_unlock returns before plan.execute,
+    //   the only path that calls resolve_credential. A refactor hoisting
+    //   resolve_credential above the `if params.dry_run` gate would make dry-run
+    //   read the passphrase -- violating ADR 022's side-effect-free preview
+    //   contract. The sibling cmd_unlock_skips_credential_resolution_when_nothing_
+    //   to_unlock pins the empty-to_unlock skip, not the dry-run skip; the two
+    //   plan_unlock_dry_run_render_* tests call plan_unlock directly (which never
+    //   resolves a credential), so neither catches this regression.
+    // Scenario: operator runs `braid unlock --dry-run --passphrase-file <path>`
+    //   against a 2-disk closed pool (both mappers closed -> to_unlock non-empty)
+    //   where the passphrase file does not exist.
+    #[test]
+    fn cmd_unlock_dry_run_skips_credential_resolution_with_disks_to_unlock() {
+        let (_state_dir, sp) = isolated_paths();
+        let config = test_config();
+        let membership = two_disk_membership();
+        let fs = unlock_storage_fs(&[
+            "/dev/disk/by-id/virtio-disk1",
+            "/dev/disk/by-id/virtio-disk2",
+        ]);
+        let runner = base_two_disk_runner();
+
+        // Path does not exist: if dry-run regresses and resolves a credential,
+        // read_passphrase opens the bogus path and fails before Ok(()).
+        let bogus = std::path::PathBuf::from("/definitely/not/a/real/path/passphrase");
+
+        let result = cmd_unlock(
+            &runner,
+            &fs,
+            &UnlockParams {
+                config: &config,
+                membership: &membership,
+                paths: &sp,
+                passphrase_stdin: false,
+                passphrase_file: Some(&bogus),
+                key_file: None,
+                allow_degraded: false,
+                dry_run: true,
+                sleeper: &crate::progress::NoopSleeper,
+                backing_path_resolver: crate::test_fixtures::mock_virtio_backing_path_resolver(),
+            },
+        );
+
+        result.expect(
+            "dry-run with disks to unlock must render the preview and return \
+             without reading the (nonexistent) passphrase file",
+        );
+
+        // Future-proof + self-documenting: even if base_two_disk_runner ever
+        // gains open/mount mocks (removing the implicit missing-mock backstop),
+        // dry-run must still issue ZERO execute-only commands. This denylist is
+        // the complete set the unlock execute path can run (credential verify +
+        // LUKS open + scan + mount, both passphrase and keyfile); none are issued
+        // by plan_unlock's probe, so any hit means execute wrongly ran.
+        let executed: Vec<CmdRequest> = runner
+            .requests()
+            .into_iter()
+            .filter(|r| {
+                matches!(
+                    r,
+                    CmdRequest::CryptsetupTestPassphrase { .. }
+                        | CmdRequest::CryptsetupTestKeyFile { .. }
+                        | CmdRequest::CryptsetupLuksOpen { .. }
+                        | CmdRequest::CryptsetupLuksOpenKeyFile { .. }
+                        | CmdRequest::BtrfsDeviceScanAll
+                        | CmdRequest::Mount { .. }
+                        | CmdRequest::MountWithOptions { .. }
+                )
+            })
+            .collect();
+        assert!(
+            executed.is_empty(),
+            "dry-run must issue zero execute-only commands, got: {executed:?}",
+        );
+    }
 }
