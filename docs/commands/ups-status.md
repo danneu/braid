@@ -68,6 +68,8 @@ reachable UPS with a populated `status_flags` array and no top-level
 }
 ```
 
+`status_flags` lists flags in first-seen `ups.status` token order (whitespace normalized, duplicate tokens dropped); braid does not sort them, so the order is deterministic for a given UPS state.
+
 `extra` is a string-keyed map of every `upsc` line that did not land in a typed field above. Its contents vary with the NUT driver and version (typically `driver.*` debug keys plus other untyped fields like `battery.charge.low` or `input.voltage.nominal`), and values are kept verbatim as strings.
 
 Distinct sentinels cover the common non-OK cases:

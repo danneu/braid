@@ -54,11 +54,11 @@ A `parse_upsc` module in `cli/src/parse/` handles the parse, with stable and uns
 
 Pinning is load-bearing. A new `braid.packages.networkupstools` option is added alongside the existing `btrfsProgs`, `cryptsetup`, and `utilLinux` pins, defaulted to nixos-25.11's `networkupstools`. The module uses this pin to configure the NUT package the `power.ups` service resolves (exact nixpkgs option name to confirm during implementation) and includes the same derivation in the CLI wrapper's PATH so that `upsc` invoked from `braid ups status` resolves to the tested version rather than whatever the host's system path provides. [Decision 010](010-toolchain-pinning.md) and [principle 10](../principles.md#10-pinned-toolchain) are updated in the same implementation to name NUT as parser-critical.
 
-`ups.status` is parsed as a set of flags (`OL`, `OB`, `LB`, `CHRG`, `DISCHRG`, `RB`, ...), not an enum. Display severity is derived from the combination; unknown tokens are preserved in the parsed model so that new NUT statuses do not silently disappear.
+`ups.status` is parsed into an ordered, deduplicated list of flags (`OL`, `OB`, `LB`, `CHRG`, `DISCHRG`, `RB`, ...), not an enum. Flags are stored in `upsc` emission order; membership and dedup give set semantics without imposing a sort. Display severity is derived from the combination; unknown tokens are preserved in the parsed model so that new NUT statuses do not silently disappear.
 
 `braid ups status` defaults to a curated human-readable summary and supports `--json` for the typed parsed model. Raw `upsc` passthrough is not exposed; users who want that can still run `upsc` directly.
 
-The `--json` success shape preserves the typed parsed model at top level. If `upsc` exits 0 but `ups.status` is empty or missing, the JSON output stays exit 0 and adds top-level `"warning": "ups_status_empty"` beside the parsed body. Scripts must treat either `.error` or `.warning` as a sentinel that the body is not trusted healthy UPS state.
+The `--json` success shape preserves the typed parsed model at top level. If `upsc` exits 0 but `ups.status` is empty or missing, the JSON output stays exit 0 and adds top-level `"warning": "ups_status_empty"` beside the parsed body. Scripts must treat either `.error` or `.warning` as a sentinel that the body is not trusted healthy UPS state. The `status_flags` array preserves first-seen `ups.status` token order across the human, `--json`, and TUI surfaces -- braid imposes no sort of its own. Order is deterministic for a given UPS state (whitespace is normalized and repeated tokens collapse to first-seen); it is not a byte copy of the raw `ups.status:` line.
 
 ### Shutdown-on-LB = `systemctl poweroff`
 

@@ -3169,6 +3169,29 @@ mod tests {
         assert_eq!(snap.daemon, DaemonStatus::Active);
     }
 
+    // Intent: probe_ups_for_tui carries parsed status_flags into the
+    // snapshot in first-seen ups.status order, with no sort at the bridge.
+    // Why it exists: this is the single UpscOutput -> UpsSnapshot bridge;
+    // both TUI render guards seed flags manually and the other probe test
+    // only checks membership, so a re-sort here would skip every existing
+    // guard. Pins the bridge as the fifth no-resort surface (ADR 020).
+    // Scenario: a UPS emitting CAL OL CHRG RB in that order.
+    #[test]
+    fn probe_ups_for_tui_preserves_status_flag_order() {
+        use crate::parse::types::UpsStatusFlag;
+        let mock = mock_with_upsc_and_unit("ups.status: CAL OL CHRG RB\n", 0, "active\n");
+        let snap = probe_ups_for_tui(&mock, "ups");
+        assert_eq!(
+            snap.flags,
+            vec![
+                UpsStatusFlag::Cal,
+                UpsStatusFlag::Ol,
+                UpsStatusFlag::Chrg,
+                UpsStatusFlag::Rb,
+            ],
+        );
+    }
+
     // Intent: probe_ups_for_tui leaves watts_estimated as None when
     // ups.realpower.nominal is missing from the upsc output.
     // Why: mirrors the watts_estimated() invariant on UpscOutput; the

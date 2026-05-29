@@ -666,11 +666,14 @@ pub struct DeviceFields {
 /// structure via `--json`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct UpscOutput {
-    /// Flags from `ups.status`, in `upsc` emission order, deduplicated on
-    /// push. Order is the script-facing contract: human render and `--json`
-    /// both iterate this Vec verbatim, matching the `ups.status:` line in
-    /// `upsc ups` byte-for-byte. Membership tests treat the Vec as a set;
-    /// dedupe-on-push keeps those calls honest.
+    /// Flags from `ups.status`, in first-seen token order, deduplicated on
+    /// push. That order is the script-facing contract (ADR 020): the human CLI
+    /// (`format_status`), `--json`, the TUI bridge (`probe_ups_for_tui`), and
+    /// both TUI renders (`format_ups_flags`, Browse) carry this `Vec` verbatim
+    /// -- none re-sorts. The `--json` path once lex-sorted via a
+    /// `serialize_with` hook; it was removed so every surface agrees.
+    /// Membership tests treat the `Vec` as a set; dedupe-on-push keeps those
+    /// calls honest.
     pub status_flags: Vec<UpsStatusFlag>,
     pub battery: BatteryFields,
     /// `ups.load` -- percent (0-100).

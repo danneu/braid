@@ -385,11 +385,16 @@ mod tests {
         );
     }
 
-    // Intent: --json status_flags preserves parser insertion order.
-    // Why it exists: scripts should see the same order `upsc` emitted; a
-    // future array-level sort would diverge from human render and NUT.
-    // Scenario: a hypothetical UPS reporting every known flag at once plus
-    // an unrecognized driver-extension token.
+    // Intent: --json serializes status_flags in stored Vec order, with no
+    // re-sort at the serialization boundary.
+    // Why it exists: this boundary once carried a `serialize_with` hook
+    // that lex-sorted the flags; the emission-order pivot removed it and
+    // made Vec order the contract (see status_flags doc + ADR 020). A
+    // re-added serialize sort would pass the parser-order test, which never
+    // serializes -- so this guard is not redundant with it. The 17-flag
+    // fixture also pins every variant's NUT token verbatim.
+    // Scenario: a UPS reporting every known flag at once plus an
+    // unrecognized driver-extension token.
     #[test]
     fn json_output_status_flags_preserve_insertion_order() {
         let flags = vec![
