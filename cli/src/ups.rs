@@ -677,11 +677,7 @@ mod tests {
         let err = cmd_ups_status(&runner, &cfg, false).expect_err("query failure expected");
         match &err {
             UpsError::InvocationFailed { detail } => {
-                assert_eq!(detail, "mock output missing for request");
-                assert!(
-                    !detail.starts_with("invocation failed"),
-                    "legacy detail prefix leaked: {detail}"
-                );
+                assert_eq!(detail, &CmdError::MissingMock.to_string());
             }
             other => panic!("expected InvocationFailed, got {other:?}"),
         }

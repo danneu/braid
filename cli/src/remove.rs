@@ -2226,7 +2226,10 @@ mod tests {
         );
         assert_eq!(
             lines[0],
-            "[warn] ENOSPC pre-flight check failed: mock output missing for request; proceeding anyway",
+            format!(
+                "[warn] ENOSPC pre-flight check failed: {}; proceeding anyway",
+                CmdError::MissingMock
+            ),
             "warning must be the first line of the rendered preview; got: {rendered:?}",
         );
         // The remaining lines are the step block. Spot-check the
