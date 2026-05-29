@@ -144,6 +144,37 @@ If `doctor` pointed users at the local files, the product would be internally in
 
 Red flags when reviewing recovery messaging: `/var/lib/braid/luks-headers/`, `.luksheader`, `luks_headers_dir()`, and any `Path::exists` against a backup path.
 
+## Open-failure header diagnosis
+
+Unlock is two-phase. `plan_open_pool` probes every declared disk and
+classifies it (`ConfigDiskState`); the disks it hands to
+`execute_unlock_and_mount` as `to_unlock` are exactly the ones it found
+`PresentLuks` -- header intact, both `luksUuid` and `luksDump` succeeded at
+plan time. `execute_unlock_and_mount` then verifies the credential and opens
+each disk.
+
+When verify or open fails, `open_disks_with_credential` re-probes the header
+at failure time and routes the result through `explain_open_failure`:
+
+- `Damaged` -- emit `cryptsetup repair` guidance.
+- `Unreadable` -- emit the off-system-backup guidance (per the messaging
+  invariant above).
+- `Ok` -- the header is intact, so the original cryptsetup/verify error is
+  passed through verbatim (e.g. a genuine wrong passphrase).
+- `ProbeFailed` -- the probe itself could not run, so braid reports that
+  diagnosis is incomplete rather than guessing a cause.
+
+The failure-time re-probe is deliberate, not redundant. Because the
+`to_unlock` disks were `PresentLuks` by construction, the planner holds no
+header-damage observation to thread in -- there is nothing to reuse. The
+header can still change in the plan->open window (external `dd`, a hardware
+fault, a swapped device), and the failure-time probe is exactly what keeps a
+wiped or damaged header from being misdiagnosed as a "wrong passphrase".
+
+`probe_luks_header` -> `LuksHeaderState` is the single header-damage
+classifier; `ConfigDiskState` is a separate, coarse membership gateway, so the
+two neither duplicate nor drift.
+
 ## Unparseable state-file reconciliation
 
 There are two state files that can block normal operation when they are

@@ -506,6 +506,19 @@ fn credential_noun(c: Credential<'_>) -> &'static str {
 /// Verify the selected credential against every to-unlock disk and then
 /// open every to-unlock disk with the same credential. Keeps header-state
 /// classification shared across passphrase and keyfile unlock paths.
+///
+/// On any verify-rejection or open failure this re-probes the header at
+/// failure time (via `probe_luks_header`) rather than reusing plan-time
+/// state. The re-probe is deliberate, not redundant: the `to_unlock` disks
+/// were classified `PresentLuks` (header intact -- `luksUuid` and `luksDump`
+/// both succeeded) at plan time, so the planner holds no damage observation
+/// to thread in. The planner's own `probe_luks_header` call fires only for
+/// `PresentNotLuks` disks, which route to `missing` and never reach here. The
+/// header can still change in the plan->open window (external `dd`, hardware
+/// fault, a swapped device), so the failure-time probe is the only available
+/// diagnosis -- it lets `explain_open_failure` emit header-damage guidance
+/// instead of a misleading "wrong passphrase". See
+/// `docs/internals/luks-unlock.md`.
 fn open_disks_with_credential<R: CommandRunner>(
     runner: &R,
     to_unlock: &[(DiskName, ByIdPath)],
@@ -516,6 +529,9 @@ fn open_disks_with_credential<R: CommandRunner>(
 ) -> Result<(), MountError> {
     let noun = credential_noun(credential);
     let targets = credential_verify_targets(to_unlock);
+    // Re-probe at failure time: plan-time state for these `PresentLuks` disks
+    // is always healthy, so the live header is the only available diagnosis --
+    // see fn doc.
     match verify_credential_for_targets(runner, &targets, credential, color_enabled, |line| {
         eprint!("{line}")
     }) {
@@ -571,6 +587,7 @@ fn open_disks_with_credential<R: CommandRunner>(
             Ok(OpenOutcome::Opened) => opened.push(mapper_name(name)),
             Ok(OpenOutcome::AlreadyOwned) => {}
             Err(e) => {
+                // Re-probe at failure time -- see fn doc.
                 let header_state = luks::probe_luks_header(runner, by_id.as_str());
                 let (original_summary, ok_fallback) = match &e {
                     LuksError::OpenFailed {

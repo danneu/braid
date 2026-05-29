@@ -650,6 +650,14 @@ fn cryptsetup_format_hint(exit_code: i32) -> &'static str {
 /// `braid doctor` (for declared-disk health checks) and `braid unlock`
 /// (for enriching open-failure errors with the real cause).
 ///
+/// This enum is the single source of header-damage classification --
+/// consumed across `doctor`, `status`, the TUI, and unlock's failure path,
+/// always via `probe_luks_header`. `ConfigDiskState` is a separate,
+/// deliberately coarse membership gateway (Absent / PresentNotLuks /
+/// PresentLuks) carrying no damage variants, so the two neither duplicate nor
+/// drift. See the rationale at the `PresentNotLuks` branch in `mount.rs`
+/// ("do NOT propagate this back into ConfigDiskState").
+///
 /// Terminology contract:
 /// - `Unreadable` means braid cannot read or recognize a LUKS header at all.
 /// - `Damaged` means braid recognized LUKS, but the header metadata is broken.
