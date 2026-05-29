@@ -97,6 +97,10 @@ one.
 - **Display code has an explicit join rule.** User-facing summaries resolve a
   live pool device's UUID back to `DiskName` for presentation. UUIDs remain
   available to verbose/machine-readable paths where they are useful evidence.
+  The TUI Data-tab Bus column is the last display correlation to adopt this
+  rule: its lsblk transport bridge now joins the parent disk's LUKS UUID to the
+  member name, so transport survives mapper drift like every sibling cell
+  instead of blanking to `--`.
 
 ## Runtime Handles And Labels
 
@@ -183,6 +187,9 @@ one.
 - `tests/cli/status-mapper-drift.py` pins that `braid status` resolves the
   operator name via the UUID join when a member is open under a drifted mapper
   (`braid-WRONG`), not the mapper basename, in both JSON and human output.
+- `cli/src/tui/probe.rs` unit tests pin the TUI Data-tab Bus column's transport
+  join to the parent disk's LUKS UUID, so a member open under a drifted mapper
+  (`braid-WRONG`) still renders its bus instead of degrading to `--`.
 - `cli/src/lock.rs` unit tests pin the normal UUID/devid-classified close set,
   observed-mapper closing, UUID-scanned fallback cleanup, orphan warnings for
   non-member UUID/devid cases, duplicate-devid `null_underlying` skip behavior,

@@ -276,21 +276,22 @@ pub fn probe_pool_for_tui<R: CommandRunner, F: Filesystem + ?Sized>(
         }
     }
 
-    // Extract transport type (sata, nvme, usb, etc.) from lsblk tree.
-    // Walk parent devices: for each child named "braid-{name}", take the
-    // parent's TRAN value. TRAN is only set on physical devices, not dm-crypt.
+    // Transport (sata/nvme/usb) for the Bus column. Join by the parent
+    // crypto_LUKS device's LUKS UUID -> member name (Decision 024 display
+    // join), NOT the crypt child's mapper name, so transport survives mapper
+    // drift like every other identity-keyed cell. braid uses whole-disk LUKS,
+    // so the disk node carries both `tran` and the LUKS header uuid.
     let mut disk_transport = HashMap::new();
     if let Ok(lsblk_raw) = runner.run(&CmdRequest::LsblkJson)
         && let Ok(lsblk) = parse_lsblk_json(&lsblk_raw)
     {
         for dev in &lsblk.blockdevices {
-            if let Some(tran) = &dev.tran {
-                for child in &dev.children {
-                    // Pattern #3: display-only -- do not use for identity decisions.
-                    if let Some(name) = crate::config::name_from_mapper(&child.name) {
-                        disk_transport.insert(name.to_owned(), tran.clone());
-                    }
-                }
+            if let Some(tran) = &dev.tran
+                && let Some(uuid_raw) = &dev.uuid
+                && let Ok(uuid) = LuksUuid::parse(uuid_raw)
+                && let Some(name) = uuid_to_name.get(&uuid)
+            {
+                disk_transport.insert((*name).to_owned(), tran.clone());
             }
         }
     }
@@ -956,7 +957,13 @@ mod tests {
         }
     }
 
-    fn lsblk_transport_json(parent_tran: Option<&str>) -> String {
+    // Parent `uuid` is vdb's membership LUKS UUID (transport_test_disks), the
+    // join key the transport bridge resolves to a member name. `child_name` is
+    // the crypt child's mapper basename; the transport join never reads it, so
+    // tests can drift it (e.g. braid-WRONG) to model a member open under a
+    // non-canonical mapper. The child `uuid` is the btrfs FSID -- arbitrary and
+    // irrelevant to the join.
+    fn lsblk_transport_json(parent_tran: Option<&str>, child_name: &str) -> String {
         let tran = parent_tran
             .map(|value| format!(r#""{value}""#))
             .unwrap_or_else(|| "null".to_owned());
@@ -968,11 +975,11 @@ mod tests {
                     "size": 1073741824,
                     "model": null,
                     "serial": "disk1",
-                    "uuid": "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa",
+                    "uuid": "11111111-1111-1111-1111-111111111111",
                     "rota": true,
                     "tran": {tran},
                     "children": [{{
-                        "name": "braid-vdb",
+                        "name": "{child_name}",
                         "type": "crypt",
                         "size": 1056964608,
                         "model": null,
@@ -986,7 +993,10 @@ mod tests {
         )
     }
 
-    fn probe_disk_transport(parent_tran: Option<&str>) -> HashMap<String, String> {
+    fn probe_disk_transport(
+        parent_tran: Option<&str>,
+        child_name: &str,
+    ) -> HashMap<String, String> {
         let mp = MountPoint("/mnt/storage".to_owned());
         let runner = MockRunner::default()
             .with_output(
@@ -1053,7 +1063,7 @@ mod tests {
             )
             .with_output(
                 CmdRequest::LsblkJson,
-                ok_raw("lsblk", &lsblk_transport_json(parent_tran)),
+                ok_raw("lsblk", &lsblk_transport_json(parent_tran, child_name)),
             );
 
         let pool = expect_pool(
@@ -1244,19 +1254,45 @@ mod tests {
         assert_eq!(pool.capacity_used_bytes, 16777216 + 16384 + 65536);
     }
 
-    // Intent: TUI pool probing maps a physical parent's lsblk TRAN value
-    // to the child braid mapper's disk name.
+    // Intent: TUI pool probing maps a physical parent's lsblk TRAN value to the
+    // member disk name by joining the parent disk's LUKS UUID to membership.
     // Why it exists: the Data-tab Bus column depends on this best-effort
     // bridge, and VM browse tests only exercise the `lsblk -f` path.
-    // Scenario: /dev/vdb reports tran=sata for child mapper braid-vdb;
-    // a parent with tran=null leaves the disk without a bus mapping.
+    // Scenario: /dev/vdb reports tran=sata and the member's LUKS UUID with crypt
+    // child braid-vdb; a parent with tran=null leaves the disk without a bus
+    // mapping.
     #[test]
     fn disk_transport_comes_from_parent_lsblk_tran() {
-        let transport = probe_disk_transport(Some("sata"));
+        let transport = probe_disk_transport(Some("sata"), "braid-vdb");
         assert_eq!(transport.get("vdb").map(String::as_str), Some("sata"));
 
-        let transport = probe_disk_transport(None);
+        let transport = probe_disk_transport(None, "braid-vdb");
         assert!(!transport.contains_key("vdb"));
+    }
+
+    // Intent: the Bus-column transport join resolves a member's transport by the
+    // parent disk's LUKS UUID, never by the crypt child's mapper name, so a
+    // member open under a drifted mapper still gets its bus rendered.
+    // Why it exists: transport was the last live-pool correlation keyed by a
+    // mapper handle (Decision 024). Under tolerated mapper drift the row's every
+    // other cell resolved by UUID/devid while Bus alone silently fell to `--`,
+    // reading as a partial probe failure. A revert to name_from_mapper keying
+    // fails both assertions below (get("vdb") -> None, contains_key("WRONG") ->
+    // true).
+    // Scenario: drift is modeled at the lsblk layer only -- vdb's crypt child is
+    // open as braid-WRONG while the parent disk still carries vdb's membership
+    // LUKS UUID and tran=sata. The btrfs-show and cryptsetup mocks are held
+    // canonical (braid-vdb) by design, not oversight: the transport join reads
+    // neither the btrfs device path nor the cryptsetup mapper -- only lsblk +
+    // membership -- so this isolates the exact input the old mapper-name keying
+    // consumed.
+    #[test]
+    fn disk_transport_resolves_by_uuid_under_mapper_drift() {
+        let transport = probe_disk_transport(Some("sata"), "braid-WRONG");
+        // Resolves by the parent LUKS UUID -> membership name, not the mapper.
+        assert_eq!(transport.get("vdb").map(String::as_str), Some("sata"));
+        // The drifted mapper basename must not leak into any key.
+        assert!(!transport.contains_key("WRONG"));
     }
 
     // Intent: TUI SMART health and temperature probes for present members use

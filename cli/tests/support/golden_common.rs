@@ -77,6 +77,20 @@ golden_test!(
                 dev.name
             );
             assert_eq!(dev.children[0].device_type, "crypt");
+            // The TUI Bus-column transport join keys by the parent disk's LUKS
+            // UUID and reads `tran` off the same node. A toolchain bump that
+            // nulled or relocated either would silently degrade Bus to `--`;
+            // present-but-null slips past lsblk_rejects_missing_required_*.
+            assert!(
+                dev.uuid.is_some(),
+                "disk {} missing lsblk uuid (LUKS header UUID join key)",
+                dev.name
+            );
+            assert!(
+                dev.tran.is_some(),
+                "disk {} missing lsblk tran (Bus column source)",
+                dev.name
+            );
         }
     }
 );
