@@ -1503,9 +1503,9 @@ mod tests {
         status_cryptsetup_status_active, status_cryptsetup_uuid_ok, status_disk_report_missing,
         status_disk_report_named, status_fs_ext4, status_fs_mounted, status_fs_not_mounted,
         status_fs_one_disk, status_fs_three_disk, status_is_luks_raw, status_lsblk_field_ok,
-        status_luks_dump_text_raw, status_membership_1disk, status_membership_3disk, status_mp,
-        status_pool_empty, status_report_with_alerts, status_report_with_scrub,
-        status_runner_healthy_3disk_base, status_runner_healthy_3disk_verbose,
+        status_membership_1disk, status_membership_3disk, status_mp, status_pool_empty,
+        status_report_with_alerts, status_report_with_scrub, status_runner_healthy_3disk_base,
+        status_runner_healthy_3disk_verbose,
     };
 
     const TEST_FSID: &str = "12345678-1234-1234-1234-123456789012";
@@ -4891,24 +4891,12 @@ mod tests {
     #[test]
     fn build_disk_reports_present_not_luks_inconsistent_falls_back_to_unknown() {
         let config_disks = status_cfg_present_not_luks("disk1", "/dev/disk/by-id/disk1");
-        let runner = MockRunner::default()
-            .with_output(
-                CmdRequest::CryptsetupIsLuks {
-                    device: "/dev/disk/by-id/disk1".to_owned(),
-                },
-                status_is_luks_raw("/dev/disk/by-id/disk1", 0, ""),
-            )
-            .with_output(
-                CmdRequest::CryptsetupLuksDumpText {
-                    device: "/dev/disk/by-id/disk1".to_owned(),
-                },
-                status_luks_dump_text_raw(
-                    "/dev/disk/by-id/disk1",
-                    0,
-                    "LUKS header information\nVersion: 2\n",
-                    "",
-                ),
-            );
+        let runner = MockRunner::default().with_output(
+            CmdRequest::CryptsetupIsLuks {
+                device: "/dev/disk/by-id/disk1".to_owned(),
+            },
+            status_is_luks_raw("/dev/disk/by-id/disk1", 0, ""),
+        );
         let stats = BtrfsDeviceStatsOutput { devices: vec![] };
 
         let ctx = build_disk_reports(

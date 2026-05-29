@@ -429,21 +429,6 @@ pub(crate) fn status_is_luks_raw(device: &str, exit: i32, stderr: &str) -> RawCo
     }
 }
 
-/// Raw text-form `cryptsetup luksDump` output for header classification tests.
-pub(crate) fn status_luks_dump_text_raw(
-    device: &str,
-    exit: i32,
-    stdout: &str,
-    stderr: &str,
-) -> RawCommandOutput {
-    RawCommandOutput {
-        cmd: format!("cryptsetup luksDump {device}"),
-        stdout: stdout.to_owned(),
-        stderr: stderr.to_owned(),
-        exit_status: exit,
-    }
-}
-
 // ---------------------------------------------------------------------------
 // lsblk output factory
 // ---------------------------------------------------------------------------
