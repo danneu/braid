@@ -6306,9 +6306,7 @@ mod tests {
 
         assert!(result.is_err(), "forced replace-start failure must surface");
         assert_eq!(
-            stderr
-                .matches("[warn] source device (devid 2) has I/O errors")
-                .count(),
+            stderr.matches(&format_source_io_error_warning(2)).count(),
             1,
             "real-run stderr must render source I/O warning exactly once, got:\n{stderr}"
         );
