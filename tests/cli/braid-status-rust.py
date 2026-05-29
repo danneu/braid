@@ -118,6 +118,7 @@ with subtest("Healthy JSON"):
         assert "by_id" in d, f"Missing by_id: {d}"
         assert "luks_uuid" in d, f"Missing luks_uuid: {d}"
         assert "devid" in d, f"Missing devid: {d}"
+        assert isinstance(d["devid"], int), f"devid must be a JSON number: {d}"
         assert d["status"] == "present", f"Expected present: {d}"
         assert "errors" in d, f"Missing errors: {d}"
         assert d["errors"] is not None, f"Expected errors object: {d}"

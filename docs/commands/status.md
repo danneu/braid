@@ -277,7 +277,7 @@ for recovery options.
     identity; do not reconstruct it as `braid-${name}`.
   - `underlying`: current backing block device (e.g. `/dev/sda`), or
     `null` when the disk is not present.
-  - `devid`: btrfs device ID **as a string** (e.g. `"1"`), or `null`
+  - `devid`: btrfs device ID **as a number** (e.g. `1`), or `null`
     when the disk is not a live pool member.
   - `status`: one of `present`, `missing`, `luks-header-unreadable`,
     `luks-header-damaged`, `unknown`.
@@ -293,7 +293,7 @@ for recovery options.
   "mapper": "braid-toshiba1",
   "by_id": "/dev/disk/by-id/ata-TOSHIBA_MN07ACA12T_1234",
   "luks_uuid": "aaaaaaaa-1111-2222-3333-444444444444",
-  "devid": "1",
+  "devid": 1,
   "underlying": "/dev/sda",
   "status": "present",
   "errors": { "read": 0, "write": 0, "flush": 0, "corruption": 0, "generation": 0 }
@@ -317,9 +317,6 @@ for recovery options.
   - `{ "type": "smartd_alert" }` -- a SMART health warning from smartd.
   - `{ "type": "computation_error", "detail": "<string>" }` -- braid could
     not compute alert state; `detail` explains.
-
-  Note `devid` here is a JSON **number**, unlike the string `devid` in
-  `disks[]`.
 - `advisories`: array of human-readable advisory strings (omitted when
   none). See the Advisories section above for what currently produces
   them.

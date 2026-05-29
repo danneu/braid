@@ -660,7 +660,7 @@ pub(crate) fn status_disk_report_named(name: &str, devid: u64) -> DiskReport {
         mapper: mapper_name(&disk_name).0,
         by_id: format!("/dev/disk/by-id/{name}"),
         luks_uuid: "00000000-0000-0000-0000-000000000000".into(),
-        devid: Some(devid.to_string()),
+        devid: Some(devid),
         underlying: None,
         status: DiskStatus::Present,
         errors: None,

@@ -201,7 +201,7 @@ pub struct DiskReport {
     pub mapper: String,
     pub by_id: String,
     pub luks_uuid: String,
-    pub devid: Option<String>,
+    pub devid: Option<u64>,
     pub underlying: Option<String>,
     pub status: DiskStatus,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -369,7 +369,7 @@ struct HumanDisk {
     member_name: Option<DiskName>,
     by_id: String,
     luks_uuid: String,
-    devid: Option<String>,
+    devid: Option<u64>,
     status: DiskStatus,
     model: Option<String>,
     serial: Option<String>,
@@ -1006,7 +1006,7 @@ fn build_disk_reports<R: CommandRunner>(
             mapper: mapper.clone(),
             by_id: by_id.clone(),
             luks_uuid: pd.luks_uuid.as_str().to_owned(),
-            devid: Some(pd.devid.to_string()),
+            devid: Some(pd.devid),
             underlying: Some(pd.underlying.clone()),
             status: DiskStatus::Present,
             errors: errors.clone(),
@@ -1017,7 +1017,7 @@ fn build_disk_reports<R: CommandRunner>(
             member_name: matched_member.map(|m| m.name.clone()),
             by_id: by_id.clone(),
             luks_uuid: pd.luks_uuid.as_str().to_owned(),
-            devid: Some(pd.devid.to_string()),
+            devid: Some(pd.devid),
             status: DiskStatus::Present,
             model,
             serial,
@@ -1349,11 +1349,7 @@ fn format_status_human(
                     out.push_str(&format!("  {:<18}LUKS HEADER DAMAGED\n", d.name));
                 }
                 DiskStatus::Present => {
-                    let devid_str = d
-                        .devid
-                        .as_deref()
-                        .map(|id| format!("devid {id}"))
-                        .unwrap_or_default();
+                    let devid_str = d.devid.map(|id| format!("devid {id}")).unwrap_or_default();
                     out.push_str(&format!("  {:<18}{:<10}{}\n", d.name, devid_str, d.status));
                 }
             }
@@ -1893,7 +1889,7 @@ mod tests {
             mapper: "disk1".to_owned(),
             by_id: "/dev/disk/by-id/disk1".to_owned(),
             luks_uuid: "11111111-1111-1111-1111-111111111111".to_owned(),
-            devid: Some("1".to_owned()),
+            devid: Some(1),
             underlying: Some("/dev/vda".to_owned()),
             status: DiskStatus::Present,
             errors: Some(DiskErrors {
@@ -1968,7 +1964,7 @@ mod tests {
         assert_eq!(d0["mapper"], "disk1");
         assert_eq!(d0["by_id"], "/dev/disk/by-id/disk1");
         assert_eq!(d0["luks_uuid"], "11111111-1111-1111-1111-111111111111");
-        assert_eq!(d0["devid"], "1");
+        assert_eq!(d0["devid"], 1);
         assert_eq!(d0["status"], "present");
         assert!(d0["errors"].is_object());
         assert_eq!(d0["errors"]["read"], 0);
@@ -2084,7 +2080,7 @@ mod tests {
                 mapper: "disk1".to_owned(),
                 by_id: "/dev/disk/by-id/disk1".to_owned(),
                 luks_uuid: "11111111-1111-1111-1111-111111111111".to_owned(),
-                devid: Some("1".to_owned()),
+                devid: Some(1),
                 underlying: Some("/dev/vda".to_owned()),
                 status: DiskStatus::Present,
                 errors: Some(DiskErrors {
@@ -2565,7 +2561,7 @@ mod tests {
             member_name: Some(DiskName::parse("disk1").unwrap()),
             by_id: "/dev/disk/by-id/disk1".to_owned(),
             luks_uuid: "11111111-1111-1111-1111-111111111111".to_owned(),
-            devid: Some("1".to_owned()),
+            devid: Some(1),
             status: DiskStatus::Present,
             model: Some("VBOX HARDDISK".to_owned()),
             serial: Some("disk1".to_owned()),
@@ -2624,7 +2620,7 @@ mod tests {
             member_name: Some(DiskName::parse("disk1").unwrap()),
             by_id: "/dev/disk/by-id/disk1".to_owned(),
             luks_uuid: "11111111-1111-1111-1111-111111111111".to_owned(),
-            devid: Some("1".to_owned()),
+            devid: Some(1),
             status: DiskStatus::Present,
             model: Some("VBOX HARDDISK".to_owned()),
             serial: Some("disk1".to_owned()),
@@ -2841,7 +2837,7 @@ mod tests {
             member_name: Some(DiskName::parse("disk1").unwrap()),
             by_id: "/dev/disk/by-id/disk1".to_owned(),
             luks_uuid: "11111111-1111-1111-1111-111111111111".to_owned(),
-            devid: Some("1".to_owned()),
+            devid: Some(1),
             status: DiskStatus::Present,
             model: None,
             serial: None,
