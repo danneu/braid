@@ -770,7 +770,7 @@ mod tests {
     }
 
     // Helpers for the temperature-watermark tests below.
-    use crate::tui::model::{TemperatureDiskId, TemperatureReading};
+    use crate::tui::model::TemperatureReading;
     use crate::types::LuksUuid;
 
     fn temp_uuid(raw: &str) -> LuksUuid {
@@ -782,7 +782,7 @@ mod tests {
         pool.disk_temperature_readings.insert(
             name.to_owned(),
             TemperatureReading {
-                id: TemperatureDiskId::LuksUuid(temp_uuid(uuid_hex)),
+                id: temp_uuid(uuid_hex),
                 celsius,
             },
         );
@@ -804,7 +804,7 @@ mod tests {
             &mut model,
             Message::PoolProbeFinished(pool_probe_ok(Some(pool)), Duration::from_millis(10)),
         );
-        let id = TemperatureDiskId::LuksUuid(temp_uuid("11111111-1111-1111-1111-111111111111"));
+        let id = temp_uuid("11111111-1111-1111-1111-111111111111");
         let w = model
             .session_temperature_stats
             .get(&id)
@@ -823,7 +823,7 @@ mod tests {
     fn probe_finished_widens_max_on_higher_sample() {
         let mut model = Model::new_demo(sample_disk_names(), PoolStatus::Loading);
         let uuid = "11111111-1111-1111-1111-111111111111";
-        let id = TemperatureDiskId::LuksUuid(temp_uuid(uuid));
+        let id = temp_uuid(uuid);
         update(
             &mut model,
             Message::PoolProbeFinished(
@@ -851,7 +851,7 @@ mod tests {
     fn probe_finished_widens_min_on_lower_sample() {
         let mut model = Model::new_demo(sample_disk_names(), PoolStatus::Loading);
         let uuid = "11111111-1111-1111-1111-111111111111";
-        let id = TemperatureDiskId::LuksUuid(temp_uuid(uuid));
+        let id = temp_uuid(uuid);
         update(
             &mut model,
             Message::PoolProbeFinished(
@@ -884,7 +884,7 @@ mod tests {
     fn probe_finished_missing_reading_preserves_watermark() {
         let mut model = Model::new_demo(sample_disk_names(), PoolStatus::Loading);
         let uuid = "11111111-1111-1111-1111-111111111111";
-        let id = TemperatureDiskId::LuksUuid(temp_uuid(uuid));
+        let id = temp_uuid(uuid);
         update(
             &mut model,
             Message::PoolProbeFinished(

@@ -19,8 +19,8 @@ use crate::status::resolve_alert_state;
 use crate::status::{DiskErrors, estimate_pool_capacity, get_balance_report};
 use crate::tui::model::{
     DaemonStatus, DiskIdentity, DiskLockState, DiskLuksInfo, DiskLuksState, DiskUsage,
-    DrivingDrive, FanReading, FanSnapshot, PoolState, TemperatureDiskId, TemperatureReading,
-    UnpooledDiskRender, UpsSnapshot,
+    DrivingDrive, FanReading, FanSnapshot, PoolState, TemperatureReading, UnpooledDiskRender,
+    UpsSnapshot,
 };
 use crate::types::{ByIdPath, ConfigDiskState, DiskName, LuksUuid, MountPoint};
 
@@ -265,14 +265,19 @@ pub fn probe_pool_for_tui<R: CommandRunner, F: Filesystem + ?Sized>(
             });
         smart_health.insert(disk_name.clone(), probe.health);
 
-        if let Some(celsius) = probe.celsius {
-            let id = match disks.luks_uuid.get(disk_name.as_str()) {
-                Some(uuid) => TemperatureDiskId::LuksUuid(uuid.clone()),
-                None => TemperatureDiskId::ByIdPath(
-                    ByIdPath::parse(by_id_path).expect("membership by-id paths are validated"),
-                ),
-            };
-            disk_temperature_readings.insert(disk_name.clone(), TemperatureReading { id, celsius });
+        // Every membership disk is keyed by its LUKS UUID (decision 024), so a
+        // reading's identity is always that UUID. If a probe-only entry somehow
+        // lacks one, skip it rather than fabricate identity from the by-id path.
+        if let (Some(celsius), Some(uuid)) =
+            (probe.celsius, disks.luks_uuid.get(disk_name.as_str()))
+        {
+            disk_temperature_readings.insert(
+                disk_name.clone(),
+                TemperatureReading {
+                    id: uuid.clone(),
+                    celsius,
+                },
+            );
         }
     }
 
@@ -1296,9 +1301,13 @@ mod tests {
     }
 
     // Intent: TUI SMART health and temperature probes for present members use
-    //   the live backing path, not the persisted by-id path.
+    //   the live backing path, not the persisted by-id path, and the produced
+    //   temperature reading is keyed by the member's LUKS UUID.
     // Why it exists: by-id drift must not blank or corrupt SMART data for a
-    //   UUID-identified member that is already open in the pool.
+    //   UUID-identified member that is already open in the pool; and the
+    //   reading's identity must be the stable LUKS UUID (decision 024) so
+    //   session watermarks survive device-path changes -- this is the only
+    //   test that pins identity on the live producer path.
     // Scenario: toshiba is live at /dev/vda; the by-id mock returns a failing
     //   no-temperature result, while /dev/vda returns healthy temperature data.
     #[test]
@@ -1345,6 +1354,10 @@ mod tests {
             .get("toshiba")
             .expect("temperature from live smartctl probe");
         assert_eq!(reading.celsius, 38);
+        assert_eq!(
+            reading.id,
+            LuksUuid::parse("11111111-1111-1111-1111-111111111111").unwrap()
+        );
     }
 
     /// Intent: TUI device_errors is keyed by disk name resolved via devid,

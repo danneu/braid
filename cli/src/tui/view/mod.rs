@@ -17,9 +17,9 @@ use crate::profile_summary::{self, Redundancy, TypeProfile};
 use crate::status::{BalanceReport, DiskErrors};
 use crate::tui::model::{
     DaemonStatus, DiskLockState, DiskLuksState, DrivingDrive, FanReading, Model, PoolState,
-    PoolStatus, Tab, TemperatureDiskId, TemperatureReading, TemperatureWatermark,
-    UnpooledDiskRender, UpsSnapshot,
+    PoolStatus, Tab, TemperatureReading, TemperatureWatermark, UnpooledDiskRender, UpsSnapshot,
 };
+use crate::types::LuksUuid;
 
 fn format_timestamp(dt: &PrimitiveDateTime) -> String {
     let fmt = format_description!(
@@ -783,7 +783,7 @@ fn smart_cell(health: &SmartHealth) -> Span<'static> {
 /// - `reading` present with `sample_count >= 2` -> `<C>° <min>/<max>`.
 fn temperature_cell(
     reading: Option<&TemperatureReading>,
-    stats: &HashMap<TemperatureDiskId, TemperatureWatermark>,
+    stats: &HashMap<LuksUuid, TemperatureWatermark>,
 ) -> Line<'static> {
     let style = Style::default().fg(Color::DarkGray);
     match reading {
@@ -1715,7 +1715,6 @@ pub(crate) mod tests {
     //           smartctl returned no temperature at all.
     #[test]
     fn snapshot_temperature_column() {
-        use crate::types::LuksUuid;
         fn uuid(raw: &str) -> LuksUuid {
             LuksUuid::parse(raw).expect("valid UUID in temperature fixture")
         }
@@ -1725,14 +1724,14 @@ pub(crate) mod tests {
             (
                 "toshiba".to_owned(),
                 TemperatureReading {
-                    id: TemperatureDiskId::LuksUuid(uuid("11111111-1111-1111-1111-111111111111")),
+                    id: uuid("11111111-1111-1111-1111-111111111111"),
                     celsius: 38,
                 },
             ),
             (
                 "ironwolf".to_owned(),
                 TemperatureReading {
-                    id: TemperatureDiskId::LuksUuid(uuid("22222222-2222-2222-2222-222222222222")),
+                    id: uuid("22222222-2222-2222-2222-222222222222"),
                     celsius: 41,
                 },
             ),
@@ -1741,7 +1740,7 @@ pub(crate) mod tests {
         let mut model = Model::new_demo(sample_disk_names(), PoolStatus::Mounted(pool));
         model.session_temperature_stats = HashMap::from([
             (
-                TemperatureDiskId::LuksUuid(uuid("11111111-1111-1111-1111-111111111111")),
+                uuid("11111111-1111-1111-1111-111111111111"),
                 TemperatureWatermark {
                     min_celsius: 32,
                     max_celsius: 45,
@@ -1749,7 +1748,7 @@ pub(crate) mod tests {
                 },
             ),
             (
-                TemperatureDiskId::LuksUuid(uuid("22222222-2222-2222-2222-222222222222")),
+                uuid("22222222-2222-2222-2222-222222222222"),
                 TemperatureWatermark {
                     min_celsius: 41,
                     max_celsius: 41,

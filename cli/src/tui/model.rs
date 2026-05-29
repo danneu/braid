@@ -7,7 +7,7 @@ use crate::state_paths::StatePaths;
 use crate::status::{BalanceReport, DiskErrors};
 use crate::tui::browse::BrowseState;
 use crate::tui::effect::Effect;
-use crate::types::{ByIdPath, LuksUuid, MountPoint};
+use crate::types::{LuksUuid, MountPoint};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Tab {
@@ -186,21 +186,13 @@ pub struct UpsSnapshot {
     pub probed_at: Instant,
 }
 
-/// Physical identity of a disk for session-scoped temperature tracking.
-/// LUKS UUID is preferred so watermarks survive device-path changes on
-/// unplug/replug; by-id path is a fallback for disks whose UUID isn't
-/// available in the probe.
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
-pub enum TemperatureDiskId {
-    LuksUuid(LuksUuid),
-    ByIdPath(ByIdPath),
-}
-
 /// Current temperature reading for one disk, produced per probe tick.
 /// `celsius` is signed because SMART can legitimately report sub-zero values.
 #[derive(Debug, Clone)]
 pub struct TemperatureReading {
-    pub id: TemperatureDiskId,
+    /// Stable LUKS-UUID key (decision 024) so session watermarks survive
+    /// device-path / name changes on unplug/replug.
+    pub id: LuksUuid,
     pub celsius: i16,
 }
 
@@ -331,7 +323,7 @@ pub struct Model {
     pub advisories: Vec<String>,
     pub paths: Option<StatePaths>,
     pub disk_luks_states: HashMap<String, DiskLuksState>,
-    pub session_temperature_stats: HashMap<TemperatureDiskId, TemperatureWatermark>,
+    pub session_temperature_stats: HashMap<LuksUuid, TemperatureWatermark>,
     pub fan_control: Option<crate::config::FanControl>,
     pub fan: Option<FanSnapshot>,
     pub fan_probe_inflight: bool,
@@ -460,7 +452,7 @@ mod tests {
     use crate::membership::{DiskMember, PoolMembership};
     use crate::state_paths::StatePaths;
     use crate::tui::app::{Message, update};
-    use crate::types::DiskName;
+    use crate::types::{ByIdPath, DiskName};
 
     fn uuid(raw: &str) -> LuksUuid {
         LuksUuid::parse(raw).expect("valid LUKS UUID in fixture")
