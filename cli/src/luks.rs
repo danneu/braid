@@ -658,18 +658,28 @@ fn cryptsetup_format_hint(exit_code: i32) -> &'static str {
 /// drift. See the rationale at the `PresentNotLuks` branch in `mount.rs`
 /// ("do NOT propagate this back into ConfigDiskState").
 ///
-/// Terminology contract:
-/// - `Unreadable` means braid cannot read or recognize a LUKS header at all.
-/// - `Damaged` means braid recognized LUKS, but the header metadata is broken.
+/// Terminology contract (see `probe_luks_header` for why this split is
+/// narrower than the names imply -- both commands share one `crypt_load`):
+/// - `Unreadable` means `isLuks` failed: cryptsetup's `crypt_load` could not
+///   read or validate a LUKS header. Genuine metadata damage lands here,
+///   because `crypt_load` -- not `luksDump` -- does the validation.
+/// - `Damaged` means `isLuks` succeeded but `luksDump` then failed. It is not
+///   a distinguishable on-disk damage state; only a transient fault between
+///   the two probes produces it.
 #[derive(Debug, Clone)]
 pub(crate) enum LuksHeaderState {
-    /// Both `isLuks` and `luksDump` succeeded; the header is intact.
+    /// Both `isLuks` and `luksDump` succeeded. The shared `crypt_load`
+    /// returned a usable header -- which may be one cryptsetup auto-recovered,
+    /// or one whose primary copy is bad but secondary is good -- not a
+    /// guarantee that every on-disk copy is pristine.
     Ok,
-    /// `isLuks` exited non-zero — the LUKS magic is gone or the header
-    /// is otherwise unreadable. Severe.
+    /// `isLuks` exited non-zero: cryptsetup's `crypt_load` could not read or
+    /// validate a LUKS header. Where genuine metadata damage surfaces. Severe.
     Unreadable,
-    /// `isLuks` succeeded but `luksDump` exited non-zero — the magic is
-    /// intact but LUKS2 metadata is damaged.
+    /// `isLuks` succeeded but `luksDump` exited non-zero. Because both share
+    /// `crypt_load`, this is not a distinguishable on-disk damage state --
+    /// real corruption fails both (-> `Unreadable`); only a transient fault
+    /// between the two probes lands here. See `probe_luks_header`.
     Damaged,
     /// The cryptsetup command failed to execute (missing binary, IPC
     /// failure). NOT the same as cryptsetup finding corruption — callers
@@ -677,10 +687,34 @@ pub(crate) enum LuksHeaderState {
     ProbeFailed(String),
 }
 
-/// Read-only LUKS header probe. Runs `cryptsetup isLuks` then
-/// `cryptsetup luksDump` and classifies the result. Safe to call on a
-/// device that is currently open via dm-crypt — the probe reads the
-/// raw block device, not the mapper.
+/// LUKS header probe. Runs `cryptsetup isLuks` then `cryptsetup luksDump`
+/// and classifies the result. Reads the raw block device, not the mapper, so
+/// it is safe to call on a device currently open via dm-crypt.
+///
+/// Not strictly read-only: braid never intends to format or open the device,
+/// but when metadata locking is enabled cryptsetup's `crypt_load` may
+/// auto-recover (write) a damaged LUKS2 header copy from the good one, so
+/// probing a one-good-copy header can mutate it.
+///
+/// What the two probes can and cannot distinguish: braid runs `isLuks` and
+/// `luksDump` with no `--type`, so both gate on the *same* cryptsetup
+/// `crypt_load`. `crypt_load` -- not `luksDump` -- performs the LUKS2 JSON
+/// validation, auto-recovery, and blkid signature probe; once it succeeds, a
+/// text `luksDump` is effectively infallible (it returns 0 unless the loaded
+/// header object is NULL, which a successful load always populates).
+/// Therefore:
+/// - On a stable device the two commands always agree, and the second probe
+///   is redundant except as a transient-fault detector. They diverge only
+///   under a transient fault (I/O error, OOM) on the second, separate
+///   invocation, or a concurrent header rewrite between the two calls.
+/// - Genuine metadata damage fails `crypt_load`, hence `isLuks`, and surfaces
+///   as `Unreadable` -- never `Damaged`. The `Ok`/`Unreadable`/`Damaged` split
+///   thus cannot distinguish "recognized-but-metadata-damaged" from
+///   "unrecognized" the way the variant names suggest.
+///
+/// Reworking this (collapsing the redundant probe, or distinguishing real
+/// damage another way) is an open design question; current behavior is
+/// unchanged.
 pub(crate) fn probe_luks_header<R: CommandRunner>(runner: &R, device: &str) -> LuksHeaderState {
     match runner.run(&CmdRequest::CryptsetupIsLuks {
         device: device.to_owned(),
@@ -771,6 +805,11 @@ impl BackingPathResolver for RealBackingPathResolver {
 /// Guidance text for a damaged-metadata LUKS header. Always pairs the
 /// `cryptsetup repair` suggestion with an explicit safe-backup warning
 /// because repair mutates the header.
+///
+/// Note: the `Damaged` state this serves is effectively unreachable from
+/// genuine corruption (see `probe_luks_header` -- real damage fails `isLuks`
+/// and routes to the unreadable / off-system-backup guidance instead). Kept
+/// as-is pending the behavioral rework; current behavior is unchanged.
 pub(crate) fn luks_header_damaged_guidance(device: &str) -> String {
     format!(
         "LUKS header metadata damaged. To attempt repair manually: \
@@ -3523,12 +3562,15 @@ mod tests {
 
     /*
      * Intent: probe returns Unreadable (and skips luksDump) when isLuks fails.
-     * Why it exists: classifying "magic bytes gone" must not cascade into a
-     *   second cryptsetup call and must not confuse the Unreadable case with
-     *   the ProbeFailed case. The mock for luksDump is deliberately absent —
-     *   if probe_luks_header tried to call it, MissingMock would turn the
-     *   return into ProbeFailed and this test would fail.
-     * Scenario: an HDD whose first sectors were clobbered by a misdirected dd.
+     * Why it exists: a header cryptsetup's crypt_load cannot read or validate
+     *   (so isLuks fails) must not cascade into a second cryptsetup call, and
+     *   must not be confused with the ProbeFailed case. The mock for luksDump
+     *   is deliberately absent -- if probe_luks_header tried to call it,
+     *   MissingMock would turn the return into ProbeFailed and this test would
+     *   fail.
+     * Scenario: an HDD whose first sectors were clobbered by a misdirected dd,
+     *   so crypt_load can no longer recognize a LUKS header. This is the path
+     *   genuine metadata damage takes (-> Unreadable, not Damaged).
      */
     #[test]
     fn probe_luks_header_unreadable_when_is_luks_fails() {
@@ -3543,12 +3585,14 @@ mod tests {
 
     /*
      * Intent: probe returns Damaged when isLuks passes but luksDump fails.
-     * Why it exists: this is the less-severe LUKS2 metadata corruption case
-     *   that cryptsetup repair --type luks2 may be able to fix. The test
-     *   requires both probes to run in order; it is the only test that
-     *   exercises the second probe succeeding after the first.
-     * Scenario: a disk with one corrupted LUKS2 header copy (LUKS2 stores two
-     *   header copies for redundancy) or damaged keyslot metadata.
+     * Why it exists: pins the isLuks-ok + luksDump-fail -> Damaged mapping.
+     *   The test requires both probes to run in order; it is the only test
+     *   that exercises the second probe failing after the first succeeds.
+     * Scenario: synthetic. Genuine corruption cannot produce this combination
+     *   -- isLuks and luksDump share one crypt_load, so real damage fails both
+     *   (-> Unreadable). The mock stands in for a transient fault (I/O error,
+     *   OOM) or a concurrent header rewrite on the second invocation, which is
+     *   the only way Damaged arises. See probe_luks_header.
      */
     #[test]
     fn probe_luks_header_damaged_when_dump_fails() {

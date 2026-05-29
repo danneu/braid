@@ -2324,7 +2324,7 @@ mod tests {
     }
 
     /// Intent: probe_pool_for_tui must refine PresentNotLuks → Unreadable
-    /// when probe_luks_header reports the LUKS magic is gone.
+    /// when isLuks fails (crypt_load cannot read or validate the header).
     ///
     /// Why: the previous TUI rendered every unrepresented disk as plain
     /// "missing"; users could not see whether a header restore was the
@@ -2332,7 +2332,8 @@ mod tests {
     /// trigger that points the user at off-system header backups.
     ///
     /// Scenario: 1-disk live pool. Second declared disk: `luksUuid` exits
-    /// non-zero, `isLuks` exits non-zero (LUKS magic missing).
+    /// non-zero, `isLuks` exits non-zero (crypt_load cannot recognize a LUKS
+    /// header).
     #[test]
     fn unpooled_disk_present_not_luks_unreadable_classified_correctly() {
         let runner = one_disk_mounted_pool_runner()
@@ -2393,15 +2394,18 @@ mod tests {
     }
 
     /// Intent: probe_pool_for_tui must refine PresentNotLuks → Damaged
-    /// when isLuks succeeds but luksDump fails — the metadata-corruption
-    /// case that has a distinct `cryptsetup repair` recovery story.
+    /// when isLuks succeeds but luksDump fails -- pinning the Damaged render
+    /// path.
     ///
-    /// Why: metadata damage is potentially repairable in place; collapsing
-    /// it into the same "missing" or even Unreadable bucket would steer
-    /// the user away from a less-destructive recovery option.
+    /// Why: the Damaged classification maps to a distinct `cryptsetup repair`
+    /// guidance, so the TUI must not collapse it into "missing" or Unreadable.
+    /// (On a stable disk genuine corruption fails isLuks and surfaces as
+    /// Unreadable; Damaged reflects a transient fault -- see
+    /// luks::probe_luks_header.)
     ///
-    /// Scenario: 1-disk live pool. Second declared disk: `luksUuid` fails,
-    /// `isLuks` succeeds, `luksDump` fails.
+    /// Scenario: 1-disk live pool. Second declared disk's mocks drive
+    /// `luksUuid` fail + `isLuks` ok + `luksDump` fail -- synthetic, the
+    /// combination only a transient fault produces.
     #[test]
     fn unpooled_disk_present_not_luks_damaged_classified_correctly() {
         let runner = one_disk_mounted_pool_runner()

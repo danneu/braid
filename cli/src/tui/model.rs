@@ -275,8 +275,9 @@ pub enum UnpooledDiskRender {
     /// off-system header backup restore.
     LuksHeaderUnreadable,
     /// `ConfigDiskState::PresentNotLuks` refined to
-    /// `LuksHeaderState::Damaged`. Potentially repairable via
-    /// `cryptsetup repair`.
+    /// `LuksHeaderState::Damaged`. Maps to `cryptsetup repair` guidance,
+    /// though Damaged is reachable only via a transient fault, not genuine
+    /// corruption (see luks::probe_luks_header).
     LuksHeaderDamaged,
     /// `probe_config_disk` returned `ProbeError::UnsupportedLuksVersion`.
     /// The disk is on-disk LUKS but the wrong version (LUKS1 — braid

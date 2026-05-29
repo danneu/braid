@@ -2716,6 +2716,40 @@ mod tests {
     }
 
     #[test]
+    // Intent: CryptsetupIsLuks renders argv ["isLuks", <device>] with no --type.
+    // Why: braid's LUKS-probe model rests on isLuks, luksUUID, and luksDump all
+    // gating on the *same* cryptsetup crypt_load, which holds only because none
+    // passes --type (see luks::probe_luks_header). Pinning argv makes that a
+    // structural invariant -- a future --type addition fails here instead of
+    // silently invalidating the probe-model comments.
+    // Scenario: code review for any future edit to this command's to_argv.
+    fn cryptsetup_is_luks_generates_correct_argv() {
+        let cmd = CmdRequest::CryptsetupIsLuks {
+            device: "/dev/disk/by-id/disk1".to_owned(),
+        }
+        .to_argv();
+        assert_eq!(cmd.program, "cryptsetup");
+        assert_eq!(cmd.args, vec!["isLuks", "/dev/disk/by-id/disk1"]);
+    }
+
+    #[test]
+    // Intent: CryptsetupLuksUuid renders argv ["luksUUID", <device>] with no
+    // --type.
+    // Why: same shared-crypt_load premise as the isLuks test -- luksUUID must
+    // stay --type-free so it gates on the identical crypt_load as isLuks and
+    // luksDump. A future --type addition fails here rather than silently making
+    // the probe model wrong.
+    // Scenario: code review for any future edit to this command's to_argv.
+    fn cryptsetup_luks_uuid_generates_correct_argv() {
+        let cmd = CmdRequest::CryptsetupLuksUuid {
+            device: "/dev/disk/by-id/disk1".to_owned(),
+        }
+        .to_argv();
+        assert_eq!(cmd.program, "cryptsetup");
+        assert_eq!(cmd.args, vec!["luksUUID", "/dev/disk/by-id/disk1"]);
+    }
+
+    #[test]
     // Intent: Mount always includes noatime and skip_balance.
     // Why: skip_balance prevents the kernel from silently resuming an
     // interrupted balance on mount — a safety-critical invariant.

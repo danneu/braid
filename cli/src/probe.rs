@@ -185,17 +185,28 @@ pub fn probe_config_disk<R: CommandRunner, F: Filesystem + ?Sized>(
         Err(e) => return Err(ProbeError::Parse(e)),
     };
 
-    // Enforce braid's LUKS2-only invariant at the gateway. The luksUuid
-    // call above accepts both LUKS1 and LUKS2 (it does not pass --type),
-    // so we have to ask luksDump for the version explicitly.
+    // Enforce braid's LUKS2-only invariant at the gateway. The luksUUID
+    // call above accepts both LUKS1 and LUKS2 (it passes no --type), so we
+    // ask luksDump for the version explicitly.
     //
-    // We deliberately propagate luksDump exit-non-zero (typically damaged
-    // LUKS2 metadata) as a hard error rather than falling through to
-    // PresentLuks. The gateway must not lie about a configured disk's
-    // state: a damaged-metadata disk is not a healthy PresentLuks disk,
-    // and downstream code paths must not be allowed to treat it as such.
-    // The user-facing error is technical (cryptsetup's stderr) but
-    // accurate; cryptsetup repair is the documented recovery.
+    // Any failure from here propagates as a hard error rather than falling
+    // through to PresentLuks: the gateway must not report an unconfirmed disk
+    // as a healthy PresentLuks member. This is NOT how genuine LUKS2 metadata
+    // damage surfaces, though. luksUUID and luksDump both gate on the same
+    // cryptsetup crypt_load (neither passes --type), so real damage fails the
+    // luksUUID above first -> PresentNotLuks, which plan_open_pool routes into
+    // the degraded-refusable `missing` vector (so --allow-degraded works).
+    // The complete set of causes that can still reach here after luksUUID
+    // succeeded, all correctly fail-closed:
+    //   1. luksDump fails to spawn -> ProbeError::Cmd (environmental).
+    //   2. luksDump runs but exits non-zero -- a transient I/O/OOM fault on
+    //      this second invocation, or a concurrent header rewrite between the
+    //      two calls -- parsed as CommandFailed -> ProbeError::Parse.
+    //   3. luksDump exits 0 but the `Version:` line is unparseable: cryptsetup
+    //      output drift, a parser-compat signal that must stay loud ->
+    //      ProbeError::Parse.
+    //   4. A LUKS1 device (`Version: 1`) -> UnsupportedLuksVersion.
+    // See probe_luks_header for the shared-crypt_load model.
     let dump_raw = runner.run(&CmdRequest::CryptsetupLuksDumpText {
         device: by_id.as_str().to_owned(),
     })?;

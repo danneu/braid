@@ -44,14 +44,15 @@ pub struct UnlockAndMountFailure {
 enum MissingReason {
     /// Device file does not exist on the host (`ConfigDiskState::Absent`).
     Unplugged,
-    /// Device exists but `cryptsetup isLuks` exits non-zero — the LUKS
-    /// magic is gone or otherwise unrecognizable. Distinct from Damaged
-    /// because there is no metadata structure left to repair via
-    /// `cryptsetup repair`.
+    /// Device exists but `cryptsetup isLuks` exited non-zero -- crypt_load
+    /// could not read or validate a LUKS header. Where genuine metadata
+    /// damage lands (see luks::probe_luks_header).
     LuksHeaderUnreadable,
-    /// Device exists, has valid LUKS magic, but `cryptsetup luksDump`
-    /// fails to parse the metadata blocks. Potentially repairable via
-    /// `cryptsetup repair --type luks2 <device>`.
+    /// Device exists, `isLuks` succeeded, but `cryptsetup luksDump` then
+    /// exited non-zero. Not a distinguishable on-disk damage state -- both
+    /// share one crypt_load, so real corruption fails isLuks first
+    /// (-> Unreadable); only a transient fault produces this. Mapped to
+    /// `cryptsetup repair` guidance (see luks::probe_luks_header).
     LuksHeaderDamaged,
 }
 
@@ -250,20 +251,20 @@ fn plan_open_pool_inner<R: CommandRunner, F: Filesystem + ?Sized>(
                 missing.push((display_name.to_owned(), MissingReason::Unplugged));
             }
             ConfigDiskState::PresentNotLuks => {
-                // Refine PresentNotLuks (luksUuid failed) into Unreadable vs
-                // Damaged for diagnostic reporting only — do NOT propagate
+                // Refine PresentNotLuks (luksUUID failed) into Unreadable vs
+                // Damaged for diagnostic reporting only -- do NOT propagate
                 // this back into ConfigDiskState. add/replace must keep
                 // seeing the coarse PresentNotLuks state to preserve their
-                // destructive-format guards on potentially recoverable
-                // damaged headers.
+                // destructive-format guards.
                 let reason = match luks::probe_luks_header(runner, member.by_id.as_str()) {
                     luks::LuksHeaderState::Damaged => MissingReason::LuksHeaderDamaged,
-                    // Unreadable, the inconsistent Ok-but-luksUuid-failed
-                    // case, and ProbeFailed all collapse to Unreadable.
-                    // Damaged is the only refinement we promote out of
-                    // this branch because it has a distinct
-                    // `cryptsetup repair` recovery story; everything else
-                    // gets the conservative Unreadable label.
+                    // Everything except Damaged collapses to the conservative
+                    // Unreadable label. Damaged is promoted separately only
+                    // because it maps to distinct `cryptsetup repair` guidance
+                    // -- but on a stable disk genuine corruption fails isLuks
+                    // and surfaces as Unreadable, so Damaged here reflects a
+                    // transient fault between the two probes, not confirmed
+                    // in-place-repairable damage (see luks::probe_luks_header).
                     _ => MissingReason::LuksHeaderUnreadable,
                 };
                 events.push(match reason {
@@ -442,11 +443,14 @@ pub fn compile_open_steps(
 ///
 /// The four match arms each represent a distinct user story:
 ///
-/// - `Unreadable` → corruption is confirmed severe; emit the off-system
-///   backup guidance regardless of what cryptsetup originally said.
-/// - `Damaged` → corruption is confirmed at the metadata level; emit
-///   the `cryptsetup repair` guidance with a safe-backup warning.
-/// - `Ok` → the header is intact, so the failure really is about the
+/// - `Unreadable` → crypt_load could not read/validate the header (where
+///   genuine damage lands); emit the off-system backup guidance regardless
+///   of what cryptsetup originally said.
+/// - `Damaged` → isLuks ok but luksDump failed; emit the `cryptsetup repair`
+///   guidance with a safe-backup warning. Not confirmed corruption -- both
+///   probes share one crypt_load, so this reflects a transient fault, not
+///   in-place-repairable damage (see luks::probe_luks_header).
+/// - `Ok` → crypt_load + dump succeeded, so the failure really is about the
 ///   caller-supplied context (passphrase, invariant, device state,
 ///   generic I/O error, etc.); use `ok_fallback` unchanged.
 /// - `ProbeFailed` → we genuinely do not know whether the header is
@@ -1542,13 +1546,15 @@ mod tests {
     /// Intent: format_degraded_refused must surface a distinct
     /// "LUKS header metadata damaged" line for `MissingReason::LuksHeaderDamaged`.
     ///
-    /// Why: damaged metadata has a different recovery story
-    /// (`cryptsetup repair`) than an unreadable header. Collapsing both
-    /// into the same label would hide the actionable distinction the
-    /// upstream probe just made.
+    /// Why: the formatter must render each MissingReason with its own label so
+    /// Damaged and Unreadable do not collapse into one line. (Damaged is
+    /// effectively unreachable from real corruption -- see
+    /// luks::probe_luks_header -- but the formatter still owns the mapping, and
+    /// this pins it.)
     ///
-    /// Scenario: a single declared disk whose LUKS magic is intact but
-    /// luksDump fails to parse the metadata blocks.
+    /// Scenario: synthetic. A single declared disk with
+    /// `MissingReason::LuksHeaderDamaged`, standing in for the transient-fault
+    /// path that produces that state.
     #[test]
     fn format_degraded_refused_damaged_includes_disk_name_and_reason() {
         let msg = format_degraded_refused(
@@ -2493,8 +2499,9 @@ pool already mounted at /mnt/storage
      *   cryptsetup open should not surface "wrong passphrase" when the
      *   header is actually gone. Also pins the cross-command invariant
      *   that no message references local /var/lib/braid/luks-headers/.
-     * Scenario: disk2's LUKS magic has been wiped by a misdirected dd,
-     *   and cryptsetup open (unsurprisingly) also fails.
+     * Scenario: disk2's LUKS header has been wiped by a misdirected dd, so
+     *   crypt_load/isLuks can no longer recognize it, and cryptsetup open
+     *   (unsurprisingly) also fails.
      */
     #[test]
     fn explain_open_failure_unreadable_overrides_fallback() {
@@ -2533,11 +2540,14 @@ pool already mounted at /mnt/storage
     /*
      * Intent: Damaged overrides fallback and suggests cryptsetup repair
      *   with a safe-backup warning.
-     * Why it exists: damaged metadata is recoverable via cryptsetup repair,
-     *   but repair mutates the header so the user MUST back up first. This
-     *   is the pairing that makes the suggestion safe to follow.
-     * Scenario: disk2's LUKS2 metadata was corrupted but the magic bytes
-     *   survived, so cryptsetup open fails on keyslot validation.
+     * Why it exists: when probe returns Damaged, explain_open_failure must
+     *   emit the cryptsetup repair guidance, which pairs repair with a
+     *   back-up-first warning because repair mutates the header. This is the
+     *   pairing that makes the suggestion safe to follow.
+     * Scenario: synthetic -- the Damaged state is fed directly. Genuine
+     *   corruption cannot produce it: isLuks and luksDump share one crypt_load,
+     *   so real damage fails both (-> Unreadable); Damaged only arises from a
+     *   transient fault between the two probes (see luks::probe_luks_header).
      */
     #[test]
     fn explain_open_failure_damaged_overrides_fallback() {
@@ -3324,19 +3334,18 @@ pool already mounted at /mnt/storage
     }
 
     /*
-     * Intent: A configured pool member with damaged LUKS2 metadata must
-     *   fail at the gateway probe (probe_config_disk → luksDump exit
-     *   non-zero → ProbeError::Parse) BEFORE any unlock attempt runs.
-     * Why it exists: braid's gateway invariant says probe_config_disk is
-     *   the single source of truth for "is this configured disk usable?".
-     *   The previous code path enriched a verify-passphrase failure with
-     *   probe_luks_header's Damaged classification, but that diagnostic
-     *   path is now unreachable for configured disks because the gateway
-     *   catches damaged metadata first. This test pins the gateway
-     *   behavior so a future regression that loosens probe_config_disk
-     *   (e.g., a CommandFailed swallow) is caught.
-     * Scenario: disk1's LUKS2 keyslot metadata is corrupted; the user
-     *   tries to unlock via keyfile.
+     * Intent: when probe_config_disk's luksDump exits non-zero after luksUUID
+     *   succeeded, the gateway must hard-error (ProbeError::Parse) BEFORE any
+     *   unlock attempt runs.
+     * Why it exists: probe_config_disk is the single source of truth for "is
+     *   this configured disk usable?". This test pins the gateway behavior so
+     *   a future regression that loosens it (e.g. a CommandFailed swallow) is
+     *   caught.
+     * Scenario: synthetic. luksUUID succeeds but luksDump then fails -- a
+     *   combination genuine corruption cannot produce (both share one
+     *   crypt_load, so real damage fails luksUUID first -> PresentNotLuks). The
+     *   mock stands in for a transient fault / concurrent rewrite on the second
+     *   call; the gateway must still refuse rather than fall through to unlock.
      */
     #[test]
     fn unlock_damaged_luks2_metadata_fails_at_gateway() {
@@ -3367,11 +3376,9 @@ pool already mounted at /mnt/storage
         );
 
         let msg = result.expect_err("expected gateway failure").to_string();
-        // The gateway propagates the cryptsetup luksDump error verbatim;
-        // we don't try to fabricate "metadata damaged" guidance here.
-        // The user gets enough to investigate (cryptsetup, luksDump, the
-        // verbatim stderr), and `cryptsetup repair --type luks2` is the
-        // documented recovery they can run themselves.
+        // The gateway propagates the cryptsetup luksDump error verbatim; we
+        // don't fabricate "metadata damaged" guidance here. The user gets
+        // enough to investigate (cryptsetup, luksDump, the verbatim stderr).
         assert!(
             msg.contains("luksDump"),
             "gateway error must surface luksDump as the failing command: {msg}"

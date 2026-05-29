@@ -1586,9 +1586,9 @@ mod tests {
     //   "<raw> (<detail>)" string on " (" inside discover; if raw itself
     //   contained " (", the warning showed a truncated raw (for example,
     //   "not" for input "not (a uuid)") and a malformed detail.
-    // Scenario: a corrupted LUKS2 header where the UUID: line reads
-    //   "not (a uuid)" -- the " (" between "not" and "(a uuid)" is the
-    //   exact delimiter the old split matched first.
+    // Scenario: a luksDump whose UUID: line reads "not (a uuid)" -- the " ("
+    //   between "not" and "(a uuid)" is the exact delimiter the old split
+    //   matched first.
     #[test]
     fn discover_warns_when_uuid_value_contains_split_delimiter() {
         let dir = tempfile::tempdir().unwrap();

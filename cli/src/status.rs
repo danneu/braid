@@ -2852,13 +2852,14 @@ mod tests {
     /// output must show its dedicated label, the damaged-specific errors
     /// line, and the doctor action guidance.
     ///
-    /// Why: damaged metadata is potentially repairable via
-    /// `cryptsetup repair`, which has a different recovery story than
-    /// header restoration. Status output must signal the distinction so
-    /// users do not skip straight to a destructive replace.
+    /// Why: the Damaged classification maps to `cryptsetup repair` guidance --
+    /// a different recovery story than header restoration -- so status output
+    /// must signal the distinction rather than steering users to a destructive
+    /// replace.
     ///
-    /// Scenario: declared pool member whose `isLuks` succeeds but
-    /// `luksDump` fails. status.rs refines `PresentNotLuks` into
+    /// Scenario: declared pool member whose `isLuks` succeeds but `luksDump`
+    /// fails (synthetic -- the combination only a transient fault produces;
+    /// see luks::probe_luks_header). status.rs refines `PresentNotLuks` into
     /// `LuksHeaderDamaged` and the human output renders the new label.
     #[test]
     fn status_verbose_luks_header_damaged_disk() {
@@ -4938,7 +4939,7 @@ mod tests {
     /// would stay collapsed in the generic Unknown bucket.
     ///
     /// Scenario: PresentNotLuks config disk where cryptsetup isLuks exits
-    /// non-zero (LUKS magic absent or corrupted).
+    /// non-zero (crypt_load cannot read or validate the header).
     #[test]
     fn build_disk_reports_present_not_luks_unreadable_maps_to_luks_header_unreadable() {
         let config_disks = status_cfg_present_not_luks("disk1", "/dev/disk/by-id/disk1");
@@ -4968,12 +4969,13 @@ mod tests {
     /// Intent: when probe_luks_header reports Damaged (isLuks ok, luksDump
     /// fails), build_disk_reports must surface DiskStatus::LuksHeaderDamaged.
     ///
-    /// Why: damaged metadata has a different recovery story
-    /// (`cryptsetup repair`) than unreadable headers; status output must
-    /// preserve the distinction.
+    /// Why: the Damaged classification maps to different guidance
+    /// (`cryptsetup repair`) than Unreadable; status output must preserve the
+    /// distinction.
     ///
-    /// Scenario: PresentNotLuks config disk where isLuks succeeds but
-    /// luksDump fails to parse the header metadata blocks.
+    /// Scenario: PresentNotLuks config disk where isLuks succeeds but luksDump
+    /// fails (synthetic -- only a transient fault produces this combination;
+    /// see luks::probe_luks_header).
     #[test]
     fn build_disk_reports_present_not_luks_damaged_maps_to_luks_header_damaged() {
         let config_disks = status_cfg_present_not_luks("disk1", "/dev/disk/by-id/disk1");

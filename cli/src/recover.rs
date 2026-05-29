@@ -18325,8 +18325,8 @@ mod tests {
     }
 
     /* Intent
-     * Verify the remount cycle reopen set excludes a by-id-present disk with
-     * damaged LUKS metadata, even when its mapper path exists.
+     * Verify the remount cycle reopen set excludes a by-id-present disk
+     * classified LuksHeaderDamaged, even when its mapper path exists.
      *
      * Why it exists
      * The cycle reopen set must come from healthy probe events, not from
@@ -18334,9 +18334,12 @@ mod tests {
      * incorrectly preview reopening a disk whose LUKS header cannot be used.
      *
      * Scenario
-     * Interrupted replace where old's by-id path and mapper path both exist,
-     * but `cryptsetup luksUUID` fails, `isLuks` succeeds, and `luksDump`
-     * fails, producing a damaged-header probe event.
+     * Synthetic. Interrupted replace where old's by-id and mapper paths both
+     * exist; the mocks drive `luksUUID` fail + `isLuks` ok + `luksDump` fail to
+     * force a Damaged probe event. Genuine corruption cannot produce that
+     * combination (luksUUID and luksDump share one crypt_load, so real damage
+     * fails luksUUID first); the mock stands in for a transient fault on the
+     * second probe (see luks::probe_luks_header).
      */
     #[test]
     fn plan_recover_dry_run_cycle_reopen_set_excludes_damaged_header_disk() {

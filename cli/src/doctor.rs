@@ -304,12 +304,13 @@ pub(crate) enum DiskState {
     /// finding it damaged — this is a tooling problem and must never produce
     /// a "repair the LUKS header" suggestion.
     ProbeFailed(String),
-    /// `cryptsetup isLuks` exited non-zero — the LUKS magic is gone or the
-    /// header is otherwise unreadable. Severe.
+    /// `cryptsetup isLuks` exited non-zero -- crypt_load could not read or
+    /// validate a LUKS header. Where genuine metadata damage lands. Severe.
     LuksHeaderUnreadable,
-    /// `cryptsetup isLuks` succeeded but `cryptsetup luksDump` failed —
-    /// the magic is intact but metadata is damaged. Less severe;
-    /// `cryptsetup repair --type luks2` may be able to fix it.
+    /// `cryptsetup isLuks` succeeded but `cryptsetup luksDump` then failed.
+    /// Both share one crypt_load, so this is not a distinguishable on-disk
+    /// damage state -- real corruption fails isLuks first (-> Unreadable);
+    /// only a transient fault produces this. See luks::probe_luks_header.
     LuksHeaderDamaged,
 }
 
@@ -3166,10 +3167,12 @@ mod tests {
          *   (isLuks fails), the check warns and points the user at an
          *   off-system header backup with luksHeaderRestore — never at a
          *   local /var/lib/braid/luks-headers/ file.
-         * Why it exists: this is the worst recoverable state — the on-disk
-         *   header is gone or zeroed. Without specific guidance, users see a
-         *   generic exit code from later cryptsetup operations and have no
-         *   actionable next step. The negative assertions also pin the
+         * Why it exists: this is the worst recoverable state -- cryptsetup's
+         *   crypt_load cannot read or validate the header (it may be zeroed, or
+         *   its metadata may have failed validation). Without specific
+         *   guidance, users see a generic exit code from later cryptsetup
+         *   operations and have no actionable next step. The negative
+         *   assertions also pin the
          *   cross-command product invariant: braid status and the TUI already
          *   warn about persistent local .luksheader files, and doctor must be
          *   consistent with that posture rather than directing users at them.
@@ -3209,17 +3212,19 @@ mod tests {
     #[test]
     fn summarize_warn_luks_header_damaged() {
         /*
-         * Intent: when a disk has LUKS magic intact but luksDump fails, the
-         *   check warns and suggests `cryptsetup repair --type luks2` with an
-         *   explicit "make a safe backup first" warning.
-         * Why it exists: this is the less-severe LUKS-corruption case — one
-         *   header copy or some metadata field is bad but the magic is still
-         *   there. The right tool is `cryptsetup repair`, but it mutates the
-         *   header, so users must back up first. Negative assertions also
-         *   pin the no-local-backup-references invariant.
-         * Scenario: a disk with one corrupted LUKS2 header copy (the on-disk
-         *   format keeps two copies for redundancy), or damaged keyslot
-         *   metadata.
+         * Intent: when a disk is classified LuksHeaderDamaged (isLuks ok but
+         *   luksDump then failed), the check warns and suggests `cryptsetup
+         *   repair --type luks2` with an explicit "make a safe backup first"
+         *   warning.
+         * Why it exists: pins the Damaged -> repair-guidance mapping and the
+         *   safe-backup pairing (repair mutates the header, so users must back
+         *   up first). Negative assertions also pin the no-local-backup-
+         *   references invariant.
+         * Scenario: synthetic. Genuine corruption cannot produce isLuks-ok +
+         *   luksDump-fail -- both share one crypt_load, so real damage fails
+         *   isLuks (-> Unreadable). The state is fed directly here, standing in
+         *   for the transient fault that is its only real cause (see
+         *   luks::probe_luks_header).
          */
         let inputs = [cls(
             "disk1",
@@ -3393,8 +3398,8 @@ mod tests {
     // Why it exists: the severity rule must remain "Fail iff uuid_mismatch is
     //   non-empty"; pairing the mismatch only with a healthy disk would miss a
     //   regression that makes mismatch fail only when it is the sole problem.
-    // Scenario: a degraded NAS has one swapped declared disk and another disk
-    //   with damaged LUKS metadata before any mutating command runs.
+    // Scenario: a degraded NAS has one swapped declared disk and another
+    //   classified LuksHeaderDamaged before any mutating command runs.
     #[test]
     fn summarize_declared_disks_fail_dominates_warn_level_problems() {
         let expected = test_uuid(1);
@@ -3460,8 +3465,8 @@ mod tests {
          * Why it exists: a real failure scenario rarely involves a single
          *   category; the check must aggregate findings instead of reporting
          *   only the first.
-         * Scenario: a degraded NAS with one missing disk, one with an
-         *   unreadable LUKS header, and one with damaged LUKS metadata
+         * Scenario: a degraded NAS with one missing disk, one classified
+         *   LuksHeaderUnreadable, and one classified LuksHeaderDamaged
          *   simultaneously.
          */
         let inputs = [

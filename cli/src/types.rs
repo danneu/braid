@@ -513,7 +513,10 @@ pub struct ConfigDisk {
 pub enum ConfigDiskState {
     /// Device file doesn't exist (unplugged / absent).
     Absent,
-    /// Device exists but is not LUKS-formatted.
+    /// `luksUUID` failed: either not LUKS-formatted, or a LUKS header that
+    /// cryptsetup's `crypt_load` cannot read or validate. Refined into
+    /// Unreadable/Damaged for diagnostics (status/doctor/TUI) while add/replace
+    /// keep this coarse state for their destructive-format guards.
     PresentNotLuks,
     /// Device exists, has LUKS header, UUID known.
     /// `label` is the optional LUKS2 label captured from the same luksDump
