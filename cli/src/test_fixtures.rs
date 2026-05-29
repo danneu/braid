@@ -216,9 +216,10 @@ pub(crate) use status::{
     status_config, status_cryptsetup_status_active, status_cryptsetup_uuid_ok,
     status_disk_report_missing, status_disk_report_named, status_fs_ext4, status_fs_mounted,
     status_fs_not_mounted, status_fs_one_disk, status_fs_three_disk, status_is_luks_raw,
-    status_lsblk_field_ok, status_luks_dump_text_raw, status_membership_1disk, status_mp,
-    status_pool_empty, status_report_with_alerts, status_report_with_scrub,
-    status_runner_healthy_3disk_base, status_runner_healthy_3disk_verbose,
+    status_lsblk_field_ok, status_luks_dump_text_raw, status_membership_1disk,
+    status_membership_3disk, status_mp, status_pool_empty, status_report_with_alerts,
+    status_report_with_scrub, status_runner_healthy_3disk_base,
+    status_runner_healthy_3disk_verbose,
 };
 #[allow(unused_imports)]
 pub(crate) use unlock::{

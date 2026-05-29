@@ -1517,9 +1517,9 @@ mod tests {
         status_cryptsetup_status_active, status_cryptsetup_uuid_ok, status_disk_report_missing,
         status_disk_report_named, status_fs_ext4, status_fs_mounted, status_fs_not_mounted,
         status_fs_one_disk, status_fs_three_disk, status_is_luks_raw, status_lsblk_field_ok,
-        status_luks_dump_text_raw, status_membership_1disk, status_mp, status_pool_empty,
-        status_report_with_alerts, status_report_with_scrub, status_runner_healthy_3disk_base,
-        status_runner_healthy_3disk_verbose,
+        status_luks_dump_text_raw, status_membership_1disk, status_membership_3disk, status_mp,
+        status_pool_empty, status_report_with_alerts, status_report_with_scrub,
+        status_runner_healthy_3disk_base, status_runner_healthy_3disk_verbose,
     };
 
     const TEST_FSID: &str = "12345678-1234-1234-1234-123456789012";
@@ -4671,6 +4671,54 @@ mod tests {
             built.report.missing_devids.len(),
             built.report.missing_count.unwrap() as usize
         );
+    }
+
+    // Intent: a present pool member renders its persisted by-id path and
+    // operator name via the LUKS-UUID membership join, not the mapper basename
+    // fallback.
+    // Why it exists: the by_id arm of build_disk_reports was only checked for
+    // presence at the VM layer, so a regression to /dev/mapper/* would still
+    // pass while verbose human output showed the wrong Device line.
+    // Scenario: a healthy mounted pool whose pool.json names differ from the
+    // live mapper basenames.
+    #[test]
+    fn build_status_present_member_renders_by_id_and_operator_name() {
+        let runner = status_runner_healthy_3disk_verbose(status_runner_healthy_3disk_base())
+            .with_luks_dump_text_luks2_for(&[
+                "/dev/disk/by-id/disk1",
+                "/dev/disk/by-id/disk2",
+                "/dev/disk/by-id/disk3",
+            ])
+            .with_mappers_closed(&["braid-toshiba1", "braid-toshiba2", "braid-toshiba3"]);
+        let fs = status_fs_three_disk();
+        let config = status_config();
+        let (_tmp, paths) = isolated_paths();
+        membership::save_membership(&status_membership_3disk(), &paths).unwrap();
+
+        let built = build_status(
+            &runner,
+            &fs,
+            &config,
+            &paths,
+            crate::test_fixtures::mock_virtio_backing_path_resolver(),
+        )
+        .expect("membership-populated healthy status should build");
+        let human = render_built_status(&built);
+
+        assert!(
+            human.contains("    Device:  /dev/disk/by-id/disk1"),
+            "got:\n{human}"
+        );
+        assert!(human.contains("  toshiba1"), "got:\n{human}");
+
+        let d1 = built
+            .report
+            .disks
+            .iter()
+            .find(|d| d.name == "toshiba1")
+            .expect("toshiba1 present row");
+        assert_eq!(d1.by_id, "/dev/disk/by-id/disk1");
+        assert_eq!(d1.mapper, "disk1");
     }
 
     #[test]

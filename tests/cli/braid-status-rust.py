@@ -136,6 +136,10 @@ with subtest("Healthy JSON"):
             f"{name} must resolve to operator name via UUID join, "
             f"got {by_uuid[uuid]['name']!r}"
         )
+        assert by_uuid[uuid]["by_id"] == f"/dev/disk/by-id/virtio-{name}", (
+            f"{name} by_id must render the membership by-id path, "
+            f"got {by_uuid[uuid]['by_id']!r}"
+        )
         assert key_by_name[name] == uuid, (
             f"pool.json key for {name} != real LUKS UUID {uuid}"
         )

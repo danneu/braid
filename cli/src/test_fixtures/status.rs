@@ -11,7 +11,9 @@
 //! allowed the staged migration to import fixture helpers while same-purpose
 //! local helpers still existed in `status.rs::tests`.
 
-use super::shared::{DeviceUsageSpec, device_usage_raw_body, disk_member, mock_ok};
+use super::shared::{
+    DeviceUsageSpec, device_usage_raw_body, disk_member, disk_member_with, mock_ok,
+};
 use crate::alert::AlertCause;
 use crate::cmd::{CmdRequest, LsblkFieldKind, MockRunner, RawCommandOutput};
 use crate::config::{Config, mapper_name};
@@ -124,6 +126,43 @@ pub(crate) fn status_membership_1disk() -> PoolMembership {
             member,
         )
         .expect("insert disk1");
+    membership
+}
+
+/// Three-disk membership whose operator names differ from mapper basenames.
+///
+/// Status identity tests use this to prove present rows came through the
+/// LUKS-UUID membership join instead of the `/dev/mapper/*` fallback.
+pub(crate) fn status_membership_3disk() -> PoolMembership {
+    let mut membership = PoolMembership::empty();
+    for (seed, name, by_id, devid, uuid) in [
+        (
+            1,
+            "toshiba1",
+            "/dev/disk/by-id/disk1",
+            1u64,
+            "11111111-1111-1111-1111-111111111111",
+        ),
+        (
+            2,
+            "toshiba2",
+            "/dev/disk/by-id/disk2",
+            2,
+            "22222222-2222-2222-2222-222222222222",
+        ),
+        (
+            3,
+            "toshiba3",
+            "/dev/disk/by-id/disk3",
+            3,
+            "33333333-3333-3333-3333-333333333333",
+        ),
+    ] {
+        let (_, member) = disk_member_with(seed, name, by_id, Some(devid), None);
+        membership
+            .insert(LuksUuid::parse(uuid).unwrap(), member)
+            .expect("insert member");
+    }
     membership
 }
 
