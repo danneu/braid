@@ -54,13 +54,26 @@ pub fn run_demo() -> io::Result<()> {
 }
 
 fn run_with_model(mut model: Model, init_effects: Vec<Effect>) -> io::Result<()> {
-    let mut terminal = ratatui::init();
+    let mut terminal = ratatui::init(); // installs ratatui's restore-then-print panic hook
+    // Take ratatui's hook (must be AFTER init) and wrap it in a gate keyed on
+    // effect::in_caught_worker. A caught worker panic must NOT run ratatui's
+    // restore() -- spawn_worker's catch_unwind recovers and the live TUI must
+    // survive. Every other thread (main loop, input reader) keeps ratatui's
+    // exact restore-then-print behavior, so a panic there still cleans up.
+    let ratatui_hook = std::panic::take_hook();
+    std::panic::set_hook(Box::new(move |info| {
+        if !effect::in_caught_worker() {
+            ratatui_hook(info);
+        }
+    }));
+
     let (_input, cmd_tx, rx) = InputHandler::new();
     for effect in init_effects {
         execute_effect(effect, &cmd_tx);
     }
     let result = run_loop(&mut terminal, &mut model, &rx, &cmd_tx);
     ratatui::restore();
+    let _ = std::panic::take_hook(); // drop our gating hook; std reinstalls its default
     result
 }
 

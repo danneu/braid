@@ -162,6 +162,19 @@ pub struct FanSnapshot {
     pub probed_at: Instant,
 }
 
+impl FanSnapshot {
+    /// Degraded snapshot for the panic-fallback path: renders identically to
+    /// the pre-probe `None` state without re-invoking a runner.
+    pub fn unknown() -> Self {
+        FanSnapshot {
+            fan: None,
+            driving: None,
+            daemon: DaemonStatus::Unknown,
+            probed_at: Instant::now(),
+        }
+    }
+}
+
 /// Snapshot of UPS state for the TUI -- produced on every UPS probe.
 ///
 /// Distinct from `UpscOutput`: the TUI only needs the fields the
@@ -184,6 +197,22 @@ pub struct UpsSnapshot {
     pub raw_text: String,
     pub daemon: DaemonStatus,
     pub probed_at: Instant,
+}
+
+impl UpsSnapshot {
+    /// Degraded snapshot for the panic-fallback path; see `FanSnapshot::unknown`.
+    pub fn unknown() -> Self {
+        UpsSnapshot {
+            flags: Vec::new(),
+            battery_charge_pct: None,
+            runtime_secs: None,
+            load_pct: None,
+            watts_estimated: None,
+            raw_text: String::new(),
+            daemon: DaemonStatus::Unknown,
+            probed_at: Instant::now(),
+        }
+    }
 }
 
 /// Current temperature reading for one disk, produced per probe tick.
