@@ -122,6 +122,12 @@ pub enum CmdRequest {
     BtrfsBalanceResume {
         mount_point: MountPoint,
     },
+    /// `btrfs balance pause <mp>` -- request a persistent paused balance
+    /// before systemd-stop unmounts so a fatal signal to the original
+    /// btrfs-progs process cannot turn the balance into a cancel.
+    BtrfsBalancePause {
+        mount_point: MountPoint,
+    },
     /// `mkfs.btrfs -d single -m dup -O block-group-tree <device>` -- create a
     /// single-data / dup-metadata filesystem, pinning only `block-group-tree`
     /// so nixos-25.11's btrfs-progs 6.17.1 gets 26.05-era 6.19.1's default; ADR-027.
@@ -690,6 +696,10 @@ impl CmdRequest {
             CmdRequest::BtrfsBalanceResume { mount_point } => CmdArgs {
                 program: "btrfs".to_owned(),
                 args: vec!["balance".into(), "resume".into(), mount_point.0.clone()],
+            },
+            CmdRequest::BtrfsBalancePause { mount_point } => CmdArgs {
+                program: "btrfs".to_owned(),
+                args: vec!["balance".into(), "pause".into(), mount_point.0.clone()],
             },
             CmdRequest::MkfsBtrfs { device } => CmdArgs {
                 program: "mkfs.btrfs".to_owned(),
@@ -2505,6 +2515,22 @@ mod tests {
         .to_argv();
         assert_eq!(cmd.program, "btrfs");
         assert_eq!(cmd.args, vec!["balance", "resume", "/mnt/storage"]);
+    }
+
+    #[test]
+    // Intent: BtrfsBalancePause generates `btrfs balance pause <mp>` with no
+    // convert filters of its own.
+    // Why it exists: systemd-stop uses this only to request a persistent
+    // pause for an already-running balance; changing filters would be invalid.
+    // Scenario: UPS shutdown catches a post-remove-missing balance in flight
+    // and lock asks the kernel to pause it before unmount.
+    fn btrfs_balance_pause_generates_correct_argv() {
+        let cmd = CmdRequest::BtrfsBalancePause {
+            mount_point: MountPoint("/mnt/storage".to_owned()),
+        }
+        .to_argv();
+        assert_eq!(cmd.program, "btrfs");
+        assert_eq!(cmd.args, vec!["balance", "pause", "/mnt/storage"]);
     }
 
     #[test]

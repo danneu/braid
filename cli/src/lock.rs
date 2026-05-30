@@ -16,6 +16,9 @@ use std::collections::HashSet;
 use std::io::{self, Write};
 
 const UMOUNT_RETRY_ATTEMPTS: u32 = 3;
+// During shutdown, the Rust mutator can die before its blocking btrfs-progs
+// balance child releases the mount fd. Stay below braid-online TimeoutStopSec.
+const SYSTEMD_STOP_UMOUNT_RETRY_ATTEMPTS: u32 = 60;
 const UMOUNT_RETRY_DELAY: std::time::Duration = std::time::Duration::from_millis(500);
 
 #[derive(Debug, thiserror::Error)]
@@ -79,6 +82,14 @@ enum Snapshot {
     /// (each candidate is verified by `cryptsetup status` + `luksUUID`
     /// before being added to the close set).
     Unmounted,
+}
+
+/// Lock planning mode selects the exclusive-operation preflight contract
+/// and the shutdown-only balance pause / umount retry behavior.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum LockMode {
+    User,
+    SystemdStop,
 }
 
 /// A mapper to close at lock execution. `mapper` is the observed name,
@@ -357,12 +368,13 @@ fn umount_with_retry<R, S>(
     sleeper: &S,
     mount_point: &MountPoint,
     color_enabled: bool,
+    attempts: u32,
 ) -> Result<(), LockError>
 where
     R: CommandRunner,
     S: Sleeper + ?Sized,
 {
-    for attempt in 1..=UMOUNT_RETRY_ATTEMPTS {
+    for attempt in 1..=attempts {
         let result = runner.run(&CmdRequest::Umount {
             mount_point: mount_point.clone(),
         })?;
@@ -373,13 +385,13 @@ where
         if !umount_stderr_is_busy(stderr) {
             return Err(build_umount_error(mount_point, result.exit_status, stderr));
         }
-        if attempt == UMOUNT_RETRY_ATTEMPTS {
+        if attempt == attempts {
             return Err(build_umount_error(mount_point, result.exit_status, stderr));
         }
         emit_status(&status_line(
             StatusTag::Warn,
             color_enabled,
-            &format!("umount {mount_point} busy, retrying ({attempt}/{UMOUNT_RETRY_ATTEMPTS})..."),
+            &format!("umount {mount_point} busy, retrying ({attempt}/{attempts})..."),
         ));
         sleeper.sleep(UMOUNT_RETRY_DELAY);
     }
@@ -464,12 +476,22 @@ where
 /// close calls byte-identical on identical inputs.
 fn compile_lock_steps(
     pool_was_mounted: bool,
+    pause_balance_before_unmount: bool,
     close_set: &LockCloseSet,
     mount_point: &MountPoint,
 ) -> Vec<Step> {
     let mut steps = Vec::new();
 
     if pool_was_mounted {
+        if pause_balance_before_unmount {
+            steps.push(Step {
+                risk: "safe",
+                description: "pause btrfs balance".into(),
+                commands: vec![CmdRequest::BtrfsBalancePause {
+                    mount_point: mount_point.clone(),
+                }],
+            });
+        }
         steps.push(Step {
             risk: "safe",
             description: format!("unmount {}", mount_point),
@@ -530,6 +552,8 @@ fn members_known_closed(
 pub struct LockPlan {
     pub notes: Vec<PreviewNote>,
     pub pool_was_mounted: bool,
+    pause_balance_before_unmount: bool,
+    umount_retry_attempts: u32,
     /// Ordered mapper closes consumed by preview, forget, and execute.
     pub close_set: LockCloseSet,
     /// Braid-prefixed mapper candidates left open because their backing
@@ -554,7 +578,12 @@ impl LockPlan {
         Preview {
             completeness: PreviewCompleteness::Complete,
             notes,
-            steps: compile_lock_steps(self.pool_was_mounted, &self.close_set, &self.mount_point),
+            steps: compile_lock_steps(
+                self.pool_was_mounted,
+                self.pause_balance_before_unmount,
+                &self.close_set,
+                &self.mount_point,
+            ),
         }
     }
 
@@ -583,6 +612,35 @@ impl LockPlan {
         let mut umount_error: Option<LockError> = None;
         let mut first_mapper_error: Option<LockError> = None;
         if self.pool_was_mounted {
+            if self.pause_balance_before_unmount {
+                eprint!(
+                    "{}",
+                    line(StatusTag::Wait, "pool: pausing btrfs balance..."),
+                );
+                let pause_result = runner.run(&CmdRequest::BtrfsBalancePause {
+                    mount_point: mount_point.clone(),
+                })?;
+                if pause_result.exit_status == 0 {
+                    eprint!("{}", line(StatusTag::Ok, "pool: balance paused"));
+                } else {
+                    let stderr = pause_result.stderr.trim();
+                    if pause_result.exit_status == 2 && stderr.contains("Not running") {
+                        eprint!(
+                            "{}",
+                            line(
+                                StatusTag::Warn,
+                                "pool: balance was no longer running -- continuing",
+                            )
+                        );
+                    } else {
+                        return Err(LockError::Failed(format!(
+                            "btrfs balance pause {mount_point} failed (exit {}): {stderr}",
+                            pause_result.exit_status
+                        )));
+                    }
+                }
+            }
+
             eprint!(
                 "{}",
                 line(
@@ -590,7 +648,13 @@ impl LockPlan {
                     &format!("pool: unmounting {mount_point}..."),
                 )
             );
-            match umount_with_retry(runner, sleeper, mount_point, color_enabled) {
+            match umount_with_retry(
+                runner,
+                sleeper,
+                mount_point,
+                color_enabled,
+                self.umount_retry_attempts,
+            ) {
                 Ok(()) => {
                     eprint!(
                         "{}",
@@ -724,6 +788,7 @@ pub fn plan_lock<R, F>(
     fs: &F,
     config: &Config,
     membership: &PoolMembership,
+    mode: LockMode,
 ) -> Result<LockPlan, LockError>
 where
     R: CommandRunner,
@@ -782,10 +847,20 @@ where
     let mut cleanup_uncertain = false;
     let mut members_potentially_present: HashSet<DiskName> = HashSet::new();
     let mut has_unclassified_skip = false;
+    let mut pause_balance_before_unmount = false;
     let close_set = match &snapshot {
         Snapshot::Probed(pool) => {
             if let Some(fsid) = &pool.fsid {
-                preflight::require_lock_preflight(fs, fsid).map_err(LockError::Failed)?;
+                match mode {
+                    LockMode::User => {
+                        preflight::require_lock_preflight(fs, fsid).map_err(LockError::Failed)?;
+                    }
+                    LockMode::SystemdStop => {
+                        pause_balance_before_unmount =
+                            preflight::systemd_stop_lock_requires_balance_pause(fs, fsid)
+                                .map_err(LockError::Failed)?;
+                    }
+                }
             }
             build_close_sets_full(
                 runner,
@@ -803,7 +878,16 @@ where
             notes.push(PreviewNote::Warn(uuid_scanned_fallback_warn_body(
                 probe_error,
             )));
-            preflight::require_lock_preflight(fs, fsid).map_err(LockError::Failed)?;
+            match mode {
+                LockMode::User => {
+                    preflight::require_lock_preflight(fs, fsid).map_err(LockError::Failed)?;
+                }
+                LockMode::SystemdStop => {
+                    pause_balance_before_unmount =
+                        preflight::systemd_stop_lock_requires_balance_pause(fs, fsid)
+                            .map_err(LockError::Failed)?;
+                }
+            }
             build_close_sets_uuid_scanned_fallback(
                 runner,
                 fs,
@@ -835,6 +919,11 @@ where
     Ok(LockPlan {
         notes,
         pool_was_mounted,
+        pause_balance_before_unmount,
+        umount_retry_attempts: match mode {
+            LockMode::User => UMOUNT_RETRY_ATTEMPTS,
+            LockMode::SystemdStop => SYSTEMD_STOP_UMOUNT_RETRY_ATTEMPTS,
+        },
         close_set,
         skipped_mappers,
         members_known_closed,
@@ -1027,6 +1116,29 @@ pub fn cmd_lock<R: CommandRunner, F: Filesystem + ?Sized>(
         membership,
         dry_run,
         extra_notes,
+        LockMode::User,
+    )
+}
+
+/// Systemd ExecStop lock entry point with shutdown-specific preflight.
+///
+/// Unlike user-initiated lock, this permits a running or paused balance so
+/// shutdown can persist it as paused before closing LUKS.
+pub fn cmd_lock_systemd_stop<R: CommandRunner, F: Filesystem + ?Sized>(
+    runner: &R,
+    fs: &F,
+    config: &Config,
+    membership: &PoolMembership,
+) -> Result<(), LockError> {
+    cmd_lock_impl_with_notes(
+        runner,
+        fs,
+        &RealSleeper,
+        config,
+        membership,
+        false,
+        Vec::new(),
+        LockMode::SystemdStop,
     )
 }
 
@@ -1095,7 +1207,16 @@ where
     F: Filesystem + ?Sized,
     S: Sleeper,
 {
-    cmd_lock_impl_with_notes(runner, fs, sleeper, config, membership, dry_run, Vec::new())
+    cmd_lock_impl_with_notes(
+        runner,
+        fs,
+        sleeper,
+        config,
+        membership,
+        dry_run,
+        Vec::new(),
+        LockMode::User,
+    )
 }
 
 /// Shared lock command body so dispatch-supplied diagnostics can join dry-run
@@ -1108,6 +1229,7 @@ fn cmd_lock_impl_with_notes<R, F, S>(
     membership: &PoolMembership,
     dry_run: bool,
     extra_notes: Vec<PreviewNote>,
+    mode: LockMode,
 ) -> Result<(), LockError>
 where
     R: CommandRunner,
@@ -1119,7 +1241,7 @@ where
         run_lock_pre_steps(config, &online_ops, &mut std::io::stderr());
     }
 
-    let mut plan = plan_lock(runner, fs, config, membership)?;
+    let mut plan = plan_lock(runner, fs, config, membership, mode)?;
     plan.notes.splice(0..0, extra_notes);
     if dry_run {
         plan.preview().print_colored();
@@ -1264,6 +1386,14 @@ mod tests {
             .count()
     }
 
+    fn balance_pause_request_count(runner: &MockRunner) -> usize {
+        runner
+            .requests()
+            .iter()
+            .filter(|request| matches!(request, CmdRequest::BtrfsBalancePause { .. }))
+            .count()
+    }
+
     fn forget_requests(runner: &MockRunner) -> Vec<Vec<String>> {
         runner
             .requests()
@@ -1287,6 +1417,28 @@ mod tests {
             stderr: String::new(),
             exit_status: 0,
         }
+    }
+
+    fn mounted_systemd_stop_runner() -> MockRunner {
+        lock_mounted_runner()
+            .with_output(
+                CmdRequest::BtrfsBalancePause {
+                    mount_point: MountPoint("/mnt/storage".to_owned()),
+                },
+                lock_ok_raw("btrfs balance pause /mnt/storage"),
+            )
+            .with_output(
+                CmdRequest::CryptsetupClose {
+                    mapper: MapperName("braid-aaa".into()),
+                },
+                lock_ok_raw("cryptsetup close braid-aaa"),
+            )
+            .with_output(
+                CmdRequest::CryptsetupClose {
+                    mapper: MapperName("braid-bbb".into()),
+                },
+                lock_ok_raw("cryptsetup close braid-bbb"),
+            )
     }
 
     fn cfg(raw: &str) -> Config {
@@ -1775,7 +1927,8 @@ mod tests {
         let fs = lock_fs(&[]);
         let config = lock_test_config();
 
-        let plan = plan_lock(&runner, &fs, &config, &membership).expect("plan should succeed");
+        let plan = plan_lock(&runner, &fs, &config, &membership, LockMode::User)
+            .expect("plan should succeed");
 
         assert_eq!(known_closed_names(&plan), vec!["alpha", "zeta"]);
     }
@@ -1825,8 +1978,8 @@ mod tests {
         let config = lock_test_config();
         let membership = lock_test_membership();
 
-        let plan =
-            plan_lock(&runner, &plan_fs, &config, &membership).expect("plan_lock should succeed");
+        let plan = plan_lock(&runner, &plan_fs, &config, &membership, LockMode::User)
+            .expect("plan_lock should succeed");
         assert!(
             plan.close_set.is_empty(),
             "precondition: plan should record no membership opens"
@@ -2576,8 +2729,14 @@ mod tests {
         let fs =
             lock_fs(&["/dev/mapper/braid-aaa", "/dev/mapper/braid-bbb"]).with_dev_mapper_error();
         let config = lock_test_config();
-        let plan = plan_lock(&runner, &fs, &config, &lock_test_membership())
-            .expect("plan_lock should succeed with list_dir failure");
+        let plan = plan_lock(
+            &runner,
+            &fs,
+            &config,
+            &lock_test_membership(),
+            LockMode::User,
+        )
+        .expect("plan_lock should succeed with list_dir failure");
         let output = plan.preview().render();
 
         assert!(
@@ -2631,8 +2790,14 @@ mod tests {
             "/dev/mapper/braid-ccc",
         ]);
         let config = lock_test_config();
-        let plan = plan_lock(&runner, &fs, &config, &lock_test_membership())
-            .expect("plan_lock should succeed with one orphan mapper");
+        let plan = plan_lock(
+            &runner,
+            &fs,
+            &config,
+            &lock_test_membership(),
+            LockMode::User,
+        )
+        .expect("plan_lock should succeed with one orphan mapper");
         let output = plan.preview().render();
         let warn_line =
             "[warn] orphaned mapper braid-ccc (not in pool.json -- likely a prior crash)\n";
@@ -2678,8 +2843,14 @@ mod tests {
             "/dev/mapper/braid-ccc",
         ]);
         let config = lock_test_config();
-        let plan = plan_lock(&runner, &fs, &config, &lock_test_membership())
-            .expect("plan_lock should succeed on mounted pool");
+        let plan = plan_lock(
+            &runner,
+            &fs,
+            &config,
+            &lock_test_membership(),
+            LockMode::User,
+        )
+        .expect("plan_lock should succeed on mounted pool");
         let output = plan.preview().render();
         let warn_line =
             "[warn] orphaned mapper braid-ccc (not in pool.json -- likely a prior crash)\n";
@@ -2740,8 +2911,14 @@ mod tests {
         );
         let fs = lock_fs(&[]);
         let config = lock_test_config();
-        let plan = plan_lock(&runner, &fs, &config, &lock_test_membership())
-            .expect("plan_lock should succeed on already-locked pool");
+        let plan = plan_lock(
+            &runner,
+            &fs,
+            &config,
+            &lock_test_membership(),
+            LockMode::User,
+        )
+        .expect("plan_lock should succeed on already-locked pool");
         let output = plan.preview().render();
 
         assert_eq!(output, "nothing to do.\n", "unexpected preview: {output:?}");
@@ -2775,7 +2952,8 @@ mod tests {
         let config = lock_test_config();
         let membership = lock_test_membership();
 
-        let plan = plan_lock(&runner, &fs, &config, &membership).expect("fallback should plan");
+        let plan = plan_lock(&runner, &fs, &config, &membership, LockMode::User)
+            .expect("fallback should plan");
 
         assert!(
             plan.notes.iter().any(|note| matches!(
@@ -2815,7 +2993,8 @@ mod tests {
         let config = lock_test_config();
         let membership = lock_test_membership();
 
-        let plan = plan_lock(&runner, &fs, &config, &membership).expect("fallback should plan");
+        let plan = plan_lock(&runner, &fs, &config, &membership, LockMode::User)
+            .expect("fallback should plan");
 
         assert!(member_summaries(&plan.close_set).is_empty());
         assert_eq!(
@@ -2862,7 +3041,7 @@ mod tests {
         let config = lock_test_config();
         let membership = PoolMembership::empty();
 
-        let plan = plan_lock(&runner, &fs, &config, &membership)
+        let plan = plan_lock(&runner, &fs, &config, &membership, LockMode::User)
             .expect("empty membership should still produce a close plan");
         assert!(member_summaries(&plan.close_set).is_empty());
         assert_eq!(
@@ -2913,7 +3092,8 @@ mod tests {
         let config = lock_test_config();
         let membership = lock_test_membership();
 
-        let plan = plan_lock(&runner, &fs, &config, &membership).expect("fallback should plan");
+        let plan = plan_lock(&runner, &fs, &config, &membership, LockMode::User)
+            .expect("fallback should plan");
 
         assert_eq!(
             member_summaries(&plan.close_set),
@@ -2944,7 +3124,8 @@ mod tests {
         let config = lock_test_config();
         let membership = lock_test_membership();
 
-        let plan = plan_lock(&runner, &fs, &config, &membership).expect("fallback should plan");
+        let plan = plan_lock(&runner, &fs, &config, &membership, LockMode::User)
+            .expect("fallback should plan");
         let output = plan.preview().render();
 
         assert!(plan.close_set.is_empty());
@@ -3514,6 +3695,184 @@ mod tests {
         );
     }
 
+    // Intent: systemd-stop lock proceeds while a balance is running.
+    // Why it exists: shutdown must reach the ordered umount path so the
+    //   explicit pause can persist the balance before LUKS close.
+    // Scenario: UPS low-battery shutdown interrupts remove-missing during
+    //   its post-commit balance and ExecStop performs lock cleanup.
+    #[test]
+    fn systemd_stop_proceeds_on_running_balance() {
+        let runner = mounted_systemd_stop_runner();
+        let fs =
+            lock_fs(&["/dev/mapper/braid-aaa", "/dev/mapper/braid-bbb"]).with_excl_op("balance");
+        let config = lock_test_config();
+        let membership = lock_test_membership();
+
+        cmd_lock_systemd_stop(&runner, &fs, &config, &membership)
+            .expect("systemd-stop lock should proceed during balance");
+
+        assert_eq!(
+            balance_pause_request_count(&runner),
+            1,
+            "expected running balance to be paused before umount"
+        );
+        assert_eq!(umount_request_count(&runner), 1, "expected one umount");
+        assert_eq!(
+            forget_requests(&runner),
+            vec![vec![
+                "/dev/mapper/braid-aaa".to_owned(),
+                "/dev/mapper/braid-bbb".to_owned(),
+            ]],
+            "expected scoped forget after umount"
+        );
+        assert_eq!(
+            cryptsetup_close_request_count(&runner),
+            2,
+            "expected both member mappers to close"
+        );
+    }
+
+    // Intent: systemd-stop lock proceeds while a balance is paused.
+    // Why it exists: a previously-paused balance is still safe for the
+    //   shutdown path because umount persists it for recover to resume.
+    // Scenario: ExecStop observes "balance paused" and must still run the
+    //   ordered umount, forget, and LUKS close sequence.
+    #[test]
+    fn systemd_stop_proceeds_on_paused_balance() {
+        let runner = mounted_systemd_stop_runner();
+        let fs = lock_fs(&["/dev/mapper/braid-aaa", "/dev/mapper/braid-bbb"])
+            .with_excl_op("balance paused");
+        let config = lock_test_config();
+        let membership = lock_test_membership();
+
+        cmd_lock_systemd_stop(&runner, &fs, &config, &membership)
+            .expect("systemd-stop lock should proceed during paused balance");
+
+        assert_eq!(
+            balance_pause_request_count(&runner),
+            0,
+            "already-paused balance should not be paused again"
+        );
+        assert_eq!(umount_request_count(&runner), 1, "expected one umount");
+        assert_eq!(
+            forget_requests(&runner),
+            vec![vec![
+                "/dev/mapper/braid-aaa".to_owned(),
+                "/dev/mapper/braid-bbb".to_owned(),
+            ]],
+            "expected scoped forget after umount"
+        );
+        assert_eq!(
+            cryptsetup_close_request_count(&runner),
+            2,
+            "expected both member mappers to close"
+        );
+    }
+
+    // Intent: systemd-stop lock retries busy umount beyond user-lock attempts.
+    // Why it exists: if shutdown kills the Rust parent before its btrfs
+    //   balance subprocess, btrfs-progs can hold the mount fd briefly after
+    //   the pool lock is free.
+    // Scenario: the first three umount attempts are busy, matching plain
+    //   user-lock exhaustion, then the balance subprocess releases the mount
+    //   and systemd-stop lock completes cleanup.
+    #[test]
+    fn systemd_stop_retries_busy_umount_beyond_user_attempts() {
+        let busy_then_success = std::iter::repeat_with(umount_busy_output)
+            .take(UMOUNT_RETRY_ATTEMPTS as usize)
+            .chain(std::iter::once(lock_ok_raw("umount /mnt/storage")))
+            .collect();
+        let runner = lock_with_fsid_probe_mocks(MockRunner::default().with_output(
+            CmdRequest::MountpointCheck {
+                path: MountPoint("/mnt/storage".to_owned()),
+            },
+            lock_ok_raw("mountpoint -q /mnt/storage"),
+        ))
+        .with_output(
+            CmdRequest::BtrfsBalancePause {
+                mount_point: MountPoint("/mnt/storage".to_owned()),
+            },
+            lock_ok_raw("btrfs balance pause /mnt/storage"),
+        )
+        .with_output_sequence(umount_request(), busy_then_success)
+        .with_output(
+            CmdRequest::BtrfsDeviceScanForget {
+                devices: vec![
+                    "/dev/mapper/braid-aaa".into(),
+                    "/dev/mapper/braid-bbb".into(),
+                ],
+            },
+            lock_ok_raw("btrfs device scan --forget"),
+        )
+        .with_output(
+            CmdRequest::CryptsetupClose {
+                mapper: MapperName("braid-aaa".into()),
+            },
+            lock_ok_raw("cryptsetup close braid-aaa"),
+        )
+        .with_output(
+            CmdRequest::CryptsetupClose {
+                mapper: MapperName("braid-bbb".into()),
+            },
+            lock_ok_raw("cryptsetup close braid-bbb"),
+        );
+        let fs =
+            lock_fs(&["/dev/mapper/braid-aaa", "/dev/mapper/braid-bbb"]).with_excl_op("balance");
+        let config = lock_test_config();
+        let membership = lock_test_membership();
+
+        cmd_lock_systemd_stop(&runner, &fs, &config, &membership)
+            .expect("systemd-stop lock should outwait transient balance holder");
+
+        assert_eq!(
+            balance_pause_request_count(&runner),
+            1,
+            "expected running balance to be paused before retrying umount"
+        );
+        assert_eq!(
+            umount_request_count(&runner),
+            UMOUNT_RETRY_ATTEMPTS as usize + 1,
+            "systemd-stop should continue retrying after the user-lock budget"
+        );
+        assert_eq!(
+            cryptsetup_close_request_count(&runner),
+            2,
+            "lock should close both member mappers after delayed umount"
+        );
+    }
+
+    // Intent: systemd-stop lock rejects non-balance exclusive operations.
+    // Why it exists: only balance has a verified safe umount quiesce path;
+    //   other exclusive ops must fail before teardown mutates anything.
+    // Scenario: ExecStop observes "device remove" in sysfs and refuses
+    //   before issuing umount.
+    #[test]
+    fn systemd_stop_rejects_non_balance_op() {
+        let runner = mounted_systemd_stop_runner();
+        let fs = lock_fs(&["/dev/mapper/braid-aaa", "/dev/mapper/braid-bbb"])
+            .with_excl_op("device remove");
+        let config = lock_test_config();
+        let membership = lock_test_membership();
+
+        let err = cmd_lock_systemd_stop(&runner, &fs, &config, &membership)
+            .expect_err("systemd-stop lock should reject non-balance exclop");
+        let msg = err.to_string();
+        assert!(
+            msg.contains("device remove") && msg.contains("in progress"),
+            "expected device-remove refusal, got: {msg}"
+        );
+        assert_eq!(
+            balance_pause_request_count(&runner),
+            0,
+            "must refuse before pausing balance"
+        );
+        assert_eq!(
+            umount_request_count(&runner),
+            0,
+            "must refuse before umount"
+        );
+    }
+
     #[test]
     // Intent: lock refuses when any exclusive op is active (running balance).
     // Why: unmounting during an exclusive op is unsafe — data corruption risk.
@@ -3715,7 +4074,7 @@ mod tests {
             ],
             vec![],
         );
-        let steps = compile_lock_steps(true, &close_set, &mount_point);
+        let steps = compile_lock_steps(true, false, &close_set, &mount_point);
         let output = Step::render_dry_run(&steps);
         let lines: Vec<&str> = output.lines().collect();
 
@@ -3741,7 +4100,7 @@ mod tests {
         use crate::types::MountPoint;
         let mount_point = MountPoint("/mnt/storage".into());
         let close_set = test_close_set(vec![member_close("braid-disk1", "disk1")], vec![]);
-        let steps = compile_lock_steps(false, &close_set, &mount_point);
+        let steps = compile_lock_steps(false, false, &close_set, &mount_point);
         let output = Step::render_dry_run(&steps);
         let lines: Vec<&str> = output.lines().collect();
 
@@ -3759,7 +4118,7 @@ mod tests {
         use crate::types::MountPoint;
         let mount_point = MountPoint("/mnt/storage".into());
         let close_set = test_close_set(vec![], vec![]);
-        let steps = compile_lock_steps(false, &close_set, &mount_point);
+        let steps = compile_lock_steps(false, false, &close_set, &mount_point);
         assert!(steps.is_empty());
     }
 
@@ -3782,7 +4141,7 @@ mod tests {
             ],
             vec![],
         );
-        let steps = compile_lock_steps(true, &close_set, &mount_point);
+        let steps = compile_lock_steps(true, false, &close_set, &mount_point);
         assert_eq!(
             lock_forget_step_devices(&steps),
             vec![
@@ -3809,7 +4168,7 @@ mod tests {
             vec![member_close("braid-aaa", "aaa")],
             vec![orphan_close("braid-orphan", "orphan")],
         );
-        let steps = compile_lock_steps(true, &close_set, &mount_point);
+        let steps = compile_lock_steps(true, false, &close_set, &mount_point);
         assert_eq!(
             lock_forget_step_devices(&steps),
             vec![
@@ -3831,7 +4190,7 @@ mod tests {
         use crate::types::MountPoint;
         let mount_point = MountPoint("/mnt/storage".into());
         let close_set = test_close_set(vec![], vec![]);
-        let steps = compile_lock_steps(true, &close_set, &mount_point);
+        let steps = compile_lock_steps(true, false, &close_set, &mount_point);
         assert_eq!(
             lock_count_forget_steps(&steps),
             0,
@@ -3843,6 +4202,42 @@ mod tests {
                 .iter()
                 .any(|c| matches!(c, CmdRequest::Umount { .. }))),
             "umount step should still be emitted",
+        );
+    }
+
+    // Intent: systemd-stop dry-run includes a balance pause before umount
+    // when planning observed a running balance.
+    // Why it exists: preview and execute must share the same ordered mutation
+    // path, so the generated plan cannot omit the quiesce request.
+    // Scenario: UPS shutdown reaches ExecStop during an in-flight balance and
+    // lock previews pause -> umount -> close.
+    #[test]
+    fn dry_run_lock_systemd_stop_pause_precedes_umount() {
+        use crate::types::MountPoint;
+        let mount_point = MountPoint("/mnt/storage".into());
+        let close_set = test_close_set(vec![member_close("braid-aaa", "aaa")], vec![]);
+        let steps = compile_lock_steps(true, true, &close_set, &mount_point);
+
+        let pause_position = steps
+            .iter()
+            .position(|step| {
+                step.commands
+                    .iter()
+                    .any(|cmd| matches!(cmd, CmdRequest::BtrfsBalancePause { .. }))
+            })
+            .expect("pause step should be present");
+        let umount_position = steps
+            .iter()
+            .position(|step| {
+                step.commands
+                    .iter()
+                    .any(|cmd| matches!(cmd, CmdRequest::Umount { .. }))
+            })
+            .expect("umount step should be present");
+
+        assert!(
+            pause_position < umount_position,
+            "pause step must precede umount"
         );
     }
 
@@ -3980,8 +4375,14 @@ mod tests {
         );
         let mount_point = MountPoint("/mnt/storage".into());
 
-        let err = umount_with_retry(&runner, &sleeper, &mount_point, false)
-            .expect_err("should exhaust retries and return umount failure");
+        let err = umount_with_retry(
+            &runner,
+            &sleeper,
+            &mount_point,
+            false,
+            UMOUNT_RETRY_ATTEMPTS,
+        )
+        .expect_err("should exhaust retries and return umount failure");
         assert!(
             matches!(err, LockError::Failed(_)),
             "expected LockError::Failed after retry exhaustion, got: {err:?}"
@@ -4192,7 +4593,8 @@ mod tests {
         let config = lock_test_config();
         let membership = lock_test_membership();
 
-        let plan = plan_lock(&runner, &fs, &config, &membership).expect("plan should succeed");
+        let plan = plan_lock(&runner, &fs, &config, &membership, LockMode::User)
+            .expect("plan should succeed");
 
         assert!(
             member_summaries(&plan.close_set).contains(&("braid-WRONG".into(), "aaa".into())),
@@ -4233,7 +4635,7 @@ mod tests {
             &mut cleanup_uncertain,
         );
         let mp = MountPoint("/mnt/storage".into());
-        let steps = super::compile_lock_steps(true, &close_set, &mp);
+        let steps = super::compile_lock_steps(true, false, &close_set, &mp);
         assert_eq!(
             lock_forget_step_devices(&steps),
             vec![
@@ -4477,7 +4879,8 @@ mod tests {
             );
         let config = lock_test_config();
 
-        let plan = plan_lock(&plan_runner, &fs, &config, &membership).expect("plan should succeed");
+        let plan = plan_lock(&plan_runner, &fs, &config, &membership, LockMode::User)
+            .expect("plan should succeed");
 
         assert!(
             plan.members_known_closed.is_empty(),
@@ -4518,7 +4921,7 @@ mod tests {
             &mut cleanup_uncertain,
         );
         let mp = MountPoint("/mnt/storage".into());
-        let steps = super::compile_lock_steps(true, &close_set, &mp);
+        let steps = super::compile_lock_steps(true, false, &close_set, &mp);
         let forget = lock_forget_step_devices(&steps);
         // Members first, orphan last -- mirroring LockCloseSet order.
         assert_eq!(
@@ -4659,7 +5062,8 @@ mod tests {
         let config = lock_test_config();
         let membership = lock_test_membership_with_ccc();
 
-        let plan = plan_lock(&runner, &fs, &config, &membership).expect("plan should succeed");
+        let plan = plan_lock(&runner, &fs, &config, &membership, LockMode::User)
+            .expect("plan should succeed");
 
         assert_eq!(
             plan.skipped_mappers,
@@ -4687,7 +5091,8 @@ mod tests {
         let config = lock_test_config();
         let membership = lock_test_membership_with_ccc();
 
-        let plan = plan_lock(&runner, &fs, &config, &membership).expect("plan should succeed");
+        let plan = plan_lock(&runner, &fs, &config, &membership, LockMode::User)
+            .expect("plan should succeed");
 
         assert!(plan.cleanup_uncertain);
         assert!(
@@ -4785,7 +5190,7 @@ mod tests {
         let config = lock_test_config();
         let membership = lock_test_membership();
 
-        let result = plan_lock(&runner, &fs, &config, &membership);
+        let result = plan_lock(&runner, &fs, &config, &membership, LockMode::User);
         let err = match result {
             Err(e) => e,
             Ok(_) => panic!("NotBtrfs must surface as an abort, not fallback cleanup"),

@@ -339,6 +339,14 @@ with subtest("Previous boot's braid-online.service stopped cleanly"):
         f"ExecStop did not complete during upsmon-triggered shutdown.\n"
         f"Journal:\n{svc_log}"
     )
+    assert "Failed with result" not in svc_log, (
+        f"braid-online.service reported a failed stop result.\n"
+        f"Journal:\n{svc_log}"
+    )
+    assert "/FAILURE" not in svc_log, (
+        f"braid-online.service ExecStop exited with failure status.\n"
+        f"Journal:\n{svc_log}"
+    )
 
 with subtest("Pending-op journal survived the forced shutdown"):
     machine.succeed("test -f /var/lib/braid/pending-op.json")

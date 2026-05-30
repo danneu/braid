@@ -79,7 +79,7 @@ Optional (only created when `braid.autoUnlock.enable = true`). Runs at boot, unl
 State-ownership service. Its only purpose is to mark "pool is online" and run the bounded `braid lock` stop path on stop.
 
 - `ExecStart = /bin/true` — no work. Exists for its `ExecStop` hook.
-- `ExecStop = braid lock --systemd-stop --deadline-secs <n>` -- unmounts pool and closes all LUKS on shutdown or manual stop with a bounded wait below `TimeoutStopSec`.
+- `ExecStop = braid lock --systemd-stop --deadline-secs <n>` -- unmounts pool and closes all LUKS on shutdown or manual stop with a bounded stop-coordinator/pool-lock wait below `TimeoutStopSec`. In this mode, braid permits a running or paused btrfs `balance`: a running balance is explicitly paused before unmount, an already-paused balance proceeds to unmount, and every other exclusive operation is refused. If the blocking `btrfs balance` userspace process briefly holds the mount fd after its parent dies, the systemd-stop path uses a longer transient-busy umount retry than plain `braid lock`.
 - `RemainAfterExit = true` — persists "active" state.
 - `ConditionPathIsMountPoint = ${mountPoint}` -- systemd skips activation when the pool is not mounted (`systemctl start` returns 0 but the unit stays inactive). Defense-in-depth: the CLI's `mountpoint -q` check is the primary gate, but this condition prevents direct `systemctl start` from leaving the unit active while unmounted.
 - `TimeoutStopSec = 300s` -- raises the stop timeout from the 90s default so a slow braid lock is not SIGKILL'd mid-operation.
@@ -154,7 +154,7 @@ permission fixups but do not touch `braid-online.service`.
    independent of cascade ordering.
 2. `ExecStop = braid lock --systemd-stop --deadline-secs <n>` waits for an in-flight plain `braid lock` to finish through the stop coordinator, or waits for the pool lock up to the configured deadline.
 3. Lock dispatch loads membership from `pool.json`; if `pool.json` is absent or corrupt, it warns and proceeds with empty membership because mapper cleanup still requires per-candidate LUKS UUID verification.
-4. CLI unmounts and closes LUKS.
+4. CLI unmounts and closes LUKS. If sysfs reports a running btrfs `balance`, `--systemd-stop` first runs `btrfs balance pause` so the kernel persists the paused balance before LUKS close; if sysfs reports an already-paused balance, teardown proceeds directly to unmount. `braid recover` resumes the paused balance on the next boot. Plain `braid lock` still refuses all active exclusive operations. The systemd-stop path also retries transient `umount` `EBUSY` longer than user lock so a surviving `btrfs balance` process can release its mount fd during shutdown.
 5. Drives are safe to power off.
 
 ## Pool lock mutual exclusion
@@ -173,7 +173,7 @@ The pool lock is the first real execution boundary. Do not model it after the sl
 
 When a unit's `ExecStop=` invokes a CLI that needs a contended resource (e.g. `braid-online.service ExecStop=braid lock` colliding with an in-flight mutator that holds the pool lock), the ExecStop path gets a distinct bounded-wait variant -- not a fail-fast call. "ExecStop fails fast; in-flight work finishes and a later stop attempt succeeds" is **not** a valid design: during shutdown there is no later stop attempt. `systemctl poweroff` can leave the resource (mounted btrfs / open LUKS) in an inconsistent state, and the "in-flight mutator finishes before TimeoutStopSec" claim is not guaranteed.
 
-Current pattern: `braid-online.service` runs `braid lock --systemd-stop --deadline-secs ${braid.lockSystemdStopDeadlineSecs}`. The module default is 270 seconds and an assertion requires it to be strictly less than `braid-online.service` `TimeoutStopSec` (300 seconds). Regular `braid lock` stays fail-fast for user invocations; the bounded-wait path is documented and tested as a distinct mode.
+Current pattern: `braid-online.service` runs `braid lock --systemd-stop --deadline-secs ${braid.lockSystemdStopDeadlineSecs}`. The module default is 270 seconds and an assertion requires it to be strictly less than `braid-online.service` `TimeoutStopSec` (300 seconds). That deadline bounds only stop-coordinator and pool-lock acquisition; once lock cleanup reaches `btrfs balance pause` or `umount`, any kernel wait to quiesce btrfs has no userspace timeout and is bounded only by the unit's `TimeoutStopSec` (300 seconds). The systemd-stop path also has a longer transient-busy umount retry (60 attempts at 500ms) because btrfs-progs holds the mount fd while blocked in `BTRFS_IOC_BALANCE_V2` and can survive the Rust parent briefly during shutdown. Regular `braid lock` stays fail-fast for user invocations; the bounded-wait path is documented and tested as a distinct mode.
 
 ### `systemctl start/stop` inside held-resource windows
 

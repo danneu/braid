@@ -1248,8 +1248,7 @@ fn run_systemd_stop_lock(
     }
     let runner = RealRunner;
     let fs = RealFilesystem;
-    if let Err(e) = braid_cli::lock::cmd_lock(&runner, &fs, &config, &membership, false, Vec::new())
-    {
+    if let Err(e) = braid_cli::lock::cmd_lock_systemd_stop(&runner, &fs, &config, &membership) {
         print_cli_error(&e.to_string());
         std::process::exit(1);
     }
