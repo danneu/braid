@@ -8,5 +8,5 @@ src = "."
 git-repository-url = "https://github.com/danneu/braid"
 site-url = "/braid/"
 
-[output.linkcheck]
+[output.linkcheck2]
 follow-web-links = false

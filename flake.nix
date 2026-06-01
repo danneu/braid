@@ -136,7 +136,7 @@
         pkgs.mkShell {
           packages = [
             pkgs.mdbook
-            pkgs.mdbook-linkcheck
+            pkgs.mdbook-linkcheck2
             pkgs.mdbook-yml-header
             pkgs.just
             (pkgs.python3.withPackages (ps: [ ps.pyyaml ]))

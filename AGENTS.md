@@ -107,8 +107,8 @@ material.
 [`docs/SUMMARY.md`](docs/SUMMARY.md) is the TOC for the unified docs tree (end-user guides,
 commands, design principles, ADRs, internals, contributor docs). [`docs/index.md`](docs/index.md)
 is the landing page. Check `SUMMARY.md` before searching the codebase for context. All cross-links
-inside `docs/` are validated by `mdbook-linkcheck` during `mdbook build docs` (configured in
-`docs/book.toml` per Decision 5) -- a broken cross-link fails CI.
+inside `docs/` are validated by `mdbook-linkcheck2` during `mdbook build docs` (configured in
+`docs/book.toml`) -- a broken cross-link fails CI.
 
 ### Reference source
 
