@@ -4,3 +4,10 @@
 resolver = "3"
 members = ["cli"]
 default-members = ["cli"]
+
+# `result_large_err` fires on CLI planning/call-site fns that return the full
+# typed error (e.g. the ~128-byte LuksError variant). These are cold paths held
+# at most once per invocation; boxing would add indirection without measurable
+# benefit. Allowed project-wide rather than per-site.
+[workspace.lints.clippy]
+result_large_err = "allow"

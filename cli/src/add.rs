@@ -1546,9 +1546,6 @@ impl AddPlan {
 /// note lives on `plan.notes`; on failure after note accumulation, notes
 /// survive on `PlanFailure::notes` so `cmd_add` can render them to stderr
 /// before the error.
-// CLI planning path -- preserving preview notes with the full typed error keeps
-// diagnostics local to `cmd_add`; boxing only this branch would churn callers.
-#[allow(clippy::result_large_err)]
 pub fn plan_add<R: CommandRunner + Sync, F: Filesystem + ?Sized>(
     runner: &R,
     fs: &F,

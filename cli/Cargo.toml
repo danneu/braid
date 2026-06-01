@@ -27,3 +27,6 @@ zeroize = "1"
 insta = { version = "1", features = ["json", "redactions"] }
 pretty_assertions = "1"
 tempfile = "3"
+
+[lints]
+workspace = true
