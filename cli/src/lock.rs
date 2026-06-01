@@ -163,6 +163,17 @@ impl LockCloseSet {
     }
 }
 
+/// Plan-level close-set outputs accumulated by the classification helpers so
+/// the planner owns one named sink instead of repeating five out-params.
+#[derive(Default)]
+struct CloseSetAccumulator {
+    notes: Vec<PreviewNote>,
+    skipped_mappers: Vec<MapperName>,
+    cleanup_uncertain: bool,
+    members_potentially_present: HashSet<DiskName>,
+    has_unclassified_skip: bool,
+}
+
 /// Issue exactly two `CmdRequest` calls per braid-prefixed candidate -- a
 /// `CryptsetupStatus` to confirm the mapper is a cryptsetup-managed
 /// dm slot and extract its backing device, then a `CryptsetupLuksUuid`
@@ -307,32 +318,28 @@ fn push_uuid_classified_candidate<R: CommandRunner>(
     runner: &R,
     mapper: MapperName,
     membership: &PoolMembership,
-    notes: &mut Vec<PreviewNote>,
     member_owned: &mut Vec<LockMapperClose>,
     orphan_mappers: &mut Vec<LockMapperClose>,
-    skipped_mappers: &mut Vec<MapperName>,
-    cleanup_uncertain: &mut bool,
-    members_potentially_present: &mut HashSet<DiskName>,
-    has_unclassified_skip: &mut bool,
+    acc: &mut CloseSetAccumulator,
 ) {
     match classify_candidate_mapper(runner, &mapper, membership) {
         Ok(LockMapperCloseKind::MemberOwned { display_name }) => {
-            members_potentially_present.insert(display_name.clone());
+            acc.members_potentially_present.insert(display_name.clone());
             member_owned.push(LockMapperClose {
                 mapper,
                 kind: LockMapperCloseKind::MemberOwned { display_name },
             });
         }
         Ok(LockMapperCloseKind::Orphan { disk_name }) => {
-            push_orphan_close(notes, orphan_mappers, mapper, disk_name);
+            push_orphan_close(&mut acc.notes, orphan_mappers, mapper, disk_name);
         }
         Err(cmd_err) => {
-            notes.push(PreviewNote::Warn(skipped_mapper_warn_body(
+            acc.notes.push(PreviewNote::Warn(skipped_mapper_warn_body(
                 &mapper, &cmd_err,
             )));
-            skipped_mappers.push(mapper);
-            *cleanup_uncertain = true;
-            *has_unclassified_skip = true;
+            acc.skipped_mappers.push(mapper);
+            acc.cleanup_uncertain = true;
+            acc.has_unclassified_skip = true;
         }
     }
 }
@@ -842,11 +849,7 @@ where
         Snapshot::Unmounted
     };
 
-    let mut notes: Vec<PreviewNote> = Vec::new();
-    let mut skipped_mappers: Vec<MapperName> = Vec::new();
-    let mut cleanup_uncertain = false;
-    let mut members_potentially_present: HashSet<DiskName> = HashSet::new();
-    let mut has_unclassified_skip = false;
+    let mut acc = CloseSetAccumulator::default();
     let mut pause_balance_before_unmount = false;
     let close_set = match &snapshot {
         Snapshot::Probed(pool) => {
@@ -862,22 +865,13 @@ where
                     }
                 }
             }
-            build_close_sets_full(
-                runner,
-                fs,
-                pool,
-                membership,
-                &mut notes,
-                &mut skipped_mappers,
-                &mut cleanup_uncertain,
-                &mut members_potentially_present,
-                &mut has_unclassified_skip,
-            )
+            build_close_sets_full(runner, fs, pool, membership, &mut acc)
         }
         Snapshot::ProbeFailed { fsid, probe_error } => {
-            notes.push(PreviewNote::Warn(uuid_scanned_fallback_warn_body(
-                probe_error,
-            )));
+            acc.notes
+                .push(PreviewNote::Warn(uuid_scanned_fallback_warn_body(
+                    probe_error,
+                )));
             match mode {
                 LockMode::User => {
                     preflight::require_lock_preflight(fs, fsid).map_err(LockError::Failed)?;
@@ -888,36 +882,20 @@ where
                             .map_err(LockError::Failed)?;
                 }
             }
-            build_close_sets_uuid_scanned_fallback(
-                runner,
-                fs,
-                membership,
-                &mut notes,
-                &mut skipped_mappers,
-                &mut cleanup_uncertain,
-                &mut members_potentially_present,
-                &mut has_unclassified_skip,
-            )
+            build_close_sets_uuid_scanned_fallback(runner, fs, membership, &mut acc)
         }
-        Snapshot::Unmounted => build_close_sets_uuid_scanned_fallback(
-            runner,
-            fs,
-            membership,
-            &mut notes,
-            &mut skipped_mappers,
-            &mut cleanup_uncertain,
-            &mut members_potentially_present,
-            &mut has_unclassified_skip,
-        ),
+        Snapshot::Unmounted => {
+            build_close_sets_uuid_scanned_fallback(runner, fs, membership, &mut acc)
+        }
     };
     let members_known_closed = members_known_closed(
         membership,
-        &members_potentially_present,
-        has_unclassified_skip,
+        &acc.members_potentially_present,
+        acc.has_unclassified_skip,
     );
 
     Ok(LockPlan {
-        notes,
+        notes: acc.notes,
         pool_was_mounted,
         pause_balance_before_unmount,
         umount_retry_attempts: match mode {
@@ -925,9 +903,9 @@ where
             LockMode::SystemdStop => SYSTEMD_STOP_UMOUNT_RETRY_ATTEMPTS,
         },
         close_set,
-        skipped_mappers,
+        skipped_mappers: acc.skipped_mappers,
         members_known_closed,
-        cleanup_uncertain,
+        cleanup_uncertain: acc.cleanup_uncertain,
         mount_point,
     })
 }
@@ -944,11 +922,7 @@ fn build_close_sets_full<R: CommandRunner, F: Filesystem + ?Sized>(
     fs: &F,
     pool: &PoolState,
     membership: &PoolMembership,
-    notes: &mut Vec<PreviewNote>,
-    skipped_mappers: &mut Vec<MapperName>,
-    cleanup_uncertain: &mut bool,
-    members_potentially_present: &mut HashSet<DiskName>,
-    has_unclassified_skip: &mut bool,
+    acc: &mut CloseSetAccumulator,
 ) -> LockCloseSet {
     let mut member_owned: Vec<LockMapperClose> = Vec::new();
     let mut orphan_mappers: Vec<LockMapperClose> = Vec::new();
@@ -956,7 +930,7 @@ fn build_close_sets_full<R: CommandRunner, F: Filesystem + ?Sized>(
     // Pass 1: pool.devices, classified by observed LUKS UUID.
     for dev in &pool.devices {
         if let Some(member) = membership.by_uuid(&dev.luks_uuid) {
-            members_potentially_present.insert(member.name.clone());
+            acc.members_potentially_present.insert(member.name.clone());
             member_owned.push(LockMapperClose {
                 mapper: dev.mapper.clone(),
                 kind: LockMapperCloseKind::MemberOwned {
@@ -967,7 +941,12 @@ fn build_close_sets_full<R: CommandRunner, F: Filesystem + ?Sized>(
             let disk_name = name_from_mapper(dev.mapper.as_str())
                 .unwrap_or(dev.mapper.as_str())
                 .to_owned();
-            push_orphan_close(notes, &mut orphan_mappers, dev.mapper.clone(), disk_name);
+            push_orphan_close(
+                &mut acc.notes,
+                &mut orphan_mappers,
+                dev.mapper.clone(),
+                disk_name,
+            );
         }
     }
 
@@ -975,7 +954,7 @@ fn build_close_sets_full<R: CommandRunner, F: Filesystem + ?Sized>(
     for nu in &pool.null_underlying {
         match membership.by_devid(nu.devid) {
             Ok(Some((_uuid, member))) => {
-                members_potentially_present.insert(member.name.clone());
+                acc.members_potentially_present.insert(member.name.clone());
                 member_owned.push(LockMapperClose {
                     mapper: nu.mapper.clone(),
                     kind: LockMapperCloseKind::MemberOwned {
@@ -987,20 +966,25 @@ fn build_close_sets_full<R: CommandRunner, F: Filesystem + ?Sized>(
                 let disk_name = name_from_mapper(nu.mapper.as_str())
                     .unwrap_or(nu.mapper.as_str())
                     .to_owned();
-                push_orphan_close(notes, &mut orphan_mappers, nu.mapper.clone(), disk_name);
+                push_orphan_close(
+                    &mut acc.notes,
+                    &mut orphan_mappers,
+                    nu.mapper.clone(),
+                    disk_name,
+                );
             }
             Err(err) => match err {
                 MembershipError::DuplicateDevid { devid, members } => {
-                    notes.push(PreviewNote::Warn(duplicate_devid_warn_body(
+                    acc.notes.push(PreviewNote::Warn(duplicate_devid_warn_body(
                         &nu.mapper, devid, &members,
                     )));
                     for uuid in &members {
                         if let Some(member) = membership.by_uuid(uuid) {
-                            members_potentially_present.insert(member.name.clone());
+                            acc.members_potentially_present.insert(member.name.clone());
                         }
                     }
-                    skipped_mappers.push(nu.mapper.clone());
-                    *cleanup_uncertain = true;
+                    acc.skipped_mappers.push(nu.mapper.clone());
+                    acc.cleanup_uncertain = true;
                 }
                 other @ (MembershipError::Corrupt { .. }
                 | MembershipError::Conflict(_)
@@ -1026,9 +1010,9 @@ fn build_close_sets_full<R: CommandRunner, F: Filesystem + ?Sized>(
         match scan_braid_mapper_candidates(fs, &already_observed) {
             Ok(entries) => entries,
             Err(e) => {
-                notes.push(PreviewNote::Warn(mapper_scan_warn_body(&e)));
-                *cleanup_uncertain = true;
-                *has_unclassified_skip = true;
+                acc.notes.push(PreviewNote::Warn(mapper_scan_warn_body(&e)));
+                acc.cleanup_uncertain = true;
+                acc.has_unclassified_skip = true;
                 // Preserve best-effort semantics: with no /dev/mapper
                 // listing, return what we have. Pass-1/2 member_owned
                 // is still valid.
@@ -1042,13 +1026,9 @@ fn build_close_sets_full<R: CommandRunner, F: Filesystem + ?Sized>(
             runner,
             mapper,
             membership,
-            notes,
             &mut member_owned,
             &mut orphan_mappers,
-            skipped_mappers,
-            cleanup_uncertain,
-            members_potentially_present,
-            has_unclassified_skip,
+            acc,
         );
     }
 
@@ -1063,11 +1043,7 @@ fn build_close_sets_uuid_scanned_fallback<R: CommandRunner, F: Filesystem + ?Siz
     runner: &R,
     fs: &F,
     membership: &PoolMembership,
-    notes: &mut Vec<PreviewNote>,
-    skipped_mappers: &mut Vec<MapperName>,
-    cleanup_uncertain: &mut bool,
-    members_potentially_present: &mut HashSet<DiskName>,
-    has_unclassified_skip: &mut bool,
+    acc: &mut CloseSetAccumulator,
 ) -> LockCloseSet {
     let mut member_owned: Vec<LockMapperClose> = Vec::new();
     let mut orphan_mappers: Vec<LockMapperClose> = Vec::new();
@@ -1075,9 +1051,9 @@ fn build_close_sets_uuid_scanned_fallback<R: CommandRunner, F: Filesystem + ?Siz
     let candidates = match scan_braid_mapper_candidates(fs, &already_observed) {
         Ok(entries) => entries,
         Err(e) => {
-            notes.push(PreviewNote::Warn(mapper_scan_warn_body(&e)));
-            *cleanup_uncertain = true;
-            *has_unclassified_skip = true;
+            acc.notes.push(PreviewNote::Warn(mapper_scan_warn_body(&e)));
+            acc.cleanup_uncertain = true;
+            acc.has_unclassified_skip = true;
             return LockCloseSet::from_classified(member_owned, orphan_mappers);
         }
     };
@@ -1087,13 +1063,9 @@ fn build_close_sets_uuid_scanned_fallback<R: CommandRunner, F: Filesystem + ?Siz
             runner,
             mapper,
             membership,
-            notes,
             &mut member_owned,
             &mut orphan_mappers,
-            skipped_mappers,
-            cleanup_uncertain,
-            members_potentially_present,
-            has_unclassified_skip,
+            acc,
         );
     }
 
@@ -3994,52 +3966,6 @@ mod tests {
         LockCloseSet::from_classified(members, orphans)
     }
 
-    fn build_close_sets_full_for_test<R: CommandRunner, F: Filesystem + ?Sized>(
-        runner: &R,
-        fs: &F,
-        pool: &PoolState,
-        membership: &PoolMembership,
-        notes: &mut Vec<PreviewNote>,
-        skipped_mappers: &mut Vec<MapperName>,
-        cleanup_uncertain: &mut bool,
-    ) -> LockCloseSet {
-        let mut members_potentially_present = HashSet::new();
-        let mut has_unclassified_skip = false;
-        super::build_close_sets_full(
-            runner,
-            fs,
-            pool,
-            membership,
-            notes,
-            skipped_mappers,
-            cleanup_uncertain,
-            &mut members_potentially_present,
-            &mut has_unclassified_skip,
-        )
-    }
-
-    fn build_close_sets_uuid_scanned_fallback_for_test<R: CommandRunner, F: Filesystem + ?Sized>(
-        runner: &R,
-        fs: &F,
-        membership: &PoolMembership,
-        notes: &mut Vec<PreviewNote>,
-        skipped_mappers: &mut Vec<MapperName>,
-        cleanup_uncertain: &mut bool,
-    ) -> LockCloseSet {
-        let mut members_potentially_present = HashSet::new();
-        let mut has_unclassified_skip = false;
-        super::build_close_sets_uuid_scanned_fallback(
-            runner,
-            fs,
-            membership,
-            notes,
-            skipped_mappers,
-            cleanup_uncertain,
-            &mut members_potentially_present,
-            &mut has_unclassified_skip,
-        )
-    }
-
     fn member_summaries(close_set: &LockCloseSet) -> Vec<(String, String)> {
         close_set
             .entries()
@@ -4559,20 +4485,10 @@ mod tests {
     fn full_arm_classifies_drifted_member_by_uuid_into_member_owned() {
         let fs = lock_fs(&["/dev/mapper/braid-WRONG", "/dev/mapper/braid-bbb"]);
         let membership = lock_test_membership();
-        let mut notes = Vec::new();
         let pool = synthetic_pool_state("braid-WRONG", "braid-bbb");
         let runner = MockRunner::default();
-        let mut skipped = Vec::new();
-        let mut cleanup_uncertain = false;
-        let close_set = build_close_sets_full_for_test(
-            &runner,
-            &fs,
-            &pool,
-            &membership,
-            &mut notes,
-            &mut skipped,
-            &mut cleanup_uncertain,
-        );
+        let mut acc = CloseSetAccumulator::default();
+        let close_set = build_close_sets_full(&runner, &fs, &pool, &membership, &mut acc);
         // Both members are classified by UUID despite the drift.
         let observed: Vec<String> = member_summaries(&close_set)
             .into_iter()
@@ -4629,20 +4545,10 @@ mod tests {
     fn full_arm_forget_set_uses_observed_mapper_on_drift() {
         let fs = lock_fs(&["/dev/mapper/braid-WRONG", "/dev/mapper/braid-bbb"]);
         let membership = lock_test_membership();
-        let mut notes = Vec::new();
         let pool = synthetic_pool_state("braid-WRONG", "braid-bbb");
         let runner = MockRunner::default();
-        let mut skipped = Vec::new();
-        let mut cleanup_uncertain = false;
-        let close_set = build_close_sets_full_for_test(
-            &runner,
-            &fs,
-            &pool,
-            &membership,
-            &mut notes,
-            &mut skipped,
-            &mut cleanup_uncertain,
-        );
+        let mut acc = CloseSetAccumulator::default();
+        let close_set = build_close_sets_full(&runner, &fs, &pool, &membership, &mut acc);
         let mp = MountPoint("/mnt/storage".into());
         let steps = super::compile_lock_steps(true, false, &close_set, &mp);
         assert_eq!(
@@ -4683,19 +4589,9 @@ mod tests {
             null_underlying: vec![],
         };
         let runner = MockRunner::default();
-        let mut notes = Vec::new();
-        let mut skipped = Vec::new();
-        let mut cleanup_uncertain = false;
+        let mut acc = CloseSetAccumulator::default();
 
-        let close_set = build_close_sets_full_for_test(
-            &runner,
-            &fs,
-            &pool,
-            &membership,
-            &mut notes,
-            &mut skipped,
-            &mut cleanup_uncertain,
-        );
+        let close_set = build_close_sets_full(&runner, &fs, &pool, &membership, &mut acc);
 
         assert!(member_summaries(&close_set).is_empty());
         assert_eq!(
@@ -4703,14 +4599,15 @@ mod tests {
             vec![("braid-leftover".to_owned(), "leftover".to_owned())]
         );
         assert!(
-            notes.iter().any(|note| matches!(
+            acc.notes.iter().any(|note| matches!(
                 note,
                 PreviewNote::Warn(body) if body.contains("orphaned mapper braid-leftover")
             )),
-            "orphan warning expected, got: {notes:?}"
+            "orphan warning expected, got: {:?}",
+            acc.notes
         );
-        assert!(skipped.is_empty());
-        assert!(!cleanup_uncertain);
+        assert!(acc.skipped_mappers.is_empty());
+        assert!(!acc.cleanup_uncertain);
     }
 
     // Intent: a null_underlying entry whose devid is absent from
@@ -4726,19 +4623,9 @@ mod tests {
         let membership = lock_test_membership();
         let pool = synthetic_pool_state_with_null_underlying("braid-aaa", "braid-ghost", 99);
         let runner = MockRunner::default();
-        let mut notes = Vec::new();
-        let mut skipped = Vec::new();
-        let mut cleanup_uncertain = false;
+        let mut acc = CloseSetAccumulator::default();
 
-        let close_set = build_close_sets_full_for_test(
-            &runner,
-            &fs,
-            &pool,
-            &membership,
-            &mut notes,
-            &mut skipped,
-            &mut cleanup_uncertain,
-        );
+        let close_set = build_close_sets_full(&runner, &fs, &pool, &membership, &mut acc);
 
         assert!(
             orphan_summaries(&close_set).contains(&("braid-ghost".to_owned(), "ghost".to_owned())),
@@ -4746,14 +4633,15 @@ mod tests {
             orphan_summaries(&close_set)
         );
         assert!(
-            notes.iter().any(|note| matches!(
+            acc.notes.iter().any(|note| matches!(
                 note,
                 PreviewNote::Warn(body) if body.contains("orphaned mapper braid-ghost")
             )),
-            "orphan warning expected, got: {notes:?}"
+            "orphan warning expected, got: {:?}",
+            acc.notes
         );
-        assert!(skipped.is_empty());
-        assert!(!cleanup_uncertain);
+        assert!(acc.skipped_mappers.is_empty());
+        assert!(!acc.cleanup_uncertain);
     }
 
     // Intent: a null_underlying entry whose devid is claimed by two
@@ -4790,19 +4678,9 @@ mod tests {
         let pool = synthetic_pool_state_with_null_underlying("braid-aaa", "braid-dup", 7);
         let fs = lock_fs(&["/dev/mapper/braid-aaa", "/dev/mapper/braid-dup"]);
         let runner = MockRunner::default();
-        let mut notes = Vec::new();
-        let mut skipped = Vec::new();
-        let mut cleanup_uncertain = false;
+        let mut acc = CloseSetAccumulator::default();
 
-        let close_set = build_close_sets_full_for_test(
-            &runner,
-            &fs,
-            &pool,
-            &membership,
-            &mut notes,
-            &mut skipped,
-            &mut cleanup_uncertain,
-        );
+        let close_set = build_close_sets_full(&runner, &fs, &pool, &membership, &mut acc);
 
         assert!(
             !member_summaries(&close_set)
@@ -4818,17 +4696,18 @@ mod tests {
             "braid-dup must not be an orphan: {:?}",
             orphan_summaries(&close_set)
         );
-        assert_eq!(skipped, vec![MapperName("braid-dup".into())]);
-        assert!(cleanup_uncertain);
+        assert_eq!(acc.skipped_mappers, vec![MapperName("braid-dup".into())]);
+        assert!(acc.cleanup_uncertain);
 
-        let warns: Vec<&str> = notes
+        let warns: Vec<&str> = acc
+            .notes
             .iter()
             .filter_map(|note| match note {
                 PreviewNote::Warn(body) => Some(body.as_str()),
                 _ => None,
             })
             .collect();
-        assert_eq!(warns.len(), 1, "expected one warn, got: {notes:?}");
+        assert_eq!(warns.len(), 1, "expected one warn, got: {:?}", acc.notes);
         let warn = warns[0];
         for expected in ["braid-dup", "devid 7", AAA_UUID, BBB_UUID] {
             assert!(
@@ -4912,23 +4791,14 @@ mod tests {
             "/dev/mapper/braid-ccc",
         ]);
         let membership = lock_test_membership();
-        let mut notes = Vec::new();
         let runner = with_orphan_mapper(
             MockRunner::default()
                 .with_mapper_open("braid-aaa", "/dev/disk/by-id/a", AAA_UUID)
                 .with_mapper_open("braid-bbb", "/dev/disk/by-id/b", BBB_UUID),
             "braid-ccc",
         );
-        let mut skipped = Vec::new();
-        let mut cleanup_uncertain = false;
-        let close_set = build_close_sets_uuid_scanned_fallback_for_test(
-            &runner,
-            &fs,
-            &membership,
-            &mut notes,
-            &mut skipped,
-            &mut cleanup_uncertain,
-        );
+        let mut acc = CloseSetAccumulator::default();
+        let close_set = build_close_sets_uuid_scanned_fallback(&runner, &fs, &membership, &mut acc);
         let mp = MountPoint("/mnt/storage".into());
         let steps = super::compile_lock_steps(true, false, &close_set, &mp);
         let forget = lock_forget_step_devices(&steps);
@@ -4941,9 +4811,12 @@ mod tests {
                 "/dev/mapper/braid-ccc".to_string(),
             ]
         );
-        assert!(skipped.is_empty(), "all candidates should verify");
         assert!(
-            !cleanup_uncertain,
+            acc.skipped_mappers.is_empty(),
+            "all candidates should verify"
+        );
+        assert!(
+            !acc.cleanup_uncertain,
             "verified candidates are complete cleanup"
         );
     }
@@ -4983,17 +4856,8 @@ mod tests {
         let fs = lock_fs(&["/dev/mapper/braid-..foo"]);
         let membership = lock_test_membership();
         let runner = with_orphan_mapper(MockRunner::default(), "braid-..foo");
-        let mut notes = Vec::new();
-        let mut skipped = Vec::new();
-        let mut cleanup_uncertain = false;
-        let close_set = build_close_sets_uuid_scanned_fallback_for_test(
-            &runner,
-            &fs,
-            &membership,
-            &mut notes,
-            &mut skipped,
-            &mut cleanup_uncertain,
-        );
+        let mut acc = CloseSetAccumulator::default();
+        let close_set = build_close_sets_uuid_scanned_fallback(&runner, &fs, &membership, &mut acc);
         let names: Vec<String> = orphan_summaries(&close_set)
             .into_iter()
             .map(|(_mapper, disk_name)| disk_name)
@@ -5002,7 +4866,10 @@ mod tests {
             names.contains(&"..foo".to_owned()),
             "malformed mapper basename must be carried as orphan disk_name, got: {names:?}",
         );
-        assert!(skipped.is_empty(), "readable UUID should not be skipped");
+        assert!(
+            acc.skipped_mappers.is_empty(),
+            "readable UUID should not be skipped"
+        );
     }
 
     /// Intent: classify_candidate_mapper skips per-mapper failures
@@ -5026,30 +4893,24 @@ mod tests {
         // pinned warning instead of closing by name.
         let pool = synthetic_pool_state("braid-aaa", "braid-bbb");
         let runner = MockRunner::default();
-        let mut notes = Vec::new();
-        let mut skipped = Vec::new();
-        let mut cleanup_uncertain = false;
-        let close_set = build_close_sets_full_for_test(
-            &runner,
-            &fs,
-            &pool,
-            &membership,
-            &mut notes,
-            &mut skipped,
-            &mut cleanup_uncertain,
-        );
+        let mut acc = CloseSetAccumulator::default();
+        let close_set = build_close_sets_full(&runner, &fs, &pool, &membership, &mut acc);
         // Member-owned still has the two pool.devices entries.
         assert_eq!(member_summaries(&close_set).len(), 2);
         assert!(orphan_summaries(&close_set).is_empty());
-        assert_eq!(skipped, vec![MapperName("braid-stranded".to_owned())]);
-        assert!(cleanup_uncertain);
+        assert_eq!(
+            acc.skipped_mappers,
+            vec![MapperName("braid-stranded".to_owned())]
+        );
+        assert!(acc.cleanup_uncertain);
         assert!(
-            notes.iter().any(|note| matches!(
+            acc.notes.iter().any(|note| matches!(
                 note,
                 PreviewNote::Warn(body)
                     if body.contains("skipping mapper braid-stranded")
             )),
-            "skip warning expected, got: {notes:?}",
+            "skip warning expected, got: {:?}",
+            acc.notes
         );
     }
 
@@ -5148,18 +5009,8 @@ mod tests {
                 },
             );
 
-        let mut notes = Vec::new();
-        let mut skipped = Vec::new();
-        let mut cleanup_uncertain = false;
-        let close_set = build_close_sets_full_for_test(
-            &runner,
-            &fs,
-            &pool,
-            &membership,
-            &mut notes,
-            &mut skipped,
-            &mut cleanup_uncertain,
-        );
+        let mut acc = CloseSetAccumulator::default();
+        let close_set = build_close_sets_full(&runner, &fs, &pool, &membership, &mut acc);
 
         let member_owned = member_summaries(&close_set);
         assert!(
