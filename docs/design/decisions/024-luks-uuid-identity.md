@@ -151,6 +151,20 @@ one.
     LUKS UUID, replace fails closed with the canonical pre-journal validation
     or `DuplicateUuid { scope: LivePool }` refusal.
 
+## Offline Disk State
+
+A recorded member whose by-id path is present, whose LUKS header is readable,
+and whose on-disk LUKS UUID matches the `pool.json` membership key is identity
+verified. If that member is not assembled into the live btrfs pool, status and
+TUI surfaces render it as `offline`, distinct from `missing` (device absent) and
+`unknown` (braid cannot classify the state).
+
+`offline` is deliberately cause-neutral. It can describe a locked member in a
+degraded mount, an interrupted post-commit mutation, or another state where
+membership and live btrfs topology have not yet been reconciled. Because those
+causes have different remedies, `braid status` does not print an `Action:` hint
+for offline rows.
+
 ## Limits And Non-Goals
 
 - A LUKS UUID identifies an encrypted LUKS container, not a physical drive,
@@ -181,9 +195,15 @@ one.
   `cryptsetup luksFormat --uuid <uuid> --label <label>` argv order.
 - `cli/src/status.rs` unit tests pin compact status names by resolving live
   pool UUIDs back to `DiskName`, including a drifted mapper case.
+- `cli/src/status.rs` and `cli/src/tui/probe.rs` unit tests pin that a present,
+  LUKS-identity-verified member absent from the live pool renders `offline`, not
+  `missing` or `unknown`.
 - `tests/cli/braid-status-rust.py` pins that present disks' rendered
   `luks_uuid` equals the real cryptsetup UUID and the `pool.json` membership
   key, and that `name` is the operator name, in intact and degraded states.
+- `tests/cli/braid-status-rust.py` pins that a degraded mount with one closed
+  verified member renders that member as `OFFLINE` in human output and
+  `offline` in JSON while the pool summary remains degraded.
 - `tests/cli/status-mapper-drift.py` pins that `braid status` resolves the
   operator name via the UUID join when a member is open under a drifted mapper
   (`braid-WRONG`), not the mapper basename, in both JSON and human output.

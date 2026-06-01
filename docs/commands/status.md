@@ -161,6 +161,7 @@ Disk states (compact `Drives:` list and detail view):
 |---|---|
 | **present** | Disk is online and healthy |
 | **MISSING** | Disk not found at its by-id path |
+| **OFFLINE** | Disk is present and LUKS identity matches membership, but it is not assembled into the live pool |
 | **LUKS HEADER UNREADABLE** | Device present but LUKS header cannot be read |
 | **LUKS UUID MISMATCH** | Device present but its LUKS header UUID differs from the recorded member -- swapped, cloned, or reformatted; run `braid doctor` |
 | **UNKNOWN** | State could not be determined |
@@ -252,18 +253,19 @@ for recovery options.
 - `disks`: array of per-disk reports -- one element per disk braid knows
   about: present pool members (matched members and foreign live devices),
   plus configured disks that are not currently live pool members (reported
-  as `missing`, `unknown`, or `luks-header-*`; see the `status` values
-  below). The field list below describes a **present** element (as in the
-  example); non-present elements differ as called out per field and in the
-  note after the example.
-  - `luks_uuid`: the disk's **live-observed** LUKS UUID -- the persistent
-    member identity. For a matched present member it equals the `pool.json`
-    membership key; a foreign present device carries a live UUID that is
-    **not** in membership (paralleling its mapper-basename `name`).
-    **Populated for present disks only.** A non-present disk reports `""`,
-    because the UUID is read from the live device and is unavailable when
-    the device is absent; correlate non-present disks by `name`, not
-    `luks_uuid`.
+  as `missing`, `offline`, `unknown`, `luks-header-unreadable`, or
+  `luks-uuid-mismatch`; see the `status` values below). The field list below
+  describes a **live pool member** element (as in the example); diagnostic
+  unpooled elements differ as called out per field and in the note after the
+  example.
+  - `luks_uuid`: the disk's LUKS UUID -- the persistent member identity. For a
+    matched live pool member it equals the `pool.json` membership key; a
+    foreign live pool device carries an observed UUID that is **not** in
+    membership (paralleling its mapper-basename `name`). A
+    `luks-uuid-mismatch` diagnostic row carries the observed on-disk UUID so
+    the divergence is visible. Other non-live rows (`missing`, `offline`,
+    `unknown`, `luks-header-unreadable`) report `""`; correlate them by
+    `name`, not `luks_uuid`.
   - `name`: operator-facing name (e.g. `toshiba1`). For a matched present
     member it is resolved via the UUID-keyed membership join; for a foreign
     present device it falls back to the mapper basename; for a non-present
@@ -276,11 +278,11 @@ for recovery options.
     mapper (decision 024 tolerates mapper drift). A runtime handle, not
     identity; do not reconstruct it as `braid-${name}`.
   - `underlying`: current backing block device (e.g. `/dev/sda`), or
-    `null` when the disk is not present.
+    `null` when the disk is not a live pool member.
   - `devid`: btrfs device ID **as a number** (e.g. `1`), or `null`
     when the disk is not a live pool member.
   - `status`: one of `present`, `missing`, `luks-header-unreadable`,
-    `luks-uuid-mismatch`, `unknown`.
+    `luks-uuid-mismatch`, `offline`, `unknown`.
   - `errors`: btrfs I/O error counters (`read`, `write`, `flush`,
     `corruption`, `generation`, all integers). Present when btrfs device
     stats are available; omitted entirely otherwise -- including for
@@ -300,9 +302,11 @@ for recovery options.
 }
 ```
 
-> A non-present disk (`missing`, `unknown`, or `luks-header-*`) reports
-> `"luks_uuid": ""`, `"devid": null`, `"underlying": null`, and no
-> `errors` key. Correlate it by `name`.
+> A diagnostic unpooled disk (`missing`, `offline`, `unknown`, or
+> `luks-header-unreadable`) reports `"luks_uuid": ""`, `"devid": null`,
+> `"underlying": null`, and no `errors` key. `offline` is present but not
+> assembled; the others reach the same blank/null row shape because no live
+> member row is available. Correlate these rows by `name`.
 
 - `alert_active`: boolean
 - `alert_causes`: array of alert cause objects. **Omitted entirely when no

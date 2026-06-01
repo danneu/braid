@@ -261,6 +261,10 @@ impl DiskUsage {
 pub enum UnpooledDiskRender {
     /// `ConfigDiskState::Absent` — device file does not exist.
     Missing,
+    /// `ConfigDiskState::PresentLuks` with an on-disk UUID that matches the
+    /// recorded membership UUID, but which is absent from the live pool:
+    /// verified identity, distinct from both unplugged and unknown-LUKS rows.
+    Offline,
     /// `ConfigDiskState::PresentLuks` with a valid LUKS header but no
     /// recorded membership UUID to compare against (defensive fallback;
     /// declared members are UUID-keyed per decision 024).

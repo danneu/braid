@@ -406,9 +406,10 @@ pub fn probe_pool_for_tui<R: CommandRunner, F: Filesystem + ?Sized>(
                     // (decision 024). Shared with `status` via the classifier.
                     match luks::classify_member_luks_identity(&uuid, disks.luks_uuid.get(disk_name))
                     {
-                        // Correct-but-offline member: reuse Missing rather than
-                        // lying about state, matching the live-pool branch.
-                        luks::MemberLuksIdentity::Matches => UnpooledDiskRender::Missing,
+                        // Same verdict maps to `DiskStatus::Offline` in
+                        // status so both surfaces agree on verified-but-
+                        // unpooled members.
+                        luks::MemberLuksIdentity::Matches => UnpooledDiskRender::Offline,
                         luks::MemberLuksIdentity::Mismatch => UnpooledDiskRender::UuidMismatch,
                         luks::MemberLuksIdentity::Unrecorded => UnpooledDiskRender::UnknownLuks,
                     }
@@ -2153,19 +2154,19 @@ mod tests {
 
     /// Intent: probe_pool_for_tui must classify a declared member whose
     /// on-disk LUKS UUID still equals its recorded membership UUID, but which
-    /// is absent from the live pool, as `UnpooledDiskRender::Missing` — not
+    /// is absent from the live pool, as `UnpooledDiskRender::Offline` -- not
     /// `UuidMismatch`.
     ///
-    /// Why: pins the locked offline-member decision (plan precedence table): a
-    /// correct-but-offline member reuses the existing Missing bucket rather
-    /// than lying about a swap. Without this, the new classifier could drift a
-    /// Matches verdict toward a scarier render.
+    /// Why: pins decision 024's offline disk state: a correct-but-offline
+    /// member is verified and present, so it must not render as either
+    /// unplugged or swapped. Without this, the shared classifier could drift a
+    /// Matches verdict toward a misleading render.
     ///
     /// Scenario: 1-disk live pool (toshiba @ 11111111). The declared member
     /// `ironwolf` records membership UUID 22222222 and its on-disk header
     /// still reports 22222222, but it is not currently assembled into the pool.
     #[test]
-    fn unpooled_disk_present_luks_matching_uuid_offline_classified_as_missing() {
+    fn unpooled_disk_present_luks_matching_uuid_offline_classified_as_offline() {
         let runner = one_disk_mounted_pool_runner()
             .with_output(
                 CmdRequest::CryptsetupLuksUuid {
@@ -2226,7 +2227,7 @@ mod tests {
 
         assert_eq!(
             pool.unpooled_disks.get("ironwolf"),
-            Some(&UnpooledDiskRender::Missing)
+            Some(&UnpooledDiskRender::Offline)
         );
     }
 

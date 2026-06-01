@@ -820,6 +820,7 @@ fn btrfs_cell(errors: &DiskErrors) -> Span<'static> {
 fn unpooled_disk_status_cell(state: &PoolState, name: &str) -> Option<Span<'static>> {
     state.unpooled_disks.get(name).map(|render| match render {
         UnpooledDiskRender::Missing => Span::styled("missing", Style::default().fg(Color::Yellow)),
+        UnpooledDiskRender::Offline => Span::styled("offline", Style::default().fg(Color::Yellow)),
         UnpooledDiskRender::UnknownLuks => {
             Span::styled("unknown", Style::default().fg(Color::Yellow))
         }
@@ -2362,6 +2363,7 @@ pub(crate) mod tests {
                 "charlie".to_owned(),
                 UnpooledDiskRender::LuksHeaderUnreadable,
             ),
+            ("delta".to_owned(), UnpooledDiskRender::Offline),
             ("echo".to_owned(), UnpooledDiskRender::WrongLuksVersion(1)),
             ("foxtrot".to_owned(), UnpooledDiskRender::MapperHijacked),
             ("golf".to_owned(), UnpooledDiskRender::UuidMismatch),
@@ -2377,10 +2379,13 @@ pub(crate) mod tests {
         assert_eq!(cell("alpha"), "missing");
         assert_eq!(cell("bravo"), "unknown");
         assert_eq!(cell("charlie"), "LUKS header unreadable");
+        assert_eq!(cell("delta"), "offline");
         assert_eq!(cell("echo"), "LUKS1 (unsupported)");
         assert_eq!(cell("foxtrot"), "mapper conflict");
         assert_eq!(cell("golf"), "uuid mismatch");
 
+        let delta_span = unpooled_disk_status_cell(&pool, "delta").expect("expected an entry");
+        assert_eq!(delta_span.style.fg, Some(Color::Yellow));
         let foxtrot_span = unpooled_disk_status_cell(&pool, "foxtrot").expect("expected an entry");
         assert_eq!(foxtrot_span.style.fg, Some(Color::Red));
         let golf_span = unpooled_disk_status_cell(&pool, "golf").expect("expected an entry");

@@ -180,6 +180,10 @@ pub enum DiskStatus {
     Missing,
     LuksHeaderUnreadable,
     LuksUuidMismatch,
+    /// Present, LUKS-identity-verified, and recorded in membership, but not
+    /// currently assembled into the live pool. Cause-neutral: distinct from
+    /// absent `Missing` and unclassified `Unknown`.
+    Offline,
     Unknown,
 }
 
@@ -190,6 +194,7 @@ impl std::fmt::Display for DiskStatus {
             Self::Missing => f.write_str("missing"),
             Self::LuksHeaderUnreadable => f.write_str("luks-header-unreadable"),
             Self::LuksUuidMismatch => f.write_str("luks-uuid-mismatch"),
+            Self::Offline => f.write_str("offline"),
             Self::Unknown => f.write_str("unknown"),
         }
     }
@@ -1073,12 +1078,13 @@ fn build_disk_reports<R: CommandRunner>(
                     luks::MemberLuksIdentity::Mismatch => {
                         (DiskStatus::LuksUuidMismatch, uuid.as_str().to_owned())
                     }
-                    // Matches = correct-but-offline member; Unrecorded =
-                    // defensive (declared members are UUID-keyed). Both keep
-                    // today's generic Unknown with no UUID line.
-                    luks::MemberLuksIdentity::Matches | luks::MemberLuksIdentity::Unrecorded => {
-                        (DiskStatus::Unknown, String::new())
-                    }
+                    // Same verdict maps to `UnpooledDiskRender::Offline` in
+                    // the TUI so both surfaces agree on verified-but-unpooled
+                    // members.
+                    luks::MemberLuksIdentity::Matches => (DiskStatus::Offline, String::new()),
+                    // Defensive: declared members are UUID-keyed, so no
+                    // recorded UUID should be unreachable here.
+                    luks::MemberLuksIdentity::Unrecorded => (DiskStatus::Unknown, String::new()),
                 }
             }
             ConfigDiskState::PresentNotLuks => {
@@ -1385,6 +1391,9 @@ fn format_status_human(
                 DiskStatus::Unknown => {
                     out.push_str(&format!("  {:<18}UNKNOWN\n", d.name));
                 }
+                DiskStatus::Offline => {
+                    out.push_str(&format!("  {:<18}OFFLINE\n", d.name));
+                }
                 DiskStatus::LuksHeaderUnreadable => {
                     out.push_str(&format!("  {:<18}LUKS HEADER UNREADABLE\n", d.name));
                 }
@@ -1436,6 +1445,10 @@ fn format_status_human(
                 }
                 None if d.status == DiskStatus::LuksUuidMismatch => {
                     out.push_str("    Errors:  unknown (LUKS UUID mismatch)\n");
+                    false
+                }
+                None if d.status == DiskStatus::Offline => {
+                    out.push_str("    Errors:  unknown (disk offline -- not in pool)\n");
                     false
                 }
                 None if d.status == DiskStatus::Unknown => {
@@ -5099,6 +5112,52 @@ mod tests {
         );
     }
 
+    /*
+     * Intent: a config disk whose by-id target reports the recorded membership
+     * UUID, but which is absent from the live pool, is classified `Offline`.
+     *
+     * Why it exists: this is the verified-but-unpooled state from decision
+     * 024. It must not be collapsed into `Unknown` (braid knows identity) or
+     * `Missing` (the device is physically present and header-readable), and it
+     * must keep the non-mismatch blank `luks_uuid` row shape.
+     *
+     * Scenario: membership records disk1 at UUID U1, disk1's by-id path probes
+     * as PresentLuks UUID U1, and the mounted pool contains no live device with
+     * that UUID.
+     */
+    #[test]
+    fn build_disk_reports_present_luks_matching_uuid_offline_classified_as_offline() {
+        let membership_uuid = LuksUuid::parse("11111111-1111-1111-1111-111111111111").unwrap();
+        let pool = PoolState {
+            mounted: true,
+            devices: vec![],
+            missing_count: 1,
+            missing_devids: vec![],
+            total_devices: 1,
+            fsid: None,
+            null_underlying: vec![],
+        };
+        let config_disks = vec![ConfigDisk {
+            name: DiskName::parse("disk1").unwrap(),
+            by_id_path: ByIdPath::parse("/dev/disk/by-id/disk1").unwrap(),
+            state: ConfigDiskState::PresentLuks {
+                uuid: membership_uuid,
+                label: Some("braid-disk1".to_owned()),
+                mapper_open: false,
+            },
+        }];
+        let membership = status_membership_1disk();
+        let runner = MockRunner::default();
+        let stats = BtrfsDeviceStatsOutput { devices: vec![] };
+
+        let ctx = build_disk_reports(&runner, &membership, &config_disks, &pool, &stats);
+
+        assert_eq!(ctx.disks.len(), 1, "disks: {:?}", ctx.disks);
+        assert_eq!(ctx.disks[0].name, "disk1");
+        assert_eq!(ctx.disks[0].status, DiskStatus::Offline);
+        assert_eq!(ctx.disks[0].luks_uuid, "");
+    }
+
     // Intent: verbose status probes present-disk hardware through the live
     //   backing path, not the persisted by-id path.
     // Why it exists: by-id paths are setup/repair handles that can drift
@@ -5888,6 +5947,72 @@ mod tests {
         assert!(
             !human.contains("braid doctor"),
             "Unknown must not push users toward doctor recovery; got:\n{human}"
+        );
+    }
+
+    /*
+     * Intent: Offline remains a cause-neutral detail label in verbose human
+     * output.
+     *
+     * Why it exists: a present, identity-verified member can be absent from
+     * the live pool because it is locked or because a mutation committed btrfs
+     * state before persisting membership. Status must name the state without
+     * prescribing the wrong recovery command.
+     *
+     * Scenario: verbose status renders a configured disk with verified LUKS
+     * identity, no live btrfs row, and no btrfs error counters.
+     */
+    #[test]
+    fn status_verbose_offline_disk_no_action_hint() {
+        let human_disks = vec![HumanDisk {
+            name: "disk2".to_owned(),
+            member_name: Some(DiskName::parse("disk2").unwrap()),
+            by_id: "/dev/disk/by-id/disk2".to_owned(),
+            luks_uuid: String::new(),
+            devid: None,
+            status: DiskStatus::Offline,
+            model: None,
+            serial: None,
+            errors: None,
+        }];
+
+        let code = StatusCode::Intact;
+        let report = StatusReport {
+            mount_point: MountPoint("/mnt/storage".to_owned()),
+            status: code,
+            total_devices: Some(1),
+            present_count: Some(1),
+            missing_count: Some(0),
+            profile: Some(ProfileJson::uniform("single")),
+            fsid: None,
+            capacity: Some(CapacityReport {
+                total_bytes: Some(1073741824),
+                used_bytes: 536870912,
+                free_bytes: 536870912,
+            }),
+            last_scrub: Some(ScrubReport::Never),
+            balance: None,
+            allocation: None,
+            disks: vec![],
+            advisories: vec![],
+            alert_active: false,
+            alert_causes: vec![],
+            missing_devids: vec![],
+        };
+
+        let human = format_status_human(&report, None, Some(&human_disks), None);
+        assert!(human.contains("OFFLINE"), "got:\n{human}");
+        assert!(
+            human.contains("disk offline -- not in pool"),
+            "got:\n{human}"
+        );
+        assert!(
+            !human.contains("Action:"),
+            "Offline must not surface cause-ambiguous recovery guidance; got:\n{human}"
+        );
+        assert!(
+            !human.contains("braid doctor"),
+            "Offline must not push users toward doctor recovery; got:\n{human}"
         );
     }
 

@@ -165,10 +165,10 @@ with subtest("Degraded summary"):
     assert "RAID1" in output, f"Expected 'RAID1':\n{output}"
     assert "1 missing device" in output, f"Expected '1 missing device':\n{output}"
     # Per-disk detail (always shown)
-    assert "UNKNOWN" in output, f"Expected 'UNKNOWN':\n{output}"
+    assert "OFFLINE" in output, f"Expected 'OFFLINE':\n{output}"
     assert "disk3" in output, f"Expected 'disk3':\n{output}"
-    assert "metadata unavailable" in output, (
-        f"Expected 'metadata unavailable':\n{output}"
+    assert "disk offline -- not in pool" in output, (
+        f"Expected 'disk offline -- not in pool':\n{output}"
     )
     lines = output.splitlines()
     for disk in ["disk1", "disk2"]:
@@ -180,9 +180,9 @@ with subtest("Degraded JSON"):
     s = json.loads(raw)
     assert s["status"] == "degraded", f"Expected degraded: {s['status']}"
     present_disks = [d for d in s["disks"] if d["status"] == "present"]
-    unknown_disks = [d for d in s["disks"] if d["status"] == "unknown"]
+    offline_disks = [d for d in s["disks"] if d["status"] == "offline"]
     assert len(present_disks) >= 2, f"Expected at least 2 present disks: {present_disks}"
-    assert len(unknown_disks) >= 1, f"Expected at least 1 unknown disk: {unknown_disks}"
+    assert len(offline_disks) >= 1, f"Expected at least 1 offline disk: {offline_disks}"
     present_by_uuid = {d["luks_uuid"]: d for d in present_disks}
     for name in ("disk1", "disk2"):
         uuid = real_uuids[name]
