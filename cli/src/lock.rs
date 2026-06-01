@@ -163,15 +163,51 @@ impl LockCloseSet {
     }
 }
 
+/// Planner-private cleanup confidence, keeping classified incomplete cleanup
+/// distinct from unclassified skips that make all absence claims unsafe.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+enum CleanupConfidence {
+    #[default]
+    Complete,
+    IncompleteClassified,
+    IncompleteUnclassified,
+}
+
+impl CleanupConfidence {
+    /// Record incomplete cleanup whose affected members are still individually
+    /// accounted for. Never downgrades an existing unclassified state.
+    fn mark_incomplete_classified(&mut self) {
+        if matches!(self, Self::Complete) {
+            *self = Self::IncompleteClassified;
+        }
+    }
+
+    /// Record an unverifiable skip whose membership cannot be pinned down.
+    /// This dominant state can never downgrade current cleanup confidence.
+    fn mark_incomplete_unclassified(&mut self) {
+        *self = Self::IncompleteUnclassified;
+    }
+
+    /// Mirror the output-facing `LockPlan.cleanup_uncertain` boolean while
+    /// keeping the planner's internal distinction private.
+    fn is_uncertain(&self) -> bool {
+        !matches!(self, Self::Complete)
+    }
+
+    /// Whether the planner must withhold every known-closed claim.
+    fn suppresses_known_closed(&self) -> bool {
+        matches!(self, Self::IncompleteUnclassified)
+    }
+}
+
 /// Plan-level close-set outputs accumulated by the classification helpers so
-/// the planner owns one named sink instead of repeating five out-params.
+/// the planner owns one sink including cleanup confidence as a tri-state.
 #[derive(Default)]
 struct CloseSetAccumulator {
     notes: Vec<PreviewNote>,
     skipped_mappers: Vec<MapperName>,
-    cleanup_uncertain: bool,
     members_potentially_present: HashSet<DiskName>,
-    has_unclassified_skip: bool,
+    cleanup: CleanupConfidence,
 }
 
 /// Issue exactly two `CmdRequest` calls per braid-prefixed candidate -- a
@@ -338,8 +374,7 @@ fn push_uuid_classified_candidate<R: CommandRunner>(
                 &mapper, &cmd_err,
             )));
             acc.skipped_mappers.push(mapper);
-            acc.cleanup_uncertain = true;
-            acc.has_unclassified_skip = true;
+            acc.cleanup.mark_incomplete_unclassified();
         }
     }
 }
@@ -537,9 +572,9 @@ fn compile_lock_steps(
 fn members_known_closed(
     membership: &PoolMembership,
     members_potentially_present: &HashSet<DiskName>,
-    has_unclassified_skip: bool,
+    cleanup: CleanupConfidence,
 ) -> Vec<DiskName> {
-    if has_unclassified_skip {
+    if cleanup.suppresses_known_closed() {
         return Vec::new();
     }
 
@@ -888,11 +923,8 @@ where
             build_close_sets_uuid_scanned_fallback(runner, fs, membership, &mut acc)
         }
     };
-    let members_known_closed = members_known_closed(
-        membership,
-        &acc.members_potentially_present,
-        acc.has_unclassified_skip,
-    );
+    let members_known_closed =
+        members_known_closed(membership, &acc.members_potentially_present, acc.cleanup);
 
     Ok(LockPlan {
         notes: acc.notes,
@@ -905,7 +937,7 @@ where
         close_set,
         skipped_mappers: acc.skipped_mappers,
         members_known_closed,
-        cleanup_uncertain: acc.cleanup_uncertain,
+        cleanup_uncertain: acc.cleanup.is_uncertain(),
         mount_point,
     })
 }
@@ -984,7 +1016,7 @@ fn build_close_sets_full<R: CommandRunner, F: Filesystem + ?Sized>(
                         }
                     }
                     acc.skipped_mappers.push(nu.mapper.clone());
-                    acc.cleanup_uncertain = true;
+                    acc.cleanup.mark_incomplete_classified();
                 }
                 other @ (MembershipError::Corrupt { .. }
                 | MembershipError::Conflict(_)
@@ -1011,8 +1043,7 @@ fn build_close_sets_full<R: CommandRunner, F: Filesystem + ?Sized>(
             Ok(entries) => entries,
             Err(e) => {
                 acc.notes.push(PreviewNote::Warn(mapper_scan_warn_body(&e)));
-                acc.cleanup_uncertain = true;
-                acc.has_unclassified_skip = true;
+                acc.cleanup.mark_incomplete_unclassified();
                 // Preserve best-effort semantics: with no /dev/mapper
                 // listing, return what we have. Pass-1/2 member_owned
                 // is still valid.
@@ -1052,8 +1083,7 @@ fn build_close_sets_uuid_scanned_fallback<R: CommandRunner, F: Filesystem + ?Siz
         Ok(entries) => entries,
         Err(e) => {
             acc.notes.push(PreviewNote::Warn(mapper_scan_warn_body(&e)));
-            acc.cleanup_uncertain = true;
-            acc.has_unclassified_skip = true;
+            acc.cleanup.mark_incomplete_unclassified();
             return LockCloseSet::from_classified(member_owned, orphan_mappers);
         }
     };
@@ -1344,6 +1374,35 @@ mod tests {
             .iter()
             .map(DiskName::as_str)
             .collect()
+    }
+
+    // Intent: CleanupConfidence escalates monotonically -- an unclassified
+    //   incomplete state dominates a classified one regardless of order, and a
+    //   classified mark never downgrades an existing unclassified state.
+    // Why it exists: the enum collapses two independent booleans into one
+    //   field, so a careless mark could silently clear known-closed
+    //   suppression; the old paired-bool code could not downgrade because the
+    //   bits were independent.
+    // Scenario: one plan_lock run hits both a duplicate-devid skip
+    //   (classified) and a stranded classify failure (unclassified) across
+    //   passes.
+    #[test]
+    fn cleanup_confidence_unclassified_dominates_classified() {
+        let mut c = CleanupConfidence::default();
+        assert!(!c.is_uncertain());
+        assert!(!c.suppresses_known_closed());
+
+        c.mark_incomplete_classified();
+        assert!(c.is_uncertain());
+        assert!(!c.suppresses_known_closed());
+
+        c.mark_incomplete_unclassified();
+        assert!(c.suppresses_known_closed());
+
+        // No downgrade: a later classified mark must not clear suppression.
+        c.mark_incomplete_classified();
+        assert!(c.suppresses_known_closed());
+        assert_eq!(c, CleanupConfidence::IncompleteUnclassified);
     }
 
     fn umount_request() -> CmdRequest {
@@ -4607,7 +4666,7 @@ mod tests {
             acc.notes
         );
         assert!(acc.skipped_mappers.is_empty());
-        assert!(!acc.cleanup_uncertain);
+        assert!(!acc.cleanup.is_uncertain());
     }
 
     // Intent: a null_underlying entry whose devid is absent from
@@ -4641,7 +4700,7 @@ mod tests {
             acc.notes
         );
         assert!(acc.skipped_mappers.is_empty());
-        assert!(!acc.cleanup_uncertain);
+        assert!(!acc.cleanup.is_uncertain());
     }
 
     // Intent: a null_underlying entry whose devid is claimed by two
@@ -4650,30 +4709,28 @@ mod tests {
     //   rescan the skipped mapper.
     // Why it exists: pins the corruption path so duplicate devids cannot
     //   silently demote to orphan cleanup, and so the Pass 3 exclusion set
-    //   includes every pool.devices and pool.null_underlying mapper.
+    //   includes every pool.devices and pool.null_underlying mapper. An
+    //   unrelated absent member must stay known-closed because duplicate-devid
+    //   is classified-incomplete, not unclassified-incomplete.
     // Scenario: in-memory membership bypasses load-time validation and
     //   contains two members with devid 7 while btrfs reports braid-dup
-    //   as the matching null-underlying mapper.
+    //   as the matching null-underlying mapper; another member is absent and
+    //   unrelated to the duplicate-devid collision.
     #[test]
     fn full_arm_pass2_duplicate_devid_skips_and_warns_with_cleanup_uncertain() {
-        use crate::membership::DiskMember;
-        use crate::types::{ByIdPath, DiskName, LuksUuid};
+        use crate::types::LuksUuid;
 
         let aaa_uuid = LuksUuid::parse(AAA_UUID).unwrap();
         let bbb_uuid = LuksUuid::parse(BBB_UUID).unwrap();
-        let mut aaa = DiskMember::new(
-            DiskName::parse("aaa").unwrap(),
-            ByIdPath::parse("/dev/disk/by-id/a").unwrap(),
-        );
-        let mut bbb = DiskMember::new(
-            DiskName::parse("bbb").unwrap(),
-            ByIdPath::parse("/dev/disk/by-id/b").unwrap(),
-        );
+        let (ccc_uuid, ccc) = disk_member(702, "ccc", "/dev/disk/by-id/c");
+        let (_, mut aaa) = disk_member(703, "aaa", "/dev/disk/by-id/a");
+        let (_, mut bbb) = disk_member(704, "bbb", "/dev/disk/by-id/b");
         aaa.devid = Some(7);
         bbb.devid = Some(7);
         let membership = PoolMembership::for_corruption_tests(vec![
             (aaa_uuid.clone(), aaa),
             (bbb_uuid.clone(), bbb),
+            (ccc_uuid, ccc),
         ]);
         let pool = synthetic_pool_state_with_null_underlying("braid-aaa", "braid-dup", 7);
         let fs = lock_fs(&["/dev/mapper/braid-aaa", "/dev/mapper/braid-dup"]);
@@ -4697,7 +4754,7 @@ mod tests {
             orphan_summaries(&close_set)
         );
         assert_eq!(acc.skipped_mappers, vec![MapperName("braid-dup".into())]);
-        assert!(acc.cleanup_uncertain);
+        assert!(acc.cleanup.is_uncertain());
 
         let warns: Vec<&str> = acc
             .notes
@@ -4770,9 +4827,10 @@ mod tests {
         let plan = plan_lock(&plan_runner, &fs, &config, &membership, LockMode::User)
             .expect("plan should succeed");
 
-        assert!(
-            plan.members_known_closed.is_empty(),
-            "duplicate-devid claimants must not be reported closed, got: {:?}",
+        assert_eq!(
+            known_closed_names(&plan),
+            vec!["ccc"],
+            "dup-devid claimants aaa/bbb excluded as potentially-present, but unrelated absent ccc must stay known-closed: {:?}",
             known_closed_names(&plan)
         );
     }
@@ -4816,7 +4874,7 @@ mod tests {
             "all candidates should verify"
         );
         assert!(
-            !acc.cleanup_uncertain,
+            !acc.cleanup.is_uncertain(),
             "verified candidates are complete cleanup"
         );
     }
@@ -4902,7 +4960,7 @@ mod tests {
             acc.skipped_mappers,
             vec![MapperName("braid-stranded".to_owned())]
         );
-        assert!(acc.cleanup_uncertain);
+        assert!(acc.cleanup.is_uncertain());
         assert!(
             acc.notes.iter().any(|note| matches!(
                 note,
