@@ -1,5 +1,5 @@
 {
-  description = "braid — NixOS NAS with LUKS + btrfs RAID1";
+  description = "Manage an encrypted btrfs-RAID1 NAS on NixOS";
 
   inputs = {
     nixpkgs.url = "github:NixOS/nixpkgs/nixos-26.05";
@@ -33,10 +33,20 @@
               || (builtins.match ".*tests/fixtures/.*" path != null)
               || (builtins.match ".*\\.snap$" path != null);
           };
+          # Shared by both the unwrapped CLI and the wrapped `braid`. The wrapped
+          # package extends this with `platforms = linux` since it shells out to
+          # btrfs/luks tooling; the unwrapped CLI is pure Rust and builds on darwin.
+          commonMeta = {
+            description = "Manage an encrypted btrfs-RAID1 NAS on NixOS";
+            homepage = "https://github.com/danneu/braid";
+            license = pkgs.lib.licenses.mit;
+            mainProgram = "braid"; # pname is braid-cli, but the binary is `braid`
+          };
           commonArgs = {
             inherit src;
             pname = "braid-cli";
             version = "0.0.1";
+            meta = commonMeta;
           };
           cargoArtifacts = craneLib.buildDepsOnly commonArgs;
           braid-cli-unwrapped = craneLib.buildPackage (commonArgs // { inherit cargoArtifacts; });
@@ -48,11 +58,20 @@
             pkgs.smartmontools
             pkgs.nut
           ];
-          braid = pkgs.runCommand "braid" { nativeBuildInputs = [ pkgs.makeWrapper ]; } ''
-            mkdir -p $out/bin
-            makeWrapper ${braid-cli-unwrapped}/bin/braid $out/bin/braid \
-              --prefix PATH : ${toolPath}
-          '';
+          braid =
+            pkgs.runCommand "braid"
+              {
+                nativeBuildInputs = [ pkgs.makeWrapper ];
+                # Wrapped binary shells out to btrfs/luks/etc, so it is Linux-only.
+                meta = commonMeta // {
+                  platforms = pkgs.lib.platforms.linux;
+                };
+              }
+              ''
+                mkdir -p $out/bin
+                makeWrapper ${braid-cli-unwrapped}/bin/braid $out/bin/braid \
+                  --prefix PATH : ${toolPath}
+              '';
         in
         {
           inherit braid-cli-unwrapped;
