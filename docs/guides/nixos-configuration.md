@@ -43,7 +43,7 @@ When `braid.enable = true`, the module sets up:
 
 - **Monthly btrfs scrub** -- timer + service tied to pool lifecycle. Configurable via `braid.autoScrub`.
 - **Resilient boot** -- a dead drive never blocks boot. LUKS open and btrfs mount are deferred to `braid unlock`, not wired into `boot.initrd`.
-- **Pinned toolchain** -- btrfs-progs, cryptsetup, and util-linux are pinned to NixOS stable versions. Override with `braid.packages.*` if needed.
+- **Pinned toolchain** -- btrfs-progs, cryptsetup, util-linux, NUT, smartmontools, and ethtool are pinned to NixOS stable versions. Override with `braid.packages.*` if needed.
 - **Shell completions** -- bash, zsh, and fish completions registered automatically via `clap_complete`.
 - **smartd integration** -- `services.smartd` enabled by default with a braid-owned alert script. SMART failures trigger the braid alert service.
 - **Storage group** -- a `storage` group is created; mount point is set to `root:storage 2770` after unlock. See [Sharing and permissions](sharing-and-permissions.md).
@@ -68,6 +68,9 @@ When `braid.enable = true`, the module sets up:
 | `braid.packages.cryptsetup` | package | `pkgs.cryptsetup` | cryptsetup package |
 | `braid.packages.btrfsProgs` | package | `pkgs.btrfs-progs` | btrfs-progs package |
 | `braid.packages.utilLinux` | package | `pkgs.util-linux` | util-linux package |
+| `braid.packages.nut` | package | `pkgs.nut` | NUT package |
+| `braid.packages.smartmontools` | package | `pkgs.smartmontools` | smartmontools package |
+| `braid.packages.ethtool` | package | `pkgs.ethtool` | ethtool package |
 
 Override these only if you need a specific version for compatibility testing. The defaults are the NixOS stable versions from your nixpkgs input.
 

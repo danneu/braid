@@ -7,7 +7,7 @@ status: Active
 
 ## Context
 
-Braid's parser-critical runtime tools (btrfs-progs, cryptsetup, util-linux, NUT, smartmontools) are parsed by the Rust CLI. Output formats change between tool versions — a flake update to nixpkgs-unstable could silently break parsers. Generic helpers (coreutils, systemd) are used for basic system operations and are outside braid's parser contract. Browse has one tolerant UI-only systemd exception: it parses `systemctl list-units --output=json` for a picker and falls back to raw output on parse failure.
+Braid's parser-critical runtime tools (btrfs-progs, cryptsetup, util-linux, NUT, smartmontools, ethtool) are parsed by the Rust CLI. Output formats change between tool versions -- a flake update to nixpkgs-unstable could silently break parsers. Generic helpers (coreutils, systemd) are used for basic system operations and are outside braid's parser contract. Browse has one tolerant UI-only systemd exception: it parses `systemctl list-units --output=json` for a picker and falls back to raw output on parse failure.
 
 ## Decision
 
@@ -16,7 +16,7 @@ Pin `flake.nix` to a specific NixOS stable release (nixos-26.05). Pin only parse
 ### How it works
 
 - **Flake input**: `nixpkgs.url = "github:NixOS/nixpkgs/nixos-26.05"` — parser-critical tool packages come from this channel.
-- **Module options**: `braid.packages.*` (cryptsetup, btrfsProgs, utilLinux, nut, smartmontools) default to the flake's nixpkgs but can be overridden per-system.
+- **Module options**: `braid.packages.*` (cryptsetup, btrfsProgs, utilLinux, nut, smartmontools, ethtool) default to the flake's nixpkgs but can be overridden per-system.
 - **PATH wrapping**: The wrapper injects `cfg.packages.*` into PATH. Generic helpers (coreutils, systemd) are resolved from the consumer's `pkgs`, not pinned.
 - **Two wrapping sites**: flake.nix wraps with `pkgs.*` defaults (for `nix run` and tests); the module wraps `cfg.package` with `cfg.packages.*` (for deployed NixOS systems where package options may be overridden).
 
@@ -39,6 +39,7 @@ New runtime dependencies must be classified into one of these two groups when ad
 | util-linux (lsblk) | Yes | Yes (`braid.packages.utilLinux`) | `lsblk` JSON output parsed by serde |
 | NUT (`upsc`) | Yes | Yes (`braid.packages.nut`) | `upsc` key: value output parsed by `parse_upsc` for preflight safety and operator visibility |
 | smartmontools | Yes | Yes (`braid.packages.smartmontools`) | `smartctl --json` output parsed by `parse_smartctl` |
+| ethtool | Yes | Yes (`braid.packages.ethtool`) | `Wake-on:` line parsed by the doctor `wake_on_lan` check |
 | coreutils | No — system `pkgs` | No option | chown/chmod/realpath/stat — output not parsed |
 | systemd | No — system `pkgs` | No option | systemctl/ask-password commodity behavior; Browse's list-units JSON picker is tolerant UI-only, not parser-critical |
 
@@ -56,6 +57,8 @@ New runtime dependencies must be classified into one of these two groups when ad
 5. Update parser tests if output format changed.
 
 NUT specifically: `parse_upsc` depends on the `key: value` shape emitted by `pkgs.nut`'s `upsc` client (see `reference/nut/clients/upsc.c`). A nixpkgs bump that touches `networkupstools` triggers the same fixture-refresh obligation as the other pinned tools -- run `just capture-ups-fixtures` and `just test-rust` before merging. The `braid-status-ups` check under `just test-parsers` is the live-tool mirror of the golden fixtures.
+
+ethtool specifically: `wake_on_lan` depends on the `Supports Wake-on:` and `Wake-on:` lines emitted by `pkgs.ethtool`. VM virtio NICs do not provide useful Wake-on-LAN state, so there is no live fixture-capture lane; parser coverage is hand-authored in Rust unit tests, and wrapper provenance is covered by the `tool-versions` and `braid-auto-suspend` VM tests.
 
 ## Alternatives considered
 

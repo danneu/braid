@@ -34,6 +34,11 @@ let
         name = cfg.ups.name;
       };
     }
+    // lib.optionalAttrs cfg.autoSuspend.enable {
+      auto_suspend = {
+        wol_interface = cfg.autoSuspend.wolInterface;
+      };
+    }
   );
 in
 {

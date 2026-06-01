@@ -16,6 +16,7 @@ let
       utilLinux
       nut
       smartmontools
+      ethtool
     ])
     ++ [ pkgs.systemd ];
 in

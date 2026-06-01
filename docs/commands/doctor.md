@@ -2,7 +2,7 @@
 
 # braid doctor
 
-Runs diagnostic checks on your braid configuration, pool health, RAID profile consistency, LUKS headers, and alerting hardware. Reports issues and suggests fixes.
+Runs diagnostic checks on your braid configuration, pool health, RAID profile consistency, LUKS headers, auto-suspend wake path, and alerting hardware. Reports issues and suggests fixes.
 
 ## When to use it
 
@@ -37,6 +37,7 @@ Output:
 [skip] alert beep      skipped (pass --beep to play the audible alert test beep)
 [skip] ups daemon      skipped (braid.ups not enabled)
 [skip] braid-online    skipped (braid.ups not enabled)
+[skip] wake-on-lan     skipped (braid.autoSuspend not enabled)
 ```
 
 The SMART self-test check emits one row per pool drive. If a drive has no recent completed self-test, the row includes a paste-ready smartctl command:
@@ -81,6 +82,7 @@ Prints a JSON object with `status` (one of `ok`, `warn`, `fail`, `skip`) and a `
 | `beep_path` | PC speaker alert beep is configured; with `--beep`, the alert beep command succeeds |
 | `ups_daemon` | With UPS enabled, `upsc` is available and can query the UPS daemon; missing or spawn-failed `upsc` is a failure, daemon unreachable/non-zero `upsc` is a warning |
 | `braid_online_active` | With UPS enabled and the pool mounted, `braid-online.service` is active so shutdown unmounts the pool |
+| `wake_on_lan` | With auto-suspend enabled, `ethtool <interface>` reports magic-packet wake support and active `Wake-on: g`; disabled, unsupported, missing, or unparseable WoL state is a failure |
 
 ## Flags
 
@@ -103,7 +105,8 @@ Prints a JSON object with `status` (one of `ok`, `warn`, `fail`, `skip`) and a `
 5. If the braid monitor NixOS module is configured, reports the alert beep check as skipped by default.
 6. With `--beep`, plays a short test beep through the canonical beep wrapper.
 7. If UPS support is enabled, checks `upsc` and the mounted-pool `braid-online.service` shutdown hook.
-8. Aggregates results and prints a summary.
+8. If auto-suspend is enabled, runs `ethtool <interface>` to verify runtime Wake-on-LAN state.
+9. Aggregates results and prints a summary.
 
 ## Related commands
 

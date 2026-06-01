@@ -146,7 +146,7 @@ If a mutation is interrupted, braid leaves `/var/lib/braid/pending-op.json` in p
 | [lock](docs/commands/lock.md) | Unmount the pool and close LUKS devices |
 | [idle](docs/commands/idle.md) | Check if the pool is idle (for auto-suspend) |
 | [status](docs/commands/status.md) | Pool health, disk status, allocation, scrub info |
-| [doctor](docs/commands/doctor.md) | Diagnostic checks for config and pool health |
+| [doctor](docs/commands/doctor.md) | Diagnostic checks for config, pool health, and runtime safety |
 | [monitor](docs/commands/monitor.md) | Health check for alerting (used by systemd timer) |
 | [ack](docs/commands/ack.md) | Acknowledge and silence an active alert |
 | [enroll](docs/commands/enroll.md) | Enroll a USB keyfile for auto-unlock |

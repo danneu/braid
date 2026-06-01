@@ -267,7 +267,7 @@ Write failing tests first, confirm they fail for the expected reasons, then impl
 
 ## Parser Compatibility
 
-braid parses output from btrfs-progs, cryptsetup, util-linux, smartmontools, and NUT. These parsers can break when tool versions change. Two validation lanes exist:
+braid parses output from btrfs-progs, cryptsetup, util-linux, smartmontools, NUT, and ethtool. These parsers can break when tool versions change. Two validation lanes exist:
 
 ### Stable lane (pinned contract)
 
@@ -292,8 +292,14 @@ braid parses output from btrfs-progs, cryptsetup, util-linux, smartmontools, and
   `smartctl-sata-with-temperature.json` against the new
   health/temperature JSON shape (`smart_status`, `temperature`,
   `ata_smart_attributes`).
+- **ethtool WoL fixtures are hand-authored / no-live-capture.** VM
+  virtio NICs do not emit useful Wake-on-LAN data, so
+  `just capture-all-fixtures` does not regenerate ethtool output. The
+  doctor `wake_on_lan` parser is covered by hand-authored Rust unit
+  fixtures, and wrapper provenance is covered by the override-based VM
+  tests in `tool-versions` and `braid-auto-suspend`.
 
-Parser-critical tool versions are the pinned `nixpkgs` versions of `btrfs-progs`, `cryptsetup`, `util-linux`, `nut`, and `smartmontools`. Treat any change to the `nixpkgs` node in `flake.lock`, any `flake.nix` change that alters the `nixpkgs` input, or any change to `braid.packages.{btrfsProgs,cryptsetup,utilLinux,nut,smartmontools}` as a required fixture-refresh event.
+Parser-critical tool versions are the pinned `nixpkgs` versions of `btrfs-progs`, `cryptsetup`, `util-linux`, `nut`, `smartmontools`, and `ethtool`. Treat any change to the `nixpkgs` node in `flake.lock`, any `flake.nix` change that alters the `nixpkgs` input, or any change to `braid.packages.{btrfsProgs,cryptsetup,utilLinux,nut,smartmontools,ethtool}` as a required fixture-refresh event.
 
 When parser-critical tool versions change, run:
 
@@ -311,10 +317,11 @@ Early-warning lane for upstream parser/output drift. Unstable failures signal up
 - `just capture-all-fixtures-unstable` + `just test-rust-unstable` --
   covers btrfs/cryptsetup/util-linux/NUT against unstable tool output via
   golden fixtures. Missing fixtures fail (not skip).
-- **smartctl has no unstable fixtures.** Unstable capture/test coverage
-  intentionally covers btrfs/cryptsetup/util-linux/NUT only; see the
-  Stable lane for why smartctl fixtures are stable-only and how to
-  refresh them on smartmontools bumps.
+- **smartctl and ethtool have no unstable fixtures.** Unstable
+  capture/test coverage intentionally covers btrfs/cryptsetup/util-linux/NUT
+  only; see the Stable lane for why smartctl fixtures are stable-only and
+  how to refresh them on smartmontools bumps, and why ethtool WoL output
+  is hand-authored instead of live-captured.
 
 Full unstable canary workflow:
 

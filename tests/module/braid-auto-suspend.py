@@ -12,6 +12,7 @@
 #   Read the generated autosuspend config file and verify all expected
 #   sections and values are present.
 
+import json
 import re
 import time
 
@@ -82,6 +83,10 @@ with subtest("General settings"):
     assert "idle_time=900" in config, "Missing idle_time=900 in config"
     assert "interval=60" in config, "Missing interval=60 in config"
 
+with subtest("braid config records WoL interface"):
+    braid_config = json.loads(machine.succeed("cat /etc/braid/config.json"))
+    assert braid_config["auto_suspend"]["wol_interface"] == "eth0", braid_config
+
 with subtest("BraidPool command fail-closes when braid idle overruns the inner timeout"):
     # Intent: Pin that a signal-killable overrun of `braid idle` past the
     #   inner `timeout -k 2 10` produces autosuspend exit 0 (block suspend),
@@ -131,5 +136,24 @@ with subtest("WoL link file exists for configured interface"):
     # support real WoL.)
     link_content = machine.succeed("cat /etc/systemd/network/40-eth0.link")
     assert "WakeOnLan" in link_content, "Missing WakeOnLan in link file: " + link_content
+
+def doctor_wol_check(mode):
+    machine.succeed(f"printf '{mode}\\n' > /tmp/braid-wol-mode")
+    result = machine.execute("braid doctor --json")
+    report = json.loads(result[1])
+    checks = {c["name"]: c for c in report["checks"]}
+    return result[0], checks["wake_on_lan"], result[1]
+
+with subtest("doctor wake_on_lan uses overridden ethtool package"):
+    exit_code, check, raw = doctor_wol_check("g")
+    assert exit_code == 0, f"doctor should pass with Wake-on: g: {raw}"
+    assert check["status"] == "ok", check
+    assert "Wake-on: g" in check["message"], check
+
+with subtest("doctor wake_on_lan fails when overridden ethtool reports disabled"):
+    exit_code, check, raw = doctor_wol_check("d")
+    assert exit_code != 0, f"doctor should fail with Wake-on: d: {raw}"
+    assert check["status"] == "fail", check
+    assert "Wake-on: d" in check["message"], check
 
 machine.shutdown()

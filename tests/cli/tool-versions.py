@@ -16,6 +16,7 @@ for tool in [
     "mountpoint",
     "upsc",
     "smartctl",
+    "ethtool",
 ]:
     with subtest(f"{tool} provenance"):
         path = machine.succeed(f"readlink -f $(command -v {tool})").strip()
@@ -46,6 +47,13 @@ with subtest("smartmontools version"):
     version = machine.succeed("smartctl --version").strip().splitlines()[0]
     exp = f"smartctl {expected['smartmontools']}"
     assert version.startswith(exp), f"expected prefix {exp!r}, got {version!r}"
+
+with subtest("ethtool version"):
+    version = machine.succeed("ethtool --version").strip()
+    assert version.startswith("ethtool"), f"unexpected ethtool version line: {version!r}"
+    assert version.endswith(expected["ethtool"]), (
+        f"expected version suffix {expected['ethtool']!r}, got {version!r}"
+    )
 
 # Rust binary wrapper provenance
 with subtest("braid provenance"):
@@ -92,3 +100,50 @@ with subtest("module wrapper finds upsc with empty PATH"):
 with subtest("top-level package wrapper finds upsc with empty PATH"):
     top_level_braid = machine.succeed("cat /etc/braid/top-level-braid-path").strip()
     assert_wrapper_finds_upsc("top-level-wrapper", shlex.quote(top_level_braid))
+
+wol_config = json.dumps(
+    {
+        "mount_point": "/mnt/storage",
+        "pool_access_group": "storage",
+        "systemd_lifecycle": True,
+        "auto_suspend": {"wol_interface": "eth0"},
+    }
+)
+machine.succeed(
+    "printf '%s\\n' "
+    + shlex.quote(wol_config)
+    + " > /tmp/tool-versions-wol.json"
+)
+
+
+def assert_wrapper_finds_ethtool(label, braid_command):
+    stdout_path = f"/tmp/{label}-wol.out"
+    stderr_path = f"/tmp/{label}-wol.err"
+    machine.execute(
+        f"PATH=/nonexistent {braid_command} --config /tmp/tool-versions-wol.json "
+        f"doctor --json >{stdout_path} 2>{stderr_path}"
+    )
+    parsed = json.loads(machine.succeed(f"cat {stdout_path}"))
+    checks = {c["name"]: c for c in parsed["checks"]}
+    check = checks["wake_on_lan"]
+    assert check["status"] in ["ok", "fail"], (
+        f"{label}: expected ethtool-backed parsed result, got {check}"
+    )
+    assert "invocation failed" not in check["message"], (
+        f"{label}: wrapper should find ethtool, got {check}"
+    )
+    assert "braid.packages.ethtool" not in check["message"], (
+        f"{label}: wrapper should find configured ethtool, got {check}"
+    )
+    err = machine.succeed(f"cat {stderr_path}")
+    assert err in ["", "error: doctor found failures\n"], (
+        f"{label}: unexpected stderr under --json, got {err!r}"
+    )
+
+
+with subtest("module wrapper finds ethtool with empty PATH"):
+    assert_wrapper_finds_ethtool("module-wrapper", shlex.quote(module_braid))
+
+with subtest("top-level package wrapper finds ethtool with empty PATH"):
+    top_level_braid = machine.succeed("cat /etc/braid/top-level-braid-path").strip()
+    assert_wrapper_finds_ethtool("top-level-wrapper", shlex.quote(top_level_braid))

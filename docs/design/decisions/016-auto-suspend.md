@@ -79,7 +79,7 @@ A paused balance holds the btrfs exclusive-operation lock. The mutating-command 
 
 ### WoL managed by braid
 
-`braid.autoSuspend.wolInterface` is required when sleep is enabled. braid sets `networking.interfaces.<iface>.wakeOnLan.enable = true` on the specified interface. A build-time assertion prevents enabling sleep without WoL — otherwise the NAS suspends and becomes unreachable until someone physically presses the power button. The BIOS-side WoL setting is the user's responsibility (can't be automated from NixOS).
+`braid.autoSuspend.wolInterface` is required when sleep is enabled. braid sets `networking.interfaces.<iface>.wakeOnLan.enable = true` on the specified interface. A build-time assertion prevents enabling sleep without WoL -- otherwise the NAS suspends and becomes unreachable until someone physically presses the power button. `braid doctor` verifies the live NIC reports magic-packet wake (`Wake-on: g`) for that interface. The BIOS-side WoL setting is the user's responsibility (can't be automated from NixOS).
 
 ### Fully qualified store paths
 

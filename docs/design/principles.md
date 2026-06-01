@@ -56,7 +56,7 @@ Braid only targets NixOS. No portability abstractions, no generic Linux fallback
 
 ## 10. Pinned toolchain
 
-Parser-critical tools (btrfs-progs, cryptsetup, util-linux, NUT, smartmontools) are pinned to a specific NixOS stable release via the flake input. Wrappers execute with an explicit PATH built from module-controlled packages (`braid.packages.*`). Parsers assume the output format of the pinned version — upgrading those tools requires updating fixtures and parser tests. These pinned defaults are a compatibility baseline, not a lock; users may override `braid.packages.*` to pick up newer system versions when needed. Generic helpers (coreutils, systemd) come from the consumer's package set and are not part of braid's parser contract, except that Browse parses `systemctl list-units --output=json` as a tolerant UI-only picker with raw-output fallback. [Why →](decisions/010-toolchain-pinning.md)
+Parser-critical tools (btrfs-progs, cryptsetup, util-linux, NUT, smartmontools, ethtool) are pinned to a specific NixOS stable release via the flake input. Wrappers execute with an explicit PATH built from module-controlled packages (`braid.packages.*`). Parsers assume the output format of the pinned version -- upgrading those tools requires updating fixtures and parser tests. These pinned defaults are a compatibility baseline, not a lock; users may override `braid.packages.*` to pick up newer system versions when needed. Generic helpers (coreutils, systemd) come from the consumer's package set and are not part of braid's parser contract, except that Browse parses `systemctl list-units --output=json` as a tolerant UI-only picker with raw-output fallback. [Why ->](decisions/010-toolchain-pinning.md)
 
 ## 11. HDD defaults
 

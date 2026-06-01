@@ -57,6 +57,7 @@
             pkgs.systemd
             pkgs.smartmontools
             pkgs.nut
+            pkgs.ethtool
           ];
           braid =
             pkgs.runCommand "braid"
@@ -1027,6 +1028,7 @@
               utilLinux = lib.mkDefault braidPkgs.util-linux;
               nut = lib.mkDefault braidPkgs.nut;
               smartmontools = lib.mkDefault braidPkgs.smartmontools;
+              ethtool = lib.mkDefault braidPkgs.ethtool;
             };
           };
         };

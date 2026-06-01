@@ -40,6 +40,14 @@ pub struct Ups {
     pub name: String,
 }
 
+/// Module-owned auto-suspend config mirrored into the CLI so runtime
+/// diagnostics can verify the same wake path NixOS configures at build time.
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct AutoSuspend {
+    pub wol_interface: String,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
 #[serde(try_from = "RawConfig")]
 pub struct Config {
@@ -48,6 +56,7 @@ pub struct Config {
     systemd_lifecycle: bool,
     fan_control: Option<FanControl>,
     ups: Option<Ups>,
+    auto_suspend: Option<AutoSuspend>,
 }
 
 impl Config {
@@ -61,6 +70,7 @@ impl Config {
             systemd_lifecycle: false,
             fan_control: None,
             ups: None,
+            auto_suspend: None,
         })
     }
 
@@ -86,6 +96,12 @@ impl Config {
 
     pub fn ups(&self) -> Option<&Ups> {
         self.ups.as_ref()
+    }
+
+    /// Auto-suspend settings are presence-based so commands can skip WoL
+    /// checks cleanly on hosts where suspend is not part of braid's contract.
+    pub fn auto_suspend(&self) -> Option<&AutoSuspend> {
+        self.auto_suspend.as_ref()
     }
 }
 
@@ -121,6 +137,8 @@ struct RawConfig {
     fan_control: Option<FanControl>,
     #[serde(default)]
     ups: Option<Ups>,
+    #[serde(default)]
+    auto_suspend: Option<AutoSuspend>,
 }
 
 impl TryFrom<RawConfig> for Config {
@@ -132,6 +150,7 @@ impl TryFrom<RawConfig> for Config {
         cfg.systemd_lifecycle = raw.systemd_lifecycle;
         cfg.fan_control = raw.fan_control;
         cfg.ups = raw.ups;
+        cfg.auto_suspend = raw.auto_suspend;
         Ok(cfg)
     }
 }
@@ -285,6 +304,22 @@ mod tests {
         assert_eq!(u.name, "ups");
     }
 
+    // Intent: Config deserializes the auto_suspend block emitted by modules/braid/cli.nix.
+    // Why: doctor needs the module-selected WoL interface at runtime; a schema
+    // mismatch would silently skip the wake_on_lan check on auto-suspend hosts.
+    // Scenario: NixOS generation with braid.autoSuspend.enable = true and
+    // wolInterface = "eno1".
+    #[test]
+    fn parses_config_with_auto_suspend() {
+        let raw = r#"{
+            "mount_point": "/mnt/storage",
+            "auto_suspend": { "wol_interface": "eno1" }
+        }"#;
+        let cfg: Config = serde_json::from_str(raw).expect("config should parse");
+        let auto = cfg.auto_suspend().expect("auto_suspend should be Some");
+        assert_eq!(auto.wol_interface, "eno1");
+    }
+
     // Intent: Config deserializes without systemd_lifecycle and defaults it to false.
     // Why it exists: standalone CLI configs omit module-owned lifecycle
     // capability and must not run braid-online systemctl calls.
@@ -366,6 +401,17 @@ mod tests {
         assert!(cfg.ups().is_none());
     }
 
+    // Intent: Config parses when auto_suspend key is absent.
+    // Why: hosts without braid.autoSuspend enabled must not fail config parsing
+    // or run Wake-on-LAN-specific diagnostics.
+    // Scenario: regular always-on NAS deployment runs any braid command.
+    #[test]
+    fn parses_config_without_auto_suspend() {
+        let raw = r#"{"mount_point":"/mnt/storage"}"#;
+        let cfg: Config = serde_json::from_str(raw).expect("config should parse");
+        assert!(cfg.auto_suspend().is_none());
+    }
+
     // Intent: malformed pwm (missing required fields) fails to deserialize.
     // Why: catching a missing pwm field at parse time surfaces the config bug
     // at CLI startup rather than as a mysterious None later in the TUI.
@@ -411,6 +457,28 @@ mod tests {
                 "max_temp": 40,
                 "min_fan_speed_percent": 20,
                 "future_key": 1
+            }
+        }"#;
+        let err = serde_json::from_str::<Config>(raw).expect_err("unknown key must fail");
+        let message = err.to_string();
+        assert!(
+            message.contains("future_key") || message.contains("unknown field"),
+            "expected unknown-field error, got: {message}"
+        );
+    }
+
+    // Intent: unknown keys inside auto_suspend fail to deserialize.
+    // Why it exists: RawConfig's deny_unknown_fields does not propagate into
+    // nested structs, so this pins the auto-suspend boundary explicitly.
+    // Scenario: a future modules/braid/cli.nix adds an auto_suspend key against
+    // a CLI binary that predates the addition.
+    #[test]
+    fn rejects_unknown_field_in_auto_suspend() {
+        let raw = r#"{
+            "mount_point": "/mnt/storage",
+            "auto_suspend": {
+                "wol_interface": "eno1",
+                "future_key": true
             }
         }"#;
         let err = serde_json::from_str::<Config>(raw).expect_err("unknown key must fail");

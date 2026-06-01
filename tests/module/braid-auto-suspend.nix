@@ -26,6 +26,19 @@
         package = braid;
         autoSuspend.enable = true;
         autoSuspend.wolInterface = "eth0";
+        packages.ethtool = pkgs.writeShellScriptBin "ethtool" ''
+          if [ "$#" -ne 1 ]; then
+            echo "fake ethtool expects exactly one interface" >&2
+            exit 64
+          fi
+
+          mode=g
+          if [ -r /tmp/braid-wol-mode ]; then
+            read -r mode < /tmp/braid-wol-mode || mode=g
+          fi
+
+          printf 'Settings for %s:\n\tSupports Wake-on: pumbg\n\tWake-on: %s\n' "$1" "$mode"
+        '';
       };
 
       services.samba = {

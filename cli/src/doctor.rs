@@ -1208,6 +1208,110 @@ fn check_beep_path<R: CommandRunner>(
     check_beep_path_inner(ctx, Path::new(NOTIFIER_CONFIG_PATH), options)
 }
 
+/// Extract one ethtool text field while keeping the parser local to doctor.
+/// The RealRunner pins LC_ALL=C, so these English labels are the runtime
+/// contract for Wake-on-LAN diagnostics.
+fn ethtool_field<'a>(stdout: &'a str, label: &str) -> Option<&'a str> {
+    stdout
+        .lines()
+        .find_map(|line| line.trim_start().strip_prefix(label).map(str::trim))
+        .filter(|value| !value.is_empty())
+}
+
+/// ethtool WoL modes are compact flag strings; rejecting unknown characters
+/// keeps output drift from being misread as either safe or unsupported.
+fn wol_modes_parseable(value: &str) -> bool {
+    !value.is_empty() && value.chars().all(|c| "pumbagsfd".contains(c))
+}
+
+/// Pure Wake-on-LAN classifier so tests can cover every ethtool output branch
+/// without needing a VM NIC that supports real magic-packet wake.
+fn summarize_wol(interface: &str, stdout: &str, stderr: &str, exit_status: i32) -> CheckResult {
+    let name = "wake_on_lan";
+    if exit_status != 0 {
+        let detail = stderr.trim();
+        let suffix = if detail.is_empty() {
+            String::new()
+        } else {
+            format!(": {detail}")
+        };
+        return CheckResult::fail(
+            name,
+            format!(
+                "ethtool {interface} failed (exit {exit_status}){suffix} -- cannot verify Wake-on-LAN"
+            ),
+        );
+    }
+
+    let Some(supports) =
+        ethtool_field(stdout, "Supports Wake-on:").filter(|value| wol_modes_parseable(value))
+    else {
+        return CheckResult::fail(
+            name,
+            format!(
+                "could not parse ethtool output for {interface} -- expected Supports Wake-on and Wake-on lines"
+            ),
+        );
+    };
+    let Some(active) = ethtool_field(stdout, "Wake-on:").filter(|value| wol_modes_parseable(value))
+    else {
+        return CheckResult::fail(
+            name,
+            format!(
+                "could not parse ethtool output for {interface} -- expected Supports Wake-on and Wake-on lines"
+            ),
+        );
+    };
+
+    if !supports.contains('g') {
+        return CheckResult::fail(
+            name,
+            format!(
+                "{interface} does not report magic-packet WoL support (Supports Wake-on: {supports}) -- use a wired NIC/driver that supports Wake-on-LAN"
+            ),
+        );
+    }
+
+    if !active.contains('g') {
+        return CheckResult::fail(
+            name,
+            format!(
+                "{interface} supports magic-packet WoL but reports Wake-on: {active} -- rebuild, verify the interface name, and check BIOS/driver WoL settings"
+            ),
+        );
+    }
+
+    CheckResult::ok(
+        name,
+        format!("{interface} reports Wake-on: {active} (magic packet armed)"),
+    )
+}
+
+/// Runtime WoL verification for auto-suspend hosts. Build-time NixOS config
+/// can request magic wake, but only the live NIC state proves the NAS will not
+/// suspend into an unreachable state.
+fn check_wake_on_lan<R: CommandRunner>(ctx: &mut DoctorContext<'_, R>) -> CheckResult {
+    let name = "wake_on_lan";
+    let Some(config) = ctx.config.as_ref() else {
+        return CheckResult::skip(name, "skipped (config not available)");
+    };
+    let Some(auto_suspend) = config.auto_suspend() else {
+        return CheckResult::skip(name, "skipped (braid.autoSuspend not enabled)");
+    };
+    let interface = auto_suspend.wol_interface.as_str();
+    match ctx.runner.run(&CmdRequest::EthtoolShow {
+        interface: interface.to_owned(),
+    }) {
+        Ok(out) => summarize_wol(interface, &out.stdout, &out.stderr, out.exit_status),
+        Err(e) => CheckResult::fail(
+            name,
+            format!(
+                "ethtool invocation failed for {interface}: {e} -- is braid.packages.ethtool on PATH?"
+            ),
+        ),
+    }
+}
+
 /// UPS doctor check for `braid.ups.enable = true`.
 ///
 /// A spawn failure or missing `upsc` is `Fail` because the enabled UPS
@@ -1481,6 +1585,7 @@ pub fn run_doctor<R: CommandRunner>(
     checks.push(check_beep_path(&mut ctx, options));
     checks.push(check_ups_daemon_up(&mut ctx));
     checks.push(check_braid_online_active_when_mounted(&mut ctx));
+    checks.push(check_wake_on_lan(&mut ctx));
 
     let status = overall_status(&checks);
 
@@ -1524,6 +1629,7 @@ pub fn format_doctor_human_with(report: &DoctorReport, color_enabled: bool) -> S
             "beep_path" => "alert beep",
             "ups_daemon" => "ups daemon",
             "braid_online_active" => "braid-online",
+            "wake_on_lan" => "wake-on-lan",
             other => other,
         };
         let display_label = match c.subject.as_deref() {
@@ -1813,6 +1919,7 @@ mod tests {
             "smart_self_test",
             "system_profile_mismatch",
             "ups_daemon",
+            "wake_on_lan",
         ];
         assert_eq!(actual_names, expected_names);
         assert_eq!(find_check(&report, "config_file").status, CheckStatus::Ok);
@@ -5415,6 +5522,190 @@ mod tests {
     }
 
     // ---------------------------------------------------------------------
+    // Wake-on-LAN doctor checks
+
+    fn config_with_auto_suspend() -> &'static str {
+        r#"{"mount_point":"/mnt/storage","auto_suspend":{"wol_interface":"eno1"}}"#
+    }
+
+    // Intent: summarize_wol reports Ok when ethtool shows magic-packet wake armed.
+    // Why it exists: this is the only green path for auto-suspend hosts; if it
+    // drifts, doctor either strands a NAS silently or creates false failures.
+    // Scenario: operator rebuilt with braid.autoSuspend.wolInterface and the
+    // NIC reports Wake-on: g at runtime.
+    #[test]
+    fn wol_summary_ok_when_magic_packet_armed() {
+        let r = summarize_wol(
+            "eno1",
+            "Settings for eno1:\n\tSupports Wake-on: pumbg\n\tWake-on: g\n",
+            "",
+            0,
+        );
+        assert_eq!(r.status, CheckStatus::Ok, "got: {r:?}");
+        assert!(r.message.contains("Wake-on: g"), "got: {}", r.message);
+    }
+
+    // Intent: summarize_wol fails when magic-packet wake is supported but off.
+    // Why it exists: Wake-on: d is the dangerous runtime drift that can let
+    // autosuspend make the NAS unreachable until physical access.
+    // Scenario: BIOS ErP, a driver reset, or a missed rebuild leaves WoL disabled.
+    #[test]
+    fn wol_summary_fails_when_magic_packet_supported_but_disabled() {
+        let r = summarize_wol(
+            "eno1",
+            "Settings for eno1:\n\tSupports Wake-on: pumbg\n\tWake-on: d\n",
+            "",
+            0,
+        );
+        assert_eq!(r.status, CheckStatus::Fail, "got: {r:?}");
+        assert!(
+            r.message.contains("supports magic-packet WoL"),
+            "got: {}",
+            r.message
+        );
+        assert!(r.message.contains("Wake-on: d"), "got: {}", r.message);
+    }
+
+    // Intent: summarize_wol fails when the NIC/driver lacks magic-packet support.
+    // Why it exists: braid.autoSuspend cannot be safe on a configured interface
+    // whose driver reports no `g` support, regardless of NixOS option state.
+    // Scenario: operator selects the wrong interface or a NIC without WoL support.
+    #[test]
+    fn wol_summary_fails_when_magic_packet_unsupported() {
+        let r = summarize_wol(
+            "eno1",
+            "Settings for eno1:\n\tSupports Wake-on: d\n\tWake-on: d\n",
+            "",
+            0,
+        );
+        assert_eq!(r.status, CheckStatus::Fail, "got: {r:?}");
+        assert!(
+            r.message
+                .contains("does not report magic-packet WoL support"),
+            "got: {}",
+            r.message
+        );
+    }
+
+    // Intent: summarize_wol fails when ethtool itself returns non-zero.
+    // Why it exists: interface removal, EPERM, and driver errors all mean
+    // doctor cannot prove the wake path, so the check must fail closed.
+    // Scenario: braid.autoSuspend.wolInterface names an interface that no
+    // longer exists after a NIC rename.
+    #[test]
+    fn wol_summary_fails_when_ethtool_query_fails() {
+        let r = summarize_wol(
+            "eno1",
+            "",
+            "Cannot get device wake-on-lan settings: No such device\n",
+            1,
+        );
+        assert_eq!(r.status, CheckStatus::Fail, "got: {r:?}");
+        assert!(r.message.contains("exit 1"), "got: {}", r.message);
+        assert!(r.message.contains("No such device"), "got: {}", r.message);
+    }
+
+    // Intent: summarize_wol fails closed when ethtool output is missing or drifted.
+    // Why it exists: parser drift must never silently downgrade to Ok,
+    // disabled, or unsupported because all three imply different operator action.
+    // Scenario: a future ethtool changes the WoL labels or emits an unexpected
+    // mode token.
+    #[test]
+    fn wol_summary_fails_closed_on_unparseable_ethtool_output() {
+        for stdout in [
+            "Settings for eno1:\n\tSupports Wake-on: pumbg\n",
+            "Settings for eno1:\n\tSupports Wake-on: pumbg\n\tWake-on: garbage\n",
+        ] {
+            let r = summarize_wol("eno1", stdout, "", 0);
+            assert_eq!(r.status, CheckStatus::Fail, "stdout={stdout:?}, got: {r:?}");
+            assert!(
+                r.message.contains("could not parse ethtool output"),
+                "got: {}",
+                r.message
+            );
+        }
+    }
+
+    // Intent: check_wake_on_lan skips when auto_suspend is absent from config.
+    // Why it exists: always-on systems should not see Wake-on-LAN-colored
+    // diagnostics or require ethtool in standalone test configs.
+    // Scenario: non-auto-suspend deployment runs `braid doctor`.
+    #[test]
+    fn wake_on_lan_check_skips_when_auto_suspend_absent() {
+        let runner = MockRunner::default();
+        let (_dir, paths) = isolated_paths();
+        let mut ctx = DoctorContext::for_test_parsed(&runner, &paths, valid_config_json());
+
+        let r = check_wake_on_lan(&mut ctx);
+
+        assert_eq!(r.status, CheckStatus::Skip, "got: {r:?}");
+        assert!(
+            r.message.contains("braid.autoSuspend not enabled"),
+            "got: {}",
+            r.message
+        );
+        assert!(runner.requests().is_empty(), "ethtool should not run");
+    }
+
+    // Intent: check_wake_on_lan fails when ethtool cannot be invoked.
+    // Why it exists: missing wrapper wiring for braid.packages.ethtool would
+    // otherwise hide the runtime wake-path check on exactly the hosts that need it.
+    // Scenario: deployed wrapper omits ethtool from PATH.
+    #[test]
+    fn wake_on_lan_check_fails_when_ethtool_spawn_fails() {
+        let runner = MockRunner::default().with_handler(|request| match request {
+            CmdRequest::EthtoolShow { interface } if interface == "eno1" => Some(Err(
+                CmdError::Failed("ethtool eno1: No such file or directory".into()),
+            )),
+            _ => None,
+        });
+        let (_dir, paths) = isolated_paths();
+        let mut ctx = DoctorContext::for_test_parsed(&runner, &paths, config_with_auto_suspend());
+
+        let r = check_wake_on_lan(&mut ctx);
+
+        assert_eq!(r.status, CheckStatus::Fail, "got: {r:?}");
+        assert!(
+            r.message.contains("ethtool invocation failed"),
+            "got: {}",
+            r.message
+        );
+        assert!(
+            r.message.contains("braid.packages.ethtool"),
+            "got: {}",
+            r.message
+        );
+    }
+
+    // Intent: run_doctor registers wake_on_lan and human formatting labels it.
+    // Why it exists: direct classifier tests cannot catch forgetting to add the
+    // check to the run list or formatter label table.
+    // Scenario: operator runs `braid doctor` on an auto-suspend host.
+    #[test]
+    fn wake_on_lan_registered_with_human_label() {
+        let runner = MockRunner::default().with_output(
+            CmdRequest::EthtoolShow {
+                interface: "eno1".into(),
+            },
+            RawCommandOutput {
+                cmd: "ethtool eno1".into(),
+                stdout: "Settings for eno1:\n\tSupports Wake-on: pumbg\n\tWake-on: g\n".into(),
+                stderr: String::new(),
+                exit_status: 0,
+            },
+        );
+        let (_dir, paths) = isolated_paths();
+        let f = write_temp(config_with_auto_suspend());
+        let report = run_doctor(f.path(), &runner, &RealFilesystem, &paths, human_options());
+
+        assert_eq!(find_check(&report, "wake_on_lan").status, CheckStatus::Ok);
+        let human = format_doctor_human(&report);
+        assert!(
+            human.contains("wake-on-lan"),
+            "expected human wake-on-lan label:\n{human}"
+        );
+    }
+
     // UPS doctor checks
     // ---------------------------------------------------------------------
 

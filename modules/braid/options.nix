@@ -24,6 +24,7 @@ in
       utilLinux = lib.mkPackageOption pkgs "util-linux" { };
       nut = lib.mkPackageOption pkgs "nut" { };
       smartmontools = lib.mkPackageOption pkgs "smartmontools" { };
+      ethtool = lib.mkPackageOption pkgs "ethtool" { };
     };
 
     package = lib.mkOption {

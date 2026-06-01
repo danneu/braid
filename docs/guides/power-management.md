@@ -145,20 +145,19 @@ Find the vendor and device IDs from `lspci -nn` for the corresponding PCI device
 
 ### 3. Verify WoL is enabled on the NIC
 
-After rebuild with `braid.autoSuspend.wolInterface` set, verify:
+After rebuild with `braid.autoSuspend.wolInterface` set, verify with doctor:
 
 ```sh
-sudo ethtool eno1 | grep Wake-on
+sudo braid doctor
 ```
 
-Expected output:
+Expected row:
 
 ```
-Supports Wake-on: pumbg
-Wake-on: g
+[ok]   wake-on-lan     eno1 reports Wake-on: g (magic packet armed)
 ```
 
-`Wake-on: g` means WoL is active (magic packet mode). If it shows `Wake-on: d` (disabled), the NixOS config is not taking effect -- check that you rebuilt and that the interface name is correct.
+`Wake-on: g` means WoL is active (magic packet mode). If doctor reports `Wake-on: d` (disabled), the NixOS config is not taking effect -- check that you rebuilt, that the interface name is correct, and that BIOS/driver WoL settings allow wake.
 
 ### 4. Test WoL from another machine
 

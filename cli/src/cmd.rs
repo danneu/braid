@@ -351,6 +351,11 @@ pub enum CmdRequest {
     SystemctlShowBoundBy {
         unit: String,
     },
+    /// `ethtool <iface>` -- raw NIC settings used by doctor to verify the
+    /// runtime Wake-on-LAN mode behind braid.autoSuspend.wolInterface.
+    EthtoolShow {
+        interface: String,
+    },
     /// `upsc <name>` — NUT status query. Emits `key: value` lines (see
     /// `reference/nut/clients/upsc.c:141`) on stdout; non-zero exit when the
     /// upsd daemon is unreachable or the UPS name is unknown. braid uses
@@ -1201,6 +1206,10 @@ impl CmdRequest {
                 program: "systemctl".to_owned(),
                 args: vec!["show".into(), "-P".into(), "BoundBy".into(), unit.clone()],
             },
+            CmdRequest::EthtoolShow { interface } => CmdArgs {
+                program: "ethtool".to_owned(),
+                args: vec![interface.clone()],
+            },
             CmdRequest::UpscQuery { name } => CmdArgs {
                 program: "upsc".to_owned(),
                 args: vec![name.clone()],
@@ -1878,6 +1887,13 @@ mod tests {
                 },
                 "systemctl",
                 vec!["show", "-P", "BoundBy", "braid-online.service"],
+            ),
+            (
+                CmdRequest::EthtoolShow {
+                    interface: "eno1".into(),
+                },
+                "ethtool",
+                vec!["eno1"],
             ),
             (CmdRequest::SmartctlScan, "smartctl", vec!["--scan"]),
             (
