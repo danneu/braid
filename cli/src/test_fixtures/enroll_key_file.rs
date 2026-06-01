@@ -14,10 +14,13 @@
 //!   * No `EnrollPool` / `EnrollTopology` handler installer. A broad
 //!     `with_handler` would resolve the deliberate `MissingMock` probes
 //!     ten enroll tests rely on and silently invert their assertions.
-//!   * No `EnrollKeyFileParamsBuilder`. Only 3 of 47 tests build an
-//!     `EnrollKeyFileParams`; they are heterogeneous (recovery-mode
-//!     gate / wrong-passphrase abort / dry-run short-circuit) and
-//!     configure different fields per scenario.
+//!   * No `EnrollKeyFileParamsBuilder`. Many enroll tests build an
+//!     `EnrollKeyFileParams` inline. The `plan_enroll` planner cohort
+//!     sets `passphrase_stdin: false` / `passphrase_file: None`
+//!     uniformly and varies only generate / dry_run / membership /
+//!     keyfile / paths; inline literals keep each test's planning
+//!     inputs explicit at the callsite, which a positional builder
+//!     would obscure.
 //!   * No base preflight runner analogous to mount's
 //!     `base_two_disk_runner`. Enroll tests vary per-disk outcomes
 //!     combinatorially (verify_pass / verify_fail x keyfile_ok /

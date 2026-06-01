@@ -616,32 +616,30 @@ fn validate_generated_keyfile_target<R: CommandRunner>(
 /// luksKillSlot` recovery wording the real run uses. Real-run plans
 /// (`dry_run = false`) leave `steps` empty because steps are preview-only;
 /// execution defers classification to `plan_enrollment` after the
-/// passphrase prompt.
+/// passphrase prompt. Takes the command's `EnrollKeyFileParams`;
+/// `passphrase_stdin` / `passphrase_file` are intentionally unread here
+/// because planning is pre-passphrase and execution consumes them after
+/// the prompt.
 pub fn plan_enroll<R: CommandRunner, F: Filesystem + ?Sized>(
     runner: &R,
     fs: &F,
-    membership: &PoolMembership,
-    key_file_path: &Path,
-    generate: bool,
-    dry_run: bool,
-    paths: &StatePaths,
-    backing_path_resolver: &dyn BackingPathResolver,
+    params: &EnrollKeyFileParams<'_>,
 ) -> Result<EnrollPlan, PlanFailure<EnrollKeyFileError>> {
-    if let Err(msg) = preflight::check_no_pending_operation(paths) {
+    if let Err(msg) = preflight::check_no_pending_operation(params.paths) {
         return Err(PlanFailure::empty(EnrollKeyFileError::Validation(msg)));
     }
 
-    let key_file_validation = if generate {
-        validate_generated_keyfile_target(runner, key_file_path, false)
+    let key_file_validation = if params.generate {
+        validate_generated_keyfile_target(runner, params.key_file_path, false)
     } else {
-        validate_key_file_path(key_file_path, false)
+        validate_key_file_path(params.key_file_path, false)
     };
     if let Err(e) = key_file_validation {
         return Err(PlanFailure::empty(e));
     }
 
     let (mut notes, discovery) =
-        discover_enrollment_candidates(runner, fs, membership, backing_path_resolver);
+        discover_enrollment_candidates(runner, fs, params.membership, params.backing_path_resolver);
     let candidates = match discovery {
         Ok(c) => c,
         Err(e) => {
@@ -649,15 +647,15 @@ pub fn plan_enroll<R: CommandRunner, F: Filesystem + ?Sized>(
         }
     };
 
-    let steps = if dry_run {
-        let mode = if generate {
+    let steps = if params.dry_run {
+        let mode = if params.generate {
             EnrollmentPlanMode::GenerateNew
         } else {
             EnrollmentPlanMode::ExistingKeyfile
         };
         let mut needs_enroll: Vec<EnrollmentCandidate> = Vec::with_capacity(candidates.len());
         for (name, by_id) in &candidates {
-            match plan_single_disk_enrollment(runner, name, by_id, key_file_path, mode) {
+            match plan_single_disk_enrollment(runner, name, by_id, params.key_file_path, mode) {
                 Ok(DiskEnrollAction::AlreadyEnrolled { name, .. }) => {
                     notes.push(PreviewNote::PerDisk {
                         name: name.as_str().to_owned(),
@@ -673,7 +671,12 @@ pub fn plan_enroll<R: CommandRunner, F: Filesystem + ?Sized>(
                 }
             }
         }
-        compile_enroll_steps(&needs_enroll, key_file_path, generate, paths)
+        compile_enroll_steps(
+            &needs_enroll,
+            params.key_file_path,
+            params.generate,
+            params.paths,
+        )
     } else {
         // Steps are a dry-run/preview-only artifact; real execution
         // re-plans from candidates after passphrase verification.
@@ -684,7 +687,7 @@ pub fn plan_enroll<R: CommandRunner, F: Filesystem + ?Sized>(
         notes,
         steps,
         candidates,
-        generate,
+        generate: params.generate,
     })
 }
 
@@ -693,16 +696,7 @@ pub fn cmd_enroll_key_file<R: CommandRunner, F: Filesystem + ?Sized>(
     fs: &F,
     params: &EnrollKeyFileParams<'_>,
 ) -> Result<(), EnrollKeyFileError> {
-    let plan = match plan_enroll(
-        runner,
-        fs,
-        params.membership,
-        params.key_file_path,
-        params.generate,
-        params.dry_run,
-        params.paths,
-        params.backing_path_resolver,
-    ) {
+    let plan = match plan_enroll(runner, fs, params) {
         Ok(p) => p,
         Err(PlanFailure { notes, error }) => {
             // Preserved-context failure: accumulated skip notes render
@@ -776,17 +770,17 @@ mod tests {
         let kf = tmp.path().join("braid.key");
         let runner = enroll_with_mountpoint_ok(runner, tmp.path());
 
-        let plan = plan_enroll(
-            &runner,
-            &fs,
-            &membership,
-            &kf,
-            true,
-            false,
-            &paths,
-            crate::test_fixtures::mock_virtio_backing_path_resolver(),
-        )
-        .expect("plan_enroll should succeed");
+        let params = EnrollKeyFileParams {
+            membership: &membership,
+            key_file_path: &kf,
+            generate: true,
+            passphrase_stdin: false,
+            passphrase_file: None,
+            dry_run: false,
+            paths: &paths,
+            backing_path_resolver: crate::test_fixtures::mock_virtio_backing_path_resolver(),
+        };
+        let plan = plan_enroll(&runner, &fs, &params).expect("plan_enroll should succeed");
         assert_eq!(plan.candidates.len(), 2);
         assert_eq!(plan.candidates[0].0.as_str(), "disk1");
         assert_eq!(plan.candidates[1].0.as_str(), "disk2");
@@ -961,17 +955,18 @@ mod tests {
         let kf = tmp.path().join("braid.key");
         let runner = enroll_with_mountpoint_ok(runner, tmp.path());
 
-        let plan = plan_enroll(
-            &runner,
-            &fs,
-            &membership,
-            &kf,
-            true,
-            false,
-            &paths,
-            crate::test_fixtures::mock_virtio_backing_path_resolver(),
-        )
-        .expect("plan_enroll should succeed with one candidate");
+        let params = EnrollKeyFileParams {
+            membership: &membership,
+            key_file_path: &kf,
+            generate: true,
+            passphrase_stdin: false,
+            passphrase_file: None,
+            dry_run: false,
+            paths: &paths,
+            backing_path_resolver: crate::test_fixtures::mock_virtio_backing_path_resolver(),
+        };
+        let plan = plan_enroll(&runner, &fs, &params)
+            .expect("plan_enroll should succeed with one candidate");
         assert_eq!(plan.candidates.len(), 1);
         assert_eq!(plan.candidates[0].0.as_str(), "disk2");
         assert_eq!(plan.notes.len(), 1);
@@ -1014,17 +1009,17 @@ mod tests {
         let kf = tmp.path().join("braid.key");
         let runner = enroll_with_mountpoint_ok(runner, tmp.path());
 
-        let plan = plan_enroll(
-            &runner,
-            &fs,
-            &membership,
-            &kf,
-            true,
-            false,
-            &paths,
-            crate::test_fixtures::mock_virtio_backing_path_resolver(),
-        )
-        .expect("plan_enroll should succeed");
+        let params = EnrollKeyFileParams {
+            membership: &membership,
+            key_file_path: &kf,
+            generate: true,
+            passphrase_stdin: false,
+            passphrase_file: None,
+            dry_run: false,
+            paths: &paths,
+            backing_path_resolver: crate::test_fixtures::mock_virtio_backing_path_resolver(),
+        };
+        let plan = plan_enroll(&runner, &fs, &params).expect("plan_enroll should succeed");
         assert_eq!(plan.candidates.len(), 1);
         assert_eq!(plan.candidates[0].0.as_str(), "disk2");
         assert_eq!(plan.notes.len(), 1);
@@ -1065,16 +1060,17 @@ mod tests {
         let kf = tmp.path().join("braid.key");
         let runner = enroll_with_mountpoint_ok(runner, tmp.path());
 
-        let failure = match plan_enroll(
-            &runner,
-            &fs,
-            &membership,
-            &kf,
-            true,
-            false,
-            &paths,
-            crate::test_fixtures::mock_virtio_backing_path_resolver(),
-        ) {
+        let params = EnrollKeyFileParams {
+            membership: &membership,
+            key_file_path: &kf,
+            generate: true,
+            passphrase_stdin: false,
+            passphrase_file: None,
+            dry_run: false,
+            paths: &paths,
+            backing_path_resolver: crate::test_fixtures::mock_virtio_backing_path_resolver(),
+        };
+        let failure = match plan_enroll(&runner, &fs, &params) {
             Ok(_) => panic!("expected no-candidates error"),
             Err(failure) => failure,
         };
@@ -1122,16 +1118,17 @@ mod tests {
         let kf = tmp.path().join("braid.key");
         let runner = enroll_with_mountpoint_ok(runner, tmp.path());
 
-        let failure = match plan_enroll(
-            &runner,
-            &fs,
-            &membership,
-            &kf,
-            true,
-            false,
-            &paths,
-            crate::test_fixtures::mock_virtio_backing_path_resolver(),
-        ) {
+        let params = EnrollKeyFileParams {
+            membership: &membership,
+            key_file_path: &kf,
+            generate: true,
+            passphrase_stdin: false,
+            passphrase_file: None,
+            dry_run: false,
+            paths: &paths,
+            backing_path_resolver: crate::test_fixtures::mock_virtio_backing_path_resolver(),
+        };
+        let failure = match plan_enroll(&runner, &fs, &params) {
             Ok(_) => panic!("expected no-candidates error"),
             Err(failure) => failure,
         };
@@ -1183,17 +1180,17 @@ mod tests {
         let kf = tmp.path().join("braid.key");
         let runner = enroll_with_mountpoint_ok(runner, tmp.path());
 
-        let plan = plan_enroll(
-            &runner,
-            &fs,
-            &membership,
-            &kf,
-            true,
-            false,
-            &paths,
-            crate::test_fixtures::mock_virtio_backing_path_resolver(),
-        )
-        .expect("plan_enroll should succeed");
+        let params = EnrollKeyFileParams {
+            membership: &membership,
+            key_file_path: &kf,
+            generate: true,
+            passphrase_stdin: false,
+            passphrase_file: None,
+            dry_run: false,
+            paths: &paths,
+            backing_path_resolver: crate::test_fixtures::mock_virtio_backing_path_resolver(),
+        };
+        let plan = plan_enroll(&runner, &fs, &params).expect("plan_enroll should succeed");
 
         let rendered_stdout = plan.preview().render();
         assert!(
@@ -1226,16 +1223,17 @@ mod tests {
         let fs = enroll_fs(&["/dev/disk/by-id/d1"]);
         let membership = enroll_make_membership(&[("disk1", "/dev/disk/by-id/d1")]);
 
-        let failure = match plan_enroll(
-            &runner,
-            &fs,
-            &membership,
-            &kf,
-            true,
-            false,
-            &paths,
-            crate::test_fixtures::mock_virtio_backing_path_resolver(),
-        ) {
+        let params = EnrollKeyFileParams {
+            membership: &membership,
+            key_file_path: &kf,
+            generate: true,
+            passphrase_stdin: false,
+            passphrase_file: None,
+            dry_run: false,
+            paths: &paths,
+            backing_path_resolver: crate::test_fixtures::mock_virtio_backing_path_resolver(),
+        };
+        let failure = match plan_enroll(&runner, &fs, &params) {
             Ok(_) => panic!("missing target directory must fail"),
             Err(failure) => failure,
         };
@@ -1270,16 +1268,17 @@ mod tests {
         let fs = enroll_fs(&["/dev/disk/by-id/d1"]);
         let membership = enroll_make_membership(&[("disk1", "/dev/disk/by-id/d1")]);
 
-        let failure = match plan_enroll(
-            &runner,
-            &fs,
-            &membership,
-            &kf,
-            true,
-            false,
-            &paths,
-            crate::test_fixtures::mock_virtio_backing_path_resolver(),
-        ) {
+        let params = EnrollKeyFileParams {
+            membership: &membership,
+            key_file_path: &kf,
+            generate: true,
+            passphrase_stdin: false,
+            passphrase_file: None,
+            dry_run: false,
+            paths: &paths,
+            backing_path_resolver: crate::test_fixtures::mock_virtio_backing_path_resolver(),
+        };
+        let failure = match plan_enroll(&runner, &fs, &params) {
             Ok(_) => panic!("non-directory target must fail"),
             Err(failure) => failure,
         };
@@ -1317,16 +1316,17 @@ mod tests {
         let fs = enroll_fs(&["/dev/disk/by-id/d1"]);
         let membership = enroll_make_membership(&[("disk1", "/dev/disk/by-id/d1")]);
 
-        let failure = match plan_enroll(
-            &runner,
-            &fs,
-            &membership,
-            &kf,
-            true,
-            false,
-            &paths,
-            crate::test_fixtures::mock_virtio_backing_path_resolver(),
-        ) {
+        let params = EnrollKeyFileParams {
+            membership: &membership,
+            key_file_path: &kf,
+            generate: true,
+            passphrase_stdin: false,
+            passphrase_file: None,
+            dry_run: false,
+            paths: &paths,
+            backing_path_resolver: crate::test_fixtures::mock_virtio_backing_path_resolver(),
+        };
+        let failure = match plan_enroll(&runner, &fs, &params) {
             Ok(_) => panic!("plain directory must fail"),
             Err(failure) => failure,
         };
@@ -1417,16 +1417,17 @@ mod tests {
         let fs = enroll_fs(&["/dev/disk/by-id/d1"]);
         let membership = enroll_make_membership(&[("disk1", "/dev/disk/by-id/d1")]);
 
-        let failure = match plan_enroll(
-            &runner,
-            &fs,
-            &membership,
-            &kf,
-            true,
-            false,
-            &paths,
-            crate::test_fixtures::mock_virtio_backing_path_resolver(),
-        ) {
+        let params = EnrollKeyFileParams {
+            membership: &membership,
+            key_file_path: &kf,
+            generate: true,
+            passphrase_stdin: false,
+            passphrase_file: None,
+            dry_run: false,
+            paths: &paths,
+            backing_path_resolver: crate::test_fixtures::mock_virtio_backing_path_resolver(),
+        };
+        let failure = match plan_enroll(&runner, &fs, &params) {
             Ok(_) => panic!("existing generated keyfile must fail"),
             Err(failure) => failure,
         };
@@ -1472,17 +1473,18 @@ mod tests {
         let fs = enroll_fs(&[d1, d2]);
         let membership = enroll_make_membership(&[("disk1", d1), ("disk2", d2)]);
 
-        let plan = plan_enroll(
-            &runner,
-            &fs,
-            &membership,
-            &kf,
-            false,
-            false,
-            &paths,
-            crate::test_fixtures::mock_virtio_backing_path_resolver(),
-        )
-        .expect("existing keyfile in ordinary directory should plan");
+        let params = EnrollKeyFileParams {
+            membership: &membership,
+            key_file_path: &kf,
+            generate: false,
+            passphrase_stdin: false,
+            passphrase_file: None,
+            dry_run: false,
+            paths: &paths,
+            backing_path_resolver: crate::test_fixtures::mock_virtio_backing_path_resolver(),
+        };
+        let plan = plan_enroll(&runner, &fs, &params)
+            .expect("existing keyfile in ordinary directory should plan");
 
         assert_eq!(plan.candidates.len(), 2);
         assert!(
@@ -1560,17 +1562,17 @@ mod tests {
         let fs = enroll_fs(&[d1, d2]);
         let membership = enroll_make_membership(&[("disk1", d1), ("disk2", d2)]);
 
-        let plan = plan_enroll(
-            &runner,
-            &fs,
-            &membership,
-            &kf,
-            false,
-            true,
-            &paths,
-            crate::test_fixtures::mock_virtio_backing_path_resolver(),
-        )
-        .expect("plan_enroll should succeed");
+        let params = EnrollKeyFileParams {
+            membership: &membership,
+            key_file_path: &kf,
+            generate: false,
+            passphrase_stdin: false,
+            passphrase_file: None,
+            dry_run: true,
+            paths: &paths,
+            backing_path_resolver: crate::test_fixtures::mock_virtio_backing_path_resolver(),
+        };
+        let plan = plan_enroll(&runner, &fs, &params).expect("plan_enroll should succeed");
 
         assert!(
             plan.notes.iter().any(|n| matches!(
@@ -1650,18 +1652,18 @@ mod tests {
         membership.insert(u1, m1).unwrap();
         membership.insert(u2, m2).unwrap();
 
+        let params = EnrollKeyFileParams {
+            membership: &membership,
+            key_file_path: &kf,
+            generate: false,
+            passphrase_stdin: false,
+            passphrase_file: None,
+            dry_run: true,
+            paths: &paths,
+            backing_path_resolver: crate::test_fixtures::mock_virtio_backing_path_resolver(),
+        };
         let captured = crate::status_tag::testing::capture_with_color(false, || {
-            plan_enroll(
-                &runner,
-                &fs,
-                &membership,
-                &kf,
-                false,
-                true,
-                &paths,
-                crate::test_fixtures::mock_virtio_backing_path_resolver(),
-            )
-            .expect("plan_enroll should succeed");
+            plan_enroll(&runner, &fs, &params).expect("plan_enroll should succeed");
         });
 
         let wait1 = "[wait] keyfile: checking against disk1...\n";
@@ -1712,16 +1714,17 @@ mod tests {
         let kf = tmp.path().join("braid.key");
         let runner = enroll_with_mountpoint_ok(runner, tmp.path());
 
-        let failure = match plan_enroll(
-            &runner,
-            &fs,
-            &membership,
-            &kf,
-            true,
-            true,
-            &paths,
-            crate::test_fixtures::mock_virtio_backing_path_resolver(),
-        ) {
+        let params = EnrollKeyFileParams {
+            membership: &membership,
+            key_file_path: &kf,
+            generate: true,
+            passphrase_stdin: false,
+            passphrase_file: None,
+            dry_run: true,
+            paths: &paths,
+            backing_path_resolver: crate::test_fixtures::mock_virtio_backing_path_resolver(),
+        };
+        let failure = match plan_enroll(&runner, &fs, &params) {
             Ok(_) => panic!("dry-run must fail on slot-1 conflict"),
             Err(failure) => failure,
         };
@@ -1776,16 +1779,17 @@ mod tests {
         let fs = enroll_fs(&[d1, d2]);
         let membership = enroll_make_membership(&[("disk1", d1), ("disk2", d2)]);
 
-        let failure = match plan_enroll(
-            &runner,
-            &fs,
-            &membership,
-            &kf,
-            false,
-            true,
-            &paths,
-            crate::test_fixtures::mock_virtio_backing_path_resolver(),
-        ) {
+        let params = EnrollKeyFileParams {
+            membership: &membership,
+            key_file_path: &kf,
+            generate: false,
+            passphrase_stdin: false,
+            passphrase_file: None,
+            dry_run: true,
+            paths: &paths,
+            backing_path_resolver: crate::test_fixtures::mock_virtio_backing_path_resolver(),
+        };
+        let failure = match plan_enroll(&runner, &fs, &params) {
             Ok(_) => panic!("dry-run must fail on slot-1 conflict"),
             Err(failure) => failure,
         };
@@ -1840,17 +1844,17 @@ mod tests {
         let fs = enroll_fs(&[d1, d2]);
         let membership = enroll_make_membership(&[("disk1", d1), ("disk2", d2)]);
 
-        let plan = plan_enroll(
-            &runner,
-            &fs,
-            &membership,
-            &kf,
-            false,
-            true,
-            &paths,
-            crate::test_fixtures::mock_virtio_backing_path_resolver(),
-        )
-        .expect("plan_enroll should succeed");
+        let params = EnrollKeyFileParams {
+            membership: &membership,
+            key_file_path: &kf,
+            generate: false,
+            passphrase_stdin: false,
+            passphrase_file: None,
+            dry_run: true,
+            paths: &paths,
+            backing_path_resolver: crate::test_fixtures::mock_virtio_backing_path_resolver(),
+        };
+        let plan = plan_enroll(&runner, &fs, &params).expect("plan_enroll should succeed");
 
         assert!(
             plan.steps.is_empty(),
@@ -1899,17 +1903,18 @@ mod tests {
         let kf = tmp.path().join("braid.key");
         let runner = enroll_with_mountpoint_ok(runner, tmp.path());
 
-        let _plan = plan_enroll(
-            &runner,
-            &fs,
-            &membership,
-            &kf,
-            true,
-            true,
-            &paths,
-            crate::test_fixtures::mock_virtio_backing_path_resolver(),
-        )
-        .expect("plan_enroll should succeed in --generate dry-run mode");
+        let params = EnrollKeyFileParams {
+            membership: &membership,
+            key_file_path: &kf,
+            generate: true,
+            passphrase_stdin: false,
+            passphrase_file: None,
+            dry_run: true,
+            paths: &paths,
+            backing_path_resolver: crate::test_fixtures::mock_virtio_backing_path_resolver(),
+        };
+        let _plan = plan_enroll(&runner, &fs, &params)
+            .expect("plan_enroll should succeed in --generate dry-run mode");
 
         let probe_count = runner
             .requests()
@@ -1963,16 +1968,17 @@ mod tests {
         let fs = enroll_fs(&[d1, d2]);
         let membership = enroll_make_membership(&[("disk1", d1), ("disk2", d2)]);
 
-        let failure = match plan_enroll(
-            &runner,
-            &fs,
-            &membership,
-            &kf,
-            false,
-            true,
-            &paths,
-            crate::test_fixtures::mock_virtio_backing_path_resolver(),
-        ) {
+        let params = EnrollKeyFileParams {
+            membership: &membership,
+            key_file_path: &kf,
+            generate: false,
+            passphrase_stdin: false,
+            passphrase_file: None,
+            dry_run: true,
+            paths: &paths,
+            backing_path_resolver: crate::test_fixtures::mock_virtio_backing_path_resolver(),
+        };
+        let failure = match plan_enroll(&runner, &fs, &params) {
             Ok(_) => panic!("probe error must propagate as Err"),
             Err(failure) => failure,
         };
