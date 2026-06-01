@@ -114,5 +114,13 @@ Single-survivor cases use a path-specific check:
 ## Consequences
 
 - Five commands instead of three (no init-disk, no plan, no apply; `remove` split into `remove` + `remove-missing`)
-- Every command supports `--dry-run` and `--yes` for scripting
+- Dry-run/confirmation coverage is a command category, not a blanket guarantee.
+  The pool/LUKS-lifecycle mutators (`add`, `remove`, `remove-missing`,
+  `replace`, `unlock`, `lock`, `enroll`, `recover`) support `--dry-run`, while
+  `discover` previews by default and commits with `--write`. `--yes` is scoped
+  to the confirmation-gated mutations (`add`, `remove`, `remove-missing`,
+  `replace`) for scripting. Reactive notification-state maintenance (`ack`) and
+  internal systemd-invoked paths (`scrub-*`) are deliberately excluded -- they
+  are reversible/self-correcting or machine-contract commands where a dry-run
+  preview adds no operator value.
 - Tab completion returns disk names from `pool.json`
