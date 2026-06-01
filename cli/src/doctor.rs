@@ -38,6 +38,7 @@ use crate::state_paths::StatePaths;
 use crate::status::{BalanceReport, format_bytes, get_balance_report, paused_balance_advice};
 use crate::status_tag::{StatusTag, color_enabled_for_stdout, status_line};
 use crate::types::{LuksUuid, PoolState};
+use crate::wol::{WolReadiness, classify_wol};
 
 // ---------------------------------------------------------------------------
 // Types
@@ -1208,83 +1209,47 @@ fn check_beep_path<R: CommandRunner>(
     check_beep_path_inner(ctx, Path::new(NOTIFIER_CONFIG_PATH), options)
 }
 
-/// Extract one ethtool text field while keeping the parser local to doctor.
-/// The RealRunner pins LC_ALL=C, so these English labels are the runtime
-/// contract for Wake-on-LAN diagnostics.
-fn ethtool_field<'a>(stdout: &'a str, label: &str) -> Option<&'a str> {
-    stdout
-        .lines()
-        .find_map(|line| line.trim_start().strip_prefix(label).map(str::trim))
-        .filter(|value| !value.is_empty())
-}
-
-/// ethtool WoL modes are compact flag strings; rejecting unknown characters
-/// keeps output drift from being misread as either safe or unsupported.
-fn wol_modes_parseable(value: &str) -> bool {
-    !value.is_empty() && value.chars().all(|c| "pumbagsfd".contains(c))
-}
-
 /// Pure Wake-on-LAN classifier so tests can cover every ethtool output branch
 /// without needing a VM NIC that supports real magic-packet wake.
 fn summarize_wol(interface: &str, stdout: &str, stderr: &str, exit_status: i32) -> CheckResult {
     let name = "wake_on_lan";
-    if exit_status != 0 {
-        let detail = stderr.trim();
-        let suffix = if detail.is_empty() {
-            String::new()
-        } else {
-            format!(": {detail}")
-        };
-        return CheckResult::fail(
-            name,
-            format!(
-                "ethtool {interface} failed (exit {exit_status}){suffix} -- cannot verify Wake-on-LAN"
-            ),
-        );
-    }
-
-    let Some(supports) =
-        ethtool_field(stdout, "Supports Wake-on:").filter(|value| wol_modes_parseable(value))
-    else {
-        return CheckResult::fail(
+    match classify_wol(stdout, stderr, exit_status) {
+        WolReadiness::QueryFailed { exit, detail } => {
+            let suffix = if detail.is_empty() {
+                String::new()
+            } else {
+                format!(": {detail}")
+            };
+            CheckResult::fail(
+                name,
+                format!(
+                    "ethtool {interface} failed (exit {exit}){suffix} -- cannot verify Wake-on-LAN"
+                ),
+            )
+        }
+        WolReadiness::Unparseable => CheckResult::fail(
             name,
             format!(
                 "could not parse ethtool output for {interface} -- expected Supports Wake-on and Wake-on lines"
             ),
-        );
-    };
-    let Some(active) = ethtool_field(stdout, "Wake-on:").filter(|value| wol_modes_parseable(value))
-    else {
-        return CheckResult::fail(
-            name,
-            format!(
-                "could not parse ethtool output for {interface} -- expected Supports Wake-on and Wake-on lines"
-            ),
-        );
-    };
-
-    if !supports.contains('g') {
-        return CheckResult::fail(
+        ),
+        WolReadiness::Unsupported { supports } => CheckResult::fail(
             name,
             format!(
                 "{interface} does not report magic-packet WoL support (Supports Wake-on: {supports}) -- use a wired NIC/driver that supports Wake-on-LAN"
             ),
-        );
-    }
-
-    if !active.contains('g') {
-        return CheckResult::fail(
+        ),
+        WolReadiness::Disabled { active, .. } => CheckResult::fail(
             name,
             format!(
                 "{interface} supports magic-packet WoL but reports Wake-on: {active} -- rebuild, verify the interface name, and check BIOS/driver WoL settings"
             ),
-        );
+        ),
+        WolReadiness::Armed { active } => CheckResult::ok(
+            name,
+            format!("{interface} reports Wake-on: {active} (magic packet armed)"),
+        ),
     }
-
-    CheckResult::ok(
-        name,
-        format!("{interface} reports Wake-on: {active} (magic packet armed)"),
-    )
 }
 
 /// Runtime WoL verification for auto-suspend hosts. Build-time NixOS config

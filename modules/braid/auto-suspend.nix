@@ -4,9 +4,10 @@
 # suspend/wake lifecycle. braid provides `braid idle` as an ExternalCommand
 # check for btrfs-specific activity: a running scrub plus any kernel
 # exclusive operation (balance, device add, device remove, device replace,
-# resize, swap activate). The exclop states are read from
-# /sys/fs/btrfs/<fsid>/exclusive_operation; scrub is checked separately
-# because it is not in the kernel exclop set.
+# resize, swap activate). braid also provides `braid wol-ready` as a
+# fail-closed check that the configured NIC currently reports Wake-on: g.
+# The exclop states are read from /sys/fs/btrfs/<fsid>/exclusive_operation;
+# scrub is checked separately because it is not in the kernel exclop set.
 #
 # SSH and local-session checks are always on. SMB and NFS checks are
 # auto-detected from whether those services are enabled.
@@ -84,6 +85,18 @@ in
             # that ignore or delay TERM. An outer `timeout` would fail open:
             # bash gets killed before `!` runs.
             command = "${pkgs.bash}/bin/bash -c '! ${pkgs.coreutils}/bin/timeout -k 2 10 ${braidWrapped}/bin/braid idle'";
+          };
+          # Block autosuspend-initiated sleep unless the configured NIC reports
+          # Wake-on: g. Inverted like BraidPool: `braid wol-ready` exit 0
+          # (armed) -> `!` -> 1 -> autosuspend allows suspend; any non-zero
+          # (not armed, unverifiable, setup error, or `timeout` overrun) -> `!`
+          # -> 0 -> activity -> block suspend. Fail-closed per
+          # docs/design/decisions/016-auto-suspend.md.
+          BraidWol = {
+            class = "ExternalCommand";
+            # `timeout` lives inside bash so its overrun result is inverted by
+            # `!`, matching the BraidPool timeout invariant.
+            command = "${pkgs.bash}/bin/bash -c '! ${pkgs.coreutils}/bin/timeout -k 2 10 ${braidWrapped}/bin/braid wol-ready'";
           };
           # SSH sessions always block suspend — braid requires SSH for unlock,
           # and an active session means someone is working on the machine.

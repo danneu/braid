@@ -19,12 +19,15 @@ The NAS stays awake while any of these are true:
 | Check | What it detects |
 | --- | --- |
 | **braid idle** | scrub plus any btrfs kernel exclusive operation (balance, device add/remove/replace, resize, swap activate) -- the latter via `/sys/fs/btrfs/<fsid>/exclusive_operation` |
+| **braid wol-ready** | configured wired NIC currently reports `Wake-on: g`; if WoL is disabled or unverifiable, auto-suspend is blocked |
 | **SSH** | Active SSH connections (port 22) |
 | **Local sessions** | TTY, X11, or Wayland sessions (via logind) |
 | **Samba** | Active SMB clients (auto-detected, only if Samba is enabled) |
 | **NFS** | Active NFS connections on port 2049 (auto-detected, only if NFS server is enabled) |
 
 If all checks pass (everything idle) for the configured idle time (default 15 minutes), the NAS suspends.
+
+The WoL check gates braid's auto-suspend path only. Manual `sudo systemctl suspend` remains available for maintenance and testing, but it bypasses braid's pre-suspend WoL check.
 
 ### Scrub wakeups
 
@@ -158,6 +161,8 @@ Expected row:
 ```
 
 `Wake-on: g` means WoL is active (magic packet mode). If doctor reports `Wake-on: d` (disabled), the NixOS config is not taking effect -- check that you rebuilt, that the interface name is correct, and that BIOS/driver WoL settings allow wake.
+
+With `autoSuspend` enabled, braid also checks this before every automatic suspend. If the NAS is idle but does not sleep, run `sudo braid doctor` and inspect the `wake-on-lan` row.
 
 ### 4. Test WoL from another machine
 

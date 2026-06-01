@@ -53,6 +53,11 @@ enum Commands {
     EnrollKeyFile(EnrollKeyFileArgs),
     /// Check if pool is idle (no scrub or btrfs exclusive operation): exit 0 = idle, exit 1 = busy or probe failure, exit 2 = setup error
     Idle,
+    /// Internal: autosuspend WoL gate. exit 0 = Wake-on: g armed,
+    /// exit 1 = not armed / unverifiable, exit 2 = setup/config error.
+    /// Hidden from `braid --help`.
+    #[command(hide = true)]
+    WolReady,
     /// Internal: invoked by `braid-scrub.service` ExecStop during lock/shutdown
     /// to cancel an in-flight scrub. Calls `btrfs scrub cancel` directly; the
     /// cancel ioctl is the kernel-authoritative test for whether a scrub is
@@ -176,6 +181,7 @@ fn lock_policy(command: &Commands) -> LockPolicy {
         Status(_)
         | Doctor(_)
         | Idle
+        | WolReady
         | ScrubCancel(_)
         | ScrubNeedsResume(_)
         | ScrubResumeOrStart(_)
@@ -799,6 +805,24 @@ fn main() {
                 braid_cli::idle::IdleResult::Busy(reason) => {
                     println!("busy: {reason}");
                     std::process::exit(1);
+                }
+            }
+        }
+        Commands::WolReady => {
+            let config = load_config_or_exit(Path::new(&config_path), 2);
+            let runner = RealRunner;
+            match braid_cli::wol::cmd_wol_ready(&runner, config.auto_suspend()) {
+                braid_cli::wol::WolReadyOutcome::Armed => {
+                    println!("wol-ready: Wake-on-LAN is armed");
+                    std::process::exit(0);
+                }
+                braid_cli::wol::WolReadyOutcome::NotReady(reason) => {
+                    println!("not-ready: {reason}");
+                    std::process::exit(1);
+                }
+                braid_cli::wol::WolReadyOutcome::SetupError(reason) => {
+                    println!("setup error: {reason}");
+                    std::process::exit(2);
                 }
             }
         }

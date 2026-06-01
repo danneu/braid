@@ -30,14 +30,27 @@ Why a separate command rather than inline shell in autosuspend config:
 - Fail-closed behavior (probe failures map to `Busy(Unknown)` -> exit 1 -> block suspend; setup/config errors stay at exit 2 and also block via `!`) is easier to get right in Rust than in shell
 - Testable with unit tests via MockRunner + a `Filesystem` mock
 
+### `braid wol-ready` as the Wake-on-LAN check
+
+A hidden CLI command (`braid wol-ready`) checks the configured `braid.autoSuspend.wolInterface` immediately before autosuspend is allowed to suspend the host. It runs `ethtool <iface>` through braid's command runner and reuses the same WoL classifier as `braid doctor`, so the on-demand diagnostic and the per-suspend gate cannot drift on what counts as magic-packet armed.
+
+Invariant: `braid.autoSuspend` will not automatically suspend the NAS unless `braid.autoSuspend.wolInterface` currently reports `Wake-on: g`.
+
+The command is intentionally scoped to braid's autosuspend path. Manual `systemctl suspend` remains available for admin maintenance, local testing, and machines where the operator deliberately accepts the wake risk. A universal `sleep.target` gate was considered and deferred because it would turn braid's claim from "braid will not auto-suspend unsafely" into "this machine may not suspend at all," which is a broader and more surprising ownership boundary.
+
 ### Exit code inversion
 
-`braid idle` follows natural Unix convention (exit 0 = success = "yes, idle"). autosuspend's ExternalCommand convention is inverted (exit 0 = activity detected). The NixOS module bridges this with `bash -c '! braid idle'`:
+`braid idle` and `braid wol-ready` follow natural Unix convention (exit 0 = success). autosuspend's ExternalCommand convention is inverted (exit 0 = activity detected). The NixOS module bridges this with `bash -c '! <command>'`:
 
-- braid exit 0 (idle) -> `!` -> exit 1 -> autosuspend: allow suspend
-- braid exit 1 (busy or probe failure) -> `!` -> exit 0 -> autosuspend: block suspend (fail-closed)
-- braid exit 2 (setup error) -> `!` -> exit 0 -> autosuspend: block suspend (fail-closed)
-- braid idle signal-killable overrun >10s -> `timeout -k 2 10` (inside bash) returns non-zero -> `!` -> exit 0 -> autosuspend: block suspend (fail-closed)
+| braid command | braid exit | Meaning | After `!` | autosuspend result |
+| --- | --- | --- | --- | --- |
+| `braid idle` | 0 | idle | 1 | allow suspend |
+| `braid idle` | 1 | busy or probe failure | 0 | block suspend (fail-closed) |
+| `braid idle` | 2 | setup error | 0 | block suspend (fail-closed) |
+| `braid wol-ready` | 0 | `Wake-on: g` armed | 1 | allow suspend |
+| `braid wol-ready` | 1 | not armed or unverifiable | 0 | block suspend (fail-closed) |
+| `braid wol-ready` | 2 | setup error | 0 | block suspend (fail-closed) |
+| either command | timeout | signal-killable overrun >10s | 0 | block suspend (fail-closed) |
 
 `timeout` must be **inside** `bash -c` so its non-zero overrun result is inverted by `!`. An outer `timeout` (`timeout -k 2 10 bash -c '! braid idle'`) would fail open: bash gets killed before `!` runs, autosuspend sees the non-zero timeout result and treats it as no activity. Coreutils' `timeout` sends TERM at the main deadline and `-k 2` escalates to KILL two seconds later for processes that ignore or delay TERM (see `reference/coreutils/src/timeout.c`).
 
@@ -79,8 +92,10 @@ A paused balance holds the btrfs exclusive-operation lock. The mutating-command 
 
 ### WoL managed by braid
 
-`braid.autoSuspend.wolInterface` is required when sleep is enabled. braid sets `networking.interfaces.<iface>.wakeOnLan.enable = true` on the specified interface. A build-time assertion prevents enabling sleep without WoL -- otherwise the NAS suspends and becomes unreachable until someone physically presses the power button. `braid doctor` verifies the live NIC reports magic-packet wake (`Wake-on: g`) for that interface. The BIOS-side WoL setting is the user's responsibility (can't be automated from NixOS).
+`braid.autoSuspend.wolInterface` is required when sleep is enabled. braid sets `networking.interfaces.<iface>.wakeOnLan.enable = true` on the specified interface. A build-time assertion prevents enabling sleep without WoL -- otherwise the NAS suspends and becomes unreachable until someone physically presses the power button. `braid doctor` verifies the live NIC reports magic-packet wake (`Wake-on: g`) for that interface on demand, and autosuspend also runs the hidden `braid wol-ready` check every suspend cycle. The BIOS-side WoL setting is the user's responsibility (can't be automated from NixOS).
+
+Some drivers can reset WoL after resume. braid does not currently re-arm WoL from a system-sleep hook; instead, the autosuspend gate keeps the machine awake after the first wake if `Wake-on: g` disappears. That is the safe degraded direction: visible and diagnosable via `braid doctor`, rather than silently sleeping into an unreachable state.
 
 ### Fully qualified store paths
 
-The ExternalCommand command string uses absolute `/nix/store/` paths for `timeout`, `bash`, and `braid`. autosuspend runs the command outside braid's wrapper, so PATH is not guaranteed to include these tools.
+The ExternalCommand command strings use absolute `/nix/store/` paths for `timeout`, `bash`, and `braid`. autosuspend runs the commands outside braid's wrapper, so PATH is not guaranteed to include these tools.

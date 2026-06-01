@@ -1,16 +1,17 @@
 # Test: braid-auto-suspend module configuration
 #
 # What: Validates that enabling braid.autoSuspend produces the correct autosuspend
-# configuration with the BraidPool check, SSH check, Smb auto-detection,
-# and scrub wakeup.
+# configuration with the BraidPool check, BraidWol check, SSH check, Smb
+# auto-detection, and scrub wakeup.
 #
 # Why: The autosuspend integration is the wiring between braid's idle check
-# and the system suspend daemon. If the check command is wrong or the service
-# fails to start, the NAS will either never suspend or suspend during operations.
+# and the system suspend daemon. If a check command is wrong or the service
+# fails to start, the NAS will either never suspend, suspend during operations,
+# or suspend without a verified wake path.
 #
 # Scenario: Enable braid.autoSuspend + samba. Verify autosuspend service is
-# configured, all expected checks exist, and the BraidPool command uses
-# fully qualified store paths.
+# configured, all expected checks exist, and the BraidPool/BraidWol commands
+# use fully qualified store paths.
 { braid }:
 { ... }:
 {

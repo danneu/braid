@@ -68,3 +68,4 @@ pub mod types;
 pub mod unlock;
 pub mod ups;
 pub mod util;
+pub mod wol;
