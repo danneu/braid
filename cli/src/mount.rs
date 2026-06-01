@@ -155,6 +155,17 @@ pub struct PlanReport {
     pub result: Result<Option<OpenPlan>, MountError>,
 }
 
+/// Read-only planning inputs threaded from `plan_open_pool` into
+/// `plan_open_pool_inner` while generic execution seams and the event
+/// accumulator stay separate for the planner boundary.
+struct PlanOpenPoolParams<'a> {
+    config: &'a Config,
+    membership: &'a PoolMembership,
+    backing_path_resolver: &'a dyn BackingPathResolver,
+    allow_degraded: bool,
+    command_hint: &'a str,
+}
+
 /// Probe membership disks, validate UUIDs, check degraded policy.
 /// Returns the planning errors that `execute_mount_only` /
 /// `execute_unlock_and_mount` would otherwise surface (degraded refusal,
@@ -175,30 +186,24 @@ pub fn plan_open_pool<R: CommandRunner, F: Filesystem + ?Sized>(
     command_hint: &str,
 ) -> PlanReport {
     let mut events = Vec::new();
-    let result = plan_open_pool_inner(
-        runner,
-        fs,
+    let params = PlanOpenPoolParams {
         config,
         membership,
         backing_path_resolver,
         allow_degraded,
         command_hint,
-        &mut events,
-    );
+    };
+    let result = plan_open_pool_inner(runner, fs, &params, &mut events);
     PlanReport { events, result }
 }
 
 fn plan_open_pool_inner<R: CommandRunner, F: Filesystem + ?Sized>(
     runner: &R,
     fs: &F,
-    config: &Config,
-    membership: &PoolMembership,
-    backing_path_resolver: &dyn BackingPathResolver,
-    allow_degraded: bool,
-    command_hint: &str,
+    params: &PlanOpenPoolParams<'_>,
     events: &mut Vec<ProbeEvent>,
 ) -> Result<Option<OpenPlan>, MountError> {
-    let mount_point = config.mount_point();
+    let mount_point = params.config.mount_point();
 
     // 1. If pool already mounted -> None
     let mp_result = runner.run(&CmdRequest::MountpointCheck {
@@ -217,7 +222,7 @@ fn plan_open_pool_inner<R: CommandRunner, F: Filesystem + ?Sized>(
     let mut first_open_mapper: Option<DiskName> = None;
     let mut missing: Vec<(String, MissingReason)> = Vec::new();
 
-    for (expected_uuid, member) in membership.iter_by_name() {
+    for (expected_uuid, member) in params.membership.iter_by_name() {
         let disk_name = &member.name;
         let display_name = disk_name.as_str();
         let probed = probe::probe_config_disk(
@@ -225,7 +230,7 @@ fn plan_open_pool_inner<R: CommandRunner, F: Filesystem + ?Sized>(
             fs,
             &member.name,
             &member.by_id,
-            backing_path_resolver,
+            params.backing_path_resolver,
         )?;
         match &probed.state {
             ConfigDiskState::Absent => {
@@ -293,10 +298,10 @@ fn plan_open_pool_inner<R: CommandRunner, F: Filesystem + ?Sized>(
     let any_missing_member = !missing.is_empty();
 
     // 4. Degraded check (before any mutations)
-    if any_missing_member && !allow_degraded {
+    if any_missing_member && !params.allow_degraded {
         return Err(MountError::DegradedRefused(format_degraded_refused(
             &missing,
-            command_hint,
+            params.command_hint,
         )));
     }
 
