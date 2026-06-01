@@ -1100,6 +1100,16 @@ fn build_close_sets_uuid_scanned_fallback<R: CommandRunner, F: Filesystem + ?Siz
     LockCloseSet::from_classified(member_owned, orphan_mappers)
 }
 
+/// The behavioral knobs that distinguish braid's lock entry points -- a user
+/// dry-run/exec versus the systemd ExecStop shutdown path. Bundled so the
+/// shared lock body stays under clippy's argument-count limit while the
+/// load-bearing DI handles and the pool's config/membership stay explicit.
+struct LockOptions {
+    dry_run: bool,
+    extra_notes: Vec<PreviewNote>,
+    mode: LockMode,
+}
+
 pub fn cmd_lock<R: CommandRunner, F: Filesystem + ?Sized>(
     runner: &R,
     fs: &F,
@@ -1114,9 +1124,11 @@ pub fn cmd_lock<R: CommandRunner, F: Filesystem + ?Sized>(
         &RealSleeper,
         config,
         membership,
-        dry_run,
-        extra_notes,
-        LockMode::User,
+        LockOptions {
+            dry_run,
+            extra_notes,
+            mode: LockMode::User,
+        },
     )
 }
 
@@ -1136,9 +1148,11 @@ pub fn cmd_lock_systemd_stop<R: CommandRunner, F: Filesystem + ?Sized>(
         &RealSleeper,
         config,
         membership,
-        false,
-        Vec::new(),
-        LockMode::SystemdStop,
+        LockOptions {
+            dry_run: false,
+            extra_notes: Vec::new(),
+            mode: LockMode::SystemdStop,
+        },
     )
 }
 
@@ -1213,9 +1227,11 @@ where
         sleeper,
         config,
         membership,
-        dry_run,
-        Vec::new(),
-        LockMode::User,
+        LockOptions {
+            dry_run,
+            extra_notes: Vec::new(),
+            mode: LockMode::User,
+        },
     )
 }
 
@@ -1227,23 +1243,21 @@ fn cmd_lock_impl_with_notes<R, F, S>(
     sleeper: &S,
     config: &Config,
     membership: &PoolMembership,
-    dry_run: bool,
-    extra_notes: Vec<PreviewNote>,
-    mode: LockMode,
+    opts: LockOptions,
 ) -> Result<(), LockError>
 where
     R: CommandRunner,
     F: Filesystem + ?Sized,
     S: Sleeper,
 {
-    if !dry_run {
+    if !opts.dry_run {
         let online_ops = RealOnlineStateOps::new(runner);
         run_lock_pre_steps(config, &online_ops, &mut std::io::stderr());
     }
 
-    let mut plan = plan_lock(runner, fs, config, membership, mode)?;
-    plan.notes.splice(0..0, extra_notes);
-    if dry_run {
+    let mut plan = plan_lock(runner, fs, config, membership, opts.mode)?;
+    plan.notes.splice(0..0, opts.extra_notes);
+    if opts.dry_run {
         plan.preview().print_colored();
         return Ok(());
     }
