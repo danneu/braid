@@ -9,13 +9,13 @@
 //!   a few labeled lines).
 //! - Do not use free-form `str::contains` for command-output classification in
 //!   domain code; keep text interpretation in `parse/*` and return typed enums.
-//! - Stable contract fixtures live in `tests/fixtures/nixos-25.11/` (authoritative).
+//! - Stable contract fixtures live in `tests/fixtures/nixos-26.05/` (authoritative).
 //! - Unstable forecast fixtures live in `tests/fixtures/nixos-unstable/` (tracked, non-authoritative).
 //! - Parser module unit tests use stable fixtures only.
 //! - Synthetic scenarios (variant happy-paths, negative/malformed inputs) must
 //!   be inline string literals in tests.
 //! - Exception: smartctl self-test log fixtures (`smartctl-selftest-*.json`) are
-//!   hand-authored under `tests/fixtures/nixos-25.11/` because the NixOS VM
+//!   hand-authored under `tests/fixtures/nixos-26.05/` because the NixOS VM
 //!   toolchain cannot produce useful self-test logs on virtio disks. They are
 //!   parser-critical contracts and follow the same review-on-bump obligation as
 //!   captured fixtures (see `AGENTS.md` Parser Compatibility).

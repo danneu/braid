@@ -386,7 +386,7 @@ mod tests {
         }
     }
 
-    const FIXTURE_DIR: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/tests/fixtures/nixos-25.11");
+    const FIXTURE_DIR: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/tests/fixtures/nixos-26.05");
 
     fn fixture(name: &str) -> String {
         std::fs::read_to_string(format!("{FIXTURE_DIR}/{name}")).expect("selftest fixture reads")

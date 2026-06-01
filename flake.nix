@@ -2,7 +2,7 @@
   description = "braid — NixOS NAS with LUKS + btrfs RAID1";
 
   inputs = {
-    nixpkgs.url = "github:NixOS/nixpkgs/nixos-25.11";
+    nixpkgs.url = "github:NixOS/nixpkgs/nixos-26.05";
     crane.url = "github:ipetkov/crane";
   };
 
@@ -813,18 +813,27 @@
               braid = linuxCrane.braid-cli-unwrapped;
             }
           );
-          eval-lock-systemd-stop-deadline-ok =
-            import ./tests/eval/lock-systemd-stop-deadline-assertion.nix {
-              inherit pkgs linuxPkgs nixpkgs linuxSystem;
-            };
+          eval-lock-systemd-stop-deadline-ok = import ./tests/eval/lock-systemd-stop-deadline-assertion.nix {
+            inherit
+              pkgs
+              linuxPkgs
+              nixpkgs
+              linuxSystem
+              ;
+          };
           eval-lock-systemd-stop-deadline-fails =
-            import ./tests/eval/lock-systemd-stop-deadline-assertion-fails.nix {
-              inherit pkgs linuxPkgs nixpkgs linuxSystem;
-            };
-          eval-nixos-module-default-supplies-package =
-            import ./tests/eval/nixos-module-default-package.nix {
-              inherit pkgs self nixpkgs;
-            };
+            import ./tests/eval/lock-systemd-stop-deadline-assertion-fails.nix
+              {
+                inherit
+                  pkgs
+                  linuxPkgs
+                  nixpkgs
+                  linuxSystem
+                  ;
+              };
+          eval-nixos-module-default-supplies-package = import ./tests/eval/nixos-module-default-package.nix {
+            inherit pkgs self nixpkgs;
+          };
           ups-preflight-on-battery = pkgs.testers.nixosTest (
             import ./tests/module/ups-preflight-on-battery.nix {
               braid = linuxCrane.braid-cli-unwrapped;

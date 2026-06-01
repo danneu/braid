@@ -3,10 +3,11 @@
 # Intent: Verify braid creates btrfs pools with the `block-group-tree`
 # feature bit set on both single-disk and raid1 layouts.
 #
-# Why it exists: braid pins the `block-group-tree` bit specifically so pools
-# created with nixos-25.11's btrfs-progs 6.17.1 carry the same bit that the
-# nixos-26.05-era btrfs-progs 6.19.1 default set enables. The rest of the
-# feature set still tracks btrfs-progs defaults; ADR-027.
+# Why it exists: braid requests the `block-group-tree` bit explicitly at mkfs
+# time so the on-disk feature set never depends on the linked btrfs-progs
+# default. The bit is the btrfs-progs 6.19 default that braid's pinned
+# nixos-26.05 toolchain ships; this fails closed if it is ever absent. The rest
+# of the feature set still tracks btrfs-progs defaults; ADR-027.
 #
 # Scenario: Boot a VM, run `braid add` to bootstrap a fresh pool, then inspect
 # `btrfs inspect-internal dump-super` on the underlying mapper device(s).

@@ -129,14 +129,18 @@ pub enum CmdRequest {
         mount_point: MountPoint,
     },
     /// `mkfs.btrfs -d single -m dup -O block-group-tree <device>` -- create a
-    /// single-data / dup-metadata filesystem, pinning only `block-group-tree`
-    /// so nixos-25.11's btrfs-progs 6.17.1 gets 26.05-era 6.19.1's default; ADR-027.
+    /// single-data / dup-metadata filesystem. `block-group-tree` is the
+    /// btrfs-progs 6.19 default that braid's pinned nixos-26.05 toolchain ships;
+    /// braid requests it explicitly so the on-disk feature set never depends on
+    /// the linked btrfs-progs default; ADR-027.
     MkfsBtrfs {
         device: String,
     },
     /// `mkfs.btrfs -d raid1 -m raid1 -O block-group-tree <device>...` --
-    /// create a RAID1 filesystem, pinning only `block-group-tree` so
-    /// nixos-25.11's btrfs-progs 6.17.1 gets 26.05-era 6.19.1's default; ADR-027.
+    /// create a RAID1 filesystem. `block-group-tree` is the btrfs-progs 6.19
+    /// default that braid's pinned nixos-26.05 toolchain ships; braid requests
+    /// it explicitly so the on-disk feature set never depends on the linked
+    /// btrfs-progs default; ADR-027.
     MkfsBtrfsRaid1 {
         devices: Vec<String>,
     },

@@ -10,10 +10,13 @@ status: Active
 
 ## Context
 
-braid currently targets nixos-25.11's btrfs-progs 6.17.1. The
-nixos-26.05-era btrfs-progs 6.19.1 default set enables
-`block-group-tree`, so braid explicitly requests that one feature bit when
-creating new pools with the older stable toolchain.
+braid pins its toolchain to nixos-26.05's btrfs-progs 6.19.1, whose default
+mkfs feature set enables `block-group-tree`. braid requests that one feature
+bit explicitly rather than inheriting it from the default, so the on-disk
+feature set is determined by braid and not by whichever btrfs-progs the running
+toolchain links. (The flag predates the 26.05 bump: under the older
+nixos-25.11 btrfs-progs 6.17.1, which did *not* default `block-group-tree`, the
+same flag made new pools forward-compatible with the 6.19 default.)
 
 This pin is deliberately narrow. `mkfs.btrfs` still starts from the linked
 btrfs-progs default feature set; braid only adds `block-group-tree` to that
@@ -23,10 +26,9 @@ defaults.
 ## Decision
 
 `cli/src/cmd.rs` passes `-O block-group-tree` on both `mkfs.btrfs`
-invocations: single-disk bootstrap and RAID1 bootstrap. This makes pools
-created on nixos-25.11 with btrfs-progs 6.17.1 carry the same
-`block-group-tree` bit that the nixos-26.05-era btrfs-progs 6.19.1 default
-set enables, without freezing any other mkfs default.
+invocations: single-disk bootstrap and RAID1 bootstrap. New pools carry the
+`block-group-tree` bit explicitly -- matching the btrfs-progs 6.19 default that
+braid's pinned toolchain ships -- without freezing any other mkfs default.
 
 The long form is preferred over the `bgt` alias because it is the documented
 primary name and matches the kernel sysfs entry `block_group_tree`.
@@ -45,8 +47,8 @@ primary name and matches the kernel sysfs entry `block_group_tree`.
 - `block-group-tree` is a `compat_ro` feature. The kernel rejects unsupported
   `compat_ro` bits for read-write mount but may still allow a read-only mount
   if no log replay is required. The kernel-side feature has been available
-  since 6.1; NixOS 25.11 ships 6.12 and 26.05 ships 6.18, so normal braid
-  read-write operation is always supported.
+  since 6.1; NixOS 26.05 ships kernel 6.18, so normal braid read-write
+  operation is always supported.
 - Existing pools created before this pin are unaffected. Offline conversion is
   possible via `btrfstune --convert-to-block-group-tree`; braid does not wrap
   that.

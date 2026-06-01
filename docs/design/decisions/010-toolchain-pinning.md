@@ -11,11 +11,11 @@ Braid's parser-critical runtime tools (btrfs-progs, cryptsetup, util-linux, NUT,
 
 ## Decision
 
-Pin `flake.nix` to a specific NixOS stable release (nixos-25.11). Pin only parser-critical tools — those whose output braid parses or whose behavior is part of braid's correctness model. Generic helpers come from the consumer's system package set.
+Pin `flake.nix` to a specific NixOS stable release (nixos-26.05). Pin only parser-critical tools — those whose output braid parses or whose behavior is part of braid's correctness model. Generic helpers come from the consumer's system package set.
 
 ### How it works
 
-- **Flake input**: `nixpkgs.url = "github:NixOS/nixpkgs/nixos-25.11"` — parser-critical tool packages come from this channel.
+- **Flake input**: `nixpkgs.url = "github:NixOS/nixpkgs/nixos-26.05"` — parser-critical tool packages come from this channel.
 - **Module options**: `braid.packages.*` (cryptsetup, btrfsProgs, utilLinux, nut, smartmontools) default to the flake's nixpkgs but can be overridden per-system.
 - **PATH wrapping**: The wrapper injects `cfg.packages.*` into PATH. Generic helpers (coreutils, systemd) are resolved from the consumer's `pkgs`, not pinned.
 - **Two wrapping sites**: flake.nix wraps with `pkgs.*` defaults (for `nix run` and tests); the module wraps `cfg.package` with `cfg.packages.*` (for deployed NixOS systems where package options may be overridden).

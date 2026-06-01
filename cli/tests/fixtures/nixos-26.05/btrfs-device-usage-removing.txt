@@ -1,22 +1,22 @@
 /dev/mapper/disk1, ID: 1
    Device size:          4278190080
    Device slack:                  0
-   Data,RAID1:           1929379840
-   Metadata,RAID1:        268435456
-   System,RAID1:           67108864
-   Unallocated:          2013265920
+   Data,RAID1:           2147483648
+   System,RAID1:           33554432
+   Unallocated:          2097152000
 
 /dev/mapper/disk2, ID: 2
    Device size:          4278190080
    Device slack:                  0
-   Data,RAID1:           3003121664
+   Data,RAID1:           1073741824
+   Metadata,RAID1:        268435456
    System,RAID1:           33554432
-   Unallocated:          1241513984
+   Unallocated:          2902458368
 
 /dev/mapper/disk3, ID: 3
    Device size:          4278190080
    Device slack:         4278190080
    Data,RAID1:           1073741824
    Metadata,RAID1:        268435456
-   System,RAID1:           33554432
-   Unallocated:          -1375731712
+   System,RAID1:           67108864
+   Unallocated:          -1409286144

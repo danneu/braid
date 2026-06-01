@@ -375,7 +375,7 @@ ups.test.result: Done and passed\n\
     // Scenario: smoke test of the `upsc-online.txt` committed fixture.
     #[test]
     fn parses_online_fixture() {
-        let fixture = include_str!("../../tests/fixtures/nixos-25.11/upsc/upsc-online.txt");
+        let fixture = include_str!("../../tests/fixtures/nixos-26.05/upsc/upsc-online.txt");
         let out = parse_upsc(fixture);
         assert!(out.status_flags.contains(&UpsStatusFlag::Ol));
         assert!(!out.status_flags.contains(&UpsStatusFlag::Ob));
@@ -389,7 +389,7 @@ ups.test.result: Done and passed\n\
     // Scenario: operator captures `upsc` output during a simulated outage.
     #[test]
     fn parses_lowbattery_fixture() {
-        let fixture = include_str!("../../tests/fixtures/nixos-25.11/upsc/upsc-lowbattery.txt");
+        let fixture = include_str!("../../tests/fixtures/nixos-26.05/upsc/upsc-lowbattery.txt");
         let out = parse_upsc(fixture);
         assert!(out.status_flags.contains(&UpsStatusFlag::Ob));
         assert!(out.status_flags.contains(&UpsStatusFlag::Lb));

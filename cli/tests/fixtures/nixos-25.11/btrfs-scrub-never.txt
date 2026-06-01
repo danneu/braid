@@ -1,5 +1,0 @@
-UUID:             de2b8517-f972-45fc-b121-3e160c8ea432
-	no stats available
-Total to scrub:   33914880
-Rate:             0/s
-Error summary:    no errors found

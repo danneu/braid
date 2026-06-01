@@ -13,7 +13,7 @@
       "generation_errs": 0
     },
     {
-      "device": "devid:2",
+      "device": "<missing disk>",
       "devid": 2,
       "write_io_errs": 0,
       "read_io_errs": 0,

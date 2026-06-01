@@ -154,7 +154,7 @@ mod tests {
 
     fn fixture(name: &str) -> String {
         let path = format!(
-            "{}/tests/fixtures/nixos-25.11/{name}",
+            "{}/tests/fixtures/nixos-26.05/{name}",
             env!("CARGO_MANIFEST_DIR")
         );
         std::fs::read_to_string(&path).unwrap_or_else(|e| panic!("fixture {name}: {e}"))
@@ -164,10 +164,10 @@ mod tests {
         s.starts_with("/dev/dm-") || s.starts_with("/dev/mapper/braid-")
     }
 
-    // --- Contract tests (nixos-25.11 fixtures) ---
+    // --- Contract tests (nixos-26.05 fixtures) ---
 
     #[test]
-    fn device_usage_parses_nixos_25_11_2disk() {
+    fn device_usage_parses_nixos_26_05_2disk() {
         let raw = RawCommandOutput {
             cmd: "btrfs device usage".into(),
             stdout: fixture("btrfs-device-usage-2disk.txt"),

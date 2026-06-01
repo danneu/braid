@@ -98,8 +98,8 @@ In `~/world/flake.nix`:
 ```nix
 {
   inputs = {
-    nixpkgs.url = "github:NixOS/nixpkgs/nixos-25.11";
-    home-manager.url = "github:nix-community/home-manager/release-25.11";
+    nixpkgs.url = "github:NixOS/nixpkgs/nixos-26.05";
+    home-manager.url = "github:nix-community/home-manager/release-26.05";
     home-manager.inputs.nixpkgs.follows = "nixpkgs";
   };
 
@@ -141,7 +141,7 @@ Create `hosts/nasbox/home.nix` for your user-level config:
 {
   home.username = "dan";
   home.homeDirectory = "/home/dan";
-  home.stateVersion = "25.11";
+  home.stateVersion = "26.05";
   programs.home-manager.enable = true;
 
   home.sessionVariables = {
@@ -257,8 +257,8 @@ Add it as a flake input in `~/world/flake.nix` and apply its overlay:
 ```nix
 {
   inputs = {
-    nixpkgs.url = "github:NixOS/nixpkgs/nixos-25.11";
-    home-manager.url = "github:nix-community/home-manager/release-25.11";
+    nixpkgs.url = "github:NixOS/nixpkgs/nixos-26.05";
+    home-manager.url = "github:nix-community/home-manager/release-26.05";
     home-manager.inputs.nixpkgs.follows = "nixpkgs";
 
     # No `follows = "nixpkgs"` -- llm-agents is built against nixpkgs-unstable.

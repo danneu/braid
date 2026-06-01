@@ -1,6 +1,6 @@
 // Shared golden-file parser test harness.
 //
-// Included (via include!) by golden_nixos_25_11.rs and golden_nixos_unstable.rs.
+// Included (via include!) by golden_nixos_26_05.rs and golden_nixos_unstable.rs.
 // Expects the including file to define:
 //   const FIXTURE_DIR: &str = "...";
 //   const REQUIRE_FIXTURES: bool = true | false;
@@ -628,7 +628,7 @@ fn golden_cryptsetup_status_inactive() {
 // --- NUT (upsc) parsers ---
 //
 // Fixtures live under `upsc/` because they were captured by the dedicated
-// `capture-ups-fixtures` VM test; the stable (nixos-25.11) fixtures are
+// `capture-ups-fixtures` VM test; the stable (nixos-26.05) fixtures are
 // authoritative and the unstable sibling tracks upstream drift. See
 // docs/design/decisions/010-toolchain-pinning.md for the pinning contract.
 

@@ -9,7 +9,7 @@
 # Why: NUT joins btrfs-progs / cryptsetup / util-linux as a pinned
 # parser-critical tool (see docs/design/decisions/010-toolchain-pinning.md).
 # These fixtures back the golden parser tests in
-# `cli/tests/golden_nixos_25_11.rs` (and the nixos-unstable sibling).
+# `cli/tests/golden_nixos_26_05.rs` (and the nixos-unstable sibling).
 # A nixpkgs bump that changes `nut`'s output format must refresh
 # these fixtures in lockstep.
 #

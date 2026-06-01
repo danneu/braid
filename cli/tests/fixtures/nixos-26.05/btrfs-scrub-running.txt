@@ -1,0 +1,10 @@
+UUID:             9f6091a4-96ca-47db-a9ed-669a99fe5630
+Scrub started:    Mon Jun  1 14:44:55 2026
+Status:           running
+Duration:         0:00:05
+Time left:        0:00:00
+ETA:              Mon Jun  1 14:45:00 2026
+Total to scrub:   3224780800
+Bytes scrubbed:   2729836544  (84.65%)
+Rate:             545967308/s
+Error summary:    no errors found

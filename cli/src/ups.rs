@@ -810,7 +810,7 @@ mod tests {
     #[test]
     fn snapshot_human_online() {
         let parsed = parse_fixture(include_str!(
-            "../tests/fixtures/nixos-25.11/upsc/upsc-online.txt"
+            "../tests/fixtures/nixos-26.05/upsc/upsc-online.txt"
         ));
         snap!(format_human("ups", &parsed));
     }
@@ -828,7 +828,7 @@ mod tests {
     #[test]
     fn json_online_fixture_has_expected_shape() {
         let parsed = parse_fixture(include_str!(
-            "../tests/fixtures/nixos-25.11/upsc/upsc-online.txt"
+            "../tests/fixtures/nixos-26.05/upsc/upsc-online.txt"
         ));
         let text = serde_json::to_string_pretty(&JsonReport::success(&parsed)).unwrap();
         let value: serde_json::Value = serde_json::from_str(&text).unwrap();
@@ -857,7 +857,7 @@ mod tests {
     #[test]
     fn snapshot_human_onbattery() {
         let parsed = parse_fixture(include_str!(
-            "../tests/fixtures/nixos-25.11/upsc/upsc-onbattery.txt"
+            "../tests/fixtures/nixos-26.05/upsc/upsc-onbattery.txt"
         ));
         snap!(format_human("ups", &parsed));
     }
@@ -865,7 +865,7 @@ mod tests {
     #[test]
     fn json_onbattery_fixture_has_expected_shape() {
         let parsed = parse_fixture(include_str!(
-            "../tests/fixtures/nixos-25.11/upsc/upsc-onbattery.txt"
+            "../tests/fixtures/nixos-26.05/upsc/upsc-onbattery.txt"
         ));
         let value: serde_json::Value =
             serde_json::from_str(&serde_json::to_string(&JsonReport::success(&parsed)).unwrap())
@@ -888,7 +888,7 @@ mod tests {
     #[test]
     fn snapshot_human_lowbattery() {
         let parsed = parse_fixture(include_str!(
-            "../tests/fixtures/nixos-25.11/upsc/upsc-lowbattery.txt"
+            "../tests/fixtures/nixos-26.05/upsc/upsc-lowbattery.txt"
         ));
         snap!(format_human("ups", &parsed));
     }
@@ -896,7 +896,7 @@ mod tests {
     #[test]
     fn json_lowbattery_fixture_has_expected_shape() {
         let parsed = parse_fixture(include_str!(
-            "../tests/fixtures/nixos-25.11/upsc/upsc-lowbattery.txt"
+            "../tests/fixtures/nixos-26.05/upsc/upsc-lowbattery.txt"
         ));
         let value: serde_json::Value =
             serde_json::from_str(&serde_json::to_string(&JsonReport::success(&parsed)).unwrap())
@@ -917,7 +917,7 @@ mod tests {
     #[test]
     fn snapshot_human_replace_battery() {
         let parsed = parse_fixture(include_str!(
-            "../tests/fixtures/nixos-25.11/upsc/upsc-replace-battery.txt"
+            "../tests/fixtures/nixos-26.05/upsc/upsc-replace-battery.txt"
         ));
         snap!(format_human("ups", &parsed));
     }
@@ -925,7 +925,7 @@ mod tests {
     #[test]
     fn json_replace_battery_fixture_has_expected_shape() {
         let parsed = parse_fixture(include_str!(
-            "../tests/fixtures/nixos-25.11/upsc/upsc-replace-battery.txt"
+            "../tests/fixtures/nixos-26.05/upsc/upsc-replace-battery.txt"
         ));
         let value: serde_json::Value =
             serde_json::from_str(&serde_json::to_string(&JsonReport::success(&parsed)).unwrap())

@@ -80,16 +80,16 @@ mod tests {
 
     fn fixture(name: &str) -> String {
         let path = format!(
-            "{}/tests/fixtures/nixos-25.11/{name}",
+            "{}/tests/fixtures/nixos-26.05/{name}",
             env!("CARGO_MANIFEST_DIR")
         );
         std::fs::read_to_string(&path).unwrap_or_else(|e| panic!("fixture {name}: {e}"))
     }
 
-    // --- Contract tests (nixos-25.11 fixtures) ---
+    // --- Contract tests (nixos-26.05 fixtures) ---
 
     #[test]
-    fn luks_uuid_parses_nixos_25_11() {
+    fn luks_uuid_parses_nixos_26_05() {
         let raw = RawCommandOutput {
             cmd: "cryptsetup luksUUID".into(),
             stdout: fixture("cryptsetup-luks-uuid.txt"),
@@ -174,7 +174,7 @@ mod tests {
     // Scenario: discover reads the LUKS header dump of a braid-labeled
     //   disk during cold-disk pool reconstruction.
     #[test]
-    fn luks_uuid_from_dump_parses_nixos_25_11_fixture() {
+    fn luks_uuid_from_dump_parses_nixos_26_05_fixture() {
         let raw = RawCommandOutput {
             cmd: "cryptsetup luksDump".into(),
             stdout: fixture("cryptsetup-luks-dump.txt"),

@@ -4,7 +4,7 @@ upstream output changes are visible in git history.
 
 **No smartctl fixtures by design.** VM virtio disks do not emit useful
 SMART data. The smartctl parsers are exercised only against
-`cli/tests/fixtures/nixos-25.11/smartctl-*.json` (a physical-drive SATA
+`cli/tests/fixtures/nixos-26.05/smartctl-*.json` (a physical-drive SATA
 capture and hand-authored selftest fixtures). The `tool-versions` VM
 test verifies `smartctl` provenance and configured-package version but
 does not detect nixpkgs version moves -- on any smartmontools nixpkgs

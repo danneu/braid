@@ -97,7 +97,7 @@ pub(crate) fn unlock_btrfs_balance_status_paused_skip_balance(
         RawCommandOutput {
             cmd: "btrfs balance status".to_owned(),
             stdout: include_str!(
-                "../../tests/fixtures/nixos-25.11/btrfs-balance-status-paused-skip-balance.txt"
+                "../../tests/fixtures/nixos-26.05/btrfs-balance-status-paused-skip-balance.txt"
             )
             .to_owned(),
             stderr: String::new(),

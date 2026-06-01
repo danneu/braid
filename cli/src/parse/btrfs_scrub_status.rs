@@ -282,19 +282,19 @@ mod tests {
 
     fn fixture(name: &str) -> String {
         let path = format!(
-            "{}/tests/fixtures/nixos-25.11/{name}",
+            "{}/tests/fixtures/nixos-26.05/{name}",
             env!("CARGO_MANIFEST_DIR")
         );
         std::fs::read_to_string(&path).unwrap_or_else(|e| panic!("fixture {name}: {e}"))
     }
 
-    // --- Contract tests (nixos-25.11 fixtures) ---
+    // --- Contract tests (nixos-26.05 fixtures) ---
 
     /// Intent: Parse a real "never scrubbed" fixture.
     /// Why: Ensures the parser recognizes the "no stats available" sentinel.
     /// Scenario: Pool has never been scrubbed.
     #[test]
-    fn scrub_parses_nixos_25_11_never() {
+    fn scrub_parses_nixos_26_05_never() {
         let raw = RawCommandOutput {
             cmd: "btrfs scrub status".into(),
             stdout: fixture("btrfs-scrub-never.txt"),
@@ -309,7 +309,7 @@ mod tests {
     /// Why: Validates timestamp, error count, total bytes, and rate from live output.
     /// Scenario: Scrub completed successfully on a healthy pool.
     #[test]
-    fn scrub_parses_nixos_25_11_completed() {
+    fn scrub_parses_nixos_26_05_completed() {
         let raw = RawCommandOutput {
             cmd: "btrfs scrub status --raw".into(),
             stdout: fixture("btrfs-scrub-completed.txt"),
@@ -335,8 +335,8 @@ mod tests {
             } => {
                 assert_eq!(started_at.0, expected_dt);
                 assert_eq!(*error_count, 0);
-                assert_eq!(*total_bytes, Some(33_931_264));
-                assert_eq!(*rate_bytes_per_sec, Some(33_914_880));
+                assert_eq!(*total_bytes, Some(33_964_032));
+                assert_eq!(*rate_bytes_per_sec, Some(33_947_648));
             }
             other => panic!("expected Finished, got {other:?}"),
         }
@@ -346,7 +346,7 @@ mod tests {
     /// Why: Validates all Running fields against live btrfs output.
     /// Scenario: Mid-scrub status check on a multi-drive pool.
     #[test]
-    fn scrub_parses_nixos_25_11_running() {
+    fn scrub_parses_nixos_26_05_running() {
         let raw = RawCommandOutput {
             cmd: "btrfs scrub status --raw".into(),
             stdout: fixture("btrfs-scrub-running.txt"),
@@ -369,9 +369,9 @@ mod tests {
                 assert!(duration_secs.is_some());
                 assert!(time_left_secs.is_some());
                 assert!(eta.is_some());
-                assert_eq!(*total_bytes, Some(596_353_253_376));
-                assert_eq!(*bytes_scrubbed, Some(88_143_626_240));
-                assert_eq!(*rate_bytes_per_sec, Some(246_211_246));
+                assert_eq!(*total_bytes, Some(3_224_780_800));
+                assert_eq!(*bytes_scrubbed, Some(2_729_836_544));
+                assert_eq!(*rate_bytes_per_sec, Some(545_967_308));
                 assert_eq!(*error_count, 0);
             }
             other => panic!("expected Running, got {other:?}"),

@@ -1,4 +1,4 @@
-# Test: capture tool output fixtures for nixos-25.11
+# Test: capture tool output fixtures for nixos-26.05
 #
 # What: Sets up LUKS + btrfs RAID1 in a VM and captures the exact output of
 # every command that the Rust parsers consume. Writes each output to a file

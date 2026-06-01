@@ -13,7 +13,7 @@
 # catch nixpkgs version moves -- expected versions read from the same
 # pkgs evaluation that builds the VM, so both sides advance together.
 # Drift relative to upstream is gated by the manual fixture-refresh
-# workflow documented in cli/tests/fixtures/nixos-25.11/README.md and
+# workflow documented in cli/tests/fixtures/nixos-26.05/README.md and
 # docs/design/decisions/010-toolchain-pinning.md.
 #
 # Dependencies: braid module (options.nix, cli.nix) must wire cfg.packages correctly.

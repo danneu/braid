@@ -83,7 +83,7 @@ Rust source lives in `cli/`.
 
 ## Upgrading dependencies
 
-braid targets the latest stable NixOS release (`nixos-25.11`) and uses whatever package versions that channel provides -- no custom pins or overlays. Versions are locked to a specific nixpkgs commit in `flake.lock`.
+braid targets the latest stable NixOS release (`nixos-26.05`) and uses whatever package versions that channel provides -- no custom pins or overlays. Versions are locked to a specific nixpkgs commit in `flake.lock`.
 
 ### 1. Update nixpkgs
 

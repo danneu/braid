@@ -1,7 +1,0 @@
-UUID:             de2b8517-f972-45fc-b121-3e160c8ea432
-Scrub started:    Wed Apr  8 17:00:25 2026
-Status:           finished
-Duration:         0:00:00
-Total to scrub:   33931264
-Rate:             33914880/s
-Error summary:    no errors found

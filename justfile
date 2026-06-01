@@ -106,7 +106,7 @@ test-parsers *args:
 
 # Run Rust unit tests (excludes unstable golden tests)
 test-rust:
-    cargo test --lib --bin braid --test golden_nixos_25_11 --test tty_guard --test confirm_yes
+    cargo test --lib --bin braid --test golden_nixos_26_05 --test tty_guard --test confirm_yes
 
 # Format nix source + tests with nixfmt
 fmt-nix:
@@ -121,27 +121,27 @@ clippy:
 clippy-fix:
     cargo fix --manifest-path cli/Cargo.toml --tests --allow-dirty
 
-# Capture tool output fixtures into cli/tests/fixtures/nixos-25.11/
+# Capture tool output fixtures into cli/tests/fixtures/nixos-26.05/
 capture-fixtures:
     nix build .#checks.{{system}}.capture-tool-fixtures -L
-    chmod u+w cli/tests/fixtures/nixos-25.11/* 2>/dev/null || true
-    cp -f result/fixtures/* cli/tests/fixtures/nixos-25.11/
-    @echo "Fixtures written to cli/tests/fixtures/nixos-25.11/"
+    chmod u+w cli/tests/fixtures/nixos-26.05/* 2>/dev/null || true
+    cp -f result/fixtures/* cli/tests/fixtures/nixos-26.05/
+    @echo "Fixtures written to cli/tests/fixtures/nixos-26.05/"
 
 # Capture in-progress fixtures from progress-monitoring VM test
 capture-progress-fixtures:
     nix build .#checks.{{system}}.progress-monitoring -L
-    chmod u+w cli/tests/fixtures/nixos-25.11/* 2>/dev/null || true
-    cp -f result/fixtures/* cli/tests/fixtures/nixos-25.11/
-    @echo "Progress fixtures written to cli/tests/fixtures/nixos-25.11/"
+    chmod u+w cli/tests/fixtures/nixos-26.05/* 2>/dev/null || true
+    cp -f result/fixtures/* cli/tests/fixtures/nixos-26.05/
+    @echo "Progress fixtures written to cli/tests/fixtures/nixos-26.05/"
 
-# Capture upsc fixtures for the NUT parser into cli/tests/fixtures/nixos-25.11/upsc/
+# Capture upsc fixtures for the NUT parser into cli/tests/fixtures/nixos-26.05/upsc/
 capture-ups-fixtures:
     nix build .#checks.{{system}}.capture-ups-fixtures -L
-    mkdir -p cli/tests/fixtures/nixos-25.11/upsc
-    chmod u+w cli/tests/fixtures/nixos-25.11/upsc/* 2>/dev/null || true
-    cp -f result/fixtures/* cli/tests/fixtures/nixos-25.11/upsc/
-    @echo "UPS fixtures written to cli/tests/fixtures/nixos-25.11/upsc/"
+    mkdir -p cli/tests/fixtures/nixos-26.05/upsc
+    chmod u+w cli/tests/fixtures/nixos-26.05/upsc/* 2>/dev/null || true
+    cp -f result/fixtures/* cli/tests/fixtures/nixos-26.05/upsc/
+    @echo "UPS fixtures written to cli/tests/fixtures/nixos-26.05/upsc/"
 
 # Capture all stable fixtures (base + progress + ups)
 capture-all-fixtures:

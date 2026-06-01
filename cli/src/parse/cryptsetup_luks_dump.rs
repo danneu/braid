@@ -132,7 +132,7 @@ mod tests {
 
     fn fixture(name: &str) -> String {
         let path = format!(
-            "{}/tests/fixtures/nixos-25.11/{name}",
+            "{}/tests/fixtures/nixos-26.05/{name}",
             env!("CARGO_MANIFEST_DIR")
         );
         std::fs::read_to_string(&path).unwrap_or_else(|e| panic!("fixture {name}: {e}"))
@@ -159,14 +159,14 @@ mod tests {
         }
     }
 
-    // --- Contract tests (nixos-25.11 fixtures) ---
+    // --- Contract tests (nixos-26.05 fixtures) ---
 
     #[test]
     // Intent: the stable cryptsetup JSON fixture yields core header fields
     //   plus the default dynamic segment model.
     // Why it exists: parser drift here breaks TUI metadata and replace
     //   target-capacity preflight.
-    // Scenario: nixos-25.11 cryptsetup emits one keyslot and segment 0.
+    // Scenario: nixos-26.05 cryptsetup emits one keyslot and segment 0.
     fn luks_dump_parses_single_keyslot_fixture() {
         let raw = RawCommandOutput {
             cmd: "cryptsetup luksDump".into(),

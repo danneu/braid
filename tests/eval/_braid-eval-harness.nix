@@ -9,7 +9,7 @@ nixpkgs.lib.nixosSystem {
         device = "none";
         fsType = "tmpfs";
       };
-      system.stateVersion = "25.11";
+      system.stateVersion = "26.05";
 
       braid = {
         enable = true;

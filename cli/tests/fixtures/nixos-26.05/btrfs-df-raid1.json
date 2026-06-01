@@ -19,12 +19,12 @@
       "bg-type": "Metadata",
       "bg-profile": "RAID1",
       "total": 105644032,
-      "used": 163840
+      "used": 180224
     },
     {
       "bg-type": "GlobalReserve",
       "bg-profile": "single",
-      "total": 5767168,
+      "total": 6029312,
       "used": 0
     }
   ]

@@ -79,25 +79,25 @@ mod tests {
 
     fn fixture(name: &str) -> String {
         let path = format!(
-            "{}/tests/fixtures/nixos-25.11/{name}",
+            "{}/tests/fixtures/nixos-26.05/{name}",
             env!("CARGO_MANIFEST_DIR")
         );
         std::fs::read_to_string(&path).unwrap_or_else(|e| panic!("fixture {name}: {e}"))
     }
 
-    // --- Contract tests (nixos-25.11 fixtures) ---
+    // --- Contract tests (nixos-26.05 fixtures) ---
 
     /*
      * Intent: parse a realistic multi-subvolume listing from a real system.
      *
      * Why it exists: ensures the nom grammar matches the actual output format
-     * produced by btrfs-progs on NixOS 25.11.
+     * produced by btrfs-progs on NixOS 26.05.
      *
      * Scenario: user opens the TUI Browse tab, switches to Subvolumes, and
      * the TUI parses the listing to populate the selectable subvolume list.
      */
     #[test]
-    fn subvolume_list_parses_nixos_25_11_fixture() {
+    fn subvolume_list_parses_nixos_26_05_fixture() {
         let raw = RawCommandOutput {
             cmd: "btrfs subvolume list /mnt/storage".into(),
             stdout: fixture("btrfs-subvolume-list.txt"),

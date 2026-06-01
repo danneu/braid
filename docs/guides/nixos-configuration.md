@@ -10,7 +10,7 @@ Complete reference for the braid NixOS module options. Read this when setting up
 # flake.nix
 {
   inputs = {
-    nixpkgs.url = "github:NixOS/nixpkgs/nixos-25.11";
+    nixpkgs.url = "github:NixOS/nixpkgs/nixos-26.05";
     braid.url = "github:danneu/braid";
     braid.inputs.nixpkgs.follows = "nixpkgs";
   };
