@@ -475,13 +475,15 @@ impl RecoverWorkAction {
                     relock_and_remount(
                         runner,
                         fs,
-                        params.sleeper,
-                        params.config,
-                        &recovery_mount_membership,
-                        params.backing_path_resolver,
-                        params.allow_degraded,
-                        cred,
-                        close_names,
+                        RelockAndRemountCtx {
+                            sleeper: params.sleeper,
+                            config: params.config,
+                            membership: &recovery_mount_membership,
+                            backing_path_resolver: params.backing_path_resolver,
+                            allow_degraded: params.allow_degraded,
+                            credential: cred,
+                            close_names,
+                        },
                     )?;
                 }
                 Ok(false)
@@ -3396,6 +3398,19 @@ fn wait_for_kernel_replace_to_finish<R: CommandRunner>(
     }
 }
 
+/// Bundles the call-specific inputs for `relock_and_remount` so the recovery
+/// remount cycle keeps the `runner, fs, ctx` positional shape shared with
+/// sibling recovery phases and stays under clippy's argument-count threshold.
+struct RelockAndRemountCtx<'a> {
+    sleeper: &'a dyn Sleeper,
+    config: &'a Config,
+    membership: &'a PoolMembership,
+    backing_path_resolver: &'a dyn BackingPathResolver,
+    allow_degraded: bool,
+    credential: &'a OpenCredential,
+    close_names: &'a [DiskName],
+}
+
 /// Drop all kernel state for the recovery mount and re-establish it from
 /// scratch, so a subsequent probe_pool reads the post-resume on-disk topology
 /// instead of the stale in-memory btrfs_fs_devices the kernel can carry
@@ -3412,14 +3427,17 @@ fn wait_for_kernel_replace_to_finish<R: CommandRunner>(
 fn relock_and_remount<R: CommandRunner, F: Filesystem + ?Sized>(
     runner: &R,
     fs: &F,
-    sleeper: &dyn Sleeper,
-    config: &Config,
-    membership: &PoolMembership,
-    backing_path_resolver: &dyn BackingPathResolver,
-    allow_degraded: bool,
-    credential: &OpenCredential,
-    close_names: &[DiskName],
+    ctx: RelockAndRemountCtx<'_>,
 ) -> Result<(), RecoverError> {
+    let RelockAndRemountCtx {
+        sleeper,
+        config,
+        membership,
+        backing_path_resolver,
+        allow_degraded,
+        credential,
+        close_names,
+    } = ctx;
     let color_enabled = color_enabled_for_stderr();
     let mount_point = config.mount_point();
 
@@ -13181,15 +13199,17 @@ mod tests {
         relock_and_remount(
             &runner,
             &fs,
-            &progress::NoopSleeper,
-            &config,
-            &membership,
-            &backing_path_resolver,
-            false,
-            &OpenCredential::Passphrase(Passphrase::from_zeroizing(zeroize::Zeroizing::new(
-                "testpass".to_owned(),
-            ))),
-            &close_names,
+            RelockAndRemountCtx {
+                sleeper: &progress::NoopSleeper,
+                config: &config,
+                membership: &membership,
+                backing_path_resolver: &backing_path_resolver,
+                allow_degraded: false,
+                credential: &OpenCredential::Passphrase(Passphrase::from_zeroizing(
+                    zeroize::Zeroizing::new("testpass".to_owned()),
+                )),
+                close_names: &close_names,
+            },
         )
         .expect("remount cycle should succeed without touching unplanned mapper");
 
@@ -13337,15 +13357,17 @@ mod tests {
         relock_and_remount(
             &runner,
             &fs,
-            &progress::NoopSleeper,
-            &config,
-            &membership,
-            crate::test_fixtures::mock_virtio_backing_path_resolver(),
-            false,
-            &OpenCredential::Passphrase(Passphrase::from_zeroizing(zeroize::Zeroizing::new(
-                "testpass".to_owned(),
-            ))),
-            &close_names,
+            RelockAndRemountCtx {
+                sleeper: &progress::NoopSleeper,
+                config: &config,
+                membership: &membership,
+                backing_path_resolver: crate::test_fixtures::mock_virtio_backing_path_resolver(),
+                allow_degraded: false,
+                credential: &OpenCredential::Passphrase(Passphrase::from_zeroizing(
+                    zeroize::Zeroizing::new("testpass".to_owned()),
+                )),
+                close_names: &close_names,
+            },
         )
         .expect("remount cycle should succeed when a planned mapper disappeared");
 
@@ -13492,15 +13514,17 @@ mod tests {
         let err = relock_and_remount(
             &runner,
             &fs,
-            &progress::NoopSleeper,
-            &config,
-            &membership,
-            crate::test_fixtures::mock_virtio_backing_path_resolver(),
-            false,
-            &OpenCredential::Passphrase(Passphrase::from_zeroizing(zeroize::Zeroizing::new(
-                "testpass".to_owned(),
-            ))),
-            &close_names,
+            RelockAndRemountCtx {
+                sleeper: &progress::NoopSleeper,
+                config: &config,
+                membership: &membership,
+                backing_path_resolver: crate::test_fixtures::mock_virtio_backing_path_resolver(),
+                allow_degraded: false,
+                credential: &OpenCredential::Passphrase(Passphrase::from_zeroizing(
+                    zeroize::Zeroizing::new("testpass".to_owned()),
+                )),
+                close_names: &close_names,
+            },
         )
         .expect_err("final mount should fail");
         assert!(
@@ -13643,15 +13667,17 @@ mod tests {
         let err = relock_and_remount(
             &runner,
             &fs,
-            &sleeper,
-            &config,
-            &membership,
-            crate::test_fixtures::mock_virtio_backing_path_resolver(),
-            false,
-            &OpenCredential::Passphrase(Passphrase::from_zeroizing(zeroize::Zeroizing::new(
-                "testpass".to_owned(),
-            ))),
-            &close_names,
+            RelockAndRemountCtx {
+                sleeper: &sleeper,
+                config: &config,
+                membership: &membership,
+                backing_path_resolver: crate::test_fixtures::mock_virtio_backing_path_resolver(),
+                allow_degraded: false,
+                credential: &OpenCredential::Passphrase(Passphrase::from_zeroizing(
+                    zeroize::Zeroizing::new("testpass".to_owned()),
+                )),
+                close_names: &close_names,
+            },
         )
         .expect_err("final mount should fail");
         assert!(
