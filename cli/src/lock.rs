@@ -1556,12 +1556,7 @@ mod tests {
             &config,
             &membership,
             |_runner, _fs, _config, _membership, _dry_run| Ok(()),
-            || {
-                Err(io::Error::new(
-                    io::ErrorKind::Other,
-                    "synthetic mark_done failure",
-                ))
-            },
+            || Err(io::Error::other("synthetic mark_done failure")),
         );
 
         assert!(matches!(result, Err(LockOrchestrateError::MarkDone(_))));

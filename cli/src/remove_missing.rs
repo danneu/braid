@@ -451,10 +451,10 @@ pub fn plan_remove_missing<R: CommandRunner + Sync, F: Filesystem + ?Sized>(
     // Skip when only 1 present device survives: in 2-device RAID1, the
     // survivor already has all data (every chunk is mirrored). This does
     // not match the reproduced relocation-failure mode.
-    if pool.devices.len() >= 2 {
-        if let Err(e) = check_relocation_space(runner, config.mount_point(), params.missing_id) {
-            return Err(PlanFailure::with_notes(notes, e));
-        }
+    if pool.devices.len() >= 2
+        && let Err(e) = check_relocation_space(runner, config.mount_point(), params.missing_id)
+    {
+        return Err(PlanFailure::with_notes(notes, e));
     }
 
     let remaining_present = pool.devices.len();

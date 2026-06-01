@@ -1380,9 +1380,11 @@ mod tests {
     // Scenario: user opens Browse > SMART > Health and inspects disk1.
     #[test]
     fn command_display_smartctl_picker_preview_uses_selected_device() {
-        let mut state = BrowseState::default();
-        state.program = BrowseProgram::Smartctl;
-        state.smartctl_command = BrowseCommand::SmartctlHealth;
+        let mut state = BrowseState {
+            program: BrowseProgram::Smartctl,
+            smartctl_command: BrowseCommand::SmartctlHealth,
+            ..Default::default()
+        };
         let disks = disk_inventory();
         let effect = state.load_current(&pool(), Some(&ups()), &DiskInventory { by_id: &disks });
         let mount_point = MountPoint("/mnt/storage".to_owned());
@@ -1401,8 +1403,10 @@ mod tests {
     // Scenario: user opens Browse > NUT > Status with braid.ups.name set.
     #[test]
     fn command_display_nut_snapshot_source_shows_upsc_query() {
-        let mut state = BrowseState::default();
-        state.program = BrowseProgram::Nut;
+        let state = BrowseState {
+            program: BrowseProgram::Nut,
+            ..Default::default()
+        };
         let mount_point = MountPoint("/mnt/storage".to_owned());
 
         assert_eq!(
@@ -1419,9 +1423,11 @@ mod tests {
     // the stale subvolume-list command from the parent view.
     #[test]
     fn command_display_subvolume_detail_shows_dispatched_request() {
-        let mut state = BrowseState::default();
-        state.btrfs_command = BrowseCommand::BtrfsSubvolumes;
-        state.focus = BrowseFocus::Content;
+        let mut state = BrowseState {
+            btrfs_command: BrowseCommand::BtrfsSubvolumes,
+            focus: BrowseFocus::Content,
+            ..Default::default()
+        };
         state.command_finished(
             RawCommandOutput {
                 cmd: "btrfs subvolume list /mnt/storage".into(),
@@ -1458,8 +1464,10 @@ mod tests {
     // Scenario: user is focused on Content and presses l.
     #[test]
     fn l_at_rightmost_is_noop() {
-        let mut state = BrowseState::default();
-        state.focus = BrowseFocus::Content;
+        let mut state = BrowseState {
+            focus: BrowseFocus::Content,
+            ..Default::default()
+        };
         state.focus_right();
         assert_eq!(state.focus(), BrowseFocus::Content);
     }
@@ -1471,8 +1479,10 @@ mod tests {
     // Scenario: user selects Btrfs Balance and presses l from Command.
     #[test]
     fn l_from_command_skips_subview_when_no_subviews() {
-        let mut state = BrowseState::default();
-        state.focus = BrowseFocus::Command;
+        let mut state = BrowseState {
+            focus: BrowseFocus::Command,
+            ..Default::default()
+        };
         for _ in 0..4 {
             state.select_next();
         }
@@ -1487,8 +1497,10 @@ mod tests {
     // Scenario: user starts on Btrfs Filesystem and presses l from Command.
     #[test]
     fn l_from_command_enters_subview_when_filesystem() {
-        let mut state = BrowseState::default();
-        state.focus = BrowseFocus::Command;
+        let mut state = BrowseState {
+            focus: BrowseFocus::Command,
+            ..Default::default()
+        };
         state.focus_right();
         assert_eq!(state.focus(), BrowseFocus::Subview);
     }
@@ -1500,8 +1512,10 @@ mod tests {
     // Scenario: user selects Btrfs Devices and presses l from Command.
     #[test]
     fn l_from_command_enters_subview_when_devices() {
-        let mut state = BrowseState::default();
-        state.focus = BrowseFocus::Command;
+        let mut state = BrowseState {
+            focus: BrowseFocus::Command,
+            ..Default::default()
+        };
         state.select_next();
         state.focus_right();
         assert_eq!(state.focus(), BrowseFocus::Subview);
@@ -1577,8 +1591,10 @@ mod tests {
     // Scenario: user focuses the subview column and presses j repeatedly.
     #[test]
     fn j_in_subview_cycles_filesystem_views() {
-        let mut state = BrowseState::default();
-        state.focus = BrowseFocus::Subview;
+        let mut state = BrowseState {
+            focus: BrowseFocus::Subview,
+            ..Default::default()
+        };
         state.select_next();
         assert_eq!(
             state.subview_rows(),
@@ -1617,8 +1633,10 @@ mod tests {
     // Scenario: user focuses the Devices subview column and presses j.
     #[test]
     fn j_in_subview_cycles_devices_usage_stats() {
-        let mut state = BrowseState::default();
-        state.focus = BrowseFocus::Command;
+        let mut state = BrowseState {
+            focus: BrowseFocus::Command,
+            ..Default::default()
+        };
         state.select_next();
         state.focus = BrowseFocus::Subview;
         state.select_next();
@@ -1707,9 +1725,10 @@ mod tests {
     // Scenario: user moves through Subvolumes, Scrub, Quota, and Inspect.
     #[test]
     fn new_btrfs_command_groups_have_expected_subviews() {
-        let mut state = BrowseState::default();
-
-        state.btrfs_command = BrowseCommand::BtrfsSubvolumes;
+        let mut state = BrowseState {
+            btrfs_command: BrowseCommand::BtrfsSubvolumes,
+            ..Default::default()
+        };
         assert_eq!(
             state.subview_rows(),
             vec![
@@ -1745,8 +1764,10 @@ mod tests {
     // and configured UPS.
     #[test]
     fn new_browse_selections_map_to_expected_requests() {
-        let mut state = BrowseState::default();
-        state.filesystem_subview = FilesystemSubview::CommitStats;
+        let mut state = BrowseState {
+            filesystem_subview: FilesystemSubview::CommitStats,
+            ..Default::default()
+        };
         assert!(matches!(
             browse_request(load_current_for_test(&mut state, &pool(), Some(&ups()))),
             CmdRequest::BtrfsFilesystemCommitStats { .. }
@@ -1957,9 +1978,11 @@ mod tests {
     // Scenario: a host has braid installed but has not enabled the UPS module.
     #[test]
     fn nut_upses_without_config_runs_discovery_command() {
-        let mut state = BrowseState::default();
-        state.program = BrowseProgram::Nut;
-        state.nut_command = BrowseCommand::NutUpses;
+        let mut state = BrowseState {
+            program: BrowseProgram::Nut,
+            nut_command: BrowseCommand::NutUpses,
+            ..Default::default()
+        };
 
         let effect = load_current_for_test(&mut state, &pool(), None);
 
@@ -1981,9 +2004,11 @@ mod tests {
     // any disks.
     #[test]
     fn smartctl_per_device_without_disks_sets_empty_state() {
-        let mut state = BrowseState::default();
-        state.program = BrowseProgram::Smartctl;
-        state.smartctl_command = BrowseCommand::SmartctlHealth;
+        let mut state = BrowseState {
+            program: BrowseProgram::Smartctl,
+            smartctl_command: BrowseCommand::SmartctlHealth,
+            ..Default::default()
+        };
         let disks = HashMap::new();
 
         let effect = state.load_current(&pool(), Some(&ups()), &DiskInventory { by_id: &disks });
@@ -1998,9 +2023,11 @@ mod tests {
     // Scenario: user opens Browse > SMART > Scan on a fresh host.
     #[test]
     fn smartctl_scan_runs_without_disks() {
-        let mut state = BrowseState::default();
-        state.program = BrowseProgram::Smartctl;
-        state.smartctl_command = BrowseCommand::SmartctlScan;
+        let mut state = BrowseState {
+            program: BrowseProgram::Smartctl,
+            smartctl_command: BrowseCommand::SmartctlScan,
+            ..Default::default()
+        };
 
         let effect = load_current_for_test(&mut state, &pool(), Some(&ups()));
 
@@ -2028,9 +2055,11 @@ mod tests {
             BrowseCommand::NutClients,
             BrowseCommand::NutRwVars,
         ] {
-            let mut state = BrowseState::default();
-            state.program = BrowseProgram::Nut;
-            state.nut_command = command;
+            let mut state = BrowseState {
+                program: BrowseProgram::Nut,
+                nut_command: command,
+                ..Default::default()
+            };
 
             let effect = load_current_for_test(&mut state, &pool(), None);
 
@@ -2074,8 +2103,10 @@ mod tests {
     // Scenario: user selects a subvolume row and presses Enter.
     #[test]
     fn enter_in_subvolume_row_drills_in() {
-        let mut state = BrowseState::default();
-        state.focus = BrowseFocus::Command;
+        let mut state = BrowseState {
+            focus: BrowseFocus::Command,
+            ..Default::default()
+        };
         state.select_next();
         state.select_next();
         state.focus = BrowseFocus::Content;
@@ -2108,10 +2139,12 @@ mod tests {
     // Scenario: user selects disk2 in Browse > SMART > Health and presses Enter.
     #[test]
     fn enter_in_smartctl_device_row_drills_in() {
-        let mut state = BrowseState::default();
-        state.program = BrowseProgram::Smartctl;
-        state.smartctl_command = BrowseCommand::SmartctlHealth;
-        state.focus = BrowseFocus::Content;
+        let mut state = BrowseState {
+            program: BrowseProgram::Smartctl,
+            smartctl_command: BrowseCommand::SmartctlHealth,
+            focus: BrowseFocus::Content,
+            ..Default::default()
+        };
         let disks = disk_inventory();
         let _ = state.load_current(&pool(), Some(&ups()), &DiskInventory { by_id: &disks });
         state.select_next();
@@ -2136,10 +2169,12 @@ mod tests {
     // and presses Enter.
     #[test]
     fn enter_in_systemd_unit_row_drills_in() {
-        let mut state = BrowseState::default();
-        state.program = BrowseProgram::Systemd;
-        state.systemd_command = BrowseCommand::SystemdStatus;
-        state.focus = BrowseFocus::Content;
+        let mut state = BrowseState {
+            program: BrowseProgram::Systemd,
+            systemd_command: BrowseCommand::SystemdStatus,
+            focus: BrowseFocus::Content,
+            ..Default::default()
+        };
         state.command_finished(
             RawCommandOutput {
                 cmd: "systemctl list-units --output=json --all braid-* hddfancontrol-braid.service"
@@ -2171,10 +2206,12 @@ mod tests {
     // Scenario: user selects Subvolumes > Full and presses Enter in content.
     #[test]
     fn non_list_subvolume_views_do_not_drill_in() {
-        let mut state = BrowseState::default();
-        state.btrfs_command = BrowseCommand::BtrfsSubvolumes;
-        state.subvolume_subview = SubvolumeSubview::Full;
-        state.focus = BrowseFocus::Content;
+        let mut state = BrowseState {
+            btrfs_command: BrowseCommand::BtrfsSubvolumes,
+            subvolume_subview: SubvolumeSubview::Full,
+            focus: BrowseFocus::Content,
+            ..Default::default()
+        };
         state.command_finished(
             RawCommandOutput {
                 cmd: "btrfs subvolume list -a /mnt/storage".into(),
@@ -2199,8 +2236,10 @@ mod tests {
     // Scenario: user drills into a subvolume and immediately backs out.
     #[test]
     fn esc_pops_back() {
-        let mut state = BrowseState::default();
-        state.focus = BrowseFocus::Command;
+        let mut state = BrowseState {
+            focus: BrowseFocus::Command,
+            ..Default::default()
+        };
         state.select_next();
         state.select_next();
         state.focus = BrowseFocus::Content;
@@ -2227,10 +2266,12 @@ mod tests {
     // Scenario: user drills into SMART health for a disk and backs out.
     #[test]
     fn esc_pops_back_from_smartctl_detail() {
-        let mut state = BrowseState::default();
-        state.program = BrowseProgram::Smartctl;
-        state.smartctl_command = BrowseCommand::SmartctlHealth;
-        state.focus = BrowseFocus::Content;
+        let mut state = BrowseState {
+            program: BrowseProgram::Smartctl,
+            smartctl_command: BrowseCommand::SmartctlHealth,
+            focus: BrowseFocus::Content,
+            ..Default::default()
+        };
         let disks = disk_inventory();
         let _ = state.load_current(&pool(), Some(&ups()), &DiskInventory { by_id: &disks });
         let _ = state.enter(&pool(), &DiskInventory { by_id: &disks });

@@ -468,6 +468,13 @@ impl RecordingOnlineStateOps {
 }
 
 #[cfg(test)]
+impl Default for RecordingOnlineStateOps {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+#[cfg(test)]
 impl OnlineStateOps for RecordingOnlineStateOps {
     fn unit_active_state(&self, _unit: &str) -> Result<UnitActiveState, OnlineError> {
         self.state.borrow().clone().map_err(|s| OnlineError::Spawn {

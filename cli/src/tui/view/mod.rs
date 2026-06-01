@@ -80,7 +80,7 @@ fn hint_lines(area_width: u16) -> u16 {
     let mut col = 0_usize;
 
     fn place_on_empty_line(lines: &mut u16, col: &mut usize, width: usize, word_len: usize) {
-        let segments = (word_len + width - 1) / width;
+        let segments = word_len.div_ceil(width);
         *lines += segments.saturating_sub(1) as u16;
         *col = word_len % width;
         if *col == 0 {

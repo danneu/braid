@@ -924,11 +924,11 @@ fn main() {
             // path uses the matching helper so corrupt or unreadable state
             // fails closed with rebuild guidance.
             let pool_json = paths.pool_json();
-            if !args.write {
-                if let Err(e) = braid_cli::discover::check_pool_json_for_bare_discover(&pool_json) {
-                    print_cli_error(&e.to_string());
-                    std::process::exit(1);
-                }
+            if !args.write
+                && let Err(e) = braid_cli::discover::check_pool_json_for_bare_discover(&pool_json)
+            {
+                print_cli_error(&e.to_string());
+                std::process::exit(1);
             }
             let runner = RealRunner;
             let scan = braid_cli::discover::discover_pool_members(&runner);
@@ -1354,7 +1354,7 @@ mod tests {
 
     fn parsed_lock_policy(argv: &[&str]) -> LockPolicy {
         let cli = Cli::try_parse_from(argv.iter().copied())
-            .expect(&format!("argv should parse for lock policy: {argv:?}"));
+            .unwrap_or_else(|err| panic!("argv should parse for lock policy: {argv:?}: {err:?}"));
         lock_policy(&cli.command)
     }
 

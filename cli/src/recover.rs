@@ -1096,9 +1096,7 @@ fn execute_generic_live_pool_recovery<R: CommandRunner + Sync>(
                 .devid
                 .map(|d| pool.missing_devids.contains(&d))
                 .unwrap_or(false);
-            if null_underlying_match.is_some() {
-                recovered.insert(uuid.clone(), member.clone())?;
-            } else if in_missing {
+            if null_underlying_match.is_some() || in_missing {
                 recovered.insert(uuid.clone(), member.clone())?;
             } else if member.devid.is_none()
                 && (!pool.null_underlying.is_empty() || !pool.missing_devids.is_empty())

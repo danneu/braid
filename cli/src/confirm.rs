@@ -27,18 +27,12 @@ impl Confirm for RealConfirm {
 }
 
 #[cfg(test)]
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
 enum Verdict {
+    #[default]
     Unexpected,
     Accept,
     Decline,
-}
-
-#[cfg(test)]
-impl Default for Verdict {
-    fn default() -> Self {
-        Self::Unexpected
-    }
 }
 
 /// Test confirmation seam that records prompts and fails closed unless armed.

@@ -883,7 +883,7 @@ mod tests {
         //   braid's identity, header, key material, type, or integrity model.
         for flag in MANAGED_LUKS_FORMAT_LONG_FLAGS {
             for token in [(*flag).to_owned(), format!("{flag}=value")] {
-                let err = LuksFormatExtraOpts::parse(&[token.clone()]).unwrap_err();
+                let err = LuksFormatExtraOpts::parse(std::slice::from_ref(&token)).unwrap_err();
                 let msg = err.to_string();
                 match err {
                     LuksFormatExtraOptsError::ManagedFormatFlag { token: offending } => {
@@ -915,7 +915,7 @@ mod tests {
                 format!("-{short}value"),
                 format!("-{short}=value"),
             ] {
-                let err = LuksFormatExtraOpts::parse(&[token.clone()]).unwrap_err();
+                let err = LuksFormatExtraOpts::parse(std::slice::from_ref(&token)).unwrap_err();
                 let msg = err.to_string();
                 match err {
                     LuksFormatExtraOptsError::ManagedFormatFlag { token: offending } => {

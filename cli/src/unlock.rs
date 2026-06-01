@@ -1340,7 +1340,7 @@ mod tests {
         let (_state_dir, sp) = isolated_paths();
         let config = test_config();
         let membership = unlock_three_disk_membership();
-        std::fs::create_dir(&sp.pool_json()).expect("pool.json blocker directory");
+        std::fs::create_dir(sp.pool_json()).expect("pool.json blocker directory");
 
         let fs = unlock_storage_fs(&[
             "/dev/disk/by-id/virtio-disk1",
