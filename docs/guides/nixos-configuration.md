@@ -169,7 +169,7 @@ Monitors all visible SATA devices (not only braid pool members). Requires a boar
 | `braid.ups.driver` | string | `"usbhid-ups"` | NUT driver; the USB default covers most home-NAS UPSes |
 | `braid.ups.port` | string | `"auto"` | Driver port; `auto` finds the first matching USB UPS |
 
-When enabled, NUT triggers an orderly poweroff on low battery (unwinding `braid-online.service` -> `braid lock` -> unmount) and pool-mutating commands (`add`/`remove`/`remove-missing`/`replace`) refuse to start while the UPS is on battery. Only `name` is written to `/etc/braid/config.json`, so `braid ups status` and the TUI know which UPS to query; `driver` and `port` configure the NUT driver only. Non-USB drivers (`apcsmart`, `snmp-ups`) are an escape hatch and not first-class.
+When enabled, NUT triggers an orderly poweroff on low battery (unwinding `braid-online.service` -> `braid lock` -> unmount) and pool-mutating commands (`add`/`remove`/`remove-missing`/`replace`) refuse to start unless the UPS reports verified utility power (`OL`). Only `name` is written to `/etc/braid/config.json`, so `braid ups status` and the TUI know which UPS to query; `driver` and `port` configure the NUT driver only. Non-USB drivers (`apcsmart`, `snmp-ups`) are an escape hatch and not first-class.
 
 See [UPS](ups.md) for the setup workflow and live status.
 

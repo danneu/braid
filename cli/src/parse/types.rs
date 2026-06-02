@@ -602,6 +602,16 @@ impl UpscOutput {
     pub fn is_on_battery(&self) -> bool {
         self.status_flags.contains(&UpsStatusFlag::Ob)
     }
+
+    /// True when the UPS explicitly reports utility (line) power via the
+    /// `OL` flag. Separate from `!is_on_battery()` because preflight
+    /// requires affirmative line-power proof, not merely the absence of
+    /// `OB`: a status set with neither `OL` nor `OB`, or only unknown
+    /// tokens, is not trustworthy evidence that line power is present.
+    /// See `preflight::check_ups_not_on_battery`.
+    pub fn reports_utility_power(&self) -> bool {
+        self.status_flags.contains(&UpsStatusFlag::Ol)
+    }
 }
 
 impl Serialize for UpsStatusFlag {

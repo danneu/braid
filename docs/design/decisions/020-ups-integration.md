@@ -19,7 +19,7 @@ A btrfs RAID1 pool tolerates clean shutdowns, but sudden power loss during activ
 A UPS solves this only if the host cooperates. NUT (Network UPS Tools) is the standard Linux interface, and nixpkgs already provides a mature `power.ups` module that configures NUT declaratively -- units, users, udev rules, killpower handling. braid's job is not to reimplement that, but to layer opinionated policy on top so that enabling UPS support gives a home NAS three specific guarantees:
 
 1. Orderly shutdown before battery exhaustion for ordinary mounted operation.
-2. Preflight refusal to start pool-mutating commands while already on battery.
+2. Preflight refusal to start pool-mutating commands unless the UPS reports verified utility power (`OL`).
 3. Live UPS state visible in `braid ups status` and the TUI; live UPS status is used for preflight safety and upsmon critical-state shutdown (normally `OB` + `LB` together, per `reference/nut/clients/upsmon.c:1404`).
 
 The guarantees do not extend to "safe against any power loss." A UPS firing LB during a mutation that started on AC still interrupts that mutation. Recovery for that case falls to the existing journal + `braid recover` path, and must be proven per mutation class by VM tests before this decision flips to Active.
@@ -66,9 +66,9 @@ When NUT fires the low-battery (LB) event, upsmon runs `systemctl poweroff`. sys
 
 This is not "alert only." The host genuinely shuts down, because the only safe state during a prolonged power outage is off. An alert-only policy would require the user to react in time, which defeats the point of unattended operation.
 
-### Reject pool-mutating commands on battery (preflight hygiene only)
+### Reject pool-mutating commands unless UPS reports utility power (preflight hygiene only)
 
-When UPS support is enabled, `braid add`, `braid remove`, `braid remove-missing`, and `braid replace` query UPS status at preflight and refuse with a `Validation`-shaped error if the status set contains `OB` or `LB`. The check sits alongside the existing preflight checks, before any journal write.
+When `braid.ups.enable = true`, `braid add`, `braid remove`, `braid remove-missing`, and `braid replace` query UPS status at preflight and refuse with a `Validation`-shaped error unless the UPS status can be trusted as explicitly on utility power. The check is fail-closed: it refuses on `upsc` invocation or query failure (dead upsd, unknown UPS name, or exec failure), an empty or missing `ups.status`, any critical flag (`LB`, `TESTFAIL`, `COMMBAD`, `FSD` -- the same set the TUI paints red), on-battery (`OB`), or any status set missing `OL`. Known non-critical advisory states such as `OL RB`, and unknown tokens co-present with `OL` and no known blocker, still pass because utility power is explicitly present. The check sits alongside the existing preflight checks, before any journal write.
 
 This is preflight hygiene, not a mutation-window guarantee. It narrows the surface that journal recovery must cover by rejecting the easy case -- "user starts `braid replace` while the power is already out" -- but it cannot and does not prevent LB from firing mid-mutation on work that started on AC. Mid-mutation power loss is handled by the existing journal + `braid recover` path; see the recovery-proof obligation in Open Questions.
 
@@ -140,7 +140,7 @@ Each of these blocked the flip from `Draft` to `Active`. All three are now close
 
 - enabling UPS support is one line of Nix, plus two optional strings for non-default drivers
 - for ordinary mounted operation, the host powers off cleanly on low battery without user intervention
-- pool-mutating commands refuse to start while on battery, narrowing the journal-recovery surface to the mid-mutation case
+- pool-mutating commands refuse to start unless utility power (`OL`) is verified, narrowing the journal-recovery surface to the mid-mutation case
 - mid-mutation power loss is a supported recovery case, not a guarantee: `braid recover` is load-bearing for `replace` / `remove` / `remove-missing` / balanced `add` interrupted by LB-driven shutdown, and VM tests prove that coverage
 - live UPS state is visible in `braid ups status` and the TUI; users not actively watching those surfaces do not get asynchronous notifications in v1 (alert-model integration deferred to a future ADR)
 - NUT joins btrfs-progs, cryptsetup, and util-linux as a pinned parser-critical tool; nixpkgs bumps touching `networkupstools` trigger the same fixture-refresh obligation as the other three

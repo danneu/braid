@@ -155,8 +155,9 @@ mod tests {
     use super::*;
 
     // Intent: parse_upsc recognizes OL as the sole flag on a healthy UPS.
-    // Why: preflight treats "status set contains OB or LB" as refuse; "status
-    // set equals {OL}" must therefore be recognized, not treated as unknown.
+    // Why: TUI severity and UPS preflight both key on the typed Ol flag:
+    // the TUI renders Ol green, and preflight requires Ol before starting
+    // pool mutations.
     // Scenario: typical `upsc ups` output with a UPS on utility power.
     #[test]
     fn parses_ol_flag() {

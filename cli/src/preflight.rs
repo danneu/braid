@@ -556,14 +556,15 @@ fn mapper_capacity_from_dynamic_segment(
     Ok(raw_target - offset)
 }
 
-/// Refuse if the configured UPS is on battery, in any critical state,
-/// or unreachable.
+/// Refuse unless the configured UPS explicitly reports utility power
+/// (`OL`); also refuse on battery, in any critical state, or when the
+/// UPS is unreachable.
 ///
 /// Fail-closed: query failure and an empty `ups.status` both refuse the
 /// mutation. The refusal wording always points operators at `braid ups
-/// status` because the safety decision needs a fresh, explicit
-/// non-critical status set. Caller passes `None` when no UPS is configured,
-/// which makes this a no-op.
+/// status` because the safety decision needs explicit utility-power
+/// proof (`OL`), not merely the absence of a known blocker. Caller
+/// passes `None` when no UPS is configured, which makes this a no-op.
 ///
 /// Critical-state classification is shared with the TUI via
 /// `UpsStatusFlag::is_critical` so the two surfaces stay in sync: any
@@ -606,6 +607,9 @@ pub fn check_ups_not_on_battery<R: CommandRunner>(
     }
     if parsed.is_on_battery() {
         return refuse("UPS reports on-battery");
+    }
+    if !parsed.reports_utility_power() {
+        return refuse("UPS does not report utility power (OL missing)");
     }
     Ok(())
 }
@@ -2048,6 +2052,46 @@ mod tests {
         let err = check_ups_not_on_battery(&runner, Some("ups"), "add").unwrap_err();
         assert!(err.contains("utility power"), "got: {err}");
         assert!(err.contains("upsc invocation failed"), "got: {err}");
+    }
+
+    #[test]
+    // Intent: a known non-critical advisory flag alongside OL still passes.
+    // Why: the gate proves utility power, not full battery health. `RB`
+    // (replace-battery advisory) is not evidence that input power is absent,
+    // so requiring exactly {OL} would lock out mutations on a healthy-but-
+    // aging UPS that is plainly on line power.
+    // Scenario: a UPS on utility power that has also raised a battery-
+    // replacement advisory.
+    fn ups_online_with_advisory_passes() {
+        let runner = upsc_mock("ups", "ups.status: OL RB\n", 0);
+        assert!(check_ups_not_on_battery(&runner, Some("ups"), "add").is_ok());
+    }
+
+    #[test]
+    // Intent: a non-empty status set with no OL refuses, even with no known
+    // blocker present.
+    // Why: preflight requires affirmative utility-power evidence (`OL`), not
+    // merely the absence of `OB`. The old final-`Ok(())` blocklist would let
+    // this pass; the OL gate is what closes that hole.
+    // Scenario: a driver reports only `RB` and drops the `OL` token while the
+    // line-power state is unproven.
+    fn ups_status_without_ol_refuses() {
+        let runner = upsc_mock("ups", "ups.status: RB\n", 0);
+        let err = check_ups_not_on_battery(&runner, Some("ups"), "add").unwrap_err();
+        assert!(err.contains("OL missing"), "got: {err}");
+    }
+
+    #[test]
+    // Intent: an unknown status token alongside OL still passes.
+    // Why: NUT permits clients to ignore unidentified tokens; failing closed
+    // on every novel advisory would create avoidable maintenance lockouts on
+    // routine NUT/device changes. `OL` present + no known blocker = safe to
+    // start.
+    // Scenario: a firmware/driver update surfaces a new ups.status token braid
+    // does not classify yet, while the UPS is on utility power.
+    fn ups_online_with_unknown_token_passes() {
+        let runner = upsc_mock("ups", "ups.status: OL NEWFLAG\n", 0);
+        assert!(check_ups_not_on_battery(&runner, Some("ups"), "add").is_ok());
     }
 
     #[test]

@@ -12,10 +12,11 @@ turns on three behaviors:
   `upsmon` invokes `systemctl poweroff`. systemd unwinds
   `braid-online.service`'s ExecStop, which runs `braid lock` and cleanly
   unmounts the pool before the battery exhausts.
-- **Preflight refusal on battery.** `braid add` / `remove` / `remove-missing` /
-  `replace` check UPS state at startup and refuse to begin a pool mutation
-  while the UPS is on battery or reporting low battery. This narrows the
-  surface that journal recovery needs to cover.
+- **Preflight refusal without verified utility power.** `braid add` /
+  `remove` / `remove-missing` / `replace` check UPS state at startup and
+  refuse to begin a pool mutation unless the UPS reports verified utility
+  power (`OL`). This narrows the surface that journal recovery needs to
+  cover.
 - **Live state visibility.** `braid ups status` (and the TUI Data tab) show
   the parsed `upsc` output: status flags, battery charge, runtime remaining,
   load, estimated watts, input voltage, and device info.
@@ -125,11 +126,25 @@ is enough headroom for a single-disk pool's clean teardown. Larger
 pools may need a wider `battery.runtime.low` (set at the NUT level,
 not through braid).
 
-## Mutation refusal on battery
+## Mutation refusal when utility power is not verified
 
-With UPS enabled, pool mutations refuse to start if the UPS reports
-any state that the TUI paints red (`LB` / `TESTFAIL` / `COMMBAD` /
-`FSD`) or yellow (`OB`). Example:
+With UPS enabled, `braid add` / `remove` / `remove-missing` / `replace`
+refuse to start unless `upsc` returns a non-empty status set that
+contains `OL` and no known blocker. The refusal cases are:
+
+- on-battery (`OB`)
+- a critical flag the TUI paints red (`LB` / `TESTFAIL` / `COMMBAD` /
+  `FSD`)
+- `OL` missing from an otherwise non-blocking status set
+- `upsc` query or invocation failure (stopped daemon, unknown UPS name,
+  or another fatal NUT error -- the message includes `upsc`'s stderr when
+  it exits non-zero)
+- an empty or missing `ups.status`
+
+Known non-critical advisory states such as `OL RB`, and unknown tokens
+co-present with `OL` and no known blocker, still pass: the `OL` flag is
+the affirmative utility-power proof, not a guarantee of full battery
+health. Example refusal:
 
 ```
 $ sudo braid add newdisk=/dev/disk/by-id/ata-TOSHIBA_NEW
@@ -138,15 +153,22 @@ error: cannot verify UPS is on utility power (UPS reports on-battery)
 power, then retry.
 ```
 
-Recovery: run `braid ups status` to confirm, restore utility power,
-wait for the status to return to `OL`, and retry the command.
+Recovery: run `braid ups status` to confirm, fix the UPS/NUT state,
+restore utility power, wait for the status to return to a trusted `OL`,
+and retry the command.
 
-If `upsc` cannot query the configured UPS, mutations also refuse with
-the same "cannot verify" wording and include `upsc`'s stderr when it
-exits non-zero. This fail-closed path covers a stopped daemon, an
-unknown UPS name, or another fatal NUT error. `TESTFAIL` and `COMMBAD`
-are treated the same way: braid does not start mutations on a UPS that
-is reporting a known-bad state, even when `OL` is also lit.
+Two clarifications:
+
+- `braid doctor`'s `ups_daemon: ok` means the configured NUT daemon is
+  reachable; it is not a guarantee that mutating-command preflight will
+  pass. The refusal error from `add` / `remove` / `remove-missing` /
+  `replace` is the primary channel for the exact mutation-readiness
+  blocker.
+- The `OL` gate assumes the configured NUT driver reports `OL` on utility
+  power as documented by NUT. If a device or driver violates that
+  contract, inspect with `braid ups status`; the recovery is to fix the
+  NUT driver/config or disable `braid.ups` until the UPS state can be
+  trusted.
 
 ## doctor checks
 

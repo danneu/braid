@@ -67,10 +67,13 @@
   testopsPassword ? "testpass",
   # Battery snapshot the dummy-ups driver loads at boot. Default reports
   # OL with full charge so the test script can mount + stage data before
-  # flipping to OB+LB. Override (e.g. raise `battery.runtime.low`) if a
-  # particular matrix test needs more of a runtime budget for the
-  # interrupted mutation to reach a useful in-flight state. See ADR 020
-  # Open Question 3.
+  # flipping to OB+LB. This OL default is load-bearing for the
+  # mutating-command preflight pass path: the `ups-lb-during-*` matrix
+  # starts its mutation while OL holds, and `check_ups_not_on_battery`
+  # requires OL (not merely the absence of OB) to pass. Override (e.g.
+  # raise `battery.runtime.low`) if a particular matrix test needs more of
+  # a runtime budget for the interrupted mutation to reach a useful
+  # in-flight state. See ADR 020 Open Question 3.
   devContent ? ''
     device.mfr: Dummy
     device.model: braid-ups-fixture

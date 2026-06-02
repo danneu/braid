@@ -37,8 +37,8 @@
       # `.dev` extension selects dummy-once mode. Status is OB (on
       # battery) but NOT LB (low battery), so upsmon does not trigger
       # its critical-state SHUTDOWNCMD before the test can run. braid
-      # preflight refuses on OB *or* LB (see check_ups_not_on_battery),
-      # so OB alone is sufficient to exercise the refusal path.
+      # preflight refuses on OB before any mutation work starts; OB alone is
+      # sufficient to exercise the on-battery refusal path.
       environment.etc."nut/ups.dev".text = ''
         device.mfr: Dummy
         device.model: OB-fixture

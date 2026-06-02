@@ -44,7 +44,7 @@ See the [command reference](docs/commands/) for full usage of each command.
 - **Dynamic pool** -- add or remove drives with a command, no `nixos-rebuild`
 - **Self-healing** -- btrfs checksums every block and silently repairs corruption from the redundant copy
 - **CLI-owned membership** -- `braid add`/`remove`/`replace` manage the pool; state lives in UUID-keyed `/var/lib/braid/pool.json`
-- **UPS safety** -- with UPS support enabled, NUT drives orderly poweroff on low battery, mutating commands refuse to start while on battery, and `braid ups status` / the TUI show live UPS state
+- **UPS safety** -- with UPS support enabled, NUT drives orderly poweroff on low battery, mutating commands refuse to start unless UPS utility power is verified, and `braid ups status` / the TUI show live UPS state
 - **Dashboard** -- `braid tui` shows pool health, disk status, balance progress, SMART data, and (when enabled) chassis fan telemetry plus UPS state
 
 ## Downsides
