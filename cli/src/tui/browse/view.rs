@@ -348,6 +348,7 @@ mod tests {
     use crate::tui::browse::state::DiskInventory;
     use crate::tui::demo::{sample_disk_names, sample_pool};
     use crate::tui::model::{DaemonStatus, PoolStatus, UpsSnapshot};
+    use crate::tui::test_support::{buffer_to_string, snap};
     use ratatui::Terminal;
     use ratatui::backend::TestBackend;
     use std::time::Instant;
@@ -359,28 +360,6 @@ mod tests {
             .draw(|frame| view_browse(model, frame, frame.area()))
             .unwrap();
         terminal
-    }
-
-    fn buffer_to_string(terminal: &Terminal<TestBackend>) -> String {
-        let buf = terminal.backend().buffer();
-        let mut out = String::new();
-        for y in 0..buf.area.height {
-            for x in 0..buf.area.width {
-                out.push_str(buf.cell((x, y)).map_or(" ", |c| c.symbol()));
-            }
-            let trimmed = out.trim_end();
-            out.truncate(trimmed.len());
-            out.push('\n');
-        }
-        out
-    }
-
-    macro_rules! snap {
-        ($value:expr) => {
-            insta::with_settings!({ prepend_module_to_snapshot => false }, {
-                insta::assert_snapshot!($value);
-            });
-        };
     }
 
     fn model() -> Model {

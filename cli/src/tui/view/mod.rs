@@ -1553,6 +1553,7 @@ pub(crate) mod tests {
     use crate::parse::types::{BtrfsBgType, BtrfsDfEntry, BtrfsProfile};
     use crate::parse::types::{ScrubState, ScrubTimestamp};
     use crate::tui::demo::{sample_disk_luks_states, sample_disk_names, sample_pool};
+    use crate::tui::test_support::{buffer_to_string, snap};
     use ratatui::Terminal;
     use ratatui::backend::TestBackend;
 
@@ -1562,28 +1563,6 @@ pub(crate) mod tests {
         let mut terminal = Terminal::new(backend).unwrap();
         terminal.draw(|frame| view(model, frame, now)).unwrap();
         terminal
-    }
-
-    fn buffer_to_string(terminal: &Terminal<TestBackend>) -> String {
-        let buf = terminal.backend().buffer();
-        let mut out = String::new();
-        for y in 0..buf.area.height {
-            for x in 0..buf.area.width {
-                out.push_str(buf.cell((x, y)).map_or(" ", |c| c.symbol()));
-            }
-            let trimmed = out.trim_end();
-            out.truncate(trimmed.len());
-            out.push('\n');
-        }
-        out
-    }
-
-    macro_rules! snap {
-        ($value:expr) => {
-            insta::with_settings!({ prepend_module_to_snapshot => false }, {
-                insta::assert_snapshot!($value);
-            });
-        };
     }
 
     fn df_entry(bg_type: BtrfsBgType, bg_profile: BtrfsProfile) -> BtrfsDfEntry {

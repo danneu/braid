@@ -6,6 +6,8 @@ mod event;
 mod keymap;
 mod model;
 pub(crate) mod probe;
+#[cfg(test)]
+pub(crate) mod test_support;
 mod view;
 
 use std::io;
