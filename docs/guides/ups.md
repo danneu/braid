@@ -185,7 +185,9 @@ Two clarifications:
   guarantee silently breaks. Fix by running `systemctl start
   braid-online.service` or `braid unlock`.
 
-Both checks skip when UPS support is disabled.
+Both checks skip when UPS support is disabled, and the braid-online check
+additionally skips when the pool is not mounted (there is nothing for the
+UPS shutdown path to unmount).
 
 ## v1 limitation: no async alert
 
