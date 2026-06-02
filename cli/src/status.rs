@@ -1665,6 +1665,44 @@ mod tests {
         assert!(built.mounted_extras.is_none());
     }
 
+    // Intent: pin the exact top-level key set of a healthy mounted `braid
+    //   status --json` report, so adding/removing a StatusReport field is a CI
+    //   failure rather than silent JSON-schema drift.
+    // Why it exists: the docs/commands/status.md JSON section is a
+    //   hand-maintained mirror of StatusReport; five fields drifted
+    //   undocumented because only the not-mounted envelope was key-set pinned.
+    //   On failure, update BOTH this set and the docs/commands/status.md JSON
+    //   output section.
+    // Scenario: a healthy 3-disk RAID1 pool, all tools succeeding, no
+    //   advisories or alerts -- the canonical mounted report a monitoring
+    //   consumer parses.
+    #[test]
+    fn mounted_status_envelope_top_level_keys_are_pinned() {
+        let built = build_healthy_status();
+        let v: serde_json::Value =
+            serde_json::from_str(&serde_json::to_string(&built.report).unwrap()).unwrap();
+        let mut keys: Vec<&str> = v.as_object().unwrap().keys().map(String::as_str).collect();
+        keys.sort_unstable();
+        assert_eq!(
+            keys,
+            [
+                "alert_active",
+                "allocation",
+                "balance",
+                "capacity",
+                "disks",
+                "fsid",
+                "last_scrub",
+                "missing_count",
+                "mount_point",
+                "present_count",
+                "profile",
+                "status",
+                "total_devices",
+            ],
+        );
+    }
+
     #[test]
     fn status_json_healthy() {
         let runner = status_runner_healthy_3disk_base();

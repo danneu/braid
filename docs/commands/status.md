@@ -291,7 +291,25 @@ for recovery options.
 
 `--json` produces a structured report suitable for monitoring tools. Key fields:
 
+- `mount_point`: the pool's configured mount path (e.g. `/mnt/storage`) -- the
+  same value shown on the human-readable `Pool:` line. **Always present**, in
+  both the mounted and not-mounted envelopes.
 - `status`: `"intact"`, `"degraded"`, or `"not_mounted"`
+- `total_devices`: total number of devices btrfs reports for the pool, as a
+  number. **Present when the pool is mounted; omitted in the not-mounted
+  envelope.**
+- `present_count`: number of member devices currently present, equal to
+  `total_devices - missing_count`, as a number. **Present when the pool is
+  mounted; omitted in the not-mounted envelope.**
+- `missing_count`: number of member devices counted as missing -- the
+  cardinality of the `missing_devids` array below (btrfs-MISSING devices plus
+  null-underlying mappers whose backing device disappeared); `0` on a healthy
+  pool. **Present when the pool is mounted; omitted in the not-mounted
+  envelope.**
+- `fsid`: the btrfs filesystem UUID, as a string -- the same value shown on
+  the human-readable `FSID:` line, and distinct from a disk's `luks_uuid`.
+  **Present when the pool is mounted** (a mounted btrfs filesystem always has
+  an FSID); omitted in the not-mounted envelope.
 - `disks`: array of per-disk reports -- one element per disk braid knows
   about: present pool members (matched members and foreign live devices),
   plus configured disks that are not currently live pool members (reported
@@ -427,6 +445,61 @@ the btrfs profile names braid observed; consumers apply their own policy.
   (`YYYY-MM-DDTHH:MM:SS`) as reported by btrfs. It records `Scrub started`, or
   `Scrub resumed` after a resumed scrub, and is not directly comparable to UTC
   fields such as pending-operation `started_at` values ending in `Z`.
+
+A complete report for a healthy 3-disk RAID1 pool:
+
+```json
+{
+  "mount_point": "/mnt/storage",
+  "status": "intact",
+  "total_devices": 3,
+  "present_count": 3,
+  "missing_count": 0,
+  "profile": {
+    "data": ["RAID1"],
+    "metadata": ["RAID1"],
+    "system": ["RAID1"]
+  },
+  "fsid": "f5f5f5f5-aaaa-bbbb-cccc-d0d0d0d0d0d0",
+  "capacity": {
+    "total_bytes": 18000000000000,
+    "used_bytes": 6000000000000,
+    "free_bytes": 12000000000000
+  },
+  "last_scrub": {
+    "state": "finished",
+    "started_at": "2026-05-01T03:00:00",
+    "error_count": 0
+  },
+  "balance": { "state": "idle" },
+  "allocation": [
+    { "bg_type": "Data", "profile": "RAID1", "used_bytes": 6000000000000, "allocated_bytes": 6500000000000 },
+    { "bg_type": "Metadata", "profile": "RAID1", "used_bytes": 8000000000, "allocated_bytes": 9000000000 },
+    { "bg_type": "System", "profile": "RAID1", "used_bytes": 65536, "allocated_bytes": 33554432 }
+  ],
+  "disks": [
+    {
+      "name": "toshiba1",
+      "mapper": "braid-toshiba1",
+      "by_id": "/dev/disk/by-id/ata-TOSHIBA_MN07ACA12T_1234",
+      "luks_uuid": "aaaaaaaa-1111-2222-3333-444444444444",
+      "devid": 1,
+      "underlying": "/dev/sda",
+      "status": "present",
+      "errors": { "read": 0, "write": 0, "flush": 0, "corruption": 0, "generation": 0 }
+    }
+  ],
+  "alert_active": false
+}
+```
+
+> When the pool is not mounted, every mounted-only field above
+> (`total_devices`, `present_count`, `missing_count`, `profile`, `fsid`,
+> `capacity`, `last_scrub`, `balance`, `allocation`) is omitted, leaving
+> `mount_point`, `status` (`"not_mounted"`), `disks` (`[]`), and
+> `alert_active`. `advisories` and `alert_causes` still follow their
+> skip-when-empty rule, so a latched alert or a pending-operation advisory can
+> still appear on an offline pool.
 
 ## Related commands
 
