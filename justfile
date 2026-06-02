@@ -235,13 +235,9 @@ check-docs:
         printf '  %s\n' $stale
         rc=1
     fi
-    # Markdown links that escape docs/ are broken in deployed mdBook output.
-    # Depth-aware: resolves each relative link against its own file and flags
-    # only those climbing above docs/. A bare `](../../` grep false-flags valid
-    # in-book links from nested pages; mdbook-linkcheck2 covers in-book targets.
-    if ! python3 scripts/docs/check-doc-link-escapes.py; then
-        rc=1
-    fi
+    # Link escapes and broken cross-links are caught by mdbook-linkcheck2 during
+    # `mdbook build docs` (it forbids linking outside the book root and validates
+    # in-book targets), so check-docs no longer re-checks them here.
     # README.md / docs/index.md tables must match SUMMARY.md order and use the
     # H1-derived label for each guide/command.
     if ! python3 scripts/docs/check-doc-tables.py; then
