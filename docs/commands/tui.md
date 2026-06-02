@@ -42,6 +42,7 @@ Demo mode shows three fake disks with sample data, useful for exploring the inte
 | `Shift-Tab` | Previous tab |
 | `j` / `k` | Select next/previous disk (Data/Scrub) or move within the focused Browse region |
 | `h` / `l` | Move left/right across Browse regions |
+| `Ctrl-D` / `Ctrl-U` | Page Browse content down/up (one screen at a time) |
 | `Enter` | Open disk detail popup (Data) or drill into Browse content |
 | `Esc` | Close disk detail popup or return from Browse drill-in |
 | `?` | Toggle help overlay |
