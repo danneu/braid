@@ -197,11 +197,12 @@ member count ahead of time, pass
 `--expect-count <N>` to fail closed against a temporarily detached disk or an
 unrelated braid-labeled disk being silently admitted.
 
-Note: non-dry-run `braid lock` (the user-facing `braid lock` and the
-`braid-online.service` ExecStop path) does NOT fail under a missing or corrupt
-`pool.json`; it warns and proceeds with per-mapper LUKS-UUID verification so
-shutdown cleanup remains complete. `braid lock --dry-run` is the exception:
-the preview pathway still requires a loadable `pool.json`.
+Note: `braid lock` -- the user-facing command, the `braid-online.service`
+ExecStop path, and `braid lock --dry-run` alike -- does NOT fail under a
+missing or corrupt `pool.json`. It warns and proceeds with empty membership;
+every observed `braid-*` mapper is then verified by its backing LUKS UUID
+before close, so shutdown cleanup stays complete. No lock pathway hard-fails
+on an unloadable `pool.json`.
 
 For a **healthy UUID-keyed** `pool.json`, do not run `discover --write` at all
 -- use `braid add` / `braid remove` / `braid replace` to mutate membership.
