@@ -13,7 +13,7 @@ The guiding question: **would a knowledgeable admin always enable this?** If yes
 
 ## Decision
 
-Braid sets opinionated defaults for the underlying NixOS options using `lib.mkDefault`. Users override them with normal NixOS config — no braid-specific wrapper options needed.
+Braid sets opinionated defaults two ways: `lib.mkDefault` for simple pass-through defaults on stable NixOS options, and a `braid.*` wrapper option when the feature is inside braid's product boundary and benefits from lifecycle control, discoverability, or a unified config surface — even if the mapping is 1:1. The two cases below say which applies.
 
 ### When to use mkDefault (don't wrap)
 
@@ -59,5 +59,7 @@ Rejected. TrueNAS runs ZFS on always-on servers. Braid targets home NAS with spi
 
 ## See
 
-- `modules/braid/storage.nix` — where defaults are applied
+- `modules/braid/options.nix` — declares the option defaults (`braid.autoScrub`, `braid.poolAccessGroup`)
+- `modules/braid/storage.nix` — realizes `braid.autoScrub` into the scrub lifecycle units (`braid-scrub` timer/service and `braid-scrub-resume-trigger`), all bound to `braid-online.service`
+- `cli/src/online_state.rs` — `mark_online()` applies the mount-root permissions from `braid.poolAccessGroup` (`root:<group> 2770`)
 - [Resilient by default](003-resilient-boot.md) — related philosophy: protect by default, no toggles
