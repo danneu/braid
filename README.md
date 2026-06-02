@@ -9,31 +9,33 @@ And it leans heavily on **[systemd](https://systemd.io/)**, built into NixOS: th
 unlock/mount lifecycle, scrub timers, and UPS/fan/suspend services all run as
 systemd units.
 
-## Example
+## Quick start
 
 ```sh
-# Create a pool from three disks
-sudo braid add \
-  toshiba1=/dev/disk/by-id/aaa \
-  toshiba2=/dev/disk/by-id/bbb \
-  toshiba3=/dev/disk/by-id/ccc
+# Find your disks
+lsblk -d -o NAME,SIZE,MODEL,ID-LINK
 
-# Unlock and mount at /mnt/storage
+# Add disks to the pool
+sudo braid add toshiba=/dev/disk/by-id/ata-Toshiba_MN07_XXXX \
+               ironwolf=/dev/disk/by-id/ata-Ironwolf_ST12_YYYY
+
+# Unlock after boot
 sudo braid unlock
 
-# Use it
-cp photos/* /mnt/storage/photos/
+# Check pool health
+sudo braid status
 
-# Remove a disk (data migrates off first)
-sudo braid remove toshiba3
+# Remove a disk
+sudo braid remove ironwolf
 
-# Replace a disk (inherits the old slot)
-sudo braid replace --old toshiba2 \
-  --new toshiba3=/dev/disk/by-id/ata-TOSHIBA_NEW_SERIAL
+# Replace a failed disk
+sudo braid replace --old ironwolf --new seagate=/dev/disk/by-id/ata-Seagate_NEW_ZZZZ
 
-# Lock (unmount, close LUKS)
+# Lock the pool
 sudo braid lock
 ```
+
+See the [command reference](docs/commands/) for full usage of each command.
 
 ## Features
 
@@ -91,34 +93,6 @@ braid = {
   mountPoint = "/mnt/storage";  # default
 };
 ```
-
-## Quick start
-
-```sh
-# Find your disks
-lsblk -d -o NAME,SIZE,MODEL,ID-LINK
-
-# Add disks to the pool
-sudo braid add toshiba=/dev/disk/by-id/ata-Toshiba_MN07_XXXX \
-               ironwolf=/dev/disk/by-id/ata-Ironwolf_ST12_YYYY
-
-# Unlock after boot
-sudo braid unlock
-
-# Check pool health
-sudo braid status
-
-# Remove a disk
-sudo braid remove ironwolf
-
-# Replace a failed disk
-sudo braid replace --old ironwolf --new seagate=/dev/disk/by-id/ata-Seagate_NEW_ZZZZ
-
-# Lock the pool
-sudo braid lock
-```
-
-See the [command reference](docs/commands/) for full usage of each command.
 
 ## Preview with --dry-run
 
