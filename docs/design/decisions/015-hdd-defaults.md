@@ -42,5 +42,5 @@ Fedora's `compress=zstd:1` precedent is workstation root filesystems on SSDs: bi
 
 - `cli/src/cmd.rs` — `CryptsetupLuksOpen` and `CryptsetupLuksOpenKeyFile` omit `--allow-discards`
 - `cli/src/cmd.rs` — `base_mount_options()` omits any `discard` option, relying on the kernel default that is itself gated by the LUKS layer
-- `modules/braid/storage.nix` — `noatime` rationale references HDD spindown
+- `cli/src/cmd.rs` — `base_mount_options()` sets `noatime`; rationale references HDD spindown
 - [Sane defaults](005-sane-defaults.md) — scrub interval tuned for spinning disks

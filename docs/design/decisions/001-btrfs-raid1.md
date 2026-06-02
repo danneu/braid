@@ -54,6 +54,6 @@ When braid blocks a live replacement because the pool has missing devices, the i
 
 ## See
 
-- `modules/braid/storage.nix` — btrfs mount configuration
+- `cli/src/cmd.rs` — `base_mount_options()` and the btrfs mount invocation
 - `tests/storage/btrfs-heal.nix` — validates auto-healing
 - `tests/storage/btrfs-grow1.nix`, `tests/storage/btrfs-shrink.nix` — validates dynamic pooling
