@@ -20,14 +20,12 @@ You'll be prompted for the pool passphrase. Output shows the recovery process:
 
 ```
 Recovering from interrupted "add" operation (started 2026-03-15T14:30:00Z)...
-  pre-operation membership:  {"ironwolf", "toshiba"}
-  target membership:         {"ironwolf", "toshiba", "wdc"}
-  recovered (live pool):     {"ironwolf", "toshiba", "wdc"}
-note: add completed -- 'wdc' now in the pool.
 pool.json written from completed add membership.
 pool.json written from committed add membership.
 pending-op.json cleared. Recovery complete.
 ```
+
+Before the `pool.json` lines, a real run prints either per-disk LUKS-open and mount rows (if the pool was offline) or a single `pool already mounted at ...` row (if it was already mounted). After the `committed` line it always prints a RAID1 soft-balance replay row pair before the final `pending-op.json cleared` line.
 
 ## Common variations
 

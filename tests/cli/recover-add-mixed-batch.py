@@ -218,6 +218,9 @@ with subtest("Recover mixed-batch add"):
     )
     err = machine.succeed("cat /tmp/recover.err")
 
+    banner = 'Recovering from interrupted "add" operation (started '
+    assert banner in err, "recover banner line missing, got: " + repr(err)
+
     soft_replay_wait = "replaying post-add RAID1 soft balance"
     soft_replay_ok = "[ok]   pool: RAID1 soft balance replay complete\n"
     assert soft_replay_wait in err, (
@@ -241,6 +244,24 @@ with subtest("Recover mixed-batch add"):
     assert err.find(completed_line) < err.find(committed_line), (
         "completed-add line must precede committed-add line, got: " + repr(err)
     )
+
+    cleared_line = "pending-op.json cleared. Recovery complete.\n"
+    assert cleared_line in err, "journal-cleared line missing, got: " + repr(err)
+    # Pin the doc's recover skeleton: committed membership, owed soft balance,
+    # then journal clear. The environment-specific open/mount rows stay out of
+    # the doc example and this ordering guard.
+    assert (
+        err.find(committed_line)
+        < err.find(soft_replay_wait)
+        < err.find(soft_replay_ok)
+        < err.find(cleared_line)
+    ), "expected committed -> soft-balance replay -> journal-cleared order, got: " + repr(err)
+
+    for triple_line in ("pre-operation membership:", "recovered (live pool):"):
+        assert triple_line not in err, (
+            f"add recovery must not print generic-live-pool line {triple_line!r}, "
+            f"got: {err!r}"
+        )
 
     machine.succeed("mountpoint -q /mnt/storage")
 
