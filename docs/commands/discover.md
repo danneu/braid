@@ -8,13 +8,12 @@ Scans `/dev/disk/by-id/` for LUKS devices with `braid-*` labels, reads their LUK
 
 - Your `pool.json` was deleted or corrupted.
 - You're migrating disks to a new machine and need to rebuild pool state.
-- You want to verify which braid-labeled LUKS devices the system can see.
 
-The normal path for adding disks is `braid add`. Use `discover` when `pool.json` is missing or corrupt.
+The normal path for adding disks is `braid add`. Use `discover` only when `pool.json` is missing or corrupt -- it refuses to run while a valid `pool.json` exists. To see the disks already in a healthy pool, use [`braid status`](status.md).
 
 ## Basic example
 
-Preview discovered membership (no changes):
+When `pool.json` is missing, preview the membership `discover` would rebuild before saving it (no changes):
 
 ```
 sudo braid discover
@@ -27,6 +26,8 @@ Output:
   toshiba = /dev/disk/by-id/ata-TOSHIBA_MN08ACA16T_XXXXXXXX
 pass --write to save to /var/lib/braid/pool.json
 ```
+
+Bare `discover` prints this preview only when `pool.json` is absent. Over a valid `pool.json` it exits with an error -- use [`braid status`](status.md) to view current membership. Over a corrupt `pool.json` it also refuses, pointing you to `discover --write` (see [Common variations](#common-variations)).
 
 The membership rows are written to stdout; the `pass --write to save` hint, the
 `--write` "pool membership written" confirmation, scan warnings, and errors go

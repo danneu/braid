@@ -41,22 +41,36 @@ sudo btrfs balance start -dusage=10 -musage=10 /mnt/storage
 
 **Symptom:** `braid unlock` fails because pool.json is missing or corrupted.
 
-**Fix:** Rebuild UUID-keyed pool.json from disk labels and LUKS UUIDs:
+**Fix:** Rebuild UUID-keyed pool.json from disk labels and LUKS UUIDs. How you
+start depends on the state of `pool.json` -- bare `discover` previews only when
+the file is absent; over a corrupt file it refuses and points you to
+`discover --write`.
+
+**If `pool.json` is missing** -- preview, then write:
 
 ```sh
 sudo braid discover
-# Shows discovered disks — verify they look correct
+# Shows discovered disks -- verify they look correct
 sudo braid discover --write
-# Then unlock normally
+```
+
+**If `pool.json` is corrupt or unreadable** -- skip the preview and rebuild in
+place (bare `discover` refuses corrupt state before scanning):
+
+```sh
+sudo braid discover --write
+```
+
+The corrupt rebuild preserves the original bytes at
+`pool.json.corrupt-<RFC3339-UTC>` before overwriting; do not remove it first.
+
+Then unlock normally:
+
+```sh
 sudo braid unlock
 ```
 
 `discover` scans `/dev/disk/by-id/` for LUKS devices with `braid-*` labels and reconstructs the membership file. See [Recovery scenarios](recovery-scenarios.md) for details.
-
-**Note:** If `pool.json` is corrupt or unreadable, run `braid discover --write`
-directly. The rebuild path automatically preserves the original bytes at
-`pool.json.corrupt-<RFC3339-UTC>` before overwriting the file; do not remove it
-first.
 
 If `pool.json` is healthy and UUID-keyed, `discover --write` refuses on
 purpose. Use `braid add` / `braid remove` / `braid replace` for normal
