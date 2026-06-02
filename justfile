@@ -258,6 +258,10 @@ check-docs-rendered-frontmatter:
 check-code-doc-anchors:
     python3 scripts/docs/check-code-doc-anchors.py
 
+# Verify decision-doc See-section code-span paths resolve
+check-docs-see-paths:
+    python3 scripts/docs/check-see-paths.py
+
 # Destroy an entire braid pool (dev use only — wipes LUKS signatures + state files)
 destroy config="/etc/braid/config.json":
     ./scripts/braid-destroy.sh {{config}}

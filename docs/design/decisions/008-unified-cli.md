@@ -89,4 +89,3 @@ Two commands (`plan` then `apply`) instead of one. This is intentional — deter
 - `docs/design/decisions/009-safe-by-construction-reconciliation.md` — destructive boundary principle
 - `docs/design/decisions/007-disk-pool-management.md` — existing pool management spec
 - `cli/src/` — Rust CLI implementation
-- `scripts/braid-add-disk.sh` — error stub directing to `init-disk` + `apply`

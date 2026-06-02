@@ -114,7 +114,6 @@ Separate scripts (`braid-add-disk`, `braid-remove-disk`, `braid-status`) — not
 
 ## See
 
-- `scripts/braid-add-disk.sh` — existing add script with auto-evict
 - `modules/braid/options.nix` — `braid.disks` option definition
 - `modules/braid/storage.nix` — config export and LUKS entry generation
 - `docs/design/decisions/002-config-first-workflow.md` — original config-first decision

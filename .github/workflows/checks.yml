@@ -1,0 +1,19 @@
+name: checks
+
+on:
+  push:
+    branches: [master]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  docs-see-paths:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Check decision-doc See paths
+        run: python3 scripts/docs/check-see-paths.py

@@ -195,6 +195,21 @@ A symbol or heading anchor survives edits and is greppable; a line number is
 neither. This applies to docs and comments -- transient analysis in `plans/wip/`
 is exempt.
 
+## Decision Doc References
+
+A decision doc with `status: Superseded` or `Deprecated` is a point-in-time
+record. Do not rewrite its body or `## See` section to track current code -- the
+`> Superseded by ...` banner is the forward pointer to live artifacts. Repointing
+a frozen doc's references at today's successor code only makes it contradict its
+own narrative.
+
+Independent of status, a `## See` bullet whose path no longer resolves is a broken
+pointer, not history. Drop it; or, if the removed file has lasting reference value
+(an archived design doc or plan -- not deleted dead code), replace the bare path
+with the git-history-note form used in 002 and 003:
+`(preserved in git history; last present at commit <hash>)`. The `## See` path
+half of this rule is enforced by `scripts/docs/check-see-paths.py`.
+
 ## Git Commits
 
 The first line of a commit message must not be capitalized (e.g. `fix the foo bug`, not `Fix the foo bug`).

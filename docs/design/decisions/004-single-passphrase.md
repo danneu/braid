@@ -45,4 +45,4 @@ requirement.
 ## See
 
 - `cli/src/` — passphrase prompt and verification logic in the Rust CLI
-- `design-docs/1-braid-add-disk.md` — original script design (historical)
+- `design-docs/1-braid-add-disk.md` — original script design (preserved in git history; last present at commit `4112e57`)
