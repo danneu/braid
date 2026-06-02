@@ -167,8 +167,6 @@ All three fields are load-bearing and do different jobs:
 
 `braid lock` walks `systemctl show -P BoundBy braid-online.service` (the reverse of `BindsTo=`) and stops every consumer this way before unmount. This is the same pattern braid's own scrub timer uses (see `modules/braid/storage.nix`).
 
-`braid doctor` also picks up active SMB connections as auto-suspend inhibitors -- see [Power management](power-management.md).
-
 ## NFS
 
 The same approach works for NFS. Export the braid mount point and control access at the network level:
