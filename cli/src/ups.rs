@@ -936,6 +936,28 @@ mod tests {
         assert!(!flags.iter().any(|v| v == "OB"));
     }
 
+    // Intent: sparse success JSON keeps every nullable typed key present
+    // with null values and keeps extra present as an empty map.
+    // Why it exists: a future `skip_serializing_if = "Option::is_none"`
+    // on the parse model would silently switch script-facing absence
+    // from null values to omitted keys.
+    // Scenario: a thin UPS driver reports ups.status but none of the
+    // optional typed telemetry fields.
+    #[test]
+    fn snapshot_json_success_keeps_sparse_typed_keys() {
+        let parsed = UpscOutput {
+            status_flags: vec![UpsStatusFlag::Ol],
+            battery: BatteryFields::default(),
+            load_pct: None,
+            realpower_nominal_watts: None,
+            input: InputFields::default(),
+            test_result: None,
+            device: DeviceFields::default(),
+            extra: std::collections::BTreeMap::new(),
+        };
+        snap_json!(&JsonReport::success(&parsed));
+    }
+
     // Intent: query-failed --json serializes to the sentinel error plus detail.
     // Why: scripts key off `.error == "query_failed"` and can surface the
     // captured upsc stderr without scraping CLI stderr.

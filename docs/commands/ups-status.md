@@ -69,6 +69,18 @@ reachable UPS with a populated `status_flags` array and no top-level
 }
 ```
 
+In a success body (the shape above -- a reachable UPS, no top-level `error`),
+every typed field is always present: a scalar the driver did not report
+serializes as `null` rather than being omitted, and the `battery`, `input`, and
+`device` objects are always present even when all of their fields are `null`.
+Test typed fields for a `null` value, not for a missing key -- a `has(...)`
+check on any typed key always returns true. `status_flags` and `extra` are
+always present but never `null` (`[]` and `{}` when empty). The only field
+omitted when absent is the top-level `warning` (see the table below). Error
+bodies are the exception -- they carry `error`/`detail` and none of the typed
+keys, so a script must confirm there is no top-level `error` before relying on
+the rule above.
+
 `status_flags` lists flags in first-seen `ups.status` token order (whitespace normalized, duplicate tokens dropped); braid does not sort them, so the order is deterministic for a given UPS state.
 
 `extra` is a string-keyed map of every `upsc` line that did not land in a typed field above. Its contents vary with the NUT driver and version (typically `driver.*` debug keys plus other untyped fields like `battery.charge.low` or `input.voltage.nominal`), and values are kept verbatim as strings.

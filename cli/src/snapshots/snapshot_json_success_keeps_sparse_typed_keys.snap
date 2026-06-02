@@ -1,0 +1,33 @@
+---
+source: cli/src/ups.rs
+expression: "&JsonReport::success(&parsed)"
+---
+{
+  "status_flags": [
+    "OL"
+  ],
+  "battery": {
+    "charge_pct": null,
+    "runtime_secs": null,
+    "voltage": null,
+    "type": null,
+    "mfr_date": null,
+    "runtime_low_secs": null
+  },
+  "load_pct": null,
+  "realpower_nominal_watts": null,
+  "input": {
+    "voltage": null,
+    "transfer_low": null,
+    "transfer_high": null,
+    "sensitivity": null
+  },
+  "test_result": null,
+  "device": {
+    "model": null,
+    "mfr": null,
+    "serial": null,
+    "type": null
+  },
+  "extra": {}
+}
