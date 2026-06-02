@@ -282,8 +282,9 @@ struct PassphraseInputArgs {
 struct LuksFormatArgs {
     /// Advanced: pass one raw argv element to cryptsetup luksFormat.
     ///
-    /// Repeat for multiple arguments. Use the equals form for values that
-    /// start with a hyphen, e.g. --luks-format-arg=--pbkdf.
+    /// Repeat for multiple arguments. Always use the equals form
+    /// (--luks-format-arg=<ARG>); the space form is rejected. Required even for
+    /// hyphen-leading values, e.g. --luks-format-arg=--pbkdf.
     #[arg(
         long = "luks-format-arg",
         value_name = "ARG",
