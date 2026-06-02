@@ -139,7 +139,15 @@ Last scrub: running (45%)
 
 ### Per-disk detail
 
-Each disk shows its device path, model, serial, LUKS UUID, and I/O error counts:
+What each disk shows depends on whether it is a live pool member. A live pool
+member shows its device path, model, serial, LUKS UUID, and btrfs I/O error
+counters. Any other disk -- missing, offline, UUID mismatch,
+header-unreadable, or unknown -- shows a reduced set: its device path and an
+`Errors: unknown (<reason>)` line in place of counters; a UUID-mismatch disk
+also shows its observed `LUKS:` UUID so the divergence is visible. Separately,
+any disk that needs attention -- for example a missing disk, or a present
+member with nonzero error counters -- gets an `Action:` line naming the next
+command (detailed below).
 
 ```
 Disks:
@@ -151,8 +159,18 @@ Disks:
     LUKS:    aaaaaaaa-1111-2222-3333-444444444444
     Errors:  read 0 / write 0 / flush 0 / corruption 0 / generation 0
 
+  toshiba2          devid 2   present
+    Device:  /dev/disk/by-id/ata-TOSHIBA_MN07ACA12T_5678
+    Model:   TOSHIBA MN07ACA12T
+    Serial:  5678DEF
+    LUKS:    bbbbbbbb-1111-2222-3333-444444444444
+    Errors:  read 12 / write 0 / flush 0 / corruption 3 / generation 0
+    Action:  braid replace --old toshiba2 --new <new-name>=/dev/disk/by-id/<...>
+
   toshiba3          MISSING
-    Device:  /dev/disk/by-id/ata-TOSHIBA_MN07ACA12T_5678  (not found)
+    Device:  /dev/disk/by-id/ata-TOSHIBA_MN07ACA12T_9ABC  (not found)
+    Errors:  unknown (device absent)
+    Action:  braid replace --old toshiba3 --new <new-name>=/dev/disk/by-id/<...>
 ```
 
 Disk states (compact `Drives:` list and detail view):
@@ -165,6 +183,30 @@ Disk states (compact `Drives:` list and detail view):
 | **LUKS HEADER UNREADABLE** | Device present but LUKS header cannot be read |
 | **LUKS UUID MISMATCH** | Device present but its LUKS header UUID differs from the recorded member -- swapped, cloned, or reformatted; run `braid doctor` |
 | **UNKNOWN** | State could not be determined |
+
+**`Errors:` line.** A live, present pool member shows real btrfs counters
+(`read / write / flush / corruption / generation`). Every other disk shows
+`Errors: unknown (<reason>)`, where `<reason>` names why counters are
+unavailable: `device absent`, `LUKS header unreadable`, `LUKS UUID mismatch`,
+`disk offline -- not in pool`, or `metadata unavailable`.
+
+**`Action:` line.** When a disk needs attention, `braid status` appends an
+`Action:` line naming the next command, so you do not have to look it up:
+
+| Condition | `Action:` line |
+|---|---|
+| Missing member, or a present member with nonzero error counts | `braid replace --old <name> --new <new-name>=/dev/disk/by-id/<...>` |
+| Missing or errored device with no pool membership (foreign mapper) | `foreign mapper detected -- run 'braid doctor' to investigate` |
+| LUKS UUID mismatch | `disk was swapped, cloned, or reformatted; detach the foreign disk and reattach the original, or run 'braid replace' if the swap was intentional -- run 'braid doctor' for the expected vs observed UUID` |
+| LUKS header unreadable | `run 'braid doctor' for recovery guidance` |
+
+Healthy present disks and disks in the `OFFLINE` or `UNKNOWN` state get no
+`Action:` line. These hints are human-output only; `--json` consumers derive
+their own remediation from the `status` and `errors` fields (the JSON
+`disks[]` element has no action field).
+
+See [braid replace](replace.md) to rebuild a missing or failing disk and
+[braid doctor](doctor.md) for the guided recovery path.
 
 ### Advisories
 
@@ -393,4 +435,5 @@ the btrfs profile names braid observed; consumers apply their own policy.
 - [braid remove-missing](remove-missing.md) -- forget a dead device
   (operates only on btrfs-authoritative MISSING devids; see that command's note
   on transient null-underlying state)
+- [braid doctor](doctor.md) -- diagnose pool/disk health and get recovery guidance
 - [braid idle](idle.md) -- machine-friendly idle/busy check for autosuspend
