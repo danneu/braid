@@ -45,16 +45,28 @@ New runtime dependencies must be classified into one of these two groups when ad
 
 ### Upgrading tools
 
-1. Bump the nixpkgs input to the next stable release.
-2. Run `nix flake update nixpkgs`.
-3. Run `make test` -- the `tool-versions` VM test verifies that each
-   pinned tool resolves to a `/nix/store/` path on the VM's PATH and
-   that its self-reported version matches `pkgs.<tool>.version` from
-   the same evaluation. It does not detect that nixpkgs has moved a
-   tool to a new version (both sides advance together); use steps 4
-   and 5 as the actual drift gate.
-4. Capture new golden-file fixtures from a VM -- `just capture-all-fixtures` writes under `cli/tests/fixtures/nixos-<release>/` (with `upsc/` holding the `capture-ups-fixtures` outputs). `just capture-all-fixtures-unstable` is the unstable-lane mirror.
-5. Update parser tests if output format changed.
+A nixpkgs bump can move parser-critical tools to new output formats, so an
+upgrade must refresh fixtures and re-run every parser-validation lane -- not
+just confirm tool provenance. These steps mirror the canonical sequence in
+[dev/overview.md](../../dev/overview.md) ("Refresh fixtures and run tests");
+keep the two in sync.
+
+1. Bump the nixpkgs input to the next stable release and run `nix flake update nixpkgs`.
+2. Refresh fixtures: `just capture-all-fixtures` writes golden files under
+   `cli/tests/fixtures/nixos-<release>/` (with `upsc/` holding the
+   `capture-ups-fixtures` outputs). `just capture-all-fixtures-unstable` is the
+   unstable-lane mirror.
+3. Run the parser-validation lanes, updating parsers/tests for any output that
+   changed:
+   - `just test-rust` -- golden-fixture parser tests.
+   - `just test-parsers` -- live-tool parser canary.
+   - `just test-vm` -- VM suite. Its `tool-versions` check verifies provenance:
+     each pinned tool resolves to a `/nix/store/` path on the VM's PATH and its
+     self-reported version matches `pkgs.<tool>.version` from the same
+     evaluation. Provenance only -- `tool-versions` does not detect that nixpkgs
+     moved a tool to a new version (both sides advance together), so the fixture
+     and parser tests above are the actual drift gate. Run it alone with
+     `just test-vm tool-versions` for a quick provenance-only check.
 
 NUT specifically: `parse_upsc` depends on the `key: value` shape emitted by `pkgs.nut`'s `upsc` client (see `reference/nut/clients/upsc.c`). A nixpkgs bump that touches `networkupstools` triggers the same fixture-refresh obligation as the other pinned tools -- run `just capture-ups-fixtures` and `just test-rust` before merging. The `braid-status-ups` check under `just test-parsers` is the live-tool mirror of the golden fixtures.
 
