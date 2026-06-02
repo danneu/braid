@@ -73,7 +73,7 @@ When `braid.enable = true`, the module sets up:
 | `braid.packages.smartmontools` | package | `pkgs.smartmontools` | smartmontools package |
 | `braid.packages.ethtool` | package | `pkgs.ethtool` | ethtool package |
 
-Override these only if you need a specific version for compatibility testing. The defaults are the NixOS stable versions from your nixpkgs input.
+Override these only if you need a specific version for compatibility testing. With the recommended `braid.inputs.nixpkgs.follows = "nixpkgs"` (the Minimal config example above), `nixosModules.default` sources these defaults from your nixpkgs input; drop that `follows` and they come from braid's own pinned `nixpkgs` (nixos-26.05) instead. Either way, keep your nixpkgs on the same NixOS stable release braid targets so the parsed tool output stays compatible -- see [Toolchain pinning](../design/decisions/010-toolchain-pinning.md).
 
 ### Auto-scrub
 
@@ -186,7 +186,8 @@ braid = {
   poolAccessGroup = "storage";   # default; null to disable
   lockSystemdStopDeadlineSecs = 270;  # default; must stay below braid-online TimeoutStopSec
 
-  # Tool version overrides (defaults to nixpkgs versions)
+  # Tool version overrides -- with the recommended nixpkgs `follows`, defaults
+  # track your nixpkgs; without it, braid's pinned nixos-26.05 (see "Tool overrides")
   # packages.cryptsetup = pkgs.cryptsetup;
   # packages.btrfsProgs = pkgs.btrfs-progs;
   # packages.utilLinux = pkgs.util-linux;

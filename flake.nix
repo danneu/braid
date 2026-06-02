@@ -1020,7 +1020,14 @@
       nixosModules.default =
         { pkgs, lib, ... }:
         let
-          # Use braid's own pinned nixpkgs for tool versions, not the consumer's
+          # Storage toolchain from braid's `nixpkgs` flake input, instantiated
+          # cleanly (no consumer overlays). NOTE: the install docs recommend
+          # `braid.inputs.nixpkgs.follows = "nixpkgs"`, which redirects this input
+          # to the consumer's nixpkgs -- so in the recommended setup tool versions
+          # track the consumer's nixpkgs, and stay on braid's pinned nixos-26.05
+          # only when the consumer does not follow. Parser-output stability holds
+          # while the consumer's nixpkgs is on the same stable release braid pins;
+          # see docs/design/decisions/010-toolchain-pinning.md.
           braidPkgs = import self.inputs.nixpkgs { system = pkgs.stdenv.hostPlatform.system; };
         in
         {

@@ -15,10 +15,16 @@ Pin `flake.nix` to a specific NixOS stable release (nixos-26.05). Pin only parse
 
 ### How it works
 
-- **Flake input**: `nixpkgs.url = "github:NixOS/nixpkgs/nixos-26.05"` — parser-critical tool packages come from this channel.
-- **Module options**: `braid.packages.*` (cryptsetup, btrfsProgs, utilLinux, nut, smartmontools, ethtool) default to the flake's nixpkgs but can be overridden per-system.
+- **Flake input**: `nixpkgs.url = "github:NixOS/nixpkgs/nixos-26.05"` — braid's own pinned channel, and the source of parser-critical tool packages unless the consumer redirects braid's `nixpkgs` input (see the follows note below).
+- **Module options**: `braid.packages.*` (cryptsetup, btrfsProgs, utilLinux, nut, smartmontools, ethtool) default to braid's `nixpkgs` flake input but can be overridden per-system.
 - **PATH wrapping**: The wrapper injects `cfg.packages.*` into PATH. Generic helpers (coreutils, systemd) are resolved from the consumer's `pkgs`, not pinned.
 - **Two wrapping sites**: flake.nix wraps with `pkgs.*` defaults (for `nix run` and tests); the module wraps `cfg.package` with `cfg.packages.*` (for deployed NixOS systems where package options may be overridden).
+
+### Consumer `follows` decides the actual source
+
+`nixosModules.default` builds the `braid.packages.*` defaults with `import self.inputs.nixpkgs` -- braid's `nixpkgs` flake input, instantiated cleanly (no consumer overlays). braid's install docs recommend `braid.inputs.nixpkgs.follows = "nixpkgs"` for closure dedup, and that `follows` redirects braid's `nixpkgs` input to the consumer's nixpkgs. So in the recommended setup the pinned tools actually resolve from the *consumer's* nixpkgs; they fall back to braid's pinned nixos-26.05 only when the consumer omits the follows.
+
+The pin therefore guarantees stable parser output only while the consumer's nixpkgs stays on the same NixOS stable release braid targets (currently nixos-26.05). Within one stable release tool output formats change only for security fixes, so a consumer aligned on braid's release is safe; a consumer who bumps nixpkgs ahead of braid moves the storage toolchain with it and re-introduces the parser-drift risk this decision otherwise prevents. Mitigate by keeping nixpkgs aligned with braid's release, pinning `braid.packages.*`, or not following braid's `nixpkgs` input.
 
 ### Operational escape hatch
 
