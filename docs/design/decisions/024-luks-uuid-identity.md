@@ -165,6 +165,11 @@ membership and live btrfs topology have not yet been reconciled. Because those
 causes have different remedies, `braid status` does not print an `Action:` hint
 for offline rows.
 
+`braid doctor`'s `declared_disks` check also surfaces an offline member as a
+cause-neutral `Warn`, never `Fail`; `Fail` stays reserved for a live LUKS UUID
+mismatch. When the pool is mounted but live topology cannot be probed, doctor
+warns rather than claiming every declared member is assembled.
+
 ## Limits And Non-Goals
 
 - A LUKS UUID identifies an encrypted LUKS container, not a physical drive,
@@ -198,12 +203,19 @@ for offline rows.
 - `cli/src/status.rs` and `cli/src/tui/probe.rs` unit tests pin that a present,
   LUKS-identity-verified member absent from the live pool renders `offline`, not
   `missing` or `unknown`.
+- `cli/src/doctor.rs` unit tests pin that `declared_disks` renders verified
+  members absent from the live pool as cause-neutral `Warn`, keeps UUID
+  mismatches as `Fail`, preserves offline-pool identity-only behavior, and warns
+  when mounted-pool topology cannot be probed.
 - `tests/cli/braid-status-rust.py` pins that present disks' rendered
   `luks_uuid` equals the real cryptsetup UUID and the `pool.json` membership
   key, and that `name` is the operator name, in intact and degraded states.
 - `tests/cli/braid-status-rust.py` pins that a degraded mount with one closed
   verified member renders that member as `OFFLINE` in human output and
   `offline` in JSON while the pool summary remains degraded.
+- `tests/cli/braid-doctor-offline-member.py` pins that a degraded mounted pool
+  with one closed verified member makes `declared_disks` warn with offline
+  wording, while a fully assembled pool and an offline pool remain Ok.
 - `tests/cli/status-mapper-drift.py` pins that `braid status` resolves the
   operator name via the UUID join when a member is open under a drifted mapper
   (`braid-WRONG`), not the mapper basename, in both JSON and human output.

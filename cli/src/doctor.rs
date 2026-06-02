@@ -1,3 +1,4 @@
+use std::collections::HashSet;
 use std::os::unix::fs::{FileTypeExt, MetadataExt};
 use std::path::{Path, PathBuf};
 
@@ -285,11 +286,13 @@ fn check_config_permissions_for_path(path: &Path) -> CheckResult {
 /// Classification of a single declared disk after the doctor's LUKS probe.
 /// `summarize_declared_disks` translates a slice of these into a `CheckResult`;
 /// the variants pin the rendered declared-disk outcomes (header Ok, UUID mismatch,
-/// header unreadable, missing, non-block, probe-failed).
+/// offline, header unreadable, missing, non-block, probe-failed).
 #[derive(Debug, Clone)]
 pub(crate) enum DiskState {
     /// Header probes succeeded and the live LUKS UUID matched the pool.json key.
     LuksHeaderOk,
+    /// Present and identity-verified, but absent from the live btrfs pool.
+    Offline,
     /// `cryptsetup isLuks` and `cryptsetup luksUUID` succeeded, but the live
     /// LUKS UUID does not match the pool.json key.
     LuksUuidMismatch {
@@ -308,6 +311,17 @@ pub(crate) enum DiskState {
     /// `cryptsetup isLuks` exited non-zero -- crypt_load could not read or
     /// validate a LUKS header. Where genuine metadata damage lands. Severe.
     LuksHeaderUnreadable,
+}
+
+/// Live btrfs topology as `declared_disks` sees it, kept separate so a mounted
+/// pool probe failure warns instead of collapsing into offline-pool behavior.
+enum LiveTopology {
+    /// Pool not mounted or config absent; preserve identity-only behavior.
+    Offline,
+    /// Pool mounted and probed; UUIDs of assembled members.
+    Online(HashSet<LuksUuid>),
+    /// Pool mounted but `probe_pool` failed; topology is indeterminate.
+    Unavailable(String),
 }
 
 /// Probe a single declared disk to figure out its `DiskState`.
@@ -369,6 +383,21 @@ fn classify_luks_identity<R: CommandRunner>(
     }
 }
 
+/// Cross-check a verified declared member against live btrfs membership without
+/// masking stronger per-disk problems or fabricating offline rows on probe error.
+fn reconcile_with_live_pool(
+    uuid: &LuksUuid,
+    state: DiskState,
+    topology: &LiveTopology,
+) -> DiskState {
+    match (&state, topology) {
+        (DiskState::LuksHeaderOk, LiveTopology::Online(live)) if !live.contains(uuid) => {
+            DiskState::Offline
+        }
+        _ => state,
+    }
+}
+
 /// Pure rendering function: takes pre-classified per-disk states and returns
 /// the `CheckResult` for `declared_disks`.
 ///
@@ -379,10 +408,14 @@ fn classify_luks_identity<R: CommandRunner>(
 /// `/var/lib/braid/luks-headers/` files — `braid status` and the TUI already
 /// warn about persistent local copies, because the intended workflow is to
 /// export headers off-system and remove the local copy.
-fn summarize_declared_disks(classifications: &[(String, String, DiskState)]) -> CheckResult {
+fn summarize_declared_disks(
+    classifications: &[(String, String, DiskState)],
+    topology_unavailable: Option<&str>,
+) -> CheckResult {
     let total = classifications.len();
     let mut missing: Vec<String> = Vec::new();
     let mut not_block: Vec<String> = Vec::new();
+    let mut offline: Vec<String> = Vec::new();
     let mut probe_failed: Vec<String> = Vec::new();
     let mut header_unreadable: Vec<String> = Vec::new();
     let mut uuid_mismatch: Vec<String> = Vec::new();
@@ -390,6 +423,7 @@ fn summarize_declared_disks(classifications: &[(String, String, DiskState)]) -> 
     for (name, by_id, state) in classifications {
         match state {
             DiskState::LuksHeaderOk => {}
+            DiskState::Offline => offline.push(format!("{name} ({by_id})")),
             DiskState::LuksUuidMismatch { expected, observed } => {
                 uuid_mismatch.push(format!(
                     "{name} ({by_id}): expected {expected}, observed {observed} -- {}",
@@ -410,13 +444,14 @@ fn summarize_declared_disks(classifications: &[(String, String, DiskState)]) -> 
         }
     }
 
-    let problem_count = missing.len()
+    let disk_problem_count = missing.len()
         + not_block.len()
+        + offline.len()
         + probe_failed.len()
         + header_unreadable.len()
         + uuid_mismatch.len();
 
-    if problem_count == 0 {
+    if disk_problem_count == 0 && topology_unavailable.is_none() {
         return CheckResult::ok(
             "declared_disks",
             format!(
@@ -455,6 +490,13 @@ fn summarize_declared_disks(classifications: &[(String, String, DiskState)]) -> 
             uuid_mismatch.join("; ")
         ));
     }
+    if !offline.is_empty() {
+        parts.push(format!(
+            "{} present but not in the live pool: {}",
+            offline.len(),
+            offline.join(", ")
+        ));
+    }
     if !probe_failed.is_empty() {
         parts.push(format!(
             "{} with LUKS header probe failures: {}",
@@ -463,13 +505,26 @@ fn summarize_declared_disks(classifications: &[(String, String, DiskState)]) -> 
         ));
     }
 
-    let message = format!(
-        "{}/{} {} problems: {}",
-        problem_count,
-        total,
-        if total == 1 { "disk has" } else { "disks have" },
-        parts.join("; ")
-    );
+    let message = if disk_problem_count > 0 {
+        let mut message = format!(
+            "{}/{} {} problems: {}",
+            disk_problem_count,
+            total,
+            if total == 1 { "disk has" } else { "disks have" },
+            parts.join("; ")
+        );
+        if let Some(reason) = topology_unavailable {
+            message.push_str(&format!(
+                "; could not compare declared disks to live pool: {reason}"
+            ));
+        }
+        message
+    } else {
+        format!(
+            "could not compare declared disks to live pool: {}",
+            topology_unavailable.expect("non-ok path with zero disk problems implies unavailable")
+        )
+    };
     if uuid_mismatch.is_empty() {
         CheckResult::warn("declared_disks", message)
     } else {
@@ -511,17 +566,39 @@ fn check_declared_disks<R: CommandRunner>(ctx: &mut DoctorContext<'_, R>) -> Che
         Err(cr) => return cr,
     };
 
+    let topology = if ensure_mountpoint_is_mounted(ctx) == Some(true) {
+        ensure_pool_state(ctx);
+        match ctx
+            .pool_state
+            .as_ref()
+            .expect("ensure_pool_state seeds the cache when config is present and mounted")
+        {
+            Ok(pool) if pool.mounted => {
+                LiveTopology::Online(pool.devices.iter().map(|d| d.luks_uuid.clone()).collect())
+            }
+            Ok(_) => LiveTopology::Offline,
+            Err(e) => LiveTopology::Unavailable(e.to_string()),
+        }
+    } else {
+        LiveTopology::Offline
+    };
+    let topology_unavailable = match &topology {
+        LiveTopology::Unavailable(reason) => Some(reason.as_str()),
+        _ => None,
+    };
+
     let members = pool_membership.iter_by_name();
     let classifications: Vec<(String, String, DiskState)> = members
         .into_iter()
         .map(|(uuid, member)| {
             let by_id = member.by_id.as_str().to_owned();
-            let state = classify_disk_state(ctx.runner, Path::new(&by_id), uuid);
+            let base = classify_disk_state(ctx.runner, Path::new(&by_id), uuid);
+            let state = reconcile_with_live_pool(uuid, base, &topology);
             (member.name.as_str().to_owned(), by_id, state)
         })
         .collect();
 
-    summarize_declared_disks(&classifications)
+    summarize_declared_disks(&classifications, topology_unavailable)
 }
 
 fn ensure_mountpoint_is_mounted<R: CommandRunner>(ctx: &mut DoctorContext<'_, R>) -> Option<bool> {
@@ -3186,6 +3263,44 @@ mod tests {
         );
     }
 
+    // Intent: declared_disks reports a mounted-pool topology probe error
+    //   alongside normal per-member classification.
+    // Why it exists: a mounted pool whose live topology cannot be probed must
+    //   not be treated like an offline pool and silently reported healthy.
+    // Scenario: btrfs topology probing fails while pool.json still names a
+    //   declared member whose by-id path is currently missing.
+    #[test]
+    fn check_declared_disks_warns_when_live_topology_unavailable() {
+        let runner = MockRunner::default();
+        let (_dir, paths) = isolated_paths();
+        save_doctor_membership(
+            &paths,
+            &[(1, "disk1", "/dev/disk/by-id/does-not-exist", None)],
+        );
+        let mut ctx = parsed_doctor_ctx(&runner, &paths);
+        ctx.mountpoint_is_mounted = Some(true);
+        ctx.pool_state = Some(Err(ProbeError::NotBtrfs {
+            mount_point: "/mnt/storage".into(),
+            fstype: "ext4".into(),
+        }));
+
+        let check = check_declared_disks(&mut ctx);
+
+        assert_eq!(check.status, CheckStatus::Warn);
+        assert!(
+            check
+                .message
+                .contains("could not compare declared disks to live pool"),
+            "missing topology warning: {}",
+            check.message
+        );
+        assert!(
+            check.message.contains("disk1"),
+            "missing per-disk classification: {}",
+            check.message
+        );
+    }
+
     // --- summarize_declared_disks: pure rendering tests ---
     //
     // These tests target the pure summarizer directly, building DiskState
@@ -3206,7 +3321,7 @@ mod tests {
             cls("disk1", "/dev/disk/by-id/wwn-0x1", DiskState::LuksHeaderOk),
             cls("disk2", "/dev/disk/by-id/wwn-0x2", DiskState::LuksHeaderOk),
         ];
-        let result = summarize_declared_disks(&inputs);
+        let result = summarize_declared_disks(&inputs, None);
         assert_eq!(result.status, CheckStatus::Ok);
         assert_eq!(result.message, "all 2 declared disks present");
     }
@@ -3236,7 +3351,7 @@ mod tests {
             "/dev/disk/by-id/wwn-0xABCD",
             DiskState::LuksHeaderUnreadable,
         )];
-        let result = summarize_declared_disks(&inputs);
+        let result = summarize_declared_disks(&inputs, None);
         assert_eq!(result.status, CheckStatus::Warn);
         let msg = &result.message;
         assert!(msg.contains("disk1"), "missing disk name: {msg}");
@@ -3278,7 +3393,7 @@ mod tests {
             "/dev/disk/by-id/wwn-0x1",
             DiskState::ProbeFailed("simulated runner error".into()),
         )];
-        let result = summarize_declared_disks(&inputs);
+        let result = summarize_declared_disks(&inputs, None);
         assert_eq!(result.status, CheckStatus::Warn);
         let msg = &result.message;
         assert!(msg.contains("disk1"), "missing disk name: {msg}");
@@ -3293,6 +3408,131 @@ mod tests {
         assert!(
             !msg.contains("luksHeaderRestore"),
             "execution failure must not suggest restore: {msg}"
+        );
+    }
+
+    // Intent: declared_disks warns when a verified member is absent from the
+    //   mounted live pool.
+    // Why it exists: present, identity-verified but unassembled members must
+    //   not be reported as healthy.
+    // Scenario: a degraded mount assembled without one declared LUKS member.
+    #[test]
+    fn summarize_warn_offline_member_not_in_live_pool() {
+        let inputs = [cls("disk1", "/dev/disk/by-id/wwn-0x1", DiskState::Offline)];
+
+        let result = summarize_declared_disks(&inputs, None);
+
+        assert_eq!(result.status, CheckStatus::Warn);
+        let msg = &result.message;
+        assert!(msg.contains("disk1"), "missing disk name: {msg}");
+        assert!(
+            msg.contains("not in the live pool"),
+            "missing offline wording: {msg}"
+        );
+        assert!(
+            !msg.contains("Action"),
+            "offline must be remedy-free: {msg}"
+        );
+        assert!(
+            !msg.contains("luksHeaderRestore"),
+            "offline must not suggest header restore: {msg}"
+        );
+    }
+
+    // Intent: offline members do not downgrade a LUKS UUID mismatch failure.
+    // Why it exists: Fail remains reserved for the unsafe identity
+    //   contradiction and must dominate cause-neutral offline rows.
+    // Scenario: one declared disk is swapped while another verified member is
+    //   absent from the mounted live pool.
+    #[test]
+    fn summarize_offline_does_not_override_uuid_mismatch_fail() {
+        let expected = test_uuid(1);
+        let observed = test_uuid(2);
+        let inputs = [
+            cls(
+                "disk1",
+                "/dev/disk/by-id/wwn-0x1",
+                DiskState::LuksUuidMismatch {
+                    expected: expected.clone(),
+                    observed: observed.clone(),
+                },
+            ),
+            cls("disk2", "/dev/disk/by-id/wwn-0x2", DiskState::Offline),
+        ];
+
+        let result = summarize_declared_disks(&inputs, None);
+
+        assert_eq!(result.status, CheckStatus::Fail);
+        let msg = &result.message;
+        assert!(msg.contains("disk1"), "missing mismatch disk: {msg}");
+        assert!(msg.contains("disk2"), "missing offline disk: {msg}");
+        assert!(
+            msg.contains("detach the foreign disk"),
+            "missing mismatch guidance: {msg}"
+        );
+    }
+
+    // Intent: declared_disks warns when the mounted pool's live topology
+    //   cannot be probed, even with no per-disk problems.
+    // Why it exists: probe failure is indeterminate mounted-pool state, not
+    //   an offline pool where identity-only checks are enough.
+    // Scenario: every declared member's LUKS identity verifies, but btrfs
+    //   topology probing fails while the mountpoint is active.
+    #[test]
+    fn summarize_warn_topology_unavailable_when_probe_failed() {
+        let inputs = [cls(
+            "disk1",
+            "/dev/disk/by-id/wwn-0x1",
+            DiskState::LuksHeaderOk,
+        )];
+
+        let result = summarize_declared_disks(&inputs, Some("boom"));
+
+        assert_eq!(result.status, CheckStatus::Warn);
+        assert!(
+            result
+                .message
+                .contains("could not compare declared disks to live pool"),
+            "missing topology warning: {}",
+            result.message
+        );
+        assert!(
+            result.message.contains("boom"),
+            "missing probe error: {}",
+            result.message
+        );
+    }
+
+    // Intent: topology probe errors do not downgrade a LUKS UUID mismatch
+    //   failure.
+    // Why it exists: a mounted-pool probe error is a warning-level global
+    //   note, while UUID mismatch is still the fail-closed identity problem.
+    // Scenario: doctor cannot probe live topology and also observes a swapped
+    //   declared disk.
+    #[test]
+    fn summarize_topology_unavailable_does_not_override_uuid_mismatch_fail() {
+        let expected = test_uuid(1);
+        let observed = test_uuid(2);
+        let inputs = [cls(
+            "disk1",
+            "/dev/disk/by-id/wwn-0x1",
+            DiskState::LuksUuidMismatch {
+                expected: expected.clone(),
+                observed: observed.clone(),
+            },
+        )];
+
+        let result = summarize_declared_disks(&inputs, Some("boom"));
+
+        assert_eq!(result.status, CheckStatus::Fail);
+        let msg = &result.message;
+        assert!(
+            msg.contains("detach the foreign disk"),
+            "missing mismatch guidance: {msg}"
+        );
+        assert!(
+            msg.contains("could not compare declared disks to live pool"),
+            "missing topology warning: {msg}"
         );
     }
 
@@ -3355,6 +3595,120 @@ mod tests {
         }
     }
 
+    // Intent: live-pool reconciliation marks verified members absent from the
+    //   assembled UUID set as offline.
+    // Why it exists: doctor must surface the status-side blind spot where a
+    //   valid declared disk is present but not part of the mounted pool.
+    // Scenario: a degraded mount includes one declared member and omits
+    //   another whose raw LUKS header still verifies.
+    #[test]
+    fn reconcile_marks_verified_member_offline_when_absent_from_live_pool() {
+        let uuid = test_uuid(1);
+        let topology = LiveTopology::Online(HashSet::from([test_uuid(2)]));
+
+        let state = reconcile_with_live_pool(&uuid, DiskState::LuksHeaderOk, &topology);
+
+        assert!(
+            matches!(state, DiskState::Offline),
+            "expected Offline, got {state:?}"
+        );
+    }
+
+    // Intent: live-pool reconciliation keeps verified members healthy when
+    //   the assembled UUID set contains them.
+    // Why it exists: the new cross-check must not create false warnings for
+    //   fully assembled pools.
+    // Scenario: a healthy mounted pool contains the declared member's LUKS
+    //   UUID in the live btrfs device set.
+    #[test]
+    fn reconcile_keeps_verified_member_ok_when_present_in_live_pool() {
+        let uuid = test_uuid(1);
+        let topology = LiveTopology::Online(HashSet::from([uuid.clone()]));
+
+        let state = reconcile_with_live_pool(&uuid, DiskState::LuksHeaderOk, &topology);
+
+        assert!(
+            matches!(state, DiskState::LuksHeaderOk),
+            "expected LuksHeaderOk, got {state:?}"
+        );
+    }
+
+    // Intent: live-pool reconciliation preserves identity-only behavior when
+    //   the pool is offline.
+    // Why it exists: declared_disks must keep its existing offline-pool
+    //   behavior and not invent btrfs membership findings without a mount.
+    // Scenario: all raw declared disks are present while the NAS pool is not
+    //   mounted.
+    #[test]
+    fn reconcile_keeps_state_when_pool_offline() {
+        let uuid = test_uuid(1);
+        let topology = LiveTopology::Offline;
+
+        let state = reconcile_with_live_pool(&uuid, DiskState::LuksHeaderOk, &topology);
+
+        assert!(
+            matches!(state, DiskState::LuksHeaderOk),
+            "expected LuksHeaderOk, got {state:?}"
+        );
+    }
+
+    // Intent: live-pool reconciliation does not fabricate offline rows when
+    //   topology probing fails.
+    // Why it exists: a probe error is a check-level indeterminate warning, not
+    //   evidence that any specific member is absent.
+    // Scenario: btrfs probing fails while a declared member's LUKS identity
+    //   still verifies.
+    #[test]
+    fn reconcile_unavailable_topology_does_not_fabricate_offline() {
+        let uuid = test_uuid(1);
+        let topology = LiveTopology::Unavailable("boom".into());
+
+        let state = reconcile_with_live_pool(&uuid, DiskState::LuksHeaderOk, &topology);
+
+        assert!(
+            matches!(state, DiskState::LuksHeaderOk),
+            "expected LuksHeaderOk, got {state:?}"
+        );
+    }
+
+    // Intent: live-pool reconciliation only upgrades verified members and
+    //   never masks stronger per-disk problems.
+    // Why it exists: missing disks and UUID mismatches have their own
+    //   remediation and severity paths that offline must not hide.
+    // Scenario: a degraded live pool is missing a UUID while a declared disk
+    //   is already classified missing or mismatched.
+    #[test]
+    fn reconcile_never_masks_real_problem() {
+        let uuid = test_uuid(1);
+        let observed = test_uuid(2);
+        let topology = LiveTopology::Online(HashSet::new());
+
+        let missing = reconcile_with_live_pool(&uuid, DiskState::Missing, &topology);
+        assert!(
+            matches!(missing, DiskState::Missing),
+            "expected Missing, got {missing:?}"
+        );
+
+        let mismatch = reconcile_with_live_pool(
+            &uuid,
+            DiskState::LuksUuidMismatch {
+                expected: uuid.clone(),
+                observed: observed.clone(),
+            },
+            &topology,
+        );
+        match mismatch {
+            DiskState::LuksUuidMismatch {
+                expected,
+                observed: got_observed,
+            } => {
+                assert_eq!(expected.as_str(), uuid.as_str());
+                assert_eq!(got_observed.as_str(), observed.as_str());
+            }
+            other => panic!("expected LuksUuidMismatch, got {other:?}"),
+        }
+    }
+
     // Intent: a LUKS UUID mismatch makes the declared_disks check fail and
     //   renders both sides of the identity comparison.
     // Why it exists: a swapped disk will be rejected by later mutating commands,
@@ -3377,7 +3731,7 @@ mod tests {
             cls("disk2", "/dev/disk/by-id/wwn-0x2", DiskState::LuksHeaderOk),
         ];
 
-        let result = summarize_declared_disks(&inputs);
+        let result = summarize_declared_disks(&inputs, None);
 
         assert_eq!(result.status, CheckStatus::Fail);
         let msg = &result.message;
@@ -3423,7 +3777,7 @@ mod tests {
             ),
         ];
 
-        let result = summarize_declared_disks(&inputs);
+        let result = summarize_declared_disks(&inputs, None);
 
         assert_eq!(result.status, CheckStatus::Fail);
         let msg = &result.message;
@@ -3448,7 +3802,7 @@ mod tests {
             cls("disk2", "/dev/disk/by-id/wwn-0x2", DiskState::NotBlock),
             cls("disk3", "/dev/disk/by-id/wwn-0x3", DiskState::LuksHeaderOk),
         ];
-        let result = summarize_declared_disks(&inputs);
+        let result = summarize_declared_disks(&inputs, None);
         assert_eq!(result.status, CheckStatus::Warn);
         let msg = &result.message;
         assert!(msg.contains("not found"), "missing 'not found': {msg}");
@@ -3486,7 +3840,7 @@ mod tests {
             ),
             cls("disk4", "/dev/disk/by-id/wwn-0x4", DiskState::LuksHeaderOk),
         ];
-        let result = summarize_declared_disks(&inputs);
+        let result = summarize_declared_disks(&inputs, None);
         assert_eq!(result.status, CheckStatus::Warn);
         let msg = &result.message;
         assert!(msg.contains("3/4"), "expected '3/4' problem count: {msg}");

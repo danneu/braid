@@ -314,6 +314,11 @@
               braid = linuxCrane.braid;
             }
           );
+          braid-doctor-offline-member = pkgs.testers.nixosTest (
+            import ./tests/cli/braid-doctor-offline-member.nix {
+              braid = linuxCrane.braid;
+            }
+          );
           braid-doctor-uuid-swap = pkgs.testers.nixosTest (
             import ./tests/cli/braid-doctor-uuid-swap.nix {
               braid = linuxCrane.braid;
