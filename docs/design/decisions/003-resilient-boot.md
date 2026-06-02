@@ -27,7 +27,7 @@ LUKS unlock is strictly stage-2 — `braid-unlock` or `braid-auto-unlock` opens 
 
 Resilience mechanisms:
 
-- **No boot-blocking mount units**: The module generates no data-pool `fileSystems` or LUKS entries. The CLI (`braid unlock`) handles LUKS open + btrfs mount directly. Nothing referencing data drives can block boot. (The one build-time `fileSystems` entry is the optional `autoUnlock` USB-key mount at `/run/braid-key/mnt`, marked `noauto`/`nofail` so it never blocks boot and references the key device, not the pool.)
+- **No boot-blocking mount units**: The module generates no data-pool `fileSystems` or LUKS entries. The CLI (`braid unlock`) opens LUKS and mounts btrfs directly with a plain `mount` call, so nothing referencing data drives can block boot. Mounting outside systemd also sidesteps the `SYSTEMD_READY=0` udev quirk (systemd/systemd#36886): a missing btrfs member can mark surviving devices not-ready and stall a *systemd*-initiated mount — the exact failure resilience-by-default exists to prevent. Related coverage: `tests/repro/udev-missing-disk-{io,idle}.py` exercise udev events when a member disappears from an already-mounted pool, characterizing disappearance signals rather than the `SYSTEMD_READY=0` mount-gating path. (The one build-time `fileSystems` entry is the optional `autoUnlock` USB-key mount at `/run/braid-key/mnt`, marked `noauto`/`nofail` so it never blocks boot and references the key device, not the pool.)
 - **Degraded mount**: Requires explicit `--allow-degraded` (or `autoUnlock.allowDegraded` for unattended use) — braid refuses to silently mount with zero redundancy.
 
 ### Three-tier failure model
@@ -41,16 +41,6 @@ Resilience mechanisms:
 ### Identity enforcement
 
 `braid unlock` uses authoritative pool membership from `pool.json` and probes only those configured members. `--allow-degraded` only bypasses degraded-mount refusal; it does not change which disks are considered pool members.
-
-## Key discoveries
-
-### udev SYSTEMD_READY=0 risk
-
-When btrfs has a missing member, udev may mark remaining devices as not ready (systemd/systemd#36886), blocking mount. Not yet hit in testing. Fallback: custom udev rule or moving mount into the scan service script.
-
-### Timeout values
-
-10s in VM tests (no spin-up delay). 30s in production (real drives may be slow to enumerate on a cold DAS).
 
 ## Constraint
 
