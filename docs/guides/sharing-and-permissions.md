@@ -103,9 +103,6 @@ services.samba = {
       "force create mode" = "0664";
       "directory mask" = "2775";
       "force directory mode" = "2775";
-
-      # Inherit group from parent directory (works with setgid)
-      "inherit permissions" = "yes";
     };
   };
 };
@@ -118,7 +115,10 @@ Key points:
 
 - `valid users = @storage` restricts the share to the storage group.
 - `force create mode` and `force directory mode` ensure group-writable permissions regardless of the client's umask.
-- `inherit permissions` respects the setgid bit on parent directories.
+- New files and directories inherit the `storage` group from the setgid bit
+  braid sets on the mount root -- a kernel behavior that does not require
+  `inherit permissions`. `force directory mode = 2775` keeps that setgid bit on
+  Samba-created subdirectories so inheritance carries down the tree.
 - Samba users must also be system users in the storage group.
 
 ### Multiple shares
@@ -153,19 +153,27 @@ By default, `samba-smbd.service` (the systemd unit NixOS creates from `services.
 
 ```nix
 systemd.services.samba-smbd = {
+  # Start smbd when braid marks the pool online after a successful unlock.
   wantedBy = [ "braid-online.service" ];
+  # Stop smbd when braid-online stops, before braid lock unmounts the pool.
   bindsTo = [ "braid-online.service" ];
+  # Order smbd on the correct side of braid-online start and stop jobs.
   after = [ "braid-online.service" ];
+  # Skip boot or direct starts when the braid mount point is not mounted.
+  unitConfig.ConditionPathIsMountPoint = config.braid.mountPoint;
 };
 ```
 
-All three fields are load-bearing and do different jobs:
+All four fields are load-bearing and do different jobs:
 
 - `wantedBy` -- `samba-smbd` starts when `braid-online.service` starts (i.e. after `braid unlock`).
 - `bindsTo` -- `samba-smbd` stops if `braid-online.service` stops or goes inactive (i.e. before `braid lock` runs `umount`).
 - `after` -- ordering only, ensures `samba-smbd` is started/stopped on the correct side of `braid-online.service`.
+- `ConditionPathIsMountPoint` -- skips activation when the braid mount point is only an offline directory, so any start the triad did not initiate cannot serve an unmounted pool.
 
-`braid lock` walks `systemctl show -P BoundBy braid-online.service` (the reverse of `BindsTo=`) and stops every consumer this way before unmount. This is the same pattern braid's own scrub timer uses (see `modules/braid/storage.nix`).
+`braid lock` walks `systemctl show -P BoundBy braid-online.service` (the reverse of `BindsTo=`) and stops every consumer this way before unmount, and `ConditionPathIsMountPoint` keeps them from restarting against an offline pool. This is the same pattern braid's own scrub timer uses (see `modules/braid/storage.nix`).
+
+The condition matters even with `wantedBy`: NixOS also starts Samba at boot through `samba.target` (which `samba-smbd.service` is `wantedBy`), and that boot edge would start `smbd` before any unlock. `ConditionPathIsMountPoint` is what stops it from serving the empty, offline mount directory. Only `smbd` serves files from the pool and can hold it busy during lock, so leave `samba.target`, `nmbd`, and `winbindd` untouched.
 
 ## NFS
 
@@ -182,7 +190,7 @@ services.nfs.server = {
 
 Adjust the subnet and options for your network. See `exports(5)` for the full option reference.
 
-The same `wantedBy` + `bindsTo` + `after` triad on `braid-online.service` (see "Binding shares to the pool lifecycle" under Samba above) applies to `nfs-server.service` if you want NFS to stop before `braid lock` runs `umount` and start again after `braid unlock`.
+The same `wantedBy` + `bindsTo` + `after` + `ConditionPathIsMountPoint` pattern on `braid-online.service` (see "Binding shares to the pool lifecycle" under Samba above) applies to `nfs-server.service` if you want NFS to stop before `braid lock` runs `umount` and start again after `braid unlock`. As with Samba, the condition gates NixOS's default `nfs-server.service` boot-start edge (`wantedBy = [ "multi-user.target" ]`) against an offline braid mount point.
 
 ## Auto-suspend integration
 
