@@ -13,6 +13,7 @@ docs/book/
 .envrc
 .DS_Store
 command-findings
+docs-findings
 features1
 # Agents keep reading wip plans and thinking these plans
 # are an authority on anything.
