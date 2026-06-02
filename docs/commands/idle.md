@@ -71,7 +71,7 @@ exits above: exit 0 prints `idle:` on stdout, busy/probe-failure exit 1 prints
 braid idle is designed to be used as an [autosuspend](https://autosuspend.readthedocs.io/) check. Add it to your autosuspend configuration:
 
 ```ini
-[check.BraidIdle]
+[check.BraidPool]
 enabled = true
 class = ExternalCommand
 command = ! timeout -k 2 10 braid idle
