@@ -105,8 +105,9 @@ Status text is color-coded by severity:
   or comms-loss).
 - **DarkGray** -- UPS query failed, or no UPS state available yet.
 
-The panel polls on the same 5-second cadence as the fan panel. Press `r`
-to refresh both pool and UPS probes immediately.
+The panel polls on the same 5-second cadence as the
+[TUI fans panel](fan-control.md#tui-fans-panel). Press `r` to refresh both
+pool and UPS probes immediately.
 
 ## What happens on low battery
 

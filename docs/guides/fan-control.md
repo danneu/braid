@@ -263,6 +263,15 @@ sudo smartctl -a /dev/sda
 
 The `pwmN_enable` values: 0=off, 1=manual (hddfancontrol sets this), 2=BIOS auto. hddfancontrol is configured with `--restore-fan-settings`, so a clean service stop restores the original enable mode.
 
+## TUI fans panel
+
+`braid tui`'s Data tab gains a Fans row when fan control is enabled. The
+section title shows `daemon:` status for `hddfancontrol-braid.service`; the
+row shows current PWM/RPM, the Driving column names the hottest drive setting
+the curve, and the Curve column shows the configured temperature-to-speed
+range. The panel polls every 5 seconds. Press `r` to refresh both pool and fan
+probes immediately.
+
 ## When braid.fanControl isn't enough
 
 `braid.fanControl` drives a single chassis PWM from the hottest SATA drive. That covers the common NAS case. If you need more control -- multiple PWMs with different curves, PID-based responsiveness, non-SATA drive temperature sources -- the usual escape hatches:

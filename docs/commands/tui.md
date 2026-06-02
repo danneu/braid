@@ -2,7 +2,8 @@
 
 # braid tui
 
-Interactive terminal dashboard showing pool state, disk health, allocation, scrub status, and active alerts. Refreshes on demand.
+Interactive terminal dashboard showing pool state, disk health, allocation,
+scrub status, and active alerts.
 
 ## When to use it
 
@@ -58,13 +59,33 @@ profile name verbatim for an unrecognized profile like `RAID5`; or `unknown`
 only when no block groups of that type were reported), capacity bar, balance
 state, and active alerts and advisories.
 
+**Refreshing** -- pool, disk, scrub, and alert data refresh on demand; press
+`r`. When enabled, Fans and UPS telemetry also refresh automatically every 5
+seconds and immediately on `r`. The footer's `Reload: r` spinner and idle
+`(Xms)` duration reflect only the pool refresh; automatic Fans/UPS polls do not
+update it. The view redraws periodically while idle so relative `ago` times
+stay current.
+
 **Disk table** -- one row per disk: number, name, bus (sata/usb/nvme), SMART health, temperature, btrfs device-error count, and allocated (shown as percent used and allocated/size).
+
+**Fans** (when fan control is enabled) -- Data-tab row with a `daemon:`
+header annotation for `hddfancontrol-braid.service`: `active` is green,
+`activating` and `inactive` are yellow, `failed` is red, and `unknown` is
+gray. The annotation is not a column; the columns are PWM (raw/255 plus
+percent), RPM, Driving (the hottest drive and its temperature), and Curve.
+See the [fan control guide](../guides/fan-control.md#tui-fans-panel).
+
+**UPS** (when UPS support is enabled) -- Data-tab row with the same
+`daemon:` header annotation for the NUT daemon. The columns are Status
+(color-coded flags), Battery, Runtime, and Load. See the
+[UPS guide](../guides/ups.md#tui-ups-panel) for Status severity.
 
 **Disk detail popup** (press Enter on a disk) -- disk name, LUKS lock status, cipher, key size, keyslot count, an allocations table (type/profile/size plus unallocated), and the btrfs device-error breakdown (read/write/flush/corruption/generation).
 
 **Tabs** -- three tabs, switched with Tab / Shift-Tab:
 
-- **Data** (default) -- pool allocation breakdown, disk table, capacity bar.
+- **Data** (default) -- pool allocation breakdown, disk table, capacity bar,
+  plus Fans and UPS rows when enabled.
 - **Scrub** -- per-device scrub state, progress, and timing.
 - **Browse** -- raw CLI output inspector across five tool families: Btrfs, NUT (UPS), Systemd, SMART (smartctl), and lsblk. Btrfs views include filesystem usage/show/df/commit-stats, device usage/stats, subvolumes with drill-in plus raw full/snapshot/deleted/default views, scrub status/limits, balance status, quota status/qgroups, and inspect-internal chunks. UPS views include status, raw variables, supported instant commands, connected clients, settable variables, and UPS discovery. Systemd views include unit status, show, braid units, failed units, timers, and mounts. SMART views include device scan, health, info, attributes, and self-test/error logs. lsblk views include tree, filesystems, disks, all-columns, and SCSI. `NUT > UPSes` can help find the correct `ups.name` before UPS support is enabled.
 
