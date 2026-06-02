@@ -53,7 +53,7 @@ sudo braid remove-missing --missing-id 3 --yes
 | `--missing-id <devid>` | Target missing device by btrfs devid (required) |
 | `--dry-run` | Show what would happen without executing |
 | `--yes` | Skip interactive confirmation |
-| `--progress auto\|on\|off` | Control progress display (default: auto) |
+| `--progress auto\|always\|never` | Control progress display (default: auto) |
 
 ## What happens under the hood
 

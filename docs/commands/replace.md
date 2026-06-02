@@ -75,7 +75,7 @@ sudo braid replace --old toshiba1 --new toshiba4=/dev/disk/by-id/ata-TOSHIBA_MN0
 | `--yes` | Skip interactive confirmation |
 | `--passphrase-stdin` | Read passphrase from stdin |
 | `--passphrase-file <path>` | Read passphrase from a file (conflicts with `--passphrase-stdin`) |
-| `--progress auto\|on\|off` | Control progress display (default: auto) |
+| `--progress auto\|always\|never` | Control progress display (default: auto) |
 
 ## What happens under the hood
 
