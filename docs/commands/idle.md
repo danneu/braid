@@ -68,24 +68,20 @@ exits above: exit 0 prints `idle:` on stdout, busy/probe-failure exit 1 prints
 
 ## Autosuspend integration
 
-braid idle is designed to be used as an [autosuspend](https://autosuspend.readthedocs.io/) check. Add it to your autosuspend configuration:
+`braid idle` is the activity check behind braid's auto-suspend. You don't write
+this check by hand: set `braid.autoSuspend.enable = true` and braid's NixOS
+module generates the [autosuspend](https://autosuspend.readthedocs.io/)
+`services.autosuspend` ExternalCommand check (`BraidPool`) for you. The
+generated command -- `bash -c '! timeout -k 2 10 braid idle'`, with fully
+qualified `/nix/store` paths for `bash`, `timeout`, and `braid` -- handles the
+exit-code inversion autosuspend expects and a fail-closed inner `timeout`.
+Don't reproduce it by hand: autosuspend runs the check outside braid's wrapper,
+so bare `braid`/`timeout` are not on its PATH.
 
-```ini
-[check.BraidPool]
-enabled = true
-class = ExternalCommand
-command = ! timeout -k 2 10 braid idle
-```
-
-Each piece of the block is load-bearing:
-
-- `enabled = true` is required. autosuspend's raw-INI parser defaults `enabled` to `false` and silently skips the section otherwise. (The NixOS module submodule defaults this to true, which is why the in-tree module form omits it.)
-- `class = ExternalCommand` is the exported activity-check class in autosuspend's plugin registry. It runs `command` via the shell and treats exit 0 as "activity detected" (block suspend), non-zero as "no activity" (allow suspend).
-- The leading `!` inverts `braid idle`'s exit codes so autosuspend sees what it expects:
-  - `braid idle` exits 0 (idle) -> `!` -> 1 -> autosuspend allows suspend
-  - `braid idle` exits 1 (busy or probe failure) -> `!` -> 0 -> autosuspend blocks suspend
-  - `braid idle` exits 2 (setup error) -> `!` -> 0 -> autosuspend blocks suspend (fail-closed)
-- The inner `timeout -k 2 10` bounds signal-killable overruns -- e.g. a parser regression, a slow userspace probe, or network-FS latency -- by sending `TERM` after 10s and escalating to `KILL` two seconds later for processes that ignore or delay `TERM`. It must be *inside* the `!`-inverted command, not outside it: an overrun produces a non-zero exit which `!` then flips to 0, preserving the fail-closed invariant. An outer timeout would fail open because the shell gets killed before `!` runs. Uninterruptible kernel waits (a process stuck in `D` state) are out of scope for `timeout(1)`; autosuspend stalls until the syscall returns and the system stays awake by virtue of not deciding.
+See the [power management guide](../guides/power-management.md) for setup, and
+[ADR 016: Auto-Suspend](../design/decisions/016-auto-suspend.md) for the
+exit-inversion table, the qualified-path requirement, and why `timeout` must
+sit inside the `!`-inverted command.
 
 ## What happens under the hood
 
