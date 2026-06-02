@@ -236,10 +236,10 @@ check-docs:
         rc=1
     fi
     # Markdown links that escape docs/ are broken in deployed mdBook output.
-    escapes=$(grep -rn '\](\.\./\.\./' docs/ --include='*.md' --exclude-dir=book || true)
-    if [ -n "$escapes" ]; then
-        printf 'markdown links escape docs/ subtree (broken in rendered mdBook):\n'
-        printf '%s\n' "$escapes"
+    # Depth-aware: resolves each relative link against its own file and flags
+    # only those climbing above docs/. A bare `](../../` grep false-flags valid
+    # in-book links from nested pages; mdbook-linkcheck2 covers in-book targets.
+    if ! python3 scripts/docs/check-doc-link-escapes.py; then
         rc=1
     fi
     # README.md / docs/index.md tables must match SUMMARY.md order and use the
