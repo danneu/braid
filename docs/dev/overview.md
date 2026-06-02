@@ -14,6 +14,8 @@ nix develop
 
 The shell includes the Rust toolchain (`cargo`, `rustc`, `rustfmt`, `clippy`, `rust-analyzer`), `just`, and braid's parser-critical/runtime tools (`btrfs-progs`, `cryptsetup`, `util-linux`, `nut`).
 
+That shell is Linux-only -- it bundles the storage tools (`btrfs-progs`, `cryptsetup`, `util-linux`, `nut`), which don't evaluate on darwin -- so `nix develop` resolves only on a Linux host. On macOS, run VM tests through the linux-builder and build the CLI with `nix build .#braid-cli-unwrapped` (below); `nix develop .#docs` works on macOS but carries only the docs toolchain (mdbook).
+
 ## Test workflow
 
 ```bash
@@ -76,10 +78,10 @@ fileSystems."/tmp-braid" = {
 ## Building the CLI
 
 ```bash
-nix build .#braid
+nix build .#braid-cli-unwrapped
 ```
 
-Rust source lives in `cli/`.
+The wrapped `.#braid` and `default` put btrfs/luks tooling on PATH and are Linux-only; on macOS build the pure-Rust `braid-cli-unwrapped`. Rust source lives in `cli/`.
 
 ## Upgrading dependencies
 
