@@ -28,7 +28,7 @@ that contradicts:
   "When to wrap in a braid option") and its "Defaults applied" table, whose
   examples `braid.autoScrub` and `braid.poolAccessGroup` *are* `braid.*`
   wrapper options.
-- The governing principle, `docs/design/principles.md:47` (Principle 7, "Sane
+- The governing principle, `docs/design/principles.md#7-sane-defaults` (Principle 7, "Sane
   defaults"), which already states the correct dual rule: "Use `lib.mkDefault`
   for simple pass-through defaults on stable NixOS options. Wrap in a `braid.*`
   option when the feature is inside braid's product boundary and benefits from
@@ -51,7 +51,7 @@ three ways, and `storage.nix` is the wrong single anchor for two of them:
 - The default *values* are **declared** in `modules/braid/options.nix`, not
   `storage.nix`.
 - `storage.nix` **realizes only `autoScrub`** (the scrub lifecycle units); it
-  applies no permissions. Its own comment says so: `storage.nix:40` reads
+  applies no permissions. Its own comment says so -- the comment above the mount-point `systemd.tmpfiles.rules` in `modules/braid/storage.nix` reads
   "Permissions are set by Rust post-unlock lifecycle fixups (root:poolAccessGroup
   2770)."
 - The `poolAccessGroup` permission (`root:<group> 2770`) is **applied in Rust**
@@ -65,15 +65,15 @@ elsewhere. Same doc-drift class fixed for ADR-001/015 in `b3b068c5`.
 
 | Default (ADR table) | Declared (default value) | Realized / applied |
 |---|---|---|
-| `braid.autoScrub.enable` (`true`) | `modules/braid/options.nix:77-80` | `modules/braid/storage.nix:63-122` -- the scrub lifecycle units, all gated on `cfg.autoScrub.enable` and bound to `braid-online.service`: `systemd.timers.braid-scrub` (:63), `systemd.services.braid-scrub` (:75), `systemd.services.braid-scrub-resume-trigger` (:99) |
-| `braid.autoScrub.interval` (`"monthly"`) | `modules/braid/options.nix:82-86` | `modules/braid/storage.nix:69` (`OnCalendar = cfg.autoScrub.interval`) |
-| `braid.poolAccessGroup` (`"storage"`) | `modules/braid/options.nix:36-40` (group also created at `:118-120`) | `cli/src/online_state.rs:277-290` `mark_online()` (`chown root:<group>` + `chmod 2770`); group value bridged via `modules/braid/cli.nix:16` (`pool_access_group = cfg.poolAccessGroup`) into the CLI config JSON |
+| `braid.autoScrub.enable` (`true`) | `braid.autoScrub` in `modules/braid/options.nix` | the scrub lifecycle units in `modules/braid/storage.nix`, all gated on `cfg.autoScrub.enable` and bound to `braid-online.service`: `systemd.timers.braid-scrub`, `systemd.services.braid-scrub`, `systemd.services.braid-scrub-resume-trigger` |
+| `braid.autoScrub.interval` (`"monthly"`) | `braid.autoScrub.interval` in `modules/braid/options.nix` | `OnCalendar = cfg.autoScrub.interval` in `systemd.timers.braid-scrub` (`modules/braid/storage.nix`) |
+| `braid.poolAccessGroup` (`"storage"`) | `braid.poolAccessGroup` in `modules/braid/options.nix` (group also created via `users.groups`) | `mark_online()` in `cli/src/online_state.rs` (`chown root:<group>` + `chmod 2770`); group value bridged via `pool_access_group = cfg.poolAccessGroup` in `modules/braid/cli.nix` into the CLI config JSON |
 
 Confirmed by direct reads plus `rg -n 'poolAccessGroup|pool_access_group'
 modules/ cli/`, `rg -n 'autoScrub' modules/ cli/`, `rg -n 'mark_online' cli/`.
 No other module or Rust source realizes these defaults.
 
-**Decision-sentence drift (line 16)** confirmed against `docs/design/principles.md:47`
+**Decision-sentence drift (line 16)** confirmed against `docs/design/principles.md#7-sane-defaults`
 (read-only): the principle already states the dual `mkDefault`/wrap rule, which
 ADR-005:16 contradicts.
 
@@ -96,7 +96,7 @@ with:
 Braid sets opinionated defaults two ways: `lib.mkDefault` for simple pass-through defaults on stable NixOS options, and a `braid.*` wrapper option when the feature is inside braid's product boundary and benefits from lifecycle control, discoverability, or a unified config surface — even if the mapping is 1:1. The two cases below say which applies.
 ```
 
-Mirrors `principles.md:47` and forward-references the existing "When to use
+Mirrors `principles.md#7-sane-defaults` and forward-references the existing "When to use
 mkDefault (don't wrap)" / "When to wrap in a braid option" subsections (the
 override mechanic is already covered at the current line 26, so it is not
 repeated here).
@@ -128,14 +128,14 @@ with:
   "surrounding file already uses the Unicode form" exception applies -- the same
   call `b3b068c5` made for ADR-015/001. Do not convert. (This plan file itself
   uses ASCII `--`: it has no surrounding Unicode form to match.)
-- **`principles.md:47` is the alignment target for Edit A, read-only.** It
+- **`principles.md#7-sane-defaults` is the alignment target for Edit A, read-only.** It
   already states the correct rule; do not edit it.
 - **`cli.nix` is deliberately not a fourth "See" bullet.** It only bridges the
-  group value into the config JSON (`cli.nix:16`); adding it would bloat a terse
+  group value into the config JSON (via `pool_access_group = cfg.poolAccessGroup` in `cli.nix`); adding it would bloat a terse
   pointer. The three-way split (options.nix / storage.nix / online_state.rs)
   matches the impl plan's stated target; the bridge detail lives in this plan's
   ownership table.
-- **The mount-root tmpfiles dir (`storage.nix:41-46`) is intentionally omitted**
+- **The mount-root tmpfiles dir (`systemd.tmpfiles.rules` in `storage.nix`) is intentionally omitted**
   from the storage.nix bullet -- it is not one of the table's three defaults.
 - Line shifts: Edit A is one line -> one line (no shift); Edit B is one line ->
   three lines (+2). No shipped doc cross-links ADR-005 by line number (mdBook
@@ -150,20 +150,20 @@ are already covered:
 - `autoScrub` lifecycle units (timer + services gated on the enable flag):
   `tests/module/auto-scrub.py`.
 - `poolAccessGroup` permission application (`root:<group> 2770`):
-  `cli/src/online_state.rs` unit test `mark_online_applies_pool_access_group_without_lifecycle`
-  (`:708`), and end-to-end in `tests/module/add-bootstrap.py`.
+  `cli/src/online_state.rs` unit test `mark_online_applies_pool_access_group_without_lifecycle`,
+  and end-to-end in `tests/module/add-bootstrap.py`.
 
 ## Out of scope (do not bundle)
 
 - The broader doc->source pointer audit/guard (impl plan follow-up 2), and the
-  other stale `storage.nix` pointers it owns (`002:62`, `007:119`, `003:61`,
-  `017:124`, `018:217`, `019:155/160`, ...). This plan makes no correctness
+  other stale `storage.nix` pointers it owns (in ADR-002, ADR-007, ADR-003,
+  ADR-017, ADR-018, ADR-019, ...). This plan makes no correctness
   claim about them.
 - Any other ADR.
-- `docs/design/principles.md` -- already states the correct rule (`:47`); read
+- `docs/design/principles.md` -- already states the correct rule (`#7-sane-defaults`); read
   only, not edited.
 - The pre-existing `just check-docs` failure on
-  `docs/design/decisions/010-toolchain-pinning.md:51` (unrelated escaped-link
+  `docs/design/decisions/010-toolchain-pinning.md#upgrading-tools` (unrelated escaped-link
   issue). Not caused by, and not fixed by, this change.
 - No formatters (`cargo fmt`, `just fmt`, mdbook formatters, etc.).
 
