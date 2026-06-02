@@ -131,9 +131,9 @@ lsblk -d -o NAME,SIZE,MODEL,ID-LINK
 sudo braid add newdisk=/dev/disk/by-id/ata-NEWDISK_SERIAL
 ```
 
-braid formats the new drive with LUKS (using your existing passphrase), adds it to the btrfs pool, and runs a background balance to spread data across all drives. No `nixos-rebuild` required.
+braid formats the new drive with LUKS (using your existing passphrase), adds it to the btrfs pool, and rebalances data across all drives. No `nixos-rebuild` required.
 
-After adding a disk, existing data gradually rebalances. You can check progress with `braid status` or `braid tui`.
+The balance runs in the foreground -- `braid add` holds the terminal and does not return until it finishes, which can take hours on a large pool. braid shows live balance progress while it runs.
 
 btrfs RAID1 keeps exactly 2 copies of every block no matter how many drives the pool has. A 3rd or 4th drive gives you more usable capacity, but it does not increase fault tolerance -- the pool still tolerates a single drive failure, the same as a 2-drive pool. See [Decision 001](../design/decisions/001-btrfs-raid1.md) for the rationale.
 
