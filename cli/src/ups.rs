@@ -165,9 +165,9 @@ fn print_not_enabled(json: bool) -> Result<UpsStatusOutcome, UpsError> {
         emit_json(&payload)?;
     } else {
         println!(
-            "UPS support is not enabled. Set `braid.ups.enable = true` in\n\
-             your NixOS configuration and rebuild to enable preflight\n\
-             safety and low-battery shutdown."
+            "UPS support is not enabled. Set `braid.enable = true` and\n\
+             `braid.ups.enable = true` in your NixOS configuration and rebuild\n\
+             to enable preflight safety and low-battery shutdown."
         );
     }
     Ok(UpsStatusOutcome::Done)

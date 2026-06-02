@@ -154,6 +154,8 @@ It takes a couple of minutes (ramps slowly to avoid bouncing the fan). Record th
 
 ## Committing to Nix
 
+Fan control is a braid sub-feature: it activates only when `braid.enable = true` (see [Getting started](getting-started.md)). The recipes below show the full `braid` block; merge the non-`braid` lines (`boot.*`, `environment.systemPackages`) into your existing config.
+
 ### Minimal recipe
 
 Paste the four discovery values into `braid.fanControl`:
@@ -165,13 +167,17 @@ Paste the four discovery values into `braid.fanControl`:
   boot.kernelModules = [ "coretemp" "nct6775" ];      # your Super I/O driver here
   # boot.kernelParams = [ "acpi_enforce_resources=lax" ];  # only if needed
 
-  braid.fanControl = {
-    enable = true;
-    pwm = {
-      platformDevice = "nct6775.656";
-      number = 2;
-      minStart = 65;   # from hddfancontrol pwm-test
-      maxStop  = 60;   # from hddfancontrol pwm-test
+  braid = {
+    enable = true;            # fan control only runs when the braid module is enabled
+
+    fanControl = {
+      enable = true;
+      pwm = {
+        platformDevice = "nct6775.656";
+        number = 2;
+        minStart = 65;   # from hddfancontrol pwm-test
+        maxStop  = 60;   # from hddfancontrol pwm-test
+      };
     };
   };
 }
@@ -348,13 +354,17 @@ maxStop:  60
 boot.kernelModules = [ "coretemp" "f71882fg" "jc42" ];
 boot.kernelParams  = [ "acpi_enforce_resources=lax" ];
 
-braid.fanControl = {
+braid = {
   enable = true;
-  pwm = {
-    platformDevice = "f71882fg.656";
-    number = 2;
-    minStart = 65;
-    maxStop  = 60;
+
+  fanControl = {
+    enable = true;
+    pwm = {
+      platformDevice = "f71882fg.656";
+      number = 2;
+      minStart = 65;
+      maxStop  = 60;
+    };
   };
 };
 ```

@@ -16,7 +16,7 @@ status: Active
 
 A btrfs RAID1 pool tolerates clean shutdowns, but sudden power loss during active I/O -- especially during a long-running `btrfs replace`, `btrfs device remove`, or post-add/remove balance -- can leave the pool in a state that requires manual recovery. This is the same risk surface that [decision 019](019-inhibit-sleep.md) protects against for suspend/wake, but it cannot use the same control model. A sleep inhibitor actively blocks the operating system from suspending; braid cannot analogously block a UPS from running out of battery. The control model here is different: reject avoidable starts on battery up front, and prove journal recovery for the unavoidable mid-mutation case.
 
-A UPS solves this only if the host cooperates. NUT (Network UPS Tools) is the standard Linux interface, and nixpkgs already provides a mature `power.ups` module that configures NUT declaratively -- units, users, udev rules, killpower handling. braid's job is not to reimplement that, but to layer opinionated policy on top so that enabling `braid.ups.enable = true` gives a home NAS three specific guarantees:
+A UPS solves this only if the host cooperates. NUT (Network UPS Tools) is the standard Linux interface, and nixpkgs already provides a mature `power.ups` module that configures NUT declaratively -- units, users, udev rules, killpower handling. braid's job is not to reimplement that, but to layer opinionated policy on top so that enabling UPS support gives a home NAS three specific guarantees:
 
 1. Orderly shutdown before battery exhaustion for ordinary mounted operation.
 2. Preflight refusal to start pool-mutating commands while already on battery.
@@ -68,7 +68,7 @@ This is not "alert only." The host genuinely shuts down, because the only safe s
 
 ### Reject pool-mutating commands on battery (preflight hygiene only)
 
-When `braid.ups.enable = true`, `braid add`, `braid remove`, `braid remove-missing`, and `braid replace` query UPS status at preflight and refuse with a `Validation`-shaped error if the status set contains `OB` or `LB`. The check sits alongside the existing preflight checks, before any journal write.
+When UPS support is enabled, `braid add`, `braid remove`, `braid remove-missing`, and `braid replace` query UPS status at preflight and refuse with a `Validation`-shaped error if the status set contains `OB` or `LB`. The check sits alongside the existing preflight checks, before any journal write.
 
 This is preflight hygiene, not a mutation-window guarantee. It narrows the surface that journal recovery must cover by rejecting the easy case -- "user starts `braid replace` while the power is already out" -- but it cannot and does not prevent LB from firing mid-mutation on work that started on AC. Mid-mutation power loss is handled by the existing journal + `braid recover` path; see the recovery-proof obligation in Open Questions.
 
@@ -82,9 +82,9 @@ v1 therefore surfaces UPS state only through `braid ups status` and the TUI. Ope
 
 ### `braid-online` becomes safety-critical under UPS
 
-`mark_online` (`cli/src/online_state.rs`) warns and exits successfully when `systemctl start braid-online.service` fails after a successful `unlock`/`add`/`recover`. Under `braid.ups.enable = true`, this silent-degradation path is unsafe: the user believes LB will trigger a clean shutdown, but without `braid-online.service` active, its ExecStop does not run and LUKS close is not guaranteed to complete before power dies.
+`mark_online` (`cli/src/online_state.rs`) warns and exits successfully when `systemctl start braid-online.service` fails after a successful `unlock`/`add`/`recover`. When UPS support is enabled, this silent-degradation path is unsafe: the user believes LB will trigger a clean shutdown, but without `braid-online.service` active, its ExecStop does not run and LUKS close is not guaranteed to complete before power dies.
 
-`braid doctor` and the TUI flag "pool mounted but `braid-online` inactive" as a high-severity configuration fault whenever `braid.ups.enable = true`. `mark_online`'s warn-and-continue behavior otherwise remains unchanged; the UPS path adds a new detector, it does not change the underlying unlock sequence. Under `systemd_lifecycle = false` (CLI-only), the lifecycle path is skipped entirely; the UPS-safety detector fires only when `systemd_lifecycle = true` and `braid.ups.enable = true`.
+`braid doctor` and the TUI flag "pool mounted but `braid-online` inactive" as a high-severity configuration fault whenever UPS support is enabled. `mark_online`'s warn-and-continue behavior otherwise remains unchanged; the UPS path adds a new detector, it does not change the underlying unlock sequence. Under `systemd_lifecycle = false` (CLI-only), the lifecycle path is skipped entirely; the UPS-safety detector fires only when `systemd_lifecycle = true` and UPS support is enabled.
 
 ### Upsmon credential lifecycle
 
@@ -97,11 +97,15 @@ Reference: the rendered NUT configs consume the file via `power.ups.users.<name>
 ## Proposed config surface
 
 ```nix
-braid.ups = {
+braid = {
   enable = true;
-  name = "ups";               # identifier used by upsd and upsc
-  driver = "usbhid-ups";      # USB default; covers the vast majority of UPSes
-  port = "auto";              # usbhid-ups's standard "find the device" value
+
+  ups = {
+    enable = true;
+    name = "ups";               # identifier used by upsd and upsc
+    driver = "usbhid-ups";      # USB default; covers the vast majority of UPSes
+    port = "auto";              # usbhid-ups's standard "find the device" value
+  };
 };
 ```
 

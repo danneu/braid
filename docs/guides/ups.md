@@ -5,7 +5,8 @@
 This guide covers enabling UPS (uninterruptible power supply) support on a
 braid NAS via NUT ([Network UPS Tools](https://networkupstools.org/)).
 
-Enabling `braid.ups.enable = true` turns on three behaviors:
+Enabling UPS support (`braid.enable = true` plus `braid.ups.enable = true`)
+turns on three behaviors:
 
 - **Orderly poweroff on low battery.** When the UPS reports critical, NUT's
   `upsmon` invokes `systemctl poweroff`. systemd unwinds
@@ -30,7 +31,10 @@ hatch but are not tested.
 ```nix
 # configuration.nix
 {
-  braid.ups.enable = true;
+  braid = {
+    enable = true;
+    ups.enable = true;
+  };
 }
 ```
 
@@ -40,11 +44,15 @@ and plug the UPS's USB cable in; NUT's auto-detect finds the device.
 Override the driver or port for non-USB UPSes:
 
 ```nix
-braid.ups = {
+braid = {
   enable = true;
-  name = "myups";
-  driver = "apcsmart";
-  port = "/dev/ttyS0";
+
+  ups = {
+    enable = true;
+    name = "myups";
+    driver = "apcsmart";
+    port = "/dev/ttyS0";
+  };
 };
 ```
 
@@ -87,7 +95,7 @@ sentinels are emitted for the common non-OK cases:
 
 ## TUI UPS panel
 
-`braid tui`'s Data tab gains a UPS row when `braid.ups.enable = true`.
+`braid tui`'s Data tab gains a UPS row when UPS support is enabled.
 Status text is color-coded by severity:
 
 - **Green** -- OL (on utility power).
@@ -142,7 +150,7 @@ is reporting a known-bad state, even when `OL` is also lit.
 
 ## doctor checks
 
-`braid doctor` adds two UPS-adjacent checks when `braid.ups.enable = true`:
+`braid doctor` adds two UPS-adjacent checks when UPS support is enabled:
 
 - **ups daemon** -- fails if `upsc` is missing or cannot be spawned,
   because braid cannot verify the enabled UPS shutdown path. It warns

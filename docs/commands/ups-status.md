@@ -5,8 +5,9 @@
 Query the UPS (NUT) daemon for the currently configured UPS and render
 a curated human summary or the serialized parsed model as JSON.
 
-Requires `braid.ups.enable = true`. With UPS disabled the command
-prints an enable hint and exits 0 (not an error).
+Requires UPS support enabled (`braid.enable = true` and
+`braid.ups.enable = true`). With UPS disabled the command prints an enable
+hint and exits 0 (not an error).
 
 ## Basic example
 
