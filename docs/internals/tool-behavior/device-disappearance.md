@@ -51,7 +51,7 @@ mapper name or LUKS label.
 
 ### Fully gone
 
-Device is completely absent — either the LUKS mapper was torn down, or the device was missing at mount time (degraded mount). `btrfs filesystem show` reports bare `path MISSING` (no mapper path). Pinned btrfs-progs v6.17.1 renders the missing-device stats path as `[devid:N]` (`device.c:625-634`); `[<missing disk>]` is an older btrfs rendering. braid does not depend on either string: the parser ignores the device field and keeps the row's `devid` and counters.
+Device is completely absent — either the LUKS mapper was torn down, or the device was missing at mount time (degraded mount). `btrfs filesystem show` reports bare `path MISSING` (no mapper path). The pinned btrfs-progs renders the missing-device stats path as `[devid:N]` (`cmds/device.c#print_device_stat_string`); `[<missing disk>]` is an older btrfs rendering. braid does not depend on either string: the parser ignores the device field and keeps the row's `devid` and counters.
 
 At this point there is no mapper and no observable LUKS UUID. Mutating commands
 that target the missing device, such as `remove-missing` and missing-path
