@@ -273,3 +273,11 @@ From `docs/internals/btrfs/balance-soft.md`, `../../` reaches `docs/`:
   `docs/design/decisions/010-toolchain-pinning.md:51` -- the sole reason
   master's `check-docs` was already red -- is a valid in-book link, so the
   depth-aware check now accepts it and this change turns that gate green.
+- Follow-up (`0d22fb76`): the depth-aware checker above was removed as
+  redundant. `mdbook-linkcheck2` already forbids links escaping the book root
+  and validates in-book targets (verified empirically: an escaping link fails
+  the build with "Linking outside of the 'root' directory is forbidden" even
+  when the target exists), and the SUMMARY.md-parity check guarantees every
+  page is rendered -- so `check-docs` no longer link-checks at all. The page's
+  in-book links stand; linkcheck2 is the gate. The pre-existing
+  `010-toolchain-pinning.md` link still passes for the same reason.
