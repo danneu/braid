@@ -59,7 +59,7 @@ sudo braid enroll /mnt/usb --generate --dry-run
 1. Checks for a pending operation journal (refuses if one exists).
 2. **With `--generate`:** Validates that the target directory exists, is a directory, is already a mount point, and does not already contain `braid.key` (if a prior `--generate` run was interrupted, drop `--generate` and re-run to finish enrolling the existing keyfile; otherwise remove it manually first).
 3. **Without `--generate`:** Validates that `DIR/braid.key` already exists and is a regular file.
-4. Scans pool membership for present LUKS disks. Absent or non-LUKS disks are skipped with a message.
+4. Scans pool membership for present LUKS disks. Absent or non-LUKS disks are skipped with a message. If a present disk's live LUKS UUID does not match the UUID recorded in `pool.json` -- the disk was swapped, cloned, or reformatted -- enrollment aborts before any passphrase prompt or slot change; detach the foreign disk and reattach the original, or run `braid replace` if the swap was intentional.
 5. Verifies the passphrase against every present pool disk before any keyfile probe.
 6. **Without `--generate`:** Probes the keyfile against each disk. If it authenticates, reports "already enrolled" and skips that disk for the rest of enrollment. A rejected probe means the disk still needs enrollment; any other probe failure (e.g. device busy) aborts immediately rather than treating the disk as un-enrolled.
 7. For each disk still needing enrollment, checks LUKS slot 1: proceeds if free; refuses with an error if occupied by an unknown key (you must remove it first with `cryptsetup luksKillSlot`).
@@ -73,6 +73,7 @@ See [Pending LUKS header backups](status.md#pending-luks-header-backups) -- copy
 
 - Refuses if a pending operation journal (`pending-op.json`) exists -- run `braid recover` to reconcile.
 - Refuses if another braid operation is in progress (pool lock `/run/braid-pool.lock` is held) -- retry once it finishes.
+- Refuses if a present disk's live LUKS UUID no longer matches its `pool.json` record -- the disk was swapped, cloned, or reformatted; detach the foreign disk and reattach the original, or run `braid replace` if the swap was intentional.
 - With `--generate`, refuses unless the target directory is already a mount point.
 - Passphrase is verified before any mutations.
 - Slot 1 conflicts are detected before the keyfile is generated, so you never end up with an orphan keyfile.
