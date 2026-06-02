@@ -5,8 +5,10 @@
 # subsequently open them.
 #
 # Why: The keyfile enrollment path uses different cryptsetup semantics than
-# passphrase (raw bytes, explicit slot, no PBKDF). If enrollment silently
-# fails or targets the wrong slot, auto-unlock breaks at 3 AM.
+# passphrase (a fixed 4096-byte file fed with --keyfile-size into an
+# explicit slot 1, vs a variable-length stdin passphrase in slot 0 -- both
+# KDF-stretched keyslots, not unstretched key material). If enrollment
+# silently fails or targets the wrong slot, auto-unlock breaks at 3 AM.
 { braid }:
 {
   name = "braid-enroll";

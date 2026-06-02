@@ -17,7 +17,10 @@ use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 use zeroize::Zeroizing;
 
-/// LUKS key slot 1: binary random keyfile (no PBKDF, raw key material).
+/// LUKS keyslot 1 holds the auto-unlock keyfile -- a high-entropy
+/// 4096-byte secret enrolled and opened as a keyslot passphrase
+/// (KDF-stretched like any LUKS secret, not a raw dm-crypt volume key).
+/// Slot 0 is the interactive passphrase.
 pub const LUKS_SLOT_KEYFILE: u8 = 1;
 
 /// Canonical keyfile filename, hardcoded to match the NixOS auto-unlock module.
@@ -982,7 +985,9 @@ pub fn ensure_luks_open<R: CommandRunner>(
     Ok(OpenOutcome::Opened)
 }
 
-/// Open a LUKS device with a binary keyfile (no passphrase, no PBKDF).
+/// Keyfile counterpart to the stdin-passphrase open: feeds the keyfile
+/// via --key-file/--keyfile-size instead of piping a passphrase. Still a
+/// KDF-stretched keyslot secret, not a raw dm-crypt volume key.
 pub fn ensure_luks_open_with_key_file<R: CommandRunner>(
     runner: &R,
     name: &DiskName,

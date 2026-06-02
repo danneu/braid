@@ -29,27 +29,47 @@ See: [Arch Wiki — Persistent block device naming](https://wiki.archlinux.org/t
 
 ## Passphrase file vs binary keyfile
 
-cryptsetup treats these as fundamentally different inputs:
+braid enrolls and opens **both** the shared passphrase and the auto-unlock
+keyfile as LUKS *keyslot* secrets, so cryptsetup stretches both through the
+keyslot KDF (Argon2id by default for LUKS2). Neither is a raw dm-crypt volume
+key. The two differ in transport, byte handling, and which slot they occupy --
+not in whether a KDF runs.
 
-- **Passphrase** (stdin or `--passphrase-file`): read until first newline,
-  processed through PBKDF2 (LUKS1) or Argon2id (LUKS2) for key stretching.
-  Designed to protect low-entropy human-chosen secrets.
+- **Passphrase** (slot 0): braid trims a trailing newline and rejects embedded
+  line breaks (`cli/src/luks.rs#finalize_passphrase_bytes`), then pipes the
+  bytes to cryptsetup via `--key-file=-` with no `--keyfile-size` (a passphrase
+  is variable-length). Designed to protect a low-entropy human-chosen secret.
 
-- **Binary keyfile** (`--key-file`): raw bytes read up to the cipher key
-  size, used directly as key material with no derivation. High entropy
-  assumed.
+- **Binary keyfile** (slot 1): exactly 4096 bytes read via `--keyfile-size
+  4096`, with no newline trimming. braid enforces the exact size before handing
+  the path to cryptsetup (`cli/src/luks.rs#validate_user_keyfile_path`). High
+  entropy, but still a KDF-protected keyslot secret -- not a raw key.
 
-These are not interchangeable even if they contain the same bytes. A
-passphrase file containing `hunter2\n` and a binary keyfile containing the
-same bytes will produce different LUKS decryption keys because the
-passphrase path applies PBKDF while the keyfile path does not.
+The passphrase and the keyfile are never interchangeable -- not even
+byte-for-byte identical inputs -- for a fundamental reason: each LUKS keyslot
+carries its own salt, so slot 0 and slot 1 derive different keys from identical
+KDF input. Secondarily, at the cryptsetup level the bytes that reach the KDF
+can also differ: a passphrase file containing `hunter2\n` feeds `hunter2` (the
+trailing newline is trimmed) while a keyfile of the same bytes feeds `hunter2\n`
+verbatim. That byte example is illustrative only -- braid's keyfile is always
+exactly 4096 random bytes (anything else is rejected by
+`validate_user_keyfile_path`), so the literal "same bytes" case never arises in
+practice. The claim to reject is that one path skips a KDF; both run it.
 
-Each mechanism occupies a separate LUKS key slot (up to 8 slots per
-device). Braid's shared passphrase uses slot 0; the binary keyfile uses
-slot 1.
+A genuinely raw dm-crypt volume key would require `--volume-key-file`, which
+braid forbids: it is in the `MANAGED_LUKS_FORMAT_LONG_FLAGS` denylist
+(`cli/src/types.rs`), so braid refuses to let it reach `luksFormat`. The
+passphrase-vs-keyfile `--keyfile-size` argv asymmetry is pinned by the block
+comment above the test
+`cli/src/cmd.rs#cryptsetup_luks_open_omits_keyfile_size`.
 
-See: [cryptsetup(8) — key-file processing](https://man7.org/linux/man-pages/man8/cryptsetup.8.html),
-[Arch Wiki — dm-crypt/Device encryption](https://wiki.archlinux.org/title/Dm-crypt/Device_encryption)
+LUKS2 provides up to 32 keyslots per device; braid uses slot 0 for the
+passphrase and slot 1 for the keyfile.
+
+See: [cryptsetup(8) -- key-file processing](https://man7.org/linux/man-pages/man8/cryptsetup.8.html)
+(the man page's "passed directly in dm-crypt" / no-digest note is scoped to the
+*plain* device type, not LUKS),
+[Arch Wiki -- dm-crypt/Device encryption](https://wiki.archlinux.org/title/Dm-crypt/Device_encryption)
 
 ## Keyfile creation target invariant
 

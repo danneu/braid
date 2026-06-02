@@ -4,8 +4,10 @@
 # that a wrong keyfile is rejected.
 #
 # Why: The keyfile unlock code path is entirely different from passphrase
-# (no PBKDF, different cryptsetup flags, run() vs run_with_stdin). Must
-# verify independently.
+# (file-fed --key-file/--keyfile-size vs a piped stdin passphrase, and
+# run() vs run_with_stdin() -- both are KDF-stretched LUKS keyslots; the
+# divergence is transport and flags, not derivation). Must verify
+# independently.
 { braid }:
 {
   name = "braid-unlock-key-file";

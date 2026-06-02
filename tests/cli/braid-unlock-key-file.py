@@ -4,9 +4,11 @@
 # that a wrong keyfile is rejected.
 #
 # Why it exists: The keyfile unlock code path is entirely different from
-# passphrase (no PBKDF, different cryptsetup flags, run() vs run_with_stdin).
-# Must verify independently that correct keyfile succeeds, wrong keyfile
-# fails, and passphrase enrollment is not corrupted by keyfile enrollment.
+# passphrase (file-fed --key-file/--keyfile-size vs a piped stdin
+# passphrase, and run() vs run_with_stdin() -- both are KDF-stretched LUKS
+# keyslots; the divergence is transport and flags, not derivation). Must
+# verify independently that correct keyfile succeeds, wrong keyfile fails,
+# and passphrase enrollment is not corrupted by keyfile enrollment.
 #
 # Scenario: Pool set up with passphrase (slot 0) and keyfile (slot 1).
 # Lock. Unlock with correct keyfile. Lock. Try wrong keyfile (fail).
