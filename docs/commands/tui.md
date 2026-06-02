@@ -54,18 +54,18 @@ Demo mode shows three fake disks with sample data, useful for exploring the inte
 verbatim for a single recognized profile such as `RAID1`, `DUP`, or `single`;
 `partial` when that block-group type spans more than one profile; the raw
 profile name verbatim for an unrecognized profile like `RAID5`; or `unknown`
-only when no block groups of that type were reported), capacity bar, scrub
-state, balance state, and active alerts.
+only when no block groups of that type were reported), capacity bar, balance
+state, and active alerts and advisories.
 
-**Disk table** -- one row per disk showing name, size, allocated, unallocated, transport (sata/usb/nvme), SMART health, and error counts.
+**Disk table** -- one row per disk: number, name, bus (sata/usb/nvme), SMART health, temperature, btrfs device-error count, and allocated (shown as percent used and allocated/size).
 
-**Disk detail popup** (press Enter on a disk) -- LUKS lock status, cipher, key size, keyslot count, a per-disk allocation table (data/metadata/system/unallocated), and the btrfs device-errors breakdown (read/write/flush/corruption/generation).
+**Disk detail popup** (press Enter on a disk) -- disk name, LUKS lock status, cipher, key size, keyslot count, an allocations table (type/profile/size plus unallocated), and the btrfs device-error breakdown (read/write/flush/corruption/generation).
 
 **Tabs** -- three tabs, switched with Tab / Shift-Tab:
 
 - **Data** (default) -- pool allocation breakdown, disk table, capacity bar.
 - **Scrub** -- per-device scrub state, progress, and timing.
-- **Browse** -- raw CLI output inspector for Btrfs and UPS data. Btrfs views include filesystem usage/show/df/commit-stats, device usage/stats, subvolumes with drill-in plus raw full/snapshot/deleted/default views, scrub status/limits, balance status, quota status/qgroups, and inspect-internal chunks. UPS views include status, raw variables, supported instant commands, connected clients, settable variables, and UPS discovery. `NUT > UPSes` can help find the correct `ups.name` before UPS support is enabled.
+- **Browse** -- raw CLI output inspector across five tool families: Btrfs, NUT (UPS), Systemd, SMART (smartctl), and lsblk. Btrfs views include filesystem usage/show/df/commit-stats, device usage/stats, subvolumes with drill-in plus raw full/snapshot/deleted/default views, scrub status/limits, balance status, quota status/qgroups, and inspect-internal chunks. UPS views include status, raw variables, supported instant commands, connected clients, settable variables, and UPS discovery. Systemd views include unit status, show, braid units, failed units, timers, and mounts. SMART views include device scan, health, info, attributes, and self-test/error logs. lsblk views include tree, filesystems, disks, all-columns, and SCSI. `NUT > UPSes` can help find the correct `ups.name` before UPS support is enabled.
 
 ## Related commands
 
