@@ -86,22 +86,48 @@ from being queued in that state.
 Unknown snapshot results warn instead of starting. The pool remains mounted and
 usable, but automatic shutdown cleanup may be missing.
 
-## Bootstrap-Journal Membership Fallback
+## Lock Tolerates Missing Or Corrupt Membership
 
-Lock-side dispatch normally loads mapper identity from `pool.json`. If
-`pool.json` is absent, it falls back to `pending-op.json` only when the journal
-is structurally a bootstrap add: `OpKind::Add` with empty `pre_membership`.
-That journal's `target_membership` is the authoritative set of disks that
-bootstrap add intended to open and mount.
+Lock-side dispatch loads pool membership from `pool.json` only; it consults no
+recovery journal. If `pool.json` is missing, unreadable, corrupt, or fails its
+uniqueness checks, lock does not abort -- it warns and proceeds with empty
+membership. On the live plain-lock and `braid-online.service` ExecStop paths
+the warning goes to stderr; under `--dry-run` it is folded into the stdout
+preview to preserve the single-stream dry-run contract
+([ADR 022](022-dry-run-preview-model.md)).
 
-This closes the second half of the failed-bootstrap-add lifecycle hole. A
-bootstrap add can mount the pool and then fail before `save_membership` writes
-the first `pool.json`; if shutdown follows, `braid-online.service` ExecStop
-still needs enough membership to unmount and close the LUKS mappers.
+Membership is advisory for lock, not authoritative -- its only role here is to
+attach friendly member names to status output. What lock closes is decided from
+observed state, not from `pool.json`:
 
-Other journal kinds are intentionally out of scope. `Remove`, `RemoveMissing`,
-`Replace`, and live-pool `Add` require `pool.json` as a precondition and should
-be resolved through `braid recover`, not guessed by `braid lock`.
+- mappers backing the live mounted pool, proven during the per-device probe by
+  `cryptsetup status` + `cryptsetup luksUUID`;
+- mounted-pool members whose backing device is gone (`device: (null)`), matched
+  by their persisted btrfs device id;
+- otherwise-stranded `/dev/mapper/braid-*` mappers, each confirmed by
+  `cryptsetup status` + `cryptsetup luksUUID` (see
+  [ADR 024](024-luks-uuid-identity.md)) before it is closed.
+
+With empty membership these mappers classify as unnamed orphans rather than
+named members and are still closed. Fallback scanning is limited to
+`/dev/mapper/braid-*`; mounted-pool cleanup closes only the mapper paths
+reported by the pool mounted at the configured mount point. A candidate that
+fails verification, a `/dev/mapper` scan that fails, or a duplicate-devid
+conflict is skipped with a warning and may leave cleanup incomplete -- the
+operator resolves it by re-running `braid lock` or reconciling `pool.json`.
+
+This closes the failed-bootstrap-add lifecycle hole without a journal. A
+bootstrap add can mount the pool and open its LUKS mappers, then fail before
+braid writes the first `pool.json`. If shutdown follows,
+`braid-online.service` ExecStop runs `braid lock --systemd-stop`, finds no
+`pool.json`, and still unmounts and closes those mappers -- because what to
+close is read from the live mounted pool and the observed mappers, not from
+`pool.json`.
+
+Lock therefore needs no special case for which operation was interrupted. An
+interrupted `Remove`, `RemoveMissing`, `Replace`, or live-pool `Add` is
+reconciled by `braid recover` against its `pending-op.json` journal; lock
+neither reads nor needs that journal to perform safe shutdown cleanup.
 
 ## Stop Coordinator + Done Protocol
 
