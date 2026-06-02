@@ -168,6 +168,33 @@ Before searching the web for tool behavior, consult local resources first. `refe
 | Filesystem limits & storage model | `btrfs-man5.rst`                            |
 | Administration overview           | `Administration.rst`                        |
 
+## File References
+
+In ADRs, decision docs, and `docs/` prose, never reference another file by line
+number. Line numbers drift the moment surrounding code or text is edited, so the
+pointer silently goes stale and misleads the next reader. Use a `path#anchor`
+reference instead -- one shape for both code and docs, where the anchor names
+*what* and the path says *where*:
+
+- **Code** -- ``path#symbol`` as a plain code span, not a link:
+  ``(see `cli/src/cmd/unlock.rs#cmd_unlock`)``. The symbol is a `fn`, `struct`,
+  `enum`, `trait`, `impl`, module, or `const`, method-qualified where it helps
+  (``cli/src/cmd/plan.rs#Planner::plan``). The symbol is the drift-proof,
+  greppable half -- one `rg cmd_unlock` finds both the citation and the
+  definition. Never write `cli/src/cmd/unlock.rs:142`, and do not linkify code
+  paths: `cli/` lives outside the mdBook root, so a link 404s in the rendered
+  book and dodges linkcheck. A bare file path (no `#symbol`) is fine when the
+  whole file is the referent.
+- **Markdown / mdBook** -- ``path#heading-slug`` as a real Markdown link, e.g.
+  `[...](docs/internals/luks-unlock.md#header-backup-workflow-and-messaging)`,
+  not a line number or section count. Unlike code refs these are clickable and
+  validated by `mdbook-linkcheck2`, so a renamed heading fails CI instead of
+  rotting silently.
+
+A symbol or heading anchor survives edits and is greppable; a line number is
+neither. This applies to docs and comments -- transient analysis in `plans/wip/`
+is exempt.
+
 ## Git Commits
 
 The first line of a commit message must not be capitalized (e.g. `fix the foo bug`, not `Fix the foo bug`).
