@@ -131,11 +131,29 @@ Balance:  paused, 5/12 chunks (58% complete)
 
 ```
 Last scrub: Mon Jan  1 00:00:00 2024 (no errors)
+Last scrub: Mon Jan  1 00:00:00 2024 (3 errors)
 Last scrub: Mon Jan  1 00:00:00 2024 cancelled (will resume)
 Last scrub: Mon Jan  1 00:00:00 2024 interrupted
 Last scrub: never
 Last scrub: running (45%)
 ```
+
+A nonzero error count replaces `(no errors)` with `(N errors)` on a
+finished scrub, and prefixes the `cancelled (will resume)` and
+`interrupted` lines when a partial scrub recorded errors. When the count
+is nonzero, braid appends a copyable kernel-journal query for the
+per-error detail lines:
+
+```
+Last scrub: Mon Jan  1 00:00:00 2024 (3 errors)
+  scrub error details:
+  sudo journalctl -k --since '2024-01-01 00:00:00' --grep 'BTRFS.*(at logical.*on (dev|mirror)|super block at physical)'
+```
+
+The `--since` argument is the scrub's start time. See
+[Scrub reported errors](../guides/troubleshooting.md#scrub-reported-errors)
+for how to read the journal output -- including corrected vs. uncorrectable
+lines and why the count can exceed the visible journal lines.
 
 ### Per-disk detail
 
@@ -445,6 +463,11 @@ the btrfs profile names braid observed; consumers apply their own policy.
   (`YYYY-MM-DDTHH:MM:SS`) as reported by btrfs. It records `Scrub started`, or
   `Scrub resumed` after a resumed scrub, and is not directly comparable to UTC
   fields such as pending-operation `started_at` values ending in `Z`.
+  The same three states also carry `error_count` (integer) -- the count
+  btrfs reported, the same number the text output renders as `(N errors)`.
+  The `scrub error details:` journalctl command from the text output is
+  not part of the JSON (mirroring the profile annotations above); a
+  `--json` consumer derives its own `--since` value from `started_at`.
 
 A complete report for a healthy 3-disk RAID1 pool:
 
