@@ -33,7 +33,7 @@ Disk membership is runtime state owned by the CLI, stored in `/var/lib/braid/poo
 
 All drives share one LUKS passphrase. `braid unlock` and `braid add` depend on this — one passphrase unlocks all drives. Before any irreversible operation, every reachable existing LUKS device that will remain in or enter post-operation pool membership has its slot 0 verified. Fresh-format disks are excluded because they have no existing slot 0. The live-replace source is excluded when other retained members exist, so a divergent slot 0 on the disk being replaced does not block its own replacement. The same all-relevant-disk rule applies to keyfile credentials used by `mount`, `unlock`, and `recover`. [Why →](decisions/004-single-passphrase.md)
 
-Binary keyfile support is available via `braid enroll` (slot 1) and `braid.autoUnlock` (NixOS module). The passphrase (slot 0) remains the interactive-unlock mechanism; keyfiles are for unattended auto-unlock only.
+Binary keyfile support is available via `braid enroll` (slot 1) and `braid.autoUnlock` (NixOS module). The passphrase (slot 0) is the default interactive-unlock mechanism; the slot-1 keyfile drives `braid.autoUnlock` for unattended boots and can also be passed directly to `braid unlock --key-file`.
 
 ## 5. Stable identifiers
 
