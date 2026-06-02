@@ -59,7 +59,7 @@ state, balance state, and active alerts.
 
 **Disk table** -- one row per disk showing name, size, allocated, unallocated, transport (sata/usb/nvme), SMART health, and error counts.
 
-**Disk detail popup** (press Enter on a disk) -- LUKS cipher, key size, keyslot count, device errors breakdown (read/write/flush/corruption/generation), and SMART health.
+**Disk detail popup** (press Enter on a disk) -- LUKS lock status, cipher, key size, keyslot count, a per-disk allocation table (data/metadata/system/unallocated), and the btrfs device-errors breakdown (read/write/flush/corruption/generation).
 
 **Tabs** -- three tabs, switched with Tab / Shift-Tab:
 
