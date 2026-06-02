@@ -5,6 +5,10 @@ braid is a NixOS CLI tool for managing an encrypted, redundant NAS. It wraps two
 - **[LUKS](https://en.wikipedia.org/wiki/Linux_Unified_Key_Setup)** -- full disk encryption (passphrase-based, keys never stored on disk)
 - **[btrfs RAID1](https://btrfs.readthedocs.io/en/latest/)** -- checksumming filesystem with automatic self-healing from redundant copies
 
+And it leans heavily on **[systemd](https://systemd.io/)**, built into NixOS: the
+unlock/mount lifecycle, scrub timers, and UPS/fan/suspend services all run as
+systemd units.
+
 ## Example
 
 ```sh
