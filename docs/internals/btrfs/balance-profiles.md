@@ -30,8 +30,17 @@ This means our standard conversion commands are complete:
 btrfs balance start -dconvert=raid1 -mconvert=raid1 /mnt/storage
 
 # RAID1 → single (before removing last redundant device)
-btrfs balance start -dconvert=single -mconvert=single -f /mnt/storage
+btrfs balance start -dconvert=single -mconvert=dup -f /mnt/storage
 ```
+
+Note the asymmetry in the second command: data converts to `single`, but
+metadata converts to **`dup`**, not `single`. A one-device pool keeps two
+same-disk copies of metadata (and system chunks), matching what
+`mkfs.btrfs` lays down for a fresh single-device filesystem (see the table
+above). `-mconvert=single` would leave metadata with a single unprotected
+copy. The `-f` is required here because reducing metadata from RAID1 to
+`dup` lowers redundancy -- btrfs refuses that without a force flag -- not
+because of the `-s` independent-conversion case discussed above.
 
 ## Why system chunks matter
 
