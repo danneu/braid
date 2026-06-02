@@ -9,7 +9,7 @@ status: Active
 
 ## Context
 
-braid needs systemd integration for three things: interactive unlock, unattended unlock, and clean shutdown (LUKS close before power-off). The module must not generate `fileSystems` or `boot.initrd.luks.devices` entries — those create hard boot dependencies on the data pool (see [003-resilient-boot.md](003-resilient-boot.md)). Instead, the CLI owns LUKS open/close and btrfs mount/unmount at runtime, and a thin systemd layer provides the entry points and shutdown hook.
+braid needs systemd integration for three things: interactive unlock, unattended unlock, and clean shutdown (LUKS close before power-off). The module must not generate data-pool `fileSystems` or `boot.initrd.luks.devices` entries — those create hard boot dependencies on the data pool (see [003-resilient-boot.md](003-resilient-boot.md)). Instead, the CLI owns LUKS open/close and btrfs mount/unmount at runtime, and a thin systemd layer provides the entry points and shutdown hook.
 
 ## Units
 

@@ -29,7 +29,7 @@ The user overrides by setting the NixOS option in their own config. `mkDefault` 
 
 Create a `braid.*` option when:
 
-- **One braid option maps to many underlying options** — e.g., `braid.shares.media` sets Samba config, permissions, and directory creation.
+- **One braid option maps to many underlying options** — e.g., `braid.autoUnlock` sets a `fileSystems` mount entry for the USB key, a `braid-auto-unlock.service`, `systemd.tmpfiles` rules, and assertions.
 - **The underlying tech could change** — the abstraction survives an implementation swap.
 - **The raw option requires braid-specific context** — e.g., the pool membership encodes LUKS + mapper naming conventions. Exposing the raw options would require the user to understand braid's internals.
 - **The mapping is non-obvious or must stay in sync** — e.g., if braid supported multiple pools, scrub `fileSystems` would need to track all mount points automatically.

@@ -95,7 +95,7 @@ braid replace --old toshiba --new seagate=/dev/disk/by-id/ata-Seagate_NEW
 
 ### Lifecycle model
 
-The NixOS module no longer generates `fileSystems`, LUKS entries, or `btrfs-device-scan`. Instead:
+The NixOS module no longer generates data-pool `fileSystems`, LUKS entries, or `btrfs-device-scan`. Instead:
 
 - `braid-online.service` — lifecycle owner (`ExecStop=braid lock`, `RemainAfterExit=yes`). Started by Rust dispatch via `mark_online` after a successful `unlock`, `add`, or `recover` that leaves the pool mounted, gated on `systemd_lifecycle = true` in runtime config.
 - `braid-pool.target` — wants unlock only, does not start `braid-online` directly.
@@ -121,5 +121,5 @@ The NixOS module no longer generates `fileSystems`, LUKS entries, or `btrfs-devi
 - `cli/src/recover.rs` — rebuild membership from live pool state
 - `cli/src/preflight.rs` — `check_no_pending_operation` recovery mode guard
 - `cli/src/discover.rs` — LUKS label scanning
-- `modules/braid/storage.nix` — `braid-online.service`, no `fileSystems`
+- `modules/braid/storage.nix` — `braid-online.service`, no data-pool `fileSystems`
 - `modules/braid/options.nix` — no `braid.disks`

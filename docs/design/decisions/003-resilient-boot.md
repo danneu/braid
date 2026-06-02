@@ -23,11 +23,11 @@ Option 3. Resilience is the default, not an option.
 
 ## Implementation
 
-LUKS unlock is strictly stage-2 — `braid-unlock` or `braid-auto-unlock` opens LUKS and mounts the pool. The module does not generate `boot.initrd.luks.devices`, `fileSystems` entries, or LUKS device declarations. The pool is brought online entirely by the CLI at runtime.
+LUKS unlock is strictly stage-2 — `braid-unlock` or `braid-auto-unlock` opens LUKS and mounts the pool. The module does not generate `boot.initrd.luks.devices`, data-pool `fileSystems` entries, or LUKS device declarations. The pool is brought online entirely by the CLI at runtime.
 
 Resilience mechanisms:
 
-- **No build-time mount units**: The module generates no `fileSystems` or LUKS entries. The CLI (`braid unlock`) handles LUKS open + btrfs mount directly. Nothing referencing data drives can block boot.
+- **No boot-blocking mount units**: The module generates no data-pool `fileSystems` or LUKS entries. The CLI (`braid unlock`) handles LUKS open + btrfs mount directly. Nothing referencing data drives can block boot. (The one build-time `fileSystems` entry is the optional `autoUnlock` USB-key mount at `/run/braid-key/mnt`, marked `noauto`/`nofail` so it never blocks boot and references the key device, not the pool.)
 - **Degraded mount**: Requires explicit `--allow-degraded` (or `autoUnlock.allowDegraded` for unattended use) — braid refuses to silently mount with zero redundancy.
 
 ### Three-tier failure model
