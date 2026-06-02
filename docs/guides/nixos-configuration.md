@@ -60,6 +60,7 @@ When `braid.enable = true`, the module sets up:
 | `braid.package` | package or null | `null` | The braid CLI package; `nixosModules.default` defaults it to `braid-cli-unwrapped` |
 | `braid.mountPoint` | path | `/mnt/storage` | Where to mount the btrfs pool |
 | `braid.poolAccessGroup` | string or null | `"storage"` | Group for mount point access. `null` to disable |
+| `braid.lockSystemdStopDeadlineSecs` | positive int | `270` | Seconds to wait for the pool lock during `braid-online.service` ExecStop; must stay below the unit's `TimeoutStopSec` |
 
 ### Tool overrides
 
@@ -159,6 +160,19 @@ See [Power management](power-management.md) for the full workflow.
 
 Monitors all visible SATA devices (not only braid pool members). Requires a board-specific Super I/O driver in `boot.kernelModules` -- see [Fan control](fan-control.md) for the hardware discovery workflow.
 
+### UPS
+
+| Option | Type | Default | Description |
+| --- | --- | --- | --- |
+| `braid.ups.enable` | bool | `false` | Enable UPS support via NUT (single-host standalone) |
+| `braid.ups.name` | string | `"ups"` | UPS identifier for `upsd`/`upsc` |
+| `braid.ups.driver` | string | `"usbhid-ups"` | NUT driver; the USB default covers most home-NAS UPSes |
+| `braid.ups.port` | string | `"auto"` | Driver port; `auto` finds the first matching USB UPS |
+
+When enabled, NUT triggers an orderly poweroff on low battery (unwinding `braid-online.service` -> `braid lock` -> unmount) and pool-mutating commands (`add`/`remove`/`remove-missing`/`replace`) refuse to start while the UPS is on battery. Only `name` is written to `/etc/braid/config.json`, so `braid ups status` and the TUI know which UPS to query; `driver` and `port` configure the NUT driver only. Non-USB drivers (`apcsmart`, `snmp-ups`) are an escape hatch and not first-class.
+
+See [UPS](ups.md) for the setup workflow and live status.
+
 ## Full config example
 
 Every option with its default (or a representative value for required/optional fields):
@@ -170,11 +184,15 @@ braid = {
   # set only to build the CLI yourself.
   mountPoint = "/mnt/storage";   # default
   poolAccessGroup = "storage";   # default; null to disable
+  lockSystemdStopDeadlineSecs = 270;  # default; must stay below braid-online TimeoutStopSec
 
   # Tool version overrides (defaults to nixpkgs versions)
   # packages.cryptsetup = pkgs.cryptsetup;
   # packages.btrfsProgs = pkgs.btrfs-progs;
   # packages.utilLinux = pkgs.util-linux;
+  # packages.nut = pkgs.nut;
+  # packages.smartmontools = pkgs.smartmontools;
+  # packages.ethtool = pkgs.ethtool;
 
   autoScrub = {
     enable = true;       # default
@@ -214,6 +232,13 @@ braid = {
     minFanSpeedPercent = 20;  # default
     interval = "30s";  # default
   };
+
+  ups = {
+    enable = false;        # default; opt-in
+    name = "ups";          # default
+    driver = "usbhid-ups"; # default
+    port = "auto";         # default
+  };
 };
 ```
 
@@ -223,5 +248,6 @@ braid = {
 - [Auto-unlock](auto-unlock.md) -- USB keyfile enrollment
 - [Monitoring and alerts](monitoring-and-alerts.md) -- alert workflow and custom commands
 - [Power management](power-management.md) -- auto-suspend and WoL setup
+- [UPS](ups.md) -- NUT-backed orderly poweroff, preflight safety, live status
 - [Fan control](fan-control.md) -- hardware discovery and fan control setup
 - [Sharing and permissions](sharing-and-permissions.md) -- storage group and Samba
