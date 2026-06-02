@@ -149,7 +149,7 @@ Disks:
     Model:   TOSHIBA MN07ACA12T
     Serial:  1234ABC
     LUKS:    aaaaaaaa-1111-2222-3333-444444444444
-    Errors:  read=0 write=0 flush=0 corruption=0 generation=0
+    Errors:  read 0 / write 0 / flush 0 / corruption 0 / generation 0
 
   toshiba3          MISSING
     Device:  /dev/disk/by-id/ata-TOSHIBA_MN07ACA12T_5678  (not found)
