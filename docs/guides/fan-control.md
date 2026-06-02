@@ -8,7 +8,7 @@ Read this if you want quieter idle and predictable ramp under sustained disk loa
 
 ## Why HDD-driven fan control
 
-On a NAS the dominant thermal load is the HDDs, not the CPU. A pool of spinning drives under scrub or heavy write load runs much hotter for much longer than a low-TDP NAS CPU ever does. BIOS fan curves only see CPU package temp and a motherboard sensor -- they cannot see drive temp. So chassis fans controlled by the BIOS ramp for the wrong reason at the wrong time.
+HDD longevity drops as drives run hotter, so the goal is to keep them under a target temperature -- a widely used rule of thumb is ~40 C. The catch is that the BIOS fan curve can't see drive temperature; it reads only CPU package temp and a motherboard sensor. So no matter how the BIOS ramps the chassis fans, nothing in that loop is actually watching the drives. The BIOS already protects the CPU regardless of its TDP -- the drives are the part left unmonitored.
 
 The fix is to move fan control into Linux userspace using drive temps as the signal. The kernel's `drivetemp` module exposes each SATA drive's SMART temperature as a standard hwmon input, and `hddfancontrol` reads those inputs and drives the chassis fan's PWM proportionally to the hottest drive.
 
