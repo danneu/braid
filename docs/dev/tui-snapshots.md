@@ -2,17 +2,42 @@
 
 ## Rendering for snapshots
 
-Create a `Terminal` with `TestBackend`, draw into it, then assert:
+Each TUI view module's `#[cfg(test)]` block defines a small `render` that
+draws the view into a `TestBackend`, then asserts via the shared `snap!`
+helper. `render` is per-module (it calls that module's own view function);
+`buffer_to_string` and the `snap!` macro are shared from
+`cli/src/tui/test_support.rs`.
 
 ```rust
-let mut terminal = Terminal::new(TestBackend::new(80, 20)).unwrap();
-terminal.draw(|frame| frame.render_widget(&app, frame.area())).unwrap();
-assert_snapshot!(terminal.backend());
+use crate::tui::test_support::{buffer_to_string, snap};
+
+// Per-module: calls this view's draw fn with a fixed `now` for determinism.
+fn render(model: &Model, width: u16, height: u16) -> Terminal<TestBackend> {
+    let now = time::macros::datetime!(2026-02-24 02:12:00);
+    let mut terminal = Terminal::new(TestBackend::new(width, height)).unwrap();
+    terminal.draw(|frame| view(model, frame, now)).unwrap();
+    terminal
+}
+
+#[test]
+fn snapshot_with_pool() {
+    let model = Model::new_demo(sample_disk_names(), PoolStatus::Mounted(sample_pool()));
+    snap!(buffer_to_string(&render(&model, 60, 24)));
+}
 ```
 
-`TestBackend` implements `Display`, so insta captures the text grid. Styles/colors are **not** captured — text only.
+`snap!` wraps `insta::assert_snapshot!` in
+`insta::with_settings!({ prepend_module_to_snapshot => false }, ...)`.
+That setting defaults to `true`; we force it off so snapshot files are
+named after the test alone (`snapshot_with_pool.snap`), not
+`braid_cli__tui__view__tests__snapshot_with_pool.snap`. Always go through
+`snap!` -- a bare `insta::assert_snapshot!` would reintroduce the prefix
+and write to a different filename.
 
-Our codebase uses a custom `buffer_to_string` helper in `cli/src/tui/view.rs` that trims trailing whitespace per line. Either approach works; ours produces slightly cleaner diffs.
+insta could snapshot the `TestBackend` directly (it implements `Display`),
+but `buffer_to_string` trims trailing whitespace per line for cleaner
+diffs, so all view tests assert on its `String`. Styles/colors are not
+captured -- text only.
 
 ## The cargo insta workflow
 
@@ -26,7 +51,7 @@ Our codebase uses a custom `buffer_to_string` helper in `cli/src/tui/view.rs` th
 
 ```
 # Write or change a test → run tests
-cargo test -p braid-cli
+just test-rust
 
 # Tests fail because snapshot is new/different → .snap.new files appear
 # Review the diffs interactively

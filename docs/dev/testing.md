@@ -4,7 +4,7 @@ intent: NixOS VM test framework gotchas and patterns specific to this repo. Read
 
 # Testing notes
 
-Test conventions and NixOS VM test framework reference for braid. The short three-bullet preamble contract (Intent / Why it exists / Scenario) lives in `AGENTS.md` at the repo root; everything else -- the literal preamble form, the flake.nix registration rule, framework gotchas, and patterns -- is here. For the lifecycle test suite see `tests/module/systemd-lifecycle.py`.
+Test conventions and NixOS VM test framework reference for braid. The short three-bullet preamble contract (Intent / Why it exists / Scenario) lives in `AGENTS.md` at the repo root; everything else -- the literal preamble form, the flake.nix registration rule, framework gotchas, and patterns -- is here. For the lifecycle test suite see `tests/module/systemd-lifecycle.py`. For the Rust-level TUI view snapshot tests (insta-based, run via `just test-rust`), see [tui-snapshots.md](tui-snapshots.md).
 
 ## Conventions
 
