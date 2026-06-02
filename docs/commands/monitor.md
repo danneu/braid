@@ -51,11 +51,14 @@ None. Monitor has no flags -- it reads from the braid config and state files.
 ## Alert pipeline
 
 ```
-braid monitor (timer) --> alert-latch.json --> braid-alert.service (beeper)
-                                           --> braid status / braid tui (display)
+braid monitor      --writes--> alert-latch.json --> braid status / braid tui (display)
+(timer, every 5m)  --exit 1--> braid-alert.service (beeper + alertCommand)
+
+smartd  --start-->  braid-alert.service (beeper)
+        --writes--> smartd-alert --> next braid monitor cycle (latches SmartdAlert)
 ```
 
-When monitor writes an active alert latch, the systemd alert service activates the PC speaker beeper. The alert stays latched until you run `braid ack`.
+On exit 1, the `braid-monitor.service` wrapper starts `braid-alert.service` (the beeper, plus any `alertCommand`); that service is a bare beep loop and never reads `alert-latch.json` or the `smartd-alert` flag. Monitor writes the active causes to `alert-latch.json` and re-reads it every cycle, re-exiting 1 while any cause remains -- that read-back, not the alert service, is what keeps the alert and beep sticky; `braid status` and the TUI read the same file for display. `smartd` is a second, independent trigger: on a SMART fault it starts `braid-alert.service` directly *and* writes the `smartd-alert` flag that the next monitor cycle latches as a `SmartdAlert` cause. The beep stops only when `braid ack` clears the latch and runs `systemctl stop braid-alert.service`.
 
 ## Related commands
 
