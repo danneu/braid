@@ -19,7 +19,7 @@ sudo braid ack
 Output:
 
 ```
-acknowledged 3 alert(s)
+acknowledged 3 alerts
 ```
 
 If there's nothing to acknowledge:
