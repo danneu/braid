@@ -65,6 +65,46 @@ The variable is whether btrfs can **begin** relocating:
 The dangerous middle case is the one that happened in the real incident
 (3×8GiB USB drives, ~80% full, one died).
 
+## How braid avoids this
+
+braid's mutation preflight refuses these removals — before the pending-op
+journal is written — whenever it can *prove* the survivors lack the space to
+absorb the target's allocations. The degraded failure-mode-2 path is fully
+guarded: `remove-missing` and the 2→1 eviction are fail-closed, so an
+operator using braid does not reach the catastrophic path above. The
+healthy >=2-survivor case is intentionally warn-and-proceed on an
+*unprovable* check, because it falls through to btrfs's clean failure mode
+1, never the mode-2 abort. Per path:
+
+- **`remove-missing`** — the degraded failure-mode-2 scenario exactly.
+  Computes RAID1 chunk-pair capacity on the survivors and refuses when it is
+  below the chunks allocated on the missing device. **Fail-closed:** any
+  probe or parse uncertainty also refuses
+  (`cli/src/preflight.rs::check_raid1_relocation_space`, wired in
+  `cli/src/remove_missing.rs`).
+- **`remove` evicting to a single survivor (2→1)** — RAID1 no longer
+  applies, so braid instead checks the lone survivor can hold the
+  post-conversion `data + 2 × metadata + 2 × system` (single + DUP profile).
+  **Fail-closed** (`cli/src/preflight.rs::check_single_survivor_capacity`).
+- **`remove` with >=2 survivors (healthy)** — same RAID1 relocation check,
+  but **warn-and-proceed** on probe/parse uncertainty. A best-effort miss
+  here falls through to `btrfs device remove`, which hits the *clean*
+  failure mode 1 (instant ENOSPC), not the failure-mode-2 abort, so the
+  filesystem stays intact.
+- **`replace` is not subject to this failure mode.** `btrfs replace`
+  rebuilds onto the new disk instead of relocating onto survivors; its
+  preflight refuses a new disk smaller than the one being replaced
+  (`cli/src/preflight.rs::check_replace_target_capacity`).
+
+`braid status` and `braid doctor` surface a proactive advisory
+(`cli/src/capacity.rs::enospc_risk_advisory`) one disk-loss *before* a pool
+enters this danger zone.
+
+The policy and its rationale are owned by ADR 012's "ENOSPC pre-flight
+check" section (`docs/design/decisions/012-intent-cli.md`). See also
+`docs/commands/remove-missing.md` and the `braid status` ENOSPC advisory
+(`docs/commands/status.md`).
+
 ## Reproducing the hang/crash in a VM
 
 The tricky part is getting btrfs to land in the "some but not enough" zone.
@@ -132,7 +172,10 @@ allocation decisions, improving the chance of even distribution.
 - `tests/repro/btrfs-remove-enospc-crash.nix/.py` — failure mode 2 (partial relocation crash, 3×4GiB)
 
 These are repro tests that document actual btrfs behavior, not TDD tests.
-They use raw `btrfs device remove missing` (not braid) and assert the real
-outcomes: instant ENOSPC with surviving filesystem, or transaction abort
-with forced read-only. They live in `tests/repro/` — a folder reserved for
-tests that reproduce real-world scenarios for our records.
+They assert the real outcomes: instant ENOSPC with surviving filesystem, or
+transaction abort with forced read-only. They invoke raw `btrfs device
+remove missing` rather than braid precisely because braid's preflight (see
+"How braid avoids this" above) refuses the operation under these conditions —
+reproducing the unguarded btrfs behavior requires bypassing it. They live in
+`tests/repro/` — a folder reserved for tests that reproduce real-world
+scenarios for our records.

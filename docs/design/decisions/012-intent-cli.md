@@ -75,6 +75,12 @@ unallocated space to absorb the target device's allocations before invoking
 crash the filesystem to read-only mid-relocation (reproduced in
 `tests/repro/`).
 
+The `>=2`-survivor `remove` path treats relocation-probe uncertainty as
+warn-and-proceed -- a miss falls through to btrfs's clean instant-ENOSPC --
+while `remove-missing` and the 2→1 `remove` path are fail-closed on any
+uncertainty, because a miss there can crash the filesystem read-only with
+`pending-op.json` already written.
+
 `remove-missing` also refuses an untrusted missing-device allocation shape
 before `btrfs device remove`. Its trust check validates shape, not per-type
 completeness: the targeted missing devid must have exactly one usage stanza,
