@@ -6,7 +6,9 @@ status: Active
 
 ## What `soft` does
 
-`soft` is a per-type modifier for `convert=` filters. From btrfs-balance(8):
+`soft` is a per-type modifier for `convert=` filters. From btrfs-progs
+`Documentation/btrfs-balance.rst` (version `6.19.1`, tag `v6.19.1`, commit
+`fa79dbea32d39ac0ae41a88a079013c7ad2a8a58`):
 "When doing convert from one profile to another and soft mode is on, chunks that
 already have the target profile are left untouched."
 
@@ -93,8 +95,20 @@ pool, so re-running `braid add` would refuse, and recover finishes the job so
 the operator is not left with `single` chunks -- and for the owed
 post-maintenance step of `remove-missing` and `replace`.
 
+`braid remove` is deliberately not part of this replay. It is the only mutation
+whose pre-mutation phase can issue a balance -- the RAID1 -> single conversion
+in the 2->1 case. A paused balance found while recovering a `remove` may be that
+unfinished conversion-to-single, not owed RAID1 maintenance, so recover neither
+resumes nor soft-replays it. Resuming it would finish converting to single
+without removing the device, then clear the journal, silently halving
+redundancy. Recover instead directs the operator to re-run `braid remove`.
+
 ## Sources
 
-- [btrfs-balance(8) -- soft filter](https://btrfs.readthedocs.io/en/latest/btrfs-balance.html)
-- [btrfs-man5 -- RAID profiles](https://btrfs.readthedocs.io/en/latest/btrfs-man5.html)
+- btrfs-progs `Documentation/btrfs-balance.rst`, version `6.19.1`, tag
+  `v6.19.1`, commit `fa79dbea32d39ac0ae41a88a079013c7ad2a8a58` -- `soft`
+  filter semantics.
+- btrfs-progs `Documentation/btrfs-man5.rst`, version `6.19.1`, tag
+  `v6.19.1`, commit `fa79dbea32d39ac0ae41a88a079013c7ad2a8a58` -- degraded
+  mounts and mixed block group profiles.
 - braid: [ADR-001 btrfs RAID1](../../design/decisions/001-btrfs-raid1.md) (replacement strategy, add+balance+remove rejected), [design principles](../../design/principles.md) (degraded restore), and the [`replace`](../../commands/replace.md) / [`remove-missing`](../../commands/remove-missing.md) command docs.
