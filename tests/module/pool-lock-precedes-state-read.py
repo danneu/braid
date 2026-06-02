@@ -78,7 +78,9 @@ with subtest("discover --write acquires before pending-op and probe reads"):
     assert "pending-op.json exists" not in out, (
         "discover read pending-op before acquiring lock; out=" + out
     )
-    assert "no braid-labeled LUKS devices found" not in out, (
+    # Lead clause must track NoMembersDiscovered's message in
+    # cli/src/discover.rs; a stale string here passes silently (ADR 018).
+    assert "no braid-labeled LUKS2 devices found" not in out, (
         "discover probed devices before acquiring lock; out=" + out
     )
 

@@ -233,6 +233,16 @@ pub enum BareDiscoverError {
     Corrupt { path: String },
 }
 
+/// Shared post-scan refusal when discover finds zero braid-labeled LUKS2
+/// members. Typed (not a bare `eprintln!`) so both the bare preview and
+/// `--write` paths surface one remediation-bearing message through
+/// `print_cli_error`, matching the other discover refusals.
+#[derive(Debug, thiserror::Error)]
+#[error(
+    "no braid-labeled LUKS2 devices found -- check that pool members are attached and readable, and labeled braid-<name> as LUKS2 (LUKS1 or unreadable disks, if any, are skipped with a warning above)"
+)]
+pub struct NoMembersDiscovered;
+
 /// Scan /dev/disk/by-id/ for LUKS devices with `braid-<name>` labels.
 /// Returns a report so callers can print warnings on success or error.
 pub fn discover_pool_members<R: CommandRunner>(runner: &R) -> DiscoverScan {
@@ -2285,5 +2295,27 @@ mod tests {
             !paths.pool_json().exists(),
             "pool.json must not have been written"
         );
+    }
+
+    #[test]
+    fn no_members_discovered_message_carries_remediation() {
+        /*
+         * Intent: the empty-scan refusal names the LUKS2 requirement and the
+         *   "attached and readable" remediation, in the discover " -- " house
+         *   style, so it cannot silently regress to a bare "found nothing".
+         * Why it exists: this message was previously a remediation-free
+         *   eprintln! in main.rs that an operator rebuilding pool.json with a
+         *   detached/mislabeled/LUKS1-only disk could not act on.
+         * Scenario: operator runs `braid discover` with the array's disks
+         *   momentarily detached and must learn what to check.
+         */
+        let msg = NoMembersDiscovered.to_string();
+        assert!(
+            msg.contains("no braid-labeled LUKS2 devices found"),
+            "got: {msg}"
+        );
+        assert!(msg.contains("attached and readable"), "got: {msg}");
+        assert!(msg.contains("LUKS1"), "got: {msg}");
+        assert!(msg.contains(" -- "), "got: {msg}");
     }
 }

@@ -80,6 +80,7 @@ sudo braid discover --write --expect-count 3
 - Without `--write`, makes no changes at all -- read-only scan that takes no pool lock and does not consult the pending-op journal.
 - Dangling `/dev/disk/by-id/` symlinks are skipped with a warning -- a diagnostic operators need when udev leaves a stale alias behind after a disk swap.
 - LUKS1 devices are skipped with a warning.
+- If no braid-labeled LUKS2 devices are found, `discover` exits 1 with `no braid-labeled LUKS2 devices found -- ...` (both bare and `--write`) -- check the intended members are attached, readable, and labeled `braid-<name>` as LUKS2. An array that is entirely LUKS1, detached, or unreadable lands here, with any present-but-skipped disk warned about above.
 - Refuses the scan if two distinct devices share the same `braid-<name>` LUKS label -- relabel or detach one disk before retrying.
 - Refuses the scan if two distinct devices share the same LUKS UUID -- detach the cloned or unintended disk before retrying.
 

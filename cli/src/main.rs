@@ -941,7 +941,7 @@ fn main() {
                 }
             };
             if members.is_empty() {
-                eprintln!("no braid-labeled LUKS devices found");
+                print_cli_error(&braid_cli::discover::NoMembersDiscovered.to_string());
                 std::process::exit(1);
             }
             for line in braid_cli::discover::render_preview_lines(&members) {
