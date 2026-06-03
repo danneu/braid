@@ -540,6 +540,16 @@ with subtest("Test 7: uninitialized disk detected — degraded-refused enumerate
     assert "braid unlock --allow-degraded" in output, \
         f"Expected --allow-degraded hint, got: {output}"
 
+    # Composition pin: the live plan_open_pool probe must classify the raw member
+    # so that format_degraded_refused renders BOTH the "raw: LUKS header unreadable"
+    # line AND the doctor footer in the same message. The pure-function tests cover
+    # the footer gate in isolation; this is the only check that the live per-disk
+    # reason text and the is_luks_header_state() footer gate stay in agreement (a
+    # future MissingReason variant reusing the per-disk text but not the gate, or
+    # the footer moved out of the pure function, would slip past every other test).
+    assert "run 'braid doctor' for recovery guidance" in output, \
+        f"Expected doctor-recovery footer on unreadable-header degraded-refusal, got: {output}"
+
     # `plan_open_pool` only emits "LUKS header unreadable" for a non-LUKS
     # member; the "LUKS header damaged" vocabulary was removed entirely, so it
     # must never appear.
