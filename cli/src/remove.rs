@@ -340,6 +340,12 @@ impl RemovePlan {
         // Build target membership and write journal before irreversible disk op.
         let pre_membership = membership::load_membership(params.paths)
             .map_err(|e| RemoveError::Validation(format!("failed to load pool membership: {e}")))?;
+        // (Confirm/inhibitor-window guard) This fresh load is the journal's
+        // pre_membership below, so re-check the target still exists: a concurrent
+        // pool.json rewrite during the confirmation prompt or inhibitor acquire
+        // would otherwise let remove_by_uuid silently no-op and journal a
+        // misleading "removed nothing." Pinned by
+        // execute_rejects_when_pool_json_drifts_after_planning.
         if pre_membership.by_uuid(&work_plan.target_uuid).is_none() {
             return Err(absent_from_membership_error(work_plan.name.as_str()));
         }
