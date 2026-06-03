@@ -45,12 +45,14 @@ See the [command reference](docs/commands/) for full usage of each command.
 - **Self-healing** -- btrfs checksums every block and silently repairs corruption from the redundant copy
 - **CLI-owned membership** -- `braid add`/`remove`/`replace` manage the pool; state lives in UUID-keyed `/var/lib/braid/pool.json`
 - **UPS safety** -- with UPS support enabled, NUT drives orderly poweroff on low battery, mutating commands refuse to start unless UPS utility power is verified, and `braid ups status` / the TUI show live UPS state
-- **Dashboard** -- `braid tui` shows pool health, disk status, balance progress, SMART data, and (when enabled) chassis fan telemetry plus UPS state
+- **TUI dashboard** -- `braid tui` shows pool health, disk status, balance progress, SMART data, and (when enabled) chassis fan telemetry plus UPS state
 
 ## Downsides
 
 - **RAID1 capacity cost** -- half your raw capacity goes to redundancy. Four 12 TB drives = 24 TB usable.
 - **HDD-first** -- defaults are tuned for spinning drives (no TRIM, HDD scrub scheduling). SSDs may work but are not validated.
+- **Unstable** -- this is unversioned and pre-v1.0, and I change things when I decide on a better way. Commands, flags, config, and even on-disk state like `pool.json` format can change.
+- **Unproven** -- I run braid on a daily-use 4x12TB NAS, and there are 180+ NixOS VM tests and 2200+ Rust tests, but there are almost certainly weird/bad edge cases. That said, you can always use `--dry-run` to see what commands will get run.
 
 ## Install
 
