@@ -71,29 +71,24 @@ with subtest("Dry-run missing-device warning routes to stdout as [warn]"):
         "dry-run stderr must be empty on success; got: {!r}".format(err)
     )
 
-# --- Phase 3: real-run -> stderr has exact legacy warning line ---
+# --- Phase 3: real-run -> add succeeds, skips the RAID1 balance ---
 
-with subtest("Real-run missing-device warning renders as canonical [warn]"):
-    # Intent: `braid add disk3` (no --dry-run) with a missing device
-    # must print the canonical `[warn] pool has 1 missing device.
-    # Consider repairing with `braid replace --old <missing-name>
-    # --new <new-name>=/dev/disk/by-id/<...>` first. Use `braid status`
-    # to see the missing disk's name.` line on stderr --
-    # the SAME bytes dry-run produces on stdout. The add-local
-    # `warning: ` legacy replay was removed; plan-derived Warn notes
-    # now route through the shared `preview::render_notes_for_stderr`
-    # in both dry-run and real-run.
-    # Why it exists: guards against a regression that reintroduces
-    # the legacy `warning:` prefix on the Ok real-run path, producing
-    # two different wordings for the same note across modes.
-    # Scenario: same as Phase 2 but without --dry-run. The add may
-    # proceed or fail depending on btrfs's degraded-mount tolerance;
-    # the test only asserts the warning wiring, not the downstream
-    # outcome. Use execute so a downstream btrfs error does not
-    # abort the test before we inspect stderr.
-    ec = machine.execute(
-        f"{add_cmd('disk3')} >/tmp/rmd-stdout 2>/tmp/rmd-stderr"
-    )[0]
+with subtest("Real-run degraded add succeeds and skips the RAID1 balance"):
+    # Intent: `braid add disk3` (no --dry-run) on a degraded pool (disk2
+    # MISSING) adds the disk, prints BOTH the canonical `[warn] pool has 1
+    # missing device ...` line AND a single `[skip] pool: RAID1 balance
+    # skipped ...` line on stderr, and runs NO RAID1 convert balance. The
+    # pool stays degraded with disk3 joined; redundancy is deferred to
+    # `remove-missing`/`replace`.
+    # Why it exists: the degraded add must defer redundancy restoration to
+    # the purpose-built repair path instead of running the hard RAID1
+    # convert (which would rewrite every chunk while the pool has no
+    # redundancy). This empirically confirms `btrfs device add` succeeds on
+    # a degraded mount -- which the old test ducked via machine.execute --
+    # and guards against an Edit-3/Edit-4 double-emit of the skip note and
+    # against the balance `[wait]/[ok]` progress lines reappearing.
+    # Scenario: same degraded pool as Phase 2 but without --dry-run.
+    machine.succeed(f"{add_cmd('disk3')} >/tmp/rmd-stdout 2>/tmp/rmd-stderr")
     err = machine.succeed("cat /tmp/rmd-stderr")
 
     expected_line = (
@@ -103,18 +98,50 @@ with subtest("Real-run missing-device warning renders as canonical [warn]"):
     )
     assert expected_line in err, (
         "real-run stderr must contain the canonical `[warn] ...` line;"
-        " exit={} stderr={!r}".format(ec, err)
+        " stderr={!r}".format(err)
+    )
+    skip_line = (
+        "[skip] pool: RAID1 balance skipped -- pool still has a missing"
+        " device; redundancy not restored. Run `braid remove-missing` or"
+        " `braid replace` to restore it."
+    )
+    assert err.count(skip_line) == 1, (
+        "degraded add must surface the balance-skip note exactly once"
+        " (guards the Edit-3/Edit-4 double-emit regression); stderr={!r}".format(err)
+    )
+    # Negative guards: the hard-convert balance progress lines must NOT
+    # appear -- no balance runs on a degraded add.
+    assert "balancing to RAID1" not in err, (
+        "degraded add must NOT run the RAID1 balance ([wait] line);"
+        " stderr={!r}".format(err)
+    )
+    assert "RAID1 balance complete" not in err, (
+        "degraded add must NOT run the RAID1 balance ([ok] line);"
+        " stderr={!r}".format(err)
     )
     assert "replace --missing-id" not in err, (
         "real-run warning must not request replace --missing-id;"
-        " exit={} stderr={!r}".format(ec, err)
+        " stderr={!r}".format(err)
     )
     assert "warning: pool has" not in err, (
         "real-run stderr must NOT carry the legacy `warning:` prefix;"
-        " exit={} stderr={!r}".format(ec, err)
+        " stderr={!r}".format(err)
     )
     assert "\x1b[" not in err, (
-        "real-run stderr must be plain without a TTY; exit={} stderr={!r}".format(ec, err)
+        "real-run stderr must be plain without a TTY; stderr={!r}".format(err)
+    )
+
+    # The disk joined but the pool is still degraded and RAID1-profiled.
+    fi_show = machine.succeed("btrfs fi show /mnt/storage")
+    assert "braid-disk3" in fi_show, (
+        "disk3 must be a pool member after the add; got:\n{}".format(fi_show)
+    )
+    assert "missing" in fi_show.lower(), (
+        "pool must remain degraded after the degraded add; got:\n{}".format(fi_show)
+    )
+    df = machine.succeed("btrfs fi df /mnt/storage")
+    assert "Data, RAID1" in df, (
+        "RAID1 profile must be preserved after the degraded add; got:\n{}".format(df)
     )
 
 # --- Phase 4: preserved-context failure uses canonical [warn] on stderr ---

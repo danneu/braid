@@ -174,6 +174,11 @@
               braid = linuxCrane.braid;
             }
           );
+          add-degraded-then-remove-missing = pkgs.testers.nixosTest (
+            import ./tests/cli/add-degraded-then-remove-missing.nix {
+              braid = linuxCrane.braid;
+            }
+          );
           braid-add-uuid-swap-rejected = pkgs.testers.nixosTest (
             import ./tests/cli/braid-add-uuid-swap-rejected.nix {
               braid = linuxCrane.braid;

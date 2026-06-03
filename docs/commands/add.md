@@ -89,7 +89,7 @@ The name is stored in pool.json and used in LUKS mapper names (`braid-toshiba1`)
    See [Pending LUKS header backups](status.md#pending-luks-header-backups) -- copy each `.luksheader` off-system and delete the local copy.
 4. If no pool exists: creates a btrfs filesystem (RAID1 if 2+ disks, single if 1 disk; braid explicitly pins the `block-group-tree` feature bit so that bit is visible and stable across toolchain versions -- see [ADR-027](../design/decisions/027-mkfs-block-group-tree.md))
 5. If a pool exists: writes a phased UUID-keyed journal, adds the device to the existing btrfs filesystem, records the new membership in pool.json, then advances the journal to the balance phase
-6. If the pool now has 2+ disks: balances data to RAID1, then clears the journal
+6. If the pool now has 2+ disks: balances data to RAID1, then clears the journal -- **unless the pool has a missing device, in which case the balance is skipped** (a `[skip]` note explains why). Redundancy is restored later by [`remove-missing`](remove-missing.md) or [`replace`](replace.md), not by the degraded add.
 
 A sleep inhibitor is held during all irreversible operations to prevent the system from suspending mid-operation.
 
@@ -112,7 +112,7 @@ braid classifies each disk before acting:
 - Rejects disks that conflict with existing pool membership (same LUKS UUID, same name, or same by-id path)
 - Rejects absent disks (not plugged in)
 - Verifies the passphrase against an existing pool member before formatting new disks
-- Warns if the pool has missing devices but does not refuse: `braid add` still attempts to add the new disk. It does not remove or replace the missing member, so even if the add succeeds the pool stays degraded. Run `braid replace --old <missing-name> --new <new-name>=/dev/disk/by-id/<...>` first to repair the missing member and return the pool to full health.
+- Warns if the pool has missing devices but does not refuse: `braid add` still adds the new disk, but **skips the RAID1 convert balance** (it surfaces a `[skip]` note), so the pool stays degraded and redundancy is not restored at add time. To repair, either run `braid replace --old <missing-name> --new <new-name>=/dev/disk/by-id/<...>` to swap in a new disk for the missing member, or -- on a 2-disk degraded pool where [`remove-missing`](remove-missing.md) alone would refuse (it cannot drop RAID1 below two devices) -- run `braid add` then `braid remove-missing` to drop the dead member and rebalance onto the new disk.
 - Warns if existing pool drives have a keyfile but `--enroll` was not passed
 - Refuses if a pending operation journal (`pending-op.json`) exists -- run `braid recover` to reconcile.
 - Refuses if another braid operation is in progress (pool lock `/run/braid-pool.lock` is held) -- retry once it finishes.

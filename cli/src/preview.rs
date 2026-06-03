@@ -47,6 +47,12 @@ pub enum PreviewGap {}
 pub enum PreviewNote {
     Info(String),
     Warn(String),
+    /// Deliberate omission of an otherwise-expected step, rendered
+    /// `[skip] <body>` in both dry-run stdout and real-run stderr.
+    /// Distinct from `Warn` so a planned no-op (e.g. the degraded-add
+    /// RAID1-balance skip) reads as an intentional decision, not a
+    /// problem. Only `add`'s degraded-balance path produces it today.
+    Skip(String),
     PerDisk {
         name: String,
         level: NoteLevel,
@@ -195,6 +201,9 @@ pub fn render_notes_for_stderr_with(
             PreviewNote::Warn(msg) => {
                 out.push_str(&status_line(StatusTag::Warn, color_enabled, msg));
             }
+            PreviewNote::Skip(msg) => {
+                out.push_str(&status_line(StatusTag::Skip, color_enabled, msg));
+            }
             PreviewNote::PerDisk {
                 name,
                 level,
@@ -253,6 +262,9 @@ impl Preview {
                 }
                 PreviewNote::Warn(msg) => {
                     out.push_str(&status_line(StatusTag::Warn, color_enabled, msg));
+                }
+                PreviewNote::Skip(msg) => {
+                    out.push_str(&status_line(StatusTag::Skip, color_enabled, msg));
                 }
                 PreviewNote::PerDisk {
                     name,

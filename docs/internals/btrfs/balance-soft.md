@@ -77,6 +77,50 @@ braid issues this soft balance from two code paths:
 (see ADR-001), so this soft balance is the only convert-balance in the replace
 path.
 
+### Skip -- degraded add (missing member present)
+
+`braid add` into a pool that still has a missing member runs NO convert
+balance at all. The post-add present-device count can already be `>= 2` (a
+2-disk RAID1 with one member missing, plus the fresh disk), which would
+otherwise trip the hard convert above; braid gates it off on
+`missing_count > 0` and surfaces a single `[skip]` note instead. The skip is
+applied symmetrically in `cli/src/add.rs`: `plan_add` pushes one
+`PreviewNote::Skip`, and the preview step builder (`AddWorkPlan::render_steps`)
+and the execute balance gate (`AddPlan::execute`) both carry the same
+`missing_count == 0` condition so dry-run and real-run agree.
+
+This is a deliberate **deferral**, not a hazard fix. The hard convert does
+succeed on a degraded pool today -- `btrfs device add` works on a degraded
+mount and the convert rewrites every chunk across the present devices -- but it
+rewrites *all* data through the allocator while the pool has no redundancy, a
+longer and less-targeted operation than the purpose-built `btrfs replace`.
+braid instead defers redundancy restoration to the repair step:
+`remove-missing` (which relocates data onto the new disk and runs the soft
+balance above) or `replace`. The soft convert, by contrast, is left running
+even on a degraded pool -- it only converts `single` -> `raid1` and never
+rewrites existing `raid1` chunks, so it cannot do a full degraded rewrite and
+is safe and beneficial there.
+
+Skipping at add also makes the degraded-add interrupt paths converge. With no
+hard balance issued, a *completed* degraded add and *every* recover path end at
+the same state: device added, pool still degraded, redundancy deferred to the
+repair step. Before this change the paths diverged: a completed degraded add
+restored redundancy via the hard balance, and a forced-shutdown interrupt also
+did -- recover's `replay_owed_raid1_maintenance` resumes a paused balance
+before its soft replay (see [Recover replay](#recover-replay)) and a forced
+shutdown leaves the hard convert paused -- but a rarer umount-cancelled
+interrupt fell through to the soft no-op and did not. Skipping at add closes
+that one divergent path; recover itself is unchanged (its resume-paused-balance
+branch is simply never armed by a degraded add).
+
+btrfs-progs guidance backs the deferral. `btrfs-balance.rst` (in Sources)
+recommends you "use :command:`btrfs replace` or :command:`btrfs device remove`
+to handle the failing/missing device first." We lean on that as general
+guidance, not a strong prohibition -- its acute warning is narrower, about
+converting to a profile with *lower* redundancy (RAID1 -> SINGLE) with a
+present-but-failing device, milder than our convert *to* `raid1` with a
+cleanly-missing member.
+
 ## Recover replay
 
 After a forced shutdown mid-mutation, `braid recover` replays owed RAID1

@@ -1,10 +1,13 @@
 # Test: braid-add-warnings
 #
 # What: Pins the routing of `braid add`'s planning-phase diagnostics
-# across dry-run vs real-run after the PR 7 Preview migration. Focus is
-# on the missing-devices warning -- the keyfile-asymmetry warning has
-# its own fixture in `braid-add-enroll.py`, and no-op wording
-# preservation is pinned in `braid-add-disk.py`.
+# across dry-run vs real-run after the PR 7 Preview migration, and the
+# degraded-add RAID1-balance skip. Focus is on the missing-devices
+# warning plus the `[skip]` balance note -- the keyfile-asymmetry warning
+# has its own fixture in `braid-add-enroll.py`, and no-op wording
+# preservation is pinned in `braid-add-disk.py`. Phase 3 also empirically
+# confirms `btrfs device add` succeeds on a degraded mount and that the
+# pool stays degraded (redundancy deferred to `remove-missing`/`replace`).
 #
 # Why: PR 7 moved `eprintln!("warning: pool has N missing device...")`
 # from a raw stderr write into `plan.notes`. Dry-run must emit the

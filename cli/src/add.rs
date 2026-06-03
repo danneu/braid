@@ -595,6 +595,11 @@ struct AddWorkPlan {
     mount_point: MountPoint,
     pool_was_mounted: bool,
     existing_pool_device_count: usize,
+    /// Pre-add count of missing pool members. The preview path renders
+    /// from this plan and cannot see `PoolState`, so the degraded-add
+    /// balance skip (Edit 3/4) keys on this threaded copy to stay in
+    /// lockstep with the execute gate's `self.pool.missing_count`.
+    pre_add_missing_count: u64,
 }
 
 /// Single definition of the `DiskName`-sorted add-target order used by
@@ -806,7 +811,13 @@ impl AddWorkPlan {
             let total_after = self.existing_pool_device_count + self.target_count();
             // Defensive lower-bound guard for live-pool adds: normal plans
             // have existing present devices plus at least one committed target.
-            if total_after >= 2 {
+            // Skipped on a degraded pool (missing member): the hard convert
+            // would rewrite all chunks with no redundancy, so braid defers
+            // redundancy restoration to `remove-missing`/`replace`. The
+            // dry-run preview must omit the step that the execute gate
+            // (`missing_count == 0`) will also omit. See
+            // docs/internals/btrfs/balance-soft.md.
+            if total_after >= 2 && self.pre_add_missing_count == 0 {
                 steps.push(Step {
                     risk: "long",
                     description: "btrfs balance to RAID1".into(),
@@ -926,6 +937,15 @@ fn format_add_missing_devices_warning(missing_count: u64) -> String {
         missing_count,
         if missing_count == 1 { "" } else { "s" }
     )
+}
+
+/// Body for the degraded-add balance-skip note, rendered `[skip] <body>` in both
+/// dry-run preview and real-run stderr via `PreviewNote::Skip`. One source so the
+/// two modes never drift (mirrors `format_add_missing_devices_warning`).
+fn format_add_degraded_balance_skip() -> String {
+    "pool: RAID1 balance skipped -- pool still has a missing device; redundancy \
+     not restored. Run `braid remove-missing` or `braid replace` to restore it."
+        .into()
 }
 
 /// Labels the disk set for no-op / done messages. Single-disk returns the
@@ -1545,7 +1565,14 @@ impl AddPlan {
             let total_after = self.pool.devices.len() + mapper_paths.len();
             // Defensive lower-bound guard for live-pool adds: normal plans
             // have existing present devices plus at least one committed target.
-            if total_after >= 2 {
+            // Skipped on a degraded pool (missing_count > 0): the hard convert
+            // would rewrite all chunks while the pool has no redundancy, so
+            // braid defers restoration to `remove-missing`/`replace`. No eprint
+            // in the skip path -- the PreviewNote::Skip from plan_add already
+            // emitted to stderr via emit_notes_to_stderr before any mutation;
+            // a second message here would double the body. See
+            // docs/internals/btrfs/balance-soft.md.
+            if total_after >= 2 && self.pool.missing_count == 0 {
                 eprint!(
                     "{}",
                     status_line(
@@ -1856,6 +1883,19 @@ pub fn plan_add<R: CommandRunner + Sync, F: Filesystem + ?Sized>(
                 }));
             }
         }
+    }
+    // Degraded-add balance skip: surfaced exactly once as a PreviewNote::Skip
+    // so the body renders identically on dry-run stdout and real-run stderr
+    // (replayed before mutation via emit_notes_to_stderr). Gated on the exact
+    // condition the balance step/execute gate use, plus the `!is_noop` /
+    // `pool_was_mounted` guards so a no-op re-add or a bootstrap does not emit
+    // it. The execute gate (Edit 4) must NOT also print this, or it double-emits.
+    if !work_plan.is_noop()
+        && work_plan.pool_was_mounted
+        && (work_plan.existing_pool_device_count + work_plan.target_count()) >= 2
+        && work_plan.pre_add_missing_count > 0
+    {
+        notes.push(PreviewNote::Skip(format_add_degraded_balance_skip()));
     }
     // No-op preview: zero steps + Info note naming the already-in-pool
     // target(s). The Info note suppresses `Preview::render`'s
@@ -2222,6 +2262,7 @@ fn build_add_work_plan<R: CommandRunner>(
         mount_point: input.mount_point.clone(),
         pool_was_mounted: input.pool.mounted,
         existing_pool_device_count: input.pool.devices.len(),
+        pre_add_missing_count: input.pool.missing_count,
     })
 }
 
@@ -2960,6 +3001,7 @@ mod tests {
                 mount_point: MountPoint("/mnt/storage".into()),
                 pool_was_mounted: pool.mounted,
                 existing_pool_device_count: pool.devices.len(),
+                pre_add_missing_count: pool.missing_count,
             },
             config: Config::new(MountPoint("/mnt/storage".into())).unwrap(),
             parsed: vec![(name.clone(), by_id.clone())],
@@ -4266,6 +4308,11 @@ mod tests {
     struct RecoverableAddRunner {
         disk2_added: std::sync::atomic::AtomicBool,
         disk2_opened: std::sync::atomic::AtomicBool,
+        /// When set, `pool_show` appends a `path MISSING` row and bumps
+        /// `Total devices`, so the fresh execute-time probe is degraded too
+        /// and the degraded-add skip test models reality instead of leaning
+        /// only on the planned `PoolState.missing_count`.
+        degraded: bool,
     }
 
     impl RecoverableAddRunner {
@@ -4273,6 +4320,14 @@ mod tests {
             Self {
                 disk2_added: std::sync::atomic::AtomicBool::new(false),
                 disk2_opened: std::sync::atomic::AtomicBool::new(false),
+                degraded: false,
+            }
+        }
+
+        fn degraded() -> Self {
+            Self {
+                degraded: true,
+                ..Self::new()
             }
         }
 
@@ -4282,12 +4337,24 @@ mod tests {
             } else {
                 ""
             };
-            let total = if disk2_line.is_empty() { 1 } else { 2 };
+            let present = if disk2_line.is_empty() { 1 } else { 2 };
+            // Missing placeholder sits at the devid after the present devices,
+            // mirroring AddPlanTestRunner's synthesis; total counts it so
+            // probe_pool computes missing_count = total - present.
+            let (total, missing_line) = if self.degraded {
+                let missing_devid = present + 1;
+                (
+                    present + 1,
+                    format!("\tdevid    {missing_devid} size 0 used 0 path MISSING\n"),
+                )
+            } else {
+                (present, String::new())
+            };
             format!(
                 "Label: none  uuid: {POOL_FSID}\n\
                  \tTotal devices {total} FS bytes used 16.17MiB\n\
                  \tdevid    1 size 496.00MiB used 121.56MiB path /dev/mapper/braid-disk1\n\
-                 {disk2_line}"
+                 {disk2_line}{missing_line}"
             )
         }
     }
@@ -4668,6 +4735,95 @@ mod tests {
         assert_eq!(
             balance_count, 1,
             "fresh add should issue exactly one RAID1 balance: {requests:?}"
+        );
+    }
+
+    // Intent: executing an add into a *degraded* mounted pool (a member is
+    //   missing) adds the disk but issues NO RAID1 convert balance.
+    // Why it exists: the hard convert would rewrite every chunk while the
+    //   pool has no redundancy; braid defers restoration to the purpose-built
+    //   `remove-missing`/`replace` repair path. This pins the execute-side
+    //   `missing_count == 0` gate so a regression that re-enables the degraded
+    //   balance fails here.
+    // Scenario: a 2-disk RAID1 has lost disk2 (still mounted -o degraded). The
+    //   operator runs `braid add disk3` -- modeled here as disk2 the fresh
+    //   target -- expecting the disk to join but redundancy to stay deferred.
+    #[test]
+    fn execute_degraded_add_skips_raid1_balance() {
+        let (_state_tmp, paths, _tmp, pass_path) = execute_fixture();
+        let fs = AddMockFs(vec!["/dev/disk/by-id/virtio-disk2".into()]);
+        let runner = RequestRecordingRunner::new(RecoverableAddRunner::degraded());
+        let inhibitor = crate::inhibit::RecordingInhibitor::new();
+        let confirm = crate::confirm::RecordingConfirm::new();
+        let target = fresh_target(
+            "disk2",
+            "/dev/disk/by-id/virtio-disk2",
+            "22222222-2222-2222-2222-222222222222",
+        );
+        let target_uuid = target.luks_uuid.clone();
+        // Planned pool: one present member (disk1) plus one missing member,
+        // so the execute balance gate keys off missing_count > 0. The degraded
+        // RecoverableAddRunner makes the fresh probe degraded too.
+        let pool = PoolState {
+            mounted: true,
+            devices: vec![PoolDevice {
+                mapper: MapperName("braid-disk1".into()),
+                luks_uuid: LuksUuid::parse("11111111-1111-1111-1111-111111111111").unwrap(),
+                devid: 1,
+                underlying: "/dev/vdb".into(),
+            }],
+            missing_count: 1,
+            missing_devids: vec![2],
+            total_devices: 2,
+            fsid: Some(POOL_FSID.into()),
+            null_underlying: vec![],
+        };
+        let plan = plan_for_execute_target(
+            AddTargetWork::Fresh(target.clone()),
+            journal_targets_with(target_uuid, fresh_journal_target(&target)),
+            pool,
+        );
+        let config = test_config();
+
+        let result = plan.execute(
+            &runner,
+            &fs,
+            &AddParams {
+                config: &config,
+                disk_specs: &[],
+                dry_run: false,
+                yes: true,
+                passphrase_stdin: false,
+                passphrase_file: Some(pass_path.as_path()),
+                enroll_key_file: None,
+                luks_format_extra_opts: &[],
+                progress: ProgressOutput::Off,
+                paths: &paths,
+                sleep_inhibitor: &inhibitor,
+                confirm: &confirm,
+                passphrase_reader: &RealTty,
+                backing_path_resolver:
+                    crate::test_fixtures::mock_virtio_offset_backing_path_resolver(),
+            },
+        );
+
+        assert!(result.is_ok(), "degraded add should succeed: {result:?}");
+        let requests = runner.requests();
+        let balance_count = requests
+            .iter()
+            .filter(|request| matches!(request, CmdRequest::BtrfsBalanceRaid1 { .. }))
+            .count();
+        assert_eq!(
+            balance_count, 0,
+            "degraded add must issue NO RAID1 balance: {requests:?}"
+        );
+        let device_add_count = requests
+            .iter()
+            .filter(|request| matches!(request, CmdRequest::BtrfsDeviceAdd { .. }))
+            .count();
+        assert_eq!(
+            device_add_count, 1,
+            "degraded add must still issue the btrfs device add: {requests:?}"
         );
     }
 
@@ -9421,7 +9577,8 @@ mod tests {
      * the destructive plan, defeating their purpose.
      * Scenario: missing-devices warning on a pool, add a fresh disk with
      * real work to plan. Pool is mounted so add work-plan rendering
-     * returns the `btrfs device add` + balance steps.
+     * returns the `btrfs device add` step (the RAID1 balance is skipped
+     * here because the pool is degraded).
      */
     #[test]
     fn plan_add_render_emits_warn_above_steps() {
@@ -9443,6 +9600,44 @@ mod tests {
         assert!(
             warn_pos < steps_pos,
             "Warn note must render above the step block; got:\n{rendered}"
+        );
+    }
+
+    /* Intent: on a degraded pool (a member missing), the dry-run preview
+     * adds the disk but OMITS the `btrfs balance to RAID1` step and
+     * surfaces exactly one `[skip]` note explaining redundancy is deferred.
+     * Why it exists: the degraded add must not run the hard RAID1 convert
+     * (it would rewrite all chunks with no redundancy); restoration is
+     * deferred to `remove-missing`/`replace`. This pins both the preview
+     * step gate and the single-emit `PreviewNote::Skip`, guarding against
+     * a regression that re-adds the balance step or double-emits the note.
+     * Scenario: a 1-present-device pool with one MISSING placeholder; the
+     * operator adds a fresh disk2.
+     */
+    #[test]
+    fn plan_add_degraded_preview_omits_balance_step() {
+        let fixture = plan_add_fixture();
+        let fs = AddMockFs(vec!["/dev/disk/by-id/virtio-disk2".into()]);
+        let runner = AddPlanTestRunner::new().with_missing(1);
+
+        let disk_specs = ["disk2=/dev/disk/by-id/virtio-disk2".to_string()];
+        let report = plan_add(&runner, &fs, &fixture.params(&disk_specs, true));
+        let plan = report.expect("plan_add should succeed on a degraded pool");
+
+        let rendered = plan.preview().render();
+        assert!(
+            rendered.contains("btrfs device add"),
+            "device-add step must still appear; got:\n{rendered}"
+        );
+        assert!(
+            !rendered.contains("btrfs balance to RAID1"),
+            "degraded preview must omit the RAID1 balance step; got:\n{rendered}"
+        );
+        let skip_body = "[skip] pool: RAID1 balance skipped";
+        assert_eq!(
+            rendered.matches(skip_body).count(),
+            1,
+            "degraded preview must surface the balance-skip note exactly once; got:\n{rendered}"
         );
     }
 
