@@ -69,9 +69,14 @@ with subtest("braid doctor fails with foreign_luks_uuid Fail"):
     check = checks["foreign_luks_uuid"]
     assert check["status"] == "fail", check
     message = check["message"]
-    for needle in ["foreign LUKS UUID", "braid-stranger"]:
+    for needle in [
+        "foreign LUKS UUID",
+        "braid-stranger",
+        "btrfs device remove /dev/mapper/braid-stranger",
+    ]:
         assert needle in message, f"missing {needle!r} in:\n{message}"
     assert message.find("btrfs device remove") < message.find("cryptsetup close"), message
+    assert "<mapper>" not in message, f"placeholder leaked in:\n{message}"
 
     stderr = machine.succeed("cat /tmp/braid-doctor.err")
     assert "Warning: live LUKS UUID" not in stderr, (

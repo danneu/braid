@@ -955,17 +955,25 @@ fn check_foreign_luks_uuid<R: CommandRunner>(ctx: &mut DoctorContext<'_, R>) -> 
     }
 
     let n = foreign.len();
-    let entries: Vec<String> = foreign
+    let mp = ctx.config.as_ref().unwrap().mount_point();
+    // Pair each foreign mapper's diagnosis with its own paste-ready
+    // remove+close recipe, so multi-foreign output reads as N independent
+    // recoveries rather than one long sequence. Every mapper was observed
+    // live, so no `<mapper>` placeholder is needed.
+    let recoveries: Vec<String> = foreign
         .iter()
-        .map(|(uuid, mapper)| format!("{uuid} at mapper {mapper}"))
+        .map(|(uuid, mapper)| {
+            format!(
+                "{uuid} at mapper {mapper} -- restore with 'btrfs device remove /dev/mapper/{mapper} {mp}' then 'cryptsetup close {mapper}'"
+            )
+        })
         .collect();
     CheckResult::fail(
         NAME,
         format!(
-            "{n} foreign LUKS UUID{plural} in live pool: {body} -- restore with 'btrfs device remove /dev/mapper/<mapper> {mp}' then 'cryptsetup close <mapper>'",
+            "{n} foreign LUKS UUID{plural} in live pool: {body}",
             plural = if n == 1 { "" } else { "s" },
-            body = entries.join("; "),
-            mp = ctx.config.as_ref().unwrap().mount_point(),
+            body = recoveries.join("; "),
         ),
     )
 }
@@ -5459,6 +5467,97 @@ mod tests {
         assert!(
             remove_pos < close_pos,
             "remediation must remove from btrfs before closing mapper: {}",
+            check.message
+        );
+        assert!(
+            check
+                .message
+                .contains("btrfs device remove /dev/mapper/braid-stranger"),
+            "remove command must name the concrete mapper: {}",
+            check.message
+        );
+        assert!(
+            check.message.contains("cryptsetup close braid-stranger"),
+            "close command must name the concrete mapper: {}",
+            check.message
+        );
+        assert!(
+            !check.message.contains("<mapper>"),
+            "remediation must not leak the <mapper> placeholder: {}",
+            check.message
+        );
+    }
+
+    // Intent: foreign_luks_uuid pairs every foreign mapper with its own
+    //   concrete remove+close recipe (not a shared <mapper> placeholder), and
+    //   pluralizes the count, when the live pool admits more than one unknown
+    //   LUKS UUID.
+    // Why it exists: the remediation runs in a high-stakes manual recovery, so
+    //   each foreign mapper must yield a paste-ready command; a single shared
+    //   <mapper> clause forces the operator to hand-substitute every name.
+    // Scenario: an operator force-adds two independently formatted LUKS mappers
+    //   (braid-stranger, braid-other) into the live pool outside braid.
+    #[test]
+    fn check_foreign_luks_uuid_emits_concrete_command_per_foreign_mapper() {
+        let (_dir, paths) = isolated_paths();
+        save_doctor_membership(
+            &paths,
+            &[(180, "disk1", "/dev/disk/by-id/virtio-disk1", Some(1))],
+        );
+        let known_uuid = test_uuid(180);
+        let stranger_uuid = test_uuid(181);
+        let other_uuid = test_uuid(182);
+        let runner = pool_state_runner(
+            vec![
+                ("braid-disk1", 1, "/dev/vdb", known_uuid),
+                ("braid-stranger", 2, "/dev/vdc", stranger_uuid.clone()),
+                ("braid-other", 3, "/dev/vdd", other_uuid.clone()),
+            ],
+            &[],
+        );
+        let fs = DoctorMockFs::mounted_btrfs_only();
+        let f = write_temp(valid_config_json());
+
+        let report = run_doctor(f.path(), &runner, &fs, &paths, human_options());
+
+        let check = find_check(&report, "foreign_luks_uuid");
+        assert_eq!(check.status, CheckStatus::Fail);
+        assert_eq!(report.status, CheckStatus::Fail);
+        // Trailing `s` matters: "2 foreign LUKS UUID" is a prefix of the plural
+        // and would pass even if pluralization regressed.
+        assert!(
+            check.message.contains("2 foreign LUKS UUIDs"),
+            "expected pluralized count: {}",
+            check.message
+        );
+        for needle in [stranger_uuid.as_str(), other_uuid.as_str()] {
+            assert!(
+                check.message.contains(needle),
+                "missing foreign UUID {needle:?} in: {}",
+                check.message
+            );
+        }
+        // Iteration is by LuksUuid (BTreeMap key), so assert per-mapper
+        // substring presence and per-mapper ordering rather than positional
+        // order across mappers.
+        for mapper in ["braid-stranger", "braid-other"] {
+            let remove = format!("btrfs device remove /dev/mapper/{mapper}");
+            let close = format!("cryptsetup close {mapper}");
+            let remove_pos = check.message.find(&remove).unwrap_or_else(|| {
+                panic!("missing concrete remove for {mapper}: {}", check.message)
+            });
+            let close_pos = check.message.find(&close).unwrap_or_else(|| {
+                panic!("missing concrete close for {mapper}: {}", check.message)
+            });
+            assert!(
+                remove_pos < close_pos,
+                "{mapper}: remove must precede close: {}",
+                check.message
+            );
+        }
+        assert!(
+            !check.message.contains("<mapper>"),
+            "remediation must not leak the <mapper> placeholder: {}",
             check.message
         );
     }
