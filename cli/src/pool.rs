@@ -452,6 +452,16 @@ pub fn pool_balance_resume<R: CommandRunner + Sync>(
     Ok(())
 }
 
+/// Plan-time predicate for whether a pool-mutation op (remove-missing, or
+/// replace's missing path) will leave the pool non-degraded with enough
+/// survivors to re-mirror. Single source for the `restore_raid1_after_commit`
+/// journal flag, the dry-run preview step, and the operator confirmation, so
+/// all three always agree. Advisory only: `maybe_restore_raid1` re-checks the
+/// real post-state and owns the final go/no-go on the soft balance.
+pub(crate) fn should_restore_raid1(clears_last_missing: bool, present_after: usize) -> bool {
+    clears_last_missing && present_after >= 2
+}
+
 /// Run a soft RAID1 rebalance if the operation just transitioned the pool from
 /// degraded to non-degraded with >=2 present devices. This restores redundancy
 /// for single-profile chunks created during degraded operation (known btrfs bug).
@@ -459,6 +469,8 @@ pub fn pool_balance_resume<R: CommandRunner + Sync>(
 /// Callers: `remove-missing` and `replace` (missing path), after the primary
 /// btrfs op completes and before the pool.json membership write + journal clear.
 /// `pre_op_missing_count` must be the missing count from the pre-op pool probe.
+/// Authoritative post-state re-check; `should_restore_raid1` is its plan-time
+/// counterpart (advisory gate on whether the balance is attempted at all).
 pub fn maybe_restore_raid1<R: CommandRunner + Sync, F: Filesystem + ?Sized>(
     runner: &R,
     fs: &F,

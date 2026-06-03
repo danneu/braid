@@ -1602,7 +1602,8 @@ fn build_replace_work_plan(input: ReplaceWorkPlanInput<'_>) -> ReplaceWorkPlan {
         && input.pool.missing_count == 1;
     // +1: the new device added by this replace fills the cleared missing slot.
     let remaining_present = input.pool.devices.len() + 1;
-    let restore_raid1_after_commit = will_clear_last_missing && remaining_present >= 2;
+    let restore_raid1_after_commit =
+        crate::pool::should_restore_raid1(will_clear_last_missing, remaining_present);
     let target_prep = match input.new_probed.state {
         PresentConfigDiskState::PresentNotLuks => ReplaceTargetPrep::FreshLuks {
             extra_opts: input.luks_format_extra_opts.clone(),

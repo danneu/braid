@@ -102,13 +102,11 @@ struct RemoveMissingWorkPlan {
     remaining_present: usize,
     missing_count: u64,
     mount_point: MountPoint,
+    // advisory plan-time gate; see `crate::pool::should_restore_raid1`
+    restore_raid1_after_commit: bool,
 }
 
 impl RemoveMissingWorkPlan {
-    fn restore_raid1_after_commit(&self) -> bool {
-        self.missing_count == 1 && self.remaining_present >= 2
-    }
-
     fn render_steps(&self) -> Vec<Step> {
         let mut steps = Vec::new();
         steps.push(Step {
@@ -122,7 +120,7 @@ impl RemoveMissingWorkPlan {
                 mount_point: self.mount_point.clone(),
             }],
         });
-        if self.restore_raid1_after_commit() {
+        if self.restore_raid1_after_commit {
             steps.push(Step {
                 risk: "long",
                 description:
@@ -212,14 +210,13 @@ impl RemoveMissingPlan {
                 ))
             })?;
 
-        let restore_raid1_after_commit = work_plan.restore_raid1_after_commit();
         let journal = journal::build_journal(
             pre_membership,
             target_membership.clone(),
             journal::OpKind::RemoveMissing {
                 phase: journal::RemoveMissingPhase::PoolMutation,
                 devid: work_plan.missing_id,
-                restore_raid1_after_commit,
+                restore_raid1_after_commit: work_plan.restore_raid1_after_commit,
             },
         );
         journal::write_journal(params.paths, &journal)
@@ -265,7 +262,7 @@ impl RemoveMissingPlan {
             journal::OpKind::RemoveMissing {
                 phase: journal::RemoveMissingPhase::PostRemoveMissingMaintenance,
                 devid: work_plan.missing_id,
-                restore_raid1_after_commit,
+                restore_raid1_after_commit: work_plan.restore_raid1_after_commit,
             },
             None,
         )
@@ -477,6 +474,10 @@ pub fn plan_remove_missing<R: CommandRunner + Sync, F: Filesystem + ?Sized>(
         remaining_present,
         missing_count: pool.missing_count,
         mount_point: config.mount_point().clone(),
+        restore_raid1_after_commit: crate::pool::should_restore_raid1(
+            pool.missing_count == 1,
+            remaining_present,
+        ),
     };
     Ok(RemoveMissingPlan {
         notes,
@@ -663,6 +664,10 @@ fn remove_missing_work_plan_for_test(
         remaining_present,
         missing_count,
         mount_point: mount_point.clone(),
+        restore_raid1_after_commit: crate::pool::should_restore_raid1(
+            missing_count == 1,
+            remaining_present,
+        ),
     }
 }
 
@@ -681,7 +686,7 @@ fn format_remove_missing_confirm(
         "  {} (devid {})  missing -- no hardware info available\n",
         name, devid
     ));
-    if missing_count == 1 && remaining_present >= 2 {
+    if crate::pool::should_restore_raid1(missing_count == 1, remaining_present) {
         msg.push_str("  Data on remaining disks will be rebalanced if redundancy is restored.\n");
     } else if missing_count == 1 {
         msg.push_str("  Surviving disk already has all data.\n");
