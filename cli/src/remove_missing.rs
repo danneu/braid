@@ -381,6 +381,14 @@ pub fn plan_remove_missing<R: CommandRunner + Sync, F: Filesystem + ?Sized>(
         ));
     }
 
+    // Ordered before validate_missing_id_target deliberately: on a healthy pool
+    // there is no btrfs-MISSING device to remove, so any --missing-id (even a
+    // live member's devid) reports "no missing devices" instead of falling
+    // through to validate's "use `braid remove`" live-device hint. Keyed on
+    // missing_count, not missing_devids.is_empty(), so null-underlying hot-unplug
+    // pools (missing_count > 0, missing_devids empty) are not mislabeled healthy.
+    // Pinned by plan_remove_missing_zero_missing_precedes_live_device_validation
+    // and plan_remove_missing_null_underlying_empty_missing_devids_not_no_missing.
     if pool.missing_count == 0 {
         return Err(PlanFailure::with_notes(
             notes,
