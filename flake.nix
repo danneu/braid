@@ -219,6 +219,11 @@
               braid = linuxCrane.braid;
             }
           );
+          braid-discover-empty-scan = pkgs.testers.nixosTest (
+            import ./tests/cli/braid-discover-empty-scan.nix {
+              braid = linuxCrane.braid;
+            }
+          );
           multi-add = pkgs.testers.nixosTest (
             import ./tests/cli/multi-add.nix {
               braid = linuxCrane.braid;
