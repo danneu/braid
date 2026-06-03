@@ -90,6 +90,30 @@ Long-running side-effect-free probes that run while building a preview may emit
 [Principle 13](../principles.md#13-announce-long-running-work). Those rows are
 not part of the structured preview.
 
+### Fresh-format identity placeholder
+
+A fresh LUKS format mints its identity per-invocation at plan time (ADR-024),
+so the UUID a real run will write does not yet exist when dry-run renders.
+Showing the minted UUID would make the preview non-reproducible -- two dry-runs
+of the same command would differ -- and misleading, since that value is
+discarded when dry-run returns and a later real run mints a different one.
+
+So the two fresh-format render sites (`cli/src/add.rs#AddWorkPlan::render_steps`
+and `cli/src/replace.rs#ReplaceWorkPlan::render_steps`) emit a preview-only
+`cli/src/cmd.rs#CmdRequest`, `CryptsetupLuksFormatPreview`, whose `to_argv`
+renders a fixed `--uuid '<generated-at-format-time>'` placeholder (single-quoted
+by `shell_words`). The real run uses `CryptsetupLuksFormat` with the journaled
+identity. Both render through one shared `cli/src/cmd.rs#luks_format_argv`
+builder, so a future luksFormat flag appears in both at once -- the "representative
+commands" / "`Step` is output-only" rules in the Decision section still hold; this
+is the one place the rendered command intentionally diverges from the real argv.
+The preview variant is never executed: `cli/src/cmd.rs#RealRunner` hard-errors on
+it via `cli/src/cmd.rs#CmdRequest::is_preview_only` before any spawn.
+
+`recover` is excluded: `cli/src/recover.rs#render_add_pool_mutation_recovery_steps`
+also emits `CryptsetupLuksFormat`, but its UUID comes from the committed journal
+-- reproducible and meaningful -- so recover keeps rendering the real identity.
+
 ## Scope
 
 The typed work-plan preview model is the precedent for `add`, `replace`,

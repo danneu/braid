@@ -657,9 +657,9 @@ impl AddWorkPlan {
                     steps.push(Step {
                         risk: "destructive",
                         description: format!("LUKS format {}", target.by_id),
-                        commands: vec![CmdRequest::CryptsetupLuksFormat {
+                        // preview variant: real uuid minted at execute; ADR-022
+                        commands: vec![CmdRequest::CryptsetupLuksFormatPreview {
                             device: target.by_id.as_str().to_owned(),
-                            uuid: target.luks_uuid.clone(),
                             label,
                             extra_opts: target.luks_format_extra_opts.clone(),
                         }],
@@ -7008,6 +7008,68 @@ mod tests {
         assert!(lines[8].contains("mount"));
         assert!(lines[9].contains("$ mount"));
         assert!(lines[9].contains("/mnt/storage"));
+    }
+
+    #[test]
+    // Intent: two consecutive dry-run renders of the same fresh-disk `add` are
+    //   byte-identical, and the format line shows the fixed
+    //   `<generated-at-format-time>` placeholder, not a per-invocation random
+    //   UUID.
+    // Why it exists: a fresh (PresentNotLuks) target mints a random LuksUuid at
+    //   plan time (ADR-024). Before the preview-variant fix that real UUID
+    //   flowed into the rendered `--uuid`, so two dry-runs of the identical
+    //   command printed different output. A single StatePaths isolates the
+    //   minted UUID as the only variable -- the header-backup path flows into
+    //   both the step description and `--header-backup-file`, so two tempdirs
+    //   would diverge even after the fix. Fails pre-fix (random `--uuid`),
+    //   passes post-fix.
+    // Scenario: an operator runs `braid add --dry-run` twice against the same
+    //   fresh disk and expects identical, honest preview output.
+    fn dry_run_render_fresh_disk_uuid_is_reproducible_across_invocations() {
+        let runner = MockRunner::default();
+        let probed = vec![PresentConfigDisk {
+            name: DiskName::parse("disk1").expect("valid disk name in test fixture"),
+            by_id_path: ByIdPath::parse("/dev/disk/by-id/disk1").unwrap(),
+            state: PresentConfigDiskState::PresentNotLuks,
+        }];
+        let pool = pool_unmounted();
+        let names = [DiskName::parse("disk1").unwrap()];
+        let by_id = ByIdPath::parse("/dev/disk/by-id/disk1").unwrap();
+        let by_ids = [&by_id];
+        let mount_point = MountPoint("/mnt/storage".into());
+        let extra_opts = LuksFormatExtraOpts::default();
+        let membership = PoolMembership::empty();
+        // Bind ONE StatePaths so the header-backup path is fixed across both
+        // builder calls; the minted LuksUuid is then the only variable.
+        let (_tmp, paths) = test_paths();
+
+        let input = AddStepsInput {
+            names: &names,
+            by_ids: &by_ids,
+            probed: &probed,
+            pool: &pool,
+            mount_point: &mount_point,
+            paths: &paths,
+            enroll_key_file: None,
+            luks_format_extra_opts: &extra_opts,
+            backing_path_resolver: crate::test_fixtures::mock_virtio_offset_backing_path_resolver(),
+            pool_membership: &membership,
+        };
+
+        // Each call mints a fresh `LuksUuid::new_v4()` internally.
+        let first =
+            Step::render_dry_run(&build_add_work_plan(&runner, &input).unwrap().render_steps());
+        let second =
+            Step::render_dry_run(&build_add_work_plan(&runner, &input).unwrap().render_steps());
+
+        assert_eq!(
+            first, second,
+            "two dry-run renders of the same fresh add must be byte-identical"
+        );
+        assert!(
+            first.contains("<generated-at-format-time>"),
+            "fresh-format preview must show the placeholder token, got:\n{first}"
+        );
     }
 
     #[test]

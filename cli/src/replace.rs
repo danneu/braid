@@ -263,9 +263,9 @@ impl ReplaceWorkPlan {
                 steps.push(Step {
                     risk: "destructive",
                     description: format!("LUKS format {}", self.new_by_id),
-                    commands: vec![CmdRequest::CryptsetupLuksFormat {
+                    // preview variant: real uuid minted at execute; ADR-022
+                    commands: vec![CmdRequest::CryptsetupLuksFormatPreview {
                         device: self.new_by_id.as_str().to_owned(),
-                        uuid: self.new_uuid.clone(),
                         label,
                         extra_opts: extra_opts.clone(),
                     }],
@@ -4084,6 +4084,59 @@ mod tests {
 
         // Resize
         assert!(lines[12].contains("btrfs filesystem resize"));
+    }
+
+    #[test]
+    // Intent: two consecutive dry-run renders of the same fresh-disk `replace`
+    //   are byte-identical, and the format line shows the fixed
+    //   `<generated-at-format-time>` placeholder, not a per-invocation random
+    //   UUID.
+    // Why it exists: a fresh (PresentNotLuks) replace target derives a random
+    //   `new_uuid` via `LuksUuid::new_v4()` at plan time (ADR-024). Before the
+    //   preview-variant fix that real UUID flowed into the rendered `--uuid`, so
+    //   two dry-runs of the identical command printed different output. A single
+    //   StatePaths fixes the header-backup path so the minted UUID is the only
+    //   variable. Fails pre-fix, passes post-fix.
+    // Scenario: an operator runs `braid replace --dry-run` twice against the
+    //   same fresh disk and expects identical, honest preview output.
+    fn dry_run_render_fresh_replace_uuid_is_reproducible_across_invocations() {
+        let new_probed = new_probed_not_luks();
+        let source = ReplaceSource::Live {
+            mapper: MapperName("braid-disk2".into()),
+            devid: 2,
+        };
+        let new_by_id = ByIdPath::parse("/dev/disk/by-id/virtio-disk3").unwrap();
+        let mount_point = MountPoint("/mnt/storage".into());
+        let extra_opts: Vec<String> = Vec::new();
+        // Bind ONE StatePaths so the header-backup path is fixed across both
+        // builder calls; the minted `new_uuid` is then the only variable.
+        let (_tmp, paths) = test_paths();
+
+        let input = ReplaceWorkPlanTestInput {
+            new_name: "disk3",
+            new_by_id: &new_by_id,
+            new_probed: &new_probed,
+            replace_source: &source,
+            mount_point: &mount_point,
+            will_clear_last_missing: false,
+            total_devices: 2,
+            paths: &paths,
+            enroll_key_file: None,
+            luks_format_extra_opts: &extra_opts,
+        };
+
+        // Each call mints a fresh `LuksUuid::new_v4()` internally.
+        let first = Step::render_dry_run(&replace_work_plan_for_test(&input).render_steps());
+        let second = Step::render_dry_run(&replace_work_plan_for_test(&input).render_steps());
+
+        assert_eq!(
+            first, second,
+            "two dry-run renders of the same fresh replace must be byte-identical"
+        );
+        assert!(
+            first.contains("<generated-at-format-time>"),
+            "fresh-format preview must show the placeholder token, got:\n{first}"
+        );
     }
 
     // Intent: dry-run for an already-LUKS replace target with `--enroll

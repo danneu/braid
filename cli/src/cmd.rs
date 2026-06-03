@@ -179,6 +179,16 @@ pub enum CmdRequest {
         label: LuksLabel,
         extra_opts: LuksFormatExtraOpts,
     },
+    /// Preview-only twin of `CryptsetupLuksFormat`. Carries no `uuid` because
+    /// dry-run runs before identity is minted; `to_argv` renders a fixed
+    /// placeholder in the `--uuid` slot. NEVER executed: never built by
+    /// `luks_format()` or `execute()`, and `RealRunner` hard-errors on it
+    /// (see `is_preview_only` guard). See ADR-022 (preview/real divergence).
+    CryptsetupLuksFormatPreview {
+        device: String,
+        label: LuksLabel,
+        extra_opts: LuksFormatExtraOpts,
+    },
     CryptsetupTestPassphrase {
         device: String,
     },
@@ -455,6 +465,49 @@ fn base_mount_options() -> Vec<String> {
         "skip_balance".to_owned(),
         "subvolid=5".to_owned(),
     ]
+}
+
+/// Placeholder rendered in the `--uuid` slot of the dry-run fresh-format
+/// preview. The real identity is minted per-invocation at plan time (ADR-024)
+/// and then discarded when dry-run returns, so the preview must show a fixed,
+/// self-documenting token rather than a misleading random UUID. See ADR-022.
+const PREVIEW_LUKS_UUID_PLACEHOLDER: &str = "<generated-at-format-time>";
+
+/// Single argv builder shared by `CryptsetupLuksFormat` (real) and
+/// `CryptsetupLuksFormatPreview` (dry-run) so a future luksFormat flag lands in
+/// both renderings at once. The sole divergence is the `--uuid` token: the real
+/// arm passes the journaled identity, the preview arm passes
+/// `PREVIEW_LUKS_UUID_PLACEHOLDER`.
+fn luks_format_argv(
+    uuid_token: &str,
+    label: &LuksLabel,
+    extra_opts: &LuksFormatExtraOpts,
+    device: &str,
+) -> CmdArgs {
+    let mut args: Vec<String> = vec![
+        "luksFormat".into(),
+        // luks2 is already the default but might as well
+        "--type".into(),
+        "luks2".into(),
+        "--batch-mode".into(),
+        "--key-file=-".into(),
+        // Managed identity. The plan pins `--uuid` before
+        // `--label` before user extras before device so a
+        // regression that reorders these tokens fails the
+        // argv pin in cmd.rs::tests.
+        "--uuid".into(),
+        uuid_token.to_owned(),
+        "--label".into(),
+        label.as_str().to_owned(),
+    ];
+    for opt in extra_opts.as_slice() {
+        args.push(opt.clone());
+    }
+    args.push(device.to_owned());
+    CmdArgs {
+        program: "cryptsetup".to_owned(),
+        args,
+    }
 }
 
 impl CmdRequest {
@@ -860,32 +913,12 @@ impl CmdRequest {
                 uuid,
                 label,
                 extra_opts,
-            } => {
-                let mut args: Vec<String> = vec![
-                    "luksFormat".into(),
-                    // luks2 is already the default but might as well
-                    "--type".into(),
-                    "luks2".into(),
-                    "--batch-mode".into(),
-                    "--key-file=-".into(),
-                    // Managed identity. The plan pins `--uuid` before
-                    // `--label` before user extras before device so a
-                    // regression that reorders these tokens fails the
-                    // argv pin in cmd.rs::tests.
-                    "--uuid".into(),
-                    uuid.as_str().to_owned(),
-                    "--label".into(),
-                    label.as_str().to_owned(),
-                ];
-                for opt in extra_opts.as_slice() {
-                    args.push(opt.clone());
-                }
-                args.push(device.clone());
-                CmdArgs {
-                    program: "cryptsetup".to_owned(),
-                    args,
-                }
-            }
+            } => luks_format_argv(uuid.as_str(), label, extra_opts, device),
+            CmdRequest::CryptsetupLuksFormatPreview {
+                device,
+                label,
+                extra_opts,
+            } => luks_format_argv(PREVIEW_LUKS_UUID_PLACEHOLDER, label, extra_opts, device),
             CmdRequest::CryptsetupTestPassphrase { device } => CmdArgs {
                 program: "cryptsetup".to_owned(),
                 args: vec![
@@ -1242,6 +1275,14 @@ impl CmdRequest {
                 | CmdRequest::CryptsetupLuksAddKeyFile { .. }
         )
     }
+
+    /// Fail-closed runtime backstop: a `true` here means the request renders a
+    /// dry-run placeholder argv and must NEVER reach a real spawn. Checked first
+    /// in both `RealRunner::run`/`run_with_stdin` so the preview luksFormat twin
+    /// (which is not a stdin request) cannot fall through to a keyless format.
+    fn is_preview_only(&self) -> bool {
+        matches!(self, CmdRequest::CryptsetupLuksFormatPreview { .. })
+    }
 }
 
 #[derive(Debug, Error)]
@@ -1355,6 +1396,11 @@ impl RealRunner {
 
 impl CommandRunner for RealRunner {
     fn run(&self, request: &CmdRequest) -> Result<RawCommandOutput, CmdError> {
+        if request.is_preview_only() {
+            return Err(CmdError::Failed(format!(
+                "{request:?} is preview-only and must never be executed"
+            )));
+        }
         if request.requires_stdin() {
             return Err(CmdError::Failed(format!(
                 "{request:?} must use run_with_stdin"
@@ -1368,6 +1414,11 @@ impl CommandRunner for RealRunner {
         request: &CmdRequest,
         stdin: &[u8],
     ) -> Result<RawCommandOutput, CmdError> {
+        if request.is_preview_only() {
+            return Err(CmdError::Failed(format!(
+                "{request:?} is preview-only and must never be executed"
+            )));
+        }
         if !request.requires_stdin() {
             return Err(CmdError::Failed(format!(
                 "{request:?} must use run, not run_with_stdin"
@@ -3374,6 +3425,177 @@ mod tests {
                 "--use-random",
                 "/dev/disk/by-id/disk2",
             ]
+        );
+    }
+
+    #[test]
+    // Intent: CryptsetupLuksFormatPreview renders the same argv shape as the
+    //   real CryptsetupLuksFormat (--uuid before --label before extras before
+    //   device), but with the fixed `<generated-at-format-time>` placeholder in
+    //   the --uuid slot. Empty extras leave zero tokens between `--label
+    //   <label>` and `<device>`; a positive non-managed extra lands after
+    //   `--label` and before `<device>`.
+    // Why: the preview variant is the dry-run-only twin. This pins that its
+    //   argv is reproducible and honest (placeholder, not a random UUID that the
+    //   real run discards). A regression that minted a real UUID into the
+    //   preview, or reordered tokens, fails here.
+    // Scenario: `braid add --dry-run` against a fresh (PresentNotLuks) disk
+    //   renders the format step.
+    fn cryptsetup_luks_format_preview_renders_placeholder_uuid_before_label_extras_device() {
+        let cmd = CmdRequest::CryptsetupLuksFormatPreview {
+            device: "/dev/disk/by-id/disk1".to_owned(),
+            label: luks_label("disk1"),
+            extra_opts: empty_extras(),
+        }
+        .to_argv();
+        assert_eq!(cmd.program, "cryptsetup");
+        assert_eq!(
+            cmd.args,
+            vec![
+                "luksFormat",
+                "--type",
+                "luks2",
+                "--batch-mode",
+                "--key-file=-",
+                "--uuid",
+                "<generated-at-format-time>",
+                "--label",
+                "braid-disk1",
+                "/dev/disk/by-id/disk1",
+            ],
+            "preview placeholder --uuid/--label precede extras and device"
+        );
+
+        let with_extra = CmdRequest::CryptsetupLuksFormatPreview {
+            device: "/dev/disk/by-id/disk2".to_owned(),
+            label: luks_label("disk2"),
+            extra_opts: extras_from(&["--use-random"]),
+        }
+        .to_argv();
+        assert_eq!(
+            with_extra.args,
+            vec![
+                "luksFormat",
+                "--type",
+                "luks2",
+                "--batch-mode",
+                "--key-file=-",
+                "--uuid",
+                "<generated-at-format-time>",
+                "--label",
+                "braid-disk2",
+                "--use-random",
+                "/dev/disk/by-id/disk2",
+            ]
+        );
+    }
+
+    #[test]
+    // Intent: real (CryptsetupLuksFormat) and preview
+    //   (CryptsetupLuksFormatPreview) argv for identical device/label/extras are
+    //   token-for-token identical EXCEPT at the --uuid index (real UUID vs
+    //   placeholder).
+    // Why: both arms render through the one shared `luks_format_argv` builder.
+    //   This is the regression guard for that seam -- it fails if someone adds a
+    //   luksFormat flag to one arm but not the other, which would silently
+    //   desync the dry-run preview from the real command.
+    // Scenario: a future PR adds a managed luksFormat flag to the real arm only.
+    fn luks_format_real_and_preview_argv_differ_only_at_uuid_token() {
+        let uuid = test_uuid(307);
+        let real = CmdRequest::CryptsetupLuksFormat {
+            device: "/dev/disk/by-id/disk1".to_owned(),
+            uuid: uuid.clone(),
+            label: luks_label("disk1"),
+            extra_opts: extras_from(&["--use-random"]),
+        }
+        .to_argv();
+        let preview = CmdRequest::CryptsetupLuksFormatPreview {
+            device: "/dev/disk/by-id/disk1".to_owned(),
+            label: luks_label("disk1"),
+            extra_opts: extras_from(&["--use-random"]),
+        }
+        .to_argv();
+        assert_eq!(real.program, preview.program);
+        assert_eq!(
+            real.args.len(),
+            preview.args.len(),
+            "shared builder must emit the same token count for both arms"
+        );
+        let uuid_idx = real
+            .args
+            .iter()
+            .position(|a| a == "--uuid")
+            .expect("real argv carries --uuid")
+            + 1;
+        for (i, (r, p)) in real.args.iter().zip(preview.args.iter()).enumerate() {
+            if i == uuid_idx {
+                assert_eq!(r, uuid.as_str(), "real arm renders the journaled UUID");
+                assert_eq!(
+                    p, "<generated-at-format-time>",
+                    "preview arm renders the placeholder"
+                );
+            } else {
+                assert_eq!(r, p, "token {i} must match between real and preview argv");
+            }
+        }
+    }
+
+    #[test]
+    // Intent: the preview format line's rendered shell-string quotes the
+    //   placeholder as `--uuid '<generated-at-format-time>'` (single-quoted by
+    //   shell_words::join, like the sibling '--key-file=-').
+    // Why: the argv-pin test checks the raw Vec<String> (bare token); this locks
+    //   the rendered/quoted form an operator actually sees on dry-run stdout, so
+    //   the angle-bracket quoting cannot silently drift. Mirrors
+    //   to_shell_string_luks_format_with_label.
+    // Scenario: `braid add --dry-run` against a fresh disk; the format line is
+    //   rendered to stdout via to_shell_string.
+    fn to_shell_string_luks_format_preview_quotes_placeholder() {
+        let s = CmdRequest::CryptsetupLuksFormatPreview {
+            device: "/dev/disk/by-id/disk1".to_owned(),
+            label: luks_label("aaa"),
+            extra_opts: extras_from(&["--use-random"]),
+        }
+        .to_argv()
+        .to_shell_string();
+        assert_eq!(
+            s,
+            "cryptsetup luksFormat --type luks2 --batch-mode '--key-file=-' --uuid '<generated-at-format-time>' --label braid-aaa --use-random /dev/disk/by-id/disk1"
+        );
+    }
+
+    #[test]
+    // Intent: RealRunner rejects a CryptsetupLuksFormatPreview on BOTH run() and
+    //   run_with_stdin() with a "preview-only" error, before any spawn.
+    // Why: the preview variant is not a stdin request, so without the
+    //   is_preview_only guard run() would fall through to RealRunner::exec and
+    //   spawn `cryptsetup luksFormat --batch-mode --key-file=-` with closed
+    //   stdin, formatting the device under an EMPTY passphrase. The pinned
+    //   "preview-only" substring fails reliably if the guard is reverted (the
+    //   fallthrough never produces that wording); a bare is_err() check would
+    //   pass even on the revert.
+    // Scenario: a future refactor accidentally routes the preview twin to a real
+    //   runner.
+    fn preview_luks_format_is_rejected_by_real_runner_on_both_paths() {
+        let runner = RealRunner;
+        let req = CmdRequest::CryptsetupLuksFormatPreview {
+            // Obviously-nonexistent device: a guard regression that DID reach
+            // the spawn must not be able to touch a real /dev node.
+            device: "/dev/nonexistent-preview-only-guard-test".to_owned(),
+            label: luks_label("test"),
+            extra_opts: empty_extras(),
+        };
+
+        let run_err = runner.run(&req).unwrap_err();
+        assert!(
+            matches!(run_err, CmdError::Failed(ref msg) if msg.contains("preview-only")),
+            "run() must reject the preview-only request, got: {run_err:?}"
+        );
+
+        let stdin_err = runner.run_with_stdin(&req, b"secret").unwrap_err();
+        assert!(
+            matches!(stdin_err, CmdError::Failed(ref msg) if msg.contains("preview-only")),
+            "run_with_stdin() must reject the preview-only request, got: {stdin_err:?}"
         );
     }
 }
