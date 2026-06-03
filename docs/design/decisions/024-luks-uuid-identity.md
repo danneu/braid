@@ -234,7 +234,12 @@ warns rather than claiming every declared member is assembled.
   instead of falling back to mapper-name inference.
 - `cli/src/enroll_key_file.rs` unit tests verify standalone enroll rejects a
   member whose live LUKS UUID does not match the pool.json membership key
-  before any slot inventory or keyfile mutation runs.
+  before any slot inventory or keyfile mutation runs. Enroll also re-probes
+  each member's live UUID again at its mutation boundary, after the passphrase
+  prompt and before `luksAddKey`, to catch a disk swapped or reformatted during
+  the prompt window: unit tests pin the standalone re-probe's mismatch and
+  fail-closed arms and the discovery->execute window closure (a swap that passes
+  discovery is rejected at execute before any keyfile is enrolled or generated).
 - `cli/src/replace.rs` unit tests verify `ReplacePlan::execute` re-probes the
   live pool before journal write, rejects unmounted/FSID-drifted/colliding
   live-pool state, and still proceeds when the fresh probe is clean.

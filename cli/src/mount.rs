@@ -259,16 +259,11 @@ fn plan_open_pool_inner<R: CommandRunner, F: Filesystem + ?Sized>(
                 uuid, mapper_open, ..
             } => {
                 if expected_uuid != uuid {
-                    return Err(MountError::Failed(format!(
-                        "disk '{}' LUKS UUID mismatch at {}:\n  \
-                             expected  {}\n  \
-                             found     {}\n\
-                         hint: {}",
+                    return Err(MountError::Failed(luks::format_luks_uuid_mismatch(
                         display_name,
-                        member.by_id,
+                        &member.by_id,
                         expected_uuid,
                         uuid,
-                        luks::luks_uuid_mismatch_guidance()
                     )));
                 }
 

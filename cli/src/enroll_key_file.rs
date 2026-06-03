@@ -9,6 +9,7 @@ use crate::luks::{
     VerifyOutcome,
 };
 use crate::membership::PoolMembership;
+use crate::parse::parse_cryptsetup_luks_uuid;
 use crate::preflight;
 use crate::preview::{
     self, NoteLevel, PerDiskStyle, PlanFailure, Preview, PreviewCompleteness, PreviewNote,
@@ -17,7 +18,7 @@ use crate::probe::{self, Filesystem};
 use crate::secret::Passphrase;
 use crate::state_paths::StatePaths;
 use crate::status_tag::{StatusTag, color_enabled_for_stderr, emit_status, status_line};
-use crate::types::{ByIdPath, ConfigDiskState, DiskName, MountPoint};
+use crate::types::{ByIdPath, ConfigDiskState, DiskName, LuksUuid, MountPoint};
 use std::io::Read;
 use std::os::unix::fs::OpenOptionsExt;
 use std::path::Path;
@@ -63,7 +64,17 @@ pub(crate) enum EnrollmentPlanMode {
     GenerateNew,
 }
 
-pub type EnrollmentCandidate = (DiskName, ByIdPath);
+/// A present LUKS pool member that discovery validated as enrollable.
+/// Carries the `uuid` discovery already proved equals the live header so
+/// the execute-time re-probe (`reprobe_member_luks_uuid`) can compare
+/// against the exact value discovery validated, rather than re-deriving
+/// it from membership at the mutation boundary.
+#[derive(Debug, Clone)]
+pub struct EnrollmentCandidate {
+    pub name: DiskName,
+    pub by_id: ByIdPath,
+    pub uuid: LuksUuid,
+}
 type EnrollmentCandidateDiscovery = (
     Vec<PreviewNote>,
     Result<Vec<EnrollmentCandidate>, EnrollKeyFileError>,
@@ -117,20 +128,21 @@ fn discover_enrollment_candidates<R: CommandRunner, F: Filesystem + ?Sized>(
                 if expected_uuid != uuid {
                     return (
                         notes,
-                        Err(EnrollKeyFileError::Validation(format!(
-                            "disk '{}' LUKS UUID mismatch at {}:\n  \
-                             expected  {}\n  \
-                             found     {}\n\
-                             hint: {}",
-                            name.as_str(),
-                            member.by_id,
-                            expected_uuid,
-                            uuid,
-                            luks::luks_uuid_mismatch_guidance()
-                        ))),
+                        Err(EnrollKeyFileError::Validation(
+                            luks::format_luks_uuid_mismatch(
+                                name.as_str(),
+                                &member.by_id,
+                                expected_uuid,
+                                uuid,
+                            ),
+                        )),
                     );
                 }
-                candidates.push((name.clone(), member.by_id.clone()));
+                candidates.push(EnrollmentCandidate {
+                    name: name.clone(),
+                    by_id: member.by_id.clone(),
+                    uuid: expected_uuid.clone(),
+                });
             }
         }
     }
@@ -163,6 +175,49 @@ fn check_slot_one_available<R: CommandRunner>(
         )));
     }
     Ok(())
+}
+
+/// Execute-time re-probe of a candidate's live LUKS UUID, mirroring
+/// `replace.rs#probe_existing_luks_new_target_uuid`. Decision-024 mandates
+/// re-checking member identity at every mutation boundary: between
+/// discovery and the `luksAddKey` mutation lies the operator-controlled
+/// passphrase-prompt window, during which a disk could be swapped or
+/// reformatted to a foreign LUKS container that happens to share the pool
+/// passphrase. Comparing against the discovery-validated `expected` UUID
+/// fails closed on every swap variant -- a different live UUID (including a
+/// LUKS1 swap, which `luksUUID` still reads at exit 0) hits the mismatch
+/// arm; an absent or non-LUKS device exits non-zero, so the parse error
+/// (or a `run` failure) hits the fail-closed arm. No swap is silently
+/// accepted.
+///
+/// A sub-second TOCTOU window remains between this probe and `luksAddKey`,
+/// identical in kind to replace's probe -> open window; closing the
+/// dominant human-scale passphrase-prompt window is the point. A per-disk
+/// re-probe inside `apply_enrollment` would shave the negligible residual
+/// at the cost of worse diagnostics and a guard split across two
+/// functions, so it is out of scope.
+fn reprobe_member_luks_uuid<R: CommandRunner>(
+    runner: &R,
+    name: &DiskName,
+    by_id: &ByIdPath,
+    expected: &LuksUuid,
+) -> Result<(), EnrollKeyFileError> {
+    let raw = runner.run(&CmdRequest::CryptsetupLuksUuid {
+        device: by_id.as_str().to_owned(),
+    })?;
+    match parse_cryptsetup_luks_uuid(&raw) {
+        Ok(parsed) if parsed.uuid == *expected => Ok(()),
+        Ok(parsed) => Err(EnrollKeyFileError::Validation(
+            luks::format_luks_uuid_mismatch(name.as_str(), by_id, expected, &parsed.uuid),
+        )),
+        Err(_) => Err(EnrollKeyFileError::Validation(format!(
+            "disk '{}': cannot confirm LUKS UUID at {} before enrolling -- \
+             device may have been swapped or disconnected after planning; \
+             re-run `braid enroll`",
+            name.as_str(),
+            by_id
+        ))),
+    }
 }
 
 /// Per-disk enrollment classifier shared by `plan_enrollment` (the
@@ -242,9 +297,9 @@ fn plan_enrollment<R: CommandRunner>(
     let color_enabled = color_enabled_for_stderr();
     let verify_targets: Vec<CredentialVerifyTarget> = candidates
         .iter()
-        .map(|(name, by_id)| CredentialVerifyTarget {
-            name: name.as_str().to_owned(),
-            device: by_id.as_str().to_owned(),
+        .map(|c| CredentialVerifyTarget {
+            name: c.name.as_str().to_owned(),
+            device: c.by_id.as_str().to_owned(),
         })
         .collect();
     match verify_credential_for_targets(
@@ -270,10 +325,10 @@ fn plan_enrollment<R: CommandRunner>(
     // sibling commands (mount/add/replace). The loop below only handles
     // mode-specific keyfile probing and slot-1 preflight via the shared helper.
     let mut plan = Vec::new();
-    for (name, by_id) in candidates {
-        let action = plan_single_disk_enrollment(runner, name, by_id, key_file_path, mode)?;
+    for c in candidates {
+        let action = plan_single_disk_enrollment(runner, &c.name, &c.by_id, key_file_path, mode)?;
         if matches!(action, DiskEnrollAction::NeedsEnroll { .. }) {
-            eprintln!("enroll: {} -- will add keyfile to slot 1", name);
+            eprintln!("enroll: {} -- will add keyfile to slot 1", c.name);
         }
         plan.push(action);
     }
@@ -383,13 +438,13 @@ pub fn compile_enroll_steps(
         });
     }
 
-    for (name, by_id) in candidates {
-        let mn = mapper_name(name);
+    for c in candidates {
+        let mn = mapper_name(&c.name);
         steps.push(Step {
             risk: "safe",
-            description: format!("enroll keyfile -> LUKS slot 1 on {}", by_id),
+            description: format!("enroll keyfile -> LUKS slot 1 on {}", c.by_id),
             commands: vec![CmdRequest::CryptsetupLuksAddKeyFile {
-                device: by_id.as_str().to_owned(),
+                device: c.by_id.as_str().to_owned(),
                 key_file_path: key_file_path.display().to_string(),
             }],
         });
@@ -398,7 +453,7 @@ pub fn compile_enroll_steps(
             risk: "safe",
             description: format!("LUKS header backup -> {}", backup_path.display()),
             commands: vec![CmdRequest::CryptsetupLuksHeaderBackup {
-                device: by_id.as_str().to_owned(),
+                device: c.by_id.as_str().to_owned(),
                 backup_path: backup_path.display().to_string(),
             }],
         });
@@ -460,6 +515,17 @@ impl EnrollPlan {
         preview::emit_notes_to_stderr(&self.notes, Self::STDERR_STYLE);
 
         let passphrase = luks::read_passphrase(params.passphrase_file, params.passphrase_stdin)?;
+
+        // Decision-024 mutation-boundary re-check: the passphrase prompt is
+        // an operator-controlled window in which a disk could be swapped or
+        // reformatted. Re-probe every candidate's live LUKS UUID against the
+        // value discovery validated before any keyfile lands in slot 1. Done
+        // before the passphrase verify so a swap reports a clear UUID
+        // mismatch rather than a misleading "wrong passphrase", and (in
+        // --generate mode) before keyfile creation, which runs later.
+        for c in &self.candidates {
+            reprobe_member_luks_uuid(runner, &c.name, &c.by_id, &c.uuid)?;
+        }
 
         let mode = if self.generate {
             EnrollmentPlanMode::GenerateNew
@@ -654,8 +720,9 @@ pub fn plan_enroll<R: CommandRunner, F: Filesystem + ?Sized>(
             EnrollmentPlanMode::ExistingKeyfile
         };
         let mut needs_enroll: Vec<EnrollmentCandidate> = Vec::with_capacity(candidates.len());
-        for (name, by_id) in &candidates {
-            match plan_single_disk_enrollment(runner, name, by_id, params.key_file_path, mode) {
+        for c in &candidates {
+            match plan_single_disk_enrollment(runner, &c.name, &c.by_id, params.key_file_path, mode)
+            {
                 Ok(DiskEnrollAction::AlreadyEnrolled { name, .. }) => {
                     notes.push(PreviewNote::PerDisk {
                         name: name.as_str().to_owned(),
@@ -663,8 +730,12 @@ pub fn plan_enroll<R: CommandRunner, F: Filesystem + ?Sized>(
                         message: "keyfile already enrolled".into(),
                     });
                 }
-                Ok(DiskEnrollAction::NeedsEnroll { name, by_id }) => {
-                    needs_enroll.push((name, by_id));
+                // The action's name/by_id are clones of `c`'s; pushing the
+                // original candidate is semantically identical and carries the
+                // discovery-validated uuid forward. The dry-run path never
+                // re-probes, so the carried uuid is inert here.
+                Ok(DiskEnrollAction::NeedsEnroll { .. }) => {
+                    needs_enroll.push(c.clone());
                 }
                 Err(e) => {
                     return Err(PlanFailure::with_notes(notes, e));
@@ -735,6 +806,20 @@ mod tests {
         DiskName::parse(name).expect("test disk name")
     }
 
+    /// Build an `EnrollmentCandidate` for the `plan_enrollment` /
+    /// `compile_enroll_steps` tests, which take candidates directly and
+    /// never re-probe -- so the carried `uuid` is inert there and a fixed
+    /// `test_uuid(500)` keeps these call sites terse. Tests that exercise
+    /// the execute-time re-probe construct candidates inline with the
+    /// specific uuid their `CryptsetupLuksUuid` mock returns.
+    fn enroll_candidate(name: &str, by_id: &str) -> EnrollmentCandidate {
+        EnrollmentCandidate {
+            name: disk(name),
+            by_id: enroll_by_id(by_id),
+            uuid: test_uuid(500),
+        }
+    }
+
     // ---- plan_enroll discovery tests ----
     //
     // These tests exercise `plan_enroll(..., generate=true, ...)` because
@@ -782,8 +867,8 @@ mod tests {
         };
         let plan = plan_enroll(&runner, &fs, &params).expect("plan_enroll should succeed");
         assert_eq!(plan.candidates.len(), 2);
-        assert_eq!(plan.candidates[0].0.as_str(), "disk1");
-        assert_eq!(plan.candidates[1].0.as_str(), "disk2");
+        assert_eq!(plan.candidates[0].name.as_str(), "disk1");
+        assert_eq!(plan.candidates[1].name.as_str(), "disk2");
         assert!(
             plan.notes.is_empty(),
             "plan.notes should be empty when all candidates present"
@@ -968,7 +1053,7 @@ mod tests {
         let plan = plan_enroll(&runner, &fs, &params)
             .expect("plan_enroll should succeed with one candidate");
         assert_eq!(plan.candidates.len(), 1);
-        assert_eq!(plan.candidates[0].0.as_str(), "disk2");
+        assert_eq!(plan.candidates[0].name.as_str(), "disk2");
         assert_eq!(plan.notes.len(), 1);
         match &plan.notes[0] {
             PreviewNote::PerDisk {
@@ -1021,7 +1106,7 @@ mod tests {
         };
         let plan = plan_enroll(&runner, &fs, &params).expect("plan_enroll should succeed");
         assert_eq!(plan.candidates.len(), 1);
-        assert_eq!(plan.candidates[0].0.as_str(), "disk2");
+        assert_eq!(plan.candidates[0].name.as_str(), "disk2");
         assert_eq!(plan.notes.len(), 1);
         match &plan.notes[0] {
             PreviewNote::PerDisk {
@@ -2099,10 +2184,7 @@ mod tests {
             .with_output(ld1_req, ld1_out)
             .with_output(ld2_req, ld2_out);
 
-        let candidates = vec![
-            (disk("disk1"), enroll_by_id(d1)),
-            (disk("disk2"), enroll_by_id(d2)),
-        ];
+        let candidates = vec![enroll_candidate("disk1", d1), enroll_candidate("disk2", d2)];
 
         let plan = plan_enrollment(
             &runner,
@@ -2152,10 +2234,7 @@ mod tests {
             .with_output(tkf1_req, tkf1_out)
             .with_output(tkf2_req, tkf2_out);
 
-        let candidates = vec![
-            (disk("disk1"), enroll_by_id(d1)),
-            (disk("disk2"), enroll_by_id(d2)),
-        ];
+        let candidates = vec![enroll_candidate("disk1", d1), enroll_candidate("disk2", d2)];
 
         let plan = plan_enrollment(
             &runner,
@@ -2221,10 +2300,7 @@ mod tests {
             .with_output(tkf2_req, tkf2_out)
             .with_output(ld2_req, ld2_out);
 
-        let candidates = vec![
-            (disk("disk1"), enroll_by_id(d1)),
-            (disk("disk2"), enroll_by_id(d2)),
-        ];
+        let candidates = vec![enroll_candidate("disk1", d1), enroll_candidate("disk2", d2)];
 
         let plan = plan_enrollment(
             &runner,
@@ -2274,10 +2350,7 @@ mod tests {
             .with_output(tkf2_req, tkf2_out)
             .with_output(ld2_req, ld2_out);
 
-        let candidates = vec![
-            (disk("disk1"), enroll_by_id(d1)),
-            (disk("disk2"), enroll_by_id(d2)),
-        ];
+        let candidates = vec![enroll_candidate("disk1", d1), enroll_candidate("disk2", d2)];
 
         let captured = crate::status_tag::testing::capture_with_color(false, || {
             plan_enrollment(
@@ -2330,7 +2403,7 @@ mod tests {
         let (tp_req, tp_stdin, tp_out) = enroll_test_passphrase_fail(d1, pass);
         let runner = MockRunner::default().with_output_stdin(tp_req, tp_stdin, tp_out);
 
-        let candidates = vec![(disk("disk1"), enroll_by_id(d1))];
+        let candidates = vec![enroll_candidate("disk1", d1)];
 
         let result = plan_enrollment(
             &runner,
@@ -2375,10 +2448,7 @@ mod tests {
             .with_output(ld1_req, ld1_out)
             .with_output(ld2_req, ld2_out);
 
-        let candidates = vec![
-            (disk("disk1"), enroll_by_id(d1)),
-            (disk("disk2"), enroll_by_id(d2)),
-        ];
+        let candidates = vec![enroll_candidate("disk1", d1), enroll_candidate("disk2", d2)];
 
         let result = plan_enrollment(
             &runner,
@@ -2534,7 +2604,7 @@ mod tests {
             .with_output_stdin(tp_req, tp_stdin, tp_out)
             .with_output(tkf_req, tkf_out);
 
-        let candidates = vec![(disk("disk1"), enroll_by_id(d1))];
+        let candidates = vec![enroll_candidate("disk1", d1)];
 
         let err = plan_enrollment(
             &runner,
@@ -2592,10 +2662,7 @@ mod tests {
             .with_output(ld1_req, ld1_out)
             .with_output(ld2_req, ld2_out);
 
-        let candidates = vec![
-            (disk("disk1"), enroll_by_id(d1)),
-            (disk("disk2"), enroll_by_id(d2)),
-        ];
+        let candidates = vec![enroll_candidate("disk1", d1), enroll_candidate("disk2", d2)];
 
         let plan = plan_enrollment(
             &runner,
@@ -2652,10 +2719,7 @@ mod tests {
             .with_output(ld1_req, ld1_out)
             .with_output(ld2_req, ld2_out);
 
-        let candidates = vec![
-            (disk("disk1"), enroll_by_id(d1)),
-            (disk("disk2"), enroll_by_id(d2)),
-        ];
+        let candidates = vec![enroll_candidate("disk1", d1), enroll_candidate("disk2", d2)];
 
         let plan = plan_enrollment(
             &runner,
@@ -2727,10 +2791,7 @@ mod tests {
             .with_output(ld1_req, ld1_out)
             .with_output(ld2_req, ld2_out);
 
-        let candidates = vec![
-            (disk("disk1"), enroll_by_id(d1)),
-            (disk("disk2"), enroll_by_id(d2)),
-        ];
+        let candidates = vec![enroll_candidate("disk1", d1), enroll_candidate("disk2", d2)];
 
         let err = plan_enrollment(
             &runner,
@@ -2787,10 +2848,7 @@ mod tests {
             .with_output_stdin(tp1_req, tp1_stdin, tp1_out)
             .with_output_stdin(tp2_req, tp2_stdin, tp2_out);
 
-        let candidates = vec![
-            (disk("disk1"), enroll_by_id(d1)),
-            (disk("disk2"), enroll_by_id(d2)),
-        ];
+        let candidates = vec![enroll_candidate("disk1", d1), enroll_candidate("disk2", d2)];
 
         let err = plan_enrollment(
             &runner,
@@ -2859,10 +2917,7 @@ mod tests {
             .with_output(ld1_req, ld1_out)
             .with_output_stdin(tp2_req, tp2_stdin, tp2_out);
 
-        let candidates = vec![
-            (disk("disk1"), enroll_by_id(d1)),
-            (disk("disk2"), enroll_by_id(d2)),
-        ];
+        let candidates = vec![enroll_candidate("disk1", d1), enroll_candidate("disk2", d2)];
 
         let err = plan_enrollment(
             &runner,
@@ -3225,6 +3280,12 @@ mod tests {
         let d1 = "/dev/disk/by-id/d1";
         let d2 = "/dev/disk/by-id/d2";
 
+        // This plan is built directly (no plan_enroll discovery), so the
+        // execute-time re-probe needs its own CryptsetupLuksUuid mock per
+        // by-id returning the carried candidate uuid -- otherwise the
+        // re-probe MissingMocks before reaching the luksAddKey apply path.
+        let (uuid1_req, uuid1_out) = enroll_luks_uuid_ok(d1, test_uuid(500).as_str());
+        let (uuid2_req, uuid2_out) = enroll_luks_uuid_ok(d2, test_uuid(501).as_str());
         let (tp1_req, tp1_stdin, tp1_out) = enroll_test_passphrase_ok(d1, pass);
         let (tp2_req, tp2_stdin, tp2_out) = enroll_test_passphrase_ok(d2, pass);
         let (ld1_req, ld1_out) = enroll_luks_dump_slot1_empty(d1);
@@ -3234,6 +3295,8 @@ mod tests {
         let (mp_req, mp_out) = enroll_mountpoint_ok(tmp.path());
 
         let runner = MockRunner::default()
+            .with_output(uuid1_req, uuid1_out)
+            .with_output(uuid2_req, uuid2_out)
             .with_output_stdin(tp1_req, tp1_stdin, tp1_out)
             .with_output_stdin(tp2_req, tp2_stdin, tp2_out)
             .with_output(ld1_req, ld1_out)
@@ -3257,8 +3320,16 @@ mod tests {
             notes: vec![],
             steps: vec![],
             candidates: vec![
-                (disk("disk1"), enroll_by_id(d1)),
-                (disk("disk2"), enroll_by_id(d2)),
+                EnrollmentCandidate {
+                    name: disk("disk1"),
+                    by_id: enroll_by_id(d1),
+                    uuid: test_uuid(500),
+                },
+                EnrollmentCandidate {
+                    name: disk("disk2"),
+                    by_id: enroll_by_id(d2),
+                    uuid: test_uuid(501),
+                },
             ],
             generate: true,
         };
@@ -3291,6 +3362,186 @@ mod tests {
         assert!(
             err.contains(&format!("braid enroll {}", tmp.path().display())),
             "expected recovery command pointing at generated-key dir in: {err}"
+        );
+    }
+
+    // ---- reprobe_member_luks_uuid tests ----
+
+    // Intent: reprobe_member_luks_uuid rejects a candidate whose live LUKS
+    //   UUID at the by-id path no longer matches the UUID discovery
+    //   validated, returning the canonical mismatch message.
+    // Why it exists: decision-024 mandates a UUID re-check at every
+    //   mutation boundary. The enroll passphrase prompt is an
+    //   operator-controlled window in which a disk can be swapped to a
+    //   foreign LUKS container that shares the pool passphrase; this pins
+    //   the guard's reject arm. No VM test -- an in-window physical swap
+    //   during the passphrase prompt is not deterministically reproducible
+    //   in a NixOS VM (tests/cli/enroll-uuid-mismatch.py covers the
+    //   pre-command discovery case).
+    // Scenario: the by-id slot now points at a different LUKS volume than
+    //   the one discovery captured; the re-probe reads the foreign UUID.
+    #[test]
+    fn reprobe_member_luks_uuid_mismatch_rejects() {
+        let d1 = "/dev/disk/by-id/d1";
+        let expected = test_uuid(500);
+        let observed = "ffffffff-ffff-ffff-ffff-ffffffffffff";
+        let (req, out) = enroll_luks_uuid_ok(d1, observed);
+        let runner = MockRunner::default().with_output(req, out);
+
+        let err = reprobe_member_luks_uuid(&runner, &disk("disk1"), &enroll_by_id(d1), &expected)
+            .expect_err("a foreign live UUID must reject the re-probe");
+        let msg = err.to_string();
+        assert!(
+            msg.contains("LUKS UUID mismatch"),
+            "expected mismatch wording: {msg}"
+        );
+        assert!(msg.contains("disk1"), "error should name disk1: {msg}");
+        assert!(
+            msg.contains(expected.as_str()),
+            "error should include expected UUID {expected}: {msg}"
+        );
+        assert!(
+            msg.contains(observed),
+            "error should include observed UUID {observed}: {msg}"
+        );
+        assert!(
+            msg.contains("detach the foreign disk"),
+            "error should include remediation guidance: {msg}"
+        );
+
+        let probe_count = runner
+            .requests()
+            .iter()
+            .filter(|r| matches!(r, CmdRequest::CryptsetupLuksUuid { device } if device == d1))
+            .count();
+        assert_eq!(probe_count, 1, "exactly one luksUUID probe must run");
+    }
+
+    // Intent: reprobe_member_luks_uuid fails closed when the live UUID
+    //   cannot be confirmed (device absent, non-LUKS, or otherwise
+    //   unreadable at probe time), and issues no enrollment mutation.
+    // Why it exists: a mid-prompt disappearance is indistinguishable from
+    //   a swap in progress, so the re-probe must hard-fail rather than
+    //   proceed -- the fail-closed arm of the decision-024 guard. Same
+    //   no-VM-test rationale as the mismatch sibling.
+    // Scenario: the disk was disconnected or reformatted to a non-LUKS
+    //   device during the passphrase prompt, so luksUUID exits non-zero.
+    #[test]
+    fn reprobe_member_luks_uuid_probe_failure_fails_closed() {
+        let d1 = "/dev/disk/by-id/d1";
+        let (req, out) = enroll_luks_uuid_not_luks(d1);
+        let runner = MockRunner::default().with_output(req, out);
+
+        let err =
+            reprobe_member_luks_uuid(&runner, &disk("disk1"), &enroll_by_id(d1), &test_uuid(500))
+                .expect_err("an unconfirmable UUID must fail closed");
+        let msg = err.to_string();
+        assert!(
+            msg.contains("cannot confirm LUKS UUID"),
+            "expected fail-closed wording: {msg}"
+        );
+        assert!(
+            msg.contains("re-run `braid enroll`"),
+            "expected re-run guidance: {msg}"
+        );
+
+        assert!(
+            !runner
+                .requests()
+                .iter()
+                .any(|r| matches!(r, CmdRequest::CryptsetupLuksAddKeyFile { .. })),
+            "no enrollment mutation may follow a fail-closed re-probe: {:?}",
+            runner.requests()
+        );
+    }
+
+    // Intent: the discovery->execute window is closed -- a disk swapped to
+    //   a foreign LUKS container during the passphrase prompt is rejected
+    //   at the execute-time re-probe, before any keyfile is written to
+    //   slot 1 or generated on the USB.
+    // Why it exists: discovery validates each member's UUID, but the
+    //   passphrase prompt that follows is an operator-controlled window.
+    //   Without the execute-boundary re-probe (decision-024), a swap in
+    //   that window silently lands the keyfile in the wrong container
+    //   while the intended member's slot 1 stays empty. No VM test -- an
+    //   in-window physical swap during the passphrase prompt is not
+    //   deterministically reproducible in a NixOS VM;
+    //   tests/cli/enroll-uuid-mismatch.py covers the pre-command reformat
+    //   (discovery) case.
+    // Scenario: 2-disk pool, --generate. disk1's by-id slot still matches
+    //   at discovery but is swapped to a foreign LUKS volume before
+    //   execute re-probes it.
+    #[test]
+    fn execute_rejects_swapped_disk_before_mutation() {
+        let (tmp, paths) = isolated_paths();
+        let kf = tmp.path().join("braid.key");
+        let pass_path = tmp.path().join("pass");
+        std::fs::write(&pass_path, "testpass\n").unwrap();
+
+        let d1 = "/dev/disk/by-id/d1";
+        let d2 = "/dev/disk/by-id/d2";
+        let foreign = "ffffffff-ffff-ffff-ffff-ffffffffffff";
+
+        // Mappers closed => discovery issues exactly one luksUUID per disk,
+        // so the 2nd sequence element below is consumed by the execute
+        // re-probe. A mapper-open disk would pop both at discovery and
+        // silently invert the test -- the mismatch would surface at plan
+        // time rather than at the execute boundary under test.
+        let (_, d1_match) = enroll_luks_uuid_ok(d1, test_uuid(500).as_str());
+        let (_, d1_swapped) = enroll_luks_uuid_ok(d1, foreign);
+        let (d2_req, d2_out) = enroll_luks_uuid_ok(d2, test_uuid(501).as_str());
+        let runner = MockRunner::default()
+            .with_output_sequence(
+                CmdRequest::CryptsetupLuksUuid {
+                    device: d1.to_owned(),
+                },
+                vec![d1_match, d1_swapped],
+            )
+            .with_output(d2_req, d2_out)
+            .with_luks_dump_text_luks2_for(&[d1, d2])
+            .with_mappers_closed(&["braid-disk1", "braid-disk2"]);
+        let runner = enroll_with_mountpoint_ok(runner, tmp.path());
+
+        let fs = enroll_fs(&[d1, d2]);
+        let membership = enroll_make_membership(&[("disk1", d1), ("disk2", d2)]);
+
+        let params = EnrollKeyFileParams {
+            membership: &membership,
+            key_file_path: &kf,
+            generate: true,
+            passphrase_stdin: false,
+            passphrase_file: Some(&pass_path),
+            dry_run: false,
+            paths: &paths,
+            backing_path_resolver: crate::test_fixtures::mock_virtio_backing_path_resolver(),
+        };
+
+        let plan =
+            plan_enroll(&runner, &fs, &params).expect("discovery must succeed with matching UUIDs");
+        let err = plan
+            .execute(&runner, &params)
+            .expect_err("execute re-probe must reject the swapped disk")
+            .to_string();
+
+        assert!(
+            err.contains("LUKS UUID mismatch"),
+            "expected mismatch error: {err}"
+        );
+        assert!(
+            err.contains("disk1"),
+            "error should name the swapped disk: {err}"
+        );
+        assert!(
+            !runner
+                .requests()
+                .iter()
+                .any(|r| matches!(r, CmdRequest::CryptsetupLuksAddKeyFile { .. })),
+            "no keyfile may be enrolled after a swap is detected: {:?}",
+            runner.requests()
+        );
+        assert!(
+            !kf.exists(),
+            "--generate must not create braid.key when the re-probe rejects"
         );
     }
 
@@ -3779,9 +4030,9 @@ mod tests {
     // Scenario: 3-disk pool, all present LUKS, --generate --dry-run.
     fn dry_run_render_enroll_generate_3_disks() {
         let candidates = vec![
-            (disk("aaa"), enroll_by_id("/dev/disk/by-id/disk-aaa")),
-            (disk("bbb"), enroll_by_id("/dev/disk/by-id/disk-bbb")),
-            (disk("ccc"), enroll_by_id("/dev/disk/by-id/disk-ccc")),
+            enroll_candidate("aaa", "/dev/disk/by-id/disk-aaa"),
+            enroll_candidate("bbb", "/dev/disk/by-id/disk-bbb"),
+            enroll_candidate("ccc", "/dev/disk/by-id/disk-ccc"),
         ];
         let (_state_dir, paths) = isolated_paths();
         let steps =
@@ -3808,8 +4059,8 @@ mod tests {
     // Scenario: 2-disk pool, existing keyfile, --dry-run (no --generate).
     fn dry_run_render_enroll_existing_keyfile() {
         let candidates = vec![
-            (disk("aaa"), enroll_by_id("/dev/disk/by-id/disk-aaa")),
-            (disk("bbb"), enroll_by_id("/dev/disk/by-id/disk-bbb")),
+            enroll_candidate("aaa", "/dev/disk/by-id/disk-aaa"),
+            enroll_candidate("bbb", "/dev/disk/by-id/disk-bbb"),
         ];
         let (_state_dir, paths) = isolated_paths();
         let steps =

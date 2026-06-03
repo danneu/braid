@@ -731,6 +731,26 @@ pub(crate) fn luks_uuid_mismatch_guidance() -> &'static str {
      intentional"
 }
 
+/// Canonical multi-line LUKS UUID-mismatch message shared by every
+/// membership boundary that compares a live header UUID against the one
+/// recorded in `pool.json` (unlock/mount, standalone enroll discovery,
+/// and the enroll execute-time re-probe). Centralised so all three render
+/// byte-identically and end with `luks_uuid_mismatch_guidance()`.
+pub(crate) fn format_luks_uuid_mismatch(
+    name: &str,
+    by_id: &ByIdPath,
+    expected: &LuksUuid,
+    found: &LuksUuid,
+) -> String {
+    format!(
+        "disk '{name}' LUKS UUID mismatch at {by_id}:\n  \
+         expected  {expected}\n  \
+         found     {found}\n\
+         hint: {}",
+        luks_uuid_mismatch_guidance()
+    )
+}
+
 /// Verdict for a present declared member whose on-disk LUKS UUID is compared
 /// against the UUID recorded in membership. Shared by `status` and the TUI so
 /// both glance surfaces agree on swap/reformat detection (decision 024);
