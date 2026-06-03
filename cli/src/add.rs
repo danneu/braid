@@ -47,10 +47,23 @@ pub enum AddError {
     Validation(String),
     #[error(
         "pool was modified, but acked-stats cleanup failed at {stage}: {detail}\n\
-         health alert baselines may be stale -- run `rm /var/lib/braid/acked-stats.json` \
-         before trusting `braid monitor`."
+         pending-op.json is preserved -- rm /var/lib/braid/acked-stats.json before trusting \
+         `braid monitor`, then run `braid recover` to finish."
     )]
     AckCleanupFailed { stage: &'static str, detail: String },
+    /// Post-mutation, pre-persist failure in the live-pool add loop:
+    /// `btrfs device add` already committed membership, but the follow-up
+    /// `probe_pool` failed (or did not yet list the new device), so braid
+    /// stopped before `save_membership` wrote pool.json. Distinct from
+    /// `AckCleanupFailed` because acked-stats was never reached -- the
+    /// PoolMutation journal is still pending, so the remediation is
+    /// `braid recover` (which replays the journal and skips already-live
+    /// members), not deleting alert baselines.
+    #[error(
+        "disk added to pool, but pool.json was not persisted: {detail}\n\
+         pending-op.json is preserved -- run `braid recover` to finish persisting pool membership."
+    )]
+    PostAddProbeFailed { detail: String },
     /// Pre-journal-write refusal: a target's LUKS UUID collides with
     /// another in-flight add target, an existing pool member, or a UUID
     /// observed in the live `pool.devices` set. Raised by
@@ -1454,15 +1467,13 @@ impl AddPlan {
                 pool_add_device(runner, &target.mapper_path, mount_point, target.force)?;
                 eprintln!("Device added to pool: {}", target.mapper_path);
                 let probe = probe_pool(runner, fs, mount_point).map_err(|e| {
-                    AddError::AckCleanupFailed {
-                        stage: "post-add probe",
+                    AddError::PostAddProbeFailed {
                         detail: format!("{}: {e}", target.name),
                     }
                 })?;
                 let dev =
                     find_added_device_by_uuid(&probe, &target.luks_uuid).ok_or_else(|| {
-                        AddError::AckCleanupFailed {
-                            stage: "post-add probe",
+                        AddError::PostAddProbeFailed {
                             detail: format!("{}: not found in pool after add", target.name),
                         }
                     })?;
@@ -6092,17 +6103,21 @@ mod tests {
 
     /*
      * Intent: post-add probe failures are fatal with the typed
-     * `AckCleanupFailed` stage `post-add probe`, both when the probe command
-     * itself fails and when the freshly added mapper is absent from the
-     * successful probe result.
+     * `PostAddProbeFailed` variant, both when the probe command itself fails
+     * and when the freshly added mapper is absent from the successful probe
+     * result. The variant directs the operator to `braid recover` (the
+     * journal is still pending and pool.json was never saved), not to acked-
+     * stats deletion -- the acked-stats cleanup was never reached.
      *
      * Why it exists: live-add cleanup needs the assigned btrfs devid. If braid
      * cannot prove which devid was assigned, it must fail closed instead of
-     * guessing or skipping cleanup.
+     * guessing or skipping cleanup. The journal must survive so `braid recover`
+     * can replay the still-pending PoolMutation.
      *
      * Scenario: disk2's `btrfs device add` succeeds. In one case the
      * following pool probe fails; in the other it succeeds but omits
-     * /dev/mapper/braid-disk2. Both must stop at the post-add probe boundary.
+     * /dev/mapper/braid-disk2. Both must stop at the post-add probe boundary
+     * with the journal intact and pool.json not yet listing disk2.
      */
     #[test]
     fn cmd_add_post_add_probe_uncertainty_is_fatal() {
@@ -6144,15 +6159,28 @@ mod tests {
             );
 
             match result {
-                Err(AddError::AckCleanupFailed { stage, .. }) => {
-                    assert_eq!(stage, "post-add probe", "{label}");
-                }
-                other => panic!("{label}: expected post-add AckCleanupFailed, got {other:?}"),
+                Err(AddError::PostAddProbeFailed { .. }) => {}
+                other => panic!("{label}: expected PostAddProbeFailed, got {other:?}"),
             }
             assert_eq!(
                 runner.added_mappers(),
                 vec!["braid-disk2"],
                 "{label}: failure must happen after device add commits"
+            );
+            // The recover-pointing contract: the PoolMutation journal survives
+            // the error, so `braid recover` has the still-pending op to replay.
+            assert!(
+                journal::load_journal(&paths).unwrap().is_some(),
+                "{label}: journal must survive so `braid recover` can replay it"
+            );
+            // pool.json was never persisted (save_membership runs only after the
+            // per-target loop completes), so disk2 must not yet be a member.
+            assert!(
+                membership::load_membership(&paths)
+                    .unwrap()
+                    .by_name(&DiskName::parse("disk2").unwrap())
+                    .is_none(),
+                "{label}: pool.json must not list disk2 -- save_membership was never reached"
             );
         }
     }
