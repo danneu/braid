@@ -318,12 +318,12 @@ fn build_compact_drives(
 /// Present devices mirror `build_disk_reports`'s UUID-first name rule; missing
 /// and null-underlying entries use persisted devid only as the no-live-UUID
 /// fallback authorized for display joins.
+/// `membership` is `load_membership`-validated, so `by_devid`'s `DuplicateDevid` is
+/// unreachable here and is treated as an unnamed join rather than refused -- this
+/// read-only display must not abort, and `load_membership` owns the refusal.
 /// The TUI has parallel input-specific logic that can collapse into this once
 /// both paths expose the same membership-shaped inputs.
-fn build_devid_names(
-    pool: &PoolState,
-    membership: &PoolMembership,
-) -> Result<HashMap<u64, String>, membership::MembershipError> {
+fn build_devid_names(pool: &PoolState, membership: &PoolMembership) -> HashMap<u64, String> {
     let mut names = HashMap::new();
 
     for pd in &pool.devices {
@@ -332,7 +332,7 @@ fn build_devid_names(
     }
 
     for nu in &pool.null_underlying {
-        if let Some((_, member)) = membership.by_devid(nu.devid)? {
+        if let Some((_, member)) = membership.by_devid(nu.devid).ok().flatten() {
             names
                 .entry(nu.devid)
                 .or_insert_with(|| member.name.as_str().to_owned());
@@ -340,14 +340,14 @@ fn build_devid_names(
     }
 
     for devid in &pool.missing_devids {
-        if let Some((_, member)) = membership.by_devid(*devid)? {
+        if let Some((_, member)) = membership.by_devid(*devid).ok().flatten() {
             names
                 .entry(*devid)
                 .or_insert_with(|| member.name.as_str().to_owned());
         }
     }
 
-    Ok(names)
+    names
 }
 
 // ---------------------------------------------------------------------------
@@ -535,7 +535,7 @@ fn build_status<R: CommandRunner, F: Filesystem>(
         StatusCode::Degraded
     };
 
-    let devid_names = build_devid_names(&pool, &membership)?;
+    let devid_names = build_devid_names(&pool, &membership);
 
     let members: Vec<_> = membership
         .iter_by_name()
@@ -5602,7 +5602,7 @@ mod tests {
             }],
         };
 
-        let names = build_devid_names(&pool, &membership).unwrap();
+        let names = build_devid_names(&pool, &membership);
 
         assert_eq!(names.get(&1).map(String::as_str), Some("toshiba1"));
         assert_eq!(names.get(&2).map(String::as_str), Some("toshiba2"));
@@ -5632,19 +5632,21 @@ mod tests {
             null_underlying: vec![],
         };
 
-        let names = build_devid_names(&pool, &PoolMembership::empty()).unwrap();
+        let names = build_devid_names(&pool, &PoolMembership::empty());
 
         assert_eq!(names.get(&7).map(String::as_str), Some("foreign-live"));
     }
 
     #[test]
-    fn build_devid_names_propagates_duplicate_devid() {
-        // Intent: corrupt membership with duplicate persisted devids fails
-        // closed during missing-device name resolution.
-        // Why it exists: silently picking one member would attach the wrong
-        // operator-facing disk name to a missing-device alert.
-        // Scenario: two pool.json entries both claim devid 7 and btrfs
-        // reports devid 7 as MISSING.
+    fn build_devid_names_leaves_duplicate_devid_unnamed() {
+        // Intent: a duplicate persisted devid that load_membership would reject
+        // upstream degrades to an unnamed join here -- no panic, no mis-named
+        // disk attached to the missing-device row.
+        // Why it exists: build_devid_names is a read-only display helper, so it
+        // must not abort braid status on a corruption it can never legitimately
+        // see; load_membership remains the authoritative refusal for it.
+        // Scenario: two pool.json entries both claim devid 7 (only reachable via
+        // the for_corruption_tests bypass) and btrfs reports devid 7 as MISSING.
         let (uuid1, member1) =
             disk_member_with(921, "toshiba1", "/dev/disk/by-id/disk1", Some(7), None);
         let (uuid2, member2) =
@@ -5661,15 +5663,9 @@ mod tests {
             null_underlying: vec![],
         };
 
-        let err = build_devid_names(&pool, &membership).unwrap_err();
+        let names = build_devid_names(&pool, &membership);
 
-        assert!(
-            matches!(
-                err,
-                membership::MembershipError::DuplicateDevid { devid: 7, .. }
-            ),
-            "expected DuplicateDevid, got: {err:?}"
-        );
+        assert_eq!(names.get(&7), None, "duplicate devid must be left unnamed");
     }
 
     // =======================================================================
@@ -6141,7 +6137,7 @@ mod tests {
             fsid: None,
             null_underlying: vec![],
         };
-        let devid_names = build_devid_names(&pool, &PoolMembership::empty()).unwrap();
+        let devid_names = build_devid_names(&pool, &PoolMembership::empty());
         let report = status_report_with_alerts(
             vec![status_disk_report_named("foreign-live", 1)],
             vec![AlertCause::BtrfsDeviceErrors { devid: 1 }],
