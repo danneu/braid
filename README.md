@@ -52,7 +52,7 @@ See the [command reference](docs/commands/) for full usage of each command.
 - **RAID1 capacity cost** -- half your raw capacity goes to redundancy. Four 12 TB drives = 24 TB usable.
 - **HDD-first** -- defaults are tuned for spinning drives (no TRIM, HDD scrub scheduling). SSDs may work but are not validated.
 - **Unstable** -- this is unversioned and pre-v1.0, and I change things when I decide on a better way. Commands, flags, config, and even on-disk state like `pool.json` format can change.
-- **Unproven** -- I run braid on a daily-use 4x12TB NAS, and there are 180+ NixOS VM tests and 2200+ Rust tests, but there are almost certainly weird/bad edge cases. That said, you can always use `--dry-run` to see what commands will get run.
+- **Unproven** -- I run braid on a daily-use 4x12TB NAS, and there are 180+ NixOS VM tests and 2200+ Rust tests, but there are almost certainly weird/bad edge cases. That said, every mutating command takes a `--dry-run` flag, so you can preview exactly what it'll do before it touches your disks.
 
 ## Install
 
@@ -202,6 +202,16 @@ If a mutation is interrupted, braid leaves `/var/lib/braid/pending-op.json` in p
 ### Development
 
 See [docs/dev/overview.md](docs/dev/overview.md) for the dev workflow, test commands, and dependency upgrade process.
+
+## How braid is built
+
+braid is written almost entirely by AI agents. After 20 years of software work, this project is my attempt at finding a state-of-the-art approach to AI-heavy engineering.
+
+It is not vibe-coded. Every change runs through a deliberate plan-first pipeline: I generally have Claude Code (`--effort max`) draft a plan, then I run a revision loop with other agents -- I answer their clarifying questions, choose among branching decisions, and double-check the direction -- until the plan is ratcheted into a final form. Then an agent implements the plan.
+
+The plan file is the main unit of work in braid. That is where all of my attention is spent. Implementation is derived from the plan.
+
+Contributors, if any, would submit plan files rather than code, then we would revision-cycle the plan until it's ready for agent implementation.
 
 ## License
 
