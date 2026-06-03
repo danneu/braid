@@ -160,6 +160,8 @@ Messages to search for:
 
 Do not force the journal forward. Investigate the foreign reformat or swapped disk, restore the intended disk if possible, and rerun recovery.
 
+See also [Unlock refused by a foreign or mismatched disk](#unlock-refused-by-a-foreign-or-mismatched-disk) for the same identity check on the `braid unlock` path.
+
 ## Never-enriched member with null-underlying mapper
 
 A member can be known to btrfs by devid while its LUKS backing device is gone (`cryptsetup status` reports `device: (null)`). If the member was never enriched with a persisted devid, recovery cannot bind that null-underlying mapper back to a UUID-keyed membership entry.
@@ -216,6 +218,29 @@ sudo braid recover   # opens its own mount and runs the relock cycle
 ```
 
 `braid lock` unmounts the pool and closes the LUKS mappers. `braid recover` then opens a fresh mount session, finishes any in-progress kernel `dev_replace`, and runs the umount-and-remount cycle that clears stale `btrfs_fs_devices` -- the standard happy path for replace recovery.
+
+## Unlock refused by a foreign or mismatched disk
+
+**Symptom:** `braid unlock` exits with `LUKS UUID mismatch`. A disk at a recorded by-id slot reports a LUKS UUID that differs from the one in `pool.json`; the error names the disk, its by-id path, and the expected vs found UUID.
+
+**Cause:** The disk was swapped, cloned, or reformatted out of band, so its LUKS identity no longer matches the recorded member. This is a hard refusal during probing, before any mapper opens. `--allow-degraded` does not bypass it -- that flag only covers *missing* disks, and this disk is present.
+
+### If the swap was unintended
+
+Detach the foreign disk and reattach the original. `braid unlock` then succeeds.
+
+### If the swap was intentional
+
+`braid replace` requires the pool mounted, but the present mismatched disk blocks the mount. Make the slot read as *missing* first, then replace:
+
+1. Detach the foreign disk so the member reads as absent.
+2. Mount the pool degraded:
+   ```sh
+   sudo braid unlock --allow-degraded
+   ```
+3. Replace the now-missing member following [Missing disk -> Option A: Replace the disk](#option-a-replace-the-disk). `braid replace` prepares its own `--new` disk; see [`braid replace`](../commands/replace.md) for how it handles a disk that already carries a LUKS header.
+
+See also [Out-of-band reformat during recovery](#out-of-band-reformat-during-recovery) for the same identity check on the `braid recover` path (a different trigger).
 
 ## Missing disk (drive failure)
 
@@ -338,6 +363,8 @@ braid command fails
 │   └── braid recover [--allow-degraded]
 ├── pool.json missing
 │   └── braid discover --write → braid unlock
+├── "LUKS UUID mismatch" error
+│   └── see "Unlock refused by a foreign or mismatched disk"
 ├── missing device / won't mount
 │   ├── braid unlock --allow-degraded
 │   └── then: braid replace or braid remove-missing

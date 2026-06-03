@@ -91,6 +91,7 @@ The exit code is **2** when a degraded mount is refused (vs. **1** for other err
 - Refuses if a pending operation journal (`pending-op.json`) exists -- run `braid recover` to reconcile.
 - Refuses if another braid operation is in progress (pool lock `/run/braid-pool.lock` is held) -- retry once it finishes.
 - Refuses to mount degraded without explicit `--allow-degraded`
+- Refuses if a present disk's LUKS UUID does not match the UUID recorded in `pool.json` -- the disk was swapped, cloned, or reformatted out of band. The error names the disk, its by-id path, and the expected vs found UUID. This is a hard error caught during the initial probe, before any mapper opens; `--allow-degraded` does not bypass it (that flag only covers *missing* disks). If unintended, detach the foreign disk and reattach the original; if the swap was intentional, see [Unlock refused by a foreign or mismatched disk](../guides/recovery-scenarios.md#unlock-refused-by-a-foreign-or-mismatched-disk).
 - If any disk rejects the selected credential during verification, unlock fails before opening any mapper and names the failing disk. If another disk already accepted the same credential, that points to disk-specific credential drift outside braid.
 - Does not prompt for a passphrase if all mappers are already open (idempotent re-run)
 

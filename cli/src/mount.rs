@@ -2247,6 +2247,67 @@ pool already mounted at /mnt/storage
         );
     }
 
+    /// Intent: A LUKS UUID mismatch on a *present* disk is refused even when
+    /// `--allow-degraded` is set. The mismatch returns inside the probe loop,
+    /// before the degraded gate, so the flag cannot reach it: the result is the
+    /// hard `MountError::Failed("...LUKS UUID mismatch...")`, never
+    /// `DegradedRefused` and never `Ok`.
+    ///
+    /// Why: docs/commands/unlock.md and docs/guides/recovery-scenarios.md tell
+    /// operators that `--allow-degraded` does not bypass a UUID mismatch (that
+    /// flag only covers *missing* disks). Both existing mismatch tests pass
+    /// `allow_degraded=false`; this locks that load-bearing doc claim so a
+    /// future gate reorder that broke it fails here instead of shipping silently.
+    ///
+    /// Scenario: 2-disk RAID1. disk1's device reports a UUID that differs from
+    /// the stored luks_uuid (swapped/cloned/reformatted drive), but the operator
+    /// reaches for `--allow-degraded` -- the wrong guess after seeing a present
+    /// disk refused.
+    #[test]
+    fn mount_luks_uuid_mismatch_refused_even_with_allow_degraded() {
+        let config = test_config();
+        let mut membership = two_disk_membership();
+        let disk1_uuid = LuksUuid::parse("11111111-1111-1111-1111-111111111111").unwrap();
+        let disk1 = membership
+            .remove_by_uuid(&disk1_uuid)
+            .expect("disk1 fixture member");
+        membership
+            .insert(
+                LuksUuid::parse("11111111-1111-1111-1111-111111111111").unwrap(),
+                disk1,
+            )
+            .expect("replace disk1 fixture UUID");
+
+        let fs = mount_fs(&[
+            "/dev/disk/by-id/virtio-disk1",
+            "/dev/disk/by-id/virtio-disk2",
+        ]);
+
+        // Override base's disk1 UUID seed with a value that mismatches the
+        // stored luks_uuid (HashMap insert semantics on `with_output`).
+        let (uuid1_req, uuid1_out) = luks_uuid_ok(
+            "/dev/disk/by-id/virtio-disk1",
+            "ffffffff-ffff-ffff-ffff-ffffffffffff",
+        );
+        let runner = base_two_disk_runner().with_output(uuid1_req, uuid1_out);
+
+        // allow_degraded = true -- the only change from
+        // mount_luks_uuid_mismatch_closed.
+        let result =
+            open_and_mount_for_test(&runner, &fs, &config, &membership, None, true, "unlock");
+
+        let err = result.expect_err("mismatch must be refused even with --allow-degraded");
+        assert!(
+            matches!(&err, MountError::Failed(_)),
+            "expected MountError::Failed (not DegradedRefused, not Ok), got: {err:?}"
+        );
+        let msg = err.to_string();
+        assert!(
+            msg.contains("LUKS UUID mismatch"),
+            "error should be the UUID-mismatch refusal, got: {msg}"
+        );
+    }
+
     /// Intent: When cryptsetup open fails with a non-auth exit code (e.g. exit 4,
     /// device not found), the error must propagate as-is — not be rewritten as a
     /// single-passphrase invariant violation.
