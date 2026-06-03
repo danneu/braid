@@ -101,7 +101,7 @@ Prints a JSON object with `status` (one of `ok`, `warn`, `fail`, `skip`) and a `
 ## What happens under the hood
 
 1. Reads and validates `/etc/braid/config.json`.
-2. Loads UUID-keyed `pool.json` and probes each declared disk via `cryptsetup isLuks`, `cryptsetup luksDump`, and `cryptsetup luksUUID`.
+2. Loads UUID-keyed `pool.json` and probes each declared disk via `cryptsetup isLuks` and `cryptsetup luksUUID`.
 3. If the pool is mounted, queries `btrfs filesystem df` and `btrfs device usage --raw` to check RAID profile consistency and metadata allocation headroom, probes for missing devices, reconciles each live pool member's LUKS UUID against `pool.json` to flag foreign devices, and runs `btrfs balance status` to detect paused balances.
 4. For each declared disk, runs `smartctl --json -A -l selftest <device>` -- the member's live backing device when it is assembled into the mounted pool, otherwise its persisted by-id path (including a member that is missing or unassembled on a degraded but mounted pool) -- and parses the self-test log to detect active failures and report the age of the most recent passing entry. See [ADR-024](../design/decisions/024-luks-uuid-identity.md#benefits) for why present members are probed by live path rather than by-id.
 5. If the braid monitor NixOS module is configured, reports the alert beep check as skipped by default.
