@@ -2001,7 +2001,7 @@ mod tests {
         };
         let missing = DiskReport {
             name: "disk3".to_owned(),
-            mapper: "disk3".to_owned(),
+            mapper: "braid-disk3".to_owned(),
             by_id: "/dev/disk/by-id/disk3".to_owned(),
             luks_uuid: String::new(),
             devid: None,
@@ -2011,7 +2011,7 @@ mod tests {
         };
         let unreadable = DiskReport {
             name: "disk4".to_owned(),
-            mapper: "disk4".to_owned(),
+            mapper: "braid-disk4".to_owned(),
             by_id: "/dev/disk/by-id/disk4".to_owned(),
             luks_uuid: String::new(),
             devid: None,
@@ -2021,7 +2021,7 @@ mod tests {
         };
         let mismatch = DiskReport {
             name: "disk6".to_owned(),
-            mapper: "disk6".to_owned(),
+            mapper: "braid-disk6".to_owned(),
             by_id: "/dev/disk/by-id/disk6".to_owned(),
             // A mismatch row carries the observed on-disk UUID.
             luks_uuid: "99999999-9999-9999-9999-999999999999".to_owned(),
@@ -2073,7 +2073,7 @@ mod tests {
 
         // Missing disk
         let d1 = &disks[1];
-        assert_eq!(d1["mapper"], "disk3");
+        assert_eq!(d1["mapper"], "braid-disk3");
         assert_eq!(d1["status"], "missing");
         assert!(d1["errors"].is_null());
         assert!(d1["devid"].is_null());
@@ -2084,13 +2084,13 @@ mod tests {
 
         // LUKS header unreadable disk
         let d2 = &disks[2];
-        assert_eq!(d2["mapper"], "disk4");
+        assert_eq!(d2["mapper"], "braid-disk4");
         assert_eq!(d2["status"], "luks-header-unreadable");
         assert!(d2["errors"].is_null());
 
         // LUKS UUID mismatch disk -- kebab-case token plus the observed UUID
         let d3 = &disks[3];
-        assert_eq!(d3["mapper"], "disk6");
+        assert_eq!(d3["mapper"], "braid-disk6");
         assert_eq!(d3["status"], "luks-uuid-mismatch");
         assert_eq!(d3["luks_uuid"], "99999999-9999-9999-9999-999999999999");
         assert!(d3["errors"].is_null());
@@ -5148,6 +5148,9 @@ mod tests {
             ctx.disks[1].luks_uuid,
             "99999999-9999-9999-9999-999999999999"
         );
+        // Non-present rows carry the expected braid-<name>, not an observed mapper
+        // (docs/commands/status.md mapper field contract).
+        assert_eq!(ctx.disks[1].mapper, "braid-disk1");
     }
 
     /*

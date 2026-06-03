@@ -351,10 +351,15 @@ for recovery options.
     identity.
   - `by_id`: stable `/dev/disk/by-id/...` hardware path -- a runtime
     handle, not identity.
-  - `mapper`: the **observed** device-mapper name -- normally
-    `braid-<name>`, but may differ when a member is open under a drifted
-    mapper (decision 024 tolerates mapper drift). A runtime handle, not
-    identity; do not reconstruct it as `braid-${name}`.
+  - `mapper`: device-mapper name -- a runtime handle, not identity. For a
+    present pool member it is the **observed** live mapper; for a matched
+    member that is normally `braid-<name>` but may have drifted (decision 024
+    tolerates mapper drift), so do not reconstruct it as `braid-${name}` or you
+    will miss the drift. For a non-present disk (`missing`, `offline`,
+    `unknown`, `luks-header-unreadable`, `luks-uuid-mismatch`) braid does not
+    report an observed mapper, so it emits the **expected** `braid-<name>`
+    derived from the configured name, paralleling the configured `name` and
+    `by_id` on those rows.
   - `underlying`: current backing block device (e.g. `/dev/sda`), or
     `null` when the disk is not a live pool member.
   - `devid`: btrfs device ID **as a number** (e.g. `1`), or `null`
