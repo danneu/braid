@@ -10,10 +10,14 @@
 # pool stays degraded (redundancy deferred to `remove-missing`/`replace`).
 #
 # Why: PR 7 moved `eprintln!("warning: pool has N missing device...")`
-# from a raw stderr write into `plan.notes`. Dry-run must emit the
-# canonical `[warn] pool has ...` body-only form on stdout; real-run
-# must preserve today's `warning: pool has ...` stderr wording
-# byte-identically so log scrapers do not drift.
+# from a raw stderr write into `plan.notes` and dropped the legacy
+# `warning:` prefix entirely. Both modes now wrap the same warning body
+# via the same `status_line(StatusTag::Warn, ...)` helper and render it
+# as `[warn] pool has ...`; only the stream differs -- dry-run to stdout
+# (`Preview::render`), real-run to stderr
+# (`preview::render_notes_for_stderr`). No legacy `warning:` wording
+# survives on either stream; the `.py` asserts `warning: pool has` is
+# absent from both the real-run and refusal-path stderr.
 #
 # Scenario: operator builds a 2-disk RAID1 pool, one drive dies (mapper
 # closed, pool remounted -o degraded), operator tries to add a
