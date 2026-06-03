@@ -96,7 +96,12 @@ Single-survivor cases use a path-specific check:
   survivor capacity check derives demand from `btrfs filesystem df`
   logical usage -- `data + 2 * metadata + 2 * system`, reflecting the
   post-balance single + DUP profile on one device -- and compares it
-  to the survivor's `device_size - device_slack`.
+  to the survivor's `device_size - device_slack`. This check runs at
+  plan time **and** is re-run as a pre-journal gate in `execute`
+  (above `journal::write_journal`), closing the plan/execute drift
+  window -- a survivor over-committed by writes during the
+  confirmation + inhibitor wait is caught before the irreversible `-f`
+  balance and fails clean, with no `pending-op.json` stranded.
 - **`remove-missing` on a 2-device RAID1 pool with 1 missing
   (`pool.total_devices == 2 && pool.devices.len() == 1 && pool.missing_count == 1`):**
   rejected at preflight. `btrfs_rm_device` runs

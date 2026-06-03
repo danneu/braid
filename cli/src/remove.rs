@@ -337,6 +337,19 @@ impl RemovePlan {
             RemoveError::Validation(format!("{detail}. {suffix}"))
         })?;
 
+        // (Pre-journal) survivor-capacity re-check for the fail-closed 2->1 branch.
+        // Capacity validated at plan time can go stale across the confirmation prompt +
+        // inhibitor-acquire window while the pool keeps taking writes. Re-running it here
+        // -- above journal::write_journal -- catches an over-committed survivor before the
+        // irreversible `-f` balance and fails CLEAN (no stranded pending-op.json), because
+        // no mutation has happened yet (principle 3,
+        // docs/design/principles.md#3-safe-by-construction-operations). The >=2-survivor
+        // branch is intentionally NOT re-checked: `btrfs device remove` ENOSPCs cleanly
+        // there (see check_eviction_space docstring).
+        if work_plan.remaining == 1 {
+            check_single_survivor(runner, &work_plan.mount_point, work_plan.target_devid)?;
+        }
+
         // Build target membership and write journal before irreversible disk op.
         let pre_membership = membership::load_membership(params.paths)
             .map_err(|e| RemoveError::Validation(format!("failed to load pool membership: {e}")))?;
@@ -706,7 +719,8 @@ pub(crate) fn check_eviction_space<R: CommandRunner>(
     remaining: usize,
 ) -> Result<EvictionCheck, RemoveError> {
     if remaining == 1 {
-        return check_single_survivor(runner, mount_point, target).map(|()| EvictionCheck::Proceed);
+        return check_single_survivor(runner, mount_point, target.devid)
+            .map(|()| EvictionCheck::Proceed);
     }
 
     // remaining >= 2: existing warn-and-proceed policy. Instead of
@@ -760,12 +774,17 @@ pub(crate) fn check_eviction_space<R: CommandRunner>(
         })
 }
 
-/// 2->1 branch of `check_eviction_space`. Fail-closed on every input
-/// uncertainty -- see `check_eviction_space` docstring for the rationale.
+/// Shared single-survivor (2->1) capacity helper, invoked at both the
+/// planning preflight (`check_eviction_space`) and the pre-journal execute
+/// gate (`RemovePlan::execute`). Takes `target_devid: u64` rather than a
+/// live `PoolDevice` so the executor -- which holds only
+/// `work_plan.target_devid`, not a probed device -- can re-run the exact same
+/// check across the plan/execute gap. Fail-closed on every input uncertainty;
+/// see `check_eviction_space` docstring for the rationale.
 fn check_single_survivor<R: CommandRunner>(
     runner: &R,
     mount_point: &MountPoint,
-    target: &PoolDevice,
+    target_devid: u64,
 ) -> Result<(), RemoveError> {
     let usage_raw = runner
         .run(&CmdRequest::BtrfsDeviceUsageRaw {
@@ -814,13 +833,12 @@ fn check_single_survivor<R: CommandRunner>(
     let survivor = usage
         .devices
         .iter()
-        .find(|d| d.devid != target.devid)
+        .find(|d| d.devid != target_devid)
         .ok_or_else(|| {
             RemoveError::Validation(format!(
                 "ENOSPC pre-flight (2->1): btrfs device usage did not list the \
-                 surviving device (target devid {}). Refusing to start remove \
-                 without a validated survivor capacity.",
-                target.devid,
+                 surviving device (target devid {target_devid}). Refusing to start remove \
+                 without a validated survivor capacity."
             ))
         })?;
 
@@ -893,8 +911,9 @@ mod tests {
     use crate::state_paths::StatePaths;
     use crate::test_fixtures::{
         DeviceUsageSpec, MockFs, PoolFixture, RemovalPool, device_usage_raw_body, mock_ok,
-        target_device, valid_three_disk_df_json, valid_three_disk_usage_stdout,
-        valid_two_disk_df_json, valid_two_disk_usage_stdout,
+        overcommitted_survivor_df_json, overcommitted_survivor_usage_stdout, target_device,
+        valid_three_disk_df_json, valid_three_disk_usage_stdout, valid_two_disk_df_json,
+        valid_two_disk_usage_stdout,
     };
     use std::collections::BTreeMap;
 
@@ -1264,6 +1283,81 @@ mod tests {
             membership::load_membership(&f.paths).unwrap(),
             drifted,
             "rejection must leave the drifted pool.json unchanged",
+        );
+    }
+
+    // Intent: RemovePlan::execute re-runs the 2->1 single-survivor capacity
+    // check before journaling, so a survivor that had room at plan time but
+    // was over-committed by execute time is refused cleanly.
+    //
+    // Why it exists: the plan-time check (check_eviction_space) is the only
+    // capacity gate today; the confirmation prompt + inhibitor-acquire window
+    // lets the pool keep taking writes, so a survivor can drift over capacity
+    // between plan and the irreversible `-f` balance. Without a pre-journal
+    // re-check, the balance crashes the fs read-only mid-migration with
+    // pending-op.json already on disk -- the exact failure
+    // tests/repro/remove-2to1-undersized-survivor.py guards at the plan
+    // boundary, here guarded at the execute seam (no in-process write
+    // injection is possible, so this is the faithful structure-insensitive
+    // guard, mirroring execute_rejects_when_pool_json_drifts_after_planning).
+    //
+    // Scenario: an operator plans a 2->1 remove against a healthy survivor,
+    // then a backup job fills the survivor while they sit at the warning
+    // prompt. execute must refuse before writing the journal -- no
+    // pending-op.json, inhibitor acquired then released (post-inhibitor gate).
+    #[test]
+    fn execute_rechecks_survivor_capacity_before_journal() {
+        let f = PoolFixture::two_disk_healthy();
+        let fs = MockFs::storage(vec![]);
+        let params = f.remove_params().build();
+
+        let healthy = RemovalPool::two_disk().install(MockRunner::default());
+        let plan =
+            plan_remove(&healthy, &fs, &params).expect("plan succeeds with healthy survivor");
+
+        // Over-committed runner: healthy probe topology (so validate_pool_topology
+        // passes) but the survivor usage + df report it over capacity.
+        let overcommitted = RemovalPool::two_disk()
+            .install(MockRunner::default())
+            .with_handler(|req| match req {
+                CmdRequest::BtrfsDeviceUsageRaw { .. } => Some(Ok(mock_ok(
+                    "btrfs device usage --raw /mnt/storage",
+                    &overcommitted_survivor_usage_stdout(),
+                ))),
+                CmdRequest::BtrfsFilesystemDfJson { .. } => Some(Ok(mock_ok(
+                    "btrfs --format json filesystem df /mnt/storage",
+                    overcommitted_survivor_df_json(),
+                ))),
+                _ => None,
+            });
+
+        let result = plan.execute(&overcommitted, &fs, &params);
+
+        match result {
+            Err(RemoveError::Validation(msg)) => {
+                assert!(
+                    msg.contains("not enough space on surviving device"),
+                    "expected survivor-capacity refusal: {msg}"
+                );
+            }
+            Err(other) => panic!("expected Validation error, got: {other:?}"),
+            Ok(()) => panic!("expected execute-time survivor-capacity rejection"),
+        }
+        assert!(
+            !f.paths.pending_op_json().exists(),
+            "pre-journal capacity rejection must not write pending-op.json",
+        );
+        assert_eq!(
+            f.inhibitor.acquire_count(),
+            1,
+            "post-inhibitor gate must acquire the sleep inhibitor exactly once",
+        );
+        let calls = overcommitted.requests();
+        assert!(
+            !calls
+                .iter()
+                .any(|c| matches!(c, CmdRequest::BtrfsBalanceSingle { .. })),
+            "capacity rejection must abort before the RAID1->single balance: {calls:?}"
         );
     }
 

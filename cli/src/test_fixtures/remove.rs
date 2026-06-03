@@ -35,6 +35,18 @@ const TWO_DISK_DF_JSON: &str = r#"{
 
 const THREE_DISK_DF_JSON: &str = TWO_DISK_DF_JSON;
 
+// `data + 2*metadata + 2*system` = 60 + 2*30 + 2*~0 MiB = ~120 MiB demand,
+// which exceeds the 100 MiB survivor `device_size` in
+// `overcommitted_survivor_usage_stdout`. Pairs with that usage body to drive
+// the single-survivor capacity check into a clean refusal.
+const OVERCOMMITTED_SURVIVOR_DF_JSON: &str = r#"{
+  "filesystem-df": [
+    { "bg-type": "Data", "bg-profile": "RAID1", "total": 62914560, "used": 62914560 },
+    { "bg-type": "Metadata", "bg-profile": "RAID1", "total": 31457280, "used": 31457280 },
+    { "bg-type": "System", "bg-profile": "RAID1", "total": 32768, "used": 32768 }
+  ]
+}"#;
+
 impl PoolFixture {
     /// pool.json: disk1 + disk2 + disk3. Kept remove-scoped until another
     /// command needs the same three-member steady-state topology. Each
@@ -252,6 +264,41 @@ pub(crate) fn valid_two_disk_df_json() -> &'static str {
 /// Valid three-disk `btrfs --format json filesystem df` stdout for overrides.
 pub(crate) fn valid_three_disk_df_json() -> &'static str {
     THREE_DISK_DF_JSON
+}
+
+/// `btrfs device usage --raw` stdout where the survivor (devid 1, the
+/// non-target when removing disk2/devid 2) has a `device_size` too small to
+/// absorb the post-balance single + DUP demand. The target stanza keeps its
+/// normal size -- only the survivor's `device_size`/`device_slack` feed the
+/// 2->1 capacity check. Pairs with `overcommitted_survivor_df_json` so the
+/// execute-time re-check refuses a survivor that drifted over capacity after
+/// a healthy plan.
+pub(crate) fn overcommitted_survivor_usage_stdout() -> String {
+    device_usage_raw_body(&[
+        // Survivor (devid 1): 100 MiB device, far smaller than the ~120 MiB
+        // demand in OVERCOMMITTED_SURVIVOR_DF_JSON.
+        DeviceUsageSpec::live(
+            "/dev/mapper/braid-disk1",
+            1,
+            104_857_600,
+            &[
+                ("Data", "RAID1", 62_914_560),
+                ("Metadata", "RAID1", 31_457_280),
+                ("System", "RAID1", 32_768),
+            ],
+            10_452_992,
+        ),
+        // Target (devid 2, being removed): its size is irrelevant to the check.
+        remove_usage_live_device(2),
+    ])
+}
+
+/// `btrfs --format json filesystem df` stdout whose `data + 2*metadata +
+/// 2*system` demand (~120 MiB) exceeds the 100 MiB survivor in
+/// `overcommitted_survivor_usage_stdout`, forcing `check_single_survivor`
+/// into a "not enough space on surviving device" refusal.
+pub(crate) fn overcommitted_survivor_df_json() -> &'static str {
+    OVERCOMMITTED_SURVIVOR_DF_JSON
 }
 
 fn remove_usage_live_device(devid: u64) -> DeviceUsageSpec {

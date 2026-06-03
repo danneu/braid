@@ -186,7 +186,8 @@ pub(crate) use mount::{
 pub(crate) use recover::{RecoverParamsBuilder, RemountHarness};
 #[allow(unused_imports)]
 pub(crate) use remove::{
-    RemovalPool, RemoveParamsBuilder, target_device, valid_three_disk_df_json,
+    RemovalPool, RemoveParamsBuilder, overcommitted_survivor_df_json,
+    overcommitted_survivor_usage_stdout, target_device, valid_three_disk_df_json,
     valid_three_disk_usage_stdout, valid_two_disk_df_json, valid_two_disk_usage_stdout,
 };
 #[allow(unused_imports)]
