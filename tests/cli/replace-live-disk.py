@@ -2,16 +2,26 @@
 #
 # Intent:
 # - What behavior this test (tries to) verify.
-#   - `braid replace --old <live> --new <new>` succeeds for a live disk in a
-#     healthy pool: the new disk is added first (RAID1 balance), then the old
-#     disk is evicted (device remove + LUKS close). Data survives, profiles
-#     remain correct, and the old mapper is fully released.
+#   - `braid replace --old <live> --new <new>` replaces a live, present disk
+#     in a healthy pool in place with a single `btrfs replace start` -- the
+#     `pool: replacing devid` / `replace complete` progress rows identify the
+#     replace-start path, not add+balance+remove -- and closes the old disk's
+#     LUKS mapper once the replace completes, leaving the pool healthy and
+#     redundant with data and `pool.json` membership intact. The same command
+#     also enrolls a keyfile in-step (`--enroll`), and the live path rejects
+#     `--missing-id` and refuses to run once the pool has degraded, pointing
+#     the operator at the correct full-syntax repair.
 #
 # Why it exists:
 # - What risk/regression this protects against.
-#   - Before this feature, `braid replace` only accepted dead/missing disks.
-#     This test ensures the new live-replace path works end-to-end and that
-#     the refactored shared eviction helper is wired correctly.
+#   - Before this feature, `braid replace` only accepted dead/missing disks;
+#     live replace is the in-place upgrade path. This test locks that path's
+#     operator-visible behavior -- the progress rows, the in-step `--enroll`,
+#     and the error/repair guidance -- against silent regression. It is
+#     distinct from `replace-preserves-devid.py`, the narrow TDD signal that
+#     `btrfs replace start` (not add+balance+remove) was used, proven via the
+#     preserved devid. Neither test subsumes the other: deleting either drops
+#     real coverage.
 #
 # Scenario:
 # - Real-world situation this models (user/system story). Especially the

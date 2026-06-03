@@ -1,13 +1,16 @@
 # Test: replace-live-disk
 #
 # What: Runs `braid replace --old <live> --new <new>` to replace a live,
-# present disk in a healthy pool. Validates the add-first ordering, data
-# integrity, and that the old disk is fully evicted (removed + LUKS closed).
-# Also covers mixed-state rejection and --missing-id rejection on live path.
+# present disk in a healthy pool in place with a single `btrfs replace start`,
+# closing the old disk's LUKS mapper once the replace completes and leaving the
+# pool healthy and redundant. Also covers the in-step `--enroll` keyfile path
+# and the live-path guards that reject `--missing-id` and a degraded pool.
 #
-# Why: Before this feature, replacing a live disk required separate
-# `braid remove` + `braid add`. The unified `braid replace` preserves
-# add-first ordering (redundancy never drops) and is simpler for operators.
+# Why: Before this feature, replacing a live disk meant orchestrating a
+# separate `braid remove` + `braid add` by hand. The unified `braid replace`
+# swaps the disk in place with `btrfs replace start` -- one operator step, and
+# the source stays in the pool until the copy completes, so the array is never
+# degraded mid-swap.
 #
 # Dependencies: braid add (builds the test pool), braid replace live path.
 { braid }:
