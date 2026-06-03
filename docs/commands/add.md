@@ -83,7 +83,7 @@ The name is stored in pool.json and used in LUKS mapper names (`braid-toshiba1`)
 ## What happens under the hood
 
 1. Probes each disk to determine its state (fresh, braid-labeled, or foreign)
-2. Shows a confirmation prompt with disk model, serial, and size
+2. Shows a confirmation prompt with the disk's name and by-id path, plus its model/size/serial (best-effort from the live device via lsblk -- omitted if unavailable)
 3. For fresh disks: pre-generates a LUKS UUID, LUKS-formats the disk with the pool passphrase and `braid-<name>` label, creates a LUKS header backup, and opens the LUKS mapper
 
    See [Pending LUKS header backups](status.md#pending-luks-header-backups) -- copy each `.luksheader` off-system and delete the local copy.
