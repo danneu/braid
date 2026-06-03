@@ -115,8 +115,28 @@ Total is omitted when the pool is degraded (the estimate would be misleading wit
 Drives:
   toshiba1     sda  devid=1  present
   toshiba2     sdb  devid=2  present
-  toshiba3     -    -        missing
+  toshiba3     -    devid=3  missing
 ```
+
+Each row shows the disk `name`, its short kernel device (e.g. `sda`), its
+btrfs `devid`, and its state. A disk not assembled into the live pool --
+missing, offline, or LUKS-mismatched -- shows `-` for its device.
+
+The `devid` column shows `devid=N` only when the live pool currently counts
+that device missing: a btrfs-MISSING device, or a hot-unplugged member whose
+backing device is gone (null-underlying). It falls back to `-` when no live
+devid exists -- a persisted devid the live pool no longer counts missing, or a
+member with no recorded devid.
+
+That devid is the input to the `braid remove-missing --missing-id` and
+`braid replace` workflows. As with the JSON `missing_devids` field, a transient
+hot-unplug devid shown here is refused by both `braid remove-missing` and
+`braid replace` until btrfs promotes the device to MISSING; see
+[Hot-unplug while pool is mounted](../guides/recovery-scenarios.md#hot-unplug-while-pool-is-mounted).
+
+State values use the same vocabulary as [Per-disk detail](#per-disk-detail)
+below, rendered lowercase and hyphenated in this compact list (e.g. `missing`,
+`offline`, `luks-uuid-mismatch`).
 
 ### Balance progress
 
