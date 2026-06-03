@@ -77,6 +77,8 @@ The protected scope includes:
 - post-replace resize
 - post-replace soft RAID1 balance for missing-path replacements that clear the last missing device
 
+The new-target LUKS identity check is deliberately **two-tier**: the primary gate (`cli/src/replace.rs#verify_existing_luks_new_target_preflight`) runs pre-journal under the excluded "reversible validation and identity checks" rule above, so an operator disk-swap or backing-drift in the post-confirmation window aborts on the reversible side without stranding `pending-op.json`; a residual re-probe (`probe_existing_luks_new_target_uuid` closed-mapper arm, `verify_existing_luks_open_mapper_target` open-mapper arm) stays post-journal inside the "new-disk LUKS initialization/open" scope to guard the narrow journal->open window that contains the optional slot-1 keyfile enroll. Do not collapse it to one tier.
+
 ### `braid remove`
 
 The protected scope includes:

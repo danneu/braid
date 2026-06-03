@@ -555,6 +555,21 @@ impl ReplacePlan {
         }
 
         verify_replace_execute_live_pool_uuid(runner, fs, config.mount_point(), &pool, &new_uuid)?;
+        // Pre-journal new-target identity gate (two-tier defense; see the
+        // dispatcher doc). The arm-appropriate ExistingLuks identity check runs
+        // here, BEFORE the inhibitor + journal, so a post-confirmation
+        // disk-swap/backing-drift aborts on the reversible side instead of
+        // stranding pending-op.json. The Step-1 post-journal re-probe stays as
+        // the tight pre-open TOCTOU guard.
+        verify_existing_luks_new_target_preflight(
+            runner,
+            &target_prep,
+            &new_name,
+            &new_mn,
+            &new_by_id,
+            &new_uuid,
+            params.backing_path_resolver,
+        )?;
 
         // Hold a logind sleep inhibitor for the rest of the replace operation --
         // covers Step 1 LUKS init, the long-running btrfs replace start, and
@@ -1057,6 +1072,40 @@ fn verify_existing_luks_open_mapper_target<R: CommandRunner>(
         OwnershipError::Parse(e) => ReplaceError::Validation(e.to_string()),
         OwnershipError::Cmd(e) => ReplaceError::Validation(e.to_string()),
     })
+}
+
+/// Pre-journal new-target identity gate for `replace`. Hoists the
+/// arm-appropriate ExistingLuks identity check above `journal::write_journal`
+/// so an operator disk-swap/backing-drift in the post-confirmation window
+/// aborts on the reversible side (principles.md "line of no return") instead
+/// of stranding pending-op.json. FreshLuks has no pre-existing identity to
+/// probe. The post-journal probe/verify in Step 1 remain as the tight
+/// pre-open guard (two-tier).
+fn verify_existing_luks_new_target_preflight<R: CommandRunner>(
+    runner: &R,
+    target_prep: &ReplaceTargetPrep,
+    new_name: &DiskName,
+    new_mapper: &MapperName,
+    new_by_id: &ByIdPath,
+    new_uuid: &LuksUuid,
+    backing_path_resolver: &dyn BackingPathResolver,
+) -> Result<(), ReplaceError> {
+    match target_prep {
+        ReplaceTargetPrep::ExistingLuks {
+            mapper_open: false, ..
+        } => probe_existing_luks_new_target_uuid(runner, new_by_id, new_uuid),
+        ReplaceTargetPrep::ExistingLuks {
+            mapper_open: true, ..
+        } => verify_existing_luks_open_mapper_target(
+            runner,
+            new_name,
+            new_mapper,
+            new_by_id,
+            new_uuid,
+            backing_path_resolver,
+        ),
+        ReplaceTargetPrep::FreshLuks { .. } => Ok(()),
+    }
 }
 
 /// True iff the stats row identified by `devid` has any non-zero error
@@ -4436,15 +4485,24 @@ mod tests {
 
     #[test]
     // Intent: a drifted live-pool row with the replacement mapper name
-    //   must not skip the already-open replacement mapper verifier.
+    //   must not skip the already-open replacement mapper verifier, and the
+    //   verifier's PRE-journal tier must catch the drift before write_journal.
     // Why it exists: mapper names are runtime handles, not membership
     //   identity; a mapper-keyed skip would let a foreign open mapper reach
     //   `btrfs replace start` when the live row's UUID differs from the
-    //   planned replacement UUID.
+    //   planned replacement UUID. The open-arm identity check now runs as the
+    //   pre-journal tier (verify_existing_luks_new_target_preflight), so a
+    //   single post-confirmation backing drift aborts on the reversible side
+    //   (no stranded pending-op.json, no inhibitor) per ADR 019's pre-journal
+    //   excluded scope -- this is the open-arm analog of
+    //   cmd_replace_existing_luks_closed_mapper_open_boundary_swap_aborts. The
+    //   residual post-journal verify still guards the keyfile-enroll window and
+    //   is covered by the --enroll post-journal-tier test below.
     // Scenario: planning observes a pool row named `braid-disk3` with a
     //   foreign LUKS UUID, then the replacement disk plans as the correct
-    //   already-open `braid-disk3`. Before execute reaches the final
-    //   mutation boundary, the open mapper's backing UUID drifts again.
+    //   already-open `braid-disk3`. Before execute reaches the journal, the
+    //   open mapper's backing UUID drifts again; the pre-journal verifier
+    //   catches it.
     fn mapper_name_drift_does_not_skip_open_mapper_verifier() {
         let f = PoolFixture::two_disk_healthy();
         let fs = MockFs::storage(vec![
@@ -4515,32 +4573,173 @@ mod tests {
                 .any(|r| matches!(r, CmdRequest::BtrfsReplaceStart { .. })),
             "no BtrfsReplaceStart may issue when the open mapper verifier fails"
         );
+        // Pre-journal-tier proof: the backing drift is caught before the journal
+        // and before the inhibitor, so a single swap is a reversible-side abort.
+        assert!(
+            journal::load_journal(&f.paths).unwrap().is_none(),
+            "pending-op.json must not be written -- the open-arm drift is caught pre-journal"
+        );
+        assert_eq!(
+            f.inhibitor.acquire_count(),
+            0,
+            "sleep inhibitor must not be acquired -- the pre-journal identity gate aborts before the inhibitor"
+        );
+    }
+
+    #[test]
+    // Intent: with `--enroll`, the already-open ExistingLuks path passes the
+    //   PRE-journal identity gate, enrolls the slot-1 keyfile, then catches a
+    //   backing drift at the residual POST-journal verify -- aborting before
+    //   BtrfsReplaceStart, with the journal already written.
+    //
+    // Why it exists: the open arm's counterpart to
+    //   cmd_replace_existing_luks_closed_mapper_enroll_post_journal_swap_aborts.
+    //   The pre-journal tier (verify_existing_luks_new_target_preflight) now
+    //   intercepts the single-drift scenario before the journal, so deleting the
+    //   post-journal verify (verify_existing_luks_open_mapper_target) in Step 1
+    //   would no longer fail any single-drift full-execute test. This makes the
+    //   pre-journal verify PASS and drifts the mapper backing UUID only AFTER the
+    //   slot-1 `cryptsetup luksAddKey`, keeping that post-journal verify
+    //   load-bearing against the journal->open keyfile-enroll window.
+    //
+    // Scenario: operator runs `braid replace --old disk2 --new disk3=<by-id>
+    //   --enroll DIR` against an already-LUKS, already-OPEN disk3 with slot 1
+    //   empty (NeedsEnroll). The pre-journal verify reads the mapper backing as
+    //   U_NEW (pass); the journal is written; the keyfile is enrolled; THEN the
+    //   open mapper's backing UUID drifts to U_FOREIGN, so the post-journal
+    //   verify aborts before the pool mutation.
+    fn cmd_replace_existing_luks_open_mapper_enroll_post_journal_drift_aborts() {
+        let f = PoolFixture::two_disk_healthy();
+        let fs = MockFs::storage(vec![
+            "/dev/disk/by-id/virtio-disk3".into(),
+            "/dev/mapper/braid-disk3".into(),
+        ]);
+        let replace_done = Arc::new(AtomicBool::new(false));
+
+        let kf_dir = tempfile::tempdir().unwrap();
+        let kf_path = kf_dir.path().join("braid.key");
+        std::fs::write(&kf_path, [0u8; crate::luks::KEYFILE_SIZE]).unwrap();
+
+        let u_new = LuksUuid::parse("33333333-3333-3333-3333-333333333333").unwrap();
+        let u_foreign = LuksUuid::parse("44444444-4444-4444-4444-444444440769").unwrap();
+        let u_new_h = u_new.clone();
+        let u_foreign_h = u_foreign.clone();
+        // Phase flag (see the closed-arm sibling): the open-arm verify reads the
+        // mapper backing (/dev/vdd). Planning identifies the disk by its by-id
+        // (virtio-disk3, canonical 33 via the install handler); only the backing
+        // reads route through this gate. The post-journal verify is the only
+        // backing read after the AddKey, so gate /dev/vdd on "enroll seen".
+        let enrolled = Arc::new(AtomicBool::new(false));
+
+        let runner = ReplacementPool::two_disk_healthy()
+            .install(MockRunner::default(), replace_done)
+            .with_handler({
+                let enrolled = enrolled.clone();
+                move |req| match req {
+                    // Keyfile not yet enrolled -> NeedsEnroll at planning.
+                    CmdRequest::CryptsetupTestKeyFile { device, .. }
+                        if device == "/dev/disk/by-id/virtio-disk3" =>
+                    {
+                        Some(Ok(RawCommandOutput {
+                            cmd: "cryptsetup open --test-passphrase --key-file".into(),
+                            stdout: String::new(),
+                            stderr: "No key available with this passphrase.\n".into(),
+                            exit_status: 2,
+                        }))
+                    }
+                    CmdRequest::CryptsetupLuksAddKeyFile { device, .. }
+                        if device == "/dev/disk/by-id/virtio-disk3" =>
+                    {
+                        enrolled.store(true, Ordering::SeqCst);
+                        Some(Ok(mock_ok(&format!("cryptsetup luksAddKey {device}"), "")))
+                    }
+                    CmdRequest::CryptsetupLuksHeaderBackup { device, .. } => Some(Ok(mock_ok(
+                        &format!("cryptsetup luksHeaderBackup {device}"),
+                        "",
+                    ))),
+                    CmdRequest::CryptsetupLuksUuid { device } if device == "/dev/vdd" => {
+                        let uuid = if enrolled.load(Ordering::SeqCst) {
+                            &u_foreign_h
+                        } else {
+                            &u_new_h
+                        };
+                        Some(Ok(mock_ok(
+                            &format!("cryptsetup luksUUID {device}"),
+                            &format!("{uuid}\n"),
+                        )))
+                    }
+                    _ => None,
+                }
+            });
+
+        let result = cmd_replace(
+            &runner,
+            &fs,
+            &f.replace_params()
+                .enroll_key_file(Some(kf_path.as_path()))
+                .build(),
+        );
+
+        match result {
+            Err(ReplaceError::NewTargetUuidMismatchAtOpen {
+                by_id,
+                expected,
+                observed,
+            }) => {
+                assert_eq!(by_id.as_str(), "/dev/disk/by-id/virtio-disk3");
+                assert_eq!(expected, u_new);
+                assert_eq!(observed, u_foreign.as_str());
+            }
+            other => panic!("expected NewTargetUuidMismatchAtOpen, got: {other:?}"),
+        }
+        let log = runner.requests();
+        assert!(
+            journal::load_journal(&f.paths).unwrap().is_some(),
+            "journal must be written -- the post-journal verify fires after write_journal"
+        );
+        assert!(
+            log.iter().any(|r| matches!(
+                r,
+                CmdRequest::CryptsetupLuksAddKeyFile { device, .. }
+                    if device == "/dev/disk/by-id/virtio-disk3"
+            )),
+            "slot-1 keyfile enroll must have run -- it is the window the post-journal verify guards"
+        );
+        assert!(
+            !log.iter()
+                .any(|r| matches!(r, CmdRequest::BtrfsReplaceStart { .. })),
+            "no BtrfsReplaceStart may issue -- no pool data routed onto the drifted disk"
+        );
     }
 
     #[test]
     // Intent: cmd_replace, on the ExistingLuks closed-mapper path, re-probes the
-    //   new target's by-id LUKS UUID at the execute-time open boundary and aborts
-    //   with NewTargetUuidMismatchAtOpen when it no longer matches the UUID
-    //   captured at planning -- before any CryptsetupLuksOpen or BtrfsReplaceStart
-    //   touches the disk.
+    //   new target's by-id LUKS UUID at the PRE-journal new-target identity gate
+    //   and aborts with NewTargetUuidMismatchAtOpen when it no longer matches the
+    //   UUID captured at planning -- before write_journal, before the sleep
+    //   inhibitor, and before any CryptsetupLuksOpen or BtrfsReplaceStart.
     //
-    // Why it exists: the open-boundary re-probe (probe_existing_luks_new_target_uuid)
-    //   is the ONLY guard on the closed-mapper path -- ensure_luks_open blindly
-    //   opens whatever sits at the by-id (classify_mapper_ownership returns Inactive
-    //   without checking UUID for a closed mapper), and verify_replace_execute_live_pool_uuid
-    //   only rejects the planned UUID as a live-pool duplicate. Existing coverage
-    //   calls the helper directly, so dropping the call site would leave tests green
-    //   while routing pool data into a foreign LUKS volume. The mapper_open=true arm
-    //   already has a cmd_replace-driven wiring test
-    //   (mapper_name_drift_does_not_skip_open_mapper_verifier); this closes the
-    //   matching gap on the closed-mapper arm.
+    // Why it exists: the closed-mapper identity check is the ONLY guard on this
+    //   path -- ensure_luks_open blindly opens whatever sits at the by-id
+    //   (classify_mapper_ownership returns Inactive without checking UUID for a
+    //   closed mapper), and verify_replace_execute_live_pool_uuid only rejects the
+    //   planned UUID as a live-pool duplicate. A single post-confirmation disk
+    //   swap is a reversible preflight-class failure, so it must abort on the
+    //   reversible side per ADR 019's pre-journal excluded scope and
+    //   principles.md's "line of no return" -- not strand pending-op.json and
+    //   force the operator into `braid recover`. The pre-journal tier hoists this
+    //   probe (verify_existing_luks_new_target_preflight) above the journal; the
+    //   tight post-journal re-probe still runs as the pre-open TOCTOU guard for
+    //   the keyfile-enroll window and is covered by the --enroll post-journal-tier
+    //   test below. The mapper_open=true arm has the matching pre-journal wiring
+    //   test (mapper_name_drift_does_not_skip_open_mapper_verifier).
     //
     // Scenario: operator runs `braid replace --old disk2 --new disk3=<by-id>` where
     //   disk3 is already LUKS-formatted with its mapper closed. Between planning
-    //   (UUID = U_NEW, journaled) and the execute-time open, the by-id slot is
+    //   (UUID = U_NEW) and the execute-time pre-journal probe, the by-id slot is
     //   swapped to a foreign LUKS volume (UUID = U_FOREIGN, no pool-member
-    //   collision). The command must abort at the open boundary: journal written,
-    //   inhibitor held, but no LUKS open and no btrfs replace start.
+    //   collision). The command must abort on the reversible side: no journal, no
+    //   inhibitor, no LUKS open, no btrfs replace start.
     fn cmd_replace_existing_luks_closed_mapper_open_boundary_swap_aborts() {
         let f = PoolFixture::two_disk_healthy();
         // Mapper closed -> only the by-id exists, not /dev/mapper/braid-disk3.
@@ -4602,18 +4801,157 @@ mod tests {
             "no BtrfsReplaceStart may issue on the swap-abort path"
         );
 
-        // Boundary-pinning assertions: prove the abort is the POST-journal open
-        // boundary, not an earlier preflight (the probe fires after write_journal
-        // and after inhibitor acquisition). Distinguishes this from the pre-journal
-        // wrong-passphrase abort, which asserts journal None + acquire_count 0.
+        // Boundary-pinning assertions: prove the abort is the PRE-journal
+        // new-target identity gate, not the residual post-journal re-probe. The
+        // pre-journal tier fires before write_journal and before the inhibitor,
+        // so a single swap leaves no stranded pending-op.json -- matching the
+        // pre-journal wrong-passphrase abort (journal None + acquire_count 0) and
+        // distinct from the --enroll post-journal-tier catch (journal Some).
         assert!(
-            journal::load_journal(&f.paths).unwrap().is_some(),
-            "journal must be written -- the swap abort is post-journal"
+            journal::load_journal(&f.paths).unwrap().is_none(),
+            "pending-op.json must not be written -- a single swap is caught on the reversible side, before the journal"
         );
         assert_eq!(
             f.inhibitor.acquire_count(),
-            1,
-            "sleep inhibitor must be acquired once before the open-boundary probe"
+            0,
+            "sleep inhibitor must not be acquired -- the pre-journal identity gate aborts before the inhibitor"
+        );
+    }
+
+    #[test]
+    // Intent: with `--enroll`, the closed-mapper ExistingLuks path passes the
+    //   PRE-journal identity gate, enrolls the slot-1 keyfile, then catches a
+    //   swap at the residual POST-journal re-probe -- aborting before
+    //   ensure_luks_open and BtrfsReplaceStart, with the journal already written.
+    //
+    // Why it exists: the pre-journal tier (verify_existing_luks_new_target_preflight)
+    //   now intercepts the single-swap scenario before the journal, so deleting
+    //   the post-journal probe in Step 1 (probe_existing_luks_new_target_uuid)
+    //   would no longer fail any single-swap test. This is the only full-execute
+    //   test that keeps that post-journal probe load-bearing: it makes the
+    //   pre-journal probe PASS and drifts the by-id UUID only AFTER the slot-1
+    //   `cryptsetup luksAddKey`, which sits between the two tiers. Guarding that
+    //   journal->open keyfile-enroll window is the documented purpose of the
+    //   two-tier design (ADR 019 / principles.md).
+    //
+    // Scenario: operator runs `braid replace --old disk2 --new disk3=<by-id>
+    //   --enroll DIR` against an already-LUKS disk3 with mapper closed and slot 1
+    //   empty (NeedsEnroll). The pre-journal probe sees U_NEW (pass); the journal
+    //   is written; the keyfile is enrolled into slot 1; THEN the by-id slot is
+    //   swapped to a foreign LUKS volume, so the post-journal re-probe sees
+    //   U_FOREIGN and aborts before the disk is opened.
+    fn cmd_replace_existing_luks_closed_mapper_enroll_post_journal_swap_aborts() {
+        let f = PoolFixture::two_disk_healthy();
+        // Mapper closed -> only the by-id exists, not /dev/mapper/braid-disk3.
+        let fs = MockFs::storage(vec!["/dev/disk/by-id/virtio-disk3".into()]);
+        let replace_done = Arc::new(AtomicBool::new(false));
+
+        let kf_dir = tempfile::tempdir().unwrap();
+        let kf_path = kf_dir.path().join("braid.key");
+        std::fs::write(&kf_path, [0u8; crate::luks::KEYFILE_SIZE]).unwrap();
+
+        let u_new = LuksUuid::parse("33333333-3333-3333-3333-333333333333").unwrap();
+        let u_foreign = LuksUuid::parse("44444444-4444-4444-4444-444444440746").unwrap();
+        let u_new_h = u_new.clone();
+        let u_foreign_h = u_foreign.clone();
+        // Phase flag, not a raw call counter: the post-journal probe is the only
+        // by-id luksUUID read that happens AFTER the slot-1 enroll. Gating the
+        // foreign UUID on "enroll seen" makes planning + the pre-journal probe
+        // (both before the AddKey) observe U_NEW and only the post-journal
+        // re-probe observe U_FOREIGN -- robust to the exact count of pre-enroll
+        // probes (the index brittleness the plan warns about).
+        let enrolled = Arc::new(AtomicBool::new(false));
+
+        let runner = ReplacementPool::two_disk_healthy()
+            .with_mapper_closed("braid-disk3")
+            .install(MockRunner::default(), replace_done)
+            .with_handler({
+                let enrolled = enrolled.clone();
+                move |req| match req {
+                    // Keyfile not yet enrolled -> NeedsEnroll at planning.
+                    CmdRequest::CryptsetupTestKeyFile { device, .. }
+                        if device == "/dev/disk/by-id/virtio-disk3" =>
+                    {
+                        Some(Ok(RawCommandOutput {
+                            cmd: "cryptsetup open --test-passphrase --key-file".into(),
+                            stdout: String::new(),
+                            stderr: "No key available with this passphrase.\n".into(),
+                            exit_status: 2,
+                        }))
+                    }
+                    CmdRequest::CryptsetupLuksAddKeyFile { device, .. }
+                        if device == "/dev/disk/by-id/virtio-disk3" =>
+                    {
+                        enrolled.store(true, Ordering::SeqCst);
+                        Some(Ok(mock_ok(&format!("cryptsetup luksAddKey {device}"), "")))
+                    }
+                    CmdRequest::CryptsetupLuksHeaderBackup { device, .. } => Some(Ok(mock_ok(
+                        &format!("cryptsetup luksHeaderBackup {device}"),
+                        "",
+                    ))),
+                    CmdRequest::CryptsetupLuksUuid { device }
+                        if device == "/dev/disk/by-id/virtio-disk3" =>
+                    {
+                        let uuid = if enrolled.load(Ordering::SeqCst) {
+                            &u_foreign_h
+                        } else {
+                            &u_new_h
+                        };
+                        Some(Ok(mock_ok(
+                            &format!("cryptsetup luksUUID {device}"),
+                            &format!("{uuid}\n"),
+                        )))
+                    }
+                    _ => None,
+                }
+            });
+
+        let result = cmd_replace(
+            &runner,
+            &fs,
+            &f.replace_params()
+                .enroll_key_file(Some(kf_path.as_path()))
+                .build(),
+        );
+
+        match result {
+            Err(ReplaceError::NewTargetUuidMismatchAtOpen {
+                by_id,
+                expected,
+                observed,
+            }) => {
+                assert_eq!(by_id.as_str(), "/dev/disk/by-id/virtio-disk3");
+                assert_eq!(expected, u_new);
+                assert_eq!(observed, u_foreign.as_str());
+            }
+            other => panic!("expected NewTargetUuidMismatchAtOpen, got: {other:?}"),
+        }
+        let log = runner.requests();
+        // The journal IS written -- the accepted post-journal residual. This is
+        // what distinguishes the post-journal tier from the pre-journal abort.
+        assert!(
+            journal::load_journal(&f.paths).unwrap().is_some(),
+            "journal must be written -- the post-journal tier fires after write_journal"
+        );
+        // The enroll window was exercised: the AddKey sits between the two tiers,
+        // so the post-journal probe is guarding a real mutation window.
+        assert!(
+            log.iter().any(|r| matches!(
+                r,
+                CmdRequest::CryptsetupLuksAddKeyFile { device, .. }
+                    if device == "/dev/disk/by-id/virtio-disk3"
+            )),
+            "slot-1 keyfile enroll must have run -- it is the window the post-journal probe guards"
+        );
+        assert!(
+            !log.iter()
+                .any(|r| matches!(r, CmdRequest::CryptsetupLuksOpen { .. })),
+            "no CryptsetupLuksOpen may issue -- abort precedes ensure_luks_open"
+        );
+        assert!(
+            !log.iter()
+                .any(|r| matches!(r, CmdRequest::BtrfsReplaceStart { .. })),
+            "no BtrfsReplaceStart may issue -- no pool data routed onto the foreign disk"
         );
     }
 
@@ -6840,6 +7178,49 @@ mod tests {
             ownership,
             MapperOwnership::Owned,
             "probe match must allow close"
+        );
+    }
+
+    #[test]
+    // Intent: the pre-journal new-target preflight dispatcher is a no-op for
+    //   FreshLuks targets -- it issues no probe and returns Ok(()).
+    // Why it exists: a FreshLuks new target has no pre-existing LUKS identity
+    //   to probe -- its journaled UUID is minted by `cryptsetup luksFormat`
+    //   AFTER the journal and is gated at finish-time/recovery instead. Pinning
+    //   the skip structure-insensitively (zero requests) keeps a future edit
+    //   from routing FreshLuks through an ExistingLuks probe and reading a disk
+    //   that has no header yet. The ExistingLuks closed/open routing is already
+    //   covered by the helper unit tests below
+    //   (replace_existing_luks_open_boundary_probe_* and
+    //   replace_existing_luks_open_mapper_backing_*); this only pins the
+    //   FreshLuks-skip branch and the dispatch.
+    // Scenario: the planner classified the new disk as FreshLuks (blank or
+    //   non-LUKS disk to be formatted); execute calls the pre-journal gate.
+    fn preflight_dispatcher_fresh_luks_is_noop() {
+        let runner = MockRunner::default();
+        let target_prep = ReplaceTargetPrep::FreshLuks {
+            extra_opts: LuksFormatExtraOpts::default(),
+            enroll_key_file: None,
+            header_backup_path: std::path::PathBuf::from("/var/lib/braid/headers/disk3.img"),
+        };
+        let resolver = MockBackingPathResolver::default();
+        let result = verify_existing_luks_new_target_preflight(
+            &runner,
+            &target_prep,
+            &disk_name("disk3"),
+            &MapperName("braid-disk3".into()),
+            &ByIdPath::parse("/dev/disk/by-id/virtio-disk3").unwrap(),
+            &LuksUuid::parse("33333333-3333-3333-3333-333333333333").unwrap(),
+            &resolver,
+        );
+        assert!(
+            result.is_ok(),
+            "FreshLuks preflight must be a no-op Ok(()), got: {result:?}"
+        );
+        assert!(
+            runner.requests().is_empty(),
+            "FreshLuks preflight must issue zero probes, got: {:?}",
+            runner.requests()
         );
     }
 
