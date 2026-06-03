@@ -160,15 +160,26 @@ with subtest("braid add fails with the canonical duplicate UUID refusal"):
     braid_exit = int(machine.succeed("cat /tmp/braid-exit").strip())
     braid_out = machine.succeed("cat /tmp/braid-out")
     assert braid_exit != 0, f"add must refuse the live clone:\n{braid_out}"
+    # Scope-only refusal (ADR 024): the message names the real add target and
+    # reports the colliding side as a device already in the live pool, deriving
+    # nothing from the foreign clone-foreign mapper.
     for needle in [
         "duplicate LUKS UUID",
-        "braid-clone-foreign",
-        "(/dev/disk/by-id/)",
-        "braid-disk3 (/dev/disk/by-id/virtio-disk3)",
+        "add target braid-disk3 (/dev/disk/by-id/virtio-disk3)",
+        "collides with a device already in the live pool",
         disk3_uuid,
     ]:
         assert needle in braid_out, f"missing {needle!r} in:\n{braid_out}"
-    assert "is open but backed by" not in braid_out, braid_out
+    # The refusal must surface nothing derived from the foreign mapper: no
+    # clone-foreign handle, no double-braid- prefix, no empty by-id placeholder.
+    # These are the regression guards for the pre-scope rendering bug.
+    for absent in [
+        "clone-foreign",
+        "braid-braid",
+        "(/dev/disk/by-id/)",
+        "is open but backed by",
+    ]:
+        assert absent not in braid_out, f"unexpected {absent!r} in:\n{braid_out}"
 
     machine.fail("test -e /var/lib/braid/pending-op.json")
     machine.succeed("cmp /tmp/pool-before-add.json /var/lib/braid/pool.json")
