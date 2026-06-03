@@ -4518,6 +4518,106 @@ mod tests {
     }
 
     #[test]
+    // Intent: cmd_replace, on the ExistingLuks closed-mapper path, re-probes the
+    //   new target's by-id LUKS UUID at the execute-time open boundary and aborts
+    //   with NewTargetUuidMismatchAtOpen when it no longer matches the UUID
+    //   captured at planning -- before any CryptsetupLuksOpen or BtrfsReplaceStart
+    //   touches the disk.
+    //
+    // Why it exists: the open-boundary re-probe (probe_existing_luks_new_target_uuid)
+    //   is the ONLY guard on the closed-mapper path -- ensure_luks_open blindly
+    //   opens whatever sits at the by-id (classify_mapper_ownership returns Inactive
+    //   without checking UUID for a closed mapper), and verify_replace_execute_live_pool_uuid
+    //   only rejects the planned UUID as a live-pool duplicate. Existing coverage
+    //   calls the helper directly, so dropping the call site would leave tests green
+    //   while routing pool data into a foreign LUKS volume. The mapper_open=true arm
+    //   already has a cmd_replace-driven wiring test
+    //   (mapper_name_drift_does_not_skip_open_mapper_verifier); this closes the
+    //   matching gap on the closed-mapper arm.
+    //
+    // Scenario: operator runs `braid replace --old disk2 --new disk3=<by-id>` where
+    //   disk3 is already LUKS-formatted with its mapper closed. Between planning
+    //   (UUID = U_NEW, journaled) and the execute-time open, the by-id slot is
+    //   swapped to a foreign LUKS volume (UUID = U_FOREIGN, no pool-member
+    //   collision). The command must abort at the open boundary: journal written,
+    //   inhibitor held, but no LUKS open and no btrfs replace start.
+    fn cmd_replace_existing_luks_closed_mapper_open_boundary_swap_aborts() {
+        let f = PoolFixture::two_disk_healthy();
+        // Mapper closed -> only the by-id exists, not /dev/mapper/braid-disk3.
+        let fs = MockFs::storage(vec!["/dev/disk/by-id/virtio-disk3".into()]);
+        let replace_done = Arc::new(AtomicBool::new(false));
+
+        let u_new = LuksUuid::parse("33333333-3333-3333-3333-333333333333").unwrap();
+        let u_foreign = LuksUuid::parse("44444444-4444-4444-4444-444444440746").unwrap();
+        let u_new_h = u_new.clone();
+        let u_foreign_h = u_foreign.clone();
+
+        let runner = ReplacementPool::two_disk_healthy()
+            .with_mapper_closed("braid-disk3")
+            .install(MockRunner::default(), replace_done)
+            .with_handler({
+                let calls = Arc::new(AtomicU32::new(0));
+                move |req| match req {
+                    CmdRequest::CryptsetupLuksUuid { device }
+                        if device == "/dev/disk/by-id/virtio-disk3" =>
+                    {
+                        let n = calls.fetch_add(1, Ordering::SeqCst);
+                        let uuid = if n == 0 { &u_new_h } else { &u_foreign_h };
+                        Some(Ok(mock_ok(
+                            &format!("cryptsetup luksUUID {device}"),
+                            &format!("{uuid}\n"),
+                        )))
+                    }
+                    _ => None,
+                }
+            });
+
+        let result = cmd_replace(&runner, &fs, &f.replace_params().build());
+
+        // Core safety assertions (each independently fails if the probe is removed):
+        match result {
+            Err(ReplaceError::NewTargetUuidMismatchAtOpen {
+                by_id,
+                expected,
+                observed,
+            }) => {
+                assert_eq!(by_id.as_str(), "/dev/disk/by-id/virtio-disk3");
+                assert_eq!(expected, u_new);
+                assert_eq!(observed, u_foreign.as_str());
+            }
+            other => panic!("expected NewTargetUuidMismatchAtOpen, got: {other:?}"),
+        }
+        assert!(
+            !runner
+                .requests()
+                .iter()
+                .any(|r| matches!(r, CmdRequest::CryptsetupLuksOpen { .. })),
+            "no CryptsetupLuksOpen may issue on the swap-abort path"
+        );
+        assert!(
+            !runner
+                .requests()
+                .iter()
+                .any(|r| matches!(r, CmdRequest::BtrfsReplaceStart { .. })),
+            "no BtrfsReplaceStart may issue on the swap-abort path"
+        );
+
+        // Boundary-pinning assertions: prove the abort is the POST-journal open
+        // boundary, not an earlier preflight (the probe fires after write_journal
+        // and after inhibitor acquisition). Distinguishes this from the pre-journal
+        // wrong-passphrase abort, which asserts journal None + acquire_count 0.
+        assert!(
+            journal::load_journal(&f.paths).unwrap().is_some(),
+            "journal must be written -- the swap abort is post-journal"
+        );
+        assert_eq!(
+            f.inhibitor.acquire_count(),
+            1,
+            "sleep inhibitor must be acquired once before the open-boundary probe"
+        );
+    }
+
+    #[test]
     // Intent: on the missing path, `cmd_replace` issues the soft-balance
     //   follow-up after the replace-start + resize sequence, and does not
     //   close any old LUKS mapper (there is none).
