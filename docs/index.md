@@ -38,6 +38,7 @@ braid is a NixOS CLI tool for managing an encrypted btrfs RAID1 NAS. These docs 
 | [replace](commands/replace.md)               | Replace a live or dead disk                       |
 | [unlock](commands/unlock.md)                 | Open LUKS devices and mount the pool              |
 | [lock](commands/lock.md)                     | Unmount the pool and close LUKS devices           |
+| [seal-mountpoint](commands/seal-mountpoint.md) | Seal the offline mountpoint immutable (boot-managed) |
 | [idle](commands/idle.md)                     | Check if the pool is idle for auto-suspend        |
 | [status](commands/status.md)                 | Pool health, disk status, allocation, scrub info  |
 | [doctor](commands/doctor.md)                 | Diagnostic checks for config and pool health      |

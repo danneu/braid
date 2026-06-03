@@ -24,6 +24,7 @@ use crate::cmd::{CmdRequest, CommandRunner, RealRunner};
 use crate::config::{Config, DEFAULT_CONFIG_PATH};
 use crate::luks;
 use crate::membership;
+use crate::mountpoint_guard::{GuardError, MountpointGuard, RealMountpointGuard};
 use crate::online_state::{BRAID_ONLINE_UNIT, OnlineStateOps, RealOnlineStateOps, UnitActiveState};
 use crate::parse::smartctl::selftest_age_hours;
 use crate::parse::types::{
@@ -1500,6 +1501,138 @@ fn check_braid_online_active_when_mounted<R: CommandRunner>(
     }
 }
 
+/// Three-way reading of the mountpoint's immutable attribute. NOT a bare bool:
+/// `guard.is_immutable` can legitimately fail to yield a bool (absent root,
+/// unsupported fs, old kernel, I/O), and that indeterminacy must suppress a
+/// finding rather than coin-flip into a false Warn or silent pass.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum ImmutabilityProbe {
+    Immutable,
+    Mutable,
+    Indeterminate,
+}
+
+impl ImmutabilityProbe {
+    /// Maps a guard read into the probe: `Ok(true) -> Immutable`,
+    /// `Ok(false) -> Mutable`, any `Err` -> `Indeterminate`. The thin seam
+    /// between the syscall boundary and the pure classifier.
+    pub(crate) fn from_result(result: Result<bool, GuardError>) -> Self {
+        match result {
+            Ok(true) => Self::Immutable,
+            Ok(false) => Self::Mutable,
+            Err(_) => Self::Indeterminate,
+        }
+    }
+}
+
+/// Severity decision for the mountpoint-immutability check, returned by the pure
+/// classifier so every branch is unit-testable without root or wiring.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum ImmutableFinding {
+    None,
+    Warn(String),
+    Failure(String),
+}
+
+/// Pure decision helper for the mountpoint-immutability doctor check. Both
+/// inputs are tri-state because both probes (mount state and immutability) can
+/// fail, and an unknown input must never produce a misleading finding.
+///
+/// - offline + Mutable -> Warn (invariant not yet held; self-heals next boot).
+/// - online + Immutable -> Failure (a live pool root is sealed -- never happens
+///   with this code; a tripwire for bugs or external interference).
+/// - either input indeterminate -> None (no honest, actionable hint).
+pub(crate) fn classify_mountpoint_immutability(
+    mount_point: &str,
+    mounted: Option<bool>,
+    probe: ImmutabilityProbe,
+) -> ImmutableFinding {
+    match (mounted, probe) {
+        // A failed mount probe could be hiding a mounted pool, so we can claim
+        // neither "offline + mutable, reseal" nor "online + immutable,
+        // catastrophe". Suppress both.
+        (None, _) => ImmutableFinding::None,
+        // Could not read the attribute (unsupported fs / old kernel / I/O). The
+        // seal unit already emits the single "protection unavailable" warning;
+        // a doctor hint here would be contradictory and un-actionable.
+        (_, ImmutabilityProbe::Indeterminate) => ImmutableFinding::None,
+        (Some(false), ImmutabilityProbe::Mutable) => ImmutableFinding::Warn(format!(
+            "{mount_point} is not immutable while the pool is offline -- writes to it would land on \
+             the root filesystem and be hidden when the pool mounts. It re-seals on the next boot or \
+             `nixos-rebuild switch`; run `braid seal-mountpoint` to re-seal now."
+        )),
+        (Some(true), ImmutabilityProbe::Immutable) => ImmutableFinding::Failure(format!(
+            "{mount_point} is mounted but its inode is immutable -- a live pool root must never be \
+             sealed. This should not happen with braid; investigate external interference or a bug \
+             before the next lock."
+        )),
+        // Healthy steady states: offline+immutable (sealed) and online+mutable
+        // (the live fs governs writes).
+        (Some(false), ImmutabilityProbe::Immutable) | (Some(true), ImmutabilityProbe::Mutable) => {
+            ImmutableFinding::None
+        }
+    }
+}
+
+/// Under the boot-only seal model this is the sole non-boot detection signal
+/// for a mountpoint left mutable out-of-band: it warns while offline-and-mutable
+/// and the next boot/activation re-seals. The branch logic lives in the pure
+/// `classify_mountpoint_immutability` so it is testable without `DoctorContext`'s
+/// non-injectable `online_ops`.
+fn check_mountpoint_immutable<R: CommandRunner>(ctx: &mut DoctorContext<'_, R>) -> CheckResult {
+    let name = "mountpoint_immutable";
+    let Some(config) = ctx.config.as_ref() else {
+        return CheckResult::skip(name, "skipped (config not available)");
+    };
+    if !config.systemd_lifecycle() {
+        return CheckResult::skip(
+            name,
+            "skipped (systemd_lifecycle not configured -- the mountpoint seal is module-managed)",
+        );
+    }
+    let mount_point = config.mount_point().to_owned();
+    let mp = Path::new(mount_point.as_str());
+
+    // Tri-state mount state straight from is_mountpoint: Ok -> Some, Err ->
+    // None. NOT ensure_mountpoint_is_mounted -- its unwrap_or(false) would let a
+    // probe error masquerade as "offline" and fire a false offline+mutable Warn.
+    let mounted = match ctx.online_ops.is_mountpoint(mp) {
+        Ok(is_mounted) => Some(is_mounted),
+        Err(_) => None,
+    };
+    let probe = ImmutabilityProbe::from_result(RealMountpointGuard.is_immutable(mp));
+
+    match classify_mountpoint_immutability(mount_point.as_str(), mounted, probe) {
+        ImmutableFinding::Warn(msg) => CheckResult::warn(name, msg),
+        ImmutableFinding::Failure(msg) => CheckResult::fail(name, msg),
+        // The pure classifier collapses "healthy" and "indeterminate" into None;
+        // render the healthy states as Ok and the indeterminate ones as Skip so
+        // an unsupported root is not falsely reported as sealed.
+        ImmutableFinding::None => match (mounted, probe) {
+            (Some(false), ImmutabilityProbe::Immutable) => CheckResult::ok(
+                name,
+                format!(
+                    "{} is immutable while the pool is offline",
+                    mount_point.as_str()
+                ),
+            ),
+            (Some(true), ImmutabilityProbe::Mutable) => CheckResult::ok(
+                name,
+                "pool is mounted -- the live filesystem governs writes",
+            ),
+            (None, _) => CheckResult::skip(
+                name,
+                "skipped (could not determine whether the pool is mounted)",
+            ),
+            (_, ImmutabilityProbe::Indeterminate) => CheckResult::skip(
+                name,
+                "skipped (could not read the immutable attribute -- see braid-seal-mountpoint logs)",
+            ),
+            _ => CheckResult::ok(name, "no action needed"),
+        },
+    }
+}
+
 fn check_beep_path_inner<R: CommandRunner>(
     ctx: &mut DoctorContext<'_, R>,
     notifier_path: &Path,
@@ -1635,6 +1768,7 @@ pub fn run_doctor<R: CommandRunner>(
     checks.push(check_beep_path(&mut ctx, options));
     checks.push(check_ups_daemon_up(&mut ctx));
     checks.push(check_braid_online_active_when_mounted(&mut ctx));
+    checks.push(check_mountpoint_immutable(&mut ctx));
     checks.push(check_wake_on_lan(&mut ctx));
 
     let status = overall_status(&checks);
@@ -1679,6 +1813,7 @@ pub fn format_doctor_human_with(report: &DoctorReport, color_enabled: bool) -> S
             "beep_path" => "alert beep",
             "ups_daemon" => "ups daemon",
             "braid_online_active" => "braid-online",
+            "mountpoint_immutable" => "mountpoint seal",
             "wake_on_lan" => "wake-on-lan",
             other => other,
         };
@@ -1963,6 +2098,7 @@ mod tests {
             "foreign_luks_uuid",
             "metadata_enospc_pressure",
             "metadata_profile_mismatch",
+            "mountpoint_immutable",
             "paused_balance",
             "pool_missing_devices",
             "smart_self_test",
@@ -6718,5 +6854,111 @@ mod tests {
             "unexpected message: {}",
             r.message
         );
+    }
+
+    // Intent: offline + mutable is the one Warn case -- the invariant is not yet
+    //   held and the operator can re-seal.
+    // Why it exists: this is the central detection signal for a mountpoint left
+    //   writable while the pool is offline (the data-safety bug this guards).
+    // Scenario: an out-of-band `chattr -i` left /mnt/storage writable offline.
+    #[test]
+    fn classify_mountpoint_immutability_offline_mutable_warns() {
+        let finding = classify_mountpoint_immutability(
+            "/mnt/storage",
+            Some(false),
+            ImmutabilityProbe::Mutable,
+        );
+        match finding {
+            ImmutableFinding::Warn(msg) => {
+                assert!(msg.contains("braid seal-mountpoint"), "hint missing: {msg}");
+                // Under the boot-only model the hint must never tell the
+                // operator to unlock to clear the warning.
+                assert!(
+                    !msg.contains("braid unlock"),
+                    "must not suggest unlock: {msg}"
+                );
+            }
+            other => panic!("expected Warn, got {other:?}"),
+        }
+    }
+
+    // Intent: online + immutable is the catastrophic Failure case -- a live pool
+    //   root must never be sealed.
+    // Why it exists: a sealed mounted root blocks all pool writes; the timing
+    //   rule exists to prevent it, so doctor must flag it loudly if it happens.
+    // Scenario: a bug or external interference sealed the mounted pool root.
+    #[test]
+    fn classify_mountpoint_immutability_online_immutable_fails() {
+        let finding = classify_mountpoint_immutability(
+            "/mnt/storage",
+            Some(true),
+            ImmutabilityProbe::Immutable,
+        );
+        assert!(matches!(finding, ImmutableFinding::Failure(_)));
+    }
+
+    // Intent: the two healthy steady states produce no finding.
+    // Why it exists: sealed-offline and mounted-mutable are correct; doctor must
+    //   stay quiet so the check is not noise.
+    // Scenario: a normally sealed offline pool, and a normally mounted pool.
+    #[test]
+    fn classify_mountpoint_immutability_healthy_states_are_none() {
+        assert_eq!(
+            classify_mountpoint_immutability(
+                "/mnt/storage",
+                Some(false),
+                ImmutabilityProbe::Immutable
+            ),
+            ImmutableFinding::None
+        );
+        assert_eq!(
+            classify_mountpoint_immutability(
+                "/mnt/storage",
+                Some(true),
+                ImmutabilityProbe::Mutable
+            ),
+            ImmutableFinding::None
+        );
+    }
+
+    // Intent: an indeterminate immutability probe suppresses any finding,
+    //   regardless of mount state.
+    // Why it exists: an unsupported root fs / old kernel must not produce the
+    //   misleading "not immutable; reseal" Warn -- the seal unit owns that
+    //   signal (the bare-bool unwrap_or coin-flip this enum forecloses).
+    // Scenario: `is_immutable` returned Err on an unsupported root filesystem.
+    #[test]
+    fn classify_mountpoint_immutability_indeterminate_probe_is_none() {
+        for mounted in [Some(false), Some(true), None] {
+            assert_eq!(
+                classify_mountpoint_immutability(
+                    "/mnt/storage",
+                    mounted,
+                    ImmutabilityProbe::Indeterminate
+                ),
+                ImmutableFinding::None,
+                "mounted={mounted:?}"
+            );
+        }
+    }
+
+    // Intent: a failed mount probe (mount-state None) suppresses both severities.
+    // Why it exists: a collapsed Some(false) would masquerade as "offline" and
+    //   fire a false offline+mutable Warn when the pool is actually mounted but
+    //   the probe failed (F3) -- the row a bare-bool `mounted` could not express.
+    // Scenario: the mountpoint probe itself errored.
+    #[test]
+    fn classify_mountpoint_immutability_mount_probe_failure_is_none() {
+        for probe in [
+            ImmutabilityProbe::Immutable,
+            ImmutabilityProbe::Mutable,
+            ImmutabilityProbe::Indeterminate,
+        ] {
+            assert_eq!(
+                classify_mountpoint_immutability("/mnt/storage", None, probe),
+                ImmutableFinding::None,
+                "probe={probe:?}"
+            );
+        }
     }
 }

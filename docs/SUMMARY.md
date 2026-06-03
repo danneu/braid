@@ -26,6 +26,7 @@
 - [replace](commands/replace.md)
 - [unlock](commands/unlock.md)
 - [lock](commands/lock.md)
+- [seal-mountpoint](commands/seal-mountpoint.md)
 - [idle](commands/idle.md)
 - [status](commands/status.md)
 - [doctor](commands/doctor.md)
@@ -70,6 +71,7 @@
 - [025: Browse vs curated](design/decisions/025-browse-vs-curated.md)
 - [026: Pool lock rust-owned](design/decisions/026-pool-lock-rust-owned.md)
 - [027: mkfs block-group-tree](design/decisions/027-mkfs-block-group-tree.md)
+- [028: Immutable unmounted mountpoint](design/decisions/028-immutable-unmounted-mountpoint.md)
 
 # Internals
 

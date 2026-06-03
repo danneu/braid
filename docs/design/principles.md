@@ -26,6 +26,7 @@ Disk membership is runtime state owned by the CLI, stored in `/var/lib/braid/poo
 - An existing LUKS device or pool member is never reformatted — a multi-layer identity check (LUKS label match, LUKS UUID cross-check against pool.json, pool-mounted requirement, btrfs FSID comparison) prevents accidental data loss, with the btrfs superblock guard as defense-in-depth.
 - Failed `unlock` and recovery mount paths close only LUKS mappers braid newly opened during that invocation. They never close pre-existing operator-owned mappers, including mappers that become already open between planning and execution.
 - Mounts always include `skip_balance` — btrfs silently resumes interrupted balances on mount by default, which can re-trigger ENOSPC or surprise the user with heavy I/O. braid manages balance lifecycle explicitly; `unlock` warns if a paused balance is detected.
+- The bare pool mountpoint is sealed immutable (`chattr +i`) while the pool is offline, so a process writing it before mount fails with `EPERM` instead of silently landing on the root filesystem and being shadowed when the pool mounts. The seal is always-on (no knob), lives only in the boot/activation unit (`braid-seal-mountpoint`), and persists across lock/unlock. [Why →](decisions/028-immutable-unmounted-mountpoint.md)
 - Dry-run previews for migrated mutating commands are rendered from the same typed work plans that execution consumes; `Step` is output-only. [Why ->](decisions/022-dry-run-preview-model.md)
 - [Why →](decisions/012-intent-cli.md)
 

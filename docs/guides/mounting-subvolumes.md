@@ -168,6 +168,42 @@ systemctl is-active var-lib-jellyfin-media.mount
 Point the Jellyfin web UI at `/var/lib/jellyfin/media`. After `braid lock`,
 both units should be inactive and the LUKS devices should be closed.
 
+## Offline mountpoint safety
+
+braid seals the pool mountpoint immutable (`chattr +i`) while the pool is
+offline, so a process writing `/mnt/storage` before the pool mounts fails with
+`EPERM` instead of silently landing data on the root filesystem (which the pool
+would then hide on mount). See
+[ADR 028](../design/decisions/028-immutable-unmounted-mountpoint.md).
+
+This boot seal covers **only the pool mountpoint** (`/mnt/storage`). It has two
+consequences for subvolume mounts:
+
+- **Subvolumes mounted under `/mnt/storage`** are inherently protected by the
+  parent seal -- the bare mountpoint is the sealed directory. This is the safe
+  default; prefer it.
+- **Subvolumes mounted at separate paths** (like the `/var/lib/jellyfin/media`
+  example above) are **not** auto-sealed. While the pool is offline the
+  `systemd.mounts` unit is stopped, leaving a bare directory at that path. The
+  unit you wired with `bindsTo = braid-online.service` does not write while
+  offline, but any *other* process that writes the path while the pool is offline
+  lands data on root and gets shadowed on the next mount -- the same bug the boot
+  seal fixes for `/mnt/storage`.
+
+To protect a separate-path subvolume mountpoint, seal it manually with the
+explicit-path form while the pool is offline:
+
+```sh
+sudo braid seal-mountpoint /var/lib/jellyfin/media
+```
+
+This is the braid-native remedy (the appliance has no `chattr` on its PATH). It
+reports a non-zero exit if it could not protect the path, so a failed seal is
+visible. It is **not** self-healing -- unlike the pool mountpoint, braid does not
+re-seal these paths on every boot, and `braid doctor` does not probe them. Re-run
+it after a reconfiguration that recreates the directory. To clear it later, use
+`braid seal-mountpoint --unseal <path>`.
+
 ## What's next
 
 - [Sharing and permissions](sharing-and-permissions.md)

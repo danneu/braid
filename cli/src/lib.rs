@@ -28,6 +28,9 @@ pub mod membership;
 pub mod monitor;
 pub mod mount;
 pub mod mount_check;
+/// Immutable-attribute guard for the bare pool mountpoint while it is offline,
+/// so an offline write fails loudly instead of silently landing on root.
+pub mod mountpoint_guard;
 pub mod online_state;
 pub mod parse;
 pub mod pool;

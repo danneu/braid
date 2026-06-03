@@ -753,6 +753,11 @@
               braid = linuxCrane.braid-cli-unwrapped;
             }
           );
+          immutable-mountpoint = pkgs.testers.nixosTest (
+            import ./tests/module/immutable-mountpoint.nix {
+              braid = linuxCrane.braid-cli-unwrapped;
+            }
+          );
           pool-lock-contention = pkgs.testers.nixosTest (
             import ./tests/module/pool-lock-contention.nix {
               braid = linuxCrane.braid-cli-unwrapped;

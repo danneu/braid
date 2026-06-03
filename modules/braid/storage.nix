@@ -179,6 +179,51 @@ in
       after = [ "braid-unlock.service" ];
     };
 
+    # Seal the offline pool mountpoint immutable (chattr +i) so a process writing
+    # ${cfg.mountPoint} while the pool is unmounted fails loudly with EPERM
+    # instead of silently landing data on the root filesystem, which the pool
+    # then shadows on mount. The sole automatic seal site. See
+    # docs/design/decisions/028-immutable-unmounted-mountpoint.md.
+    #
+    # Type=oneshot with NO RemainAfterExit: the unit returns to inactive (dead)
+    # once ExecStart exits, so NixOS re-runs it on every `nixos-rebuild
+    # switch`/`test` as well as every boot (self-healing). The static
+    # ${cfg.mountPoint} is created by the tmpfiles rule above and sealed here
+    # before any `braid add` runs, so the pool always mounts OVER an
+    # already-sealed dir and +i persists underneath.
+    #
+    # ConditionPathIsMountPoint=! gates the seal to the offline window
+    # (belt-and-suspenders alongside the in-CLI STATX_ATTR_MOUNT_ROOT fd check),
+    # so a mounted `nixos-rebuild switch` never seals the live pool root.
+    #
+    # before braid-auto-unlock.service is load-bearing, not a nicety: both units
+    # are pulled in by multi-user.target, so without the edge they race. If
+    # auto-unlock won, it would mount the pool and this unit's
+    # ConditionPathIsMountPoint=! would then skip the seal -- so an
+    # auto-unlock-with-USB NAS (which never boots offline) would never seal the
+    # bare dir. Ordering before auto-unlock runs the seal in the pre-mount window
+    # every boot; the pool then mounts over the sealed dir and persistence
+    # carries it. When autoUnlock is disabled the unit does not exist and
+    # `before` is a harmless no-op ordering string.
+    #
+    # The seal is pure syscalls (open/statx/ioctl), so only braidWrapped is
+    # needed on PATH -- no cryptsetup/btrfs/util-linux. `script` (not a relative
+    # `ExecStart = braid ...`) compiles to an absolute generated-script ExecStart
+    # that resolves `braid` through the unit PATH, matching braid-unlock.
+    systemd.services.braid-seal-mountpoint = {
+      description = "Seal braid pool mountpoint immutable while offline";
+      wantedBy = [ "multi-user.target" ];
+      after = [
+        "local-fs.target"
+        "systemd-tmpfiles-setup.service"
+      ];
+      before = [ "braid-auto-unlock.service" ];
+      unitConfig.ConditionPathIsMountPoint = "!${cfg.mountPoint}";
+      serviceConfig.Type = "oneshot";
+      path = [ braidWrapped ];
+      script = "braid seal-mountpoint";
+    };
+
     # --- Auto-unlock via USB keyfile ---
 
     fileSystems."/run/braid-key/mnt" = lib.mkIf cfg.autoUnlock.enable {

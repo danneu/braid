@@ -84,6 +84,8 @@ enum Commands {
     Discover(DiscoverArgs),
     /// Recover from an interrupted operation by rebuilding pool.json from live pool state
     Recover(RecoverArgs),
+    /// Seal the offline pool mountpoint immutable so writes while the pool is unmounted fail loudly instead of landing on root. No args seals the configured mount point; PATH seals a specific dir; --unseal PATH clears it.
+    SealMountpoint(SealMountpointArgs),
     /// UPS (NUT) inspection commands
     Ups(UpsArgs),
     /// Print this message or the help of the given commands
@@ -178,6 +180,15 @@ fn lock_policy(command: &Commands) -> LockPolicy {
                 LockPlain
             }
         }
+        SealMountpoint(args) => {
+            // Bare boot form and explicit-path SEAL are monotonic toward
+            // more-protected and the fd mount-root guard already refuses a live
+            // mount, so neither needs the pool lock. `--unseal` is a
+            // lock-acquiring remediation: it serializes against an in-flight
+            // unlock/lock so a concurrent mount cannot land over a just-cleared
+            // bare dir. See ADR 028.
+            if args.unseal { NonBlocking } else { None }
+        }
         Status(_)
         | Doctor(_)
         | Idle
@@ -198,6 +209,17 @@ struct HelpArgs {
     /// Print help for the commands
     #[arg(value_name = "COMMAND", num_args(0..))]
     commands: Vec<String>,
+}
+
+#[derive(Debug, Args)]
+struct SealMountpointArgs {
+    /// Explicit directory to seal/unseal (advanced). Defaults to the configured
+    /// mount point when omitted -- the bare form the boot unit runs.
+    path: Option<std::path::PathBuf>,
+    /// Clear the immutable attribute instead of setting it. Requires PATH and
+    /// refuses the configured mount point, which must stay sealed while offline.
+    #[arg(long, requires = "path")]
+    unseal: bool,
 }
 
 #[derive(Debug, Args)]
@@ -1017,6 +1039,53 @@ fn main() {
                 }
             }
         }
+        Commands::SealMountpoint(args) => {
+            let guard = braid_cli::mountpoint_guard::RealMountpointGuard;
+            match (&args.path, args.unseal) {
+                // Explicit unseal: needs the configured mount point so it can
+                // refuse to clear the live path. Config-load failure fails
+                // closed (exit 1) -- we cannot verify it is not the configured
+                // path. The pool lock is already held (NonBlocking policy).
+                (Some(path), true) => {
+                    let config = load_config_or_exit(Path::new(&config_path), 1);
+                    match braid_cli::mountpoint_guard::run_explicit_unseal(
+                        &guard,
+                        path,
+                        Path::new(config.mount_point().as_str()),
+                    ) {
+                        Ok(msg) => println!("{msg}"),
+                        Err(msg) => {
+                            print_cli_error(&msg);
+                            std::process::exit(1);
+                        }
+                    }
+                }
+                // Explicit seal of a supplied path: honest desired-state exit
+                // code so a manual seal that failed is visible, not a green
+                // no-op (F2).
+                (Some(path), false) => {
+                    match braid_cli::mountpoint_guard::run_explicit_seal(&guard, path) {
+                        Ok(msg) => println!("{msg}"),
+                        Err(msg) => {
+                            print_cli_error(&msg);
+                            std::process::exit(1);
+                        }
+                    }
+                }
+                // Bare boot/internal form: seal the configured mount point,
+                // best-effort, always exit 0 -- boot must not fail on the guard.
+                // A config-load failure warns and exits 0, never blocks boot.
+                (None, _) => match config_read(Path::new(&config_path)) {
+                    Ok(config) => braid_cli::mountpoint_guard::seal_offline_mountpoint(
+                        Path::new(config.mount_point().as_str()),
+                        &guard,
+                    ),
+                    Err(e) => {
+                        eprintln!("braid: WARNING: seal-mountpoint could not load config: {e}");
+                    }
+                },
+            }
+        }
         Commands::Ups(args) => match args.command {
             UpsCommand::Status(status_args) => {
                 let runner = RealRunner;
@@ -1417,6 +1486,12 @@ mod tests {
             (vec!["braid", "recover", "--dry-run"], None),
             (vec!["braid", "discover", "--write"], NonBlocking),
             (vec!["braid", "discover"], None),
+            (vec!["braid", "seal-mountpoint"], None),
+            (vec!["braid", "seal-mountpoint", "/mnt/orphan"], None),
+            (
+                vec!["braid", "seal-mountpoint", "--unseal", "/mnt/orphan"],
+                NonBlocking,
+            ),
             (vec!["braid", "lock", "--dry-run"], None),
             (vec!["braid", "lock"], LockPlain),
             (

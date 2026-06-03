@@ -43,6 +43,7 @@ See the [command reference](docs/commands/) for full usage of each command.
 - **Redundancy** -- data stored on two disks; tolerates a single disk failure
 - **Dynamic pool** -- add or remove drives with a command, no `nixos-rebuild`
 - **Self-healing** -- btrfs checksums every block and silently repairs corruption from the redundant copy
+- **Offline-write safety** -- the pool mountpoint is sealed immutable while the pool is unmounted, so a process writing it before the pool mounts fails loudly with `EPERM` instead of silently landing data on the root disk (which the pool would then hide on mount)
 - **CLI-owned membership** -- `braid add`/`remove`/`replace` manage the pool; state lives in UUID-keyed `/var/lib/braid/pool.json`
 - **UPS safety** -- with UPS support enabled, NUT drives orderly poweroff on low battery, mutating commands refuse to start unless UPS utility power is verified, and `braid ups status` / the TUI show live UPS state
 - **TUI dashboard** -- `braid tui` shows pool health, disk status, balance progress, SMART data, and (when enabled) chassis fan telemetry plus UPS state
@@ -170,6 +171,7 @@ If a mutation is interrupted, braid leaves `/var/lib/braid/pending-op.json` in p
 | [replace](docs/commands/replace.md)               | Replace a live or dead disk                                   |
 | [unlock](docs/commands/unlock.md)                 | Open LUKS devices and mount the pool                          |
 | [lock](docs/commands/lock.md)                     | Unmount the pool and close LUKS devices                       |
+| [seal-mountpoint](docs/commands/seal-mountpoint.md) | Seal the offline mountpoint immutable (boot-managed; manual lever) |
 | [idle](docs/commands/idle.md)                     | Check if the pool is idle (for auto-suspend)                  |
 | [status](docs/commands/status.md)                 | Pool health, disk status, allocation, scrub info              |
 | [doctor](docs/commands/doctor.md)                 | Diagnostic checks for config, pool health, and runtime safety |
