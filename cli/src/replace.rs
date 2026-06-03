@@ -240,8 +240,6 @@ struct ReplaceWorkPlan {
     pool: PoolState,
     replace_source: ReplaceSource,
     target_prep: ReplaceTargetPrep,
-    pre_membership: PoolMembership,
-    target_membership: PoolMembership,
     journal_target: journal::ReplaceJournalTarget,
     journal_source: journal::ReplaceJournalSource,
     restore_raid1_after_commit: bool,
@@ -430,8 +428,6 @@ impl ReplacePlan {
             pool,
             replace_source,
             target_prep,
-            pre_membership,
-            target_membership,
             journal_target: new_target,
             journal_source,
             restore_raid1_after_commit,
@@ -593,8 +589,30 @@ impl ReplacePlan {
                 ))
             })?;
 
+        // (Confirm/passphrase/inhibitor-window guard) Re-load pool.json and
+        // re-derive target_membership here, mirroring RemovePlan::execute:
+        // journaling/saving the plan-time snapshot would persist a stale
+        // membership if pool.json was rewritten during the
+        // confirmation/passphrase/inhibitor window. Reject if old drifted out;
+        // derive_replace_target_membership's insert re-runs the four-axis
+        // uniqueness invariant against the fresh read. Pinned by
+        // replace_execute_rejects_when_pool_json_drifts_after_planning.
+        let pre_membership = membership::load_membership(params.paths).map_err(|e| {
+            ReplaceError::Validation(format!("failed to load pool membership: {e}"))
+        })?;
+        if pre_membership.by_uuid(&old_uuid).is_none() {
+            return Err(absent_from_membership_error(old_name.as_str()));
+        }
+        let target_membership = derive_replace_target_membership(
+            &pre_membership,
+            &old_uuid,
+            &new_uuid,
+            &new_name,
+            &new_by_id,
+        )?;
+
         // Write journal before irreversible disk ops. pre_membership and
-        // target_membership were computed earlier, before the inhibitor.
+        // target_membership are derived above from a fresh pool.json read.
         let journal = journal::build_journal(
             pre_membership,
             target_membership.clone(),
@@ -1513,18 +1531,18 @@ where
         return Err(PlanFailure::with_notes(notes, e));
     }
 
-    // Build target_membership through `PoolMembership::insert` so the
-    // four-axis uniqueness invariant runs once. Mirrors the
-    // `validate_no_conflicts` deletion called out in the plan.
-    let mut target_membership = pre_membership.clone();
-    target_membership.remove_by_uuid(&old_uuid);
-    let new_member = membership::DiskMember {
-        name: new_name_parsed.clone(),
-        by_id: new_by_id.clone(),
-        devid: None,
-        added_at: None,
-    };
-    if let Err(e) = target_membership.insert(new_uuid.clone(), new_member) {
+    // Validate the four-axis membership invariant at plan time so a
+    // colliding target is rejected during --dry-run and before the
+    // confirmation prompt. The derived membership is discarded: the
+    // authoritative derivation runs again in `ReplacePlan::execute` against a
+    // fresh pool.json read, so the plan stores no membership snapshot.
+    if let Err(e) = derive_replace_target_membership(
+        &pre_membership,
+        &old_uuid,
+        &new_uuid,
+        &new_name_parsed,
+        &new_by_id,
+    ) {
         return Err(PlanFailure::with_notes(notes, e.into()));
     }
 
@@ -1538,8 +1556,6 @@ where
         new_probed,
         replace_source,
         pool,
-        pre_membership,
-        target_membership,
         paths: params.paths,
         enroll_key_file: resolved_enroll_key_file,
         luks_format_extra_opts,
@@ -1575,6 +1591,41 @@ fn assert_new_uuid_unique(
         });
     }
     Ok(())
+}
+
+/// Derive post-replace membership: drop `old_uuid`, insert the new member,
+/// running `PoolMembership::insert`'s four-axis uniqueness invariant. Shared by
+/// `plan_replace` (early/dry-run rejection) and `ReplacePlan::execute`
+/// (authoritative, against a fresh pool.json read) so both derive identically.
+fn derive_replace_target_membership(
+    pre_membership: &PoolMembership,
+    old_uuid: &LuksUuid,
+    new_uuid: &LuksUuid,
+    new_name: &DiskName,
+    new_by_id: &ByIdPath,
+) -> Result<PoolMembership, membership::MembershipError> {
+    let mut target = pre_membership.clone();
+    target.remove_by_uuid(old_uuid);
+    target.insert(
+        new_uuid.clone(),
+        membership::DiskMember {
+            name: new_name.clone(),
+            by_id: new_by_id.clone(),
+            devid: None,
+            added_at: None,
+        },
+    )?;
+    Ok(target)
+}
+
+/// `replace`'s execute-time `by_uuid` drift error -- same operator wording as
+/// remove's `absent_from_membership_error`, so the two commands reject an
+/// absent member identically before journaling.
+fn absent_from_membership_error(name: &str) -> ReplaceError {
+    ReplaceError::Validation(format!(
+        "'{name}' not found in pool.json membership -- \
+         no disk entry has this name. Pool membership may need manual repair."
+    ))
 }
 
 pub fn cmd_replace<R, F, D>(
@@ -1625,8 +1676,6 @@ struct ReplaceWorkPlanInput<'a> {
     new_probed: PresentConfigDisk,
     replace_source: ReplaceSource,
     pool: PoolState,
-    pre_membership: PoolMembership,
-    target_membership: PoolMembership,
     paths: &'a StatePaths,
     /// Resolved keyfile decision after `plan_single_disk_enrollment`
     /// for `PresentLuks` targets. `Some(kf)` means an enrollment will
@@ -1684,8 +1733,6 @@ fn build_replace_work_plan(input: ReplaceWorkPlanInput<'_>) -> ReplaceWorkPlan {
         pool: input.pool,
         replace_source: input.replace_source,
         target_prep,
-        pre_membership: input.pre_membership,
-        target_membership: input.target_membership,
         journal_target,
         journal_source,
         restore_raid1_after_commit,
@@ -1902,8 +1949,6 @@ fn replace_work_plan_for_test(input: &ReplaceWorkPlanTestInput<'_>) -> ReplaceWo
         new_probed: input.new_probed.clone(),
         replace_source: input.replace_source.clone(),
         pool,
-        pre_membership: PoolMembership::empty(),
-        target_membership: PoolMembership::empty(),
         paths: input.paths,
         enroll_key_file: input.enroll_key_file.map(Path::to_path_buf),
         luks_format_extra_opts: extra_opts,
@@ -3230,22 +3275,6 @@ mod tests {
         let old_uuid = LuksUuid::parse("22222222-2222-2222-2222-222222222222").unwrap();
         let new_name = disk_name("disk3");
         let new_by_id = ByIdPath::parse("/dev/disk/by-id/virtio-disk3").unwrap();
-        let pre_membership = membership::load_membership(&f.paths).unwrap();
-        let mut target_membership = pre_membership.clone();
-        target_membership
-            .remove_by_uuid(&old_uuid)
-            .expect("fixture contains disk2");
-        target_membership
-            .insert(
-                new_uuid.clone(),
-                membership::DiskMember {
-                    name: new_name.clone(),
-                    by_id: new_by_id.clone(),
-                    devid: None,
-                    added_at: None,
-                },
-            )
-            .expect("fixture target membership is unique");
 
         let pool = PoolState {
             mounted: true,
@@ -3289,8 +3318,6 @@ mod tests {
                     devid: 2,
                 },
                 pool,
-                pre_membership,
-                target_membership,
                 paths: &f.paths,
                 enroll_key_file: None,
                 luks_format_extra_opts: LuksFormatExtraOpts::parse(&[]).unwrap(),
@@ -3534,6 +3561,148 @@ mod tests {
                 .iter()
                 .any(|r| matches!(r, CmdRequest::BtrfsReplaceStart { .. })),
             "clean re-check should proceed to BtrfsReplaceStart"
+        );
+    }
+
+    // Intent: `ReplacePlan::execute` re-loads pool.json after the inhibitor
+    //   and rejects a drift that dropped the old member out of membership,
+    //   before journaling -- mirroring RemovePlan::execute's drift guard.
+    // Why it exists: execute journals/saves from the re-derived membership;
+    //   without a fresh by_uuid re-check, a pool.json rewrite during the
+    //   confirmation/passphrase/inhibitor window would let the derive run
+    //   against a stale snapshot and persist a misleading membership.
+    // Scenario: disk2 is planned for replacement, then pool.json is rewritten
+    //   to drop disk2 before execute reaches the journal. execute must fail
+    //   with no journal and the drifted pool.json left untouched.
+    #[test]
+    fn replace_execute_rejects_when_pool_json_drifts_after_planning() {
+        let f = PoolFixture::two_disk_healthy();
+        let new_uuid = LuksUuid::parse("33333333-3333-3333-3333-333333333333").unwrap();
+        let plan = fresh_luks_execute_plan_for_test(&f, new_uuid.clone());
+        let runner = execute_gate_runner(None, new_uuid, true);
+        let fs = MockFs::storage(vec!["/dev/disk/by-id/virtio-disk3".into()]);
+
+        // Drift: rewrite pool.json to drop disk2 (the old member) after the
+        // plan was built but before execute re-loads.
+        let mut drifted = PoolMembership::empty();
+        drifted
+            .insert(
+                LuksUuid::parse("11111111-1111-1111-1111-111111111111").unwrap(),
+                membership::DiskMember {
+                    name: disk_name("disk1"),
+                    by_id: ByIdPath::parse("/dev/disk/by-id/virtio-disk1").unwrap(),
+                    devid: None,
+                    added_at: None,
+                },
+            )
+            .expect("drifted membership is unique");
+        membership::save_membership(&drifted, &f.paths).expect("save drifted pool.json");
+
+        let result = plan.execute(&runner, &fs, &f.replace_params().build());
+
+        match result {
+            Err(ReplaceError::Validation(msg)) => {
+                assert!(
+                    msg.contains("not found in pool.json membership"),
+                    "expected pool.json membership error: {msg}"
+                );
+                assert!(msg.contains("disk2"), "expected disk2 in error: {msg}");
+            }
+            other => panic!("expected Err(ReplaceError::Validation), got: {other:?}"),
+        }
+        assert!(
+            !f.paths.pending_op_json().exists(),
+            "execute-time drift rejection must happen before journal write",
+        );
+        assert_eq!(
+            f.inhibitor.acquire_count(),
+            1,
+            "execute guard must run after acquiring the sleep inhibitor",
+        );
+        assert_eq!(
+            membership::load_membership(&f.paths).unwrap(),
+            drifted,
+            "rejection must leave the drifted pool.json unchanged",
+        );
+    }
+
+    // Intent: `ReplacePlan::execute`'s fresh-read re-derive runs the four-axis
+    //   uniqueness invariant -- a drift that keeps the old member but adds a
+    //   member colliding with the disk being added fails closed pre-journal.
+    // Why it exists: the re-derive feeds `derive_replace_target_membership`'s
+    //   `insert ?`; dropping or swallowing that `?` would silently let a
+    //   colliding fresh read journal a conflicting membership. This pins the
+    //   conflict path the absent-name guard does NOT cover.
+    // Scenario: disk2 is planned for replacement with disk3
+    //   (/dev/disk/by-id/virtio-disk3), then a concurrent write adds a member
+    //   binding that same by-id under a foreign UUID before execute re-loads.
+    //   execute must fail with a membership conflict and no journal.
+    #[test]
+    fn replace_execute_rejects_when_pool_json_drift_conflicts_with_new_disk() {
+        let f = PoolFixture::two_disk_healthy();
+        let new_uuid = LuksUuid::parse("33333333-3333-3333-3333-333333333333").unwrap();
+        let plan = fresh_luks_execute_plan_for_test(&f, new_uuid.clone());
+        let runner = execute_gate_runner(None, new_uuid, true);
+        let fs = MockFs::storage(vec!["/dev/disk/by-id/virtio-disk3".into()]);
+
+        // Drift: keep disk1 + disk2 (so the absent-name guard does not
+        // short-circuit) and add a foreign member binding the new target's
+        // by-id, so the re-derive's insert collides on the by_id axis.
+        let mut drifted = PoolMembership::empty();
+        drifted
+            .insert(
+                LuksUuid::parse("11111111-1111-1111-1111-111111111111").unwrap(),
+                membership::DiskMember {
+                    name: disk_name("disk1"),
+                    by_id: ByIdPath::parse("/dev/disk/by-id/virtio-disk1").unwrap(),
+                    devid: None,
+                    added_at: None,
+                },
+            )
+            .expect("disk1 insert");
+        drifted
+            .insert(
+                LuksUuid::parse("22222222-2222-2222-2222-222222222222").unwrap(),
+                membership::DiskMember {
+                    name: disk_name("disk2"),
+                    by_id: ByIdPath::parse("/dev/disk/by-id/virtio-disk2").unwrap(),
+                    devid: None,
+                    added_at: None,
+                },
+            )
+            .expect("disk2 insert");
+        drifted
+            .insert(
+                LuksUuid::parse("44444444-4444-4444-4444-444444444444").unwrap(),
+                membership::DiskMember {
+                    name: disk_name("decoy"),
+                    by_id: ByIdPath::parse("/dev/disk/by-id/virtio-disk3").unwrap(),
+                    devid: None,
+                    added_at: None,
+                },
+            )
+            .expect("foreign by-id insert");
+        membership::save_membership(&drifted, &f.paths).expect("save drifted pool.json");
+
+        let result = plan.execute(&runner, &fs, &f.replace_params().build());
+
+        match result {
+            Err(ReplaceError::Membership(membership::MembershipError::Conflict(msg))) => {
+                assert!(
+                    msg.contains("by_id") && msg.contains("virtio-disk3"),
+                    "expected by_id conflict against the new target: {msg}"
+                );
+            }
+            other => panic!("expected Err(ReplaceError::Membership(Conflict)), got: {other:?}"),
+        }
+        assert!(
+            !f.paths.pending_op_json().exists(),
+            "membership conflict on the fresh read must reject before journal write",
+        );
+        assert_eq!(
+            f.inhibitor.acquire_count(),
+            1,
+            "execute guard must run after acquiring the sleep inhibitor",
         );
     }
 
@@ -4246,8 +4415,6 @@ mod tests {
                 false,
                 2,
             ),
-            pre_membership: PoolMembership::empty(),
-            target_membership: PoolMembership::empty(),
             paths: &paths,
             // Resolved value as `plan_replace` would compute it for a
             // `NeedsEnroll` outcome: the planner would have run
