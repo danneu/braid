@@ -32,12 +32,19 @@ use crate::status_tag::{StatusTag, color_enabled_for_stderr, emit_status, status
 use crate::types::*;
 use std::path::{Path, PathBuf};
 
-/// Errors raised by `braid add` planning and execution. `DuplicateUuid` is
-/// the discover-symmetric refusal for the cloned-disk planning path:
-/// raised from planning BEFORE any `LuksUuidMap::insert` on the journal
-/// `targets` map AND BEFORE `PoolMembership::insert`, so the operator
-/// message names both colliding `(name, by_id)` pairs explicitly rather
-/// than falling through to the generic `MembershipError::Conflict`.
+/// Errors raised by `braid add` planning and execution. Two refusals cover
+/// duplicate LUKS UUIDs, both raised from planning BEFORE any
+/// `LuksUuidMap::insert` on the journal `targets` map AND BEFORE
+/// `PoolMembership::insert`. `DuplicateUuid` is the discover-symmetric
+/// refusal for the in-flight and membership arms, where both colliding
+/// parties are real, legitimately-resolved identities, so it names both
+/// `(name, by_id)` pairs explicitly rather than falling through to the
+/// generic `MembershipError::Conflict`. `DuplicateUuidLivePool` is the
+/// live-pool arm, where the colliding device is a foreign/cloned btrfs
+/// member absent from membership: per ADR 024 braid does not invent an
+/// identity for the clone, so it names only the real add target and reports
+/// the colliding side by scope -- mirroring `replace`'s
+/// `DuplicateUuid { scope: LivePool }` name-nothing-foreign contract.
 /// `ManagedFormatFlag` surfaces a rejected `--luks-format-arg` through
 /// the `AddError` chain so the CLI matches a single error type at the
 /// boundary.
@@ -65,12 +72,12 @@ pub enum AddError {
     )]
     PostAddProbeFailed { detail: String },
     /// Pre-journal-write refusal: a target's LUKS UUID collides with
-    /// another in-flight add target, an existing pool member, or a UUID
-    /// observed in the live `pool.devices` set. Raised by
+    /// another in-flight add target or an existing pool member. Raised by
     /// `assert_target_uuid_unique` before journal write, before any
     /// `CryptsetupLuksFormat`, and before any `PoolMembership::insert`,
     /// so the operator-facing message names both `(name, by_id)` pairs
-    /// and suggests cloning as the typical cause. Mirrors
+    /// and suggests cloning as the typical cause. The live `pool.devices`
+    /// collision arm is `DuplicateUuidLivePool`, not this variant. Mirrors
     /// `DiscoverError::DuplicateUuid`.
     #[error(
         "duplicate LUKS UUID: braid-{name1} ({by_id1}) and braid-{name2} ({by_id2}) share UUID {uuid} -- detach the cloned or unintended disk before retrying (this typically indicates a dd-cloned disk)"
@@ -81,6 +88,23 @@ pub enum AddError {
         by_id1: ByIdPath,
         name2: DiskName,
         by_id2: ByIdPath,
+    },
+    /// Live-pool UUID collision: an add target's LUKS UUID matches a
+    /// device already live in the btrfs pool but absent from membership
+    /// (a foreign/cloned device). Per ADR 024 braid does not invent an
+    /// identity for the clone, so this names only the real add target and
+    /// reports the colliding side by scope -- mirroring
+    /// `ReplaceError::DuplicateUuid { scope: LivePool }`.
+    #[error(
+        "duplicate LUKS UUID {uuid}: add target braid-{name} ({by_id}) \
+         collides with a device already in the live pool -- detach the \
+         cloned or unintended disk before retrying (this typically \
+         indicates a dd-cloned disk)"
+    )]
+    DuplicateUuidLivePool {
+        uuid: LuksUuid,
+        name: DiskName,
+        by_id: ByIdPath,
     },
     /// Closed-PresentLuks target identity drift between planning-time
     /// probe and the live disk immediately before Pass 1
@@ -134,15 +158,16 @@ enum AddLuksBtrfsProbe {
 
 /// Live-pool correlation for a PresentLuks target after UUID match.
 /// A UUID match only counts as ownership when the candidate and live
-/// pool row also resolve to the same backing block device.
+/// pool row also resolve to the same backing block device. All variants
+/// are unit: per ADR 024 a different-backing (cloned/foreign) row is
+/// refused by scope alone, so no foreign `PoolDevice` handle is carried.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum LivePoolMatch<'a> {
+enum LivePoolMatch {
     /// The target is already represented by a live row with the same backing.
-    /// Unit because callers only need the no-op signal.
     SameBacking,
-    DifferentBacking {
-        device: &'a PoolDevice,
-    },
+    /// A live row carries the target's UUID under a different backing path
+    /// (a cloned/foreign device, refused by scope per ADR 024).
+    DifferentBacking,
     NoMatch,
 }
 
@@ -243,12 +268,12 @@ fn identity_to_error(identity: &AddLuksBtrfsProbe, name: &str) -> Option<AddErro
 /// Classify live-pool membership for an add target by UUID and backing path.
 /// Different backing dominates so cloned LUKS headers fail closed even if
 /// another live row proves the candidate itself is already open.
-fn classify_live_pool_match<'a>(
+fn classify_live_pool_match(
     target_uuid: &LuksUuid,
     target_by_id: &ByIdPath,
-    pool: &'a PoolState,
+    pool: &PoolState,
     resolver: &dyn BackingPathResolver,
-) -> Result<LivePoolMatch<'a>, AddError> {
+) -> Result<LivePoolMatch, AddError> {
     let target_backing = resolver
         .canonicalize(target_by_id.as_str())
         .map_err(|source| {
@@ -258,7 +283,7 @@ fn classify_live_pool_match<'a>(
             ))
         })?;
     let mut same_backing = false;
-    let mut different_backing = None;
+    let mut different_backing = false;
 
     for device in pool
         .devices
@@ -274,14 +299,14 @@ fn classify_live_pool_match<'a>(
                 ))
             })?;
         if live_backing != target_backing {
-            different_backing.get_or_insert(device);
+            different_backing = true;
         } else {
             same_backing = true;
         }
     }
 
-    if let Some(device) = different_backing {
-        Ok(LivePoolMatch::DifferentBacking { device })
+    if different_backing {
+        Ok(LivePoolMatch::DifferentBacking)
     } else if same_backing {
         Ok(LivePoolMatch::SameBacking)
     } else {
@@ -328,12 +353,11 @@ fn recheck_execute_live_pool_targets(
     for (uuid, target) in journal_targets {
         match classify_live_pool_match(uuid, &target.by_id, fresh_pool, resolver)? {
             LivePoolMatch::NoMatch => {}
-            LivePoolMatch::DifferentBacking { device } => {
+            LivePoolMatch::DifferentBacking => {
                 return Err(duplicate_live_pool_uuid_error(
                     uuid,
                     &target.name,
                     &target.by_id,
-                    device,
                 ));
             }
             LivePoolMatch::SameBacking => {
@@ -2096,10 +2120,8 @@ fn build_add_work_plan<R: CommandRunner>(
                                 input.backing_path_resolver,
                             )? {
                                 LivePoolMatch::SameBacking => continue,
-                                LivePoolMatch::DifferentBacking { device } => {
-                                    return Err(duplicate_live_pool_uuid_error(
-                                        uuid, name, by_id, device,
-                                    ));
+                                LivePoolMatch::DifferentBacking => {
+                                    return Err(duplicate_live_pool_uuid_error(uuid, name, by_id));
                                 }
                                 LivePoolMatch::NoMatch => {}
                             }
@@ -2161,8 +2183,8 @@ fn build_add_work_plan<R: CommandRunner>(
                         input.backing_path_resolver,
                     )? {
                         LivePoolMatch::SameBacking => continue,
-                        LivePoolMatch::DifferentBacking { device } => {
-                            return Err(duplicate_live_pool_uuid_error(uuid, name, by_id, device));
+                        LivePoolMatch::DifferentBacking => {
+                            return Err(duplicate_live_pool_uuid_error(uuid, name, by_id));
                         }
                         LivePoolMatch::NoMatch => {}
                     }
@@ -2212,14 +2234,17 @@ fn build_add_work_plan<R: CommandRunner>(
 ///      different by-id, raise `AddError::DuplicateUuid` naming both
 ///      `(name, by_id)` pairs (the cloned-disk-across-targets case).
 ///   2. Otherwise, check membership keys and live `pool.devices` UUIDs.
-///      On collision, raise `AddError::DuplicateUuid` naming the
-///      in-flight target plus a synthesized `(name, by_id)` for the
-///      colliding existing member (membership case) or live device
-///      (live-pool case).
+///      A membership-key collision raises `AddError::DuplicateUuid`
+///      naming the in-flight target plus the colliding member's real
+///      `(name, by_id)`. A live `pool.devices` collision raises
+///      `AddError::DuplicateUuidLivePool` naming only the add target,
+///      reporting the colliding foreign device by scope (ADR 024: no
+///      invented identity for the clone).
 ///
 /// `LuksUuidMap::insert` fail-closed and `PoolMembership::insert` are
 /// the defense-in-depth backstops; this gate is the pre-write refusal
-/// so the operator message names both by-id paths explicitly rather
+/// so the operator gets a structured collision message (naming the real
+/// parties, or the add target plus scope for the live-pool arm) rather
 /// than falling through to a generic conflict error.
 fn assert_target_uuid_unique(
     uuid: &LuksUuid,
@@ -2249,41 +2274,27 @@ fn assert_target_uuid_unique(
             &existing.by_id,
         ));
     }
-    // (2b) Live-pool collision. The colliding device has no by-id
-    // observation; we render its observed `mapper` via
-    // `MapperName::Display` as the "name" surface, and use an empty
-    // by-id placeholder (the test plan accepts this for the live-pool
-    // arm).
-    if let Some(dev) = live_pool.devices.iter().find(|d| d.luks_uuid == *uuid) {
-        return Err(duplicate_live_pool_uuid_error(
-            uuid, this_name, this_by_id, dev,
-        ));
+    // (2b) Live-pool collision: the colliding device is a foreign btrfs
+    // member absent from membership. Per ADR 024 braid does not invent an
+    // identity for it, so the refusal names only the add target and reports
+    // the colliding side by scope -- nothing derived from the foreign mapper.
+    if live_pool.devices.iter().any(|d| d.luks_uuid == *uuid) {
+        return Err(duplicate_live_pool_uuid_error(uuid, this_name, this_by_id));
     }
     Ok(())
 }
 
-/// Render a live-pool UUID collision with the same synthesized live side
-/// as `assert_target_uuid_unique` so clone refusals stay operator-stable.
-fn duplicate_live_pool_uuid_error(
-    uuid: &LuksUuid,
-    this_name: &DiskName,
-    this_by_id: &ByIdPath,
-    live_device: &PoolDevice,
-) -> AddError {
-    let synth_name = DiskName::parse(&live_device.mapper.0)
-        // Mapper "braid-<diskname>" should parse cleanly. If it
-        // does not (operator created a non-standard mapper),
-        // fall back to a placeholder so the error message still
-        // names both pairs.
-        .unwrap_or_else(|_| DiskName::parse("foreign").expect("placeholder DiskName is valid"));
-    let synth_by_id = ByIdPath::parse("/dev/disk/by-id/").expect("placeholder by-id is valid");
-    duplicate_uuid_error(
-        uuid.clone(),
-        this_name,
-        this_by_id,
-        &synth_name,
-        &synth_by_id,
-    )
+/// Render a live-pool UUID collision naming only the real add target,
+/// reporting the colliding foreign device by scope. Per ADR 024 braid
+/// invents no identity for the clone, so nothing here is derived from the
+/// foreign device's mapper -- mirroring `replace`'s
+/// `DuplicateUuid { scope: LivePool }` name-nothing-foreign contract.
+fn duplicate_live_pool_uuid_error(uuid: &LuksUuid, name: &DiskName, by_id: &ByIdPath) -> AddError {
+    AddError::DuplicateUuidLivePool {
+        uuid: uuid.clone(),
+        name: name.clone(),
+        by_id: by_id.clone(),
+    }
 }
 
 /// Sort the two `(name, by_id)` pairs lexicographically by `by_id`
@@ -2755,12 +2766,7 @@ mod tests {
 
         let result = classify_live_pool_match(&uuid, &by_id, &pool, &resolver).unwrap();
 
-        match result {
-            LivePoolMatch::DifferentBacking { device } => {
-                assert_eq!(device.mapper, MapperName("braid-clone".into()));
-            }
-            other => panic!("expected DifferentBacking, got: {other:?}"),
-        }
+        assert_eq!(result, LivePoolMatch::DifferentBacking);
     }
 
     // Intent: classify_live_pool_match reports NoMatch when no live pool row
@@ -2863,12 +2869,10 @@ mod tests {
 
         let result = classify_live_pool_match(&uuid, &by_id, &pool, &resolver).unwrap();
 
-        match result {
-            LivePoolMatch::DifferentBacking { device } => {
-                assert_eq!(device.mapper, MapperName("braid-clone".into()));
-            }
-            other => panic!("expected DifferentBacking, got: {other:?}"),
-        }
+        // DifferentBacking dominates: had the same-backing legit row won, this
+        // would be SameBacking. The colliding row's handle is intentionally not
+        // carried (per ADR 024 the refusal names nothing foreign).
+        assert_eq!(result, LivePoolMatch::DifferentBacking);
     }
 
     fn recoverable_target(name: &str, by_id: &str, uuid: &str) -> RecoverableBraidTarget {
@@ -3105,24 +3109,28 @@ mod tests {
 
         let body = err.to_string();
         match err {
-            AddError::DuplicateUuid {
-                uuid,
-                name1,
-                by_id1,
-                name2,
-                by_id2,
-            } => {
+            AddError::DuplicateUuidLivePool { uuid, name, by_id } => {
                 assert_eq!(uuid.as_str(), UUID);
-                assert_eq!(name1.as_str(), "clone-foreign");
-                assert_eq!(by_id1.as_str(), "/dev/disk/by-id/");
-                assert_eq!(name2.as_str(), "disk2");
-                assert_eq!(by_id2.as_str(), BY_ID);
+                assert_eq!(name.as_str(), "disk2");
+                assert_eq!(by_id.as_str(), BY_ID);
             }
-            other => panic!("expected DuplicateUuid, got: {other:?}"),
+            other => panic!("expected DuplicateUuidLivePool, got: {other:?}"),
         }
         assert!(
-            body.contains("duplicate LUKS UUID: braid-clone-foreign (/dev/disk/by-id/) and braid-disk2 (/dev/disk/by-id/virtio-disk2) share UUID"),
-            "unexpected duplicate UUID body: {body}"
+            body.contains("add target braid-disk2 (/dev/disk/by-id/virtio-disk2)"),
+            "live-pool refusal must name the real add target: {body}"
+        );
+        assert!(
+            body.contains("live pool"),
+            "live-pool refusal must report the colliding side by scope: {body}"
+        );
+        assert!(
+            !body.contains("braid-braid"),
+            "live-pool refusal must not double-prefix: {body}"
+        );
+        assert!(
+            !body.contains("clone-foreign"),
+            "live-pool refusal must surface nothing derived from the foreign mapper: {body}"
         );
         assert_eq!(inhibitor.acquire_count(), 0);
         assert!(journal::load_journal(&paths).unwrap().is_none());
@@ -9987,19 +9995,15 @@ mod tests {
         );
 
         match result {
-            Err(AddError::DuplicateUuid {
-                uuid,
-                by_id1,
-                by_id2,
-                ..
-            }) => {
+            Err(AddError::DuplicateUuidLivePool { uuid, by_id, .. }) => {
                 assert_eq!(uuid.as_str(), collision_uuid);
-                assert!(
-                    [by_id1.as_str(), by_id2.as_str()].contains(&by_id.as_str()),
-                    "duplicate error must name the candidate by-id, got {by_id1} and {by_id2}"
+                assert_eq!(
+                    by_id.as_str(),
+                    BY_ID,
+                    "live-pool refusal must name the candidate add target's by-id"
                 );
             }
-            other => panic!("expected DuplicateUuid for open clone, got: {other:?}"),
+            other => panic!("expected DuplicateUuidLivePool for open clone, got: {other:?}"),
         }
     }
 
@@ -10182,10 +10186,15 @@ mod tests {
         );
 
         match result {
-            Err(AddError::DuplicateUuid { uuid, .. }) => {
+            Err(AddError::DuplicateUuidLivePool { uuid, by_id, .. }) => {
                 assert_eq!(uuid.as_str(), collision_uuid);
+                assert_eq!(
+                    by_id.as_str(),
+                    "/dev/disk/by-id/usb-CLONE",
+                    "live-pool refusal must name the candidate add target's by-id"
+                );
             }
-            other => panic!("expected DuplicateUuid for closed clone, got: {other:?}"),
+            other => panic!("expected DuplicateUuidLivePool for closed clone, got: {other:?}"),
         }
         assert!(
             runner.requests().is_empty(),
@@ -10569,9 +10578,12 @@ mod tests {
      * remain the defense-in-depth backstop.
      *
      * Scenario: a returning braid-labeled disk probes to the same UUID
-     * as an unrecognized live `PoolDevice` (foreign mapper). Planning
-     * refuses with `AddError::DuplicateUuid` and names the in-flight
-     * target plus the foreign mapper.
+     * as an unrecognized live `PoolDevice` whose mapper is `braid-foreign`.
+     * Planning refuses with `AddError::DuplicateUuidLivePool`, naming only
+     * the real add target and reporting the colliding side by scope. The
+     * `braid-`-prefixed live mapper is the canonical double-prefix
+     * regression: it is the only input that could have rendered
+     * `braid-braid-foreign` under the old mapper-synthesis path.
      */
     #[test]
     fn add_pre_write_uniqueness_assert_live_pool_collision() {
@@ -10617,12 +10629,40 @@ mod tests {
                 pool_membership: &PoolMembership::empty(),
             },
         );
+        let body = result
+            .as_ref()
+            .err()
+            .map(|e| e.to_string())
+            .unwrap_or_default();
         match result {
-            Err(AddError::DuplicateUuid { uuid, .. }) => {
+            Err(AddError::DuplicateUuidLivePool { uuid, name, by_id }) => {
                 assert_eq!(uuid.as_str(), collision_uuid);
+                assert_eq!(name.as_str(), "clone");
+                assert_eq!(by_id.as_str(), "/dev/disk/by-id/usb-CLONE");
             }
-            other => panic!("expected DuplicateUuid (live-pool collision), got: {other:?}"),
+            other => {
+                panic!("expected DuplicateUuidLivePool (live-pool collision), got: {other:?}")
+            }
         }
+        assert!(
+            body.contains("add target braid-clone (/dev/disk/by-id/usb-CLONE)"),
+            "live-pool refusal must name the real add target: {body}"
+        );
+        assert!(
+            body.contains("live pool"),
+            "live-pool refusal must report the colliding side by scope: {body}"
+        );
+        // Canonical double-prefix regression: a `braid-`-prefixed live mapper
+        // (braid-foreign) is the only input that could render `braid-braid-...`
+        // under the old mapper-synthesis path.
+        assert!(
+            !body.contains("braid-braid"),
+            "live-pool refusal must not double-prefix: {body}"
+        );
+        assert!(
+            !body.contains("braid-foreign"),
+            "live-pool refusal must surface nothing derived from the foreign mapper: {body}"
+        );
         // No CryptsetupLuksFormat issued on the refusal path.
         let requests = recording.requests();
         assert!(
@@ -10630,6 +10670,65 @@ mod tests {
                 .iter()
                 .any(|r| matches!(r, CmdRequest::CryptsetupLuksFormat { .. })),
             "live-pool collision refusal must not invoke luksFormat: {requests:?}"
+        );
+    }
+
+    // Intent: a live-pool UUID collision whose colliding device carries a
+    // non-braid mapper (`clone-foreign`) renders a refusal that names only
+    // the real add target and reports the colliding side by scope -- nothing
+    // derived from the foreign mapper.
+    // Why it exists: the prior code synthesized a `DiskName` from the live
+    // device's mapper, leaking `braid-clone-foreign` into the message (and
+    // double-prefixing `braid-`-prefixed mappers). ADR 024 forbids inventing
+    // an identity for the clone; this pins that a non-`braid-` foreign mapper
+    // never reaches the operator-facing text (the complement of the
+    // `braid-foreign` double-prefix regression above).
+    // Scenario: an add target's probed LUKS UUID matches a live `PoolDevice`
+    // an operator opened by hand under the mapper `clone-foreign`, absent from
+    // membership.
+    #[test]
+    fn assert_target_uuid_unique_live_pool_collision_omits_foreign_mapper() {
+        let uuid = LuksUuid::parse("66666666-6666-6666-6666-666666666666").unwrap();
+        let name = DiskName::parse("disk2").unwrap();
+        let by_id = ByIdPath::parse("/dev/disk/by-id/virtio-disk2").unwrap();
+        let live_pool =
+            pool_with_live_devices(vec![live_pool_device("clone-foreign", &uuid, "/dev/vde")]);
+        let in_flight: LuksUuidMap<journal::AddJournalTarget> = LuksUuidMap::new();
+
+        let err = assert_target_uuid_unique(
+            &uuid,
+            &PoolMembership::empty(),
+            &live_pool,
+            &in_flight,
+            &name,
+            &by_id,
+        )
+        .unwrap_err();
+
+        let body = err.to_string();
+        match err {
+            AddError::DuplicateUuidLivePool {
+                uuid: collided,
+                name: target_name,
+                by_id: target_by_id,
+            } => {
+                assert_eq!(collided.as_str(), uuid.as_str());
+                assert_eq!(target_name.as_str(), "disk2");
+                assert_eq!(target_by_id.as_str(), by_id.as_str());
+            }
+            other => panic!("expected DuplicateUuidLivePool, got: {other:?}"),
+        }
+        assert!(
+            body.contains("add target braid-disk2 (/dev/disk/by-id/virtio-disk2)"),
+            "live-pool refusal must name the real add target: {body}"
+        );
+        assert!(
+            body.contains("live pool"),
+            "live-pool refusal must report the colliding side by scope: {body}"
+        );
+        assert!(
+            !body.contains("clone-foreign"),
+            "live-pool refusal must surface nothing derived from the foreign mapper: {body}"
         );
     }
 }
