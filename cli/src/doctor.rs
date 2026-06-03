@@ -1810,12 +1810,11 @@ mod tests {
         UpscSpawnFailureRunner, beep_ctx, cls, config_with_ups_enabled, config_without_ups,
         device_usage_raw, device_usage_raw_body, device_usage_three_one_tight,
         device_usage_three_two_tight, device_usage_two_healthy, device_usage_two_tight, df_json,
-        df_json_fail, disk_member_with, human_options, is_luks_ok, isolated_paths,
-        luks_dump_text_ok, luks_uuid_ok, mountpoint_fail, mountpoint_ok, parsed_doctor_ctx,
-        pool_state_runner, smart_selftest_runner_for, smartctl_selftest_json,
-        systemctl_show_active_state_output, test_uuid, unlock_btrfs_balance_status_idle,
-        unlock_btrfs_balance_status_paused, unlock_btrfs_balance_status_paused_skip_balance,
-        ups_ctx, valid_config_json, write_temp,
+        df_json_fail, disk_member_with, human_options, is_luks_ok, isolated_paths, luks_uuid_ok,
+        mountpoint_fail, mountpoint_ok, parsed_doctor_ctx, pool_state_runner,
+        smart_selftest_runner_for, smartctl_selftest_json, systemctl_show_active_state_output,
+        test_uuid, unlock_btrfs_balance_status_idle, unlock_btrfs_balance_status_paused,
+        unlock_btrfs_balance_status_paused_skip_balance, ups_ctx, valid_config_json, write_temp,
     };
     use crate::types::MountPoint;
 
@@ -3548,11 +3547,9 @@ mod tests {
         let expected = test_uuid(1);
         let observed = test_uuid(2);
         let (is_luks_req, is_luks_out) = is_luks_ok(device);
-        let (dump_req, dump_out) = luks_dump_text_ok(device);
         let (uuid_req, uuid_out) = luks_uuid_ok(device, observed.as_str());
         let runner = MockRunner::default()
             .with_output(is_luks_req, is_luks_out)
-            .with_output(dump_req, dump_out)
             .with_output(uuid_req, uuid_out);
 
         let state = classify_luks_identity(&runner, device, &expected);
@@ -3580,11 +3577,9 @@ mod tests {
         let device = "/dev/disk/by-id/wwn-0x1";
         let expected = test_uuid(1);
         let (is_luks_req, is_luks_out) = is_luks_ok(device);
-        let (dump_req, dump_out) = luks_dump_text_ok(device);
         let (uuid_req, uuid_out) = luks_uuid_ok(device, expected.as_str());
         let runner = MockRunner::default()
             .with_output(is_luks_req, is_luks_out)
-            .with_output(dump_req, dump_out)
             .with_output(uuid_req, uuid_out);
 
         let state = classify_luks_identity(&runner, device, &expected);
@@ -3593,6 +3588,46 @@ mod tests {
             DiskState::LuksHeaderOk => {}
             other => panic!("expected LuksHeaderOk, got {other:?}"),
         }
+    }
+
+    // Intent: classify_luks_identity probes a declared disk with exactly
+    //   `cryptsetup isLuks` then `cryptsetup luksUUID`, and never `luksDump`.
+    // Why it exists: doctor is a read-only diagnostic, but isLuks/crypt_load can
+    //   auto-recover (write) a one-good-copy LUKS2 header under metadata locking;
+    //   a redundant second crypt_load probe (luksDump) would multiply that write
+    //   surface for no gain. The DiskState doc already drifted once (commit
+    //   3ff2ec15) claiming luksDump was part of the probe -- pin the wiring so a
+    //   re-added dump call fails loudly instead of passing silently against a
+    //   leftover optional mock.
+    // Scenario: a healthy declared member at its by-id path whose live UUID matches
+    //   pool.json; the probe must touch the device exactly twice, in order.
+    #[test]
+    fn classify_luks_identity_issues_isluks_then_luksuuid_only() {
+        let device = "/dev/disk/by-id/wwn-0x1";
+        let expected = test_uuid(1);
+        let (is_luks_req, is_luks_out) = is_luks_ok(device);
+        let (uuid_req, uuid_out) = luks_uuid_ok(device, expected.as_str());
+        let runner = MockRunner::default()
+            .with_output(is_luks_req, is_luks_out)
+            .with_output(uuid_req, uuid_out);
+
+        let state = classify_luks_identity(&runner, device, &expected);
+
+        // Sanity: the path actually completed (not short-circuited to ProbeFailed).
+        assert!(matches!(state, DiskState::LuksHeaderOk));
+        // Load-bearing: exact request set pins presence (isLuks + luksUUID),
+        // order, count, and absence of any dump variant or other probe.
+        assert_eq!(
+            runner.requests(),
+            vec![
+                CmdRequest::CryptsetupIsLuks {
+                    device: device.to_owned(),
+                },
+                CmdRequest::CryptsetupLuksUuid {
+                    device: device.to_owned(),
+                },
+            ],
+        );
     }
 
     // Intent: live-pool reconciliation marks verified members absent from the
