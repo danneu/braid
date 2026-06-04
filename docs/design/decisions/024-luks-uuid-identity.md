@@ -126,10 +126,12 @@ one.
 7. `lock` is the special cleanup case: classify live mappers by UUID/devid
    first, then close the observed mapper name, not a reconstructed
    `mapper_name(&member.name)`, so drifted-but-member-owned mappers are closed
-   correctly. If mounted per-device probing fails, `lock` first requires the
-   mounted filesystem FSID to prove braid owns the mount, then scans
-   `/dev/mapper/braid-*` candidates and closes only those with verified backing
-   LUKS UUIDs. If a `null_underlying` mapper's persisted devid resolves to
+   correctly. If mounted per-device probing fails, `lock` reads the mounted
+   filesystem FSID to key the exclusive-operation preflight (so it will not
+   unmount mid balance/replace), then scans `/dev/mapper/braid-*` candidates
+   and closes only those with verified backing LUKS UUIDs. The unmount is
+   licensed by mount-point ownership, not an FSID identity match (see Limits
+   And Non-Goals). If a `null_underlying` mapper's persisted devid resolves to
    multiple membership UUIDs, `lock` warns, leaves that mapper open, and marks
    cleanup uncertain instead of demoting it to orphan cleanup. `lock` reports
    `disk <name>: already closed` only for members the planner has proved absent
@@ -191,6 +193,19 @@ warns rather than claiming every declared member is assembled.
 - UUIDs are not a user-facing naming scheme. They may appear in diagnostics,
   `pool.json`, `pending-op.json`, and machine-readable output, but command
   selection and normal summaries should continue to use `DiskName`.
+- `lock`'s mounted-fallback teardown unmounts the configured btrfs mount point
+  (licensed by mount-point ownership, not an FSID identity match -- braid
+  persists no durable pool FSID to compare a probe against), then scans only
+  `/dev/mapper/braid-*` and closes by backing LUKS UUID: verified member UUIDs
+  close as members, verified non-member `braid-*` mappers close as orphans;
+  non-`braid-*` devices and unverified candidates are skipped. The cleanup is
+  scoped by the `braid-*` namespace plus UUID, not by which devices backed the
+  unmounted filesystem. Consequence: a foreign btrfs at braid's mount point
+  would be unmounted (a non-destructive, EBUSY-safe `umount` with no `-f`/`-l`);
+  a foreign filesystem normally sits on non-`braid-*` devices, so the realistic
+  consequence is the unmount alone. This is accepted, and gating it would
+  require a durable pool-FSID identity axis this decision deliberately omits to
+  keep membership single-axis.
 
 ## Tests That Enforce This
 

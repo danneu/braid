@@ -60,17 +60,19 @@ impl std::fmt::Display for LockOrchestrateError {
 
 /// Snapshot of the pool's live state at lock-planning time. Variants
 /// encode the three real branches: a successful per-device probe, a
-/// mounted pool whose per-device probe failed (FSID still proved
-/// ownership), and an unmounted pool that bypasses mounted-pool
-/// probing and FSID preflight (per-candidate UUID probing still runs
-/// during mapper cleanup).
+/// mounted pool whose per-device probe failed (FSID only keys the
+/// exclusive-op preflight), and an unmounted pool that bypasses
+/// mounted-pool probing and FSID preflight (per-candidate UUID probing
+/// still runs during mapper cleanup).
 enum Snapshot {
     /// Per-device probe succeeded; close-set classification routes
     /// through observed LUKS UUIDs.
     Probed(PoolState),
-    /// Pool is mounted and FSID matched, but per-device probing
-    /// failed. `fsid` feeds preflight; `probe_error` is quoted in the
-    /// fallback warning.
+    /// Pool is mounted (btrfs occupies the mount point); per-device
+    /// probing failed. `fsid` is read only to key the exclusive-op
+    /// preflight -- it is not compared to any persisted pool identity
+    /// (braid persists none); `probe_error` is quoted in the fallback
+    /// warning.
     ProbeFailed {
         fsid: String,
         probe_error: ProbeError,
@@ -337,8 +339,10 @@ fn push_orphan_close(
 }
 
 /// Message body (no `[warn]` prefix) for the mounted fallback warning.
-/// The FSID preflight still proves braid owns the mount, but mapper
-/// cleanup remains UUID-gated and unverified candidates are skipped.
+/// The unmount is licensed by mount-point ownership; the destructive
+/// close stays UUID-gated, so only verified braid-* mappers are closed
+/// and unverified candidates are skipped. The FSID only keys the
+/// exclusive-op preflight, not an ownership check.
 fn uuid_scanned_fallback_warn_body(probe_error: &ProbeError) -> String {
     format!(
         "per-device probe failed ({probe_error}); falling back to UUID-scanned mapper cleanup. \
@@ -1061,9 +1065,10 @@ fn build_close_sets_full<R: CommandRunner, F: Filesystem + ?Sized>(
 }
 
 /// Close-set construction for fallback cleanup. The mounted variant has
-/// only FSID proof for the filesystem, and the unmounted variant has no
-/// btrfs probe at all, so every candidate must prove ownership or orphan
-/// status by backing LUKS UUID before it enters the close set.
+/// only the filesystem FSID (it keys the exclusive-op preflight, not an
+/// ownership check), and the unmounted variant has no btrfs probe at all,
+/// so every candidate must prove ownership or orphan status by backing
+/// LUKS UUID before it enters the close set.
 fn build_close_sets_uuid_scanned_fallback<R: CommandRunner, F: Filesystem + ?Sized>(
     runner: &R,
     fs: &F,
