@@ -45,6 +45,7 @@
         braid
         pkgs.cryptsetup
         pkgs.btrfs-progs
+        pkgs.lvm2
       ];
 
       environment.etc."braid/config.json".text = builtins.toJSON {
@@ -52,5 +53,8 @@
       };
     };
 
-  testScript = builtins.readFile ./braid-add-during-balance.py;
+  testScript =
+    builtins.readFile ./../module/dm_delay_helpers.py
+    + "\n\n"
+    + builtins.readFile ./braid-add-during-balance.py;
 }
