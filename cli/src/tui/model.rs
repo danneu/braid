@@ -296,6 +296,16 @@ pub struct PoolState {
     pub disk_transport: HashMap<String, String>,
     pub smart_health: HashMap<String, SmartHealth>,
     pub disk_temperature_readings: HashMap<String, TemperatureReading>,
+    /// Live backing block-device path per **btrfs-assembled, UUID-verified**
+    /// present member -- the `mounted_classification` subset, sourced
+    /// identically to the Data-tab SMART loop. Deliberately **not**
+    /// `disk_luks_states.underlying_present`, which is a superset (it also
+    /// covers `fallback_disk_luks_lock`-classified open mappers not assembled
+    /// into btrfs); resolving SMART from the superset would reintroduce the
+    /// Data-tab-vs-Browse divergence this field exists to prevent. Absent =>
+    /// caller falls back to by-id. The TUI-layer, name-keyed analog of the
+    /// domain's `PoolState::underlying_for_uuid`.
+    pub disk_underlying: HashMap<String, String>,
     pub device_errors: HashMap<String, DiskErrors>,
     /// Per-declared-disk render classification for disks NOT in
     /// `disk_usage`. Populated by `tui::probe` via `probe_config_disk`
@@ -308,6 +318,23 @@ pub struct PoolState {
     pub capacity_total_bytes: Option<u64>,
     pub capacity_used_bytes: u64,
     pub probed_at: Instant,
+}
+
+/// Device a hardware (SMART) probe must target for a disk: the live backing
+/// path when the member is present, else the persisted by-id handle
+/// (decision 024). Both SMART surfaces (Data-tab probe loop and the Browse
+/// picker) call this with a `mounted_classification`-sourced map, so they
+/// resolve identically. A free fn rather than a `PoolState` method so `model`
+/// stays free of a `probe` back-edge.
+pub(crate) fn smart_query_device<'a>(
+    name: &str,
+    by_id: &'a str,
+    present_underlying: &'a HashMap<String, String>,
+) -> &'a str {
+    present_underlying
+        .get(name)
+        .map(String::as_str)
+        .unwrap_or(by_id)
 }
 
 pub enum PoolStatus {

@@ -6,7 +6,7 @@ use crate::config::Ups;
 use crate::parse::types::BtrfsSubvolume;
 use crate::parse::{SystemdUnitRow, parse_btrfs_subvolume_list, parse_systemctl_list_units_json};
 use crate::tui::effect::Effect;
-use crate::tui::model::PoolStatus;
+use crate::tui::model::{PoolStatus, smart_query_device};
 use crate::types::MountPoint;
 
 /// Focus owner for Browse's sidebar/content regions so the top-level
@@ -513,7 +513,7 @@ impl BrowseState {
         }
 
         if selection.is_smartctl_picker() {
-            self.populate_smartctl_devices(disks);
+            self.populate_smartctl_devices(disks, pool);
             if self.smartctl_devices.is_empty() {
                 self.install_empty(BrowseEmptyState::NoDisksKnown);
             } else {
@@ -621,7 +621,7 @@ impl BrowseState {
         }
         if self.is_smartctl_picker() {
             if self.smartctl_devices.is_empty() {
-                self.populate_smartctl_devices(disks);
+                self.populate_smartctl_devices(disks, pool);
             }
             let request = self.selected_smartctl_request()?;
             self.mode = BrowseMode::SmartctlDeviceDetail;
@@ -673,7 +673,7 @@ impl BrowseState {
             }
             BrowseMode::SmartctlDeviceDetail => {
                 if self.smartctl_devices.is_empty() {
-                    self.populate_smartctl_devices(disks);
+                    self.populate_smartctl_devices(disks, pool);
                 }
                 let request = self.selected_smartctl_request()?;
                 self.dispatch(request)
@@ -1036,11 +1036,23 @@ impl BrowseState {
         self.systemd_units.clear();
     }
 
-    fn populate_smartctl_devices(&mut self, disks: &DiskInventory<'_>) {
+    /// Build the picker rows, resolving each disk's probe target through the
+    /// shared SMART rule: a present member shows (and dispatches against) its
+    /// live backing path, an offline disk its persisted by-id handle. Storing
+    /// the *resolved* device means the table row and the footer command cannot
+    /// diverge from what `smartctl` actually probes (decision 024).
+    fn populate_smartctl_devices(&mut self, disks: &DiskInventory<'_>, pool: &PoolStatus) {
+        let present_underlying = pool.current().map(|p| &p.disk_underlying);
         self.smartctl_devices = disks
             .by_id
             .iter()
-            .map(|(name, path)| (name.clone(), path.clone()))
+            .map(|(name, by_id)| {
+                let device = match present_underlying {
+                    Some(underlying) => smart_query_device(name, by_id, underlying).to_owned(),
+                    None => by_id.clone(),
+                };
+                (name.clone(), device)
+            })
             .collect();
         self.smartctl_devices.sort_by(|a, b| a.0.cmp(&b.0));
         self.smartctl_selected = self
@@ -1311,6 +1323,7 @@ mod tests {
             disk_transport: HashMap::new(),
             smart_health: HashMap::new(),
             disk_temperature_readings: HashMap::new(),
+            disk_underlying: HashMap::new(),
             device_errors: HashMap::new(),
             unpooled_disks: HashMap::new(),
             alert_state: AlertState::default(),
@@ -1320,6 +1333,18 @@ mod tests {
             capacity_used_bytes: 0,
             probed_at: Instant::now(),
         })
+    }
+
+    /// `pool()` with a populated `disk_underlying` so picker tests can exercise
+    /// the present-member (live-path) branch alongside the by-id fallback.
+    fn pool_with_underlying(disk_underlying: HashMap<String, String>) -> PoolStatus {
+        match pool() {
+            PoolStatus::Mounted(mut state) => {
+                state.disk_underlying = disk_underlying;
+                PoolStatus::Mounted(state)
+            }
+            _ => unreachable!("pool() returns Mounted"),
+        }
     }
 
     fn ups() -> Ups {
@@ -1377,7 +1402,9 @@ mod tests {
     // dispatching a command during normal navigation.
     // Why it exists: picker rows come from braid's disk inventory, but the
     // footer still needs to track the selected device command.
-    // Scenario: user opens Browse > SMART > Health and inspects disk1.
+    // Scenario: user opens Browse > SMART > Health and inspects disk1. The
+    // pool's disk_underlying is empty (no live-path branch), so this pins the
+    // by-id fallback.
     #[test]
     fn command_display_smartctl_picker_preview_uses_selected_device() {
         let mut state = BrowseState {
@@ -1393,6 +1420,48 @@ mod tests {
         assert_eq!(
             state.command_display(&mount_point, Some(&ups())),
             Some("smartctl -H /dev/disk/by-id/virtio-disk1".to_owned())
+        );
+    }
+
+    // Intent: the SMART picker resolves each disk's probe target through the
+    // shared rule -- a present member to its live backing path, an offline
+    // disk to its by-id handle -- and stores the resolved device so the footer
+    // command matches what smartctl runs.
+    // Why it exists: the Browse picker was the last by-id present-device SMART
+    // surface (decision 024); under by-id drift it probed a stale node while
+    // the Data tab probed the live one. The fix routes both through
+    // disk_underlying. Resolving from the superset disk_luks_states would
+    // reintroduce that divergence, so this pins the present + offline branches
+    // in one test.
+    // Scenario: disk1 is a btrfs-assembled present member at live /dev/vdb;
+    // disk2 is declared but offline (absent from disk_underlying).
+    #[test]
+    fn smartctl_picker_resolves_present_member_to_live_path() {
+        let mut state = BrowseState {
+            program: BrowseProgram::Smartctl,
+            smartctl_command: BrowseCommand::SmartctlHealth,
+            focus: BrowseFocus::Content,
+            ..Default::default()
+        };
+        let pool =
+            pool_with_underlying(HashMap::from([("disk1".to_owned(), "/dev/vdb".to_owned())]));
+        let disks = disk_inventory();
+        let mount_point = MountPoint("/mnt/storage".to_owned());
+
+        let effect = state.load_current(&pool, Some(&ups()), &DiskInventory { by_id: &disks });
+        assert!(effect.is_none());
+
+        // disk1 (selected first) is present: row/footer resolve to the live node.
+        assert_eq!(
+            state.command_display(&mount_point, Some(&ups())),
+            Some("smartctl -H /dev/vdb".to_owned())
+        );
+
+        // disk2 is absent from disk_underlying: falls back to its by-id handle.
+        state.select_next();
+        assert_eq!(
+            state.command_display(&mount_point, Some(&ups())),
+            Some("smartctl -H /dev/disk/by-id/virtio-disk2".to_owned())
         );
     }
 
@@ -2137,6 +2206,8 @@ mod tests {
     // Why it exists: SMART health/info/log views are pickers, not raw commands
     // against an implicit current disk.
     // Scenario: user selects disk2 in Browse > SMART > Health and presses Enter.
+    // The pool's disk_underlying is empty (no live-path branch), so the
+    // dispatched device is the by-id handle.
     #[test]
     fn enter_in_smartctl_device_row_drills_in() {
         let mut state = BrowseState {

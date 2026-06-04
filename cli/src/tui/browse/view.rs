@@ -204,7 +204,7 @@ fn render_subvolume_table(frame: &mut Frame, area: Rect, model: &Model) {
 }
 
 fn render_smartctl_device_table(frame: &mut Frame, area: Rect, model: &Model) {
-    let header = Row::new(["", "Name", "ByIdPath"]).style(
+    let header = Row::new(["", "Name", "Device"]).style(
         Style::default()
             .fg(Color::DarkGray)
             .add_modifier(Modifier::BOLD),

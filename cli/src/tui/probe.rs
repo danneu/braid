@@ -20,7 +20,7 @@ use crate::status::{DiskErrors, estimate_pool_capacity, get_balance_report};
 use crate::tui::model::{
     DaemonStatus, DiskIdentity, DiskLockState, DiskLuksInfo, DiskLuksState, DiskUsage,
     DrivingDrive, FanReading, FanSnapshot, PoolState, TemperatureReading, UnpooledDiskRender,
-    UpsSnapshot,
+    UpsSnapshot, smart_query_device,
 };
 use crate::types::{ByIdPath, ConfigDiskState, DiskName, LuksUuid, MountPoint};
 
@@ -180,6 +180,14 @@ pub fn probe_pool_for_tui<R: CommandRunner, F: Filesystem + ?Sized>(
             mounted_classification.insert((*name).to_owned(), (DiskLockState::Unlocked, None));
         }
     }
+    // The `mounted_classification`-sourced live-path subset: every member with a
+    // `Some(underlying)` backing path. Shared verbatim between the Data-tab SMART
+    // loop below and `PoolState.disk_underlying` (the Browse picker's source), so
+    // both SMART surfaces resolve a present member to the same device.
+    let present_underlying: HashMap<String, String> = mounted_classification
+        .iter()
+        .filter_map(|(name, (_, underlying))| underlying.clone().map(|path| (name.clone(), path)))
+        .collect();
     let disk_luks_states = build_disk_luks_states(
         runner,
         &disks.by_id,
@@ -258,10 +266,7 @@ pub fn probe_pool_for_tui<R: CommandRunner, F: Filesystem + ?Sized>(
     let mut smart_health = HashMap::new();
     let mut disk_temperature_readings = HashMap::new();
     for (disk_name, by_id_path) in &disks.by_id {
-        let query_device = mounted_classification
-            .get(disk_name)
-            .and_then(|(_, underlying)| underlying.as_deref())
-            .unwrap_or(by_id_path.as_str());
+        let query_device = smart_query_device(disk_name, by_id_path, &present_underlying);
         let probe = runner
             .run(&CmdRequest::SmartctlHealthJson {
                 device: query_device.to_owned(),
@@ -448,6 +453,7 @@ pub fn probe_pool_for_tui<R: CommandRunner, F: Filesystem + ?Sized>(
             disk_transport,
             smart_health,
             disk_temperature_readings,
+            disk_underlying: present_underlying,
             device_errors,
             unpooled_disks: unpooled_by_name,
             alert_state,
@@ -1318,15 +1324,21 @@ mod tests {
     }
 
     // Intent: TUI SMART health and temperature probes for present members use
-    //   the live backing path, not the persisted by-id path, and the produced
-    //   temperature reading is keyed by the member's LUKS UUID.
+    //   the live backing path, not the persisted by-id path; the produced
+    //   temperature reading is keyed by the member's LUKS UUID; and
+    //   PoolState.disk_underlying carries the present member's live path while
+    //   omitting a declared-but-offline member.
     // Why it exists: by-id drift must not blank or corrupt SMART data for a
     //   UUID-identified member that is already open in the pool; and the
     //   reading's identity must be the stable LUKS UUID (decision 024) so
     //   session watermarks survive device-path changes -- this is the only
-    //   test that pins identity on the live producer path.
+    //   test that pins identity on the live producer path. disk_underlying is
+    //   the Browse picker's source, so pinning its contents here pins both SMART
+    //   surfaces to the same live path (present) and by-id fallback (offline).
     // Scenario: toshiba is live at /dev/vda; the by-id mock returns a failing
     //   no-temperature result, while /dev/vda returns healthy temperature data.
+    //   ironwolf is declared in membership but absent from the live one-disk
+    //   pool, so it is the offline member.
     #[test]
     fn smartctl_health_for_present_member_uses_live_underlying() {
         let disk_by_id = HashMap::from([(
@@ -1375,6 +1387,15 @@ mod tests {
             reading.id,
             LuksUuid::parse("11111111-1111-1111-1111-111111111111").unwrap()
         );
+
+        // disk_underlying carries the present member's live path (so Browse
+        // probes /dev/vda, not the drifted by-id handle) and omits the
+        // declared-but-offline ironwolf (so Browse falls back to its by-id).
+        assert_eq!(
+            pool.disk_underlying.get("toshiba").map(String::as_str),
+            Some("/dev/vda")
+        );
+        assert!(!pool.disk_underlying.contains_key("ironwolf"));
     }
 
     // Intent: the disk-detail LUKS metadata dump for a mounted, present

@@ -72,7 +72,10 @@ with subtest("browse smart health detail"):
     press("l")
     machine.wait_until_tty_matches("2", r"disk1")
     press("ret")
-    machine.wait_until_tty_matches("2", r"/dev/disk/by-id/")
+    # disk1 is a present, unlocked member, so the SMART detail/footer dispatches
+    # against the live backing node (decision 024), not the persisted by-id
+    # handle. `/dev/vd` matches whichever virtio node cryptsetup reports.
+    machine.wait_until_tty_matches("2", r"/dev/vd")
     press("esc")
     machine.wait_until_tty_matches("2", r"disk1")
 

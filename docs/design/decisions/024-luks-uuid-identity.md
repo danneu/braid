@@ -243,6 +243,12 @@ warns rather than claiming every declared member is assembled.
   reads the live backing path for a verified-present member (surviving by-id
   drift), and that a foreign / ownership-unverified mapper does not surface the
   live device's metadata under the declared disk.
+- `cli/src/tui/probe.rs` and `cli/src/tui/browse/state.rs` unit tests pin that
+  the TUI Browse SMART picker resolves a verified-present member through its live
+  backing path (`PoolState.disk_underlying`, shared with the Data-tab SMART
+  loop) and an offline member through its persisted by-id handle, so the two
+  SMART surfaces cannot disagree under by-id drift. `tests/cli/braid-tui-browse.py`
+  pins the live `/dev/vd*` node end-to-end for a present, unlocked member.
 - `cli/src/lock.rs` unit tests pin the normal UUID/devid-classified close set,
   observed-mapper closing, UUID-scanned fallback cleanup, orphan warnings for
   non-member UUID/devid cases, duplicate-devid `null_underlying` skip behavior,
