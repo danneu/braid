@@ -66,7 +66,7 @@ sudo braid recover --dry-run
 ## What happens under the hood
 
 1. Loads `pending-op.json` (refuses if absent -- nothing to recover).
-2. Chooses the mount membership from the journal phase. Add and remove-missing `PoolMutation` phases mount from the pre-operation membership. Add, remove-missing, and replace post-maintenance phases mount from the committed target membership. Replace `PoolMutation` uses the pre/target union because the kernel may still be completing `dev_replace`.
+2. Chooses the mount membership from the journal phase. Existing-pool add and remove-missing `PoolMutation` phases mount from the pre-operation membership. Add, remove-missing, and replace post-maintenance phases mount from the committed target membership. Replace `PoolMutation`, bootstrap add `PoolMutation` (the first disk, whose pre-operation membership is empty), and `Remove` mount from the admission membership (pre-operation snapshot plus target-only members) -- for replace this matters because the kernel may still be completing `dev_replace`.
 3. Opens LUKS devices and mounts the pool (or reuses the existing mount if already mounted). **Exception:** a `Replace::PoolMutation` journal on an externally-mounted pool is refused (see Safety checks); replace post-maintenance recovery on an already-mounted pool is allowed.
 4. For `Replace::PoolMutation` only, if a kernel-resumed btrfs replace is in progress, waits for it to finish.
 5. For `Replace::PoolMutation` only, if the pool was just mounted by this recover run, performs a full relock-and-remount cycle (umount, `btrfs device scan --forget`, close LUKS, reopen, remount) to ensure the kernel's in-memory device topology matches the on-disk state.

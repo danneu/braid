@@ -3688,6 +3688,20 @@ fn recovery_admission_membership(
     Ok(membership)
 }
 
+/// Phase-specific mount source: which membership recover opens and mounts
+/// before probing live topology. Three sources, so an interrupted mutation
+/// mounts the set still observable at its journal phase.
+///
+/// - Pre-operation membership: existing-pool `Add::PoolMutation`,
+///   `RemoveMissing::PoolMutation`.
+/// - Committed target membership: every post-maintenance phase
+///   (`PostAddBalanceRaid1`, `PostRemoveMissingMaintenance`,
+///   `PostReplaceMaintenance`).
+/// - Admission membership (pre + target-only; see
+///   `recovery_admission_membership`): `Replace::PoolMutation` (kernel may
+///   still be finishing `dev_replace`), bootstrap `Add::PoolMutation` (pre is
+///   empty, so this is the new disk), and plain `Remove` (target is a subset
+///   of pre, so this is the pre-removal set).
 fn mount_membership_for_recover<'a>(
     journal: &'a Journal,
     admission_membership: &'a PoolMembership,
