@@ -798,10 +798,13 @@ mod tests {
     // format_human that changes a label, ordering, or sentinel
     // produces a visible diff the reviewer must accept.
     //
-    // Each snapshot test also JSON-serializes the parsed model so the
-    // `--json` contract is covered from the same fixture. This double
-    // coverage is cheap (one parse, two serializers) and guards the
-    // two outputs against drift relative to each other.
+    // The online fixture additionally JSON-serializes its parsed model
+    // (json_online_fixture_has_expected_shape), anchoring the `--json`
+    // contract against a real fixture. The other states keep only their
+    // human snapshot -- per-state JSON shape is not re-checked here,
+    // because status-token serialization is covered by
+    // json_output_status_flags_preserve_insertion_order and sparse field
+    // presence by snapshot_json_success_keeps_sparse_typed_keys.
 
     fn parse_fixture(stdout: &str) -> UpscOutput {
         crate::parse::parse_upsc(stdout)
@@ -885,24 +888,6 @@ mod tests {
         snap!(format_human("ups", &parsed));
     }
 
-    #[test]
-    fn json_onbattery_fixture_has_expected_shape() {
-        let parsed = parse_fixture(include_str!(
-            "../tests/fixtures/nixos-26.05/upsc/upsc-onbattery.txt"
-        ));
-        let value: serde_json::Value =
-            serde_json::from_str(&serde_json::to_string(&JsonReport::success(&parsed)).unwrap())
-                .unwrap();
-        let flags = value["status_flags"].as_array().unwrap();
-        assert!(flags.iter().any(|v| v == "OB"), "OB in status_flags");
-        assert!(
-            !flags.iter().any(|v| v == "LB"),
-            "LB not in onbattery fixture"
-        );
-        assert_eq!(value["input"]["voltage"], "0.0");
-        assert!(value.get("warning").is_none(), "got: {value}");
-    }
-
     // Intent: lowbattery fixture renders Status: OB LB.
     // Why: this is the critical pair upsmon fires SHUTDOWNCMD on; the
     // human render must show both flags so the operator understands
@@ -915,21 +900,6 @@ mod tests {
             "../tests/fixtures/nixos-26.05/upsc/upsc-lowbattery.txt"
         ));
         snap!(format_human("ups", &parsed));
-    }
-
-    #[test]
-    fn json_lowbattery_fixture_has_expected_shape() {
-        let parsed = parse_fixture(include_str!(
-            "../tests/fixtures/nixos-26.05/upsc/upsc-lowbattery.txt"
-        ));
-        let value: serde_json::Value =
-            serde_json::from_str(&serde_json::to_string(&JsonReport::success(&parsed)).unwrap())
-                .unwrap();
-        let flags = value["status_flags"].as_array().unwrap();
-        assert!(flags.iter().any(|v| v == "OB"), "OB in status_flags");
-        assert!(flags.iter().any(|v| v == "LB"), "LB in status_flags");
-        assert_eq!(value["battery"]["charge_pct"], 8);
-        assert!(value.get("warning").is_none(), "got: {value}");
     }
 
     // Intent: replace-battery fixture renders OL + RB without triggering
@@ -945,20 +915,6 @@ mod tests {
             "../tests/fixtures/nixos-26.05/upsc/upsc-replace-battery.txt"
         ));
         snap!(format_human("ups", &parsed));
-    }
-
-    #[test]
-    fn json_replace_battery_fixture_has_expected_shape() {
-        let parsed = parse_fixture(include_str!(
-            "../tests/fixtures/nixos-26.05/upsc/upsc-replace-battery.txt"
-        ));
-        let value: serde_json::Value =
-            serde_json::from_str(&serde_json::to_string(&JsonReport::success(&parsed)).unwrap())
-                .unwrap();
-        let flags = value["status_flags"].as_array().unwrap();
-        assert!(flags.iter().any(|v| v == "OL"));
-        assert!(flags.iter().any(|v| v == "RB"));
-        assert!(!flags.iter().any(|v| v == "OB"));
     }
 
     // Intent: sparse success JSON keeps every nullable typed key present
