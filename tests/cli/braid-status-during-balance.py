@@ -6,7 +6,6 @@
 #           window, then runs braid status to verify it handles the state.
 
 import json
-import re
 import shlex
 
 start_all()
@@ -60,54 +59,11 @@ with subtest("manually add disk2 to btrfs"):
     )
     machine.succeed("btrfs device add /dev/mapper/braid-disk2 /mnt/storage")
 
-# 4. Start balance and immediately pause it.
-#    The balance on small VM disks completes in <2s, too fast to reliably poll.
-#    Start+pause in a single shell command to avoid Python roundtrip overhead.
-#    If the balance completes before pause catches it, retry with the opposite
-#    conversion target so there's always new work to do.
+# 4. Start and pause a balance via the shared helper.
+#    dm-delay keeps each relocation slow enough for the helper to catch.
 with subtest("start and pause balance"):
     dm_delay_activate(machine, DELAYED_DISKS, write_delay_ms=500)
-    targets = ["single", "raid1"]
-    paused = False
-    for attempt in range(3):
-        target = targets[attempt % 2]
-
-        machine.execute(
-            f"btrfs balance start -dconvert={target} -mconvert={target} /mnt/storage "
-            f"> /tmp/balance.log 2>&1 & "
-            f"for i in $(seq 1 200); do "
-            f"  btrfs balance pause /mnt/storage 2>/dev/null && break; "
-            f"  sleep 0.02; "
-            f"done"
-        )
-
-        ret = machine.execute("btrfs balance status /mnt/storage")
-        output = ret[1]
-
-        if "paused" in output.lower():
-            match = re.search(
-                r"(\d+)\s+out of about\s+(\d+)\s+chunks", output
-            )
-            if match and int(match.group(1)) < int(match.group(2)):
-                paused = True
-                break
-
-        # Balance completed or paused with no remaining work — clean up and retry.
-        machine.execute(
-            "btrfs balance cancel /mnt/storage 2>/dev/null || true"
-        )
-        for _ in range(30):
-            ret = machine.execute("btrfs balance status /mnt/storage")
-            if "no balance" in ret[1].lower():
-                break
-            import time
-            time.sleep(0.2)
-        else:
-            raise Exception(
-                "Balance did not terminate after cancel — cannot retry safely"
-            )
-
-    assert paused, "Could not pause balance with remaining work after 3 attempts"
+    pause_balance_with_remaining_work(machine)
     dm_delay_deactivate(machine, DELAYED_DISKS)
 
 # 5. With the balance reliably paused, check both text and JSON output.

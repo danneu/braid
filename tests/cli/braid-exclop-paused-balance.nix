@@ -7,8 +7,8 @@
 # hang forever waiting for it to clear. Braid must detect this via sysfs and
 # error immediately with an actionable message.
 #
-# How: Creates a 2-disk pool, writes data, starts and pauses a balance (using
-# the retry pattern from braid-status-during-balance), then verifies that
+# How: Creates a 2-disk pool, writes data, starts and pauses a balance (via
+# the shared balance_helpers retry pattern), then verifies that
 # braid add and braid lock both refuse.
 #
 # Dependencies: Rust braid binary for all commands.
@@ -47,5 +47,8 @@
       };
     };
 
-  testScript = builtins.readFile ./braid-exclop-paused-balance.py;
+  testScript =
+    builtins.readFile ./../module/balance_helpers.py
+    + "\n\n"
+    + builtins.readFile ./braid-exclop-paused-balance.py;
 }

@@ -578,71 +578,16 @@ with subtest("Test 8: paused balance survives unlock"):
     close_all()
     machine.succeed(unlock_cmd(passphrase))
 
-    # Write enough data to create multiple btrfs chunks so balance has
-    # observable work that can be paused mid-operation.
+    # The small payload gives the balance real data to relocate; the helper's
+    # data+metadata hard raid1 convert yields multiple block-group types, and
+    # dm-delay keeps each relocation slow enough to catch the pause.
     machine.succeed(
         "dd if=/dev/urandom of=/mnt/storage/balancedata bs=1M count=32"
     )
     machine.succeed("sync")
     dm_delay_activate(machine, DELAYED_DISKS, write_delay_ms=500)
 
-    import re
-
-    # Bounded retry: start balance → pause → check for remaining work.
-    # If the balance completes before pause catches it, restart with
-    # the opposite conversion target so there's always new work to do.
-    #
-    # The start+pause loop runs in a single shell command to avoid the
-    # serial-console overhead of machine.execute() — each roundtrip
-    # takes ~100ms which is too slow for a balance that finishes in <1s.
-    targets = ["single", "raid1"]
-    paused_status = None
-    for attempt in range(3):
-        target = targets[attempt % 2]
-
-        # Start balance in background, then tight-loop pause attempts
-        # natively on the VM (no Python roundtrip overhead).
-        machine.execute(
-            f"btrfs balance start -dconvert={target} /mnt/storage "
-            f"> /tmp/balance.log 2>&1 & "
-            f"for i in $(seq 1 200); do "
-            f"  btrfs balance pause /mnt/storage 2>/dev/null && break; "
-            f"  sleep 0.02; "
-            f"done"
-        )
-
-        # Check status from Python — one roundtrip is fine here.
-        ret = machine.execute("btrfs balance status /mnt/storage")
-        output = ret[1]
-        lower = output.lower()
-
-        if "paused" in lower:
-            match = re.search(
-                r"(\d+)\s+out of about\s+(\d+)\s+chunks", output
-            )
-            if match and int(match.group(1)) < int(match.group(2)):
-                paused_status = output
-                break
-
-        # Balance completed or paused with no remaining work.
-        # Clean up and retry with the opposite conversion target.
-        machine.execute(
-            "btrfs balance cancel /mnt/storage 2>/dev/null || true"
-        )
-        for _ in range(30):
-            ret = machine.execute("btrfs balance status /mnt/storage")
-            if "no balance" in ret[1].lower():
-                break
-            import time
-            time.sleep(0.2)
-        else:
-            raise Exception(
-                "Balance did not terminate after cancel — cannot retry safely"
-            )
-    else:
-        raise Exception(
-            "Could not pause balance with remaining work after 3 full attempts"
-        )
+    pause_balance_with_remaining_work(machine)
 
     dm_delay_deactivate(machine, DELAYED_DISKS)
 

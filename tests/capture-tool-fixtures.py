@@ -145,8 +145,9 @@ import time
 machine.succeed(f"dd if=/dev/urandom of={MOUNT}/balancedata bs=1M count=512")
 machine.succeed("sync")
 
-# Bounded retry: start balance → pause → check for remaining work.
-# Reuses the proven pattern from tests/cli/braid-unlock.py.
+# Bounded retry: start balance -> pause -> check for remaining work.
+# Mirrors tests/module/balance_helpers.py, but stays inline as a separate
+# capture-pipeline artifact.
 targets = ["single", "raid1"]
 for attempt in range(3):
     target = targets[attempt % 2]

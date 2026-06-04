@@ -5,7 +5,6 @@
 #   a third disk (should fail with "paused" message) and try to lock the pool
 #   (should fail with "in progress" message, pool stays mounted).
 
-import re
 import shlex
 
 start_all()
@@ -34,50 +33,10 @@ with subtest("write test data"):
     machine.succeed("dd if=/dev/urandom of=/mnt/storage/bigfile bs=1M count=512")
     machine.succeed("sync")
 
-# 3. Start and pause a balance.
-#    Reuse the retry pattern from braid-status-during-balance.py:56-102.
+# 3. Start and pause a balance via the shared
+#    balance_helpers.pause_balance_with_remaining_work helper.
 with subtest("start and pause balance"):
-    targets = ["single", "raid1"]
-    paused = False
-    for attempt in range(3):
-        target = targets[attempt % 2]
-
-        machine.execute(
-            f"btrfs balance start -dconvert={target} -mconvert={target} /mnt/storage "
-            f"> /tmp/balance.log 2>&1 & "
-            f"for i in $(seq 1 200); do "
-            f"  btrfs balance pause /mnt/storage 2>/dev/null && break; "
-            f"  sleep 0.02; "
-            f"done"
-        )
-
-        ret = machine.execute("btrfs balance status /mnt/storage")
-        output = ret[1]
-
-        if "paused" in output.lower():
-            match = re.search(
-                r"(\d+)\s+out of about\s+(\d+)\s+chunks", output
-            )
-            if match and int(match.group(1)) < int(match.group(2)):
-                paused = True
-                break
-
-        # Balance completed or paused with no remaining work — clean up and retry.
-        machine.execute(
-            "btrfs balance cancel /mnt/storage 2>/dev/null || true"
-        )
-        for _ in range(30):
-            ret = machine.execute("btrfs balance status /mnt/storage")
-            if "no balance" in ret[1].lower():
-                break
-            import time
-            time.sleep(0.2)
-        else:
-            raise Exception(
-                "Balance did not terminate after cancel — cannot retry safely"
-            )
-
-    assert paused, "Could not pause balance with remaining work after 3 attempts"
+    pause_balance_with_remaining_work(machine)
 
 # 4. With balance reliably paused, test that braid add fails fast.
 with subtest("braid add fails fast on paused balance"):
