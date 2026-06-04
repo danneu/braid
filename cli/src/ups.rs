@@ -480,6 +480,29 @@ mod tests {
         assert!(value.get("error").is_none(), "got: {value}");
     }
 
+    // Intent: an all-unrecognized `ups.status` serializes as a no-warning,
+    // no-error success body whose `status_flags` carries the unknown token
+    // verbatim.
+    // Why it exists: the commands page tells scripts the absence of
+    // `warning`/`error` is NOT a health claim; this pins the one body that
+    // proves it -- `upsc` reports a status braid cannot classify, yet
+    // `--json` still emits a clean success. Driving the real `parse_upsc`
+    // -> `JsonReport::success` path (not a hand-built struct) is deliberate:
+    // a future parser regression that dropped unknown-only tokens would flip
+    // this to `ups_status_empty`, and only raw input catches that.
+    // Scenario: `upsc` emits `ups.status: WEIRD` -- a token from a newer
+    // firmware braid has not shipped support for.
+    #[test]
+    fn json_all_unknown_status_has_no_warning() {
+        let parsed = parse_upsc("ups.status: WEIRD\n");
+        let value: serde_json::Value =
+            serde_json::from_str(&serde_json::to_string(&JsonReport::success(&parsed)).unwrap())
+                .unwrap();
+        assert!(value.get("warning").is_none(), "got: {value}");
+        assert!(value.get("error").is_none(), "got: {value}");
+        assert_eq!(value["status_flags"], serde_json::json!(["WEIRD"]));
+    }
+
     // Intent: format_human emits exactly `Battery: --`, `Runtime: --`,
     // and `Load: --` when charge, runtime, and load are missing.
     // Why it exists: captured fixtures populate these fields, so snapshots
@@ -877,6 +900,7 @@ mod tests {
             "LB not in onbattery fixture"
         );
         assert_eq!(value["input"]["voltage"], "0.0");
+        assert!(value.get("warning").is_none(), "got: {value}");
     }
 
     // Intent: lowbattery fixture renders Status: OB LB.
@@ -905,6 +929,7 @@ mod tests {
         assert!(flags.iter().any(|v| v == "OB"), "OB in status_flags");
         assert!(flags.iter().any(|v| v == "LB"), "LB in status_flags");
         assert_eq!(value["battery"]["charge_pct"], 8);
+        assert!(value.get("warning").is_none(), "got: {value}");
     }
 
     // Intent: replace-battery fixture renders OL + RB without triggering

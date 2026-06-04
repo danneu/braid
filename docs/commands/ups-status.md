@@ -35,9 +35,19 @@ Last test: Done and passed
 sudo braid ups status --json | jq .
 ```
 
-Emits the serialized `UpscOutput` model. A trusted healthy success is a
-reachable UPS with a populated `status_flags` array and no top-level
-`error` or `warning` field. Shape:
+Emits the serialized `UpscOutput` model. A success body (no top-level
+`error`) is **trustworthy telemetry**: braid faithfully serialized
+whatever `upsc` reported. It is **not** a claim that the UPS is online --
+on-battery (`OB`), low-battery (`OB LB`), and all-unrecognized status sets
+are all success bodies with no `error` and no `warning`.
+
+To judge UPS state, read `status_flags`: utility power is proven only by
+the presence of `OL` with no blocking flag (`OB`, `LB`, `TESTFAIL`,
+`COMMBAD`, `FSD`) -- the same affirmative-`OL` criterion braid's own
+mutation preflight uses (see
+[the UPS guide](../guides/ups.md#mutation-refusal-when-utility-power-is-not-verified)).
+
+Shape:
 
 ```json
 {
@@ -101,6 +111,11 @@ stderr stays silent so the JSON sentinel can be piped into a single
 sink (`jq`, `tee`, CI logs) without a redundant human error line.
 Other failure modes, such as malformed config, still print a human
 error to stderr.
+
+The converse does not hold: the absence of `error` and `warning` does
+not by itself mean the UPS is online -- inspect `status_flags` as above.
+`ups_status_empty` fires only when `ups.status` is empty or missing (no
+flags to read), so it is not a general health signal.
 
 ## Flags
 

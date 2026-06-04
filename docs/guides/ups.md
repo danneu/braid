@@ -89,7 +89,8 @@ sentinels are emitted for the common non-OK cases:
 
 | Condition | JSON shape | Exit code |
 | --- | --- | --- |
-| UPS reachable | serialized `UpscOutput` | 0 |
+| UPS reachable with populated `ups.status` | serialized `UpscOutput` | 0 |
+| UPS reachable but `ups.status` empty | serialized `UpscOutput` plus `"warning": "ups_status_empty"` | 0 |
 | UPS query failed | `{"error": "query_failed", "detail": "exit <code>: <stderr>"}` | 1 |
 | UPS invocation failed (upsc could not run -- missing on PATH, killed by signal, or other runner-level failure) | `{"error": "invocation_failed", "detail": "command failed: upsc ups: <reason>"}` | 1 |
 | UPS not enabled | `{"error": "ups_not_enabled"}` | 0 |
