@@ -67,9 +67,49 @@ with subtest("fail-fast mutators acquire before broken config"):
         assert_contention(name, command)
 
 with subtest("discover --write acquires before pending-op and probe reads"):
+    # Intent: under contention, discover --write must exit at the central lock
+    #   acquire (cli/src/main.rs#acquire_per_policy, before the dispatch match)
+    #   before it reads the pending-op journal or probes /dev/disk/by-id/.
+    # Why: ADR 018 / principle 12
+    #   (`docs/design/principles.md#12-one-pool-operation-at-a-time`) make lock
+    #   acquire the serialization boundary. The two negative sentinels below each
+    #   catch a DIFFERENT pre-lock leak, primed differently:
+    #     - pending-op: primed by the planted placeholder journal -- a pre-lock
+    #       read errors "pending-op.json exists".
+    #     - probe: primed by this host discovering ZERO braid-labeled LUKS2
+    #       members (the .nix is diskless; see pool-lock-precedes-state-read.nix).
+    #       The baseline below proves that precondition by observation rather than
+    #       assuming it, so a discoverable member appearing later fails here loudly
+    #       instead of silently neutering the guard.
+    # Scenario: external holder holds /run/braid-pool.lock; discover --write runs
+    #   with a placeholder pending-op.json planted. Nonblocking flock fails fast
+    #   with the contention message before either read.
     machine.succeed("mkdir -p /var/lib/braid")
+    # Single source of truth for the probe sentinel's substring -- asserted
+    # PRESENT in the baseline, ABSENT under contention. Tracks the lead clause of
+    # cli/src/discover.rs#NoMembersDiscovered (not the remediation tail, which may
+    # reword freely). Because the baseline asserts it PRESENT, a stale value here
+    # -- renamed in NoMembersDiscovered but not updated -- now fails the baseline
+    # loudly instead of silently retiring the negative sentinel.
+    refusal = "no braid-labeled LUKS2 devices found"
+    # Baseline (no contention): the probe runs, finds zero discoverable
+    # braid-labeled LUKS2 members, and discover --write prints the empty-scan
+    # refusal, exiting at the is_empty gate before writing anything. This positive
+    # half is what makes the negative probe sentinel under contention meaningful.
+    # --expect-count 0 keeps the baseline fail-closed against fixture drift: if a
+    # discoverable member ever appears, write_discovered_membership refuses with
+    # ExpectCountUnmet (count != 0) before save_membership -- so no pool.json is
+    # written, and base_out carries that error instead of the refusal, tripping
+    # the "precondition broken" assertion below rather than silently writing state.
+    base_rc, base_out = machine.execute("braid discover --write --expect-count 0 2>&1")
+    assert base_rc != 0, "baseline should exit nonzero (empty-scan refusal); out=" + base_out
+    assert refusal in base_out, (
+        "precondition broken: expected the empty-scan refusal without contention "
+        "(did a discoverable braid-labeled LUKS2 member appear in the .nix?); "
+        "out=" + base_out
+    )
     machine.succeed("printf '{\"op\":\"placeholder\"}' > /var/lib/braid/pending-op.json")
-    rc, out = with_holder("braid discover --write --expect-count 1")
+    rc, out = with_holder("braid discover --write --expect-count 0")
     machine.succeed("rm -f /var/lib/braid/pending-op.json")
     assert rc != 0, "discover --write should fail under contention; out=" + out
     assert "another braid operation is already in progress" in out, (
@@ -78,9 +118,7 @@ with subtest("discover --write acquires before pending-op and probe reads"):
     assert "pending-op.json exists" not in out, (
         "discover read pending-op before acquiring lock; out=" + out
     )
-    # Lead clause must track NoMembersDiscovered's message in
-    # cli/src/discover.rs; a stale string here passes silently (ADR 018).
-    assert "no braid-labeled LUKS2 devices found" not in out, (
+    assert refusal not in out, (
         "discover probed devices before acquiring lock; out=" + out
     )
 
