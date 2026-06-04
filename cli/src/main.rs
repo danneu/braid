@@ -939,16 +939,21 @@ fn main() {
             }
         }
         Commands::Discover(args) => {
-            // Note: the pre-save fail-closed gates for `--write`
-            // (pending-op presence + pool.json shape check that refuses
-            // `ValidUuidKeyed`; `Corrupt` is the documented rebuild path
-            // per decision 017) live inside
-            // `discover::write_discovered_membership`. The bare read-only
-            // path uses the matching helper so corrupt or unreadable state
-            // fails closed with rebuild guidance.
+            // Fail-closed state gates run BEFORE the multi-disk cryptsetup scan,
+            // so a refusal costs no probe and prints no misleading preview rows.
+            // Bare discover gates on pool.json shape; `--write` refuses a
+            // pending-op journal or a healthy UUID-keyed pool.json
+            // (Corrupt/Missing are the rebuild path).
+            // `write_discovered_membership` re-runs the `--write` gates as the
+            // authoritative mutation-layer check (ADR 022 precedent).
             let pool_json = paths.pool_json();
-            if !args.write
-                && let Err(e) = braid_cli::discover::check_pool_json_for_bare_discover(&pool_json)
+            if args.write {
+                if let Err(e) = braid_cli::discover::check_discover_write_preconditions(&paths) {
+                    print_cli_error(&e.to_string());
+                    std::process::exit(1);
+                }
+            } else if let Err(e) =
+                braid_cli::discover::check_pool_json_for_bare_discover(&pool_json)
             {
                 print_cli_error(&e.to_string());
                 std::process::exit(1);

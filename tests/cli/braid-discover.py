@@ -135,6 +135,46 @@ with subtest("bare discover ignores pending-op journal"):
     machine.succeed("rm /var/lib/braid/pending-op.json")
     assert_pool_json_absent()
 
+with subtest("discover --write refuses pending-op before scanning"):
+    # Intent: a pending-op journal makes discover --write refuse BEFORE the
+    # multi-disk cryptsetup scan, so no preview rows reach stdout. This is the
+    # second scan-independent gate (the one ADR 022 names), checked here with
+    # pool.json absent so only the pending-op gate can fire.
+    # Why it exists: pending-op moved ahead of the scan; an empty stdout
+    # capture is the only observable proof the scan/preview were skipped.
+    # Scenario: an interrupted mutation left a pending journal and the operator
+    # runs discover --write before recovering.
+    machine.succeed("mkdir -p /var/lib/braid")
+    pending = {
+        "started_at": "2026-01-01T00:00:00Z",
+        "op": {"op": "Add", "phase": "PoolMutation", "targets": {}},
+        "pre_membership": {"disks": {}},
+        "target_membership": {"disks": {}},
+    }
+    machine.succeed(
+        "printf '%s' "
+        + shlex.quote(json.dumps(pending, sort_keys=True))
+        + " > /var/lib/braid/pending-op.json"
+    )
+    assert_pool_json_absent()
+    rc = machine.execute(
+        "braid discover --write >/tmp/discover-out 2>/tmp/discover-err"
+    )[0]
+    assert rc != 0, "discover --write should refuse with a pending-op journal present"
+    out = machine.succeed("cat /tmp/discover-out")
+    err = machine.succeed("cat /tmp/discover-err")
+    assert out.strip() == "", (
+        "refused discover --write (pending-op) printed preview rows to stdout; "
+        "got:\n" + out
+    )
+    # Robust to whether the seeded journal parses: the canonical guard emits
+    # either "interrupted operation detected (pending-op.json exists, ...)"
+    # (valid) or "cannot read pending-op.json" (corrupt); both name the file.
+    # The exact valid-vs-corrupt wording is pinned by the Rust unit tests.
+    assert "pending-op.json" in err, "expected a pending-op refusal; got:\n" + err
+    assert_pool_json_absent()
+    machine.succeed("rm /var/lib/braid/pending-op.json")
+
 with subtest("parseable off-schema preview refuses and leaves pool.json unchanged"):
     # Intent: bare discover refuses parseable but off-schema pool.json
     # with rebuild guidance and makes no changes.
@@ -233,13 +273,29 @@ with subtest("bare discover refuses existing UUID-keyed pool.json"):
         "expected command-purpose clause; got:\n" + out
     )
 
-with subtest("discover --write also refuses healthy UUID-keyed pool.json"):
+with subtest("discover --write refuses healthy UUID-keyed pool.json before scanning"):
+    # Intent: a healthy UUID-keyed pool.json makes discover --write refuse
+    # BEFORE the multi-disk cryptsetup scan, so no preview rows reach stdout.
+    # Why it exists: the refusal moved ahead of the scan; an empty stdout
+    # capture is the only observable proof the scan/preview were skipped.
+    # Scenario: an operator reflexively re-runs discover --write against a
+    # pool whose pool.json is already correct.
     before = read_pool_json()
-    out = machine.fail("braid discover --write 2>&1")
-    assert "is already a healthy UUID-keyed membership" in out, (
-        "expected ValidUuidKeyed refusal; got:\n" + out
+    # Split streams: a refusal that short-circuits before the scan prints no
+    # preview rows to stdout. This is the regression guard for the pre-scan gate.
+    rc = machine.execute(
+        "braid discover --write >/tmp/discover-out 2>/tmp/discover-err"
+    )[0]
+    assert rc != 0, "discover --write should refuse a healthy UUID-keyed pool.json"
+    out = machine.succeed("cat /tmp/discover-out")
+    err = machine.succeed("cat /tmp/discover-err")
+    assert out.strip() == "", (
+        "refused discover --write scanned and printed preview rows to stdout "
+        "instead of short-circuiting; got:\n" + out
     )
-    after = read_pool_json()
-    assert before == after, "pool.json must be byte-for-byte unchanged"
+    assert "is already a healthy UUID-keyed membership" in err, (
+        "expected ValidUuidKeyed refusal on stderr; got:\n" + err
+    )
+    assert read_pool_json() == before, "pool.json must be byte-for-byte unchanged"
 
 machine.shutdown()

@@ -161,13 +161,12 @@ pub fn drain_warnings<W: std::io::Write>(
 /// downstream tests assert against.
 #[derive(Debug, thiserror::Error)]
 pub enum DiscoverWriteError {
-    /// `pending-op.json` exists at the journal path -- the discover
-    /// `--write` precondition fails closed instead of overwriting
-    /// `pool.json` mid-recovery (see `docs/internals/luks-unlock.md`).
-    #[error(
-        "discover refusing to write pool.json: pending-op.json exists at {path} -- run 'braid recover' first (see docs/internals/luks-unlock.md)"
-    )]
-    PendingOpExists { path: String },
+    /// A pending-operation journal is present or unreadable. Forwards the
+    /// canonical recovery-mode message from
+    /// `preflight::check_no_pending_operation` so `discover --write` refuses
+    /// pending operations identically to add/remove/replace (ADR 017).
+    #[error("{0}")]
+    PendingOperation(String),
     /// Existing `pool.json` on disk is already a healthy UUID-keyed
     /// membership. `discover --write` would clobber persisted
     /// `DiskMember.devid` bindings, which are decision 024's authorized
@@ -574,10 +573,41 @@ pub fn check_pool_json_for_bare_discover(path: &Path) -> Result<(), BareDiscover
     }
 }
 
+/// The scan-independent half of discover's `--write` fail-closed gates:
+/// the two refusals that need no scan result. Factored out so the CLI can
+/// run them before the multi-disk cryptsetup scan (fail-fast: no wasted
+/// probe, no misleading preview rows) and `write_discovered_membership`
+/// can re-run them as the authoritative check at the mutation layer.
+/// Returns the classified shape on success so the writing path decides the
+/// corrupt-sidecar branch without re-reading pool.json. `Corrupt` is an
+/// accept (the ADR 017 rebuild path), not a refusal -- only a pending
+/// operation and `ValidUuidKeyed` short-circuit here.
+pub fn check_discover_write_preconditions(
+    paths: &StatePaths,
+) -> Result<PoolJsonShape, DiscoverWriteError> {
+    // Canonical recovery-mode guard, same as add/remove/replace/unlock
+    // (ADR 017). Fail-closed on a present, corrupt, OR unreadable journal --
+    // not a bare `pending_op_json().exists()` probe.
+    crate::preflight::check_no_pending_operation(paths)
+        .map_err(DiscoverWriteError::PendingOperation)?;
+    let pool_json_path = paths.pool_json();
+    match classify_pool_json(&pool_json_path) {
+        PoolJsonShape::ValidUuidKeyed => Err(DiscoverWriteError::ValidUuidKeyed {
+            path: pool_json_path.display().to_string(),
+        }),
+        shape @ (PoolJsonShape::Corrupt | PoolJsonShape::Missing) => Ok(shape),
+    }
+}
+
 /// Apply discover's `--write` pre-save fail-closed gates and persist
-/// the discovered membership. The three gates pinned in the plan must
-/// fire BEFORE any `save_membership` call:
-/// 1. `pending-op.json` must not exist (covered by `PendingOpExists`).
+/// the discovered membership. Gates 1-2 now live in
+/// `check_discover_write_preconditions`, which the CLI also runs before
+/// the scan (fail-fast: no wasted probe, no misleading preview rows); this
+/// function re-runs it as the authoritative mutation-layer check. The
+/// gates must all fire BEFORE any `save_membership` call:
+/// 1. No `pending-op.json` may be present or unreadable -- routed through
+///    the canonical `preflight::check_no_pending_operation` recovery-mode
+///    guard (covered by `PendingOperation`).
 /// 2. Existing `pool.json` must not be a healthy UUID-keyed membership
 ///    (covered by `ValidUuidKeyed`). `Corrupt` is intentionally allowed
 ///    -- it is the documented rebuild remediation per decision 017.
@@ -601,27 +631,14 @@ pub fn write_discovered_membership(
     paths: &StatePaths,
     expected_count: Option<usize>,
 ) -> Result<PoolMembership, DiscoverWriteError> {
-    let journal_path = paths.pending_op_json();
-    if journal_path.exists() {
-        return Err(DiscoverWriteError::PendingOpExists {
-            path: journal_path.display().to_string(),
-        });
-    }
-
-    let pool_json_path = paths.pool_json();
-    let needs_corrupt_sidecar = match classify_pool_json(&pool_json_path) {
-        PoolJsonShape::ValidUuidKeyed => {
-            return Err(DiscoverWriteError::ValidUuidKeyed {
-                path: pool_json_path.display().to_string(),
-            });
-        }
-        // `Missing` is the normal first-write path. `Corrupt` is the
-        // documented rebuild remediation per decision 017, but the
-        // corrupt file may still carry prior-binding bytes. Defer the
-        // sidecar write until every other gate has passed.
-        PoolJsonShape::Corrupt => true,
-        PoolJsonShape::Missing => false,
-    };
+    // Authoritative re-check at the mutation layer. The CLI also runs this
+    // before the scan as a fail-fast preflight; re-running it here keeps the
+    // invariant owned by the helper that performs the unsafe save (Mutation
+    // Safety Heuristics; ADR 022 pending-op-preflight precedent).
+    let needs_corrupt_sidecar = matches!(
+        check_discover_write_preconditions(paths)?,
+        PoolJsonShape::Corrupt
+    );
 
     if let Some(expected) = expected_count {
         let actual = members.len();
@@ -631,6 +648,7 @@ pub fn write_discovered_membership(
     }
 
     if needs_corrupt_sidecar {
+        let pool_json_path = paths.pool_json();
         crate::membership::write_corrupt_sidecar(&pool_json_path).map_err(|e| {
             DiscoverWriteError::CorruptSidecarFailed {
                 sidecar: e.target().display().to_string(),
@@ -1856,29 +1874,154 @@ mod tests {
         assert!(check_pool_json_for_bare_discover(&paths.pool_json()).is_ok());
     }
 
-    /// Intent: write_discovered_membership refuses when pending-op.json
-    /// exists; no save_membership call happens; pool.json is untouched.
-    /// Why: the write precondition gate from plan 2849-2887.
-    /// Scenario: seed 804.
+    /// Test-local helper: write a valid pending-op journal so the canonical
+    /// recovery-mode guard parses it and refuses with "interrupted
+    /// operation" (vs. an unparseable seed, which yields "cannot read").
+    fn seed_valid_pending_journal(paths: &StatePaths) {
+        let journal = crate::journal::build_journal(
+            PoolMembership::empty(),
+            PoolMembership::empty(),
+            crate::journal::OpKind::Add {
+                phase: crate::journal::AddPhase::PoolMutation,
+                targets: crate::membership::LuksUuidMap::new(),
+            },
+        );
+        crate::journal::write_journal(paths, &journal).unwrap();
+    }
+
+    // Intent: check_discover_write_preconditions accepts an absent pool.json,
+    //   returning Ok(Missing) so the first-write rebuild path proceeds.
+    // Why it exists: the preflight is the new pre-scan gate; if it refused
+    //   Missing it would block every fresh `discover --write`.
+    // Scenario: a freshly reinstalled NAS has no pool.json and no pending
+    //   journal; the operator runs `discover --write` to rebuild.
+    #[test]
+    fn check_discover_write_preconditions_accepts_missing() {
+        let root = tempfile::tempdir().unwrap();
+        let paths = StatePaths::custom(root.path().to_path_buf());
+        assert_eq!(
+            check_discover_write_preconditions(&paths).unwrap(),
+            PoolJsonShape::Missing
+        );
+    }
+
+    // Intent: a corrupt/off-schema pool.json is an ACCEPT (Ok(Corrupt)), not
+    //   a refusal -- it is the ADR 017 in-place rebuild path.
+    // Why it exists: the preflight must not turn corrupt state into a hard
+    //   stop; the corrupt branch still drives the post-scan forensic sidecar.
+    // Scenario: power loss left pool.json as non-JSON bytes while the labeled
+    //   disks remain attached; the operator rebuilds.
+    #[test]
+    fn check_discover_write_preconditions_accepts_corrupt() {
+        let root = tempfile::tempdir().unwrap();
+        let paths = StatePaths::custom(root.path().to_path_buf());
+        std::fs::write(paths.pool_json(), "not-json").unwrap();
+        assert_eq!(
+            check_discover_write_preconditions(&paths).unwrap(),
+            PoolJsonShape::Corrupt
+        );
+    }
+
+    // Intent: a healthy UUID-keyed pool.json refuses with ValidUuidKeyed and
+    //   its byte-exact "already a healthy UUID-keyed membership" wording.
+    // Why it exists: this is the gate that protects an established pool's
+    //   devid bindings from a stray `discover --write`.
+    // Scenario: an operator reflexively re-runs `discover --write` against a
+    //   pool whose pool.json is already correct.
+    #[test]
+    fn check_discover_write_preconditions_refuses_valid_uuid_keyed() {
+        let root = tempfile::tempdir().unwrap();
+        let paths = StatePaths::custom(root.path().to_path_buf());
+        save_membership(&discovered_members(&["disk1"]), &paths).unwrap();
+        let err = check_discover_write_preconditions(&paths)
+            .expect_err("must refuse with ValidUuidKeyed");
+        assert!(
+            matches!(&err, DiscoverWriteError::ValidUuidKeyed { .. }),
+            "expected ValidUuidKeyed, got: {err:?}"
+        );
+        assert!(
+            err.to_string()
+                .contains("is already a healthy UUID-keyed membership"),
+            "got: {err}"
+        );
+    }
+
+    // Intent: a present valid pending journal refuses through the canonical
+    //   recovery-mode guard ("interrupted operation"), and wins even when
+    //   pool.json is ValidUuidKeyed -- pinning pending-op-before-shape order.
+    // Why it exists: routing through check_no_pending_operation is the point
+    //   of the refactor; the order guarantee matches add/remove/replace.
+    // Scenario: an interrupted add left a pending journal next to an
+    //   otherwise healthy pool.json; the journal must refuse first.
+    #[test]
+    fn check_discover_write_preconditions_refuses_pending_before_shape() {
+        let root = tempfile::tempdir().unwrap();
+        let paths = StatePaths::custom(root.path().to_path_buf());
+        // ValidUuidKeyed pool.json -- the shape gate would also refuse, so
+        // this proves pending-op wins the ordering, not the shape gate.
+        save_membership(&discovered_members(&["disk1"]), &paths).unwrap();
+        seed_valid_pending_journal(&paths);
+        let err = check_discover_write_preconditions(&paths)
+            .expect_err("must refuse with PendingOperation");
+        assert!(
+            matches!(&err, DiscoverWriteError::PendingOperation(_)),
+            "expected PendingOperation, got: {err:?}"
+        );
+        assert!(
+            err.to_string().contains("interrupted operation"),
+            "got: {err}"
+        );
+    }
+
+    // Intent: a corrupt/unreadable pending journal also refuses, with the
+    //   canonical "cannot read" wording -- the case a bare .exists() probe
+    //   could not distinguish from a valid journal.
+    // Why it exists: fail-closed on an unreadable journal is exactly the
+    //   read-error handling the canonical guard adds over .exists().
+    // Scenario: pending-op.json exists but is truncated/garbage; the gate
+    //   must still refuse rather than wave the write through.
+    #[test]
+    fn check_discover_write_preconditions_refuses_corrupt_pending() {
+        let root = tempfile::tempdir().unwrap();
+        let paths = StatePaths::custom(root.path().to_path_buf());
+        std::fs::write(paths.pending_op_json(), "not json").unwrap();
+        let err = check_discover_write_preconditions(&paths)
+            .expect_err("must refuse with PendingOperation");
+        assert!(
+            matches!(&err, DiscoverWriteError::PendingOperation(_)),
+            "expected PendingOperation, got: {err:?}"
+        );
+        assert!(err.to_string().contains("cannot read"), "got: {err}");
+    }
+
+    /// Intent: write_discovered_membership refuses when a pending-op journal
+    /// is present; no save_membership call happens; pool.json is untouched.
+    /// Why: the composed preflight routes the pending-op gate through the
+    /// canonical recovery-mode guard, so the refusal carries the shared
+    /// "interrupted operation" message and still leaves state byte-identical.
+    /// Scenario: an interrupted mutation left a valid pending journal when the
+    /// operator runs `discover --write`.
     #[test]
     fn discover_write_refuses_when_pending_op_exists() {
         let root = tempfile::tempdir().unwrap();
         let paths = StatePaths::custom(root.path().to_path_buf());
-        // Seed pending-op.json with valid-looking JSON; the gate only
-        // checks for file existence.
-        std::fs::write(paths.pending_op_json(), "{}").unwrap();
+        // Seed a VALID pending journal: the canonical guard parses it and
+        // refuses with "interrupted operation". A bare "{}" would now parse
+        // as a corrupt journal and surface "cannot read" instead.
+        seed_valid_pending_journal(&paths);
         // Seed an existing pool.json (UUID-keyed shape) so we can
         // assert it's unchanged after the refusal.
         let pool_json_pre = "{\"disks\":{}}";
         std::fs::write(paths.pool_json(), pool_json_pre).unwrap();
 
         let err = write_discovered_membership(PoolMembership::empty(), &paths, None)
-            .expect_err("must refuse with PendingOpExists");
-        let msg = err.to_string();
+            .expect_err("must refuse with PendingOperation");
         assert!(
-            msg.contains("discover refusing to write pool.json: pending-op.json exists at"),
-            "got: {msg}"
+            matches!(&err, DiscoverWriteError::PendingOperation(_)),
+            "expected PendingOperation, got: {err:?}"
         );
+        let msg = err.to_string();
+        assert!(msg.contains("interrupted operation"), "got: {msg}");
         let pool_json_post = std::fs::read_to_string(paths.pool_json()).unwrap();
         assert_eq!(
             pool_json_post, pool_json_pre,

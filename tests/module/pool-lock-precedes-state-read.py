@@ -75,7 +75,8 @@ with subtest("discover --write acquires before pending-op and probe reads"):
     #   acquire the serialization boundary. The two negative sentinels below each
     #   catch a DIFFERENT pre-lock leak, primed differently:
     #     - pending-op: primed by the planted placeholder journal -- a pre-lock
-    #       read errors "pending-op.json exists".
+    #       read routes through the canonical recovery-mode guard, which fails
+    #       to parse the placeholder and errors "cannot read pending-op.json".
     #     - probe: primed by this host discovering ZERO braid-labeled LUKS2
     #       members (the .nix is diskless; see pool-lock-precedes-state-read.nix).
     #       The baseline below proves that precondition by observation rather than
@@ -85,6 +86,13 @@ with subtest("discover --write acquires before pending-op and probe reads"):
     #   with a placeholder pending-op.json planted. Nonblocking flock fails fast
     #   with the contention message before either read.
     machine.succeed("mkdir -p /var/lib/braid")
+    # Keep the empty-scan baseline robust against pool.json drift: after Edit 3
+    # the ValidUuidKeyed gate runs before the scan, so a stray healthy pool.json
+    # would refuse with "is already a healthy UUID-keyed membership" instead of
+    # the empty-scan refusal and trip the "did a discoverable member appear?"
+    # assertion below. Diskless host -> pool.json is normally absent; this just
+    # pins it. Matches the defensive rm -f the FIFO subtest already uses.
+    machine.succeed("rm -f /var/lib/braid/pool.json")
     # Single source of truth for the probe sentinel's substring -- asserted
     # PRESENT in the baseline, ABSENT under contention. Tracks the lead clause of
     # cli/src/discover.rs#NoMembersDiscovered (not the remediation tail, which may
@@ -115,7 +123,7 @@ with subtest("discover --write acquires before pending-op and probe reads"):
     assert "another braid operation is already in progress" in out, (
         "expected contention message; out=" + out
     )
-    assert "pending-op.json exists" not in out, (
+    assert "cannot read pending-op.json" not in out, (
         "discover read pending-op before acquiring lock; out=" + out
     )
     assert refusal not in out, (
