@@ -84,13 +84,10 @@ fn fallback_disk_luks_lock<R: CommandRunner>(
 }
 
 /// Best-effort LUKS metadata bridge for the disk detail popup.
-fn probe_disk_luks_metadata<R: CommandRunner>(
-    runner: &R,
-    by_id_path: &str,
-) -> Option<DiskLuksInfo> {
+fn probe_disk_luks_metadata<R: CommandRunner>(runner: &R, device: &str) -> Option<DiskLuksInfo> {
     let raw = runner
         .run(&CmdRequest::CryptsetupLuksDump {
-            device: by_id_path.to_owned(),
+            device: device.to_owned(),
         })
         .ok()?;
     let dump = parse_cryptsetup_luks_dump(&raw).ok()?;
@@ -126,12 +123,23 @@ fn build_disk_luks_states<R: CommandRunner>(
                     backing_path_resolver,
                 )
             });
+        // Present-device probes read the live backing path (decision 024):
+        // a verified-present (`Unlocked`) member's by-id handle may have
+        // drifted while `underlying` stays live, so route its metadata dump
+        // through `underlying`. Locked or ownership-unverified members --
+        // including the backing-path-mismatch fallback whose `underlying` is a
+        // foreign device -- stay on the persisted by-id handle.
+        let metadata_device = match underlying_present.as_deref() {
+            Some(underlying) if lock == DiskLockState::Unlocked => underlying,
+            _ => by_id_path.as_str(),
+        };
+        let metadata = probe_disk_luks_metadata(runner, metadata_device);
         disk_luks_states.insert(
             disk_name.clone(),
             DiskLuksState {
                 lock,
                 underlying_present,
-                metadata: probe_disk_luks_metadata(runner, by_id_path),
+                metadata,
             },
         );
     }
@@ -1369,6 +1377,59 @@ mod tests {
         );
     }
 
+    // Intent: the disk-detail LUKS metadata dump for a mounted, present
+    //   member is read from the live backing path, surviving by-id drift.
+    // Why it exists: commit 8593c9fe routed SMART/model probes through the
+    //   live path but left the metadata dump on the persisted by-id handle.
+    //   For a mounted member whose by-id handle has drifted, `cryptsetup
+    //   luksDump` then runs against a stale path and fails, so disk detail
+    //   renders "LUKS metadata unavailable" for an open, healthy disk. This
+    //   also closes a coverage gap: no other test pins metadata on the
+    //   mounted present-member path.
+    // Scenario: toshiba is live at /dev/vda (UUID-matched into the pool); the
+    //   by-id handle is drifted so its luksDump fails, while /dev/vda's
+    //   luksDump returns the real cipher.
+    #[test]
+    fn luks_metadata_for_present_member_uses_live_underlying() {
+        let disk_by_id = HashMap::from([(
+            "toshiba".to_owned(),
+            "/dev/disk/by-id/braid-toshiba".to_owned(),
+        )]);
+        let runner = one_disk_mounted_pool_runner()
+            .with_output(
+                CmdRequest::CryptsetupLuksDump {
+                    device: "/dev/vda".to_owned(),
+                },
+                ok_raw("cryptsetup luksDump", &luks_dump_json("aes-xts-plain64")),
+            )
+            .with_output(
+                CmdRequest::CryptsetupLuksDump {
+                    device: "/dev/disk/by-id/braid-toshiba".to_owned(),
+                },
+                err_raw("cryptsetup luksDump", "drifted handle\n", 1),
+            );
+
+        let (states, _pool) = probe_pool_for_tui(
+            &runner,
+            &StubFs::empty(),
+            &MountPoint("/mnt/storage".into()),
+            &tui_disks_with_by_id(disk_by_id),
+            &test_paths().1,
+            crate::test_fixtures::mock_virtio_backing_path_resolver(),
+        )
+        .unwrap();
+
+        // With the bug present, the read targets the failing by-id handle and
+        // yields None; with the fix it reads the live cipher from /dev/vda.
+        assert_eq!(
+            states["toshiba"]
+                .metadata
+                .as_ref()
+                .map(|info| info.cipher.as_str()),
+            Some("aes-xts-plain64")
+        );
+    }
+
     /// Intent: TUI device_errors is keyed by disk name resolved via devid,
     /// not by the `/dev/mapper/braid-X` prefix on the stats row's path.
     /// A stats row whose path doesn't strip cleanly (e.g. /dev/dm-N) but
@@ -1737,12 +1798,19 @@ mod tests {
     }
 
     // Intent: unmounted TUI probes must still classify open and closed
-    //         mappers per declared disk.
+    //         mappers per declared disk, and read each disk's LUKS metadata
+    //         from the right device -- the live backing path for an open
+    //         (verified-present) mapper, the persisted by-id handle for a
+    //         closed one.
     // Why it exists: disk detail used to derive lock state from mounted
     //      btrfs membership, so an unmounted pool rendered every disk as
-    //      locked regardless of cryptsetup truth.
+    //      locked regardless of cryptsetup truth; and the metadata dump used
+    //      to always read the by-id handle, which fails under by-id drift for
+    //      a present member (decision 024).
     // Scenario: pool is not mounted; toshiba's mapper is open against the
-    //           configured device and ironwolf's mapper is inactive.
+    //           configured device (metadata read from live /dev/vdb) and
+    //           ironwolf's mapper is inactive (metadata read from its by-id
+    //           handle).
     #[test]
     fn probe_classifies_unmounted_open_and_closed_mappers() {
         let disk_by_id = HashMap::from([
@@ -1775,9 +1843,12 @@ mod tests {
                     "11111111-1111-1111-1111-111111111111\n",
                 ),
             )
+            // toshiba is fallback-`Unlocked` with underlying `/dev/vdb`, so its
+            // metadata dump is read from the live backing path, not the by-id
+            // handle.
             .with_output(
                 CmdRequest::CryptsetupLuksDump {
-                    device: "/dev/disk/by-id/braid-toshiba".into(),
+                    device: "/dev/vdb".into(),
                 },
                 ok_raw("cryptsetup luksDump", &luks_dump_json("aes-xts-plain64")),
             )
@@ -1938,6 +2009,71 @@ mod tests {
             states.get("toshiba").map(|state| state.lock),
             Some(DiskLockState::Unknown)
         );
+    }
+
+    // Intent: a backing-path-mismatch fallback mapper -- whose observed
+    //   `underlying` is a foreign device, not the declared disk -- must not
+    //   surface that foreign device's LUKS metadata under the declared disk.
+    // Why it exists: the live-path metadata routing is gated on an `Unlocked`
+    //   classification precisely so an ungated read cannot dump a foreign
+    //   mapper's cipher/keyslots under the declared disk's identity. This is
+    //   the branch where the gate matters behaviorally: by-id and `underlying`
+    //   resolve to different devices, so the live path is a genuinely foreign
+    //   read, not a drifted handle for the same disk. Drop the gate and the
+    //   read targets /dev/vdz, leaking "foreign-cipher".
+    // Scenario: pool unmounted; braid-toshiba's mapper is open against a
+    //   foreign /dev/vdz, while the disk's by-id handle canonicalizes to
+    //   /dev/vdb -- the path check fails, so the disk classifies Unknown with
+    //   underlying /dev/vdz before any UUID probe.
+    #[test]
+    fn probe_fallback_backing_path_mismatch_does_not_read_foreign_metadata() {
+        let disk_by_id = HashMap::from([(
+            "toshiba".to_owned(),
+            "/dev/disk/by-id/braid-toshiba".to_owned(),
+        )]);
+        let runner = MockRunner::default()
+            .with_output(
+                CmdRequest::CryptsetupStatus {
+                    mapper: MapperName("braid-toshiba".into()),
+                },
+                ok_raw(
+                    "cryptsetup status braid-toshiba",
+                    "/dev/mapper/braid-toshiba is active and is in use.\n\
+                     \tdevice:  /dev/vdz\n",
+                ),
+            )
+            // The foreign backing has readable metadata -- the bait an ungated
+            // read would take. No by-id luksDump and no luksUUID are
+            // registered: the gate routes the read to the by-id request string
+            // (unregistered -> MissingMock -> None), and the path check returns
+            // Unknown before any UUID probe.
+            .with_output(
+                CmdRequest::CryptsetupLuksDump {
+                    device: "/dev/vdz".to_owned(),
+                },
+                ok_raw("cryptsetup luksDump", &luks_dump_json("foreign-cipher")),
+            );
+        let resolver = crate::test_fixtures::MockBackingPathResolver::default()
+            .with_path("/dev/disk/by-id/braid-toshiba", "/dev/vdb");
+
+        let (states, _pool) = probe_pool_for_tui(
+            &runner,
+            &StubFs::unmounted_with_paths(&[]),
+            &MountPoint("/mnt/storage".into()),
+            &tui_disks_with_by_id(disk_by_id),
+            &test_paths().1,
+            &resolver,
+        )
+        .unwrap();
+
+        let state = states.get("toshiba").expect("toshiba state");
+        assert_eq!(state.lock, DiskLockState::Unknown);
+        // The foreign backing WAS observed, so an ungated read would have
+        // used it.
+        assert_eq!(state.underlying_present.as_deref(), Some("/dev/vdz"));
+        // The gate routed the read to the by-id handle instead, which is
+        // unregistered -- so the foreign cipher never surfaces.
+        assert_eq!(state.metadata, None);
     }
 
     /// Helper: build the minimum mock-runner mocks for a single-disk

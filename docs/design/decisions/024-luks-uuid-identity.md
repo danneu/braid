@@ -73,10 +73,12 @@ one.
   names such as `toshiba1`; mapper names and labels remain `braid-<DiskName>`.
   UUIDs appear where they help diagnostics or machine-readable state, not as the
   normal command vocabulary.
-- **Present-device hardware probes use live paths.** Queries such as lsblk
-  model/serial and smartctl use the live backing path
-  (`PoolState::underlying_for_uuid`), not persisted by-id setup/repair handles
-  that can drift while the disk is still present.
+- **Present-device probes use live paths.** Queries such as lsblk model/serial
+  and smartctl use the live backing path (`PoolState::underlying_for_uuid`), and
+  the TUI disk-detail LUKS metadata dump (`cryptsetup luksDump`) reads the live
+  backing path for a verified-present (`Unlocked`) member -- not persisted by-id
+  setup/repair handles that can drift while the disk is still present. Metadata
+  for locked or ownership-unverified mappers stays on the by-id handle.
 
 ## Concrete Improvements
 
@@ -222,6 +224,10 @@ warns rather than claiming every declared member is assembled.
 - `cli/src/tui/probe.rs` unit tests pin the TUI Data-tab Bus column's transport
   join to the parent disk's LUKS UUID, so a member open under a drifted mapper
   (`braid-WRONG`) still renders its bus instead of degrading to `--`.
+- `cli/src/tui/probe.rs` unit tests pin that the disk-detail LUKS metadata dump
+  reads the live backing path for a verified-present member (surviving by-id
+  drift), and that a foreign / ownership-unverified mapper does not surface the
+  live device's metadata under the declared disk.
 - `cli/src/lock.rs` unit tests pin the normal UUID/devid-classified close set,
   observed-mapper closing, UUID-scanned fallback cleanup, orphan warnings for
   non-member UUID/devid cases, duplicate-devid `null_underlying` skip behavior,
