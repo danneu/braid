@@ -20,6 +20,8 @@ pub(crate) const IDLE_FSID_OTHER: &str = "deadbeef-dead-beef-dead-beefdeadbeef";
 
 const MOUNTINFO_WITH_BTRFS_TARGET: &str =
     "36 35 0:32 / /mnt/storage rw,noatime shared:1 - btrfs /dev/mapper/braid-disk1 rw\n";
+const MOUNTINFO_NON_BTRFS_TARGET: &str =
+    "36 35 0:32 / /mnt/storage rw,noatime shared:1 - ext4 /dev/sda1 rw\n";
 const MOUNTINFO_WITHOUT_TARGET: &str = "26 25 0:23 / / rw,noatime shared:1 - ext4 /dev/sda1 rw\n";
 
 /// Strict idle filesystem mock whose unseeded reads and directory listings fail.
@@ -51,6 +53,13 @@ impl IdleMockFs {
     /// pool offline before scrub or sysfs probes can run.
     pub(crate) fn offline_mountinfo() -> Self {
         Self::empty().seed_mountinfo(MOUNTINFO_WITHOUT_TARGET)
+    }
+
+    /// Mountinfo fixture with a non-btrfs filesystem at the configured target,
+    /// pinning that idle treats it as PoolOffline rather than diverging into the
+    /// probe_* NotBtrfs error.
+    pub(crate) fn non_btrfs_target() -> Self {
+        Self::empty().seed_mountinfo(MOUNTINFO_NON_BTRFS_TARGET)
     }
 
     /// Custom mountinfo fixture for parser-failure tests that keep the bad

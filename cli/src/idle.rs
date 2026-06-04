@@ -137,6 +137,29 @@ mod tests {
         assert_eq!(result, IdleResult::PoolOffline);
     }
 
+    // Intent: a non-btrfs filesystem mounted at the configured mount point
+    //   yields PoolOffline (allow suspend), not Busy and not an error.
+    // Why it exists: cmd_idle gates on is_btrfs_mounted, which collapses
+    //   "nothing mounted" and "non-btrfs mounted" into one Ok(false) ->
+    //   PoolOffline. This deliberately diverges from probe_pool / probe_fsid /
+    //   probe_pool_alerts, which reject a non-btrfs mount at the same path with
+    //   ProbeError::NotBtrfs. The divergence is correct (ext4 at /mnt/storage
+    //   means the btrfs pool is not assembled, so suspend is safe) but was
+    //   unguarded: a refactor swapping is_btrfs_mounted for fstype_at_mount_via_fs
+    //   + a NotBtrfs-style error would compile, keep parser tests green, and
+    //   silently flip this case to suspend-blocked. The sibling
+    //   idle_when_pool_offline only covers the unmounted case (fstype None),
+    //   which never exercises this branch.
+    // Scenario: a misconfiguration mounts ext4 at /mnt/storage; autosuspend must
+    //   still be allowed because the encrypted btrfs pool is offline.
+    #[test]
+    fn pool_offline_when_non_btrfs_at_mount_point() {
+        let runner = MockRunner::default();
+        let fs = IdleMockFs::non_btrfs_target();
+        let result = cmd_idle(&runner, &fs, &idle_mp());
+        assert_eq!(result, IdleResult::PoolOffline);
+    }
+
     // Intent: Pool mounted, sysfs reports `none`, scrub idle -> Idle.
     // Why: The normal idle state -- system should be allowed to suspend.
     // Scenario: NAS pool is online but no user activity or maintenance in progress.
