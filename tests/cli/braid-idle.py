@@ -11,8 +11,7 @@
 # Scenario: 2-disk RAID1 pool. Check exit 0 when pool offline, exit 2 for
 #   unreadable or unparseable config, exit 1 before config/probes when run
 #   without root, exit 0 when pool idle, exit 1 on a forced probe failure, and
-#   exit 1 during scrub (racy on small VM disks -- unit tests are authoritative
-#   for the busy path).
+#   exit 1 during a live scrub held running with dm-delay read throttling.
 
 import base64
 import re
@@ -61,11 +60,13 @@ with subtest("braid idle exits 1 at the non-root gate before config/probes"):
 
 with subtest("Create 2-disk RAID1 pool"):
     for d in ["disk1", "disk2"]:
+        dm_delay_create(machine, d)
+        by_id = f"/dev/disk/by-id/braid-test-{d}-delay"
         machine.succeed(
-            f"echo -n '{passphrase}' | cryptsetup luksFormat --batch-mode --key-file=- --pbkdf pbkdf2 --pbkdf-force-iterations 1000 /dev/disk/by-id/virtio-{d}"
+            f"echo -n '{passphrase}' | cryptsetup luksFormat --batch-mode --key-file=- --pbkdf pbkdf2 --pbkdf-force-iterations 1000 {by_id}"
         )
         machine.succeed(
-            f"echo -n '{passphrase}' | cryptsetup open --type luks --key-file=- /dev/disk/by-id/virtio-{d} braid-{d}"
+            f"echo -n '{passphrase}' | cryptsetup open --type luks --key-file=- {by_id} braid-{d}"
         )
     machine.succeed(
         "mkfs.btrfs -f -d raid1 -m raid1 /dev/mapper/braid-disk1 /dev/mapper/braid-disk2"
@@ -120,23 +121,37 @@ exec __REAL_BTRFS__ "$@"
     assert status == 0, f"Expected wrapped braid idle to recover, got {status}: {output}"
     assert "idle" in output, f"Expected 'idle' in output, got: {output}"
 
-with subtest("braid idle detects scrub"):
-    # Write data so scrub has work to do
-    machine.succeed("dd if=/dev/urandom of=/mnt/storage/data bs=1M count=50")
+with subtest("braid idle reports busy while a scrub is genuinely running"):
+    machine.succeed("dd if=/dev/urandom of=/mnt/storage/data bs=1M count=32")
     machine.succeed("sync")
-    # Start scrub
-    machine.succeed("btrfs scrub start /mnt/storage")
-    # Check immediately -- scrub may complete before we check on small VM disks
-    result = machine.execute("braid idle")
-    exit_code = result[0]
-    output = result[1].strip()
-    # On small VM disks, scrub may finish instantly -- both exit 0 (idle) and
-    # exit 1 (busy) are acceptable. The unit tests are authoritative for the
-    # busy path. Here we just verify the command runs without error (not exit 2).
-    assert exit_code in [0, 1], f"Expected exit 0 or 1, got {exit_code}: {output}"
-    if exit_code == 1:
-        assert "busy" in output, f"Expected 'busy' in output, got: {output}"
-        assert "scrub" in output, f"Expected 'scrub' in output, got: {output}"
-    print(f"braid idle during scrub: exit={exit_code}, output={output}")
+    # Throttle scrub reads so it stays running through the assertion. Status
+    # queries are not on the delayed path, so the poll and `braid idle` stay fast.
+    dm_delay_activate(machine, ["disk1", "disk2"], read_delay_ms=500)
+    # Redirect the scrub daemon's stdio off the driver pipe.
+    machine.succeed("btrfs scrub start /mnt/storage > /dev/null 2>&1")
+    machine.succeed(
+        "for i in $(seq 1 400); do "
+        "out=\"$(btrfs scrub status --raw /mnt/storage 2>&1 || true)\"; "
+        "if printf '%s\\n' \"$out\" | grep -Eq 'Status:[[:space:]]+running'; "
+        "then exit 0; fi; sleep 0.05; done; "
+        "printf '%s\\n' \"$out\"; exit 1"
+    )
+
+    status, output = machine.execute("braid idle")
+    output = output.strip()
+    assert status == 1, f"running scrub must make braid idle exit 1, got {status}: {output}"
+    assert output.startswith("busy: scrub running"), (
+        f"expected 'busy: scrub running', got: {output}"
+    )
+
+    # Cancel while the throttle still holds the scrub running, so the cancel
+    # ioctl lands before the tiny scrub can finish on its own.
+    machine.succeed("btrfs scrub cancel /mnt/storage")
+    machine.wait_until_succeeds(
+        "btrfs scrub status --raw /mnt/storage | "
+        "grep -Eq 'Status:[[:space:]]+(aborted|interrupted)'",
+        timeout=30,
+    )
+    dm_delay_deactivate(machine, ["disk1", "disk2"])
 
 machine.shutdown()
