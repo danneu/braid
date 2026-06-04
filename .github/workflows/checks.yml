@@ -17,3 +17,13 @@ jobs:
 
       - name: Check decision-doc See paths
         run: python3 scripts/docs/check-see-paths.py
+
+  output-ascii:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Guard CLI output ASCII (selftest first)
+        run: |
+          python3 scripts/docs/check-output-ascii.py --selftest
+          python3 scripts/docs/check-output-ascii.py

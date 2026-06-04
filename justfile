@@ -262,6 +262,11 @@ check-code-doc-anchors:
 check-docs-see-paths:
     python3 scripts/docs/check-see-paths.py
 
+# Guard: no typographic Unicode in user-facing CLI output (selftest first)
+check-output-ascii:
+    python3 scripts/docs/check-output-ascii.py --selftest
+    python3 scripts/docs/check-output-ascii.py
+
 # Destroy an entire braid pool (dev use only — wipes LUKS signatures + state files)
 destroy config="/etc/braid/config.json":
     ./scripts/braid-destroy.sh {{config}}

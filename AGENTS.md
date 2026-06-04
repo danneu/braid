@@ -216,7 +216,18 @@ The first line of a commit message must not be capitalized (e.g. `fix the foo bu
 
 ## CLI Output Style
 
-Use `--` (double hyphen), not `—` (em-dash), in all user-facing CLI output -- error messages, help text, TUI strings, shell `echo` lines. Em-dashes render poorly over SSH and in non-UTF-8 locales.
+Use plain ASCII, not typographic Unicode substitutes, in all user-facing CLI
+output -- error messages, help text, TUI strings, shell `echo` lines. Banned
+substitutes and their ASCII forms: em-dash and en-dash -> `--`; curly single
+and double quotes -> `'` and `"`; ellipsis -> `...`; multiplication sign -> `x`.
+These render poorly over SSH and in non-UTF-8 locales. Rendering Unicode
+(arrows, box-drawing, the degree sign, spinner glyphs) is fine -- only the
+plain-ASCII substitutes are banned.
+
+Enforced by `scripts/docs/check-output-ascii.py` (a lexical scan of
+`cli/src/**/*.rs` string/help context and `modules/**/*.nix` `echo` lines, run
+in CI and via `just check-output-ascii`); comments and test code are out of
+scope.
 
 Example: `pool is not mounted -- nothing to acknowledge`
 
