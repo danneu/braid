@@ -89,9 +89,9 @@ sit inside the `!`-inverted command.
 2. If not mounted: returns idle (exit 0)
 3. Reads `/sys/fs/btrfs/*/exclusive_operation` for any active exclusive operation on any btrfs filesystem: `balance`, `balance paused`, `device add`, `device remove`, `device replace`, `resize`, `swap activate`
 4. If sysfs reports a busy operation or the sysfs probe fails, returns immediately before probing scrub
-5. Probes scrub status via `btrfs scrub status` only after the sysfs scan is clean (scrub is not in the kernel exclusive-operation set, so sysfs cannot detect it)
+5. Probes scrub status via `btrfs scrub status` against the configured pool mount point, only after the sysfs scan is clean (scrub is not in the kernel exclusive-operation set, so sysfs cannot detect it)
 
-When the host has more than one btrfs filesystem (e.g. a btrfs root in addition to the pool), an exclusive op on any of them keeps the system awake while the pool is mounted, and the `busy:` line above may name an op on the non-pool fs. This is intentionally conservative -- see [ADR 016: Auto-Suspend](../design/decisions/016-auto-suspend.md).
+When the host has more than one btrfs filesystem (e.g. a btrfs root in addition to the pool), an exclusive op on any of them keeps the system awake while the pool is mounted, and the `busy:` line above may name an op on the non-pool fs. This is intentionally conservative -- see [ADR 016: Auto-Suspend](../design/decisions/016-auto-suspend.md). Scrub detection is narrower: `braid idle` only checks for a scrub on the braid pool itself, so a scrub running on a non-pool btrfs (e.g. the btrfs root) is not detected and does not block suspend.
 
 ## Related commands
 

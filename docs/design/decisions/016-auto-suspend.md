@@ -78,6 +78,22 @@ The scrub probe is held to the same contract: a `parse_btrfs_scrub_status` resul
 
 `probe::probe_fsid` is no longer reached from `cmd_idle`. It remains in use by non-idle callers (`lock.rs` and the preflight pipelines that need a UUID for other purposes), and is out of scope for this gate.
 
+### Scrub probe is scoped to the pool mount point
+
+Unlike the exclusive-op scan, the scrub probe is not host-wide: `cmd_idle`
+runs `btrfs scrub status` against only the configured pool mount point. A
+scrub on a non-pool btrfs (e.g. the btrfs root) is therefore not detected and
+does not block suspend.
+
+This asymmetry is intentional. braid's autosuspend gate protects the braid
+pool, not every btrfs on the host -- the same ownership boundary that scopes
+`braid wol-ready` to braid's suspend path rather than installing a universal
+`sleep.target` gate. The exclusive-op scan is broader only because one pass
+over `/sys/fs/btrfs/*` reads every filesystem's state for free and errs
+conservative; matching that breadth for scrub would mean spawning a `btrfs
+scrub status` subprocess per filesystem on every autosuspend tick, for
+coverage braid does not own.
+
 ### SSH always on, SMB/NFS auto-detected
 
 SSH check is unconditional — braid requires SSH for unlock, and an active SSH session means someone is working. SMB and NFS checks are auto-detected from `config.services.samba.enable` and `config.services.nfs.server.enable` to avoid false positives on systems that don't run those services.
