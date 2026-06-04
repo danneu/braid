@@ -218,6 +218,9 @@ fn cleanup_alert_files_and_beeper(
     Ok(())
 }
 
+/// Shells out directly rather than via `OnlineStateOps::systemctl_stop`
+/// because the beeper stop also runs on the offline cleanup path
+/// (`ack_offline`), which issues no `CommandRunner` requests.
 fn stop_beeper() {
     let result = std::process::Command::new("systemctl")
         .args(["stop", "braid-alert.service"])
