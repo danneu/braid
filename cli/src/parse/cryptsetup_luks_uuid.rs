@@ -187,8 +187,9 @@ mod tests {
 
     // Intent: a luksDump body with no `UUID:` line surfaces as
     //   ParseError::MissingField naming the UUID field.
-    // Why: discover maps the missing-field outcome to
-    //   DiscoverWarning::MissingLuksUuid; a regression that swallowed
+    // Why: discover folds the missing-field outcome into
+    //   DiscoverWarning::LuksDumpUnparseable (the parser-drift bucket,
+    //   matching the missing-`Version:` path); a regression that swallowed
     //   the missing field would silently drop the disk from discovery.
     #[test]
     fn luks_uuid_from_dump_returns_missing_field_when_absent() {
@@ -261,6 +262,38 @@ mod tests {
             } => {
                 assert_eq!(field, "UUID");
                 assert_eq!(raw, "not (a uuid)");
+                assert!(!detail.is_empty(), "detail must carry uuid-crate reason");
+            }
+            other => panic!("expected InvalidValue UUID, got {other:?}"),
+        }
+    }
+
+    // Intent: a `UUID:` line carrying cryptsetup's literal `(no UUID)`
+    //   sentinel surfaces as ParseError::InvalidValue with the sentinel
+    //   preserved verbatim in `raw`.
+    // Why: LUKS2_hdr_dump prints `(no UUID)` for an empty in-memory UUID
+    //   field
+    //   (reference/cryptsetup/lib/luks2/luks2_json_metadata.c#LUKS2_hdr_dump),
+    //   so this pins the exact real-cryptsetup sentinel at the producing
+    //   parser. The other InvalidValue tests feed `not-a-uuid` /
+    //   `not (a uuid)`, never the sentinel discover routes to
+    //   DiscoverWarning::InvalidLuksUuid.
+    #[test]
+    fn luks_uuid_from_dump_rejects_no_uuid_sentinel() {
+        let raw = RawCommandOutput {
+            cmd: "cryptsetup luksDump".into(),
+            stdout: "LUKS header information\nVersion:       \t2\nUUID:          \t(no UUID)\n"
+                .into(),
+            stderr: String::new(),
+            exit_status: 0,
+        };
+        let err = parse_cryptsetup_luks_uuid_from_dump(&raw).unwrap_err();
+        match err {
+            ParseError::InvalidValue {
+                field, raw, detail, ..
+            } => {
+                assert_eq!(field, "UUID");
+                assert_eq!(raw, "(no UUID)");
                 assert!(!detail.is_empty(), "detail must carry uuid-crate reason");
             }
             other => panic!("expected InvalidValue UUID, got {other:?}"),

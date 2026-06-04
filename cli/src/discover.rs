@@ -73,13 +73,6 @@ pub enum DiscoverWarning {
         label: String,
     },
     /// Discovery read a braid-labeled LUKS2 disk whose `luksDump` text
-    /// body had no `UUID:` line. The disk is skipped (it cannot be a
-    /// pool member without identity) and surfaced as a structured
-    /// warning so operators know to inspect the header.
-    MissingLuksUuid {
-        path: String,
-    },
-    /// Discovery read a braid-labeled LUKS2 disk whose `luksDump` text
     /// body carried a `UUID:` value that `LuksUuid::parse` rejected.
     /// The disk is skipped; the warning carries the raw offending text
     /// so operators can correlate against `cryptsetup luksDump` output.
@@ -119,9 +112,6 @@ impl fmt::Display for DiscoverWarning {
                 "skipping {path}: label \"{}\" has an invalid disk name",
                 label.escape_default(),
             ),
-            DiscoverWarning::MissingLuksUuid { path } => {
-                write!(f, "skipping {path}: luksDump output missing UUID")
-            }
             DiscoverWarning::InvalidLuksUuid { path, raw, detail } => write!(
                 f,
                 "skipping {path}: invalid LUKS UUID \"{raw}\" -- {detail}"
@@ -457,12 +447,6 @@ fn discover_from_dir_inner<R: CommandRunner>(
         // is skipped -- it cannot be a pool member without identity.
         let luks_uuid = match parse_cryptsetup_luks_uuid_from_dump(&dump_raw) {
             Ok(u) => u,
-            Err(ParseError::MissingField { .. }) => {
-                warnings.push(DiscoverWarning::MissingLuksUuid {
-                    path: path_str.clone(),
-                });
-                continue;
-            }
             Err(ParseError::InvalidValue { raw, detail, .. }) => {
                 warnings.push(DiscoverWarning::InvalidLuksUuid {
                     path: path_str.clone(),
@@ -1493,17 +1477,23 @@ mod tests {
         body
     }
 
-    /// Intent: a braid-labeled LUKS2 disk whose luksDump body has no
-    /// UUID line surfaces as DiscoverWarning::MissingLuksUuid and is
-    /// absent from the discovered members.
-    /// Why it exists: the discover -> save_membership path depends on
-    /// every member having a UUID. A regression that silently kept
-    /// the disk (or dropped it without warning) would either corrupt
-    /// pool.json or leave the operator without a diagnostic.
-    /// Scenario: a disk's LUKS header was zeroed mid-format leaving a
-    /// label but no UUID; discover warns and skips it (seed 800).
+    // Intent: a braid-labeled LUKS2 disk whose luksDump body has no
+    //   `UUID:` line at all is skipped and surfaced as
+    //   DiscoverWarning::LuksDumpUnparseable (the parser-drift bucket),
+    //   never silently admitted to membership.
+    // Why it exists: real LUKS2 output always carries the `UUID:` line
+    //   (reference/cryptsetup/lib/luks2/luks2_json_metadata.c#LUKS2_hdr_dump
+    //   emits it unconditionally), so an absent line means upstream format
+    //   drift -- a future cryptsetup that renames or removes the field.
+    //   This guards against silently admitting an identity-less disk on
+    //   that drift, routing the absent `UUID:` line exactly as the absent
+    //   `Version:` line already routes (into LuksDumpUnparseable).
+    // Scenario: a hypothetical cryptsetup release drops the `UUID:` line
+    //   from luksDump; discover must skip the disk with a structured
+    //   unparseable warning rather than reconstruct membership without an
+    //   identity.
     #[test]
-    fn discover_warns_when_uuid_line_missing() {
+    fn discover_treats_absent_uuid_line_as_unparseable() {
         let dir = tempfile::tempdir().unwrap();
         let target = discover_create_target(dir.path(), "fake-bad");
         let path = discover_create_by_id_symlink(dir.path(), "ata-MISSING_UUID", &target);
@@ -1527,16 +1517,67 @@ mod tests {
         let warning = scan
             .warnings
             .iter()
-            .find(|w| matches!(w, DiscoverWarning::MissingLuksUuid { .. }))
-            .expect("MissingLuksUuid warning expected");
-        let DiscoverWarning::MissingLuksUuid { path: warn_path } = warning else {
+            .find(|w| matches!(w, DiscoverWarning::LuksDumpUnparseable { .. }))
+            .expect("LuksDumpUnparseable warning expected");
+        let DiscoverWarning::LuksDumpUnparseable {
+            path: warn_path,
+            detail,
+        } = warning
+        else {
             unreachable!();
         };
         assert!(warn_path.ends_with("ata-MISSING_UUID"));
-        assert_eq!(
-            warning.to_string(),
-            format!("skipping {warn_path}: luksDump output missing UUID"),
+        assert!(detail.contains("UUID"), "detail was {detail}");
+    }
+
+    // Intent: a braid-labeled LUKS2 disk whose luksDump prints the literal
+    //   `(no UUID)` sentinel surfaces as DiscoverWarning::InvalidLuksUuid
+    //   carrying that raw text, and the disk is absent from members.
+    // Why it exists: cryptsetup's LUKS2_hdr_dump prints `(no UUID)` when
+    //   the in-memory header UUID field is empty
+    //   (reference/cryptsetup/lib/luks2/luks2_json_metadata.c#LUKS2_hdr_dump:
+    //   `*hdr->uuid ? hdr->uuid : "(no UUID)"`). This is the reachable
+    //   empty-UUID case for a loadable LUKS2 header; braid must reject the
+    //   sentinel and skip the disk, never admit an identity-less disk to
+    //   membership. How the field came to be empty is unproven and not the
+    //   point -- only the dump-time print is.
+    // Scenario: cryptsetup loads a LUKS2 header whose binary UUID field is
+    //   empty, so luksDump emits `UUID:\t(no UUID)`; discover warns and
+    //   skips the disk.
+    #[test]
+    fn discover_warns_when_header_uuid_is_no_uuid_sentinel() {
+        let dir = tempfile::tempdir().unwrap();
+        let target = discover_create_target(dir.path(), "fake-bad");
+        let path = discover_create_by_id_symlink(dir.path(), "ata-NO_UUID_SENTINEL", &target);
+        let runner = DiscoverLabelMap::new(&[(&path, "braid-baddisk")]).with_dump_response(
+            &path,
+            RawCommandOutput {
+                cmd: "cryptsetup".into(),
+                stdout: luksdump_body("braid-baddisk", Some("UUID:\t(no UUID)")),
+                stderr: String::new(),
+                exit_status: 0,
+            },
         );
+
+        let scan = discover_from_dir(&runner, &RealByIdResolver, dir.path());
+        let members = scan.result.unwrap();
+
+        assert!(!contains_name(&members, "baddisk"));
+        let warning = scan
+            .warnings
+            .iter()
+            .find(|w| matches!(w, DiscoverWarning::InvalidLuksUuid { .. }))
+            .expect("InvalidLuksUuid warning expected");
+        let DiscoverWarning::InvalidLuksUuid {
+            path: warn_path,
+            raw,
+            ..
+        } = warning
+        else {
+            unreachable!();
+        };
+        assert!(warn_path.ends_with("ata-NO_UUID_SENTINEL"));
+        assert_eq!(raw, "(no UUID)");
     }
 
     /// Intent: a braid-labeled LUKS2 disk whose UUID line carries text
