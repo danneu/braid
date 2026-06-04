@@ -112,15 +112,18 @@ pub fn execute_effect(effect: Effect, cmd_tx: &mpsc::Sender<Event>) {
             );
         }
         Effect::ScheduleFanProbe { delay } => {
+            // Sleep-in-worker timer, deliberately not a main-loop deadline: with
+            // only two 5s cadences the per-tick spawn is negligible, and routing
+            // through spawn_worker keeps every execute_effect spawn behind one
+            // panic-safe boundary. (A loop-side deadline would couple probe cadence
+            // to the redraw timeout.) The sleep can't panic; the on-panic fallback
+            // re-emits the tick only to honor that single-boundary invariant.
             spawn_worker(
                 cmd_tx,
                 move || {
                     thread::sleep(delay);
                     Event::PollFanRefresh
                 },
-                // Defensive only: the body just sleeps and cannot realistically
-                // panic. Routed through spawn_worker so no execute_effect spawn
-                // is left unguarded; the fallback re-emits the same poll tick.
                 |_| Event::PollFanRefresh,
             );
         }
@@ -137,14 +140,14 @@ pub fn execute_effect(effect: Effect, cmd_tx: &mpsc::Sender<Event>) {
             );
         }
         Effect::ScheduleUpsProbe { delay } => {
+            // Sleep-in-worker like ScheduleFanProbe. PollUpsRefresh and
+            // PollFanRefresh are distinct ticks -- do not collapse them.
             spawn_worker(
                 cmd_tx,
                 move || {
                     thread::sleep(delay);
                     Event::PollUpsRefresh
                 },
-                // Defensive only: see ScheduleFanProbe. PollUpsRefresh and
-                // PollFanRefresh are distinct ticks -- do not collapse them.
                 |_| Event::PollUpsRefresh,
             );
         }
