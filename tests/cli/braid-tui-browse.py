@@ -7,6 +7,7 @@
 # Scenario: user opens `sudo braid tui`, tabs to Browse, selects Btrfs
 # Subvolumes, drills into a row, and backs out to the list.
 
+import re
 import time
 
 
@@ -57,11 +58,24 @@ with subtest("browse systemd status detail"):
     press("j")
     press("l")
     press("l")
-    machine.wait_until_tty_matches("2", r"braid-online\.service")
+    # Picker row 0 is braid-auto-unlock.service: a not-found phantom that
+    # `list-units --all` shows because storage.nix orders a real unit `before=`
+    # it while autoUnlock is disabled here. Its status has no Loaded: line, so
+    # drilling into row 0 would never satisfy the wait below. Drive the
+    # selection down to braid-online.service (pool-online sentinel,
+    # active/exited once mounted) instead, order-independently, and self-check
+    # the `>` marker before ret so a future picker reorder fails loudly rather
+    # than silently testing the wrong unit.
+    machine.wait_until_tty_matches("2", r"braid-online\.service", timeout=30)
+    for _ in range(15):
+        if re.search(r">\s+braid-online", machine.get_tty_text("2")):
+            break
+        press("j")
+    machine.wait_until_tty_matches("2", r">\s+braid-online", timeout=30)
     press("ret")
-    machine.wait_until_tty_matches("2", r"Loaded:")
+    machine.wait_until_tty_matches("2", r"Loaded:", timeout=30)
     press("esc")
-    machine.wait_until_tty_matches("2", r"braid-online\.service")
+    machine.wait_until_tty_matches("2", r"braid-online\.service", timeout=30)
 
 with subtest("browse smart health detail"):
     press("h")
