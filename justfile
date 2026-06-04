@@ -64,6 +64,8 @@ _build-checks flake_attr *args:
     exit $rc
 
 # Run NixOS VM tests — excludes repro tests (pass test names to run specific tests, add -v for verbose)
+# Stops on first failed test, but use -k flag to continue through
+# all tests and then report failures at end.
 test-vm *args:
     just _build-checks checks {{args}}
 
