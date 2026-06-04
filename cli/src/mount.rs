@@ -50,12 +50,6 @@ enum MissingReason {
     LuksHeaderUnreadable,
 }
 
-impl MissingReason {
-    fn is_luks_header_state(self) -> bool {
-        matches!(self, MissingReason::LuksHeaderUnreadable)
-    }
-}
-
 /// Format a structured `DegradedRefused` error message that names each
 /// missing disk and the reason in probe order. Preserves the substrings
 /// `"refusing to mount degraded"` and
@@ -80,7 +74,10 @@ fn format_degraded_refused(missing: &[(String, MissingReason)], command_hint: &s
     }
     lines.push("new writes would land on a degraded pool with reduced redundancy".to_owned());
     lines.push(format!("hint: braid {command_hint} --allow-degraded"));
-    if missing.iter().any(|(_, r)| r.is_luks_header_state()) {
+    if missing
+        .iter()
+        .any(|(_, r)| matches!(r, MissingReason::LuksHeaderUnreadable))
+    {
         lines.push("run 'braid doctor' for recovery guidance".to_owned());
     }
     lines.join("\n")
@@ -1548,7 +1545,7 @@ mod tests {
     }
 
     /// Intent: format_degraded_refused must include the doctor footer at
-    /// most once, even when multiple LUKS-header-state disks are present
+    /// most once, even when multiple LuksHeaderUnreadable disks are present
     /// alongside an unplugged disk.
     ///
     /// Why: emitting the footer per-disk would be noisy and could
