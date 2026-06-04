@@ -51,7 +51,7 @@ See the [command reference](docs/commands/) for full usage of each command.
 ## Downsides
 
 - **RAID1 capacity cost** -- half your raw capacity goes to redundancy. Four 12 TB drives = 24 TB usable.
-- **HDD-first** -- defaults are tuned for spinning drives (no TRIM, HDD scrub scheduling). SSDs may work but are not validated.
+- **HDD-first** -- defaults are tuned for spinning drives (e.g. no TRIM). SSDs may work but are not supported.
 - **Unstable** -- this is unversioned and pre-v1.0, and I change things when I decide on a better way. Commands, flags, config, and even on-disk state like `pool.json` format can change.
 - **Unproven** -- I run braid on a daily-use 4x12TB NAS, and there are 180+ NixOS VM tests and 2200+ Rust tests, but there are almost certainly weird/bad edge cases. That said, every mutating command takes a `--dry-run` flag, so you can preview exactly what it'll do before it touches your disks.
 
