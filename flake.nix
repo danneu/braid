@@ -949,6 +949,11 @@
               braid = linuxCrane.braid;
             }
           );
+          braid-ack-cleanup-pending = pkgs.testers.nixosTest (
+            import ./tests/cli/braid-ack-cleanup-pending.nix {
+              braid = linuxCrane.braid;
+            }
+          );
           braid-alert = pkgs.testers.nixosTest (
             import ./tests/module/braid-alert.nix {
               braid = linuxCrane.braid-cli-unwrapped;
