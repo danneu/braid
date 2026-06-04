@@ -205,7 +205,6 @@ impl CleanupConfidence {
 #[derive(Default)]
 struct CloseSetAccumulator {
     notes: Vec<PreviewNote>,
-    skipped_mappers: Vec<MapperName>,
     members_potentially_present: HashSet<DiskName>,
     cleanup: CleanupConfidence,
 }
@@ -347,9 +346,10 @@ fn uuid_scanned_fallback_warn_body(probe_error: &ProbeError) -> String {
     )
 }
 
-/// Classify one scanned candidate into the ordered close vectors or the
-/// skipped set. Keeping this shared between full and fallback planning
-/// prevents stranded mapper handling from drifting back to name inference.
+/// Classify one scanned candidate: push a member/orphan close entry, or
+/// warn and mark cleanup incomplete when backing LUKS UUID verification
+/// fails. Keeping this shared between full and fallback planning prevents
+/// stranded mapper handling from drifting back to name inference.
 fn push_uuid_classified_candidate<R: CommandRunner>(
     runner: &R,
     mapper: MapperName,
@@ -373,7 +373,6 @@ fn push_uuid_classified_candidate<R: CommandRunner>(
             acc.notes.push(PreviewNote::Warn(skipped_mapper_warn_body(
                 &mapper, &cmd_err,
             )));
-            acc.skipped_mappers.push(mapper);
             acc.cleanup.mark_incomplete_unclassified();
         }
     }
@@ -598,9 +597,6 @@ pub struct LockPlan {
     umount_retry_attempts: u32,
     /// Ordered mapper closes consumed by preview, forget, and execute.
     pub close_set: LockCloseSet,
-    /// Braid-prefixed mapper candidates left open because their backing
-    /// LUKS UUID could not be verified during planning.
-    pub skipped_mappers: Vec<MapperName>,
     /// Planner-derived members confidently absent from every observed live
     /// state; execute renders this instead of reconstructing mapper names.
     pub members_known_closed: Vec<DiskName>,
@@ -935,7 +931,6 @@ where
             LockMode::SystemdStop => SYSTEMD_STOP_UMOUNT_RETRY_ATTEMPTS,
         },
         close_set,
-        skipped_mappers: acc.skipped_mappers,
         members_known_closed,
         cleanup_uncertain: acc.cleanup.is_uncertain(),
         mount_point,
@@ -1015,7 +1010,6 @@ fn build_close_sets_full<R: CommandRunner, F: Filesystem + ?Sized>(
                             acc.members_potentially_present.insert(member.name.clone());
                         }
                     }
-                    acc.skipped_mappers.push(nu.mapper.clone());
                     acc.cleanup.mark_incomplete_classified();
                 }
                 other @ (MembershipError::Corrupt { .. }
@@ -3008,7 +3002,6 @@ mod tests {
             member_summaries(&plan.close_set),
             vec![("braid-aaa".to_owned(), "aaa".to_owned())],
         );
-        assert!(plan.skipped_mappers.is_empty());
         assert!(!plan.cleanup_uncertain);
     }
 
@@ -3041,7 +3034,6 @@ mod tests {
             orphan_summaries(&plan.close_set),
             vec![("braid-aaa".to_owned(), "aaa".to_owned())],
         );
-        assert!(plan.skipped_mappers.is_empty());
         assert!(!plan.cleanup_uncertain);
     }
 
@@ -3169,7 +3161,6 @@ mod tests {
         let output = plan.preview().render();
 
         assert!(plan.close_set.is_empty());
-        assert_eq!(plan.skipped_mappers, vec![MapperName("braid-aaa".into())]);
         assert!(plan.cleanup_uncertain);
         assert!(
             output.starts_with("[warn] skipping mapper braid-aaa: cannot verify backing LUKS UUID"),
@@ -4665,7 +4656,6 @@ mod tests {
             "orphan warning expected, got: {:?}",
             acc.notes
         );
-        assert!(acc.skipped_mappers.is_empty());
         assert!(!acc.cleanup.is_uncertain());
     }
 
@@ -4699,14 +4689,12 @@ mod tests {
             "orphan warning expected, got: {:?}",
             acc.notes
         );
-        assert!(acc.skipped_mappers.is_empty());
         assert!(!acc.cleanup.is_uncertain());
     }
 
     // Intent: a null_underlying entry whose devid is claimed by two
-    //   members surfaces a typed DuplicateDevid warn, lands exactly once
-    //   in skipped_mappers, and sets cleanup_uncertain. Pass 3 must not
-    //   rescan the skipped mapper.
+    //   members surfaces a typed DuplicateDevid warn exactly once and
+    //   sets cleanup_uncertain. Pass 3 must not rescan the skipped mapper.
     // Why it exists: pins the corruption path so duplicate devids cannot
     //   silently demote to orphan cleanup, and so the Pass 3 exclusion set
     //   includes every pool.devices and pool.null_underlying mapper. An
@@ -4753,7 +4741,6 @@ mod tests {
             "braid-dup must not be an orphan: {:?}",
             orphan_summaries(&close_set)
         );
-        assert_eq!(acc.skipped_mappers, vec![MapperName("braid-dup".into())]);
         assert!(acc.cleanup.is_uncertain());
 
         let warns: Vec<&str> = acc
@@ -4870,10 +4857,6 @@ mod tests {
             ]
         );
         assert!(
-            acc.skipped_mappers.is_empty(),
-            "all candidates should verify"
-        );
-        assert!(
             !acc.cleanup.is_uncertain(),
             "verified candidates are complete cleanup"
         );
@@ -4925,7 +4908,7 @@ mod tests {
             "malformed mapper basename must be carried as orphan disk_name, got: {names:?}",
         );
         assert!(
-            acc.skipped_mappers.is_empty(),
+            !acc.cleanup.is_uncertain(),
             "readable UUID should not be skipped"
         );
     }
@@ -4956,10 +4939,6 @@ mod tests {
         // Member-owned still has the two pool.devices entries.
         assert_eq!(member_summaries(&close_set).len(), 2);
         assert!(orphan_summaries(&close_set).is_empty());
-        assert_eq!(
-            acc.skipped_mappers,
-            vec![MapperName("braid-stranded".to_owned())]
-        );
         assert!(acc.cleanup.is_uncertain());
         assert!(
             acc.notes.iter().any(|note| matches!(
@@ -4993,9 +4972,14 @@ mod tests {
         let plan = plan_lock(&runner, &fs, &config, &membership, LockMode::User)
             .expect("plan should succeed");
 
-        assert_eq!(
-            plan.skipped_mappers,
-            vec![MapperName("braid-stranded".to_owned())]
+        assert!(
+            plan.notes.iter().any(|note| matches!(
+                note,
+                PreviewNote::Warn(body)
+                    if body.contains("skipping mapper braid-stranded")
+            )),
+            "skip warning for braid-stranded expected, got: {:?}",
+            plan.notes
         );
         assert!(plan.cleanup_uncertain);
         assert!(
