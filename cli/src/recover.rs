@@ -16443,6 +16443,10 @@ mod tests {
             "error must name the read-only state: {msg}"
         );
         assert!(
+            msg.contains("recovery aborted"),
+            "error must identify the real-run completion refusal, not the dry-run wording: {msg}"
+        );
+        assert!(
             msg.contains("remount,rw"),
             "error must include remount guidance: {msg}"
         );
@@ -16489,6 +16493,10 @@ mod tests {
         assert!(
             msg.contains("mounted read-only"),
             "error must name the read-only state: {msg}"
+        );
+        assert!(
+            msg.contains("recovery aborted"),
+            "error must identify the real-run completion refusal, not the dry-run wording: {msg}"
         );
         assert!(
             msg.contains("remount,rw"),
