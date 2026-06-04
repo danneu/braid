@@ -17983,13 +17983,13 @@ mod tests {
         );
         assert!(
             rendered.contains(
-                "[safe       ] replay verified returned-disk add /dev/mapper/braid-disk2 (skipped: target already live in pool)"
+                "[safe]        replay verified returned-disk add /dev/mapper/braid-disk2 (skipped: target already live in pool)"
             ),
             "returned target should render a safe skip placeholder: {rendered:?}",
         );
         assert!(
             rendered.contains(
-                "[safe       ] replay fresh add target /dev/disk/by-id/virtio-disk3 (skipped: target already live in pool)"
+                "[safe]        replay fresh add target /dev/disk/by-id/virtio-disk3 (skipped: target already live in pool)"
             ),
             "fresh target should render a safe skip placeholder: {rendered:?}",
         );

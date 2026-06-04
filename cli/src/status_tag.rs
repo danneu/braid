@@ -7,8 +7,8 @@ use std::io::IsTerminal;
 /// event-log rows. Padding is derived from the status level before
 /// color is applied, so ANSI bytes do not affect visible width.
 ///
-/// Distinct from the dry-run risk tag in `cmd::Step::print_dry_run`,
-/// which uses an 11-wide column for `safe` / `destructive` etc.
+/// Dry-run risk tags use the same tight-token + outside-pad shape,
+/// but pad to the widest risk token over a different vocabulary.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum StatusTag {
     Ok,

@@ -4293,7 +4293,7 @@ mod tests {
         assert!(lines[7].contains("$ cryptsetup open --type luks"));
 
         // Replace start
-        assert!(lines[8].contains("[long       ]"));
+        assert!(lines[8].contains("[long]"));
         assert!(lines[9].contains("$ btrfs replace start"));
 
         // Close old mapper (before resize: a resize failure must not strand

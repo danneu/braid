@@ -344,7 +344,7 @@ mod tests {
         let rendered = preview.render();
         let expected = "\
 [warn] scan failed
-[safe       ] btrfs device scan
+[safe]        btrfs device scan
                $ btrfs device scan
 ";
         assert_eq!(rendered, expected);
@@ -367,7 +367,7 @@ mod tests {
         let rendered = preview.render_with(true);
         let expected = "\
 \x1b[33m[warn]\x1b[0m scan failed
-[safe       ] btrfs device scan
+[safe]        btrfs device scan
                $ btrfs device scan
 ";
         assert_eq!(rendered, expected);

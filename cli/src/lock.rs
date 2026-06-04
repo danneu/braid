@@ -2903,7 +2903,7 @@ mod tests {
             .find(warn_line)
             .expect("orphan warning should be present");
         let first_step_pos = output
-            .find("[safe       ]")
+            .find("[safe]")
             .expect("preview should include at least one step");
         assert!(
             warn_pos < first_step_pos,

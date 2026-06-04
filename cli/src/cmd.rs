@@ -418,12 +418,20 @@ pub struct Step {
     pub commands: Vec<CmdRequest>,
 }
 
+/// Width of the widest dry-run risk token, including brackets.
+const RISK_TAG_COL: usize = "[destructive]".len();
+
 impl Step {
     /// Pure renderer — returns the formatted dry-run lines.
     pub fn render_dry_run(steps: &[Step]) -> String {
         let mut out = String::new();
         for step in steps {
-            out.push_str(&format!("[{:<11}] {}\n", step.risk, step.description));
+            let tag = format!("[{}]", step.risk);
+            out.push_str(&format!(
+                "{tag:<width$} {}\n",
+                step.description,
+                width = RISK_TAG_COL
+            ));
             for cmd in &step.commands {
                 out.push_str(&format!(
                     "               $ {}\n",
@@ -3016,7 +3024,7 @@ mod tests {
         assert_eq!(lines.len(), 4);
         assert_eq!(lines[0], "[destructive] LUKS format /dev/disk/by-id/disk1");
         assert!(lines[1].contains("$ cryptsetup luksFormat"));
-        assert_eq!(lines[2], "[safe       ] LUKS open -> braid-aaa");
+        assert_eq!(lines[2], "[safe]        LUKS open -> braid-aaa");
         assert!(lines[3].contains("$ cryptsetup open --type luks"));
         assert!(
             output.is_ascii(),
@@ -3039,7 +3047,7 @@ mod tests {
         assert_eq!(lines.len(), 1);
         assert_eq!(
             lines[0],
-            "[safe       ] identity verification at execution time"
+            "[safe]        identity verification at execution time"
         );
     }
 

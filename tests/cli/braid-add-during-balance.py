@@ -140,7 +140,7 @@ with subtest("dry-run during in-flight balance routes notes to stdout only"):
         f"expected 'waiting for in-flight' on dry-run stdout, got:\n{stdout}"
     )
     # Preview step lines use the bracketed risk tag, e.g.
-    # `[safe       ]` / `[destructive]` / `[long       ]`. Assert at
+    # `[safe]` / `[destructive]` / `[long]`. Assert at
     # least one bracketed risk tag is present on stdout to prove the
     # step block still rendered after the Info note.
     assert "[safe" in stdout or "[destructive" in stdout or "[long" in stdout, (

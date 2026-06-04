@@ -1492,13 +1492,13 @@ mod tests {
 
         // 2 steps (device remove + close), each with 1 command line = 4 lines
         assert_eq!(lines.len(), 4, "expected 4 lines, got:\n{output}");
-        assert!(lines[0].contains("[long       ]"));
+        assert!(lines[0].contains("[long]"));
         assert!(lines[0].contains("btrfs device remove"));
         assert_eq!(
             lines[1],
             "               $ btrfs device remove --enqueue /dev/mapper/braid-disk2 /mnt/storage"
         );
-        assert!(lines[2].contains("[safe       ]"));
+        assert!(lines[2].contains("[safe]"));
         assert!(lines[2].contains("cryptsetup close"));
         assert_eq!(lines[3], "               $ cryptsetup close braid-disk2");
     }
