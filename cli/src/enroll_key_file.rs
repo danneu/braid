@@ -64,6 +64,21 @@ pub(crate) enum EnrollmentPlanMode {
     GenerateNew,
 }
 
+/// Which validation pass is checking the generated-keyfile target.
+/// The mount-point requirement is identical across passes; only the
+/// failure wording differs, because the caller's prior knowledge differs.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum KeyfileTargetPhase {
+    /// First check, in `plan_enroll`: no prior validation. A failure
+    /// means the operator never mounted the USB device.
+    Plan,
+    /// Mutation-boundary re-check in `EnrollPlan::execute`, run right
+    /// before `generate_key_file`. The plan already proved the target
+    /// was mounted, so a failure here means it regressed mid-run
+    /// (hot-unplug / automount timeout) -- the load-bearing TOCTOU guard.
+    Recheck,
+}
+
 /// A present LUKS pool member that discovery validated as enrollable.
 /// Carries the `uuid` discovery already proved equals the live header so
 /// the execute-time re-probe (`reprobe_member_luks_uuid`) can compare
@@ -545,7 +560,11 @@ impl EnrollPlan {
         )?;
 
         if self.generate {
-            validate_generated_keyfile_target(runner, params.key_file_path, true)?;
+            validate_generated_keyfile_target(
+                runner,
+                params.key_file_path,
+                KeyfileTargetPhase::Recheck,
+            )?;
             generate_key_file(params.key_file_path)?;
             eprintln!("ok: generated {}", params.key_file_path.display());
         }
@@ -617,10 +636,14 @@ fn key_file_directory(key_file_path: &Path) -> &Path {
         .unwrap_or_else(|| Path::new("."))
 }
 
+/// Shared target-safety gate for generated keyfiles, run at plan time and
+/// again at the mutation boundary. Both phases enforce the same
+/// no-root-filesystem invariant while framing mount-point failures from
+/// the caller's phase-specific knowledge.
 fn validate_generated_keyfile_target<R: CommandRunner>(
     runner: &R,
     key_file_path: &Path,
-    recheck: bool,
+    phase: KeyfileTargetPhase,
 ) -> Result<(), EnrollKeyFileError> {
     let dir = key_file_directory(key_file_path);
     let dir_display = dir.display().to_string();
@@ -648,14 +671,13 @@ fn validate_generated_keyfile_target<R: CommandRunner>(
         path: MountPoint(dir_display.clone()),
     })?;
     if mountpoint.exit_status != 0 {
-        let message = if recheck {
-            format!(
+        let message = match phase {
+            KeyfileTargetPhase::Recheck => format!(
                 "keyfile directory {dir_display} was a mount point at plan time but is no longer mounted -- the USB device may have been unmounted or disconnected during enrollment; remount and re-run braid enroll --generate"
-            )
-        } else {
-            format!(
+            ),
+            KeyfileTargetPhase::Plan => format!(
                 "keyfile directory is not a mount point: {dir_display} -- mount the USB device there before running braid enroll --generate"
-            )
+            ),
         };
         return Err(EnrollKeyFileError::Validation(message));
     }
@@ -696,7 +718,7 @@ pub fn plan_enroll<R: CommandRunner, F: Filesystem + ?Sized>(
     }
 
     let key_file_validation = if params.generate {
-        validate_generated_keyfile_target(runner, params.key_file_path, false)
+        validate_generated_keyfile_target(runner, params.key_file_path, KeyfileTargetPhase::Plan)
     } else {
         validate_key_file_path(params.key_file_path, false)
     };
@@ -3845,10 +3867,12 @@ mod tests {
         )
         .expect_err("re-check must fail when mountpoint disappears mid-run");
 
-        assert!(
-            err.to_string()
-                .contains("was a mount point at plan time but is no longer mounted"),
-            "expected execute-time mountpoint error, got: {err}"
+        assert_eq!(
+            err.to_string(),
+            format!(
+                "keyfile directory {} was a mount point at plan time but is no longer mounted -- the USB device may have been unmounted or disconnected during enrollment; remount and re-run braid enroll --generate",
+                tmp.path().display()
+            )
         );
         assert!(
             !kf.exists(),
