@@ -59,6 +59,7 @@ Standalone CLI installs (no NixOS module) skip all three -- there is no `braid-o
 - If unmount fails after 3 retry attempts (e.g. a process has files open on the mount), lock skips `btrfs device scan --forget` and still attempts to close the LUKS mappers, reporting the failure
 - If a mapper close fails with "device busy" after unmount also failed, the error is downgraded to a warning (the root cause is likely the stuck unmount)
 - The hint `lsof <mount_point>` or `fuser -vm <mount_point>` is printed when unmount fails, to help identify the blocking process
+- If a scanned `braid-*` mapper's backing LUKS UUID cannot be verified (for example because its backing device is gone or its LUKS header is unreadable), lock prints a `[warn]`, leaves that mapper open instead of closing it, excludes it from both `btrfs device scan --forget` and the close step, and still exits cleanly. Re-run `braid lock` once the mapper's LUKS UUID is readable. The literal `cleanup incomplete` summary line appears only under `--dry-run`; a real run surfaces the per-mapper `[warn]` and does not print `pool already locked`. See [ADR-024](../design/decisions/024-luks-uuid-identity.md#runtime-handles-and-labels).
 
 ## Related commands
 
