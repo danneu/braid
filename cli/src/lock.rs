@@ -3930,6 +3930,56 @@ mod tests {
         );
     }
 
+    // Intent: the `ProbeFailed` fallback arm runs the exclusive-op preflight
+    //   and refuses on an active balance before unmounting or closing any
+    //   mapper.
+    // Why it exists: the FSID preflight is the only guard between fallback
+    //   unmount and an in-flight exclusive op; dropping it from this arm would
+    //   risk unmount during balance.
+    // Scenario: a mounted pool's per-device probe fails while a balance runs;
+    //   the operator runs `braid lock`.
+    #[test]
+    fn lock_probe_failed_refuses_when_exclusive_op_active() {
+        let runner = lock_with_fsid_probe_mocks(MockRunner::default().with_output(
+            CmdRequest::MountpointCheck {
+                path: MountPoint("/mnt/storage".to_owned()),
+            },
+            lock_ok_raw("mountpoint -q /mnt/storage"),
+        ))
+        .with_output_sequence(
+            CmdRequest::CryptsetupStatus {
+                mapper: MapperName("braid-aaa".into()),
+            },
+            vec![lock_err_raw(
+                "cryptsetup status braid-aaa",
+                5,
+                "transient status failure",
+            )],
+        );
+        let fs =
+            lock_fs(&["/dev/mapper/braid-aaa", "/dev/mapper/braid-bbb"]).with_excl_op("balance");
+        let config = lock_test_config();
+        let membership = lock_test_membership();
+
+        let err = cmd_lock_impl(&runner, &fs, &LockNoopSleeper, &config, &membership, false)
+            .expect_err("should refuse before fallback cleanup");
+        let msg = err.to_string();
+        assert!(
+            msg.contains("balance") && msg.contains("in progress"),
+            "expected active-op refusal, got: {msg}"
+        );
+        assert_eq!(
+            umount_request_count(&runner),
+            0,
+            "fallback must refuse before umount"
+        );
+        assert_eq!(
+            cryptsetup_close_request_count(&runner),
+            0,
+            "fallback must refuse before mapper close"
+        );
+    }
+
     #[test]
     // Intent: lock refuses when a balance is paused.
     // Why: a paused balance still holds the exclusive lock — unmounting is unsafe.

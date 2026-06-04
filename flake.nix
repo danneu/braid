@@ -554,6 +554,11 @@
               braid = linuxCrane.braid;
             }
           );
+          braid-lock-probe-failed = pkgs.testers.nixosTest (
+            import ./tests/cli/braid-lock-probe-failed.nix {
+              braid = linuxCrane.braid;
+            }
+          );
           braid-unlock = pkgs.testers.nixosTest (
             import ./tests/cli/braid-unlock.nix {
               braid = linuxCrane.braid;
