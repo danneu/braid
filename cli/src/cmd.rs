@@ -366,8 +366,9 @@ pub enum CmdRequest {
     EthtoolShow {
         interface: String,
     },
-    /// `upsc <name>` — NUT status query. Emits `key: value` lines (see
-    /// `reference/nut/clients/upsc.c:141`) on stdout; non-zero exit when the
+    /// `upsc <name>` -- NUT status query. Emits `key: value` lines on stdout
+    /// (nut 2.8.4, clients/upsc.c fn `list_vars`:
+    /// `printf("%s: %s\n", answer[2], answer[3]);`); non-zero exit when the
     /// upsd daemon is unreachable or the UPS name is unknown. braid uses
     /// this for preflight-on-battery and `braid ups status`.
     UpscQuery {

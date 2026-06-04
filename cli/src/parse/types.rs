@@ -543,8 +543,9 @@ pub enum UpsStatusFlag {
 }
 
 impl UpsStatusFlag {
-    /// Rendered token, matching NUT's own `ups.status` vocabulary
-    /// (`reference/nut/clients/upsc.c:141` emits these verbatim).
+    /// Rendered token, matching NUT's own `ups.status` vocabulary. `upsc`
+    /// emits these verbatim -- nut 2.8.4, clients/upsc.c (fn `list_vars`):
+    /// `printf("%s: %s\n", answer[2], answer[3]);`
     pub fn as_token(&self) -> &str {
         match self {
             Self::Ol => "OL",

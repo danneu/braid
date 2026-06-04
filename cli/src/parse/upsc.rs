@@ -1,12 +1,16 @@
 //! `upsc <name>` output parser.
 //!
-//! NUT's `upsc` client emits one `key: value` pair per line (see
-//! `reference/nut/clients/upsc.c:141`). This parser splits the familiar
-//! keys (`ups.status`, `battery.*`, `input.*`, `ups.load`,
-//! `ups.realpower.nominal`, `ups.test.result`, `device.*` / `ups.mfr` /
-//! `ups.model` / `ups.serial`) into the typed `UpscOutput` shape, and
-//! keeps every other line verbatim in `extra` so unfamiliar driver keys
-//! are still observable via `braid ups status --json`.
+//! NUT's `upsc` client emits one `key: value` pair per line. Source,
+//! nut 2.8.4, clients/upsc.c (fn `list_vars`):
+//! ```c
+//! printf("%s: %s\n", answer[2], answer[3]);
+//! ```
+//!
+//! This parser splits the familiar keys (`ups.status`, `battery.*`,
+//! `input.*`, `ups.load`, `ups.realpower.nominal`, `ups.test.result`,
+//! `device.*` / `ups.mfr` / `ups.model` / `ups.serial`) into the typed
+//! `UpscOutput` shape, and keeps every other line verbatim in `extra` so
+//! unfamiliar driver keys are still observable via `braid ups status --json`.
 //!
 //! This parser is infallible by design: malformed or unknown fields are
 //! omitted from typed fields or preserved in `extra`. Subprocess invocation
