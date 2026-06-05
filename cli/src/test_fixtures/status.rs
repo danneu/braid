@@ -687,7 +687,8 @@ pub(crate) fn status_disk_report_named(name: &str, devid: u64) -> DiskReport {
         devid: Some(devid),
         underlying: None,
         status: DiskStatus::Present,
-        errors: None,
+        btrfs_errors: None,
+        smart: None,
     }
 }
 
@@ -702,6 +703,7 @@ pub(crate) fn status_disk_report_missing(name: &str) -> DiskReport {
         devid: None,
         underlying: None,
         status: DiskStatus::Missing,
-        errors: None,
+        btrfs_errors: None,
+        smart: None,
     }
 }

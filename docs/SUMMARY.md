@@ -73,6 +73,7 @@
 - [027: mkfs block-group-tree](design/decisions/027-mkfs-block-group-tree.md)
 - [028: Immutable unmounted mountpoint](design/decisions/028-immutable-unmounted-mountpoint.md)
 - [029: Release process](design/decisions/029-release-process.md)
+- [030: SMART/btrfs error reporting](design/decisions/030-smart-btrfs-error-reporting.md)
 
 # Internals
 

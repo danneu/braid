@@ -1,6 +1,6 @@
 use std::collections::BTreeSet;
 
-use serde::{Serialize, Serializer};
+use serde::{Deserialize, Serialize, Serializer};
 
 use crate::types::LuksUuid;
 
@@ -362,23 +362,156 @@ pub struct BtrfsBalanceStatusOutput {
     pub state: BalanceState,
 }
 
-/// smartctl health classification
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+/// smartctl health classification. The serde renames pin each variant to the
+/// lowercase word the TUI column already prints, so the `--json` `smart.health`
+/// string and the TUI verdict cannot drift in vocabulary.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum SmartHealth {
+    #[serde(rename = "ok")]
     Healthy,
+    #[serde(rename = "warning")]
     Degraded,
+    #[serde(rename = "failing")]
     Failing,
+    #[serde(rename = "unknown")]
     Unknown,
 }
 
-/// smartctl per-probe result: health classification plus optional current
-/// temperature in Celsius. `celsius` is `None` when the drive doesn't emit
-/// `temperature.current` (USB-bridged drives, NVMe without thermal reporting,
-/// parser failure, etc.). `celsius` is independent of `health`: a drive can
-/// report temperature while health is Unknown, or vice versa.
+/// Stable per-field identity for one SMART evidence counter. Decouples a field's
+/// identity from its rendered text so the TUI red row, the human parenthetical,
+/// and the color test all key off this enum, never a matched label string.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SmartField {
+    // SATA (ATA attributes)
+    Reallocated,
+    Pending,
+    Uncorrectable,
+    // NVMe (health-information log)
+    CriticalWarning,
+    MediaErrors,
+    AvailableSpare,
+    PercentageUsed,
+}
+
+impl SmartField {
+    /// Rendered label for this field, shared by the human `SMART:` parenthetical
+    /// and the TUI evidence rows so the two surfaces cannot disagree on wording.
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Reallocated => "reallocated",
+            Self::Pending => "pending",
+            Self::Uncorrectable => "uncorrectable",
+            Self::CriticalWarning => "critical warning",
+            Self::MediaErrors => "media errors",
+            Self::AvailableSpare => "available spare",
+            Self::PercentageUsed => "percentage used",
+        }
+    }
+}
+
+/// SMART supporting evidence, tagged by `protocol` so the field set is
+/// unambiguous and the serialized shape is forward-compatible. SMART's
+/// authoritative signal is the pass/fail verdict (`SmartHealth`); these counts
+/// are evidence behind it, never a verdict of their own. A single summed
+/// `smart_errors` integer was rejected: it mixes units and would render `0` on a
+/// drive reporting `passed:false`. `Copy` so one probe value feeds every surface
+/// without a clone.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "protocol", rename_all = "snake_case")]
+pub enum SmartEvidence {
+    Sata {
+        reallocated_sectors: u64,
+        pending_sectors: u64,
+        offline_uncorrectable: u64,
+    },
+    Nvme {
+        media_errors: u64,
+        critical_warning: u64,
+        percentage_used: u64,
+        available_spare: u64,
+        available_spare_threshold: u64,
+    },
+}
+
+impl SmartEvidence {
+    /// Every display field as `(key, value, is_concern)` -- the single source of
+    /// both the shown value and the per-protocol "out of spec" test. The TUI
+    /// builds one row per triple and reds it iff `is_concern`; the human line and
+    /// verdict consult `concerns()`. `available_spare_threshold` is consulted by
+    /// the spare predicate (a threshold pair, not a generic `> 0` rule -- exactly
+    /// why a flat numeric rule is wrong for NVMe) but is not itself a row.
+    pub fn fields(&self) -> Vec<(SmartField, u64, bool)> {
+        match *self {
+            Self::Sata {
+                reallocated_sectors,
+                pending_sectors,
+                offline_uncorrectable,
+            } => vec![
+                (
+                    SmartField::Reallocated,
+                    reallocated_sectors,
+                    reallocated_sectors > 0,
+                ),
+                (SmartField::Pending, pending_sectors, pending_sectors > 0),
+                (
+                    SmartField::Uncorrectable,
+                    offline_uncorrectable,
+                    offline_uncorrectable > 0,
+                ),
+            ],
+            Self::Nvme {
+                media_errors,
+                critical_warning,
+                percentage_used,
+                available_spare,
+                available_spare_threshold,
+            } => vec![
+                (
+                    SmartField::CriticalWarning,
+                    critical_warning,
+                    critical_warning != 0,
+                ),
+                (SmartField::MediaErrors, media_errors, media_errors != 0),
+                (
+                    SmartField::AvailableSpare,
+                    available_spare,
+                    available_spare_threshold > 0 && available_spare <= available_spare_threshold,
+                ),
+                (
+                    SmartField::PercentageUsed,
+                    percentage_used,
+                    percentage_used >= 90,
+                ),
+            ],
+        }
+    }
+
+    /// The `is_concern` subset of `fields()` as `(key, value)`. Drives the
+    /// SATA/NVMe verdict (`Healthy` iff empty, else `Degraded`) and the human
+    /// `SMART:` parenthetical, so the verdict and the itemized concerns share one
+    /// threshold definition.
+    pub fn concerns(&self) -> Vec<(SmartField, u64)> {
+        self.fields()
+            .into_iter()
+            .filter(|(_, _, is_concern)| *is_concern)
+            .map(|(key, value, _)| (key, value))
+            .collect()
+    }
+}
+
+/// smartctl per-probe result: a `health` verdict plus optional supporting
+/// `evidence` and current temperature. `evidence` is `None` when the protocol's
+/// detail log is absent (the verdict still derives, but there is nothing to
+/// itemize); `celsius` is `None` when the drive omits `temperature.current`
+/// (USB-bridged drives, NVMe without thermal reporting, parser failure). Both
+/// are independent of `health`. The evidence serializes flat so `protocol` + the
+/// counters sit at the `smart` object level alongside `health`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SmartProbe {
     pub health: SmartHealth,
+    #[serde(flatten, skip_serializing_if = "Option::is_none")]
+    pub evidence: Option<SmartEvidence>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub celsius: Option<i16>,
 }
 
@@ -804,6 +937,161 @@ mod tests {
             UpsStatusFlag::Unknown("WHATEVER".into()),
         ] {
             assert!(!flag.is_critical(), "{flag:?} must not be critical");
+        }
+    }
+
+    // Intent: a healthy NVMe drive produces an empty `concerns()` set, and its
+    //   spare/wear rows in `fields()` carry `is_concern == false`.
+    // Why it exists: this is the structure-insensitive guard on the NVMe
+    //   threshold-pair inversion -- `available_spare 100` (a *good* value) must
+    //   not red the spare row the way a generic `> 0` rule would. It pins no
+    //   false-positive concern on a healthy drive, independent of any rendering.
+    // Scenario: a fresh NVMe at 12% wear, full spare, threshold 10.
+    #[test]
+    fn smart_evidence_nvme_healthy_has_no_concerns() {
+        let healthy = SmartEvidence::Nvme {
+            media_errors: 0,
+            critical_warning: 0,
+            percentage_used: 12,
+            available_spare: 100,
+            available_spare_threshold: 10,
+        };
+        assert_eq!(healthy.concerns(), vec![]);
+        // The spare and wear rows render, but neither is a concern.
+        let by_key: Vec<(SmartField, bool)> = healthy
+            .fields()
+            .into_iter()
+            .map(|(key, _, is_concern)| (key, is_concern))
+            .collect();
+        assert!(by_key.contains(&(SmartField::AvailableSpare, false)));
+        assert!(by_key.contains(&(SmartField::PercentageUsed, false)));
+    }
+
+    // Intent: NVMe wear over the threshold is the only concern, keyed by
+    //   `PercentageUsed` with its value.
+    // Why it exists: pins the wear predicate to PercentageUsed alone.
+    // Scenario: an NVMe at 92% rated endurance, otherwise nominal.
+    #[test]
+    fn smart_evidence_nvme_wear_concern() {
+        let worn = SmartEvidence::Nvme {
+            media_errors: 0,
+            critical_warning: 0,
+            percentage_used: 92,
+            available_spare: 100,
+            available_spare_threshold: 10,
+        };
+        assert_eq!(worn.concerns(), vec![(SmartField::PercentageUsed, 92)]);
+    }
+
+    // Intent: NVMe spare at/under its threshold is a concern keyed by
+    //   `AvailableSpare`.
+    // Why it exists: the threshold *pair* (spare <= threshold), not a `> 0` rule,
+    //   is what fires -- the exact case a generic numeric rule gets wrong.
+    // Scenario: an NVMe whose spare has fallen to 5 against a threshold of 10.
+    #[test]
+    fn smart_evidence_nvme_low_spare_concern() {
+        let low = SmartEvidence::Nvme {
+            media_errors: 0,
+            critical_warning: 0,
+            percentage_used: 0,
+            available_spare: 5,
+            available_spare_threshold: 10,
+        };
+        assert_eq!(low.concerns(), vec![(SmartField::AvailableSpare, 5)]);
+    }
+
+    // Intent: clean SATA has no concerns; a reallocated count is the lone concern.
+    // Why it exists: pins the SATA predicate to Reallocated with its value.
+    // Scenario: a clean drive, then one with 2 reallocated sectors.
+    #[test]
+    fn smart_evidence_sata_concerns() {
+        let clean = SmartEvidence::Sata {
+            reallocated_sectors: 0,
+            pending_sectors: 0,
+            offline_uncorrectable: 0,
+        };
+        assert_eq!(clean.concerns(), vec![]);
+
+        let degraded = SmartEvidence::Sata {
+            reallocated_sectors: 2,
+            pending_sectors: 0,
+            offline_uncorrectable: 0,
+        };
+        assert_eq!(degraded.concerns(), vec![(SmartField::Reallocated, 2)]);
+    }
+
+    // Intent: the `smart` JSON object serializes to the exact locked shape for
+    //   SATA, NVMe, and unknown -- health, then the flattened protocol+counters,
+    //   then celsius -- and round-trips back through Deserialize.
+    // Why it exists: no `status --json` golden covers this, so this is the
+    //   contract lock on the flatten + internally-tagged Option<SmartEvidence>
+    //   shape (it also verifies the round-trip the no-hand-written-serde decision
+    //   relies on).
+    // Scenario: the three serialized shapes a DiskReport.smart can take.
+    #[test]
+    fn smart_probe_serialization_shape() {
+        use serde_json::json;
+
+        let sata = SmartProbe {
+            health: SmartHealth::Degraded,
+            evidence: Some(SmartEvidence::Sata {
+                reallocated_sectors: 2,
+                pending_sectors: 0,
+                offline_uncorrectable: 0,
+            }),
+            celsius: Some(41),
+        };
+        assert_eq!(
+            serde_json::to_value(sata).unwrap(),
+            json!({
+                "health": "warning",
+                "protocol": "sata",
+                "reallocated_sectors": 2,
+                "pending_sectors": 0,
+                "offline_uncorrectable": 0,
+                "celsius": 41
+            })
+        );
+
+        let nvme = SmartProbe {
+            health: SmartHealth::Healthy,
+            evidence: Some(SmartEvidence::Nvme {
+                media_errors: 0,
+                critical_warning: 0,
+                percentage_used: 12,
+                available_spare: 100,
+                available_spare_threshold: 10,
+            }),
+            celsius: Some(52),
+        };
+        assert_eq!(
+            serde_json::to_value(nvme).unwrap(),
+            json!({
+                "health": "ok",
+                "protocol": "nvme",
+                "media_errors": 0,
+                "critical_warning": 0,
+                "percentage_used": 12,
+                "available_spare": 100,
+                "available_spare_threshold": 10,
+                "celsius": 52
+            })
+        );
+
+        let unknown = SmartProbe {
+            health: SmartHealth::Unknown,
+            evidence: None,
+            celsius: None,
+        };
+        assert_eq!(
+            serde_json::to_value(unknown).unwrap(),
+            json!({ "health": "unknown" })
+        );
+
+        for probe in [sata, nvme, unknown] {
+            let value = serde_json::to_value(probe).unwrap();
+            let back: SmartProbe = serde_json::from_value(value).unwrap();
+            assert_eq!(back, probe);
         }
     }
 }

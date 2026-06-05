@@ -1,5 +1,6 @@
 ---
 source: cli/src/tui/view/mod.rs
+assertion_line: 1800
 expression: "format!(\"-- toshiba --\\n{unlocked}\\n-- ironwolf --\\n{locked}\")"
 ---
 -- toshiba --
@@ -11,7 +12,7 @@ Data  Scrub  Browse
  ▶ 1 toshiba  --
    2 ironwolf --
    3 wdc      --
-      ┌ Disk Detail ─────────────────────────────────┐
+   4 s┌ Disk Detail ─────────────────────────────────┐
       │ Disk       toshiba                           │
       │ Status     unlocked                          │
       │ Cipher     aes-xts-plain64                   │
@@ -31,7 +32,7 @@ Data  Scrub  Browse
    1 toshiba  --
  ▶ 2 ironwolf --
    3 wdc      --
-      ┌ Disk Detail ─────────────────────────────────┐
+   4 s┌ Disk Detail ─────────────────────────────────┐
       │ Disk       ironwolf                          │
       │ Status     locked                            │
       │ Cipher     aes-xts-plain64                   │

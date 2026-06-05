@@ -11,11 +11,11 @@ use crate::journal;
 use crate::luks::{self, BackingPathResolver};
 use crate::membership::{self, PoolMembership};
 use crate::parse::types::BalanceState;
-use crate::parse::types::{BtrfsDeviceUsageOutput, BtrfsDfOutput};
+use crate::parse::types::{BtrfsDeviceUsageOutput, BtrfsDfOutput, SmartHealth, SmartProbe};
 use crate::parse::{
     BtrfsDeviceStatsOutput, ParseError, ScrubState, parse_btrfs_balance_status,
     parse_btrfs_device_stats, parse_btrfs_device_usage, parse_btrfs_df_json,
-    parse_btrfs_filesystem_usage, parse_btrfs_scrub_status,
+    parse_btrfs_filesystem_usage, parse_btrfs_scrub_status, parse_smartctl,
 };
 use crate::probe::{Filesystem, ProbeError, probe_config_disk, probe_pool};
 use crate::profile_summary::{self, ProfileJson, ProfileSummary, Redundancy, TypeProfile};
@@ -209,8 +209,19 @@ pub struct DiskReport {
     pub devid: Option<u64>,
     pub underlying: Option<String>,
     pub status: DiskStatus,
+    /// btrfs device-error counters (read/write/flush/corruption/generation) --
+    /// the filesystem's I/O accounting. Named `btrfs_errors` (not a bare
+    /// `errors`) so it reads as a sibling of the `smart` object, not the only
+    /// error concept. `None` for disks with no live btrfs row (missing/offline).
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub errors: Option<DiskErrors>,
+    pub btrfs_errors: Option<DiskErrors>,
+    /// SMART verdict + supporting evidence -- the drive's own self-report, a
+    /// different layer from `btrfs_errors`. `None` for disks with no backing path
+    /// to probe (missing/offline). Diagnostic only: a degraded `smart` here never
+    /// synthesizes an `AlertCause` (smartd remains the alert source; see ADR 014
+    /// / ADR 030), so a `warning` verdict can coexist with `alert_active: false`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub smart: Option<SmartProbe>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -390,7 +401,13 @@ struct HumanDisk {
     status: DiskStatus,
     model: Option<String>,
     serial: Option<String>,
+    /// btrfs device-error counters. Render-only struct, so this keeps the bare
+    /// `errors` name -- only the serialized `DiskReport` field renames to
+    /// `btrfs_errors`.
     errors: Option<DiskErrors>,
+    /// SMART probe for the per-disk `SMART:` human line, paired in lock-step with
+    /// `DiskReport.smart` from the same probe value.
+    smart: Option<SmartProbe>,
 }
 
 // ---------------------------------------------------------------------------
@@ -1028,6 +1045,23 @@ fn build_disk_reports<R: CommandRunner>(
                 generation: d.generation_errs,
             });
 
+        // SMART probe of the live backing device. Failure-tolerant: any error or
+        // empty output collapses to an Unknown probe (mirroring the TUI's
+        // `unwrap_or`), so a status build never fails on a flaky/absent smartctl
+        // -- and the call is a no-op for tests whose runner returns MissingMock.
+        // Target `pd.underlying` (the live `/dev/sdX`), not the by-id path.
+        // `SmartProbe` is `Copy`, so the same value feeds both structs.
+        let smart = runner
+            .run(&CmdRequest::SmartctlHealthJson {
+                device: pd.underlying.clone(),
+            })
+            .map(|raw| parse_smartctl(&raw))
+            .unwrap_or(SmartProbe {
+                health: SmartHealth::Unknown,
+                evidence: None,
+                celsius: None,
+            });
+
         disk_reports.push(DiskReport {
             name: disk_name.clone(),
             mapper: mapper.clone(),
@@ -1036,7 +1070,8 @@ fn build_disk_reports<R: CommandRunner>(
             devid: Some(pd.devid),
             underlying: Some(pd.underlying.clone()),
             status: DiskStatus::Present,
-            errors: errors.clone(),
+            btrfs_errors: errors.clone(),
+            smart: Some(smart),
         });
 
         human_details.push(HumanDisk {
@@ -1049,6 +1084,7 @@ fn build_disk_reports<R: CommandRunner>(
             model,
             serial,
             errors,
+            smart: Some(smart),
         });
     }
 
@@ -1112,6 +1148,8 @@ fn build_disk_reports<R: CommandRunner>(
         };
         let mapper = mapper_name(&cd.name).0;
 
+        // Unpooled/offline disks have no live backing path in btrfs, so there is
+        // nothing to read btrfs error stats or SMART from -- both stay `None`.
         disk_reports.push(DiskReport {
             name: cd.name.as_str().to_owned(),
             mapper: mapper.clone(),
@@ -1120,7 +1158,8 @@ fn build_disk_reports<R: CommandRunner>(
             devid: None,
             underlying: None,
             status,
-            errors: None,
+            btrfs_errors: None,
+            smart: None,
         });
 
         human_details.push(HumanDisk {
@@ -1133,6 +1172,7 @@ fn build_disk_reports<R: CommandRunner>(
             model: None,
             serial: None,
             errors: None,
+            smart: None,
         });
     }
 
@@ -1165,6 +1205,46 @@ fn format_type_profile_human(profile: &TypeProfile) -> String {
         Redundancy::NoRedundancy => format!("{names} (no redundancy)"),
         Redundancy::Mixed => format!("{names} (not fully redundant)"),
         Redundancy::Unknown => names,
+    }
+}
+
+/// The parenthetical reason a non-present disk exposes no btrfs/SMART data,
+/// shared by the `btrfs:` and `SMART:` human lines so the two stay in lock-step.
+/// `Present` returns `None` -- a present disk always carries a btrfs row and a
+/// SMART probe, so the caller renders the real data instead.
+fn absent_data_reason(status: DiskStatus) -> Option<&'static str> {
+    match status {
+        DiskStatus::Missing => Some("device absent"),
+        DiskStatus::LuksHeaderUnreadable => Some("LUKS header unreadable"),
+        DiskStatus::LuksUuidMismatch => Some("LUKS UUID mismatch"),
+        DiskStatus::Offline => Some("disk offline -- not in pool"),
+        DiskStatus::Unknown => Some("metadata unavailable"),
+        DiskStatus::Present => None,
+    }
+}
+
+/// Render a `SmartProbe` as the per-disk human `SMART:` value: the verdict word,
+/// plus a parenthetical listing the concerns when there is evidence to show. The
+/// parenthetical is driven by `concerns()` being non-empty, NOT by the verdict
+/// word -- so both `warning` and `failing` carry it when an attribute is out of
+/// spec, while a bare `failing`/`ok`/`unknown` (no concerns) renders without one.
+fn format_smart_human(probe: &SmartProbe) -> String {
+    let verdict = match probe.health {
+        SmartHealth::Healthy => "ok",
+        SmartHealth::Degraded => "warning",
+        SmartHealth::Failing => "failing",
+        SmartHealth::Unknown => "unknown",
+    };
+    let concerns = probe.evidence.map(|e| e.concerns()).unwrap_or_default();
+    if concerns.is_empty() {
+        verdict.to_owned()
+    } else {
+        let detail = concerns
+            .iter()
+            .map(|(field, value)| format!("{value} {}", field.label()))
+            .collect::<Vec<_>>()
+            .join(", ");
+        format!("{verdict} ({detail})")
     }
 }
 
@@ -1426,37 +1506,39 @@ fn format_status_human(
                 out.push_str(&format!("    LUKS:    {}\n", d.luks_uuid));
             }
 
-            // Errors
+            // btrfs device errors -- the filesystem's I/O accounting. Labeled
+            // `btrfs:` (was `Errors:`) so it parallels the `SMART:` line below and
+            // is unambiguous now that two error-ish lines sit adjacent.
             let has_errors = match &d.errors {
                 Some(e) => {
                     out.push_str(&format!(
-                        "    Errors:  read {} / write {} / flush {} / corruption {} / generation {}\n",
+                        "    btrfs:   read {} / write {} / flush {} / corruption {} / generation {}\n",
                         e.read, e.write, e.flush, e.corruption, e.generation
                     ));
                     e.total() > 0
                 }
-                None if d.status == DiskStatus::Missing => {
-                    out.push_str("    Errors:  unknown (device absent)\n");
+                None => {
+                    if let Some(reason) = absent_data_reason(d.status) {
+                        out.push_str(&format!("    btrfs:   unknown ({reason})\n"));
+                    }
                     false
                 }
-                None if d.status == DiskStatus::LuksHeaderUnreadable => {
-                    out.push_str("    Errors:  unknown (LUKS header unreadable)\n");
-                    false
-                }
-                None if d.status == DiskStatus::LuksUuidMismatch => {
-                    out.push_str("    Errors:  unknown (LUKS UUID mismatch)\n");
-                    false
-                }
-                None if d.status == DiskStatus::Offline => {
-                    out.push_str("    Errors:  unknown (disk offline -- not in pool)\n");
-                    false
-                }
-                None if d.status == DiskStatus::Unknown => {
-                    out.push_str("    Errors:  unknown (metadata unavailable)\n");
-                    false
-                }
-                None => false,
             };
+
+            // SMART -- the drive's own self-report, a separate layer from the
+            // btrfs counters above. The parenthetical is driven solely by
+            // `concerns()` being non-empty, so a `failing` verdict with an
+            // out-of-spec attribute carries it just like `warning`.
+            match &d.smart {
+                Some(probe) => {
+                    out.push_str(&format!("    SMART:   {}\n", format_smart_human(probe)));
+                }
+                None => {
+                    if let Some(reason) = absent_data_reason(d.status) {
+                        out.push_str(&format!("    SMART:   unknown ({reason})\n"));
+                    }
+                }
+            }
 
             // Action guidance
             let needs_doctor = matches!(d.status, DiskStatus::LuksHeaderUnreadable);
@@ -1500,6 +1582,7 @@ mod tests {
     use super::*;
     use crate::cmd::{MockRunner, RawCommandOutput};
     use crate::membership::{DiskMember, PoolMembership};
+    use crate::parse::types::SmartEvidence;
     // Keep the err_raw alias to document that status reuses mount's raw
     // error factory through the test fixture facade.
     use crate::test_fixtures::{
@@ -1991,12 +2074,17 @@ mod tests {
             devid: Some(1),
             underlying: Some("/dev/vda".to_owned()),
             status: DiskStatus::Present,
-            errors: Some(DiskErrors {
+            btrfs_errors: Some(DiskErrors {
                 read: 0,
                 write: 0,
                 flush: 0,
                 corruption: 0,
                 generation: 0,
+            }),
+            smart: Some(SmartProbe {
+                health: SmartHealth::Healthy,
+                evidence: None,
+                celsius: None,
             }),
         };
         let missing = DiskReport {
@@ -2007,7 +2095,8 @@ mod tests {
             devid: None,
             underlying: None,
             status: DiskStatus::Missing,
-            errors: None,
+            btrfs_errors: None,
+            smart: None,
         };
         let unreadable = DiskReport {
             name: "disk4".to_owned(),
@@ -2017,7 +2106,8 @@ mod tests {
             devid: None,
             underlying: None,
             status: DiskStatus::LuksHeaderUnreadable,
-            errors: None,
+            btrfs_errors: None,
+            smart: None,
         };
         let mismatch = DiskReport {
             name: "disk6".to_owned(),
@@ -2028,7 +2118,8 @@ mod tests {
             devid: None,
             underlying: None,
             status: DiskStatus::LuksUuidMismatch,
-            errors: None,
+            btrfs_errors: None,
+            smart: None,
         };
 
         let report = StatusReport {
@@ -2066,16 +2157,20 @@ mod tests {
         assert_eq!(d0["luks_uuid"], "11111111-1111-1111-1111-111111111111");
         assert_eq!(d0["devid"], 1);
         assert_eq!(d0["status"], "present");
-        assert!(d0["errors"].is_object());
-        assert_eq!(d0["errors"]["read"], 0);
-        assert_eq!(d0["errors"]["write"], 0);
-        assert_eq!(d0["errors"]["corruption"], 0);
+        // The btrfs error counters now serialize under `btrfs_errors`; the SMART
+        // verdict is a sibling object.
+        assert!(d0["btrfs_errors"].is_object());
+        assert_eq!(d0["btrfs_errors"]["read"], 0);
+        assert_eq!(d0["btrfs_errors"]["write"], 0);
+        assert_eq!(d0["btrfs_errors"]["corruption"], 0);
+        assert_eq!(d0["smart"]["health"], "ok");
 
         // Missing disk
         let d1 = &disks[1];
         assert_eq!(d1["mapper"], "braid-disk3");
         assert_eq!(d1["status"], "missing");
-        assert!(d1["errors"].is_null());
+        assert!(d1["btrfs_errors"].is_null());
+        assert!(d1["smart"].is_null());
         assert!(d1["devid"].is_null());
         // A non-present element carries no live LUKS UUID and no backing
         // device; the docs tell monitoring authors to correlate by `name`.
@@ -2086,14 +2181,16 @@ mod tests {
         let d2 = &disks[2];
         assert_eq!(d2["mapper"], "braid-disk4");
         assert_eq!(d2["status"], "luks-header-unreadable");
-        assert!(d2["errors"].is_null());
+        assert!(d2["btrfs_errors"].is_null());
+        assert!(d2["smart"].is_null());
 
         // LUKS UUID mismatch disk -- kebab-case token plus the observed UUID
         let d3 = &disks[3];
         assert_eq!(d3["mapper"], "braid-disk6");
         assert_eq!(d3["status"], "luks-uuid-mismatch");
         assert_eq!(d3["luks_uuid"], "99999999-9999-9999-9999-999999999999");
-        assert!(d3["errors"].is_null());
+        assert!(d3["btrfs_errors"].is_null());
+        assert!(d3["smart"].is_null());
     }
 
     // =======================================================================
@@ -2184,13 +2281,14 @@ mod tests {
                 devid: Some(1),
                 underlying: Some("/dev/vda".to_owned()),
                 status: DiskStatus::Present,
-                errors: Some(DiskErrors {
+                btrfs_errors: Some(DiskErrors {
                     read: 0,
                     write: 0,
                     flush: 0,
                     corruption: 0,
                     generation: 0,
                 }),
+                smart: None,
             }],
             advisories: vec![],
             alert_active: false,
@@ -2673,6 +2771,11 @@ mod tests {
                 corruption: 0,
                 generation: 0,
             }),
+            smart: Some(SmartProbe {
+                health: SmartHealth::Healthy,
+                evidence: None,
+                celsius: None,
+            }),
         }];
 
         let code = StatusCode::Intact;
@@ -2703,7 +2806,8 @@ mod tests {
         assert!(human.contains("present"), "got:\n{human}");
         assert!(human.contains("devid 1"), "got:\n{human}");
         assert!(human.contains("LUKS:"), "got:\n{human}");
-        assert!(human.contains("Errors:"), "got:\n{human}");
+        assert!(human.contains("btrfs:"), "got:\n{human}");
+        assert!(human.contains("SMART:"), "got:\n{human}");
         assert!(human.contains("Model:"), "got:\n{human}");
         assert!(human.contains("Serial:"), "got:\n{human}");
     }
@@ -2731,6 +2835,11 @@ mod tests {
                 flush: 0,
                 corruption: 0,
                 generation: 0,
+            }),
+            smart: Some(SmartProbe {
+                health: SmartHealth::Healthy,
+                evidence: None,
+                celsius: None,
             }),
         }];
 
@@ -2774,6 +2883,7 @@ mod tests {
             model: None,
             serial: None,
             errors: None,
+            smart: None,
         }];
 
         let code = StatusCode::Degraded;
@@ -2829,6 +2939,7 @@ mod tests {
             model: None,
             serial: None,
             errors: None,
+            smart: None,
         }];
 
         let report = StatusReport {
@@ -2894,6 +3005,7 @@ mod tests {
             model: None,
             serial: None,
             errors: None,
+            smart: None,
         }];
 
         let report = StatusReport {
@@ -2953,6 +3065,11 @@ mod tests {
                 flush: 0,
                 corruption: 0,
                 generation: 0,
+            }),
+            smart: Some(SmartProbe {
+                health: SmartHealth::Healthy,
+                evidence: None,
+                celsius: None,
             }),
         }];
 
@@ -3667,6 +3784,153 @@ mod tests {
         .expect("tolerant status should build")
     }
 
+    /// Healthy three-disk runner plus a SATA SMART response for every present
+    /// member's backing device (/dev/vda|vdb|vdc), so build_status exercises the
+    /// live per-disk SMART probe. `passed:false` drives a Failing verdict;
+    /// `reallocated > 0` over `passed:true` drives Degraded.
+    fn status_runner_with_smart(passed: bool, reallocated: u64) -> MockRunner {
+        let json = format!(
+            r#"{{
+                "smart_status": {{"passed": {passed}}},
+                "device": {{"protocol": "ATA"}},
+                "ata_smart_attributes": {{"table": [
+                    {{"name": "Reallocated_Sector_Ct", "raw": {{"value": {reallocated}}}}},
+                    {{"name": "Current_Pending_Sector", "raw": {{"value": 0}}}},
+                    {{"name": "Offline_Uncorrectable", "raw": {{"value": 0}}}}
+                ]}}
+            }}"#
+        );
+        let mut runner = status_runner_healthy_3disk_verbose(status_runner_healthy_3disk_base());
+        for device in ["/dev/vda", "/dev/vdb", "/dev/vdc"] {
+            runner = runner.with_output(
+                CmdRequest::SmartctlHealthJson {
+                    device: device.to_owned(),
+                },
+                mock_ok("smartctl", &json),
+            );
+        }
+        runner
+    }
+
+    // Intent: a live per-disk SMART probe populates DiskReport.smart and the
+    //   human `SMART:` line, and -- at any severity -- never synthesizes an
+    //   AlertCause.
+    // Why it exists: the locked decision is that per-disk `smart` is diagnostic
+    //   evidence only; the "SMART health warning" alert cause stays
+    //   `AlertCause::SmartdAlert` (smartd-flag-driven, ADR 014/030). A future
+    //   regression that wired the latch to `SmartHealth::Failing` (the most
+    //   tempting variant to escalate) must trip this, so (c) is table-driven over
+    //   both Degraded and Failing.
+    // Scenario: status runs against drives reporting degraded/failing SMART while
+    //   no smartd-alert flag is set.
+    #[test]
+    fn status_live_smart_populates_report_without_synthesizing_alert() {
+        let fs = status_fs_three_disk();
+        let config = status_config();
+        let (_tmp, paths) = isolated_paths();
+
+        // (a)/(b): a degraded live probe populates every present disk's smart
+        // field and renders the human SMART line with its concern parenthetical.
+        let degraded = build_status(
+            &status_runner_with_smart(true, 2),
+            &fs,
+            &config,
+            &paths,
+            crate::test_fixtures::mock_virtio_backing_path_resolver(),
+        )
+        .expect("status builds");
+        let present: Vec<_> = degraded
+            .report
+            .disks
+            .iter()
+            .filter(|d| d.status == DiskStatus::Present)
+            .collect();
+        assert!(!present.is_empty(), "expected present disks to probe");
+        for disk in &present {
+            let smart = disk.smart.expect("present disk carries a SMART probe");
+            assert_eq!(smart.health, SmartHealth::Degraded);
+        }
+        let human = render_built_status(&degraded);
+        assert!(
+            human.contains("SMART:   warning (2 reallocated)"),
+            "got:\n{human}"
+        );
+
+        // (c): neither a degraded nor a failing live probe may synthesize a
+        // SmartdAlert. This isolated_paths has no smartd flag, so alert_causes
+        // must stay free of SmartdAlert at every severity.
+        for (passed, expected) in [(true, SmartHealth::Degraded), (false, SmartHealth::Failing)] {
+            let built = build_status(
+                &status_runner_with_smart(passed, 2),
+                &fs,
+                &config,
+                &paths,
+                crate::test_fixtures::mock_virtio_backing_path_resolver(),
+            )
+            .expect("status builds");
+            let probe = built
+                .report
+                .disks
+                .iter()
+                .find(|d| d.status == DiskStatus::Present)
+                .and_then(|d| d.smart)
+                .expect("present disk carries a SMART probe");
+            assert_eq!(probe.health, expected);
+            assert!(
+                !built
+                    .report
+                    .alert_causes
+                    .iter()
+                    .any(|c| matches!(c, AlertCause::SmartdAlert)),
+                "live per-disk SMART must not synthesize a SmartdAlert; causes: {:?}",
+                built.report.alert_causes
+            );
+        }
+    }
+
+    // Intent: a `failing` SMART verdict carries the concern parenthetical when
+    //   there is out-of-spec evidence -- the parenthetical follows concerns(),
+    //   not the verdict word, so it is not limited to `warning`.
+    // Why it exists: pins the verdict-independent parenthetical (a `failing`
+    //   drive with non-nominal attributes must list them).
+    // Scenario: a `passed:false` SATA drive whose attribute 5 shows 5 reallocated.
+    #[test]
+    fn status_human_smart_failing_carries_concern_parenthetical() {
+        let human_disks = vec![HumanDisk {
+            name: "disk1".to_owned(),
+            member_name: Some(DiskName::parse("disk1").unwrap()),
+            by_id: "/dev/disk/by-id/disk1".to_owned(),
+            luks_uuid: "11111111-1111-1111-1111-111111111111".to_owned(),
+            devid: Some(1),
+            status: DiskStatus::Present,
+            model: Some("VBOX HARDDISK".to_owned()),
+            serial: Some("disk1".to_owned()),
+            errors: Some(DiskErrors {
+                read: 0,
+                write: 0,
+                flush: 0,
+                corruption: 0,
+                generation: 0,
+            }),
+            smart: Some(SmartProbe {
+                health: SmartHealth::Failing,
+                evidence: Some(SmartEvidence::Sata {
+                    reallocated_sectors: 5,
+                    pending_sectors: 0,
+                    offline_uncorrectable: 0,
+                }),
+                celsius: None,
+            }),
+        }];
+
+        let report = status_report_with_scrub(ScrubReport::Never);
+        let human = format_status_human(&report, None, Some(&human_disks), None);
+        assert!(
+            human.contains("SMART:   failing (5 reallocated)"),
+            "got:\n{human}"
+        );
+    }
+
     fn status_btrfs_device_usage_raw_3disk_enospc_risk() -> RawCommandOutput {
         mock_ok(
             "btrfs device usage",
@@ -3742,7 +4006,11 @@ mod tests {
 
     fn assert_error_stats_retained(built: &BuiltStatus) {
         assert!(
-            built.report.disks.iter().all(|disk| disk.errors.is_some()),
+            built
+                .report
+                .disks
+                .iter()
+                .all(|disk| disk.btrfs_errors.is_some()),
             "disks: {:?}",
             built.report.disks
         );
@@ -3805,7 +4073,7 @@ mod tests {
         assert_common_human_sections_survived(&human);
         assert!(!human.contains("Allocation:"), "got:\n{human}");
         assert!(!human.contains("Capacity:"), "got:\n{human}");
-        assert!(human.contains("Errors:  read 0"), "got:\n{human}");
+        assert!(human.contains("btrfs:   read 0"), "got:\n{human}");
     }
 
     // Intent: df parse failures leave `braid status` usable with explicit partial-data warnings.
@@ -3833,7 +4101,7 @@ mod tests {
         assert_common_human_sections_survived(&human);
         assert!(!human.contains("Allocation:"), "got:\n{human}");
         assert!(!human.contains("Capacity:"), "got:\n{human}");
-        assert!(human.contains("Errors:  read 0"), "got:\n{human}");
+        assert!(human.contains("btrfs:   read 0"), "got:\n{human}");
     }
 
     // Intent: filesystem-usage command failures only remove capacity from an otherwise usable status report.
@@ -3866,7 +4134,7 @@ mod tests {
         assert_common_human_sections_survived(&human);
         assert!(human.contains("Allocation:"), "got:\n{human}");
         assert!(!human.contains("Capacity:"), "got:\n{human}");
-        assert!(human.contains("Errors:  read 0"), "got:\n{human}");
+        assert!(human.contains("btrfs:   read 0"), "got:\n{human}");
     }
 
     // Intent: filesystem-usage parse failures only remove capacity from an otherwise usable status report.
@@ -3899,7 +4167,7 @@ mod tests {
         assert_common_human_sections_survived(&human);
         assert!(human.contains("Allocation:"), "got:\n{human}");
         assert!(!human.contains("Capacity:"), "got:\n{human}");
-        assert!(human.contains("Errors:  read 0"), "got:\n{human}");
+        assert!(human.contains("btrfs:   read 0"), "got:\n{human}");
     }
 
     // Intent: device-usage command failures only remove the estimated total from capacity.
@@ -4150,7 +4418,13 @@ mod tests {
         );
         let human = render_built_status(&built);
 
-        assert!(built.report.disks.iter().all(|disk| disk.errors.is_none()));
+        assert!(
+            built
+                .report
+                .disks
+                .iter()
+                .all(|disk| disk.btrfs_errors.is_none())
+        );
         assert_pool_sections_retained(&built);
         assert_scrub_and_balance_retained(&built);
         assert_disk_identity_matches_healthy(&built);
@@ -4159,7 +4433,7 @@ mod tests {
         assert_common_human_sections_survived(&human);
         assert!(human.contains("Allocation:"), "got:\n{human}");
         assert!(human.contains("Capacity:"), "got:\n{human}");
-        assert!(!human.contains("Errors:  read"), "got:\n{human}");
+        assert!(!human.contains("btrfs:   read"), "got:\n{human}");
     }
 
     // Intent: device-stats parse failures only remove per-disk error counts.
@@ -4176,7 +4450,13 @@ mod tests {
         );
         let human = render_built_status(&built);
 
-        assert!(built.report.disks.iter().all(|disk| disk.errors.is_none()));
+        assert!(
+            built
+                .report
+                .disks
+                .iter()
+                .all(|disk| disk.btrfs_errors.is_none())
+        );
         assert_pool_sections_retained(&built);
         assert_scrub_and_balance_retained(&built);
         assert_disk_identity_matches_healthy(&built);
@@ -4185,7 +4465,7 @@ mod tests {
         assert_common_human_sections_survived(&human);
         assert!(human.contains("Allocation:"), "got:\n{human}");
         assert!(human.contains("Capacity:"), "got:\n{human}");
-        assert!(!human.contains("Errors:  read"), "got:\n{human}");
+        assert!(!human.contains("btrfs:   read"), "got:\n{human}");
     }
 
     /// Intent: CapacityReport.used_bytes must be logical (df-derived)
@@ -5948,6 +6228,7 @@ mod tests {
             model: None,
             serial: None,
             errors: None,
+            smart: None,
         }];
 
         let code = StatusCode::Intact;
@@ -6011,6 +6292,7 @@ mod tests {
             model: None,
             serial: None,
             errors: None,
+            smart: None,
         }];
 
         let code = StatusCode::Intact;
@@ -6481,7 +6763,7 @@ mod tests {
 
         assert_eq!(ctx.disks.len(), 1);
         let errors = ctx.disks[0]
-            .errors
+            .btrfs_errors
             .as_ref()
             .expect("disk1 errors must be present for matching devid");
         assert_eq!(

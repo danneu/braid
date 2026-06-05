@@ -1,5 +1,6 @@
 ---
 source: cli/src/tui/view/mod.rs
+assertion_line: 1622
 expression: buffer_to_string(&terminal)
 ---
 Data  Scrub  Browse
@@ -10,4 +11,5 @@ Data  Scrub  Browse
  ▶ 1 toshiba  --
    2 ironwolf --
    3 wdc      --
+   4 samsung  --
 Quit: q │ Help: ? │ Reset temp hi/lo: R │ Reload: r

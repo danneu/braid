@@ -2,7 +2,7 @@ use std::collections::HashMap;
 use std::time::{Duration, Instant};
 
 use crate::alert::AlertState;
-use crate::parse::types::{BtrfsDfEntry, DeviceAllocation, ScrubState, SmartHealth, UpsStatusFlag};
+use crate::parse::types::{BtrfsDfEntry, DeviceAllocation, ScrubState, SmartProbe, UpsStatusFlag};
 use crate::state_paths::StatePaths;
 use crate::status::{BalanceReport, DiskErrors};
 use crate::tui::browse::BrowseState;
@@ -294,7 +294,10 @@ pub struct PoolState {
     pub df_entries: Vec<BtrfsDfEntry>,
     pub disk_usage: HashMap<String, DiskUsage>,
     pub disk_transport: HashMap<String, String>,
-    pub smart_health: HashMap<String, SmartHealth>,
+    /// Whole SMART probe per disk -- the verdict (column), evidence (detail
+    /// section), and temperature share one per-disk source instead of a second
+    /// parallel map.
+    pub smart: HashMap<String, SmartProbe>,
     pub disk_temperature_readings: HashMap<String, TemperatureReading>,
     /// Live backing block-device path per **btrfs-assembled, UUID-verified**
     /// present member -- the `mounted_classification` subset, sourced

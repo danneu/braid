@@ -1,6 +1,6 @@
 ---
 source: cli/src/tui/view/mod.rs
-assertion_line: 2326
+assertion_line: 2435
 expression: buffer_to_string(&terminal)
 ---
 Data  Scrub  Browse
@@ -14,9 +14,10 @@ Data  Scrub  Browse
  System     RAID1    0.0 MiB    16.0 MiB
  Disks ─────────────────────────────────────────────────────────────────
      Name     Bus  SMART   Temp btrfs Allocated
- ▶ 1 toshiba  sata ok      -    0 err 25%  1.4 / 5.5 TiB
-   2 ironwolf sata warning -    3 err 25%  1.4 / 5.5 TiB
+ ▶ 1 toshiba  sata warning -    0 err 25%  1.4 / 5.5 TiB
+   2 ironwolf sata ok      -    3 err 25%  1.4 / 5.5 TiB
    3 wdc      usb  -       -    0 err 21%  0.8 / 3.6 TiB
+   4 samsung  nvme warning -    0 err 41%  0.8 / 1.8 TiB
  Fans -- daemon: unknown ───────────────────────────────────────────────
     PWM           RPM    Driving        Curve
  1  -/-           -      -              30-40° -> 20-100%

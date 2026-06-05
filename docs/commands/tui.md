@@ -80,7 +80,7 @@ See the [fan control guide](../guides/fan-control.md#tui-fans-panel).
 (color-coded flags), Battery, Runtime, and Load. See the
 [UPS guide](../guides/ups.md#tui-ups-panel) for Status severity.
 
-**Disk detail popup** (press Enter on a disk) -- disk name, LUKS lock status, cipher, key size, keyslot count, an allocations table (type/profile/size plus unallocated), and the btrfs device-error breakdown (read/write/flush/corruption/generation).
+**Disk detail popup** (press Enter on a disk) -- disk name, LUKS lock status, cipher, key size, keyslot count, an allocations table (type/profile/size plus unallocated), the btrfs device-error breakdown (read/write/flush/corruption/generation), and a `SMART` section with the health verdict plus its supporting evidence rows (per-protocol: SATA reallocated/pending/uncorrectable, or NVMe critical-warning/media-errors/available-spare/percentage-used). A row for an out-of-spec attribute is colored red. Temperature is not repeated here -- it has its own column in the disk table.
 
 **Tabs** -- three tabs, switched with Tab / Shift-Tab:
 

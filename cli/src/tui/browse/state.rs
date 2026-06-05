@@ -1321,7 +1321,7 @@ mod tests {
             df_entries: vec![],
             disk_usage: HashMap::new(),
             disk_transport: HashMap::new(),
-            smart_health: HashMap::new(),
+            smart: HashMap::new(),
             disk_temperature_readings: HashMap::new(),
             disk_underlying: HashMap::new(),
             device_errors: HashMap::new(),

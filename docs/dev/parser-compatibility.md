@@ -10,7 +10,8 @@ braid parses output from btrfs-progs, cryptsetup, util-linux, smartmontools, NUT
 
 - `just test-parsers` — CLI parser canary. Exercises CLI-reachable parsers against live tool output in VMs (including `braid-status-ups`, the NUT canary).
 - `just test-rust` — validates golden fixtures for the full parser set, including `parse_upsc`. Fixture-backed coverage stays current only after running `just capture-all-fixtures` when parser-critical tool versions change (e.g. nixpkgs bump).
-- Fixture refresh is a separate obligation: `just test-parsers` passing does not guarantee TUI-only parsers (`parse_lsblk_json`, `parse_cryptsetup_luks_dump`, `parse_smartctl_health`) or unused parsers (`parse_btrfs_scrub_status_per_device`) are compatible with the current toolchain.
+- Fixture refresh is a separate obligation: `just test-parsers` passing does not guarantee TUI-only parsers (`parse_lsblk_json`, `parse_cryptsetup_luks_dump`) or unused parsers (`parse_btrfs_scrub_status_per_device`) are compatible with the current toolchain.
+- `parse_smartctl` (the SMART health parser) is reachable from both the TUI and the `braid status` CLI command, so it is no longer TUI-only. It is **still not** covered by the live VM canary, though: virtio disks emit no usable SMART, so `just test-parsers` cannot exercise it. Its drift canary is the stable-only smartctl golden fixture (see the smartctl-fixtures note below).
 - Fixtures in `cli/tests/fixtures/nixos-26.05/` are committed and authoritative. NUT fixtures live in `cli/tests/fixtures/nixos-26.05/upsc/` (and the unstable mirror); they are produced by `just capture-ups-fixtures`, which boots a dedicated NUT VM with per-state `dummy-ups` drivers (see `tests/capture-ups-fixtures.nix`).
 - **smartctl fixtures are stable-only by design.** VM virtio disks do
   not emit useful SMART data, so `just capture-all-fixtures` does not

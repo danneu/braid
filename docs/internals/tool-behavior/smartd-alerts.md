@@ -142,6 +142,24 @@ Based on real Seagate SATA output.
 | 193 | `Load_Cycle_Count` | Wear indicator, not an error. |
 | 199 | `UDMA_CRC_Error_Count` | Almost always a cable/connection problem, not the drive. |
 
-## Relationship to TUI `classify_sata`
+## Relationship to braid's live SMART classifier (`SmartEvidence`)
 
-`classify_sata` (in `cli/src/parse/smartctl.rs`) checks raw values of 3 attributes: `Reallocated_Sector_Ct`, `Current_Pending_Sector`, `Offline_Uncorrectable`. This is complementary to smartd -- smartd handles real-time alerts (with its own set of checks), while the TUI gives at-a-glance status from `smartctl --json` output. They don't need to be identical but should cover the same ground between them.
+braid runs its own live SMART probe: `parse_smartctl` (in
+`cli/src/parse/smartctl.rs`) builds a `SmartEvidence` from `smartctl -H -A
+--json` output, reading the raw values of 3 ATA attributes:
+`Reallocated_Sector_Ct`, `Current_Pending_Sector`, `Offline_Uncorrectable`
+(plus the NVMe health-information log on NVMe drives). This verdict now feeds
+**both** `braid status` and the TUI -- the same per-disk probe surfaces in
+`status` output (the `smart` JSON object and the `SMART:` text line) and in the
+TUI disk-detail panel.
+
+This is complementary to smartd, not a replacement: smartd handles real-time
+alerts (with its own set of checks), while braid's classifier gives
+at-a-glance diagnostic status. Critically, the live classifier is **diagnostic
+only** -- a degraded `SmartEvidence` never raises an `AlertCause`. smartd
+remains the sole SMART alert source (it writes the `smartd-alert` flag that
+drives `AlertCause::SmartdAlert`); see
+[ADR 014](../../design/decisions/014-alerts.md) and
+[ADR 030](../../design/decisions/030-smart-btrfs-error-reporting.md). The two
+SMART signals don't need to be identical but should cover the same ground
+between them.

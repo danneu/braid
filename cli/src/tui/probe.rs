@@ -263,7 +263,7 @@ pub fn probe_pool_for_tui<R: CommandRunner, F: Filesystem + ?Sized>(
 
     let balance = get_balance_report(runner, mount_point);
 
-    let mut smart_health = HashMap::new();
+    let mut smart = HashMap::new();
     let mut disk_temperature_readings = HashMap::new();
     for (disk_name, by_id_path) in &disks.by_id {
         let query_device = smart_query_device(disk_name, by_id_path, &present_underlying);
@@ -274,9 +274,13 @@ pub fn probe_pool_for_tui<R: CommandRunner, F: Filesystem + ?Sized>(
             .map(|raw| parse_smartctl(&raw))
             .unwrap_or(SmartProbe {
                 health: SmartHealth::Unknown,
+                evidence: None,
                 celsius: None,
             });
-        smart_health.insert(disk_name.clone(), probe.health);
+        // Carry the whole probe (verdict + evidence); the detail section reads
+        // evidence from it. `SmartProbe` is `Copy`, so the temperature read below
+        // still sees `probe`.
+        smart.insert(disk_name.clone(), probe);
 
         // Every membership disk is keyed by its LUKS UUID (decision 024), so a
         // reading's identity is always that UUID. If a probe-only entry somehow
@@ -451,7 +455,7 @@ pub fn probe_pool_for_tui<R: CommandRunner, F: Filesystem + ?Sized>(
             df_entries: df.entries,
             disk_usage,
             disk_transport,
-            smart_health,
+            smart,
             disk_temperature_readings,
             disk_underlying: present_underlying,
             device_errors,
@@ -1375,8 +1379,8 @@ mod tests {
         );
 
         assert_eq!(
-            pool.smart_health.get("toshiba"),
-            Some(&SmartHealth::Healthy)
+            pool.smart.get("toshiba").map(|p| p.health),
+            Some(SmartHealth::Healthy)
         );
         let reading = pool
             .disk_temperature_readings

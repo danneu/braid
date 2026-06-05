@@ -3,7 +3,7 @@ use std::time::Instant;
 
 use crate::parse::types::{
     BtrfsBgType, BtrfsDfEntry, BtrfsProfile, DeviceAllocation, ScrubState, ScrubTimestamp,
-    SmartHealth,
+    SmartEvidence, SmartHealth, SmartProbe,
 };
 use crate::status::{BalanceReport, DiskErrors};
 use crate::tui::model::{DiskLockState, DiskLuksInfo, DiskLuksState, DiskUsage, PoolState};
@@ -14,6 +14,7 @@ pub(crate) fn sample_disk_names() -> Vec<String> {
         "toshiba".to_owned(),
         "ironwolf".to_owned(),
         "wdc".to_owned(),
+        "samsung".to_owned(),
     ]
 }
 
@@ -113,16 +114,90 @@ pub(crate) fn sample_pool() -> PoolState {
                 unallocated: 3_175_062_790_144,
             },
         ),
+        (
+            "samsung".to_owned(),
+            DiskUsage {
+                size: 2_000_398_934_016,
+                allocations: vec![
+                    DeviceAllocation {
+                        alloc_type: "Data".into(),
+                        profile: "RAID1".into(),
+                        bytes: 824_633_720_832,
+                    },
+                    DeviceAllocation {
+                        alloc_type: "Metadata".into(),
+                        profile: "DUP".into(),
+                        bytes: 1_073_741_824,
+                    },
+                    DeviceAllocation {
+                        alloc_type: "System".into(),
+                        profile: "DUP".into(),
+                        bytes: 16_777_216,
+                    },
+                ],
+                unallocated: 1_174_674_694_144,
+            },
+        ),
     ]);
-    let smart_health = HashMap::from([
-        ("toshiba".to_owned(), SmartHealth::Healthy),
-        ("ironwolf".to_owned(), SmartHealth::Degraded),
-        ("wdc".to_owned(), SmartHealth::Unknown),
+    // Index 0 (toshiba) is the headline `snapshot_disk_detail` target -- a
+    // degraded SATA drive (reallocated > 0) over clean btrfs errors, so the
+    // default detail snapshot exercises a red SATA evidence row and demonstrates
+    // the btrfs/SMART independence. ironwolf inverts it (clean SMART over a
+    // non-zero btrfs counter), wdc covers the single-health-row Unknown case, and
+    // samsung covers the NVMe evidence-row path (wear-degraded).
+    let smart = HashMap::from([
+        (
+            "toshiba".to_owned(),
+            SmartProbe {
+                health: SmartHealth::Degraded,
+                evidence: Some(SmartEvidence::Sata {
+                    reallocated_sectors: 2,
+                    pending_sectors: 0,
+                    offline_uncorrectable: 0,
+                }),
+                celsius: None,
+            },
+        ),
+        (
+            "ironwolf".to_owned(),
+            SmartProbe {
+                health: SmartHealth::Healthy,
+                evidence: Some(SmartEvidence::Sata {
+                    reallocated_sectors: 0,
+                    pending_sectors: 0,
+                    offline_uncorrectable: 0,
+                }),
+                celsius: None,
+            },
+        ),
+        (
+            "wdc".to_owned(),
+            SmartProbe {
+                health: SmartHealth::Unknown,
+                evidence: None,
+                celsius: None,
+            },
+        ),
+        (
+            "samsung".to_owned(),
+            SmartProbe {
+                health: SmartHealth::Degraded,
+                evidence: Some(SmartEvidence::Nvme {
+                    media_errors: 0,
+                    critical_warning: 0,
+                    percentage_used: 92,
+                    available_spare: 100,
+                    available_spare_threshold: 10,
+                }),
+                celsius: None,
+            },
+        ),
     ]);
     let disk_transport = HashMap::from([
         ("toshiba".to_owned(), "sata".to_owned()),
         ("ironwolf".to_owned(), "sata".to_owned()),
         ("wdc".to_owned(), "usb".to_owned()),
+        ("samsung".to_owned(), "nvme".to_owned()),
     ]);
     PoolState {
         mount_point: MountPoint("/mnt/storage".to_owned()),
@@ -154,7 +229,7 @@ pub(crate) fn sample_pool() -> PoolState {
         ],
         disk_usage,
         disk_transport,
-        smart_health,
+        smart,
         disk_temperature_readings: HashMap::new(),
         disk_underlying: HashMap::new(),
         device_errors: HashMap::from([
@@ -180,6 +255,16 @@ pub(crate) fn sample_pool() -> PoolState {
             ),
             (
                 "wdc".to_owned(),
+                DiskErrors {
+                    read: 0,
+                    write: 0,
+                    flush: 0,
+                    corruption: 0,
+                    generation: 0,
+                },
+            ),
+            (
+                "samsung".to_owned(),
                 DiskErrors {
                     read: 0,
                     write: 0,

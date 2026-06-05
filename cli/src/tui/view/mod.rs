@@ -767,13 +767,25 @@ fn scrub_lines(scrub: &ScrubState) -> u16 {
     }
 }
 
-fn smart_cell(health: &SmartHealth) -> Span<'static> {
+/// Severity color for a SMART verdict, shared by the disk-table column
+/// (`smart_cell`) and the detail panel's `health` row so the column cell and the
+/// detail verdict can never diverge in color.
+fn smart_health_color(health: SmartHealth) -> Color {
     match health {
-        SmartHealth::Healthy => Span::styled("ok", Style::default().fg(Color::DarkGray)),
-        SmartHealth::Degraded => Span::styled("warning", Style::default().fg(Color::Yellow)),
-        SmartHealth::Failing => Span::styled("failing", Style::default().fg(Color::Red)),
-        SmartHealth::Unknown => Span::styled("-", Style::default().fg(Color::DarkGray)),
+        SmartHealth::Failing => Color::Red,
+        SmartHealth::Degraded => Color::Yellow,
+        SmartHealth::Healthy | SmartHealth::Unknown => Color::DarkGray,
     }
+}
+
+fn smart_cell(health: SmartHealth) -> Span<'static> {
+    let text = match health {
+        SmartHealth::Healthy => "ok",
+        SmartHealth::Degraded => "warning",
+        SmartHealth::Failing => "failing",
+        SmartHealth::Unknown => "-",
+    };
+    Span::styled(text, Style::default().fg(smart_health_color(health)))
 }
 
 /// Temperature cell for the disks table.
@@ -844,7 +856,7 @@ fn disk_table(model: &Model, unit: ByteUnit) -> Table<'_> {
     let pool = model.pool.current();
     let disk_usage = pool.map(|p| &p.disk_usage);
     let disk_transport = pool.map(|p| &p.disk_transport);
-    let smart_health = pool.map(|p| &p.smart_health);
+    let smart = pool.map(|p| &p.smart);
     let device_errors = pool.map(|p| &p.device_errors);
     let header = Row::new(["", "Name", "Bus", "SMART", "Temp", "btrfs", "Allocated"])
         .style(Style::default().fg(Color::DarkGray));
@@ -860,7 +872,7 @@ fn disk_table(model: &Model, unit: ByteUnit) -> Table<'_> {
                     .map(|s| s.as_str())
                     .unwrap_or("--"),
             );
-            let smart_val = smart_health.and_then(|s| s.get(name));
+            let smart_val = smart.and_then(|s| s.get(name)).map(|p| p.health);
             let smart_line = Line::from(match smart_val {
                 Some(h) => smart_cell(h),
                 None => Span::raw(""),
@@ -944,14 +956,14 @@ fn disk_table(model: &Model, unit: ByteUnit) -> Table<'_> {
         })
         .unwrap_or(0)
         .max("Bus".len()) as u16;
-    let smart_width = smart_health
+    let smart_width = smart
         .map(|s| {
             model
                 .disks
                 .names
                 .iter()
                 .filter_map(|name| s.get(name))
-                .map(|h| smart_cell(h).width())
+                .map(|p| smart_cell(p.health).width())
                 .max()
                 .unwrap_or(0)
         })
@@ -1353,25 +1365,76 @@ fn view_disk_detail(model: &Model, frame: &mut Frame, area: Rect) {
             )
         });
 
+    // SMART section: one verdict row plus one row per evidence field. The health
+    // row's color comes from the shared severity mapping, so a failing drive with
+    // no concern rows (e.g. evidence: None) still shows a red verdict matching its
+    // column cell, instead of an all-uncolored section that understates the
+    // signal. Each evidence row is red iff its `is_concern` bool is set -- read
+    // straight from the field, never a label-string match. No temperature row
+    // (the Temp column owns that; it is not a verdict input).
+    let smart_table = pool.and_then(|p| p.smart.get(&disk_name)).map(|probe| {
+        let verdict = match probe.health {
+            SmartHealth::Healthy => "ok",
+            SmartHealth::Degraded => "warning",
+            SmartHealth::Failing => "failing",
+            SmartHealth::Unknown => "unknown",
+        };
+        let mut rows = vec![Row::new([
+            Span::raw("health"),
+            Span::styled(
+                verdict,
+                Style::default().fg(smart_health_color(probe.health)),
+            ),
+        ])];
+        if let Some(evidence) = probe.evidence {
+            for (key, value, is_concern) in evidence.fields() {
+                let style = if is_concern {
+                    Style::default().fg(Color::Red)
+                } else {
+                    Style::default()
+                };
+                rows.push(Row::new([
+                    Span::raw(key.label()),
+                    Span::styled(value.to_string(), style),
+                ]));
+            }
+        }
+        let row_count = rows.len() as u16;
+        // Label column is 16 so the longest NVMe field name ("critical warning")
+        // fits without truncation.
+        let table = Table::new(rows, [Constraint::Length(16), Constraint::Min(5)]).block(
+            Block::new()
+                .borders(Borders::TOP)
+                .title("SMART ")
+                .border_style(Style::default().fg(Color::Cyan)),
+        );
+        (table, row_count)
+    });
+
     let info_height = lines.len() as u16;
-    // alloc section: 1 border + 1 header + data rows (incl. unallocated) + 1 padding left
-    let alloc_height = alloc_table
-        .as_ref()
-        .map(|_| {
-            let data_rows = pool
-                .and_then(|p| p.disk_usage.get(&disk_name))
-                .map(|u| u.allocations.len() as u16 + 1) // +1 for unallocated
-                .unwrap_or(0);
-            1 + 1 + 1 + data_rows // spacer + border + header + rows
-        })
-        .unwrap_or(0);
-    let errors_height = if errors_table.is_some() {
-        1 + 1 + 5u16 // spacer + border + 5 error rows
-    } else {
-        0
-    };
     let footer_height = 2u16; // blank line + text
-    let total_content = info_height + alloc_height + errors_height + footer_height;
+
+    // Optional detail sections, each carrying its own laid-out height (spacer +
+    // border + rows). Collected into one list so the popup grows to fit whatever
+    // is present, rather than matching over every Some/None combination.
+    let mut sections: Vec<(Table, u16)> = Vec::new();
+    if let Some(alloc) = alloc_table {
+        // alloc section: spacer + border + header + data rows (incl. unallocated)
+        let data_rows = pool
+            .and_then(|p| p.disk_usage.get(&disk_name))
+            .map(|u| u.allocations.len() as u16 + 1) // +1 for unallocated
+            .unwrap_or(0);
+        sections.push((alloc, 1 + 1 + 1 + data_rows));
+    }
+    if let Some(errors) = errors_table {
+        sections.push((errors, 1 + 1 + 5)); // spacer + border + 5 error rows
+    }
+    if let Some((smart, row_count)) = smart_table {
+        sections.push((smart, 1 + 1 + row_count)); // spacer + border + rows
+    }
+
+    let sections_height: u16 = sections.iter().map(|(_, h)| *h).sum();
+    let total_content = info_height + sections_height + footer_height;
 
     let width = 48u16.min(area.width);
     let height = (total_content + 2).min(area.height); // +2 for popup border
@@ -1388,56 +1451,21 @@ fn view_disk_detail(model: &Model, frame: &mut Frame, area: Rect) {
     let inner = outer_block.inner(popup);
     frame.render_widget(outer_block, popup);
 
-    match (alloc_table, errors_table) {
-        (Some(alloc), Some(errors)) => {
-            let regions = Layout::vertical([
-                Constraint::Length(info_height),
-                Constraint::Length(1), // spacer
-                Constraint::Length(alloc_height - 1),
-                Constraint::Length(1), // spacer
-                Constraint::Length(errors_height - 1),
-                Constraint::Length(footer_height),
-            ])
-            .split(inner);
-            frame.render_widget(Paragraph::new(lines), regions[0]);
-            frame.render_widget(alloc, regions[2]);
-            frame.render_widget(errors, regions[4]);
-            frame.render_widget(footer, regions[5]);
-        }
-        (Some(alloc), None) => {
-            let regions = Layout::vertical([
-                Constraint::Length(info_height),
-                Constraint::Length(1),
-                Constraint::Length(alloc_height - 1),
-                Constraint::Length(footer_height),
-            ])
-            .split(inner);
-            frame.render_widget(Paragraph::new(lines), regions[0]);
-            frame.render_widget(alloc, regions[2]);
-            frame.render_widget(footer, regions[3]);
-        }
-        (None, Some(errors)) => {
-            let regions = Layout::vertical([
-                Constraint::Length(info_height),
-                Constraint::Length(1),
-                Constraint::Length(errors_height - 1),
-                Constraint::Length(footer_height),
-            ])
-            .split(inner);
-            frame.render_widget(Paragraph::new(lines), regions[0]);
-            frame.render_widget(errors, regions[2]);
-            frame.render_widget(footer, regions[3]);
-        }
-        (None, None) => {
-            let regions = Layout::vertical([
-                Constraint::Length(info_height),
-                Constraint::Length(footer_height),
-            ])
-            .split(inner);
-            frame.render_widget(Paragraph::new(lines), regions[0]);
-            frame.render_widget(footer, regions[1]);
-        }
+    // info, then [spacer, body] per section, then footer.
+    let mut constraints = vec![Constraint::Length(info_height)];
+    for (_, section_height) in &sections {
+        constraints.push(Constraint::Length(1)); // spacer
+        constraints.push(Constraint::Length(section_height - 1)); // border + rows
     }
+    constraints.push(Constraint::Length(footer_height));
+
+    let n_sections = sections.len();
+    let regions = Layout::vertical(constraints).split(inner);
+    frame.render_widget(Paragraph::new(lines), regions[0]);
+    for (i, (table, _)) in sections.into_iter().enumerate() {
+        frame.render_widget(table, regions[2 + 2 * i]);
+    }
+    frame.render_widget(footer, regions[1 + 2 * n_sections]);
 }
 
 pub fn view(model: &Model, frame: &mut Frame, now: PrimitiveDateTime) {
@@ -1551,7 +1579,7 @@ pub(crate) mod tests {
 
     use super::*;
     use crate::parse::types::{BtrfsBgType, BtrfsDfEntry, BtrfsProfile};
-    use crate::parse::types::{ScrubState, ScrubTimestamp};
+    use crate::parse::types::{ScrubState, ScrubTimestamp, SmartProbe};
     use crate::tui::demo::{sample_disk_luks_states, sample_disk_names, sample_pool};
     use crate::tui::test_support::{buffer_to_string, snap};
     use ratatui::Terminal;
@@ -1794,6 +1822,112 @@ pub(crate) mod tests {
 
         let terminal = render(&model, 60, 30);
         snap!(buffer_to_string(&terminal));
+    }
+
+    // Intent: the disk-detail SMART section renders the NVMe evidence rows.
+    // Why it exists: no NVMe path was visualized before this change; the demo's
+    //   4th disk (samsung) is a wear-degraded NVMe so a snapshot exercises the
+    //   five NVMe rows (incl. the wear concern).
+    // Scenario: select the NVMe demo disk and open its detail popup.
+    #[test]
+    fn snapshot_disk_detail_nvme() {
+        let mut model = Model::new_demo(sample_disk_names(), PoolStatus::Mounted(sample_pool()));
+        model.disk_luks_states = sample_disk_luks_states();
+        model.selected_disk = 3; // samsung -- NVMe
+        model.show_disk_detail = true;
+        let terminal = render(&model, 60, 34);
+        snap!(buffer_to_string(&terminal));
+    }
+
+    /// Find the fg color of the value cell on the detail row whose label matches
+    /// `label`. Scans the rendered buffer cell-by-cell (the same buffer
+    /// `buffer_to_string` walks) and reads the first non-space cell after the
+    /// label -- located by text, never a hardcoded `(x, y)`, so a popup-layout
+    /// shift does not break the test. `buffer_to_string` drops style, so this is
+    /// the only way to assert red-vs-not.
+    fn detail_row_value_fg(terminal: &Terminal<TestBackend>, label: &str) -> Color {
+        let buf = terminal.backend().buffer();
+        let area = buf.area;
+        let label_chars: Vec<char> = label.chars().collect();
+        for y in 0..area.height {
+            let cells: Vec<(char, Color)> = (0..area.width)
+                .map(|x| {
+                    let c = buf.cell((x, y)).expect("cell in bounds");
+                    (c.symbol().chars().next().unwrap_or(' '), c.fg)
+                })
+                .collect();
+            let start = (0..cells.len()).find(|&i| {
+                i + label_chars.len() <= cells.len()
+                    && label_chars
+                        .iter()
+                        .enumerate()
+                        .all(|(j, &ch)| cells[i + j].0 == ch)
+            });
+            if let Some(start) = start {
+                let mut i = start + label_chars.len();
+                while i < cells.len() {
+                    if cells[i].0 != ' ' {
+                        return cells[i].1;
+                    }
+                    i += 1;
+                }
+            }
+        }
+        panic!("label {label:?} not found in rendered detail");
+    }
+
+    // Intent: SMART evidence rows render red iff the field is a concern -- driven
+    //   by the `is_concern` bool, never a label match.
+    // Why it exists: text snapshots drop style, so a miscolor is invisible to
+    //   insta; this is the only check that sees it. A wear-degraded NVMe must red
+    //   the percentage-used row while leaving the healthy spare row uncolored
+    //   (the NVMe inversion this design fixes).
+    // Scenario: the degraded-NVMe demo disk (samsung), percentage_used 92,
+    //   available_spare 100.
+    #[test]
+    fn smart_detail_evidence_rows_red_iff_concern() {
+        let mut model = Model::new_demo(sample_disk_names(), PoolStatus::Mounted(sample_pool()));
+        model.disk_luks_states = sample_disk_luks_states();
+        model.selected_disk = 3; // samsung -- degraded NVMe
+        model.show_disk_detail = true;
+        let terminal = render(&model, 60, 34);
+
+        assert_eq!(
+            detail_row_value_fg(&terminal, "percentage used"),
+            Color::Red,
+            "the wear concern row must be red"
+        );
+        assert_ne!(
+            detail_row_value_fg(&terminal, "available spare"),
+            Color::Red,
+            "a healthy (non-concern) row must not be red"
+        );
+    }
+
+    // Intent: a `failing` verdict with no concern rows still shows a red `health`
+    //   row, matching its red column cell.
+    // Why it exists (F2): the verdict reaches the detail via the shared severity
+    //   color even when `evidence` is None, so an all-uncolored section cannot
+    //   understate the strongest signal.
+    // Scenario: an inline probe `{Failing, evidence: None}` on the selected disk.
+    #[test]
+    fn smart_detail_failing_health_row_is_red_without_evidence() {
+        let mut pool = sample_pool();
+        pool.smart.insert(
+            "toshiba".to_owned(),
+            SmartProbe {
+                health: SmartHealth::Failing,
+                evidence: None,
+                celsius: None,
+            },
+        );
+        let mut model = Model::new_demo(sample_disk_names(), PoolStatus::Mounted(pool));
+        model.disk_luks_states = sample_disk_luks_states();
+        model.selected_disk = 0; // toshiba
+        model.show_disk_detail = true;
+        let terminal = render(&model, 60, 30);
+
+        assert_eq!(detail_row_value_fg(&terminal, "health"), Color::Red);
     }
 
     #[test]

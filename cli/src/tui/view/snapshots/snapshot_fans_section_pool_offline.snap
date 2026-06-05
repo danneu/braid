@@ -1,5 +1,6 @@
 ---
 source: cli/src/tui/view/mod.rs
+assertion_line: 2373
 expression: buffer_to_string(&terminal)
 ---
 Data  Scrub  Browse
@@ -10,6 +11,7 @@ Data  Scrub  Browse
  ▶ 1 toshiba  --
    2 ironwolf --
    3 wdc      --
+   4 samsung  --
  Fans -- daemon: active ────────────────────────────────────────────────
     PWM           RPM    Driving        Curve
  1  215/255 84%   1240   38° ironwolf   30-40° -> 20-100%

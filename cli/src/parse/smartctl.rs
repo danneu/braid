@@ -1,5 +1,7 @@
 use crate::cmd::RawCommandOutput;
-use crate::parse::types::{SelftestEntry, SelftestKind, SelftestSummary, SmartHealth, SmartProbe};
+use crate::parse::types::{
+    SelftestEntry, SelftestKind, SelftestSummary, SmartEvidence, SmartHealth, SmartProbe,
+};
 use serde::Deserialize;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -143,6 +145,7 @@ pub fn parse_smartctl(raw: &RawCommandOutput) -> SmartProbe {
         if raw.stdout.is_empty() {
             return SmartProbe {
                 health: SmartHealth::Unknown,
+                evidence: None,
                 celsius: None,
             };
         }
@@ -153,6 +156,7 @@ pub fn parse_smartctl(raw: &RawCommandOutput) -> SmartProbe {
         Err(_) => {
             return SmartProbe {
                 health: SmartHealth::Unknown,
+                evidence: None,
                 celsius: None,
             };
         }
@@ -164,8 +168,39 @@ pub fn parse_smartctl(raw: &RawCommandOutput) -> SmartProbe {
         .and_then(|t| t.current)
         .and_then(|v| i16::try_from(v).ok());
 
-    let health = classify_health(&parsed);
-    SmartProbe { health, celsius }
+    // Build evidence once from the protocol's source detail log, then derive the
+    // verdict from it -- a single threshold definition lives in
+    // `SmartEvidence::fields` (it must agree with the column, the human line, and
+    // the TUI rows). `evidence` is `None` in two cases: no `smart_status`
+    // (Unknown), or `smart_status` present but the per-protocol detail log absent
+    // -- e.g. a passing USB-NVMe bridge that emits no health log, where a
+    // zero-filled `Nvme { available_spare: 0, .. }` would read as total spare
+    // exhaustion.
+    let evidence = parsed
+        .smart_status
+        .as_ref()
+        .and_then(|_| match detect_protocol(&parsed) {
+            DiskProtocol::Nvme => parsed
+                .nvme_smart_health_information_log
+                .as_ref()
+                .map(nvme_evidence),
+            DiskProtocol::Sata => parsed.ata_smart_attributes.as_ref().map(sata_evidence),
+        });
+
+    let health = match &parsed.smart_status {
+        None => SmartHealth::Unknown,
+        Some(status) if !status.passed => SmartHealth::Failing,
+        Some(_) => match evidence {
+            Some(e) if !e.concerns().is_empty() => SmartHealth::Degraded,
+            _ => SmartHealth::Healthy,
+        },
+    };
+
+    SmartProbe {
+        health,
+        evidence,
+        celsius,
+    }
 }
 
 /// Parse SMART self-test logs with stricter command-error handling than
@@ -297,69 +332,50 @@ fn classify_selftest_status(value: Option<u8>) -> SelftestStatusClass {
     }
 }
 
-fn classify_health(parsed: &RawSmartctlOutput) -> SmartHealth {
-    let passed = match &parsed.smart_status {
-        Some(s) => s.passed,
-        None => return SmartHealth::Unknown,
-    };
-
-    if !passed {
-        return SmartHealth::Failing;
-    }
-
-    let protocol = parsed
-        .device
-        .as_ref()
-        .and_then(|d| d.protocol.as_deref())
-        .map(|p| {
-            if p.eq_ignore_ascii_case("nvme") {
-                DiskProtocol::Nvme
-            } else {
-                DiskProtocol::Sata
-            }
-        })
-        .unwrap_or(DiskProtocol::Sata);
-
-    match protocol {
-        DiskProtocol::Nvme => classify_nvme(parsed),
-        DiskProtocol::Sata => classify_sata(parsed),
+/// Protocol of the probed drive, derived from `device.protocol`. Defaults to
+/// SATA when the field is absent or unrecognized. Factored out of the old
+/// `classify_health` so `parse_smartctl` can pick the evidence source on the
+/// `Failing` path too, not only when `smart_status.passed` is true.
+fn detect_protocol(parsed: &RawSmartctlOutput) -> DiskProtocol {
+    match parsed.device.as_ref().and_then(|d| d.protocol.as_deref()) {
+        Some(p) if p.eq_ignore_ascii_case("nvme") => DiskProtocol::Nvme,
+        _ => DiskProtocol::Sata,
     }
 }
 
-fn classify_nvme(parsed: &RawSmartctlOutput) -> SmartHealth {
-    let Some(nvme) = &parsed.nvme_smart_health_information_log else {
-        return SmartHealth::Healthy;
+/// SATA evidence from ATA attributes, reusing the exact reads the old
+/// `classify_sata` performed: `Reallocated_Sector_Ct` masked to its lower 16
+/// bits, plus the raw48 pending/uncorrectable counts. The mask keeps a drive
+/// that reports reallocation *events* in the upper words (0 actual sectors) out
+/// of the concern set.
+fn sata_evidence(attrs: &RawAtaSmartAttributes) -> SmartEvidence {
+    let read = |name: &str| {
+        attrs
+            .table
+            .iter()
+            .find(|a| a.name == name)
+            .map_or(0, |a| a.raw.value)
     };
-    if nvme.critical_warning != 0
-        || nvme.media_errors != 0
-        || (nvme.available_spare_threshold > 0
-            && nvme.available_spare <= nvme.available_spare_threshold)
-        || nvme.percentage_used >= 90
-    {
-        SmartHealth::Degraded
-    } else {
-        SmartHealth::Healthy
-    }
-}
-
-fn classify_sata(parsed: &RawSmartctlOutput) -> SmartHealth {
-    // TODO: validate with real SATA fixture
-    let Some(attrs) = &parsed.ata_smart_attributes else {
-        return SmartHealth::Healthy;
-    };
-    let bad = attrs.table.iter().any(|a| match a.name.as_str() {
-        // raw16(raw16) format: sector count is lower 16 bits
+    SmartEvidence::Sata {
+        // raw16(raw16) format: sector count is the lower 16 bits
         // (https://github.com/smartmontools/smartmontools/blob/RELEASE_7_5/smartmontools/drivedb.h#L83)
-        "Reallocated_Sector_Ct" => a.raw.value & 0xFFFF > 0,
-        // raw48 format: full value is the count
+        reallocated_sectors: read("Reallocated_Sector_Ct") & 0xFFFF,
+        // raw48 format: the full value is the count
         // (https://github.com/smartmontools/smartmontools/blob/RELEASE_7_5/smartmontools/drivedb.h#L118-L119)
-        "Current_Pending_Sector" | "Offline_Uncorrectable" => a.raw.value > 0,
-        _ => false,
-    });
-    if bad {
-        SmartHealth::Degraded
-    } else {
-        SmartHealth::Healthy
+        pending_sectors: read("Current_Pending_Sector"),
+        offline_uncorrectable: read("Offline_Uncorrectable"),
+    }
+}
+
+/// NVMe evidence from the health-information log, reusing the exact five reads
+/// the old `classify_nvme` performed.
+fn nvme_evidence(nvme: &RawNvmeHealth) -> SmartEvidence {
+    SmartEvidence::Nvme {
+        media_errors: nvme.media_errors,
+        critical_warning: nvme.critical_warning,
+        percentage_used: nvme.percentage_used,
+        available_spare: nvme.available_spare,
+        available_spare_threshold: nvme.available_spare_threshold,
     }
 }
 
@@ -953,5 +969,208 @@ mod tests {
         }"#;
         let summary = parse_smartctl_selftest_log(&raw(json));
         assert_eq!(summary.last_passing.expect("passing").lifetime_hours, 100);
+    }
+
+    // -- Evidence: health is now derived from the evidence the parser carries.
+    // These assert the (health, evidence) pair end-to-end so the verdict and the
+    // itemized counts can never disagree.
+
+    // Intent: clean SATA reports zeroed Sata evidence and a Healthy verdict.
+    // Why it exists: the verdict is `concerns().is_empty()` over the same reads
+    //   the old classify_sata used; the zeroed evidence proves no concern fired.
+    // Scenario: a healthy SATA drive with all three attributes at 0.
+    #[test]
+    fn sata_clean_evidence_and_health() {
+        let json = r#"{
+            "smart_status": {"passed": true},
+            "device": {"protocol": "ATA"},
+            "ata_smart_attributes": {"table": [
+                {"name": "Reallocated_Sector_Ct", "raw": {"value": 0}},
+                {"name": "Current_Pending_Sector", "raw": {"value": 0}},
+                {"name": "Offline_Uncorrectable", "raw": {"value": 0}}
+            ]}
+        }"#;
+        let probe = parse_smartctl(&raw(json));
+        assert_eq!(probe.health, SmartHealth::Healthy);
+        assert_eq!(
+            probe.evidence,
+            Some(SmartEvidence::Sata {
+                reallocated_sectors: 0,
+                pending_sectors: 0,
+                offline_uncorrectable: 0,
+            })
+        );
+    }
+
+    // Intent: a degraded SATA drive carries the reallocated count as evidence.
+    // Why it exists: the human line and TUI row render this count; it must be
+    //   the masked lower-16-bit value, not a bare boolean.
+    // Scenario: 8 reallocated sectors -> Degraded with Sata{8,0,0}.
+    #[test]
+    fn sata_degraded_evidence_carries_count() {
+        let json = r#"{
+            "smart_status": {"passed": true},
+            "device": {"protocol": "ATA"},
+            "ata_smart_attributes": {"table": [
+                {"name": "Reallocated_Sector_Ct", "raw": {"value": 8}},
+                {"name": "Current_Pending_Sector", "raw": {"value": 0}},
+                {"name": "Offline_Uncorrectable", "raw": {"value": 0}}
+            ]}
+        }"#;
+        let probe = parse_smartctl(&raw(json));
+        assert_eq!(probe.health, SmartHealth::Degraded);
+        assert_eq!(
+            probe.evidence,
+            Some(SmartEvidence::Sata {
+                reallocated_sectors: 8,
+                pending_sectors: 0,
+                offline_uncorrectable: 0,
+            })
+        );
+    }
+
+    // Intent: a `passed:false` SATA drive with readable attributes is Failing but
+    //   still carries its Sata evidence.
+    // Why it exists: the verdict reaches Failing via smart_status, independent of
+    //   attributes; evidence must still be built so the human/TUI can itemize the
+    //   non-nominal attribute behind a failing drive.
+    // Scenario: drive self-reports failure while attribute 5 shows 5 reallocated.
+    #[test]
+    fn sata_failing_with_attributes_keeps_evidence() {
+        let json = r#"{
+            "smart_status": {"passed": false},
+            "device": {"protocol": "ATA"},
+            "ata_smart_attributes": {"table": [
+                {"name": "Reallocated_Sector_Ct", "raw": {"value": 5}},
+                {"name": "Current_Pending_Sector", "raw": {"value": 0}},
+                {"name": "Offline_Uncorrectable", "raw": {"value": 0}}
+            ]}
+        }"#;
+        let probe = parse_smartctl(&raw(json));
+        assert_eq!(probe.health, SmartHealth::Failing);
+        assert_eq!(
+            probe.evidence,
+            Some(SmartEvidence::Sata {
+                reallocated_sectors: 5,
+                pending_sectors: 0,
+                offline_uncorrectable: 0,
+            })
+        );
+    }
+
+    // Intent: a healthy NVMe drive carries its five-field Nvme evidence.
+    // Why it exists: NVMe is fully implemented, not TODO'd; available_spare 100
+    //   over a threshold of 10 with low wear must read Healthy with no concern.
+    // Scenario: a fresh enterprise NVMe at 12% wear.
+    #[test]
+    fn nvme_healthy_evidence_and_health() {
+        let json = r#"{
+            "smart_status": {"passed": true},
+            "device": {"protocol": "NVMe"},
+            "nvme_smart_health_information_log": {
+                "critical_warning": 0,
+                "media_errors": 0,
+                "available_spare": 100,
+                "available_spare_threshold": 10,
+                "percentage_used": 12
+            }
+        }"#;
+        let probe = parse_smartctl(&raw(json));
+        assert_eq!(probe.health, SmartHealth::Healthy);
+        assert_eq!(
+            probe.evidence,
+            Some(SmartEvidence::Nvme {
+                media_errors: 0,
+                critical_warning: 0,
+                percentage_used: 12,
+                available_spare: 100,
+                available_spare_threshold: 10,
+            })
+        );
+    }
+
+    // Intent: NVMe wear at/over 90% is Degraded and carries the wear figure.
+    // Why it exists: percentage_used >= 90 is the wear threshold; it must drive
+    //   the verdict and surface the exact value.
+    // Scenario: an NVMe drive at 92% rated endurance.
+    #[test]
+    fn nvme_wear_degraded_evidence() {
+        let json = r#"{
+            "smart_status": {"passed": true},
+            "device": {"protocol": "NVMe"},
+            "nvme_smart_health_information_log": {
+                "critical_warning": 0,
+                "media_errors": 0,
+                "available_spare": 100,
+                "available_spare_threshold": 10,
+                "percentage_used": 92
+            }
+        }"#;
+        let probe = parse_smartctl(&raw(json));
+        assert_eq!(probe.health, SmartHealth::Degraded);
+        assert_eq!(
+            probe.evidence,
+            Some(SmartEvidence::Nvme {
+                media_errors: 0,
+                critical_warning: 0,
+                percentage_used: 92,
+                available_spare: 100,
+                available_spare_threshold: 10,
+            })
+        );
+    }
+
+    // Intent: a passing NVMe drive that emits no health-information log yields
+    //   `evidence: None`, not a zero-filled Nvme that reads as spare exhaustion.
+    // Why it exists (F2): every RawNvmeHealth field is `#[serde(default)]` -> 0,
+    //   and 0 is the *failure* value for available_spare. A USB-NVMe bridge that
+    //   omits the log must stay Healthy with no evidence.
+    // Scenario: a passing NVMe behind a bridge that drops the health log.
+    #[test]
+    fn nvme_logless_passing_has_no_evidence() {
+        let json = r#"{
+            "smart_status": {"passed": true},
+            "device": {"protocol": "NVMe"}
+        }"#;
+        let probe = parse_smartctl(&raw(json));
+        assert_eq!(probe.health, SmartHealth::Healthy);
+        assert_eq!(probe.evidence, None);
+    }
+
+    // Intent: a passing SATA drive with no ata_smart_attributes log yields
+    //   `evidence: None` (gated on log presence for symmetry with NVMe).
+    // Why it exists (F2): even though SATA zero-fill is benign, evidence is gated
+    //   on the source log so a drive with no attribute table itemizes nothing.
+    // Scenario: a SATA drive that reports smart_status but no attribute table.
+    #[test]
+    fn sata_logless_passing_has_no_evidence() {
+        let json = r#"{
+            "smart_status": {"passed": true},
+            "device": {"protocol": "ATA"}
+        }"#;
+        let probe = parse_smartctl(&raw(json));
+        assert_eq!(probe.health, SmartHealth::Healthy);
+        assert_eq!(probe.evidence, None);
+    }
+
+    // Intent: no smart_status -> Unknown and `evidence: None`.
+    // Why it exists: the verdict is Unknown and there is nothing to itemize even
+    //   if a detail log happens to be present.
+    // Scenario: smartctl JSON omits smart_status entirely.
+    #[test]
+    fn unknown_has_no_evidence() {
+        let json = r#"{
+            "device": {"protocol": "NVMe"},
+            "nvme_smart_health_information_log": {
+                "critical_warning": 0,
+                "media_errors": 0,
+                "available_spare": 100,
+                "available_spare_threshold": 10,
+                "percentage_used": 0
+            }
+        }"#;
+        let probe = parse_smartctl(&raw(json));
+        assert_eq!(probe.health, SmartHealth::Unknown);
+        assert_eq!(probe.evidence, None);
     }
 }

@@ -30,4 +30,15 @@ fn golden_smartctl_sata_with_temperature() {
     let probe = parse::smartctl::parse_smartctl(&raw);
     assert_eq!(probe.health, parse::types::SmartHealth::Healthy);
     assert_eq!(probe.celsius, Some(26));
+    // The real fixture's attributes 5/197/198 are all nominal, so the parser
+    // carries zeroed SATA evidence -- validating sata_evidence against a real
+    // capture, which retires the old `// TODO: validate with real SATA fixture`.
+    assert_eq!(
+        probe.evidence,
+        Some(parse::types::SmartEvidence::Sata {
+            reallocated_sectors: 0,
+            pending_sectors: 0,
+            offline_uncorrectable: 0,
+        })
+    );
 }

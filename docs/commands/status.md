@@ -178,14 +178,16 @@ lines and why the count can exceed the visible journal lines.
 ### Per-disk detail
 
 What each disk shows depends on whether it is a live pool member. A live pool
-member shows its device path, model, serial, LUKS UUID, and btrfs I/O error
-counters. Any other disk -- missing, offline, UUID mismatch,
-header-unreadable, or unknown -- shows a reduced set: its device path and an
-`Errors: unknown (<reason>)` line in place of counters; a UUID-mismatch disk
-also shows its observed `LUKS:` UUID so the divergence is visible. Separately,
-any disk that needs attention -- for example a missing disk, or a present
-member with nonzero error counters -- gets an `Action:` line naming the next
-command (detailed below).
+member shows its device path, model, serial, LUKS UUID, btrfs I/O error
+counters (the `btrfs:` line), and a SMART verdict (the `SMART:` line). These
+last two are different layers: `btrfs:` is the filesystem's own I/O accounting,
+`SMART:` is the drive's self-report. Any other disk -- missing, offline, UUID
+mismatch, header-unreadable, or unknown -- shows a reduced set: its device path
+and `btrfs: unknown (<reason>)` / `SMART: unknown (<reason>)` lines in place of
+counters; a UUID-mismatch disk also shows its observed `LUKS:` UUID so the
+divergence is visible. Separately, any disk that needs attention -- for example
+a missing disk, or a present member with nonzero error counters -- gets an
+`Action:` line naming the next command (detailed below).
 
 ```
 Disks:
@@ -195,19 +197,22 @@ Disks:
     Model:   TOSHIBA MN07ACA12T
     Serial:  1234ABC
     LUKS:    aaaaaaaa-1111-2222-3333-444444444444
-    Errors:  read 0 / write 0 / flush 0 / corruption 0 / generation 0
+    btrfs:   read 0 / write 0 / flush 0 / corruption 0 / generation 0
+    SMART:   ok
 
   toshiba2          devid 2   present
     Device:  /dev/disk/by-id/ata-TOSHIBA_MN07ACA12T_5678
     Model:   TOSHIBA MN07ACA12T
     Serial:  5678DEF
     LUKS:    bbbbbbbb-1111-2222-3333-444444444444
-    Errors:  read 12 / write 0 / flush 0 / corruption 3 / generation 0
+    btrfs:   read 12 / write 0 / flush 0 / corruption 3 / generation 0
+    SMART:   warning (2 reallocated)
     Action:  braid replace --old toshiba2 --new <new-name>=/dev/disk/by-id/<...>
 
   toshiba3          MISSING
     Device:  /dev/disk/by-id/ata-TOSHIBA_MN07ACA12T_9ABC  (not found)
-    Errors:  unknown (device absent)
+    btrfs:   unknown (device absent)
+    SMART:   unknown (device absent)
     Action:  braid replace --old toshiba3 --new <new-name>=/dev/disk/by-id/<...>
 ```
 
@@ -222,11 +227,24 @@ Disk states (compact `Drives:` list and detail view):
 | **LUKS UUID MISMATCH** | Device present but its LUKS header UUID differs from the recorded member -- swapped, cloned, or reformatted; run `braid doctor` |
 | **UNKNOWN** | State could not be determined |
 
-**`Errors:` line.** A live, present pool member shows real btrfs counters
+**`btrfs:` line.** A live, present pool member shows real btrfs counters
 (`read / write / flush / corruption / generation`). Every other disk shows
-`Errors: unknown (<reason>)`, where `<reason>` names why counters are
+`btrfs: unknown (<reason>)`, where `<reason>` names why counters are
 unavailable: `device absent`, `LUKS header unreadable`, `LUKS UUID mismatch`,
-`disk offline -- not in pool`, or `metadata unavailable`.
+`disk offline -- not in pool`, or `metadata unavailable`. (This line was
+labeled `Errors:` before braid reported SMART; it was renamed to `btrfs:` so it
+reads as a sibling of the `SMART:` line, not the only error concept.)
+
+**`SMART:` line.** A live, present pool member shows the drive's SMART verdict:
+`ok`, `warning`, `failing`, or `unknown`. When the drive reports an out-of-spec
+attribute, the verdict carries a parenthetical listing the concern(s) -- e.g.
+`warning (2 reallocated)` or `warning (92 percentage used)`. The parenthetical
+follows the evidence, not the verdict word, so a `failing` drive whose
+attributes braid reads as non-nominal also lists them (`failing (5
+reallocated)`); a bare `failing`/`ok`/`unknown` has no evidence to show. Every
+non-present disk shows `SMART: unknown (<reason>)` with the same reasons as the
+`btrfs:` line. The SMART verdict is independent of the btrfs counters: a drive
+can report clean btrfs I/O while SMART reads `warning`, and vice versa.
 
 **`Action:` line.** When a disk needs attention, `braid status` appends an
 `Action:` line naming the next command, so you do not have to look it up:
@@ -386,11 +404,25 @@ for recovery options.
     when the disk is not a live pool member.
   - `status`: one of `present`, `missing`, `luks-header-unreadable`,
     `luks-uuid-mismatch`, `offline`, `unknown`.
-  - `errors`: btrfs I/O error counters (`read`, `write`, `flush`,
-    `corruption`, `generation`, all integers). Present when btrfs device
-    stats are available; omitted entirely otherwise -- including for
-    present disks when `btrfs device stats` fails (which also emits a
-    `btrfs device stats failed` advisory).
+  - `btrfs_errors`: btrfs I/O error counters (`read`, `write`, `flush`,
+    `corruption`, `generation`, all integers) -- the filesystem's I/O
+    accounting. Present when btrfs device stats are available; omitted entirely
+    otherwise -- including for present disks when `btrfs device stats` fails
+    (which also emits a `btrfs device stats failed` advisory). (This field was
+    named `errors` before braid reported SMART; it was renamed so it reads as a
+    sibling of `smart`, not the only error concept.)
+  - `smart`: the drive's own SMART self-report -- a verdict plus supporting
+    evidence, a different layer from `btrfs_errors`. Present for live pool
+    members; omitted for disks with no backing path to probe. The object always
+    carries `health` (`"ok"`, `"warning"`, `"failing"`, or `"unknown"`). When
+    SMART evidence is available it also carries a `protocol` discriminator
+    (`"sata"` or `"nvme"`) and the per-protocol counters -- for SATA
+    `reallocated_sectors`, `pending_sectors`, `offline_uncorrectable`; for NVMe
+    `media_errors`, `critical_warning`, `percentage_used`, `available_spare`,
+    `available_spare_threshold` -- plus `celsius` when the drive reports a
+    current temperature. A drive whose detail log is absent (or whose health is
+    `unknown`) carries `health` alone. **This field is diagnostic evidence only
+    -- it does not feed the alert latch** (see the note under `alert_causes`).
 
 ```json
 {
@@ -401,15 +433,16 @@ for recovery options.
   "devid": 1,
   "underlying": "/dev/sda",
   "status": "present",
-  "errors": { "read": 0, "write": 0, "flush": 0, "corruption": 0, "generation": 0 }
+  "btrfs_errors": { "read": 0, "write": 0, "flush": 0, "corruption": 0, "generation": 0 },
+  "smart": { "health": "ok", "protocol": "sata", "reallocated_sectors": 0, "pending_sectors": 0, "offline_uncorrectable": 0, "celsius": 26 }
 }
 ```
 
 > A diagnostic unpooled disk (`missing`, `offline`, `unknown`, or
 > `luks-header-unreadable`) reports `"luks_uuid": ""`, `"devid": null`,
-> `"underlying": null`, and no `errors` key. `offline` is present but not
-> assembled; the others reach the same blank/null row shape because no live
-> member row is available. Correlate these rows by `name`.
+> `"underlying": null`, and no `btrfs_errors` or `smart` key. `offline` is
+> present but not assembled; the others reach the same blank/null row shape
+> because no live member row is available. Correlate these rows by `name`.
 
 - `alert_active`: boolean
 - `alert_causes`: array of alert cause objects. **Omitted entirely when no
@@ -424,6 +457,15 @@ for recovery options.
   - `{ "type": "smartd_alert" }` -- a SMART health warning from smartd.
   - `{ "type": "computation_error", "detail": "<string>" }` -- braid could
     not compute alert state; `detail` explains.
+
+> **The per-disk `smart` field does not feed the alert latch.** The
+> `smartd_alert` cause is driven by the **smartd** daemon's flag
+> (`/var/lib/braid/smartd-alert`; see [ADR 014](../design/decisions/014-alerts.md)
+> and [ADR 030](../design/decisions/030-smart-btrfs-error-reporting.md)), not by
+> the live per-disk SMART probe `status` runs. So a report can carry a degraded
+> `smart` object (`"health": "warning"`) while `alert_active` is `false` and no
+> `smartd_alert` cause is present. This is intentional: the per-disk `smart`
+> field is diagnostic evidence; smartd remains the alert source.
 - `advisories`: array of human-readable advisory strings (omitted when
   none). See the Advisories section above for what currently produces
   them.
@@ -534,7 +576,8 @@ A complete report for a healthy 3-disk RAID1 pool:
       "devid": 1,
       "underlying": "/dev/sda",
       "status": "present",
-      "errors": { "read": 0, "write": 0, "flush": 0, "corruption": 0, "generation": 0 }
+      "btrfs_errors": { "read": 0, "write": 0, "flush": 0, "corruption": 0, "generation": 0 },
+      "smart": { "health": "ok", "protocol": "sata", "reallocated_sectors": 0, "pending_sectors": 0, "offline_uncorrectable": 0, "celsius": 26 }
     }
   ],
   "alert_active": false
