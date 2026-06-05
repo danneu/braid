@@ -112,16 +112,6 @@ pub enum CmdRequest {
     BtrfsBalanceSingle {
         mount_point: MountPoint,
     },
-    /// `btrfs balance resume <mp>` -- continue a paused balance using the
-    /// convert filters the kernel already persisted in the chunk tree's
-    /// `BALANCE_ITEM`. Used by `cmd_recover` to drain a balance that a
-    /// forced shutdown left paused (skip_balance prevents kernel
-    /// auto-resume on mount). Idempotent only in the sense that the
-    /// kernel rejects with non-zero when no balance is in progress; the
-    /// caller must check `BalanceReport::Paused` before invoking this.
-    BtrfsBalanceResume {
-        mount_point: MountPoint,
-    },
     /// `btrfs balance pause <mp>` -- request a persistent paused balance
     /// before systemd-stop unmounts so a fatal signal to the original
     /// btrfs-progs process cannot turn the balance into a cancel.
@@ -763,10 +753,6 @@ impl CmdRequest {
                     "-f".into(),
                     mount_point.0.clone(),
                 ],
-            },
-            CmdRequest::BtrfsBalanceResume { mount_point } => CmdArgs {
-                program: "btrfs".to_owned(),
-                args: vec!["balance".into(), "resume".into(), mount_point.0.clone()],
             },
             CmdRequest::BtrfsBalancePause { mount_point } => CmdArgs {
                 program: "btrfs".to_owned(),
@@ -2576,25 +2562,6 @@ mod tests {
                 "/mnt/storage",
             ]
         );
-    }
-
-    #[test]
-    // Intent: BtrfsBalanceResume generates `btrfs balance resume <mp>` with no
-    // convert filters of its own.
-    // Why: the kernel reuses the convert filters persisted in the chunk tree
-    // BALANCE_ITEM by the original balance start. Adding our own -dconvert /
-    // -mconvert here would either be ignored (best case) or conflict with the
-    // stored filters (worst case). recover relies on this command picking up
-    // exactly where the interrupted balance left off.
-    // Scenario: forced shutdown during a post-add RAID1 conversion leaves a
-    // paused balance; `cmd_recover` issues `btrfs balance resume` to drain it.
-    fn btrfs_balance_resume_generates_correct_argv() {
-        let cmd = CmdRequest::BtrfsBalanceResume {
-            mount_point: MountPoint("/mnt/storage".to_owned()),
-        }
-        .to_argv();
-        assert_eq!(cmd.program, "btrfs");
-        assert_eq!(cmd.args, vec!["balance", "resume", "/mnt/storage"]);
     }
 
     #[test]

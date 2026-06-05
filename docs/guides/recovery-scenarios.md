@@ -11,7 +11,7 @@ braid has two recovery commands that solve different problems:
 | Command | When to use | What it does |
 | --- | --- | --- |
 | `braid discover --write` | pool.json is missing or corrupted | Scans disk labels to rebuild pool.json |
-| `braid recover` | pending-op.json exists (interrupted mutation) | Opens pool, probes live topology, rebuilds pool.json, clears journal |
+| `braid recover` | pending-op.json exists (interrupted mutation) | Opens pool, probes live topology, rebuilds pool.json, and clears the journal after the idle/no-paused recovery path succeeds; preserves the journal when owed RAID1 replay finds a paused, running, or unknown balance state |
 
 **discover** solves metadata loss -- the CLI's record of which disks belong to the pool is gone, but the disks themselves are fine. It reads LUKS labels (`braid-<name>`) and LUKS UUIDs from `/dev/disk/by-id/` devices to reconstruct UUID-keyed membership.
 
@@ -105,7 +105,7 @@ Recover will:
 - Probe the live btrfs topology to determine what actually happened
 - For existing-pool add `PoolMutation`, first open and scan any already-committed journaled add targets that can be reconciled without wiping or adding
 - For add `PoolMutation`, finish only the journaled add targets that are not already live
-- For add `PostAddBalanceRaid1`, skip all disk preparation and btrfs add steps, then finish the owed RAID1 balance
+- For add `PostAddBalanceRaid1`, skip all disk preparation and btrfs add steps, then run the owed RAID1 balance only when btrfs balance state is idle; preserve `pending-op.json` when a paused, running, or unknown balance state requires manual inspection
 - Rebuild or repair pool.json only when live membership is complete
 - Clear pending-op.json only after required membership and balance work is complete
 

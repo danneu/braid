@@ -124,7 +124,7 @@ braid classifies each disk before acting:
 Existing-pool adds recover in two phases:
 
 - **PoolMutation**: disk preparation and btrfs membership are not fully committed yet. `braid recover` may finish formatting a fresh target, re-open a verified returned target, run the narrow btrfs-signature wipe for that returned target, and run `btrfs device add`.
-- **PostAddBalanceRaid1**: membership and `pool.json` are committed. `braid recover` will not format, wipe, or add disks in this phase; it only mounts/probes the committed pool, repairs `pool.json` from the committed live topology if needed, resumes or runs the owed RAID1 balance, and clears `pending-op.json`.
+- **PostAddBalanceRaid1**: membership and `pool.json` are committed. `braid recover` will not format, wipe, or add disks in this phase; it only mounts/probes the committed pool, repairs `pool.json` from the committed live topology if needed, runs the owed RAID1 balance when btrfs balance state is idle, and clears `pending-op.json` after that succeeds. A paused, running, or unknown balance state fails closed with the journal preserved.
 
 ## Related commands
 

@@ -105,13 +105,10 @@ Skipping at add also makes the degraded-add interrupt paths converge. With no
 hard balance issued, a *completed* degraded add and *every* recover path end at
 the same state: device added, pool still degraded, redundancy deferred to the
 repair step. Before this change the paths diverged: a completed degraded add
-restored redundancy via the hard balance, and a forced-shutdown interrupt also
-did -- recover's `replay_owed_raid1_maintenance` resumes a paused balance
-before its soft replay (see [Recover replay](#recover-replay)) and a forced
-shutdown leaves the hard convert paused -- but a rarer umount-cancelled
-interrupt fell through to the soft no-op and did not. Skipping at add closes
-that one divergent path; recover itself is unchanged (its resume-paused-balance
-branch is simply never armed by a degraded add).
+restored redundancy via the hard balance, but recover could only safely replay
+owed RAID1 maintenance when no paused balance survived the interruption.
+Skipping at add closes that divergent path by making degraded-add recovery end
+in the same deferred-repair state.
 
 btrfs-progs guidance backs the deferral. `btrfs-balance.rst` (in Sources)
 recommends you "use :command:`btrfs replace` or :command:`btrfs device remove`
@@ -124,20 +121,20 @@ cleanly-missing member.
 ## Recover replay
 
 After a forced shutdown mid-mutation, `braid recover` replays owed RAID1
-maintenance:
+maintenance only if `btrfs balance status` reports no active balance:
 
-1. If a balance is paused, resume it with `btrfs balance resume`
-   (`pool_balance_resume`). This drains the convert filters the kernel
-   persisted -- it is not a fresh balance.
-2. Then, on any pool with two or more devices, run the soft balance above to
-   catch `single` chunks an interrupted balance left behind -- including the
-   case where `umount` cancelled (rather than paused) a partial balance. The
-   idempotent `,soft` filter makes this safe even when nothing needs converting.
+> [!WARNING]
+> Replaying a crash-paused RAID1 balance can underflow btrfs block-group accounting and silently halve redundancy. recover preserves `pending-op.json` instead of automating recovery when the balance state is paused, running, or unknown.
 
-This replay fires for an interrupted `add` -- the new disk is already in the
-pool, so re-running `braid add` would refuse, and recover finishes the job so
-the operator is not left with `single` chunks -- and for the owed
-post-maintenance step of `remove-missing` and `replace`.
+On any pool with two or more devices, the idle/no-paused path runs the soft
+balance above to catch `single` chunks an interrupted balance left behind. The
+idempotent `,soft` filter makes this safe even when nothing needs converting.
+
+This replay fires for an interrupted `add` when the balance state is idle -- the
+new disk is already in the pool, so re-running `braid add` would refuse, and
+recover finishes the job so the operator is not left with `single` chunks -- and
+for the idle/no-paused owed post-maintenance step of `remove-missing` and
+`replace`.
 
 `braid remove` is deliberately not part of this replay. It is the only mutation
 whose pre-mutation phase can issue a balance -- the RAID1 -> single conversion

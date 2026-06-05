@@ -167,7 +167,7 @@ sudo braid remove ironwolf --yes
 
 ## Recovery
 
-If a mutation is interrupted, braid leaves `/var/lib/braid/pending-op.json` in place and normal commands refuse until recovery completes. Run `sudo braid recover` (add `--allow-degraded` when a member is missing). Recovery repairs `pool.json` from committed live btrfs membership and finishes only the owed post-mutation maintenance, such as resize or soft RAID1 balance.
+If a mutation is interrupted, braid leaves `/var/lib/braid/pending-op.json` in place and normal commands refuse until recovery completes. Run `sudo braid recover` (add `--allow-degraded` when a member is missing). Recovery repairs `pool.json` from committed live btrfs membership and, when btrfs balance state is idle, finishes only the owed post-mutation maintenance, such as resize or soft RAID1 balance. If owed RAID1 replay finds a paused, running, or unknown balance state, recover fails closed and preserves `pending-op.json` for manual inspection.
 
 `pool.json` is keyed by each member's LUKS UUID. Disk names are still the names you type in commands and see in output; by-id paths are the hardware addresses braid uses to find disks.
 

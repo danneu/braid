@@ -427,31 +427,6 @@ pub fn pool_balance_raid1_soft<R: CommandRunner + Sync>(
     Ok(())
 }
 
-/// Resume a paused btrfs balance using the convert filters the kernel
-/// persisted in the chunk tree's `BALANCE_ITEM`. Used by `cmd_recover` to
-/// drain a balance that a forced shutdown left paused (`skip_balance` mount
-/// option prevents kernel auto-resume on the post-crash mount via
-/// `base_mount_options`). Caller must verify the balance is paused before
-/// calling -- this function does not check.
-pub fn pool_balance_resume<R: CommandRunner + Sync>(
-    runner: &R,
-    mount_point: &MountPoint,
-    progress: ProgressOutput,
-) -> Result<(), PoolError> {
-    let result = run_with_progress(
-        runner,
-        &CmdRequest::BtrfsBalanceResume {
-            mount_point: mount_point.clone(),
-        },
-        mount_point,
-        progress,
-    )?;
-    if result.exit_status != 0 {
-        return Err(balance_error("btrfs balance resume", mount_point, &result));
-    }
-    Ok(())
-}
-
 /// Plan-time predicate for whether a pool-mutation op (remove-missing, or
 /// replace's missing path) will leave the pool non-degraded with enough
 /// survivors to re-mirror. Single source for the `restore_raid1_after_commit`

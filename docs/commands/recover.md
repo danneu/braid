@@ -2,7 +2,7 @@
 
 # braid recover
 
-Resumes from an interrupted operation (add, remove, replace) by opening LUKS devices, mounting the pool, rebuilding `pool.json` from live pool state when appropriate, finishing owed maintenance, and clearing the pending-operation journal.
+Resumes from an interrupted operation (add, remove, replace) by opening LUKS devices, mounting the pool, rebuilding `pool.json` from live pool state when appropriate, running owed maintenance when the btrfs balance state is idle, and clearing the pending-operation journal only after the safe recovery path completes.
 
 ## When to use it
 
@@ -25,7 +25,10 @@ pool.json written from committed add membership.
 pending-op.json cleared. Recovery complete.
 ```
 
-Before the `pool.json` lines, a real run prints either per-disk LUKS-open and mount rows (if the pool was offline) or a single `pool already mounted at ...` row (if it was already mounted). After the `committed` line it always prints a RAID1 soft-balance replay row pair before the final `pending-op.json cleared` line.
+Before the `pool.json` lines, a real run prints either per-disk LUKS-open and mount rows (if the pool was offline) or a single `pool already mounted at ...` row (if it was already mounted). On the idle/no-paused owed RAID1 path, after the `committed` line it prints a RAID1 soft-balance replay row pair before the final `pending-op.json cleared` line. If the balance check is paused, running, or unknown, recover fails before the replay row and does not clear the journal.
+
+> [!IMPORTANT]
+> If recover refuses owed RAID1 replay because btrfs balance state is paused, running, or unknown, it left `pending-op.json` in place. Inspect btrfs manually before clearing recovery state.
 
 ## Common variations
 
@@ -75,9 +78,9 @@ sudo braid recover --dry-run
 8. For add `PoolMutation`, replays only journaled targets that are not already live. `RecoverableBraidLabeled` targets are replayed via `wipefs --all --types btrfs` plus `btrfs device add -f` after LUKS UUID and visible-FSID checks. `FreshLuks` targets that are physically present are replayed from the journaled format options, skipping format if the disk already has the expected LUKS label; if the journal carried `enroll_key_file`, the keyfile is re-enrolled, then the LUKS header is backed up, the mapper is opened, and `btrfs device add` runs without `-f`. `FreshLuks` targets that are physically absent or carry an unexpected LUKS label make recover fail and leave `pending-op.json` in place so the disk can be reattached or replaced and recovery rerun.
 
    See [Pending LUKS header backups](status.md#pending-luks-header-backups) -- copy each `.luksheader` off-system and delete the local copy.
-9. For add `PostAddBalanceRaid1`, does not format, enroll, back up headers as target prep, wipe, or add disks. It only validates the committed live pool and finishes the owed RAID1 balance.
+9. For add `PostAddBalanceRaid1`, does not format, enroll, back up headers as target prep, wipe, or add disks. It only validates the committed live pool and runs the owed RAID1 balance when btrfs balance state is idle; a paused, running, or unknown balance state fails closed with the journal preserved.
 10. For replace and remove-missing `PoolMutation`, detects whether the primary btrfs membership mutation committed. If it did not commit, recover restores/keeps the pre-operation `pool.json`, clears the journal, and tells you to rerun the original command. It does not rerun `btrfs replace start` or `btrfs device remove`.
-11. For replace and remove-missing post-maintenance phases, validates committed live membership, repairs `pool.json` if needed, and finishes only owed maintenance such as resize, paused-balance resume, or soft RAID1 balance; it does not rerun the primary btrfs membership mutation.
+11. For replace and remove-missing post-maintenance phases, validates committed live membership, repairs `pool.json` if needed, and finishes only owed maintenance such as resize or, when btrfs balance state is idle, soft RAID1 balance; it does not rerun the primary btrfs membership mutation. A paused, running, or unknown balance state before owed RAID1 replay fails closed with `pending-op.json` preserved.
 12. Resolves `/dev/disk/by-id/` paths from live LUKS UUIDs, using btrfs devid only for missing or null-underlying bindings (not from the journal's by-id path, which may be stale).
 13. Writes or repairs `pool.json` only after the journal phase allows it and live membership is complete.
 14. Clears `pending-op.json` only after membership is complete and any owed balance work is done.

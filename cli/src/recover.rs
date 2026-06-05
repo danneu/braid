@@ -192,9 +192,8 @@ pub struct RecoverParams<'a> {
     pub passphrase_file: Option<&'a std::path::Path>,
     pub allow_degraded: bool,
     pub dry_run: bool,
-    /// Progress output for the post-mount remediation phase (replace resize
-    /// replay and paused-balance resume). Off in tests; Human/Json in real
-    /// use because the resume can be long-running.
+    /// Progress output for post-mount maintenance that can run for a long time,
+    /// such as replace resize replay or owed RAID1 soft-balance replay.
     pub progress: ProgressOutput,
     pub sleep_inhibitor: &'a dyn AcquireSleepInhibitor,
     /// Sleeper seam for transient mapper-close retries and recovery
@@ -908,9 +907,9 @@ fn render_recovery_tail(
 
     if show_raid1_maintenance {
         steps.push(Step {
-            risk: "long",
+            risk: "safe",
             description: format!(
-                "btrfs balance resume {} (skipped if no paused balance)",
+                "check btrfs balance status {} is idle before RAID1 replay",
                 plan.mount_point
             ),
             commands: vec![],
@@ -1806,25 +1805,32 @@ fn replay_owed_raid1_maintenance<R: CommandRunner + Sync>(
     progress: ProgressOutput,
 ) -> Result<(), RecoverError> {
     let color_enabled = color_enabled_for_stderr();
-    if let BalanceReport::Paused { .. } = get_balance_report(runner, mount_point) {
-        eprint!(
-            "{}",
-            status_line(
-                StatusTag::Wait,
-                color_enabled,
-                &format!("pool: resuming paused balance left by interrupted {label}..."),
-            )
-        );
-        crate::pool::pool_balance_resume(runner, mount_point, progress)
-            .map_err(|e| RecoverError::Failed(format!("recover balance resume: {e}")))?;
-        eprint!(
-            "{}",
-            status_line(
-                StatusTag::Ok,
-                color_enabled,
-                "pool: balance resume complete",
-            )
-        );
+    match get_balance_report(runner, mount_point) {
+        BalanceReport::Idle => {}
+        BalanceReport::Paused { .. } => {
+            return Err(RecoverError::Failed(format!(
+                "recover found a paused btrfs balance at {mount_point} before post-{label} \
+                 RAID1 replay. Automatic recovery is unsafe for crash-paused owed RAID1 \
+                 maintenance; preserving pending-op.json. Inspect btrfs manually before \
+                 clearing recovery state."
+            )));
+        }
+        BalanceReport::Running { .. } => {
+            return Err(RecoverError::Failed(format!(
+                "recover found a running btrfs balance at {mount_point} before post-{label} \
+                 RAID1 replay. Automatic recovery requires an idle btrfs balance before \
+                 owed RAID1 replay; preserving pending-op.json. Inspect btrfs manually \
+                 before clearing recovery state."
+            )));
+        }
+        BalanceReport::Unknown => {
+            return Err(RecoverError::Failed(format!(
+                "recover could not determine btrfs balance state at {mount_point} before \
+                 post-{label} RAID1 replay. Automatic recovery requires an idle btrfs \
+                 balance before owed RAID1 replay; preserving pending-op.json. Inspect \
+                 btrfs manually before clearing recovery state."
+            )));
+        }
     }
 
     if pool.devices.len() >= 2 {
@@ -5635,23 +5641,25 @@ mod tests {
             )
     }
 
+    fn with_idle_balance_status(runner: MockRunner) -> MockRunner {
+        runner.with_output(
+            CmdRequest::BtrfsBalanceStatus {
+                mount_point: MountPoint("/mnt/storage".into()),
+            },
+            ok_raw(
+                "btrfs balance status",
+                "No balance found on '/mnt/storage'\n",
+            ),
+        )
+    }
+
     fn with_balance_replay(runner: MockRunner) -> MockRunner {
-        runner
-            .with_output(
-                CmdRequest::BtrfsBalanceStatus {
-                    mount_point: MountPoint("/mnt/storage".into()),
-                },
-                ok_raw(
-                    "btrfs balance status",
-                    "No balance found on '/mnt/storage'\n",
-                ),
-            )
-            .with_output(
-                CmdRequest::BtrfsBalanceRaid1Soft {
-                    mount_point: MountPoint("/mnt/storage".into()),
-                },
-                ok_raw_empty("btrfs balance start"),
-            )
+        with_idle_balance_status(runner).with_output(
+            CmdRequest::BtrfsBalanceRaid1Soft {
+                mount_point: MountPoint("/mnt/storage".into()),
+            },
+            ok_raw_empty("btrfs balance start"),
+        )
     }
 
     // Intent
@@ -8326,9 +8334,7 @@ mod tests {
         assert!(
             !runner.requests().iter().any(|r| matches!(
                 r,
-                CmdRequest::BtrfsBalanceStatus { .. }
-                    | CmdRequest::BtrfsBalanceResume { .. }
-                    | CmdRequest::BtrfsBalanceRaid1Soft { .. }
+                CmdRequest::BtrfsBalanceStatus { .. } | CmdRequest::BtrfsBalanceRaid1Soft { .. }
             )),
             "inhibitor failure must stop before balance commands"
         );
@@ -9249,9 +9255,7 @@ mod tests {
         assert!(
             !runner.requests().iter().any(|r| matches!(
                 r,
-                CmdRequest::BtrfsBalanceStatus { .. }
-                    | CmdRequest::BtrfsBalanceResume { .. }
-                    | CmdRequest::BtrfsBalanceRaid1Soft { .. }
+                CmdRequest::BtrfsBalanceStatus { .. } | CmdRequest::BtrfsBalanceRaid1Soft { .. }
             )),
             "post-add inhibitor failure must stop before balance"
         );
@@ -10591,9 +10595,7 @@ mod tests {
         assert!(
             !requests.iter().any(|r| matches!(
                 r,
-                CmdRequest::BtrfsBalanceStatus { .. }
-                    | CmdRequest::BtrfsBalanceResume { .. }
-                    | CmdRequest::BtrfsBalanceRaid1Soft { .. }
+                CmdRequest::BtrfsBalanceStatus { .. } | CmdRequest::BtrfsBalanceRaid1Soft { .. }
             )),
             "restore_raid1_after_commit=false must skip balance probes and replay"
         );
@@ -12029,8 +12031,17 @@ mod tests {
                 },
                 cryptsetup_uuid_ok("/dev/vdb", "22222222-2222-2222-2222-222222222222"),
             )
-            // M1: replay_owed_raid1_maintenance runs the post-Add soft RAID1
-            // balance because pool has 2 devices and OpKind is Add.
+            // Idle gate + replay: post-Add recovery probes btrfs balance state
+            // before the owed soft RAID1 balance.
+            .with_output(
+                CmdRequest::BtrfsBalanceStatus {
+                    mount_point: MountPoint("/mnt/storage".into()),
+                },
+                ok_raw(
+                    "btrfs balance status",
+                    "No balance found on '/mnt/storage'\n",
+                ),
+            )
             .with_output(
                 CmdRequest::BtrfsBalanceRaid1Soft {
                     mount_point: MountPoint("/mnt/storage".into()),
@@ -12179,8 +12190,17 @@ mod tests {
                 },
                 cryptsetup_uuid_ok("/dev/vdb", "22222222-2222-2222-2222-222222222222"),
             )
-            // M1: replay_owed_raid1_maintenance runs the post-Add soft RAID1
-            // balance because pool has 2 devices and OpKind is Add.
+            // Idle gate + replay: post-Add recovery probes btrfs balance state
+            // before the owed soft RAID1 balance.
+            .with_output(
+                CmdRequest::BtrfsBalanceStatus {
+                    mount_point: MountPoint("/mnt/storage".into()),
+                },
+                ok_raw(
+                    "btrfs balance status",
+                    "No balance found on '/mnt/storage'\n",
+                ),
+            )
             .with_output(
                 CmdRequest::BtrfsBalanceRaid1Soft {
                     mount_point: MountPoint("/mnt/storage".into()),
@@ -13858,8 +13878,17 @@ mod tests {
                 },
                 cryptsetup_uuid_ok("/dev/vdb", "22222222-2222-2222-2222-222222222222"),
             )
-            // M1: replay_owed_raid1_maintenance runs the post-Add soft RAID1
-            // balance because pool has 2 devices and OpKind is Add.
+            // Idle gate + replay: post-Add recovery probes btrfs balance state
+            // before the owed soft RAID1 balance.
+            .with_output(
+                CmdRequest::BtrfsBalanceStatus {
+                    mount_point: MountPoint("/mnt/storage".into()),
+                },
+                ok_raw(
+                    "btrfs balance status",
+                    "No balance found on '/mnt/storage'\n",
+                ),
+            )
             .with_output(
                 CmdRequest::BtrfsBalanceRaid1Soft {
                     mount_point: MountPoint("/mnt/storage".into()),
@@ -14022,7 +14051,7 @@ mod tests {
         let journal = bootstrap_journal();
         journal::write_journal(&f.paths, &journal).unwrap();
 
-        let runner = already_mounted_one_disk_runner();
+        let runner = with_idle_balance_status(already_mounted_one_disk_runner());
         let resolver = resolver_for(&[("/dev/vda", "virtio-disk1")]);
         let result = cmd_recover(
             &runner,
@@ -14139,6 +14168,15 @@ mod tests {
                     device: "/dev/vdb".into(),
                 },
                 cryptsetup_uuid_ok("/dev/vdb", "22222222-2222-2222-2222-222222222222"),
+            )
+            .with_output(
+                CmdRequest::BtrfsBalanceStatus {
+                    mount_point: MountPoint("/mnt/storage".into()),
+                },
+                ok_raw(
+                    "btrfs balance status",
+                    "No balance found on '/mnt/storage'\n",
+                ),
             )
             .with_output(
                 CmdRequest::BtrfsBalanceRaid1Soft {
@@ -14667,8 +14705,17 @@ mod tests {
                 },
                 cryptsetup_uuid_ok("/dev/vdb", "22222222-2222-2222-2222-222222222222"),
             )
-            // M1: replay_owed_raid1_maintenance runs the post-Add soft RAID1
-            // balance because pool has 2 devices and OpKind is Add.
+            // Idle gate + replay: post-Add recovery probes btrfs balance state
+            // before the owed soft RAID1 balance.
+            .with_output(
+                CmdRequest::BtrfsBalanceStatus {
+                    mount_point: MountPoint("/mnt/storage".into()),
+                },
+                ok_raw(
+                    "btrfs balance status",
+                    "No balance found on '/mnt/storage'\n",
+                ),
+            )
             .with_output(
                 CmdRequest::BtrfsBalanceRaid1Soft {
                     mount_point: MountPoint("/mnt/storage".into()),
@@ -15707,10 +15754,9 @@ mod tests {
                 "/dev/disk/by-id/virtio-old",
                 "/dev/disk/by-id/virtio-new",
             ]);
-        // Note: BtrfsBalanceStatus, BtrfsBalanceResume, and
-        // BtrfsBalanceRaid1Soft are NOT mocked. This live-source replace does
-        // not owe post-commit RAID1 maintenance, so any balance replay would
-        // fail with MissingMock.
+        // Note: BtrfsBalanceStatus and BtrfsBalanceRaid1Soft are NOT mocked.
+        // This live-source replace does not owe post-commit RAID1 maintenance,
+        // so any balance replay would fail with MissingMock.
 
         // RemountFs starts with by-id paths for the union {disk1, old,
         // new}. No mapper paths -- everything starts closed.
@@ -15772,9 +15818,7 @@ mod tests {
         assert!(
             !requests.iter().any(|r| matches!(
                 r,
-                CmdRequest::BtrfsBalanceStatus { .. }
-                    | CmdRequest::BtrfsBalanceResume { .. }
-                    | CmdRequest::BtrfsBalanceRaid1Soft { .. }
+                CmdRequest::BtrfsBalanceStatus { .. } | CmdRequest::BtrfsBalanceRaid1Soft { .. }
             )),
             "live-source replace recovery must not replay unowed balance work: {requests:?}"
         );
@@ -15932,40 +15976,10 @@ mod tests {
         );
     }
 
-    /// Intent: When `cmd_recover` finds a paused balance after rebuilding
-    /// pool.json, it MUST issue `btrfs balance resume` before clearing the
-    /// journal. Otherwise the pool stays in reduced-redundancy state until
-    /// the operator manually runs the resume.
-    ///
-    /// Why it exists: This closes the GAP A identified in the Pre-M11 audit
-    /// for all four mutation classes. braid mounts with `skip_balance`
-    /// via `base_mount_options` so the kernel does NOT auto-resume a paused
-    /// balance, and the previous `emit_paused_balance_warning` only printed
-    /// a hint, leaving the pool unprotected. The VM matrix tests M5 (RemoveMissing
-    /// soft balance) and M6 (post-add RAID1 balance) explicitly trigger this
-    /// scenario; without auto-resume those tests cannot assert "pool is back
-    /// to a known-good state without manual intervention".
-    ///
-    /// Scenario: An operator ran `braid add disk3` against a 2-disk pool;
-    /// UPS LB fired during the post-add `pool_balance_raid1`. Reboot leaves
-    /// a paused RAID1 balance. `braid recover` runs, sees the paused state,
-    /// resumes the balance to drain it, then clears the journal.
-    #[test]
-    fn recover_resumes_paused_balance_then_clears_journal() {
-        let f = PoolFixture::empty();
-        let fs = MockFs::new(&[]);
-
-        // OpKind::Add interrupted mid-balance. Live pool already reflects
-        // the target membership (disk1 + disk2) because `btrfs device add`
-        // committed before the crash; only the rebalance was in flight.
-        let journal = committed_two_disk_add_journal();
-        journal::write_journal(&f.paths, &journal).unwrap();
-
+    fn committed_add_recover_runner(balance_status: Option<RawCommandOutput>) -> MockRunner {
         let (mp_req, mp_out) = mountpoint_ok();
         let runner = MockRunner::default()
-            // mountpoint check -> already mounted
             .with_output(mp_req, mp_out)
-            // probe_pool path
             .with_output(
                 CmdRequest::BtrfsFilesystemShow {
                     mount_point: MountPoint("/mnt/storage".into()),
@@ -15995,62 +16009,106 @@ mod tests {
                     device: "/dev/vdb".into(),
                 },
                 cryptsetup_uuid_ok("/dev/vdb", "22222222-2222-2222-2222-222222222222"),
-            )
-            // Balance status reports Paused (matches the post-skip_balance
-            // remount with reset chunk counters from
-            // `parse_btrfs_balance_status::balance_status_paused_after_remount_negative_nan_pct`).
-            .with_output(
+            );
+        if let Some(output) = balance_status {
+            runner.with_output(
                 CmdRequest::BtrfsBalanceStatus {
                     mount_point: MountPoint("/mnt/storage".into()),
                 },
-                RawCommandOutput {
-                    cmd: "btrfs balance status".into(),
-                    stdout: "Balance on '/mnt/storage' is paused\n\
-                             0 out of about 0 chunks balanced (0 considered), -nan% left\n"
-                        .into(),
-                    stderr: String::new(),
-                    exit_status: 1,
-                },
+                output,
             )
-            // M1 replay: paused balance -> issue resume. Without this mock
-            // the test fails with MissingMock, proving recover actually
-            // issued the resume.
-            .with_output(
-                CmdRequest::BtrfsBalanceResume {
-                    mount_point: MountPoint("/mnt/storage".into()),
-                },
-                ok_raw_empty("btrfs balance resume"),
+        } else {
+            runner
+        }
+    }
+
+    fn balance_status_paused_output() -> RawCommandOutput {
+        RawCommandOutput {
+            cmd: "btrfs balance status".into(),
+            stdout: "Balance on '/mnt/storage' is paused\n\
+                     0 out of about 0 chunks balanced (0 considered), -nan% left\n"
+                .into(),
+            stderr: String::new(),
+            exit_status: 1,
+        }
+    }
+
+    fn balance_status_running_output() -> RawCommandOutput {
+        RawCommandOutput {
+            cmd: "btrfs balance status".into(),
+            stdout: "Balance on '/mnt/storage' is running\n\
+                     3 out of about 10 chunks balanced (7 considered), 70% left\n"
+                .into(),
+            stderr: String::new(),
+            exit_status: 1,
+        }
+    }
+
+    // Intent: owed RAID1 recovery fails closed for paused, running, and unknown
+    // btrfs balance states.
+    // Why it exists: replaying owed soft RAID1 maintenance on top of a
+    // crash-paused or otherwise non-idle balance can make the kernel underflow
+    // block-group accounting, so recover must preserve the journal for manual
+    // inspection instead of resuming or starting balance work.
+    // Scenario: an add committed its membership and crashed before post-add
+    // RAID1 maintenance finished; next-boot recover sees a non-idle or
+    // indeterminate balance state after repairing pool.json.
+    #[test]
+    fn recover_owed_raid1_non_idle_balance_fails_closed_and_preserves_journal() {
+        let cases = [
+            ("paused", Some(balance_status_paused_output())),
+            ("running", Some(balance_status_running_output())),
+            ("unknown", None),
+        ];
+
+        for (state, balance_status) in cases {
+            let f = PoolFixture::empty();
+            let fs = MockFs::new(&[]);
+            let journal = committed_two_disk_add_journal();
+            journal::write_journal(&f.paths, &journal).unwrap();
+
+            let runner = committed_add_recover_runner(balance_status);
+            let resolver =
+                resolver_for(&[("/dev/vda", "virtio-disk1"), ("/dev/vdb", "virtio-disk2")]);
+            let err = cmd_recover(
+                &runner,
+                &fs,
+                &resolver,
+                &f.recover_params().passphrase_file(None).build(),
             )
-            // M1 replay: unconditional soft RAID1 balance for OpKind::Add.
-            // After the resume drains the paused balance, this re-runs the
-            // soft balance to also catch the case where umount cancelled
-            // (rather than paused) a partial balance. Idempotent: the
-            // `,soft` filter skips already-RAID1 chunks.
-            .with_output(
-                CmdRequest::BtrfsBalanceRaid1Soft {
-                    mount_point: MountPoint("/mnt/storage".into()),
-                },
-                ok_raw_empty("btrfs balance start"),
+            .unwrap_err();
+
+            let msg = err.to_string();
+            let expected_state_text = if state == "unknown" {
+                "could not determine btrfs balance state"
+            } else {
+                state
+            };
+            assert!(
+                msg.contains(expected_state_text) && msg.contains("preserving pending-op.json"),
+                "unexpected {state} error: {msg}"
             );
-
-        let resolver = resolver_for(&[("/dev/vda", "virtio-disk1"), ("/dev/vdb", "virtio-disk2")]);
-        let result = cmd_recover(
-            &runner,
-            &fs,
-            &resolver,
-            &f.recover_params().passphrase_file(None).build(),
-        );
-
-        result.expect("recover should succeed and resume the paused balance");
-
-        let recovered = membership::load_membership(&f.paths).unwrap();
-        assert!(recovered.by_name(&disk_name("disk1")).is_some());
-        assert!(recovered.by_name(&disk_name("disk2")).is_some());
-
-        assert!(
-            !f.paths.pending_op_json().exists(),
-            "journal must be cleared after the paused balance is resumed"
-        );
+            let recovered = membership::load_membership(&f.paths).unwrap();
+            assert!(recovered.by_name(&disk_name("disk1")).is_some());
+            assert!(recovered.by_name(&disk_name("disk2")).is_some());
+            assert!(
+                f.paths.pending_op_json().exists(),
+                "{state} balance state must preserve pending-op.json"
+            );
+            let requests = runner.requests();
+            assert!(
+                !requests
+                    .iter()
+                    .any(|r| matches!(r, CmdRequest::BtrfsBalanceRaid1Soft { .. })),
+                "{state} balance state must fail before soft RAID1 replay: {requests:?}"
+            );
+            assert!(
+                requests
+                    .iter()
+                    .any(|r| matches!(r, CmdRequest::BtrfsBalanceStatus { .. })),
+                "{state} balance state should probe btrfs balance status"
+            );
+        }
     }
 
     /// Two-disk Remove journal modeling an interrupted 2->1 remove: pre =
@@ -16089,10 +16147,10 @@ mod tests {
     /// phase issues a balance (the RAID1 -> single conversion in the 2->1
     /// case via `pool_balance_single`). A shutdown landing during that
     /// pre-balance leaves the kernel with a paused convert-to-single balance
-    /// against a still-2-disk pool. If `replay_owed_raid1_maintenance` resumed it
-    /// unconditionally, recover would finish the conversion to single
-    /// without ever removing the device, then clear the journal, silently
-    /// halving redundancy. The matrix test `ups-lb-during-remove` only
+    /// against a still-2-disk pool. If `replay_owed_raid1_maintenance` ran on
+    /// this remove path, recover could finish the conversion to single without
+    /// ever removing the device, then clear the journal, silently halving
+    /// redundancy. The matrix test `ups-lb-during-remove` only
     /// exercises a 3->2 remove, so this unit test is the regression guard
     /// for the 2->1 pre-balance path.
     ///
@@ -16100,10 +16158,10 @@ mod tests {
     /// RAID1 pool; UPS LB fired during the pre-remove `pool_balance_single`.
     /// Pool comes up with both disks still present and a paused balance.
     /// Recover writes the recovered membership ({disk1, disk2} = pre), skips
-    /// the resume + the soft RAID1 replay, clears the journal, and prints
-    /// guidance to re-run `braid remove`.
+    /// balance probing and replay, clears the journal, and prints guidance to
+    /// re-run `braid remove`.
     #[test]
-    fn recover_skips_paused_balance_resume_for_remove() {
+    fn recover_skips_balance_replay_for_remove() {
         let f = PoolFixture::empty();
         let fs = MockFs::new(&[]);
 
@@ -16147,12 +16205,11 @@ mod tests {
                 },
                 cryptsetup_uuid_ok("/dev/vdb", "22222222-2222-2222-2222-222222222222"),
             );
-        // Note: BtrfsBalanceStatus, BtrfsBalanceResume, and BtrfsBalanceRaid1Soft
-        // are NOT mocked. If the runtime gate for OpKind::Remove regresses and
-        // recover calls replay_owed_raid1_maintenance -- either probing balance
-        // status, issuing `btrfs balance resume`, or replaying the soft RAID1
-        // balance -- the test fails with MissingMock, proving recover correctly
-        // leaves the paused balance alone for the remove path.
+        // Note: BtrfsBalanceStatus and BtrfsBalanceRaid1Soft are NOT mocked. If
+        // the runtime gate for OpKind::Remove regresses and recover calls
+        // replay_owed_raid1_maintenance, the test fails with MissingMock,
+        // proving recover correctly leaves the paused balance alone for the
+        // remove path.
 
         let resolver = resolver_for(&[("/dev/vda", "virtio-disk1"), ("/dev/vdb", "virtio-disk2")]);
         let result = cmd_recover(
@@ -18533,9 +18590,9 @@ mod tests {
         let write_pos = rendered
             .find("write recovered pool.json")
             .unwrap_or_else(|| panic!("missing write step: {rendered:?}"));
-        let resume_pos = rendered
-            .find("btrfs balance resume /mnt/storage (skipped if no paused balance)")
-            .unwrap_or_else(|| panic!("missing balance resume placeholder: {rendered:?}"));
+        let status_pos = rendered
+            .find("check btrfs balance status /mnt/storage is idle before RAID1 replay")
+            .unwrap_or_else(|| panic!("missing balance status placeholder: {rendered:?}"));
         let soft_pos = rendered
             .find("btrfs balance -dconvert=raid1,soft -mconvert=raid1,soft /mnt/storage (skipped if pool has <2 devices)")
             .unwrap_or_else(|| panic!("missing soft balance placeholder: {rendered:?}"));
@@ -18544,11 +18601,11 @@ mod tests {
             .unwrap_or_else(|| panic!("missing clear step: {rendered:?}"));
 
         assert!(
-            write_pos < resume_pos && resume_pos < soft_pos && soft_pos < clear_pos,
+            write_pos < status_pos && status_pos < soft_pos && soft_pos < clear_pos,
             "post-mutation placeholders must sit between write and clear: {rendered:?}",
         );
         assert!(
-            !rendered.contains("$ btrfs balance resume")
+            !rendered.contains("$ btrfs balance status")
                 && !rendered.contains("$ btrfs balance start --enqueue -dconvert=raid1,soft"),
             "conditional placeholders must not render btrfs balance commands: {rendered:?}",
         );
@@ -18567,7 +18624,7 @@ mod tests {
         );
 
         assert!(
-            rendered.contains("btrfs balance resume /mnt/storage (skipped if no paused balance)")
+            rendered.contains("check btrfs balance status /mnt/storage is idle before RAID1 replay")
                 && rendered.contains(
                     "btrfs balance -dconvert=raid1,soft -mconvert=raid1,soft /mnt/storage (skipped if pool has <2 devices)"
                 ),
@@ -18614,7 +18671,7 @@ mod tests {
             "conditional resize placeholder must not render a command: {rendered:?}",
         );
         assert!(
-            !rendered.contains("$ btrfs balance resume")
+            !rendered.contains("$ btrfs balance status")
                 && !rendered.contains("-dconvert=raid1,soft"),
             "live-source replace preview must not include RAID1 balance replay: {rendered:?}",
         );
@@ -18624,8 +18681,8 @@ mod tests {
      * Verify remove-missing dry-run previews the balance replay placeholders.
      *
      * Why it exists
-     * Remove-missing can leave paused or incomplete post-mutation balancing
-     * just like add and replace. The preview needs to name that follow-up
+     * Remove-missing can leave incomplete post-mutation balancing just like add
+     * and replace. The preview needs to name the idle gate and the follow-up
      * work.
      *
      * Scenario
@@ -18642,7 +18699,7 @@ mod tests {
         );
 
         assert!(
-            rendered.contains("btrfs balance resume /mnt/storage (skipped if no paused balance)")
+            rendered.contains("check btrfs balance status /mnt/storage is idle before RAID1 replay")
                 && rendered.contains(
                     "btrfs balance -dconvert=raid1,soft -mconvert=raid1,soft /mnt/storage (skipped if pool has <2 devices)"
                 ),
@@ -18676,7 +18733,7 @@ mod tests {
         );
 
         assert!(
-            !rendered.contains("btrfs balance resume")
+            !rendered.contains("check btrfs balance status")
                 && !rendered.contains("-dconvert=raid1,soft")
                 && !rendered.contains("btrfs filesystem resize <devid>:max"),
             "remove preview should omit replay placeholders: {rendered:?}",

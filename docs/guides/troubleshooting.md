@@ -92,7 +92,10 @@ sudo braid discover --write
 sudo braid recover
 ```
 
-Recover reads the pending-operation journal, opens LUKS devices and mounts the pool if needed, probes the live btrfs topology, and rebuilds pool.json from actual state. It then clears the journal.
+Recover reads the pending-operation journal, opens LUKS devices and mounts the pool if needed, probes the live btrfs topology, and rebuilds pool.json from actual state. It clears the journal only after the idle/no-paused recovery path succeeds.
+
+> [!IMPORTANT]
+> If recover refuses owed RAID1 replay because btrfs balance state is paused, running, or unknown, it left `pending-op.json` in place. Inspect btrfs manually before clearing recovery state.
 
 If devices are missing (drive failure during the interrupted operation):
 

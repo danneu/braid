@@ -2,21 +2,19 @@
 #
 # Intent: verify that a forced shutdown driven by upsmon's critical-
 # state SHUTDOWNCMD while the `maybe_restore_raid1` soft balance
-# triggered by `braid remove-missing` is in flight is a recoverable
-# state. After reboot, `braid recover` MUST detect the paused soft
-# balance and resume it (M1 remediation in `cli/src/recover.rs`),
-# leaving the pool with all chunks back to RAID1 -- not stuck with
-# unprotected single-profile chunks.
+# triggered by `braid remove-missing` is in flight fails closed after
+# reboot when btrfs persists the balance as paused. `braid recover`
+# MUST preserve `pending-op.json` and refuse automatic RAID1 replay,
+# leaving the operator with explicit manual-reconciliation state.
 #
 # Why it exists: ADR 020's "mid-mutation power loss is a supported
 # recovery case" guarantee covers the remove-missing path. The
-# Pre-M11 audit identified this exact scenario as a gap (the existing
-# `emit_paused_balance_warning` only printed an advisory; it did not
-# actually drain the paused balance). M1 closed the gap by inserting
-# a paused-balance resume between `save_membership` and
-# `clear_journal` in `cmd_recover`. This VM test pins that fix in
-# place -- if the resume regresses, the post-recover assertion that
-# no `Data, single` chunks remain will fail.
+# Pre-M11 audit identified this exact scenario as a gap. Later VM
+# evidence showed that automatic replay after a crash-paused owed
+# RAID1 balance can underflow btrfs block-group accounting. This test
+# now pins the fail-closed policy: recover repairs committed membership
+# but does not resume, cancel, or start balance work while the persisted
+# paused balance still needs manual inspection.
 #
 # Scenario: Operator's pool was running degraded (a disk had failed
 # and the operator was using the array degraded-mounted while
@@ -25,8 +23,9 @@
 # disk, then started `braid remove-missing` to drop the dead disk's
 # metadata reference; the UPS LB fired during the post-removal soft
 # balance that converts those single-profile chunks back to RAID1.
-# The next morning the operator runs `braid recover`. The pool comes
-# back fully RAID1 -- no manual `btrfs balance resume` required.
+# The next morning the operator runs `braid recover`. Recovery refuses
+# to automate the crash-paused balance, leaves the journal in place,
+# and keeps the single-profile chunks visible for manual reconciliation.
 #
 # Setup notes
 # -----------
@@ -356,27 +355,37 @@ with subtest("Pending-op journal survived the forced shutdown"):
         f"journal is not OpKind::RemoveMissing as expected:\n{journal_text}"
     )
 
-with subtest("braid recover completes cleanly"):
+with subtest("braid recover fails closed on paused owed RAID1 balance"):
     # disk2 is genuinely gone (LUKS mapper closed, btrfs metadata
     # already removed by the in-flight remove-missing). Recovery
-    # must succeed without --allow-degraded because the live pool is
-    # disk1 + disk3 (= the post-remove-missing target), not degraded.
+    # can mount and repair the committed membership without
+    # --allow-degraded because the live pool is disk1 + disk3 (= the
+    # post-remove-missing target), not degraded. It must still refuse
+    # the crash-paused owed RAID1 replay.
     recover_exit, recover_out = machine.execute(
         f"printf '%s\\n' {pq} | braid recover --passphrase-stdin 2>&1"
     )
     print(f"=== braid recover (exit {recover_exit}) ===\n{recover_out}")
-    assert recover_exit == 0, (
-        f"braid recover failed (exit {recover_exit}):\n{recover_out}"
+    assert recover_exit != 0, (
+        f"braid recover should fail closed on a paused balance:\n{recover_out}"
     )
     assert "panicked at" not in recover_out, (
         f"braid recover panicked:\n{recover_out}"
     )
-    # The M1 fix logs this when the post-mutation soft balance replays.
-    # This message appears regardless of whether the umount paused or
-    # cancelled the original balance.
-    assert "replaying post-remove-missing RAID1 soft balance" in recover_out, (
-        f"recover did not replay the post-remove-missing soft balance "
-        f"-- the M1 remediation may have regressed.\n{recover_out}"
+    assert "paused btrfs balance" in recover_out, (
+        f"recover did not name the paused-balance refusal:\n{recover_out}"
+    )
+    assert "preserving pending-op.json" in recover_out, (
+        f"recover did not say the journal is preserved:\n{recover_out}"
+    )
+    assert "balance resume" not in recover_out, (
+        f"recover must not resume a crash-paused balance:\n{recover_out}"
+    )
+    assert "balance cancel" not in recover_out, (
+        f"recover must not cancel a crash-paused balance:\n{recover_out}"
+    )
+    assert "replaying post-remove-missing RAID1 soft balance" not in recover_out, (
+        f"recover must not start soft RAID1 replay after paused status:\n{recover_out}"
     )
 
 # --- Phase 8: post-recover state assertions. ---
@@ -393,15 +402,11 @@ with subtest("btrfs reports zero device errors"):
                 f"btrfs reports non-zero stat after recover: {line!r}"
             )
 
-with subtest("No single-profile chunks remain (the M1 resume drained them)"):
+with subtest("Single-profile chunks remain visible for manual reconciliation"):
     fi_df = machine.succeed("btrfs filesystem df /mnt/storage")
     print(f"=== final fi df ===\n{fi_df}")
-    assert "Data, single" not in fi_df, (
-        f"single-profile chunks still present -- M1 paused-balance resume "
-        f"failed to drain them:\n{fi_df}"
-    )
-    assert "Metadata, single" not in fi_df, (
-        f"single-profile metadata still present:\n{fi_df}"
+    assert "Data, single" in fi_df, (
+        f"fail-closed recovery should leave Data,single visible:\n{fi_df}"
     )
 
 with subtest("Live pool has the post-remove-missing target membership"):
@@ -425,16 +430,21 @@ with subtest("pool.json reflects the post-remove-missing membership"):
     assert '"disk3"' in final_pool_json
     assert '"disk2"' not in final_pool_json
 
-with subtest("Journal cleared after recover"):
-    machine.fail("test -f /var/lib/braid/pending-op.json")
+with subtest("Journal preserved after fail-closed recover"):
+    machine.succeed("test -f /var/lib/braid/pending-op.json")
 
-with subtest("No paused balance left behind"):
+with subtest("Paused balance left for manual inspection"):
     status_out = machine.execute("btrfs balance status /mnt/storage 2>&1")[1]
     print(f"=== final balance status ===\n{status_out}")
-    assert "paused" not in status_out, (
-        f"a paused balance still exists after recover -- the M1 resume "
-        f"either did not run or did not complete:\n{status_out}"
+    assert "paused" in status_out, (
+        f"fail-closed recovery should leave the paused balance visible:\n{status_out}"
     )
+
+with subtest("No forced-readonly or underflow kernel log"):
+    klog = machine.execute("journalctl -k --no-pager 2>&1")[1].lower()
+    assert "forced readonly" not in klog, klog
+    assert "forced read-only" not in klog, klog
+    assert "underflow" not in klog, klog
 
 with subtest("Both payload checksums survived"):
     baseline_post = machine.succeed("sha256sum /mnt/storage/baseline").split()[0]
@@ -446,16 +456,15 @@ with subtest("Both payload checksums survived"):
         f"degraded-write payload changed: pre={degraded_sha} post={degraded_post}"
     )
 
-with subtest("Subsequent lock/unlock cycle stays clean"):
-    machine.succeed("braid lock")
-    machine.succeed(f"printf '%s\\n' {pq} | braid unlock --passphrase-stdin")
-    machine.succeed("mountpoint -q /mnt/storage")
-    cycle_fs_show = machine.succeed("btrfs filesystem show /mnt/storage")
-    assert "missing" not in cycle_fs_show.lower(), (
-        f"missing re-appeared after lock/unlock cycle:\n{cycle_fs_show}"
+with subtest("Recovery mode remains latched"):
+    unlock_exit, unlock_out = machine.execute(
+        f"printf '%s\\n' {pq} | braid unlock --passphrase-stdin 2>&1"
     )
-    assert "Total devices 2" in cycle_fs_show, (
-        f"pool should still have 2 devices:\n{cycle_fs_show}"
+    assert unlock_exit != 0, (
+        f"unlock should refuse while pending-op.json is preserved:\n{unlock_out}"
+    )
+    assert "interrupted operation" in unlock_out, (
+        f"unlock did not report recovery mode:\n{unlock_out}"
     )
 
 machine.shutdown()

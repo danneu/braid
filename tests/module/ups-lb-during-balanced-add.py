@@ -2,27 +2,28 @@
 #
 # Intent: verify that a forced shutdown driven by upsmon's critical-
 # state SHUTDOWNCMD while the post-add `pool_balance_raid1`
-# conversion is in flight is a recoverable state. After reboot,
-# `braid recover` MUST drain the in-flight balance and ensure all
-# data ends up RAID1 -- not stuck with a mix of single-profile and
-# RAID1 chunks, which would leave the new data unprotected.
+# conversion is in flight either recovers on the idle/no-paused path
+# or fails closed when btrfs persists the balance as paused. After
+# reboot, `braid recover` MUST NOT automate crash-paused owed RAID1
+# replay; it preserves the journal for manual reconciliation instead.
 #
 # Why it exists: ADR 020's "mid-mutation power loss is a supported
 # recovery case" guarantee covers the balanced-add path. The
-# Pre-M11 audit identified this exact scenario as a gap (the existing
-# `emit_paused_balance_warning` only printed an advisory). M1 closed
-# the gap by inserting a paused-balance resume + per-op soft balance
-# replay between `save_membership` and `clear_journal` in
-# `cmd_recover`. This VM test pins that fix for the Add path -- if
-# the replay regresses, the post-recover assertion that no `Data,
-# single` chunks remain will fail.
+# Pre-M11 audit identified this exact scenario as a gap. Later VM
+# evidence showed that automatic replay after a crash-paused owed
+# RAID1 balance can underflow btrfs block-group accounting. This test
+# pins both supported outcomes: idle/no-paused recovery still replays
+# the soft balance and clears the journal, while a persisted paused
+# balance fails closed before replay.
 #
 # Scenario: Operator's pool was 1-disk single-profile with data.
 # They added a second disk via `braid add` to gain
 # RAID1 redundancy. The UPS LB fired during the post-add balance
 # that converts single-profile chunks to RAID1. The next morning
-# they run `braid recover`. The pool comes back fully RAID1 -- no
-# manual `btrfs balance start` required.
+# they run `braid recover`. If btrfs has no paused balance, recover
+# finishes the soft RAID1 replay; if btrfs persisted a paused balance,
+# recover leaves `pending-op.json` in place and requires manual
+# inspection before the recovery state is cleared.
 
 import re
 import shlex
@@ -177,36 +178,45 @@ with subtest("braid unlock refuses with journal present"):
         f"unlock did not emit the journal-detected error:\n{output}"
     )
 
-with subtest("braid recover completes cleanly"):
+recover_failed_closed = False
+recover_out = ""
+
+with subtest("braid recover handles the post-add balance state"):
     recover_exit, recover_out = machine.execute(
         f"printf '%s\\n' {pq} | braid recover --passphrase-stdin 2>&1"
     )
     print(f"=== braid recover (exit {recover_exit}) ===\n{recover_out}")
-    assert recover_exit == 0, (
-        f"braid recover failed (exit {recover_exit}):\n{recover_out}"
-    )
     assert "panicked at" not in recover_out, (
         f"braid recover panicked:\n{recover_out}"
     )
-    # The M1 fix logs this when the post-Add soft balance replays.
-    assert "replaying post-add RAID1 soft balance" in recover_out, (
-        f"recover did not replay the post-add soft balance -- the M1 "
-        f"remediation may have regressed.\n{recover_out}"
-    )
-    # Soft pin for the paused-balance resume rows. Whether btrfs persists
-    # a paused balance after the LB shutdown depends on timing -- if the
-    # balance completed (or failed to write a clean paused state) before
-    # the kernel umount, recover sees an idle balance and only the soft
-    # balance replay below fires. If both rows do appear, they must be
-    # ordered correctly per Principle 13.
-    resume_wait = "[wait] pool: resuming paused balance left by interrupted add..."
-    resume_ok = "[ok]   pool: balance resume complete"
-    if resume_ok in recover_out:
-        assert resume_wait in recover_out, (
-            f"resume ok appears without preceding wait:\n{recover_out}"
+
+    if recover_exit == 0:
+        # Idle/no-paused path: recover should replay the idempotent soft balance
+        # and clear recovery mode.
+        assert "replaying post-add RAID1 soft balance" in recover_out, (
+            f"recover did not replay the post-add soft balance:\n{recover_out}"
         )
-        assert recover_out.find(resume_wait) < recover_out.find(resume_ok), (
-            f"paused-balance wait must precede ok:\n{recover_out}"
+        assert "balance resume" not in recover_out, (
+            f"recover must not resume balances automatically:\n{recover_out}"
+        )
+    else:
+        recover_failed_closed = True
+        assert "preserving pending-op.json" in recover_out, (
+            f"fail-closed recover did not preserve the journal:\n{recover_out}"
+        )
+        assert (
+            "paused btrfs balance" in recover_out
+            or "running btrfs balance" in recover_out
+            or "could not determine btrfs balance state" in recover_out
+        ), f"recover did not name the balance-state refusal:\n{recover_out}"
+        assert "balance resume" not in recover_out, (
+            f"recover must not resume a crash-paused balance:\n{recover_out}"
+        )
+        assert "balance cancel" not in recover_out, (
+            f"recover must not cancel a crash-paused balance:\n{recover_out}"
+        )
+        assert "replaying post-add RAID1 soft balance" not in recover_out, (
+            f"recover must fail before soft RAID1 replay:\n{recover_out}"
         )
 
 # --- Phase 5: post-recover state assertions. ---
@@ -223,13 +233,17 @@ with subtest("btrfs reports zero device errors"):
                 f"btrfs reports non-zero stat after recover: {line!r}"
             )
 
-with subtest("No single-profile chunks remain (the M1 replay drained them)"):
+with subtest("Single-profile chunk state matches recovery outcome"):
     fi_df = machine.succeed("btrfs filesystem df /mnt/storage")
     print(f"=== final fi df ===\n{fi_df}")
-    assert "Data, single" not in fi_df, (
-        f"single-profile chunks still present -- M1 soft-balance replay "
-        f"failed to drain them:\n{fi_df}"
-    )
+    if recover_failed_closed:
+        assert "Data, single" in fi_df, (
+            f"fail-closed recovery should leave Data,single visible:\n{fi_df}"
+        )
+    else:
+        assert "Data, single" not in fi_df, (
+            f"single-profile chunks still present after idle-path replay:\n{fi_df}"
+        )
 
 with subtest("Live pool has the post-add target membership"):
     fi_show = machine.succeed("btrfs filesystem show /mnt/storage")
@@ -251,15 +265,23 @@ with subtest("pool.json reflects the post-add target membership"):
     assert '"disk1"' in final_pool_json
     assert '"disk2"' in final_pool_json
 
-with subtest("Journal cleared after recover"):
-    machine.fail("test -f /var/lib/braid/pending-op.json")
+with subtest("Journal state matches recovery outcome"):
+    if recover_failed_closed:
+        machine.succeed("test -f /var/lib/braid/pending-op.json")
+    else:
+        machine.fail("test -f /var/lib/braid/pending-op.json")
 
-with subtest("No paused balance left behind"):
+with subtest("Balance state matches recovery outcome"):
     status_out = machine.execute("btrfs balance status /mnt/storage 2>&1")[1]
     print(f"=== final balance status ===\n{status_out}")
-    assert "paused" not in status_out, (
-        f"a paused balance still exists after recover:\n{status_out}"
-    )
+    if recover_failed_closed:
+        assert "No balance found" not in status_out, (
+            f"fail-closed recovery should leave balance work visible:\n{status_out}"
+        )
+    else:
+        assert "paused" not in status_out, (
+            f"a paused balance still exists after recover:\n{status_out}"
+        )
 
 with subtest("Payload checksum survived"):
     post_sha = machine.succeed("sha256sum /mnt/storage/payload").split()[0]
@@ -267,16 +289,27 @@ with subtest("Payload checksum survived"):
         f"payload sha256 changed: pre={payload_sha} post={post_sha}"
     )
 
-with subtest("Subsequent lock/unlock cycle stays clean"):
-    machine.succeed("braid lock")
-    machine.succeed(f"printf '%s\\n' {pq} | braid unlock --passphrase-stdin")
-    machine.succeed("mountpoint -q /mnt/storage")
-    cycle_fs_show = machine.succeed("btrfs filesystem show /mnt/storage")
-    assert "MISSING" not in cycle_fs_show, (
-        f"MISSING re-appeared after lock/unlock cycle:\n{cycle_fs_show}"
-    )
-    assert "Total devices 2" in cycle_fs_show, (
-        f"pool should still have 2 devices:\n{cycle_fs_show}"
-    )
+with subtest("Subsequent command behavior matches recovery outcome"):
+    if recover_failed_closed:
+        unlock_exit, unlock_out = machine.execute(
+            f"printf '%s\\n' {pq} | braid unlock --passphrase-stdin 2>&1"
+        )
+        assert unlock_exit != 0, (
+            f"unlock should refuse while pending-op.json is preserved:\n{unlock_out}"
+        )
+        assert "interrupted operation" in unlock_out, (
+            f"unlock did not report recovery mode:\n{unlock_out}"
+        )
+    else:
+        machine.succeed("braid lock")
+        machine.succeed(f"printf '%s\\n' {pq} | braid unlock --passphrase-stdin")
+        machine.succeed("mountpoint -q /mnt/storage")
+        cycle_fs_show = machine.succeed("btrfs filesystem show /mnt/storage")
+        assert "MISSING" not in cycle_fs_show, (
+            f"MISSING re-appeared after lock/unlock cycle:\n{cycle_fs_show}"
+        )
+        assert "Total devices 2" in cycle_fs_show, (
+            f"pool should still have 2 devices:\n{cycle_fs_show}"
+        )
 
 machine.shutdown()

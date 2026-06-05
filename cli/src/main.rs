@@ -253,11 +253,8 @@ struct RecoverArgs {
     /// Show what would be done without making changes
     #[arg(long)]
     dry_run: bool,
-    /// Progress output for the post-mount remediation phase (replace resize
-    /// replay and paused-balance resume). Defaults to auto, like the
-    /// mutation commands. The resume itself can be many minutes on a loaded
-    /// pool, so progress matters here even though `recover` is otherwise
-    /// quiet.
+    /// Progress output for post-mount maintenance that can run for a long time,
+    /// such as replace resize replay or owed RAID1 soft-balance replay.
     #[arg(long, value_enum, default_value_t = braid_cli::progress::ProgressMode::Auto)]
     progress: braid_cli::progress::ProgressMode,
 }
