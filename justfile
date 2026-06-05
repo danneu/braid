@@ -244,8 +244,12 @@ test-hw *args:
 fetch-references +ARGS="":
     python3 scripts/fetch-references.py {{ARGS}}
 
-# Build and serve the docs locally
-docs:
+# Build the docs once -- runs mdbook-linkcheck2, mirroring the CI cross-link gate
+docs-build:
+    nix develop .#docs -c mdbook build docs
+
+# Build and serve the docs locally with live reload
+docs-serve:
     nix develop .#docs -c mdbook serve docs --open
 
 # Verify SUMMARY.md parity and docs link integrity
