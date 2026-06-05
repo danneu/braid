@@ -5,6 +5,19 @@ resolver = "3"
 members = ["cli"]
 default-members = ["cli"]
 
+# `just release` runs `cargo release` from the workspace root, so its config must
+# live here -- a [package.metadata.release] in cli/Cargo.toml is not reliably read
+# from a root/virtual-manifest invocation and would silently fall back to
+# cargo-release defaults (publish = true, a braid-cli-v{{version}} tag). See
+# docs/design/decisions/029-release-process.md.
+[workspace.metadata.release]
+publish = false                                   # never touch crates.io (release-tool layer)
+tag = true
+push = true
+tag-name = "v{{version}}"                          # override the workspace-member default braid-cli-v{{version}}
+pre-release-commit-message = "chore(release): v{{version}}"
+tag-message = "v{{version}}"
+
 # `result_large_err` fires on CLI planning/call-site fns that return the full
 # typed error (e.g. the ~128-byte LuksError variant). These are cold paths held
 # at most once per invocation; boxing would add indirection without measurable

@@ -22,9 +22,11 @@ Pin `flake.nix` to a specific NixOS stable release (nixos-26.05). Pin only parse
 
 ### Consumer `follows` decides the actual source
 
-`nixosModules.default` builds the `braid.packages.*` defaults with `import self.inputs.nixpkgs` -- braid's `nixpkgs` flake input, instantiated cleanly (no consumer overlays). braid's install docs recommend `braid.inputs.nixpkgs.follows = "nixpkgs"` for closure dedup, and that `follows` redirects braid's `nixpkgs` input to the consumer's nixpkgs. So in the recommended setup the pinned tools actually resolve from the *consumer's* nixpkgs; they fall back to braid's pinned nixos-26.05 only when the consumer omits the follows.
+`nixosModules.default` builds the `braid.packages.*` defaults with `import self.inputs.nixpkgs` -- braid's `nixpkgs` flake input, instantiated cleanly (no consumer overlays). Whether the consumer sets `braid.inputs.nixpkgs.follows = "nixpkgs"` decides where the pinned tools actually come from.
 
-The pin therefore guarantees stable parser output only while the consumer's nixpkgs stays on the same NixOS stable release braid targets (currently nixos-26.05). Within one stable release tool output formats change only for security fixes, so a consumer aligned on braid's release is safe; a consumer who bumps nixpkgs ahead of braid moves the storage toolchain with it and re-introduces the parser-drift risk this decision otherwise prevents. Mitigate by keeping nixpkgs aligned with braid's release, pinning `braid.packages.*`, or not following braid's `nixpkgs` input.
+**The recommended default is no follows.** With no follows, braid's `nixpkgs` input stays on its pinned nixos-26.05, so the pinned tools resolve from braid's release channel and `braid-cli-unwrapped` matches the exact binary the release cache publishes -- a cache hit instead of a from-source rebuild on the NAS. [ADR 029](029-release-process.md) is the authoritative home for that cache-path-identity rationale; the short version is that `follows` rebuilds braid against the consumer's nixpkgs, changing the store path and forcing a recompile.
+
+`follows = "nixpkgs"` is a valid advanced opt-out (smaller closure via nixpkgs dedup), but it redirects braid's `nixpkgs` input to the consumer's nixpkgs, so the pinned tools then resolve from the *consumer's* nixpkgs. The pin therefore guarantees stable parser output only while the consumer's nixpkgs stays on the same NixOS stable release braid targets (currently nixos-26.05). Within one stable release tool output formats change only for security fixes, so a consumer aligned on braid's release is safe; a consumer who bumps nixpkgs ahead of braid moves the storage toolchain with it and re-introduces the parser-drift risk this decision otherwise prevents. If you do opt into `follows`, mitigate by keeping nixpkgs aligned with braid's release or pinning `braid.packages.*`.
 
 ### Operational escape hatch
 
@@ -99,4 +101,5 @@ Previously active, now superseded. Blanket pinning created unnecessary closure d
 ## See
 
 - [NixOS-native](006-nix-native.md) — follow NixOS conventions (PATH wrapping via makeWrapper)
+- [Release process](029-release-process.md) -- cache-path-identity rationale for the no-follows default
 - Principle 10 in [principles.md](../principles.md)

@@ -1,0 +1,94 @@
+# Cut a release from a v* tag (pushed by `just release`). Single sequential job,
+# ordered cheapest-gate-first: validate tag (lineage + format + version) -> test
+# -> build -> push cache -> GitHub release -> fast-forward `release`.
+#
+# This workflow deliberately does NOT run the NixOS VM suite, and does not require
+# one. VM coverage is a manual, per-release choice (run `just test-vm` locally, or
+# a workflow_dispatch run of test.yml) -- never wired into this path. CI here runs
+# the Rust tests + the version-SoT eval check, builds the x86_64-linux binary, and
+# warms the public `braid` cachix cache. Keeping the VM suite out of the release
+# path keeps releases fast and free of VM flakiness. See
+# docs/design/decisions/029-release-process.md and docs/dev/releasing.md.
+#
+# Fork-safe by trigger: `push: tags` only (no pull_request), and forks cannot
+# push tags upstream, so CACHIX_AUTH_TOKEN never reaches a fork.
+name: release
+on:
+  push:
+    tags: ['v*']
+permissions:
+  contents: write # push `release` branch + create the GitHub release
+concurrency:
+  # Serialize release runs repo-wide: an in-progress release is never cancelled
+  # (cancel-in-progress: false), and up to 100 later tags queue behind it
+  # (queue: max, FIFO by time started waiting on the group) so a burst of tags
+  # drops no release. queue: max requires cancel-in-progress != true. The runbook
+  # rule is still one active release tag at a time -- it keeps the Actions UI
+  # clean and avoids the rare out-of-order non-fast-forward when tags start
+  # waiting out of dispatch order.
+  group: release
+  cancel-in-progress: false
+  queue: max
+jobs:
+  publish:
+    if: ${{ github.event.deleted != true }} # tag-delete pushes also fire here; skip them
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.ref }}
+          fetch-depth: 0
+      - name: Require the tag to be on master (reject stray v* tags)
+        id: guard
+        run: |
+          git fetch --no-tags origin master            # FETCH_HEAD = origin/master tip
+          release_commit="$(git rev-list -n1 "$GITHUB_REF_NAME")"
+          git merge-base --is-ancestor "$release_commit" FETCH_HEAD \
+            || { echo "::error::$GITHUB_REF_NAME ($release_commit) is not on master; refusing to release" >&2; exit 1; }
+          echo "commit=$release_commit" >> "$GITHUB_OUTPUT"
+      - name: Require the tag to be vX.Y.Z matching cli/Cargo.toml (reject malformed/mismatched)
+        run: |
+          [[ "$GITHUB_REF_NAME" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]] \
+            || { echo "::error::$GITHUB_REF_NAME is not a vX.Y.Z release tag" >&2; exit 1; }
+          tag_ver="${GITHUB_REF_NAME#v}"
+          # read [package] version only (checkout is at the tagged commit); no nix/cargo yet
+          cargo_ver="$(sed -n '/^\[package\]/,/^\[/{s/^version = "\(.*\)"/\1/p;}' cli/Cargo.toml | head -1)"
+          [ "$tag_ver" = "$cargo_ver" ] \
+            || { echo "::error::$GITHUB_REF_NAME != cli/Cargo.toml version $cargo_ver" >&2; exit 1; }
+      - uses: DeterminateSystems/nix-installer-action@main
+      - uses: cachix/cachix-action@v15
+        with:
+          name: braid
+          authToken: ${{ secrets.CACHIX_AUTH_TOKEN }}
+          skipPush: true # disable the push daemon; the explicit step below is the ONLY push
+      - name: Version SoT + Rust test gate
+        run: |
+          nix build .#checks.x86_64-linux.eval-version-matches-cargo --no-link
+          nix develop --command just test-rust   # default Linux devShell (craneLib) -- full toolchain + linker
+      - name: Build x86_64-linux binary
+        id: build
+        # Assign first: under the default `bash -eo pipefail` shell a failed
+        # nix build aborts the step here. `echo "out=$(nix build ...)"` would
+        # mask it -- echo exits 0 and the empty path would still advance release.
+        run: |
+          out="$(nix build .#packages.x86_64-linux.braid-cli-unwrapped --no-link --print-out-paths)"
+          [ -n "$out" ] || { echo "::error::nix build produced no output path" >&2; exit 1; }
+          echo "out=$out" >> "$GITHUB_OUTPUT"
+      - name: Push closure to cachix (synchronous, sole push -- gates the release)
+        env:
+          CACHIX_AUTH_TOKEN: ${{ secrets.CACHIX_AUTH_TOKEN }}
+        # Guard non-empty before piping: `cachix push` with empty stdin exits 0
+        # ("Nothing to push"), so a silent miss must never reach the release.
+        run: |
+          out="${{ steps.build.outputs.out }}"
+          [ -n "$out" ] || { echo "::error::no build output path to push to cachix" >&2; exit 1; }
+          echo "$out" | cachix push braid
+      - name: Create GitHub release (guarded, idempotent -- before the FF)
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          tag="${GITHUB_REF_NAME}"
+          gh release view "$tag" >/dev/null 2>&1 && echo "release $tag exists; skipping." \
+            || gh release create "$tag" --generate-notes --verify-tag
+      - name: Fast-forward `release` (LAST -- sole consumer gate, after cache + release object)
+        run: git push origin ${{ steps.guard.outputs.commit }}:refs/heads/release

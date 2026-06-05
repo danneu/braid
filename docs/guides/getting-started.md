@@ -26,8 +26,7 @@ Add braid to your flake inputs and import the module:
 {
   inputs = {
     nixpkgs.url = "github:NixOS/nixpkgs/nixos-26.05";
-    braid.url = "github:danneu/braid";
-    braid.inputs.nixpkgs.follows = "nixpkgs";
+    braid.url = "github:danneu/braid?ref=release";
   };
 
   outputs = { nixpkgs, braid, ... }: {
@@ -42,6 +41,10 @@ Add braid to your flake inputs and import the module:
 }
 ```
 
+`?ref=release` follows braid's release channel; `nix flake update braid` upgrades
+to the newest release. The snippet also keeps braid on its own pinned nixpkgs (no
+`follows` override) on purpose, so braid matches its binary cache (next section).
+
 Minimal configuration:
 
 ```nix
@@ -55,6 +58,22 @@ braid = {
 Only `braid.enable = true` is required. `nixosModules.default` defaults
 `braid.package` to braid's pinned `braid-cli-unwrapped`; `mountPoint` defaults
 to `/mnt/storage`.
+
+### Binary cache
+
+braid publishes prebuilt binaries to a public Cachix cache. Add it before
+rebuilding so the NAS pulls the CLI instead of compiling Rust:
+
+```nix
+# configuration.nix
+nix.settings = {
+  extra-substituters = [ "https://braid.cachix.org" ];
+  extra-trusted-public-keys = [ "braid.cachix.org-1:I/p7fx1z5n0+O80KzMuT7aXRdkVyHr/buZKaBu7HvJs=" ];
+};
+```
+
+This relies on the no-`follows` input above -- the cache only matches braid's
+pinned nixpkgs. See [NixOS configuration](nixos-configuration.md#binary-cache).
 
 Rebuild and switch:
 

@@ -192,7 +192,41 @@ test-rust-unstable:
 playground:
     nix run .#playground
 
-# Build and push x86_64-linux binary to cachix
+# Cut a release: bump cli/Cargo.toml + Cargo.lock, tag vX.Y.Z, push master+tag.
+# The tag triggers .github/workflows/release.yml, which builds x86_64-linux,
+# pushes to the public `braid` cachix cache, creates the GitHub release, and
+# fast-forwards the `release` branch (the consumer channel). Run from
+# `nix develop .#release`.
+#
+# VM coverage is a manual, per-release choice -- run `just test-vm` locally (or a
+# workflow_dispatch run of test.yml) when a release warrants it. CI does not run
+# the VM suite, and this recipe does not require it; release.yml re-runs the fast
+# `just test-rust` on the tag. See docs/dev/releasing.md.
+#
+# IRREVERSIBLE once the tag is pushed. If CI fails downstream, fix and re-run the
+# release workflow from the GitHub Actions UI (its steps are idempotent) -- do
+# NOT re-run `just release` (that would bump again). See docs/dev/releasing.md.
+release level:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    case "{{level}}" in patch|minor|major) ;; *) echo "error: level must be patch|minor|major" >&2; exit 2 ;; esac
+    command -v cargo-release >/dev/null || { echo "error: cargo-release missing -- run inside 'nix develop .#release'" >&2; exit 1; }
+    command -v gh >/dev/null || { echo "error: gh missing" >&2; exit 1; }
+    [ -z "$(git status --porcelain)" ] || { echo "error: working tree not clean" >&2; exit 1; }
+    [ "$(git rev-parse --abbrev-ref HEAD)" = "master" ] || { echo "error: must release from master" >&2; exit 1; }
+    git fetch origin master --tags
+    [ "$(git rev-parse @)" = "$(git rev-parse origin/master)" ] || { echo "error: master out of sync with origin (git pull --ff-only)" >&2; exit 1; }
+    # Compile gate: darwin-native via nix (the Mac cannot build x86_64-linux -- CI
+    # does). Catches Rust compile breakage before the irreversible tag. The VM
+    # behavioral suite is a manual pre-release step (see header), not gated here.
+    nix build .#packages.{{system}}.braid-cli-unwrapped --no-link
+    cargo release {{level}} --execute --no-confirm
+    tag="$(git describe --tags --abbrev=0)"
+    echo "==> pushed $tag; release workflow triggered. Watch: gh run watch (release.yml)"
+
+# Build and push x86_64-linux binary to cachix. Manual/ad-hoc only: real release
+# cache pushes go through .github/workflows/release.yml on the v* tag. Must run on
+# an x86_64-linux host (the Mac cannot build x86_64-linux).
 cachix:
     nix build .#packages.x86_64-linux.braid-cli-unwrapped --no-link --print-out-paths | xargs nix run nixpkgs#cachix -- push braid
 

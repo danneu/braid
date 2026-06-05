@@ -11,8 +11,7 @@ Complete reference for the braid NixOS module options. Read this when setting up
 {
   inputs = {
     nixpkgs.url = "github:NixOS/nixpkgs/nixos-26.05";
-    braid.url = "github:danneu/braid";
-    braid.inputs.nixpkgs.follows = "nixpkgs";
+    braid.url = "github:danneu/braid?ref=release";
   };
 
   outputs = { nixpkgs, braid, ... }: {
@@ -27,6 +26,12 @@ Complete reference for the braid NixOS module options. Read this when setting up
 }
 ```
 
+`?ref=release` pins braid to its release channel: a moving branch the release
+fast-forwards to each tag. `nix flake update braid` is then the "upgrade to the
+newest release" button, and `flake.lock` still pins the exact rev. The snippet
+deliberately omits `braid.inputs.nixpkgs.follows` -- see [Binary cache](#binary-cache)
+and [Tool overrides](#tool-overrides) for why no-follows is the default.
+
 ```nix
 # configuration.nix
 braid = {
@@ -36,6 +41,25 @@ braid = {
 
 `nixosModules.default` supplies `braid.package` automatically. Override it only
 to build the CLI yourself.
+
+## Binary cache
+
+braid publishes a prebuilt `x86_64-linux` CLI to a public Cachix cache on every
+release. Add it so the NAS pulls the binary instead of recompiling Rust:
+
+```nix
+# configuration.nix
+nix.settings = {
+  extra-substituters = [ "https://braid.cachix.org" ];
+  extra-trusted-public-keys = [ "braid.cachix.org-1:I/p7fx1z5n0+O80KzMuT7aXRdkVyHr/buZKaBu7HvJs=" ];
+};
+```
+
+The cache only hits when braid resolves to the exact store path CI built -- that
+is, with the recommended no-`follows` setup above. Setting
+`braid.inputs.nixpkgs.follows` rebuilds braid against your nixpkgs, producing a
+different path and a cache miss. See [Toolchain pinning](../design/decisions/010-toolchain-pinning.md)
+and [ADR 029](../design/decisions/029-release-process.md).
 
 ## What you get for free
 
@@ -73,7 +97,7 @@ When `braid.enable = true`, the module sets up:
 | `braid.packages.smartmontools` | package | `pkgs.smartmontools` | smartmontools package |
 | `braid.packages.ethtool` | package | `pkgs.ethtool` | ethtool package |
 
-Override these only if you need a specific version for compatibility testing. With the recommended `braid.inputs.nixpkgs.follows = "nixpkgs"` (the Minimal config example above), `nixosModules.default` sources these defaults from your nixpkgs input; drop that `follows` and they come from braid's own pinned `nixpkgs` (nixos-26.05) instead. Either way, keep your nixpkgs on the same NixOS stable release braid targets so the parsed tool output stays compatible -- see [Toolchain pinning](../design/decisions/010-toolchain-pinning.md).
+Override these only if you need a specific version for compatibility testing. The recommended setup omits `braid.inputs.nixpkgs.follows` (the Minimal config example above), so `nixosModules.default` sources these defaults from braid's own pinned `nixpkgs` (nixos-26.05) -- the same versions the release binary cache is built against, so braid is a cache hit. Adding `braid.inputs.nixpkgs.follows = "nixpkgs"` is an advanced opt-out: it dedups your closure but rebuilds braid against your nixpkgs (a cache miss) and sources these tools from your nixpkgs instead. If you take it, keep your nixpkgs on the same NixOS stable release braid targets so the parsed tool output stays compatible -- see [Toolchain pinning](../design/decisions/010-toolchain-pinning.md).
 
 ### Auto-scrub
 
@@ -186,8 +210,9 @@ braid = {
   poolAccessGroup = "storage";   # default; null to disable
   lockSystemdStopDeadlineSecs = 270;  # default; must stay below braid-online TimeoutStopSec
 
-  # Tool version overrides -- with the recommended nixpkgs `follows`, defaults
-  # track your nixpkgs; without it, braid's pinned nixos-26.05 (see "Tool overrides")
+  # Tool version overrides -- the recommended setup omits nixpkgs `follows`, so
+  # defaults come from braid's pinned nixos-26.05 (cache hit); `follows` is an
+  # opt-out that tracks your nixpkgs but rebuilds braid (cache miss). See "Tool overrides".
   # packages.cryptsetup = pkgs.cryptsetup;
   # packages.btrfsProgs = pkgs.btrfs-progs;
   # packages.utilLinux = pkgs.util-linux;

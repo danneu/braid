@@ -72,6 +72,7 @@
 - [026: Pool lock rust-owned](design/decisions/026-pool-lock-rust-owned.md)
 - [027: mkfs block-group-tree](design/decisions/027-mkfs-block-group-tree.md)
 - [028: Immutable unmounted mountpoint](design/decisions/028-immutable-unmounted-mountpoint.md)
+- [029: Release process](design/decisions/029-release-process.md)
 
 # Internals
 
@@ -87,5 +88,6 @@
 # Development
 
 - [Overview](dev/overview.md)
+- [Releasing](dev/releasing.md)
 - [Testing](dev/testing.md)
 - [TUI snapshots](dev/tui-snapshots.md)

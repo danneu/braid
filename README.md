@@ -52,7 +52,7 @@ See the [command reference](docs/commands/) for full usage of each command.
 
 - **RAID1 capacity cost** -- half your raw capacity goes to redundancy. Four 12 TB drives = 24 TB usable.
 - **HDD-first** -- defaults are tuned for spinning drives (e.g. no TRIM). SSDs may work but are not supported.
-- **Unstable** -- this is unversioned and pre-v1.0, and I change things when I decide on a better way. Commands, flags, config, and even on-disk state like `pool.json` format can change.
+- **Unstable** -- this is pre-v1.0 and I change things when I decide on a better way. Commands, flags, config, and even on-disk state like `pool.json` format can change.
 - **Unproven** -- I run braid on a daily-use 4x12TB NAS, and there are 180+ NixOS VM tests and 2200+ Rust tests, but there are almost certainly weird/bad edge cases. That said, every mutating command takes a `--dry-run` flag, so you can preview exactly what it'll do before it touches your disks.
 
 ## Install
@@ -63,7 +63,7 @@ See the [command reference](docs/commands/) for full usage of each command.
 Try it without installing anything:
 
 ```sh
-nix run github:danneu/braid -- --help
+nix run github:danneu/braid?ref=release -- --help
 ```
 
 Add braid to your flake inputs and import the module:
@@ -73,8 +73,7 @@ Add braid to your flake inputs and import the module:
 {
   inputs = {
     nixpkgs.url = "github:NixOS/nixpkgs/nixos-26.05";
-    braid.url = "github:danneu/braid";
-    braid.inputs.nixpkgs.follows = "nixpkgs";
+    braid.url = "github:danneu/braid?ref=release";
   };
 
   outputs = { nixpkgs, braid, ... }: {
@@ -94,6 +93,19 @@ Add braid to your flake inputs and import the module:
 braid = {
   enable = true;
   mountPoint = "/mnt/storage";  # default
+};
+```
+
+`?ref=release` tracks braid's release channel (`nix flake update braid` upgrades).
+Add braid's public binary cache so the NAS pulls the prebuilt CLI instead of
+recompiling -- this relies on the no-`follows` input above, which keeps braid on
+its pinned nixpkgs:
+
+```nix
+# configuration.nix
+nix.settings = {
+  extra-substituters = [ "https://braid.cachix.org" ];
+  extra-trusted-public-keys = [ "braid.cachix.org-1:I/p7fx1z5n0+O80KzMuT7aXRdkVyHr/buZKaBu7HvJs=" ];
 };
 ```
 
