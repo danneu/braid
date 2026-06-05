@@ -92,8 +92,12 @@ jobs:
             echo "release $tag exists; skipping."
           else
             notes="$RUNNER_TEMP/release-notes.md"
-            nix develop .#release -c git-cliff --current --strip all --output "$notes"
-            [ -s "$notes" ] || printf '_No notable changes._\n' > "$notes"
+            if [ "$tag" = "v0.0.1" ]; then
+              : > "$notes"
+            else
+              nix develop .#release -c git-cliff --current --strip all --output "$notes"
+              [ -s "$notes" ] || printf '_No notable changes._\n' > "$notes"
+            fi
             gh release create "$tag" --title "$tag" --notes-file "$notes" --verify-tag
           fi
       - name: Fast-forward `release` (LAST -- sole consumer gate, after cache + release object)

@@ -86,8 +86,9 @@ release body is rendered by git-cliff, pinned in the `.#release` devShell and
 invoked as `nix develop .#release -c git-cliff`, from `cliff.toml`: conventional
 commit types are grouped into stable sections such as Features, Bug Fixes,
 Documentation, Tests, CI, Build, and Chores, while unmatched commit subjects
-land in Other; a genuinely empty rendered range gets the `_No notable changes._`
-placeholder.
+land in Other. The first release (`v0.0.1`) is a one-time exception and publishes
+an intentionally blank body instead of a whole-history changelog; later genuinely
+empty rendered ranges get the `_No notable changes._` placeholder.
 
 ### Public cachix cache `braid`
 
