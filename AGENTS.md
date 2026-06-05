@@ -191,7 +191,8 @@ half of this rule is enforced by `scripts/docs/check-see-paths.py`.
 
 ## Git Commits
 
-The first line of a commit message must not be capitalized (e.g. `fix the foo bug`, not `Fix the foo bug`).
+Use Conventional Commits-style commit messages. The first line must not be
+capitalized (e.g. `fix the foo bug`, not `Fix the foo bug`).
 
 ## CLI Output Style
 
@@ -302,7 +303,3 @@ then `just test-parsers`.
 The stable and unstable validation lanes, the smartctl/ethtool hand-authored-fixture
 caveats, and the full unstable workflow are in
 [`docs/dev/parser-compatibility.md`](docs/dev/parser-compatibility.md).
-
-## Git commits
-
-Use Conventional Commits-style commit messages.
