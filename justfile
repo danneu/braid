@@ -329,6 +329,11 @@ check-output-ascii:
     python3 scripts/docs/check-output-ascii.py --selftest
     python3 scripts/docs/check-output-ascii.py
 
+# Verify ](...) links in AGENTS.md and README.md resolve (path + anchor)
+check-doc-links:
+    python3 scripts/docs/check-doc-links.py --selftest
+    python3 scripts/docs/check-doc-links.py
+
 # Destroy an entire braid pool (dev use only — wipes LUKS signatures + state files)
 destroy config="/etc/braid/config.json":
     ./scripts/braid-destroy.sh {{config}}

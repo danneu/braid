@@ -27,3 +27,21 @@ jobs:
         run: |
           python3 scripts/docs/check-output-ascii.py --selftest
           python3 scripts/docs/check-output-ascii.py
+
+  doc-links:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Guard AGENTS.md/README.md links (selftest first)
+        run: |
+          python3 scripts/docs/check-doc-links.py --selftest
+          python3 scripts/docs/check-doc-links.py
+
+  code-doc-anchors:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Check code doc anchors
+        run: python3 scripts/docs/check-code-doc-anchors.py

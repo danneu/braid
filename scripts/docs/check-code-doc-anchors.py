@@ -1,11 +1,13 @@
 #!/usr/bin/env python3
-"""Validate source-tree citations to principles.md anchors."""
+"""Validate source-tree citations to principles.md anchors (slugs via _mdslug)."""
 
 from __future__ import annotations
 
 import re
 import sys
 from pathlib import Path
+
+from _mdslug import anchors_of
 
 
 ROOT = Path(__file__).resolve().parents[2]
@@ -20,25 +22,6 @@ SEARCH_ROOTS = [
     ROOT / "prompts",
 ]
 CITE_PATTERN = re.compile(r"docs/design/principles\.md#(\S+?)(?=[\"`)\s])")
-
-
-def normalize_id(heading: str) -> str:
-    heading = heading.strip()
-    out: list[str] = []
-    for ch in heading:
-        if ch.isalnum() or ch in ("_", "-"):
-            out.append(ch.lower())
-        elif ch.isspace():
-            out.append("-")
-    return "".join(out)
-
-
-def valid_anchors() -> set[str]:
-    anchors: set[str] = set()
-    for line in PRINCIPLES.read_text(encoding="utf-8").splitlines():
-        if line.startswith("## "):
-            anchors.add(normalize_id(line[3:]))
-    return anchors
 
 
 def iter_files(root: Path):
@@ -56,7 +39,7 @@ def iter_files(root: Path):
 
 
 def main() -> int:
-    anchors = valid_anchors()
+    anchors = anchors_of(PRINCIPLES)
     failures: list[str] = []
 
     for root in SEARCH_ROOTS:

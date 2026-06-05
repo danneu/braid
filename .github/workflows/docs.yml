@@ -36,9 +36,6 @@ jobs:
       - name: Check source frontmatter
         run: nix develop .#docs -c just check-docs-frontmatter
 
-      - name: Check code doc anchors
-        run: nix develop .#docs -c just check-code-doc-anchors
-
       - name: Build
         run: nix develop .#docs -c mdbook build docs
 
