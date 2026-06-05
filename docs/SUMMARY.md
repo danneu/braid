@@ -90,4 +90,6 @@
 - [Overview](dev/overview.md)
 - [Releasing](dev/releasing.md)
 - [Testing](dev/testing.md)
+- [Parser compatibility](dev/parser-compatibility.md)
+- [Reference source](dev/reference-source.md)
 - [TUI snapshots](dev/tui-snapshots.md)

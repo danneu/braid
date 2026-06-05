@@ -94,7 +94,7 @@ When braid code is changed to depend on a specific external-tool behavior -- a p
 
 Whenever a plan introduces a classifier of the form `exit_code == <N>` or `stderr.contains("<wording>")` against an external tool, identify (or add) a live-tool repro/VM test that asserts the same code/wording directly. List that test in the plan's verification section as a required gate. If the live-tool test would be non-trivial to add, pause and reconsider whether the classifier is actually robust.
 
-This is the same family as braid's parser-compatibility lanes (`just test-parsers`, `just test-rust-unstable`, see `AGENTS.md` (Parser Compatibility section)) -- those lock the parser against tool-output drift; a behavior-lock test locks an exit-code or wording classifier against the same drift surface. Reference example: `tests/repro/cryptsetup-close-mounted.py` asserts `exit_code == 5` for busy-close and `exit_code == 4` for already-closed, behavior-locking the assumption that `cli/src/lock.rs` retry classifier depends on.
+This is the same family as braid's parser-compatibility lanes (`just test-parsers`, `just test-rust-unstable`, see [parser compatibility](parser-compatibility.md)) -- those lock the parser against tool-output drift; a behavior-lock test locks an exit-code or wording classifier against the same drift surface. Reference example: `tests/repro/cryptsetup-close-mounted.py` asserts `exit_code == 5` for busy-close and `exit_code == 4` for already-closed, behavior-locking the assumption that `cli/src/lock.rs` retry classifier depends on.
 
 ### VM and command test design
 

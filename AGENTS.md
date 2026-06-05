@@ -2,8 +2,7 @@
 
 ## Project: braid
 
-Github: https://github.com/danneu/braid (private, use `gh` cli tool for
-access)
+Github: https://github.com/danneu/braid
 
 braid is a Rust CLI tool + NixOS module for managing a NixOS-based NAS of full-disk-encrypted drives (luks) in a btrfs raid1 array.
 
@@ -40,7 +39,7 @@ Unlock:
   - `internals/` — implementation notes (luks-unlock, tool behavior, btrfs deep-dives)
   - `dev/` — contributor docs (development workflow, testing, TUI snapshots)
 - `scripts/` — helper scripts (fetch references, destroy pool)
-- `reference/` — upstream source checkouts for reading, not shipped. See [Reference source](#reference-source) below for the full inventory. Refresh with `just fetch-references`.
+- `reference/` — upstream source checkouts for reading, not shipped. Full inventory in [`docs/dev/reference-source.md`](docs/dev/reference-source.md). Refresh with `just fetch-references`.
 
 ## Systemd Lifecycle
 
@@ -107,66 +106,16 @@ material.
 [`docs/SUMMARY.md`](docs/SUMMARY.md) is the TOC for the unified docs tree (end-user guides,
 commands, design principles, ADRs, internals, contributor docs). [`docs/index.md`](docs/index.md)
 is the landing page. Check `SUMMARY.md` before searching the codebase for context. All cross-links
-inside `docs/` are validated by `mdbook-linkcheck2` during `mdbook build docs` (configured in
+inside `docs/` are validated by `mdbook-linkcheck2` during `just docs-build` (configured in
 `docs/book.toml`) -- a broken cross-link fails CI.
 
 ### Reference source
 
-Before searching the web for tool behavior, consult local resources first. `reference/` contains shallow clones of upstream repos at the versions pinned in nixpkgs, plus Rust crate sources pinned in `Cargo.lock`. Refresh with `just fetch-references`.
-
-**When to look:** Any time you're implementing, modifying, or debugging code that interacts with these tools — especially parsers. Read the relevant source before making assumptions about output format or behavior.
-
-- **btrfs-progs** — [kdave/btrfs-progs](https://github.com/kdave/btrfs-progs)
-  - **Source:** [`reference/btrfs-progs/cmds/`](reference/btrfs-progs/cmds/) — one file per subcommand (e.g. `cmds/scrub.c`). Parser output formats, exit codes.
-  - **Docs:** [`reference/btrfs-progs/Documentation/`](reference/btrfs-progs/Documentation/) — RST. See [btrfs docs](#btrfs-docs) below for the topic table.
-- **systemd** — [systemd/systemd](https://github.com/systemd/systemd)
-  - **Source:** [`reference/systemd/src/`](reference/systemd/src/) — unit lifecycle internals, `systemd-ask-password`, mount/automount.
-  - **Docs:** [`reference/systemd/docs/`](reference/systemd/docs/) — markdown design docs (`BOOT.md`, `INHIBITOR_LOCKS.md`, `MOUNT_REQUIREMENTS.md`, `CREDENTIALS.md`, `PASSWORD_AGENTS.md`, etc.). [`reference/systemd/man/`](reference/systemd/man/) — XML man-page sources for unit/option reference (`systemd.service.xml`, `systemd.mount.xml`, …).
-- **autosuspend** — [languitar/autosuspend](https://github.com/languitar/autosuspend)
-  - **Source:** [`reference/autosuspend/src/`](reference/autosuspend/src/) — check classes, config schema, wakeup scheduling.
-  - **Docs:** [`reference/autosuspend/doc/source/`](reference/autosuspend/doc/source/) — RST (`available_checks.rst`, `available_wakeups.rst`, `configuration_file.rst`, `systemd_integration.rst`).
-- **cryptsetup** — [cryptsetup/cryptsetup](https://gitlab.com/cryptsetup/cryptsetup)
-  - **Source:** [`reference/cryptsetup/src/`](reference/cryptsetup/src/) (CLI), [`reference/cryptsetup/lib/`](reference/cryptsetup/lib/) (libcryptsetup) — `luksDump` output, LUKS2 header structure, keyslot operations.
-  - **Docs:** [`reference/cryptsetup/man/`](reference/cryptsetup/man/) — `*.8.adoc` man pages (`cryptsetup-luksDump.8.adoc`, `cryptsetup-open.8.adoc`, …). [`reference/cryptsetup/docs/`](reference/cryptsetup/docs/) — design notes including `LUKS2-locking.txt` and `on-disk-format-luks2.pdf`.
-- **util-linux** — [util-linux/util-linux](https://github.com/util-linux/util-linux)
-  - **Source:** [`reference/util-linux/misc-utils/`](reference/util-linux/misc-utils/) (`lsblk`, `blkid`), [`reference/util-linux/sys-utils/`](reference/util-linux/sys-utils/) (`mount`, `umount`), [`reference/util-linux/libmount/`](reference/util-linux/libmount/), [`reference/util-linux/libblkid/`](reference/util-linux/libblkid/) — `lsblk` JSON schema, `blkid` output, mount/unmount behavior.
-  - **Docs:** Man pages live next to source as `*.8.adoc` (e.g. `misc-utils/lsblk.8.adoc`, `sys-utils/mount.8.adoc`). [`reference/util-linux/Documentation/`](reference/util-linux/Documentation/) is project meta (build/test/contribution notes), not user reference.
-- **smartmontools** — [smartmontools/smartmontools](https://github.com/smartmontools/smartmontools)
-  - **Source:** [`reference/smartmontools/smartmontools/`](reference/smartmontools/smartmontools/) — flat layout. `smartctl` output format, SMART attribute definitions, exit codes.
-  - **Docs:** No separate docs dir. Man-page sources are inline alongside the code: `smartctl.8.in`, `smartd.8.in`, `smartd.conf.5.in`.
-- **hddfancontrol** — [desbma/hddfancontrol](https://github.com/desbma/hddfancontrol)
-  - **Source:** [`reference/hddfancontrol/src/`](reference/hddfancontrol/src/) — Rust daemon. `device/` (drivetemp, hddtemp, smartctl probing), `probe/` (pwm-test ramp logic), `fan.rs` (PWM control), `pwm.rs` (sysfs PWM I/O), `cl.rs` (CLI args).
-  - **Docs:** No separate docs dir. [`reference/hddfancontrol/README.md`](reference/hddfancontrol/README.md) and [`reference/hddfancontrol/systemd/hddfancontrol.service`](reference/hddfancontrol/systemd/hddfancontrol.service) — the upstream unit we intentionally don't use (see `modules/braid/fan-control.nix`).
-- **nut** — [networkupstools/nut](https://github.com/networkupstools/nut)
-  - **Source:** [`reference/nut/clients/`](reference/nut/clients/) (`upsmon.c` -- shutdown-on-LB daemon, `upsc.c` -- status query, `upscmd.c`, `upssched.c`, `upsrw.c`), [`reference/nut/server/`](reference/nut/server/) (`upsd.c` and net protocol handlers), [`reference/nut/drivers/`](reference/nut/drivers/) (`usbhid-ups.c` and per-vendor `*-hid.c` for the USB HID path v1 targets).
-  - **Config schema:** [`reference/nut/conf/`](reference/nut/conf/) — sample files (`nut.conf.sample`, `ups.conf.sample`, `upsd.conf.sample`, `upsd.users.sample`, `upsmon.conf.sample.in`, `upssched.conf.sample.in`). Authoritative for fields braid generates into `/etc/nut/*`.
-  - **Docs:** [`reference/nut/docs/man/`](reference/nut/docs/man/) — `*.txt` asciidoc man pages for daemons, drivers, and config files. [`reference/nut/docs/`](reference/nut/docs/) — design notes (`design.txt`, `net-protocol.txt`, `developer-guide.txt`, `new-drivers.txt`, `FAQ.txt`).
-- **linux** — [torvalds/linux](https://github.com/torvalds/linux)
-  - **Source:** [`reference/linux/`](reference/linux/) — kernel source at the exact version pinned in nixpkgs. Look in `fs/btrfs/` for btrfs-specific I/O scheduling, raid handling, and read balancing logic. `drivers/md/` for raid and block layer behavior.
-  - **Use for:** Understanding kernel-level I/O behavior, raid1 read balancing, mount semantics, block device management.
-- **coreutils** — [coreutils/coreutils](https://github.com/coreutils/coreutils) (GitHub mirror of GNU Coreutils)
-  - **Source:** [`reference/coreutils/src/`](reference/coreutils/src/) — one C file per utility (e.g. `src/timeout.c`, `src/realpath.c`, `src/stat.c`, `src/chmod.c`, `src/chown.c`, `src/head.c`, `src/base64.c`). Read these to confirm what each helper actually guarantees -- e.g. `timeout(1)` exit-code semantics and signal forwarding live in `src/timeout.c`, not in any manpage.
-  - **Docs:** [`reference/coreutils/doc/coreutils.texi`](reference/coreutils/doc/coreutils.texi) — the canonical reference manual (per-utility sections inside one big Texinfo file). Per-utility manpage stubs live in [`reference/coreutils/man/`](reference/coreutils/man/) as `*.x` (e.g. `man/timeout.x`); these are short prologues that get merged with `--help` output by `help2man` at build time, so the full prose is in `coreutils.texi`.
-  - **Use for:** Any time braid code or a plan reasons about a Coreutils helper's behavior beyond the obvious — exit codes, signal handling, race windows, `--help` text, edge cases. Especially `timeout(1)`: `timeout` cannot bound an uninterruptible kernel wait, and the proof is in `src/timeout.c`'s use of `kill()` against a userspace child.
-- **nix (Rust crate)** -- [nix-rust/nix](https://github.com/nix-rust/nix)
-  - **Source:** [`reference/nix-crate/src/`](reference/nix-crate/src/) -- Rust crate at the version pinned in `Cargo.lock`, not `flake.lock`. `unistd.rs` (User/Group/chown/exec helpers, fd ownership types), `fcntl.rs` (`open`, `flock`, `OFlag`), `errno.rs` (`Errno`), `sys/stat.rs` (`Mode`), `sys/signal.rs` (sigaction, signal handlers), `sys/termios.rs` (termios constants, terminal flags).
-  - **Docs:** No separate docs dir -- rustdoc is inline as `///` doc comments on each item. [`reference/nix-crate/Cargo.toml`](reference/nix-crate/Cargo.toml) declares the feature gates (braid currently enables `fs`, `user`, `term`, and `signal`); consult it before reaching for a `nix` API to confirm which feature it lives under.
-  - **Use for:** Touching any `nix::` API, checking feature gates, understanding fd-ownership types, signal-safe helpers, or termios constants. Refresh after any change to the `nix` line in `cli/Cargo.toml` or any `cargo update`-driven bump in `Cargo.lock`.
-
-### btrfs docs
-
-- **Docs:** [`reference/btrfs-progs/Documentation/`](reference/btrfs-progs/Documentation/) — RST docs from btrfs-progs. Start with `index.rst` for a full table of contents, or use the topic table below for common lookups. Glob by keyword for anything not in the table. `ch-*` fragments are inlined by `just fetch-references`.
-
-| Topic                             | File(s)                                     |
-| --------------------------------- | ------------------------------------------- |
-| Adding/removing devices           | `Volume-management.rst`, `btrfs-device.rst` |
-| Device replacement                | `btrfs-replace.rst`                         |
-| Rebalancing                       | `Balance.rst`, `btrfs-balance.rst`          |
-| RAID profiles (RAID1 etc.)        | `mkfs.btrfs.rst` (search for "profiles")    |
-| Mount options                     | `btrfs-man5.rst`                            |
-| Scrub / self-healing              | `Scrub.rst`                                 |
-| Filesystem limits & storage model | `btrfs-man5.rst`                            |
-| Administration overview           | `Administration.rst`                        |
+Before searching the web for a tool's behavior or output format, read the vendored
+upstream source in `reference/` (shallow clones at nixpkgs-pinned versions, plus
+Rust crate sources; refresh with `just fetch-references`). The full per-tool
+inventory -- what each checkout holds and what to read it for -- and the btrfs docs
+topic table live in [`docs/dev/reference-source.md`](docs/dev/reference-source.md).
 
 ## File References
 
@@ -174,18 +123,18 @@ In ADRs, decision docs, and `docs/` prose, never reference another file by line
 number. Line numbers drift the moment surrounding code or text is edited, so the
 pointer silently goes stale and misleads the next reader. Use a `path#anchor`
 reference instead -- one shape for both code and docs, where the anchor names
-*what* and the path says *where*:
+_what_ and the path says _where_:
 
-- **Code** -- ``path#symbol`` as a plain code span, not a link:
+- **Code** -- `path#symbol` as a plain code span, not a link:
   ``(see `cli/src/cmd/unlock.rs#cmd_unlock`)``. The symbol is a `fn`, `struct`,
   `enum`, `trait`, `impl`, module, or `const`, method-qualified where it helps
-  (``cli/src/cmd/plan.rs#Planner::plan``). The symbol is the drift-proof,
+  (`cli/src/cmd/plan.rs#Planner::plan`). The symbol is the drift-proof,
   greppable half -- one `rg cmd_unlock` finds both the citation and the
   definition. Never write `cli/src/cmd/unlock.rs:142`, and do not linkify code
   paths: `cli/` lives outside the mdBook root, so a link 404s in the rendered
   book and dodges linkcheck. A bare file path (no `#symbol`) is fine when the
   whole file is the referent.
-- **Markdown / mdBook** -- ``path#heading-slug`` as a real Markdown link, e.g.
+- **Markdown / mdBook** -- `path#heading-slug` as a real Markdown link, e.g.
   `[...](docs/internals/luks-unlock.md#header-backup-workflow-and-messaging)`,
   not a line number or section count. Unlike code refs these are clickable and
   validated by `mdbook-linkcheck2`, so a renamed heading fails CI instead of
@@ -213,12 +162,12 @@ neither form validates or even resolves. Cite external upstream code by its **sh
   Precedent: `cli/src/parse/cryptsetup_luks_version.rs#parse_cryptsetup_luks_version`. An
   inline code span (`` `printf(...)` ``) is fine for a tight function or field doc where a
   fenced block is too heavy. The `pkg <version>` stamp is the upstream release tag (`git -C
-  reference/<pkg> describe --tags`); it pins the excerpt and is the re-verify trigger when a
+reference/<pkg> describe --tags`); it pins the excerpt and is the re-verify trigger when a
   nixpkgs bump changes that tool's version -- the same Parser Compatibility refresh event
   that recaptures fixtures.
 - **Region or multi-line** -- a code area with no single quotable line (a long function, a
   struct, two scattered lines). Keep a pointer, not a wall of inlined code: `pkg <version>,
-  <path> (fn name)` plus a one-line paraphrase of what's there. Prefer a function name over a line
+<path> (fn name)` plus a one-line paraphrase of what's there. Prefer a function name over a line
   number; a bare line range is a last resort.
 
 Existing bare-line-number `reference/` citations are tolerated -- nothing validates them
@@ -333,13 +282,6 @@ Every individual test starts with a `//` line-comment preamble with three labele
 
 For the literal preamble form, the flake.nix `checks` registration rule for new VM tests, and NixOS VM test framework gotchas, see [`docs/dev/testing.md`](docs/dev/testing.md).
 
-## Formatting
-
-Do not run `cargo fmt`, `rustfmt`, `just fmt`, or any formatter-over-source
-wrapper unless the user explicitly asks in the current turn. The repo can have
-pre-existing formatter drift, so formatter runs easily bury the intended diff
-in unrelated rewrites. Fix hand-written indentation with narrow edits instead.
-
 ## Development Approach: TDD with NixOS VM Tests
 
 Write failing tests first, confirm they fail for the expected reasons, then implement the NixOS config to make them pass.
@@ -350,106 +292,16 @@ Write failing tests first, confirm they fail for the expected reasons, then impl
 
 ## Parser Compatibility
 
-braid parses output from btrfs-progs, cryptsetup, util-linux, smartmontools, NUT, and ethtool. These parsers can break when tool versions change. Two validation lanes exist:
+braid parses tool output from btrfs-progs, cryptsetup, util-linux, NUT,
+smartmontools, and ethtool; these parsers break when tool versions drift. Treat any
+change to the `nixpkgs` node in `flake.lock` (or to
+`braid.packages.{btrfsProgs,cryptsetup,utilLinux,nut,smartmontools,ethtool}`) as a
+required fixture-refresh event: run `just capture-all-fixtures`, then `just test-rust`,
+then `just test-parsers`.
 
-### Stable lane (pinned contract)
-
-- `just test-parsers` — CLI parser canary. Exercises CLI-reachable parsers against live tool output in VMs (including `braid-status-ups`, the NUT canary).
-- `just test-rust` — validates golden fixtures for the full parser set, including `parse_upsc`. Fixture-backed coverage stays current only after running `just capture-all-fixtures` when parser-critical tool versions change (e.g. nixpkgs bump).
-- Fixture refresh is a separate obligation: `just test-parsers` passing does not guarantee TUI-only parsers (`parse_lsblk_json`, `parse_cryptsetup_luks_dump`, `parse_smartctl_health`) or unused parsers (`parse_btrfs_scrub_status_per_device`) are compatible with the current toolchain.
-- Fixtures in `cli/tests/fixtures/nixos-26.05/` are committed and authoritative. NUT fixtures live in `cli/tests/fixtures/nixos-26.05/upsc/` (and the unstable mirror); they are produced by `just capture-ups-fixtures`, which boots a dedicated NUT VM with per-state `dummy-ups` drivers (see `tests/capture-ups-fixtures.nix`).
-- **smartctl fixtures are stable-only by design.** VM virtio disks do
-  not emit useful SMART data, so `just capture-all-fixtures` does not
-  regenerate `smartctl-sata-with-temperature.json` or
-  `smartctl-selftest-*.json`. `smartctl-sata-with-temperature.json` is
-  a one-time physical-drive capture; `smartctl-selftest-*.json`
-  fixtures are hand-authored (see
-  `cli/tests/fixtures/nixos-26.05/README.md`). The `tool-versions` VM
-  test checks that `smartctl` resolves to a `/nix/store/` path on the
-  VM's PATH and that its self-reported version matches
-  `pkgs.smartmontools.version`, but it does not detect nixpkgs version
-  bumps because both sides advance together. On any nixpkgs bump that
-  touches smartmontools, manually review and refresh
-  `smartctl-selftest-*.json` against the new
-  `ata_smart_self_test_log.standard` JSON shape and
-  `smartctl-sata-with-temperature.json` against the new
-  health/temperature JSON shape (`smart_status`, `temperature`,
-  `ata_smart_attributes`).
-- **ethtool WoL fixtures are hand-authored / no-live-capture.** VM
-  virtio NICs do not emit useful Wake-on-LAN data, so
-  `just capture-all-fixtures` does not regenerate ethtool output. The
-  doctor `wake_on_lan` parser is covered by hand-authored Rust unit
-  fixtures, and wrapper provenance is covered by the override-based VM
-  tests in `tool-versions` and `braid-auto-suspend`.
-
-Parser-critical tool versions are the pinned `nixpkgs` versions of `btrfs-progs`, `cryptsetup`, `util-linux`, `nut`, `smartmontools`, and `ethtool`. Treat any change to the `nixpkgs` node in `flake.lock`, any `flake.nix` change that alters the `nixpkgs` input, or any change to `braid.packages.{btrfsProgs,cryptsetup,utilLinux,nut,smartmontools,ethtool}` as a required fixture-refresh event.
-
-When parser-critical tool versions change, run:
-
-1. `just capture-all-fixtures`
-2. `just test-rust`
-3. `just test-parsers`
-
-### Unstable lane (tracked forecast)
-
-Early-warning lane for upstream parser/output drift. Unstable failures signal upcoming changes, not a contract violation. Fixtures in `cli/tests/fixtures/nixos-unstable/` are committed so upstream output changes are visible in git history, but they are non-authoritative.
-
-- `just test-all-unstable` -- VM tests against nixos-unstable. Covers
-  CLI-reachable parsers against live tool output but does not cover the
-  full parser surface (TUI-only parsers, unused parsers, smartctl).
-- `just capture-all-fixtures-unstable` + `just test-rust-unstable` --
-  covers btrfs/cryptsetup/util-linux/NUT against unstable tool output via
-  golden fixtures. Missing fixtures fail (not skip).
-- **smartctl and ethtool have no unstable fixtures.** Unstable
-  capture/test coverage intentionally covers btrfs/cryptsetup/util-linux/NUT
-  only; see the Stable lane for why smartctl fixtures are stable-only and
-  how to refresh them on smartmontools bumps, and why ethtool WoL output
-  is hand-authored instead of live-captured.
-
-Full unstable canary workflow:
-
-1. `just test-all-unstable`
-2. `just capture-all-fixtures-unstable`
-3. `just test-rust-unstable`
-
----
-
-## Plan Files
-
-Agents write plan files (design proposals, implementation plans, scratch
-analysis) to `./plans/wip/`, named `YYYY-MM-DD-{slug}.md` where `{slug}`
-is a short kebab-case identifier of the topic (e.g.
-`2026-05-23-test-perf.md`). Use today's date from the system context, not
-a guess.
-
-The `plans/wip/` directory is gitignored deliberately -- stale plans
-surfacing in project greps was causing agents to treat them as
-authoritative. Don't flag plan files as "untracked" or suggest committing
-them; that's the intended state.
-
-## Plan Review Protocol
-
-When reviewing a plan:
-
-- List findings ordered by severity.
-- For each finding: state issue, impact, and include one recommended fix.
-- Prescriptions must be singular: do not present multiple options in the report.
-- After listing findings, assess the overall plan viability.
-- If you think there's an even better + simpler + more robust solution, tell the
-  user so that they can consider pivoting to a new, better plan.
-
-Decision rule:
-
-- For each finding, consider the best resolutions and their trade-offs internally, then choose the best solution.
-- If multiple open-ended solutions exist, brainstorm with the user until one
-  solution is agreed.
-- After alignment, report only that agreed solution.
-
-Example (single finding):
-
-- High: Plan makes `braid status` mutate `pool.json` membership.
-  Impact: A read command causes side effects, which breaks safety expectations and complicates debugging.
-  Recommended fix: Keep `braid status` read-only; perform `pool.json` membership reconciliation only in explicit mutating commands (`add`, `remove`, `remove-missing`, `replace`).
+The stable and unstable validation lanes, the smartctl/ethtool hand-authored-fixture
+caveats, and the full unstable workflow are in
+[`docs/dev/parser-compatibility.md`](docs/dev/parser-compatibility.md).
 
 ## Git commits
 
