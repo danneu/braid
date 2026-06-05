@@ -18,7 +18,7 @@
 //!   hand-authored under `tests/fixtures/nixos-26.05/` because the NixOS VM
 //!   toolchain cannot produce useful self-test logs on virtio disks. They are
 //!   parser-critical contracts and follow the same review-on-bump obligation as
-//!   captured fixtures (see `AGENTS.md` Parser Compatibility).
+//!   captured fixtures (see `docs/dev/parser-compatibility.md`).
 //! - Compatibility aliases are out of contract unless explicitly documented.
 //!
 pub mod btrfs_balance_status;

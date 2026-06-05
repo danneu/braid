@@ -81,7 +81,7 @@ resolves. Cite external upstream code by its **shape**:
   inline code span (`` `printf(...)` ``) is fine for a tight function or field doc where a
   fenced block is too heavy. The `pkg <version>` stamp is the upstream release tag (`git -C
 reference/<pkg> describe --tags`); it pins the excerpt and is the re-verify trigger when a
-  nixpkgs bump changes that tool's version -- the same Parser Compatibility refresh event
+  nixpkgs bump changes that tool's version -- the same [parser-compatibility](parser-compatibility.md) refresh event
   that recaptures fixtures.
 - **Region or multi-line** -- a code area with no single quotable line (a long function, a
   struct, two scattered lines). Keep a pointer, not a wall of inlined code: `pkg <version>,

@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Guard: no typographic Unicode in user-facing CLI output.
 
-Enforces the "CLI Output Style" rule from AGENTS.md going forward: the
+Enforces the CLI-output ASCII rule from AGENTS.md going forward: the
 operator-facing surfaces of the Rust CLI and the NixOS module must use plain
 ASCII (`--`, straight quotes, `...`, `x`) rather than typographic substitutes
 that render badly over SSH and in non-UTF-8 locales.

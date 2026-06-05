@@ -34,5 +34,5 @@ Bad:
   enforces)
 
 Rust CLI only. Nix module options use NixOS option `description` fields;
-shell scripts and Python tests follow their own conventions (see Test
-Conventions).
+shell scripts and Python tests follow their own conventions (see
+[testing.md](testing.md)).
