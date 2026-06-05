@@ -40,7 +40,7 @@ scope, refactor, or backwards-compatibility cost.
 - dry-run, preview, or mutating command planning/execution -> [ADR 022 dry-run-preview-model](docs/design/decisions/022-dry-run-preview-model.md)
 - mutation code (invariant placement, fail-closed policy, residual guards, state enums) -> [safety-heuristics.md](docs/dev/safety-heuristics.md)
 - writing or reviewing a plan -> [planning-hygiene.md](docs/dev/planning-hygiene.md)
-- editing a frozen (Superseded/Deprecated) ADR or a `## See` section -> [doc-citations.md#decision-doc-references](docs/dev/doc-citations.md#decision-doc-references) (enforced by `check-see-paths.py`)
+- editing a frozen (Superseded/Deprecated) ADR or a `## See` section -> [doc-citations.md#decision-doc-references](docs/dev/doc-citations.md#decision-doc-references) (enforced by `scripts/docs/check-see-paths.py`)
 - `doctor`/`status`/`unlock` recovery messaging or the LUKS header-backup workflow -> [luks-unlock.md](docs/internals/luks-unlock.md#header-backup-workflow-and-messaging)
 
 ## Conventions (always)
@@ -49,7 +49,7 @@ scope, refactor, or backwards-compatibility cost.
   `echo` lines) use ASCII, not Unicode substitutes: `--` for em/en-dash, `'`/`"`
   for curly quotes, `...` for ellipsis, `x` for the multiplication sign. Rendering
   Unicode (arrows, box-drawing, degree sign, spinners) is fine. Enforced by
-  `check-output-ascii.py` over `cli/src/**/*.rs` and `modules/**/*.nix` echo lines
+  `scripts/docs/check-output-ascii.py` over `cli/src/**/*.rs` and `modules/**/*.nix` echo lines
   (comments and tests exempt).
 - **Commits:** Conventional Commits; first line lowercase (`fix the foo bug`, not `Fix ...`).
 - **File citations:** cite `path#symbol` (code, as a code span) or `path#heading-slug`
