@@ -53,8 +53,8 @@ scope, refactor, or backwards-compatibility cost.
   (comments and tests exempt).
 - **Commits:** Conventional Commits; first line lowercase (`fix the foo bug`, not `Fix ...`).
 - **File citations:** cite `path#symbol` (code, as a code span) or `path#heading-slug`
-  (markdown link) -- never line numbers. Details, plus citing vendored `reference/`
-  code: [doc-citations.md](docs/dev/doc-citations.md).
+  (markdown link) -- never line numbers. Details: [doc-citations.md](docs/dev/doc-citations.md);
+  citing vendored `reference/` code: [reference-source.md](docs/dev/reference-source.md#citing-reference-code).
 - **Doc comments:** every top-level or `pub`/`pub(crate)` Rust CLI item gets a `///`
   saying why it exists at that boundary (intent/invariant/ownership), not what the
   signature already says. Skip list + Good/Bad catalog: [doc-comments.md](docs/dev/doc-comments.md).

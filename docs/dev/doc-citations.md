@@ -29,6 +29,10 @@ A symbol or heading anchor survives edits and is greppable; a line number is
 neither. This applies to docs and comments -- transient analysis in `plans/wip/`
 is exempt.
 
+This rule governs braid's own tracked files; external upstream code under
+`reference/` is gitignored and cited differently (by shape, not `path#symbol`) --
+see [Citing reference/ code](reference-source.md#citing-reference-code).
+
 ## Decision-doc references
 
 A decision doc with `status: Superseded` or `Deprecated` is a point-in-time
