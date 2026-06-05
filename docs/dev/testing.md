@@ -12,6 +12,10 @@ Test conventions and NixOS VM test framework reference for braid. The short thre
 
 Every test's preamble is a contiguous block of `//` line comments directly above the test item.
 
+1. **Intent** — what behavior this test verifies (or tries to verify)
+2. **Why it exists** — what risk/regression this protects against
+3. **Scenario** — the real-world user/system story this models, especially the concrete bug or incident that inspired the test
+
 ```rust
 // Intent: one-line statement of the behavior verified.
 // Why it exists: the regression risk this protects against, ideally with
@@ -90,7 +94,7 @@ turns bad coverage into no coverage.
 
 ### Live-tool behavior locks
 
-When braid code is changed to depend on a specific external-tool behavior -- a particular exit code, a particular output wording, a particular return-value path -- mocked unit tests prove the *classifier* is correct given the assumed behavior, but they do NOT prove the tool still behaves that way. A nixpkgs bump that changed cryptsetup's exit-code contract would silently misclassify in production while every mocked test still passed.
+When braid code is changed to depend on a specific external-tool behavior -- a particular exit code, a particular output wording, a particular return-value path -- mocked unit tests prove the _classifier_ is correct given the assumed behavior, but they do NOT prove the tool still behaves that way. A nixpkgs bump that changed cryptsetup's exit-code contract would silently misclassify in production while every mocked test still passed.
 
 Whenever a plan introduces a classifier of the form `exit_code == <N>` or `stderr.contains("<wording>")` against an external tool, identify (or add) a live-tool repro/VM test that asserts the same code/wording directly. List that test in the plan's verification section as a required gate. If the live-tool test would be non-trivial to add, pause and reconsider whether the classifier is actually robust.
 

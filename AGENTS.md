@@ -8,20 +8,6 @@ braid is a Rust CLI tool + NixOS module for managing a NixOS-based NAS of full-d
 
 braid wraps luks + btrfs to provide higher level UX to make things easier, more accessible, and less error-prone for people just trying to manage their NAS without fiddling or reading manpages to do everything.
 
-## Example
-
-```
-Physical drives:
-  /dev/sda → LUKS ─┐
-  /dev/sdb → LUKS ─┼─ single btrfs RAID1 → /mnt/storage
-  /dev/sdc → LUKS ─┘
-
-Unlock:
-  NAS powers on → boots to login (pool offline)
-  → ssh user@nas → sudo braid unlock
-  → LUKS drives open → btrfs assembles → pool online
-```
-
 ## The Stack
 
 - **NixOS** — declarative, reproducible system configuration
@@ -34,20 +20,21 @@ Unlock:
 - `modules/braid/` — NixOS module (options, systemd units, storage config)
 - `tests/` — NixOS VM tests (`.py` scripts, `module/` NixOS configs, `hw/` hardware canary tests)
 - `docs/` — unified mdBook docs (single TOC at `docs/SUMMARY.md`, landing at `docs/index.md`)
-  - `guides/`, `commands/` — end-user material (formerly under `manual/`)
+  - `guides/`, `commands/` — end-user material
   - `design/principles.md`, `design/decisions/` — architecture authority
   - `internals/` — implementation notes (luks-unlock, tool behavior, btrfs deep-dives)
   - `dev/` — contributor docs (development workflow, testing, TUI snapshots)
-- `scripts/` — helper scripts (fetch references, destroy pool)
+- `scripts/` — helper scripts
 - `reference/` — upstream source checkouts for reading, not shipped. Full inventory in [`docs/dev/reference-source.md`](docs/dev/reference-source.md). Refresh with `just fetch-references`.
+
+## General guidelines
+
+- Always consider the ideal, robust, simple, most correct solution regardless of
+  its scope cost, refactoring cost, and backwards compatibility cost.
 
 ## Systemd Lifecycle
 
 Systemd lifecycle design: [`docs/design/decisions/018-systemd-lifecycle.md`](docs/design/decisions/018-systemd-lifecycle.md). Read before modifying units, the wrapper, or writing systemd-related tests.
-
-## No backwards compatibility
-
-braid is unreleased software. Never add migration paths, compatibility shims, or legacy support. If a format or interface changes, change it everywhere — old versions are not a concern.
 
 ## Architecture Authority
 
@@ -61,37 +48,11 @@ Before modifying dry-run, preview, or mutating command planning/execution, read 
 
 ## Planning and Review Hygiene
 
-- Re-read the central files immediately before writing or reviewing a plan; do
-  not rely on earlier conversation reads when code may have changed.
-- For renames, refactors, and callsite sweeps, derive the inventory from
-  tracked files with `git ls-files` plus `rg`. Be explicit about exclusions and
-  rerun the same search as verification.
-- Before planning recovery or cleanup recipes, verify every step against the
-  current `cmd_*` / `plan_*` code and the relevant tool or kernel behavior.
-  Treat issue recipes as hypotheses until the code proves them.
-- Architecture docs describe behavioral contracts, not internal helper names.
-  Verify wrapper process/lifetime claims from the wrapper code before writing
-  docs that depend on them.
-- For external-tool exit-code or wording classifiers, trace the specific
-  subcommand return path in `reference/`; a shared errno table is not enough to
-  prove one invocation's behavior.
+Re-read central files before planning, derive rename/refactor inventories from `git ls-files` + `rg`, and verify recovery recipes against current `cmd_*`/`plan_*` code: [`docs/dev/planning-hygiene.md`](docs/dev/planning-hygiene.md). Read before writing or reviewing a plan.
 
 ## Mutation Safety Heuristics
 
-- Query the authoritative source of state directly; do not pre-gate it with a
-  cheaper but weaker observable such as path existence.
-- Put invariant checks at the layer that owns the invariant. Primitive-level
-  checks belong inside the helper that performs the unsafe operation; caller
-  policy gates belong at callsites.
-- Keep diagnostic refinements out of mutating-command state enums when the new
-  distinction only matters for `status`, `doctor`, TUI, or error rendering.
-- Set fail-closed policy from the downstream failure mode. If a branch can
-  corrupt state or strand a journal when a preflight is wrong, every uncertainty
-  in that branch is a hard error even if a sibling branch can warn and proceed.
-- Residual invariant checks must be hard errors in all builds; do not replace a
-  production guard with `debug_assert!`.
-- Split post-commit failure variants by the operator's remediation and on-disk
-  consequence, not by implementation layer.
+Invariant placement, fail-closed policy, hard-vs-`debug_assert!` residual guards, and state-enum discipline for mutating commands: [`docs/dev/safety-heuristics.md`](docs/dev/safety-heuristics.md). Read before touching mutation code.
 
 ## User Guide
 
@@ -119,75 +80,11 @@ topic table live in [`docs/dev/reference-source.md`](docs/dev/reference-source.m
 
 ## File References
 
-In ADRs, decision docs, and `docs/` prose, never reference another file by line
-number. Line numbers drift the moment surrounding code or text is edited, so the
-pointer silently goes stale and misleads the next reader. Use a `path#anchor`
-reference instead -- one shape for both code and docs, where the anchor names
-_what_ and the path says _where_:
-
-- **Code** -- `path#symbol` as a plain code span, not a link:
-  ``(see `cli/src/cmd/unlock.rs#cmd_unlock`)``. The symbol is a `fn`, `struct`,
-  `enum`, `trait`, `impl`, module, or `const`, method-qualified where it helps
-  (`cli/src/cmd/plan.rs#Planner::plan`). The symbol is the drift-proof,
-  greppable half -- one `rg cmd_unlock` finds both the citation and the
-  definition. Never write `cli/src/cmd/unlock.rs:142`, and do not linkify code
-  paths: `cli/` lives outside the mdBook root, so a link 404s in the rendered
-  book and dodges linkcheck. A bare file path (no `#symbol`) is fine when the
-  whole file is the referent.
-- **Markdown / mdBook** -- `path#heading-slug` as a real Markdown link, e.g.
-  `[...](docs/internals/luks-unlock.md#header-backup-workflow-and-messaging)`,
-  not a line number or section count. Unlike code refs these are clickable and
-  validated by `mdbook-linkcheck2`, so a renamed heading fails CI instead of
-  rotting silently.
-
-A symbol or heading anchor survives edits and is greppable; a line number is
-neither. This applies to docs and comments -- transient analysis in `plans/wip/`
-is exempt.
-
-### External `reference/` citations
-
-The rule above governs braid's own tracked files. External upstream code lives in
-`reference/`, which is gitignored and refreshed wholesale by `just fetch-references`: it
-is absent on a clean checkout and invisible to CI. A line number into it drifts on every
-refresh, and a braid-style `path#symbol` is not greppable when the file is not on disk --
-neither form validates or even resolves. Cite external upstream code by its **shape**:
-
-- **Short, behavior-defining snippet** -- one line or small function emitting a format,
-  token, or exit code braid parses. Inline the excerpt as frozen ground truth, so a reader
-  sees the contract without fetching `reference/`. Stamp it `pkg <version>, <path> (fn name)`
-  and drop the line number. Fence the excerpt with a non-`rust` language tag -- `c` for
-  source, `text` for tool output -- so rustdoc does not run it as a doctest. An unannotated
-  or `rust`-tagged block becomes a failing doctest, caught by `cargo test -p braid-cli --doc`
-  (not `just test-rust`, whose `--lib --bin --test` selectors skip doctests).
-  Precedent: `cli/src/parse/cryptsetup_luks_version.rs#parse_cryptsetup_luks_version`. An
-  inline code span (`` `printf(...)` ``) is fine for a tight function or field doc where a
-  fenced block is too heavy. The `pkg <version>` stamp is the upstream release tag (`git -C
-reference/<pkg> describe --tags`); it pins the excerpt and is the re-verify trigger when a
-  nixpkgs bump changes that tool's version -- the same Parser Compatibility refresh event
-  that recaptures fixtures.
-- **Region or multi-line** -- a code area with no single quotable line (a long function, a
-  struct, two scattered lines). Keep a pointer, not a wall of inlined code: `pkg <version>,
-<path> (fn name)` plus a one-line paraphrase of what's there. Prefer a function name over a line
-  number; a bare line range is a last resort.
-
-Existing bare-line-number `reference/` citations are tolerated -- nothing validates them
-either way -- but migrate them toward the excerpt or pointer form when you next touch the
-surrounding file.
+Cite files by `path#symbol` (code, as a plain code span) or `path#heading-slug` (markdown link), never by line number: [`docs/dev/doc-citations.md`](docs/dev/doc-citations.md). Read before writing an ADR or doc cross-reference. For citing vendored upstream code under `reference/`, see [`docs/dev/reference-source.md`](docs/dev/reference-source.md#citing-reference-code).
 
 ## Decision Doc References
 
-A decision doc with `status: Superseded` or `Deprecated` is a point-in-time
-record. Do not rewrite its body or `## See` section to track current code -- the
-`> Superseded by ...` banner is the forward pointer to live artifacts. Repointing
-a frozen doc's references at today's successor code only makes it contradict its
-own narrative.
-
-Independent of status, a `## See` bullet whose path no longer resolves is a broken
-pointer, not history. Drop it; or, if the removed file has lasting reference value
-(an archived design doc or plan -- not deleted dead code), replace the bare path
-with the git-history-note form used in 002 and 003:
-`(preserved in git history; last present at commit <hash>)`. The `## See` path
-half of this rule is enforced by `scripts/docs/check-see-paths.py`.
+Do not rewrite a frozen (Superseded/Deprecated) ADR's body or `## See` section to track current code; the `> Superseded by ...` banner is the forward pointer. The `## See` rules (enforced by `scripts/docs/check-see-paths.py`): [`docs/dev/doc-citations.md`](docs/dev/doc-citations.md#decision-doc-references). Read before editing a decision doc.
 
 ## Git Commits
 
@@ -215,38 +112,7 @@ For the LUKS header backup workflow and the messaging invariant for `doctor`/`st
 
 ## Doc Comments
 
-When adding a new top-level function, type, module, trait, or
-`pub`/`pub(crate)` item in the Rust CLI, add a `///` doc comment justifying
-why it exists at that boundary. Capture intent, invariant, ownership, or
-call-site coupling -- not the signature.
-
-Prefer one to three lines. If removing the comment would not lose any
-information a reader could not recover from the code, do not write it.
-
-Skip:
-
-- Trait impls whose purpose is the trait (`Display`, `Debug`, `From`,
-  `Default`, ...)
-- Enum variants already covered by an enum-level doc
-- `#[cfg(test)]` items and test fixtures
-
-Good:
-
-- "Shared mapper ownership classifier so planner and executor use the
-  same LUKS UUID invariant."
-- "Separate from `MountState` because we observe LUKS state without
-  holding the pool lock."
-
-Bad:
-
-- "Returns mapper ownership." (restates signature)
-- "Helper used by the planner." (vague)
-- "Caller must ensure path is canonical." (fabricated invariant nothing
-  enforces)
-
-Rust CLI only. Nix module options use NixOS option `description` fields;
-shell scripts and Python tests follow their own conventions (see Test
-Conventions).
+When adding a top-level `fn`/type/module/trait or `pub`/`pub(crate)` item in the Rust CLI, add a `///` doc comment justifying why it exists at that boundary (intent/invariant/ownership), not the signature. Skip list and Good/Bad catalog: [`docs/dev/doc-comments.md`](docs/dev/doc-comments.md). Rust CLI only.
 
 ## Commands
 

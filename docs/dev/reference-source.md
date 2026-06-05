@@ -1,5 +1,5 @@
 ---
-intent: Inventory of the vendored upstream source under `reference/` -- what each checkout contains and what to read it for. Consult before searching the web for tool behavior or output formats.
+intent: Inventory of the vendored upstream source under `reference/` -- what each checkout contains and what to read it for -- plus how to cite external upstream code in braid's docs and comments. Consult before searching the web for tool behavior or output formats, or before citing reference/ code.
 ---
 
 # Reference source
@@ -59,3 +59,35 @@ Before searching the web for tool behavior, consult local resources first. `refe
 | Scrub / self-healing              | `Scrub.rst`                                 |
 | Filesystem limits & storage model | `btrfs-man5.rst`                            |
 | Administration overview           | `Administration.rst`                        |
+
+## Citing reference/ code
+
+braid's own tracked files are cited by `path#symbol` or `path#heading-slug`
+([doc and ADR file references](doc-citations.md)); external upstream code is
+different. It lives in `reference/`, which is gitignored and refreshed wholesale
+by `just fetch-references`: it is absent on a clean checkout and invisible to CI.
+A line number into it drifts on every refresh, and a braid-style `path#symbol` is
+not greppable when the file is not on disk -- neither form validates or even
+resolves. Cite external upstream code by its **shape**:
+
+- **Short, behavior-defining snippet** -- one line or small function emitting a format,
+  token, or exit code braid parses. Inline the excerpt as frozen ground truth, so a reader
+  sees the contract without fetching `reference/`. Stamp it `pkg <version>, <path> (fn name)`
+  and drop the line number. Fence the excerpt with a non-`rust` language tag -- `c` for
+  source, `text` for tool output -- so rustdoc does not run it as a doctest. An unannotated
+  or `rust`-tagged block becomes a failing doctest, caught by `cargo test -p braid-cli --doc`
+  (not `just test-rust`, whose `--lib --bin --test` selectors skip doctests).
+  Precedent: `cli/src/parse/cryptsetup_luks_version.rs#parse_cryptsetup_luks_version`. An
+  inline code span (`` `printf(...)` ``) is fine for a tight function or field doc where a
+  fenced block is too heavy. The `pkg <version>` stamp is the upstream release tag (`git -C
+reference/<pkg> describe --tags`); it pins the excerpt and is the re-verify trigger when a
+  nixpkgs bump changes that tool's version -- the same Parser Compatibility refresh event
+  that recaptures fixtures.
+- **Region or multi-line** -- a code area with no single quotable line (a long function, a
+  struct, two scattered lines). Keep a pointer, not a wall of inlined code: `pkg <version>,
+<path> (fn name)` plus a one-line paraphrase of what's there. Prefer a function name over a line
+  number; a bare line range is a last resort.
+
+Existing bare-line-number `reference/` citations are tolerated -- nothing validates them
+either way -- but migrate them toward the excerpt or pointer form when you next touch the
+surrounding file.
