@@ -35,8 +35,7 @@ Review the command's behavior for:
 3. **Simplicity opportunities** -- dead code, unnecessary
    abstractions, overly defensive code, duplicated logic, and places
    where the implementation is more complex than the problem requires.
-   Respect braid's "no backwards compatibility" rule -- simplification
-   is welcome.
+   Simplification is welcome.
 4. **Project fit** -- contradictions with `docs/design/principles.md`,
    relevant decision records, README/user-guide behavior, CLI output
    style, or documented LUKS/systemd/btrfs invariants.
@@ -67,7 +66,6 @@ Review the command's behavior for:
 ## Project Conventions
 
 - Follow the project instructions already loaded from `CLAUDE.md`.
-- No migrations or compatibility shims -- braid is unreleased.
 - Use plain ASCII in user-facing strings; use `--`, not em dash.
 - Tests must fail when the bug they protect against is reintroduced.
   Parser canaries do not catch wiring bugs.

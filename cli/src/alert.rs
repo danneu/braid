@@ -660,13 +660,12 @@ mod tests {
      * preserved causes; AlertState::active() is then derived from causes
      * regardless of what the legacy "active" value was on disk.
      *
-     * Why it exists: braid is unreleased and AGENTS.md forbids migration
-     * paths, but pre-refactor latches written to /var/lib/braid/alert-latch.json
-     * by an older binary still need to load cleanly post-refactor. The refactor
-     * relies on serde ignoring the legacy key because AlertState has no
-     * deny_unknown_fields. Without this test, a later strictness change could
-     * regress every legacy on-disk latch into the corrupt-latch quarantine path
-     * on next monitor cycle.
+     * Why it exists: pre-refactor latches written to
+     * /var/lib/braid/alert-latch.json by an older binary still need to load
+     * cleanly post-refactor. The refactor relies on serde ignoring the legacy
+     * key because AlertState has no deny_unknown_fields. Without this test, a
+     * later strictness change could regress every legacy on-disk latch into the
+     * corrupt-latch quarantine path on next monitor cycle.
      *
      * Scenario: a NAS upgrades the braid binary across this refactor with a
      * latch from the prior version still on disk. Next monitor/status/ack

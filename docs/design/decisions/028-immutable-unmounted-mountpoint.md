@@ -72,9 +72,9 @@ on an unsupported fs / old kernel (`Unsupported` / `MountStateUnknown`) and the
 
 **Tradeoff:** the only capability lost is a declarative, rebuild-time off switch.
 Recovery from any unforeseen interaction is the manual `--unseal` plus the
-graceful self-disable, not a NixOS option flip. Under the no-backwards-compat
-policy the always-on default is reversible later if a concrete need ever surfaces
-(a knob could be re-added trivially).
+graceful self-disable, not a NixOS option flip. The always-on default is
+reversible later if a concrete need ever surfaces (a knob could be re-added
+trivially).
 
 ### 2. Close the boot window
 
@@ -216,8 +216,7 @@ path during that same activation, so the new path is sealed promptly. braid does
 NOT auto-clear the OLD one -- the old bare directory keeps its `+i` until cleared,
 so a later `rmdir` or reuse of the old path fails with `EPERM`. This is the same
 class as any NixOS path option (changing `dataDir` leaves the old directory
-behind); braid does not track prior mountpoints, consistent with the
-no-migration stance in `AGENTS.md`.
+behind); braid does not track prior mountpoints.
 
 Remediation is the explicit-path clear lever (not `chattr`, which is absent from
 the appliance wrapper PATH): `braid seal-mountpoint --unseal /mnt/storage`. The

@@ -31,9 +31,8 @@ not caught up to, in which case say so. Review the page for:
    or other pages; broken or wrong cross-links (every `docs/` cross-link is
    linkchecked in CI, so a broken link is a real break); pre-migration disk
    identifiers (device paths, serials, by-id) where LUKS UUIDs are now
-   canonical; migration or backwards-compatibility language (braid is
-   unreleased -- there is none); CLI-output-style violations quoted in the
-   doc (em dash where `--` is required).
+   canonical; CLI-output-style violations quoted in the doc (em dash where
+   `--` is required).
 3. **Completeness / gaps** -- shipped behavior with no documentation, an
    option or flag that exists in code but is undocumented, a recovery or
    troubleshooting flow that omits a real failure mode, a step that would
@@ -85,8 +84,6 @@ not caught up to, in which case say so. Review the page for:
 ## Project Conventions
 
 - Follow the project instructions already loaded from `CLAUDE.md`.
-- No migrations or compatibility shims -- braid is unreleased. Docs that
-  describe legacy paths or back-compat are wrong.
 - Use plain ASCII in examples and prose; `--`, not em dash.
 - `README.md` and `docs/` must stay in sync; flag drift between them.
 - Do not modify any documentation or source code.

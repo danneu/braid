@@ -2865,8 +2865,7 @@ mod tests {
     /*
      * Intent: verify the advisory does NOT fire for legacy `.img` files.
      * Why it exists: `.img` was the original header-backup extension
-     *   before the rename to `.luksheader`. Per the project's
-     *   no-backwards-compat policy, `.img` is no longer a supported
+     *   before the rename to `.luksheader`; it is no longer a supported
      *   input. This test pins that removal so a future regression that
      *   re-adds legacy `.img` matching to the extension predicate fails
      *   loudly instead of silently re-enabling legacy support.
