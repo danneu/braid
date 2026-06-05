@@ -88,7 +88,13 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         run: |
           tag="${GITHUB_REF_NAME}"
-          gh release view "$tag" >/dev/null 2>&1 && echo "release $tag exists; skipping." \
-            || gh release create "$tag" --generate-notes --verify-tag
+          if gh release view "$tag" >/dev/null 2>&1; then
+            echo "release $tag exists; skipping."
+          else
+            notes="$RUNNER_TEMP/release-notes.md"
+            nix develop .#release -c git-cliff --current --strip all --output "$notes"
+            [ -s "$notes" ] || printf '_No notable changes._\n' > "$notes"
+            gh release create "$tag" --title "$tag" --notes-file "$notes" --verify-tag
+          fi
       - name: Fast-forward `release` (LAST -- sole consumer gate, after cache + release object)
         run: git push origin ${{ steps.guard.outputs.commit }}:refs/heads/release

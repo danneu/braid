@@ -81,7 +81,13 @@ not `^vX.Y.Z$` equal to `cli/Cargo.toml`'s version at the tagged commit. The
 `release` FF is the **last** step and the sole consumer-visible "it's released"
 gate: it lands only after the cache is warm and the GitHub release object exists,
 so no consumer can `nix flake update` to a half-published rev. Every step is
-idempotent, so a failed run is re-runnable from the Actions UI.
+idempotent, so a failed run is re-runnable from the Actions UI. The GitHub
+release body is rendered by git-cliff, pinned in the `.#release` devShell and
+invoked as `nix develop .#release -c git-cliff`, from `cliff.toml`: conventional
+commit types are grouped into stable sections such as Features, Bug Fixes,
+Documentation, Tests, CI, Build, and Chores, while unmatched commit subjects
+land in Other; a genuinely empty rendered range gets the `_No notable changes._`
+placeholder.
 
 ### Public cachix cache `braid`
 
@@ -176,6 +182,7 @@ merges.
 
 - `justfile` -- the `release` recipe (Mac-side bump + local gates).
 - `.github/workflows/release.yml` -- CI build, cache push, GitHub release, `release` FF.
+- `cliff.toml` -- git-cliff template + commit-group config for the GitHub release-notes body.
 - `tests/eval/version-matches-cargo.nix` -- the version single-source-of-truth eval guard.
 - [Releasing](../../dev/releasing.md) -- the operator runbook.
 - [Toolchain pinning](010-toolchain-pinning.md) -- no-follows default and parser-critical tool pinning.

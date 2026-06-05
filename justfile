@@ -194,8 +194,9 @@ playground:
 
 # Cut a release: bump cli/Cargo.toml + Cargo.lock, tag vX.Y.Z, push master+tag.
 # The tag triggers .github/workflows/release.yml, which builds x86_64-linux,
-# pushes to the public `braid` cachix cache, creates the GitHub release, and
-# fast-forwards the `release` branch (the consumer channel). Run from
+# pushes to the public `braid` cachix cache, creates the GitHub release (body
+# rendered from conventional commits by git-cliff; preview with `just changelog`),
+# and fast-forwards the `release` branch (the consumer channel). Run from
 # `nix develop .#release`.
 #
 # VM coverage is a manual, per-release choice -- run `just test-vm` locally (or a
@@ -223,6 +224,12 @@ release level:
     cargo release {{level}} --execute --no-confirm
     tag="$(git describe --tags --abbrev=0)"
     echo "==> pushed $tag; release workflow triggered. Watch: gh run watch (release.yml)"
+
+# Preview the release notes git-cliff will render for the next release (commits
+# since the last v* tag), using the same pinned git-cliff CI publishes with.
+# Run before `just release` to sanity-check the body.
+changelog:
+    nix develop .#release -c git-cliff --unreleased --strip all
 
 # Build and push x86_64-linux binary to cachix. Manual/ad-hoc only: real release
 # cache pushes go through .github/workflows/release.yml on the v* tag. Must run on

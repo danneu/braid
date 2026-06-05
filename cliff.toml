@@ -1,0 +1,51 @@
+# git-cliff config for braid release notes.
+#
+# release.yml runs `git-cliff --current` to render the just-tagged release range
+# (commits since the previous v* tag) into the GitHub release body. `just changelog`
+# runs `git-cliff --unreleased` to preview the next release's notes before tagging.
+#
+# Scope is deliberately broad for now: conventional commit types render into
+# named sections, and anything that does not match a named type lands in Other.
+# The release workflow still keeps an empty-notes fallback for a genuinely empty
+# rendered range.
+
+[changelog]
+header = ""
+body = """
+{% for group, commits in commits | group_by(attribute="group") %}
+### {{ group | striptags | trim }}
+
+{% for commit in commits -%}
+- {% if commit.scope %}*({{ commit.scope }})* {% endif %}\
+{{ commit.message | split(pat="\n") | first | upper_first }}
+{% endfor %}
+{% endfor %}
+"""
+trim = true
+footer = ""
+
+[git]
+conventional_commits = true
+filter_unconventional = false
+filter_commits = false
+tag_pattern = "^v[0-9]+\\.[0-9]+\\.[0-9]+$"
+topo_order = false
+sort_commits = "oldest"
+
+# First match wins. Named conventional commit types render into stable sections,
+# then a catch-all Other group keeps unconventional commits visible. Sections
+# render in declaration order via the `<!-- N -->` prefix striptags removes.
+commit_parsers = [
+    { message = "^feat(\\([^)]+\\))?!?:",     group = "<!-- 00 -->Features" },
+    { message = "^fix(\\([^)]+\\))?!?:",      group = "<!-- 01 -->Bug Fixes" },
+    { message = "^perf(\\([^)]+\\))?!?:",     group = "<!-- 02 -->Performance" },
+    { message = "^docs(\\([^)]+\\))?!?:",     group = "<!-- 03 -->Documentation" },
+    { message = "^refactor(\\([^)]+\\))?!?:", group = "<!-- 04 -->Refactoring" },
+    { message = "^test(\\([^)]+\\))?!?:",     group = "<!-- 05 -->Tests" },
+    { message = "^ci(\\([^)]+\\))?!?:",       group = "<!-- 06 -->CI" },
+    { message = "^build(\\([^)]+\\))?!?:",    group = "<!-- 07 -->Build" },
+    { message = "^chore(\\([^)]+\\))?!?:",    group = "<!-- 08 -->Chores" },
+    { message = "^style(\\([^)]+\\))?!?:",    group = "<!-- 09 -->Style" },
+    { message = "^revert(\\([^)]+\\))?!?:",   group = "<!-- 10 -->Reverts" },
+    { message = ".*",                          group = "<!-- 99 -->Other" },
+]

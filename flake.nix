@@ -148,11 +148,12 @@
           ];
         };
 
-      # Cross-platform shell for the Mac-side `just release` bump only: cargo-release
-      # needs cargo on PATH, and the default devShell is Linux-only. The bump compiles
-      # nothing; the x86_64-linux build + cachix push happen in CI on the tag. The CI
-      # Rust test gate uses the default Linux devShell (craneLib), not this one --
-      # see docs/design/decisions/029-release-process.md.
+      # Cross-platform release-tool boundary used by the Mac-side `just release`
+      # bump and by CI's release-notes step (pinned git-cliff). cargo-release
+      # needs cargo on PATH, and the default devShell is Linux-only. The bump
+      # compiles nothing; the x86_64-linux build + cachix push happen in CI on
+      # the tag. The CI Rust test gate still uses the default Linux devShell
+      # (craneLib) -- see docs/design/decisions/029-release-process.md.
       releaseShellFor =
         system:
         let
@@ -163,6 +164,7 @@
             pkgs.cargo-release
             pkgs.cargo
             pkgs.rustc
+            pkgs.git-cliff
             pkgs.gh
             pkgs.git
             pkgs.just
