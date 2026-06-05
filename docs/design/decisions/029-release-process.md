@@ -66,7 +66,10 @@ independent publish guards: `[workspace.metadata.release] publish = false` stops
 assume `vX.Y.Z`.
 
 Pre-1.0 bumps are plain semver: `patch` 0.0.1->0.0.2, `minor`->0.1.0,
-`major`->1.0.0 (so `minor`'s jump to 0.1.0 is expected, not a surprise).
+`major`->1.0.0 (so `minor`'s jump to 0.1.0 is expected, not a surprise). The
+in-tree pre-release version is `0.0.0`, so the first `just release patch` cuts
+`v0.0.1` through the same path as every later release -- there is no special-case
+bootstrap.
 
 The tag triggers `.github/workflows/release.yml`, a single sequential job ordered
 cheapest-gate-first: ancestry guard -> tag/version guard -> Rust test + version

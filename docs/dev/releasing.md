@@ -1,8 +1,8 @@
 ---
 intent: Operator runbook for cutting a braid release -- prerequisites, the local
-  pre-release test step, the normal `just release` flow, first-release bootstrap,
-  and CI-failure recovery. Read before running `just release` or recovering a
-  failed release. For the design rationale see ADR 029.
+  pre-release test step, the normal `just release` flow (which the first release
+  also follows), and CI-failure recovery. Read before running `just release` or
+  recovering a failed release. For the design rationale see ADR 029.
 ---
 
 # Releasing
@@ -95,23 +95,26 @@ fast-forward then fails as a non-fast-forward. That outcome is benign for
 consumers (`release` only ever moves forward) but shows a red run. So push (or
 `just release`) one tag at a time.
 
-## Bootstrapping the first release (v0.0.1)
+## The first release
 
-`cli/Cargo.toml` is already `0.0.1`, so the first release is "publish current,"
-not a bump. Do it by hand -- `just release` is for bumps:
+The first release is not special: it is `just release patch`, the same flow as
+every later release. The in-tree version is the pre-release `0.0.0`, so the first
+`just release patch` cuts `v0.0.1` (`0.0.0` -> `0.0.1`); all later runs bump from
+`0.0.1`.
 
-1. Confirm the `master` HEAD you will tag passes the local behavioral gate
-   (`just test-vm`, `just test-rust`).
-2. Tag that HEAD directly and push:
+Two first-run-only things happen for free, with no extra steps:
 
-   ```sh
-   git tag -a v0.0.1 -m v0.0.1
-   git push origin v0.0.1
-   ```
+- `release.yml`'s final `git push origin <commit>:refs/heads/release` **creates**
+  the `release` branch (the ref does not exist yet, so the first push makes it),
+  and `gh release create` cuts the first GitHub release (no pre-existing release
+  required).
 
-The tag triggers `release.yml`, which **creates** the `release` branch, warms the
-cache, and cuts the GitHub release. All later `just release` runs bump from
-`0.0.2`.
+Because CI has no VM gate, run the behavioral suite locally before this first cut:
+
+```sh
+just test-vm
+just test-rust
+```
 
 ## If release CI fails
 
