@@ -63,13 +63,22 @@ _build-checks flake_attr *args:
     fi
     exit $rc
 
-# Run NixOS VM tests — excludes repro tests (pass test names to run specific tests, add -v for verbose)
-# Stops on first failed test, but use -k flag to continue through
-# all tests and then report failures at end.
+# Run NixOS VM tests -- excludes repro tests. Pass test names to scope the run,
+# -v for verbose (full VM logs), -k to continue past the first failure (default
+# stops on it), -rebuild to force a rebuild, --unstable to run against
+# nixos-unstable (e.g. `just test-vm hello-world --unstable`).
+#
+# The full (no-arg) suite takes 20-30 min. Default to focused runs
+# (`just test-vm test1 test2`); reserve the full suite for changes with broad
+# blast radius (systemd lifecycle, pool lock, mount/unmount, module-wide
+# refactors) or a pre-handoff check on a substantial change. No -v by default;
+# add it only to a single failing test whose plain output is unclear, never to
+# the whole suite (too much output).
+[doc('Run NixOS VM tests, excludes repro (full suite ~20-30 min; -v, -k, --unstable, or named tests)')]
 test-vm *args:
     just _build-checks checks {{args}}
 
-# Run repro tests only (same flags as `test-vm`: -v, -rebuild, -k, or named tests)
+# Run repro tests only (same flags as `test-vm`: -v, -rebuild, -k, --unstable, or named tests)
 test-repro *args:
     just _build-checks reproChecks {{args}}
 
@@ -106,7 +115,8 @@ test-fast:
 test-parsers *args:
     just test-vm braid-status-rust braid-status-during-balance braid-status-ups braid-idle braid-discover braid-tui-browse {{args}}
 
-# Run Rust unit tests (excludes unstable golden tests)
+# Run Rust unit tests (excludes unstable golden tests). The CLI crate's package
+# name is `braid-cli` (not `braid`); prefer this recipe over `cargo test -p <name>`.
 test-rust:
     cargo test --lib --bin braid --test golden_nixos_26_05 --test tty_guard --test confirm_yes
 
@@ -225,10 +235,15 @@ release level:
     tag="$(git describe --tags --abbrev=0)"
     echo "==> pushed $tag; release workflow triggered. Watch: gh run watch (release.yml)"
 
-# Preview the release notes git-cliff will render for the next release (commits
-# since the last v* tag), using the same pinned git-cliff CI publishes with.
-# Run before `just release` to sanity-check the body.
+# Preview the release notes git-cliff will render for the next release, using the
+# same pinned git-cliff CI publishes with. Before the first v* tag, this prints
+# nothing because v0.0.1 intentionally ships with an empty release body.
 changelog:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    if ! git tag --list | grep -Eq '^v[0-9]+\.[0-9]+\.[0-9]+$'; then
+        exit 0
+    fi
     nix develop .#release -c git-cliff --unreleased --strip all
 
 # Build and push x86_64-linux binary to cachix. Manual/ad-hoc only: real release
