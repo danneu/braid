@@ -1596,10 +1596,7 @@ fn check_mountpoint_immutable<R: CommandRunner>(ctx: &mut DoctorContext<'_, R>) 
     // Tri-state mount state straight from is_mountpoint: Ok -> Some, Err ->
     // None. NOT ensure_mountpoint_is_mounted -- its unwrap_or(false) would let a
     // probe error masquerade as "offline" and fire a false offline+mutable Warn.
-    let mounted = match ctx.online_ops.is_mountpoint(mp) {
-        Ok(is_mounted) => Some(is_mounted),
-        Err(_) => None,
-    };
+    let mounted = ctx.online_ops.is_mountpoint(mp).ok();
     let probe = ImmutabilityProbe::from_result(RealMountpointGuard.is_immutable(mp));
 
     match classify_mountpoint_immutability(mount_point.as_str(), mounted, probe) {

@@ -592,7 +592,7 @@ mod tests {
         for ok in [GuardOutcome::Set, GuardOutcome::AlreadyImmutable] {
             let guard = MockMountpointGuard::new(Ok(ok));
             assert!(run_explicit_seal(&guard, path).is_ok(), "{ok:?}");
-            assert_eq!(guard.calls()[0].want_immutable, true);
+            assert!(guard.calls()[0].want_immutable);
         }
         for bad in [
             GuardOutcome::SkippedMounted,
@@ -623,9 +623,8 @@ mod tests {
                 run_explicit_unseal(&guard, path, configured).is_ok(),
                 "{ok:?}"
             );
-            assert_eq!(
-                guard.calls()[0].want_immutable,
-                false,
+            assert!(
+                !guard.calls()[0].want_immutable,
                 "unseal must clear, not seal"
             );
         }
