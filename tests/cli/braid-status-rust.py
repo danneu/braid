@@ -106,7 +106,8 @@ with subtest("Healthy RAID1 summary"):
         assert disk_lines, f"{disk} not shown as present:\n{output}"
     assert "devid" in output, f"Expected 'devid':\n{output}"
     assert "LUKS:" in output, f"Expected 'LUKS:':\n{output}"
-    assert "Errors:" in output, f"Expected 'Errors:':\n{output}"
+    assert "btrfs:" in output, f"Expected 'btrfs:':\n{output}"
+    assert "SMART:" in output, f"Expected 'SMART:':\n{output}"
 
 with subtest("Healthy JSON"):
     raw = machine.succeed(rust_status("--json"))
@@ -120,10 +121,11 @@ with subtest("Healthy JSON"):
         assert "devid" in d, f"Missing devid: {d}"
         assert isinstance(d["devid"], int), f"devid must be a JSON number: {d}"
         assert d["status"] == "present", f"Expected present: {d}"
-        assert "errors" in d, f"Missing errors: {d}"
-        assert d["errors"] is not None, f"Expected errors object: {d}"
+        assert "btrfs_errors" in d, f"Missing btrfs_errors: {d}"
+        assert d["btrfs_errors"] is not None, f"Expected btrfs_errors object: {d}"
         for key in ["read", "write", "corruption"]:
-            assert key in d["errors"], f"Missing errors.{key}: {d}"
+            assert key in d["btrfs_errors"], f"Missing btrfs_errors.{key}: {d}"
+        assert "smart" in d, f"Missing smart: {d}"
     by_uuid = {d["luks_uuid"]: d for d in s["disks"]}
     pool = json.loads(machine.succeed("cat /var/lib/braid/pool.json"))
     key_by_name = {entry["name"]: key for key, entry in pool["disks"].items()}

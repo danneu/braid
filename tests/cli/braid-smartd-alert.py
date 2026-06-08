@@ -65,7 +65,7 @@ with subtest("After smartd alert: monitor exits 1"):
 with subtest("After smartd alert: status shows SMART warning"):
     output = machine.succeed("braid status")
     assert "ALERT" in output, f"Expected ALERT, got: {output}"
-    assert "SMART" in output, f"Expected SMART cause, got: {output}"
+    assert "SMART health warning" in output, f"Expected SMART cause, got: {output}"
 
 with subtest("Ack clears smartd alert"):
     status, _stdout = machine.execute("braid ack >/tmp/ack.out 2>/tmp/ack.err")
@@ -95,7 +95,7 @@ with subtest("Pool offline with smartd alert: status shows ALERT"):
     machine.succeed("touch /var/lib/braid/smartd-alert")
     output = machine.succeed("braid status")
     assert "ALERT" in output, f"Expected ALERT, got: {output}"
-    assert "SMART" in output, f"Expected SMART cause, got: {output}"
+    assert "SMART health warning" in output, f"Expected SMART cause, got: {output}"
 
 with subtest("Pool offline with smartd alert: ack succeeds"):
     machine.succeed("braid ack")

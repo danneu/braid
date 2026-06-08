@@ -84,8 +84,8 @@ with subtest("ack fails mid-cleanup, leaving the sentinel"):
     machine.fail("test -f /var/lib/braid/smartd-alert")
 
 # Surface: status reads the sentinel as a cleanup-pending alert cause. The
-# exact string pins the docs/commands/ack.md messaging invariant. SMART must
-# not appear -- the flag was already removed, so the sentinel is the only
+# exact string pins the docs/commands/ack.md messaging invariant. No SMART alert
+# cause must appear -- the flag was already removed, so the sentinel is the only
 # surfaced cause. status exits 0 even with an active alert, so succeed() is
 # correct here.
 with subtest("status reports the cleanup-pending cause"):
@@ -94,8 +94,8 @@ with subtest("status reports the cleanup-pending cause"):
     assert "ack cleanup pending -- re-run `braid ack` to resume" in out, (
         f"expected the cleanup-pending cause string, got: {out}"
     )
-    assert "SMART" not in out, (
-        f"smartd flag was removed; only the sentinel should surface, got: {out}"
+    assert "SMART health warning" not in out, (
+        f"smartd flag was removed; no SMART alert cause should surface, got: {out}"
     )
 
 # Consume: the operator removes the poison and re-runs ack. The sentinel-only

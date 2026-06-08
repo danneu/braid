@@ -73,7 +73,8 @@ with subtest("braid status shows pool summary with per-disk detail"):
         assert disk_lines, f"{disk} not shown as present:\n{output}"
     assert "devid" in output, f"Expected 'devid':\n{output}"
     assert "LUKS:" in output, f"Expected 'LUKS:':\n{output}"
-    assert "Errors:" in output, f"Expected 'Errors:':\n{output}"
+    assert "btrfs:" in output, f"Expected 'btrfs:':\n{output}"
+    assert "SMART:" in output, f"Expected 'SMART:':\n{output}"
 
 # --- Phase 2: braid status --json ---
 
@@ -105,7 +106,8 @@ with subtest("braid status --json has schema fields and disk details"):
         assert "devid" in disk, f"Disk missing devid: {disk}"
         assert "status" in disk, f"Disk missing status: {disk}"
         assert disk["status"] == "present", f"Disk not present: {disk}"
-        assert "errors" in disk, f"Disk missing errors: {disk}"
+        assert "btrfs_errors" in disk, f"Disk missing btrfs_errors: {disk}"
+        assert "smart" in disk, f"Disk missing smart: {disk}"
 
 # --- Phase 3: Error cases ---
 
