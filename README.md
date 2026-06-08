@@ -97,6 +97,14 @@ braid = {
 ```
 
 `?ref=release` tracks braid's release channel (`nix flake update braid` upgrades).
+Pin a fixed version instead with a tag or commit:
+
+```nix
+# flake.nix
+braid.url = "github:danneu/braid?ref=v0.0.1";    # pin a tag
+braid.url = "github:danneu/braid?rev=<commit>";  # pin an exact commit
+```
+
 Add braid's public binary cache so the NAS pulls the prebuilt CLI instead of
 recompiling -- this relies on the no-`follows` input above, which keeps braid on
 its pinned nixpkgs:

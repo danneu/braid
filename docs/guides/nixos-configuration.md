@@ -32,6 +32,15 @@ newest release" button, and `flake.lock` still pins the exact rev. The snippet
 deliberately omits `braid.inputs.nixpkgs.follows` -- see [Binary cache](#binary-cache)
 and [Tool overrides](#tool-overrides) for why no-follows is the default.
 
+The `braid.url` input takes any of:
+
+```nix
+# flake.nix
+braid.url = "github:danneu/braid?ref=release";   # newest release (default)
+braid.url = "github:danneu/braid?ref=v0.0.1";    # pin a tag
+braid.url = "github:danneu/braid?rev=<commit>";  # pin an exact commit
+```
+
 ```nix
 # configuration.nix
 braid = {
