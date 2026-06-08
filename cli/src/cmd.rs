@@ -409,25 +409,14 @@ pub struct Step {
     pub commands: Vec<CmdRequest>,
 }
 
-/// Width of the widest dry-run risk token, including brackets.
-const RISK_TAG_COL: usize = "[destructive]".len();
-
 impl Step {
     /// Pure renderer — returns the formatted dry-run lines.
     pub fn render_dry_run(steps: &[Step]) -> String {
         let mut out = String::new();
         for step in steps {
-            let tag = format!("[{}]", step.risk);
-            out.push_str(&format!(
-                "{tag:<width$} {}\n",
-                step.description,
-                width = RISK_TAG_COL
-            ));
+            out.push_str(&format!("[{}] {}\n", step.risk, step.description));
             for cmd in &step.commands {
-                out.push_str(&format!(
-                    "               $ {}\n",
-                    cmd.to_argv().to_shell_string()
-                ));
+                out.push_str(&format!("$ {}\n", cmd.to_argv().to_shell_string()));
             }
         }
         out
@@ -2992,7 +2981,7 @@ mod tests {
         assert_eq!(lines.len(), 4);
         assert_eq!(lines[0], "[destructive] LUKS format /dev/disk/by-id/disk1");
         assert!(lines[1].contains("$ cryptsetup luksFormat"));
-        assert_eq!(lines[2], "[safe]        LUKS open -> braid-aaa");
+        assert_eq!(lines[2], "[safe] LUKS open -> braid-aaa");
         assert!(lines[3].contains("$ cryptsetup open --type luks"));
         assert!(
             output.is_ascii(),
@@ -3013,10 +3002,7 @@ mod tests {
         let output = Step::render_dry_run(&steps);
         let lines: Vec<&str> = output.lines().collect();
         assert_eq!(lines.len(), 1);
-        assert_eq!(
-            lines[0],
-            "[safe]        identity verification at execution time"
-        );
+        assert_eq!(lines[0], "[safe] identity verification at execution time");
     }
 
     // Intent: output_to_raw returns CmdError::Failed with signal number and name

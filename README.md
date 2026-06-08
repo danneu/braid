@@ -124,29 +124,29 @@ nix.settings = {
 Add `--dry-run` to any pool-lifecycle command to print the exact plan -- every
 LUKS, btrfs, and mount step it would run -- without touching your disks. Each
 step is tagged `[destructive]`, `[safe]`, or `[long]` (a long-running step like a
-btrfs balance), so you can see at a glance what each step does, and the indented
-`$` line is the literal command:
+btrfs balance), so you can see at a glance what each step does, and the `$` line
+beneath each step is the literal command:
 
 ```
 sudo braid add ironwolf=/dev/disk/by-id/ata-Ironwolf_ST12_YYYY \
                toshiba=/dev/disk/by-id/ata-Toshiba_MN07_XXXX --dry-run
 
 [destructive] LUKS format /dev/disk/by-id/ata-Ironwolf_ST12_YYYY
-               $ cryptsetup luksFormat --type luks2 --batch-mode '--key-file=-' --uuid 7f9d2e4a-1c3b-4f5a-8e6d-2a1b3c4d5e6f --label braid-ironwolf /dev/disk/by-id/ata-Ironwolf_ST12_YYYY
-[safe]        LUKS header backup -> /var/lib/braid/luks-headers/braid-ironwolf.luksheader
-               $ cryptsetup luksHeaderBackup --header-backup-file /var/lib/braid/luks-headers/braid-ironwolf.luksheader /dev/disk/by-id/ata-Ironwolf_ST12_YYYY
-[safe]        LUKS open -> braid-ironwolf
-               $ cryptsetup open --type luks '--key-file=-' --perf-no_read_workqueue --perf-no_write_workqueue /dev/disk/by-id/ata-Ironwolf_ST12_YYYY braid-ironwolf
+$ cryptsetup luksFormat --type luks2 --batch-mode '--key-file=-' --uuid '<generated-at-format-time>' --label braid-ironwolf /dev/disk/by-id/ata-Ironwolf_ST12_YYYY
+[safe] LUKS header backup -> /var/lib/braid/luks-headers/braid-ironwolf.luksheader
+$ cryptsetup luksHeaderBackup --header-backup-file /var/lib/braid/luks-headers/braid-ironwolf.luksheader /dev/disk/by-id/ata-Ironwolf_ST12_YYYY
+[safe] LUKS open -> braid-ironwolf
+$ cryptsetup open --type luks '--key-file=-' --perf-no_read_workqueue --perf-no_write_workqueue /dev/disk/by-id/ata-Ironwolf_ST12_YYYY braid-ironwolf
 [destructive] LUKS format /dev/disk/by-id/ata-Toshiba_MN07_XXXX
-               $ cryptsetup luksFormat --type luks2 --batch-mode '--key-file=-' --uuid 3a8c1d9f-5e2b-4a7c-9f1e-6b4d2c8a0e3f --label braid-toshiba /dev/disk/by-id/ata-Toshiba_MN07_XXXX
-[safe]        LUKS header backup -> /var/lib/braid/luks-headers/braid-toshiba.luksheader
-               $ cryptsetup luksHeaderBackup --header-backup-file /var/lib/braid/luks-headers/braid-toshiba.luksheader /dev/disk/by-id/ata-Toshiba_MN07_XXXX
-[safe]        LUKS open -> braid-toshiba
-               $ cryptsetup open --type luks '--key-file=-' --perf-no_read_workqueue --perf-no_write_workqueue /dev/disk/by-id/ata-Toshiba_MN07_XXXX braid-toshiba
-[safe]        mkfs.btrfs RAID1 /dev/mapper/braid-ironwolf /dev/mapper/braid-toshiba
-               $ mkfs.btrfs -d raid1 -m raid1 -O block-group-tree /dev/mapper/braid-ironwolf /dev/mapper/braid-toshiba
-[safe]        mount -> /mnt/storage
-               $ mount -o 'noatime,skip_balance,subvolid=5' /dev/mapper/braid-ironwolf /mnt/storage
+$ cryptsetup luksFormat --type luks2 --batch-mode '--key-file=-' --uuid '<generated-at-format-time>' --label braid-toshiba /dev/disk/by-id/ata-Toshiba_MN07_XXXX
+[safe] LUKS header backup -> /var/lib/braid/luks-headers/braid-toshiba.luksheader
+$ cryptsetup luksHeaderBackup --header-backup-file /var/lib/braid/luks-headers/braid-toshiba.luksheader /dev/disk/by-id/ata-Toshiba_MN07_XXXX
+[safe] LUKS open -> braid-toshiba
+$ cryptsetup open --type luks '--key-file=-' --perf-no_read_workqueue --perf-no_write_workqueue /dev/disk/by-id/ata-Toshiba_MN07_XXXX braid-toshiba
+[safe] mkfs.btrfs RAID1 /dev/mapper/braid-ironwolf /dev/mapper/braid-toshiba
+$ mkfs.btrfs -d raid1 -m raid1 -O block-group-tree /dev/mapper/braid-ironwolf /dev/mapper/braid-toshiba
+[safe] mount -> /mnt/storage
+$ mount -o 'noatime,skip_balance,subvolid=5' /dev/mapper/braid-ironwolf /mnt/storage
 ```
 
 ### Confirm before it runs

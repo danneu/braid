@@ -2431,14 +2431,11 @@ mod tests {
         // 2 steps: device remove + balance, each with 1 command = 4 lines
         assert_eq!(lines.len(), 4, "expected 4 lines, got:\n{output}");
         assert!(lines[0].contains("target specific missing device"));
-        assert_eq!(
-            lines[1],
-            "               $ btrfs device remove --enqueue 2 /mnt/storage"
-        );
+        assert_eq!(lines[1], "$ btrfs device remove --enqueue 2 /mnt/storage");
         assert!(lines[2].contains("restore redundancy"));
         assert_eq!(
             lines[3],
-            "               $ btrfs balance start --enqueue '-dconvert=raid1,soft' '-mconvert=raid1,soft' /mnt/storage"
+            "$ btrfs balance start --enqueue '-dconvert=raid1,soft' '-mconvert=raid1,soft' /mnt/storage"
         );
     }
 

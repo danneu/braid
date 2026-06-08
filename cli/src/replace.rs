@@ -4299,7 +4299,7 @@ mod tests {
         // Close old mapper (before resize: a resize failure must not strand
         // the old dm slot)
         assert!(lines[10].contains("cryptsetup close"));
-        assert_eq!(lines[11], "               $ cryptsetup close braid-disk2");
+        assert_eq!(lines[11], "$ cryptsetup close braid-disk2");
 
         // Resize
         assert!(lines[12].contains("btrfs filesystem resize"));

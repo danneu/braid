@@ -1496,11 +1496,11 @@ mod tests {
         assert!(lines[0].contains("btrfs device remove"));
         assert_eq!(
             lines[1],
-            "               $ btrfs device remove --enqueue /dev/mapper/braid-disk2 /mnt/storage"
+            "$ btrfs device remove --enqueue /dev/mapper/braid-disk2 /mnt/storage"
         );
         assert!(lines[2].contains("[safe]"));
         assert!(lines[2].contains("cryptsetup close"));
-        assert_eq!(lines[3], "               $ cryptsetup close braid-disk2");
+        assert_eq!(lines[3], "$ cryptsetup close braid-disk2");
     }
 
     #[test]
@@ -1544,7 +1544,7 @@ mod tests {
         assert!(lines[0].contains("RAID1 -> single"));
         assert_eq!(
             lines[1],
-            "               $ btrfs balance start --enqueue '-dconvert=single' '-mconvert=dup' -f /mnt/storage"
+            "$ btrfs balance start --enqueue '-dconvert=single' '-mconvert=dup' -f /mnt/storage"
         );
     }
 
@@ -1639,9 +1639,9 @@ mod tests {
 
         assert_eq!(
             lines[3],
-            "               $ btrfs device remove --enqueue /dev/mapper/braid-renamed /mnt/storage"
+            "$ btrfs device remove --enqueue /dev/mapper/braid-renamed /mnt/storage"
         );
-        assert_eq!(lines[5], "               $ cryptsetup close braid-renamed");
+        assert_eq!(lines[5], "$ cryptsetup close braid-renamed");
         assert!(
             !output.contains("braid-decoy"),
             "helper must not select the decoy mapper:\n{output}"
