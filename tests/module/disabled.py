@@ -17,6 +17,11 @@ machine.wait_for_unit("multi-user.target")
 with subtest("Module is inert when disabled"):
     machine.succeed("uname -a")
     machine.fail("mountpoint /mnt/storage")
-    machine.succeed("systemctl list-unit-files >/tmp/all-units && ! grep -q '^braid-' /tmp/all-units")
+    # The disabled module must leak no braid-* units. NixOS renders every
+    # module-defined unit and any activation symlink into /etc/systemd/system,
+    # so this static check avoids querying PID 1 through D-Bus while it is
+    # still settling after boot.
+    leaked = machine.succeed("find /etc/systemd/system -name 'braid-*'").strip()
+    assert leaked == "", f"disabled module leaked braid units:\n{leaked}"
 
 machine.shutdown()
