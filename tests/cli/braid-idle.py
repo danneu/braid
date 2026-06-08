@@ -122,19 +122,20 @@ exec __REAL_BTRFS__ "$@"
     assert "idle" in output, f"Expected 'idle' in output, got: {output}"
 
 with subtest("braid idle reports busy while a scrub is genuinely running"):
-    machine.succeed("dd if=/dev/urandom of=/mnt/storage/data bs=1M count=32")
+    machine.succeed("dd if=/dev/urandom of=/mnt/storage/data bs=1M count=64 conv=fsync")
     machine.succeed("sync")
-    # Throttle scrub reads so it stays running through the assertion. Status
-    # queries are not on the delayed path, so the poll and `braid idle` stay fast.
-    dm_delay_activate(machine, ["disk1", "disk2"], read_delay_ms=500)
+    # Slow scrub reads enough that the scrub cannot reach a terminal state before
+    # we sample it. `btrfs scrub status` only prints a `Status:` line once the
+    # scrub daemon surfaces a progress record on its ~5s cycle, so the wait below
+    # is mandatory. A finite delay keeps status/ioctl queries and `braid idle`
+    # responsive while widening the post-wait running window.
+    dm_delay_activate(machine, ["disk1", "disk2"], read_delay_ms=1000)
     # Redirect the scrub daemon's stdio off the driver pipe.
     machine.succeed("btrfs scrub start /mnt/storage > /dev/null 2>&1")
-    machine.succeed(
-        "for i in $(seq 1 400); do "
-        "out=\"$(btrfs scrub status --raw /mnt/storage 2>&1 || true)\"; "
-        "if printf '%s\\n' \"$out\" | grep -Eq 'Status:[[:space:]]+running'; "
-        "then exit 0; fi; sleep 0.05; done; "
-        "printf '%s\\n' \"$out\"; exit 1"
+    machine.wait_until_succeeds(
+        "btrfs scrub status --raw /mnt/storage | "
+        "grep -Eq 'Status:[[:space:]]+running'",
+        timeout=30,
     )
 
     status, output = machine.execute("braid idle")
@@ -144,14 +145,15 @@ with subtest("braid idle reports busy while a scrub is genuinely running"):
         f"expected 'busy: scrub running', got: {output}"
     )
 
-    # Cancel while the throttle still holds the scrub running, so the cancel
-    # ioctl lands before the tiny scrub can finish on its own.
-    machine.succeed("btrfs scrub cancel /mnt/storage")
+    # Release the read throttle first so the cancel ioctl cannot block behind a
+    # delayed scrub read. Once drained the scrub may auto-finish before cancel
+    # lands, so tolerate that and accept "finished" as a terminal state.
+    dm_delay_deactivate(machine, ["disk1", "disk2"])
+    machine.succeed("btrfs scrub cancel /mnt/storage || true")
     machine.wait_until_succeeds(
         "btrfs scrub status --raw /mnt/storage | "
-        "grep -Eq 'Status:[[:space:]]+(aborted|interrupted)'",
+        "grep -Eq 'Status:[[:space:]]+(aborted|interrupted|finished)'",
         timeout=30,
     )
-    dm_delay_deactivate(machine, ["disk1", "disk2"])
 
 machine.shutdown()
