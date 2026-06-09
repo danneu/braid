@@ -565,7 +565,12 @@ impl EnrollPlan {
                 params.key_file_path,
                 KeyfileTargetPhase::Recheck,
             )?;
-            generate_key_file(params.key_file_path)?;
+            generate_key_file(params.key_file_path).map_err(|e| match e.kind() {
+                std::io::ErrorKind::AlreadyExists => EnrollKeyFileError::Validation(
+                    format_keyfile_already_exists(params.key_file_path),
+                ),
+                _ => EnrollKeyFileError::Io(e),
+            })?;
             eprintln!("ok: generated {}", params.key_file_path.display());
         }
 
@@ -613,15 +618,9 @@ pub fn validate_key_file_path(
 ) -> Result<(), EnrollKeyFileError> {
     if generate {
         if key_file_path.exists() {
-            let dir = key_file_directory(key_file_path);
-            return Err(EnrollKeyFileError::Validation(format!(
-                "braid.key already exists at {}.\n\
-                 If a prior `--generate` run was interrupted, drop `--generate` and re-run \
-                 `braid enroll {}` to finish enrolling the existing keyfile.\n\
-                 Otherwise remove it manually if you want to generate a new one.",
-                key_file_path.display(),
-                dir.display()
-            )));
+            return Err(EnrollKeyFileError::Validation(
+                format_keyfile_already_exists(key_file_path),
+            ));
         }
     } else {
         luks::validate_user_keyfile_path(key_file_path)?;
@@ -636,10 +635,31 @@ fn key_file_directory(key_file_path: &Path) -> &Path {
         .unwrap_or_else(|| Path::new("."))
 }
 
+/// Friendly no-overwrite message for `enroll --generate`. Shared by the
+/// plan-time existence check (`validate_key_file_path`) and the
+/// mutation-boundary `create_new(true)` failure in `EnrollPlan::execute`
+/// so both render byte-identically and both surface the
+/// "drop `--generate` and re-run" recovery hint.
+fn format_keyfile_already_exists(key_file_path: &Path) -> String {
+    let dir = key_file_directory(key_file_path);
+    format!(
+        "braid.key already exists at {}.\n\
+         If a prior `--generate` run was interrupted, drop `--generate` and re-run \
+         `braid enroll {}` to finish enrolling the existing keyfile.\n\
+         Otherwise remove it manually if you want to generate a new one.",
+        key_file_path.display(),
+        dir.display()
+    )
+}
+
 /// Shared target-safety gate for generated keyfiles, run at plan time and
-/// again at the mutation boundary. Both phases enforce the same
-/// no-root-filesystem invariant while framing mount-point failures from
-/// the caller's phase-specific knowledge.
+/// again at the mutation boundary. The mount-point (no-root-filesystem)
+/// invariant is enforced at both phases, framing mount-point failures from
+/// the caller's phase-specific knowledge. The no-overwrite existence check
+/// runs only at `Plan` -- a friendly early error; at the mutation boundary
+/// `generate_key_file`'s `create_new(true)` is the atomic guard, so
+/// re-checking `exists()` here would add no protection and only duplicate
+/// the message.
 fn validate_generated_keyfile_target<R: CommandRunner>(
     runner: &R,
     key_file_path: &Path,
@@ -682,7 +702,14 @@ fn validate_generated_keyfile_target<R: CommandRunner>(
         return Err(EnrollKeyFileError::Validation(message));
     }
 
-    validate_key_file_path(key_file_path, true)
+    // No-overwrite is a plan-time friendly early error. At the mutation
+    // boundary generate_key_file's create_new(true) is the atomic guard;
+    // re-checking exists() here adds no protection (it races create_new)
+    // and only duplicates this message.
+    if let KeyfileTargetPhase::Plan = phase {
+        validate_key_file_path(key_file_path, true)?;
+    }
+    Ok(())
 }
 
 /// Plan a `braid enroll` run. Owns the pending-op preflight,
@@ -3384,6 +3411,103 @@ mod tests {
         assert!(
             err.contains(&format!("braid enroll {}", tmp.path().display())),
             "expected recovery command pointing at generated-key dir in: {err}"
+        );
+    }
+
+    // Intent: at the mutation boundary, a braid.key that appeared after
+    //   plan time makes generate_key_file's create_new(true) fail, and
+    //   EnrollPlan::execute remaps that io::ErrorKind::AlreadyExists into
+    //   the same friendly no-overwrite Validation message the plan-time
+    //   check emits -- not a raw I/O error.
+    // Why it exists: gating the existence check to plan time leaves
+    //   create_new(true) as the sole boundary guard, so the rare mid-run
+    //   race now surfaces through it. Without the boundary map_err, that
+    //   race would report a bare "I/O error: File exists" with no
+    //   drop-`--generate` recovery hint. This pins the remap and the full
+    //   recovery message on a live path the suite did not otherwise cover.
+    // Scenario: braid.key is absent during planning but a concurrent
+    //   process (or a re-run racing the same USB) creates it before
+    //   execute reaches the write.
+    #[test]
+    fn execute_generate_existing_keyfile_at_boundary_reports_friendly_error() {
+        let (tmp, paths) = isolated_paths();
+        let kf = tmp.path().join("braid.key");
+        let pass = "testpass";
+        let pass_path = tmp.path().join("pass");
+        std::fs::write(&pass_path, format!("{pass}\n")).unwrap();
+
+        // braid.key is absent during plan construction (the plan is built
+        // by hand here) but present when generate_key_file runs -- the
+        // mid-run race the boundary map_err handles.
+        std::fs::write(&kf, b"raced").unwrap();
+
+        let d1 = "/dev/disk/by-id/d1";
+
+        // Plan built directly (no plan_enroll discovery): mock the
+        // execute-time re-probe, passphrase verify, slot-1 inventory, and
+        // the Recheck mountpoint probe so execution reaches
+        // generate_key_file.
+        let (uuid_req, uuid_out) = enroll_luks_uuid_ok(d1, test_uuid(500).as_str());
+        let (tp_req, tp_stdin, tp_out) = enroll_test_passphrase_ok(d1, pass);
+        let (slot_req, slot_out) = enroll_luks_dump_slot1_empty(d1);
+        let (mp_req, mp_out) = enroll_mountpoint_ok(tmp.path());
+
+        let runner = MockRunner::default()
+            .with_output(uuid_req, uuid_out)
+            .with_output_stdin(tp_req, tp_stdin, tp_out)
+            .with_output(slot_req, slot_out)
+            .with_output(mp_req, mp_out);
+
+        let plan = EnrollPlan {
+            notes: vec![],
+            steps: vec![],
+            candidates: vec![EnrollmentCandidate {
+                name: disk("disk1"),
+                by_id: enroll_by_id(d1),
+                uuid: test_uuid(500),
+            }],
+            generate: true,
+        };
+        let membership = enroll_make_membership(&[]);
+        let params = EnrollKeyFileParams {
+            membership: &membership,
+            key_file_path: &kf,
+            generate: true,
+            passphrase_stdin: false,
+            passphrase_file: Some(&pass_path),
+            dry_run: false,
+            paths: &paths,
+            backing_path_resolver: crate::test_fixtures::mock_virtio_backing_path_resolver(),
+        };
+
+        let err = plan
+            .execute(&runner, &params)
+            .expect_err("existing braid.key at the boundary must abort generate execute");
+
+        // Match the variant, not just a substring, to pin the remap away
+        // from the raw Io error.
+        let msg = match err {
+            EnrollKeyFileError::Validation(msg) => msg,
+            other => panic!("expected Validation, got {other:?}"),
+        };
+        // Assert the full friendly message, not just its opening clause: a
+        // truncated boundary message that dropped the drop-`--generate`
+        // recovery hint would still contain "braid.key already exists".
+        assert!(
+            msg.contains("braid.key already exists"),
+            "expected no-overwrite headline in: {msg}"
+        );
+        assert!(
+            msg.contains("drop `--generate`"),
+            "expected drop-generate recovery hint in: {msg}"
+        );
+        assert!(
+            msg.contains(&format!("braid enroll {}", tmp.path().display())),
+            "expected retry command pointing at target dir in: {msg}"
+        );
+        assert!(
+            !msg.contains("I/O error"),
+            "boundary AlreadyExists must remap to Validation, not surface as Io: {msg}"
         );
     }
 
