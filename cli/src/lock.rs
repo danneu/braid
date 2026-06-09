@@ -1355,10 +1355,14 @@ mod tests {
     const AAA_UUID: &str = "00000000-0000-0000-0000-0000000002bc";
     const BBB_UUID: &str = "00000000-0000-0000-0000-0000000002bd";
     const ORPHAN_UUID: &str = "00000000-0000-0000-0000-0000000002ff";
+    // Synthetic stand-in backing device for orphan mappers: a mapper is an orphan
+    // because its backing LUKS UUID (ORPHAN_UUID) is non-member, not because of any
+    // path value. Kept decoupled from `mapper` so it is not misread as the
+    // name->identity coupling ADR-024 forbids.
+    const ORPHAN_BACKING: &str = "/dev/disk/by-id/orphan-backing";
 
     fn with_orphan_mapper(runner: MockRunner, mapper: &str) -> MockRunner {
-        let device = format!("/dev/disk/by-id/{mapper}");
-        runner.with_mapper_open(mapper, &device, ORPHAN_UUID)
+        runner.with_mapper_open(mapper, ORPHAN_BACKING, ORPHAN_UUID)
     }
 
     fn lock_test_membership_with_ccc() -> PoolMembership {
