@@ -31,11 +31,19 @@ pub enum RemoveMissingError {
         "no member in membership has devid {devid} -- pool.json membership may need manual repair (run `braid status` to inspect)"
     )]
     NoMemberForDevid { devid: u64 },
-    /// `pool.json` membership corruption surfaced from `by_devid` (two
-    /// or more members share the same persisted devid). Wraps
-    /// `MembershipError::DuplicateDevid` so the operator-facing
-    /// remediation reads consistently with the rest of the membership
-    /// errors.
+    /// Defense-in-depth refusal for `pool.json` membership corruption (two
+    /// or more members carry the same persisted devid). `by_devid` returns
+    /// `MembershipError::DuplicateDevid` only on such a corrupt snapshot, but
+    /// `plan_remove_missing` resolves against a `load_membership`-validated
+    /// membership whose devid-uniqueness sweep (`membership::load_membership_from`)
+    /// already rejects that corruption -- surfaced as `Validation`, not this
+    /// variant. So on the production path this arm is unreachable and
+    /// `load_membership` owns the duplicate-devid refusal, exactly as
+    /// `status::build_devid_names` documents. It is kept (rather than swallowed
+    /// like that read-only display) because remove-missing mutates: a future
+    /// caller that ever resolved against an unvalidated membership would stay
+    /// fail-closed with an accurate corruption message instead of acting on a
+    /// device chosen from a corrupt map.
     #[error("pool membership corruption: {0}")]
     Membership(#[from] membership::MembershipError),
     #[error("probe error: {0}")]
@@ -47,11 +55,14 @@ pub enum RemoveMissingError {
 /// Resolve a missing devid to a `(LuksUuid, DiskName)` pair via
 /// `PoolMembership::by_devid`. Returns
 /// `RemoveMissingError::NoMemberForDevid` when no member carries the
-/// persisted devid (so the operator can decide whether enrichment ever
-/// ran on the pool); propagates `MembershipError::DuplicateDevid` when
-/// the membership is corrupt. This is the single point of identity
-/// resolution for `remove-missing` -- callers thread the returned UUID
-/// straight into the journal and the persisted-member removal.
+/// persisted devid (so the operator can decide whether enrichment ever ran
+/// on the pool). The `?` propagates `MembershipError::DuplicateDevid` as
+/// fail-closed defense-in-depth only: the sole caller (`plan_remove_missing`)
+/// passes a `load_membership`-validated snapshot whose devid-uniqueness sweep
+/// already refuses duplicate devids, so that arm is unreachable in practice
+/// (see `RemoveMissingError::Membership`). This is the single point of identity
+/// resolution for `remove-missing` -- callers thread the returned UUID straight
+/// into the journal and the persisted-member removal.
 fn resolve_removal_target(
     devid: u64,
     membership: &membership::PoolMembership,
@@ -3309,6 +3320,103 @@ mod tests {
                     | CmdRequest::BtrfsDeviceScanForget { .. }
             )),
             "dry-run never-enriched refusal must issue zero mutating requests; calls: {calls:?}"
+        );
+    }
+
+    // Intent: a corrupt pool.json -- two members sharing the missing devid --
+    //   is refused by remove-missing at the load gate, fail-closed, before
+    //   resolution or any mutation.
+    //
+    // Why it exists: pins the premise the `RemoveMissingError::Membership` and
+    //   `resolve_removal_target` doc comments rely on -- `load_membership`
+    //   owns the duplicate-devid refusal, so the `Membership` arm is
+    //   unreachable on the production path. A reorder that resolved before
+    //   loading, or a relaxed load gate, would let remove-missing act on a
+    //   corrupt map; it would fail here first. `membership.rs` pins the load
+    //   sweep in isolation; this pins the `plan_remove_missing` ordering and
+    //   the fail-closed wrapping through `cmd_remove_missing`.
+    //
+    // Scenario: an operator's pool.json is corrupted so two UUIDs both claim
+    //   devid 3 (the dead disk); `braid remove-missing --missing-id 3` must
+    //   refuse cleanly, not mutate.
+    #[test]
+    fn cmd_remove_missing_duplicate_devid_pool_json_refused_at_load() {
+        let f = PoolFixture::three_disk_devids_pinned();
+        // Two members both carry devid Some(3) but have distinct UUIDs,
+        // names, and by-id paths -- so the load sweep's devid post-loop
+        // check (not the earlier name/by-id checks) is what rejects.
+        // for_corruption_tests bypasses insert-time validation, and save
+        // does not validate, so the corrupt snapshot lands on disk and only
+        // load_membership's sweep catches it.
+        let m = PoolMembership::for_corruption_tests(vec![
+            (
+                test_uuid(452),
+                DiskMember {
+                    name: DiskName::parse("dupe-a").unwrap(),
+                    by_id: ByIdPath::parse("/dev/disk/by-id/virtio-dupe-a").unwrap(),
+                    devid: Some(3),
+                    added_at: None,
+                },
+            ),
+            (
+                test_uuid(453),
+                DiskMember {
+                    name: DiskName::parse("dupe-b").unwrap(),
+                    by_id: ByIdPath::parse("/dev/disk/by-id/virtio-dupe-b").unwrap(),
+                    devid: Some(3),
+                    added_at: None,
+                },
+            ),
+        ]);
+        membership::save_membership(&m, &f.paths).unwrap();
+        let pre_bytes = std::fs::read(f.paths.pool_json()).unwrap();
+
+        let (runner, _remove_done) =
+            RemoveMissingPool::three_disk_one_missing().install(MockRunner::default());
+        let err = cmd_remove_missing(
+            &runner,
+            &MockFs::storage(vec![]),
+            &f.remove_missing_params().missing_id(3).build(),
+        )
+        .unwrap_err();
+
+        // Fail-closed: the refusal is the duplicate-devid load sweep surfaced
+        // *through the command* -- the `failed to load pool membership` wrapper
+        // plus the `devid '3' already in use` inner cause -- not the unreachable
+        // `Membership` arm and not an incidental load failure.
+        let msg = match &err {
+            RemoveMissingError::Validation(m) => m.clone(),
+            other => panic!("expected Validation, got: {other:?}"),
+        };
+        assert!(
+            msg.contains("failed to load pool membership"),
+            "refusal must come from the load gate; got: {msg}"
+        );
+        assert!(
+            msg.contains("devid '3' already in use"),
+            "refusal must name the duplicate-devid sweep as the cause; got: {msg}"
+        );
+
+        assert_eq!(
+            f.inhibitor.acquire_count(),
+            0,
+            "duplicate-devid refusal must land before the sleep inhibitor"
+        );
+        assert!(
+            journal::load_journal(&f.paths).unwrap().is_none(),
+            "duplicate-devid refusal must land before pending-op.json is written"
+        );
+        assert!(
+            !runner
+                .requests()
+                .iter()
+                .any(|c| matches!(c, CmdRequest::BtrfsDeviceRemove { .. })),
+            "duplicate-devid refusal must not call btrfs device remove"
+        );
+        let post_bytes = std::fs::read(f.paths.pool_json()).unwrap();
+        assert_eq!(
+            pre_bytes, post_bytes,
+            "cmd_remove_missing must not perturb pool.json on duplicate-devid refusal"
         );
     }
 }
