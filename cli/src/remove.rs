@@ -227,12 +227,6 @@ impl RemoveWorkPlan {
 }
 
 impl RemovePlan {
-    /// Real-run and failure-path stderr for `remove` use `Bracketed`
-    /// per-disk style to match the canonical dry-run render. `remove`
-    /// does not emit `PerDisk` notes today, but the constant keeps the
-    /// stderr-note contract uniform with the other migrated commands.
-    pub const STDERR_STYLE: PerDiskStyle = PerDiskStyle::Bracketed;
-
     /// Build a `Preview` carrying any plan-derived notes. The 1-disk
     /// `WARNING:` line stays in `execute()` behind the `!params.yes`
     /// gate and does not appear here.
@@ -254,7 +248,7 @@ impl RemovePlan {
         // before any mutation. Warn notes emit as the canonical
         // `[warn] <body>` (same as dry-run stdout), so both modes
         // share one render contract for plan-derived notes.
-        preview::emit_notes_to_stderr(&self.notes, Self::STDERR_STYLE);
+        preview::emit_notes_to_stderr(&self.notes, PerDiskStyle::Bracketed);
 
         let RemovePlan {
             notes: _,
@@ -653,7 +647,7 @@ pub fn cmd_remove<R: CommandRunner + Sync, F: Filesystem + ?Sized>(
             // path (`RemovePlan::execute`), so preflight diagnostics
             // surface identically across success, failure, and dry-run
             // stdout.
-            preview::emit_notes_to_stderr(&notes, RemovePlan::STDERR_STYLE);
+            preview::emit_notes_to_stderr(&notes, PerDiskStyle::Bracketed);
             return Err(error);
         }
     };
@@ -2445,7 +2439,7 @@ mod tests {
      * that reintroduces the legacy prefix -- either in execute's
      * replay or by re-wrapping the body -- fails here.
      * Scenario: hand-built notes vec with one soft-warn body; render
-     * via `RemovePlan::STDERR_STYLE` and assert byte-exact output with
+     * via `PerDiskStyle::Bracketed` and assert byte-exact output with
      * no `warning:` substring.
      */
     #[test]
@@ -2453,7 +2447,7 @@ mod tests {
         let notes = vec![PreviewNote::Warn(
             "ENOSPC pre-flight check failed: boom; proceeding anyway".into(),
         )];
-        let rendered = preview::render_notes_for_stderr(&notes, RemovePlan::STDERR_STYLE);
+        let rendered = preview::render_notes_for_stderr(&notes, PerDiskStyle::Bracketed);
         assert_eq!(
             rendered,
             "[warn] ENOSPC pre-flight check failed: boom; proceeding anyway\n",

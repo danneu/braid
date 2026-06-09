@@ -393,12 +393,6 @@ impl ReplaceWorkPlan {
 }
 
 impl ReplacePlan {
-    /// Real-run and failure-path stderr for `replace` use `Bracketed`
-    /// per-disk style to match the canonical dry-run render. `replace`
-    /// does not emit `PerDisk` notes today, but the constant keeps the
-    /// stderr-note contract uniform with the other migrated commands.
-    pub const STDERR_STYLE: PerDiskStyle = PerDiskStyle::Bracketed;
-
     /// Build a `Preview` carrying any plan-derived notes. The 1-disk
     /// leftover `WARNING:` line stays in `execute()` behind the
     /// `!params.yes` gate and does not appear here.
@@ -1164,7 +1158,7 @@ fn emit_replace_notes_to_stderr(notes: &[PreviewNote]) {
 }
 
 fn render_replace_notes_for_stderr(notes: &[PreviewNote], color_enabled: bool) -> String {
-    preview::render_notes_for_stderr_with(notes, ReplacePlan::STDERR_STYLE, color_enabled)
+    preview::render_notes_for_stderr_with(notes, PerDiskStyle::Bracketed, color_enabled)
 }
 
 fn emit_replace_stderr(rendered: &str) {

@@ -209,7 +209,7 @@ pub struct RecoverParams<'a> {
 /// Dry-run preview source of truth for `braid recover` plus the
 /// execute inputs pre-computed during planning. `preview()` renders
 /// accumulated notes plus steps from the semantic work plan; `execute()`
-/// renders `notes` to stderr with `STDERR_STYLE` before any mutation,
+/// renders `notes` to stderr with `PerDiskStyle::Bracketed` before any mutation,
 /// preserving today's "entry banner then probe context then work"
 /// real-run sequence.
 ///
@@ -1186,12 +1186,6 @@ pub fn format_recover_entry(journal: &Journal) -> String {
 }
 
 impl RecoverPlan {
-    /// Real-run and failure-path stderr both use `Bracketed`, matching
-    /// today's `mount::render_probe_events` output. `Preview::render`
-    /// is already `Bracketed`, so success/failure/real-run all share
-    /// the same per-disk wording.
-    pub const STDERR_STYLE: PerDiskStyle = PerDiskStyle::Bracketed;
-
     pub fn preview(&self) -> Preview {
         Preview {
             completeness: PreviewCompleteness::Complete,
@@ -1211,7 +1205,7 @@ impl RecoverPlan {
         // stderr before any mutation. This replaces today's pair of
         // `eprintln!(entry)` + `mount::print_probe_events(&events)`
         // calls with byte-identical output in the same order.
-        preview::emit_notes_to_stderr(&self.notes, Self::STDERR_STYLE);
+        preview::emit_notes_to_stderr(&self.notes, PerDiskStyle::Bracketed);
 
         let RecoverPlan {
             notes: _,
@@ -1565,7 +1559,7 @@ pub fn cmd_recover<R: CommandRunner + Sync, F: Filesystem + ?Sized>(
             // banner + per-disk probe events) render to stderr before
             // the error, mirroring today's `eprintln!(entry)` +
             // `mount::print_probe_events` + `?` sequence.
-            preview::emit_notes_to_stderr(&notes, RecoverPlan::STDERR_STYLE);
+            preview::emit_notes_to_stderr(&notes, PerDiskStyle::Bracketed);
             return Err(error);
         }
     };
@@ -17742,7 +17736,7 @@ mod tests {
             "error must name the read-only state, got: {err:?}",
         );
         let rendered =
-            preview::render_notes_for_stderr_with(&failure.notes, RecoverPlan::STDERR_STYLE, false);
+            preview::render_notes_for_stderr_with(&failure.notes, PerDiskStyle::Bracketed, false);
         assert!(
             !rendered.contains("luks-foreign"),
             "failure notes must not add mapper-name identity skips, got: {rendered:?}",

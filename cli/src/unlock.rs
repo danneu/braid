@@ -39,7 +39,7 @@ pub struct UnlockParams<'a> {
 /// Dry-run preview source of truth for `braid unlock` plus the execute
 /// inputs pre-computed during planning. `notes` + `steps` are both
 /// rendered by `preview()`; `execute()` renders `notes` to stderr with
-/// `STDERR_STYLE` before any mutation, preserving today's "probe
+/// `PerDiskStyle::Bracketed` before any mutation, preserving today's "probe
 /// context then work" real-run sequence.
 ///
 /// `open_plan` is `None` when the pool was already mounted at probe
@@ -53,12 +53,6 @@ pub struct UnlockPlan {
 }
 
 impl UnlockPlan {
-    /// Real-run and failure-path stderr both use `Bracketed`, matching
-    /// today's `mount::render_probe_events` output. `Preview::render`
-    /// is already `Bracketed`, so success/failure/real-run all share
-    /// the same per-disk wording.
-    pub const STDERR_STYLE: PerDiskStyle = PerDiskStyle::Bracketed;
-
     pub fn preview(&self) -> Preview {
         Preview {
             completeness: PreviewCompleteness::Complete,
@@ -77,7 +71,7 @@ impl UnlockPlan {
         // In the already-mounted case this emits the "pool already
         // mounted at <mp>" Info note (byte-identical to today's
         // `print_probe_events` output for that event).
-        preview::emit_notes_to_stderr(&self.notes, Self::STDERR_STYLE);
+        preview::emit_notes_to_stderr(&self.notes, PerDiskStyle::Bracketed);
 
         let Some(plan) = self.open_plan else {
             // Pool was already mounted (plan_open_pool returned None).
@@ -244,7 +238,7 @@ pub fn cmd_unlock<R: CommandRunner, F: Filesystem + ?Sized>(
             // Preserved-context failure: accumulated probe notes render
             // to stderr before the error, mirroring today's
             // `print_probe_events` + `?` sequence.
-            preview::emit_notes_to_stderr(&notes, UnlockPlan::STDERR_STYLE);
+            preview::emit_notes_to_stderr(&notes, PerDiskStyle::Bracketed);
             return Err(error);
         }
     };

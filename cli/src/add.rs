@@ -1011,12 +1011,6 @@ pub struct AddPlan {
 }
 
 impl AddPlan {
-    /// Real-run and failure-path stderr for `add` use `Bracketed` per-disk
-    /// style to match other note-carrying commands; note that `add` does not
-    /// produce `PerDisk` notes in PR 7, so this constant exists only to
-    /// satisfy the uniform stderr-note contract.
-    pub const STDERR_STYLE: PerDiskStyle = PerDiskStyle::Bracketed;
-
     pub fn preview(&self) -> Preview {
         Preview {
             completeness: PreviewCompleteness::Complete,
@@ -1039,7 +1033,7 @@ impl AddPlan {
         // `cmd_add`'s preserved-context Err branch pipes `PlanFailure::notes`
         // through the same helper, so success, failure, and dry-run
         // stdout share one render contract for these notes.
-        preview::emit_notes_to_stderr(&self.notes, Self::STDERR_STYLE);
+        preview::emit_notes_to_stderr(&self.notes, PerDiskStyle::Bracketed);
 
         // No-op early-return: if the plan has zero steps, the Info
         // note emitted above is the whole user-visible output for
@@ -1934,7 +1928,7 @@ pub fn cmd_add<R: CommandRunner + Sync, F: Filesystem + ?Sized>(
             // emitted on the refusal path is byte-identical to the
             // same note emitted on dry-run stdout and real-run
             // success stderr.
-            preview::emit_notes_to_stderr(&notes, AddPlan::STDERR_STYLE);
+            preview::emit_notes_to_stderr(&notes, PerDiskStyle::Bracketed);
             return Err(error);
         }
     };
@@ -9842,7 +9836,7 @@ mod tests {
      * diverging between paths.
      * Scenario: a notes vec with every variant plus both add-specific
      * Warn kinds, rendered via the shared helper with
-     * `AddPlan::STDERR_STYLE`.
+     * `PerDiskStyle::Bracketed`.
      */
     #[test]
     fn add_warn_notes_render_canonical_bracketed_form() {
@@ -9856,7 +9850,7 @@ mod tests {
                 message: "not present".into(),
             },
         ];
-        let rendered = preview::render_notes_for_stderr(&notes, AddPlan::STDERR_STYLE);
+        let rendered = preview::render_notes_for_stderr(&notes, PerDiskStyle::Bracketed);
         let expected = concat!(
             "Nothing to do -- disk2 already in pool.\n",
             "[warn] pool has 1 missing device. Consider repairing with",

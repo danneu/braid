@@ -147,13 +147,6 @@ impl RemoveMissingWorkPlan {
 }
 
 impl RemoveMissingPlan {
-    /// Real-run and failure-path stderr for `remove-missing` use
-    /// `Bracketed` per-disk style to match the canonical dry-run render.
-    /// `remove-missing` does not emit `PerDisk` notes today, but the
-    /// constant keeps the stderr-note contract uniform with the other
-    /// migrated commands.
-    pub const STDERR_STYLE: PerDiskStyle = PerDiskStyle::Bracketed;
-
     pub fn preview(&self) -> Preview {
         Preview {
             completeness: PreviewCompleteness::Complete,
@@ -172,7 +165,7 @@ impl RemoveMissingPlan {
         // before any mutation. Warn notes emit as the canonical
         // `[warn] <body>` (same as dry-run stdout), so both modes
         // share one render contract for plan-derived notes.
-        preview::emit_notes_to_stderr(&self.notes, Self::STDERR_STYLE);
+        preview::emit_notes_to_stderr(&self.notes, PerDiskStyle::Bracketed);
 
         let RemoveMissingPlan {
             notes: _,
@@ -511,7 +504,7 @@ pub fn cmd_remove_missing<R: CommandRunner + Sync, F: Filesystem + ?Sized>(
             // path (`RemoveMissingPlan::execute`), so preflight
             // diagnostics surface identically across success, failure,
             // and dry-run stdout.
-            preview::emit_notes_to_stderr(&notes, RemoveMissingPlan::STDERR_STYLE);
+            preview::emit_notes_to_stderr(&notes, PerDiskStyle::Bracketed);
             return Err(error);
         }
     };
@@ -2686,7 +2679,7 @@ mod tests {
      * prefix -- either in execute's replay or by re-wrapping the body
      * -- fails here.
      * Scenario: hand-built notes vec with one read-only-probe warn body; render
-     * via `RemoveMissingPlan::STDERR_STYLE` and assert byte-exact
+     * via `PerDiskStyle::Bracketed` and assert byte-exact
      * output with no `warning:` substring.
      */
     #[test]
@@ -2694,7 +2687,7 @@ mod tests {
         let notes = vec![PreviewNote::Warn(
             "read-only pre-flight failed: mountinfo probe failed; proceeding anyway".into(),
         )];
-        let rendered = preview::render_notes_for_stderr(&notes, RemoveMissingPlan::STDERR_STYLE);
+        let rendered = preview::render_notes_for_stderr(&notes, PerDiskStyle::Bracketed);
         assert_eq!(
             rendered,
             "[warn] read-only pre-flight failed: mountinfo probe failed; proceeding anyway\n",
