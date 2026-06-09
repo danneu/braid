@@ -3567,6 +3567,99 @@ mod tests {
         );
     }
 
+    // Intent: the discovery->execute window is closed for the EXISTING-KEYFILE
+    //   path too -- a disk swapped to a foreign LUKS container during the
+    //   passphrase prompt is rejected at the execute-time re-probe in
+    //   `braid enroll DIR` (no --generate) mode, before any keyfile lands in
+    //   slot 1.
+    // Why it exists: the re-probe loop in EnrollPlan::execute runs
+    //   unconditionally for both modes, but its sibling
+    //   execute_rejects_swapped_disk_before_mutation only drives --generate.
+    //   A regression that gated the loop behind `if self.generate { ... }`
+    //   would pass every other test while silently dropping the decision-024
+    //   mutation-boundary guard for the more common existing-keyfile operation
+    //   (braid enroll DIR against a USB keyfile already on disk). This pins the
+    //   guard's mode-independence. No VM test -- an in-window physical swap
+    //   during the passphrase prompt is not deterministically reproducible in a
+    //   NixOS VM; tests/cli/enroll-uuid-mismatch.py covers the pre-command
+    //   discovery case (--generate only).
+    // Scenario: 2-disk pool, existing braid.key on the USB. disk1's by-id slot
+    //   still matches at discovery but is swapped to a foreign LUKS volume
+    //   before execute re-probes it.
+    #[test]
+    fn execute_rejects_swapped_disk_existing_keyfile_before_mutation() {
+        let (tmp, paths) = isolated_paths();
+        let (kf, _kf_str) = enroll_make_existing_keyfile(&tmp);
+        let pass_path = tmp.path().join("pass");
+        std::fs::write(&pass_path, "testpass\n").unwrap();
+
+        let d1 = "/dev/disk/by-id/d1";
+        let d2 = "/dev/disk/by-id/d2";
+        let foreign = "ffffffff-ffff-ffff-ffff-ffffffffffff";
+
+        // Mappers closed => discovery issues exactly one luksUUID per disk, so
+        // the 2nd sequence element below is consumed by the execute re-probe.
+        // A mapper-open disk would pop both at discovery and surface the
+        // mismatch at plan time rather than at the execute boundary under test.
+        let (_, d1_match) = enroll_luks_uuid_ok(d1, test_uuid(500).as_str());
+        let (_, d1_swapped) = enroll_luks_uuid_ok(d1, foreign);
+        let (d2_req, d2_out) = enroll_luks_uuid_ok(d2, test_uuid(501).as_str());
+        let runner = MockRunner::default()
+            .with_output_sequence(
+                CmdRequest::CryptsetupLuksUuid {
+                    device: d1.to_owned(),
+                },
+                vec![d1_match, d1_swapped],
+            )
+            .with_output(d2_req, d2_out)
+            .with_luks_dump_text_luks2_for(&[d1, d2])
+            .with_mappers_closed(&["braid-disk1", "braid-disk2"]);
+        // No mountpoint mock: existing-keyfile mode skips the generate-only
+        // mountpoint gate on both the plan and recheck paths.
+
+        let fs = enroll_fs(&[d1, d2]);
+        let membership = enroll_make_membership(&[("disk1", d1), ("disk2", d2)]);
+
+        let params = EnrollKeyFileParams {
+            membership: &membership,
+            key_file_path: &kf,
+            generate: false,
+            passphrase_stdin: false,
+            passphrase_file: Some(&pass_path),
+            dry_run: false,
+            paths: &paths,
+            backing_path_resolver: crate::test_fixtures::mock_virtio_backing_path_resolver(),
+        };
+
+        let plan =
+            plan_enroll(&runner, &fs, &params).expect("discovery must succeed with matching UUIDs");
+        let err = plan
+            .execute(&runner, &params)
+            .expect_err("execute re-probe must reject the swapped disk")
+            .to_string();
+
+        assert!(
+            err.contains("LUKS UUID mismatch"),
+            "expected mismatch error: {err}"
+        );
+        assert!(
+            err.contains("disk1"),
+            "error should name the swapped disk: {err}"
+        );
+        assert!(
+            !runner
+                .requests()
+                .iter()
+                .any(|r| matches!(r, CmdRequest::CryptsetupLuksAddKeyFile { .. })),
+            "no keyfile may be enrolled after a swap is detected: {:?}",
+            runner.requests()
+        );
+        assert!(
+            kf.exists(),
+            "the existing user keyfile must be left untouched"
+        );
+    }
+
     // ---- generate_key_file tests ----
 
     /*
