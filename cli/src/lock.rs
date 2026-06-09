@@ -16,8 +16,14 @@ use std::collections::HashSet;
 use std::io::{self, Write};
 
 const UMOUNT_RETRY_ATTEMPTS: u32 = 3;
-// During shutdown, the Rust mutator can die before its blocking btrfs-progs
-// balance child releases the mount fd. Stay below braid-online TimeoutStopSec.
+/// Longer transient-busy umount retry for the systemd-stop path. During
+/// shutdown the Rust mutator can die before its blocking btrfs-progs balance
+/// child releases the mount fd, so this count must outlast that transient
+/// hold. It is a lower-bound heuristic, not an upper-bound coupling: it is not
+/// gated by `--deadline-secs` (which bounds only lock acquisition) and need
+/// not fit under `TimeoutStopSec` -- post-lock cleanup is backstopped by
+/// systemd's SIGKILL, not by this count. See ADR 018
+/// `docs/design/decisions/018-systemd-lifecycle.md#execstop-bounded-wait-pattern`.
 const SYSTEMD_STOP_UMOUNT_RETRY_ATTEMPTS: u32 = 60;
 const UMOUNT_RETRY_DELAY: std::time::Duration = std::time::Duration::from_millis(500);
 
