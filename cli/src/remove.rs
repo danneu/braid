@@ -910,10 +910,10 @@ mod tests {
     use crate::membership::PoolMembership;
     use crate::state_paths::StatePaths;
     use crate::test_fixtures::{
-        DeviceUsageSpec, MockFs, PoolFixture, RemovalPool, device_usage_raw_body, mock_ok,
-        overcommitted_survivor_df_json, overcommitted_survivor_usage_stdout, target_device,
-        valid_three_disk_df_json, valid_three_disk_usage_stdout, valid_two_disk_df_json,
-        valid_two_disk_usage_stdout,
+        DeviceUsageSpec, MockFs, PoolFixture, RemovalPool, canonical_luks_uuid,
+        device_usage_raw_body, mock_ok, overcommitted_survivor_df_json,
+        overcommitted_survivor_usage_stdout, target_device, valid_three_disk_df_json,
+        valid_three_disk_usage_stdout, valid_two_disk_df_json, valid_two_disk_usage_stdout,
     };
     use std::collections::BTreeMap;
 
@@ -927,23 +927,49 @@ mod tests {
         }
     }
 
-    fn disk2_disk3_membership() -> PoolMembership {
-        // Seed UUIDs match the disk-number mirroring used in
-        // `PoolFixture::three_disk_healthy`, so a fixture that loads
-        // and then a test re-serializes the same set get bit-equal
-        // pool.json bodies on disk.
-        let mut m = PoolMembership::empty();
-        for (seed, name) in [(2u64, "disk2"), (3, "disk3")] {
-            let (uuid, member) = crate::test_fixtures::disk_member_with(
-                seed,
-                name,
-                &format!("/dev/disk/by-id/virtio-{name}"),
-                None,
-                None,
-            );
-            m.insert(uuid, member).expect("fixture insert");
-        }
+    /// pool.json drift for the membership-drift rejection tests: the
+    /// `three_disk_healthy` membership with `disk1` removed. Derived from the
+    /// fixture's own saved pool.json, so the surviving disk2/disk3 keep the
+    /// canonical LUKS UUIDs the live `RemovalPool` probe returns -- the drift
+    /// cannot re-encode disk identity under a second UUID convention.
+    fn three_disk_healthy_without_disk1(paths: &StatePaths) -> PoolMembership {
+        let mut m = membership::load_membership(paths).expect("three_disk_healthy pool.json");
+        let (uuid, _) = m
+            .by_name(&DiskName::parse("disk1").expect("valid fixture name"))
+            .expect("disk1 present in three_disk_healthy");
+        let uuid = uuid.clone();
+        m.remove_by_uuid(&uuid);
         m
+    }
+
+    // Intent: the drift fixture keeps its surviving disks under the SAME
+    //   canonical LUKS UUIDs `three_disk_healthy` assigns -- it derives the
+    //   drift from the saved pool, never re-encoding disk identity under a
+    //   second UUID convention.
+    // Why it exists: the drift-rejection tests remove `disk1`, so they stay
+    //   green even when disk2/disk3 are keyed under the wrong UUIDs -- the
+    //   incidental-pass bug this change fixes. This contract test fails closed
+    //   on that regression: revert `three_disk_healthy_without_disk1` to a
+    //   hand-built `test_uuid(2/3)` membership and this is the only test red.
+    // Scenario: `three_disk_healthy` saves disk1+disk2+disk3; the drift drops
+    //   disk1; disk2/disk3 must remain keyed by canonical_luks_uuid(2/3).
+    #[test]
+    fn drift_fixture_keeps_survivors_under_canonical_uuids() {
+        let f = PoolFixture::three_disk_healthy();
+        let drift = three_disk_healthy_without_disk1(&f.paths);
+
+        assert_eq!(drift.len(), 2, "drift drops exactly disk1");
+        assert!(
+            drift.by_name(&DiskName::parse("disk1").unwrap()).is_none(),
+            "disk1 must be absent from the drift",
+        );
+        for n in [2u64, 3] {
+            let member = drift.by_uuid(&canonical_luks_uuid(n));
+            assert!(
+                member.is_some_and(|m| m.name.as_str() == format!("disk{n}")),
+                "disk{n} must be keyed under canonical_luks_uuid({n}), as in three_disk_healthy",
+            );
+        }
     }
 
     #[test]
@@ -1260,7 +1286,7 @@ mod tests {
     #[test]
     fn cmd_remove_dry_run_rejects_when_target_absent_from_pool_json() {
         let f = PoolFixture::three_disk_healthy();
-        let drifted = disk2_disk3_membership();
+        let drifted = three_disk_healthy_without_disk1(&f.paths);
         membership::save_membership(&drifted, &f.paths).unwrap();
 
         let runner = RemovalPool::three_disk().install(MockRunner::default());
@@ -1322,7 +1348,7 @@ mod tests {
 
         let plan = plan_remove(&runner, &fs, &params)
             .expect("initial plan must succeed before pool.json drift");
-        let drifted = disk2_disk3_membership();
+        let drifted = three_disk_healthy_without_disk1(&f.paths);
         membership::save_membership(&drifted, &f.paths).unwrap();
 
         let result = plan.execute(&runner, &fs, &params);
@@ -2964,15 +2990,14 @@ mod tests {
 
     /// Build a fresh 3-disk pool fixture whose membership pins one
     /// specific (uuid, name, by_id, devid) -> entry. Other entries
-    /// (`disk1`, `disk3`) use seed-default UUIDs and devids that line
-    /// up with the `RemovalPool::three_disk` topology mocks (UUIDs
+    /// (`disk1`, `disk3`) use `canonical_luks_uuid(1/3)` and devids that
+    /// line up with the `RemovalPool::three_disk` topology mocks (UUIDs
     /// `11111111...`, `33333333...`).
     fn three_disk_membership_with_pinned_disk2(target_uuid: &LuksUuid) -> PoolMembership {
         let mut m = PoolMembership::empty();
-        // disk1: seed 1, UUID 11111111..., devid 1.
-        let disk1_uuid = LuksUuid::parse("11111111-1111-1111-1111-111111111111").unwrap();
+        // disk1: canonical UUID 11111111..., devid 1.
         m.insert(
-            disk1_uuid,
+            canonical_luks_uuid(1),
             membership::DiskMember {
                 name: DiskName::parse("disk1").unwrap(),
                 by_id: ByIdPath::parse("/dev/disk/by-id/virtio-disk1").unwrap(),
@@ -2993,10 +3018,9 @@ mod tests {
             },
         )
         .unwrap();
-        // disk3: seed 3, UUID 33333333..., devid 3.
-        let disk3_uuid = LuksUuid::parse("33333333-3333-3333-3333-333333333333").unwrap();
+        // disk3: canonical UUID 33333333..., devid 3.
         m.insert(
-            disk3_uuid,
+            canonical_luks_uuid(3),
             membership::DiskMember {
                 name: DiskName::parse("disk3").unwrap(),
                 by_id: ByIdPath::parse("/dev/disk/by-id/virtio-disk3").unwrap(),
@@ -3102,9 +3126,8 @@ mod tests {
         let f = PoolFixture::empty();
         let u_r = test_uuid(401);
         let mut m = PoolMembership::empty();
-        let (u1, m1) =
-            disk_member_with(410, "disk1", "/dev/disk/by-id/virtio-disk1", Some(1), None);
-        m.insert(u1.clone(), m1).unwrap();
+        let (_, m1) = disk_member_with(410, "disk1", "/dev/disk/by-id/virtio-disk1", Some(1), None);
+        m.insert(canonical_luks_uuid(1), m1).unwrap();
         m.insert(
             u_r.clone(),
             membership::DiskMember {
@@ -3115,9 +3138,8 @@ mod tests {
             },
         )
         .unwrap();
-        let (u3, m3) =
-            disk_member_with(411, "disk3", "/dev/disk/by-id/virtio-disk3", Some(3), None);
-        m.insert(u3.clone(), m3).unwrap();
+        let (_, m3) = disk_member_with(411, "disk3", "/dev/disk/by-id/virtio-disk3", Some(3), None);
+        m.insert(canonical_luks_uuid(3), m3).unwrap();
         membership::save_membership(&m, &f.paths).unwrap();
 
         // Live pool: U_R observed under MAPPER "braid-WRONG", not "braid-right".
@@ -3236,9 +3258,8 @@ mod tests {
         let u_r = test_uuid(402);
         let u_foreign = test_uuid(403);
         let mut m = PoolMembership::empty();
-        let (u1, m1) =
-            disk_member_with(420, "disk1", "/dev/disk/by-id/virtio-disk1", Some(1), None);
-        m.insert(u1.clone(), m1).unwrap();
+        let (_, m1) = disk_member_with(420, "disk1", "/dev/disk/by-id/virtio-disk1", Some(1), None);
+        m.insert(canonical_luks_uuid(1), m1).unwrap();
         m.insert(
             u_r.clone(),
             membership::DiskMember {
@@ -3249,9 +3270,8 @@ mod tests {
             },
         )
         .unwrap();
-        let (u3, m3) =
-            disk_member_with(421, "disk3", "/dev/disk/by-id/virtio-disk3", Some(3), None);
-        m.insert(u3.clone(), m3).unwrap();
+        let (_, m3) = disk_member_with(421, "disk3", "/dev/disk/by-id/virtio-disk3", Some(3), None);
+        m.insert(canonical_luks_uuid(3), m3).unwrap();
         membership::save_membership(&m, &f.paths).unwrap();
 
         let show = "Label: none  uuid: cc86845b-aec3-408e-bef5-553affc1f2b1\n\

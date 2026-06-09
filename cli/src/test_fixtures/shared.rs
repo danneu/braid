@@ -32,6 +32,36 @@ pub(crate) fn test_uuid(seed: u64) -> LuksUuid {
         .expect("hand-padded UUID is canonical")
 }
 
+/// Canonical repeated-digit fixture LUKS UUID for disk `n`: `n` is the hex
+/// digit repeated across all 32 positions (`canonical_luks_uuid(2)` ->
+/// `22222222-2222-2222-2222-222222222222`). This is the UUID the present-pool
+/// `RemovalPool` live probe (`luks_uuid_for_device`) reports for `/dev/vd{b,c,d}`.
+///
+/// Use `canonical_luks_uuid(n)` for any fixture entry modeling the canonical
+/// `diskN` identity -- present OR temporarily missing (e.g. the replace target
+/// in `one_live_one_missing`). For a PRESENT, live-probed disk the pool.json key
+/// MUST equal the probed UUID or the membership<->live-UUID correlation is a
+/// silent incidental pass; for a missing `diskN` it keeps the row recognizable
+/// and future-proof if that disk later becomes present.
+///
+/// Reserve `test_uuid(seed)` (`00000000-...-{seed}`) for identities that are NOT
+/// a canonical `diskN`: arbitrary unique values and deliberately custom-mocked
+/// sentinels (drift / foreign targets whose `CryptsetupLuksUuid` probe is
+/// overridden to that exact value).
+pub(crate) fn canonical_luks_uuid(n: u64) -> LuksUuid {
+    // Fail closed: n == 0 would silently build the nil UUID, and n > 15 (or a
+    // value that truncates under `as u32`) would alias another disk -- both
+    // defeat the single-source purpose. Assert the full u64 before casting.
+    assert!(
+        (1..=15).contains(&n),
+        "canonical disk index must be 1..=15, got {n}"
+    );
+    let d = std::char::from_digit(n as u32, 16).expect("1..=15 is a single hex digit");
+    let g = |len: usize| -> String { std::iter::repeat_n(d, len).collect() };
+    LuksUuid::parse(&format!("{}-{}-{}-{}-{}", g(8), g(4), g(4), g(4), g(12)))
+        .expect("canonical repeated-digit UUID is valid")
+}
+
 /// Build a `(LuksUuid, DiskMember)` pair for use as the value half of a
 /// `PoolMembership::insert(uuid, member)` call. Devid and added_at
 /// default to `None`; tests that need them populated use
@@ -421,13 +451,11 @@ impl PoolFixture {
         let base = Self::empty_inner();
         let mut m = PoolMembership::empty();
         let (_, member) = disk_member(1, "disk1", "/dev/disk/by-id/virtio-disk1");
-        let uuid = LuksUuid::parse("11111111-1111-1111-1111-111111111111")
-            .expect("canonical fixture UUID");
-        m.insert(uuid, member).expect("insert disk1");
+        m.insert(canonical_luks_uuid(1), member)
+            .expect("insert disk1");
         let (_, member) = disk_member(2, "disk2", "/dev/disk/by-id/virtio-disk2");
-        let uuid = LuksUuid::parse("22222222-2222-2222-2222-222222222222")
-            .expect("canonical fixture UUID");
-        m.insert(uuid, member).expect("insert disk2");
+        m.insert(canonical_luks_uuid(2), member)
+            .expect("insert disk2");
         membership::save_membership(&m, &base.paths).expect("save_membership");
         Self {
             _state_tmp: base.state_tmp,
@@ -447,14 +475,12 @@ impl PoolFixture {
         let base = Self::empty_inner();
         let mut m = PoolMembership::empty();
         let (_, member) = disk_member(1, "disk1", "/dev/disk/by-id/virtio-disk1");
-        let uuid = LuksUuid::parse("11111111-1111-1111-1111-111111111111")
-            .expect("canonical fixture UUID");
-        m.insert(uuid, member).expect("insert disk1");
+        m.insert(canonical_luks_uuid(1), member)
+            .expect("insert disk1");
         let (_, member) =
             disk_member_with(2, "disk2", "/dev/disk/by-id/virtio-disk2", Some(2), None);
-        let uuid = LuksUuid::parse("22222222-2222-2222-2222-222222222222")
-            .expect("canonical fixture UUID");
-        m.insert(uuid, member).expect("insert disk2");
+        m.insert(canonical_luks_uuid(2), member)
+            .expect("insert disk2");
         membership::save_membership(&m, &base.paths).expect("save_membership");
         Self {
             _state_tmp: base.state_tmp,
@@ -525,5 +551,44 @@ mod tests {
              \x20  Data,RAID1:            67108864\n\
              \x20  Unallocated:                  0\n\n"
         );
+    }
+
+    // Intent: canonical_luks_uuid(n) yields the exact repeated-digit literal for
+    //   each disk index (1/2/3 -> 11111111-.../22222222-.../33333333-...) the
+    //   inline fixtures used before this change.
+    // Why it exists: step 2 routes BOTH the membership map (luks_uuid_for_disk_name)
+    //   and the live-probe map (luks_uuid_for_device) through this one generator, so
+    //   a wrong generator corrupts both sides in lockstep with no cross-check; this
+    //   pins the output byte-for-byte against the literals it replaces.
+    // Scenario: a refactor tweaks a segment length or the digit and silently shifts
+    //   every canonical fixture UUID; this byte-for-byte tripwire fails closed.
+    #[test]
+    fn canonical_luks_uuid_pins_repeated_digit_literals() {
+        assert_eq!(
+            canonical_luks_uuid(1).as_str(),
+            "11111111-1111-1111-1111-111111111111"
+        );
+        assert_eq!(
+            canonical_luks_uuid(2).as_str(),
+            "22222222-2222-2222-2222-222222222222"
+        );
+        assert_eq!(
+            canonical_luks_uuid(3).as_str(),
+            "33333333-3333-3333-3333-333333333333"
+        );
+    }
+
+    // Intent: canonical_luks_uuid(0) panics instead of silently returning the nil
+    //   UUID (00000000-...).
+    // Why it exists: n == 0 builds the nil UUID, which aliases an "absent/zero"
+    //   identity and defeats the fail-closed 1..=15 domain guard; this pins that
+    //   guard so the n=0 trap cannot regress.
+    // Scenario: a caller passes a 0-based disk index by mistake; the generator must
+    //   fail closed, not mint a nil-UUID pool member.
+    #[test]
+    #[should_panic(expected = "canonical disk index must be 1..=15")]
+    fn canonical_luks_uuid_rejects_disk_index_zero() {
+        // n == 0 silently built the nil UUID before the guard -- the alias trap.
+        let _ = canonical_luks_uuid(0);
     }
 }

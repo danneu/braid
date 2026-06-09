@@ -2,7 +2,8 @@
 //! remove-only `PoolFixture` constructors.
 
 use super::shared::{
-    DeviceUsageSpec, PoolFixture, device_usage_raw_body, disk_member_with, mock_ok,
+    DeviceUsageSpec, PoolFixture, canonical_luks_uuid, device_usage_raw_body, disk_member_with,
+    mock_ok,
 };
 use crate::cmd::{CmdRequest, MockRunner};
 use crate::config::{Config, mapper_name};
@@ -49,9 +50,12 @@ const OVERCOMMITTED_SURVIVOR_DF_JSON: &str = r#"{
 
 impl PoolFixture {
     /// pool.json: disk1 + disk2 + disk3. Kept remove-scoped until another
-    /// command needs the same three-member steady-state topology. Each
-    /// disk's UUID seed encodes its disk number (`disk1` -> seed 1, etc.)
-    /// so fixture UUIDs read at a glance and stay in disk-number order.
+    /// command needs the same three-member steady-state topology. Each disk
+    /// is keyed by `canonical_luks_uuid(n)` (via `luks_uuid_for_disk_name`) in
+    /// disk-number order, so the membership key equals the UUID the live
+    /// `RemovalPool` probe reports for `/dev/vd{b,c,d}`. The seed passed to
+    /// `disk_member_with` feeds only its now-discarded UUID -- the member's
+    /// fields come from name/by_id/devid -- so it is vestigial here.
     pub(crate) fn three_disk_healthy() -> Self {
         let base = Self::empty_inner();
         let mut m = PoolMembership::empty();
@@ -63,8 +67,7 @@ impl PoolFixture {
                 None,
                 None,
             );
-            let uuid = LuksUuid::parse(luks_uuid_for_disk_name(name).expect("fixture disk name"))
-                .expect("canonical fixture UUID");
+            let uuid = luks_uuid_for_disk_name(name).expect("fixture disk name");
             m.insert(uuid, member).expect("fixture insert");
         }
         membership::save_membership(&m, &base.paths).expect("save_membership");
@@ -229,13 +232,15 @@ impl<'a> RemoveParamsBuilder<'a> {
 pub(crate) fn target_device(name: &str) -> PoolDevice {
     let disk = name.strip_prefix("disk").unwrap_or(name);
     let devid = disk.parse().unwrap_or(1);
-    let uuid_raw = luks_uuid_for_disk_name(name).unwrap_or("00000000-0000-0000-0000-000000000000");
+    let luks_uuid = luks_uuid_for_disk_name(name).unwrap_or_else(|| {
+        LuksUuid::parse("00000000-0000-0000-0000-000000000000").expect("valid fixture UUID")
+    });
     let disk_name = DiskName::parse(name).expect("valid fixture disk name");
     let mapper = mapper_name(&disk_name);
     PoolDevice {
         devid,
         mapper: mapper.clone(),
-        luks_uuid: LuksUuid::parse(uuid_raw).expect("valid fixture UUID"),
+        luks_uuid,
         underlying: mapper_underlying(mapper.as_str())
             .unwrap_or("/dev/vda")
             .to_owned(),
@@ -324,20 +329,22 @@ fn mapper_underlying(mapper: &str) -> Option<&'static str> {
     }
 }
 
-fn luks_uuid_for_device(device: &str) -> Option<&'static str> {
-    match device {
-        "/dev/vdb" | "/dev/disk/by-id/virtio-disk1" => Some("11111111-1111-1111-1111-111111111111"),
-        "/dev/vdc" | "/dev/disk/by-id/virtio-disk2" => Some("22222222-2222-2222-2222-222222222222"),
-        "/dev/vdd" | "/dev/disk/by-id/virtio-disk3" => Some("33333333-3333-3333-3333-333333333333"),
-        _ => None,
-    }
+fn luks_uuid_for_device(device: &str) -> Option<LuksUuid> {
+    let n = match device {
+        "/dev/vdb" | "/dev/disk/by-id/virtio-disk1" => 1,
+        "/dev/vdc" | "/dev/disk/by-id/virtio-disk2" => 2,
+        "/dev/vdd" | "/dev/disk/by-id/virtio-disk3" => 3,
+        _ => return None,
+    };
+    Some(canonical_luks_uuid(n))
 }
 
-fn luks_uuid_for_disk_name(name: &str) -> Option<&'static str> {
-    match name {
-        "disk1" => Some("11111111-1111-1111-1111-111111111111"),
-        "disk2" => Some("22222222-2222-2222-2222-222222222222"),
-        "disk3" => Some("33333333-3333-3333-3333-333333333333"),
-        _ => None,
-    }
+fn luks_uuid_for_disk_name(name: &str) -> Option<LuksUuid> {
+    let n = match name {
+        "disk1" => 1,
+        "disk2" => 2,
+        "disk3" => 3,
+        _ => return None,
+    };
+    Some(canonical_luks_uuid(n))
 }
