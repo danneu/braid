@@ -2707,6 +2707,46 @@ mod tests {
         assert!(r.message.contains("passed ~2 days ago"), "{}", r.message);
     }
 
+    // Intent: a present member's stale-self-test Warn hint cites the persisted
+    //   by-id path even though the probe read the live backing device.
+    // Why it exists: probe device (live /dev/sdX) and hint device (by-id) are
+    //   deliberately separate args; a refactor collapsing them would print an
+    //   unstable /dev/sdX in the "smartctl -t short ..." hint, violating the
+    //   ADR-024 by-id-survives-reboots contract. The only prior live-pool test
+    //   asserts the Ok branch, which emits no hint -- so nothing pinned the warn
+    //   arm where probe device != hint device.
+    // Scenario: disk1 is present at /dev/vdb whose live self-test is stale (warns),
+    //   while the persisted by-id mock would have passed.
+    #[test]
+    fn check_smart_selftest_present_member_warn_hint_uses_by_id() {
+        let (dir, paths) = isolated_paths();
+        save_doctor_membership(&paths, &[(1, "disk1", "/dev/disk/by-id/disk1", Some(1))]);
+        let (live_req, live_out) =
+            smartctl_selftest_json("/dev/vdb", "smartctl-selftest-ata-stale.json", 0);
+        let (by_id_req, by_id_out) = smartctl_selftest_json(
+            "/dev/disk/by-id/disk1",
+            "smartctl-selftest-ata-recent-pass.json",
+            0,
+        );
+        let runner = pool_state_runner(vec![("braid-disk1", 1, "/dev/vdb", test_uuid(1))], &[])
+            .with_output(live_req, live_out)
+            .with_output(by_id_req, by_id_out);
+        let fs = DoctorMockFs::mounted_btrfs_only();
+        let mut ctx =
+            DoctorContext::for_test_parsed_with_fs(&runner, &fs, &paths, valid_config_json());
+
+        let results = check_smart_selftests(&mut ctx);
+        drop(dir);
+
+        let r = only_result(&results);
+        assert_eq!(r.status, CheckStatus::Warn);
+        // Probe read the live stale fixture, not the by-id recent-pass.
+        assert!(r.message.contains("~125 days"), "{}", r.message);
+        // Hint cites the stable by-id path and never leaks the live /dev/vdb node.
+        assert!(r.message.contains("/dev/disk/by-id/disk1"), "{}", r.message);
+        assert!(!r.message.contains("/dev/vdb"), "{}", r.message);
+    }
+
     /* Intent: valid custom config files skip canonical permission enforcement.
      * Why it exists: `braid doctor --config /tmp/...` is commonly used for
      * diagnostics and should still validate file presence and schema without
