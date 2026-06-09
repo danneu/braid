@@ -4,7 +4,8 @@
 # journal once btrfs has already removed the missing devid.
 #
 # Why: This pins the VM path for degraded mount probing, real btrfs missing
-# device removal, by-id membership resolution, and pending-op cleanup.
+# device removal, UUID-keyed membership resolution with by-id re-resolved from
+# the live backing device, and pending-op cleanup.
 { braid }:
 {
   name = "recover-remove-missing-completed";

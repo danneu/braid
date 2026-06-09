@@ -5,7 +5,8 @@
 #
 # Why it exists: Unit tests cover the dispatcher with mocked pool states, but
 # this pins the VM integration path: degraded mount, real btrfs missing-device
-# probing, real by-id membership resolution, and journal cleanup.
+# probing, UUID-keyed membership resolution with by-id re-resolved from the
+# live backing device, and journal cleanup.
 #
 # Scenario: 3-disk RAID1 pool. disk3 disappears, btrfs `device remove missing`
 # succeeds, and the system crashes before braid can rewrite pool.json and clear
