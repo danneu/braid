@@ -16,6 +16,15 @@ pub fn enospc_risk_threshold(total_device_bytes: u64) -> u64 {
     GIB.min(total_device_bytes / 10)
 }
 
+/// Canonical data-only balance command for proactive ENOSPC guidance.
+///
+/// The helper makes metadata balance parameters unrepresentable for the status
+/// advisory and doctor's metadata-pressure check, where preserving metadata
+/// block-group headroom is the safety invariant.
+pub(crate) fn compact_data_command(mount: &str, usage: u8) -> String {
+    format!("btrfs balance start -dusage={usage} {mount}")
+}
+
 /// Compute usable RAID1 chunk-pair capacity from sorted per-device headroom.
 ///
 /// The caller supplies unallocated bytes in descending order so preflight and
@@ -82,8 +91,9 @@ pub fn enospc_risk_advisory(devices: &[BtrfsDeviceUsageEntry], missing_count: u6
         return Vec::new();
     }
 
+    let cmd = compact_data_command("<mount>", 50);
     vec![format!(
-        "ENOSPC risk: {count_below} of {} devices have less than {} unallocated -- pool may be unable to allocate new RAID1 chunks. Free up files or run 'btrfs balance start -dusage=0 -musage=0 <mount>' to reclaim empty chunks.",
+        "ENOSPC risk: {count_below} of {} devices have less than {} unallocated -- if a disk fails, the pool may be unable to allocate RAID1 chunks to restore redundancy. Add capacity with 'braid add', delete unneeded files or snapshots, or compact data chunks with '{cmd}' (data only; do not balance metadata).",
         devices.len(),
         format_bytes(current_threshold),
     )]
@@ -106,6 +116,21 @@ mod tests {
             allocations: Vec::new(),
             unallocated,
         }
+    }
+
+    fn assert_data_only_recovery_advice(advisory: &str) {
+        assert!(
+            advisory.contains("braid add"),
+            "should recommend braid add before raw btrfs recovery: {advisory}"
+        );
+        assert!(
+            advisory.contains("-dusage=50"),
+            "should recommend data compaction at a useful threshold: {advisory}"
+        );
+        assert!(
+            !advisory.contains("mconvert") && !advisory.contains("musage"),
+            "must not recommend metadata balancing: {advisory}"
+        );
     }
 
     // Intent: enospc_risk_threshold caps large pools at btrfs's 1 GiB data
@@ -241,6 +266,7 @@ mod tests {
         assert!(advisories[0].starts_with("ENOSPC risk:"));
         assert!(advisories[0].contains("1 of 2 devices"));
         assert!(advisories[0].contains("1.00 GiB"));
+        assert_data_only_recovery_advice(&advisories[0]);
     }
 
     // Intent: enospc_risk_advisory simulates every single-disk loss on 3+
@@ -261,6 +287,7 @@ mod tests {
         assert_eq!(advisories.len(), 1);
         assert!(advisories[0].starts_with("ENOSPC risk:"));
         assert!(advisories[0].contains("1 of 3 devices"));
+        assert_data_only_recovery_advice(&advisories[0]);
     }
 
     // Intent: enospc_risk_advisory tolerates one low device when every

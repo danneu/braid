@@ -1103,10 +1103,11 @@ fn check_metadata_enospc_pressure<R: CommandRunner>(ctx: &mut DoctorContext<'_, 
 
         let pct = (metadata_ratio * 100.0).round() as u64;
         let headroom = format_bytes(METADATA_CHUNK_HEADROOM);
+        let compact_cmd = capacity::compact_data_command(mount_point.as_str(), 50);
         return CheckResult::warn(
             NAME,
             format!(
-                "metadata {pct}% used; only {with_headroom} of {n_devices} device(s) have >= {headroom} unallocated -- RAID1 needs 2 with headroom for the next metadata chunk; delete files to free space, or compact data with `btrfs balance start -dusage=50 {mount_point}` before metadata cannot grow."
+                "metadata {pct}% used; only {with_headroom} of {n_devices} device(s) have >= {headroom} unallocated -- RAID1 needs 2 with headroom for the next metadata chunk; delete files to free space, or compact data with `{compact_cmd}` before metadata cannot grow."
             ),
         );
     }

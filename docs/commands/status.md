@@ -333,7 +333,7 @@ disk-loss away from insufficient RAID1 chunk-pair space, `braid status`
 prints:
 
 ```
-warning: ENOSPC risk: 1 of 3 devices have less than 1.00 GiB unallocated -- pool may be unable to allocate new RAID1 chunks. Free up files or run 'btrfs balance start -dusage=0 -musage=0 <mount>' to reclaim empty chunks.
+warning: ENOSPC risk: 1 of 3 devices have less than 1.00 GiB unallocated -- if a disk fails, the pool may be unable to allocate RAID1 chunks to restore redundancy. Add capacity with 'braid add', delete unneeded files or snapshots, or compact data chunks with 'btrfs balance start -dusage=50 <mount>' (data only; do not balance metadata).
 ```
 
 For 2-disk pools, the warning fires when either device drops below the

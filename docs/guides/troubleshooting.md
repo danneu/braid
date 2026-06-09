@@ -10,14 +10,16 @@ btrfs balance needs temporary free space to relocate chunks. Braid balances
 convert both data and metadata profiles, so either side can hit ENOSPC even
 when there appears to be space available.
 
-**Fix:** Free up empty block groups first, then retry the original operation:
+**Fix:** Free up empty data block groups first, then retry the original operation:
 
 ```sh
-sudo btrfs balance start -dusage=0 -musage=0 /mnt/storage
+sudo btrfs balance start -dusage=0 /mnt/storage
 ```
 
-The `usage=0` pass relocates only completely empty block groups, so it does not
-need temporary work space.
+The `usage=0` pass relocates only completely empty data block groups, so it does
+not need temporary work space. Keep recovery balances data-only: metadata block
+groups are write headroom, and balancing them can hit metadata ENOSPC and force
+the filesystem read-only.
 
 If the retry still fails, inspect data vs metadata usage:
 
@@ -30,11 +32,11 @@ snapshot references, while `braid status` reports the same btrfs-derived
 capacity. In `btrfs filesystem usage`, compare the Data and Metadata used/size
 ratios to see which side is the bottleneck.
 
-If there is enough temporary work space, a non-zero threshold can reclaim
+If there is enough temporary work space, a non-zero data threshold can reclaim
 nearly-empty groups, but it moves data:
 
 ```sh
-sudo btrfs balance start -dusage=10 -musage=10 /mnt/storage
+sudo btrfs balance start -dusage=10 /mnt/storage
 ```
 
 ## Pool won't mount
