@@ -2032,6 +2032,85 @@ pool already mounted at /mnt/storage
         );
     }
 
+    /// Intent: A LUKS UUID mismatch on a *later* membership member (by name
+    /// order) is still caught as a hard `MountError::Failed`, and the probe
+    /// events already accumulated for the healthy members ahead of it survive
+    /// on the error path.
+    ///
+    /// Why: Every other mismatch test (`mount_luks_uuid_mismatch_closed`,
+    /// `_already_open`, `_refused_even_with_allow_degraded`) mismatches `disk1`
+    /// -- the first name in `iter_by_name` order -- so the early
+    /// `return Err(Failed)` in `plan_open_pool_inner` fires before any
+    /// `DiskAvailable` event is pushed. That leaves two promises from ADR 024
+    /// and docs/commands/unlock.md unpinned: the mismatch is position-
+    /// independent (the loop keeps probing past healthy members), and operator
+    /// probe context renders before the refusal. A regression that routed the
+    /// mismatch through the `missing` vector + degraded gate, or that dropped
+    /// already-pushed events on the mismatch return, would pass every existing
+    /// test but fail here.
+    ///
+    /// Scenario: 2-disk RAID1. disk1 is healthy and probed first (mapper closed
+    /// -> classified Available). disk2's device now reports a UUID that differs
+    /// from its stored membership key (swapped/reformatted drive). The plan must
+    /// fail with the UUID-mismatch error, not a degraded refusal, and must still
+    /// carry disk1's "found" event.
+    #[test]
+    fn plan_open_pool_emits_events_before_uuid_mismatch_on_later_member() {
+        let config = test_config();
+        let membership = two_disk_membership();
+        let fs = mount_fs(&[
+            "/dev/disk/by-id/virtio-disk1",
+            "/dev/disk/by-id/virtio-disk2",
+        ]);
+
+        // disk1 probes healthy (stored 1111 == probed 1111 from base runner).
+        // Override only disk2's probe UUID so it mismatches its stored 2222
+        // membership key -- the mismatch now lands on the *second* member.
+        let (uuid2_req, uuid2_out) = luks_uuid_ok(
+            "/dev/disk/by-id/virtio-disk2",
+            "ffffffff-ffff-ffff-ffff-ffffffffffff",
+        );
+        let runner = base_two_disk_runner().with_output(uuid2_req, uuid2_out);
+
+        let report = plan_open_pool(
+            &runner,
+            &fs,
+            &config,
+            &membership,
+            crate::test_fixtures::mock_virtio_backing_path_resolver(),
+            false,
+            "unlock",
+        );
+
+        // disk1's healthy probe event survives on the mismatch Err path, and is
+        // the only event: disk2 returns before pushing its own.
+        assert_eq!(
+            report.events,
+            vec![ProbeEvent::DiskAvailable {
+                name: "disk1".to_owned()
+            }],
+            "disk1's found event must precede and survive the disk2 mismatch, got: {:?}",
+            report.events,
+        );
+
+        let err = report
+            .result
+            .expect_err("UUID mismatch on a later member must still fail");
+        assert!(
+            matches!(&err, MountError::Failed(_)),
+            "mismatch must be a hard Failed, not DegradedRefused, got: {err:?}",
+        );
+        let msg = err.to_string();
+        assert!(
+            msg.contains("LUKS UUID mismatch"),
+            "error should be the UUID-mismatch refusal, got: {msg}",
+        );
+        assert!(
+            msg.contains("disk2"),
+            "mismatch must name the later member, got: {msg}",
+        );
+    }
+
     /// Intent: End-to-end, the degraded-mount path with an absent first disk
     /// and all surviving mappers open must issue the MountWithOptions call
     /// against the open mapper, not the stale first-disk mapper.

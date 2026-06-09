@@ -122,6 +122,26 @@ with subtest("UUID mismatch: reformatted disk2 detected and rejected"):
     assert "disk2" in ret[1], (
         f"Expected 'disk2' named in output, got: {ret[1]}"
     )
+
+    # The healthy disk1 probe-OK row must render before the mismatch error,
+    # proving probe context precedes the refusal (ADR 024, unlock.md) and that
+    # the mismatch on a *later* member is caught (disk1 is classified first).
+    # Anchor on the full rendered row, not bare "disk1": that token also occurs
+    # in by-id device paths and remediation text, so it would not prove the
+    # probe row itself rendered. close_all() at the top of this subtest closes
+    # braid-disk1, so disk1 probes closed -> classified Available -> "found"
+    # (an open mapper would render "already open" instead). The "disk <name>:
+    # <message>" body is pinned by the Rust test
+    # render_probe_events_formats_mixed_probe_result; stderr is uncolored under
+    # capture, and color (when on) wraps only the [ok] tag, never the body.
+    probe_row = "disk disk1: found"
+    assert probe_row in ret[1], (
+        f"Expected healthy disk1 probe-OK row {probe_row!r} in output, got: {ret[1]}"
+    )
+    assert ret[1].index(probe_row) < ret[1].index("LUKS UUID mismatch"), (
+        f"disk1 probe row must precede the mismatch error, got: {ret[1]}"
+    )
+
     assert expected_uuid in ret[1], (
         f"Expected original UUID {expected_uuid} in output, got: {ret[1]}"
     )
