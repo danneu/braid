@@ -1,5 +1,13 @@
 # Plan: dissolve the "redundant present-disk probe" finding in `braid status`
 
+> **Update (2026-06-09):** The *fatality* of the present-member probe described
+> below was revisited. `braid status` now treats `probe_config_disk` errors as
+> non-fatal -- an advisory plus, for an unpooled member, an `unknown` row --
+> rather than aborting the whole report via `?`. The probe sweep itself (the I/O
+> this document defends) is unchanged. See
+> [2026-06-09-status-config-probe-non-fatal.md](2026-06-09-status-config-probe-non-fatal.md).
+> The rest of this document is preserved as history.
+
 ## Context
 
 An ultrareview finding (Low / Simplicity) flagged that `build_status` runs

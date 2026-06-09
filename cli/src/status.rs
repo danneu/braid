@@ -563,23 +563,40 @@ fn build_status<R: CommandRunner, F: Filesystem>(
     // identity is only consumed for unpooled/missing rows below. The error
     // path is the status-side fault surface for config-side mapper backing
     // mismatches, mapper conflicts, LUKS-version drift, and luksDump failures
-    // on live pool members; `build_status` propagates those errors through
-    // `?`. `doctor` does not probe configured disks, and the TUI skips live
-    // members, so dropping the present-member probe would silently remove the
-    // diagnostic pinned by `status_surfaces_mapper_conflict`. The redundant
-    // cryptsetup I/O on a healthy pool is the accepted cost of that check.
-    let config_disks: Vec<ConfigDisk> = members
-        .into_iter()
-        .map(|member| {
-            probe_config_disk(
-                runner,
-                fs,
-                &member.name,
-                &member.by_id,
-                backing_path_resolver,
-            )
-        })
-        .collect::<Result<Vec<_>, _>>()?;
+    // on live pool members; `doctor` does not probe configured disks, and the
+    // TUI skips live members, so dropping the present-member probe would
+    // silently remove the diagnostic pinned by `status_surfaces_mapper_conflict`.
+    // The redundant cryptsetup I/O on a healthy pool is the accepted cost.
+    //
+    // Unlike the mutating/unlock gateways that also call `probe_config_disk`
+    // and legitimately fail closed on these errors, `status` is the
+    // always-available read-only diagnostic (principles.md: `status` and
+    // `doctor` "stay available" so operators retain a working diagnostic
+    // surface). A probe error here is therefore non-fatal: it becomes a
+    // per-disk advisory plus, for an unpooled member, a cause-neutral
+    // `Unknown` row. A hijacked `braid-<name>` mapper backing a member that is
+    // already live-and-healthy under another mapper is decision-024's textbook
+    // tolerated-drift case -- it degrades one member, not the whole report.
+    let mut config_disks: Vec<ConfigDisk> = Vec::with_capacity(members.len());
+    let mut probe_failures: Vec<ConfigProbeFailure> = Vec::new();
+    for member in members {
+        match probe_config_disk(
+            runner,
+            fs,
+            &member.name,
+            &member.by_id,
+            backing_path_resolver,
+        ) {
+            Ok(cd) => config_disks.push(cd),
+            Err(e) => {
+                advisories.push(config_probe_advisory(&member.name, &e));
+                probe_failures.push(ConfigProbeFailure {
+                    name: member.name.clone(),
+                    by_id: member.by_id.clone(),
+                });
+            }
+        }
+    }
     let device_stats = match get_device_stats(runner, config.mount_point()) {
         Ok(device_stats) => device_stats,
         Err(_) => {
@@ -588,7 +605,14 @@ fn build_status<R: CommandRunner, F: Filesystem>(
             BtrfsDeviceStatsOutput { devices: vec![] }
         }
     };
-    let verbose_ctx = build_disk_reports(runner, &membership, &config_disks, &pool, &device_stats);
+    let verbose_ctx = build_disk_reports(
+        runner,
+        &membership,
+        &config_disks,
+        &probe_failures,
+        &pool,
+        &device_stats,
+    );
 
     // Compact and detail must agree on each unpooled member's status (decision
     // 024 swap/reformat detection): derive the compact summary from the detail
@@ -985,6 +1009,35 @@ pub fn emit_paused_balance_warning<R: CommandRunner>(
 }
 
 // ---------------------------------------------------------------------------
+// Config-probe failure handling (status-local, non-fatal)
+// ---------------------------------------------------------------------------
+
+/// Phrase a config-disk probe failure as a status advisory. The mapper- and
+/// LUKS-version `ProbeError` variants already embed the disk name and the
+/// remediation command in their `Display`, so they pass through verbatim; the
+/// environmental `Cmd`/`Parse` variants do not name the disk, so they are
+/// attributed here. Invariant: every config-probe advisory names its disk
+/// (pinned by `config_probe_advisory_names_disk`).
+fn config_probe_advisory(name: &DiskName, e: &ProbeError) -> String {
+    match e {
+        ProbeError::MapperConflict { .. }
+        | ProbeError::MapperBackingMismatch { .. }
+        | ProbeError::MapperBackingResolveError { .. }
+        | ProbeError::UnsupportedLuksVersion { .. } => e.to_string(),
+        _ => format!("disk '{name}' probe failed -- {e}"),
+    }
+}
+
+/// A configured member whose `probe_config_disk` errored during status. Carries
+/// the identity needed to render a cause-neutral `Unknown` row without a
+/// `ConfigDisk` -- status keeps probe errors non-fatal while the gateway role
+/// stays in the mutating commands.
+struct ConfigProbeFailure {
+    name: DiskName,
+    by_id: ByIdPath,
+}
+
+// ---------------------------------------------------------------------------
 // build_disk_reports
 // ---------------------------------------------------------------------------
 
@@ -992,6 +1045,7 @@ fn build_disk_reports<R: CommandRunner>(
     runner: &R,
     membership: &PoolMembership,
     config_disks: &[ConfigDisk],
+    probe_failures: &[ConfigProbeFailure],
     pool: &PoolState,
     device_stats: &BtrfsDeviceStatsOutput,
 ) -> VerboseContext {
@@ -1088,6 +1142,14 @@ fn build_disk_reports<R: CommandRunner>(
         });
     }
 
+    // Both kinds of unpooled row, paired and keyed by name for a single
+    // ordered block. The present block above already sorts by display name
+    // (decision-024#consequences); the Ok-classified unpooled rows are only
+    // name-ordered because `iter_by_name` pre-sorts `config_disks`, and probe
+    // failures arrive in that same order. To keep both kinds interleaved by
+    // name -- not concatenated -- collect both here, sort once, then drain.
+    let mut unpooled: Vec<(DiskReport, HumanDisk)> = Vec::new();
+
     // Unpooled config disks (not matched to pool)
     for cd in config_disks {
         let membership_uuid_live = membership
@@ -1150,30 +1212,81 @@ fn build_disk_reports<R: CommandRunner>(
 
         // Unpooled/offline disks have no live backing path in btrfs, so there is
         // nothing to read btrfs error stats or SMART from -- both stay `None`.
-        disk_reports.push(DiskReport {
-            name: cd.name.as_str().to_owned(),
-            mapper: mapper.clone(),
-            by_id: cd.by_id_path.as_str().to_owned(),
-            luks_uuid: luks_uuid.clone(),
-            devid: None,
-            underlying: None,
-            status,
-            btrfs_errors: None,
-            smart: None,
-        });
+        unpooled.push((
+            DiskReport {
+                name: cd.name.as_str().to_owned(),
+                mapper: mapper.clone(),
+                by_id: cd.by_id_path.as_str().to_owned(),
+                luks_uuid: luks_uuid.clone(),
+                devid: None,
+                underlying: None,
+                status,
+                btrfs_errors: None,
+                smart: None,
+            },
+            HumanDisk {
+                name: cd.name.as_str().to_owned(),
+                member_name: Some(cd.name.clone()),
+                by_id: cd.by_id_path.as_str().to_owned(),
+                luks_uuid,
+                devid: None,
+                status,
+                model: None,
+                serial: None,
+                errors: None,
+                smart: None,
+            },
+        ));
+    }
 
-        human_details.push(HumanDisk {
-            name: cd.name.as_str().to_owned(),
-            member_name: Some(cd.name.clone()),
-            by_id: cd.by_id_path.as_str().to_owned(),
-            luks_uuid,
-            devid: None,
-            status,
-            model: None,
-            serial: None,
-            errors: None,
-            smart: None,
-        });
+    // Probe failures have no `ConfigDisk` to classify. A live member is already
+    // rendered `Present` by the present loop above (and its `build_status`
+    // advisory carries the fault), so skip it here. A non-live member gets a
+    // cause-neutral `Unknown` row so it is neither silently dropped nor forced
+    // to `Missing` by `build_compact_drives`'s missing-when-absent fallback --
+    // `unknown` is decision-024's "braid cannot classify the state."
+    for failure in probe_failures {
+        let membership_uuid_live = membership
+            .by_name(&failure.name)
+            .is_some_and(|(uuid, _)| pool_uuid_set.contains(uuid));
+        if membership_uuid_live {
+            continue;
+        }
+        let mapper = mapper_name(&failure.name).0;
+        unpooled.push((
+            DiskReport {
+                name: failure.name.as_str().to_owned(),
+                mapper,
+                by_id: failure.by_id.as_str().to_owned(),
+                luks_uuid: String::new(),
+                devid: None,
+                underlying: None,
+                status: DiskStatus::Unknown,
+                btrfs_errors: None,
+                smart: None,
+            },
+            HumanDisk {
+                name: failure.name.as_str().to_owned(),
+                member_name: Some(failure.name.clone()),
+                by_id: failure.by_id.as_str().to_owned(),
+                luks_uuid: String::new(),
+                devid: None,
+                status: DiskStatus::Unknown,
+                model: None,
+                serial: None,
+                errors: None,
+                smart: None,
+            },
+        ));
+    }
+
+    // Single name-sorted unpooled block (mirrors the present block's sort).
+    // Idempotent for the Ok-only case, so existing output stays byte-identical
+    // when there are no probe failures.
+    unpooled.sort_by(|(a, _), (b, _)| a.name.cmp(&b.name));
+    for (report, human) in unpooled {
+        disk_reports.push(report);
+        human_details.push(human);
     }
 
     VerboseContext {
@@ -5161,6 +5274,7 @@ mod tests {
             &runner,
             &PoolMembership::empty(),
             &config_disks,
+            &[],
             &status_pool_empty(),
             &stats,
         );
@@ -5197,6 +5311,7 @@ mod tests {
             &runner,
             &PoolMembership::empty(),
             &config_disks,
+            &[],
             &status_pool_empty(),
             &stats,
         );
@@ -5234,6 +5349,7 @@ mod tests {
             &runner,
             &PoolMembership::empty(),
             &config_disks,
+            &[],
             &status_pool_empty(),
             &stats,
         );
@@ -5278,7 +5394,7 @@ mod tests {
         let runner = MockRunner::default();
         let stats = BtrfsDeviceStatsOutput { devices: vec![] };
 
-        let ctx = build_disk_reports(&runner, &membership, &config_disks, &pool, &stats);
+        let ctx = build_disk_reports(&runner, &membership, &config_disks, &[], &pool, &stats);
 
         assert_eq!(ctx.disks.len(), 1, "disks: {:?}", ctx.disks);
         assert_eq!(ctx.disks[0].status, DiskStatus::Present);
@@ -5353,7 +5469,7 @@ mod tests {
         let runner = MockRunner::default();
         let stats = BtrfsDeviceStatsOutput { devices: vec![] };
 
-        let ctx = build_disk_reports(&runner, &membership, &config_disks, &pool, &stats);
+        let ctx = build_disk_reports(&runner, &membership, &config_disks, &[], &pool, &stats);
 
         assert_eq!(ctx.disks.len(), 2, "disks: {:?}", ctx.disks);
         assert_eq!(ctx.disks[0].name, "braid-disk1");
@@ -5411,7 +5527,7 @@ mod tests {
         let runner = MockRunner::default();
         let stats = BtrfsDeviceStatsOutput { devices: vec![] };
 
-        let ctx = build_disk_reports(&runner, &membership, &config_disks, &pool, &stats);
+        let ctx = build_disk_reports(&runner, &membership, &config_disks, &[], &pool, &stats);
 
         assert_eq!(ctx.disks.len(), 2, "disks: {:?}", ctx.disks);
         assert_eq!(ctx.disks[0].name, "braid-disk1");
@@ -5471,7 +5587,7 @@ mod tests {
         let runner = MockRunner::default();
         let stats = BtrfsDeviceStatsOutput { devices: vec![] };
 
-        let ctx = build_disk_reports(&runner, &membership, &config_disks, &pool, &stats);
+        let ctx = build_disk_reports(&runner, &membership, &config_disks, &[], &pool, &stats);
 
         assert_eq!(ctx.disks.len(), 1, "disks: {:?}", ctx.disks);
         assert_eq!(ctx.disks[0].name, "disk1");
@@ -5535,7 +5651,7 @@ mod tests {
         let config_disks: Vec<ConfigDisk> = vec![];
         let stats = BtrfsDeviceStatsOutput { devices: vec![] };
 
-        let ctx = build_disk_reports(&runner, &membership, &config_disks, &pool, &stats);
+        let ctx = build_disk_reports(&runner, &membership, &config_disks, &[], &pool, &stats);
 
         let disk = ctx
             .human_details
@@ -5622,7 +5738,7 @@ mod tests {
         let runner = MockRunner::default();
         let stats = BtrfsDeviceStatsOutput { devices: vec![] };
 
-        let ctx = build_disk_reports(&runner, &membership, &config_disks, &pool, &stats);
+        let ctx = build_disk_reports(&runner, &membership, &config_disks, &[], &pool, &stats);
 
         let disk_rows: Vec<(&str, DiskStatus)> = ctx
             .disks
@@ -5713,7 +5829,7 @@ mod tests {
         let runner = MockRunner::default();
         let membership = status_membership_1disk();
 
-        let ctx = build_disk_reports(&runner, &membership, &config_disks, &pool, &stats);
+        let ctx = build_disk_reports(&runner, &membership, &config_disks, &[], &pool, &stats);
 
         let foreign = ctx
             .human_details
@@ -5792,6 +5908,7 @@ mod tests {
             &runner,
             &membership,
             &config_disks,
+            &[],
             &status_pool_empty(),
             &stats,
         );
@@ -6554,23 +6671,25 @@ mod tests {
     }
 
     /*
-     * Intent: a ProbeError::MapperConflict raised by probe_config_disk while
-     *   building the per-disk status report must surface through
-     *   build_status as a StatusError::Probe(MapperConflict), not be
-     *   swallowed or remapped.
-     * Why it exists: a future regression in the status-path error handling
-     *   could narrow or drop the MapperConflict variant (e.g. a .or_else that
-     *   filters probe errors), hiding the probe-layer safety fix from the
-     *   non-mutating command boundary. The probe-level tests in probe.rs lock
-     *   the gateway behavior; this test locks the propagation contract so
-     *   both halves stay honest.
+     * Intent: a MapperConflict on a present member's expected mapper surfaces
+     *   as a non-fatal advisory while the healthy pool still renders. The probe
+     *   sweep is still the status-side fault surface for config-side mapper
+     *   drift, but build_status no longer aborts on it: the report comes back
+     *   Ok with the pool summary intact and the fault attributed to its disk in
+     *   advisories.
+     * Why it exists: a regression could reintroduce the `?` that blanks the
+     *   always-available read-only diagnostic (principles.md). status must
+     *   degrade like its sibling doctor, not refuse all output because one
+     *   peripheral mapper was hijacked -- this is decision-024's tolerated
+     *   mapper/label drift, not a reason to blank capacity, scrub, and per-disk
+     *   detail. The probe-level tests in probe.rs still lock the gateway
+     *   behavior; this test locks the non-fatal status contract.
      * Scenario: braid status run on a host where the LUKS mapper
      *   /dev/mapper/braid-disk1 was externally aliased to a different LUKS
      *   container (a distinct UUID) before braid was invoked.
      */
     #[test]
     fn status_surfaces_mapper_conflict() {
-        use crate::probe::ProbeError;
         use crate::types::LuksUuid;
 
         let (_tmp, paths) = isolated_paths();
@@ -6683,26 +6802,314 @@ mod tests {
 
         let backing_path_resolver = crate::test_fixtures::MockBackingPathResolver::default()
             .with_path("/dev/disk/by-id/disk1", "/dev/vdz");
-        let result = build_status(&runner, &fs, &config, &paths, &backing_path_resolver);
-        match result {
-            Err(StatusError::Probe(ProbeError::MapperConflict {
-                name,
-                expected,
-                found,
-            })) => {
-                assert_eq!(name, "disk1");
-                assert_eq!(
-                    expected,
-                    LuksUuid::parse("11111111-1111-1111-1111-111111111111").unwrap()
-                );
-                assert_eq!(
-                    found,
-                    Some(LuksUuid::parse("99999999-9999-9999-9999-999999999999").unwrap())
-                );
-            }
-            Err(other) => panic!("expected StatusError::Probe(MapperConflict), got: {other:?}"),
-            Ok(_) => panic!("expected StatusError::Probe(MapperConflict), got Ok"),
+        let built = build_status(&runner, &fs, &config, &paths, &backing_path_resolver)
+            .expect("a MapperConflict on a present member must not blank status");
+
+        // The healthy pool still renders: the conflict degrades one member, not
+        // the whole report.
+        assert_eq!(built.report.status, StatusCode::Intact);
+        assert_eq!(built.report.present_count, Some(1));
+
+        // The fault reaches the non-mutating boundary as an advisory that names
+        // its disk and carries the conflict's remediation text.
+        assert!(
+            built
+                .report
+                .advisories
+                .iter()
+                .any(|a| a.contains("disk1") && a.contains("not backed by the configured disk")),
+            "advisories: {:?}",
+            built.report.advisories
+        );
+
+        // disk1 is live in the pool, so its detail row comes from the UUID
+        // membership join and stays Present despite the hijacked braid-disk1
+        // mapper -- no Unknown row for a present member.
+        let disk1 = built
+            .report
+            .disks
+            .iter()
+            .find(|d| d.name == "disk1")
+            .expect("disk1 detail row");
+        assert_eq!(disk1.status, DiskStatus::Present);
+    }
+
+    /*
+     * Intent: a config-disk probe error on an UNPOOLED member is non-fatal --
+     *   build_status returns Ok, attributes the fault to its disk in an
+     *   advisory, and renders that member as a cause-neutral Unknown row in
+     *   both the detail section and the compact summary, rather than blanking
+     *   the report or silently dropping the member.
+     * Why it exists: build_compact_drives falls back to `missing` for a member
+     *   with no detail row, so a probe-failed member would be mislabeled
+     *   `missing` unless build_disk_reports emits the Unknown row that keeps the
+     *   two surfaces in agreement. A regression that dropped that row, or
+     *   reinstated the fatal `?`, would break the always-available read-only
+     *   diagnostic (principles.md).
+     * Scenario: a healthy 1-disk pool (disk1 live) plus a configured member
+     *   disk2 that is offline -- its by-id node lingers but cryptsetup cannot
+     *   read it, so probe_config_disk errors on the luksUUID call.
+     */
+    #[test]
+    fn status_unpooled_probe_failure_renders_unknown() {
+        use crate::types::LuksUuid;
+
+        let (_tmp, paths) = isolated_paths();
+
+        let membership = membership_from(vec![
+            (
+                LuksUuid::parse("11111111-1111-1111-1111-111111111111").unwrap(),
+                DiskMember::new(
+                    DiskName::parse("disk1").unwrap(),
+                    ByIdPath::parse("/dev/disk/by-id/disk1").unwrap(),
+                ),
+            ),
+            (
+                LuksUuid::parse("22222222-2222-2222-2222-222222222222").unwrap(),
+                DiskMember::new(
+                    DiskName::parse("disk2").unwrap(),
+                    ByIdPath::parse("/dev/disk/by-id/disk2").unwrap(),
+                ),
+            ),
+        ]);
+        membership::save_membership(&membership, &paths).unwrap();
+
+        // disk2's CryptsetupLuksUuid is deliberately left unmocked: its by-id
+        // node exists but cryptsetup cannot read it, so probe_config_disk
+        // returns ProbeError::Cmd (the "luksUUID fails to spawn" environmental
+        // fault documented in probe.rs). That is the unpooled probe failure
+        // under test.
+        let runner = MockRunner::default()
+            .with_output(
+                CmdRequest::BtrfsFilesystemShow {
+                    mount_point: status_mp(),
+                },
+                status_btrfs_show_1disk(),
+            )
+            .with_output(
+                CmdRequest::CryptsetupStatus {
+                    mapper: MapperName("disk1".into()),
+                },
+                status_cryptsetup_status_active("disk1", "/dev/vda"),
+            )
+            .with_output(
+                CmdRequest::CryptsetupLuksUuid {
+                    device: "/dev/vda".into(),
+                },
+                status_cryptsetup_uuid_ok("/dev/vda", "11111111-1111-1111-1111-111111111111"),
+            )
+            .with_output(
+                CmdRequest::BtrfsFilesystemDfJson {
+                    mount_point: status_mp(),
+                },
+                status_btrfs_df_single(),
+            )
+            .with_output(
+                CmdRequest::BtrfsFilesystemUsageRaw {
+                    mount_point: status_mp(),
+                },
+                status_btrfs_usage_raw(),
+            )
+            .with_output(
+                CmdRequest::BtrfsDeviceUsageRaw {
+                    mount_point: status_mp(),
+                },
+                status_btrfs_device_usage_raw_1disk(),
+            )
+            .with_output(
+                CmdRequest::BtrfsScrubStatus {
+                    mount_point: status_mp(),
+                },
+                status_btrfs_scrub_never(),
+            )
+            .with_output(
+                CmdRequest::BtrfsDeviceStatsJson {
+                    mount_point: status_mp(),
+                },
+                mock_ok(
+                    "btrfs device stats",
+                    r#"{"device-stats": [
+                        {"device": "/dev/mapper/disk1", "devid": 1, "write_io_errs": 0, "read_io_errs": 0, "flush_io_errs": 0, "corruption_errs": 0, "generation_errs": 0}
+                    ]}"#,
+                ),
+            )
+            // disk1 probes cleanly: present, LUKS2, mapper closed -> PresentLuks.
+            .with_output(
+                CmdRequest::CryptsetupLuksUuid {
+                    device: "/dev/disk/by-id/disk1".into(),
+                },
+                status_cryptsetup_uuid_ok(
+                    "/dev/disk/by-id/disk1",
+                    "11111111-1111-1111-1111-111111111111",
+                ),
+            )
+            .with_luks_dump_text_luks2_for(&["/dev/disk/by-id/disk1"])
+            .with_mapper_closed("braid-disk1");
+
+        let fs = status_fs_mounted(&[
+            "/dev/disk/by-id/disk1",
+            "/dev/mapper/disk1",
+            "/dev/disk/by-id/disk2",
+        ]);
+        let config = status_config();
+
+        let built = build_status(
+            &runner,
+            &fs,
+            &config,
+            &paths,
+            crate::test_fixtures::mock_virtio_backing_path_resolver(),
+        )
+        .expect("an unpooled probe error must not blank status");
+
+        // The pool still renders intact; the offline member degrades alone.
+        assert_eq!(built.report.status, StatusCode::Intact);
+        assert_eq!(built.report.present_count, Some(1));
+
+        // The fault is attributed to disk2 by name (the Cmd variant does not
+        // self-name, so config_probe_advisory adds the attribution).
+        assert!(
+            built.report.advisories.iter().any(|a| a.contains("disk2")),
+            "advisories: {:?}",
+            built.report.advisories
+        );
+
+        // disk2 has no ConfigDisk to classify, so it renders a cause-neutral
+        // Unknown detail row -- not Missing, not absent.
+        let disk2 = built
+            .report
+            .disks
+            .iter()
+            .find(|d| d.name == "disk2")
+            .expect("disk2 detail row");
+        assert_eq!(disk2.status, DiskStatus::Unknown);
+
+        // The compact summary mirrors the detail verdict (no Missing fallback).
+        let extras = built.mounted_extras.as_ref().expect("mounted extras");
+        let compact2 = extras
+            .compact_drives
+            .iter()
+            .find(|d| d.name == "disk2")
+            .expect("disk2 compact row");
+        assert_eq!(compact2.status, DiskStatus::Unknown);
+    }
+
+    /*
+     * Intent: every config-probe advisory names the disk it concerns,
+     *   regardless of which ProbeError variant probe_config_disk returned. The
+     *   mapper/LUKS-version variants self-name via Display; the environmental
+     *   Cmd/Parse variants do not, so config_probe_advisory must attribute
+     *   them.
+     * Why it exists: an operator reading a degraded multi-disk status must be
+     *   able to tell which disk a warning is about. A Display change or a new
+     *   variant could silently drop the name; this pins the invariant against
+     *   that drift.
+     * Scenario: one representative of each ProbeError variant
+     *   probe_config_disk can produce for a present member.
+     */
+    #[test]
+    fn config_probe_advisory_names_disk() {
+        use crate::cmd::CmdError;
+        use crate::parse::ParseError;
+        use crate::probe::ProbeError;
+        use crate::types::LuksUuid;
+
+        let name = DiskName::parse("disk1").unwrap();
+        let variants = [
+            ProbeError::Cmd(CmdError::Failed("io error".into())),
+            ProbeError::Parse(ParseError::InvalidText {
+                cmd: "cryptsetup luksDump".into(),
+                detail: "no Version line".into(),
+            }),
+            ProbeError::MapperConflict {
+                name: "disk1".into(),
+                expected: LuksUuid::parse("11111111-1111-1111-1111-111111111111").unwrap(),
+                found: Some(LuksUuid::parse("99999999-9999-9999-9999-999999999999").unwrap()),
+            },
+            ProbeError::MapperBackingMismatch {
+                name: "disk1".into(),
+                expected_path: "/dev/disk/by-id/disk1".into(),
+                found_path: "/dev/vdz".into(),
+            },
+            ProbeError::MapperBackingResolveError {
+                name: "disk1".into(),
+                by_id: "/dev/disk/by-id/disk1".into(),
+                source: std::io::Error::from(std::io::ErrorKind::NotFound),
+            },
+            ProbeError::UnsupportedLuksVersion {
+                name: "disk1".into(),
+                version: 1,
+            },
+        ];
+
+        for e in &variants {
+            let advisory = config_probe_advisory(&name, e);
+            assert!(
+                advisory.contains("disk1"),
+                "advisory must name its disk, got {advisory:?} for {e:?}"
+            );
         }
+    }
+
+    /*
+     * Intent: the unpooled detail block stays sorted by DiskName even when it
+     *   mixes successfully-classified rows and probe-failure Unknown rows. A
+     *   probe failure for `a`, an Ok-classified `b`, and a probe failure for
+     *   `c` must render in name order a, b, c -- interleaved, not "Ok rows
+     *   then failure rows".
+     * Why it exists: decision-024 requires operator-name ordering for unpooled
+     *   display rows, and the two row kinds are produced by separate loops. A
+     *   naive append-after-classify would emit b, a, c. This pins the single
+     *   combined sort against regression to that append-after shape.
+     * Scenario: three configured members, none live in the pool; a and c fail
+     *   to probe (-> Unknown), b is absent (-> Missing).
+     */
+    #[test]
+    fn status_unpooled_rows_sorted_by_name_across_ok_and_failures() {
+        // b is the only successfully-probed member: an absent by-id -> Missing.
+        let config_disks = vec![ConfigDisk {
+            name: DiskName::parse("b").unwrap(),
+            by_id_path: ByIdPath::parse("/dev/disk/by-id/diskb").unwrap(),
+            state: ConfigDiskState::Absent,
+        }];
+        // a and c errored during probe -> Unknown rows.
+        let probe_failures = vec![
+            ConfigProbeFailure {
+                name: DiskName::parse("a").unwrap(),
+                by_id: ByIdPath::parse("/dev/disk/by-id/diska").unwrap(),
+            },
+            ConfigProbeFailure {
+                name: DiskName::parse("c").unwrap(),
+                by_id: ByIdPath::parse("/dev/disk/by-id/diskc").unwrap(),
+            },
+        ];
+        let runner = MockRunner::default();
+        let stats = BtrfsDeviceStatsOutput { devices: vec![] };
+
+        let ctx = build_disk_reports(
+            &runner,
+            &PoolMembership::empty(),
+            &config_disks,
+            &probe_failures,
+            &status_pool_empty(),
+            &stats,
+        );
+
+        // JSON disks[] and human detail rows must both interleave by name.
+        let json_names: Vec<&str> = ctx.disks.iter().map(|d| d.name.as_str()).collect();
+        assert_eq!(json_names, ["a", "b", "c"], "disks[] must be name-ordered");
+        let human_names: Vec<&str> = ctx.human_details.iter().map(|d| d.name.as_str()).collect();
+        assert_eq!(
+            human_names,
+            ["a", "b", "c"],
+            "human detail must be name-ordered"
+        );
+
+        // And the verdicts are correct per kind: a/c Unknown (probe failure),
+        // b Missing (absent).
+        assert_eq!(ctx.disks[0].status, DiskStatus::Unknown);
+        assert_eq!(ctx.disks[1].status, DiskStatus::Missing);
+        assert_eq!(ctx.disks[2].status, DiskStatus::Unknown);
     }
 
     /*
@@ -6759,7 +7166,7 @@ mod tests {
         let runner = MockRunner::default();
         let membership = status_membership_1disk();
 
-        let ctx = build_disk_reports(&runner, &membership, &config_disks, &pool, &stats);
+        let ctx = build_disk_reports(&runner, &membership, &config_disks, &[], &pool, &stats);
 
         assert_eq!(ctx.disks.len(), 1);
         let errors = ctx.disks[0]

@@ -346,6 +346,29 @@ matching btrfs's effective data chunk size.
 See [Balance fails with No space left on device](../guides/troubleshooting.md#balance-fails-with-no-space-left-on-device)
 for recovery options.
 
+**Config-disk probe fault.** While building per-disk detail, `braid status`
+probes every configured member's LUKS header and its expected `braid-<name>`
+mapper. When that probe fails -- a `braid-<name>` mapper hijacked by a foreign
+container, a backing-path mismatch, a LUKS1 header, or an
+unreadable/unspawnable `cryptsetup` call -- the fault is recorded as an advisory
+naming the affected disk:
+
+```
+warning: disk 'disk2' mapper '/dev/mapper/braid-disk2' is open but not backed by the configured disk. Expected LUKS UUID ..., found ...
+```
+
+Unlike the mutating commands (`add`, `replace`, `enroll`), which fail closed on
+such a fault, `status` is the always-available read-only diagnostic: it **stays
+non-fatal (exit 0)** and still prints the full pool summary, capacity, and
+per-disk detail. The fault degrades a single member, not the whole report.
+
+A member already live and healthy in the pool keeps its `present` row -- its
+identity comes from the LUKS-UUID membership join, which tolerates mapper drift
+(decision 024) -- and the advisory is its only flag. **Only** an affected member
+that is **not** live in the pool additionally gets an `unknown` disk row, so it
+is neither silently dropped from the detail section nor mislabeled `missing` in
+the compact `Drives:` list.
+
 ## JSON output
 
 `--json` produces a structured report suitable for monitoring tools. Key fields:
@@ -446,6 +469,12 @@ for recovery options.
 > `"underlying": null`, and no `btrfs_errors` or `smart` key. `offline` is
 > present but not assembled; the others reach the same blank/null row shape
 > because no live member row is available. Correlate these rows by `name`.
+>
+> A config-disk probe fault (see the Advisories section above) on a member that
+> is **not** live in the pool produces an `unknown` row of this shape -- the
+> advisory carries the cause. A member that **is** live keeps its `present` row
+> and is flagged by the advisory alone, so not every probe fault adds an
+> `unknown` row.
 
 - `alert_active`: boolean
 - `alert_causes`: array of alert cause objects. **Omitted entirely when no
