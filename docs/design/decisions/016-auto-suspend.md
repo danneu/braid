@@ -9,6 +9,12 @@ status: Active
 
 HDDs in a btrfs RAID1 NAS can't rely on per-drive spindown — btrfs periodic commits (every 30s), smartd polling, and braid-monitor health checks wake drives frequently. The user wants the NAS to be quiet and low-power when not in use, and responsive when needed.
 
+Scope note: this decision governs whole-system suspend-to-RAM (S3). Its
+per-drive spindown context explains why braid chose system suspend for mounted
+NAS idle behavior; it does not preclude a future opt-in per-drive
+`braid.autoSpinDown` that parks drives only while the pool is locked. See
+[ADR 031: Drive-wake posture](031-drive-wake-posture.md).
+
 ## Decision
 
 ### Whole-system suspend-to-RAM
@@ -115,3 +121,7 @@ Some drivers can reset WoL after resume. braid does not currently re-arm WoL fro
 ### Fully qualified store paths
 
 The ExternalCommand command strings use absolute `/nix/store/` paths for `timeout`, `bash`, and `braid`. autosuspend runs the commands outside braid's wrapper, so PATH is not guaranteed to include these tools.
+
+## See
+
+- [ADR 031: Drive-wake posture](031-drive-wake-posture.md)

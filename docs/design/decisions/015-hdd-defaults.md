@@ -12,7 +12,8 @@ status: Active
 braid manages a NAS pool of LUKS-encrypted btrfs RAID1 drives. The typical deployment is bulk storage on large-capacity spinning drives (e.g., 12–16 TB HDDs). Several defaults already assume rotational media:
 
 - `cryptsetup open` omits `--allow-discards`, so TRIM/discard requests from btrfs never reach the underlying device. btrfs also exposes a mount-layer discard knob (`discard=async`, the kernel default since 6.2 on devices that advertise discard support), but braid's LUKS layer gates it: without `--allow-discards`, the mapped device never reports discard support upward, so the kernel default never activates and any explicit `discard=async` would be silently dropped.
-- `noatime` mount rationale references HDD spindown prevention.
+- `noatime` avoids relatime's read-triggered metadata write-amplification on
+  every RAID1 copy.
 - Monthly scrub interval is tuned for spinning disk wear and noise.
 
 Making braid flash-aware would mean adding `--allow-discards` (with its security tradeoff of leaking block-usage patterns through the encryption layer), flash-specific scrub/balance scheduling, and flash-targeted test coverage. None of this is warranted for the target use case.
@@ -42,5 +43,8 @@ Fedora's `compress=zstd:1` precedent is workstation root filesystems on SSDs: bi
 
 - `cli/src/cmd.rs` — `CryptsetupLuksOpen` and `CryptsetupLuksOpenKeyFile` omit `--allow-discards`
 - `cli/src/cmd.rs` — `base_mount_options()` omits any `discard` option, relying on the kernel default that is itself gated by the LUKS layer
-- `cli/src/cmd.rs` — `base_mount_options()` sets `noatime`; rationale references HDD spindown
+- `cli/src/cmd.rs#base_mount_options` -- sets noatime to avoid relatime's
+  read-triggered metadata write-amplification on RAID1.
 - [Sane defaults](005-sane-defaults.md) — scrub interval tuned for spinning disks
+- [ADR 031: Drive-wake posture](031-drive-wake-posture.md) -- mounted drives are
+  treated as awake; `noatime` is not spindown management.

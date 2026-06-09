@@ -2,7 +2,7 @@ use std::collections::HashMap;
 use std::time::{Duration, Instant};
 
 use crate::tui::browse::state::DiskInventory;
-use crate::tui::effect::{Effect, FAN_PROBE_INTERVAL, UPS_PROBE_INTERVAL};
+use crate::tui::effect::{Effect, FAN_PROBE_INTERVAL, POOL_PROBE_INTERVAL, UPS_PROBE_INTERVAL};
 use crate::tui::model::{
     DiskLuksState, FanSnapshot, Model, PoolState, PoolStatus, Tab, TemperatureWatermark,
     UpsSnapshot,
@@ -40,6 +40,9 @@ pub enum Message {
         Result<(HashMap<String, DiskLuksState>, Option<PoolState>), String>,
         Duration,
     ),
+    /// Scheduler tick from `Effect::SchedulePoolProbe`. The handler only
+    /// refreshes while the live pool is mounted.
+    PollPoolRefresh,
     /// A fan probe finished. Install the snapshot and re-arm the loop.
     FanProbeFinished(FanSnapshot),
     /// Scheduler tick from `Effect::ScheduleFanProbe`. The handler reads
@@ -257,10 +260,49 @@ pub fn update(model: &mut Model, msg: Message) -> Vec<Effect> {
                 },
             };
             model.probe_duration = Some(elapsed);
-            if model.tab == Tab::Browse {
-                return browse_load_if_active(model);
+            let mut effects: Vec<Effect> = vec![];
+            // Online => drives are awake; auto-refresh the view. Manual-only
+            // while locked/errored: leave the loop torn down. See ADR-031.
+            if matches!(model.pool, PoolStatus::Mounted(_)) && !model.pool_scheduler_pending {
+                model.pool_scheduler_pending = true;
+                effects.push(Effect::SchedulePoolProbe {
+                    delay: POOL_PROBE_INTERVAL,
+                });
             }
-            vec![]
+            if model.tab == Tab::Browse {
+                effects.extend(browse_load_if_active(model));
+            }
+            effects
+        }
+        Message::PollPoolRefresh => {
+            model.pool_scheduler_pending = false;
+            let Some(paths) = model.paths.clone() else {
+                return vec![];
+            };
+            // Tear the loop down while locked/offline. It re-arms via
+            // PoolProbeFinished the next time a refresh finds the pool mounted.
+            if !matches!(
+                model.pool,
+                PoolStatus::Mounted(_) | PoolStatus::Refreshing(_)
+            ) {
+                return vec![];
+            }
+            if model.pool.is_inflight() {
+                model.pool_scheduler_pending = true;
+                return vec![Effect::SchedulePoolProbe {
+                    delay: POOL_PROBE_INTERVAL,
+                }];
+            }
+            model.spinner_deadline = Some(Instant::now() + Duration::from_millis(500));
+            model.pool = match model.pool.current().cloned() {
+                Some(stale) => PoolStatus::Refreshing(stale),
+                None => PoolStatus::Loading,
+            };
+            vec![Effect::ProbePool {
+                mount_point: model.mount_point.clone(),
+                disks: model.disks.clone(),
+                paths,
+            }]
         }
         Message::FanProbeFinished(snapshot) => {
             model.fan = Some(snapshot);
@@ -354,6 +396,9 @@ mod tests {
     }
     fn is_probe_pool(e: &Effect) -> bool {
         matches!(e, Effect::ProbePool { .. })
+    }
+    fn is_schedule_pool(e: &Effect) -> bool {
+        matches!(e, Effect::SchedulePoolProbe { .. })
     }
     fn is_schedule_fan(e: &Effect) -> bool {
         matches!(e, Effect::ScheduleFanProbe { .. })
@@ -489,8 +534,10 @@ mod tests {
 
         assert_eq!(count_effects(&init_effects, is_probe_fan), 1);
         assert_eq!(count_effects(&init_effects, is_probe_ups), 1);
+        assert_eq!(count_effects(&init_effects, is_schedule_pool), 0);
         assert_eq!(count_effects(&init_effects, is_schedule_fan), 0);
         assert_eq!(count_effects(&init_effects, is_schedule_ups), 0);
+        assert!(!model.pool_scheduler_pending);
         assert!(!model.fan_scheduler_pending);
         assert!(!model.ups_scheduler_pending);
 
@@ -912,8 +959,7 @@ mod tests {
     //         no pool-probe side-effects.
     // Why: the two loops are independent. If FanProbeFinished accidentally
     //      pushed a pool effect, every fan tick would also run a heavy
-    //      smartctl probe -- defeating the whole "cheap fan cadence"
-    //      design decision (revision 7 in the plan).
+    //      smartctl+btrfs probe at the cheap 5s fan cadence.
     // Scenario: an in-flight fan probe returns; model is refreshed and
     //         the next scheduler tick is armed.
     #[test]
@@ -1003,17 +1049,13 @@ mod tests {
         assert!(model.fan_scheduler_pending);
     }
 
-    // Intent: PoolProbeFinished must NOT auto-reschedule pool probes.
-    // Why: the pool probe is heavy (smartctl -H -A per disk, btrfs
-    //      commands). Auto-rescheduling would wake sleeping drives and
-    //      contradict the HDD spindown posture from
-    //      docs/design/decisions/015-hdd-defaults.md and the anti-wake stance in
-    //      docs/design/decisions/016-auto-suspend.md. This test locks in the
-    //      manual-only contract; reintroducing a scheduler here needs to
-    //      revisit those decision docs first.
-    // Scenario: any pool probe completion.
+    // Intent: a mounted pool-probe result arms exactly one pool refresh
+    // scheduler.
+    // Why: the TUI treats mounted disks as awake, so the pool view should
+    // refresh itself while online without leaking duplicate scheduler sleepers.
+    // Scenario: startup probe completes successfully on a mounted pool.
     #[test]
-    fn pool_probe_finished_returns_no_effects() {
+    fn pool_probe_finished_arms_scheduler_when_online() {
         let mut model = Model::new_demo(sample_disk_names(), PoolStatus::Loading);
         let effects = update(
             &mut model,
@@ -1022,7 +1064,152 @@ mod tests {
                 Duration::from_millis(10),
             ),
         );
-        assert!(effects.is_empty(), "got {} effects", effects.len());
+        assert_eq!(count_effects(&effects, is_schedule_pool), 1);
+        assert!(model.pool_scheduler_pending);
+        match effects.as_slice() {
+            [Effect::SchedulePoolProbe { delay }] => assert_eq!(*delay, POOL_PROBE_INTERVAL),
+            other => panic!(
+                "expected one SchedulePoolProbe, got {} effects",
+                other.len()
+            ),
+        }
+    }
+
+    // Intent: an unmounted pool result must not arm the auto-refresh loop.
+    // Why: locked/offline drives belong to the future locked-state spindown
+    // policy, so automatic pool probes must stay torn down there.
+    // Scenario: startup probe finds declared disks but no mounted btrfs pool.
+    #[test]
+    fn pool_probe_finished_no_reschedule_when_locked() {
+        let mut model = Model::new_demo(sample_disk_names(), PoolStatus::Loading);
+        let effects = update(
+            &mut model,
+            Message::PoolProbeFinished(pool_probe_ok(None), Duration::from_millis(10)),
+        );
+        assert_eq!(count_effects(&effects, is_schedule_pool), 0);
+        assert!(!model.pool_scheduler_pending);
+    }
+
+    // Intent: a failed pool probe must not arm the auto-refresh loop.
+    // Why: errors are not proof that the pool is mounted/online; automatic
+    // retries would turn diagnostic failure into background disk work.
+    // Scenario: the initial pool probe fails before producing a mounted state.
+    #[test]
+    fn pool_probe_finished_no_reschedule_on_error() {
+        let mut model = Model::new_demo(sample_disk_names(), PoolStatus::Loading);
+        let effects = update(
+            &mut model,
+            Message::PoolProbeFinished(Err("probe failed".to_owned()), Duration::from_millis(10)),
+        );
+        assert_eq!(count_effects(&effects, is_schedule_pool), 0);
+        assert!(!model.pool_scheduler_pending);
+    }
+
+    // Intent: a manual pool probe finishing while a scheduler sleeper is
+    // already pending must not arm a duplicate sleeper.
+    // Why: the pending flag is the one-sleeper invariant shared with the fan
+    // and UPS loops.
+    // Scenario: user presses `r` between automatic pool-refresh ticks.
+    #[test]
+    fn pool_probe_finished_does_not_double_arm_scheduler_when_pending() {
+        let mut model = Model::new_demo(sample_disk_names(), PoolStatus::Loading);
+        model.pool_scheduler_pending = true;
+        let effects = update(
+            &mut model,
+            Message::PoolProbeFinished(
+                pool_probe_ok(Some(sample_pool())),
+                Duration::from_millis(10),
+            ),
+        );
+        assert_eq!(count_effects(&effects, is_schedule_pool), 0);
+        assert!(model.pool_scheduler_pending);
+    }
+
+    // Intent: a Browse-tab pool probe completion both re-arms the pool
+    // scheduler and reloads the active Browse command.
+    // Why: adding the scheduler must extend the existing Browse-tab reload
+    // behavior, not replace it.
+    // Scenario: user is watching raw btrfs output in Browse when a mounted
+    // pool probe completes.
+    #[test]
+    fn pool_probe_finished_browse_tab_arms_scheduler_and_reloads() {
+        let mut model = Model::new_demo(sample_disk_names(), PoolStatus::Loading);
+        model.tab = Tab::Browse;
+        let effects = update(
+            &mut model,
+            Message::PoolProbeFinished(
+                pool_probe_ok(Some(sample_pool())),
+                Duration::from_millis(10),
+            ),
+        );
+        assert_eq!(count_effects(&effects, is_schedule_pool), 1);
+        assert!(effects.iter().any(|effect| matches!(
+            effect,
+            Effect::BrowseRunCommand {
+                request: crate::cmd::CmdRequest::BtrfsFilesystemUsage { .. },
+                ..
+            }
+        )));
+        assert!(model.pool_scheduler_pending);
+    }
+
+    // Intent: a pool scheduler tick on an online, idle pool starts a pool
+    // probe and consumes the pending sleeper.
+    // Why: this is the auto-refresh loop's productive path.
+    // Scenario: the 10s timer fires while the mounted pool view is idle.
+    #[test]
+    fn poll_pool_refresh_starts_probe_when_online_and_idle() {
+        let mut model = Model::new_demo(sample_disk_names(), PoolStatus::Mounted(sample_pool()));
+        let tmp = tempfile::tempdir().unwrap();
+        model.paths = Some(crate::state_paths::StatePaths::custom(tmp.path().into()));
+        model.pool_scheduler_pending = true;
+
+        let effects = update(&mut model, Message::PollPoolRefresh);
+
+        assert_eq!(count_effects(&effects, is_probe_pool), 1);
+        assert_eq!(count_effects(&effects, is_schedule_pool), 0);
+        assert!(!model.pool_scheduler_pending);
+        assert!(matches!(model.pool, PoolStatus::Refreshing(_)));
+        assert!(model.spinner_deadline.is_some());
+    }
+
+    // Intent: a pool scheduler tick tears the loop down while the pool is
+    // locked/offline.
+    // Why: automatic pool probes must stay mounted-only; manual `r` remains
+    // the locked-state path.
+    // Scenario: the pool was unmounted before the pending timer fired.
+    #[test]
+    fn poll_pool_refresh_tears_down_when_locked() {
+        let mut model = Model::new_demo(sample_disk_names(), PoolStatus::NotMounted);
+        let tmp = tempfile::tempdir().unwrap();
+        model.paths = Some(crate::state_paths::StatePaths::custom(tmp.path().into()));
+        model.pool_scheduler_pending = true;
+
+        let effects = update(&mut model, Message::PollPoolRefresh);
+
+        assert!(effects.is_empty());
+        assert!(!model.pool_scheduler_pending);
+    }
+
+    // Intent: a pool scheduler tick that lands during an in-flight pool probe
+    // re-arms the scheduler without spawning a duplicate probe.
+    // Why: manual refresh and automatic refresh can overlap, but the TUI must
+    // keep one pool probe in flight at most.
+    // Scenario: user presses `r`, then the 10s timer fires before that probe
+    // returns.
+    #[test]
+    fn poll_pool_refresh_rearms_when_inflight() {
+        let mut model = Model::new_demo(sample_disk_names(), PoolStatus::Refreshing(sample_pool()));
+        let tmp = tempfile::tempdir().unwrap();
+        model.paths = Some(crate::state_paths::StatePaths::custom(tmp.path().into()));
+        model.pool_scheduler_pending = true;
+
+        let effects = update(&mut model, Message::PollPoolRefresh);
+
+        assert_eq!(count_effects(&effects, is_schedule_pool), 1);
+        assert_eq!(count_effects(&effects, is_probe_pool), 0);
+        assert!(model.pool_scheduler_pending);
+        assert!(matches!(model.pool, PoolStatus::Refreshing(_)));
     }
 
     // Intent: RefreshFan with a fan probe already in flight re-arms the
@@ -1171,9 +1358,8 @@ mod tests {
 
     // Intent: UpsProbeFinished installs the snapshot, clears inflight,
     // and emits exactly one ScheduleUpsProbe -- no pool side-effects.
-    // Why: pool and UPS probes are independent; a stray pool-schedule
-    // here would wake drives on every 5s UPS tick, defeating the
-    // cheap-cadence design.
+    // Why: pool and UPS probes are independent; a stray pool effect here
+    // would run the heavy smartctl+btrfs probe at the cheap 5s UPS cadence.
     // Scenario: in-flight UPS probe returns.
     #[test]
     fn ups_probe_finished_schedules_only_ups_refresh() {

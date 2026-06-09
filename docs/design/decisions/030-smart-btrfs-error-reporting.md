@@ -67,12 +67,12 @@ SMART detail section (it has its own Temp column and is not a verdict input).
 
 **`status` probes `smartctl` plainly, per disk.** Each `braid status` now spawns
 one `smartctl -H -A --json` per present disk (reusing the command the TUI already
-runs). No `-n standby` guard is needed: braid does only whole-system
-suspend-to-RAM (no per-drive spindown; see
-[power management](../../guides/power-management.md)), so whenever `status` can
-run, the drives are already spinning. The probe is failure-tolerant -- any error
-collapses to an `unknown` verdict -- so a flaky or absent `smartctl` never fails a
-status build. This affects only the CLI `status` path, not the monitor daemon.
+runs). No `-n standby` guard is needed: `status` reaches this live SMART probe
+only for a mounted pool, and [ADR 031](031-drive-wake-posture.md) treats mounted
+member disks as awake. The future locked-only `braid.autoSpinDown` does not
+overlap this mounted-only probe. The probe is failure-tolerant -- any error
+collapses to an `unknown` verdict -- so a flaky or absent `smartctl` never fails
+a status build. This affects only the CLI `status` path, not the monitor daemon.
 
 **Per-disk `smart` is diagnostic evidence only -- it does not feed the alert
 latch.** The "SMART health warning" alert cause stays `AlertCause::SmartdAlert`,
@@ -96,4 +96,8 @@ thresholds; the live probe is a point-in-time diagnostic.
   the evidence at a single call site, so the column, the human line, and the TUI
   detail cannot drift apart.
 - Every `braid status` now does one synchronous `smartctl` spawn per disk. This is
-  accepted per the spindown analysis above.
+  accepted per the mounted-pool drive-wake posture above.
+
+## See
+
+- [ADR 031: Drive-wake posture](031-drive-wake-posture.md)

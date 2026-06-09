@@ -431,7 +431,8 @@ impl Step {
 /// Base mount options braid always applies.
 ///
 /// noatime: relatime (default) turns reads into CoW metadata writes across all
-/// RAID1 drives, preventing HDD spindown.
+/// RAID1 copies. braid treats online drives as awake (ADR-031), so this is
+/// write-amplification control, not spindown management.
 ///
 /// skip_balance: prevent the kernel from silently resuming an interrupted balance
 /// on mount. braid manages balance lifecycle explicitly.

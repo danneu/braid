@@ -41,7 +41,7 @@ Demo mode shows three fake disks with sample data, useful for exploring the inte
 | Key | Action |
 | --- | --- |
 | `q` | Quit |
-| `r` | Reload pool data |
+| `r` | Reload pool data now |
 | `Tab` | Next tab |
 | `Shift-Tab` | Previous tab |
 | `j` / `k` | Select next/previous disk (Data/Scrub) or move within the focused Browse region |
@@ -62,12 +62,14 @@ profile name verbatim for an unrecognized profile like `RAID5`; or `unknown`
 only when no block groups of that type were reported), capacity bar, balance
 state, and active alerts and advisories.
 
-**Refreshing** -- pool, disk, scrub, and alert data refresh on demand; press
-`r`. When enabled, Fans and UPS telemetry also refresh automatically every 5
-seconds and immediately on `r`. The footer's `Reload: r` spinner and idle
-`(Xms)` duration reflect only the pool refresh; automatic Fans/UPS polls do not
-update it. The view redraws periodically while idle so relative `ago` times
-stay current.
+**Refreshing** -- while the pool is mounted, pool, disk, scrub, and alert data
+refresh automatically about every 10 seconds and immediately when you press
+`r`. While the pool is not mounted, that data stays manual-only via `r`. When
+enabled, Fans and UPS telemetry also refresh automatically every 5 seconds and
+immediately on `r`. The footer's `Reload: r` spinner and idle `(Xms)` duration
+reflect pool refreshes, including automatic pool refreshes; automatic Fans/UPS
+polls do not update it. The view redraws periodically while idle so relative
+`ago` times stay current.
 
 **Disk table** -- one row per disk: number, name, bus (sata/usb/nvme), SMART health, temperature, btrfs device-error count, and allocated (shown as percent used and allocated/size).
 

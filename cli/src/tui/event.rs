@@ -23,6 +23,7 @@ pub enum Event {
         Duration,
     ),
     FanProbeFinished(FanSnapshot),
+    PollPoolRefresh,
     PollFanRefresh,
     UpsProbeFinished(UpsSnapshot),
     PollUpsRefresh,
@@ -46,6 +47,7 @@ impl Event {
                 Some(Message::PoolProbeFinished(result, elapsed))
             }
             Event::FanProbeFinished(snapshot) => Some(Message::FanProbeFinished(snapshot)),
+            Event::PollPoolRefresh => Some(Message::PollPoolRefresh),
             Event::PollFanRefresh => Some(Message::RefreshFan),
             Event::UpsProbeFinished(snapshot) => Some(Message::UpsProbeFinished(snapshot)),
             Event::PollUpsRefresh => Some(Message::RefreshUps),

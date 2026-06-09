@@ -15,6 +15,7 @@ use crate::types::MountPoint;
 use std::time::Duration;
 
 pub const FAN_PROBE_INTERVAL: Duration = Duration::from_secs(5);
+pub const POOL_PROBE_INTERVAL: Duration = Duration::from_secs(10);
 pub const UPS_PROBE_INTERVAL: Duration = Duration::from_secs(5);
 
 pub enum Effect {
@@ -32,6 +33,9 @@ pub enum Effect {
         fan_control: FanControl,
     },
     ScheduleFanProbe {
+        delay: Duration,
+    },
+    SchedulePoolProbe {
         delay: Duration,
     },
     /// Run `upsc <name>` through `query_ups` on a worker thread; raw stdout
@@ -125,6 +129,18 @@ pub fn execute_effect(effect: Effect, cmd_tx: &mpsc::Sender<Event>) {
                     Event::PollFanRefresh
                 },
                 |_| Event::PollFanRefresh,
+            );
+        }
+        Effect::SchedulePoolProbe { delay } => {
+            // Sleep-in-worker like ScheduleFanProbe. The pool cadence is slower
+            // because it runs the heavy smartctl+btrfs probe.
+            spawn_worker(
+                cmd_tx,
+                move || {
+                    thread::sleep(delay);
+                    Event::PollPoolRefresh
+                },
+                |_| Event::PollPoolRefresh,
             );
         }
         Effect::ProbeUps { name } => {
