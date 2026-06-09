@@ -1478,7 +1478,7 @@ mod tests {
     /// header backup paths.
     ///
     /// Why: The cross-command negative invariant established in
-    /// `plans/wip/cheeky-questing-popcorn.md` says that user-facing
+    /// docs/internals/luks-unlock.md#messaging-invariant says that user-facing
     /// recovery messages must use generic off-system backup language and
     /// must not point at `/var/lib/braid/luks-headers/` or `.luksheader`
     /// files. Locking this in at the formatter level means the invariant

@@ -3,7 +3,7 @@
 
 AGENTS.md and README.md sit outside `docs/`, so mdbook-linkcheck2 (which only
 sees the book src) never validates their links, and the sibling guards cover
-different forms (`check-code-doc-anchors.py`: principles.md cites in any textual
+different forms (`check-code-doc-anchors.py`: docs/*.md#anchor cites in textual
 form; `check-see-paths.py`: backticked paths in ADR See sections). This closes
 the remaining gap: every inline `](target)` link in those root files is checked
 for path existence and, when the target is a `.md#fragment`, for anchor

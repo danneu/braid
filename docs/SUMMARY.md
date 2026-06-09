@@ -86,6 +86,7 @@
 - [btrfs balance soft flag](internals/btrfs/balance-soft.md)
 - [btrfs ENOSPC vs hang](internals/btrfs/enospc-vs-hang.md)
 - [LUKS sector size and btrfs](internals/btrfs/luks-sector-size.md)
+- [btrfs dev_replace resume](internals/btrfs/dev-replace-resume.md)
 
 # Development
 

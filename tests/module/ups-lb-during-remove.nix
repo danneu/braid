@@ -7,7 +7,7 @@
 # remove to finish) or completes (2 devices) -- both are legitimate
 # recovered states.
 #
-# This is M4 of plans/wip/forced-shutdown-recovery-proof.md and is one
+# This is M4 of plans/impl/2026-04-21-forced-shutdown-recovery-proof.md and is one
 # of the four matrix tests gating the flip of ADR 020 to Active.
 #
 # 3 disks, 10 GiB each. The payload is small; dm-delay on the remove

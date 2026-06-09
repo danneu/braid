@@ -9,7 +9,7 @@
 # the M1 fix this test would leave the pool with single-profile
 # chunks unprotected by RAID1 redundancy.
 #
-# This is M5 of plans/wip/forced-shutdown-recovery-proof.md and is one
+# This is M5 of plans/impl/2026-04-21-forced-shutdown-recovery-proof.md and is one
 # of the four matrix tests gating the flip of ADR 020 to Active.
 #
 # 3 disks, 10 GiB each. The test populates the pool, kills disk2 by

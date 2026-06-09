@@ -3429,7 +3429,7 @@ struct RelockAndRemountCtx<'a> {
 ///
 /// The LUKS close+reopen is load-bearing: empirically, an `umount + scan
 /// --forget + remount` cycle that leaves the dm devices alive does NOT clear
-/// the staleness — see plans/wip/sharded-drifting-beaver-findings.md.
+/// the staleness — see docs/internals/btrfs/dev-replace-resume.md.
 fn relock_and_remount<R: CommandRunner, F: Filesystem + ?Sized>(
     runner: &R,
     fs: &F,

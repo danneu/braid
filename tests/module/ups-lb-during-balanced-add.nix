@@ -9,7 +9,7 @@
 # -- replaying the post-Add soft RAID1 balance to drain any chunks
 # left non-RAID1 by the cancelled balance worker.
 #
-# This is M6 of plans/wip/forced-shutdown-recovery-proof.md and is one
+# This is M6 of plans/impl/2026-04-21-forced-shutdown-recovery-proof.md and is one
 # of the four matrix tests gating the flip of ADR 020 to Active.
 #
 # 2 disks, 6 GiB each. The test populates a 1-disk pool with a small

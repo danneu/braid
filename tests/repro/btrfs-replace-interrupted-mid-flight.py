@@ -26,7 +26,7 @@
 # fatal_signal_pending checks added inside the scrub worker loop) — that path
 # requires a userspace process to be alive to observe the freeze, and an
 # unclean kernel kill bypasses it entirely. A separate sibling test would be
-# needed to exercise that path; see plans/wip/sharded-drifting-beaver-findings.md.
+# needed to exercise that path; see docs/internals/btrfs/dev-replace-resume.md.
 #
 # Scenario: 3-disk RAID1 pool with a 400 MiB urandom payload. Operator starts
 # `braid replace disk2 disk4` and the VM is forcibly crashed (qemu SIGKILL via
@@ -231,7 +231,7 @@ with subtest("Safety floor: at least one of disk2 or disk4 in live pool"):
 # scan --forget + remount) and writes a clean pool.json. Any drift —
 # kernel resume semantics changing, the recover-side cycle being removed,
 # the journal handling shifting — fails the test loudly so the regression
-# is visible in CI. See plans/wip/sharded-drifting-beaver-findings.md for
+# is visible in CI. See docs/internals/btrfs/dev-replace-resume.md for
 # the full investigation that motivated the fix.
 
 with subtest("Observation lock: braid unlock refuses with journal-detected error"):
@@ -266,7 +266,7 @@ with subtest("Observation lock: kernel resumed and finished the replace on mount
     assert "braid-disk4" in final_fs_show, (
         "Kernel did not resume the replace on mount — disk4 is missing from "
         "the live pool after recovery. The resume-on-mount code path may have "
-        "changed; revisit plans/wip/sharded-drifting-beaver-findings.md.\n"
+        "changed; revisit docs/internals/btrfs/dev-replace-resume.md.\n"
         + final_fs_show
     )
 
@@ -301,7 +301,7 @@ with subtest("Observation lock: braid status reports intact after recovery"):
     assert "DEGRADED" not in final_braid_status, (
         "braid status reports DEGRADED after recovery from an interrupted "
         "replace — the recover-side remount cycle has regressed. Revisit "
-        "plans/wip/sharded-drifting-beaver-findings.md.\n"
+        "docs/internals/btrfs/dev-replace-resume.md.\n"
         + final_braid_status
     )
 

@@ -11,7 +11,7 @@
 #
 # Why it exists: ADR 020's "mid-mutation power loss is a supported
 # recovery case" guarantee covers the remove path. The Pre-M11 audit
-# (plans/wip/forced-shutdown-recovery-proof.md, "Remove" section)
+# (plans/impl/2026-04-21-forced-shutdown-recovery-proof.md, "Remove" section)
 # concluded that the rollback case is well-handled by the existing
 # recover code: live device count == pre count, recover writes pre
 # membership, recovery_guidance prints "remove did not complete --

@@ -5,7 +5,7 @@
 # returns the pool to a clean state with the replace either completed or
 # cleanly resumable.
 #
-# This is M3 of plans/wip/forced-shutdown-recovery-proof.md and is one
+# This is M3 of plans/impl/2026-04-21-forced-shutdown-recovery-proof.md and is one
 # of the four matrix tests that gate flipping ADR 020 to Active.
 #
 # 4 disks: disk1/2/3 are pool members, disk4 is the replacement target.

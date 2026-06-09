@@ -317,9 +317,15 @@ check-docs-frontmatter:
 check-docs-rendered-frontmatter:
     python3 scripts/docs/check-rendered-frontmatter.py
 
-# Verify code-side principles anchors resolve to rendered mdBook headings
+# Verify code-side docs anchors resolve to rendered mdBook headings (selftest first)
 check-code-doc-anchors:
+    python3 scripts/docs/check-code-doc-anchors.py --selftest
     python3 scripts/docs/check-code-doc-anchors.py
+
+# Verify durable docs/code/tests do not cite transient plans/wip files (selftest first)
+check-plans-refs:
+    python3 scripts/docs/check-plans-refs.py --selftest
+    python3 scripts/docs/check-plans-refs.py
 
 # Verify decision-doc See-section code-span paths resolve
 check-docs-see-paths:
