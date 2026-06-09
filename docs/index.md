@@ -30,7 +30,7 @@ braid is a NixOS CLI tool for managing an encrypted btrfs RAID1 NAS. These docs 
 
 ## Commands
 
-Commands marked 🧪 are experimental, less-trodden, and more likely to have rough edges. All of braid is pre-v1.0.
+Commands marked 🧪 are experimental: the idea or implementation is still uncertain and may be removed, replaced, or overhauled before braid v1.0.
 
 | Command                                         | Description                                          |
 | ----------------------------------------------- | ---------------------------------------------------- |

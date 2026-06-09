@@ -183,7 +183,7 @@ If a mutation is interrupted, braid leaves `/var/lib/braid/pending-op.json` in p
 
 ### Commands
 
-Commands marked 🧪 are experimental, less-trodden, and more likely to have rough edges. All of braid is pre-v1.0.
+Commands marked 🧪 are experimental: the idea or implementation is still uncertain and may be removed, replaced, or overhauled before braid v1.0.
 
 | Command                                             | Description                                                          |
 | --------------------------------------------------- | -------------------------------------------------------------------- |
