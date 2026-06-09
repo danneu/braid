@@ -5,8 +5,7 @@ experimental: true
 
 # braid enroll
 
-> [!NOTE]
-> This command is experimental. It is less-trodden and more likely to have rough edges while braid is pre-v1.0.
+{{#include ../_includes/experimental-command-callout.md.inc}}
 
 Enrolls a binary keyfile into LUKS slot 1 on all pool disks. Used to set up USB auto-unlock: plug in a USB drive with the keyfile, and `braid unlock --key-file` can open the pool without typing a passphrase.
 

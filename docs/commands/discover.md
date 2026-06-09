@@ -5,8 +5,7 @@ experimental: true
 
 # braid discover
 
-> [!NOTE]
-> This command is experimental. It is less-trodden and more likely to have rough edges while braid is pre-v1.0.
+{{#include ../_includes/experimental-command-callout.md.inc}}
 
 Scans `/dev/disk/by-id/` for LUKS devices with `braid-*` labels, reads their LUKS UUIDs, and reconstructs UUID-keyed pool membership. This is a repair tool for recovering a lost or corrupt `pool.json`.
 

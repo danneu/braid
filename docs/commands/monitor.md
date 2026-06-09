@@ -5,8 +5,7 @@ experimental: true
 
 # braid monitor
 
-> [!NOTE]
-> This command is experimental. It is less-trodden and more likely to have rough edges while braid is pre-v1.0.
+{{#include ../_includes/experimental-command-callout.md.inc}}
 
 Checks btrfs device error stats, missing devices, and SMART alerts. Designed to be run automatically by a systemd timer (every 5 minutes by default). Exits with a status code that drives the alert pipeline.
 

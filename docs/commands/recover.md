@@ -5,8 +5,7 @@ experimental: true
 
 # braid recover
 
-> [!NOTE]
-> This command is experimental. It is less-trodden and more likely to have rough edges while braid is pre-v1.0.
+{{#include ../_includes/experimental-command-callout.md.inc}}
 
 Resumes from an interrupted operation (add, remove, replace) by opening LUKS devices, mounting the pool, rebuilding `pool.json` from live pool state when appropriate, running owed maintenance when the btrfs balance state is idle, and clearing the pending-operation journal only after the safe recovery path completes.
 

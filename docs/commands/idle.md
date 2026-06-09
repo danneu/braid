@@ -5,8 +5,7 @@ experimental: true
 
 # braid idle
 
-> [!NOTE]
-> This command is experimental. It is less-trodden and more likely to have rough edges while braid is pre-v1.0.
+{{#include ../_includes/experimental-command-callout.md.inc}}
 
 Check if the pool has any active operations. Designed for autosuspend integration.
 

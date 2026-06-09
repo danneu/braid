@@ -5,8 +5,7 @@ experimental: true
 
 # braid ups status
 
-> [!NOTE]
-> This command is experimental. It is less-trodden and more likely to have rough edges while braid is pre-v1.0.
+{{#include ../_includes/experimental-command-callout.md.inc}}
 
 Query the UPS (NUT) daemon for the currently configured UPS and render
 a curated human summary or the serialized parsed model as JSON.

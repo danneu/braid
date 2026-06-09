@@ -7,6 +7,7 @@ Source-of-truth rules:
     whether the label is experimental.
   - Command link labels are the bare command name plus " 🧪" when
     `experimental: true`, else the bare command name.
+  - Experimental command pages include the shared experimental callout snippet.
   - SUMMARY.md owns the canonical ordering; index.md and README.md must follow it.
 
 Membership is checked transitively: the existing `check-docs` bash recipe verifies
@@ -25,6 +26,7 @@ ROOT = Path(__file__).resolve().parents[2]
 LINK_RE = re.compile(r"\[([^\]]+)\]\(([^)]+\.md)\)")
 FRONTMATTER_RE = re.compile(r"\A---\n(.*?)\n---\n", re.DOTALL)
 EXPERIMENTAL_EMOJI = "🧪"
+EXPERIMENTAL_CALLOUT_INCLUDE = "{{#include ../_includes/experimental-command-callout.md.inc}}"
 
 
 def read_h1(path: Path) -> str:
@@ -48,13 +50,18 @@ def read_experimental(path: Path) -> str | None:
 def expected_label(errors: list[str], kind: str, path: Path, h1: str) -> str:
     if kind == "commands":
         name = h1.removeprefix("braid ")
+        text = path.read_text(encoding="utf-8")
         experimental = read_experimental(path)
+        rel = path.relative_to(ROOT / "docs")
         if experimental not in {"true", "false"}:
             got = "missing" if experimental is None else experimental
-            rel = path.relative_to(ROOT / "docs")
             errors.append(
                 f"{rel}: experimental frontmatter must be exactly true or false (got {got!r})"
             )
+        if experimental == "true" and EXPERIMENTAL_CALLOUT_INCLUDE not in text:
+            errors.append(f"{rel}: experimental commands must include {EXPERIMENTAL_CALLOUT_INCLUDE}")
+        if experimental == "false" and EXPERIMENTAL_CALLOUT_INCLUDE in text:
+            errors.append(f"{rel}: non-experimental commands must not include {EXPERIMENTAL_CALLOUT_INCLUDE}")
         return f"{name} {EXPERIMENTAL_EMOJI}" if experimental == "true" else name
     return h1
 
