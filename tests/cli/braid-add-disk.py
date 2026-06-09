@@ -2,9 +2,9 @@
 #
 # What: Runs `braid add <name> --yes` through its full lifecycle: first disk
 # (creates pool), second disk (converts to RAID1), third disk (expands pool),
-# validation errors, idempotent re-add, identity-check refusals (non-braid
-# LUKS, braid-labeled but no btrfs), disk add after cleanup, and fifth disk
-# expansion.
+# validation errors, idempotent re-add, identity-check refusals (managed
+# --luks-format-arg, non-braid LUKS, braid-labeled but no btrfs), disk add
+# after cleanup, and fifth disk expansion.
 #
 # Why: `braid add` is the primary intent command for LUKS format + pool join.
 # Every primitive has been proven in isolation (luks, btrfs-raid1, grow, shrink,
@@ -168,6 +168,47 @@ with subtest("Already-in-pool disk is a no-op (exit 0)"):
     )
 
 # --- Phase 5: Identity check refusals + fresh add after cleanup ---
+
+with subtest("Managed --luks-format-arg=--uuid is refused with no state change"):
+    # Intent: a user extra targeting braid-managed identity (--uuid) is rejected
+    # at the CLI boundary, fail-closed -- nonzero exit, the managed-flag wording
+    # on stderr with empty stdout, and ZERO side effects: disk4 stays raw, no
+    # pending-op.json, pool.json byte identical.
+    # Why it exists: LuksFormatExtraOpts::parse rejection is unit-tested, but the
+    # CLI wiring (clap collection -> parse -> reject -> stderr -> exit; no
+    # mutation) was untested end-to-end. A regression that let the extra reach
+    # cryptsetup, wrote a journal/membership before rejecting, or routed the
+    # error to stdout, would slip past the units.
+    # Scenario: operator fat-fingers `--luks-format-arg=--uuid=...`; braid must
+    # refuse before touching the raw disk or any state file.
+    dev = "/dev/disk/by-id/virtio-disk4"
+    pq = shlex.quote(passphrase)
+    machine.succeed("cp /var/lib/braid/pool.json /tmp/pool-before-refusal.json")
+    # No pipe: feed the passphrase via --passphrase-file so braid is the sole
+    # process and `rc` is unambiguously braid's exit. A piped `printf | braid`
+    # could SIGPIPE under `set -euo pipefail` and inflate `rc` to nonzero even if
+    # braid wrongly exited 0, masking the nonzero-exit contract.
+    # Separate stdout/stderr redirects: a regression routing the error to stdout
+    # (stderr routing is part of the uncovered wiring) must fail here.
+    machine.succeed(f"printf '%s\\n' {pq} > /tmp/refuse-pass")
+    rc, _ = machine.execute(
+        f"braid add --luks-format-arg=--uuid=11111111-1111-1111-1111-111111111111 "
+        f"disk4={dev} --passphrase-file /tmp/refuse-pass --yes "
+        f">/tmp/refuse-out 2>/tmp/refuse-err"
+    )
+    out = machine.succeed("cat /tmp/refuse-out")
+    err = machine.succeed("cat /tmp/refuse-err")
+    assert rc != 0, f"add must refuse a managed --uuid extra:\nstdout={out!r}\nstderr={err!r}"
+    assert out == "", f"refusal must keep stdout empty; got: {out!r}"
+    assert "targets a braid-managed identity" in err, (
+        f"managed-flag rejection wording must be on stderr:\n{err}"
+    )
+    # Fail-closed: rejection happens in plan_add, before any probe or format.
+    assert machine.execute(f"cryptsetup isLuks {dev}")[0] != 0, (
+        "disk4 must remain unformatted after a refused add"
+    )
+    machine.fail("test -e /var/lib/braid/pending-op.json")
+    machine.succeed("cmp /tmp/pool-before-refusal.json /var/lib/braid/pool.json")
 
 with subtest("Non-braid LUKS disk is refused"):
     # Intent: braid add refuses a LUKS device without the braid-<name> label.

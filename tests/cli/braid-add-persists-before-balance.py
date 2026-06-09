@@ -4,7 +4,9 @@
 # Why it exists: an interrupted post-add balance used to leave pool.json
 # reporting N disks while the live pool had N+1. `braid status` then
 # disagreed with pool.json, pushing the operator into recovery just to
-# reconcile bookkeeping.
+# reconcile bookkeeping. It also pins that the pre-balance-persisted pool.json
+# key equals the live LUKS header UUID at the write window -- distinct from
+# braid-status-rust.py, which only checks the settled final state.
 #
 # Scenario: bootstrap a 1-disk pool, write enough single-profile data to
 # make the post-add balance observable, run `braid add disk2` in the
@@ -113,6 +115,9 @@ with subtest("pool.json already contains the new disk during balance"):
     assert disk2_uuid, f"disk2 UUID key missing:\n{pool_json}"
     assert str(uuid.UUID(disk2_uuid)) == disk2_uuid, (
         f"disk2 pool.json key is not canonical LUKS UUID form:\n{pool_json}"
+    )
+    assert machine.succeed("cryptsetup luksUUID /dev/disk/by-id/virtio-disk2").strip() == disk2_uuid, (
+        f"disk2 pool.json key must equal its live LUKS UUID:\n{pool_json}"
     )
     assert "luks_uuid" not in disk2, (
         f"disk2 must not carry duplicate value-side luks_uuid:\n{pool_json}"
