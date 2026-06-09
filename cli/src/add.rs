@@ -1695,41 +1695,39 @@ pub fn plan_add<R: CommandRunner + Sync, F: Filesystem + ?Sized>(
         Err(e) => return Err(PlanFailure::empty(e.into())),
     };
 
-    // Route conflict-detection through `PoolMembership::insert` on a
-    // throwaway clone. This enforces the full four-axis uniqueness
-    // invariant (UUID + name + by-id + non-None devid) in one place;
-    // the historical `validate_no_conflicts` checked only name + by-id
-    // and is gone from the membership API. Exact existing members are
-    // allowed through so the planner can classify them as the documented
-    // already-in-pool no-op.
-    {
-        let mut prospective = pool_membership.clone();
-        // Use placeholder UUIDs sentinel-seeded from each spec's by_id
-        // string so two specs hitting the same existing-name/by-id
-        // produce distinct prospective UUIDs and the actual collision
-        // surface is the name/by-id axis we mean to test.
-        for (i, (name, by_id)) in parsed.iter().enumerate() {
-            let placeholder = LuksUuid::parse(&format!(
-                "fffffff{:01x}-ffff-ffff-ffff-{:012x}",
-                i & 0xf,
-                (i as u64) + 1,
-            ))
-            .expect("placeholder UUID is canonical");
-            let member = DiskMember {
-                name: name.clone(),
-                by_id: by_id.clone(),
-                devid: None,
-                added_at: None,
-            };
-            if pool_membership
-                .by_name(name)
-                .is_some_and(|(_, existing)| &existing.name == name && &existing.by_id == by_id)
-            {
+    // Fail-fast name/by-id conflict gate. Runs before any probe, passphrase
+    // read, inhibitor acquisition, or journal write so a name/by-id collision
+    // with an existing member fails with zero side effects. In-invocation
+    // duplicate names and by-ids were already rejected above, so each spec is
+    // mutually distinct and only needs checking against existing members.
+    //
+    // Only the name and by-id axes are checked here: no LUKS UUID has been
+    // assigned yet (it is generated/probed per target later) and devid is
+    // enrichment-only. The full four-axis uniqueness invariant is enforced by
+    // the real `PoolMembership::insert` that builds `target_membership` at
+    // commit time -- this is the early fail-fast, that is the backstop.
+    for (name, by_id) in &parsed {
+        if let Some((existing_uuid, existing)) = pool_membership.by_name(name) {
+            // Exact existing member (same name AND by-id): re-specifying a
+            // disk already in the pool is the documented already-in-pool
+            // no-op, classified downstream -- not a conflict.
+            if &existing.by_id == by_id {
                 continue;
             }
-            if let Err(e) = prospective.insert(placeholder, member) {
-                return Err(PlanFailure::empty(e.into()));
-            }
+            return Err(PlanFailure::empty(
+                membership::MembershipError::Conflict(format!(
+                    "name '{name}' already in use under UUID {existing_uuid}"
+                ))
+                .into(),
+            ));
+        }
+        if let Some((existing_uuid, _)) = pool_membership.by_by_id(by_id) {
+            return Err(PlanFailure::empty(
+                membership::MembershipError::Conflict(format!(
+                    "by_id '{by_id}' already in use under UUID {existing_uuid}"
+                ))
+                .into(),
+            ));
         }
     }
 
@@ -6815,6 +6813,171 @@ mod tests {
             inhibitor.acquire_count(),
             0,
             "validation failure must NOT acquire the sleep inhibitor"
+        );
+    }
+
+    #[test]
+    // Intent: a disk spec whose name matches an existing pool member but whose
+    //   by-id differs is rejected at the fail-fast gate -- before any probe,
+    //   passphrase read, inhibitor acquisition, or journal write -- and the
+    //   operator message names the colliding name without leaking a synthetic
+    //   placeholder UUID.
+    //
+    // Why it exists: the name/by-id conflict gate previously drove
+    //   PoolMembership::insert on a throwaway clone seeded with sentinel UUIDs
+    //   (fffffff...), which leaked into operator output and left the
+    //   name-collision arm untested. This pins the operator contract so the
+    //   simplified direct-lookup gate (and the sentinel removal) cannot
+    //   silently regress.
+    //
+    // Scenario: operator reuses an in-pool logical name (disk1) for a
+    //   brand-new physical disk (virtio-disk9) -- a copy-paste slip -- and runs
+    //   a non-dry-run `braid add`. The command must refuse with disk1 named and
+    //   zero side effects.
+    fn add_rejects_name_collision_with_existing_member() {
+        let (_state_tmp, paths, _tmp, config_path, _pass_path) = add_test_setup();
+        // fs lookups never happen -- the conflict gate fires before any probe.
+        let fs = AddMockFs(vec![]);
+        // Empty MockRunner: the gate fires before the first runner.run() at
+        // probe_pool, so an empty runner never returns MissingMock. Asserting
+        // the conflict error text indirectly pins "nothing executed".
+        let runner = MockRunner::default();
+        let inhibitor = crate::inhibit::RecordingInhibitor::new();
+        let confirm = crate::confirm::RecordingConfirm::new();
+        // Scripted reader pins "refused before credentials are read": a valid
+        // passphrase_file would not, since a file read is silent and a gate
+        // moved after credential reading would still error and still pass. The
+        // unpopped queue makes "never read" an explicit assertion.
+        let tty = ScriptedPassphraseReader::new(["SENTINEL"]);
+
+        let result = cmd_add(
+            &runner,
+            &fs,
+            &AddParams {
+                config: &read_test_config(&config_path),
+                disk_specs: &["disk1=/dev/disk/by-id/virtio-disk9".into()],
+                dry_run: false,
+                yes: true,
+                passphrase_stdin: false,
+                passphrase_file: None,
+                enroll_key_file: None,
+                luks_format_extra_opts: &[],
+                progress: ProgressOutput::Off,
+                paths: &paths,
+                sleep_inhibitor: &inhibitor,
+                confirm: &confirm,
+                passphrase_reader: &tty,
+                backing_path_resolver:
+                    crate::test_fixtures::mock_virtio_offset_backing_path_resolver(),
+            },
+        );
+
+        let err = result
+            .expect_err("name collision must be rejected")
+            .to_string();
+        assert!(
+            err.contains("disk1") && err.contains("in use"),
+            "error must name the colliding disk name, got: {err}"
+        );
+        assert!(
+            !err.contains("fffffff"),
+            "operator output must not leak a synthetic placeholder UUID, got: {err}"
+        );
+        assert!(
+            journal::load_journal(&paths).unwrap().is_none(),
+            "no journal after pre-probe validation failure"
+        );
+        assert_eq!(
+            inhibitor.acquire_count(),
+            0,
+            "validation failure must NOT acquire the sleep inhibitor"
+        );
+        assert_eq!(
+            tty.remaining(),
+            1,
+            "conflict refused before passphrase read"
+        );
+    }
+
+    #[test]
+    // Intent: a disk spec whose by-id matches an existing pool member but whose
+    //   name differs is rejected at the fail-fast gate -- before any probe,
+    //   passphrase read, inhibitor acquisition, or journal write -- and the
+    //   operator message names the colliding by-id path without leaking a
+    //   synthetic placeholder UUID.
+    //
+    // Why it exists: same gate, by-id arm. Neither conflict arm had add-layer
+    //   coverage before; the by-id arm in particular must not be shadowed by
+    //   the exact-re-add skip (the `continue` fires only when name AND by-id
+    //   both match an existing member).
+    //
+    // Scenario: operator gives a new logical name (disk9) to a
+    //   /dev/disk/by-id path (virtio-disk1) that already belongs to disk1 --
+    //   e.g. renaming a disk already in the pool -- and runs a non-dry-run
+    //   `braid add`. The command must refuse with the by-id path named and zero
+    //   side effects.
+    fn add_rejects_by_id_collision_with_existing_member() {
+        let (_state_tmp, paths, _tmp, config_path, _pass_path) = add_test_setup();
+        // fs lookups never happen -- the conflict gate fires before any probe.
+        let fs = AddMockFs(vec![]);
+        // Empty MockRunner: the gate fires before the first runner.run() at
+        // probe_pool, so an empty runner never returns MissingMock. Asserting
+        // the conflict error text indirectly pins "nothing executed".
+        let runner = MockRunner::default();
+        let inhibitor = crate::inhibit::RecordingInhibitor::new();
+        let confirm = crate::confirm::RecordingConfirm::new();
+        // Scripted reader pins "refused before credentials are read": a valid
+        // passphrase_file would not, since a file read is silent and a gate
+        // moved after credential reading would still error and still pass. The
+        // unpopped queue makes "never read" an explicit assertion.
+        let tty = ScriptedPassphraseReader::new(["SENTINEL"]);
+
+        let result = cmd_add(
+            &runner,
+            &fs,
+            &AddParams {
+                config: &read_test_config(&config_path),
+                disk_specs: &["disk9=/dev/disk/by-id/virtio-disk1".into()],
+                dry_run: false,
+                yes: true,
+                passphrase_stdin: false,
+                passphrase_file: None,
+                enroll_key_file: None,
+                luks_format_extra_opts: &[],
+                progress: ProgressOutput::Off,
+                paths: &paths,
+                sleep_inhibitor: &inhibitor,
+                confirm: &confirm,
+                passphrase_reader: &tty,
+                backing_path_resolver:
+                    crate::test_fixtures::mock_virtio_offset_backing_path_resolver(),
+            },
+        );
+
+        let err = result
+            .expect_err("by_id collision must be rejected")
+            .to_string();
+        assert!(
+            err.contains("/dev/disk/by-id/virtio-disk1") && err.contains("in use"),
+            "error must name the colliding by-id path, got: {err}"
+        );
+        assert!(
+            !err.contains("fffffff"),
+            "operator output must not leak a synthetic placeholder UUID, got: {err}"
+        );
+        assert!(
+            journal::load_journal(&paths).unwrap().is_none(),
+            "no journal after pre-probe validation failure"
+        );
+        assert_eq!(
+            inhibitor.acquire_count(),
+            0,
+            "validation failure must NOT acquire the sleep inhibitor"
+        );
+        assert_eq!(
+            tty.remaining(),
+            1,
+            "conflict refused before passphrase read"
         );
     }
 
