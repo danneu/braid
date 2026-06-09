@@ -414,7 +414,11 @@ the compact `Drives:` list.
     disk it is the configured name. For display/command selection, not
     identity.
   - `by_id`: stable `/dev/disk/by-id/...` hardware path -- a runtime
-    handle, not identity.
+    handle, not identity. For a matched present member it is the member's
+    recorded by-id path; for a non-present disk it is the configured by-id
+    path; but a foreign present device has no membership join, so it falls
+    back to `/dev/mapper/<observed-mapper>` (paralleling its mapper-basename
+    `name`) -- the only row whose `by_id` is not a by-id path.
   - `mapper`: device-mapper name -- a runtime handle, not identity. For a
     present pool member it is the **observed** live mapper; for a matched
     member that is normally `braid-<name>` but may have drifted (decision 024

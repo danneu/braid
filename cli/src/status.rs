@@ -5495,6 +5495,10 @@ mod tests {
             ctx.disks[0].luks_uuid,
             "99999999-9999-9999-9999-999999999999"
         );
+        // Foreign live device has no membership join, so `by_id` falls back to the
+        // observed mapper path -- pins the JSON contract documented for the by_id
+        // field in docs/commands/status.md.
+        assert_eq!(ctx.disks[0].by_id, "/dev/mapper/braid-disk1");
         assert_eq!(ctx.disks[1].name, "disk1");
         assert_eq!(ctx.disks[1].status, DiskStatus::Unknown);
     }
