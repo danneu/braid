@@ -4119,8 +4119,8 @@ mod tests {
         assert!(built.report.balance.is_some());
     }
 
-    fn assert_pool_sections_retained(built: &BuiltStatus) {
-        assert_profile_json(&built.report.profile, &["RAID1"], &["RAID1"], &["RAID1"]);
+    // profile-agnostic body check
+    fn assert_capacity_and_allocation_retained(built: &BuiltStatus) {
         assert!(
             built
                 .report
@@ -4131,6 +4131,11 @@ mod tests {
             built.report.allocation
         );
         assert!(built.report.capacity.is_some());
+    }
+
+    fn assert_pool_sections_retained(built: &BuiltStatus) {
+        assert_profile_json(&built.report.profile, &["RAID1"], &["RAID1"], &["RAID1"]);
+        assert_capacity_and_allocation_retained(built);
     }
 
     fn assert_disk_identity_matches_healthy(built: &BuiltStatus) {
@@ -6795,6 +6800,15 @@ mod tests {
         assert_eq!(built.report.status, StatusCode::Intact);
         assert_eq!(built.report.present_count, Some(1));
 
+        // The non-fatal contract keeps the whole mounted body rendering, not just
+        // the status code: capacity, allocation, and scrub survive even though one
+        // member's config probe errored. status/present_count come from the
+        // membership join, computed independently of the df/usage/scrub gather (see
+        // build_status_df_cmd_failure_tolerant), so they alone would not catch a
+        // mounted report that kept status and counts but dropped the body sections.
+        assert_capacity_and_allocation_retained(&built);
+        assert_scrub_and_balance_retained(&built);
+
         // The fault reaches the non-mutating boundary as an advisory that names
         // its disk and carries the conflict's remediation text.
         assert!(
@@ -6950,6 +6964,15 @@ mod tests {
         // The pool still renders intact; the offline member degrades alone.
         assert_eq!(built.report.status, StatusCode::Intact);
         assert_eq!(built.report.present_count, Some(1));
+
+        // The non-fatal contract keeps the whole mounted body rendering, not just
+        // the status code: capacity, allocation, and scrub survive even though one
+        // member's config probe errored. status/present_count come from the
+        // membership join, computed independently of the df/usage/scrub gather (see
+        // build_status_df_cmd_failure_tolerant), so they alone would not catch a
+        // mounted report that kept status and counts but dropped the body sections.
+        assert_capacity_and_allocation_retained(&built);
+        assert_scrub_and_balance_retained(&built);
 
         // The fault is attributed to disk2 by name (the Cmd variant does not
         // self-name, so config_probe_advisory adds the attribution).
