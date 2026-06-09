@@ -254,16 +254,6 @@ struct CompactDrive {
     status: DiskStatus,
 }
 
-/// Single source of the decision-024 present-device display-name rule:
-/// UUID-join membership to the operator name, falling back to the raw mapper
-/// basename for foreign live devices. Shared so compact, verbose, and
-/// devid-name rendering cannot diverge.
-fn present_display_name(member: Option<&membership::DiskMember>, mapper: &MapperName) -> String {
-    member
-        .map(|m| m.name.as_str().to_owned())
-        .unwrap_or_else(|| mapper.0.clone())
-}
-
 /// `member_status` carries each member's detail-section `DiskStatus` so the
 /// compact summary renders the same verdict as the detail view (decision 024);
 /// unpooled members default to `Missing` when absent from the map.
@@ -279,12 +269,7 @@ fn build_compact_drives(
     let mut present: Vec<(&PoolDevice, String)> = pool
         .devices
         .iter()
-        .map(|pd| {
-            (
-                pd,
-                present_display_name(membership.by_uuid(&pd.luks_uuid), &pd.mapper),
-            )
-        })
+        .map(|pd| (pd, membership::present_device_name(membership, pd)))
         .collect();
     present.sort_by(|(_, left), (_, right)| left.cmp(right));
     for (pd, name) in present {
@@ -338,7 +323,7 @@ fn build_devid_names(pool: &PoolState, membership: &PoolMembership) -> HashMap<u
     let mut names = HashMap::new();
 
     for pd in &pool.devices {
-        let name = present_display_name(membership.by_uuid(&pd.luks_uuid), &pd.mapper);
+        let name = membership::present_device_name(membership, pd);
         names.insert(pd.devid, name);
     }
 
@@ -1063,7 +1048,7 @@ fn build_disk_reports<R: CommandRunner>(
             (
                 pd,
                 matched_member,
-                present_display_name(matched_member, &pd.mapper),
+                membership::present_display_name(matched_member, &pd.mapper),
             )
         })
         .collect();

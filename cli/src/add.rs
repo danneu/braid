@@ -1,6 +1,6 @@
 use crate::alert;
 use crate::cmd::{CmdError, CmdRequest, CommandRunner, Step};
-use crate::config::{Config, luks_label_for, mapper_name, name_from_mapper};
+use crate::config::{Config, luks_label_for, mapper_name};
 use crate::confirm;
 use crate::credential_verify::{
     Credential, CredentialVerifyError, CredentialVerifyTarget, verify_credential_for_targets,
@@ -1986,12 +1986,11 @@ fn build_add_credential_prelude(
         .devices
         .iter()
         .map(|device| CredentialVerifyTarget {
-            // Display-only fallback: name_from_mapper here labels live
-            // pool members for the credential-verify error message,
-            // NOT for identity decisions.
-            name: name_from_mapper(&device.mapper.0)
-                .unwrap_or(device.mapper.0.as_str())
-                .to_owned(),
+            // Decision-024 display join: resolve the live member's operator
+            // name through membership (UUID->DiskName), matching status/TUI so
+            // the credential-verify message survives mapper drift. Identity is
+            // `device`, not this cosmetic name.
+            name: membership::present_device_name(input.pool_membership, device),
             device: device.underlying.clone(),
         })
         .collect();
@@ -7342,6 +7341,81 @@ mod tests {
         assert!(lines[8].contains("mount"));
         assert!(lines[9].contains("$ mount"));
         assert!(lines[9].contains("/mnt/storage"));
+    }
+
+    // Intent: under mapper drift (a live member open as braid-WRONG), the add
+    //   credential-verify prelude names the existing member through membership
+    //   ('disk1'), not the drifted mapper basename.
+    // Why it exists: this site used to parse the mapper basename, so a drifted
+    //   member surfaced as 'WRONG' in the `passphrase: checking against ...`
+    //   line; decision 024 requires the live-UUID->DiskName join here.
+    // Scenario: an operator adds disk2 while disk1 is open under a stale
+    //   'braid-WRONG' mapper; the verify prelude must still read 'disk1'.
+    #[test]
+    fn add_credential_prelude_names_drifted_member_via_membership() {
+        let drifted_uuid = LuksUuid::parse("11111111-1111-1111-1111-111111111111").unwrap();
+        let pool = PoolState {
+            mounted: true,
+            devices: vec![PoolDevice {
+                mapper: MapperName("braid-WRONG".into()),
+                luks_uuid: drifted_uuid.clone(),
+                devid: 1,
+                underlying: "/dev/vda".into(),
+            }],
+            missing_count: 0,
+            total_devices: 1,
+            fsid: Some("aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee".into()),
+            missing_devids: vec![],
+            null_underlying: vec![],
+        };
+        let mut membership = PoolMembership::empty();
+        membership
+            .insert(
+                drifted_uuid,
+                DiskMember::new(
+                    DiskName::parse("disk1").unwrap(),
+                    ByIdPath::parse("/dev/disk/by-id/virtio-disk1").unwrap(),
+                ),
+            )
+            .unwrap();
+        // New disk being added is PresentNotLuks, so it contributes no verify
+        // target; the only verify target is the live (drifted) member.
+        let names = [DiskName::parse("disk2").unwrap()];
+        let by_id = ByIdPath::parse("/dev/disk/by-id/virtio-disk2").unwrap();
+        let by_ids = [&by_id];
+        let probed = vec![PresentConfigDisk {
+            name: DiskName::parse("disk2").unwrap(),
+            by_id_path: by_id.clone(),
+            state: PresentConfigDiskState::PresentNotLuks,
+        }];
+        let mount_point = MountPoint("/mnt/storage".into());
+        let extra_opts = LuksFormatExtraOpts::default();
+        let (_tmp, paths) = test_paths();
+        let input = AddStepsInput {
+            names: &names,
+            by_ids: &by_ids,
+            probed: &probed,
+            pool: &pool,
+            mount_point: &mount_point,
+            paths: &paths,
+            enroll_key_file: None,
+            luks_format_extra_opts: &extra_opts,
+            backing_path_resolver: crate::test_fixtures::mock_virtio_offset_backing_path_resolver(),
+            pool_membership: &membership,
+        };
+
+        let prelude = build_add_credential_prelude(&input, &[]);
+
+        assert_eq!(
+            prelude.verify_targets.len(),
+            1,
+            "only the live pool member should be a verify target"
+        );
+        assert_eq!(
+            prelude.verify_targets[0].name, "disk1",
+            "drifted-mapper member must resolve to 'disk1' via membership, not 'braid-WRONG'"
+        );
+        assert_eq!(prelude.verify_targets[0].device, "/dev/vda");
     }
 
     #[test]

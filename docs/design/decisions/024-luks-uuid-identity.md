@@ -99,10 +99,15 @@ one.
 - **Display code has an explicit join rule.** User-facing summaries resolve a
   live pool device's UUID back to `DiskName` for presentation. UUIDs remain
   available to verbose/machine-readable paths where they are useful evidence.
-  The TUI Data-tab Bus column is the last display correlation to adopt this
-  rule: its lsblk transport bridge now joins the parent disk's LUKS UUID to the
-  member name, so transport survives mapper drift like every sibling cell
-  instead of blanking to `--`.
+  Every display surface uses the same join, including the TUI Data-tab Bus
+  column (its lsblk transport bridge joins the parent disk's LUKS UUID to the
+  member name) and the passphrase credential-verification display for `add`,
+  `replace`, and their recovery replays, which resolves each existing pool
+  member's name through the same live-UUID->`DiskName` join. Member names
+  therefore survive mapper drift -- a member open as `braid-WRONG` still shows
+  its operator name in the `passphrase: checking against ...` line and the
+  `... does not match existing pool member '...'` rejection -- instead of
+  blanking to `--` or echoing the drifted mapper basename.
 
 ## Runtime Handles And Labels
 
@@ -236,6 +241,12 @@ warns rather than claiming every declared member is assembled.
 - `tests/cli/status-mapper-drift.py` pins that `braid status` resolves the
   operator name via the UUID join when a member is open under a drifted mapper
   (`braid-WRONG`), not the mapper basename, in both JSON and human output.
+- `cli/src/membership.rs`, `cli/src/add.rs`, `cli/src/replace.rs`, and
+  `cli/src/recover.rs` unit tests pin that the passphrase credential-verify
+  display resolves each existing pool member's name through the UUID join: a
+  member open under a drifted mapper (`braid-WRONG`) is named by its operator
+  name (`disk1`) in the verify prelude and the `... does not match existing pool
+  member '...'` / `... rejected by '...'` rejection, not the mapper basename.
 - `cli/src/tui/probe.rs` unit tests pin the TUI Data-tab Bus column's transport
   join to the parent disk's LUKS UUID, so a member open under a drifted mapper
   (`braid-WRONG`) still renders its bus instead of degrading to `--`.

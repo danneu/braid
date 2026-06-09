@@ -2079,6 +2079,7 @@ fn verify_recover_passphrase_for_add_replay<R: CommandRunner, F: Filesystem + ?S
     runner: &R,
     fs: &F,
     pool: &PoolState,
+    membership: &PoolMembership,
     targets: &LuksUuidMap<journal::AddJournalTarget>,
     backing_path_resolver: &dyn BackingPathResolver,
     passphrase: &Passphrase,
@@ -2087,11 +2088,10 @@ fn verify_recover_passphrase_for_add_replay<R: CommandRunner, F: Filesystem + ?S
         .devices
         .iter()
         .map(|device| CredentialVerifyTarget {
-            // Display-only fallback for credential error messages; replay
-            // identity decisions above use live LUKS UUID membership.
-            name: config::name_from_mapper(&device.mapper.0)
-                .unwrap_or(device.mapper.0.as_str())
-                .to_owned(),
+            // Decision-024 display join: resolve the live member's operator
+            // name through membership so the credential-verify message
+            // survives mapper drift. Identity decisions above use live UUID.
+            name: membership::present_device_name(membership, device),
             device: device.underlying.clone(),
         })
         .collect();
@@ -2404,6 +2404,7 @@ fn execute_add_pool_mutation_recovery<R: CommandRunner + Sync, F: Filesystem + ?
             runner,
             fs,
             &pool,
+            union,
             targets,
             params.backing_path_resolver,
             passphrase,
@@ -2823,6 +2824,7 @@ fn recover_passphrase_for_context<'a>(
 fn verify_replace_fresh_prep_passphrase<R: CommandRunner>(
     runner: &R,
     pool: &PoolState,
+    membership: &PoolMembership,
     new_name: &DiskName,
     new_by_id: &ByIdPath,
     passphrase: &Passphrase,
@@ -2831,11 +2833,10 @@ fn verify_replace_fresh_prep_passphrase<R: CommandRunner>(
         .devices
         .iter()
         .map(|device| CredentialVerifyTarget {
-            // Display-only fallback for credential error messages; replay
-            // identity decisions above use live LUKS UUID membership.
-            name: config::name_from_mapper(&device.mapper.0)
-                .unwrap_or(device.mapper.0.as_str())
-                .to_owned(),
+            // Decision-024 display join: resolve each existing member's
+            // operator name through membership so the credential-verify
+            // message survives mapper drift. Identity uses live UUID above.
+            name: membership::present_device_name(membership, device),
             device: device.underlying.clone(),
         })
         .collect();
@@ -2943,6 +2944,7 @@ fn finish_uncommitted_replace_recovery<R: CommandRunner + Sync, F: Filesystem + 
                 verify_replace_fresh_prep_passphrase(
                     runner,
                     pool,
+                    &journal.pre_membership,
                     new_name,
                     &new_target.by_id,
                     passphrase.expose_secret(),
@@ -3003,6 +3005,7 @@ fn finish_uncommitted_replace_recovery<R: CommandRunner + Sync, F: Filesystem + 
                     verify_replace_fresh_prep_passphrase(
                         runner,
                         pool,
+                        &journal.pre_membership,
                         new_name,
                         &new_target.by_id,
                         passphrase.expose_secret(),
@@ -7228,6 +7231,135 @@ mod tests {
                 )
             }),
             "matching later target must be scanned"
+        );
+    }
+
+    // Intent: under mapper drift (a live member open as braid-WRONG), the
+    //   add-replay passphrase rejection names the operator disk name resolved
+    //   through membership ('disk1'), not the drifted mapper basename.
+    // Why it exists: the credential-verify display used to parse the mapper
+    //   basename, so a drifted member surfaced as 'WRONG'; decision 024 requires
+    //   the live-UUID->DiskName join here as on every sibling surface.
+    // Scenario: an interrupted add is replayed while disk1 is open under a stale
+    //   'braid-WRONG' mapper and its passphrase no longer matches.
+    #[test]
+    fn add_replay_passphrase_rejection_names_drifted_member_via_membership() {
+        let drifted_uuid = uuid_for_name("disk1");
+        let pool = PoolState {
+            mounted: true,
+            devices: vec![PoolDevice {
+                mapper: MapperName("braid-WRONG".into()),
+                luks_uuid: drifted_uuid.clone(),
+                devid: 1,
+                underlying: "/dev/vda".into(),
+            }],
+            missing_count: 0,
+            total_devices: 1,
+            fsid: Some("aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee".into()),
+            missing_devids: vec![],
+            null_underlying: vec![],
+        };
+        let mut membership = PoolMembership::empty();
+        membership
+            .insert(
+                drifted_uuid,
+                disk_member_named("disk1", "/dev/disk/by-id/virtio-disk1", None, Some(1)),
+            )
+            .unwrap();
+        // No journaled targets: the verify runs against the live (drifted)
+        // member only, which is exactly the membership join under test.
+        let targets: LuksUuidMap<journal::AddJournalTarget> = LuksUuidMap::new();
+        let runner = MockRunner::default().with_output_stdin(
+            CmdRequest::CryptsetupTestPassphrase {
+                device: "/dev/vda".into(),
+            },
+            b"wrongpass".to_vec(),
+            err_raw("cryptsetup open --test-passphrase", 2, "No key available"),
+        );
+        let fs = MockFs::new(&[]);
+
+        let err = verify_recover_passphrase_for_add_replay(
+            &runner,
+            &fs,
+            &pool,
+            &membership,
+            &targets,
+            &crate::test_fixtures::MockBackingPathResolver::default(),
+            &passphrase("wrongpass"),
+        )
+        .unwrap_err();
+
+        let msg = err.to_string();
+        assert!(
+            msg.contains("recover add passphrase was rejected by 'disk1'"),
+            "drifted member must resolve to 'disk1' via membership, got: {msg}"
+        );
+        assert!(
+            !msg.contains("WRONG"),
+            "must not surface the drifted mapper basename, got: {msg}"
+        );
+    }
+
+    // Intent: under mapper drift, the replace fresh-prep passphrase rejection
+    //   names the existing member's operator name resolved through membership
+    //   ('disk1'), not the drifted mapper basename.
+    // Why it exists: same decision-024 join as the add-replay path; the replace
+    //   recovery prep verifies existing members before any LUKS mutation.
+    // Scenario: an interrupted replace prep is finished while an existing member
+    //   is open under a stale 'braid-WRONG' mapper and its passphrase no longer
+    //   matches.
+    #[test]
+    fn replace_prep_passphrase_rejection_names_drifted_member_via_membership() {
+        let drifted_uuid = uuid_for_name("disk1");
+        let pool = PoolState {
+            mounted: true,
+            devices: vec![PoolDevice {
+                mapper: MapperName("braid-WRONG".into()),
+                luks_uuid: drifted_uuid.clone(),
+                devid: 1,
+                underlying: "/dev/vda".into(),
+            }],
+            missing_count: 0,
+            total_devices: 1,
+            fsid: Some("aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee".into()),
+            missing_devids: vec![],
+            null_underlying: vec![],
+        };
+        let mut membership = PoolMembership::empty();
+        membership
+            .insert(
+                drifted_uuid,
+                disk_member_named("disk1", "/dev/disk/by-id/virtio-disk1", None, Some(1)),
+            )
+            .unwrap();
+        // Existing member (/dev/vda) is verified before the new disk, so its
+        // rejection is what the assertion observes.
+        let runner = MockRunner::default().with_output_stdin(
+            CmdRequest::CryptsetupTestPassphrase {
+                device: "/dev/vda".into(),
+            },
+            b"wrongpass".to_vec(),
+            err_raw("cryptsetup open --test-passphrase", 2, "No key available"),
+        );
+
+        let err = verify_replace_fresh_prep_passphrase(
+            &runner,
+            &pool,
+            &membership,
+            &disk_name("new"),
+            &by_id_path("/dev/disk/by-id/virtio-new"),
+            &passphrase("wrongpass"),
+        )
+        .unwrap_err();
+
+        let msg = err.to_string();
+        assert!(
+            msg.contains("recover replace passphrase was rejected by 'disk1'"),
+            "drifted member must resolve to 'disk1' via membership, got: {msg}"
+        );
+        assert!(
+            !msg.contains("WRONG"),
+            "must not surface the drifted mapper basename, got: {msg}"
         );
     }
 

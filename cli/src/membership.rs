@@ -9,7 +9,9 @@
 
 use crate::state_io;
 use crate::state_paths::StatePaths;
-use crate::types::{ByIdPath, DiskName, LuksUuid, MapperName, PoolState, format_uuid_list};
+use crate::types::{
+    ByIdPath, DiskName, LuksUuid, MapperName, PoolDevice, PoolState, format_uuid_list,
+};
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 use std::collections::btree_map;
@@ -717,6 +719,27 @@ pub fn enrich_from_pool_state(
 }
 
 // ---------------------------------------------------------------------------
+// Display-name join (decision 024)
+// ---------------------------------------------------------------------------
+
+/// Single source of the decision-024 present-device display-name rule:
+/// UUID-join membership to the operator name, falling back to the raw mapper
+/// basename for a foreign live device. Shared so every display surface
+/// (status, TUI, credential-verify) resolves the same name under mapper drift.
+pub(crate) fn present_display_name(member: Option<&DiskMember>, mapper: &MapperName) -> String {
+    member
+        .map(|m| m.name.as_str().to_owned())
+        .unwrap_or_else(|| mapper.0.clone())
+}
+
+/// Common case of `present_display_name`: resolve a live `PoolDevice`'s
+/// operator name through membership by its LUKS UUID, so callers do not repeat
+/// the `by_uuid(&d.luks_uuid)` + `&d.mapper` join at each site.
+pub(crate) fn present_device_name(membership: &PoolMembership, device: &PoolDevice) -> String {
+    present_display_name(membership.by_uuid(&device.luks_uuid), &device.mapper)
+}
+
+// ---------------------------------------------------------------------------
 // Tests
 // ---------------------------------------------------------------------------
 
@@ -1409,6 +1432,69 @@ mod tests {
             "known UUIDs must not be returned as foreign"
         );
         assert_eq!(m, before, "pure helper must not mutate membership");
+    }
+
+    // ----- present display-name join (decision 024) ------------------------
+
+    // Intent: present_display_name returns the operator name when a member is
+    //   present, and the FULL mapper basename (not the stripped suffix) when
+    //   the live device is foreign.
+    // Why it exists: the credential-verify display surfaces route through this
+    //   helper so member names survive mapper drift -- the bug being fixed was
+    //   four sites parsing the mapper basename and showing 'WRONG' under drift.
+    // Scenario: a member to label, and a foreign live device absent from
+    //   membership, both observed under a drifted 'braid-WRONG' mapper.
+    #[test]
+    fn present_display_name_uses_member_name_and_falls_back_to_full_mapper() {
+        let m = member("disk1", "/dev/disk/by-id/ata-K");
+        assert_eq!(
+            present_display_name(Some(&m), &MapperName("braid-WRONG".into())),
+            "disk1",
+            "member present -> operator name regardless of mapper drift"
+        );
+        assert_eq!(
+            present_display_name(None, &MapperName("braid-WRONG".into())),
+            "braid-WRONG",
+            "foreign device -> full mapper basename, NOT stripped to 'WRONG'"
+        );
+    }
+
+    // Intent: present_device_name joins a live PoolDevice's UUID to membership,
+    //   so a member open under a drifted mapper still presents its operator
+    //   name, while a foreign UUID falls back to the full mapper basename.
+    // Why it exists: this is the wrapper the four credential-verify sites call;
+    //   it must resolve 'disk1' even when the mapper reads 'braid-WRONG'.
+    // Scenario: pool device mapper=braid-WRONG, UUID U, membership U->'disk1';
+    //   plus a second device whose UUID is not in membership.
+    #[test]
+    fn present_device_name_resolves_drifted_mapper_through_uuid() {
+        let u = test_uuid(170);
+        let mut m = PoolMembership::empty();
+        m.insert(u.clone(), member("disk1", "/dev/disk/by-id/ata-K"))
+            .unwrap();
+        let device = PoolDevice {
+            mapper: MapperName("braid-WRONG".into()),
+            luks_uuid: u.clone(),
+            devid: 1,
+            underlying: "/dev/vdb".into(),
+        };
+        assert_eq!(
+            present_device_name(&m, &device),
+            "disk1",
+            "drifted mapper must resolve to the membership name via UUID"
+        );
+
+        let foreign = PoolDevice {
+            mapper: MapperName("braid-WRONG".into()),
+            luks_uuid: test_uuid(171),
+            devid: 2,
+            underlying: "/dev/vdc".into(),
+        };
+        assert_eq!(
+            present_device_name(&m, &foreign),
+            "braid-WRONG",
+            "foreign UUID -> full mapper basename"
+        );
     }
 
     // ----- parse_disk_spec -------------------------------------------------

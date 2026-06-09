@@ -1,6 +1,6 @@
 use crate::btrfs_ioctl::BtrfsDevInfo;
 use crate::cmd::{CmdRequest, CommandRunner, Step};
-use crate::config::{Config, luks_label_for, mapper_name, name_from_mapper};
+use crate::config::{Config, luks_label_for, mapper_name};
 use crate::confirm;
 use crate::credential_verify::{
     Credential, CredentialVerifyError, CredentialVerifyTarget, verify_credential_for_targets,
@@ -245,6 +245,12 @@ struct ReplaceWorkPlan {
     restore_raid1_after_commit: bool,
     new_mapper: MapperName,
     new_mapper_path: String,
+    /// Existing-pool-member credential-verify targets, resolved at plan time
+    /// so each member's display `name` is UUID-joined through membership
+    /// (decision 024) and survives mapper drift. Identity is carried by each
+    /// target's `device`; the name is cosmetic. The new-disk target is built
+    /// separately in `execute` from `new_name`/`new_by_id`.
+    member_verify_targets: Vec<CredentialVerifyTarget>,
 }
 
 impl ReplaceWorkPlan {
@@ -427,6 +433,7 @@ impl ReplacePlan {
             restore_raid1_after_commit,
             new_mapper: new_mn,
             new_mapper_path,
+            member_verify_targets,
         } = work_plan;
 
         // Render accumulated notes to stderr via the shared helper
@@ -475,35 +482,11 @@ impl ReplacePlan {
         // Read passphrase
         let passphrase = read_passphrase(params.passphrase_file, params.passphrase_stdin)?;
 
-        let retained_members: Vec<_> = match &replace_source {
-            ReplaceSource::Live { .. } => pool
-                .devices
-                .iter()
-                .filter(|device| device.luks_uuid != old_uuid)
-                .collect(),
-            ReplaceSource::Missing { .. } => pool.devices.iter().collect(),
-        };
-        let anchor_members: Vec<_> = if matches!(&replace_source, ReplaceSource::Live { .. })
-            && retained_members.is_empty()
-        {
-            pool.devices
-                .iter()
-                .filter(|device| device.luks_uuid == old_uuid)
-                .collect()
-        } else {
-            retained_members
-        };
-        let mut credential_targets: Vec<CredentialVerifyTarget> = anchor_members
-            .into_iter()
-            .map(|device| CredentialVerifyTarget {
-                // Display-only fallback for credential error messages; replace
-                // source identity is resolved by LUKS UUID before this point.
-                name: name_from_mapper(device.mapper.as_str())
-                    .unwrap_or(device.mapper.as_str())
-                    .to_owned(),
-                device: device.underlying.clone(),
-            })
-            .collect();
+        // Existing-pool-member targets were resolved at plan time (names
+        // UUID-joined through membership; see `build_member_verify_targets`).
+        // The new-disk target is appended here because its identity
+        // (`new_name`/`new_by_id`) is op-level, not a live pool member.
+        let mut credential_targets = member_verify_targets;
         let new_disk_target = match &target_prep {
             ReplaceTargetPrep::ExistingLuks { .. } => Some(CredentialVerifyTarget {
                 name: new_name.as_str().to_owned(),
@@ -1540,6 +1523,13 @@ where
         return Err(PlanFailure::with_notes(notes, e.into()));
     }
 
+    // Resolve existing-member credential-verify display names now, while the
+    // plan-time `pre_membership` is in scope, so the join reuses the
+    // already-loaded membership (no extra pool.json read) and only the
+    // resolved strings -- not a membership snapshot -- ride on the plan.
+    let member_verify_targets =
+        build_member_verify_targets(&pre_membership, &pool, &replace_source, &old_uuid);
+
     let work_plan = build_replace_work_plan(ReplaceWorkPlanInput {
         config: config.clone(),
         old_uuid,
@@ -1553,6 +1543,7 @@ where
         paths: params.paths,
         enroll_key_file: resolved_enroll_key_file,
         luks_format_extra_opts,
+        member_verify_targets,
     });
 
     Ok(ReplacePlan { notes, work_plan })
@@ -1678,6 +1669,50 @@ struct ReplaceWorkPlanInput<'a> {
     /// resolution is a no-op so this carries the raw user input.
     enroll_key_file: Option<PathBuf>,
     luks_format_extra_opts: LuksFormatExtraOpts,
+    /// Existing-pool-member credential-verify targets, resolved by the caller
+    /// at plan time so the join reuses the already-loaded `pre_membership`
+    /// (no extra `pool.json` read) and the plan stores only display strings.
+    member_verify_targets: Vec<CredentialVerifyTarget>,
+}
+
+/// Resolve the existing pool members whose passphrase must match before a
+/// replace touches anything, with each member's display `name` UUID-joined
+/// through membership (decision 024) so the credential-verify message survives
+/// mapper drift. The anchor selection mirrors what `execute` consumes: a live
+/// replace verifies every retained member, but when it would leave no other
+/// member it falls back to the disk being replaced (the only passphrase we can
+/// check); a missing-source replace verifies all live members. Identity is
+/// carried by each target's `device`, never the cosmetic `name`.
+fn build_member_verify_targets(
+    pre_membership: &PoolMembership,
+    pool: &PoolState,
+    replace_source: &ReplaceSource,
+    old_uuid: &LuksUuid,
+) -> Vec<CredentialVerifyTarget> {
+    let retained_members: Vec<_> = match replace_source {
+        ReplaceSource::Live { .. } => pool
+            .devices
+            .iter()
+            .filter(|device| device.luks_uuid != *old_uuid)
+            .collect(),
+        ReplaceSource::Missing { .. } => pool.devices.iter().collect(),
+    };
+    let anchor_members: Vec<_> =
+        if matches!(replace_source, ReplaceSource::Live { .. }) && retained_members.is_empty() {
+            pool.devices
+                .iter()
+                .filter(|device| device.luks_uuid == *old_uuid)
+                .collect()
+        } else {
+            retained_members
+        };
+    anchor_members
+        .into_iter()
+        .map(|device| CredentialVerifyTarget {
+            name: membership::present_device_name(pre_membership, device),
+            device: device.underlying.clone(),
+        })
+        .collect()
 }
 
 fn build_replace_work_plan(input: ReplaceWorkPlanInput<'_>) -> ReplaceWorkPlan {
@@ -1732,6 +1767,7 @@ fn build_replace_work_plan(input: ReplaceWorkPlanInput<'_>) -> ReplaceWorkPlan {
         restore_raid1_after_commit,
         new_mapper,
         new_mapper_path,
+        member_verify_targets: input.member_verify_targets,
     }
 }
 
@@ -1933,6 +1969,15 @@ fn replace_work_plan_for_test(input: &ReplaceWorkPlanTestInput<'_>) -> ReplaceWo
     let new_name = DiskName::parse(input.new_name).expect("valid new disk name in test");
     let extra_opts = LuksFormatExtraOpts::parse(input.luks_format_extra_opts)
         .expect("test extras must be valid (no managed flags)");
+    // Same selection `execute` consumes; an empty membership is fine here
+    // because render tests do not inspect the cosmetic `name`, and the
+    // `device` set (which drives verification) is membership-independent.
+    let member_verify_targets = build_member_verify_targets(
+        &PoolMembership::empty(),
+        &pool,
+        input.replace_source,
+        &old_uuid,
+    );
     build_replace_work_plan(ReplaceWorkPlanInput {
         config,
         old_uuid,
@@ -1946,6 +1991,7 @@ fn replace_work_plan_for_test(input: &ReplaceWorkPlanTestInput<'_>) -> ReplaceWo
         paths: input.paths,
         enroll_key_file: input.enroll_key_file.map(Path::to_path_buf),
         luks_format_extra_opts: extra_opts,
+        member_verify_targets,
     })
 }
 
@@ -3293,6 +3339,17 @@ mod tests {
             null_underlying: vec![],
         };
 
+        let replace_source = ReplaceSource::Live {
+            mapper: MapperName("braid-disk2".into()),
+            devid: 2,
+        };
+        let member_verify_targets = build_member_verify_targets(
+            &PoolMembership::empty(),
+            &pool,
+            &replace_source,
+            &old_uuid,
+        );
+
         ReplacePlan {
             notes: vec![],
             work_plan: build_replace_work_plan(ReplaceWorkPlanInput {
@@ -3307,14 +3364,12 @@ mod tests {
                     by_id_path: new_by_id,
                     state: PresentConfigDiskState::PresentNotLuks,
                 },
-                replace_source: ReplaceSource::Live {
-                    mapper: MapperName("braid-disk2".into()),
-                    devid: 2,
-                },
+                replace_source,
                 pool,
                 paths: &f.paths,
                 enroll_key_file: None,
                 luks_format_extra_opts: LuksFormatExtraOpts::parse(&[]).unwrap(),
+                member_verify_targets,
             }),
         }
     }
@@ -4518,6 +4573,9 @@ mod tests {
             // returned `Empty`, so the keyfile path flows in as `Some`.
             enroll_key_file: Some(kf.to_path_buf()),
             luks_format_extra_opts: LuksFormatExtraOpts::default(),
+            // Render-only test: render_steps() never reads the credential
+            // targets, so they need not be resolved here.
+            member_verify_targets: Vec::new(),
         });
 
         let steps = work_plan.render_steps();
@@ -4675,6 +4733,129 @@ mod tests {
             f.inhibitor.acquire_count(),
             0,
             "sleep inhibitor must not be acquired before passphrase verification"
+        );
+    }
+
+    // Intent: under mapper drift (a retained member open as braid-WRONG), the
+    //   execute-time passphrase rejection names the member resolved through
+    //   membership ('disk1'), not the drifted mapper basename.
+    // Why it exists: the retained-member credential targets are resolved at
+    //   plan time precisely so this message survives drift (decision 024). An
+    //   execute-level assertion is required: a plan-builder check on
+    //   member_verify_targets[0].name would pass even if execute re-derived a
+    //   mapper-based name.
+    // Scenario: replacing old disk2 while the retained member disk1 is open
+    //   under a stale 'braid-WRONG' mapper and the typed passphrase is wrong.
+    #[test]
+    fn replace_execute_passphrase_rejection_names_drifted_member_via_membership() {
+        let f = PoolFixture::two_disk_healthy();
+        let old_uuid = LuksUuid::parse("22222222-2222-2222-2222-222222222222").unwrap();
+        let drifted_uuid = LuksUuid::parse("11111111-1111-1111-1111-111111111111").unwrap();
+        let pool = PoolState {
+            mounted: true,
+            devices: vec![
+                PoolDevice {
+                    mapper: MapperName("braid-WRONG".into()),
+                    luks_uuid: drifted_uuid.clone(),
+                    devid: 1,
+                    underlying: "/dev/vdb".into(),
+                },
+                PoolDevice {
+                    mapper: MapperName("braid-disk2".into()),
+                    luks_uuid: old_uuid.clone(),
+                    devid: 2,
+                    underlying: "/dev/vdc".into(),
+                },
+            ],
+            missing_count: 0,
+            total_devices: 2,
+            fsid: Some(REPLACE_TEST_FSID.to_owned()),
+            missing_devids: vec![],
+            null_underlying: vec![],
+        };
+        let mut membership = PoolMembership::empty();
+        membership
+            .insert(
+                drifted_uuid,
+                membership::DiskMember {
+                    name: disk_name("disk1"),
+                    by_id: ByIdPath::parse("/dev/disk/by-id/virtio-disk1").unwrap(),
+                    devid: Some(1),
+                    added_at: None,
+                },
+            )
+            .unwrap();
+        let replace_source = ReplaceSource::Live {
+            mapper: MapperName("braid-disk2".into()),
+            devid: 2,
+        };
+        let member_verify_targets =
+            build_member_verify_targets(&membership, &pool, &replace_source, &old_uuid);
+        let new_name = disk_name("disk3");
+        let new_by_id = ByIdPath::parse("/dev/disk/by-id/virtio-disk3").unwrap();
+        let work_plan = build_replace_work_plan(ReplaceWorkPlanInput {
+            config: f.config.clone(),
+            old_uuid,
+            old_name: disk_name("disk2"),
+            new_uuid: LuksUuid::new_v4(),
+            new_name: new_name.clone(),
+            new_by_id: new_by_id.clone(),
+            new_probed: PresentConfigDisk {
+                name: new_name,
+                by_id_path: new_by_id,
+                state: PresentConfigDiskState::PresentNotLuks,
+            },
+            replace_source,
+            pool,
+            paths: &f.paths,
+            enroll_key_file: None,
+            luks_format_extra_opts: LuksFormatExtraOpts::parse(&[]).unwrap(),
+            member_verify_targets,
+        });
+        let plan = ReplacePlan {
+            notes: vec![],
+            work_plan,
+        };
+        // Reject the retained (drifted) member's passphrase; it is the first
+        // credential target, so execute aborts here before any mutation.
+        let runner = MockRunner::default().with_handler(|req| match req {
+            CmdRequest::CryptsetupTestPassphrase { device } if device == "/dev/vdb" => {
+                Some(Ok(RawCommandOutput {
+                    cmd: format!("cryptsetup open --test-passphrase {device}"),
+                    stdout: String::new(),
+                    stderr: "No key available with this passphrase.\n".into(),
+                    exit_status: 2,
+                }))
+            }
+            _ => None,
+        });
+        let fs = MockFs::storage(vec!["/dev/disk/by-id/virtio-disk3".into()]);
+
+        let err = plan
+            .execute(&runner, &fs, &f.replace_params().yes(true).build())
+            .expect_err("wrong passphrase on the retained member must abort");
+
+        match err {
+            ReplaceError::Validation(msg) => {
+                assert!(
+                    msg.contains("passphrase does not match existing pool member 'disk1'"),
+                    "drifted member must resolve to 'disk1' via membership, got: {msg}"
+                );
+                assert!(
+                    !msg.contains("WRONG"),
+                    "must not surface the drifted mapper basename, got: {msg}"
+                );
+            }
+            other => panic!("expected Err(ReplaceError::Validation), got: {other:?}"),
+        }
+        assert!(
+            journal::load_journal(&f.paths).unwrap().is_none(),
+            "credential rejection must precede the journal write"
+        );
+        assert_eq!(
+            f.inhibitor.acquire_count(),
+            0,
+            "credential rejection must precede the sleep inhibitor"
         );
     }
 
