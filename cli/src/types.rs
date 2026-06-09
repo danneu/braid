@@ -317,6 +317,12 @@ fn is_managed_format_flag(token: &str) -> bool {
     // (`--uuid`, `--label`) or change the on-disk/passphrase model braid
     // assumes after format. Names and short aliases come from
     // reference/cryptsetup/src/cryptsetup_arg_list.h.
+    //
+    // popt matches long options by full name only -- no getopt_long-style
+    // abbreviation (`longOptionStrcmp` requires equal length) -- so exact and
+    // `--flag=value` are the only spellings that reach a managed flag. A
+    // prefix like `--uui` is rejected by cryptsetup as unknown, never read
+    // as `--uuid`.
     if MANAGED_LUKS_FORMAT_LONG_FLAGS.iter().any(|flag| {
         token == *flag
             || token
