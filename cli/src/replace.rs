@@ -4149,6 +4149,108 @@ mod tests {
         );
     }
 
+    // Intent: live replace warns and SKIPS the old-mapper close when the post-commit
+    //   UUID probe finds braid-disk2's mapper now backs a FOREIGN LUKS volume
+    //   (operator double-drift: a different disk opened under the same mapper name
+    //   between plan and the post-commit close).
+    // Why it exists: the MapperOwnership::Unverified arm in ReplacePlan::execute is
+    //   the guard against tearing down a foreign disk's dm slot after a swap-in-place.
+    //   Until now only the probe helper was unit-tested, so the arm could regress to
+    //   `Unverified => { close it }` with every test still green. remove and recover
+    //   already pin this at execute level
+    //   (post_commit_close_uuid_probe_demotes_to_skip_on_mismatch,
+    //   recover_replace_old_close_foreign_mapper_warns_and_skips); this brings live
+    //   replace to parity.
+    // Scenario: live replace of disk2 -> disk3 commits; afterwards
+    //   `cryptsetup status braid-disk2` resolves to a foreign backing /dev/vdf whose
+    //   LUKS UUID is U_FOREIGN != the journaled 2222...2222.
+    #[test]
+    fn live_replace_old_close_foreign_mapper_warns_and_skips_close() {
+        let f = PoolFixture::two_disk_healthy();
+        let fs = MockFs::storage(vec![
+            "/dev/disk/by-id/virtio-disk3".into(),
+            "/dev/mapper/braid-disk3".into(),
+        ]);
+        let replace_done = Arc::new(AtomicBool::new(false));
+        let runner = ReplacementPool::two_disk_healthy()
+            .install(MockRunner::default(), replace_done.clone())
+            .with_handler({
+                let replace_done = replace_done.clone();
+                move |req| match req {
+                    CmdRequest::BtrfsReplaceStart { .. } => {
+                        replace_done.store(true, Ordering::Relaxed);
+                        Some(Ok(mock_ok("btrfs replace start", "")))
+                    }
+                    // Post-commit: braid-disk2's mapper now backs a foreign disk.
+                    CmdRequest::CryptsetupStatus { mapper }
+                        if mapper.as_str() == "braid-disk2"
+                            && replace_done.load(Ordering::Relaxed) =>
+                    {
+                        Some(Ok(mock_ok(
+                            "cryptsetup status braid-disk2",
+                            "braid-disk2 is active and is in use.\n  type:    LUKS2\n  \
+                             device:  /dev/vdf\n  mode:    read/write\n",
+                        )))
+                    }
+                    CmdRequest::CryptsetupLuksUuid { device } if device == "/dev/vdf" => {
+                        Some(Ok(mock_ok(
+                            "cryptsetup luksUUID /dev/vdf",
+                            "99999999-9999-9999-9999-999999999999\n",
+                        )))
+                    }
+                    // A regressed arm would issue this; answer it so the regression
+                    // fails on the assertion below, not on a dispatch error.
+                    CmdRequest::CryptsetupClose { .. } => Some(Ok(mock_ok("cryptsetup close", ""))),
+                    CmdRequest::BtrfsFilesystemResize { .. } => {
+                        Some(Ok(mock_ok("btrfs filesystem resize", "")))
+                    }
+                    _ => None,
+                }
+            });
+
+        let captured = crate::status_tag::testing::capture_with_color(false, || {
+            cmd_replace(&runner, &fs, &f.replace_params().build())
+                .expect("foreign old-mapper close skip must not fail replace");
+        });
+
+        let requests = runner.requests();
+        // Core invariant: the foreign mapper is never closed.
+        assert!(
+            !requests.iter().any(|r| matches!(
+                r,
+                CmdRequest::CryptsetupClose { mapper } if mapper.as_str() == "braid-disk2"
+            )),
+            "foreign old-mapper probe must skip close: {requests:?}"
+        );
+        // The post-commit probe actually ran against the foreign backing.
+        let foreign_probes = requests
+            .iter()
+            .filter(
+                |r| matches!(r, CmdRequest::CryptsetupLuksUuid { device } if device == "/dev/vdf"),
+            )
+            .count();
+        assert_eq!(
+            foreign_probes, 1,
+            "exactly one post-commit UUID probe against braid-disk2's foreign backing"
+        );
+        // Execution continues past the skip -- maintenance still replays.
+        assert!(
+            requests
+                .iter()
+                .any(|r| matches!(r, CmdRequest::BtrfsFilesystemResize { devid: 2, .. })),
+            "resize must still replay after the foreign close skip: {requests:?}"
+        );
+        // Operator-facing warning names both UUIDs (emitted inside the probe helper).
+        assert!(
+            captured.contains(
+                "Warning: post-commit close skipped for mapper braid-disk2: \
+                 expected LUKS UUID 22222222-2222-2222-2222-222222222222 \
+                 but observed 99999999-9999-9999-9999-999999999999\n"
+            ),
+            "foreign close skip must warn with both UUIDs: {captured:?}"
+        );
+    }
+
     #[test]
     // Intent: cmd_replace's missing path rejects a --old name that is absent
     //   from pool.json, with no inhibitor acquired and no journal written.
@@ -7222,8 +7324,8 @@ mod tests {
 
     /// Build a recording `MockRunner` that injects a `CryptsetupLuksUuid`
     /// probe response for `device`, returning the supplied canned
-    /// `RawCommandOutput`. Used by the open-boundary re-probe and
-    /// post-commit close double-drift regression tests.
+    /// `RawCommandOutput`. Used by the open-boundary re-probe tests
+    /// (`replace_existing_luks_open_boundary_probe_*`).
     fn runner_with_luks_uuid_probe(device: &'static str, canned: RawCommandOutput) -> MockRunner {
         MockRunner::default().with_output(
             CmdRequest::CryptsetupLuksUuid {
@@ -7256,96 +7358,6 @@ mod tests {
                 },
                 canned,
             )
-    }
-
-    /// Seed 620: Post-commit close double-drift probe mismatch arm.
-    /// When the active mapper's backing-device LUKS UUID disagrees
-    /// with the journaled `old_uuid`, the close is demoted to a
-    /// logged warning skip; zero `CryptsetupClose` requests reach the
-    /// runner.
-    //
-    // Intent: probe_observed_mapper_uuid returns Unverified on mismatch and
-    //   the caller skips the close.
-    // Why: defense-in-depth against operator double-drift -- closing
-    //   the wrong dm slot would tear down a foreign disk's mapper.
-    // Scenario: journaled old_uuid = U_OLD, observed mapper
-    //   "braid-WRONG" now reports backing device /dev/vdf, whose LUKS
-    //   UUID is U_FOREIGN.
-    #[test]
-    fn replace_post_commit_close_probe_mismatch_skips_close() {
-        let u_old = LuksUuid::parse("eeeeeeee-eeee-eeee-eeee-eeeeeeee0620").unwrap();
-        let u_foreign = LuksUuid::parse("ffffffff-ffff-ffff-ffff-ffffffff0621").unwrap();
-        let runner = runner_with_active_mapper_uuid(
-            "braid-WRONG",
-            "/dev/vdf",
-            RawCommandOutput {
-                cmd: "cryptsetup luksUUID /dev/vdf".into(),
-                stdout: format!("{u_foreign}\n"),
-                stderr: String::new(),
-                exit_status: 0,
-            },
-        );
-        let mapper = MapperName("braid-WRONG".into());
-        let ownership = probe_observed_mapper_uuid(&runner, &mapper, &u_old);
-        assert_eq!(
-            ownership,
-            MapperOwnership::Unverified,
-            "probe mismatch must signal skip-close"
-        );
-        // Caller must NOT issue CryptsetupClose on the unverified arm.
-        let requests = runner.requests();
-        let probe_count = requests
-            .iter()
-            .filter(
-                |r| matches!(r, CmdRequest::CryptsetupLuksUuid { device } if device == "/dev/vdf"),
-            )
-            .count();
-        assert_eq!(
-            probe_count, 1,
-            "exactly one backing-device probe must run before the skip decision"
-        );
-        let close_count = requests
-            .iter()
-            .filter(|r| matches!(r, CmdRequest::CryptsetupClose { .. }))
-            .count();
-        assert_eq!(
-            close_count, 0,
-            "no close may issue when the probe disagrees with the journaled UUID"
-        );
-    }
-
-    /// Seed 621: Control arm for the post-commit close double-drift
-    /// probe. When the active mapper's backing-device LUKS UUID matches
-    /// the journaled value, `probe_observed_mapper_uuid` returns Owned so
-    /// the caller proceeds to close.
-    //
-    // Intent: probe match returns Owned; caller continues to close.
-    // Why: pins the fail-safe-skip-only semantic so a future change
-    //   that turned the probe into fail-skip-on-any-condition would
-    //   flip this assertion.
-    // Scenario: journaled old_uuid = U_OLD, observed mapper
-    //   "braid-disk2" reports backing device /dev/vdc, whose probe
-    //   returns U_OLD.
-    #[test]
-    fn replace_post_commit_close_probe_match_allows_close() {
-        let u_old = LuksUuid::parse("11111111-1111-1111-1111-111111110621").unwrap();
-        let runner = runner_with_active_mapper_uuid(
-            "braid-disk2",
-            "/dev/vdc",
-            RawCommandOutput {
-                cmd: "cryptsetup luksUUID /dev/vdc".into(),
-                stdout: format!("{u_old}\n"),
-                stderr: String::new(),
-                exit_status: 0,
-            },
-        );
-        let mapper = MapperName("braid-disk2".into());
-        let ownership = probe_observed_mapper_uuid(&runner, &mapper, &u_old);
-        assert_eq!(
-            ownership,
-            MapperOwnership::Owned,
-            "probe match must allow close"
-        );
     }
 
     #[test]

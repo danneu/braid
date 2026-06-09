@@ -378,4 +378,57 @@ mod tests {
             "luksUUID parse error must run exactly one status probe and one UUID probe"
         );
     }
+
+    // Intent: an active mapper whose backing luksUUID parses cleanly but differs
+    //   from the expected UUID makes the close probe return Unverified, after both
+    //   probes run.
+    // Why it exists: this is the operator double-drift arm -- a foreign disk opened
+    //   under the same mapper name reports a valid-but-wrong UUID. It is the one
+    //   Unverified branch the other helper tests don't cover, and the close-skip
+    //   guard at every call site (replace/remove/recover) hinges on it.
+    // Scenario: status resolves braid-WRONG to /dev/vdc; `cryptsetup luksUUID
+    //   /dev/vdc` returns a valid foreign UUID != the expected UUID.
+    #[test]
+    fn probe_returns_unverified_when_uuid_value_differs() {
+        let mapper = MapperName("braid-WRONG".into());
+        let expected = test_uuid(716);
+        let foreign = test_uuid(799);
+        let runner = MockRunner::default()
+            .with_output(
+                CmdRequest::CryptsetupStatus {
+                    mapper: mapper.clone(),
+                },
+                mock_ok(
+                    "cryptsetup status braid-WRONG",
+                    "braid-WRONG is active and is in use.\n  type:    LUKS2\n  \
+                     device:  /dev/vdc\n  mode:    read/write\n",
+                ),
+            )
+            .with_output(
+                CmdRequest::CryptsetupLuksUuid {
+                    device: "/dev/vdc".into(),
+                },
+                mock_ok("cryptsetup luksUUID /dev/vdc", &format!("{foreign}\n")),
+            );
+
+        let ownership = probe_observed_mapper_uuid(&runner, &mapper, &expected);
+
+        assert_eq!(
+            ownership,
+            MapperOwnership::Unverified,
+            "a valid-but-different backing UUID must signal skip-close"
+        );
+        assert_eq!(
+            runner.requests(),
+            vec![
+                CmdRequest::CryptsetupStatus {
+                    mapper: mapper.clone()
+                },
+                CmdRequest::CryptsetupLuksUuid {
+                    device: "/dev/vdc".into()
+                },
+            ],
+            "value mismatch must run exactly one status probe and one UUID probe"
+        );
+    }
 }
