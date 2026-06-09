@@ -70,7 +70,7 @@ not persistent host storage.
 | `--yes` | Skip interactive confirmation |
 | `--passphrase-stdin` | Read passphrase from stdin instead of TTY prompt |
 | `--passphrase-file <path>` | Read passphrase from a file (conflicts with `--passphrase-stdin`) |
-| `--enroll <dir>` | Enroll `braid.key` from this directory into LUKS slot 1 on new disks |
+| `--enroll <dir>` | Enroll `braid.key` from this directory into LUKS slot 1 on each adopted disk -- fresh or returning -- whose slot 1 is empty; idempotent skip if the keyfile already authenticates slot 1 |
 | `--luks-format-arg=<ARG>` | Advanced: pass one raw argument to `cryptsetup luksFormat`, repeated once per argument; always use the equals form (e.g. `--luks-format-arg=--pbkdf`). braid refuses flags it manages itself -- identity, key-material, integrity, and on-disk-layout options such as `--uuid`, `--label`, `--type`, `--key-file`, and offset/sizing flags. |
 | `--progress auto\|always\|never` | Control progress display (default: auto) |
 
@@ -87,12 +87,14 @@ The name is stored in pool.json and used in LUKS mapper names (`braid-toshiba1`)
 
 1. Probes each disk to determine its state (fresh, braid-labeled, or foreign)
 2. Shows a confirmation prompt with the disk's name and by-id path, plus its model/size/serial (best-effort from the live device via lsblk -- omitted if unavailable)
-3. For fresh disks: pre-generates a LUKS UUID, LUKS-formats the disk with the pool passphrase and `braid-<name>` label, creates a LUKS header backup, and opens the LUKS mapper
+3. For fresh disks: pre-generates a LUKS UUID, LUKS-formats the disk with the pool passphrase and `braid-<name>` label, enrolls the `--enroll` keyfile into slot 1 if provided, creates a LUKS header backup, and opens the LUKS mapper
 
    See [Pending LUKS header backups](status.md#pending-luks-header-backups) -- copy each `.luksheader` off-system and delete the local copy.
 4. If no pool exists: creates a btrfs filesystem (RAID1 if 2+ disks, single if 1 disk; braid explicitly pins the `block-group-tree` feature bit so that bit is visible and stable across toolchain versions -- see [ADR-027](../design/decisions/027-mkfs-block-group-tree.md))
 5. If a pool exists: writes a phased UUID-keyed journal, adds the device to the existing btrfs filesystem, records the new membership in pool.json, then advances the journal to the balance phase
 6. If the pool now has 2+ disks: balances data to RAID1, then clears the journal -- **unless the pool has a missing device, in which case the balance is skipped** (a `[skip]` note explains why). Redundancy is restored later by [`remove-missing`](remove-missing.md) or [`replace`](replace.md), not by the degraded add.
+
+**Keyfile enrollment (`--enroll DIR`):** braid enrolls `braid.key` into LUKS slot 1 on every adopted disk -- fresh or returning. On a fresh disk slot 1 is always empty, so the keyfile is always added. On a returning braid disk braid first probes the keyfile: if it already authenticates slot 1 the enrollment is an idempotent skip with no slot change and no new header backup; if slot 1 is empty the keyfile is added. (If slot 1 holds a different, unknown key braid refuses -- see Safety checks.) The keyfile is added before the header backup so the backup captures slot 1.
 
 A sleep inhibitor is held during all irreversible operations to prevent the system from suspending mid-operation.
 
@@ -117,6 +119,7 @@ braid classifies each disk before acting:
 - Verifies the passphrase against an existing pool member before formatting new disks
 - Warns if the pool has missing devices but does not refuse: `braid add` still adds the new disk, but **skips the RAID1 convert balance** (it surfaces a `[skip]` note), so the pool stays degraded and redundancy is not restored at add time. To repair, either run `braid replace --old <missing-name> --new <new-name>=/dev/disk/by-id/<...>` to swap in a new disk for the missing member, or -- on a 2-disk degraded pool where [`remove-missing`](remove-missing.md) alone would refuse (it cannot drop RAID1 below two devices) -- run `braid add` then `braid remove-missing` to drop the dead member and rebalance onto the new disk.
 - Warns if existing pool drives have a keyfile but `--enroll` was not passed
+- With `--enroll`, refuses if an adopted disk's LUKS slot 1 is occupied by an unknown key the keyfile does not authenticate -- remove it first with `cryptsetup luksKillSlot`, then retry.
 - Refuses if a pending operation journal (`pending-op.json`) exists -- run `braid recover` to reconcile.
 - Refuses if another braid operation is in progress (pool lock `/run/braid-pool.lock` is held) -- retry once it finishes.
 - Refuses if a btrfs balance is *paused* on the pool -- resume or cancel it first. A paused balance holds the exclusive-operation lock indefinitely, so braid cannot wait it out.

@@ -1,23 +1,36 @@
 # Test: add --enroll DIR against a recoverable returning braid disk
 #
 # Intent: `braid add disk3=... --enroll /tmp` against a returning
-# braid disk that has slot 1 empty must enroll the keyfile in
-# slot 1 + back up the header, then force-add the disk back to the
-# pool. A second add against the same disk -- now with slot 1
-# already authenticating the same keyfile -- must take the
-# `AlreadyEnrolled` idempotent skip and emit no addKey work.
+# braid disk resolves to exactly one of three slot-1 outcomes.
+# (1) Slot 1 empty (`NeedsEnroll`): enroll the keyfile in slot 1 +
+# back up the header, then force-add the disk back to the pool.
+# (2) Slot 1 already authenticating the same keyfile
+# (`AlreadyEnrolled`): take the idempotent skip -- no addKey work,
+# no new header backup. (3) Slot 1 occupied by an unknown key the
+# keyfile does not authenticate (`SlotConflict`): a pre-journal
+# refusal with the canonical `cryptsetup luksKillSlot` remediation,
+# exit non-zero, no journal, no pool mutation, and the unknown
+# slot-1 key left untouched.
 #
 # Why it exists: the silent-drop bug fix on the add path. Pre-
 # refactor, `Some(kf) + recoverable braid disk` was a no-op -- the
 # disk was re-added but slot 1 stayed empty, the auto-unlock service
 # could not open it, and the operator was forced to run `braid
 # enroll DIR` afterwards. Routing through `plan_single_disk_
-# enrollment` makes the decision explicit and journaled.
+# enrollment` makes the decision explicit and journaled. The
+# SlotConflict phase additionally locks the documented refusal on
+# the add path: that guarantee is otherwise exercised only on the
+# replace path and at the shared helper, so an add-path regression
+# that swallowed the helper's `Err` could break it while those
+# tests stayed green.
 #
 # Scenario: a disk that was originally added without a keyfile is
 # disconnected (`remove-missing`), then later replugged. Operator
 # wants to re-add it with the same keyfile the rest of the pool
-# uses; uses `--enroll DIR` to install slot 1 in the same shot.
+# uses; uses `--enroll DIR` to install slot 1 in the same shot. In
+# the refusal case the returning disk's slot 1 already holds an
+# unknown key (a previous owner's, say), so braid declines and tells
+# the operator to clear it with `cryptsetup luksKillSlot` first.
 
 import json
 import shlex
@@ -169,6 +182,81 @@ with subtest("Make disk3 missing again, then re-add (AlreadyEnrolled)"):
     )
     assert dump_after == dump_before, (
         "AlreadyEnrolled idempotent skip must not mutate the LUKS header; "
+        f"before:\n{dump_before}\nafter:\n{dump_after}"
+    )
+
+# --- Phase 4: SlotConflict path (unknown key in slot 1 -> refusal) ---
+
+with subtest("Make disk3 missing again, poison slot 1 with an unknown key"):
+    make_disk3_missing_then_remove()
+
+    # Disk3 returns with slot 1 still authenticating /tmp/braid.key from
+    # Phase 2 -- the header survives remove-missing. `cryptsetup
+    # luksAddKey --key-slot 1` refuses a full slot, so clear the
+    # inherited slot 1 before planting the foreign key.
+    machine.succeed(
+        "cryptsetup luksKillSlot --batch-mode /dev/disk/by-id/virtio-disk3 1"
+    )
+    dump = machine.succeed(
+        "cryptsetup luksDump --dump-json-metadata /dev/disk/by-id/virtio-disk3"
+    )
+    assert '"1"' not in dump, (
+        f"slot 1 must be cleared before planting the foreign key:\n{dump}"
+    )
+
+    # Plant an unknown key in slot 1 (distinct bytes from /tmp/braid.key),
+    # authenticated with the pool passphrase -- "a previous owner left
+    # something there". The --enroll keyfile /tmp/braid.key does not
+    # authenticate this slot.
+    machine.succeed(
+        "dd if=/dev/urandom of=/tmp/foreign.key bs=4096 count=1 iflag=fullblock"
+    )
+    machine.succeed("chmod 400 /tmp/foreign.key")
+    pq = shlex.quote(passphrase)
+    machine.succeed(
+        f"printf '%s' {pq} | "
+        f"cryptsetup luksAddKey --batch-mode --key-slot 1 --key-file=- {luks_opts} "
+        f"/dev/disk/by-id/virtio-disk3 /tmp/foreign.key"
+    )
+    dump_before = machine.succeed(
+        "cryptsetup luksDump --dump-json-metadata /dev/disk/by-id/virtio-disk3"
+    )
+    assert '"1"' in dump_before, (
+        f"slot 1 should be occupied by the foreign key:\n{dump_before}"
+    )
+
+with subtest("add --enroll refuses with luksKillSlot remediation (SlotConflict)"):
+    exit_code, output = machine.execute(f"{add_cmd('disk3', '--enroll /tmp')} 2>&1")
+    assert exit_code != 0, (
+        f"add must refuse on slot-1 conflict; got exit {exit_code}, output:\n{output}"
+    )
+    assert "slot 1 on disk3" in output, (
+        f"missing per-disk slot-1 wording; got:\n{output}"
+    )
+    assert "occupied by an unknown key" in output, (
+        f"missing canonical occupancy wording; got:\n{output}"
+    )
+    assert "luksKillSlot" in output, (
+        f"missing luksKillSlot remediation; got:\n{output}"
+    )
+
+with subtest("Refusal wrote no journal and did not mutate the pool"):
+    machine.fail("test -f /var/lib/braid/pending-op.json")
+    fi_show = machine.succeed("btrfs fi show /mnt/storage")
+    assert "braid-disk3" not in fi_show, (
+        f"disk3 must not be re-added on a refused enroll:\n{fi_show}"
+    )
+
+with subtest("Refusal left the unknown slot-1 key untouched"):
+    # The contract is a refusal that preserves operator state: braid
+    # must not wipe or replace the unknown slot-1 key, only decline and
+    # point at `cryptsetup luksKillSlot`. Reuse the AlreadyEnrolled
+    # phase's dump-equality idiom.
+    dump_after = machine.succeed(
+        "cryptsetup luksDump --dump-json-metadata /dev/disk/by-id/virtio-disk3"
+    )
+    assert dump_after == dump_before, (
+        "SlotConflict refusal must not mutate the LUKS header; "
         f"before:\n{dump_before}\nafter:\n{dump_after}"
     )
 
