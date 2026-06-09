@@ -301,7 +301,8 @@ check-docs:
     # `mdbook build docs` (it forbids linking outside the book root and validates
     # in-book targets), so check-docs no longer re-checks them here.
     # README.md / docs/index.md tables must match SUMMARY.md order and use the
-    # H1-derived label for each guide/command.
+    # canonical labels computed by check-doc-tables.py. Command labels include
+    # the experimental prefix when their page frontmatter sets experimental: true.
     if ! python3 scripts/docs/check-doc-tables.py; then
         rc=1
     fi

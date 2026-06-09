@@ -10,7 +10,7 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[2]
 HTML_ROOT = ROOT / "docs/book/html"
-LEAK_PATTERN = re.compile(r"(<p>|<br ?/?>|^)(intent|status):", re.MULTILINE)
+LEAK_PATTERN = re.compile(r"(<p>|<br ?/?>|^)(intent|status|experimental):", re.MULTILINE)
 
 
 def main() -> int:

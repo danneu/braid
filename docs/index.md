@@ -30,25 +30,27 @@ braid is a NixOS CLI tool for managing an encrypted btrfs RAID1 NAS. These docs 
 
 ## Commands
 
-| Command                                      | Description                                       |
-| -------------------------------------------- | ------------------------------------------------- |
-| [add](commands/add.md)                       | Add disks to the pool or create a new pool        |
-| [remove](commands/remove.md)                 | Remove a live disk from the pool                  |
-| [remove-missing](commands/remove-missing.md) | Forget a dead or missing device entry             |
-| [replace](commands/replace.md)               | Replace a live or dead disk                       |
-| [unlock](commands/unlock.md)                 | Open LUKS devices and mount the pool              |
-| [lock](commands/lock.md)                     | Unmount the pool and close LUKS devices           |
-| [seal-mountpoint](commands/seal-mountpoint.md) | Seal the offline mountpoint immutable (boot-managed) |
-| [idle](commands/idle.md)                     | Check if the pool is idle for auto-suspend        |
-| [status](commands/status.md)                 | Pool health, disk status, allocation, scrub info  |
-| [doctor](commands/doctor.md)                 | Diagnostic checks for config and pool health      |
-| [monitor](commands/monitor.md)               | Health check for alerting used by systemd timer   |
-| [ack](commands/ack.md)                       | Acknowledge and silence an active alert           |
-| [enroll](commands/enroll.md)                 | Enroll a USB keyfile for auto-unlock              |
-| [discover](commands/discover.md)             | Scan for braid LUKS devices and rebuild pool.json |
-| [recover](commands/recover.md)               | Recover from an interrupted operation             |
-| [tui](commands/tui.md)                       | Interactive dashboard with raw-output Browse tab  |
-| [ups status](commands/ups-status.md)         | Live UPS state from NUT, with JSON for scripts    |
+🧪 Experimental commands are less-trodden and more likely to have rough edges. All of braid is pre-v1.0.
+
+| Command                                         | Description                                          |
+| ----------------------------------------------- | ---------------------------------------------------- |
+| [add](commands/add.md)                          | Add disks to the pool or create a new pool           |
+| [remove](commands/remove.md)                    | Remove a live disk from the pool                     |
+| [remove-missing](commands/remove-missing.md)    | Forget a dead or missing device entry                |
+| [replace](commands/replace.md)                  | Replace a live or dead disk                          |
+| [unlock](commands/unlock.md)                    | Open LUKS devices and mount the pool                 |
+| [lock](commands/lock.md)                        | Unmount the pool and close LUKS devices              |
+| [🧪 seal-mountpoint](commands/seal-mountpoint.md) | Seal the offline mountpoint immutable (boot-managed) |
+| [🧪 idle](commands/idle.md)                     | Check if the pool is idle for auto-suspend           |
+| [status](commands/status.md)                    | Pool health, disk status, allocation, scrub info     |
+| [doctor](commands/doctor.md)                    | Diagnostic checks for config and pool health         |
+| [🧪 monitor](commands/monitor.md)               | Health check for alerting used by systemd timer      |
+| [🧪 ack](commands/ack.md)                       | Acknowledge and silence an active alert              |
+| [🧪 enroll](commands/enroll.md)                 | Enroll a USB keyfile for auto-unlock                 |
+| [🧪 discover](commands/discover.md)             | Scan for braid LUKS devices and rebuild pool.json    |
+| [🧪 recover](commands/recover.md)               | Recover from an interrupted operation                |
+| [tui](commands/tui.md)                          | Interactive dashboard with raw-output Browse tab     |
+| [🧪 ups status](commands/ups-status.md)         | Live UPS state from NUT, with JSON for scripts       |
 
 ## Design
 

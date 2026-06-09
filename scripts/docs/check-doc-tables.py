@@ -2,8 +2,11 @@
 """Validate guide/command table parity across SUMMARY.md, docs/index.md, and README.md.
 
 Source-of-truth rules:
-  - Each guide/command file's H1 owns its title.
-  - Command link labels are the H1 with the leading "braid " removed.
+  - Each guide file's H1 owns its title.
+  - Each command file's H1 owns its bare command name, and its frontmatter owns
+    whether the label is experimental.
+  - Command link labels are "🧪 " plus the bare command name when
+    `experimental: true`, else the bare command name.
   - SUMMARY.md owns the canonical ordering; index.md and README.md must follow it.
 
 Membership is checked transitively: the existing `check-docs` bash recipe verifies
@@ -20,6 +23,8 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[2]
 LINK_RE = re.compile(r"\[([^\]]+)\]\(([^)]+\.md)\)")
+FRONTMATTER_RE = re.compile(r"\A---\n(.*?)\n---\n", re.DOTALL)
+EXPERIMENTAL_EMOJI = "🧪"
 
 
 def read_h1(path: Path) -> str:
@@ -29,9 +34,28 @@ def read_h1(path: Path) -> str:
     raise RuntimeError(f"{path} has no H1 heading")
 
 
-def expected_label(kind: str, h1: str) -> str:
+def read_experimental(path: Path) -> str | None:
+    match = FRONTMATTER_RE.match(path.read_text(encoding="utf-8"))
+    if match is None:
+        return None
+    for line in match.group(1).splitlines():
+        key, sep, value = line.partition(":")
+        if sep and key.strip() == "experimental":
+            return value.strip()
+    return None
+
+
+def expected_label(errors: list[str], kind: str, path: Path, h1: str) -> str:
     if kind == "commands":
-        return h1.removeprefix("braid ")
+        name = h1.removeprefix("braid ")
+        experimental = read_experimental(path)
+        if experimental not in {"true", "false"}:
+            got = "missing" if experimental is None else experimental
+            rel = path.relative_to(ROOT / "docs")
+            errors.append(
+                f"{rel}: experimental frontmatter must be exactly true or false (got {got!r})"
+            )
+        return f"{EXPERIMENTAL_EMOJI} {name}" if experimental == "true" else name
     return h1
 
 
@@ -76,10 +100,11 @@ def collect_canonical(errors: list[str], summary_text: str, heading: str, prefix
     canonical: list[tuple[str, str]] = []
     for label, href in section_links(summary_text, heading, prefix):
         file_key = normalize(href)
-        h1 = read_h1(ROOT / "docs" / file_key)
-        want = expected_label(kind, h1)
+        path = ROOT / "docs" / file_key
+        h1 = read_h1(path)
+        want = expected_label(errors, kind, path, h1)
         if label != want:
-            errors.append(f"SUMMARY.md: {file_key} label {label!r} != H1-derived {want!r}")
+            errors.append(f"SUMMARY.md: {file_key} label {label!r} != canonical {want!r}")
         canonical.append((want, file_key))
     return canonical
 
