@@ -858,7 +858,7 @@ mod tests {
         luks_uuid_ok, mount_fs, ok_raw, open_and_mount_for_test, test_config, test_passphrase,
         test_passphrase_fail, three_disk_membership, two_disk_membership,
     };
-    use crate::types::{ByIdPath, LuksUuid, MountPoint};
+    use crate::types::{ByIdPath, MountPoint};
     use zeroize::Zeroizing;
 
     fn disk(name: &str) -> DiskName {
@@ -2117,17 +2117,7 @@ pool already mounted at /mnt/storage
     #[test]
     fn mount_luks_uuid_mismatch_closed() {
         let config = test_config();
-        let mut membership = two_disk_membership();
-        let disk1_uuid = LuksUuid::parse("11111111-1111-1111-1111-111111111111").unwrap();
-        let disk1 = membership
-            .remove_by_uuid(&disk1_uuid)
-            .expect("disk1 fixture member");
-        membership
-            .insert(
-                LuksUuid::parse("11111111-1111-1111-1111-111111111111").unwrap(),
-                disk1,
-            )
-            .expect("replace disk1 fixture UUID");
+        let membership = two_disk_membership();
 
         let fs = mount_fs(&[
             "/dev/disk/by-id/virtio-disk1",
@@ -2180,17 +2170,7 @@ pool already mounted at /mnt/storage
     #[test]
     fn mount_luks_uuid_mismatch_already_open() {
         let config = test_config();
-        let mut membership = two_disk_membership();
-        let disk1_uuid = LuksUuid::parse("11111111-1111-1111-1111-111111111111").unwrap();
-        let disk1 = membership
-            .remove_by_uuid(&disk1_uuid)
-            .expect("disk1 fixture member");
-        membership
-            .insert(
-                LuksUuid::parse("11111111-1111-1111-1111-111111111111").unwrap(),
-                disk1,
-            )
-            .expect("replace disk1 fixture UUID");
+        let membership = two_disk_membership();
 
         let fs = mount_fs(&[
             "/dev/disk/by-id/virtio-disk1",
@@ -2263,17 +2243,7 @@ pool already mounted at /mnt/storage
     #[test]
     fn mount_luks_uuid_mismatch_refused_even_with_allow_degraded() {
         let config = test_config();
-        let mut membership = two_disk_membership();
-        let disk1_uuid = LuksUuid::parse("11111111-1111-1111-1111-111111111111").unwrap();
-        let disk1 = membership
-            .remove_by_uuid(&disk1_uuid)
-            .expect("disk1 fixture member");
-        membership
-            .insert(
-                LuksUuid::parse("11111111-1111-1111-1111-111111111111").unwrap(),
-                disk1,
-            )
-            .expect("replace disk1 fixture UUID");
+        let membership = two_disk_membership();
 
         let fs = mount_fs(&[
             "/dev/disk/by-id/virtio-disk1",
