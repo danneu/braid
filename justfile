@@ -341,6 +341,14 @@ check-doc-links:
     python3 scripts/docs/check-doc-links.py --selftest
     python3 scripts/docs/check-doc-links.py
 
+# Verify every braid doctor check has a row in docs/commands/doctor.md (and no
+# stale rows). The cargo test first pins expected_names == run_doctor output, so
+# the python guard's code-side source of truth cannot silently go stale.
+check-doctor-table:
+    cargo test --lib valid_config_parses_ok_declared_disks_skips
+    python3 scripts/docs/check-doctor-table-parity.py --selftest
+    python3 scripts/docs/check-doctor-table-parity.py
+
 # Destroy an entire braid pool (dev use only — wipes LUKS signatures + state files)
 destroy config="/etc/braid/config.json":
     ./scripts/braid-destroy.sh {{config}}

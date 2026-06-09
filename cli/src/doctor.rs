@@ -1588,7 +1588,7 @@ fn check_mountpoint_immutable<R: CommandRunner>(ctx: &mut DoctorContext<'_, R>) 
     if !config.systemd_lifecycle() {
         return CheckResult::skip(
             name,
-            "skipped (systemd_lifecycle not configured -- the mountpoint seal is module-managed)",
+            "skipped (systemd_lifecycle not configured -- standalone install; the offline mountpoint seal is a NixOS-module boot feature)",
         );
     }
     let mount_point = config.mount_point().to_owned();
@@ -6502,6 +6502,30 @@ mod tests {
             )),
             "unexpected braid-online probe: {:?}",
             runner.requests()
+        );
+    }
+
+    // Intent: a standalone CLI install (systemd_lifecycle unset) skips
+    //   mountpoint_immutable with a message that names the standalone case and
+    //   does not imply the install is module-managed.
+    // Why it exists: the warn/heal model assumes the module's boot/activation
+    //   re-seal, so there is no invariant to verify without it; the prior
+    //   wording ("the mountpoint seal is module-managed") read to a standalone
+    //   operator as "this install is module-managed" (it is not).
+    // Scenario: hand-written config.json omits systemd_lifecycle, so `braid
+    //   doctor` must skip the seal check with the corrected rationale.
+    #[test]
+    fn mountpoint_immutable_check_skips_when_lifecycle_disabled() {
+        let runner = MockRunner::default();
+        let (_dir, paths) = isolated_paths();
+        let mut ctx = ups_ctx(&runner, &paths, r#"{"mount_point":"/mnt/storage"}"#);
+
+        let r = check_mountpoint_immutable(&mut ctx);
+
+        assert_eq!(r.status, CheckStatus::Skip);
+        assert_eq!(
+            r.message,
+            "skipped (systemd_lifecycle not configured -- standalone install; the offline mountpoint seal is a NixOS-module boot feature)"
         );
     }
 
