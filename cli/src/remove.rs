@@ -1023,9 +1023,23 @@ mod tests {
         );
     }
 
-    // Intent: accepted remove confirmation records the exact assembled prompt.
-    // Why it exists: the confirm seam must receive the formatter output plus
-    //   the single-survivor warning bytes exactly once.
+    /// The single-survivor warning sentence emitted on a 2->1 remove confirm
+    /// (see `RemovePlan::execute`). Pinned here so the present/absent
+    /// assertions in the two confirm tests below stay consistent. Sentence
+    /// only (no trailing newlines) so the checks are robust to
+    /// surrounding-whitespace changes while still pinning the wording; an
+    /// independent copy of production's literal, so a production wording
+    /// change still fails the test.
+    const SINGLE_SURVIVOR_WARNING: &str = "WARNING: Pool will have 1 disk -- no RAID1 redundancy.";
+
+    // Intent: a 2->1 remove confirm shows the single-survivor warning exactly
+    //   once, on the named target's prompt with the correct pool transition.
+    // Why it exists: this is the ONLY coverage of the warning prompt -- the VM
+    //   suite's only redundancy-reducing remove runs `--yes`, which bypasses
+    //   the prompt. Asserting behavior (warning present once, correct target,
+    //   correct transition) instead of byte-exact assembly keeps the test
+    //   pinned to the contract, not to cosmetic prompt layout, while the
+    //   literal still catches wording regressions.
     // Scenario: removing disk2 from a two-disk pool leaves one disk, so the
     //   operator sees the normal remove prompt and the no-RAID1 warning.
     #[test]
@@ -1038,20 +1052,74 @@ mod tests {
         cmd_remove(&runner, &fs, &f.remove_params().yes(false).build())
             .expect("accepted confirm should proceed");
 
-        let mut expected = format!(
-            "{}\n",
-            format_remove_confirm(
-                &RemoveConfirmDisk {
-                    name: "disk2",
-                    hw: Some(&confirm::DiskHwInfo::default()),
-                    devid: 2,
-                },
-                1,
-                2,
-            )
+        let prompts = f.confirm.prompts();
+        assert_eq!(
+            prompts.len(),
+            1,
+            "confirm must be invoked exactly once: {prompts:?}"
         );
-        expected.push_str("WARNING: Pool will have 1 disk -- no RAID1 redundancy.\n\n");
-        assert_eq!(f.confirm.prompts(), vec![expected]);
+        let prompt = &prompts[0];
+        assert_eq!(
+            prompt.matches(SINGLE_SURVIVOR_WARNING).count(),
+            1,
+            "single-survivor warning must appear exactly once: {prompt:?}"
+        );
+        assert!(
+            prompt.contains("disk2"),
+            "prompt must name the target disk: {prompt:?}"
+        );
+        assert!(
+            prompt.contains("devid 2"),
+            "prompt must name the target devid: {prompt:?}"
+        );
+        assert!(
+            prompt.contains("2 disks -> 1 disk"),
+            "prompt must show the 2->1 pool transition: {prompt:?}"
+        );
+    }
+
+    // Intent: a redundancy-preserving remove (3->2) shows the normal confirm
+    //   prompt WITHOUT the single-survivor warning.
+    // Why it exists: the warning is gated on `remaining == 1`; the negative
+    //   side of that gate was untested, so a regression that always (or never)
+    //   appended the warning would pass the 2->1 test alone.
+    // Scenario: removing disk2 from a three-disk pool leaves two disks, so the
+    //   operator sees the remove prompt but no no-RAID1 warning.
+    #[test]
+    fn cmd_remove_3to2_confirm_omits_redundancy_warning() {
+        let f = PoolFixture::three_disk_healthy();
+        f.confirm.accept();
+        let runner = RemovalPool::three_disk().install(MockRunner::default());
+        let fs = MockFs::storage(vec![]);
+
+        cmd_remove(&runner, &fs, &f.remove_params().yes(false).build())
+            .expect("accepted confirm should proceed");
+
+        let prompts = f.confirm.prompts();
+        assert_eq!(
+            prompts.len(),
+            1,
+            "confirm must be invoked exactly once: {prompts:?}"
+        );
+        let prompt = &prompts[0];
+        // Positive: it is the real 3->2 remove prompt for the named target...
+        assert!(
+            prompt.contains("disk2"),
+            "prompt must name the target disk: {prompt:?}"
+        );
+        assert!(
+            prompt.contains("devid 2"),
+            "prompt must name the target devid: {prompt:?}"
+        );
+        assert!(
+            prompt.contains("3 disks -> 2 disks"),
+            "prompt must show the 3->2 pool transition: {prompt:?}"
+        );
+        // ...negative: but no single-survivor warning, because two disks remain.
+        assert!(
+            !prompt.contains(SINGLE_SURVIVOR_WARNING),
+            "3->2 remove must not show the no-RAID1 warning: {prompt:?}"
+        );
     }
 
     // Intent: accepted remove confirmation does not block the mutation.
