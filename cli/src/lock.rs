@@ -1944,6 +1944,20 @@ mod tests {
         }
     }
 
+    /// Inactive-mapper status fixture matching real cryptsetup output: the
+    /// "is inactive." line lands on stdout (cryptsetup `action_status` logs it via
+    /// `log_std`/CRYPT_LOG_NORMAL), stderr is empty, exit is 4 (`-ENODEV`). Drives
+    /// classify_candidate_mapper's Inactive fail-closed skip; `parse_cryptsetup_status`
+    /// keys inactivity off this stdout line.
+    fn cryptsetup_status_inactive(mapper: &str) -> RawCommandOutput {
+        RawCommandOutput {
+            cmd: format!("cryptsetup status {mapper}"),
+            stdout: format!("/dev/mapper/{mapper} is inactive.\n"),
+            stderr: String::new(),
+            exit_status: 4,
+        }
+    }
+
     // Intent: planner-derived members_known_closed lists members in
     //   DiskName order regardless of underlying UUID order.
     // Why it exists: the executor prelude consumes this field directly,
@@ -4965,6 +4979,104 @@ mod tests {
         assert!(
             !acc.cleanup.is_uncertain(),
             "readable UUID should not be skipped"
+        );
+    }
+
+    // Intent: a scanned braid-* candidate whose `cryptsetup status` reports a
+    //   null backing device is skipped -- never closed as orphan-by-name.
+    // Why it exists: a null-backing mapper's LUKS UUID cannot be read, so its
+    //   identity is unprovable; closing it by the braid-* name would be a
+    //   fail-open in lock teardown. Pins the BackingDevice::Null arm, whose
+    //   distinct error text was previously unreachable by any test.
+    // Scenario: seed 707 -- pool unmounted, /dev/mapper/braid-null is listed but
+    //   `cryptsetup status` returns an active mapping with `device: (null)`.
+    #[test]
+    fn uuid_scanned_fallback_null_backing_candidate_is_skipped() {
+        let fs = lock_fs(&["/dev/mapper/braid-null"]);
+        let membership = lock_test_membership();
+        let runner = MockRunner::default().with_output(
+            CmdRequest::CryptsetupStatus {
+                mapper: MapperName("braid-null".into()),
+            },
+            cryptsetup_status_active_null("braid-null"),
+        );
+        let mut acc = CloseSetAccumulator::default();
+        let close_set = build_close_sets_uuid_scanned_fallback(&runner, &fs, &membership, &mut acc);
+
+        assert!(
+            close_set.is_empty(),
+            "null-backing candidate must not enter the close set"
+        );
+        assert!(member_summaries(&close_set).is_empty());
+        assert!(
+            orphan_summaries(&close_set).is_empty(),
+            "null-backing mapper must not be demoted to orphan-by-name",
+        );
+        assert!(
+            acc.cleanup.is_uncertain(),
+            "unprovable skip must mark cleanup uncertain"
+        );
+        assert!(
+            acc.notes.iter().any(|note| matches!(
+                note,
+                PreviewNote::Warn(body)
+                    if body.contains("skipping mapper braid-null") && body.contains("reports null")
+            )),
+            "null-distinct skip warn expected, got: {:?}",
+            acc.notes,
+        );
+        assert!(
+            !runner
+                .requests()
+                .iter()
+                .any(|r| matches!(r, CmdRequest::CryptsetupLuksUuid { .. })),
+            "null backing must short-circuit before any luksUUID read",
+        );
+    }
+
+    // Intent: a scanned braid-* candidate whose `cryptsetup status` reports the
+    //   mapper inactive is skipped -- never closed as orphan-by-name.
+    // Why it exists: an inactive status (the dm slot was torn down between the
+    //   /dev/mapper scan and the status call) proves neither member nor orphan
+    //   identity; closing by name would be fail-open. Pins the
+    //   CryptsetupStatusOutput::Inactive arm, previously untested here.
+    // Scenario: seed 708 -- pool unmounted, /dev/mapper/braid-gone is listed but
+    //   `cryptsetup status` exits 4 with "is inactive.".
+    #[test]
+    fn uuid_scanned_fallback_inactive_candidate_is_skipped() {
+        let fs = lock_fs(&["/dev/mapper/braid-gone"]);
+        let membership = lock_test_membership();
+        let runner = MockRunner::default().with_output(
+            CmdRequest::CryptsetupStatus {
+                mapper: MapperName("braid-gone".into()),
+            },
+            cryptsetup_status_inactive("braid-gone"),
+        );
+        let mut acc = CloseSetAccumulator::default();
+        let close_set = build_close_sets_uuid_scanned_fallback(&runner, &fs, &membership, &mut acc);
+
+        assert!(close_set.is_empty());
+        assert!(member_summaries(&close_set).is_empty());
+        assert!(
+            orphan_summaries(&close_set).is_empty(),
+            "inactive mapper must not be demoted to orphan-by-name",
+        );
+        assert!(acc.cleanup.is_uncertain());
+        assert!(
+            acc.notes.iter().any(|note| matches!(
+                note,
+                PreviewNote::Warn(body)
+                    if body.contains("skipping mapper braid-gone") && body.contains("mapper is inactive")
+            )),
+            "inactive-distinct skip warn expected, got: {:?}",
+            acc.notes,
+        );
+        assert!(
+            !runner
+                .requests()
+                .iter()
+                .any(|r| matches!(r, CmdRequest::CryptsetupLuksUuid { .. })),
+            "inactive status must short-circuit before any luksUUID read",
         );
     }
 
