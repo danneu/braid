@@ -629,6 +629,16 @@ pub(crate) fn status_cfg_present_not_luks(name: &str, by_id: &str) -> Vec<Config
     }]
 }
 
+/// One-element config-disk set in the `Absent` state, so `build_disk_views`
+/// emits a `Missing` row -- the input shape the compact devid tests need.
+pub(crate) fn status_cfg_absent(name: &str, by_id: &str) -> Vec<ConfigDisk> {
+    vec![ConfigDisk {
+        name: DiskName::parse(name).expect("valid disk name in test fixture"),
+        by_id_path: ByIdPath::parse(by_id).unwrap(),
+        state: ConfigDiskState::Absent,
+    }]
+}
+
 /// Canonical three-disk RAID1 status report with caller-supplied scrub state.
 pub(crate) fn status_report_with_scrub(last_scrub: ScrubReport) -> StatusReport {
     StatusReport {

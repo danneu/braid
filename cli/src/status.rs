@@ -247,6 +247,10 @@ impl DiskErrors {
 // Compact drive (always-on summary)
 // ---------------------------------------------------------------------------
 
+/// Render-only `Drives:` summary row -- never serialized (the JSON surface
+/// carries `DiskReport` instead). Built in `build_disk_views` alongside the
+/// detail row it summarizes, so its `status` is that row's `DiskReport.status`
+/// by construction and the two cannot contradict (decision 024).
 struct CompactDrive {
     name: String,
     device_short: String,
@@ -254,64 +258,8 @@ struct CompactDrive {
     status: DiskStatus,
 }
 
-/// `member_status` carries each member's detail-section `DiskStatus` so the
-/// compact summary renders the same verdict as the detail view (decision 024);
-/// unpooled members default to `Missing` when absent from the map.
-fn build_compact_drives(
-    pool: &PoolState,
-    membership: &PoolMembership,
-    member_status: &HashMap<String, DiskStatus>,
-) -> Vec<CompactDrive> {
-    let mut drives = Vec::new();
-
-    // Present pool devices
-    let pool_luks_uuids: HashSet<&LuksUuid> = pool.devices.iter().map(|d| &d.luks_uuid).collect();
-    let mut present: Vec<(&PoolDevice, String)> = pool
-        .devices
-        .iter()
-        .map(|pd| (pd, membership::present_device_name(membership, pd)))
-        .collect();
-    present.sort_by(|(_, left), (_, right)| left.cmp(right));
-    for (pd, name) in present {
-        let device_short = pd
-            .underlying
-            .strip_prefix("/dev/")
-            .unwrap_or(&pd.underlying)
-            .to_owned();
-        drives.push(CompactDrive {
-            name,
-            device_short,
-            devid: Some(pd.devid),
-            status: DiskStatus::Present,
-        });
-    }
-
-    // Unpooled membership disks
-    let alert_devids: HashSet<u64> = pool.alert_missing_devids().into_iter().collect();
-    for (uuid, member) in membership.iter_by_name() {
-        if pool_luks_uuids.contains(uuid) {
-            continue;
-        }
-        let name = member.name.as_str();
-        let devid = member.devid.filter(|d| alert_devids.contains(d));
-        drives.push(CompactDrive {
-            name: name.to_owned(),
-            device_short: "-".to_owned(),
-            devid,
-            // Mirror the detail section's verdict for this member; a genuinely
-            // absent member has no detail report and falls back to Missing.
-            status: member_status
-                .get(name)
-                .copied()
-                .unwrap_or(DiskStatus::Missing),
-        });
-    }
-
-    drives
-}
-
 /// Resolve every btrfs-surfaced devid to the display name status should show.
-/// Present devices mirror `build_disk_reports`'s UUID-first name rule; missing
+/// Present devices mirror `build_disk_views`'s UUID-first name rule; missing
 /// and null-underlying entries use persisted devid only as the no-live-UUID
 /// fallback authorized for display joins.
 /// `membership` is `load_membership`-validated, so `by_devid`'s `DuplicateDevid` is
@@ -369,12 +317,18 @@ pub enum StatusError {
 // ---------------------------------------------------------------------------
 
 // ---------------------------------------------------------------------------
-// Internal types (verbose context)
+// Internal types (disk views)
 // ---------------------------------------------------------------------------
 
-struct VerboseContext {
+/// The three per-disk projections of a single classification pass, returned by
+/// `build_disk_views`: `disks` (machine/JSON), `human_details` (verbose human
+/// detail), and `compact_drives` (the always-on `Drives:` summary). Holding
+/// all three behind one builder is what guarantees they cannot disagree on a
+/// disk's status (decision 024).
+struct DiskViews {
     disks: Vec<DiskReport>,
     human_details: Vec<HumanDisk>,
+    compact_drives: Vec<CompactDrive>,
 }
 
 struct HumanDisk {
@@ -562,6 +516,11 @@ fn build_status<R: CommandRunner, F: Filesystem>(
     // `Unknown` row. A hijacked `braid-<name>` mapper backing a member that is
     // already live-and-healthy under another mapper is decision-024's textbook
     // tolerated-drift case -- it degrades one member, not the whole report.
+    //
+    // Every member lands in exactly one of these two vecs (Ok -> config_disks,
+    // Err -> probe_failures). `build_disk_views` relies on that total partition:
+    // its unpooled rows equal "every member not live in the pool," so the
+    // folded compact set stays equal to the detail set with no separate pass.
     let mut config_disks: Vec<ConfigDisk> = Vec::with_capacity(members.len());
     let mut probe_failures: Vec<ConfigProbeFailure> = Vec::new();
     for member in members {
@@ -590,7 +549,11 @@ fn build_status<R: CommandRunner, F: Filesystem>(
             BtrfsDeviceStatsOutput { devices: vec![] }
         }
     };
-    let verbose_ctx = build_disk_reports(
+    // One classification pass projects each disk into the JSON, verbose, and
+    // compact surfaces at once, so the always-on `Drives:` summary cannot
+    // contradict the detail verdict (decision 024 swap/reformat detection) --
+    // no separate compact pass, no bridge map to keep them in sync.
+    let disk_views = build_disk_views(
         runner,
         &membership,
         &config_disks,
@@ -598,17 +561,6 @@ fn build_status<R: CommandRunner, F: Filesystem>(
         &pool,
         &device_stats,
     );
-
-    // Compact and detail must agree on each unpooled member's status (decision
-    // 024 swap/reformat detection): derive the compact summary from the detail
-    // reports so the two sub-surfaces of `braid status` can never contradict
-    // (e.g. `missing` vs `LUKS UUID MISMATCH` for the same present disk).
-    let member_status: HashMap<String, DiskStatus> = verbose_ctx
-        .disks
-        .iter()
-        .map(|report| (report.name.clone(), report.status))
-        .collect();
-    let compact_drives = build_compact_drives(&pool, &membership, &member_status);
 
     let alert_state = resolve_alert_state(paths);
 
@@ -627,7 +579,7 @@ fn build_status<R: CommandRunner, F: Filesystem>(
         last_scrub: Some(last_scrub),
         balance: Some(balance),
         allocation: df_summary.map(|summary| summary.allocation),
-        disks: verbose_ctx.disks,
+        disks: disk_views.disks,
         advisories,
         alert_active: alert_state.active(),
         alert_causes: alert_state.causes,
@@ -637,8 +589,8 @@ fn build_status<R: CommandRunner, F: Filesystem>(
     Ok(BuiltStatus {
         report,
         mounted_extras: Some(MountedExtras {
-            compact_drives,
-            human_details: verbose_ctx.human_details,
+            compact_drives: disk_views.compact_drives,
+            human_details: disk_views.human_details,
             devid_names,
         }),
     })
@@ -1023,21 +975,36 @@ struct ConfigProbeFailure {
 }
 
 // ---------------------------------------------------------------------------
-// build_disk_reports
+// build_disk_views
 // ---------------------------------------------------------------------------
 
-fn build_disk_reports<R: CommandRunner>(
+/// Classify each present/configured disk exactly once and project the verdict
+/// into all three `braid status` surfaces: `DiskReport` (machine/JSON),
+/// `HumanDisk` (verbose human detail), and `CompactDrive` (the always-on
+/// `Drives:` summary). One classification point is what makes those surfaces
+/// unable to contradict on a disk's status (decision 024) -- the compact row
+/// carries the same `status` local its `DiskReport` does, by construction.
+///
+/// The folded unpooled set (`config_disks` + `probe_failures`) equals "every
+/// member not live in the pool" only because `build_status` partitions every
+/// member into one of those two before calling here; see the probe loop there.
+fn build_disk_views<R: CommandRunner>(
     runner: &R,
     membership: &PoolMembership,
     config_disks: &[ConfigDisk],
     probe_failures: &[ConfigProbeFailure],
     pool: &PoolState,
     device_stats: &BtrfsDeviceStatsOutput,
-) -> VerboseContext {
+) -> DiskViews {
     let pool_uuid_set: HashSet<&LuksUuid> = pool.devices.iter().map(|d| &d.luks_uuid).collect();
+    // Alert-confirmed missing devids gate the compact row's persisted devid:
+    // membership devids are a display fallback, shown only when live btrfs
+    // currently reports the devid missing (decision 024 display-join rule).
+    let alert_devids: HashSet<u64> = pool.alert_missing_devids().into_iter().collect();
 
     let mut disk_reports = Vec::new();
     let mut human_details = Vec::new();
+    let mut compact_drives = Vec::new();
 
     // Present pool devices
     let mut present: Vec<(&PoolDevice, Option<&membership::DiskMember>, String)> = pool
@@ -1113,6 +1080,20 @@ fn build_disk_reports<R: CommandRunner>(
             smart: Some(smart),
         });
 
+        // Compact `Drives:` row for the same present device. Inside the
+        // name-sorted loop so present compact rows inherit that order.
+        let device_short = pd
+            .underlying
+            .strip_prefix("/dev/")
+            .unwrap_or(&pd.underlying)
+            .to_owned();
+        compact_drives.push(CompactDrive {
+            name: disk_name.clone(),
+            device_short,
+            devid: Some(pd.devid),
+            status: DiskStatus::Present,
+        });
+
         human_details.push(HumanDisk {
             name: disk_name,
             member_name: matched_member.map(|m| m.name.clone()),
@@ -1133,7 +1114,7 @@ fn build_disk_reports<R: CommandRunner>(
     // name-ordered because `iter_by_name` pre-sorts `config_disks`, and probe
     // failures arrive in that same order. To keep both kinds interleaved by
     // name -- not concatenated -- collect both here, sort once, then drain.
-    let mut unpooled: Vec<(DiskReport, HumanDisk)> = Vec::new();
+    let mut unpooled: Vec<(DiskReport, HumanDisk, CompactDrive)> = Vec::new();
 
     // Unpooled config disks (not matched to pool)
     for cd in config_disks {
@@ -1221,15 +1202,25 @@ fn build_disk_reports<R: CommandRunner>(
                 errors: None,
                 smart: None,
             },
+            CompactDrive {
+                name: cd.name.as_str().to_owned(),
+                device_short: "-".to_owned(),
+                devid: membership
+                    .by_name(&cd.name)
+                    .and_then(|(_, m)| m.devid)
+                    .filter(|d| alert_devids.contains(d)),
+                status,
+            },
         ));
     }
 
     // Probe failures have no `ConfigDisk` to classify. A live member is already
     // rendered `Present` by the present loop above (and its `build_status`
     // advisory carries the fault), so skip it here. A non-live member gets a
-    // cause-neutral `Unknown` row so it is neither silently dropped nor forced
-    // to `Missing` by `build_compact_drives`'s missing-when-absent fallback --
-    // `unknown` is decision-024's "braid cannot classify the state."
+    // cause-neutral `Unknown` row that projects directly into the compact
+    // summary -- `unknown` is decision-024's "braid cannot classify the
+    // state," so the member is neither silently dropped nor mislabeled
+    // `missing`.
     for failure in probe_failures {
         let membership_uuid_live = membership
             .by_name(&failure.name)
@@ -1262,21 +1253,32 @@ fn build_disk_reports<R: CommandRunner>(
                 errors: None,
                 smart: None,
             },
+            CompactDrive {
+                name: failure.name.as_str().to_owned(),
+                device_short: "-".to_owned(),
+                devid: membership
+                    .by_name(&failure.name)
+                    .and_then(|(_, m)| m.devid)
+                    .filter(|d| alert_devids.contains(d)),
+                status: DiskStatus::Unknown,
+            },
         ));
     }
 
     // Single name-sorted unpooled block (mirrors the present block's sort).
     // Idempotent for the Ok-only case, so existing output stays byte-identical
     // when there are no probe failures.
-    unpooled.sort_by(|(a, _), (b, _)| a.name.cmp(&b.name));
-    for (report, human) in unpooled {
+    unpooled.sort_by(|(a, _, _), (b, _, _)| a.name.cmp(&b.name));
+    for (report, human, compact) in unpooled {
         disk_reports.push(report);
         human_details.push(human);
+        compact_drives.push(compact);
     }
 
-    VerboseContext {
+    DiskViews {
         disks: disk_reports,
         human_details,
+        compact_drives,
     }
 }
 
@@ -1693,7 +1695,7 @@ mod tests {
         status_btrfs_scrub_finished_with_errors, status_btrfs_scrub_interrupted,
         status_btrfs_scrub_never, status_btrfs_show_1disk, status_btrfs_show_3disk_1missing,
         status_btrfs_show_3disk_1null_underlying_1missing, status_btrfs_show_3disk_missing_devid3,
-        status_btrfs_usage_raw, status_cfg_present_not_luks, status_config,
+        status_btrfs_usage_raw, status_cfg_absent, status_cfg_present_not_luks, status_config,
         status_cryptsetup_status_active, status_cryptsetup_uuid_ok, status_disk_report_missing,
         status_disk_report_named, status_fs_ext4, status_fs_mounted, status_fs_not_mounted,
         status_fs_one_disk, status_fs_three_disk, status_is_luks_raw, status_lsblk_field_ok,
@@ -5018,7 +5020,7 @@ mod tests {
     // Intent: a present pool member renders its persisted by-id path and
     // operator name via the LUKS-UUID membership join, not the mapper basename
     // fallback.
-    // Why it exists: the by_id arm of build_disk_reports was only checked for
+    // Why it exists: the by_id arm of build_disk_views was only checked for
     // presence at the VM layer, so a regression to /dev/mapper/* would still
     // pass while verbose human output showed the wrong Device line.
     // Scenario: a healthy mounted pool whose pool.json names differ from the
@@ -5157,6 +5159,31 @@ mod tests {
             toshiba3_row.contains("devid=3"),
             "missing compact row must show live-confirmed devid, got:\n{human}"
         );
+
+        // The main fold invariant (section 5): the non-present compact set must
+        // equal the non-present detail set. Map equality is two-way and asserts
+        // equal status per name, so it catches a *dropped* compact row whose
+        // detail row survives (the silent-drop a one-way "every compact row has
+        // a detail row" check would miss) and an extra or misclassified compact
+        // row -- the regression a future "skip live-member probe" optimization
+        // could introduce.
+        let detail_nonpresent: std::collections::BTreeMap<&str, DiskStatus> = built
+            .report
+            .disks
+            .iter()
+            .filter(|d| d.status != DiskStatus::Present)
+            .map(|d| (d.name.as_str(), d.status))
+            .collect();
+        let compact_nonpresent: std::collections::BTreeMap<&str, DiskStatus> = extras
+            .compact_drives
+            .iter()
+            .filter(|d| d.status != DiskStatus::Present)
+            .map(|d| (d.name.as_str(), d.status))
+            .collect();
+        assert_eq!(
+            detail_nonpresent, compact_nonpresent,
+            "non-present compact set must equal non-present detail set"
+        );
     }
 
     #[test]
@@ -5241,11 +5268,11 @@ mod tests {
     }
 
     // =======================================================================
-    // build_disk_reports: PresentNotLuks classification
+    // build_disk_views: PresentNotLuks classification
     // =======================================================================
 
     /// Intent: when probe_luks_header itself cannot run (no mock outputs),
-    /// build_disk_reports must collapse the unpooled PresentNotLuks disk to
+    /// build_disk_views must collapse the unpooled PresentNotLuks disk to
     /// the generic Unknown bucket rather than guess at Unreadable.
     ///
     /// Why: if we cannot prove that the luksUuid failure came from an
@@ -5255,12 +5282,12 @@ mod tests {
     /// Scenario: a declared pool member with PresentNotLuks state, no
     /// CryptsetupIsLuks/LuksDumpText outputs configured on the runner.
     #[test]
-    fn build_disk_reports_present_not_luks_probe_failed_falls_back_to_unknown() {
+    fn build_disk_views_present_not_luks_probe_failed_falls_back_to_unknown() {
         let config_disks = status_cfg_present_not_luks("disk1", "/dev/disk/by-id/disk1");
         let runner = MockRunner::default();
         let stats = BtrfsDeviceStatsOutput { devices: vec![] };
 
-        let ctx = build_disk_reports(
+        let ctx = build_disk_views(
             &runner,
             &PoolMembership::empty(),
             &config_disks,
@@ -5273,7 +5300,7 @@ mod tests {
     }
 
     /// Intent: when probe_luks_header reports Unreadable on the
-    /// PresentNotLuks branch, build_disk_reports must surface
+    /// PresentNotLuks branch, build_disk_views must surface
     /// DiskStatus::LuksHeaderUnreadable.
     ///
     /// Why: status reporting is the user-facing surface that distinguishes an
@@ -5283,7 +5310,7 @@ mod tests {
     /// Scenario: PresentNotLuks config disk where cryptsetup isLuks exits
     /// non-zero (crypt_load cannot read or validate the header).
     #[test]
-    fn build_disk_reports_present_not_luks_unreadable_maps_to_luks_header_unreadable() {
+    fn build_disk_views_present_not_luks_unreadable_maps_to_luks_header_unreadable() {
         let config_disks = status_cfg_present_not_luks("disk1", "/dev/disk/by-id/disk1");
         let runner = MockRunner::default().with_output(
             CmdRequest::CryptsetupIsLuks {
@@ -5297,7 +5324,7 @@ mod tests {
         );
         let stats = BtrfsDeviceStatsOutput { devices: vec![] };
 
-        let ctx = build_disk_reports(
+        let ctx = build_disk_views(
             &runner,
             &PoolMembership::empty(),
             &config_disks,
@@ -5311,7 +5338,7 @@ mod tests {
 
     /*
      * Intent: when probe_luks_header reports Ok after probe_config_disk saw
-     * PresentNotLuks, build_disk_reports must classify the disk as Unknown
+     * PresentNotLuks, build_disk_views must classify the disk as Unknown
      * rather than a confident header-problem verdict.
      *
      * Why it exists: a clean isLuks re-probe contradicts the original luksUuid
@@ -5325,7 +5352,7 @@ mod tests {
      * and the original luksUuid exit-non-zero was a transient failure.
      */
     #[test]
-    fn build_disk_reports_present_not_luks_inconsistent_falls_back_to_unknown() {
+    fn build_disk_views_present_not_luks_inconsistent_falls_back_to_unknown() {
         let config_disks = status_cfg_present_not_luks("disk1", "/dev/disk/by-id/disk1");
         let runner = MockRunner::default().with_output(
             CmdRequest::CryptsetupIsLuks {
@@ -5335,7 +5362,7 @@ mod tests {
         );
         let stats = BtrfsDeviceStatsOutput { devices: vec![] };
 
-        let ctx = build_disk_reports(
+        let ctx = build_disk_views(
             &runner,
             &PoolMembership::empty(),
             &config_disks,
@@ -5350,7 +5377,7 @@ mod tests {
     /*
      * Intent: when a config disk's by_id LUKS header probe failed
      * (PresentNotLuks) but its membership UUID is already live in the pool,
-     * build_disk_reports must emit exactly one Present row for that disk in
+     * build_disk_views must emit exactly one Present row for that disk in
      * both the JSON disks array and the verbose human output, not a duplicate
      * Unknown/LuksHeader* row from the unpooled fall-through.
      *
@@ -5364,7 +5391,7 @@ mod tests {
      * mocks exist, so probe_luks_header would return ProbeFailed if it ran.
      */
     #[test]
-    fn build_disk_reports_skips_unpooled_row_when_membership_uuid_live_for_present_not_luks() {
+    fn build_disk_views_skips_unpooled_row_when_membership_uuid_live_for_present_not_luks() {
         let pool = PoolState {
             mounted: true,
             devices: vec![PoolDevice {
@@ -5384,7 +5411,7 @@ mod tests {
         let runner = MockRunner::default();
         let stats = BtrfsDeviceStatsOutput { devices: vec![] };
 
-        let ctx = build_disk_reports(&runner, &membership, &config_disks, &[], &pool, &stats);
+        let ctx = build_disk_views(&runner, &membership, &config_disks, &[], &pool, &stats);
 
         assert_eq!(ctx.disks.len(), 1, "disks: {:?}", ctx.disks);
         assert_eq!(ctx.disks[0].status, DiskStatus::Present);
@@ -5439,7 +5466,7 @@ mod tests {
      * handle and a separate disk1 diagnostic row.
      */
     #[test]
-    fn build_disk_reports_foreign_mapper_name_does_not_hide_missing_member() {
+    fn build_disk_views_foreign_mapper_name_does_not_hide_missing_member() {
         let pool = PoolState {
             mounted: true,
             devices: vec![PoolDevice {
@@ -5459,7 +5486,7 @@ mod tests {
         let runner = MockRunner::default();
         let stats = BtrfsDeviceStatsOutput { devices: vec![] };
 
-        let ctx = build_disk_reports(&runner, &membership, &config_disks, &[], &pool, &stats);
+        let ctx = build_disk_views(&runner, &membership, &config_disks, &[], &pool, &stats);
 
         assert_eq!(ctx.disks.len(), 2, "disks: {:?}", ctx.disks);
         assert_eq!(ctx.disks[0].name, "braid-disk1");
@@ -5488,7 +5515,7 @@ mod tests {
      * probes as PresentLuks UUID U9 and the mounted pool also reports U9.
      */
     #[test]
-    fn build_disk_reports_foreign_config_uuid_classified_as_uuid_mismatch() {
+    fn build_disk_views_foreign_config_uuid_classified_as_uuid_mismatch() {
         let foreign_uuid = LuksUuid::parse("99999999-9999-9999-9999-999999999999").unwrap();
         let pool = PoolState {
             mounted: true,
@@ -5517,7 +5544,7 @@ mod tests {
         let runner = MockRunner::default();
         let stats = BtrfsDeviceStatsOutput { devices: vec![] };
 
-        let ctx = build_disk_reports(&runner, &membership, &config_disks, &[], &pool, &stats);
+        let ctx = build_disk_views(&runner, &membership, &config_disks, &[], &pool, &stats);
 
         assert_eq!(ctx.disks.len(), 2, "disks: {:?}", ctx.disks);
         assert_eq!(ctx.disks[0].name, "braid-disk1");
@@ -5553,7 +5580,7 @@ mod tests {
      * that UUID.
      */
     #[test]
-    fn build_disk_reports_present_luks_matching_uuid_offline_classified_as_offline() {
+    fn build_disk_views_present_luks_matching_uuid_offline_classified_as_offline() {
         let membership_uuid = LuksUuid::parse("11111111-1111-1111-1111-111111111111").unwrap();
         let pool = PoolState {
             mounted: true,
@@ -5577,7 +5604,7 @@ mod tests {
         let runner = MockRunner::default();
         let stats = BtrfsDeviceStatsOutput { devices: vec![] };
 
-        let ctx = build_disk_reports(&runner, &membership, &config_disks, &[], &pool, &stats);
+        let ctx = build_disk_views(&runner, &membership, &config_disks, &[], &pool, &stats);
 
         assert_eq!(ctx.disks.len(), 1, "disks: {:?}", ctx.disks);
         assert_eq!(ctx.disks[0].name, "disk1");
@@ -5641,7 +5668,7 @@ mod tests {
         let config_disks: Vec<ConfigDisk> = vec![];
         let stats = BtrfsDeviceStatsOutput { devices: vec![] };
 
-        let ctx = build_disk_reports(&runner, &membership, &config_disks, &[], &pool, &stats);
+        let ctx = build_disk_views(&runner, &membership, &config_disks, &[], &pool, &stats);
 
         let disk = ctx
             .human_details
@@ -5661,7 +5688,7 @@ mod tests {
     // Scenario: a pool whose devids run opposite to disk names still shows
     // `alpha` before `bravo`, while preserving present-then-missing grouping.
     #[test]
-    fn build_disk_reports_sorts_present_rows_by_name_not_devid() {
+    fn build_disk_views_sorts_present_rows_by_name_not_devid() {
         let (bravo_uuid, bravo_member) =
             disk_member_with(951, "bravo", "/dev/disk/by-id/disk-bravo", Some(1), None);
         let (alpha_uuid, alpha_member) =
@@ -5728,7 +5755,7 @@ mod tests {
         let runner = MockRunner::default();
         let stats = BtrfsDeviceStatsOutput { devices: vec![] };
 
-        let ctx = build_disk_reports(&runner, &membership, &config_disks, &[], &pool, &stats);
+        let ctx = build_disk_views(&runner, &membership, &config_disks, &[], &pool, &stats);
 
         let disk_rows: Vec<(&str, DiskStatus)> = ctx
             .disks
@@ -5760,7 +5787,7 @@ mod tests {
     // Scenario: one pool row is a foreign `braid-disk1` mapper with errors
     // and another pool row is the real disk1 member with errors.
     #[test]
-    fn build_disk_reports_routes_foreign_mapper_errors_to_doctor() {
+    fn build_disk_views_routes_foreign_mapper_errors_to_doctor() {
         use crate::parse::types::DeviceErrorStats;
 
         let member_uuid = LuksUuid::parse("11111111-1111-1111-1111-111111111111").unwrap();
@@ -5819,7 +5846,7 @@ mod tests {
         let runner = MockRunner::default();
         let membership = status_membership_1disk();
 
-        let ctx = build_disk_reports(&runner, &membership, &config_disks, &[], &pool, &stats);
+        let ctx = build_disk_views(&runner, &membership, &config_disks, &[], &pool, &stats);
 
         let foreign = ctx
             .human_details
@@ -5884,7 +5911,7 @@ mod tests {
     // Scenario: disk1 is declared in membership and config, but the mounted
     // pool has no live device for it.
     #[test]
-    fn build_disk_reports_missing_member_keeps_replace_action_target() {
+    fn build_disk_views_missing_member_keeps_replace_action_target() {
         let config_disks = vec![ConfigDisk {
             name: DiskName::parse("disk1").unwrap(),
             by_id_path: ByIdPath::parse("/dev/disk/by-id/disk1").unwrap(),
@@ -5894,7 +5921,7 @@ mod tests {
         let stats = BtrfsDeviceStatsOutput { devices: vec![] };
         let membership = status_membership_1disk();
 
-        let ctx = build_disk_reports(
+        let ctx = build_disk_views(
             &runner,
             &membership,
             &config_disks,
@@ -6059,107 +6086,40 @@ mod tests {
     // Compact drive tests
     // =======================================================================
 
+    // Intent: an `Absent` config disk projects into a `missing` compact row.
+    // Why it exists: the compact `Drives:` summary is now folded into
+    //   `build_disk_views`, so the Missing verdict must travel the same
+    //   classification path the detail row does (decision 024).
+    // Scenario: disk1 is a declared member with no live pool device and an
+    //   Absent config-disk probe -> one missing compact row.
     #[test]
     fn status_compact_missing_disk() {
-        let pool = PoolState {
-            mounted: true,
-            devices: vec![],
-            missing_count: 0,
-            missing_devids: vec![],
-            total_devices: 0,
-            fsid: None,
-            null_underlying: vec![],
-        };
+        let pool = status_pool_empty();
         let membership = status_membership_1disk();
-        let drives = build_compact_drives(&pool, &membership, &HashMap::new());
-        assert_eq!(drives.len(), 1);
-        assert_eq!(drives[0].status, DiskStatus::Missing);
-    }
+        let config_disks = status_cfg_absent("disk1", "/dev/disk/by-id/disk1");
+        let runner = MockRunner::default();
+        let stats = BtrfsDeviceStatsOutput { devices: vec![] };
 
-    // Intent: the compact summary renders an unpooled member's detail-section
-    //   status -- a mismatch member shows `luks-uuid-mismatch`, while a
-    //   genuinely absent member (no detail report) still shows `missing`.
-    // Why it exists: compact used to hardcode every unpooled member as
-    //   `missing`, so a present-but-reformatted disk that the detail section
-    //   flagged `LUKS UUID MISMATCH` rendered `missing` on the literal primary
-    //   glance -- a same-invocation contradiction. Deriving compact from the
-    //   detail reports (decision 024) closes that drift.
-    // Scenario: two declared members, neither assembled into the pool. The
-    //   detail pass classified disk1 as LuksUuidMismatch (its header was
-    //   reformatted) and produced no distinct verdict for disk2 (truly
-    //   unplugged), so disk2 falls back to Missing.
-    #[test]
-    fn build_compact_drives_unpooled_member_mirrors_detail_status() {
-        let (disk1_uuid, disk1_member) =
-            disk_member_with(101, "disk1", "/dev/disk/by-id/disk1", None, None);
-        let (disk2_uuid, disk2_member) =
-            disk_member_with(102, "disk2", "/dev/disk/by-id/disk2", None, None);
-        let membership =
-            membership_from(vec![(disk1_uuid, disk1_member), (disk2_uuid, disk2_member)]);
-        let pool = PoolState {
-            mounted: true,
-            devices: vec![],
-            missing_count: 2,
-            missing_devids: vec![],
-            total_devices: 2,
-            fsid: None,
-            null_underlying: vec![],
-        };
-        // disk1 was classified a mismatch by the detail pass; disk2 has no
-        // detail report (genuinely absent) and must fall back to Missing.
-        let member_status = HashMap::from([("disk1".to_owned(), DiskStatus::LuksUuidMismatch)]);
+        let views = build_disk_views(&runner, &membership, &config_disks, &[], &pool, &stats);
 
-        let drives = build_compact_drives(&pool, &membership, &member_status);
-
-        let status_of = |name: &str| {
-            drives
-                .iter()
-                .find(|d| d.name == name)
-                .unwrap_or_else(|| panic!("expected a compact row for {name}"))
-                .status
-        };
-        assert_eq!(status_of("disk1"), DiskStatus::LuksUuidMismatch);
-        assert_eq!(status_of("disk2"), DiskStatus::Missing);
-    }
-
-    #[test]
-    fn status_compact_names_present_disk_from_membership_uuid() {
-        let pool = PoolState {
-            mounted: true,
-            devices: vec![PoolDevice {
-                mapper: MapperName("braid-drifted".to_owned()),
-                luks_uuid: LuksUuid::parse("11111111-1111-1111-1111-111111111111").unwrap(),
-                devid: 1,
-                underlying: "/dev/vda".to_owned(),
-            }],
-            missing_count: 0,
-            missing_devids: vec![],
-            total_devices: 1,
-            fsid: None,
-            null_underlying: vec![],
-        };
-        let membership = status_membership_1disk();
-
-        let drives = build_compact_drives(&pool, &membership, &HashMap::new());
-
-        assert_eq!(drives.len(), 1);
-        assert_eq!(drives[0].name, "disk1");
-        assert_eq!(drives[0].status, DiskStatus::Present);
+        assert_eq!(views.compact_drives.len(), 1);
+        assert_eq!(views.compact_drives[0].status, DiskStatus::Missing);
     }
 
     /*
      * Intent: a live pool device with a foreign LUKS UUID does not satisfy a
      * missing member just because its mapper name has the expected
-     * `braid-<name>` shape.
+     * `braid-<name>` shape -- the compact summary shows the foreign handle
+     * present and the member missing, mirroring the detail rows.
      *
      * Why it exists: LUKS UUID is the membership join. The status compact
      * summary must not parse mapper names to decide that a UUID-keyed member
      * is present, or it can hide a swapped/reformatted disk behind the old
-     * human name.
+     * human name. The detail analog asserts the same on `.disks`.
      *
      * Scenario: membership expects disk1 at UUID U1, but the mounted pool has
-     * a live mapper `braid-disk1` with UUID U9. The compact list shows the
-     * foreign runtime handle as present and disk1 as missing.
+     * a live mapper `braid-disk1` with UUID U9, and disk1's config probe is
+     * Absent.
      */
     #[test]
     fn status_compact_foreign_mapper_name_does_not_hide_missing_member() {
@@ -6178,25 +6138,40 @@ mod tests {
             null_underlying: vec![],
         };
         let membership = status_membership_1disk();
+        let config_disks = status_cfg_absent("disk1", "/dev/disk/by-id/disk1");
+        let runner = MockRunner::default();
+        let stats = BtrfsDeviceStatsOutput { devices: vec![] };
 
-        let drives = build_compact_drives(&pool, &membership, &HashMap::new());
+        let views = build_disk_views(&runner, &membership, &config_disks, &[], &pool, &stats);
 
-        assert_eq!(drives.len(), 2);
-        assert_eq!(drives[0].name, "braid-disk1");
-        assert_eq!(drives[0].status, DiskStatus::Present);
-        assert_eq!(drives[1].name, "disk1");
-        assert_eq!(drives[1].status, DiskStatus::Missing);
+        let rows: Vec<(&str, DiskStatus)> = views
+            .compact_drives
+            .iter()
+            .map(|d| (d.name.as_str(), d.status))
+            .collect();
+        assert_eq!(
+            rows,
+            vec![
+                ("braid-disk1", DiskStatus::Present),
+                ("disk1", DiskStatus::Missing),
+            ]
+        );
     }
 
     // Intent: present compact rows are ordered by resolved `DiskName`, not by
-    // btrfs devid order.
+    //   btrfs devid order, and each row carries the compact-only `device_short`
+    //   and alert-filtered `devid` fields -- not just `(name, status)`.
     // Why it exists: decision 024 requires name ordering; present rows came
-    // straight off devid-ordered `pool.devices`, diverging from the
-    // name-sorted missing half.
+    //   straight off devid-ordered `pool.devices`, diverging from the
+    //   name-sorted missing half. `device_short` and the unpooled `devid` have
+    //   no `DiskReport`/JSON counterpart, so this full-tuple assertion is their
+    //   sole guard against the human `Drives:` output regressing (e.g. to
+    //   `/dev/vda` or a dropped `-`) while every parity test still passes.
     // Scenario: a pool whose devids run opposite to disk names still shows
-    // `alpha` before `bravo`, while preserving present-then-missing grouping.
+    //   `alpha` before `bravo`, then the missing `aardvark`, preserving
+    //   present-then-missing grouping.
     #[test]
-    fn build_compact_drives_sorts_present_rows_by_name_not_devid() {
+    fn build_disk_views_sorts_present_compact_rows_by_name_not_devid() {
         let (bravo_uuid, bravo_member) =
             disk_member_with(961, "bravo", "/dev/disk/by-id/disk-bravo", Some(1), None);
         let (alpha_uuid, alpha_member) =
@@ -6235,33 +6210,42 @@ mod tests {
             fsid: None,
             null_underlying: vec![],
         };
+        // aardvark is the unpooled member; its Absent probe yields the missing
+        // row. alpha/bravo are live, so the present loop renders them.
+        let config_disks = status_cfg_absent("aardvark", "/dev/disk/by-id/disk-aardvark");
+        let runner = MockRunner::default();
+        let stats = BtrfsDeviceStatsOutput { devices: vec![] };
 
-        let drives = build_compact_drives(&pool, &membership, &HashMap::new());
+        let views = build_disk_views(&runner, &membership, &config_disks, &[], &pool, &stats);
 
-        let rows: Vec<(&str, DiskStatus)> = drives
+        let rows: Vec<(&str, &str, Option<u64>, DiskStatus)> = views
+            .compact_drives
             .iter()
-            .map(|drive| (drive.name.as_str(), drive.status))
+            .map(|d| (d.name.as_str(), d.device_short.as_str(), d.devid, d.status))
             .collect();
         assert_eq!(
             rows,
             vec![
-                ("alpha", DiskStatus::Present),
-                ("bravo", DiskStatus::Present),
-                ("aardvark", DiskStatus::Missing),
+                ("alpha", "vda", Some(2), DiskStatus::Present),
+                ("bravo", "vdb", Some(1), DiskStatus::Present),
+                ("aardvark", "-", Some(3), DiskStatus::Missing),
             ]
         );
     }
 
     #[test]
-    fn build_compact_drives_missing_member_shows_devid_when_live_confirmed() {
+    fn build_disk_views_missing_member_shows_devid_when_live_confirmed() {
         // Intent: a missing compact row shows a persisted devid only when live
         // btrfs confirms that devid is currently missing.
-        // Why it exists: this is the compact `Drives:` half of the missing
-        // device UX; the alert banner fix alone would still leave `-`.
-        // Scenario: pool.json remembers disk1 as devid 3 and btrfs reports
+        // Why it exists: `DiskReport.devid` is None for unpooled rows, so the
+        // alert-filtered devid lives only in the compact projection -- this is
+        // the compact `Drives:` half of the missing-device UX, uncovered by any
+        // detail test.
+        // Scenario: pool.json remembers toshiba3 as devid 3 and btrfs reports
         // devid 3 in the alert-local missing set.
         let (_, member) = disk_member_with(931, "toshiba3", "/dev/disk/by-id/disk3", Some(3), None);
         let membership = membership_from(vec![(test_uuid(931), member)]);
+        let config_disks = status_cfg_absent("toshiba3", "/dev/disk/by-id/disk3");
         let pool = PoolState {
             mounted: true,
             devices: vec![],
@@ -6271,41 +6255,39 @@ mod tests {
             fsid: None,
             null_underlying: vec![],
         };
+        let runner = MockRunner::default();
+        let stats = BtrfsDeviceStatsOutput { devices: vec![] };
 
-        let drives = build_compact_drives(&pool, &membership, &HashMap::new());
+        let views = build_disk_views(&runner, &membership, &config_disks, &[], &pool, &stats);
 
-        assert_eq!(drives.len(), 1);
-        assert_eq!(drives[0].name, "toshiba3");
-        assert_eq!(drives[0].devid, Some(3));
-        assert_eq!(drives[0].status, DiskStatus::Missing);
+        assert_eq!(views.compact_drives.len(), 1);
+        assert_eq!(views.compact_drives[0].name, "toshiba3");
+        assert_eq!(views.compact_drives[0].devid, Some(3));
+        assert_eq!(views.compact_drives[0].status, DiskStatus::Missing);
     }
 
     #[test]
-    fn build_compact_drives_missing_member_hides_stale_persisted_devid() {
+    fn build_disk_views_missing_member_hides_stale_persisted_devid() {
         // Intent: a missing compact row hides a persisted devid when live
         // btrfs does not currently report that devid as missing.
         // Why it exists: persisted membership is only a fallback join key; it
-        // must not make stale devids look btrfs-authoritative in display.
-        // Scenario: pool.json remembers disk1 as devid 3, but live btrfs has
+        // must not make stale devids look btrfs-authoritative in display. Like
+        // the show branch, this devid lives only in the compact projection.
+        // Scenario: pool.json remembers toshiba3 as devid 3, but live btrfs has
         // no MISSING or null-underlying record for devid 3.
         let (_, member) = disk_member_with(941, "toshiba3", "/dev/disk/by-id/disk3", Some(3), None);
         let membership = membership_from(vec![(test_uuid(941), member)]);
-        let pool = PoolState {
-            mounted: true,
-            devices: vec![],
-            missing_count: 0,
-            missing_devids: vec![],
-            total_devices: 0,
-            fsid: None,
-            null_underlying: vec![],
-        };
+        let config_disks = status_cfg_absent("toshiba3", "/dev/disk/by-id/disk3");
+        let pool = status_pool_empty();
+        let runner = MockRunner::default();
+        let stats = BtrfsDeviceStatsOutput { devices: vec![] };
 
-        let drives = build_compact_drives(&pool, &membership, &HashMap::new());
+        let views = build_disk_views(&runner, &membership, &config_disks, &[], &pool, &stats);
 
-        assert_eq!(drives.len(), 1);
-        assert_eq!(drives[0].name, "toshiba3");
-        assert_eq!(drives[0].devid, None);
-        assert_eq!(drives[0].status, DiskStatus::Missing);
+        assert_eq!(views.compact_drives.len(), 1);
+        assert_eq!(views.compact_drives[0].name, "toshiba3");
+        assert_eq!(views.compact_drives[0].devid, None);
+        assert_eq!(views.compact_drives[0].status, DiskStatus::Missing);
     }
 
     // =======================================================================
@@ -6839,12 +6821,12 @@ mod tests {
      *   advisory, and renders that member as a cause-neutral Unknown row in
      *   both the detail section and the compact summary, rather than blanking
      *   the report or silently dropping the member.
-     * Why it exists: build_compact_drives falls back to `missing` for a member
-     *   with no detail row, so a probe-failed member would be mislabeled
-     *   `missing` unless build_disk_reports emits the Unknown row that keeps the
-     *   two surfaces in agreement. A regression that dropped that row, or
-     *   reinstated the fatal `?`, would break the always-available read-only
-     *   diagnostic (principles.md).
+     * Why it exists: the compact summary is folded into `build_disk_views`'
+     *   single classification pass, so a probe-failed member's compact row
+     *   carries the same Unknown verdict as its detail row by construction --
+     *   but only if `build_disk_views` emits that Unknown row at all. A
+     *   regression that dropped the row, or reinstated the fatal `?`, would
+     *   break the always-available read-only diagnostic (principles.md).
      * Scenario: a healthy 1-disk pool (disk1 live) plus a configured member
      *   disk2 that is offline -- its by-id node lingers but cryptsetup cannot
      *   read it, so probe_config_disk errors on the luksUUID call.
@@ -7094,7 +7076,7 @@ mod tests {
         let runner = MockRunner::default();
         let stats = BtrfsDeviceStatsOutput { devices: vec![] };
 
-        let ctx = build_disk_reports(
+        let ctx = build_disk_views(
             &runner,
             &PoolMembership::empty(),
             &config_disks,
@@ -7103,7 +7085,10 @@ mod tests {
             &stats,
         );
 
-        // JSON disks[] and human detail rows must both interleave by name.
+        // JSON disks[], human detail, and the compact summary must all
+        // interleave Ok/failure rows by name -- the compact list is the
+        // canonical "unpooled rows interleave by name" guard now that it is
+        // folded into the same drain.
         let json_names: Vec<&str> = ctx.disks.iter().map(|d| d.name.as_str()).collect();
         assert_eq!(json_names, ["a", "b", "c"], "disks[] must be name-ordered");
         let human_names: Vec<&str> = ctx.human_details.iter().map(|d| d.name.as_str()).collect();
@@ -7111,6 +7096,12 @@ mod tests {
             human_names,
             ["a", "b", "c"],
             "human detail must be name-ordered"
+        );
+        let compact_names: Vec<&str> = ctx.compact_drives.iter().map(|d| d.name.as_str()).collect();
+        assert_eq!(
+            compact_names,
+            ["a", "b", "c"],
+            "compact drives must be name-ordered"
         );
 
         // And the verdicts are correct per kind: a/c Unknown (probe failure),
@@ -7121,7 +7112,7 @@ mod tests {
     }
 
     /*
-     * Intent: build_disk_reports pairs btrfs device-stats rows to DiskReport
+     * Intent: build_disk_views pairs btrfs device-stats rows to DiskReport
      * by devid. A stats row whose devid matches a pool member must populate
      * DiskReport.errors without requiring a path string.
      *
@@ -7174,7 +7165,7 @@ mod tests {
         let runner = MockRunner::default();
         let membership = status_membership_1disk();
 
-        let ctx = build_disk_reports(&runner, &membership, &config_disks, &[], &pool, &stats);
+        let ctx = build_disk_views(&runner, &membership, &config_disks, &[], &pool, &stats);
 
         assert_eq!(ctx.disks.len(), 1);
         let errors = ctx.disks[0]
