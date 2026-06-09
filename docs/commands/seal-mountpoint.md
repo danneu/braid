@@ -5,6 +5,9 @@ experimental: true
 
 # braid seal-mountpoint
 
+> [!NOTE]
+> This command is experimental. It is less-trodden and more likely to have rough edges while braid is pre-v1.0.
+
 Set the immutable attribute (`chattr +i`) on the pool mountpoint while it is
 unmounted, so a process that writes the path before the pool mounts fails loudly
 with `EPERM` instead of silently landing data on the root filesystem (which the

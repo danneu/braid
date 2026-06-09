@@ -5,7 +5,7 @@ Source-of-truth rules:
   - Each guide file's H1 owns its title.
   - Each command file's H1 owns its bare command name, and its frontmatter owns
     whether the label is experimental.
-  - Command link labels are "🧪 " plus the bare command name when
+  - Command link labels are the bare command name plus " 🧪" when
     `experimental: true`, else the bare command name.
   - SUMMARY.md owns the canonical ordering; index.md and README.md must follow it.
 
@@ -55,7 +55,7 @@ def expected_label(errors: list[str], kind: str, path: Path, h1: str) -> str:
             errors.append(
                 f"{rel}: experimental frontmatter must be exactly true or false (got {got!r})"
             )
-        return f"{EXPERIMENTAL_EMOJI} {name}" if experimental == "true" else name
+        return f"{name} {EXPERIMENTAL_EMOJI}" if experimental == "true" else name
     return h1
 
 

@@ -5,6 +5,9 @@ experimental: true
 
 # braid ack
 
+> [!NOTE]
+> This command is experimental. It is less-trodden and more likely to have rough edges while braid is pre-v1.0.
+
 Acknowledges active alerts and silences the PC speaker beeper. When there is an active alert source on a mounted pool, it also sets the current device error counts as the new baseline so the same condition won't re-trigger.
 
 ## When to use it

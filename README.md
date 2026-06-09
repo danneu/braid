@@ -183,7 +183,7 @@ If a mutation is interrupted, braid leaves `/var/lib/braid/pending-op.json` in p
 
 ### Commands
 
-🧪 Experimental commands are less-trodden and more likely to have rough edges. All of braid is pre-v1.0.
+Commands marked 🧪 are experimental, less-trodden, and more likely to have rough edges. All of braid is pre-v1.0.
 
 | Command                                             | Description                                                          |
 | --------------------------------------------------- | -------------------------------------------------------------------- |
@@ -193,17 +193,17 @@ If a mutation is interrupted, braid leaves `/var/lib/braid/pending-op.json` in p
 | [replace](docs/commands/replace.md)                 | Replace a live or dead disk                                          |
 | [unlock](docs/commands/unlock.md)                   | Open LUKS devices and mount the pool                                 |
 | [lock](docs/commands/lock.md)                       | Unmount the pool and close LUKS devices                              |
-| [🧪 seal-mountpoint](docs/commands/seal-mountpoint.md) | Seal the offline mountpoint immutable (boot-managed; manual lever) |
-| [🧪 idle](docs/commands/idle.md)                    | Check if the pool is idle (for auto-suspend)                         |
+| [seal-mountpoint 🧪](docs/commands/seal-mountpoint.md) | Seal the offline mountpoint immutable (boot-managed; manual lever) |
+| [idle 🧪](docs/commands/idle.md)                    | Check if the pool is idle (for auto-suspend)                         |
 | [status](docs/commands/status.md)                   | Pool health, disk status, allocation, scrub info                     |
 | [doctor](docs/commands/doctor.md)                   | Diagnostic checks for config, pool health, and runtime safety        |
-| [🧪 monitor](docs/commands/monitor.md)              | Health check for alerting (used by systemd timer)                    |
-| [🧪 ack](docs/commands/ack.md)                      | Acknowledge and silence an active alert                              |
-| [🧪 enroll](docs/commands/enroll.md)                | Enroll a USB keyfile for auto-unlock                                 |
-| [🧪 discover](docs/commands/discover.md)            | Scan for braid LUKS devices and rebuild pool.json                    |
-| [🧪 recover](docs/commands/recover.md)              | Recover from an interrupted operation                                |
+| [monitor 🧪](docs/commands/monitor.md)              | Health check for alerting (used by systemd timer)                    |
+| [ack 🧪](docs/commands/ack.md)                      | Acknowledge and silence an active alert                              |
+| [enroll 🧪](docs/commands/enroll.md)                | Enroll a USB keyfile for auto-unlock                                 |
+| [discover 🧪](docs/commands/discover.md)            | Scan for braid LUKS devices and rebuild pool.json                    |
+| [recover 🧪](docs/commands/recover.md)              | Recover from an interrupted operation                                |
 | [tui](docs/commands/tui.md)                         | Interactive dashboard with raw-output Browse tab                     |
-| [🧪 ups status](docs/commands/ups-status.md)        | Live UPS state (NUT); `--json` for scripts                           |
+| [ups status 🧪](docs/commands/ups-status.md)        | Live UPS state (NUT); `--json` for scripts                           |
 
 ### Guides
 
