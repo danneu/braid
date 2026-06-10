@@ -468,10 +468,25 @@ impl fmt::Display for Devid {
 pub struct MapperName(pub String);
 
 impl MapperName {
+    /// Wrap a mapper basename observed from system output (btrfs show,
+    /// cryptsetup status, a `/dev/mapper/` scan). Unvalidated on purpose:
+    /// these names come from the kernel, not user input. `config::mapper_name`
+    /// is the canonical `braid-<disk>` derivation; this is the observation door.
+    pub fn from_basename(name: String) -> Self {
+        MapperName(name)
+    }
+
     /// Borrow the mapper basename at command argv and filesystem-path
     /// boundaries without exposing mutable access to the identity text.
     pub fn as_str(&self) -> &str {
         &self.0
+    }
+
+    /// The absolute `/dev/mapper/<name>` device path. Single source of the
+    /// `/dev/mapper/` prefix so the convention cannot drift across the call
+    /// sites that hand it to mount, btrfs, and `fs.exists`.
+    pub fn dev_path(&self) -> String {
+        format!("/dev/mapper/{}", self.0)
     }
 }
 
@@ -503,6 +518,11 @@ impl LuksLabel {
 pub struct MountPoint(pub String);
 
 impl MountPoint {
+    /// Sole construction door now that the inner mount path is sealed.
+    pub fn new(path: String) -> Self {
+        MountPoint(path)
+    }
+
     /// Borrow the configured mount path for command argv and mountinfo
     /// comparisons without exposing a mutable string.
     pub fn as_str(&self) -> &str {
@@ -1188,5 +1208,32 @@ mod tests {
         //   silently drops accepted extras would pass the rejection suite.
         let opts = LuksFormatExtraOpts::parse(&["--use-random".to_owned()]).unwrap();
         assert_eq!(opts.as_slice(), &["--use-random".to_owned()]);
+    }
+
+    // Intent: `MapperName::dev_path()` builds the absolute
+    // `/dev/mapper/<name>` device path, and `from_basename`/`as_str`
+    // round-trip the basename verbatim.
+    // Why it exists: `dev_path` is the single source of the `/dev/mapper/`
+    // prefix; pinning its output here keeps the convention from drifting
+    // back into hand-rolled `format!` at call sites.
+    // Scenario: planner code holds a mapper basename observed from system
+    // output and needs the device path handed to mount/btrfs/`fs.exists`.
+    #[test]
+    fn mapper_name_dev_path_and_round_trip() {
+        let mapper = MapperName::from_basename("braid-x".to_owned());
+        assert_eq!(mapper.dev_path(), "/dev/mapper/braid-x");
+        assert_eq!(mapper.as_str(), "braid-x");
+    }
+
+    // Intent: `MountPoint::new`/`as_str` round-trip the mount path verbatim.
+    // Why it exists: `new` is the sole construction door once the inner
+    // field is sealed; this keeps it exercised and pins the no-validation
+    // pass-through contract.
+    // Scenario: config deserialization wraps the configured mount path and
+    // argv builders read it back unchanged.
+    #[test]
+    fn mount_point_round_trip() {
+        let mount = MountPoint::new("/mnt/braid".to_owned());
+        assert_eq!(mount.as_str(), "/mnt/braid");
     }
 }

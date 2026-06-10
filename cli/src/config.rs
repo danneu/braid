@@ -109,7 +109,7 @@ impl Config {
 /// signature so callers cannot synthesize a `MapperName` from unchecked
 /// text at this boundary.
 pub fn mapper_name(name: &DiskName) -> MapperName {
-    MapperName(format!("braid-{}", name.as_str()))
+    MapperName::from_basename(format!("braid-{}", name.as_str()))
 }
 
 /// Thin public entry point for the canonical LUKS label constructor.
