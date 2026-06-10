@@ -1544,7 +1544,10 @@ mod tests {
         assert_eq!(result.devices.len(), 2);
         assert_eq!(result.missing_count, 0);
         assert_eq!(result.total_devices, 2);
-        assert_eq!(result.devices[0].mapper, MapperName::from_basename("braid-toshiba".into()));
+        assert_eq!(
+            result.devices[0].mapper,
+            MapperName::from_basename("braid-toshiba".into())
+        );
         assert_eq!(
             result.devices[0].luks_uuid,
             LuksUuid::parse("11111111-1111-1111-1111-111111111111").unwrap()
@@ -1638,7 +1641,10 @@ mod tests {
         assert_eq!(result.devices.len(), 1, "MISSING device must be excluded");
         assert_eq!(result.missing_count, 1);
         assert_eq!(result.total_devices, 2);
-        assert_eq!(result.devices[0].mapper, MapperName::from_basename("braid-toshiba".into()));
+        assert_eq!(
+            result.devices[0].mapper,
+            MapperName::from_basename("braid-toshiba".into())
+        );
     }
 
     #[test]
@@ -1755,7 +1761,10 @@ mod tests {
             1,
             "device with (null) underlying must be skipped"
         );
-        assert_eq!(result.devices[0].mapper, MapperName::from_basename("braid-toshiba".into()));
+        assert_eq!(
+            result.devices[0].mapper,
+            MapperName::from_basename("braid-toshiba".into())
+        );
         assert_eq!(result.missing_count, 1);
         assert_eq!(result.total_devices, 2);
 

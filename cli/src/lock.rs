@@ -4513,9 +4513,13 @@ mod tests {
             ),
         );
 
-        let err =
-            close_mapper_with_retry(&runner, &sleeper, &MapperName::from_basename("braid-aaa".into()), false)
-                .expect_err("should exhaust retries and return DeviceBusy");
+        let err = close_mapper_with_retry(
+            &runner,
+            &sleeper,
+            &MapperName::from_basename("braid-aaa".into()),
+            false,
+        )
+        .expect_err("should exhaust retries and return DeviceBusy");
         assert!(
             matches!(err, CloseMapperError::DeviceBusy(_)),
             "expected DeviceBusy after retry exhaustion, got: {err:?}"

@@ -968,9 +968,7 @@ fn main() {
                 print_cli_error(&braid_cli::discover::NoMembersDiscovered.to_string());
                 std::process::exit(1);
             }
-            for line in braid_cli::discover::render_preview_lines(&members) {
-                println!("{line}");
-            }
+            let preview = braid_cli::discover::render_preview_lines(&members);
             if args.write {
                 match braid_cli::discover::write_discovered_membership(
                     members,
@@ -978,6 +976,9 @@ fn main() {
                     args.expect_count,
                 ) {
                     Ok(_) => {
+                        for line in preview {
+                            println!("{line}");
+                        }
                         eprintln!("pool membership written to {}", pool_json.display());
                     }
                     Err(e) => {
@@ -986,6 +987,9 @@ fn main() {
                     }
                 }
             } else {
+                for line in preview {
+                    println!("{line}");
+                }
                 eprintln!("pass --write to save to {}", pool_json.display());
             }
         }

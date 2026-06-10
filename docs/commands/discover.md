@@ -37,7 +37,10 @@ Bare `discover` prints this preview only when `pool.json` is absent. Over a vali
 The membership rows are written to stdout; the `pass --write to save` hint, the
 `--write` "pool membership written" confirmation, scan warnings, and errors go
 to stderr. So `braid discover > members` (or `braid discover | grep <disk>`)
-captures only the rows.
+captures only the rows. A refused `discover --write` (for example an
+`--expect-count` mismatch, or a forensic sidecar that cannot be written) prints
+nothing to stdout and reports the refusal on stderr, so a redirected capture of
+a write that did not happen is empty rather than holding membership rows.
 
 ## Common variations
 

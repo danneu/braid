@@ -215,17 +215,31 @@ with subtest("non-UUID-keyed file is treated as corrupt during preview"):
 
 with subtest("expect-count mismatch refuses and writes nothing"):
     # Intent: discover --write refuses both low and high expected counts
-    # before writing pool.json or a corrupt sidecar.
+    # before writing pool.json, writing a corrupt sidecar, or printing preview
+    # rows to stdout.
     # Why it exists: expected-count must be a fail-closed guard for
-    # detached intended members and stray braid-labeled disks.
+    # detached intended members and stray braid-labeled disks. Splitting the
+    # streams distinguishes rows withheld from rows printed before the refusal.
+    # The same Err branch also suppresses stdout for corrupt-sidecar failures.
     # Scenario: operator knows the pool should have two members, but
     # passes an impossible count while rebuilding corrupt state.
     corrupt = '{"unexpected":true}'
     write_pool_json(corrupt)
     for expected in [1, 3]:
-        out = machine.fail("braid discover --write --expect-count " + str(expected) + " 2>&1")
-        assert "expected exactly " + str(expected) + " members, found 2" in out, (
-            "expected count mismatch refusal in output:\n" + out
+        rc = machine.execute(
+            "braid discover --write --expect-count "
+            + str(expected)
+            + " >/tmp/discover-out 2>/tmp/discover-err"
+        )[0]
+        assert rc != 0, "discover --write should refuse an expect-count mismatch"
+        out = machine.succeed("cat /tmp/discover-out")
+        err = machine.succeed("cat /tmp/discover-err")
+        assert out.strip() == "", (
+            "refused discover --write (expect-count) printed preview rows to stdout; "
+            "got:\n" + out
+        )
+        assert "expected exactly " + str(expected) + " members, found 2" in err, (
+            "expected count mismatch refusal on stderr:\n" + err
         )
         assert read_pool_json() == corrupt, "pool.json must be byte-for-byte unchanged"
         assert_no_corrupt_sidecars()
