@@ -1,14 +1,20 @@
 //! Shared `/dev/disk/by-id/` symlink handling.
 //!
-//! Covers by-id enumeration, canonicalization, prefix priority, and partition
-//! filtering for both discover (scanning attached braid-labeled disks) and
-//! recover (resolving stable identifiers for live pool devices).
+//! The prefix-priority and partition-filtering helpers (`by_id_priority`,
+//! `is_partition_entry`) serve both discover (scanning attached braid-labeled
+//! disks) and recover (resolving stable identifiers for live pool devices). The
+//! `ByIdResolver` trait (enumeration + canonicalization) serves recover, which
+//! needs a mockable seam; discover reads and canonicalizes its injectable by-id
+//! directory directly via `std::fs` and does not use the trait.
 
-/// Resolve `/dev/disk/by-id/` symlinks for discover and recover.
+/// Resolve `/dev/disk/by-id/` symlinks for recover.
 ///
-/// Kept separate from `probe::Filesystem` so tests can substitute this narrow
-/// boundary without widening a shared trait that already has many mock impls.
-/// `RealByIdResolver` is the production implementation.
+/// Discover does not use this trait -- it reads and canonicalizes its injectable
+/// by-id directory directly via `std::fs`, driving real udev-style symlinks in a
+/// tempdir under test. Recover is the trait's only consumer and substitutes a
+/// mock at this boundary. Kept separate from `probe::Filesystem` so tests can
+/// substitute this narrow boundary without widening a shared trait that already
+/// has many mock impls. `RealByIdResolver` is the production implementation.
 pub trait ByIdResolver {
     /// List filenames under `/dev/disk/by-id/`. Returns an empty vec if the
     /// directory does not exist (mirrors `Filesystem::list_dir` semantics).

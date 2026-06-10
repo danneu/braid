@@ -1,4 +1,4 @@
-use crate::by_id::{ByIdResolver, RealByIdResolver, by_id_priority, is_partition_entry};
+use crate::by_id::{by_id_priority, is_partition_entry};
 use crate::cmd::{CmdRequest, CommandRunner};
 use crate::membership::{DiskMember, PoolMembership, save_membership};
 use crate::parse::{
@@ -235,7 +235,7 @@ pub struct NoMembersDiscovered;
 /// Scan /dev/disk/by-id/ for LUKS devices with `braid-<name>` labels.
 /// Returns a report so callers can print warnings on success or error.
 pub fn discover_pool_members<R: CommandRunner>(runner: &R) -> DiscoverScan {
-    discover_from_dir(runner, &RealByIdResolver, Path::new("/dev/disk/by-id"))
+    discover_from_dir(runner, Path::new("/dev/disk/by-id"))
 }
 
 /// Classifies an existing pool.json by shape for discover's gating.
@@ -291,13 +291,9 @@ struct AliasCandidate {
 
 /// Testable discover wrapper that preserves warnings collected before
 /// any structural error returned by the inner scanner.
-fn discover_from_dir<R: CommandRunner>(
-    runner: &R,
-    resolver: &dyn ByIdResolver,
-    by_id_dir: &Path,
-) -> DiscoverScan {
+fn discover_from_dir<R: CommandRunner>(runner: &R, by_id_dir: &Path) -> DiscoverScan {
     let mut warnings = Vec::new();
-    let result = discover_from_dir_inner(runner, resolver, by_id_dir, &mut warnings);
+    let result = discover_from_dir_inner(runner, by_id_dir, &mut warnings);
     DiscoverScan { warnings, result }
 }
 
@@ -305,10 +301,13 @@ fn discover_from_dir<R: CommandRunner>(
 /// borrowing the outer warning accumulator for error-path reporting.
 fn discover_from_dir_inner<R: CommandRunner>(
     runner: &R,
-    resolver: &dyn ByIdResolver,
     by_id_dir: &Path,
     warnings: &mut Vec<DiscoverWarning>,
 ) -> Result<PoolMembership, DiscoverError> {
+    // Discover reads and canonicalizes its by-id directory directly via `std::fs`
+    // against an injectable `by_id_dir`, so its tests drive real udev-style
+    // symlinks in a tempdir (dangling ones included). The `ByIdResolver` trait is
+    // recover's mockable seam; discover does not need it.
     let entries = match std::fs::read_dir(by_id_dir) {
         Ok(entries) => entries,
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
@@ -341,8 +340,8 @@ fn discover_from_dir_inner<R: CommandRunner>(
 
         // Catch stale udev by-id symlinks before the LUKS probe. A dangling
         // symlink is a structural by-id problem independent of LUKS state.
-        let canonical = match resolver.canonicalize(&path_str) {
-            Ok(c) => c,
+        let canonical = match std::fs::canonicalize(&path_str) {
+            Ok(c) => c.to_string_lossy().into_owned(),
             Err(e) => {
                 warnings.push(DiscoverWarning::CannotCanonicalize {
                     path: path_str.clone(),
@@ -816,7 +815,7 @@ mod tests {
         let target = discover_create_target(target_dir.path(), "fake-disk");
         discover_create_by_id_symlink(by_id_dir.path(), "ata-SOMEDISK", &target);
 
-        let scan = discover_from_dir(&IsLuksFailRunner, &RealByIdResolver, by_id_dir.path());
+        let scan = discover_from_dir(&IsLuksFailRunner, by_id_dir.path());
         let err = scan.result.unwrap_err();
 
         assert!(
@@ -868,7 +867,7 @@ mod tests {
         let target = discover_create_target(target_dir.path(), "fake-disk");
         discover_create_by_id_symlink(by_id_dir.path(), "ata-SOMEDISK", &target);
 
-        let scan = discover_from_dir(&LuksDumpFailRunner, &RealByIdResolver, by_id_dir.path());
+        let scan = discover_from_dir(&LuksDumpFailRunner, by_id_dir.path());
         let err = scan.result.unwrap_err();
 
         assert!(
@@ -897,7 +896,7 @@ mod tests {
 
         // Only the LUKS device is in the label map; the USB stick is unknown.
         let runner = DiscoverLabelMap::new(&[(&luks_path, "braid-sda")]);
-        let scan = discover_from_dir(&runner, &RealByIdResolver, dir.path());
+        let scan = discover_from_dir(&runner, dir.path());
         scan.result.unwrap();
         assert!(
             scan.warnings.is_empty(),
@@ -950,7 +949,7 @@ mod tests {
             },
         );
 
-        let scan = discover_from_dir(&runner, &RealByIdResolver, dir.path());
+        let scan = discover_from_dir(&runner, dir.path());
         let members = scan.result.unwrap();
 
         assert_eq!(members.len(), 1);
@@ -1000,7 +999,7 @@ mod tests {
             },
         );
 
-        let scan = discover_from_dir(&runner, &RealByIdResolver, dir.path());
+        let scan = discover_from_dir(&runner, dir.path());
         let members = scan.result.unwrap();
 
         assert!(members.is_empty());
@@ -1029,7 +1028,7 @@ mod tests {
         let ata_path = discover_create_by_id_symlink(dir.path(), "ata-SEAGATE_ST500", &target);
         let wwn_path = discover_create_by_id_symlink(dir.path(), "wwn-0x50014ee606704442", &target);
         let runner = DiscoverLabelMap::new(&[(&ata_path, "braid-sda"), (&wwn_path, "braid-sda")]);
-        let scan = discover_from_dir(&runner, &RealByIdResolver, dir.path());
+        let scan = discover_from_dir(&runner, dir.path());
         let members = scan.result.unwrap();
         assert!(
             scan.warnings.is_empty(),
@@ -1061,7 +1060,7 @@ mod tests {
         let ata_z = discover_create_by_id_symlink(dir.path(), "ata-ZZZZZ_DISK", &target);
         let ata_a = discover_create_by_id_symlink(dir.path(), "ata-AAAAA_DISK", &target);
         let runner = DiscoverLabelMap::new(&[(&ata_z, "braid-sda"), (&ata_a, "braid-sda")]);
-        let scan = discover_from_dir(&runner, &RealByIdResolver, dir.path());
+        let scan = discover_from_dir(&runner, dir.path());
         let members = scan.result.unwrap();
         assert!(
             scan.warnings.is_empty(),
@@ -1103,7 +1102,7 @@ mod tests {
         let runner =
             DiscoverLabelMap::new(&[(&luks1_path, "braid-legacy"), (&luks2_path, "braid-modern")])
                 .with_version(&luks1_path, 1);
-        let scan = discover_from_dir(&runner, &RealByIdResolver, dir.path());
+        let scan = discover_from_dir(&runner, dir.path());
         let members = scan.result.unwrap();
         assert_eq!(
             members.len(),
@@ -1157,7 +1156,7 @@ mod tests {
         let good_path = discover_create_by_id_symlink(dir.path(), "ata-GOOD_LABEL", &good_target);
         let runner = DiscoverLabelMap::new(&[(&bad_path, "braid-é"), (&good_path, "braid-good")]);
 
-        let scan = discover_from_dir(&runner, &RealByIdResolver, dir.path());
+        let scan = discover_from_dir(&runner, dir.path());
         let members = scan.result.unwrap();
 
         assert_eq!(
@@ -1220,7 +1219,7 @@ mod tests {
             (&ata_beta, "braid-beta"),
             (&wwn_beta, "braid-beta"),
         ]);
-        let scan = discover_from_dir(&runner, &RealByIdResolver, dir.path());
+        let scan = discover_from_dir(&runner, dir.path());
         let members = scan.result.unwrap();
         assert!(
             scan.warnings.is_empty(),
@@ -1258,7 +1257,7 @@ mod tests {
         let alias_b = discover_create_by_id_symlink(dir.path(), "ata-CLONE_B", &target_b);
         let runner = DiscoverLabelMap::new(&[(&alias_a, "braid-foo"), (&alias_b, "braid-foo")]);
 
-        let scan = discover_from_dir(&runner, &RealByIdResolver, dir.path());
+        let scan = discover_from_dir(&runner, dir.path());
         let err = scan.result.unwrap_err();
 
         match &err {
@@ -1311,7 +1310,7 @@ mod tests {
         ])
         .with_version(&luks1_alias, 1);
 
-        let scan = discover_from_dir(&runner, &RealByIdResolver, dir.path());
+        let scan = discover_from_dir(&runner, dir.path());
 
         assert!(
             matches!(&scan.result, Err(DiscoverError::LabelCollision { .. })),
@@ -1401,7 +1400,7 @@ mod tests {
         );
         let runner = DiscoverLabelMap::new(&[]);
 
-        let scan = discover_from_dir(&runner, &RealByIdResolver, dir.path());
+        let scan = discover_from_dir(&runner, dir.path());
         let members = scan.result.unwrap();
 
         assert!(members.is_empty());
@@ -1434,7 +1433,7 @@ mod tests {
         let valid = discover_create_by_id_symlink(dir.path(), "wwn-VALID", &target);
         let runner = DiscoverLabelMap::new(&[(&dangling, "braid-foo"), (&valid, "braid-foo")]);
 
-        let scan = discover_from_dir(&runner, &RealByIdResolver, dir.path());
+        let scan = discover_from_dir(&runner, dir.path());
         let members = scan.result.unwrap();
 
         assert_eq!(members.len(), 1, "expected only the canonicalizable entry");
@@ -1471,7 +1470,7 @@ mod tests {
         let absent = dir.path().join("by-id-does-not-exist");
         let runner = DiscoverLabelMap::new(&[]);
 
-        let scan = discover_from_dir(&runner, &RealByIdResolver, &absent);
+        let scan = discover_from_dir(&runner, &absent);
         let members = scan
             .result
             .expect("absent by-id dir must yield Ok(empty), not DiscoverError::ReadDir");
@@ -1562,7 +1561,7 @@ mod tests {
             },
         );
 
-        let scan = discover_from_dir(&runner, &RealByIdResolver, dir.path());
+        let scan = discover_from_dir(&runner, dir.path());
         let members = scan.result.unwrap();
 
         assert!(
@@ -1614,7 +1613,7 @@ mod tests {
             },
         );
 
-        let scan = discover_from_dir(&runner, &RealByIdResolver, dir.path());
+        let scan = discover_from_dir(&runner, dir.path());
         let members = scan.result.unwrap();
 
         assert!(!contains_name(&members, "baddisk"));
@@ -1657,7 +1656,7 @@ mod tests {
             },
         );
 
-        let scan = discover_from_dir(&runner, &RealByIdResolver, dir.path());
+        let scan = discover_from_dir(&runner, dir.path());
         let members = scan.result.unwrap();
 
         assert!(!contains_name(&members, "baddisk"));
@@ -1710,7 +1709,7 @@ mod tests {
             },
         );
 
-        let scan = discover_from_dir(&runner, &RealByIdResolver, dir.path());
+        let scan = discover_from_dir(&runner, dir.path());
         let members = scan.result.unwrap();
 
         assert!(!contains_name(&members, "baddisk"));
@@ -1761,7 +1760,7 @@ mod tests {
             .with_uuid(&path_a, shared_uuid)
             .with_uuid(&path_b, shared_uuid);
 
-        let scan = discover_from_dir(&runner, &RealByIdResolver, dir.path());
+        let scan = discover_from_dir(&runner, dir.path());
         let err = scan
             .result
             .expect_err("duplicate UUID must surface as DuplicateUuid");
@@ -1822,7 +1821,7 @@ mod tests {
             .with_uuid(&path_a, shared_uuid)
             .with_uuid(&path_b, shared_uuid);
 
-        let scan = discover_from_dir(&runner, &RealByIdResolver, dir.path());
+        let scan = discover_from_dir(&runner, dir.path());
         let err = scan.result.expect_err("expected an error");
 
         assert!(
