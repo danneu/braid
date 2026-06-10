@@ -27,9 +27,9 @@ pub enum BusyReason {
     /// autosuspend blocks rather than assuming idle.
     Unknown(String),
     /// Scrub progress comes from `btrfs scrub status` because scrub is
-    /// not in the kernel exclusive-operation set (see
-    /// `reference/btrfs-progs/common/utils.c:1188-1197`), so sysfs cannot
-    /// detect or quantify it.
+    /// not in the kernel exclusive-operation set (`enum
+    /// btrfs_exclusive_operation`, `reference/linux/fs/btrfs/fs.h`), so
+    /// sysfs cannot detect or quantify it.
     ScrubRunning { pct: Option<u8> },
     /// Shared sysfs exclusive-op identity so idle and mutating-command
     /// preflight cannot drift on the set of operations that block suspend.
@@ -545,7 +545,8 @@ mod tests {
     /* Intent: `/sys/fs/btrfs/` entries named `features` or `debug` are
      *   skipped by name -- the helper never even attempts to read their
      *   `exclusive_operation` (which the kernel does not create for
-     *   them; see reference/linux/fs/btrfs/sysfs.c:29-47).
+     *   them; see `reference/linux/fs/btrfs/sysfs.c`, whose sysfs path
+     *   table lists `features`/`debug` as the only non-`<uuid>` entries).
      * Why: skipping by name -- not by "absorb any NotFound on read" --
      *   keeps the fail-closed contract. The next test pins the other
      *   half of that contract: a real fsid dir whose exclop disappears

@@ -76,16 +76,20 @@ pub fn check_no_pending_operation(paths: &StatePaths) -> Result<(), String> {
 /// `Ok(None)` from [`ExclusiveOp::parse`], so consumers cannot
 /// accidentally treat idle as a member of this enum.
 ///
-/// String values follow `exclop_def[]` in btrfs-progs
-/// `common/utils.c:1186-1194` (vendored in `reference/btrfs-progs/`).
+/// The kernel emits these strings from `btrfs_exclusive_operation_show`
+/// (`reference/linux/fs/btrfs/sysfs.c`) -- that switch is the authority for
+/// what this file can contain. btrfs-progs is a fellow parser of the same
+/// file (`btrfs-progs v6.19.1, reference/btrfs-progs/common/utils.c
+/// (get_fs_exclop, exclop_def[])`), not the source.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ExclusiveOp {
     Balance,
     BalancePaused,
     DeviceAdd,
     /// The kernel writes "device remove" -- not "device delete" as
-    /// btrfs-man5.rst sometimes says. Follows `exclop_def[]` in
-    /// `reference/btrfs-progs/common/utils.c:1191`.
+    /// btrfs-man5.rst sometimes says. The string is the
+    /// `BTRFS_EXCLOP_DEV_REMOVE` arm of `btrfs_exclusive_operation_show`
+    /// (`reference/linux/fs/btrfs/sysfs.c`).
     DeviceRemove,
     DeviceReplace,
     Resize,
@@ -220,8 +224,9 @@ fn check_exclusive_op_with_policy<F: Filesystem + ?Sized>(
 }
 
 /// Names of `/sys/fs/btrfs/` entries that are not per-filesystem fsid dirs
-/// and therefore do not expose `exclusive_operation`. Source:
-/// `reference/linux/fs/btrfs/sysfs.c:29-47`.
+/// and therefore do not expose `exclusive_operation`. Source: the sysfs
+/// path table in `reference/linux/fs/btrfs/sysfs.c`, which lists `features`
+/// and `debug` as the only non-`<uuid>` entries.
 ///
 /// Allowlist (rather than "skip any NotFound") so a real fsid dir whose
 /// `exclusive_operation` disappears mid-scan -- e.g. concurrent unmount --
@@ -1105,8 +1110,8 @@ mod tests {
     // --- ExclusiveOp::parse tests ---
 
     #[test]
-    // Intent: ExclusiveOp::parse maps every sysfs string from exclop_def[]
-    //   to the right outcome -- `"none"` -> Ok(None) (idle), each busy
+    // Intent: ExclusiveOp::parse maps every sysfs string from the kernel
+    //   exclop set to the right outcome -- `"none"` -> Ok(None) (idle), each busy
     //   string -> Ok(Some(variant)).
     // Why: Pins the type-level split between idle and busy. If a kernel
     //   string is added or renamed, this catches it before the busy paths
@@ -1143,11 +1148,11 @@ mod tests {
 
     #[test]
     // Intent: ExclusiveOp::parse returns Err(s) carrying the unrecognized
-    //   input for any value outside exclop_def[].
+    //   input for any value outside the kernel exclop set.
     // Why: Future kernel versions may add new op types; fail-closed is
     //   safer. Carrying the offending string lets callers surface it via
     //   `ExclusiveOpError::Unrecognized`.
-    // Scenario: Kernel writes a value not in exclop_def[].
+    // Scenario: Kernel writes a value `btrfs_exclusive_operation_show` would not emit.
     fn exclusive_op_parse_unrecognized() {
         assert_eq!(
             ExclusiveOp::parse("something new"),
@@ -1740,7 +1745,7 @@ mod tests {
     // Why: Fail-closed -- a future kernel that adds a new exclop name must not
     //   silently allow lock teardown. Pins the parser-error to caller-facing
     //   string wiring at the boundary that actually matters for callers.
-    // Scenario: New btrfs version writes a value not in exclop_def[].
+    // Scenario: New btrfs version writes a value `btrfs_exclusive_operation_show` would not emit.
     fn lock_preflight_rejects_on_unrecognized_value() {
         let fs = MockFs::with_sysfs(FSID, "brand new op\n");
         let err = require_lock_preflight(&fs, &fsid()).unwrap_err();
