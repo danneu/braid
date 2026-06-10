@@ -1951,24 +1951,9 @@ fn write_add_phase(
     Ok(next)
 }
 
-fn recover_passphrase<'a>(
-    existing: Option<&'a OpenCredential>,
-    params: &RecoverParams<'_>,
-) -> Result<RecoverPassphrase<'a>, RecoverError> {
-    match existing {
-        Some(OpenCredential::Passphrase(passphrase)) => Ok(RecoverPassphrase::Borrowed(passphrase)),
-        Some(OpenCredential::KeyFile(_)) => Err(RecoverError::Failed(
-            "add recovery requires a passphrase for delayed LUKS format".into(),
-        )),
-        None => Ok(RecoverPassphrase::Owned(luks::read_passphrase_with(
-            params.passphrase_file,
-            params.passphrase_stdin,
-            false,
-            params.tty,
-        )?)),
-    }
-}
-
+/// The single place recover refuses a key-file credential; recover has not
+/// exposed `--key-file` yet, so every no-prompt passphrase boundary funnels
+/// through this guard until that policy changes.
 fn open_credential_passphrase<'a>(
     credential: &'a OpenCredential,
     context: &str,
@@ -1978,6 +1963,27 @@ fn open_credential_passphrase<'a>(
         OpenCredential::KeyFile(_) => Err(RecoverError::Failed(format!(
             "{context} requires a passphrase"
         ))),
+    }
+}
+
+/// Resolves the passphrase recover drives `cryptsetup` with, preserving the
+/// single-passphrase invariant across already-open credentials and delayed
+/// prompt paths.
+fn recover_passphrase<'a>(
+    existing: Option<&'a OpenCredential>,
+    params: &RecoverParams<'_>,
+    context: &str,
+) -> Result<RecoverPassphrase<'a>, RecoverError> {
+    match existing {
+        Some(credential) => Ok(RecoverPassphrase::Borrowed(open_credential_passphrase(
+            credential, context,
+        )?)),
+        None => Ok(RecoverPassphrase::Owned(luks::read_passphrase_with(
+            params.passphrase_file,
+            params.passphrase_stdin,
+            false,
+            params.tty,
+        )?)),
     }
 }
 
@@ -2369,7 +2375,7 @@ fn execute_add_pool_mutation_recovery<R: CommandRunner + Sync, F: Filesystem + ?
 
             if !mapper_open {
                 if passphrase.is_none() {
-                    passphrase = Some(recover_passphrase(credential, params)?);
+                    passphrase = Some(recover_passphrase(credential, params, "add recovery")?);
                 }
                 let passphrase = passphrase
                     .as_ref()
@@ -2397,7 +2403,7 @@ fn execute_add_pool_mutation_recovery<R: CommandRunner + Sync, F: Filesystem + ?
 
     if !add_targets_all_live(&pool, targets) {
         if passphrase.is_none() {
-            passphrase = Some(recover_passphrase(credential, params)?);
+            passphrase = Some(recover_passphrase(credential, params, "add recovery")?);
         }
         let passphrase = passphrase
             .as_ref()
@@ -2805,25 +2811,6 @@ fn execute_remove_missing_post_maintenance_recovery<R: CommandRunner + Sync>(
     Ok(())
 }
 
-fn recover_passphrase_for_context<'a>(
-    existing: Option<&'a OpenCredential>,
-    params: &RecoverParams<'_>,
-    context: &str,
-) -> Result<RecoverPassphrase<'a>, RecoverError> {
-    match existing {
-        Some(OpenCredential::Passphrase(passphrase)) => Ok(RecoverPassphrase::Borrowed(passphrase)),
-        Some(OpenCredential::KeyFile(_)) => Err(RecoverError::Failed(format!(
-            "{context} requires a passphrase"
-        ))),
-        None => Ok(RecoverPassphrase::Owned(luks::read_passphrase_with(
-            params.passphrase_file,
-            params.passphrase_stdin,
-            false,
-            params.tty,
-        )?)),
-    }
-}
-
 fn verify_replace_fresh_prep_passphrase<R: CommandRunner>(
     runner: &R,
     pool: &PoolState,
@@ -2933,8 +2920,7 @@ fn finish_uncommitted_replace_recovery<R: CommandRunner + Sync, F: Filesystem + 
                 // below: passphrase is verified against existing pool
                 // members AND the new disk before any LUKS mutation, so
                 // wrong-passphrase aborts with the journal preserved.
-                let passphrase =
-                    recover_passphrase_for_context(credential, params, "replace recovery")?;
+                let passphrase = recover_passphrase(credential, params, "replace recovery")?;
                 verify_replace_fresh_prep_passphrase(
                     runner,
                     pool,
@@ -2994,8 +2980,7 @@ fn finish_uncommitted_replace_recovery<R: CommandRunner + Sync, F: Filesystem + 
                         )));
                     }
 
-                    let passphrase =
-                        recover_passphrase_for_context(credential, params, "replace recovery")?;
+                    let passphrase = recover_passphrase(credential, params, "replace recovery")?;
                     verify_replace_fresh_prep_passphrase(
                         runner,
                         pool,
@@ -3768,6 +3753,25 @@ mod tests {
         let key_file = dir.path().join(name);
         std::fs::write(&key_file, vec![0u8; luks::KEYFILE_SIZE]).unwrap();
         key_file
+    }
+
+    // Intent: a key-file credential reaching recover's passphrase boundary is
+    //   refused with a "requires a passphrase" error, never silently accepted.
+    // Why it exists: this OpenCredential::KeyFile arm is a fail-closed guard on
+    //   a branch unreachable through today's CLI, so a unit test is its only
+    //   behavioral guard.
+    // Scenario: a future recover --key-file path hands recover a resolved
+    //   key-file credential; the guard must still fire with the passphrase
+    //   hint, not proceed.
+    #[test]
+    fn key_file_credential_is_rejected_at_recover_passphrase_boundary() {
+        let cred = OpenCredential::KeyFile(std::path::PathBuf::from("/dev/null"));
+        let err = open_credential_passphrase(&cred, "add recovery").unwrap_err();
+
+        assert!(
+            matches!(err, RecoverError::Failed(ref msg) if msg.contains("requires a passphrase")),
+            "key-file credential must be refused with a passphrase hint, got {err:?}"
+        );
     }
 
     struct MockFs {
