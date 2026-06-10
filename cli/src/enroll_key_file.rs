@@ -509,7 +509,7 @@ impl EnrollPlan {
     /// survives the migration byte-for-byte. `Preview::render` itself
     /// always uses `Bracketed`, so dry-run stdout wording differs --
     /// the "two products, two formats" call-out in the plan.
-    pub const STDERR_STYLE: PerDiskStyle = PerDiskStyle::Plain;
+    const STDERR_STYLE: PerDiskStyle = PerDiskStyle::Plain;
 
     pub fn preview(&self) -> Preview {
         Preview {
